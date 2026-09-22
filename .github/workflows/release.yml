@@ -1,15 +1,15 @@
 name: Release
 
-# Creating a v* tag runs CI first and only then builds the web frontend,
-# publishes a GitHub release carrying the packaged source zip
+# Creating a v* tag runs CI first, then builds the client bundles and pushes the
+# Docker image side by side, and publishes the GitHub release only once every
+# one of them has finished. It carries the packaged source zip
 # (la-musica-<version>-windows-x64.zip: mlo/, server/, tools/, web/dist plus
 # docker-compose.yml and the Dockerfile — the container is how the server is
 # installed, and the zip exists for people who want the sources under it) plus
 # the desktop bundles (Windows/macOS/Linux) and the mobile builds (an unsigned
 # Android APK and an unsigned iOS IPA — see .github/workflows/mobile.yml for why
-# they cannot be signed here), and pushes a Docker image to GHCR. The tag is
-# checked against mlo/__init__.py first: the
-# app reports that version, so a mistagged release would ship two different
+# they cannot be signed here). The tag is checked against mlo/__init__.py first:
+# the app reports that version, so a mistagged release would ship two different
 # answers to "which version is this?".
 # There is no in-app updater (desktop/src-tauri/tauri.conf.json configures no
 # updater plugin/endpoints/pubkey), so a release is consumed by downloading an
@@ -38,10 +38,10 @@ jobs:
     uses: ./.github/workflows/ci.yml
 
   # The client bundles, built from the same reusable workflows the manual runs
-  # use. A tag should still publish the app (source zip + Docker image) when a
-  # platform's own toolchain is having a bad day: the failing job is red in the
-  # run either way, and `if: always()` below is what lets the release job run
-  # after it instead of being skipped. (Note: `continue-on-error` is NOT usable
+  # use. They GATE the release: the release job waits on both of them, so a tag
+  # whose bundles do not all build publishes nothing — a release that goes out
+  # quietly missing a platform is worse than no release (the reasoning is on the
+  # release job below). (Note: `continue-on-error` is NOT usable
   # on a job that calls a reusable workflow — the workflow file fails to load,
   # which is how this shipped once and published nothing.)
   desktop:
@@ -52,30 +52,17 @@ jobs:
     needs: ci
     uses: ./.github/workflows/mobile.yml
 
-  release:
-    # Every platform, or nothing. An earlier version of this ran the release
-    # even after a client build failed (`if: always()`), on the theory that the
-    # source zip and the Docker image are still worth publishing — but the run
-    # that proved it also showed the trap: the release then goes out with a
-    # platform missing from its assets and nobody notices, because the OLD
-    # installer is still sitting there under the same name. A tag that cannot
-    # build all five platforms must fail loudly instead.
-    needs: [ci, desktop, mobile]
+  # The image is built from the repository and the tag alone: its Dockerfile runs
+  # the frontend build inside the image and .dockerignore keeps web/dist out of
+  # the context, so it needs neither the desktop bundles nor the mobile ones. It
+  # waits only on CI and the tag check, which is what lets it run BESIDE the
+  # client builds instead of after them; the release job still waits for it
+  # before publishing, so an image that fails to build still fails the release.
+  docker:
+    needs: ci
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-
-      - name: Build web frontend
-        uses: actions/setup-node@v4
-        with:
-          node-version: 22
-          cache: npm
-          cache-dependency-path: web/package-lock.json
-      - name: npm ci + build
-        working-directory: web
-        run: |
-          npm ci
-          npm run build
 
       - name: Set up Python
         uses: actions/setup-python@v5
@@ -83,12 +70,10 @@ jobs:
           python-version: "3.12"
 
       - name: Tag must match every version copy
-        # The app reports mlo.__version__ on /api/health, the installers and
-        # the iOS IPA take theirs from tauri.conf.json, the container from
-        # this workflow's build-arg, and the README header from hand. A tag
-        # that disagrees with ANY of them publishes a release that disagrees
-        # with itself, so the shared checker (also run on every push in CI)
-        # is the gate rather than the single grep this step used to do.
+        # The release job applies the same check before it publishes; here it is
+        # what stops a mistagged tag from pushing an image labelled with a
+        # version the source does not claim. This is the whole reason the image
+        # job waits on CI at all.
         run: python tools/check_versions.py "${GITHUB_REF_NAME}"
 
       - name: Version for the image labels
@@ -99,26 +84,6 @@ jobs:
         # metadata that lets a user tell a stale image from a current one was
         # useless. Compute it here and pass it as an expression below.
         run: echo "value=${GITHUB_REF_NAME#v}" >> "$GITHUB_OUTPUT"
-
-      - name: Package application zip
-        run: |
-          VERSION="${GITHUB_REF_NAME#v}"
-          STAGE="la-musica-${VERSION}"
-          mkdir -p "${STAGE}/web"
-          cp -r mlo server tools "${STAGE}/"
-          cp -r web/dist "${STAGE}/web/dist"
-          cp README.md LICENSE THIRD-PARTY-NOTICES.md "${STAGE}"/
-          # The server is installed from a container now — the local launchers
-          # (start_app.py, tray.py, the .bat wrappers) are gone with host-local
-          # hosting — so the compose file and the Dockerfile travel with the
-          # source. A zip without them has no install path at all, which must
-          # fail the release rather than ship.
-          for f in docker-compose.yml Dockerfile; do
-            test -f "$f" || { echo "::error::$f is missing - the source zip would have nothing to install with"; exit 1; }
-            cp "$f" "${STAGE}/"
-          done
-          zip -qr "la-musica-${VERSION}-windows-x64.zip" "${STAGE}"
-          rm -rf "${STAGE}"
 
       - name: Docker meta
         id: meta
@@ -159,14 +124,73 @@ jobs:
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
+  release:
+    # Every platform, or nothing. An earlier version of this ran the release
+    # even after a client build failed (`if: always()`), on the theory that the
+    # source zip and the Docker image are still worth publishing — but the run
+    # that proved it also showed the trap: the release then goes out with a
+    # platform missing from its assets and nobody notices, because the OLD
+    # installer is still sitting there under the same name. A tag that cannot
+    # build all five platforms must fail loudly instead — and so must one whose
+    # image did not build, which is why `docker` is waited on here even though it
+    # runs beside the client builds rather than before them.
+    needs: [ci, desktop, mobile, docker]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: The frontend ci.yml built
+        # The zip ships web/dist, and ci.yml builds it for this commit: taking
+        # that copy keeps npm ci + vite build off the tag-to-asset path.
+        uses: actions/download-artifact@v4
+        with:
+          name: web-dist
+          path: web/dist
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Tag must match every version copy
+        # The app reports mlo.__version__ on /api/health, the installers and
+        # the iOS IPA take theirs from tauri.conf.json, the container from
+        # this workflow's build-arg, and the README header from hand. A tag
+        # that disagrees with ANY of them publishes a release that disagrees
+        # with itself, so the shared checker (also run on every push in CI)
+        # is the gate rather than the single grep this step used to do.
+        run: python tools/check_versions.py "${GITHUB_REF_NAME}"
+
+      - name: Package application zip
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+          STAGE="la-musica-${VERSION}"
+          mkdir -p "${STAGE}/web"
+          cp -r mlo server tools "${STAGE}/"
+          cp -r web/dist "${STAGE}/web/dist"
+          cp README.md LICENSE THIRD-PARTY-NOTICES.md "${STAGE}"/
+          # The server is installed from a container now — the local launchers
+          # (start_app.py, tray.py, the .bat wrappers) are gone with host-local
+          # hosting — so the compose file and the Dockerfile travel with the
+          # source. A zip without them has no install path at all, which must
+          # fail the release rather than ship.
+          for f in docker-compose.yml Dockerfile; do
+            test -f "$f" || { echo "::error::$f is missing - the source zip would have nothing to install with"; exit 1; }
+            cp "$f" "${STAGE}/"
+          done
+          zip -qr "la-musica-${VERSION}-windows-x64.zip" "${STAGE}"
+          rm -rf "${STAGE}"
+
       - name: Collect the desktop and mobile builds
         # The reusable workflows upload their bundles as artifacts of THIS run
         # (a called workflow's artifacts belong to the caller's run), so the
         # installers and the mobile builds ride along with the release instead
-        # of expiring in the run's artifact list.
+        # of expiring in the run's artifact list. `pattern` is what keeps the
+        # frontend artifact ci.yml uploads (web-dist) out of clients/.
         uses: actions/download-artifact@v4
         continue-on-error: true
         with:
+          pattern: la-musica-*
           path: clients
           merge-multiple: true
 

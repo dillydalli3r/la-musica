@@ -33,6 +33,7 @@ if not FFMPEG:
     sys.exit(0)
 
 from mlo.audio import AudioFile          # noqa: E402
+from mlo import naming                   # noqa: E402
 from server import exporter              # noqa: E402
 
 # ---------------------------------------------------------------- codec table
@@ -133,6 +134,53 @@ assert _rel("custom", TAGGED, None, ".mp3", "", "%albumartist%/$left(%title%,2)%
 assert _rel(exporter.DEFAULT_STRUCTURE, {}) == \
     os.path.join("Artist One", "Album A", "1-00 03 - Song.mp3")
 
+# ------------------------------------------------------- invalid characters
+# The app's ONE filename rule, through the real path builder: a character a
+# filesystem refuses becomes "_" in the name the run writes — never dropped,
+# never transliterated, one "_" per character. The default config is what an
+# export uses, so this is what a run writes without being asked for anything.
+for bad, title in (("<", "A<B"), (">", "A>B"), (":", "A:B"), ('"', 'A"B'),
+                   ("|", "A|B"), ("?", "A?B"), ("*", "A*B"), ("\\", "A\\B"),
+                   ("\x01", "A\x01B"), ("\t", "A\tB")):
+    rel = _rel(exporter.DEFAULT_STRUCTURE, dict(TAGGED, TITLE=title))
+    assert rel == os.path.join("Artist One", "Album A", "1-03 A_B.mp3"), (bad, rel)
+# A run of three becomes "___": the mapping is one "_" per invalid character,
+# not a collapse.
+assert _rel(exporter.DEFAULT_STRUCTURE, dict(TAGGED, TITLE="A***B")).endswith("A___B.mp3")
+# A trailing dot or space is invalid on Windows (the filesystem drops it, so
+# the name the app computed would not be the name on disk) — replaced too.
+assert _rel(exporter.DEFAULT_STRUCTURE, dict(TAGGED, TITLE="Vol. 1.")).endswith("Vol. 1_.mp3")
+assert _rel(exporter.DEFAULT_STRUCTURE, dict(TAGGED, TITLE="Track ")).endswith("Track_.mp3")
+# A reserved device name is not a name, with or without an extension: the
+# album folder and the artist folder are guarded as whole names.
+assert _rel("album", dict(TAGGED, ALBUM="CON")) == os.path.join("CON_", "03 - Song.mp3")
+assert _rel("album", dict(TAGGED, ALBUM="AUX.mp3")) == os.path.join("AUX_.mp3", "03 - Song.mp3")
+assert _rel(exporter.DEFAULT_STRUCTURE, dict(TAGGED, ALBUMARTIST="NUL", ALBUM="COM1")) == \
+    os.path.join("NUL_", "COM1_", "1-03 Song.mp3")
+# The subfolder under the drive root is one NAME too, so it is named by the
+# same rule (and can never be a traversal or a reserved name).
+assert exporter.safe_subfolder("CON") == "CON_"
+assert exporter.safe_subfolder("Music.") == "Music_"
+# "/" is STRUCTURE in a template but a character of a TAG VALUE: a title of
+# "AC/DC" names one file inside one album folder, never a level of its own.
+assert _rel("custom", dict(TAGGED, TITLE="AC/DC"), None, ".mp3", "",
+            "%albumartist%/%title%") == os.path.join("Artist One", "AC_DC.mp3")
+assert _rel(exporter.DEFAULT_STRUCTURE, dict(TAGGED, TITLE="AC/DC", ALBUM="AC/DC")) == \
+    os.path.join("Artist One", "AC_DC", "1-03 AC_DC.mp3")
+assert _rel("album", dict(TAGGED, TITLE="AC/DC", ALBUM="AC/DC")) == \
+    os.path.join("AC_DC", "03 - AC_DC.mp3")
+assert _rel("flat", dict(TAGGED, TITLE="AC/DC", ALBUMARTIST="AC/DC")) == "AC_DC - 03 - AC_DC.mp3"
+
+# Idempotent: sanitising a name the rule already produced changes nothing, so
+# organizing or exporting an album a second time is a no-op rather than a
+# rename. (Asserted on the whole relative path, the unit a writer works in.)
+for _text in ("Artist One/Album A/1-03 AC_DC.mp3", "CON_/AUX_.mp3/1-03 A_B.mp3",
+              "NUL_/COM1_/1-03 Vol. 1_.mp3"):
+    assert naming.sanitize_path(_text) == _text
+    for _seg in _text.split("/"):
+        assert naming.sanitize_segment(_seg) == _seg, _seg
+        assert naming.sanitize_segment(naming.sanitize_segment(_seg)) == _seg, _seg
+
 # What the page offers and what a run accepts are the same table, and the menu
 # carries the vocabulary a custom script is written in.
 _menu = exporter.structure_menu()
@@ -215,6 +263,11 @@ try:
 
     CFG = {"music_folder": LIB, "embed_cover_jpeg_quality": 85,
            "embed_cover_resolution": 400, "jpeg_progressive": True}
+    # The login gate reads the config through server.auth's own import (not the
+    # `load_config` alias patched above), so it is switched off HERE rather than
+    # left to whatever auth state the machine happens to have.
+    from server import auth as _auth_mod
+    _auth_mod.requires_login = lambda request, state: False
     TRACKS = [one, two, d1, d2, m4a]
     OPTS = dict(embed_covers=True, replaygain=True, playlists=True, verify=True,
                 workers=4)
@@ -230,9 +283,21 @@ try:
     # The shipped structure is the library's own: the disc number comes first
     # even on a single-disc album ("1-01 Track 1"), and the " - " the old
     # preset used is gone (that is the library's spelling, not a choice here).
+    # An export carries AUDIO: the cover travels EMBEDDED (asserted below) and
+    # the cover.jpg / description.txt / .lrc of the library stay there. The
+    # album playlist IS here because this run asked for playlists=True; without
+    # it (the default) the album export writes no .m3u8 at all.
     assert sorted(os.listdir(album_dir)) == [
-        "01 - One.lrc", "1-01 Track 1.mp3", "1-02 Track 2.mp3", "Album A.m3u8",
-        "cover.jpg", "description.txt"], os.listdir(album_dir)
+        "1-01 Track 1.mp3", "1-02 Track 2.mp3", "Album A.m3u8"], os.listdir(album_dir)
+    assert stats["sidecars"] == 0, stats
+    assert stats["playlists"] == 4, stats   # 3 album playlists + all.m3u8
+    # Nothing was left behind in silence: the report names every non-audio file
+    # beside the selection with the reason it did not travel.
+    assert {r["name"] for r in stats["excluded"]} == {
+        "01 - One.lrc", "cover.jpg", "description.txt"}, stats["excluded"]
+    assert stats["excluded_counts"] == {"cover": 1, "sidecar": 1, "lyrics": 1}, \
+        stats["excluded_counts"]
+    assert stats["excluded_note"] and "not exported" in stats["excluded_note"]
     assert sorted(os.listdir(os.path.join(DEST, "Music", "Artist One", "Album B"))) == [
         "1-01 Track 1.mp3", "2-01 Track 1.mp3", "Album B.m3u8"]
 
@@ -316,6 +381,183 @@ try:
                                     playlists=False, prune=True, verify=True)
     assert pruned["pruned"] == 2, (pruned["pruned"], pruned["pruned_files"])
     assert not os.path.exists(stale)
+
+    # ----------------------------------------- hostile names through the run
+    # A REAL export of tags a filesystem cannot spell. This is the same path
+    # builder the checks above use, driven end to end: what lands on the device
+    # comes from mlo.naming's one rule, so a "/" inside a TITLE names one file
+    # (never a second directory level), a "|" in the artist one folder, a
+    # reserved device name is spelled so Windows can hold it — and every TAG
+    # keeps exactly what the source said, because the library's data is the
+    # truth and only the NAME on disk is sanitised.
+    HOST_LIB = os.path.join(ROOT, "HostileLib")
+    HOST_DEST = os.path.join(ROOT, "HostileDest")
+    os.makedirs(HOST_DEST)
+    HOST_SRC = os.path.join(HOST_LIB, "Album")
+    HOST_CASES = [
+        # artist, album, title, track, expected path under the export root
+        ("AC/DC", "CON", "AC/DC", "1", "AC_DC/CON_/1-01 AC_DC.flac"),
+        ("AC/DC", "CON", "Bad:Name?*", "2", "AC_DC/CON_/1-02 Bad_Name__.flac"),
+        # the tag writer trims the trailing blank (tag hygiene), so what the
+        # rule sees is "Trail." — and the trailing dot still cannot survive
+        ("AC/DC", "AUX.mp3", "Trail. ", "3", "AC_DC/AUX_.mp3/1-03 Trail_.flac"),
+        # a control character in a tag (the rip's own encoding damage) is part
+        # of the invalid set too, and it must not reach a name either
+        ("AC/DC", "CON", "Bell\x01X", "4", "AC_DC/CON_/1-04 Bell_X.flac"),
+    ]
+    host_paths = []
+    for artist, album, title, track, _rel_want in HOST_CASES:
+        host_paths.append(make(
+            os.path.join(HOST_SRC, f"{track} - t.flac"), 0.4, 520,
+            {"TITLE": title, "ARTIST": artist, "ALBUMARTIST": artist,
+             "ALBUM": album, "TRACKNUMBER": track}))
+    hostile_run = exporter.export_tracks(CFG, host_paths, HOST_DEST, codec="copy",
+                                         playlists=False, verify=True, workers=2)
+    assert hostile_run["failed"] == 0, hostile_run["errors"]
+    host_root = HOST_DEST.replace("\\", "/")
+    assert listing(HOST_DEST) == sorted(
+        f"{host_root}/Music/{want}" for *_x, want in HOST_CASES), listing(HOST_DEST)
+    # No written name carries a character Windows refuses, a control character,
+    # a trailing dot/space or a reserved device name — the rule is what the
+    # acceptance list is, checked on what the RUN actually wrote.
+    _RESERVED = {"con", "prn", "aux", "nul"} | {f"com{i}" for i in range(1, 10)} \
+        | {f"lpt{i}" for i in range(1, 10)}
+    for rel in (want for *_x, want in HOST_CASES):
+        for seg in rel.split("/"):
+            assert not any(c in seg for c in '<>:"/\\|?*'), seg
+            assert not any(ord(c) < 32 for c in seg), seg
+            assert seg == seg.rstrip(" ."), seg
+            assert os.path.splitext(seg)[0].lower() not in _RESERVED, seg
+    # AC/DC is ONE file in ONE album folder: the tag made no directory level.
+    assert len([p for p in listing(HOST_DEST) if "AC_DC" in p]) == 4, listing(HOST_DEST)
+    assert f"{host_root}/Music/AC_DC/CON_/1-01 AC_DC.flac" in listing(HOST_DEST)
+    assert f"{host_root}/Music/AC_DC/AUX_.mp3/1-03 Trail_.flac" in listing(HOST_DEST)
+    # ...and the TAG is untouched: the file on disk is "AC_DC", the title in it
+    # is "AC/DC" (the app audits and grades on the tag, never on the name).
+    moved = AudioFile(os.path.join(HOST_DEST, "Music", "AC_DC", "CON_", "1-01 AC_DC.flac"))
+    assert moved.get_tag("TITLE") == "AC/DC", moved.all_tags()
+    assert moved.get_tag("ALBUM") == "CON" and moved.get_tag("ARTIST") == "AC/DC"
+    # Idempotent at the ALBUM level: a second run under the same rule renames
+    # nothing and re-copies nothing — "_"-vs-invalid is not a difference.
+    again_host = exporter.export_tracks(CFG, host_paths, HOST_DEST, codec="copy",
+                                        playlists=False, verify=True, workers=2)
+    assert (again_host["exported"], again_host["skipped"], again_host["failed"]) == (0, 4, 0), again_host
+    assert listing(HOST_DEST) == sorted(
+        f"{host_root}/Music/{want}" for *_x, want in HOST_CASES), listing(HOST_DEST)
+
+    # ------------------------------------- extra files are audited, never lost
+    # A library album carries more than audio. An export carries the AUDIO, so
+    # every one of these stays in the library — and the run reports each of
+    # them, by name and classification, instead of dropping them in silence.
+    EX_LIB = os.path.join(LIB, "Artist One", "Extras Album")
+    EX_DEST = os.path.join(ROOT, "ExtrasDest")
+    os.makedirs(EX_DEST)
+    ex_track = make(os.path.join(EX_LIB, "1-01 Extras.flac"), 0.4, 440,
+                    album_tags("Extras Album", "1"))
+    subprocess.run([FFMPEG, "-y", "-v", "error", "-f", "lavfi", "-i",
+                    "color=c=blue:s=600x600", "-frames:v", "1",
+                    os.path.join(EX_LIB, "cover.jpg")], check=True, capture_output=True)
+    for extra_name in ("Album.accurip", "Album.log", "Album.cue", "notes.txt",
+                       "Artist.jpg", "Album.m3u8", "release.nfo", "Album.md5",
+                       "Album.sfv", "Thumbs.db", "liner.bak"):
+        with open(os.path.join(EX_LIB, extra_name), "w", encoding="utf-8") as f:
+            f.write("x\n")
+    os.makedirs(os.path.join(EX_LIB, "Scans"), exist_ok=True)
+    ex_run = exporter.export_tracks(CFG, [ex_track], EX_DEST, codec="copy",
+                                    embed_covers=True, verify=True)
+    assert ex_run["failed"] == 0, ex_run["errors"]
+    # Only the audio travelled — no .accurip/.log/.cue/.txt/.jpg/.m3u8/.nfo/
+    # .md5/.sfv/Thumbs.db/.bak and no stray subfolder in the exported tree.
+    assert listing(EX_DEST) == [
+        f"{EX_DEST.replace(chr(92), '/')}/Music/Artist One/Extras Album/1-01 Track 1.flac"
+    ], listing(EX_DEST)
+    # The cover still reaches the device — EMBEDDED in the file it belongs to.
+    assert AudioFile(os.path.join(EX_DEST, "Music", "Artist One", "Extras Album",
+                                  "1-01 Track 1.flac")).embedded_pictures(), \
+        "the cover must travel embedded"
+    # Every extra is reported, named, classified and explained.
+    reported = {r["name"]: r for r in ex_run["excluded"]}
+    assert set(reported) == {
+        "Album.accurip", "Album.log", "Album.cue", "notes.txt", "Artist.jpg",
+        "Album.m3u8", "release.nfo", "Album.md5", "Album.sfv", "Thumbs.db",
+        "liner.bak", "cover.jpg", "Scans/"}, sorted(reported)
+    for name in ("Album.accurip", "Album.log", "Album.md5", "Album.sfv"):
+        assert reported[name]["kind"] == "evidence", reported[name]
+    for name in ("Album.cue", "notes.txt", "release.nfo"):
+        assert reported[name]["kind"] == "sidecar", reported[name]
+    assert reported["Album.m3u8"]["kind"] == "playlist", reported["Album.m3u8"]
+    for name in ("cover.jpg", "Artist.jpg"):
+        assert reported[name]["kind"] == "cover", reported[name]
+    assert reported["Thumbs.db"]["kind"] == "unknown", reported["Thumbs.db"]
+    assert reported["liner.bak"]["kind"] == "unknown", reported["liner.bak"]
+    assert reported["Scans/"]["dir"] is True and reported["Scans/"]["kind"] == "unknown"
+    assert all(r["reason"] for r in ex_run["excluded"]), ex_run["excluded"]
+    assert all(r["album"] == "Artist One/Extras Album" for r in ex_run["excluded"])
+    assert ex_run["excluded_total"] == 13, ex_run["excluded_total"]
+    assert ex_run["excluded_counts"] == {"evidence": 4, "sidecar": 3, "playlist": 1,
+                                         "cover": 2, "unknown": 3}, ex_run["excluded_counts"]
+    assert "13 non-audio file(s) not exported" in ex_run["excluded_note"], ex_run["excluded_note"]
+
+    # The two switches still exist for a device that wants the old behaviour:
+    # asking for them copies the sidecars and writes the album playlists again.
+    EX_OPT = os.path.join(ROOT, "ExtrasOptIn")
+    os.makedirs(EX_OPT)
+    opt_in = exporter.export_tracks(CFG, [ex_track], EX_OPT, codec="copy",
+                                    sidecars=True, playlists=True, verify=True)
+    assert opt_in["failed"] == 0, opt_in["errors"]
+    opt_files = sorted(os.path.basename(p) for p in listing(EX_OPT))
+    assert "cover.jpg" in opt_files and "Album.cue" in opt_files \
+        and "Album.accurip" in opt_files, opt_files
+    assert "Extras Album.m3u8" in opt_files, opt_files
+    assert opt_in["sidecars"] and opt_in["playlists"], opt_in
+
+    # A PLAYLIST export is a different writer and still writes its .m3u8 (the
+    # rule above is about ALBUM exports, and a blunt "never write .m3u8" would
+    # have broken this).
+    from server import playlists as pl_mod
+    _pl_tmp = tempfile.mkdtemp(prefix="mlo_export_pl_")
+    _real_db = pl_mod.db_path
+    pl_mod.db_path = lambda: os.path.join(_pl_tmp, "playlists.db")
+    try:
+        pid = pl_mod.create_playlist("Export check")
+        pl_mod.add_tracks(pid, [ex_track])
+        body = pl_mod.export_m3u8(pid)
+        assert body.startswith("#EXTM3U"), body
+        assert ex_track.replace("\\", "/") in body, body
+    finally:
+        pl_mod.db_path = _real_db
+        shutil.rmtree(_pl_tmp, ignore_errors=True)
+
+    # ------------------------------------------ the audit still finds the file
+    # The other half of the rule: a cue sheet that still names the file the way
+    # the RIP spelled it ("1-01 AC/DC.flac") must resolve to the file this app
+    # WROTE ("1-01 AC_DC.flac"). Both sides go through naming.name_key, so the
+    # app's own renaming never reads as a missing file.
+    from mlo.discs import _norm_name
+    from mlo.grader import _grade_album
+    assert _norm_name("1-01 AC/DC.flac") == _norm_name("1-01 AC_DC.flac")
+    assert _norm_name("1-01 AC_DC.flac") == _norm_name("1-01 AC_DC.flac")
+    AUD_LIB = os.path.join(ROOT, "AuditLib", "Artists", "Artist One", "Audit Album")
+    os.makedirs(AUD_LIB)
+    aud_track = make(os.path.join(AUD_LIB, "1-01 AC_DC.flac"), 0.4, 700,
+                     album_tags("Audit Album", "1"))
+
+    def _cue(ref):
+        with open(os.path.join(AUD_LIB, "Audit Album.cue"), "w",
+                  encoding="utf-8") as f:
+            f.write(f'FILE "{ref}" WAVE\n  TRACK 01 AUDIO\n    INDEX 01 00:00:00\n')
+
+    AUD_CFG = {"music_folder": os.path.join(ROOT, "AuditLib"), "grade_check_cue_files": True}
+    _cue("1-01 AC/DC.flac")
+    graded = str(_grade_album(AUD_LIB, "EMBEDDED", AUD_CFG))
+    assert "CUE references a file the album does not have" not in graded, graded
+    # ...and the check is not vacuous: a reference to a file that really is not
+    # there is still reported.
+    _cue("1-99 Nothing Here.flac")
+    graded = str(_grade_album(AUD_LIB, "EMBEDDED", AUD_CFG))
+    assert "CUE references a file the album does not have" in graded, graded
+    os.remove(os.path.join(AUD_LIB, "Audit Album.cue"))
+
 
     # ------------------------------------------------------------ refusal
     try:

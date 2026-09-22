@@ -4,10 +4,13 @@
 The Export page can now change the audio itself, not just its tags or its
 container, so this suite pins the parts of that which a tag cannot show:
 
-  * the Equalizer APO / Peace parser, fed a real parametric profile and a real
-    Peace export (both in this file), including the lines it REFUSES to guess
-    at — a profile that silently loses its Include half is not the curve the
-    user saved;
+  * the Equalizer APO / Peace parser, fed the profiles a user actually has
+    (``tools/fixtures/eq``: a real Peace ``FilterCurve:`` export, a parametric
+    APO text profile, a 31-band graphic profile, a straight-line curve saved
+    with a BOM and CRLF, and a file with nothing to apply), including the lines
+    it REFUSES to guess at — a profile that silently loses one of its bands is
+    a different curve, so a band line that cannot be read refuses the whole
+    import and names itself;
   * the rendered ``-af`` chain, asserted literally and then actually run
     through ffmpeg, since a chain that only looks right is worth nothing;
   * ``replaygain_mode=apply``: an album's quiet and loud track must come out
@@ -17,7 +20,13 @@ container, so this suite pins the parts of that which a tag cannot show:
   * ``eq_profile``: a bass shelf must raise the low band measurably and leave
     the mid band where it was;
   * the copy codec refusing a filtering run with the one message the UI shows;
-  * the EQ endpoints and the zip target end to end.
+  * the EQ endpoints end to end (list/import/delete, the encoding a hand-copied
+    file is read in, the traversal refusals, the size cap);
+  * the SAVED EXPORT CONFIGS end to end: the form under a name, one JSON file
+    per name, the round trip that proves a saved config still names the profile
+    it was saved with (the run reports the id and stamps the file it wrote), and
+    the honest degradation when that profile is gone;
+  * the zip target end to end.
 
 Every number below is measured with the same ffmpeg EBU R128 meter the export
 itself uses (mlo.loudness), so "it changed the audio" is a measurement.
@@ -26,6 +35,8 @@ Run:  python tools/test_export_audio.py
 """
 import hashlib
 import io
+import json
+import math
 import os
 import shutil
 import subprocess
@@ -53,6 +64,7 @@ from mlo import eq as eq_mod                                   # noqa: E402
 from mlo.audio import AudioFile                                 # noqa: E402
 from mlo.loudness import RG2_REFERENCE_LUFS, analyze_file, parse_ebur128  # noqa: E402
 from server import exporter                                     # noqa: E402
+from server import exportconfigs                                # noqa: E402
 from server import main as mlo_main                             # noqa: E402
 
 # --------------------------------------------------------------------------- #
@@ -128,7 +140,7 @@ assert peace["unsupported"] == [
     "Filter Settings file", "Room EQ V5.1", "EqualizerAPO Configuration File",
     "Device: Speakers (Realtek(R) Audio)", "Include: MyHeadphone.txt", "Gain: 0",
 ], peace["unsupported"]
-assert peace["notes"] and "6 line(s)" in peace["notes"][0], peace["notes"]
+assert any("6 line(s)" in n for n in peace["notes"]), peace["notes"]
 assert eq_mod.to_af(peace) == (
     "volume=-5.6dB,"
     "equalizer=f=30:t=q:w=0.7:g=6,"
@@ -142,15 +154,27 @@ chain = eq_mod.to_af(peace)
 for absent in ("f=1000", "Include", "Realtek", "Gain: 0"):
     assert absent not in chain, (absent, chain)
 
-# A malformed filter line is reported, not half-rendered: an unknown type, a
-# missing frequency and a non-numeric value all land in `unsupported`.
+# A malformed BAND line is an ERROR naming its line and its problem — an
+# unknown filter type, a missing frequency, a non-numeric value, a `GraphicEQ`
+# group that is not one pair, an unreadable preamp. The readable half is never
+# imported as a shorter curve: `import_profile` refuses the whole file.
 broken = eq_mod.parse_apo(
     "Filter 1: ON PK Fc 1000 Gain 3 Q 1\n"
     "Filter 2: ON XX Fc 200 Gain 3\n"
     "Filter 3: ON PK\n"
-    "Filter 4: ON PK Fc abc Gain 1\n")
-assert len(broken["filters"]) == 1 and len(broken["unsupported"]) == 3, broken
-assert eq_mod.to_af(broken) == "equalizer=f=1000:t=q:w=1:g=3", eq_mod.to_af(broken)
+    "Filter 4: ON PK Fc abc Gain 1\n"
+    "GraphicEQ: 25 0; 40 x\n"
+    "Preamp: loud dB\n")
+assert len(broken["filters"]) == 1 and broken["filters"][0]["fc"] == 1000.0, broken
+assert [e.split(" — ")[-1] for e in broken["errors"]] == [
+    "unknown filter type 'XX' (the types are PK, LS, HS, LP, HP, BP, NO, LSC, HSC)",
+    "no frequency (Fc)",
+    "Fc needs a number, got 'abc'",
+    "expected one 'frequency gain' pair, got '40 x'",
+    "Preamp needs a number, got 'loud dB'",
+], broken["errors"]
+assert [e.split(":")[0] for e in broken["errors"]] == [
+    "line 2", "line 3", "line 4", "line 5", "line 6"], broken["errors"]
 
 # A GraphicEQ band list (what AutoEQ publishes) becomes peaking filters with
 # Q 1.41 — AutoEQ's own conversion — and says so in the notes.
@@ -180,6 +204,137 @@ for row in eq_mod.preset_rows():
         cmd += ["-af", rendered]
     proc = subprocess.run(cmd + ["-f", "null", "-"], capture_output=True, text=True)
     assert proc.returncode == 0, (row["id"], rendered, proc.stderr[-300:])
+
+# --------------------------------------------------------------------------- #
+# The FILES a user actually has, byte for byte (tools/fixtures/eq): a real
+# Peace `FilterCurve:` export, a parametric APO text profile, a Peace graphic
+# profile, a straight-line curve saved with a BOM and CRLF, and a file whose
+# every line is one this app has no equivalent for.
+# --------------------------------------------------------------------------- #
+
+FIXTURES = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                        "fixtures", "eq")
+
+
+def fixture_bytes(name):
+    with open(os.path.join(FIXTURES, name), "rb") as f:
+        return f.read()
+
+
+def fixture_profile(name):
+    """The fixture as the app reads a profile file: bytes decoded per encoding."""
+    return eq_mod.parse_apo(eq_mod.decode_profile(fixture_bytes(name)), name)
+
+
+# --- Peace's FilterCurve: ONE line, fN/vN paired by index ---------------------
+curve_raw = fixture_bytes("earbuds_filtercurve.txt")
+assert b"FilterCurve:" in curve_raw and not curve_raw.startswith(b"\xef\xbb\xbf")
+assert not curve_raw.endswith(b"\n"), "the real file has no trailing newline"
+curve = fixture_profile("earbuds_filtercurve.txt")
+assert curve["errors"] == [] and curve["unsupported"] == [], curve
+# Every point became a band — 50 of them, and nothing was assumed about the
+# ladder: the frequencies are the file's own, in order.
+assert len(curve["filters"]) == 50, len(curve["filters"])
+freqs = [f["fc"] for f in curve["filters"]]
+assert freqs == sorted(freqs) and freqs[0] == 10.0 and freqs[-1] == 18903.4, freqs
+assert curve["filters"][0]["gain"] == 0.03, curve["filters"][0]
+assert all(f["type"] == "PK" and f["on"] for f in curve["filters"]), curve["filters"]
+# The band widths follow the ladder's own spacing: a 50-point curve is far
+# denser than a 10-band octave list, so Q 1.41 would smear every point into its
+# neighbours. A 1/3-octave ladder comes out at the textbook Q 4.32.
+assert 5.0 < curve["filters"][25]["q"] < 8.0, curve["filters"][25]
+# What the mapping does NOT reproduce is stated, not implied.
+curve_notes = " ".join(curve["notes"])
+assert "B-spline" in curve_notes, curve["notes"]
+assert "8191" in curve_notes and "convolution" in curve_notes, curve["notes"]
+assert "50 point(s)" in curve_notes, curve["notes"]
+assert eq_mod.to_af(curve).count("equalizer=") == 50, eq_mod.to_af(curve)
+
+# A 31-point curve with STRAIGHT lines, saved the way Notepad saves it: UTF-8
+# with a BOM and CRLF. (The count is the file's: nothing may assume 50.)
+linear_raw = fixture_bytes("filtercurve_linear_31_crlf.txt")
+assert linear_raw.startswith(b"\xef\xbb\xbf") and b"\r\n" in linear_raw, linear_raw[:20]
+linear = fixture_profile("filtercurve_linear_31_crlf.txt")
+assert linear["errors"] == [] and len(linear["filters"]) == 31, linear
+assert linear["filters"][0]["fc"] == 20.0 and linear["filters"][-1]["fc"] == 20000.0, linear
+# The band width comes from the FILE's own spacing: for this 31-point ladder
+# that is ~1/3 octave, which lands on the textbook Q 4.32 (and not on the
+# octave-wide 1.41 a 10-band list gets).
+mid = linear["filters"][15]
+lo, hi = linear["filters"][14]["fc"], linear["filters"][16]["fc"]
+bw = math.log2(hi / lo) / 2
+assert abs(mid["q"] - math.sqrt(2 ** bw) / (2 ** bw - 1)) < 1e-9, mid
+assert 4.2 < mid["q"] < 4.4, mid
+linear_notes = " ".join(linear["notes"])
+assert "InterpolateLin=1" in linear_notes and "straight lines" in linear_notes, linear["notes"]
+assert "4096" in linear_notes, linear["notes"]
+
+# A malformed curve fails NAMING the attribute — never as a shorter curve.
+for body, needle in (
+    ('FilterCurve: f0="20" v1="1"', "v1 has no f1"),
+    ('FilterCurve: f0="20" f1="30" v0="1"', "f1 has no v1"),
+    ('FilterCurve: f0="20" v0="loud"', "is not a number"),
+    ('FilterCurve: f0="20" v0="1" nonsense', 'expected name="value"'),
+    ('FilterCurve: FilterLength="8191"', "no points"),
+):
+    bad = eq_mod.parse_apo(body, "bad")
+    assert not bad["filters"], (body, bad)
+    assert len(bad["errors"]) == 1 and needle in bad["errors"][0], (body, bad["errors"])
+    assert bad["errors"][0].startswith("line 1: FilterCurve —"), bad["errors"]
+
+# --- the APO text shape, as Peace writes it ----------------------------------
+parametric = fixture_profile("peace_parametric.txt")
+assert parametric["errors"] == [], parametric["errors"]
+assert parametric["preamp_db"] == -6.5, parametric["preamp_db"]
+# Eight bands, in the file's order: the OFF slot and the `ON None` slot are not
+# bands, and a disabled band stays in the list marked off.
+assert [(f["type"], f["on"]) for f in parametric["filters"]] == [
+    ("PK", True), ("PK", False), ("LSC", True), ("HS", True), ("LP", True),
+    ("PK", True), ("NO", True), ("HP", False)], parametric["filters"]
+# BW 1.2 → Q ≈ 1.17 by APO's own relation, not the type's default 1.41.
+assert 1.1 < parametric["filters"][5]["q"] < 1.25, parametric["filters"][5]
+param_notes = " ".join(parametric["notes"])
+assert "LSC/HSC" in param_notes and "BW" in param_notes, parametric["notes"]
+assert parametric["unsupported"] == [
+    "Filter Settings file", "Room EQ V5.1", "EqualizerAPO Configuration File",
+    "Device: Speakers (Realtek(R) Audio)", "Include: MyHeadphone.txt", "Gain: 0",
+], parametric["unsupported"]
+assert "MyHeadphone" not in eq_mod.to_af(parametric), eq_mod.to_af(parametric)
+
+# --- a Peace graphic profile: 31 bands on its own ladder ---------------------
+graphic31 = fixture_profile("peace_graphic_31.txt")
+assert graphic31["errors"] == [] and len(graphic31["filters"]) == 31, graphic31
+assert [f["fc"] for f in graphic31["filters"]][:3] == [20.0, 25.0, 31.5], graphic31
+assert {f["q"] for f in graphic31["filters"]} == {1.41}, graphic31
+# (The one band the file puts at 0 dB is carried but not rendered: a peaking
+# filter at 0 dB is transparent, and rendering it would cost samples for
+# nothing. That is why the chain is one shorter than the band list.)
+assert eq_mod.to_af(graphic31).count("equalizer=") == 30, eq_mod.to_af(graphic31)
+
+# --- a file with nothing this app can apply: EMPTY, and said so --------------
+empty = fixture_profile("unknown_only.txt")
+assert empty["filters"] == [] and empty["errors"] == [], empty
+assert empty["empty"] is True, empty
+assert empty["unsupported"] == [
+    "Filter Settings file", "Device: Speakers (Realtek(R) Audio)",
+    "Include: MyHeadphone.txt"], empty["unsupported"]
+assert "holds no filters" in " ".join(empty["notes"]), empty["notes"]
+assert eq_mod.to_af(empty) == "", eq_mod.to_af(empty)
+
+# --- the same file read as UTF-16 (a Windows tool's other save) --------------
+utf16 = fixture_bytes("peace_parametric.txt").decode("utf-8").encode("utf-16")
+utf16_parsed = eq_mod.parse_apo(eq_mod.decode_profile(utf16), "utf16")
+assert utf16_parsed["preamp_db"] == -6.5 and utf16_parsed["errors"] == [], utf16_parsed
+assert utf16_parsed["filters"] == parametric["filters"], utf16_parsed["filters"]
+
+# And the chains above really are chains ffmpeg accepts (one 50-band curve —
+# the deepest of them — is enough to prove the shape; the presets above cover
+# the rest).
+deep = eq_mod.to_af(curve)
+proc = subprocess.run(
+    [FFMPEG, "-y", "-v", "error", "-f", "lavfi", "-i", "sine=frequency=440:duration=0.3",
+     "-af", deep, "-f", "null", "-"], capture_output=True, text=True)
+assert proc.returncode == 0, (deep[:200], proc.stderr[-400:])
 
 # --------------------------------------------------------------------------- #
 # A small library: one album, one quiet and one loud track, both pink noise so
@@ -256,6 +411,10 @@ try:
     loud = noise(os.path.join(ALBUM, "02 Loud.flac"), -10.0)
     CFG = {"music_folder": MUSIC, "embed_cover_jpeg_quality": 85,
            "embed_cover_resolution": 400, "jpeg_progressive": True}
+    # The login gate reads the config through server.auth's own import (not the
+    # `load_config` alias patched above), so it is switched off HERE rather than
+    # left to whatever auth state the machine happens to have.
+    mlo_main.auth_mod.requires_login = lambda request, state: False
     BASE = dict(embed_covers=False, playlists=False, sidecars=False,
                 verify=True, workers=1)
 
@@ -545,6 +704,343 @@ try:
     assert refused.status_code == 400, refused.text[:300]
     assert refused.json()["detail"] == exporter._PROCESSING_NEEDS_CODEC, refused.json()
 
+    # ---------------------------------------------------- the files a user has
+    # Every shape in tools/fixtures/eq imports, and each lands in the one list
+    # the export menu's equalizer control renders.
+    imported = {}
+    for name, fixture_name in (("Peace parametric", "peace_parametric.txt"),
+                               ("Peace graphic", "peace_graphic_31.txt"),
+                               ("Earbuds curve", "earbuds_filtercurve.txt"),
+                               ("Nothing here", "unknown_only.txt")):
+        with open(os.path.join(FIXTURES, fixture_name), "rb") as f:
+            r = client.post("/api/export/eq/import",
+                            json={"name": name, "text": eq_mod.decode_profile(f.read())})
+        assert r.status_code == 200, (fixture_name, r.text[:300])
+        imported[fixture_name] = r.json()
+    assert len(imported["peace_parametric.txt"]["filters"]) == 8, imported["peace_parametric.txt"]
+    assert len(imported["peace_graphic_31.txt"]["filters"]) == 31, imported["peace_graphic_31.txt"]
+    assert len(imported["earbuds_filtercurve.txt"]["filters"]) == 50, imported["earbuds_filtercurve.txt"]
+    # The all-unknown file is importable AND visibly empty: an explicit answer,
+    # not a flat curve standing in for one that was never read.
+    assert imported["unknown_only.txt"]["empty"] is True, imported["unknown_only.txt"]
+    assert imported["unknown_only.txt"]["filters"] == [], imported["unknown_only.txt"]
+    listing = {p["id"]: p for p in client.get("/api/export/eq").json()["profiles"]}
+    for row in imported.values():
+        assert row["id"] in listing, (row["id"], sorted(listing))
+
+    # A profile someone dropped into the folder themselves is read per its own
+    # ENCODING: UTF-16 read as UTF-8 would be a profile with no filters at all,
+    # which is the one outcome worse than an error.
+    eq_folder = os.path.join(MUSIC, ".mlo", "data", "eq")
+    with open(os.path.join(FIXTURES, "peace_graphic_31.txt"), "rb") as f:
+        graphic_text = eq_mod.decode_profile(f.read())
+    with open(os.path.join(eq_folder, "hand_copied.txt"), "wb") as f:
+        f.write(graphic_text.encode("utf-16"))
+    listing = {p["id"]: p for p in client.get("/api/export/eq").json()["profiles"]}
+    assert len(listing["hand_copied"]["filters"]) == 31, listing["hand_copied"]
+    assert listing["hand_copied"]["empty"] is False, listing["hand_copied"]
+
+    # A hand-copied file with ONE unreadable band is listed as broken, and a run
+    # that names it refuses every track with that line in the message — never a
+    # chain built from the bands that did parse.
+    with open(os.path.join(eq_folder, "half_broken.txt"), "w",
+              encoding="utf-8", newline="\n") as f:
+        f.write("Preamp: -3 dB\n"
+                "Filter 1: ON PK Fc 100 Hz Gain 2.0 dB Q 1.0\n"
+                "Filter 2: ON PK Fc abc Gain 1.0 dB Q 1.0\n")
+    listing = {p["id"]: p for p in client.get("/api/export/eq").json()["profiles"]}
+    assert listing["half_broken"]["errors"], listing["half_broken"]
+    DEST_BROKEN = os.path.join(ROOT, "DestBroken")
+    os.makedirs(DEST_BROKEN)
+    broken_run = client.post("/api/export", json={
+        "paths": [loud], "dest": DEST_BROKEN, "codec": "flac",
+        "structure": exporter.DEFAULT_STRUCTURE, "eq_profile": "half_broken",
+        "embed_covers": False, "playlists": False, "sidecars": False})
+    assert broken_run.status_code == 200, broken_run.text[:300]
+    broken_body = broken_run.json()
+    assert broken_body["failed"] == 1 and broken_body["eq_applied"] == 0, broken_body
+    assert "Fc needs a number" in broken_body["errors"][0], broken_body["errors"]
+    os.remove(os.path.join(eq_folder, "hand_copied.txt"))
+    os.remove(os.path.join(eq_folder, "half_broken.txt"))
+
+    # A malformed profile is refused over HTTP with the line (or the attribute)
+    # named, and nothing is stored under the name that asked for it.
+    for i, (text, needle) in enumerate((
+            ("Filter 1: ON PK Fc abc Gain 3\n", "line 1"),
+            ("GraphicEQ: 25 0; 40 x\n", "expected one 'frequency gain' pair"),
+            ('FilterCurve: f0="20" v1="1"\n', "v1 has no f1"),
+            ('FilterCurve: f0="20" v0="loud"\n', "is not a number"),
+            ("Preamp: loud dB\n", "Preamp needs a number"))):
+        malformed = client.post("/api/export/eq/import",
+                                json={"name": f"bad line {i}", "text": text})
+        assert malformed.status_code == 400, malformed.text[:200]
+        detail = malformed.json()["detail"]
+        assert "profile not imported" in detail and needle in detail, detail
+        assert not os.path.exists(os.path.join(eq_folder, f"bad_line_{i}.txt"))
+        assert f"bad_line_{i}" not in {
+            p["id"] for p in client.get("/api/export/eq").json()["profiles"]}
+
+    # ---------------------------------------------------- saved export configs
+    # The Export page's whole form under a name — including the equalizer
+    # profile BY ID — and the round trip that proves the identity: the config is
+    # saved, loaded back, posted to `/api/export` unchanged, and the run reports
+    # and stamps that profile on the file it wrote.
+    profile_id = imported["earbuds_filtercurve.txt"]["id"]
+    DEST_CFG = os.path.join(ROOT, "DestConfig")
+    os.makedirs(DEST_CFG)
+    form = dict(exporter.EXPORT_DEFAULTS)
+    form.update({"source_kind": "library", "dest": DEST_CFG, "subfolder": "Music",
+                 "codec": "flac", "quality": "8", "structure": exporter.DEFAULT_STRUCTURE,
+                 "structure_script": "", "id3v2": "2.3", "embed_covers": False,
+                 "eq_profile": profile_id})
+    saved = client.post("/api/export/configs",
+                        json={"name": "Earbuds curve (FLAC)", "config": form})
+    assert saved.status_code == 200, saved.text[:300]
+    row = saved.json()
+    assert row["id"] == "Earbuds_curve_FLAC" and row["name"] == "Earbuds curve (FLAC)", row
+    assert row["replaced"] is False, row
+    assert row["eq_profile"] == profile_id and row["eq_missing"] is False, row
+    assert row["eq_problem"] == "", row
+
+    # One JSON file per name, holding the form under `config` — and NOT the
+    # selection: which album was ticked is data, not configuration.
+    stored_path = os.path.join(MUSIC, ".mlo", "data", "export_configs",
+                               "Earbuds_curve_FLAC.json")
+    assert os.path.isfile(stored_path), stored_path
+    with open(stored_path, encoding="utf-8") as f:
+        stored = json.load(f)
+    assert stored["name"] == "Earbuds curve (FLAC)", stored
+    assert stored["config"] == row["config"], stored
+    assert stored["config"]["eq_profile"] == profile_id, stored["config"]
+    assert "paths" not in stored["config"], sorted(stored["config"])
+
+    # Load it back — a page that had been cleared gets the whole form — and run
+    # exactly that body, with only the selection added.
+    loaded = client.get("/api/export/configs/Earbuds_curve_FLAC")
+    assert loaded.status_code == 200, loaded.text[:200]
+    body = loaded.json()
+    assert body["config"] == stored["config"], body
+    assert body["config"]["source_kind"] == "library", body["config"]
+    run = client.post("/api/export", json={**body["config"], "paths": [loud]})
+    assert run.status_code == 200, run.text[:400]
+    result = run.json()
+    assert result["failed"] == 0 and result["exported"] == 1, result
+    assert result["eq_profile"] == profile_id, result
+    assert result["eq_applied"] == 1 and result["processed"] == 1, result
+    out_flac = os.path.join(DEST_CFG, "Music", "Artist One", "Album A", "1-02 Loud.flac")
+    assert exporter._processing_of(out_flac) == f"eq={profile_id}", \
+        AudioFile(out_flac).all_tags()
+
+    # The profile goes away (deleted — renaming it has the same effect, since an
+    # id is what a config names): loading the config SAYS so and keeps the id,
+    # rather than resolving to another profile or to none.
+    assert client.delete(f"/api/export/eq/{profile_id}").status_code == 200
+    gone = client.get("/api/export/configs/Earbuds_curve_FLAC").json()
+    assert gone["eq_missing"] is True, gone
+    assert "is gone" in gone["eq_problem"] and profile_id in gone["eq_problem"], gone
+    assert gone["config"]["eq_profile"] == profile_id, gone["config"]
+    listed_configs = {c["id"]: c for c in client.get("/api/export/configs").json()["configs"]}
+    assert listed_configs["Earbuds_curve_FLAC"]["eq_missing"] is True, listed_configs
+    gone_run = client.post("/api/export", json={**gone["config"], "paths": [loud]})
+    assert gone_run.json()["failed"] == 1 and gone_run.json()["eq_applied"] == 0, gone_run.json()
+    assert profile_id in gone_run.json()["errors"][0], gone_run.json()["errors"]
+    # The same curve under a NEW name does not satisfy the old id: identity is
+    # the id the config names, not a profile that looks like it.
+    with open(os.path.join(FIXTURES, "earbuds_filtercurve.txt"), "rb") as f:
+        eq_mod.import_profile(MUSIC, "Earbuds renamed", eq_mod.decode_profile(f.read()))
+    renamed = client.get("/api/export/configs/Earbuds_curve_FLAC").json()
+    assert renamed["eq_missing"] is True, renamed
+    assert renamed["config"]["eq_profile"] == profile_id, renamed["config"]
+
+    # Saving again under a name REPLACES that config, and says which happened.
+    again = client.post("/api/export/configs",
+                        json={"name": "Earbuds curve (FLAC)", "config": form})
+    assert again.status_code == 200 and again.json()["replaced"] is True, again.text[:200]
+    assert len({c["id"] for c in client.get("/api/export/configs").json()["configs"]}) == 1
+
+    # A config the RUN would refuse cannot be saved: the form is validated
+    # against the exporter's own tables, with the run's own sentences.
+    for patch, needle in (
+            ({"codec": "mp3x"}, "unknown codec"),
+            ({"target": "carrier-pigeon"}, "unknown export target"),
+            ({"structure": "artist_album_2003"}, "unknown folder structure"),
+            ({"replaygain_mode": "loud"}, "unknown ReplayGain mode"),
+            ({"workers": "4"}, "must be a whole number"),
+            ({"embed_covers": "yes"}, "must be true or false"),
+            ({"eq_profile": "../../../etc/passwd"}, "invalid equalizer profile id"),
+            ({"paths": [loud]}, "unknown config field")):
+        bad_config = client.post("/api/export/configs",
+                                 json={"name": "refuse me", "config": dict(form, **patch)})
+        assert bad_config.status_code == 400, (patch, bad_config.text[:200])
+        assert needle in bad_config.json()["detail"], (patch, bad_config.json())
+    assert client.get("/api/export/configs/refuse_me").status_code == 404
+    # A custom folder structure goes through the run's own validator, so a
+    # script an export would refuse is not saveable either.
+    bad_script = client.post("/api/export/configs", json={
+        "name": "bad script",
+        "config": dict(form, structure="custom", structure_script="%nope%/x")})
+    assert bad_script.status_code == 400, bad_script.text[:200]
+    assert "not a field" in bad_script.json()["detail"], bad_script.json()
+
+    # Deleting, and the 404s either side of it.
+    assert client.get("/api/export/configs/nope").status_code == 404
+    assert client.delete("/api/export/configs/nope").status_code == 404
+    # An id is never a path: a traversal spelling is either routed away before
+    # the handler (Starlette normalizes the dots out of the path, so the
+    # request becomes 404 Not Found / 405 Method Not Allowed) or refused by the
+    # handler itself — never a 200, and never a file touched out of the folder.
+    # The store's own refusal is pinned below, where the id does reach it.
+    canary_cfg = os.path.join(MUSIC, ".mlo", "data", "canary.json")
+    with open(canary_cfg, "w", encoding="utf-8") as f:
+        f.write('{"not": "a saved config"}\n')
+    for spelling in ("..%2F..%2Fcanary.json", "../canary.json", "..%2Fcanary",
+                     "%2E%2E%2Fcanary.json"):
+        assert client.delete(f"/api/export/configs/{spelling}").status_code in (400, 404, 405)
+        assert client.get(f"/api/export/configs/{spelling}").status_code in (400, 404)
+    assert client.get("/api/export/configs/%00canary").status_code == 400
+    assert client.get("/api/export/configs/%00canary").json()["detail"].startswith(
+        "invalid config id")
+    for bad in ("../../canary", "..\\..\\canary", "..", "", "/etc/passwd"):
+        try:
+            exportconfigs.load(MUSIC, bad)
+        except ValueError:
+            pass
+        else:
+            raise AssertionError(f"loading {bad!r} must be refused")
+        try:
+            exportconfigs.delete(MUSIC, bad)
+        except ValueError:
+            pass
+        else:
+            raise AssertionError(f"deleting {bad!r} must be refused")
+    assert os.path.isfile(canary_cfg), "a traversal deleted a file outside the folder"
+    assert client.delete("/api/export/configs/Earbuds_curve_FLAC").json()["ok"] is True
+    assert client.get("/api/export/configs/Earbuds_curve_FLAC").status_code == 404
+    assert not os.path.exists(stored_path), "the deleted config's file is gone"
+    os.remove(canary_cfg)
+
+    # ---------------------------------------------------- lyrics in an export
+    # A source album whose tracks keep their lyrics in the two places a library
+    # does: one in the LYRICS tag, one in a `.lrc` beside it. Every mode has to
+    # produce the lyrics in the form it names — for BOTH tracks, whichever way
+    # the source happened to store them.
+    LYRIC_DIR = os.path.join(MUSIC, "Artist One", "Album Lyrics")
+    os.makedirs(LYRIC_DIR, exist_ok=True)
+    LRC_TEXT = "[00:01.00]First line\n[00:05.50]Second line\n"
+
+    def lyric_track(path, title, number, lyrics=None):
+        subprocess.run([FFMPEG, "-y", "-v", "error", "-f", "lavfi", "-i",
+                        "sine=frequency=440:duration=1.5", "-c:a", "flac", path],
+                       check=True, capture_output=True)
+        af = AudioFile(path)
+        af.defer_save(True)
+        for key, value in (("ARTIST", "Artist One"), ("ALBUMARTIST", "Artist One"),
+                           ("ALBUM", "Album Lyrics"), ("TITLE", title),
+                           ("TRACKNUMBER", number), ("DISCNUMBER", "1")):
+            af.set_tag(key, value)
+        if lyrics:
+            af.set_lyrics(lyrics)
+        af.defer_save(False)
+        return path
+
+    tagged_track = lyric_track(os.path.join(LYRIC_DIR, "1-01 Tagged.flac"), "Tagged",
+                               "01", lyrics="[00:02.00]Tagged line\n")
+    sidecar_track = lyric_track(os.path.join(LYRIC_DIR, "1-02 Sidecar.flac"), "Sidecar", "02")
+    with open(os.path.join(LYRIC_DIR, "1-02 Sidecar.lrc"), "w",
+              encoding="utf-8", newline="\n") as f:
+        f.write(LRC_TEXT)
+
+    lyric_dests = {}
+    for mode in ("embedded", "lrc", "both"):
+        dest = os.path.join(ROOT, f"DestLyrics{mode}")
+        os.makedirs(dest)
+        lyric_dests[mode] = dest
+        res = client.post("/api/export", json={
+            "paths": [tagged_track, sidecar_track], "dest": dest, "codec": "flac",
+            "structure": exporter.DEFAULT_STRUCTURE, "embed_covers": False,
+            "playlists": False, "sidecars": False, "lyrics": mode})
+        assert res.status_code == 200, res.text[:300]
+        run = res.json()
+        assert run["failed"] == 0, run["errors"]
+        assert run["lyrics_mode"] == mode, run
+        folder = os.path.join(dest, "Music", "Artist One", "Album Lyrics")
+        one, two = ("1-01 Tagged", "1-02 Sidecar")
+        assert os.path.isfile(os.path.join(folder, one + ".flac")), run
+        assert os.path.isfile(os.path.join(folder, two + ".flac")), run
+        embedded = {stem: (AudioFile(os.path.join(folder, stem + ".flac")).get_lyrics() or "")
+                    for stem in (one, two)}
+        files = {stem: os.path.isfile(os.path.join(folder, stem + ".lrc"))
+                 for stem in (one, two)}
+        rows = [f for f in run["excluded"] if f["kind"] == "lyrics"]
+        if mode == "embedded":
+            # The tag carries the lyrics for both tracks — the one whose lyrics
+            # were in a FILE gets them embedded, so no mode loses them.
+            assert "Tagged line" in embedded[one], embedded
+            assert "First line" in embedded[two], embedded
+            assert files == {one: False, two: False}, files
+            assert run["lyrics_files"] == 0, run
+            # ...and the source sidecar is reported as an extra, by name.
+            assert {f["name"] for f in rows} == {"1-02 Sidecar.lrc"}, run["excluded"]
+            assert run["excluded_counts"].get("lyrics") == 1, run["excluded_counts"]
+        elif mode == "lrc":
+            assert embedded == {one: "", two: ""}, embedded
+            assert files == {one: True, two: True}, files
+            assert run["lyrics_files"] == 2, run
+            assert rows == [], run["excluded"]
+            for stem, expected in ((one, "Tagged line"), (two, "First line")):
+                with open(os.path.join(folder, stem + ".lrc"), encoding="utf-8") as f:
+                    assert expected in f.read(), (stem, expected)
+        else:
+            assert "Tagged line" in embedded[one] and "First line" in embedded[two], embedded
+            assert files == {one: True, two: True}, files
+            assert run["lyrics_files"] == 2, run
+            assert rows == [], run["excluded"]
+            with open(os.path.join(folder, two + ".lrc"), encoding="utf-8") as f:
+                assert "First line" in f.read()
+        # The sidecar's own name is the exported track's own name (no second
+        # naming rule), and it sits in the exported album folder.
+        assert sorted(os.listdir(folder)) == sorted(
+            [one + ".flac", two + ".flac"]
+            + ([one + ".lrc"] if files[one] else [])
+            + ([two + ".lrc"] if files[two] else [])), os.listdir(folder)
+    print(f"    lyrics: modes wrote "
+          f"embedded={os.listdir(os.path.join(lyric_dests['embedded'], 'Music', 'Artist One', 'Album Lyrics'))}, "
+          f"lrc={os.listdir(os.path.join(lyric_dests['lrc'], 'Music', 'Artist One', 'Album Lyrics'))}")
+
+    # The half of the audit the modes turn around: a `.lrc` whose track is NOT
+    # in the selection stays in the library and is still reported.
+    PARTIAL_DIR = os.path.join(ROOT, "DestLyricsPartial")
+    os.makedirs(PARTIAL_DIR, exist_ok=True)
+    partial = client.post("/api/export", json={
+        "paths": [tagged_track], "dest": PARTIAL_DIR,
+        "codec": "flac", "structure": exporter.DEFAULT_STRUCTURE,
+        "embed_covers": False, "playlists": False, "sidecars": False, "lyrics": "lrc"})
+    assert partial.status_code == 200, partial.text[:200]
+    partial_run = partial.json()
+    assert {f["name"] for f in partial_run["excluded"] if f["kind"] == "lyrics"} == \
+        {"1-02 Sidecar.lrc"}, partial_run["excluded"]
+
+    # The option is part of a saved config, and it survives the round trip.
+    os.makedirs(os.path.join(ROOT, "DestLyricsLoaded"), exist_ok=True)
+    lyrics_cfg = client.post("/api/export/configs", json={
+        "name": "Lyrics to files",
+        "config": dict(form, dest=os.path.join(ROOT, "DestLyricsLoaded"),
+                       codec="flac", structure=exporter.DEFAULT_STRUCTURE,
+                       embed_covers=False, lyrics="lrc",
+                       eq_profile="")})   # this run is about lyrics, not the EQ
+    assert lyrics_cfg.status_code == 200, lyrics_cfg.text[:200]
+    assert lyrics_cfg.json()["config"]["lyrics"] == "lrc", lyrics_cfg.json()
+    back = client.get(f"/api/export/configs/{lyrics_cfg.json()['id']}")
+    assert back.json()["config"]["lyrics"] == "lrc", back.json()
+    loaded_lyrics = client.post("/api/export",
+                                json={**back.json()["config"], "paths": [tagged_track]})
+    assert loaded_lyrics.status_code == 200, loaded_lyrics.text[:200]
+    loaded_run = loaded_lyrics.json()
+    assert loaded_run["lyrics_mode"] == "lrc" and loaded_run["lyrics_files"] == 1, loaded_run
+    assert os.path.isfile(os.path.join(ROOT, "DestLyricsLoaded", "Music", "Artist One",
+                                       "Album Lyrics", "1-01 Tagged.lrc")), loaded_run
+    assert client.delete(f"/api/export/configs/{lyrics_cfg.json()['id']}").json()["ok"] is True
+
     # ---------------------------------------------------- zip target
     zip_body = {"paths": [quiet, loud], "dest": "", "target": "zip",
                 "codec": "flac", "quality": "", "structure": exporter.DEFAULT_STRUCTURE,
@@ -606,10 +1102,15 @@ try:
 finally:
     shutil.rmtree(ROOT, ignore_errors=True)
 
-print("ok  export audio: Equalizer APO/Peace parsing (incl. the refused lines), the "
-      "literal -af chain and its real ffmpeg run, album gain applied to the samples "
-      "with REPLAYGAIN_* stripped, track gain for a partial selection, tags mode "
-      "unchanged, a measurable bass shelf with the mids left alone, a missing "
-      "profile failing its tracks, copy refusing to filter, the EQ endpoints "
-      "(list/import/delete/traversal/oversize) and a zip export that replaces "
-      "the previous archive")
+print("ok  export audio: lyrics embedded / .lrc / both per setting (tag vs file vs both, "
+      "the audit reporting a travelling source .lrc as output and a non-selected one as an "
+      "extra, and the option surviving a config round trip); Equalizer APO/Peace parsing of the real fixture files "
+      "(parametric, graphic, FilterCurve, empty, BOM/CRLF, UTF-16) with the malformed "
+      "cases refused by name, the literal -af chain and its real ffmpeg run, album gain "
+      "applied to the samples with REPLAYGAIN_* stripped, track gain for a partial "
+      "selection, tags mode unchanged, a measurable bass shelf with the mids left alone, "
+      "a missing or unreadable profile failing its tracks, copy refusing to filter, the "
+      "EQ endpoints (list/import/delete/traversal/oversize), saved export configs "
+      "(save/load/delete, validation, and the equalizer profile surviving the round trip "
+      "by identity or reporting itself gone) and a zip export that replaces the "
+      "previous archive")

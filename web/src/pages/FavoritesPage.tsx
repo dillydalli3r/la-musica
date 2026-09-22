@@ -356,7 +356,7 @@ function LikedTracks() {
                       albumPath={r.albumPath}
                       trackCover={r.coverFile}
                       albumCover={r.albumCover}
-                      wrapperClass="h-9 w-9 rounded bg-raise border border-border overflow-hidden shrink-0"
+                      wrapperClass="h-9 w-9 rounded bg-raise overflow-hidden shrink-0"
                     />
                   ) : null}
                 </td>

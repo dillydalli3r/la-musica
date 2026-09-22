@@ -553,7 +553,12 @@ export interface ExportForm {
   /** "off" | "tags" (write ReplayGain tags, the player applies them) |
    *  "apply" (bake the correction into the exported audio). */
   replaygain_mode: string;
-  /** An equaliser preset or imported profile id; "" = none. */
+  /** How lyrics travel: "embedded" (the LYRICS tag inside the file), "lrc"
+   *  (a .lrc beside the exported file) or "both". The saved default follows
+   *  the library's own `lyrics_format`, so an export writes lyrics the way the
+   *  library does until the user says otherwise. */
+  lyrics: string;
+  /** An equalizer preset or imported profile id; "" = none. */
   eq_profile: string;
   clean_tags: boolean;
   playlists: boolean;
@@ -577,9 +582,14 @@ export interface ExportZip {
   url: string;
 }
 
-/** One equaliser profile the server can bake into an export
+/** One equalizer profile the server can bake into an export
  *  (`GET /api/export/eq`): the built-in presets, and the profiles the user
- *  imported. `unsupported` names filters the server's own processor skipped. */
+ *  imported from Equalizer APO / Peace text. `unsupported` names lines the
+ *  server's own processor has no equivalent for (skipped, and reported);
+ *  `errors` names BAND lines it cannot read, in which case the server refuses
+ *  to apply the profile at all rather than exporting a different curve;
+ *  `empty` is a profile with no filters in it at all — it exports the audio
+ *  unchanged, which is not the same as a flat curve. */
 export interface ExportEqProfile {
   id: string;
   label: string;
@@ -587,7 +597,9 @@ export interface ExportEqProfile {
   filters: Record<string, unknown>[];
   imported_at?: string;
   unsupported?: string[];
-  notes?: string;
+  errors?: string[];
+  empty?: boolean;
+  notes?: string[];
 }
 
 export interface ExportEq {
@@ -595,6 +607,33 @@ export interface ExportEq {
   profiles: ExportEqProfile[];
   /** The server's own line about what applying a profile does, shown verbatim. */
   note: string;
+}
+
+/** One saved export configuration (`/api/export/configs`): the Export page's
+ *  form under a name.
+ *
+ *  `config` is that form — every value the page's controls carry, plus
+ *  `source_kind`, the source tab it was saved from — so a loaded config can be
+ *  posted to `/api/export` exactly as it stands. The SELECTION is not part of
+ *  it (which albums are ticked is data, not configuration).
+ *
+ *  `eq_missing` / `eq_problem` describe the equalizer profile it names: a
+ *  profile deleted or renamed after the config was saved is reported here (and
+ *  by the run, which refuses it) instead of the export quietly using another
+ *  curve. */
+export interface ExportSavedConfig {
+  id: string;
+  name: string;
+  saved_at: string;
+  config: Partial<ExportForm> & { source_kind?: string };
+  /** The profile id the config names ("" = no equalizer). */
+  eq_profile: string;
+  /** The profile is not there any more (deleted or renamed). */
+  eq_missing: boolean;
+  /** The sentence to show about that profile, or "" when it is usable. */
+  eq_problem: string;
+  /** Set by a save that replaced a config of the same name. */
+  replaced?: boolean;
 }
 
 /** One item in <music folder>/.mlo/trash. `cover` is false when the cover
@@ -1157,17 +1196,21 @@ export function answerSources(
 
 /** Run both per-track checks on one selection. The legs are independent: an
  *  endpoint a server does not have must not hide the other leg's values, so a
- *  failed leg arrives as null with its message in `errors`. `force` is the
- *  advisory RE-RATE (the only route that can lower a rating): every file is
- *  asked and what the sources state is written, including ones already
- *  carrying a 0/1/2 — an explicit, confirmed action, never the default. */
-export async function checkTrackValues(paths: string[], force = false): Promise<{
+ *  failed leg arrives as null with its message in `errors`. The advisory leg is
+ *  FORCED — every file is asked and what the sources state is written,
+ *  including ones already carrying a 0/1/2 — because this function IS the
+ *  advisory action of the surfaces that use it (the track page, the metadata
+ *  review): a rating an earlier run invented must not keep answering for a file
+ *  nobody asked about. The fill-only pass belongs to the IMPORT's own automatic
+ *  fetch, where no user pressed anything. Only evidence lowers a stored rating,
+ *  so the ladder's invented fallback never overwrites one even here. */
+export async function checkTrackValues(paths: string[]): Promise<{
   adv: AdvisoryFetchResult | null;
   inst: InstrumentalFetchResult | null;
   errors: string[];
 }> {
   const [adv, inst] = await Promise.all([
-    api.mbAdvisoryFetch({ paths, force }).catch((e) => e as Error),
+    api.mbAdvisoryFetch({ paths, force: true }).catch((e) => e as Error),
     api.instrumentalFetch(paths).catch((e) => e as Error),
   ]);
   const errors: string[] = [];
@@ -2741,9 +2784,48 @@ export const api = {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ script, ext }),
     }),
-  /** The equaliser profiles an export can bake in, and the server's own line
-   *  about what applying one does. */
+  /** The equalizer profiles an export can bake in — the built-in presets and
+   *  everything the user imported — and the server's own line about what
+   *  applying one does. */
   exportEq: () => json<ExportEq>(`${API}/export/eq`),
+  /** Import one Equalizer APO / Peace profile (its text: `Preamp:`/`Filter N:`
+   *  lines, a `GraphicEQ:` band list, or a Peace `FilterCurve:` line) under a
+   *  name. The server refuses a name that could name a file, a body past its
+   *  cap, a name a built-in preset already has, and — with the line named — a
+   *  band line it cannot read: a curve that silently loses a band is worse
+   *  than a refusal. */
+  exportEqImport: (name: string, text: string) =>
+    json<ExportEqProfile>(`${API}/export/eq/import`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ name, text }),
+    }),
+  /** Drop one imported profile (404 when it is already gone). */
+  exportEqDelete: (id: string) =>
+    json<{ ok: boolean; id: string }>(`${API}/export/eq/${encodeURIComponent(id)}`, {
+      method: "DELETE",
+    }),
+  /** The saved export configurations, newest first. Each row carries the state
+   *  of the equalizer profile it names, so a config whose profile has been
+   *  deleted or renamed is visible as such before it is loaded. */
+  exportConfigs: () => json<{ configs: ExportSavedConfig[] }>(`${API}/export/configs`),
+  /** Save the export form under a name (replacing that name's config). The
+   *  server validates the form against the exporter's own tables, so a config
+   *  it would refuse to run cannot be saved either. */
+  exportConfigSave: (name: string, config: ExportSavedConfig["config"]) =>
+    json<ExportSavedConfig>(`${API}/export/configs`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ name, config }),
+    }),
+  /** One saved config: the form values to load, plus `eq_missing`/`eq_problem`
+   *  when the equalizer profile it names is gone or unreadable. */
+  exportConfigLoad: (id: string) =>
+    json<ExportSavedConfig>(`${API}/export/configs/${encodeURIComponent(id)}`),
+  exportConfigDelete: (id: string) =>
+    json<{ ok: boolean; id: string }>(`${API}/export/configs/${encodeURIComponent(id)}`, {
+      method: "DELETE",
+    }),
   /** The archive a `target: "zip"` run built, as a URL an `<a download>` can
    *  be pointed at. The token rides in the query string because a download
    *  cannot send an Authorization header; on the web app (`BASE === ""`) the
@@ -2757,9 +2839,18 @@ export const api = {
       error_count: number; errors: string[]; estimated_bytes: number | null;
       /** Present only for `target: "zip"` — what to hand the browser. */
       zip: ExportZip | null;
+      /** Every non-audio file the export left in the library, with the reason
+       *  it did not travel (server.exporter.extra_files). */
+      excluded: { album: string; name: string; kind: string; reason: string; dir: boolean }[];
+      excluded_counts: Record<string, number>;
+      excluded_total: number;
+      excluded_note: string;
       /** What the run did with the audio: the mode it used, the profile id it
-       *  resolved, and how many files it processed / equalised. */
+       *  resolved, and how many files it processed / equalized. */
       replaygain_mode: string; eq_profile: string;
+      /** What the run did with lyrics: the mode it used and how many `.lrc`
+       *  files it wrote. */
+      lyrics_mode: string; lyrics_files: number;
       processed: number; eq_applied: number;
     }>(`${API}/export`, {
       method: "POST",
@@ -3098,12 +3189,16 @@ export const api = {
       600000
     ),
   /** Run the configured import script chain over already-imported albums.
-   *  Each album's reply also carries its `autonomy` block: what the import
-   *  could not finish (see server/imports._report_gaps). */
+   *  Each album's reply also carries its `autonomy` block (what the import
+   *  could not finish, see server/imports._report_gaps) and the chain's own
+   *  `note` line — which is where an import says that a family it was
+   *  CONFIGURED not to fetch was skipped (`skipped_families`, the same reasons
+   *  spelled out in the note), since a switched-off family is not a gap. */
   importFinish: (paths: string[], force: Record<string, boolean> = {}, staged = false) =>
     json<{
       albums: {
         path: string; chain: number[]; scripts: unknown[]; errors: unknown[];
+        note?: string; skipped_families?: string[];
         autonomy?: ImportAutonomy;
       }[];
     }>(
@@ -3201,7 +3296,11 @@ export const api = {
    *  `answers` reports every provider that had something to say (the UI's
    *  provenance). A file that already carries a valid 0/1/2 is ECHOED, not
    *  re-asked; `force: true` is the re-rate that asks anyway — the only route
-   *  that can lower a rating, so it is an explicit action, never the default. */
+   *  that can lower a rating. The REQUEST's own default is the routine pass
+   *  (`false`), which is the import's automatic fetch: nobody pressed anything
+   *  there, so it must not overrule a value it did not decide. Every surface a
+   *  user PRESSES sends `true` (see `checkTrackValues`, the tag actions' entry
+   *  and the wizard's advisory step). */
   mbAdvisoryFetch: (body: { paths?: string[]; release_mbid?: string; staged?: boolean; force?: boolean }) =>
     json<AdvisoryFetchResult>(`${API}/mb/advisory/fetch`, {
       method: "POST",

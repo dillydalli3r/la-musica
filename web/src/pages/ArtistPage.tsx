@@ -317,7 +317,7 @@ export default function ArtistPage() {
         <div className="relative flex flex-col sm:flex-row items-start gap-5">
           {/* Same cover geometry as the album hero: one square tile, the
               stored image or a plain monogram when there is none. */}
-          <div className="h-40 w-40 shrink-0 mx-auto sm:mx-0 rounded-xl overflow-hidden border border-border bg-gradient-to-br from-accent/30 to-accent/5 flex items-center justify-center shadow-2xl">
+          <div className="h-40 w-40 shrink-0 mx-auto sm:mx-0 rounded-xl overflow-hidden bg-gradient-to-br from-accent/30 to-accent/5 flex items-center justify-center shadow-2xl">
             {imageUrl ? (
               <img src={imageUrl} alt={`${name} artist image`} className="h-full w-full object-cover" />
             ) : monogram ? (

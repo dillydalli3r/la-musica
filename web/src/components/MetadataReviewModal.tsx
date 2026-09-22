@@ -69,13 +69,16 @@ export default function MetadataReviewModal({
   // it is fetched on demand and never inferred from the stored tag.
   const [checked, setChecked] = useState<null | { adv?: AdvisoryFetchResult; inst?: InstrumentalFetchResult }>(null);
   const [checking, setChecking] = useState(false);
-  /** `force` is the advisory re-rate: the server echoes a file that already
-   *  carries a valid 0/1/2, and forcing asks anyway and writes what the sources
-   *  state — the only route that can lower a rating. */
-  const checkPerTrack = async (force = false) => {
+  /** The one check this modal offers, and it ASKS ANYWAY: `checkTrackValues`
+   *  forces the advisory leg, so a track that already carries a 0/1/2 is asked
+   *  too and what the sources state is written — the only route that can lower
+   *  a rating, and the reason there is no gentler entry beside it. The
+   *  instrumental leg has no such mode: INSTRUMENTAL is left alone where it is
+   *  already 0/1. */
+  const checkPerTrack = async () => {
     setChecking(true);
     try {
-      const { adv, inst, errors } = await checkTrackValues(paths, force);
+      const { adv, inst, errors } = await checkTrackValues(paths);
       setChecked({ adv: adv ?? undefined, inst: inst ?? undefined });
       if (errors.length) toast.error(errors.join(" · "));
       else toast(`Checked — ${advisoryOutcome(adv)}, ${inst?.updated ?? 0} instrumental value(s) written`);
@@ -84,19 +87,6 @@ export default function MetadataReviewModal({
       setChecking(false);
     }
   };
-  /** The re-rate, behind a confirmation: it can LOWER a rating, so a stray
-   *  click must not reach it. */
-  const reRatePerTrack = () => {
-    if (
-      !window.confirm(
-        `Re-rate ITUNESADVISORY for ${paths.length} track(s)?\n\n` +
-          "This asks even for files that already carry a value, and a source's answer can lower a rating (1 → 0)."
-      )
-    )
-      return;
-    void checkPerTrack(true);
-  };
-
   const run = async (key: string, fn: () => Promise<unknown>, done: string) => {
     setBusy(key);
     try {
@@ -155,7 +145,7 @@ export default function MetadataReviewModal({
                   {images.map((img) => (
                     <button
                       key={img.url}
-                      className="group relative overflow-hidden rounded-lg border border-border hover:border-accent transition-colors"
+                      className="group relative overflow-hidden rounded-lg border border-transparent hover:border-accent transition-colors"
                       disabled={busy === img.url}
                       title={`${SOURCE_NAMES[img.source] ?? img.source}${img.width ? ` · ${img.width}×${img.height}` : ""}`}
                       onClick={() =>
@@ -288,20 +278,12 @@ export default function MetadataReviewModal({
                 </span>
                 <button
                   className="btn-ghost !py-0.5 !px-1.5 ml-auto normal-case tracking-normal text-[10px] font-normal"
-                  onClick={() => checkPerTrack(false)}
+                  onClick={() => checkPerTrack()}
                   disabled={checking}
-                  title="Ask the configured sources for each track's advisory + INSTRUMENTAL and write what they state. A track that already carries a value keeps it — Re-rate asks anyway."
+                  title="Ask the configured sources for each track's advisory + INSTRUMENTAL and write what they state. Advisory files that already carry a value are asked too, and a source's answer can lower a rating; INSTRUMENTAL is left alone where it is already 0/1."
                 >
                   {checking ? <Loader2 className="h-3 w-3 animate-spin" /> : <RefreshCw className="h-3 w-3" />}
-                  Check
-                </button>
-                <button
-                  className="btn-ghost !py-0.5 !px-1.5 normal-case tracking-normal text-[10px] font-normal"
-                  onClick={reRatePerTrack}
-                  disabled={checking}
-                  title="Ask the advisory sources again even for tracks that already carry a value, and write what they state — the only way a rating can go down"
-                >
-                  Re-rate…
+                  Check advisory + instrumental
                 </button>
               </div>
               {checked ? (

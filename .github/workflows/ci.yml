@@ -6,7 +6,10 @@ name: CI
 #             skip). The browser checks (check_menus.cjs, check_lyrscroll.cjs,
 #             check_player_state.cjs, check_sidebar.cjs, check_trash.cjs) and
 #             smoke_api.py need a live backend and are not run here.
-#   web     — type-checks, lints and builds the React app.
+#   web     — lints and builds the React app, and uploads the built tree as
+#             the `web-dist` artifact: the desktop and mobile legs and
+#             release.yml's source zip download that rather than building the
+#             same frontend again for the same commit.
 #   desktop — compiles the Tauri shell (cargo check) and installs its npm
 #             dependencies, so the Rust crate graph cannot rot unnoticed.
 # release.yml calls this workflow (workflow_call) and only publishes when it
@@ -53,14 +56,10 @@ jobs:
         run: python tools/check_versions.py
 
       - name: Install Python dependencies
-        run: |
-          python -m pip install --upgrade pip
-          python -m pip install -r server/requirements.txt
+        run: python -m pip install --upgrade pip && python -m pip install -r server/requirements.txt
 
       - name: Install external toolchain for the suites
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends flac ffmpeg
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends flac ffmpeg
 
       - name: Expose the bundled-toolchain layout the suites resolve
         # Several suites look for the bundled encoder at
@@ -135,17 +134,22 @@ jobs:
         working-directory: web
         run: npm ci
 
-      - name: Type-check
-        working-directory: web
-        run: npx tsc -b
-
       - name: Lint
         working-directory: web
         run: npx oxlint
 
-      - name: Build
+      - name: Type-check and build
+        # `npm run build` is already `tsc -b && vite build`, so the type-check
+        # and the bundle are one pass here instead of two runs of tsc.
         working-directory: web
         run: npm run build
+
+      - name: Upload the built frontend for the client legs
+        # The one build of web/dist for this commit (see the header).
+        uses: actions/upload-artifact@v4
+        with:
+          name: web-dist
+          path: web/dist
 
       - name: Lyrics-pane auto-scroll checks
         # web/src/lib/lyrScroll.ts against a fake scroller — the retarget that
@@ -164,15 +168,7 @@ jobs:
         # a build script rather than in our code.
         run: |
           sudo apt-get update
-          sudo apt-get install -y --no-install-recommends \
-            build-essential \
-            libwebkit2gtk-4.1-dev \
-            libgtk-3-dev \
-            libayatana-appindicator3-dev \
-            librsvg2-dev \
-            libxdo-dev \
-            libssl-dev \
-            patchelf
+          sudo apt-get install -y --no-install-recommends build-essential libwebkit2gtk-4.1-dev libgtk-3-dev libayatana-appindicator3-dev librsvg2-dev libxdo-dev libssl-dev patchelf
 
       - uses: actions/setup-node@v4
         with:

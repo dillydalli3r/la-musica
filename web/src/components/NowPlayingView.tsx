@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import {
-  AudioLines, Captions, ChevronDown, Heart, ListMusic, ListPlus, Pause, Play, Repeat, Settings2, Shuffle,
+  AudioLines, Captions, ChevronDown, Heart, ListMusic, ListPlus, Mic2, Pause, Play, Repeat, Settings2, Shuffle,
   SkipBack, SkipForward, Volume1, Volume2, VolumeX, X,
 } from "lucide-react";
 import { api } from "../api";
@@ -30,6 +30,14 @@ const KARAOKE_KEY = "mlo.np.karaoke"; // "1" = word-level karaoke, "0" = line hi
 const ORBS_KEY = "mlo.np.orbs"; // "1" = animated background
 const VIS_KEY = "mlo.np.vis"; // "1" = background pulses with the beat
 const VIZ_KEY = "mlo.np.viz"; // "1" = frequency-bar visualizer visible
+// "1" = the lyrics pane is shown (default). The pane is a control the reader
+// owns, not a side effect of the track carrying lyrics: it used to appear
+// whenever lyrics existed and could not be dismissed, so a track whose lyrics
+// you did not want took half the screen with no way back. Persisted like the
+// other display picks, and the pane stays MOUNTED while hidden — that is what
+// keeps its scroll position and zoom across a toggle instead of rebuilding it
+// (and re-finding the sung line) on the next open.
+const LYRICS_KEY = "mlo.np.lyrics";
 const ZOOM_KEY = "mlo.np.lyrzoom.v2"; // lyrics zoom multiplier (persisted)
 // 150 % is the new 100 %: the multiplier 1.5 (the shipped default) is what the
 // box now calls 100 %, because that is the size the pane was always read at.
@@ -302,6 +310,9 @@ export default function NowPlayingView(p: Props) {
   const [vis, setVis] = useState(() => localStorage.getItem(VIS_KEY) !== "0");
   // Frequency-bar visualizer (fullscreen + sidebar), default on.
   const [viz, setViz] = useState(() => localStorage.getItem(VIZ_KEY) !== "0");
+  // Lyrics pane, default on; the toggle sits beside the visualizer's in the
+  // top bar (LYRICS_KEY carries the why).
+  const [showLyrics, setShowLyrics] = useState(() => localStorage.getItem(LYRICS_KEY) !== "0");
   // ReplayGain preamp: the slider drags locally and commits to the config on a
   // short debounce, so one drag is one config write (and one re-fetch of the
   // track's gain), not one per 0.5 dB step. The commit goes through a ref —
@@ -639,6 +650,11 @@ export default function NowPlayingView(p: Props) {
   // Layout (cover sizing, pane presence) follows the on-screen lyrics even
   // while stale so next/previous never reflows the whole view.
   const layoutHasLyrics = hasLyricsText(lyricsText) && !instrumental;
+  // Whether the pane is actually on screen: the track has lyrics AND the
+  // reader has not dismissed them. The track's lyrics still decide the
+  // toggle's presence (below) — a button that cannot do anything is hidden,
+  // not rendered inert.
+  const paneOpen = layoutHasLyrics && showLyrics;
   const hasLyrics = layoutHasLyrics && !staleLyrics;
   const plainLines = useMemo(() => {
     if (!hasLyrics) return [];
@@ -670,8 +686,14 @@ export default function NowPlayingView(p: Props) {
   // stopped working" whenever the cursor was parked over the pane). A wheel /
   // touch hands the pane to the reader for a few seconds; a seek, a click on
   // a line, or pressing play takes it straight back.
+  //
+  // While the pane is put away it follows NOTHING: `active` goes back to the
+  // controller's own "nothing sung yet" (-1), which it skips. A collapsed pane
+  // has no width, so every row's offsetTop is measured against a
+  // one-character-wide layout — a write from there would park the pane deep in
+  // the song, and it is the reopen below that re-centres it instead.
   const { centerLine, takeOver } = useLyricsFollow({
-    active: activeLine,
+    active: paneOpen ? activeLine : -1,
     time: dispTime,
     playing: p.playing,
     scroll: lyricsScrollRef,
@@ -1267,6 +1289,31 @@ export default function NowPlayingView(p: Props) {
                 <AudioLines className="h-5 w-5" />
               </button>
             )}
+            {/* the lyrics pane's ONE control, built exactly like the
+                visualizer toggle beside it (same box, same active treatment,
+                same `aria-pressed`) and the same idea as the player bar's
+                lyrics button (Mic2 on the bar toggles the docked pane).
+                Hidden when the track has no lyrics rather than shown inert —
+                the same rule the visualizer follows over a music video: a
+                control that cannot do anything is not drawn. It used to be
+                nothing at all: the pane appeared whenever lyrics existed and
+                could not be put away, which is what made it feel like an
+                accident of the layout instead of something you own. */}
+            {!videoPath && layoutHasLyrics && (
+              <button
+                className={`p-2 rounded-lg transition-colors hover:bg-white/10 ${showLyrics ? "text-accent" : "text-zinc-400 hover:text-white"}`}
+                onClick={() => {
+                  const v = !showLyrics;
+                  setShowLyrics(v);
+                  persist(LYRICS_KEY, v ? "1" : "0");
+                }}
+                title="Toggle the lyrics pane"
+                aria-label="Toggle the lyrics pane"
+                aria-pressed={showLyrics}
+              >
+                <Mic2 className="h-5 w-5" />
+              </button>
+            )}
             <div className="relative">
               <button
                 className={`p-2 rounded-lg transition-colors hover:bg-white/10 ${options ? "text-white bg-white/10" : "text-zinc-400 hover:text-white"}`}
@@ -1421,9 +1468,17 @@ export default function NowPlayingView(p: Props) {
 
         {/* main area — music videos never reach this branch: their picture
             fills the screen behind the top bar (see the video layer above)
-            with the same controls overlaid at the bottom edge */}
+            with the same controls overlaid at the bottom edge.
+
+            Alignment when the pane is put away is `start`, not `center`: the
+            collapsed pane is still a (zero-width) flex item, so the row's gap
+            still counts and the line overflows by that gap — centring splits
+            the overflow across both edges and the cover lands half a gap left
+            of the middle. Packed from the start, the cover column is the whole
+            row and the art sits dead centre, which is also where the
+            no-lyrics layout puts it. */}
         {!videoPath && (
-        <div className={`safe-np-body flex-1 min-h-0 flex flex-col lg:flex-row items-center gap-4 sm:gap-8 overflow-y-auto lg:overflow-clip ${layoutHasLyrics ? "" : "lg:justify-center"}`}>
+        <div className={`safe-np-body flex-1 min-h-0 flex flex-col lg:flex-row items-center gap-4 sm:gap-8 overflow-y-auto lg:overflow-clip ${paneOpen ? "" : "lg:justify-start"}`}>
           {/* left column: cover, track/album/artist, all playback controls —
               centered as a group inside the full column height.
               `w-full`: this is a flex item in a column whose `items-center`
@@ -1443,8 +1498,8 @@ export default function NowPlayingView(p: Props) {
               overflow unreachable on very short windows; move to a safe-center
               layout if anyone ever uses the player that small. */}
           <div
-            className={`w-full flex flex-col items-center justify-center gap-4 shrink-0 min-w-0 max-h-full min-h-0 overflow-x-clip overflow-y-auto ${
-              layoutHasLyrics ? "lg:w-[42%] lg:h-full" : ""
+            className={`w-full flex flex-col items-center justify-center gap-4 shrink-0 min-w-0 max-h-full min-h-0 overflow-x-clip overflow-y-auto transition-[width] duration-300 ease-out ${
+              paneOpen ? "lg:w-[42%] lg:h-full" : ""
             }`}
           >
             <div className="relative">
@@ -1459,7 +1514,7 @@ export default function NowPlayingView(p: Props) {
                 coverFile={coverFile}
                 // ONE size with or without lyrics — the art must never
                 // jump when a track's lyrics load or finish.
-                wrapperClass="relative rounded-2xl shadow-2xl border border-white/10 bg-raise overflow-hidden w-72 h-72 lg:w-[min(28rem,48vh)] lg:h-[min(28rem,48vh)]"
+                wrapperClass="relative rounded-2xl shadow-2xl bg-raise overflow-hidden w-72 h-72 lg:w-[min(28rem,48vh)] lg:h-[min(28rem,48vh)]"
               />
             </div>
             {textBlock}
@@ -1490,9 +1545,41 @@ export default function NowPlayingView(p: Props) {
               short (zoomed) window, which left this column 60 px tall at the
               very bottom of a clipped body — lyrics that were rendered and
               unreachable. With the floor the body scrolls (overflow-y-auto
-              below lg) and the pane is a real reading surface. */}
+              below lg) and the pane is a real reading surface.
+
+              Shown and hidden by the toggle in the top bar, and the BOX is the
+              same one in both states — only its size changes. Collapsing
+              (w-0 / max-h-0 / overflow-clip) is what makes it take no room, so
+              the cover column can widen to the whole row and the art glides
+              back to the middle over 300 ms instead of snapping; the scroll
+              container itself is never removed, so the reader's scroll
+              position, the zoom and the auto-follow refs all survive a toggle.
+              The lyric lines are divs, not controls, so hiding the subtree
+              from assistive tech costs no tab stop. */}
           {!videoPath && layoutHasLyrics && (
-            <div className="flex-1 min-h-[45vh] lg:min-h-0 w-full lg:h-full flex flex-col max-w-3xl lg:max-w-none lg:flex-none lg:w-[56%] lg:ml-auto">
+            <div
+              className={`flex flex-col max-w-3xl overflow-clip transition-[width,max-height,opacity,transform] duration-300 ease-out ${
+                paneOpen
+                  ? "flex-1 min-h-[45vh] w-full lg:min-h-0 lg:h-full lg:max-w-none lg:flex-none lg:w-[56%] lg:ml-auto max-h-[100vh] opacity-100 translate-x-0"
+                  : "flex-none min-h-0 max-h-0 w-0 max-w-0 opacity-0 translate-x-6 pointer-events-none"
+              }`}
+              aria-hidden={!paneOpen}
+              /* While the pane is collapsed its width is zero, so every row's
+                 offsetTop is measured against a one-character-wide layout and
+                 any follow write made there is meaningless. Re-open is the one
+                 moment that matters: the sung line is re-centred once the box
+                 has finished growing (a `transitionend` on the width, which is
+                 the property that moves it at both breakpoints — a timeout
+                 would drift off the 300 ms in the class). Nothing is written
+                 while closed, so the reader's own scroll position is what the
+                 pane shows in between. */
+              onTransitionEnd={(e) => {
+                if (e.target !== e.currentTarget || !paneOpen) return;
+                if (e.propertyName !== "width") return;
+                if (aStart >= 0) centerLine(aStart);
+                else if (lyricsScrollRef.current) lyricsScrollRef.current.scrollTop = 0;
+              }}
+            >
               <div
                 ref={lyricsScrollRef}
                 /* No panel: the lyrics sit straight on the ambience so the

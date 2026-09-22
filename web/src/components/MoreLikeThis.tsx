@@ -171,7 +171,7 @@ function AlbumTile({ item }: { item: RecommendItem }) {
       <CoverImg
         albumPath={item.cover_path || item.path}
         coverFile={item.cover}
-        wrapperClass="aspect-square w-full rounded-xl bg-raise border border-border overflow-hidden shadow-lg"
+        wrapperClass="aspect-square w-full rounded-xl bg-raise overflow-hidden shadow-lg"
       />
       <div className="mt-1.5 px-0.5">
         <div className="text-sm font-medium truncate group-hover:text-accent-soft">{item.title}</div>

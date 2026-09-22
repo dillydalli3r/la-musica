@@ -1,13 +1,15 @@
 import { useEffect, useState } from "react";
 import type { ReactNode } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
-import { AlertTriangle, Download, FileOutput, HardDrive, HardDriveDownload, RotateCcw, Save } from "lucide-react";
+import { AlertTriangle, Download, FileOutput, HardDrive, HardDriveDownload, RotateCcw, Save, Trash2, Upload } from "lucide-react";
 import { api, IN_TAURI } from "../api";
 import type { ExportCodecSpec, ExportEq, ExportForm, ExportStructurePreview, ExportStructures } from "../api";
 import { toast } from "../store";
 import { fmtBytes, fmtDuration } from "../lib/fmt";
 import Segmented from "./Segmented";
 import Modal from "./Modal";
+import ConfirmButton from "./ConfirmButton";
+import EqProfileModal from "./EqProfileModal";
 
 /** The dropdown's synthetic entry for a codec's "custom value" field; the
  * backend takes the plain number the field holds (kbps, or 0-10 for Vorbis),
@@ -54,10 +56,17 @@ export const BLANK_FORM: ExportForm = {
   id3v2: "2.3",
   id3v1: false,
   replaygain_mode: "off",
+  /* "embedded" is the library's own shipped `lyrics_format` (mlo/config.py),
+     which is what a saved export default resolves to until the user picks. */
+  lyrics: "embedded",
   eq_profile: "",
   clean_tags: true,
-  playlists: true,
-  sidecars: true,
+  /* An album export carries audio: no .m3u8, no cover.jpg, no rip evidence
+   * (server.exporter.EXPORT_DEFAULTS / mlo.config export_playlists,
+   * export_sidecars — the cover travels embedded). Both stay available as an
+   * opt-in for a device that wants them. */
+  playlists: false,
+  sidecars: false,
   manifest: false,
   verify: true,
   prune: false,
@@ -175,8 +184,14 @@ export interface ExportOptions {
   /** The mode this run will use, with a saved `target` this client cannot
    *  honour already resolved to the one it can (see `resolveTarget`). */
   target: "server" | "zip";
-  /** The server's equaliser presets and imported profiles. */
+  /** The server's equalizer presets and imported profiles. */
   eq: ExportEq | undefined;
+  /** The source tab this surface is on and its setter — the Export page's own
+   *  state, so a saved config can carry the tab it was saved from and put it
+   *  back. The per-page export dialog has no tabs (its selection is the page it
+   *  was opened from), so it supplies neither and saves the form alone. */
+  sourceKind?: string;
+  setSourceKind?: (v: string) => void;
   /** The selection this form would export. */
   paths: string[];
   seconds: number;
@@ -187,13 +202,23 @@ export interface ExportOptions {
   refreshDrives: () => void;
 }
 
+/** What a surface with source tabs hands `useExportOptions` — see
+ *  `ExportOptions.sourceKind`. */
+export interface ExportPageFields {
+  sourceKind: string;
+  setSourceKind: (v: string) => void;
+}
+
 /** The export form's state and its run/save/reset actions, shared verbatim by
  *  the Export page and the per-page dialog: the user's edits override the
  *  saved `export_*` config values, which override the shipped defaults. An
  *  export sends exactly what is displayed; nothing is written back to config
  *  until "Save as default" is pressed. `seconds` is the selection's total
- *  duration (0 when unknown) and only feeds the drive-fit estimate. */
-export function useExportOptions(paths: string[], seconds = 0): ExportOptions {
+ *  duration (0 when unknown) and only feeds the drive-fit estimate.
+ *
+ *  `page` is the source tab of the surface that has one, so a saved config can
+ *  remember it; nothing else about a page's own state is the form's business. */
+export function useExportOptions(paths: string[], seconds = 0, page?: ExportPageFields): ExportOptions {
   const queryClient = useQueryClient();
   const { data: drivesData } = useQuery({ queryKey: ["exportDrives"], queryFn: api.exportDrives });
   const { data: specs } = useQuery({ queryKey: ["exportCodecs"], queryFn: api.exportCodecs });
@@ -263,6 +288,7 @@ export function useExportOptions(paths: string[], seconds = 0): ExportOptions {
         r.skipped ? `${r.skipped} already there` : "",
         r.playlists ? `${r.playlists} playlist(s)` : "",
         r.sidecars ? `${r.sidecars} sidecar file(s)` : "",
+        r.excluded_total ? `${r.excluded_total} file(s) left behind` : "",
         r.pruned ? `${r.pruned} removed from the device` : "",
       ].filter(Boolean).join(" · ");
       if (r.failed) toast.error(`Export finished with ${r.failed} failure(s): ${r.errors[0] ?? ""}`);
@@ -309,13 +335,15 @@ export function useExportOptions(paths: string[], seconds = 0): ExportOptions {
     f, set, setMany, customValue, setCustomValue, busy, spec, kbps, estBytes,
     specs, structures, drives, selectedDrive, overCapacity, target, eq, paths,
     seconds, run, saveDefaults, resetDefaults,
+    sourceKind: page?.sourceKind,
+    setSourceKind: page?.setSourceKind,
     refreshDrives: () => void queryClient.invalidateQueries({ queryKey: ["exportDrives"] }),
   };
 }
 
 /** The whole export option surface — where the files go, codec + quality,
  *  folder structure, artwork, tag compatibility, audio processing (ReplayGain
- *  and the equaliser), the files written beside the audio (playlists, sidecars,
+ *  and the equalizer), the files written beside the audio (playlists, sidecars,
  *  a checksum manifest), verification, concurrency and sync mode — plus the
  *  run / save / reset row. The Export page and the per-page dialog both render
  *  exactly this, so the two can never drift apart.
@@ -329,9 +357,34 @@ export function ExportOptionsPanel({ e, hint }: {
   /** Prepended above the options: what this particular run will export. */
   hint?: ReactNode;
 }) {
+  const queryClient = useQueryClient();
   const { f, set, setMany, spec, kbps, estBytes, seconds, paths, busy, target, eq } = e;
   const zip = target === "zip";
   const eqSelected = [...(eq?.presets ?? []), ...(eq?.profiles ?? [])].find((p) => p.id === f.eq_profile);
+  /* The id the form carries but the catalogue does not: a profile that was
+   * deleted or renamed after the form (or a saved config) named it. Nothing
+   * here falls back to another profile — the id stays, is shown as missing, and
+   * the run refuses it. */
+  const missingEq = !!f.eq_profile && !eqSelected;
+  const importedEq = (eq?.profiles ?? []).some((p) => p.id === f.eq_profile);
+  const [importing, setImporting] = useState(false);
+  const removeProfile = async () => {
+    if (!f.eq_profile) return;
+    try {
+      await api.exportEqDelete(f.eq_profile);
+      // The removal was deliberate, so the form lets go of the id too; a SAVED
+      // config that still names it will say the profile is gone when it loads.
+      set("eq_profile", "");
+      toast(`Removed the equalizer profile “${f.eq_profile}”`);
+      void queryClient.invalidateQueries({ queryKey: ["exportEq"] });
+      // ...and the saved configs, whose rows carry whether the profile they
+      // name is still there: a cached list would keep saying "fine" about a
+      // config that has just lost its curve.
+      void queryClient.invalidateQueries({ queryKey: ["exportConfigs"] });
+    } catch (err) {
+      toast.error(String(err));
+    }
+  };
   /* The user's own structure is checked by the SERVER while it is typed — the
    * same validator a run refuses with, so the sentence under the box is the
    * one an export would give. Debounced: one request per pause instead of one
@@ -388,7 +441,13 @@ export function ExportOptionsPanel({ e, hint }: {
           </div>
           <label className="flex items-center gap-2 mt-2 text-xs text-zinc-300">
             <span className="shrink-0">Subfolder</span>
-            <input className="input !py-1 text-xs flex-1 min-w-0 tap" value={f.subfolder} onChange={(ev) => set("subfolder", ev.target.value)} />
+            {/* Capped: this holds a folder name, and on the Export page's wide
+                column a `flex-1` box would be 600 px of empty field beside a
+                two-word label. `max-w-xs` is the app's own cap for a short
+                input in a wide column (same as the Settings-family inputs).
+                Long values stay readable by scrolling inside the box; the
+                drive above keeps its full width because drive labels are long. */}
+            <input className="input !py-1 text-xs flex-1 min-w-0 max-w-xs tap" value={f.subfolder} onChange={(ev) => set("subfolder", ev.target.value)} />
           </label>
         </>
       )}
@@ -595,6 +654,23 @@ export function ExportOptionsPanel({ e, hint }: {
           hint="For players that read nothing else (short, latin-1 fields)."
         />
       </div>
+      {/* The library's own three-way choice (mlo.lyrics' `lyrics_format`), in
+          the export's words: what travels INSIDE the file, beside it, or both.
+          The default follows the library, so an export writes lyrics the way
+          the app keeps them until the user says otherwise. */}
+      <label className="text-[10px] text-zinc-500 flex flex-col gap-1 mt-2 max-w-xs">
+        Lyrics
+        <select
+          className="input !py-1 text-xs min-w-0 tap"
+          value={f.lyrics}
+          onChange={(ev) => set("lyrics", ev.target.value)}
+        >
+          <option value="embedded">Embedded in the file</option>
+          <option value="lrc">.lrc files beside the audio</option>
+          <option value="both">Both</option>
+        </select>
+      </label>
+
       {/* ---- audio processing ------------------------------------- */}
       {/* The section the applied-audio work lives in: what a run does to the
           SOUND, as opposed to what it writes beside it. */}
@@ -612,23 +688,59 @@ export function ExportOptionsPanel({ e, hint }: {
             <option value="apply">Apply to the audio — permanent</option>
           </select>
         </label>
-        <label className="text-[10px] text-zinc-500 flex flex-col gap-1">
-          Equaliser profile
+        {/* A div, not a label: this cell holds THREE controls (the profile, the
+            import, and the removal of an imported one), and a label wrapping a
+            button would hand its clicks to the select. */}
+        <div className="text-[10px] text-zinc-500 flex flex-col gap-1">
+          <span id="eq-profile-label">Equalizer profile</span>
           <select
             className="input !py-1 text-xs min-w-0 tap"
+            aria-labelledby="eq-profile-label"
             value={f.eq_profile}
             onChange={(ev) => set("eq_profile", ev.target.value)}
             disabled={!eq || (!eq.presets.length && !eq.profiles.length)}
           >
-            <option value="">No equaliser</option>
+            <option value="">No equalizer</option>
+            {/* A saved config (or a saved default) can name a profile that has
+                since been deleted or renamed. The select SHOWS that id, marked
+                as missing, instead of quietly falling back to the first option:
+                the run refuses a profile it cannot find, and the user has to
+                see why before they run it. */}
+            {missingEq && (
+              <option value={f.eq_profile}>{f.eq_profile} — missing (no such profile)</option>
+            )}
             {(eq?.presets ?? []).map((pr) => (
               <option key={pr.id} value={pr.id}>{pr.label}</option>
             ))}
             {(eq?.profiles ?? []).map((pr) => (
-              <option key={pr.id} value={pr.id}>{pr.label}</option>
+              <option key={pr.id} value={pr.id}>
+                {pr.label}{pr.errors?.length ? " — unreadable line(s)" : ""}
+              </option>
             ))}
           </select>
-        </label>
+          <div className="flex flex-wrap items-center gap-1">
+            {/* The app imports these from Peace / Equalizer APO text — paste it
+                or drop the file — and the profile then sits in this very list.
+                Without this the import endpoint had no way in from the UI. */}
+            <button
+              className="btn-ghost !py-0.5 text-[10px] tap"
+              disabled={busy}
+              onClick={() => setImporting(true)}
+            >
+              <Upload className="h-3 w-3" /> Import a profile…
+            </button>
+            {importedEq && (
+              <ConfirmButton
+                className="btn-ghost !py-0.5 text-[10px] tap"
+                confirmLabel="Remove this profile?"
+                disabled={busy}
+                onConfirm={removeProfile}
+              >
+                <Trash2 className="h-3 w-3" /> Remove
+              </ConfirmButton>
+            )}
+          </div>
+        </div>
       </div>
       <div className="text-[10px] text-zinc-600 mt-1">
         {f.replaygain_mode === "apply"
@@ -636,9 +748,16 @@ export function ExportOptionsPanel({ e, hint }: {
           : f.replaygain_mode === "tags"
             ? "Measures each track (ffmpeg EBU R128, one pass that rides along with the transcode) and stores track + album gain/peak, so a player that reads ReplayGain matches your library's loudness. The audio itself is untouched."
             : "No ReplayGain measurement or tags."}
-        {f.eq_profile && " The equaliser is applied to the exported audio."}
-        {eqSelected?.unsupported?.length
-          ? ` This profile uses ${eqSelected.unsupported.length} filter(s) this server cannot apply — those are skipped.`
+        {f.eq_profile && " The equalizer is applied to the exported audio."}
+        {missingEq
+          ? " This equalizer profile is not on this server any more — pick another profile or “No equalizer”; an export that names it is refused rather than exporting a different curve."
+          : eqSelected?.errors?.length
+            ? ` This profile has ${eqSelected.errors.length} band line(s) this server cannot read — it is refused at import and by a run, rather than applying a different curve.`
+            : eqSelected?.empty && importedEq
+              ? " This profile has no filters in it — the export leaves the audio as it is, which is not the same as a flat curve."
+              : ""}
+        {!missingEq && eqSelected?.unsupported?.length
+          ? ` ${eqSelected.unsupported.length} line(s) of this profile have no equivalent here and are skipped.`
           : ""}
       </div>
 
@@ -670,8 +789,11 @@ export function ExportOptionsPanel({ e, hint }: {
       />
       <label className="flex flex-wrap items-center gap-2 mt-2 text-xs text-zinc-300">
         <span className="shrink-0">Parallel workers</span>
+        {/* A `.input` in a wrapping flex row is `w-full`, so on the Export
+            page's wide column this one select claimed the whole line for a
+            choice whose longest option is "Auto (half the cores, max 8)". */}
         <select
-          className="input !py-1 text-xs min-w-0 tap"
+          className="input !py-1 text-xs min-w-0 max-w-[16rem] tap"
           value={f.workers}
           onChange={(ev) => set("workers", Number(ev.target.value))}
         >
@@ -697,6 +819,8 @@ export function ExportOptionsPanel({ e, hint }: {
         </>
       )}
 
+      <SavedConfigs e={e} />
+
       <div className="grid grid-cols-2 sm:grid-cols-[2fr_1fr_auto] gap-2 mt-4">
         <button className="btn-primary text-xs col-span-2 sm:col-span-1 tap" disabled={busy || !paths.length} onClick={e.run}>
           <HardDriveDownload className="h-3.5 w-3.5" />
@@ -712,19 +836,169 @@ export function ExportOptionsPanel({ e, hint }: {
           <RotateCcw className="h-3.5 w-3.5" />
         </button>
       </div>
+      {importing && (
+        <EqProfileModal
+          onClose={() => setImporting(false)}
+          onImported={(id) => {
+            set("eq_profile", id);
+            void queryClient.invalidateQueries({ queryKey: ["exportConfigs"] });
+          }}
+        />
+      )}
       <div className="text-[10px] text-zinc-600 mt-2">
         {f.codec === "copy"
           ? f.replaygain_mode === "apply" || f.eq_profile
             /* A copy run that also processes the audio is no longer a copy of
                the bytes: saying "bit-exact" there would be a lie about the
                files the user is about to get. */
-            ? "Copy keeps the original files bit-exact — except the ones the audio processing above changes: applying ReplayGain or an equaliser re-encodes those so the correction is in the audio."
+            ? "Copy keeps the original files bit-exact — except the ones the audio processing above changes: applying ReplayGain or an equalizer re-encodes those so the correction is in the audio."
             : "Copy keeps the original files bit-exact (an embed-cover pass still rewrites tags when art must change)."
           : f.codec === "flac"
             ? "FLAC → FLAC exports are bit-copies; anything else is re-encoded with ffmpeg and fully re-tagged."
             : f.codec === "wav" || f.codec === "aiff"
               ? `${spec?.label ?? f.codec} carries no tag set this app can write — the export keeps the audio only.`
               : `Exporting as ${spec?.label ?? f.codec} — files are re-encoded with ffmpeg and fully re-tagged.`}
+      </div>
+    </div>
+  );
+}
+
+/** The saved export configurations: the whole form under a name, so the user
+ *  who exports the same way twice does not rebuild it — and, when they pick a
+ *  different destination or curve, a second named copy instead of losing the
+ *  first.
+ *
+ *  A config is the form PLUS the source tab it was saved from (`source_kind`,
+ *  only for a surface that has tabs) and MINUS the selection: which albums are
+ *  ticked is data, not configuration, and a config carrying paths would export
+ *  something else the moment the library moved.
+ *
+ *  Loading says what it could not restore: a config that names an equalizer
+ *  profile which has since been deleted or renamed comes back marked, with the
+ *  server's own sentence, because the run refuses that profile — quietly
+ *  substituting another curve is the one thing neither half may do. */
+function SavedConfigs({ e }: { e: ExportOptions }) {
+  const queryClient = useQueryClient();
+  const { data } = useQuery({ queryKey: ["exportConfigs"], queryFn: api.exportConfigs });
+  const [id, setId] = useState("");
+  const [name, setName] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [problem, setProblem] = useState("");
+  const configs = data?.configs ?? [];
+  const picked = configs.find((c) => c.id === id) ?? null;
+
+  const load = async (configId: string) => {
+    if (!configId) {
+      setId("");
+      setProblem("");
+      return;
+    }
+    setBusy(true);
+    try {
+      const row = await api.exportConfigLoad(configId);
+      const { source_kind, ...form } = row.config;
+      e.setMany(form);
+      if (source_kind) e.setSourceKind?.(source_kind);
+      setId(row.id);
+      setName(row.name);
+      setProblem(row.eq_problem);
+      if (row.eq_problem) toast.error(row.eq_problem);
+      else toast.success(`Loaded “${row.name}”`);
+    } catch (err) {
+      toast.error(String(err));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const save = async () => {
+    const target = name.trim();
+    if (!target) {
+      toast.error("Name this config first");
+      return;
+    }
+    setBusy(true);
+    try {
+      const row = await api.exportConfigSave(target, {
+        ...e.f,
+        ...(e.sourceKind ? { source_kind: e.sourceKind } : {}),
+      });
+      setId(row.id);
+      setName(row.name);
+      setProblem(row.eq_problem);
+      void queryClient.invalidateQueries({ queryKey: ["exportConfigs"] });
+      toast.success(row.replaced ? `Updated “${row.name}”` : `Saved “${row.name}”`);
+    } catch (err) {
+      // The server refuses a value a run would refuse (an unknown codec, a bad
+      // custom structure…) with its own sentence: show it, do not swallow it.
+      toast.error(String(err));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const remove = async () => {
+    if (!picked) return;
+    setBusy(true);
+    try {
+      await api.exportConfigDelete(picked.id);
+      toast(`Deleted “${picked.name}”`);
+      setId("");
+      setName("");
+      setProblem("");
+      void queryClient.invalidateQueries({ queryKey: ["exportConfigs"] });
+    } catch (err) {
+      toast.error(String(err));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const updating = !!picked && picked.name === name.trim();
+
+  return (
+    <div className="mt-4">
+      <div className="text-xs font-bold text-zinc-300 mb-2">Saved configs</div>
+      <div className="flex flex-wrap items-center gap-2">
+        <select
+          className="input !py-1 text-xs min-w-0 max-w-xs tap"
+          value={id}
+          disabled={busy}
+          onChange={(ev) => void load(ev.target.value)}
+        >
+          <option value="">Load a saved config…</option>
+          {configs.map((c) => (
+            <option key={c.id} value={c.id}>
+              {c.name}{c.eq_problem ? " — equalizer profile missing" : ""}
+            </option>
+          ))}
+        </select>
+        <input
+          className="input !py-1 text-xs min-w-0 max-w-xs"
+          value={name}
+          placeholder="Name this config"
+          disabled={busy}
+          onChange={(ev) => setName(ev.target.value)}
+        />
+        <button className="btn text-xs tap" disabled={busy || !name.trim()} onClick={save}>
+          <Save className="h-3.5 w-3.5" />
+          {updating ? "Update" : "Save"}
+        </button>
+        {picked && (
+          <ConfirmButton
+            className="btn text-xs tap"
+            confirmLabel="Delete this saved config?"
+            disabled={busy}
+            onConfirm={remove}
+          >
+            <Trash2 className="h-3.5 w-3.5" /> Delete
+          </ConfirmButton>
+        )}
+      </div>
+      <div className="text-[10px] text-zinc-600 mt-1">
+        {problem
+          ? <span className="text-amber-300">“{picked?.name}” — {problem}</span>
+          : "Everything this form carries — destination, codec and quality, folder structure, artwork and tags, ReplayGain, and the equalizer profile by name — under one name. What you have ticked is not part of a config."}
       </div>
     </div>
   );

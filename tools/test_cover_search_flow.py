@@ -136,6 +136,32 @@ ok(
     "export function offlineFallback()" in api,
 )
 
+# The finder's WRITE is the wizard's too. `POST /api/cover/fromurl` is refused
+# for an album outside the music folder unless the request carries the wizard's
+# `staged` opt-in — the same flag every other cover call the wizard makes
+# passes. A finder write that leaves it out is answered 400 "album outside
+# music folder", so the pick never reaches the folder and the "Current album
+# cover" panel keeps the art the album arrived with (a peer's sidecar), however
+# well the row was chosen.
+ok(
+    "the finder has exactly ONE cover-write call site",
+    count(modal, "api.coverFromUrl(") == 1,
+    f"found {count(modal, 'api.coverFromUrl(')}",
+)
+ok(
+    "...and it passes the caller's staged allowance",
+    "}, staged);" in modal and "staged?: boolean;" in modal and "staged = false" in modal,
+    "the modal must thread staged into api.coverFromUrl (see test_cover_preview.py §5)",
+)
+wizard = read("web/src/pages/ImportWizard.tsx")
+finder_call = wizard[wizard.index("<CoverSearchModal"):]
+finder_call = finder_call[: finder_call.index("/>")]
+ok(
+    "...which the wizard passes for the album it is importing",
+    "staged={staged}" in finder_call,
+    "the wizard's album is not in the library yet: staged is what makes its writes land",
+)
+
 # The logic module itself must keep the two functions the wiring leans on.
 ok(
     "the module decides the automatic search and the phase",

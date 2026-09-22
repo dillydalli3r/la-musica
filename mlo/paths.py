@@ -6,6 +6,7 @@ config.json and the .dependencies toolchain live next to the executable.
 import errno
 import json
 import os
+import re
 import shutil
 import sys
 import tempfile
@@ -174,6 +175,42 @@ def user_segment(user):
     if any(c in text for c in "/\\:"):
         return DEFAULT_SCOPE
     return text
+
+
+def slug_name(name, limit=60):
+    """A user-typed name reduced to ONE safe path segment — the rule both
+    named file stores under `app_data_dir` share (imported EQ profiles in
+    `mlo.eq`, saved export configs in `mlo.exportconfigs`), so a name written
+    once reads back under the same file.
+
+    Letters, digits, ``-``, ``_`` and ``.`` survive; every other character
+    becomes ``_``, runs collapse, and the result is trimmed of leading/trailing
+    separators. ``""`` when nothing survives (a name of only punctuation).
+    """
+    text = re.sub(r"[^0-9A-Za-z._ -]+", "_", str(name or "").strip())
+    text = re.sub(r"\s+", "_", text)
+    text = re.sub(r"_+", "_", text).strip("._-")
+    return text[:limit]
+
+
+def safe_segment(value, what="id"):
+    """``(segment, None)`` when *value* is a usable file stem, else
+    ``(None, error)``.
+
+    The value comes from a URL and from a user-editable config, so anything
+    that could name a file outside the folder it belongs in is REFUSED rather
+    than sanitized: a caller that asked for ``../../config`` gets told no
+    instead of silently reading or deleting something in the data dir.
+    """
+    raw = str(value or "").strip()
+    if not raw:
+        return None, f"no {what} given"
+    if any(sep in raw for sep in ("/", "\\")) or ".." in raw or "\x00" in raw:
+        return None, f"invalid {what}: {raw!r}"
+    stem = slug_name(raw)
+    if not stem:
+        return None, f"invalid {what}: {raw!r}"
+    return stem, None
 
 
 # The old name, kept because the tests and a sibling module import it.

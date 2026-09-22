@@ -40,6 +40,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 
 from .audio import AudioFile
 from .discs import album_discs, _disc_pattern_for, _disc_expected_name, CUE_FILE_RE
+from .naming import cue_ref_names, name_key
 from .paths import AUDIO_EXTS, app_data_dir, fsync_dir
 from .stats import (is_audio_file, _collect_targets, new_stats,
                     _make_pbar, _pbar_skip, _pbar_update, worker_count)
@@ -139,11 +140,14 @@ def _find_cue_for_disc(album_dir, disc_num, discs, pattern):
     p = os.path.join(album_dir, expected)
     if os.path.isfile(p):
         return p
-    # Fallback: scan cues and map FILE entries -> disc via exact basename
+    # Fallback: scan cues and map FILE entries -> disc via exact basename.
+    # Both sides are keyed through the shared name rule (naming.name_key): a
+    # sheet naming the rip's own spelling of a file ("01. AC/DC - x.flac")
+    # still identifies the disc holding the file this app wrote for it.
     known = {}
     for d, paths in (discs or {}).items():
         for pp in paths:
-            known[os.path.basename(pp).lower()] = d
+            known[name_key(os.path.basename(pp)).lower()] = d
     cues = [f for f in os.listdir(album_dir) if f.lower().endswith(".cue")]
     for cf in sorted(cues):
         path = os.path.join(album_dir, cf)
@@ -153,10 +157,13 @@ def _find_cue_for_disc(album_dir, disc_num, discs, pattern):
             continue
         file_discs = set()
         for m in CUE_FILE_RE.finditer(txt):
-            raw = m.group(1).replace("/", "\\").split("\\")[-1]
-            d = known.get(raw.lower())
-            if d is not None:
-                file_discs.add(d)
+            # Every spelling a reference may denote (naming.cue_ref_names): a
+            # "/" in a recorded name is a character the app wrote as "_".
+            for raw in cue_ref_names(m.group(1)):
+                d = known.get(raw.lower())
+                if d is not None:
+                    file_discs.add(d)
+                    break
         if len(file_discs) == 1 and disc_num in file_discs:
             return path
         # single-disc album with one cue: that cue belongs to the sole disc
@@ -177,6 +184,8 @@ def _patched_cue_for_temp(original_text, discs_wav_map):
     # (album.ape for album.flac), so a reference whose basename is not in the
     # map is retried by stem. A stem shared by two tracks proves nothing and
     # is left alone: guessing there puts one track's audio under another's.
+    # Keys and lookups both go through the shared name rule (naming.name_key),
+    # so a sheet naming "AC/DC" finds the "AC_DC" file this app wrote.
     by_stem = {}
     for src_base, wav in discs_wav_map.items():
         by_stem.setdefault(os.path.splitext(src_base)[0], set()).add(wav)
@@ -185,14 +194,27 @@ def _patched_cue_for_temp(original_text, discs_wav_map):
         m = CUE_FILE_RE.match(line.rstrip("\n"))
         if m:
             ref = m.group(1)
-            base = ref.replace("/", "\\").split("\\")[-1]
-            wav = discs_wav_map.get(base.lower())
+            names = cue_ref_names(ref)
+            wav = None
+            matched = None
+            for nm in names:
+                wav = discs_wav_map.get(nm.lower())
+                if wav:
+                    matched = nm
+                    break
             if not wav:
-                cands = by_stem.get(os.path.splitext(base.lower())[0])
-                wav = next(iter(cands)) if cands and len(cands) == 1 else None
+                for nm in names:
+                    cands = by_stem.get(os.path.splitext(nm.lower())[0])
+                    if cands and len(cands) == 1:
+                        wav, matched = next(iter(cands)), nm
+                        break
             if wav:
-                # keep any directory part of original ref (should be none) but replace basename
-                head = ref[: len(ref) - len(base)] if base else ""
+                # keep any directory part of the original ref (should be none)
+                # but replace the basename — and only when the LEAF was what
+                # matched: if the whole reference is the name, its "/" was a
+                # character of it, not a directory.
+                head = (ref[: len(ref) - len(matched)]
+                        if matched and ref.endswith(matched) else "")
                 new_ref = head + wav
                 line = line.replace(f'"{ref}"', f'"{new_ref}"', 1)
         out_lines.append(line)
@@ -292,7 +314,10 @@ def _convert_to_wavs(ffmpeg_exe, track_paths, tmp_dir, config, transport=None):
             i += 1
         used.add(wav_base.lower())
         tasks.append((src, os.path.join(tmp_dir, wav_base)))
-        name_map[base.lower()] = wav_base
+        # Keyed through the shared name rule: a cue sheet's FILE reference is
+        # matched against this map, and the sheet may spell the name the rip
+        # used ("AC/DC") where the file this app wrote says "AC_DC".
+        name_map[name_key(base).lower()] = wav_base
 
     workers = (worker_count(config, default=4, maximum=8, items=len(tasks))
                if transport is None
@@ -364,7 +389,8 @@ def _synthesized_cue(track_paths, name_map):
     lines = []
     for idx, tp in enumerate(track_paths, 1):
         base = os.path.basename(tp)
-        wav = name_map.get(base.lower(), os.path.splitext(base)[0] + ".wav")
+        wav = name_map.get(name_key(base).lower(),
+                           os.path.splitext(base)[0] + ".wav")
         lines.append(f'FILE "{wav}" WAVE')
         lines.append(f'  TRACK {idx:02d} AUDIO')
         lines.append('    INDEX 01 00:00:00')
@@ -379,9 +405,9 @@ def _cue_unresolved_refs(cue_text, folder):
         if not m:
             continue
         ref = m.group(1)
-        base = ref.replace("/", "\\").split("\\")[-1]
-        if not base or not os.path.isfile(os.path.join(folder, base)):
-            unresolved.append(base or ref)
+        if not any(cand and os.path.isfile(os.path.join(folder, cand))
+                   for cand in cue_ref_names(ref)):
+            unresolved.append(ref)
     return unresolved
 
 

@@ -1,0 +1,18 @@
+Filter Settings file
+
+Room EQ V5.1
+EqualizerAPO Configuration File
+Device: Speakers (Realtek(R) Audio)
+Channel: all
+Preamp: -6.5 dB
+Filter 1: ON PK Fc 100 Hz Gain 2.5 dB Q 1.4
+Filter 2: OFF PK Fc 250 Hz Gain -1.5 dB Q 1.0
+Filter 3: ON None
+Filter 4: ON LSC Fc 80 Hz Gain 3.0 dB Q 0.7
+Filter 5: ON HS Fc 6000 Hz Gain -2.0 dB Q 0.7
+Filter 6: ON LP Fc 18000 Hz Q 0.707
+Filter 7: ON PK Fc 3000 Hz Gain 1.5 dB BW 1.2
+Filter 8: ON NO Fc 1200 Hz Q 2.0
+Filter 9: OFF HP Fc 30 Hz Q 0.707
+Include: MyHeadphone.txt
+Gain: 0

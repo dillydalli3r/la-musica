@@ -216,7 +216,7 @@ export function advisoryOutcome(reply: AdvisoryFetchResult | null | undefined): 
   if (reply.updated) parts.push(`${reply.updated} track(s) re-rated`);
   if (existing) {
     parts.push(`${existing} track(s) already rated — the file's own value was kept and no source`
-      + ` was asked (Re-rate asks anyway)`);
+      + ` was asked`);
   }
   if (unchanged) {
     parts.push(`${unchanged} track(s) re-checked — the sources state what the file already carries`);

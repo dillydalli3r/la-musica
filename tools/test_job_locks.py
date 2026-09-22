@@ -650,8 +650,10 @@ bar_frames = []
 
 
 def recorder(done, total, desc):
-    """Stands in for the WebSocket relay the header bar is drawn from."""
-    bar_frames.append((desc, live["now"]))
+    """Stands in for the WebSocket relay the header bar is drawn from — and for
+    the client's rendering of it: what a client shows is the LAST frame that
+    reached it, so every frame is kept in order."""
+    bar_frames.append((done, total, desc, live["now"]))
 
 
 _stats.progress_hook = recorder
@@ -709,14 +711,15 @@ check("both chains ran", [len(out_3), len(out_5)] == [1, 1], f"{out_3} {out_5}")
 # Frames recorded while BOTH runs were inside their script: the one run that
 # owns the bar ticked TICKS times and the other run's ticks stayed off it — the
 # count is what catches a shared wrapper, which would have delivered both.
-overlap = [desc for desc, now in bar_frames if now >= 2]
+overlap = [f for f in bar_frames if f[3] >= 2]
 check("only the run that owns the bar ticks it, never both",
-      len(overlap) == TICKS and len(set(overlap)) == 1,
-      f"{len(overlap)} frame(s) while both ran: {overlap}")
+      len(overlap) == TICKS and len({f[2] for f in overlap}) == 1,
+      f"{len(overlap)} frame(s) while both ran: "
+      f"{[(f[0], f[1], f[2]) for f in overlap]}")
 check("and the bar never carried the other run's name",
       len([name for name in ("Optimize FLACs", "Process images")
-           if any(name in desc for desc, _ in bar_frames)]) == 1,
-      f"{sorted({desc for desc, _ in bar_frames})}")
+           if any(name in f[2] for f in bar_frames)]) == 1,
+      f"{sorted({f[2] for f in bar_frames})}")
 check("each run's own in-progress row carries its own script",
       sorted(rows) == ["Optimize FLACs", "Process images"]
       and all(texts == {label} for label, texts in rows.items()),
@@ -747,12 +750,197 @@ finally:
     script_runners.RUNNERS.update(real_runners)
 
 check("a chain on its own still drives the header bar it is handed",
-      len({desc for desc, _ in bar_frames}) >= 1
-      and all(desc == "Optimize FLACs" or desc.endswith("Optimize FLACs")
-              for desc, _ in bar_frames),
+      len({f[2] for f in bar_frames}) >= 1
+      and all(f[2] == "Optimize FLACs" or f[2].endswith("Optimize FLACs")
+              for f in bar_frames),
       str(bar_frames))
 check("and hands the hook back when it ends", lone_after is recorder,
       f"{lone_after}")
+
+print("== a run claims the bar with its own zero state, not the last one's ==")
+
+# The surfaces show the LAST frame that reached them, so a run has to replace
+# whatever the previous producer left there — an import's stages, a finished
+# run's report — with its own zero state the moment it starts, instead of
+# inheriting a foreign percentage while its first script is still starting
+# (the reported "half-filled bar at the start of an import chain").
+bar_frames.clear()
+_stats.progress_hook = recorder                  # the relay a run talks to
+recorder(4, 8, "Previous album — organizing")     # a foreign frame at 50 %
+mark = len(bar_frames)
+inside = threading.Event()
+release_run = threading.Event()
+
+
+def gated_runner(cfg):
+    inside.set()
+    release_run.wait(5)
+    return {"modified_count": 0}
+
+
+script_runners.RUNNERS[3] = ("Optimize FLACs", gated_runner)
+script_runners.RUNNERS[5] = ("Process images", gated_runner)
+fresh_rows = {}
+try:
+    out_two = []
+    t = threading.Thread(target=run_on, args=(album_a, out_two),
+                         kwargs={"ids": (3, 5)})
+    t.start()
+    inside.wait(5)
+    fresh = bar_frames[mark:]
+    fresh_rows = {r["label"]: r["progress"] for r in jl.jobs()}
+    release_run.set()
+    t.join(15)
+finally:
+    release_run.set()
+    _stats.progress_hook = real_hook
+    script_runners.RUNNERS.clear()
+    script_runners.RUNNERS.update(real_runners)
+
+check("the run's own zero frame is the first thing the bar is told",
+      bool(fresh) and (fresh[0][0], fresh[0][1]) == (0, 2)
+      and "#1/2" in fresh[0][2],
+      f"{[(f[0], f[1], f[2]) for f in fresh]}")
+check("and the foreign 50 % it replaced is behind it, never the last word",
+      (bar_frames[mark - 1][0], bar_frames[mark - 1][1]) == (4, 8)
+      and bar_frames[-1][0] != 4,
+      f"{[(f[0], f[1], f[2]) for f in bar_frames]}")
+check("the run's own row starts at zero as well",
+      (fresh_rows.get(script_runners.run_label([3, 5])) or {}).get("done") == 0
+      and (fresh_rows.get(script_runners.run_label([3, 5])) or {}).get("total") == 2
+      and (fresh_rows.get(script_runners.run_label([3, 5])) or {}).get("steps") == [1, 2],
+      str(fresh_rows))
+
+print("== a run cut short ends the surface instead of freezing on it ==")
+
+# The auto-updater stops a chain at a script boundary: its last step announce
+# left the bar INSIDE the run and nothing follows it, so the run ends the
+# surface (a bar frozen on "1 of 2" is exactly what a screenshot showed) while
+# the readout keeps the honest pair — how many steps ran of how many were asked
+# for — and the text says which.
+from server import interrupt_recovery            # noqa: E402
+
+stopping = {"now": False}
+real_shutdown = interrupt_recovery.is_shutting_down
+interrupt_recovery.is_shutting_down = lambda: stopping["now"]
+
+
+def stopping_runner(cfg):
+    stopping["now"] = True        # the next script boundary sees the update
+    return {"modified_count": 0}
+
+
+bar_frames.clear()
+_stats.progress_hook = recorder                  # the relay a run talks to
+script_runners.RUNNERS[3] = ("Optimize FLACs", stopping_runner)
+script_runners.RUNNERS[5] = ("Process images", stopping_runner)
+cut_results = None
+try:
+    cut_results = script_runners.run_chain({"music_folder": music}, [3, 5],
+                                           targets=[album_a])
+finally:
+    interrupt_recovery.is_shutting_down = real_shutdown
+    _stats.progress_hook = real_hook
+    script_runners.RUNNERS.clear()
+    script_runners.RUNNERS.update(real_runners)
+
+last = bar_frames[-1]
+check("only the first step of the two ran",
+      cut_results is not None and [r.get("id") for r in cut_results] == [3],
+      str(cut_results))
+check("the run ended the surface rather than leaving it mid-way",
+      last[0] == last[1] == 2 and "stopped" in last[2] and "#1/2" in last[2],
+      f"{[(f[0], f[1], f[2]) for f in bar_frames]}")
+
+print("== a run that has to queue says so while it waits ==")
+
+# `wait=True` is an import, and it can sit behind another job on the same album
+# for minutes. With nothing published until its first script ran, that wait was
+# invisible — MAINTAIN listed the job it was queued behind, and the header bar
+# kept that job's numbers. The waiting run now has its own row and a sentence
+# naming who it waits for.
+holder_in = threading.Event()
+release_holder = threading.Event()
+
+
+def hold_album():
+    with jl.holding([album_a], kind="import", label="Import Album"):
+        holder_in.set()
+        release_holder.wait(15)
+
+
+bar_frames.clear()
+_stats.progress_hook = recorder
+script_runners.RUNNERS[3] = ("Optimize FLACs", short_runner)
+holder_thread = threading.Thread(target=hold_album)
+queued_snap = []
+queued_results = []
+try:
+    holder_thread.start()
+    holder_in.wait(5)
+    t = threading.Thread(target=run_on, args=(album_a, queued_results),
+                         kwargs={"wait": True, "timeout": 15})
+    t.start()
+    deadline = time.time() + 5
+    while time.time() < deadline:
+        queued_snap = jl.jobs()
+        if any("waiting for" in str((r.get("progress") or {}).get("text"))
+               for r in queued_snap):
+            break
+        time.sleep(0.05)
+    release_holder.set()
+    t.join(20)
+    holder_thread.join(20)
+finally:
+    release_holder.set()
+    _stats.progress_hook = real_hook
+    script_runners.RUNNERS.clear()
+    script_runners.RUNNERS.update(real_runners)
+
+waiting_rows = [r for r in queued_snap
+                if "waiting for" in str((r.get("progress") or {}).get("text"))]
+check("the queued run is listed, with a row of its own",
+      len(waiting_rows) == 1
+      and waiting_rows[0]["label"] == "Optimize FLACs",
+      str([(r["label"], r.get("progress")) for r in queued_snap]))
+check("and it names the album and the job it is waiting for",
+      "Import Album" in str(waiting_rows[0].get("progress"))
+      and os.path.basename(album_a) in str(waiting_rows[0].get("progress")),
+      str(waiting_rows[0].get("progress")))
+check("the job it is queued behind is still listed beside it",
+      len({r["label"] for r in queued_snap}) == 2,
+      str([r["label"] for r in queued_snap]))
+check("the bar was told, not left on the other job's numbers",
+      any("waiting for Import Album" in f[2] for f in bar_frames),
+      str([(f[0], f[1], f[2]) for f in bar_frames]))
+check("and the run went through as soon as the holder let go",
+      [r.get("id") for r in (queued_results[0] if queued_results else [])] == [3],
+      str(queued_results))
+check("with no row left behind afterwards", jl.jobs() == [], str(jl.jobs()))
+
+print("== a run stopped before it claimed anything still ends cleanly ==")
+
+# The shutdown path enters a chain that never claimed a bar at all:
+# tools/test_interrupt_safety.py calls `_run_chain_locked` directly, with no
+# job and no bar, and the shutdown flag already set — so the loop breaks before
+# its first script and the run still has to END its surface (or publish
+# nothing) instead of raising on the way out. That crash took the 3.17 battery
+# down, so it is pinned here as well as in the interrupt suite.
+from server import interrupt_recovery            # noqa: E402
+
+real_shutdown_early = interrupt_recovery.is_shutting_down
+interrupt_recovery.is_shutting_down = lambda: True
+stopped_result = "not run"
+try:
+    stopped_result = script_runners._run_chain_locked(
+        {"music_folder": music, "targets": None}, [1, 2, 3])
+except Exception as e:                            # noqa: BLE001 - the pin IS the raise
+    stopped_result = f"{type(e).__name__}: {e}"
+finally:
+    interrupt_recovery.is_shutting_down = real_shutdown_early
+
+check("a run cut short with no bar claimed ends without raising",
+      stopped_result == [], str(stopped_result))
 
 print("== the payload MAINTAIN → In progress reads ==")
 
@@ -956,6 +1144,207 @@ if mlo_main is not None:
         r = probe("the downloads import", [ready], lambda: client.post("/api/soulseek/import"))
         check("the downloads import went on to import the album it holds",
               r.json().get("moved") == [ready], str(r.json())[:200])
+
+        # ---- the wizard's own "Run the import chain" press ------------------
+        # The report this class of check exists for: an album another job is
+        # already finishing (the import that put it there, a script run) made
+        # the press QUEUE — silently, for as long as that job took, and then it
+        # ran the very same chain over the album again. A press has someone at
+        # the keyboard, so it is answered at once with the claim's own sentence
+        # naming the holder, and the album is left to the job already on it.
+        print("== the user's own chain press is never parked ==")
+
+        press_album = os.path.join(music, "Artists", "Other", "Press Album")
+        os.makedirs(press_album, exist_ok=True)
+        with open(os.path.join(press_album, "01 - Track.flac"), "w", encoding="utf-8") as fh:
+            fh.write("not really audio")
+
+        import mlo.stats as mlo_stats  # noqa: E402
+
+        _press = {
+            "config": mlo_main.load_config,
+            # `imports` holds its own `load_config` (imported from mlo.config at
+            # module load), and `/api/import/finish` reaches the engine with no
+            # config of its own — so the route's own module has to be pointed at
+            # the temp library too, or the press runs the DEVELOPER's config
+            # against the fixture.
+            "imports_config": imports_mod.load_config,
+            "rym": imports_mod.stamp_rym_links,
+            "adv": imports_mod.fetch_advisories,
+            "inst": imports_mod.fetch_instrumentals,
+            "meta": imports_mod.run_metadata_step,
+            "cover": imports_mod.run_cover_step,
+            "hook": getattr(mlo_stats, "progress_hook", None),
+        }
+        # The press runs the configured chain, so it is the suite's one stub
+        # script — and the import's own remote steps (links, metadata, cover
+        # art) are stubbed: those are /api/import's own test, what is pinned
+        # here is WHEN the press is answered and what the surfaces say.
+        press_cfg = lambda: {**_press["config"](), "music_folder": music,
+                             "import_scripts": [3]}
+        mlo_main.load_config = press_cfg
+        imports_mod.load_config = press_cfg
+        imports_mod.stamp_rym_links = lambda path, cfg=None: {
+            "album": "", "artist": "", "note": "", "written": 0}
+        imports_mod.fetch_advisories = lambda paths, cfg=None, progress=None: {
+            "updated": 0, "values": {}}
+        imports_mod.fetch_instrumentals = lambda paths, cfg=None: {
+            "updated": 0, "values": [], "evidence": {}}
+        imports_mod.run_metadata_step = lambda album_dir, cfg=None: {
+            "note": "", "staged": False, "applied": {}}
+
+        # What the header bar (mlo.stats.progress_hook → the server's relay)
+        # was told, in order — the surface the user watches at the top of the
+        # window while a press is in flight.
+        bar_frames = []
+        mlo_stats.progress_hook = (lambda done=None, total=None, text="", steps=None:
+                                   bar_frames.append(text))
+        # A pre-chain step that takes a moment (the real ones are network
+        # lookups, measured at 5.4 s on a throwaway album): the bar must NOT be
+        # blank while it runs.
+        bar_during_prechain = []
+        script_started = []
+        script_ran = []
+
+        def slow_cover_step(album_dir, cfg=None):
+            # What the bar said at the moment this step ran, with what had run
+            # by then: no script of the press may have started yet, so a text
+            # here can only be the import's own readout.
+            bar_during_prechain.append((bar_frames[-1] if bar_frames else "",
+                                        list(script_ran)))
+            return {"note": "", "staged": False, "fetched": 0, "source": ""}
+
+        imports_mod.run_cover_step = slow_cover_step
+
+        def press_runner(cfg):
+            script_started.append(time.time())
+            script_ran.append("Press script")
+            return {"modified_count": 0}
+
+        script_runners.RUNNERS[3] = ("Press script", press_runner)
+        try:
+            started = time.time()
+            r = with_foreign_job(
+                [press_album],
+                lambda: client.post("/api/import/finish", json={"paths": [press_album]}))
+            elapsed = time.time() - started
+            check("the press over an album another job is finishing is refused 409",
+                  r.status_code == 409, f"{r.status_code} {r.text[:200]}")
+            check("...at once, not after that job finished (it holds for 20 s)",
+                  elapsed < 5, f"{elapsed:.1f}s")
+            check("...with the claim's own sentence naming the holder",
+                  "in use by" in r.json().get("detail", "")
+                  and "Optimize FLACs" in r.json().get("detail", ""),
+                  r.text[:200])
+            check("...and it started no script of its own", script_ran == [],
+                  str(script_ran))
+
+            bar_frames.clear()
+            r = client.post("/api/import/finish", json={"paths": [press_album]})
+            check("the press does its work once the album is free",
+                  r.status_code == 200, f"{r.status_code} {r.text[:200]}")
+            check("...running the configured chain", script_ran == ["Press script"],
+                  str(r.text[:200]))
+            check("and while it was doing its own steps the bar was not blank",
+                  [t for t, _ran in bar_during_prechain if t], str(bar_during_prechain))
+            check("...saying so BEFORE the first script ran",
+                  bool(bar_during_prechain)
+                  and all(not ran for _t, ran in bar_during_prechain),
+                  str(bar_during_prechain))
+
+            # A batch is not a single album: the free ones still run, and each
+            # refusal sits in its OWN path's slot — the wizard reads
+            # `albums[i]` as the album it sent at `targets[i]`.
+            free_album = os.path.join(music, "Artists", "Other", "Free Album")
+            os.makedirs(free_album, exist_ok=True)
+            with open(os.path.join(free_album, "01 - Track.flac"), "w", encoding="utf-8") as fh:
+                fh.write("not really audio")
+            script_ran.clear()
+            r = with_foreign_job(
+                [press_album],
+                lambda: client.post("/api/import/finish",
+                                    json={"paths": [press_album, free_album]}))
+            body = r.json().get("albums") or []
+            check("a batch with one busy album still runs the others",
+                  r.status_code == 200 and len(body) == 2
+                  and body[0].get("path") == press_album
+                  and body[1].get("path") == free_album,
+                  f"{r.status_code} {r.text[:240]}")
+            check("...reporting the busy one in its own slot, in its own words",
+                  "in use by" in " ".join(body[0].get("errors") or [])
+                  and "in use by" in str(body[0].get("note") or ""),
+                  str(body[0])[:240])
+            check("...and the free one through the chain",
+                  script_ran == ["Press script"] and body[1].get("chained") is True,
+                  f"{script_ran} {str(body[1])[:200]}")
+
+            # An AUTONOMOUS import (the bulk queue, a download, a wish) is the
+            # other half: it must not skip its chain, so it QUEUES behind the
+            # job holding the album — and it says so while it waits, naming who
+            # and which album, instead of leaving MAINTAIN showing only the
+            # holder (which is what a queued import used to look like: dead).
+            print("== a queued import says what it waits for ==")
+            holder_in, holder_may_go = threading.Event(), threading.Event()
+
+            def hold_album():
+                with jl.holding([press_album], kind="import", label="Import Album"):
+                    holder_in.set()
+                    holder_may_go.wait(20)
+
+            def importing():
+                imports_mod.finish_album(press_album, imports_mod.load_config())
+
+            holder_thread = threading.Thread(target=hold_album)
+            holder_thread.start()
+            holder_in.wait(10)
+            script_ran.clear()
+            script_started.clear()
+            importer_thread = threading.Thread(target=importing)
+            importer_thread.start()
+            waited_rows, waited_text = [], ""
+            for _ in range(200):            # while the import is at the claim
+                rows = [row for row in jl.jobs() if row.get("label") == "Press script"]
+                if rows and (rows[0].get("progress") or {}).get("text"):
+                    waited_rows = rows
+                    waited_text = rows[0]["progress"]["text"]
+                    break
+                if script_ran:
+                    break
+                time.sleep(0.05)
+            check("the queued import is listed with a row of its own",
+                  bool(waited_rows), str(jl.jobs()))
+            check("...saying what it waits for and on which album",
+                  "Import Album" in waited_text and "Press Album" in waited_text,
+                  waited_text)
+            check("...and its chain has not started yet", script_ran == [],
+                  str(script_ran))
+            holder_may_go.set()
+            released = time.time()
+            holder_thread.join(20)
+            for _ in range(200):
+                if script_ran:
+                    break
+                time.sleep(0.05)
+            check("the queued import runs the chain the moment it gets the album",
+                  script_ran == ["Press script"], str(script_ran))
+            check("...within a moment of the holder letting go, not a poll later",
+                  bool(script_started) and script_started[0] - released < 2.0,
+                  f"{script_started} released at {released:.2f}")
+            importer_thread.join(30)
+            check("and nothing is left claimed or listed afterwards",
+                  other(press_album) is None and jl.jobs() == [],
+                  f"{other(press_album)} {jl.jobs()}")
+        finally:
+            mlo_main.load_config = _press["config"]
+            imports_mod.load_config = _press["imports_config"]
+            imports_mod.stamp_rym_links = _press["rym"]
+            imports_mod.fetch_advisories = _press["adv"]
+            imports_mod.fetch_instrumentals = _press["inst"]
+            imports_mod.run_metadata_step = _press["meta"]
+            imports_mod.run_cover_step = _press["cover"]
+            mlo_stats.progress_hook = _press["hook"]
+            script_runners.RUNNERS.clear()
+            script_runners.RUNNERS.update(real_runners)
 
         mlo_main.load_config = _real["config"]
         mlo_main._cover_url_bytes = _real["cover_bytes"]

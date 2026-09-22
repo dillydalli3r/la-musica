@@ -31,6 +31,7 @@ import threading
 
 from .audio import AudioFile
 from .config import should_write_audio_tag
+from . import naming
 from .paths import AUDIO_EXTS, fsync_dir
 from .stats import is_audio_file
 from .subproc import run_tool
@@ -579,16 +580,19 @@ def rename_cues_for_discs(album_dir, discs=None, log_fn=None, config=None):
             text = ""
         file_discs = set()
         for m in CUE_FILE_RE.finditer(text):
-            raw = m.group(1).replace("/", "\\").split("\\")[-1]
-            # Try exact, then stem, then normalized (most lenient)
-            d = known_exact.get(raw.lower())
-            if d is None:
-                stem = os.path.splitext(_ascii_dashes(raw))[0].lower()
-                d = known_stem.get(stem)
-            if d is None:
-                d = known_norm.get(_norm_name(raw))
-            if d is not None:
-                file_discs.add(d)
+            # A "/" in a reference is a name character the app may have written
+            # as "_" (see naming.cue_ref_names): every spelling is tried.
+            for raw in naming.cue_ref_names(m.group(1)):
+                # Try exact, then stem, then normalized (most lenient)
+                d = known_exact.get(raw.lower())
+                if d is None:
+                    stem = os.path.splitext(_ascii_dashes(raw))[0].lower()
+                    d = known_stem.get(stem)
+                if d is None:
+                    d = known_norm.get(_norm_name(raw))
+                if d is not None:
+                    file_discs.add(d)
+                    break
         info[f] = (file_discs, _cue_track_count(text), _cue_index_starts(text))
 
         if _is_expected_disc_file(f, pattern, ".cue"):
@@ -943,11 +947,16 @@ def _strip_disc_prefix(name):
 def _norm_name(s):
     """Normalize a filename for comparison: lowercase, strip extension
     separators/underscores/double spaces. Never removes digits.
-    Handles Unicode dashes and strips disc prefix so '1-01 Title' matches '01 Title'."""
+    Handles Unicode dashes and strips disc prefix so '1-01 Title' matches '01 Title'.
+
+    The name is keyed through the shared rule first (naming.name_key), so a
+    sheet naming the PRE-change spelling of a file still matches the file this
+    app wrote: "A*B.flac" and "A_B.flac" key alike."""
     # Normalize dashes first, then strip disc prefix for comparison
+    s = naming.name_key(s)
     s = _ascii_dashes(s)
     s = _strip_disc_prefix(s)
-    s = os.path.splitext(os.path.basename(s))[0].lower()
+    s = os.path.splitext(s)[0].lower()
     s = re.sub(r"[\s_\-\.]+", " ", s).strip()
     return re.sub(r"\s+", " ", s)
 
@@ -1006,13 +1015,13 @@ def _converted_twin(ref_base, album_dir, audio):
     "img.mp3" is ambiguous and stays as the sheet wrote it, while the plain
     conversion case (the source plus the file that replaced it) resolves.
     """
-    stem = os.path.splitext(ref_base)[0].lower()
+    stem = os.path.splitext(naming.name_key(ref_base))[0].lower()
     if not stem:
         return None
     ext = os.path.splitext(ref_base)[1].lower()
     try:
         siblings = [f for f in os.listdir(album_dir)
-                    if os.path.splitext(f)[0].lower() == stem
+                    if os.path.splitext(naming.name_key(f))[0].lower() == stem
                     and os.path.splitext(f)[1].lower() != ext]
     except OSError:
         return None
@@ -1183,10 +1192,18 @@ def _fix_cue_filenames_locked(album_dir, log_fn, config):
                 out_lines.append(line)
                 continue
             ref = m.group(1)
-            ref_base = ref.replace("/", "\\").split("\\")[-1]
+            # Every spelling this reference may denote: the whole reference
+            # first (a "/" can be a CHARACTER of the name, one this app writes
+            # as "_": "1-01 AC/DC.flac" for "1-01 AC_DC.flac") and then its leaf
+            # (a reference is usually path-shaped — "CD1/01 x.flac" — and the
+            # LEAF is the file in this folder). See naming.cue_ref_names.
+            names = naming.cue_ref_names(ref)
+            ref_base = names[-1] if names else ""
             new_line = line
 
-            exists = (
+            # The reference AS WRITTEN: when that name is in the folder the
+            # sheet is right, and only a conversion can still need a repoint.
+            exists = bool(ref_base) and (
                 os.path.isfile(os.path.join(album_dir, ref_base))
                 or ref_base.lower() in exact
                 or any(f.lower() == ref_base.lower() for f in audio)
@@ -1206,34 +1223,43 @@ def _fix_cue_filenames_locked(album_dir, log_fn, config):
                         changed = True
                 out_lines.append(new_line)
                 continue
-            candidates = None
-            # 1) unique normalized-name match
-            c = norm.get(_norm_name(ref_base), [])
-            if len(c) == 1:
-                candidates = c
-            else:
+            candidates, matched = None, None
+            for nm in names:
+                # 1) unique normalized-name match
+                c = norm.get(_norm_name(nm), [])
+                if len(c) == 1:
+                    candidates, matched = c, nm
+                    break
                 # 2) unique leading-track-number match
-                tn = _track_num_of(ref_base)
+                tn = _track_num_of(nm)
                 if tn is not None:
                     c2 = nums.get(tn, [])
                     if len(c2) == 1:
-                        candidates = c2
-            if candidates is None and cue_disc is not None:
-                # 3) the reference's number as a track of THIS cue's disc
-                #    (the number alone is ambiguous — see _ref_track_numbers)
-                for n in _ref_track_numbers(ref_base, cue_disc):
-                    c3 = disc_nums.get(n, [])
-                    if len(c3) == 1:
-                        candidates = c3
+                        candidates, matched = c2, nm
                         break
-                if candidates is None and single_image:
-                    # 4) one FILE line for the whole disc, and the disc holds
-                    #    one file: that file IS the audio the sheet names.
-                    candidates = list(disc_audio)
+                if cue_disc is not None:
+                    # 3) the reference's number as a track of THIS cue's disc
+                    #    (the number alone is ambiguous — see _ref_track_numbers)
+                    for n in _ref_track_numbers(nm, cue_disc):
+                        c3 = disc_nums.get(n, [])
+                        if len(c3) == 1:
+                            candidates, matched = c3, nm
+                            break
+                    if candidates:
+                        break
+                    if single_image:
+                        # 4) one FILE line for the whole disc, and the disc
+                        #    holds one file: that file IS what the sheet names.
+                        candidates, matched = list(disc_audio), nm
+                        break
             if candidates:
                 actual = candidates[0]
-                # Keep any directory part of the original reference.
-                head = ref[: len(ref) - len(ref_base)] if ref_base else ""
+                # Keep any directory part of the original reference — but only
+                # when the LEAF was what matched. When the whole reference is
+                # the name (its "/" was a character this app wrote as "_"),
+                # its "directory" was never one.
+                head = (ref[: len(ref) - len(matched)]
+                        if matched and ref.endswith(matched) else "")
                 new_ref = head + actual
                 if new_ref != ref:
                     new_line = line.replace(

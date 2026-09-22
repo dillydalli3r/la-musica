@@ -392,7 +392,7 @@ export default function BrowsePage() {
             albumPath={m?.albumPath ?? tr.path.split("/").slice(0, -1).join("/")}
             trackCover={tr.cover_file}
             albumCover={m?.albumCover}
-            wrapperClass="h-9 w-9 rounded bg-raise border border-border overflow-hidden shrink-0"
+            wrapperClass="h-9 w-9 rounded bg-raise overflow-hidden shrink-0"
           />
         </td>
         <td className="td">

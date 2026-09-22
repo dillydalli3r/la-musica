@@ -85,13 +85,20 @@ const PICK_COLS: Record<ListTab, Col[]> = {
 /** One floor per picker column, same rule as the library's own column maps:
  *  these are the table's floor, so a window too narrow for them scrolls the
  *  wrapper instead of wrapping a cell one character per line. The checkbox is
- *  32 px — the library's own select column — which leaves the name the rest. */
+ *  32 px — the library's own select column — which leaves the name the rest.
+ *
+ *  Only the columns holding a VALUE of a known width are named here: the
+ *  checkbox, the thumbnail, the count and the duration. Name, artist and album
+ *  carry prose, so they are deliberately left without a width — a fixed one is
+ *  a width that cannot know the value it holds, and `w-[108px]` left the
+ *  artist of every row at the mercy of the columns beside it. Left auto, the
+ *  three prose columns share whatever the card has once the fixed ones are
+ *  paid for, and a value too long for its share wraps onto a second line
+ *  (the cells are `break-words`) instead of pushing the table past the card's
+ *  own edge, where the wrapper would cut it off mid-word. */
 const PICK_COL_W: Record<string, string> = {
   sel: "w-8",
   cover: "w-[52px]",
-  name: "md:w-[220px]",
-  artist: "w-[108px]",
-  album: "w-[112px]",
   count: "w-[88px]",
   dur: "w-20",
 };
@@ -152,9 +159,25 @@ function PickTable({ cols, rows, emptyNote }: {
   emptyNote: ReactNode;
 }) {
   if (!rows.length) return <>{emptyNote}</>;
+  /* The list is the source panel's BODY, not a fixed-height box: from `xl` the
+   * panel is a stretched grid item (the destination stack beside it is much
+   * taller), so `flex-1` hands the table the height the card was given —
+   * without it the list ended after two rows and half the card sat empty
+   * below. Below `xl` the two panels stack and the card is only as tall as its
+   * own content, where the old viewport-friendly cap is still right, so it
+   * stays there and only lifts at `xl`. `min-h-32` is the floor for that
+   * stacked case, where the basis resolves against an indefinite height.
+   *
+   * No `table-scroll` here: that class carries the wide MusicBrainz tables'
+   * own 46 rem floor, which forced this five-column table to scroll at every
+   * window narrower than 736 px — on the owner's 1568 px window the wrapper
+   * showed 510 px of a 736 px table, which is what cut the Artist column off
+   * mid-word. The picker has no such floor of its own: `w-full` alone, so the
+   * table is always exactly as wide as the card it was given and its prose
+   * columns (the auto ones, see PICK_COL_W) share what the fixed ones leave. */
   return (
-    <div className="max-h-72 overflow-auto border border-border rounded-md table-scroll">
-      <table className={`${TABLE_FIT} text-xs`}>
+    <div className="flex-1 min-h-32 max-h-72 xl:max-h-none overflow-auto border border-border rounded-md">
+      <table className="w-full text-xs">
         <thead className="border-b border-border sticky top-0 z-10 bg-card">
           <tr>
             {cols.map((c) => (
@@ -218,6 +241,14 @@ export default function ExportPage() {
   const [artistPaths, setArtistPaths] = useState<Set<string>>(new Set());
   const [trackPaths, setTrackPaths] = useState<Set<string>>(new Set());
   const [filter, setFilter] = useState("");
+
+  /* A saved config carries the source tab it was saved from. Only a tab this
+   * page HAS is applied: a config written by a version with another tab would
+   * otherwise set a kind nothing renders, and the picker's own selection logic
+   * would fall through to an empty list under a tab that is not shown. */
+  const pickSourceKind = (kind: string) => {
+    if (SOURCE_KINDS.some((k) => k.id === kind)) setSourceKind(kind as SourceKind);
+  };
 
   const artists = useMemo<Artist[]>(() => lib?.artists ?? [], [lib]);
   const albums = useMemo(() => artists.flatMap((a) => a.albums ?? []), [artists]);
@@ -362,8 +393,10 @@ export default function ExportPage() {
   );
 
   // The destination/format half lives in the shared panel, driven by this
-  // exact selection.
-  const e = useExportOptions(paths, totalSeconds);
+  // exact selection. The source tab is THIS page's state, handed over so a
+  // saved config remembers the tab it was saved from (the per-page dialog has
+  // no tabs and passes none).
+  const e = useExportOptions(paths, totalSeconds, { sourceKind, setSourceKind: pickSourceKind });
 
   const toggle = (set: Set<string>, path: string, apply: (s: Set<string>) => void) => {
     const next = new Set(set);
@@ -407,21 +440,35 @@ export default function ExportPage() {
     </div>
   );
 
+  /* `max-w-6xl` is the app's READING width (the list pages), and it is wrong
+   * for this one: the picker panels and the preview below them are tables, and
+   * a 1152 px cap stranded ~400 px of a 1568 px window — the two panels then
+   * grew nothing and the picker's prose columns sat at their floors. Browse is
+   * the app's other content-heavy page (a query builder over the same tables)
+   * and it caps at 1600, so this page follows it: the same scale, one step
+   * wider. */
   return (
-    <div className="p-6 space-y-5 mx-auto max-w-6xl">
+    <div className="p-6 space-y-5 mx-auto max-w-[1600px]">
       <PageHeader
         icon={HardDriveDownload}
         title="Export"
         subtitle="Copy or convert any part of the library — playlists, albums, artists, single tracks or everything — onto a drive. Tags and artwork ride along; already-exported tracks are skipped on re-runs."
       />
 
-      <div className="grid lg:grid-cols-2 gap-4">
+      {/* Two panels side by side only from `xl`: at `lg` a 1024 px window
+          leaves the access rail 832 px and each panel 384, which is narrower
+          than the picker's own columns and wraps every album name three lines
+          deep — stacked, each panel gets the whole pane. From `xl` the row has
+          room for both, and they share it evenly. */}
+      <div className="grid xl:grid-cols-2 gap-4">
         {/* ---- source -------------------------------------------------- */}
         {/* `min-w-0`: as a grid item the panel's automatic minimum is its
             content's min-content, which the tab strip below sets — and then
             the strip grows the panel instead of scrolling inside its own box
-            on a phone. */}
-        <div className="panel min-w-0">
+            on a phone. `flex flex-col`: the panel is the taller row's height,
+            and the list inside it is the piece that takes the slack (see
+            PickTable). */}
+        <div className="panel min-w-0 flex flex-col">
           <div className="text-xs font-bold text-zinc-300 mb-2">Source</div>
           {/* Five options are wider than a phone: the strip scrolls in its own
               box instead of pushing the page sideways. */}
@@ -464,7 +511,7 @@ export default function ExportPage() {
                           albumPath={row?.albumPath ?? path.split(/[\\/]/).slice(0, -1).join("/")}
                           trackCover={row?.coverFile}
                           albumCover={row?.albumCover}
-                          wrapperClass="h-9 w-9 rounded bg-raise border border-border overflow-hidden shrink-0"
+                          wrapperClass="h-9 w-9 rounded bg-raise overflow-hidden shrink-0"
                         />
                       ),
                       cells: {
@@ -550,7 +597,7 @@ export default function ExportPage() {
                         <CoverImg
                           albumPath={a.path}
                           coverFile={a.cover_file}
-                          wrapperClass="h-9 w-9 rounded bg-raise border border-border overflow-hidden shrink-0"
+                          wrapperClass="h-9 w-9 rounded bg-raise overflow-hidden shrink-0"
                         />
                       ),
                       cells: {
@@ -578,7 +625,7 @@ export default function ExportPage() {
                             albumPath={t.albumPath}
                             trackCover={t.coverFile}
                             albumCover={t.albumCover}
-                            wrapperClass="h-9 w-9 rounded bg-raise border border-border overflow-hidden shrink-0"
+                            wrapperClass="h-9 w-9 rounded bg-raise overflow-hidden shrink-0"
                           />
                         ),
                         cells: {
@@ -653,7 +700,7 @@ export default function ExportPage() {
                                   albumPath={m?.albumPath ?? p.split(/[\\/]/).slice(0, -1).join("/")}
                                   trackCover={m?.coverFile}
                                   albumCover={m?.albumCover}
-                                  wrapperClass="h-9 w-9 rounded bg-raise border border-border overflow-hidden shrink-0"
+                                  wrapperClass="h-9 w-9 rounded bg-raise overflow-hidden shrink-0"
                                 />
                               </td>
                             );

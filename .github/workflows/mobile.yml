@@ -14,7 +14,9 @@ name: Mobile bundles
 # build used to carry its own backend, and that is what this workflow stopped
 # doing (see README.md, *Clients*).
 #
-# Reusable (`release.yml` can call it) and manually dispatchable.
+# Reusable (`release.yml` can call it) and manually dispatchable. Neither job
+# builds the React frontend: `tauri build`'s beforeBuildCommand is cleared in
+# favour of the web/dist ci.yml built and uploaded for the same commit.
 
 on:
   workflow_dispatch:
@@ -86,11 +88,22 @@ jobs:
         # would be four times the download for three of them nobody asked for.
         run: rustup target add aarch64-linux-android
 
-      - name: npm ci (web)
+      - name: Use the frontend ci.yml built
+        # The one build of web/dist for this commit; a dispatch of this file
+        # alone has none, which the guarded build below covers.
+        uses: actions/download-artifact@v4
+        continue-on-error: true
+        with:
+          name: web-dist
+          path: web/dist
+
+      - name: Build the frontend when this run carried none
+        if: hashFiles('web/dist/index.html') == ''
         working-directory: web
-        run: npm ci
+        run: npm ci && npm run build
 
       - name: npm ci (desktop)
+        # tauri-cli: the icon generator, the project generators and the build.
         working-directory: desktop
         run: npm ci
 
@@ -186,10 +199,13 @@ jobs:
         #
         # `--target aarch64` is what decides the ABI list, and it is the only
         # one built above: a phone install of a client does not need x86 slices.
+        #
+        # `--config` clears beforeBuildCommand — the frontend this job wrapped
+        # is already in web/dist, so the hook must not build a second one.
         working-directory: desktop
         env:
           NDK_HOME: ${{ steps.setup-ndk.outputs.ndk-path }}
-        run: npx tauri android build --apk --debug --target aarch64
+        run: npx tauri android build --apk --debug --target aarch64 --config '{"build":{"beforeBuildCommand":null}}'
 
       - name: Verify the icons inside the built APK
         # The launcher rasters are copied out of `icons/android/**` by the
@@ -234,11 +250,22 @@ jobs:
       - name: Add the iOS Rust targets
         run: rustup target add aarch64-apple-ios aarch64-apple-ios-sim
 
-      - name: npm ci (web)
+      - name: Use the frontend ci.yml built
+        # See the Android job: the one build of web/dist for this commit, with
+        # the guarded build below for a run that carried none.
+        uses: actions/download-artifact@v4
+        continue-on-error: true
+        with:
+          name: web-dist
+          path: web/dist
+
+      - name: Build the frontend when this run carried none
+        if: hashFiles('web/dist/index.html') == ''
         working-directory: web
-        run: npm ci
+        run: npm ci && npm run build
 
       - name: npm ci (desktop)
+        # tauri-cli: the icon generator, the project generators and the build.
         working-directory: desktop
         run: npm ci
 
@@ -298,7 +325,10 @@ jobs:
         # (arm64-apple-ios), `aarch64-sim`/`x86_64` the simulators. Passing the
         # cargo triple here is rejected outright ("invalid value
         # 'aarch64-apple-ios'"), which is what failed the first CI run.
-        run: npx tauri ios build --target aarch64 --no-sign
+        #
+        # `--config` clears beforeBuildCommand, so the web/dist this job
+        # downloaded is what the app is built around.
+        run: npx tauri ios build --target aarch64 --no-sign --config '{"build":{"beforeBuildCommand":null}}'
 
       - name: Verify the icons inside the built app
         # The two `cmp` assertions above compare the *generated Xcode project*

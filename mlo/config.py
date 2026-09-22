@@ -1424,11 +1424,24 @@ DEFAULT_CONFIG = {
     # source's leftover frames ride along beside it.
     "export_clean_tags": True,
     # .m3u8 playlists next to the exported albums (and one for the whole
-    # export) — what a DAP needs to show album order.
-    "export_playlists": True,
+    # export) — what a DAP needs to show album order. OFF by default: an album
+    # export carries audio, and a playlist (server.playlists.export_m3u8) is
+    # what writes a playlist file.
+    "export_playlists": False,
     # Mirror cover.*/description.txt/artist image/.lrc/.cue/.log next to the
-    # exported audio.
-    "export_sidecars": True,
+    # exported audio. OFF by default: the cover travels EMBEDDED in each file
+    # (export_embed_covers) and the rip's evidence (.cue/.log/.accurip) stays
+    # in the library, where the audit and the grading read it. On, the run
+    # copies them exactly as before. A `.lrc` is the exception either way: it
+    # follows `export_lyrics` below, which says whether lyrics travel in the
+    # file, as a sidecar, or both.
+    "export_sidecars": False,
+    # How an export writes lyrics: "embedded" (the LYRICS tag), "lrc" (a .lrc
+    # beside the exported file) or "both". "" follows the LIBRARY's own
+    # `lyrics_format` — an export defaults to what the app keeps in the library
+    # rather than to an opinion of its own, and a user who changes one setting
+    # does not have to remember the other.
+    "export_lyrics": "",
     # Write checksums.sha256 (sha256<2 spaces>relative path, what `sha256sum -c`
     # reads back) at the export root, so a copy to a card can be proven intact.
     "export_manifest": False,

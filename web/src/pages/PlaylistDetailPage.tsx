@@ -435,7 +435,7 @@ export default function PlaylistDetailPage() {
                           albumPath={m?.albumPath ?? t.split("/").slice(0, -1).join("/")}
                           trackCover={m?.coverFile}
                           albumCover={m?.albumCover}
-                          wrapperClass="h-9 w-9 rounded bg-raise border border-border overflow-hidden shrink-0"
+                          wrapperClass="h-9 w-9 rounded bg-raise overflow-hidden shrink-0"
                         />
                       </td>
                       <td className="td">

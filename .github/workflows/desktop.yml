@@ -15,7 +15,9 @@ name: Desktop bundles
 # Neither the Rust toolchain nor the Tauri CLI is installed here: the runner
 # images ship a stable rustup toolchain, and the CLI comes from
 # desktop/package-lock.json (`npm ci`), so the bundle is built by exactly the
-# version this repository pins.
+# version this repository pins. The frontend is not built here either: each leg
+# wraps the web/dist ci.yml built and uploaded for this commit, with tauri's
+# beforeBuildCommand cleared so it cannot build it a second time.
 
 on:
   workflow_dispatch:
@@ -52,15 +54,7 @@ jobs:
         if: runner.os == 'Linux'
         run: |
           sudo apt-get update
-          sudo apt-get install -y --no-install-recommends \
-            build-essential \
-            libwebkit2gtk-4.1-dev \
-            libgtk-3-dev \
-            libayatana-appindicator3-dev \
-            librsvg2-dev \
-            libxdo-dev \
-            libssl-dev \
-            patchelf
+          sudo apt-get install -y --no-install-recommends build-essential libwebkit2gtk-4.1-dev libgtk-3-dev libayatana-appindicator3-dev librsvg2-dev libxdo-dev libssl-dev patchelf
 
       - uses: actions/setup-node@v4
         with:
@@ -70,43 +64,48 @@ jobs:
             web/package-lock.json
             desktop/package-lock.json
 
-      - name: npm ci (web)
-        working-directory: web
-        run: npm ci
+      - name: Use the frontend ci.yml built
+        # The one build of web/dist for this commit. A dispatch of this file on
+        # its own has no CI run behind it, which is what the guarded build below
+        # is for.
+        uses: actions/download-artifact@v4
+        continue-on-error: true
+        with:
+          name: web-dist
+          path: web/dist
 
       - name: npm ci (desktop)
+        # tauri-cli: the icon generator, the bundlers and `tauri build` itself.
         working-directory: desktop
         run: npm ci
 
-      - name: Build the web frontend
-        # tauri build would run this itself through beforeBuildCommand; doing
-        # it here means a broken frontend fails before the Rust compile, which
-        # is the expensive half of this job.
+      - name: Build the frontend when this run carried none
+        # The built index.html is the test, so a download that half-failed lands
+        # here too rather than handing tauri a stale tree.
+        if: hashFiles('web/dist/index.html') == ''
         working-directory: web
-        run: npm run build
+        run: npm ci && npm run build
 
-      # The Rust build is the expensive part of this job and it is almost
-
-      # entirely dependencies: with the crate graph cached, a bundle build
-
-      # drops from ~10 minutes to ~2, and only the shell crate itself is
-
-      # recompiled. Keyed per platform — the compiled artifacts are not
-
-      # portable between them.
-
-      - uses: Swatinem/rust-cache@v2
-
+      - name: Cache the Rust crate graph
+        # The Rust build is the expensive part of this job and it is almost
+        # entirely dependencies: with the crate graph cached, a bundle build
+        # drops from ~10 minutes to ~2, and only the shell crate itself is
+        # recompiled. Keyed per platform — the compiled artifacts are not
+        # portable between them.
+        uses: Swatinem/rust-cache@v2
         with:
-
           workspaces: desktop/src-tauri -> target
-
           key: ${{ matrix.os }}
-
 
       - name: Build the bundles
         working-directory: desktop
-        run: npx tauri build --bundles ${{ matrix.bundles }}
+        # beforeBuildCommand (`npm run build --prefix ../web`) would rebuild the
+        # frontend this leg just downloaded — and needs web/node_modules back to
+        # do it — so the hook is cleared from the merged config. shell: bash,
+        # because the Windows runner's PowerShell cannot be trusted to pass that
+        # JSON argument through intact.
+        shell: bash
+        run: npx tauri build --bundles ${{ matrix.bundles }} --config '{"build":{"beforeBuildCommand":null}}'
 
       - name: Verify the icons inside the built bundles
         # `bundle.icon` is what each bundler is *told* to use; what it actually

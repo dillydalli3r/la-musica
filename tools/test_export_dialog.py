@@ -21,8 +21,10 @@ server half of that agreement:
     shortening the tree;
   * ONE track stays ONE FILE: the audio is written on its own, never inside an
     archive;
-  * many tracks write one file each plus the .m3u8 playlists and sidecars the
-    defaults ask for, and a re-run skips everything it already wrote;
+  * many tracks write one file each — audio only, since the defaults leave the
+    album's own `.m3u8`/sidecar files in the library and REPORT them as
+    excluded — plus, when the form asks for them, the sidecars and playlists;
+    a re-run skips everything it already wrote;
   * the selection is what decides: exporting only the second track of an album
     writes only that file and (prune off) leaves the first one alone.
 
@@ -59,8 +61,8 @@ from server import main as mlo_main      # noqa: E402  (heavy import)
 # --------------------------------------------------------------------------- #
 
 # Fields of the request that are positional parts of the call, not run options
-# (the endpoint's own declaration — same tuple it filters on).
-_FORM_FIELDS = set(mlo_main._EXPORT_FORM_FIELDS)
+# (the exporter's own declaration — same tuple the endpoint filters on).
+_FORM_FIELDS = set(exporter.FORM_FIELDS)
 _OPTION_FIELDS = set(mlo_main.ExportRequest.model_fields) - _FORM_FIELDS
 
 # The dialog's BLANK_FORM is the server's table plus those positional fields,
@@ -88,6 +90,10 @@ os.makedirs(os.path.join(MUSIC, "Artist One", "Album A"), exist_ok=True)
 
 CFG = {"music_folder": MUSIC, "embed_cover_jpeg_quality": 85,
        "embed_cover_resolution": 400, "jpeg_progressive": True}
+# The login gate reads the config through server.auth's own import (not the
+# `load_config` alias patched below), so it is switched off HERE rather than
+# left to whatever auth state the machine happens to have.
+mlo_main.auth_mod.requires_login = lambda request, state: False
 # The endpoints read the config through this module's own name (the pattern the
 # other HTTP suites use), so a temp library needs no real install.
 mlo_main.load_config = lambda: dict(CFG)
@@ -160,23 +166,30 @@ try:
     assert audio == [f"{DEST}/Music/Artist One/Album A/1-01 Track 1.flac".replace("\\", "/")], written
     # …and no archive anywhere: a single-track export is the track, unpackaged.
     assert not [p for p in written if p.lower().endswith((".zip", ".7z", ".rar", ".tar"))], written
-    # The defaults also carry the album's sidecars (cover + lyrics) next to it.
-    assert res["sidecars"] == 2, res
-    assert f"{DEST}/Music/Artist One/Album A/cover.jpg".replace("\\", "/") in written
-    assert f"{DEST}/Music/Artist One/Album A/01 - One.lrc".replace("\\", "/") in written
+    # The defaults write AUDIO and nothing else: no cover.jpg, no .lrc — the
+    # cover travels EMBEDDED inside the file and the library's own files stay
+    # in the library. What did not travel is REPORTED, never dropped silently.
+    assert res["sidecars"] == 0, res
+    assert f"{DEST}/Music/Artist One/Album A/cover.jpg".replace("\\", "/") not in written
+    assert f"{DEST}/Music/Artist One/Album A/01 - One.lrc".replace("\\", "/") not in written
+    assert AudioFile(audio[0]).embedded_pictures(), "the cover must travel embedded"
+    reported = {r["name"]: r["kind"] for r in res["excluded"]}
+    assert reported.get("cover.jpg") == "cover", res["excluded"]
+    assert reported.get("01 - One.lrc") == "lyrics", res["excluded"]
+    assert res["excluded_total"] == 2, res["excluded"]
 
     # ---------------------------------------------------------- the whole album
     # Two tracks are new (the first one is already on the device) — the count
     # only ever reports what this run wrote.
     res = post(dialog_body([one, two, solo], DEST))
     assert (res["exported"], res["skipped"]) == (2, 1), res
-    assert res["playlists"] == 3, res           # Album A, Album B, all.m3u8
+    # No album `.m3u8` by default either: a PLAYLIST export is a different
+    # thing (server.playlists.export_m3u8), and this switch is opt-in too.
+    assert res["playlists"] == 0, res
     written = listing(DEST)
     assert f"{DEST}/Music/Artist Two/Album B/1-01 Track 1.flac".replace("\\", "/") in written
     assert f"{DEST}/Music/Artist One/Album A/1-02 Track 2.flac".replace("\\", "/") in written
-    assert f"{DEST}/Music/Artist One/Album A/Album A.m3u8".replace("\\", "/") in written
-    assert f"{DEST}/Music/Artist Two/Album B/Album B.m3u8".replace("\\", "/") in written
-    assert [p for p in written if p.lower().endswith("all.m3u8")], written
+    assert not [p for p in written if p.lower().endswith(".m3u8")], written
 
     # Already there: a re-run of the same selection writes nothing again.
     again = post(dialog_body([one, two, solo], DEST))
@@ -211,8 +224,21 @@ try:
     assert [p for p in listing(mp3_one) if p.endswith(".mp3")] == \
         [f"{mp3_one}/Music/Artist One/Album A/1-01 Track 1.mp3".replace("\\", "/")]
 
-    # ------------------------------------- sidecars and playlists can be turned off
-    bare = os.path.join(ROOT, "Device5")
+    # ------------------------------------- sidecars and playlists are opt-in
+    # OFF is the default (asserted above); ON still writes exactly what the old
+    # default did — the album's cover.jpg/.lrc beside the files and one .m3u8
+    # per album plus all.m3u8 — so a device that wants them can still have them.
+    opted = os.path.join(ROOT, "Device5")
+    os.makedirs(opted)
+    res = post(dialog_body([one], opted, playlists=True, sidecars=True))
+    assert (res["playlists"], res["sidecars"]) == (2, 2), res
+    got = listing(opted)
+    assert f"{opted}/Music/Artist One/Album A/cover.jpg".replace("\\", "/") in got, got
+    assert f"{opted}/Music/Artist One/Album A/01 - One.lrc".replace("\\", "/") in got, got
+    assert f"{opted}/Music/Artist One/Album A/Album A.m3u8".replace("\\", "/") in got, got
+    assert [p for p in got if p.lower().endswith("all.m3u8")], got
+
+    bare = os.path.join(ROOT, "Device5b")
     os.makedirs(bare)
     res = post(dialog_body([one], bare, playlists=False, sidecars=False, embed_covers=False))
     assert (res["playlists"], res["sidecars"]) == (0, 0), res
@@ -278,6 +304,7 @@ finally:
     shutil.rmtree(ROOT, ignore_errors=True)
 
 print("ok  export dialog: shared option set == the API's run options, the default "
-      "request exports end to end, 1 track stays 1 file, album + transcode runs "
-      "produce one file per track, sidecars/playlists toggle off, the structure "
-      "menu + custom structure preview/run agree, bad structures and targets 400")
+      "request exports end to end (audio only, extras reported), 1 track stays 1 "
+      "file, album + transcode runs produce one file per track, sidecars/playlists "
+      "opt-in, the structure menu + custom structure preview/run agree, bad "
+      "structures and targets 400")

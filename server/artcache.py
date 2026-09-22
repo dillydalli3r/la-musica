@@ -342,10 +342,20 @@ def _fallback_candidates(artist, album, rg, cfg, timeout):
 
     Each tier only touches the network when every tier before it has already
     failed, so a working Cover Art Archive costs Apple and Deezer nothing.
+
+    The last two tiers are ALBUM lookups (`/search/album`, entity=album), so
+    they are asked only when there is an album to ask about. Asked with an
+    artist alone they answer with whatever that artist's most popular release
+    is — a DIFFERENT album, which is the one thing a cover fetch must never
+    return: a row whose own URL failed would then be replaced by another
+    album's artwork, cached under the row's URL for a month and written to the
+    library by the next "Use this cover". A cover with no album name has no
+    album tier to fall back to; the Cover Art Archive's release-group tier
+    above is the one that answers by identity.
     """
     if rg:
         yield _caa_front(rg), "coverartarchive"
-    if artist or album:
+    if album:
         two = (("itunes", _itunes_art_url), ("deezer", _deezer_art_url))
         for source, find in two:
             url = find(artist, album, cfg, timeout)

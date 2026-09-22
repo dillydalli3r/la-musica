@@ -465,6 +465,23 @@ def holder(path, asker=None):
         return dict(rec) if rec else dict(hit[1])
 
 
+def register(job, kind="", label=""):
+    """Give *job* a row before it holds anything.
+
+    A caller that knows it is about to QUEUE — an import waiting on an album
+    another job is on — wants its row and its sentence on screen while it
+    waits, and :func:`set_progress`/`publish` no-op for a job with no record
+    yet. This creates the same record :func:`acquire` would (and refines its
+    kind/label the same way), so the claim that follows just fills it in.
+
+    It holds NOTHING: no path is owned, no owner is registered, and the job
+    still ends with :func:`release` — which is also what forgets a row that a
+    failed wait left behind.
+    """
+    with _lock:
+        _record(job, kind, label)
+
+
 def set_progress(job, done=None, total=None, text="", steps=None):
     """How far *job* has got, for the in-progress list. "" total = unknown.
 

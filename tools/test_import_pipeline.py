@@ -13,7 +13,15 @@ What an import must guarantee end to end:
     the library, and is pollable through job_state();
   * AcoustID says WHY it is unusable instead of pretending the audio matched;
   * progress reaches both the caller's callback and mlo.stats.progress_hook
-    (the websocket relay's source).
+    (the websocket relay's source);
+  * an import that arrives carrying a peer's lyrics, genre, rating and art
+    REPLACES all four with what it finds (the drop, then the writers), asserted
+    end to end through `finish_album` for the lyric fetch (script 13), the
+    release's genres and the advisory ladder;
+  * a config that switches one of those three families OFF (a saved chain
+    without script 13, `genre_autofill` off, `advisory_auto_fetch` off) says so
+    in the import's own result and its one-line note instead of quietly
+    importing without it — and the shipped defaults skip none of them.
 
 No network, no slskd, no real scripts: the chain is switched off or
 monkeypatched everywhere a real run would happen.
@@ -243,7 +251,10 @@ assert default_args["chain"][0][1]["targets"] == [DF_PATH], default_args["chain"
 assert full["chain"] == [4, 3] and full["chained"] is True, full
 assert full["chain_off"] is False and full["scripts"] == [], full
 # the chain was configured but reported no results: the note says exactly that
-assert full["note"] == "the script chain did not run", full
+# — and, since this saved chain does not carry script 13, the lyrics it was
+# therefore configured not to fetch ride along (see the skip case below)
+assert full["note"] == ("the script chain did not run — " + imports.SKIPPED_LYRICS), full
+assert full["skipped_families"] == [imports.SKIPPED_LYRICS], full["skipped_families"]
 assert imports.chain_summary(full) == full["note"], full
 
 # the auto-import's own seam hands the album to the SAME call, with nothing
@@ -1017,11 +1028,121 @@ try:
     assert dropped["lyrics"] == 0 and dropped["advisory"] == 0, dropped
     assert dropped["genre"] == 1 and dropped["cover"] == 1, dropped
     assert (af.get_lyrics() or "").strip() and af.embedded_pictures() == [], af.all_tags()
+
+    # ---- END TO END: the import FINDS all three and writes them over --------
+    # One WHOLE import — the chain included — on an album that arrived carrying
+    # the peer's genre, rating and lyric: after `finish_album` the files hold
+    # what the import found, family by family (script 13's own runner for the
+    # lyrics, `_stamp_release` for the release's genres, `fetch_advisories` for
+    # the rating). The chain is faked at ONE seam — `run_chain` — because no
+    # real script may touch this suite's fixtures, and script 13 is run FOR REAL
+    # inside it: the point is that the import's own chain reaches the fetcher,
+    # not that a script runner works.
+    e2e = os.path.join(ARRIVED_ROOT, "End To End Album")
+    e2e_track = peer_flac(e2e, lyric="peer lyric, plain")
+    e2e_sidecar = os.path.join(e2e, "01 - Track.lrc")
+    with open(e2e_sidecar, "w", encoding="utf-8") as fh:
+        fh.write("peer lyric, from the sidecar it arrived with")
+    # The cover family is off here on purpose: this case is about the three
+    # families the ask names, and an on cover step would search the network.
+    e2e_cfg = {"music_folder": ARRIVED_ROOT, "import_scripts": [13],
+               "advisory_auto_fetch": True, "instrumental_auto_fetch": False,
+               "genre_autofill": True, "cover_auto_fetch": False,
+               "rym_links_auto": False, "metadata_auto_fetch": False}
+    _real_chain_fn = script_runners.run_chain
+    _chain_ids = []
+
+    def _fake_chain(cfg, ids, targets=None, force=None, progress=None,
+                    wait=True, final=None):
+        """The one seam: script 13 runs its real runner, everything else is a
+        row without work (no other script may touch these fixtures)."""
+        _chain_ids.append(list(ids))
+        rows = []
+        for sid in ids:
+            if sid == 13:
+                rows.append({"id": 13, "label": "Fetch lyrics",
+                             "stats": _lyrics_fetch.run_fetch_lyrics(
+                                 dict(cfg, targets=list(targets or [])))})
+            else:
+                rows.append({"id": sid, "label": f"script {sid}", "stats": {}})
+        return rows
+
+    script_runners.run_chain = _fake_chain
+    try:
+        e2e_res = imports.finish_album(e2e, e2e_cfg, release=APP_NOTES)
+    finally:
+        script_runners.run_chain = _real_chain_fn
+    # the chain the import ran carried the lyrics step, and nothing was
+    # configured away — the default shape of an import
+    assert _chain_ids == [[13]], _chain_ids
+    assert e2e_res["chained"] is True and e2e_res["chain"] == [13], e2e_res
+    assert e2e_res["skipped_families"] == [], e2e_res
+    # WHAT ARRIVED went first, all three families of it (the cover switch is
+    # off, so the peer's art is left where it is — nobody claimed that family)
+    assert e2e_res["dropped"] == {"checked": 1, "failed": 0, "lyrics": 1,
+                                  "genre": 1, "advisory": 1, "cover": 0}, e2e_res["dropped"]
+    af = arrived(e2e_track)
+    # …and each one is now the IMPORT's: the fetched lyric (the sidecar it
+    # arrived with was replaced with the embedded tag the format asks for), the
+    # release's genres, the sources' rating.
+    assert "the lyric the import fetched" in (af.get_lyrics() or ""), af.get_lyrics()
+    assert "peer lyric" not in (af.get_lyrics() or ""), af.get_lyrics()
+    assert not os.path.exists(e2e_sidecar), "the arrived .lrc is gone, not kept"
+    assert af.get_tag("GENRE") == "Rock; Shoegaze", af.get_tag("GENRE")
+    assert af.get_tag("ITUNESADVISORY") == "1", af.get_tag("ITUNESADVISORY")
+
+    # ---- a CONFIGURED skip is REPORTED, never silent ------------------------
+    # The three families a config can switch off on its own: a saved chain
+    # without script 13, `genre_autofill` off, `advisory_auto_fetch` off. The
+    # grader never requires a tag whose writer is off, so there is no gap and no
+    # prompt — the import's own report is the only place this can appear, and
+    # nothing is overruled to close it: the album keeps exactly what it arrived
+    # with, because the writers that would have replaced it are the ones off.
+    sk = os.path.join(ARRIVED_ROOT, "Skipped Album")
+    sk_track = peer_flac(sk, lyric="peer lyric, plain")
+    sk_cfg = dict(e2e_cfg, import_scripts=[4], genre_autofill=False,
+                  advisory_auto_fetch=False)
+    script_runners.run_chain = _fake_chain
+    try:
+        sk_res = imports.finish_album(sk, sk_cfg, release=APP_NOTES)
+    finally:
+        script_runners.run_chain = _real_chain_fn
+    assert sk_res["skipped_families"] == [imports.SKIPPED_GENRES,
+                                          imports.SKIPPED_LYRICS,
+                                          imports.SKIPPED_ADVISORY], sk_res["skipped_families"]
+    # the one honest line every surface prints carries them all — a queue row,
+    # a notification and the wizard's Finish line are the same wording
+    assert sk_res["note"].startswith("the script chain ran 1 script"), sk_res["note"]
+    for _reason in sk_res["skipped_families"]:
+        assert _reason in sk_res["note"], sk_res["note"]
+    assert imports.chain_summary(sk_res) == sk_res["note"], sk_res
+    af = arrived(sk_track)
+    assert af.get_tag("GENRE") == "Peer Genre", af.get_tag("GENRE")
+    assert af.get_tag("ITUNESADVISORY") == "0", af.get_tag("ITUNESADVISORY")
+    assert "peer lyric" in (af.get_lyrics() or ""), af.get_lyrics()
 finally:
     _intg.genre_chain = _real_genre_chain
     _intg.resolve_advisory_route = _real_advisory_route
     _lyrics_fetch.fetch_lyrics = _real_fetch_lyrics
     shutil.rmtree(ARRIVED_ROOT, ignore_errors=True)
+
+# --------------------------------------------------------------------------- #
+# The SHIPPED defaults reach all three families
+# --------------------------------------------------------------------------- #
+# All of the above is only worth anything if an untouched install can fetch each
+# family: the default chain carries the lyric fetch (13), both families' own
+# switches ship on, and `import_scripts` ships empty (i.e. DEFAULT_CHAIN). The
+# skip report above is for a config that CHANGED one of those, never for a
+# fresh one.
+from mlo.config import DEFAULT_CONFIG  # noqa: E402  (read with the defaults above)
+
+assert 13 in imports.DEFAULT_CHAIN, imports.DEFAULT_CHAIN
+assert DEFAULT_CONFIG["import_scripts"] == [], DEFAULT_CONFIG["import_scripts"]
+assert DEFAULT_CONFIG["genre_autofill"] is True, DEFAULT_CONFIG["genre_autofill"]
+assert DEFAULT_CONFIG["advisory_auto_fetch"] is True, DEFAULT_CONFIG["advisory_auto_fetch"]
+# …which is exactly a config no import reports a skip for
+assert imports._skipped_families(imports.DEFAULT_CHAIN, DEFAULT_CONFIG, ()) == [], \
+    imports._skipped_families(imports.DEFAULT_CHAIN, DEFAULT_CONFIG, ())
 
 # --------------------------------------------------------------------------- #
 # soulseek.import_completed(finish=...): the chain is opt-in per album

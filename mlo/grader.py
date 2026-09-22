@@ -33,7 +33,8 @@ from .lyrics_xlit import (
 )
 from .cue import canonical_cue_text
 from .naming import (DEFAULT_NAMING_SCRIPT, UNKNOWN_RELEASE_TYPE,
-                     lookup_style_release_type, mb_style_release_type)
+                     cue_ref_names, lookup_style_release_type,
+                     mb_style_release_type, name_key)
 from .paths import (ALBUM_SIDECAR_NAMES, AUDIO_EXTS, IMAGE_EXTS,
                     LIB_AUDIO_EXTS, LIB_VIDEO_EXTS, get_track_cover,
                     library_root, load_expected_tracks, load_pending,
@@ -3598,12 +3599,17 @@ def _grade_album(album_dir, lyrics_format, cfg=None):
     # there — playable nowhere, invisible to every other check.
     if has_cue and cfg.get("grade_check_cue_files", True):
         from .discs import cue_file_refs
-        on_disk = {f.lower() for f in all_files}
+        # Both sides through the shared name rule (naming.name_key, which
+        # cue_ref_names applies): a sheet that still names a file the way the
+        # rip wrote it ("01. AC/DC - Theme.flac") refers to the file this app
+        # WROTE for it ("01. AC_DC - Theme.flac"). Without that the app's own
+        # renaming reads as a missing file and fails the album for it.
+        on_disk = {name_key(f).lower() for f in all_files}
         missing = []
         for cue_path in cue_files:
             for ref in cue_file_refs(cue_path):
-                base = ref.replace("/", "\\").split("\\")[-1]
-                if base and base.lower() not in on_disk:
+                names = cue_ref_names(ref)
+                if names and not any(n.lower() in on_disk for n in names):
                     missing.append(f"{os.path.basename(cue_path)}: {ref}")
         total_checks += 1
         if missing:

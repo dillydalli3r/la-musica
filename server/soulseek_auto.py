@@ -73,6 +73,9 @@ from mlo.release_choice import media_formats, video_formats
 # The library's definition of a track, for the one step that must see a
 # music-video album's files as tracks (the MB stamping below).
 from mlo.paths import LIB_AUDIO_EXTS
+# The app's ONE filename rule (see _safe_component): a folder this module names
+# has to be the same folder the organizer and the export would name.
+from mlo.naming import sanitize_segment
 # The app's own multi-value separator: RELEASECOUNTRY is written "; "-joined
 # (mlo.audio joins repeated fields with it, mlo.naming._first_multi reads the
 # first entry back), so the writer and the reader cannot disagree.
@@ -4006,8 +4009,14 @@ class _AlbumClaim:
 
 
 def _safe_component(name, fallback="Soulseek Import"):
-    """One path segment with the characters a filesystem refuses removed."""
-    return re.sub(r'[<>:"/\\|?*\x00-\x1f]', "", str(name or "")).strip() or fallback
+    """One path segment, named by the ONE shared rule (mlo.naming).
+
+    This used to DELETE the characters a filesystem refuses, which put the
+    import folder on a different convention than the organizer and the export:
+    a release titled "AC/DC" imported into "ACDC" while the same album
+    downloaded from elsewhere organized into "AC_DC", and the folder claim
+    (which locks two jobs out of one destination) counted them as two."""
+    return sanitize_segment(name) or fallback
 
 
 def _youtube_album_dir(release, cfg):

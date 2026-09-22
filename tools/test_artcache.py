@@ -10,6 +10,10 @@ What this pins, with the one HTTP seam stubbed (no network at all):
   * a provider that refuses us (403) falls through to the next candidate, and
     the chain is Cover Art Archive → iTunes → Deezer, LAZILY: a tier is only
     asked when every tier before it failed;
+  * the two album tiers (iTunes, Deezer) are asked only when there IS an album
+    to ask about: asked with an artist alone they answer with whatever that
+    artist's most popular release is — a different album's cover, which is
+    cached under the row's URL and written to the library as the row's image;
   * a total failure is `(None, None, None)` — never an exception — and is
     negatively cached for minutes, so a broken shelf row makes one round of
     requests, not one per render;
@@ -185,6 +189,44 @@ data, _ctype, source = artcache.fetch_art(PRIMARY, artist="Radiohead", album="OK
 assert asked == ["itunes", "deezer"], asked
 assert source == "deezer", source
 assert [u for u, _h in calls] == [PRIMARY, DEEZER], calls
+
+# The iTunes and Deezer tiers are ALBUM lookups: with no album name there is
+# nothing for them to answer ABOUT, and asked anyway they answer with whatever
+# that artist's most popular release is — a DIFFERENT album's cover. That is
+# the art the user never picked: it gets cached under the row's own URL for a
+# month and, on the finder's "Use this cover", written into the library as if
+# it were the row's image. An artist alone therefore falls back to the
+# release-group tier (which answers by identity) and to nothing else.
+_real_itunes_tier, _real_deezer_tier = artcache._itunes_art_url, artcache._deezer_art_url
+try:
+    reset()
+    asked = []
+    calls = stub_get({ITUNES: (200, JPEG3000, "image/jpeg"),
+                      DEEZER: (200, JPEG, "image/jpeg")})
+    artcache._itunes_art_url = lambda a, al, cfg, t: asked.append(("itunes", al)) or ITUNES
+    artcache._deezer_art_url = lambda a, al, cfg, t: asked.append(("deezer", al)) or DEEZER
+    assert artcache.fetch_art(PRIMARY, artist="Radiohead") == (None, None, None)
+    assert asked == [], asked
+    assert [u for u, _h in calls] == [PRIMARY], calls
+    # …while the album's OWN identity still falls back exactly as before, and
+    # the release-group tier still answers an id-only request.
+    reset()
+    asked = []
+    calls = stub_get({ITUNES: (200, JPEG3000, "image/jpeg")})
+    data, _ctype, source = artcache.fetch_art(PRIMARY, artist="Radiohead",
+                                              album="In Rainbows")
+    assert asked == [("itunes", "In Rainbows")], asked
+    assert source == "itunes" and data == JPEG3000, (source, data)
+
+    reset()
+    asked = []
+    calls = stub_get({CAA: (200, JPEG, "image/jpeg")})
+    data, _ctype, source = artcache.fetch_art(PRIMARY, release_group_mbid="rg-1")
+    assert source == "coverartarchive" and data == JPEG, (source, data)
+    assert asked == [], asked
+    assert [u for u, _h in calls] == [PRIMARY, CAA], calls
+finally:
+    artcache._itunes_art_url, artcache._deezer_art_url = _real_itunes_tier, _real_deezer_tier
 
 
 # --------------------------------------------------------------------------- #

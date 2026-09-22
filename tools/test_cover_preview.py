@@ -21,11 +21,17 @@ album OUTSIDE the music folder — the import wizard's staged album:
     (`no-cache`) — so a cover whose file name did not change can never be
     served stale, and an unchanged one still costs a 304;
   * the album payload names the freshly written cover, so the page's own cover
-    slot has something to render after the write.
+    slot has something to render after the write;
+  * the FINDER's own write on that staged album (the wizard's cover step): an
+    album whose folder arrived carrying another album's `cover.jpg` — a peer's
+    sidecar no import step clears — keeps showing it UNLESS the request carries
+    the wizard's staged allowance, and with it the pick lands on `cover.jpg` and
+    is what the preview serves.
 
 Run:  python tools/test_cover_preview.py
 Exit 0 = pass, 2 = skip (no fastapi/httpx, so no TestClient).
 """
+import base64
 import os
 import shutil
 import struct
@@ -202,6 +208,107 @@ assert res4.json()["token"] != res3.json()["token"]
 cached = tagcache.cover_bytes(ALBUM)
 assert cached[0] == after.content, "tagcache still holds the replaced cover"
 assert cached[2] == after.headers["etag"].strip('"'), (cached[2], after.headers["etag"])
+
+# --------------------------------------------------------------------------- #
+# 5) The finder's own write on the wizard's staged album — the pick must become
+#    what the preview serves.
+#
+#    The album folder arrived with ANOTHER album's cover.jpg (a peer's sidecar:
+#    nothing in the import clears a cover FILE — `imports.drop_arrived_values`
+#    drops embedded art only — and `run_cover_step` leaves an album that has art
+#    alone). Replacing it is the user's own pick, and the request the finder
+#    builds must carry the wizard's staged allowance the way every other cover
+#    call the wizard makes does: without it the write is refused and the panel
+#    below keeps showing the arrived art, however well the row was picked.
+#
+#    The two JPEGs are inlined so the check needs no Pillow, and both land as
+#    cover.jpg — the same in-place replacement the album page does.
+# --------------------------------------------------------------------------- #
+FOREIGN = os.path.join(TMP, "downloads", "Another Album")
+os.makedirs(FOREIGN)
+FOREIGN_JPG = base64.b64decode(
+    "/9j/4AAQSkZJRgABAQAAAQABAAD/2wBDAAMCAgMCAgMDAwMEAwMEBQgFBQQEBQoHBwYIDAoMDAsK"
+    "CwsNDhIQDQ4RDgsLEBYQERMUFRUVDA8XGBYUGBIUFRT/2wBDAQMEBAUEBQkFBQkUDQsNFBQUFBQU"
+    "FBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBT/wAARCAAIAAgDASIA"
+    "AhEBAxEB/8QAHwAAAQUBAQEBAQEAAAAAAAAAAAECAwQFBgcICQoL/8QAtRAAAgEDAwIEAwUFBAQA"
+    "AAF9AQIDAAQRBRIhMUEGE1FhByJxFDKBkaEII0KxwRVS0fAkM2JyggkKFhcYGRolJicoKSo0NTY3"
+    "ODk6Q0RFRkdISUpTVFVWV1hZWmNkZWZnaGlqc3R1dnd4eXqDhIWGh4iJipKTlJWWl5iZmqKjpKWm"
+    "p6ipqrKztLW2t7i5usLDxMXGx8jJytLT1NXW19jZ2uHi4+Tl5ufo6erx8vP09fb3+Pn6/8QAHwEA"
+    "AwEBAQEBAQEBAQAAAAAAAAECAwQFBgcICQoL/8QAtREAAgECBAQDBAcFBAQAAQJ3AAECAxEEBSEx"
+    "BhJBUQdhcRMiMoEIFEKRobHBCSMzUvAVYnLRChYkNOEl8RcYGRomJygpKjU2Nzg5OkNERUZHSElK"
+    "U1RVVldYWVpjZGVmZ2hpanN0dXZ3eHl6goOEhYaHiImKkpOUlZaXmJmaoqOkpaanqKmqsrO0tba3"
+    "uLm6wsPExcbHyMnK0tPU1dbX2Nna4uPk5ebn6Onq8vP09fb3+Pn6/9oADAMBAAIRAxEAPwD4Pooo"
+    "r+9T4o//2Q==")
+PICK_JPG = base64.b64decode(
+    "/9j/4AAQSkZJRgABAQAAAQABAAD/2wBDAAMCAgMCAgMDAwMEAwMEBQgFBQQEBQoHBwYIDAoMDAsK"
+    "CwsNDhIQDQ4RDgsLEBYQERMUFRUVDA8XGBYUGBIUFRT/2wBDAQMEBAUEBQkFBQkUDQsNFBQUFBQU"
+    "FBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBT/wAARCAAIAAgDASIA"
+    "AhEBAxEB/8QAHwAAAQUBAQEBAQEAAAAAAAAAAAECAwQFBgcICQoL/8QAtRAAAgEDAwIEAwUFBAQA"
+    "AAF9AQIDAAQRBRIhMUEGE1FhByJxFDKBkaEII0KxwRVS0fAkM2JyggkKFhcYGRolJicoKSo0NTY3"
+    "ODk6Q0RFRkdISUpTVFVWV1hZWmNkZWZnaGlqc3R1dnd4eXqDhIWGh4iJipKTlJWWl5iZmqKjpKWm"
+    "p6ipqrKztLW2t7i5usLDxMXGx8jJytLT1NXW19jZ2uHi4+Tl5ufo6erx8vP09fb3+Pn6/8QAHwEA"
+    "AwEBAQEBAQEBAQAAAAAAAAECAwQFBgcICQoL/8QAtREAAgECBAQDBAcFBAQAAQJ3AAECAxEEBSEx"
+    "BhJBUQdhcRMiMoEIFEKRobHBCSMzUvAVYnLRChYkNOEl8RcYGRomJygpKjU2Nzg5OkNERUZHSElK"
+    "U1RVVldYWVpjZGVmZ2hpanN0dXZ3eHl6goOEhYaHiImKkpOUlZaXmJmaoqOkpaanqKmqsrO0tba3"
+    "uLm6wsPExcbHyMnK0tPU1dbX2Nna4uPk5ebn6Onq8vP09fb3+Pn6/9oADAMBAAIRAxEAPwCpRRRX"
+    "85H8VH//2Q==")
+assert FOREIGN_JPG != PICK_JPG
+with open(os.path.join(FOREIGN, "cover.jpg"), "wb") as f:
+    f.write(FOREIGN_JPG)
+with open(os.path.join(FOREIGN, "01 - Song.mp3"), "wb") as f:
+    f.write(_MP3_FRAME * 40)
+
+# The finder's candidate: a URL the server fetches through the one seam the
+# other suites stub (a provider CDN is not reachable from a test).
+def cover_info_file(alb):
+    r = client.get("/api/cover/info", params={"album": alb, "staged": "true"})
+    assert r.status_code == 200, (r.status_code, r.text)
+    return r.json()["file"]
+
+
+# 5a) What the panel shows BEFORE anything is applied: the arrived cover. That
+#     file IS the album's cover — no import step cleared it, and the cover step
+#     leaves an album that already has art alone.
+assert cover_file(FOREIGN, staged=True) == "cover.jpg"
+arrived = fetch(FOREIGN, "cover.jpg", staged=True)
+assert arrived.content == FOREIGN_JPG, "the fixture album starts on another album's art"
+assert cover_info_file(FOREIGN) == "cover.jpg"
+
+_orig_fetch = mlo_main.intg.fetch_image_bytes
+mlo_main.intg.fetch_image_bytes = lambda url, *a, **k: (PICK_JPG, "image/jpeg")
+try:
+    # 5b) The finder's write WITHOUT the wizard's allowance — the request the
+    #     modal used to send: refused, and the panel keeps the arrived art.
+    #     This refusal IS the bug: every "Use this cover" in the wizard's cover
+    #     step was answered with this 400, so the pick never reached the folder.
+    res5 = client.post("/api/cover/fromurl", params={
+        "album": FOREIGN, "url": "http://covers.invalid/pick.jpg",
+        "artist": "Some Artist", "title": "Some Album"})
+    assert res5.status_code == 400, (res5.status_code, res5.text)
+    assert "outside music folder" in res5.text, res5.text
+    assert fetch(FOREIGN, "cover.jpg", staged=True).content == FOREIGN_JPG, (
+        "the preview changed under a refused write")
+    assert not os.path.exists(os.path.join(FOREIGN, "cover.png"))
+
+    # 5c) The same write WITH the wizard's own flag — what the finder sends now
+    #     — lands, and IS what the preview serves.
+    res6 = client.post("/api/cover/fromurl", params={
+        "album": FOREIGN, "url": "http://covers.invalid/pick.jpg",
+        "artist": "Some Artist", "title": "Some Album", "staged": "true"})
+    assert res6.status_code == 200, (res6.status_code, res6.text)
+    landed = os.path.abspath(res6.json()["path"].replace("/", os.sep))
+    assert os.path.basename(landed) == "cover.jpg", landed   # replaced in place
+    served5 = fetch(FOREIGN, "cover.jpg", staged=True)
+    # The writer compresses on the way in (`_compress_cover_bytes`), so "the
+    # pick" is the file the write reports — what matters is that the preview
+    # serves THAT and not the art the album arrived with.
+    assert served5.content == on_disk(landed), "the applied pick is not what the preview serves"
+    assert served5.content != FOREIGN_JPG, "the arrived cover is still what the preview serves"
+    assert served5.headers["etag"] != arrived.headers["etag"], (
+        "the replaced cover reports the same ETag")
+    assert cover_info_file(FOREIGN) == "cover.jpg"
+finally:
+    mlo_main.intg.fetch_image_bytes = _orig_fetch
 
 print("cover preview: all checks passed")
 shutil.rmtree(TMP, ignore_errors=True)

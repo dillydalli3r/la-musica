@@ -44,6 +44,7 @@ from server import playlists as pl_mod
 from server import integrations as intg
 from server import tagcache
 from server import exporter
+from server import exportconfigs
 from server import api_discovery
 from server import api_discover
 from server import api_imports
@@ -70,6 +71,7 @@ from server import job_locks
 from server import discovery
 from server import artcache
 from server import version as version_mod
+from mlo.naming import sanitize_segment
 from mlo.paths import (SKIP_DIRS, clear_track_covers, downloads_dir,
                        is_video_file, library_root, load_track_covers, move_path,
                        save_track_covers, set_track_covers, trash_dir, trash_path)
@@ -1885,8 +1887,8 @@ async def upload_cover(album: str = Query(...), file: UploadFile = File(...),
 
 def _cover_stem(track):
     """Sidecar stem for a track filename: '01 - Song.flac' -> '01 - Song'."""
-    tstem = os.path.splitext(os.path.basename(track or ""))[0].strip()
-    return re_safe_filename(tstem).strip().rstrip(".") or "cover"
+    tstem = os.path.splitext(os.path.basename(track or ""))[0]
+    return re_safe_filename(tstem) or "cover"
 
 
 def _resolve_selected_tracks(alb, tracks):
@@ -3037,6 +3039,9 @@ class ExportRequest(BaseModel):
     # "off" | "tags" (write the ReplayGain tags) | "apply" (rewrite the audio).
     replaygain_mode: Optional[str] = None
     eq_profile: Optional[str] = None   # a preset/profile id, "" = no EQ
+    # "embedded" (the LYRICS tag) | "lrc" (a .lrc beside the file) | "both" |
+    # None = the saved export_lyrics, else the library's own lyrics_format.
+    lyrics: Optional[str] = None
     clean_tags: Optional[bool] = None
     playlists: Optional[bool] = None
     sidecars: Optional[bool] = None
@@ -3055,15 +3060,19 @@ class EqImportRequest(BaseModel):
     text: str = ""
 
 
+class ExportConfigRequest(BaseModel):
+    name: str = ""
+    # The Export page's form, as the page holds it. A dict rather than one field
+    # per option on purpose: the form IS the schema, and
+    # server.exportconfigs validates it against the exporter's own tables
+    # (EXPORT_DEFAULTS, CODECS, STRUCTURES) — a Pydantic copy here would be a
+    # second schema to keep in step with the run.
+    config: dict = {}
+
+
 class StructurePreviewRequest(BaseModel):
     script: str = ""
     ext: str = ""      # the codec's produced extension, for the example path
-
-
-# Fields of ExportRequest that are not run options (they are positional parts
-# of the call, not keys of exporter.EXPORT_DEFAULTS).
-_EXPORT_FORM_FIELDS = ("paths", "dest", "subfolder", "codec", "quality",
-                       "structure", "structure_script")
 
 
 @app.get("/api/export/defaults")
@@ -3077,7 +3086,68 @@ def export_defaults():
         out[name] = cfg.get("export_" + name, DEFAULT_CONFIG.get("export_" + name, ""))
     for name, default in exporter.EXPORT_DEFAULTS.items():
         out[name] = cfg.get("export_" + name, default)
+    # Lyrics are the one option whose shipped default is NOT a constant: with
+    # nothing saved it is the library's own `lyrics_format`, so the form opens
+    # showing what the app keeps in the library (see exporter.lyrics_mode) and
+    # the select always has a value that matches one of its options.
+    out["lyrics"] = exporter.lyrics_mode(cfg, {})
     return out
+
+
+@app.get("/api/export/configs")
+def export_configs_list():
+    """Every saved export configuration, newest first.
+
+    Each row carries the equalizer profile it names and whether that profile is
+    still there (`eq_missing` / `eq_problem`): a config outlives the profile it
+    was saved with, so the list has to be able to mark one as broken before the
+    user picks it."""
+    return {"configs": exportconfigs.list_configs(_music_folder())}
+
+
+@app.post("/api/export/configs")
+def export_configs_save(req: ExportConfigRequest):
+    """Save the Export page's form under a name (or replace that name's config).
+
+    A name that could name a path outside the config folder, an unknown field,
+    and a value a run would refuse (an unknown codec, folder structure, target
+    or ReplayGain mode) are 400s: a saved config must not be a way to store
+    something an export cannot do."""
+    try:
+        return exportconfigs.save(_music_folder(), req.name, req.config)
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+
+
+@app.get("/api/export/configs/{config_id}")
+def export_configs_load(config_id: str):
+    """One saved config: the form values a run takes, plus the state of the
+    equalizer profile it names.
+
+    A config whose profile has been renamed or deleted comes back with
+    `eq_missing` true and `eq_problem` filled — the UI says so and the run
+    refuses that profile, rather than the export quietly using another curve. A
+    config that is not there is a 404 (the UI may be showing a stale list); an
+    id that could name another file is a 400."""
+    try:
+        row = exportconfigs.load(_music_folder(), config_id)
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+    if row is None:
+        raise HTTPException(404, f"no such saved config: {config_id}")
+    return row
+
+
+@app.delete("/api/export/configs/{config_id}")
+def export_configs_delete(config_id: str):
+    """Drop one saved configuration. Not there = 404; a path-shaped id = 400."""
+    try:
+        removed = exportconfigs.delete(_music_folder(), config_id)
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+    if not removed:
+        raise HTTPException(404, f"no such saved config: {config_id}")
+    return {"ok": True, "id": config_id}
 
 
 @app.get("/api/export/structures")
@@ -3185,7 +3255,7 @@ def export_run(req: ExportRequest):
     if not req.paths:
         raise HTTPException(400, "no tracks selected")
     target = (req.target or "server").strip().lower()
-    if target not in ("server", "zip"):
+    if target not in exporter.TARGETS:
         raise HTTPException(400, f"unknown export target: {req.target}")
     dest_root = ""
     if target == "server":
@@ -3201,7 +3271,7 @@ def export_run(req: ExportRequest):
         raise HTTPException(400, f"unknown codec: {req.codec}")
     cfg = load_config()
     opts = {k: v for k, v in req.model_dump().items()
-            if k not in _EXPORT_FORM_FIELDS and v is not None}
+            if k not in exporter.FORM_FIELDS and v is not None}
     try:
         res = exporter.export_tracks(
             cfg, [os.path.normpath(p) for p in req.paths], dest_root,
@@ -3347,8 +3417,15 @@ async def playlists_import(name: str = Query(...), file: UploadFile = File(...),
 
 
 def re_safe_filename(name):
-    import re
-    return re.sub(r'[\\/*?:"<>|]', "_", name)
+    """Older, weaker spelling of the app's ONE filename rule.
+
+    Kept as a name (the routes below and their tests call it) but it is now
+    exactly mlo.naming.sanitize_segment: a character that is invalid in a name
+    becomes "_", a trailing dot/space becomes "_" instead of hiding until the
+    filesystem drops it, and a reserved device name gets a trailing "_". Two
+    conventions for one character set is how a path the app WROTE stops being
+    a path the app can find again."""
+    return sanitize_segment(name)
 
 
 # --------------------------------------------------------------------------- #
@@ -7283,12 +7360,15 @@ async def import_upload(
     folder = cfg.get("music_folder") or ""
     if not folder or not os.path.isdir(folder):
         raise HTTPException(400, "music_folder not set or not found")
-    safe = re_safe_filename(os.path.basename(target_dir)) or "Imported"
-    # `re_safe_filename` strips \\/*?:"<>| but not a dot, and
-    # os.path.basename("..") is "..": joined to the Artists folder that
-    # resolves to the MUSIC FOLDER itself, which the containment guard
-    # accepts — uploads and ingests would land in the library root.
-    if safe in ("", ".", ".."):
+    raw = os.path.basename(target_dir)
+    safe = re_safe_filename(raw) or "Imported"
+    # A name of nothing but dots or blanks has no legal spelling: os.path
+    # .basename("..") is "..", and joined to the Artists folder that resolves
+    # to the MUSIC FOLDER itself, which the containment guard accepts —
+    # uploads and ingests would land in the library root. sanitize_segment
+    # already rewrites ".." to "__"; this refuses it outright instead of
+    # silently inventing a folder for it.
+    if not raw.strip(" ."):
         raise HTTPException(400, "invalid album name")
     target = os.path.normpath(os.path.join(library_root(folder), safe))
     if not _in_music_folder(target, folder):
@@ -7381,11 +7461,12 @@ def import_ingest(source: str = Query(...), target: str = Query(...)):
     src = os.path.normpath(source)
     if not os.path.isdir(src):
         raise HTTPException(404, "source folder not found")
-    name = re_safe_filename(os.path.basename(target or os.path.basename(src)))
-    if name in ("", ".", ".."):
+    raw = os.path.basename(target or os.path.basename(src))
+    name = re_safe_filename(raw)
+    # Nothing but dots/blanks has no legal spelling — see the upload route
+    # above: ".." joined to the library root IS the library root.
+    if not name or not raw.strip(" ."):
         raise HTTPException(400, "invalid album name")
-    if not name:
-        raise HTTPException(400, "invalid target name")
     dest = os.path.normpath(os.path.join(library_root(folder), name))
     if not _in_music_folder(dest, folder):
         raise HTTPException(400, "target outside music folder")
@@ -7713,8 +7794,6 @@ def downloads_import(req: DownloadsImport = DownloadsImport()):
             err = "not found in downloads"
         if err is None:
             safe = re_safe_filename(os.path.basename(name)) or "Download"
-            if safe in ("", ".", ".."):
-                safe = "Download"
             dest = os.path.normpath(os.path.join(lib, safe))
             if not _in_music_folder(dest, folder):
                 err = "target outside music folder"

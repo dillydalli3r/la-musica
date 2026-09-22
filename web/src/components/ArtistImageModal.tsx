@@ -97,7 +97,7 @@ export default function ArtistImageModal({
           {rows.map((r) => (
             <button
               key={r.url}
-              className="group text-left rounded-lg border border-border bg-raise/40 p-1.5 hover:border-zinc-500 hover:bg-raise transition-colors disabled:opacity-60"
+              className="group text-left rounded-lg border border-transparent bg-raise/40 p-1.5 hover:border-zinc-500 hover:bg-raise transition-colors disabled:opacity-60"
               disabled={!!busy}
               onClick={() => pick(r.url, r.source)}
               title={`Use this image (${r.source})`}

@@ -142,7 +142,60 @@ def _invalidate_caches():
         pass
 
 
-def finish_album(album_dir, cfg=None, progress=None, force=None, release=None):
+def _phase(text):
+    """One line saying what the import is doing BEFORE its chain starts.
+
+    The steps between the press and the first script are the slow ones — the
+    links, the metadata and the cover art are network lookups — and none of
+    them is a script, so nothing was publishing anything: the header bar and
+    the run's row kept whatever the last producer had left on them (measured on
+    a throwaway album: 5.4 s from the press to the first script, all of it
+    before the chain, none of it on screen — and a real album's lookups are
+    longer). "Run the import chain" then read as a press that did nothing,
+    which is what the owner reported.
+
+    Published exactly like every other frame (``job_locks.publish``), so the row
+    (MAINTAIN → In progress) and the bar can never disagree — the row is this
+    job's when the import runs inside one (the bulk queue, a download) — with
+    the bar left alone while a CHAIN owns it: a script run's own numbers are
+    the truth then, and the installed dispatcher drops a frame from a thread
+    that is not one of its runs (see ``script_runners``'s bar block).
+
+    Best-effort by design: this is a readout, and a headless caller with no
+    relay at all must not have an import fail over one.
+    """
+    try:
+        from server import job_locks
+        job_locks.publish(0, 0, text, job=job_locks.current())
+    except Exception:
+        traceback.print_exc()
+
+
+def _refuse_if_held(album_dir, wait):
+    """A caller that will not queue asks BEFORE it starts (see *wait*).
+
+    Everything between here and the chain writes to the album — the arrived
+    values are dropped, the links, the genres, the metadata and the cover art
+    are written — so a press whose album is already being finished has to hear
+    it NOW: the steps below would otherwise run against the very files the
+    other job is rewriting (measured: two presses on one album did their
+    tag-writing steps at the same time, unclaimed) and the user would watch the
+    lookups for as long as they take before being told the chain will not
+    start. The sentence is :func:`job_locks.refusal`'s — the same one the claim
+    itself raises — so the answer cannot differ from the one the chain would
+    have given.
+    """
+    if wait:
+        return
+    from server import job_locks
+    path = os.path.normpath(str(album_dir))
+    holder = job_locks.holder(path)
+    if holder:
+        raise script_runners.RunBusy(job_locks.refusal(path, holder))
+
+
+def finish_album(album_dir, cfg=None, progress=None, force=None, release=None,
+                 wait=True):
     """Run the configured chain over ONE album folder.
 
     The single call every import path makes after an album is on disk — the
@@ -150,7 +203,8 @@ def finish_album(album_dir, cfg=None, progress=None, force=None, release=None):
     import queue, the bulk queue, the Soulseek auto-importer and the wish /
     artist-watch pipeline behind it, so what an album ends up as cannot depend
     on which button was pressed. Returns ``{"path", "chain", "scripts",
-    "errors", "chained", "chain_off", "note", "autonomy", "dropped"}``:
+    "errors", "chained", "chain_off", "note", "autonomy", "dropped",
+    "skipped_families"}``:
     ``scripts`` is one
     result per chain id (``server.script_runners`` shape), ``errors`` a flat
     list for a caller that only wants to know what went wrong, and ``path`` the
@@ -169,6 +223,15 @@ def finish_album(album_dir, cfg=None, progress=None, force=None, release=None):
                        notification — :func:`chain_summary` is that wording,
                        and it is "" only for a result that says nothing about a
                        chain at all
+
+    ``skipped_families`` is the other half of that honesty, and the one a
+    grader cannot report: the families this import was CONFIGURED not to fetch
+    (the lyric fetch without script 13, ``genre_autofill`` off, the advisory
+    with ``advisory_auto_fetch`` off) — one reason each, in the wizard's step
+    order, and the same reasons ride along in ``note`` (so a queue row, a
+    notification and the wizard's Finish line all say it) and are printed to
+    the log. The user's switch is never overruled to close the gap; it is only
+    never silent. See :func:`_skipped_families`.
 
     A failing script is reported, never raised: the album is already imported.
     An import whose chain did not run is never reported as an ordinary success.
@@ -216,12 +279,26 @@ def finish_album(album_dir, cfg=None, progress=None, force=None, release=None):
     before the first family that needs a decision. In neither mode is an album
     left out of the library, and a prompt is withdrawn by the next import of
     the same album (the call that resolves the gaps is the one that clears it).
+
+    *wait* decides what the chain does when another job already holds the
+    album. ``True`` (every import path — the bulk queue, the one-click
+    downloads import, the Soulseek importer, a wish landing) queues behind it
+    and SAYS so while it waits (``script_runners.run_chain``): an import must
+    not skip its chain, because the album is already on disk and the user asked
+    for it to be finished. ``False`` is the user's own press of "Run the import
+    chain" (``POST /api/import/finish``): there is someone at the keyboard, the
+    run it would be queueing behind is doing that same work, and a press parked
+    for minutes behind it and then re-running the chain is exactly the "nothing
+    happens for ages" this rule removes — so it answers at once instead
+    (``RunBusy``, which the route returns as 409 naming the holder).
     """
+    _refuse_if_held(album_dir, wait)
     _announce_import("import_started", album_dir, cfg=cfg)
     cfg = cfg or load_config()
     path = os.path.normpath(str(album_dir))
     out = {"path": path, "scripts": [], "chain": [], "errors": [],
-           "chained": False, "chain_off": False, "note": ""}
+           "chained": False, "chain_off": False, "note": "",
+           "skipped_families": []}
     chain = chain_for(cfg)
     out["chain"] = chain
     # Nothing to run: `import_auto_scripts` off, or every configured id is one
@@ -241,6 +318,16 @@ def finish_album(album_dir, cfg=None, progress=None, force=None, release=None):
     # (`mlo.import_policy.plan`).
     policy = import_policy.plan(cfg, path)
     run_cfg = import_policy.effective_config(cfg)
+    # Which of the three FETCHED families this import is configured not to
+    # fetch — the lyrics (script 13 in the chain), the genres (`genre_autofill`)
+    # and the advisory (`advisory_auto_fetch`). Read off `run_cfg`, i.e. the
+    # config the steps below actually run with, so the report and the run can
+    # never disagree. Nothing is overruled to close a gap: the switch stays as
+    # the user set it, and an import that lands without a family says so in its
+    # own result and its own note (`_skipped_families`).
+    out["skipped_families"] = _skipped_families(chain, run_cfg, policy["review"])
+    for _reason in out["skipped_families"]:
+        print(f"[mlo] import: {_reason} — {os.path.basename(path)}")
     # A FRAMEWORK album (`server.pending_albums`) loses OUR placeholder cover
     # here, BEFORE the cover step below — that step then sees a folder with no
     # cover and fetches the release's real artwork instead of accepting the
@@ -286,6 +373,11 @@ def finish_album(album_dir, cfg=None, progress=None, force=None, release=None):
     # check — an album imported with no scripts configured still gets its
     # links. Gated by rym_links_auto; a lookup that finds nothing is one log
     # line (the user pastes the URL in the links editor), never an error.
+    # Announced first: what the user pressed was "Run the import chain", and
+    # this is where the time before its first script goes (see `_phase` — a
+    # family switched off finishes in the same breath and its line is replaced
+    # by the next one, so nothing here can be left standing as a stale claim).
+    _phase("Looking up links…")
     try:
         rym = stamp_rym_links(path, run_cfg)
         if rym["note"].startswith("could not resolve"):
@@ -304,6 +396,7 @@ def finish_album(album_dir, cfg=None, progress=None, force=None, release=None):
     # reviewed Genres family is left alone here exactly as it is by the wizard.
     # Runs BEFORE the chain, because script 8 reads what this writes. Never
     # fatal: a genre that cannot be resolved is a gap the report names.
+    _phase("Fetching genres…")
     if run_cfg.get("genre_autofill", True):
         rel = release
         if not rel and album_mbid:
@@ -332,6 +425,7 @@ def finish_album(album_dir, cfg=None, progress=None, force=None, release=None):
     # when a chain is configured to read them — they exist to feed script 8 and
     # the lyrics step, and a chain that is switched off must not leave those
     # tags behind as a side effect.
+    _phase("Fetching advisories…")
     if chain and run_cfg.get("advisory_auto_fetch", True):
         try:
             out["advisory"] = fetch_advisories([path], run_cfg)
@@ -342,6 +436,7 @@ def finish_album(album_dir, cfg=None, progress=None, force=None, release=None):
     # lyrics step reads INSTRUMENTAL), and is independent of the advisory: a
     # track can be instrumental and explicit-rated. Gated by
     # instrumental_auto_fetch; never fatal.
+    _phase("Checking instrumentals…")
     if chain and cfg.get("instrumental_auto_fetch", True):
         try:
             out["instrumental"] = fetch_instrumentals([path], cfg)
@@ -354,6 +449,7 @@ def finish_album(album_dir, cfg=None, progress=None, force=None, release=None):
     # the record is looked up by the album's own identity (see
     # `staged_metadata`), so it survives the chain moving the album to its
     # canonical folder — which it does, via beets/organize. Never fatal.
+    _phase("Fetching metadata…")
     try:
         out["metadata"] = run_metadata_step(path, run_cfg)
     except Exception:
@@ -371,6 +467,7 @@ def finish_album(album_dir, cfg=None, progress=None, force=None, release=None):
     # fetched them since it existed — the chain's own switch is about the
     # scripts, and turning it off must not silently take the cover art away
     # with it.
+    _phase("Finding cover art…")
     try:
         out["cover"] = run_cover_step(path, run_cfg)
     except Exception:
@@ -384,7 +481,7 @@ def finish_album(album_dir, cfg=None, progress=None, force=None, release=None):
         # passing a bare "imported" on. A framework album's pending state ends
         # here as well: no chain is coming to end it later, and a folder the
         # user can never clear is a trap, not a warning.
-        out["note"] = _chain_off_note(cfg)
+        out["note"] = _with_families(_chain_off_note(cfg), out["skipped_families"])
         _invalidate_caches()            # the steps above wrote tags/files
         _clear_pending(path, cfg, chained=False, chain_off=True)
         return out
@@ -396,16 +493,25 @@ def finish_album(album_dir, cfg=None, progress=None, force=None, release=None):
     # into the library and renames it).
     final = []
     try:
-        # wait=True: an import must not skip its chain just because a UI run
-        # happens to hold the library lock — it queues behind it instead.
+        # *wait*: an import must not skip its chain just because a UI run
+        # happens to hold the library lock — it queues behind it instead, and
+        # says so while it waits (see the parameter's note above). The user's
+        # own press passes False and is answered at once instead.
         # `final` is where the chain ended: script 14 moves the album into the
         # library and renames every file, so the folder this function was
         # handed is not the album any more (`_follow_moved_targets` follows it
         # and this is how the import hears about it).
         out["scripts"] = script_runners.run_chain(
             run_cfg, chain, targets=[path], force=force, progress=progress,
-            wait=True, final=final)
+            wait=wait, final=final)
     except script_runners.RunBusy as e:
+        if not wait:
+            # A caller that asked NOT to queue (the wizard's own "Run the
+            # import chain") hears this at once, and the route answers 409 with
+            # the claim's own sentence naming the holder. Queueing instead is
+            # what made that press look dead: it sat behind whatever was
+            # finishing the album and then ran the very same chain again.
+            raise
         # Only reachable after the (1 h) wait timed out: report it so the
         # caller marks the album unfinished instead of "imported".
         out["errors"] = [str(e)]
@@ -426,6 +532,64 @@ def finish_album(album_dir, cfg=None, progress=None, force=None, release=None):
     return _report_gaps(out, cfg, policy, out["path"])
 
 
+# The three families an import FETCHES with its own writers — the lyrics (the
+# chain's script 13), the genres (`_stamp_release`, the family's only fetcher)
+# and the advisory (`fetch_advisories`) — are gated by switches a user can turn
+# off: an `import_scripts` list without 13, `genre_autofill`, and
+# `advisory_auto_fetch`. Off, the import finishes WITHOUT that family and
+# nothing else says so: the grader never requires a tag whose writer is
+# switched off, so there is no gap and no prompt for it. So the import reports
+# the skip itself — in its result, in the ONE line every surface prints
+# (`chain_summary`) and in the log. The switch is never overruled to close the
+# gap; it is only never silent.
+SKIPPED_LYRICS = ("lyrics were not fetched: script 13 is not in the configured "
+                  "chain (import_scripts)")
+SKIPPED_GENRES = ("genres were not fetched: genre_autofill is off "
+                  "(Settings → Import pipeline)")
+SKIPPED_ADVISORY = ("advisory ratings were not fetched: advisory_auto_fetch is "
+                    "off (Settings → Import pipeline)")
+
+
+def _skipped_families(chain, cfg, review=()):
+    """The families this import is configured NOT to fetch, with their switch.
+
+    One reason per family, in the wizard's step order (genres, lyrics,
+    advisory). Only a family whose fetch is a step of THIS pipeline appears:
+    the lyric fetch needs script 13 in the chain, and the genre and advisory
+    steps answer to their own switches. A family the USER kept for themselves
+    (`import_review_families`, or review mode — *review*) is left out: that
+    decision has its own report already (`import_policy.gaps` and the prompt
+    that sends the user to the step), and naming it here would read as a second
+    problem.
+
+    A chain that is not going to run at all is reported by the chain's own keys
+    (`chain_off`/`note`), so the two steps that ride on the chain — the lyric
+    fetch and the advisory — are only named when there IS a chain that does not
+    reach them.
+    """
+    out = []
+    if not cfg.get("genre_autofill", True) and "genres" not in review:
+        out.append(SKIPPED_GENRES)
+    if chain and 13 not in chain and "lyrics" not in review:
+        out.append(SKIPPED_LYRICS)
+    if chain and not cfg.get("advisory_auto_fetch", True) and "advisory" not in review:
+        out.append(SKIPPED_ADVISORY)
+    return out
+
+
+def _with_families(text, skipped):
+    """*text* plus what this import was configured not to fetch.
+
+    The import's own line has to carry both halves: what ran (or did not) and
+    what was never asked to run. No skipped family, no change — so a shipped
+    config keeps the note it always had.
+    """
+    extra = "; ".join(str(s) for s in (skipped or []) if s)
+    if not extra:
+        return text
+    return f"{text} — {extra}" if text else extra
+
+
 def chain_summary(result):
     """The ONE honest line about what an import's script chain did.
 
@@ -435,6 +599,11 @@ def chain_summary(result):
     reported as one that did. "" for a result that says nothing about a chain
     at all (a caller's own fallback dict, the auto-importer's job result before
     the chain's background thread has finished), never a claim either way.
+
+    A result that carries ``skipped_families`` (see :func:`_skipped_families`)
+    says that too: an import which ran its chain and was configured not to
+    fetch a family IS finished, and a reader of this line is the only one who
+    can tell it from one that fetched everything.
     """
     res = result if isinstance(result, dict) else {}
     if isinstance(res.get("chain"), dict):
@@ -444,21 +613,27 @@ def chain_summary(result):
         return chain_summary(res["chain"])
     if not any(k in res for k in ("chain", "scripts", "chained", "chain_off")):
         return ""
+    skipped = res.get("skipped_families") or []
     scripts = list(res.get("scripts") or [])
     errors = [str(e) for e in (res.get("errors") or []) if str(e)]
     if not scripts:
         if res.get("note"):
             return str(res["note"])
         if res.get("chain_off") or not res.get("chain"):
-            return "no script chain was run (import_auto_scripts is off)"
-        return "the script chain did not run" + (f": {errors[0]}" if errors else "")
+            return _with_families("no script chain was run (import_auto_scripts is off)",
+                                  skipped)
+        return _with_families("the script chain did not run"
+                              + (f": {errors[0]}" if errors else ""), skipped)
     failed = [s for s in scripts if isinstance(s, dict) and s.get("error")]
     total = len(scripts)
     if not failed:
-        return f"the script chain ran {total} script" + ("" if total == 1 else "s")
+        return _with_families(
+            f"the script chain ran {total} script" + ("" if total == 1 else "s"),
+            skipped)
     names = ", ".join(str(s.get("label") or s.get("id")) for s in failed[:3])
-    return (f"the script chain ran {total - len(failed)} of {total} scripts — "
-            f"{len(failed)} failed ({names})")
+    return _with_families(
+        f"the script chain ran {total - len(failed)} of {total} scripts — "
+        f"{len(failed)} failed ({names})", skipped)
 
 
 def _chain_off_note(cfg):

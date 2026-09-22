@@ -575,7 +575,7 @@ ad-hoc key: it stays out, and the writer says which fields it could not place.
 
 The two advisory tags answer to **different switches**, because different things
 write them: `ITUNESADVISORY` to `advisory_auto_fetch` (the provider fetch — the
-import step, the wizard and the *Fetch advisory rating* action) and
+import step, the wizard and the *Fetch / refresh advisory rating* action) and
 `ALBUMITUNESADVISORY` to script 8's *Auto Album Advisory* derivation
 (`mlo/config.py::_TAG_WRITE_SWITCH`). The advisory fetch derives the album tag
 too, with script 8's own rule, so a manual fetch never leaves it stale.
@@ -590,8 +590,16 @@ provider-stated 0 stays escalateable to 1 by a word-reading stage (the
 configured AI, then the multilingual scan — the source says `(escalated)`), and
 a track that already holds 0/1/2 is echoed back UNCHANGED with
 `sources = ["existing-tag"]` unless the caller asks for a re-rate (`force`).
-Even a forced re-rate rewrites only with evidence: the invented
-`advisory_fallback` never overwrites a stored rating.
+**The asymmetry is deliberate**: the UNATTENDED import path is fill-only —
+`server.imports.finish_album` calls `fetch_advisories(..., force=False)`, and
+that is the only caller that does — because nothing was pressed there, while
+EVERY action a user presses sends `force: true` (the tag menu's *Fetch / refresh
+advisory rating*, the wizard's *Auto-import advisory for all tracks*, the
+metadata review's and the track page's *Check advisory + instrumental*, all
+through `checkTrackValues`). So each surface a user presses offers exactly ONE
+advisory action, and none of them is fill-only. Even a forced re-rate rewrites
+only with evidence: the invented `advisory_fallback` never overwrites a stored
+rating.
 
 ---
 
@@ -773,6 +781,22 @@ Even a forced re-rate rewrites only with evidence: the invented
   and each surface keeps its OWN value (`mlo.lyrzoom.sidebar.v1` for the
   sidebar, `mlo.np.lyrzoom.v2` for the player): resizing one must not
   re-lay-out the other.
+- **R52b — the lyrics pane is the reader's, and its control lives in the
+  player's own control row.** The fullscreen pane is shown and hidden by ONE
+  toggle — the microphone, beside the queue / visualizer / options buttons
+  (`web/src/components/NowPlayingView.tsx`) — never by a control drawn over the
+  album art. The sidebar pane keeps the same concept: the player bar's
+  microphone button, same icon, same pressed state
+  (`web/src/components/PlayerBar.tsx`). The toggle is drawn only while the
+  current TRACK carries lyrics (a control that cannot do anything is hidden,
+  not rendered inert) and the choice is remembered per device
+  (`mlo.np.lyrics`, like the other display picks). Show and hide are seamless:
+  the pane stays MOUNTED and only its box animates (the app's 300 ms base
+  motion step, as the player's other transitions use), so the reader's scroll
+  position, the zoom and the active-line emphasis survive the toggle, the cover
+  glides back to the middle of the row instead of jumping, and nothing is ever
+  painted on top of the artwork. Pinned by
+  `tools/check_fullscreen_player.cjs`.
 
 ### 7.5 Covers
 
@@ -805,6 +829,19 @@ Even a forced re-rate rewrites only with evidence: the invented
   the policy's first rule prefers — a `/release/<id>/front` is one edition's own
   sleeve and ranks below even a name-searched row. Both are asked when both ids
   are known, and the group's cover being absent falls back to the release's.
+- **R56c — a cover is never framed by a decorative border in the UI.** No
+  border, ring or outline is drawn around a cover wherever it appears — the
+  album grid, the library and list rows, the fullscreen player, the album
+  header, the cover pickers, the menus. Covers keep their rounding, their
+  placeholder background and their elevation shadow (`shadow-lg` /
+  `shadow-2xl` are a drop shadow, not a frame). Two things are deliberately NOT
+  that frame: the keyboard-only `:focus-visible` ring on whatever a keyboard
+  user focuses (`web/src/index.css`, kept — without it there is nothing to see
+  where they are), and a picker's own selection highlight, which must be
+  transparent at rest so nothing is drawn until it is earned. Pinned by
+  `tools/check_fullscreen_player.cjs` (the computed border/ring/outline of the
+  player's art and of an album-grid card, plus the focus ring on the card's
+  cover link).
 
 ### 7.6 Tag value spelling and spacing
 
@@ -969,7 +1006,9 @@ user asked for, in the order they asked for it. `server/exporter.py` owns both.
   zip.** `export_target` is `zip` (the client downloads one archive) or `server`
   (a folder the machine running this app can see, chosen with the drive picker).
   The zip target stages the export under `<music>/.mlo/data/export_zip/<id>/`,
-  packs it with the `.m3u8` playlists and the manifest inside, answers
+  packs it with whatever the run wrote (the `.m3u8` playlists only when
+  `playlists` is on — OFF by default, see R75 — and the manifest when
+  `export_manifest` is), answers
   `zip: {id, name, bytes, files, url}` and serves it from
   `GET /api/export/zip/{id}` with `Content-Disposition: attachment`; one archive
   is kept at a time and a new export replaces it. `prune` is meaningless for a
@@ -986,26 +1025,83 @@ user asked for, in the order they asked for it. `server/exporter.py` owns both.
 - **R72 — an equalizer profile is the user's own file, and its losses are
   named.** `export_eq_profile` selects a built-in preset or a profile imported
   from **Equalizer APO / Peace EQ** text (`mlo/eq.py`): `Preamp:`, `Filter N:
-  ON|OFF PK|LS|HS|LP|HP|LSC|HSC Fc … Gain … Q …`, `GraphicEQ:` band lists, free
+  ON|OFF PK|LS|HS|LP|HP|BP|NO|LSC|HSC Fc … Gain … Q …`, `GraphicEQ:` band lists, free
   field order, optional units, case-insensitive keywords. OFF filters are
-  skipped; anything the module cannot render (`Include:`, unknown constructs) is
-  REPORTED in `unsupported` rather than dropped, because a profile that silently
-  loses half its curve is not the curve the user asked for. Profiles live in
+  skipped; a line with no equivalent (`Include:`, unknown constructs) is IGNORED
+  and REPORTED in `unsupported` rather than dropped, while a BAND line that
+  cannot be read is an ERROR naming its attribute or its line, and an import of
+  it is REFUSED whole — a profile missing the band that failed to parse is not
+  the curve the user asked for. Profiles live in
   `<music>/.mlo/data/eq/` with a sanitized id and a 64 KiB cap.
 - **R73 — the chain order is ReplayGain gain → EQ preamp → EQ filters →
   encoder**, and processing requires a real codec: a copied stream cannot be
   filtered, so `copy` with `apply` or an EQ profile fails with one message that
   the endpoint and the UI share (`_PROCESSING_NEEDS_CODEC`). A profile that
-  cannot be found fails the track naming it — never a silent export without the
-  curve the user selected.
+  cannot be found — or cannot be READ, a file with a band line this app refuses
+  — fails the track naming it, never a silent export without the curve the user
+  selected.
 - **R74 — a processing change is not "the same export".** The skip/duplicate
   decision carries a processing signature (`replaygain=apply eq=<id>`), so
   re-exporting with a different curve re-encodes instead of being skipped as
   identical to the previous run.
-- **R75 — sidecars and the manifest travel with the files.** The sidecar mirror
-  covers `.cue`, `.log`, `.accurip` and the `.lrc`/cover/description/artist-image
-  set, and `export_manifest` (ON) writes `checksums.sha256` listing every written
-  file with its hash, so a copied library can be proven intact at the other end.
+- **R75 — an export carries AUDIO; everything it leaves behind is reported.**
+  An album export writes no `.accurip`, `.log`, `.cue`, `.txt`, `.jpg` or
+  `.m3u8` file: the cover travels EMBEDDED in each exported file
+  (`embed_covers`, ON) and the rip's evidence stays in the library where the
+  audit, the grading and the log's own checksum read it. Two switches keep the
+  old behaviour available and both are OFF by default — `export_sidecars`
+  (mirror `cover.*`/`description.txt`/artist image/`.lrc`/`.cue`/`.log`) and
+  `export_playlists` (the per-album `.m3u8` plus `all.m3u8`) — and the run
+  result reports what did not travel in `excluded` (one row per file: album,
+  name, `kind` ∈ cover / playlist / sidecar / evidence / unknown, and the
+  reason), with `excluded_counts`, `excluded_total` and the sentence
+  `excluded_note` that also goes to the run log. Nothing is dropped in silence:
+  an unexpected `.nfo`/`.md5`/`.sfv`/`.pdf`/`Thumbs.db`, a `.bak` nobody
+  anticipated and a stray subfolder are all classified and counted. The
+  `export_manifest` key (OFF) still writes `checksums.sha256` listing every
+  written file, so a copied library can be proven intact at the other end.
+  **A PLAYLIST export is not an album export**: `server.playlists.export_m3u8`
+  still writes `.m3u8` (the Playlists page's *Download .m3u8*), and
+  `sidecars`/`playlists` ON still write the album's own files for a device that
+  wants them.
+- **R100 — every filename the app writes obeys ONE rule, and it is
+  `mlo.naming.sanitize_segment`.** A character a filesystem refuses —
+  `< > : " / \ | ? *`, an ASCII control character (0x01–0x1F; NUL is left alone
+  because it can never reach a file and `mlo.grader`'s `UNKNOWN_RELEASE_TYPE`
+  sentinel is spelled with it), a trailing dot or space, and the reserved
+  device names (`CON`, `PRN`, `AUX`, `NUL`, `COM1`–`COM9`, `LPT1`–`LPT9`, with
+  or without an extension, any case) — becomes `_`. Replacement, never
+  deletion or transliteration; ONE `_` per character, so `A***B` is `A___B`;
+  and `sanitize_segment(sanitize_segment(x)) == sanitize_segment(x)`, so a
+  second organize or export of an already-named library is a no-op rather than
+  a rename. `sanitize_path` applies the same rule per name and keeps `/` as
+  STRUCTURE; `_run` applies it to every substituted tag value, so a `/` inside
+  a TAG ("AC/DC" in a TITLE) becomes `_` and can never invent a directory
+  level. The subfolder under the export root (`safe_subfolder`), the CUE
+  sheet's own name (`re_safe_filename`), the Soulseek import folder
+  (`_safe_component`) and the organizer (`eval_script` → `sanitize_path`) all
+  call this one function: a second spelling of the character set is how a path
+  the app WROTE stops being a path the app can FIND again.
+- **R101 — the tags keep the truth; only the NAME on disk changes.** A `TITLE`
+  of `AC/DC` is written to the file as `AC_DC.flac` and the tag inside stays
+  `AC/DC`, byte for byte: the library's data is the evidence, and sanitisation
+  is a naming rule, never a data rule. `.log` and `.cue` CONTENT is never
+  rewritten by sanitisation (a `.log`'s checksum is verified over its raw bytes
+  — see R-§3), and a sidecar that is copied is copied verbatim.
+- **R102 — the audit and the grading match by the same rule.**
+  `mlo.naming.name_key` is applied to BOTH sides wherever a name recorded by
+  another program meets a name on disk: the graded CUE check
+  (`grade_check_cue_files`, which no longer reports a file the app itself
+  renamed as missing), the CUE repair and disc resolution
+  (`mlo/discs._norm_name`, `fix_cue_filenames`, `rename_cues_for_discs`), and
+  the `.accurip` generator's cue→disc and cue→WAV maps (`mlo/accurip`).
+  `mlo.naming.cue_ref_names` gives every spelling a `FILE "…"` reference may
+  denote — the whole reference keyed through the rule, and its leaf — because a
+  `/` in a reference is usually a directory part and occasionally a character
+  the app wrote as `_`; splitting on the separator first is how
+  `01. AC/DC - Theme.flac` used to become `DC - Theme.flac` and match nothing.
+  Log→track attribution itself is numeric (`_track_num_of`), so it never
+  depended on spellings.
 - **R96 — the folder structure is the library's own shape, and a custom one is
   the same grammar.** `export_structure` is `albumartist_album_disc` (shipped),
   `album`, `flat`, `mirror`, or `custom`; a custom one evaluates the user's own
@@ -1033,6 +1129,112 @@ user asked for, in the order they asked for it. `server/exporter.py` owns both.
   value moves to the new layout and the key can never name a tree the app does
   not write. (`artist_album_disc`, advertised by Settings for years without ever
   being implemented, migrates there too.)
+- **R97 — an export configuration is the Export page's form under a name.**
+  A saved config is ONE JSON file per name at
+  `<music>/.mlo/data/export_configs/<slug>.json`, named by the same
+  name→one-safe-path-segment rule the imported EQ profiles use
+  (`mlo.paths.slug_name`) and implemented in `server/exportconfigs.py`. The
+  stored shape is `{"name": "<what the user typed>", "config": {…}}`, and
+  `config` is exactly what `POST /api/export` takes, key for key, so a loaded
+  config can be posted unchanged. What it holds is what decides what the export
+  IS: the destination (`target`, `dest`, `subfolder`), `codec`, `quality`,
+  `structure` and `structure_script`, the cover options (`embed_covers`,
+  `embed_cover_jpeg_quality`, `embed_cover_resolution`), `id3v2`/`id3v1`,
+  `replaygain_mode`, `clean_tags`, `playlists`, `sidecars`, `manifest`,
+  `verify`, `prune`, `workers`, how lyrics travel (`lyrics`), the equalizer
+  profile **by id** (`eq_profile`)
+  — so a load points at the profile itself rather than at a copy of its curve —
+  and `source_kind`, the Export page's source tab, stored verbatim for
+  whichever surface has tabs. What it deliberately does NOT hold: the
+  selection (which playlist, which albums/artists/tracks are ticked) — data,
+  not configuration, because a config carrying paths would export something
+  else after the library moved — and the page's filter box, which is a view
+  aid. Its keys are whitelisted from the exporter's own tables
+  (`server.exporter.FORM_FIELDS` minus `paths`, plus `EXPORT_DEFAULTS`), and
+  the enumerated values a run would refuse — an unknown codec, folder
+  structure, export target or ReplayGain mode, or a profile id that could name
+  a file outside the profile folder — are refused at SAVE time with the run's
+  own sentence (the folder structure uses `exporter.structure_error`). Saving
+  under a name that already exists REPLACES that config; the response's
+  `replaced` flag says which happened. The endpoints are `GET
+  /api/export/configs` (list, newest first), `POST /api/export/configs` (save:
+  `{name, config}`), `GET /api/export/configs/{id}` (load) and `DELETE
+  /api/export/configs/{id}` (drop); an unknown id is a 404 and a path-shaped
+  one a 400. Every row, list and load alike, carries `eq_profile`, `eq_missing`
+  and `eq_problem`: a config outlives the profile it was saved with, so a
+  profile that has been deleted or renamed is REPORTED — list rows are marked,
+  the load says "its equalizer profile '…' is gone — pick another profile
+  before exporting", and the run refuses that profile — never a silent
+  fallback to another curve.
+- **R98 — the EQ profiles the app accepts are Equalizer APO / Peace files,
+  both shapes, and their approximations are stated.** ONE parser
+  (`mlo/eq.py`) reads both. The first shape is the Equalizer APO / Peace text:
+  `Preamp: -6.5 dB`, `Filter N: ON|OFF PK|LS|HS|LP|HP|BP|NO|LSC|HSC Fc … Gain
+  … Q …` (or `BW …` instead of `Q …`, converted with APO's own BW→Q relation; a
+  missing Q takes the type's standard width), `GraphicEQ: 25 0; 40 0.5; …` band
+  lists — free field order, optional `Hz`/`dB` units, case-insensitive
+  keywords. `Filter N: ON None` is APO's empty slot and is skipped, not treated
+  as a band. The second is Peace's `FilterCurve:` export: ONE line with no
+  trailing newline, `FilterCurve:f0="10" f1="11.7" … v0="0.03" v1="0.043" …` —
+  `fN` the frequency of point N and `vN` the value there, paired BY INDEX,
+  because there is no separate gain list — followed by the curve's meta
+  attributes (`FilterLength`, `InterpolateLin`, `InterpolationMethod`,
+  optionally `Preamp`). The points are read from the file: a real Peace export
+  runs 10 Hz → 18.9 kHz on no clean geometric ladder (50 points, ~5% off a
+  geometric ladder), so no fixed frequency table is assumed. The bytes are
+  decoded per their own encoding — UTF-8 with or without a BOM, UTF-16 when its
+  BOM says so, otherwise the Windows code page — and CRLF and CRLF-less lines
+  both parse. A `FilterCurve` is a CONVOLUTION curve while the app's model is a
+  chain of ffmpeg biquads, so the mapping is stated in the import result rather
+  than implied: one peaking filter per point (never a subset), each band's Q
+  taken from its own neighbours' spacing (so a denser ladder gets narrower
+  bands, not the octave-wide Q 1.41 the `GraphicEQ` conversion uses), the curve
+  exact AT the file's points and an approximation between them, the file's own
+  interpolation (`InterpolateLin=0` with `InterpolationMethod="B-spline"`, or
+  `InterpolateLin=1` for straight lines) stated as approximated — never
+  silently flattened to straight lines or dropped — and `FilterLength` (the
+  convolution's tap count, i.e. a linear-phase FIR) reported because
+  minimum-phase peaking bands do not carry that phase response. Two kinds of
+  bad input are treated differently. A line with no equivalent (`Include:`,
+  `Convolution:`, `Device:`, a Peace banner, an unknown `FilterCurve`
+  attribute) is IGNORED and REPORTED in `unsupported`; a BAND line that cannot
+  be read (an unknown filter type, a non-numeric frequency, gain, Q or BW, a
+  `GraphicEQ` group that is not one `frequency gain` pair, a `FilterCurve` `vN`
+  with no `fN` or the reverse, a non-numeric `vN`) is an ERROR naming the
+  attribute or the line number, and the import of that file is REFUSED whole —
+  a profile missing the band that failed to parse is a different curve, which
+  for audio is worse than a refusal. A file whose lines are all ignorable
+  imports as an explicitly EMPTY profile (`empty: true`, and its result says it
+  exports the audio unchanged), never as a flat curve. Profiles live in
+  `<music>/.mlo/data/eq/<slug>.txt` with a 64 KiB cap; presets and imported
+  profiles share ONE id space (`eq_profile` names one of them), and a profile
+  an export names that cannot be found or cannot be read fails the run naming
+  it — never a silent export without the curve.
+
+- **R99 — lyrics are the user's choice, and the export defaults to the
+  library's own.** `export_lyrics` (and the run option `lyrics`) is `embedded`
+  (the `LYRICS` tag inside the file), `lrc` (a `.lrc` beside the exported file)
+  or `both`; the shipped value is `""`, which means "whatever the library
+  keeps" — `lyrics_format` — so an export writes lyrics the way the app itself
+  does until the user says otherwise, and the two settings cannot silently
+  disagree (`server.exporter.lyrics_mode`; the Export page's default comes from
+  that same resolver). The text and its form come from `mlo.lyrics`, the one
+  code path that already writes lyrics for the library: the sidecar leg reads
+  the source's own lyrics (its `.lrc` when that holds lyrics, else its tag,
+  `read_lyrics`), canonicalises them with the formatter the format pass uses,
+  and writes them under the exported track's OWN name (`write_lyrics_sidecar` —
+  the same name rule, so nothing here invents a second sanitiser); a source
+  whose lyrics live in a FILE has them embedded when the mode wants the tag, so
+  no mode can lose them. A `.lrc` is never inherited from the source's tag list:
+  when the mode writes lyrics as a file, the lyrics tags are DROPPED from the
+  exported file (`_LYRICS_TAGS`) — on the transcode path through the tag write
+  and on a byte copy through an explicit strip — because a file carrying both
+  is a player showing a second, stale copy. In the audit, a source `.lrc` whose
+  track IS in the selection is output when the mode writes `.lrc`, and is
+  reported as `lyrics` (the one non-audio kind the run itself can account for)
+  when it is not; the `.lrc` of a track outside the selection is always
+  reported. The run result carries `lyrics_mode` and the number of `.lrc`
+  files it wrote.
 
 ### 7.10 YouTube, cookies and the Soulseek port
 
@@ -1375,6 +1577,52 @@ user asked for, in the order they asked for it. `server/exporter.py` owns both.
   one in flight longest, so the line never interleaves two albums' numbers);
   every run's own row in MAINTAIN → In progress shows its own progress
   regardless of who holds the bar.
+
+- **R94a — a run that waits says so, and the user's own press never waits.**
+  The reported bug was a press of `Run the import chain` that sat there: an
+  album another job was already finishing (the import that put it there, a
+  script run on it) made the press queue — silently, for as long as that run
+  took, and then it ran the very same chain over the album again. Two rules
+  come out of it, and they are the two halves of one sentence: a caller that
+  QUEUES must say what it waits for, and a caller with someone at the keyboard
+  must not queue at all.
+  * **A queued run is visible.** `script_runners.run_chain` resolves its job and
+    answers `job_locks.holder` BEFORE it claims anything, so a run that has to
+    wait registers its own row, joins the header bar and publishes
+    `waiting_text(path, holder)`'s sentence ("`waiting for Import Album —
+    <album> is in use`") on both surfaces. Before this, a queued run had no row
+    of its own (MAINTAIN listed only the job it waited behind, under that job's
+    numbers) and the bar kept the other run's last frame, which is exactly what
+    the owner read as "nothing happens for ages". The wait itself is unchanged:
+    an import still waits for that album's claim rather than skipping its chain,
+    and a timed-out or refused wait releases the row it made, so no ghost is
+    left in MAINTAIN. What waits: the AUTONOMOUS paths — the bulk queue, the
+    one-click downloads import, the Soulseek importer, a wish or a watch landing
+    (`server.imports.finish_album`'s `wait`, default ON).
+  * **The user's own press is answered at once.** `POST /api/import/finish` is
+    the wizard's `Run the import chain` button, so it passes `wait=False`:
+    `server.imports._refuse_if_held` asks the album **before** the import does
+    any of its own work and answers 409 with the claim's own sentence
+    ("`<album>` is in use by Import Album (job-4) — wait for it to finish, then
+    retry") when another job is already finishing it — the same answer
+    `/api/run` gives a double-pressed run. Asking first is also what keeps the
+    press's own tag-writing steps off an album in use, and it is why the chain
+    is never started twice over one album (queueing behind that job used to
+    re-run the whole chain the moment it ended). A batch where only SOME albums
+    are busy still runs the free ones, and reports each refused one in its own
+    album entry; 409 is for a request that started nothing at all.
+  * **The steps an import takes before its chain are named.** The links, the
+    genres, the advisories, the instrumentals, the metadata and the cover art
+    are network work that happens before the first script — measured at 5.4 s on
+    a throwaway album, and longer on a real one — and none of it is a script, so
+    nothing published anything: the press read as having done nothing until the
+    chain's first frame arrived. `server.imports._phase` announces each of them
+    through `job_locks.publish`, so the row and the bar show the phase
+    (`0/0`, i.e. indeterminate, with the phase's own text and NO step pair: it
+    is not a step of the chain and must never be drawn as one). The bar is left
+    alone while a chain owns it — one line cannot honestly show two producers —
+    and the row is the running job's, which is the import's own when it runs
+    inside one.
 
 ### 7.15 Notifications and the player's own immediacy
 

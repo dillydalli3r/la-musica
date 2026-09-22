@@ -5,7 +5,7 @@ import { useQuery, useQueryClient } from "@tanstack/react-query";
 import {
   UploadCloud, ExternalLink, Check, ChevronLeft, ChevronRight, ChevronDown, Wand2,
   Plus, Trash2, Disc3, FolderOpen, X, Search, Loader2, Image as ImageIcon, AlertTriangle,
-  Languages, RotateCcw,
+  Languages,
 } from "lucide-react";
 import { api, answerSources, replyFor, IN_MOBILE_SHELL } from "../api";
 import type { AdvisoryFetchResult, MetadataFetchItem, MetadataItemKind } from "../api";
@@ -2442,12 +2442,13 @@ export default function ImportWizard() {
    *  per-track `values`/`sources`/`answers`/`status` are the outcome rows
    *  below, and a failure is shown rather than swallowed.
 
-   *  `force` is the re-rate: the server echoes a file that already carries a
-   *  valid 0/1/2 instead of asking anyone, and `force` asks anyway and writes
-   *  what the sources state — the ONLY route that can lower a rating (a 0 an
-   *  earlier run invented outlives every provider that later knew better), so
-   *  it is only ever reached through the confirmed button below. */
-  const fetchAdvisoryAll = async (force = false) => {
+   *  It ASKS ANYWAY (`force`): a file that already carries a 0/1/2 is asked
+   *  like every other one, and what the sources state is written — the only
+   *  route that can lower a rating, and the reason a 0 an earlier run invented
+   *  does not outlive the provider that later knew better. This is the step's
+   *  ONE advisory action, so it carries no confirmation: the button's own
+   *  title says a value already on a file is re-asked and can go down. */
+  const fetchAdvisoryAll = async () => {
     const targets = stepTracks.map((t) => t.path);
     if (!targets.length) {
       toast("No tracks to fetch an advisory for");
@@ -2455,13 +2456,9 @@ export default function ImportWizard() {
     }
     setBusy(true);
     setAdvError(null);
-    setAct({
-      label: force
-        ? `Re-rating ${targets.length} track(s) — asking the sources anyway…`
-        : `Asking the advisory sources for ${targets.length} track(s)…`,
-    });
+    setAct({ label: `Re-rating ${targets.length} track(s) — asking the sources anyway…` });
     try {
-      const res = await api.mbAdvisoryFetch({ paths: targets, staged, force });
+      const res = await api.mbAdvisoryFetch({ paths: targets, staged, force: true });
       setAdvReply(res);
       // The server wrote what it found — mirror it into the step's buttons so
       // they show the fetched value, not the pre-fetch tag.
@@ -2487,22 +2484,6 @@ export default function ImportWizard() {
       setAct(null);
       setBusy(false);
     }
-  };
-
-  /** The re-rate, behind a confirmation: it asks for tracks the server would
-   *  otherwise leave alone and can LOWER a rating, which is not something a
-   *  stray click may do. */
-  const reRateAdvisoryAll = () => {
-    if (!stepTracks.length) return;
-    if (
-      !window.confirm(
-        `Re-rate ITUNESADVISORY for ${stepTracks.length} track(s) and write what the sources state?\n\n` +
-          "This asks even for files that already carry a value, and a source's answer can lower a rating (1 → 0). " +
-          "The album tag ALBUMITUNESADVISORY is derived from the new values."
-      )
-    )
-      return;
-    void fetchAdvisoryAll(true);
   };
 
   const applyAdvisoryToAll = (v: string) => {
@@ -2677,6 +2658,7 @@ const runAllScripts = async () => {
   setFinishMsg("Running the import chain…");
   setRunRows(null);
   let stillMissing: string[] = [];
+  let notFetched: string[] = [];
   try {
     beginRun(`Import chain — ${scriptChain?.chain?.length ?? 0} script(s) on ${targets.length} album(s)`);
     const res = await api.importFinish(targets, {}, staged);
@@ -2700,6 +2682,13 @@ const runAllScripts = async () => {
       // looking finished.
       stillMissing = Object.keys(mine?.autonomy?.missing ?? {}).filter((id) => id in FAMILY_STEP);
       setMissingFamilies(stillMissing);
+      // Families this import was CONFIGURED not to fetch (a saved chain with no
+      // script 13, `genre_autofill` / `advisory_auto_fetch` off). They are not
+      // gaps — the grader does not require a family whose own writer is off —
+      // so the reply's own note is the only place the import says it, and the
+      // step repeats it rather than letting the album read as finished
+      // without them.
+      notFetched = mine?.skipped_families ?? [];
       qc.invalidateQueries({ queryKey: ["importPrompts"] });
     }
     // The chain reports one result per chain id per album; the album is kept
@@ -2715,8 +2704,8 @@ const runAllScripts = async () => {
     // reply keeps one entry per path, so that album's own claim sentence
     // arrives in its `errors` while the free albums ran — and reporting it as
     // an error said the chain broke on an album where nothing ran at all. The
-    // sentence names the album itself, exactly as the single-album press reads
-    // it (`startProblem`), so it needs no prefix here.
+    // sentence names the album itself, exactly as the single-album press
+    // reads it (`startProblem`), so it needs no prefix here.
     const busy = res.albums.flatMap((a) =>
       a.errors.filter((e) => alreadyRunning(String(e))).map((e) => String(e))
     );
@@ -2741,7 +2730,8 @@ const runAllScripts = async () => {
           : `Import chain finished on ${targets.length} album${targets.length > 1 ? "s" : ""}` +
             (stillMissing.length
               ? ` — still missing ${stillMissing.map((id) => FAMILY_LABEL[id]).join(", ")}`
-              : "")
+              : "") +
+            (notFetched.length ? ` — not fetched: ${notFetched.join("; ")}` : "")
     );
     qc.invalidateQueries({ queryKey: ["library"] });
     qc.invalidateQueries({ queryKey: ["album"] });
@@ -3691,7 +3681,7 @@ const finish = async () => {
                   albumPath={albumPath}
                   coverFile={coverInfo?.file}
                   staged={staged}
-                  wrapperClass="h-40 w-40 rounded-lg bg-raise border border-border overflow-hidden"
+                  wrapperClass="h-40 w-40 rounded-lg bg-raise overflow-hidden"
                 />
                 <div className="text-xs text-zinc-500">
                   {coverInfo?.file
@@ -3752,7 +3742,7 @@ const finish = async () => {
                     src={api.artUrl(mbCoverUrl)}
                     alt="MusicBrainz release-group cover"
                     referrerPolicy="no-referrer"
-                    className="h-40 w-40 rounded-lg bg-raise border border-border object-cover"
+                    className="h-40 w-40 rounded-lg bg-raise object-cover"
                   />
                 ) : (
                   <div className="h-40 w-40 rounded-lg bg-raise border border-border flex items-center justify-center text-center px-3 text-xs text-zinc-600">
@@ -3953,6 +3943,11 @@ const finish = async () => {
             {coverSearch && (
               <CoverSearchModal
                 albumPath={albumPath}
+                // The album the wizard is importing is not in the library yet:
+                // the finder's own write needs the same staged allowance the
+                // step's other cover calls pass, or the pick is refused and the
+                // folder's arrived cover stays.
+                staged={staged}
                 artist={release?.artists.map((a) => a.name).join(", ") || trackArtist(stepTracks[0]?.path ?? "")}
                 album={trackAlbum || currentAlbumName}
                 releaseGroupMbid={release?.release_group_id ?? undefined}
@@ -4458,22 +4453,15 @@ const finish = async () => {
               <div className="flex items-center gap-2 flex-wrap">
                 <button
                   className="btn-ghost !py-1 text-xs tap"
-                  onClick={() => fetchAdvisoryAll(false)}
+                  onClick={() => fetchAdvisoryAll()}
                   disabled={busy || !stepTracks.length}
-                  title="Ask the configured advisory sources (Deezer / Spotify by ISRC, Apple) for every track and write what they state. A track that already carries a value keeps it — use Re-rate to ask anyway."
+                  title="Ask the configured advisory sources (Deezer / Spotify by ISRC, Apple) for every track and write what they state. Tracks that already carry a value are asked too, and a source's answer can lower a rating (1 → 0)."
                 >
                   <CloudDownloadIcon /> Auto-import advisory for all tracks
                 </button>
-                <button
-                  className="btn-ghost !py-1 text-xs tap"
-                  onClick={reRateAdvisoryAll}
-                  disabled={busy || !stepTracks.length}
-                  title="Ask the sources again even for tracks that already carry a value, and write what they state — the only way a rating can go down"
-                >
-                  <RotateCcw className="h-3 w-3" /> Re-rate…
-                </button>
                 <span className="text-[11px] text-zinc-500">
-                  Asks the same sources the album page's Check does, for all {stepTracks.length} track(s) at once.
+                  Asks the same sources the album page's Check does, for all {stepTracks.length} track(s) at once,
+                  and asks again even for a track that already carries a rating.
                   {advReply ? ` ${advisoryOutcome(advReply)}` : ""}
                 </span>
               </div>
@@ -5172,9 +5160,9 @@ function ImportFileRow({ f, gi, albums, groupFiles, selectable, excluded, onTogg
         />
       )}
       {isImage && thumb ? (
-        <img src={thumb} alt="" className="h-8 w-8 rounded bg-raise border border-border object-cover shrink-0" />
+        <img src={thumb} alt="" className="h-8 w-8 rounded bg-raise object-cover shrink-0" />
       ) : isImage ? (
-        <span className="h-8 w-8 rounded bg-raise border border-border shrink-0 flex items-center justify-center text-zinc-600 text-[9px]">IMG</span>
+        <span className="h-8 w-8 rounded bg-raise shrink-0 flex items-center justify-center text-zinc-600 text-[9px]">IMG</span>
       ) : null}
       <span className="flex-1 min-w-0" title={f.relPath}>
         <span className={`block break-words ${excluded ? "text-zinc-500 line-through" : "text-zinc-400"}`}>{f.relPath}</span>

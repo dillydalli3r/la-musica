@@ -31,6 +31,10 @@ names:
 
     POST /api/import/finish           {paths: [str], force?: {script_id: bool}}
          -> {albums: [{path, scripts, chain, errors}]}
+         409 with the claim's sentence when an album is already being finished
+         by another job (this press never queues behind one); a batch where
+         only some albums are busy runs the rest and reports the refused ones
+         in their own album entry's `errors`/`note`.
 
     POST /api/import/bulk             {items: [{path, move?, release?}]}
          -> {ok: True, job: {...}} | {ok: False, error: "…"}
@@ -219,12 +223,46 @@ def _matched_paths(match):
 
 @router.post("/api/import/finish")
 def import_finish(req: FinishRequest):
-    """Run the configured import chain over each album folder, synchronously."""
+    """Run the configured import chain over each album folder, synchronously.
+
+    This is the wizard's own "Run the import chain" press, so it does NOT
+    queue: an album another job is already finishing (the import that put it
+    there, a script run) answers this request at once with 409 and the claim's
+    own sentence naming the holder, instead of parking the press for the length
+    of that run and then running the very same chain again. Every AUTONOMOUS
+    import path keeps queueing (``server.imports.finish_album``'s ``wait``) —
+    an album handed over to be finished must not skip its chain, and a queued
+    import now says what it is waiting for while it waits.
+
+    A batch where only SOME albums are busy still runs the free ones: the
+    refused ones come back as an album entry carrying the sentence in `errors`
+    and `note`, exactly like a chain that could not start. 409 is for a request
+    that started nothing at all.
+    """
+    from server import script_runners
+
     _require_manual()
     _cap(len(req.paths), MAX_PATHS, "paths")
     _guard(req.paths, req.staged)
-    return {"albums": [imports.finish_album(p, force=req.force)
-                       for p in req.paths]}
+    # One entry per path, in the order they were asked for: the wizard reads
+    # `albums[i]` as the album it sent at `targets[i]` (that is how it adopts
+    # the folder a chain's beets/organize step moved the album to), so a
+    # refusal has to sit in its own path's slot rather than being appended.
+    albums, refusals = [], []
+    for p in req.paths:
+        try:
+            albums.append(imports.finish_album(p, force=req.force, wait=False))
+        except script_runners.RunBusy as e:
+            refusals.append(str(e))
+            albums.append({"path": p, "scripts": [], "chain": [],
+                           "errors": [str(e)], "chained": False,
+                           "chain_off": False,
+                           "note": f"the script chain could not start: {e}"})
+    if refusals and len(refusals) == len(req.paths):
+        # Nothing at all started: the whole request is the refusal, answered
+        # the way `/api/run` answers a double-pressed run.
+        raise HTTPException(409, refusals[0])
+    return {"albums": albums}
 
 
 @router.post("/api/import/bulk")

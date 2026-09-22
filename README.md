@@ -281,6 +281,13 @@ put its secondary lines at ~2.5:1 on both polarities. Both lyric surfaces — th
 pane and the right-docked sidebar viewer — carry the same size control: `−`, a
 percentage you can type into, `+`, 5 % a press (85-160 %), remembered per
 surface because a 380 px sidebar and a full-screen pane want different numbers.
+The pane is a control you own rather than a consequence of the tags: one
+microphone toggle in the player's own control row (beside the queue, the
+visualizer and the display options — and the same button on the player bar for
+the sidebar pane) shows and hides it, the toggle only appears while the current
+track actually has lyrics, and hiding is seamless — the pane keeps its scroll
+position, its zoom and its sung line while its box animates away and the cover
+glides back to the middle. Nothing is ever drawn on top of the artwork.
 ReplayGain is applied through the WebAudio gain stage in
 **track**, **album** or **off** mode (`replaygain_mode`) with a preamp
 (`replaygain_preamp_db`, ±24 dB); a file without ReplayGain tags is measured on
@@ -314,7 +321,13 @@ pair the files already carry to AcoustID's database — a two-press confirm, and
 it needs `acoustid_user_key` (a *user* key from the same account; the
 application key can only look up). The wizard's eight steps are **Select & separate → Links → Match → Covers →
 Genres → Lyrics → Advisory → Finish**, and *Finish* can run the import chain or
-the whole `run_all_order` over that album. The **import script chain** then runs
+the whole `run_all_order` over that album. **Run the import chain** re-runs the
+configured chain on this album, and it never sits on a press: while another job
+is already finishing that album it says so at once, naming the job that has it,
+instead of waiting behind it — and an import that *does* queue (the bulk queue, a
+one-click download, a wish) shows what it waits for and on which album, with the
+steps before its chain (links, metadata, cover art) named on the progress bar
+while they run. The **import script chain** then runs
 (default `import_scripts`, i.e. `DEFAULT_CHAIN`, which *is* `run_all_order` —
 one list, in `mlo/config.py`, so a script added to Run All can never be missing
 from an import); `import_auto_scripts` turns it off, `import_scripts` replaces it
@@ -364,8 +377,8 @@ Deezer and Spotify by ISRC (every ISRC the file states *and* every one
 MusicBrainz holds for its recording), Apple's explicit-edition album route and
 Apple's exact-title song search — merged so explicit anywhere wins, and derives
 `ALBUMITUNESADVISORY` from the per-track values with script 8's own rule (the
-*Fetch advisory rating* action derives it too, so a manual fetch never leaves
-the album tag stale). The configured AI provider is one of those sources: it is
+*Fetch / refresh advisory rating* action derives it too, so a manual fetch never
+leaves the album tag stale). The configured AI provider is one of those sources: it is
 asked once for every track (when `advisory_ai_classify` is on) and its answer is
 ranked with the providers' by the same rule, so an AI `1` overrules a stated `0`
 or `2` while a stated `1` survives whatever it says — and it only overrules one
@@ -386,11 +399,14 @@ says so (`lyrics-scan (escalated)`). Each track's value names the source behind
 it, and the reply carries every answer it weighed beside it; a track no source
 could state anything about is not invented — `mlo/advisory.py`
 decides (instrumental → configured AI → the multilingual lyrics scan →
-`advisory_fallback`) and reports the stage it used. A routine fetch never
-re-asks a track that already holds 0/1/2: it reports the value back with its
-provenance — `the file's own tag, not re-checked` — and the wizard's
-*re-check* (the `force` request) is the one action that asks the providers
-again; even then an invented fallback never overwrites a stored rating. The two
+`advisory_fallback`) and reports the stage it used. What an IMPORT fetches on its
+own never re-asks a track that already holds 0/1/2: it reports the value back
+with its provenance — `the file's own tag, not re-checked` — because nobody
+pressed anything there. Every action a person presses asks the providers again
+(the `force` request), and each surface has exactly one: *Fetch / refresh
+advisory rating* in the tag menu, the wizard's *Auto-import advisory for all
+tracks*, the metadata review's check and the track page's check; even then an
+invented fallback never overwrites a stored rating. The two
 tags answer to their own switches:
 `advisory_auto_fetch` for the per-track rating, *Auto Album Advisory*
 (`auto_advisory`) for the album tag script 8 derives.

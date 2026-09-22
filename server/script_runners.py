@@ -388,13 +388,14 @@ def _bar_context():
     return {"joined": False, "ident": None, "emit": None, "publish": None}
 
 
-def _bar_attach(bar, emit, publish):
-    """Put this run on the header bar, with *emit* handling its runner frames.
+def _bar_join(bar):
+    """Put this run on the header bar (once), installing the dispatcher if it
+    is the first run in flight.
 
-    *emit* re-labels a runner's own tick as this script's step; *publish* is
-    the run's frame writer (``job_locks.publish`` with this run's job and the
-    bar relay it is entitled to), which is what a frame from the CHAIN itself —
-    a step that never entered its runner — goes through.
+    A run joins when it starts, not when its first script has a bar of its own:
+    its thread is then its own for the whole chain, so the zero frame it claims
+    the surfaces with — and the frame a step publishes between two scripts —
+    are attributed to it rather than to whichever run happens to be registered.
 
     The hook the dispatcher replaces is remembered ONCE, by the first run in
     flight, and restored by the last one out. Capturing it per script (what the
@@ -405,14 +406,28 @@ def _bar_attach(bar, emit, publish):
     """
     global _bar_base
     with _bars_lock:
+        if bar.get("joined"):
+            return
         if not _bars:
             _bar_base = getattr(mlo_stats, "progress_hook", None)
             mlo_stats.progress_hook = _bar_dispatch
         bar["joined"] = True
         bar["ident"] = threading.get_ident()
+        _bars[bar["ident"]] = bar
+
+
+def _bar_attach(bar, emit, publish):
+    """Point this run's slot at the script that is running now.
+
+    *emit* re-labels a runner's own tick as this script's step; *publish* is
+    the run's frame writer (`job_locks.publish` with this run's job and the bar
+    relay it is entitled to), which is what a frame from the CHAIN itself — a
+    step that never entered its runner, the run's opening frame — goes through.
+    """
+    _bar_join(bar)
+    with _bars_lock:
         bar["emit"] = emit
         bar["publish"] = publish
-        _bars[bar["ident"]] = bar
 
 
 def _bar_release(bar):
@@ -440,10 +455,16 @@ def _bar_relay(bar):
     non-callable base (a suite running chains with no relay at all) is no bar
     for anyone, which is also what keeps a frame from being handed back to the
     dispatcher that called it (the recursion this used to swallow).
+
+    A run with NO bar at all — `_run_chain_locked` entered directly, which is
+    the shutdown path (a run stopped before it ever claimed a bar) — is the
+    same answer, not an error: the frame it is publishing still belongs to its
+    own row.
     """
+    bar = bar or {}
     with _bars_lock:
         owner, base = next(iter(_bars), None), _bar_base
-    if bar.get("ident") == owner and callable(base):
+    if bar.get("joined") and bar.get("ident") == owner and callable(base):
         return base
     return _no_bar
 
@@ -452,16 +473,24 @@ def _bar_frame(bar, done, total, text, job=None, steps=None):
     """One frame from the RUN itself, not from a script's bar.
 
     A step that never entered its runner (a switched-off feature, an
-    unavailable module) has no script bar to be labelled by, so it goes
-    through the run's own frame writer while it has one — attributed to this
-    run and painted only if it owns the bar — and writes its in-progress row
-    alone when it has none (a chain that never got as far as a runner).
+    unavailable module) and the zero frame a run claims its surfaces with both
+    publish this way: through the run's own frame writer once a script has
+    given it one — attributed to this run and painted only if it owns the bar —
+    and, before that, straight to the registry with the relay this run is
+    entitled to (never to the installed hook, which is the dispatcher that
+    would look for a script of ours that does not exist yet).
+
+    The in-progress row is written either way: it is keyed by job, so a run
+    that does not own the bar still shows its own zero state and its own steps.
+    A run with no bar AND no job (`_run_chain_locked` entered directly) has no
+    surface left to write into and simply publishes nothing.
     """
-    publish = (bar or {}).get("publish")
+    bar = bar or {}
+    publish = bar.get("publish")
     if publish is not None:
         publish(done, total, text, steps)
         return
-    job_locks.publish(done, total, text, steps, job=job)
+    job_locks.publish(done, total, text, steps, job=job, hook=_bar_relay(bar))
 
 
 def _no_bar(*_args, **_kwargs):
@@ -695,6 +724,59 @@ def run_label(ids):
     return names[0] if len(names) == 1 else f"{names[0]} + {len(names) - 1} more"
 
 
+def run_start_frame(ids):
+    """The frame a run claims its surfaces with: ``(done, total, text, steps)``.
+
+    Both surfaces (the header bar and the run's own in-progress row) show the
+    LAST frame that reached them, so a run has to replace whatever the last
+    producer left there with its own zero state the moment it really starts —
+    before its first script has built a bar — or the bar reads someone else's
+    percentage while this run is still starting.
+
+    It is deliberately the very frame the run's first script publishes for
+    itself (see :func:`_run_with_progress`), so claiming here changes nothing
+    once that script starts. A run of ONE script keeps the lone script's
+    indeterminate frame (``total=0``): a runner that never ticks (AccurateRip,
+    Beets) must not sit at "0/1" reading as hung. ``text`` is "" for a run with
+    nothing to run — it claims nothing at all.
+    """
+    total = len(ids)
+    if not total:
+        return 0, 0, "", None
+    label = RUNNERS.get(ids[0], (f"Script {ids[0]}", None))[0]
+    if total == 1:
+        return 0, 0, label, None
+    return 0, total, f"#1/{total} · {label}", (1, total)
+
+
+def _waiting_on(paths, job):
+    """``(path, holder)`` of the first claim that would make this run wait.
+
+    The non-blocking query a client asks (:func:`job_locks.holder`), asked as
+    this run — its own claims are never a conflict — so a run that is about to
+    queue can say what it is waiting for before it queues. The claim itself is
+    taken afterwards, under the caller's wait/timeout rule.
+    """
+    for path in paths:
+        rec = job_locks.holder(path, asker=job)
+        if rec:
+            return path, rec
+    return None
+
+
+def waiting_text(path, holder):
+    """The sentence a queued run shows while it waits: who has the album.
+
+    The positive of :func:`job_locks.refusal` ("… is in use by …"): what someone
+    watching MAINTAIN during an import needs is who to wait for, named the same
+    way the refusal that would have failed the run names them.
+    """
+    holder = holder or {}
+    who = holder.get("label") or holder.get("kind") or "another job"
+    name = os.path.basename(str(path).rstrip("\\/")) or str(path)
+    return f"waiting for {who} — {name} is in use"
+
+
 def run_chain(cfg, ids, targets=None, force=None, progress=None, wait=False,
               timeout=None, final=None):
     """Run *ids* in order against a COPY of *cfg*; report after every script.
@@ -742,23 +824,60 @@ def run_chain(cfg, ids, targets=None, force=None, progress=None, wait=False,
     # The claim (and with it the gate) is taken INSIDE the stack, so the
     # refusal is translated here — a PathLocked raised by the body would be
     # some other job's collision, not this run's, and stays one.
+    paths = held_paths(cfg, targets)
+    label = run_label(ids)
     bar = _bar_context()
+    # The job this run works as: a chain started inside another job (an import
+    # finishing an album it already holds) JOINS it, exactly as the claim below
+    # would — so what a waiting run writes is that job's own row.
+    job = job_locks.current() or job_locks.new_job()
     with contextlib.ExitStack() as stack:
         # The run's bar goes back with the run, however it ends — including on
         # a raise — so the header never keeps a finished run's slot.
         stack.callback(_bar_release, bar)
+        # A caller that QUEUES says so while it waits. `wait=True` is an import,
+        # and it can be minutes behind another job on the same album: with
+        # nothing published until its first script ran, the wait showed as no
+        # row of its own (MAINTAIN listed the job it was queued behind) and the
+        # header kept that job's numbers. One frame names what it waits for; the
+        # claim itself is still taken below, under the same wait/timeout rule.
+        waiting_by = _waiting_on(paths, job) if wait else None
+        registered = False
+        if waiting_by is not None:
+            path, holder = waiting_by
+            if job_locks.current() != job:
+                # A job of this run's own: it needs a row to be listed in.
+                job_locks.register(job, kind="scripts", label=label)
+                registered = True
+            _bar_join(bar)
+            _bar_frame(bar, 0, 0, waiting_text(path, holder), job=job)
         try:
             job = stack.enter_context(
-                job_locks.holding(held_paths(cfg, targets), kind="scripts",
-                                  label=run_label(ids), wait=wait,
-                                  timeout=timeout))
+                job_locks.holding(paths, job=job, kind="scripts", label=label,
+                                  wait=wait, timeout=timeout))
         except job_locks.PathLocked as e:
+            # A wait that timed out (or a one-shot run) never ran: the row this
+            # made for the wait is forgotten with it, so MAINTAIN keeps no ghost.
+            if registered:
+                job_locks.release(job)
             # The claim's own sentence — "Album is in use by Import Album
             # (job-4) — wait for it to finish, then retry" — names what to wait
             # for, which "a script run is already in progress" could not.
             # RunBusy is the type every caller already answers with 409
             # (`/api/run`) or "the chain could not start" (an import).
             raise RunBusy(str(e)) from None
+        # A run owns the surfaces from the moment it is really running, not
+        # from the moment its first script has built a bar: both the header bar
+        # and the run's own row are painted by the LAST frame that reached them,
+        # so a new run has to replace whatever the last producer left there
+        # (the import stages before it, a finished run's report) with ITS OWN
+        # zero state — otherwise the bar reads someone else's percentage while
+        # this run is still starting, which is what a "half-filled bar at the
+        # start of an import chain" was.
+        _bar_join(bar)
+        done, total, text, steps = run_start_frame(ids)
+        if text:
+            _bar_frame(bar, done, total, text, job=job, steps=steps)
         return _run_chain_locked(cfg, ids, targets=targets, force=force,
                                  progress=progress, final=final, job=job,
                                  bar=bar)
@@ -1036,6 +1155,17 @@ def _run_chain_locked(cfg, ids, targets=None, force=None, progress=None,
                 progress(done, total, label, result)
             except Exception:
                 traceback.print_exc()
+    if ids and len(results) < total:
+        # The run was cut short at a script boundary (the auto-updater above):
+        # its last step announce left the bar INSIDE the run, and nothing else
+        # is coming, so end the surface rather than leave a frozen fraction on
+        # it. The bar fills (done == total, the one state a single-line bar can
+        # read as "over") while the readout keeps the honest pair — how many
+        # steps ran of how many were asked for — and the text says which.
+        ran = len(results)
+        _bar_frame(bar, total, total,
+                   f"#{ran}/{total} · {run_label(ids)} stopped", job=job,
+                   steps=(ran, total))
     if ids:
         try:
             removed = _prune_empty_target_dirs(cfg)

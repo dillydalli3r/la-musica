@@ -53,8 +53,14 @@ overridable per run — see ``EXPORT_DEFAULTS``):
 * ``clean_tags`` — write only the canonical tag set on transcodes instead of
   keeping the source's leftover frames.
 * ``playlists`` — write ``.m3u8`` playlists (UTF-8, relative paths) next to
-  the exported albums plus one for the whole export.
+  the exported albums plus one for the whole export. OFF by default: the
+  album playlists are an album-export artifact, while a real playlist export
+  is written by ``server.playlists.export_m3u8``.
 * ``sidecars`` — mirror cover.*/description.txt/artist image/.lrc/.cue/.log.
+  OFF by default: an export carries audio, the cover travels embedded, and
+  the rip's evidence stays in the library. On, it restores the old behaviour.
+* Every non-audio file left behind is reported in ``excluded`` (name, album,
+  classification and the reason it did not travel — see ``extra_files``).
 * ``manifest`` — write ``checksums.sha256`` at the export root: one
   "<sha256>  <relative path>" line per exported file, the format
   ``sha256sum -c`` reads back.
@@ -92,9 +98,10 @@ import time
 import zipfile
 
 from mlo import eq as eq_mod
+from mlo import lyrics as lyrics_mod
 from mlo import naming
 from mlo.audio import AudioFile
-from mlo.naming import sanitize_path
+from mlo.naming import sanitize_path, sanitize_segment
 from mlo.paths import app_data_dir
 from mlo.stats import worker_count
 from mlo.subproc import tool_path
@@ -115,10 +122,12 @@ def safe_subfolder(name):
 
     The value comes from a saved default and a form field, and it is joined
     onto the destination — "../.." there would write outside the device, so
-    separators are dropped and traversal is neutralised instead of trusted."""
-    text = str(name or "").strip().replace("/", " ").replace("\\", " ")
-    text = text.replace("..", "_").strip(" .")
-    return text[:120] or "Music"
+    separators are neutralised and traversal is refused instead of trusted.
+    The NAME itself follows the app's one rule (mlo.naming.sanitize_segment),
+    so a subfolder is spelled the same way every other folder the app writes
+    is."""
+    text = str(name or "").replace("..", "_")[:120]
+    return sanitize_segment(text) or "Music"
 
 
 # Codec table. Each codec carries the quality PRESETS the UI offers (the
@@ -280,19 +289,55 @@ EXPORT_DEFAULTS = {
     "replaygain_mode": "off",
     "eq_profile": "",
     "clean_tags": True,
-    "playlists": True,
-    "sidecars": True,
+    # An export is a copy service for AUDIO. By default it writes neither the
+    # album's own files (.m3u8/cover.jpg/description.txt) nor the rip's
+    # evidence (.cue/.log/.accurip/.lrc): the cover travels EMBEDDED in each
+    # file (embed_covers), and the rest stays in the library where the audit,
+    # the grading and the rip's checksum read it. Both switches still exist for
+    # a device that wants them, and both are off unless asked for. Whatever the
+    # run leaves behind is reported in ``excluded`` (see extra_files).
+    "playlists": False,
+    "sidecars": False,
     "manifest": False,
     "verify": True,
     "prune": False,
     "workers": 0,
     "target": "server",
+    # How lyrics travel: the LYRICS tag ("embedded"), a `.lrc` beside the
+    # exported file ("lrc"), or both. "" — the shipped value — follows the
+    # LIBRARY's own `lyrics_format`, so an export defaults to what the app
+    # keeps in the library instead of to an opinion of its own (see
+    # lyrics_mode below).
+    "lyrics": "",
 }
+
+# The parts of a run that are POSITIONAL: they say WHAT is exported and where
+# it lands, and each has its own parameter on ``export_tracks`` below.
+# Everything else a caller may send is an option with a default
+# (``EXPORT_DEFAULTS``). The endpoint reads this to split a posted form into
+# options and positionals, and the saved-config store reads it to know exactly
+# which keys of the form a config snapshots — one tuple, so neither can know
+# half the form.
+FORM_FIELDS = ("paths", "dest", "subfolder", "codec", "quality",
+               "structure", "structure_script")
 
 # ReplayGain modes. "tags" is the tag-writing behaviour the export shipped with
 # (a player applies it), "apply" bakes the same gain into the samples (a player
 # that honours nothing still plays level).
 REPLAYGAIN_MODES = ("off", "tags", "apply")
+
+# How an export can write lyrics: keep the LYRICS tag ("embedded"), write a
+# `.lrc` beside the exported file ("lrc"), or both. The tag names are the
+# source's own — an exported file must not carry a lyrics tag the run decided
+# to write as a file instead, or a player shows a second, stale copy.
+LYRICS_MODES = ("embedded", "lrc", "both")
+_LYRICS_TAGS = ("LYRICS", "UNSYNCEDLYRICS", "SYNCLYRICS")
+
+# Where an export can go, as one table: `server` writes into dest/subfolder on
+# the machine running this app, `zip` stages the same export and hands back one
+# archive. Read by the endpoint that validates a request, by the run itself and
+# by the saved-config store, so the three cannot disagree about what a target is.
+TARGETS = ("server", "zip")
 
 # The one thing a processing run needs that the copy codec cannot give it. The
 # API hands this exact text to the UI, so there is one wording for it.
@@ -383,6 +428,23 @@ def option(cfg, opts, name):
             return value
     value = (cfg or {}).get("export_" + name)
     return EXPORT_DEFAULTS[name] if value is None or value == "" else value
+
+
+def lyrics_mode(cfg, opts):
+    """This run's lyric handling: the per-run value, else the saved
+    `export_lyrics`, else the LIBRARY's own `lyrics_format`.
+
+    "" is not a fourth mode — it is "whatever the library keeps", so an export
+    made by someone who never touched either setting writes lyrics the way the
+    library itself does (mlo.lyrics' own format pass), and changing one setting
+    cannot silently disagree with the other. An unreadable value falls back the
+    same way rather than reaching the writer as an unknown mode.
+    """
+    value = str(option(cfg, opts, "lyrics") or "").strip().lower()
+    if value in LYRICS_MODES:
+        return value
+    library = str((cfg or {}).get("lyrics_format") or "").strip().lower()
+    return library if library in LYRICS_MODES else "embedded"
 
 
 def option_int(cfg, opts, name, low=0, high=None):
@@ -710,13 +772,17 @@ def _target_relpath(path, af, structure, music_folder, ext, disc="", script=""):
             or (os.path.basename(os.path.dirname(path)) if structure != "flat" else "")
         title = (af.get_tag("TITLE") or "").strip() or stem
         nn = _tracknum(af)
+        # sanitize_segment, not sanitize_path: everything joined here is ONE
+        # name. A tag value carrying a "/" ("AC/DC") has to become "AC_DC" —
+        # through sanitize_path it would have read as a folder boundary and
+        # written a second directory level nobody asked for.
         if structure == "flat":
             base = f"{disc}{nn} - {title}"
             if artist:
                 base = f"{artist} - {base}"
-            return sanitize_path(f"{base}{ext}")
-        return os.path.join(sanitize_path(album or "Unknown Album"),
-                            sanitize_path(f"{disc}{nn} - {title}{ext}"))
+            return sanitize_segment(f"{base}{ext}")
+        return os.path.join(sanitize_segment(album or "Unknown Album") or "Unknown Album",
+                            sanitize_segment(f"{disc}{nn} - {title}{ext}"))
     # albumartist_album_disc (the shipped default) and every custom structure
     # are naming scripts: the tree is the grammar's business. The disc number
     # is the script's own %discnumber% (always written, "1" when untagged), so
@@ -1281,6 +1347,109 @@ def _verify(dst, src_seconds):
     return None
 
 
+# ------------------------------------------------- what an export leaves behind
+# An album folder holds more than audio: a rip's verification evidence
+# (.log/.accurip/.md5), the ripper's own sidecars (.cue/.txt/.nfo), the app's
+# album playlists and the cover image. An export carries the AUDIO — the cover
+# travels EMBEDDED in each file (embed_covers) — so every other file stays in
+# the library where the audit, the grading and the rip's own checksum read it.
+# What an export must NEVER do is drop one of them silently: the run reports
+# every non-audio file it found, by album, with the reason it did not travel.
+_EXTRA_REASONS = {
+    ".log": ("evidence", "the rip log — the audit verifies its checksum"),
+    ".accurip": ("evidence", "the AccurateRip report the audit verifies"),
+    ".md5": ("evidence", "a checksum list for the rip"),
+    ".sfv": ("evidence", "a checksum list for the rip"),
+    ".ffp": ("evidence", "a FLAC fingerprint list for the rip"),
+    ".torrent": ("evidence", "a torrent file describing the release"),
+    ".cue": ("sidecar", "the rip's track layout, which stays with the audio it describes"),
+    ".txt": ("sidecar", "a text sidecar (an album description) written beside the audio"),
+    ".nfo": ("sidecar", "the ripper's release notes"),
+    ".lrc": ("lyrics", "lyrics written beside the track"),
+    ".url": ("sidecar", "a link file written beside the audio"),
+    ".pdf": ("sidecar", "a booklet/scan written beside the audio"),
+    ".m3u": ("playlist", "playlists come from a playlist export, not from an album export"),
+    ".m3u8": ("playlist", "playlists come from a playlist export, not from an album export"),
+    ".pls": ("playlist", "playlists come from a playlist export, not from an album export"),
+    ".wpl": ("playlist", "playlists come from a playlist export, not from an album export"),
+}
+
+
+def _extra_kind(name, covers, image_exts):
+    """(kind, why) for one non-audio sibling: "cover" | "playlist" |
+    "evidence" | "unknown". Nothing is guessed from a file's contents — only
+    its name decides, so the same file always lands in the same bucket."""
+    low = name.lower()
+    ext = os.path.splitext(low)[1]
+    if ext in image_exts:
+        if low in covers:
+            return ("cover",
+                    "the album cover — it travels INSIDE the file (embed_covers)")
+        if os.path.splitext(low)[0] == "artist":
+            return ("cover",
+                    "the artist image — it belongs to the artist folder, not the album")
+    known = _EXTRA_REASONS.get(ext)
+    if known:
+        return known
+    return "unknown", "not audio and not a file this app writes"
+
+
+def extra_files(cfg, paths, skip=None):
+    """Every non-audio file beside the selected tracks, grouped by album, with
+    the reason it is not part of the export.
+
+    Returns ``{"files": [{album, name, kind, reason, dir}], "counts": {kind: n},
+    "total": n, "albums": {album: n}}``. Directories are reported too — a stray
+    subfolder is exactly the kind of thing a library carries that nobody
+    anticipated — named with a trailing "/" and never walked.
+
+    ``skip(folder, name, kind)`` says a sibling is NOT an extra for the run that
+    asked: a `.lrc` whose track is in the selection, when the run writes lyrics
+    as a file, travels as that exported track's own `.lrc` — output, not
+    something left behind. The `.lrc` of a track OUTSIDE the selection stays in
+    the library and is still reported.
+    """
+    from mlo.grader import COVER_NAMES
+    from mlo.artistdata import ARTIST_IMAGE_EXTS
+    from mlo.stats import is_audio_file
+
+    covers = {n.lower() for n in COVER_NAMES}
+    image_exts = tuple(e.lower() for e in ARTIST_IMAGE_EXTS)
+    root = os.path.abspath(cfg.get("music_folder") or "")
+    rows, counts, albums = [], {}, {}
+    for folder in sorted({os.path.dirname(p) for p in paths if p}):
+        album = folder
+        if root and os.path.normcase(folder).startswith(os.path.normcase(root) + os.sep):
+            album = os.path.relpath(folder, root).replace(os.sep, "/")
+        albums.setdefault(album, 0)
+        try:
+            entries = sorted(os.listdir(folder))
+        except OSError:
+            continue
+        for name in entries:
+            if is_audio_file(name):
+                continue                       # audio is what travels
+            kind, reason = _extra_kind(name, covers, image_exts)
+            if skip and skip(folder, name, kind):
+                continue
+            is_dir = os.path.isdir(os.path.join(folder, name))
+            rows.append({"album": album, "name": name + ("/" if is_dir else ""),
+                         "kind": kind, "reason": reason, "dir": is_dir})
+            counts[kind] = counts.get(kind, 0) + 1
+            albums[album] += 1
+    return {"files": rows, "counts": counts, "total": len(rows), "albums": albums}
+
+
+def _extra_summary(extra):
+    """One sentence naming what the run left behind, for the run log and the
+    result. Empty when the selection carried nothing but audio."""
+    if not extra["total"]:
+        return ""
+    counts = ", ".join(f"{n} {kind}" for kind, n in sorted(extra["counts"].items()))
+    return (f"{extra['total']} non-audio file(s) not exported ({counts}) — "
+            f"see 'excluded' for each one and why")
+
+
 def _write_playlists(root, groups, exported):
     """Write ``.m3u8`` playlists for a DAP (UTF-8, relative paths, EXTINF).
 
@@ -1296,7 +1465,7 @@ def _write_playlists(root, groups, exported):
             continue
         name = os.path.basename(folder) if folder else "all"
         if folder:
-            plan.append((folder, f"{sanitize_path(name) or 'album'}.m3u8", rows))
+            plan.append((folder, f"{sanitize_segment(name) or 'album'}.m3u8", rows))
     if exported:
         plan.append(("", "all.m3u8", [r for rows in groups.values() for r in rows]))
     for folder, name, rows in plan:
@@ -1519,12 +1688,46 @@ def export_tracks(cfg, paths, dest, subfolder="Music", codec="copy",
            "bytes": 0, "sidecars": 0, "playlists": 0, "verified": 0,
            "pruned": 0, "pruned_files": [], "warnings": [], "errors": [],
            "error_count": 0, "estimated_bytes": None,
-           "processed": 0, "eq_applied": 0, "zip": None}
+           "processed": 0, "eq_applied": 0, "zip": None,
+           "lyrics_mode": "", "lyrics_files": 0,
+           # Every non-audio file beside the selection, and why it did not
+           # travel: an export is a copy service for AUDIO, and a file it
+           # leaves behind is reported rather than dropped in silence.
+           "excluded": [], "excluded_counts": {}, "excluded_total": 0,
+           "excluded_note": ""}
     if not paths:
         return out
 
+    # Read BEFORE the audit below, which asks what this run writes itself.
+    lyrics = lyrics_mode(cfg, opts)
+    # The two halves of the choice: the tag rides along with every other tag on
+    # a rewrite, and is DROPPED when the run writes the lyrics as a file. The
+    # `.lrc` leg is written with the tracks, from the SOURCE text — so "both"
+    # cannot leave the tag and the file disagreeing.
+    lyrics_tag = lyrics in ("embedded", "both")
+    lyrics_lrc = lyrics in ("lrc", "both")
+
+    # What the run itself writes as a `.lrc`, so the audit below does not
+    # report a travelling lyric file as "left behind" (see extra_files' skip).
+    travelling = {}
+    for _p in paths:
+        travelling.setdefault(os.path.normcase(os.path.dirname(_p)), set()).add(
+            os.path.splitext(os.path.basename(_p))[0].lower())
+
+    def _lyrics_written(folder, name, kind):
+        if kind != "lyrics" or not lyrics_lrc:
+            return False
+        return (os.path.splitext(name)[0].lower()
+                in travelling.get(os.path.normcase(folder), ()))
+
+    extra = extra_files(cfg, paths, skip=_lyrics_written)
+    out["excluded"] = extra["files"]
+    out["excluded_counts"] = extra["counts"]
+    out["excluded_total"] = extra["total"]
+    out["excluded_note"] = _extra_summary(extra)
+
     target = str(option(cfg, opts, "target") or "server").strip().lower()
-    if target not in ("server", "zip"):
+    if target not in TARGETS:
         raise ValueError(f"unknown export target: {target}")
     zip_target = target == "zip"
     if not zip_target and (not dest or not os.path.isdir(dest)):
@@ -1574,6 +1777,13 @@ def export_tracks(cfg, paths, dest, subfolder="Music", codec="copy",
         eq_filters = []
         eq_error = (f"equalizer profile {eq_id!r} not found — pick another "
                     "profile or clear the equalizer option")
+    elif eq_profile and eq_profile.get("errors"):
+        # A profile file on disk with a band line this app cannot read: applying
+        # the rest would put a curve on the device that the profile never asked
+        # for, which for audio is worse than refusing. The line is named.
+        eq_filters = []
+        eq_error = (f"equalizer profile {eq_id!r} cannot be applied — "
+                    f"{eq_profile['errors'][0]}")
     else:
         eq_filters = eq_mod.chain(eq_profile) if eq_profile else []
         eq_error = None
@@ -1587,6 +1797,7 @@ def export_tracks(cfg, paths, dest, subfolder="Music", codec="copy",
         raise ValueError(_PROCESSING_NEEDS_CODEC)
 
     out["replaygain_mode"] = rg_mode
+    out["lyrics_mode"] = lyrics
     out["eq_profile"] = eq_id
     if zip_target and bool(option(cfg, opts, "prune")):
         out["warnings"].append(
@@ -1748,6 +1959,29 @@ def export_tracks(cfg, paths, dest, subfolder="Music", codec="copy",
                     raise RuntimeError(
                         f"target name collision with {os.path.basename(state['written'][dst])!r}")
 
+            src_lyrics = None
+            src_lyrics_tag = ""
+            if lyrics_lrc or lyrics_tag:
+                src_lyrics = lyrics_mod.read_lyrics(path)
+                _tags = af.all_tags() or {}
+                src_lyrics_tag = next(
+                    (str(_tags.get(k) or "").strip() for k in _LYRICS_TAGS
+                     if str(_tags.get(k) or "").strip()), "")
+            if lyrics_lrc and src_lyrics:
+                # The exported file's OWN name carries its lyrics beside it
+                # (mlo.lyrics' one name rule: the track's own name), written
+                # from the SOURCE text and canonicalised by the same formatter
+                # the library's own format pass uses — so a "both" run's file
+                # and tag cannot disagree. A lyric sidecar is never worth
+                # failing an export for.
+                try:
+                    if lyrics_mod.write_lyrics_sidecar(
+                            dst, lyrics_mod.format_lyrics_text(src_lyrics, cfg=cfg)):
+                        with state["lock"]:
+                            out["lyrics_files"] += 1
+                except Exception:
+                    pass
+
             # Sidecars BEFORE the skip check: re-exporting an album whose
             # tracks are already there must still complete its cover / lyrics
             # / cue / log / description / artist image.
@@ -1864,7 +2098,8 @@ def export_tracks(cfg, paths, dest, subfolder="Music", codec="copy",
                 # longer describe this file. The tags mode writes fresh ones
                 # right below, from the measurement of THIS encode.
                 _write_tags(dst, af, id3v2=id3v2, id3v1=id3v1,
-                            drop=_RG_TAGS if filtered_run else ())
+                            drop=(_RG_TAGS if filtered_run else ())
+                            + (() if lyrics_tag else _LYRICS_TAGS))
                 _write_processing_tag(dst, processing, id3v2=id3v2, id3v1=id3v1)
                 if embed_covers:
                     _embed_cover(af, path, dst, embed_quality, embed_resolution,
@@ -1876,6 +2111,40 @@ def export_tracks(cfg, paths, dest, subfolder="Music", codec="copy",
                     # tag write, and only the cover pass forces one
                     _embed_cover(af, path, dst, embed_quality, embed_resolution,
                                  progressive, id3v2, id3v1)
+                if not lyrics_tag and any(
+                        str((af.all_tags() or {}).get(k) or "").strip()
+                        for k in _LYRICS_TAGS):
+                    # A byte copy carries the source's tags with it, so a
+                    # lyrics tag this option writes as a FILE has to be
+                    # REMOVED — a tag write can only add, and merely leaving it
+                    # out of the inherited set would keep the copy's own copy
+                    # of the lyrics beside the file. Only when the source has
+                    # one, and never worth failing an export for.
+                    try:
+                        dst_af = _writer(dst, id3v2, id3v1)
+                        if dst_af.audio is not None:
+                            dst_af.defer_save(True)
+                            for _k in _LYRICS_TAGS:
+                                dst_af.delete_tag(_k)
+                            dst_af.defer_save(False)
+                    except Exception:
+                        pass
+
+            if lyrics_tag and src_lyrics and not src_lyrics_tag:
+                # The source kept its lyrics in an `.lrc` rather than in a tag,
+                # so nothing rode along with its other tags and the chosen mode
+                # would have dropped them. Embed the text the sidecar leg read
+                # — one text, one formatter, and only when the source had no
+                # lyrics tag of its own to inherit.
+                try:
+                    dst_af = _writer(dst, id3v2, id3v1)
+                    if dst_af.audio is not None:
+                        dst_af.defer_save(True)
+                        dst_af.set_lyrics(
+                            lyrics_mod.format_lyrics_text(src_lyrics, cfg=cfg))
+                        dst_af.defer_save(False)
+                except Exception:
+                    pass  # a lyric conversion never fails an export
 
             if rg_tags and measurement is None:
                 # copy/FLAC-to-FLAC path, or a transcode whose summary was
@@ -2006,5 +2275,10 @@ def export_tracks(cfg, paths, dest, subfolder="Music", codec="copy",
                 "could not build the export archive — the export is staged in "
                 "the app's data folder")
 
+    # The run log gets the extras by name, not only the counts: a user reading
+    # the finished run has to see WHAT stayed in the library and WHY.
+    if out["excluded_note"]:
+        job_locks.publish(out["total"], out["total"],
+                          f"Export finished · {out['excluded_note']}", job=job)
     job_locks.publish(out["total"], out["total"], "Export finished", job=job)
     return out

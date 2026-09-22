@@ -354,6 +354,44 @@ def _lrc_for(audio_path):
     return os.path.splitext(audio_path)[0] + ".lrc"
 
 
+def read_lyrics(audio_path):
+    """The lyric text *audio_path* holds: the `.lrc` beside it when that holds
+    lyrics, else the text in its own LYRICS tag; None when it has neither.
+
+    The pair to :func:`write_lyrics_sidecar`, and the same two places the
+    format pass reads (the sidecar is the richer copy — it carries the
+    timestamps — so it wins when both exist). Used by the export, which must
+    travel with the lyrics the library kept rather than with a reading of its
+    own.
+    """
+    path = _lrc_for(audio_path)
+    try:
+        with open(path, "r", encoding="utf-8", errors="replace") as f:
+            text = f.read()
+    except OSError:
+        text = ""
+    if has_lyrics_text(text):
+        return text
+    try:
+        embedded = AudioFile(audio_path).get_lyrics()
+    except Exception:
+        embedded = None
+    return embedded if has_lyrics_text(embedded) else None
+
+
+def write_lyrics_sidecar(audio_path, text):
+    """Write *text* as the `.lrc` that belongs to *audio_path* — the one name
+    rule (:func:`_lrc_for`: the track's own name) and the one atomic write the
+    format pass uses. Returns the path written, or None when there is nothing
+    to write ("some lines" is not lyrics: an empty sidecar is worse than none).
+    """
+    if not has_lyrics_text(text):
+        return None
+    path = _lrc_for(audio_path)
+    _atomic_write_text(path, text)
+    return path
+
+
 # Non-blank is not the same as "has lyrics". An aborted run leaves a 0-byte
 # sidecar, a metadata-only write leaves "[ar:…]" / "[offset:…]" headers, and
 # a synced provider with empty text leaves bare "[00:00.00]" / "<00:00.00>"

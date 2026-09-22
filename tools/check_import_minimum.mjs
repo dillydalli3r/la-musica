@@ -193,6 +193,14 @@ has(advisory.collapsed, ["Show everything else on this step",
     "minimum advisory step collapses the album-wide helpers");
 lacks(advisory.open, ["Apply to all tracks", "Auto-import advisory for all tracks"],
       "minimum advisory step hides the helpers");
+// ONE advisory action, and it is the one that asks the sources anyway (the
+// "Re-rate…" button beside it is gone: a second, gentler entry would be the one
+// that leaves a value an earlier run invented standing). The button's own
+// title says so — the re-rate is what this step's button DOES now.
+lacks(advisory.collapsed.concat(advisory.open), ["Re-rate"],
+      "the advisory step offers ONE advisory action");
+lacks(advisory.collapsed, ["already carries a value keeps it", "use Re-rate"],
+      "and its title does not promise the fill-only behaviour it no longer has");
 has(advisory.open, ["This import could not finish: Cover art, Advisory still missing"],
     "the banner names both families on the advisory step too");
 
@@ -217,6 +225,7 @@ has(ordinary.html, ["Set iTunes advisory per track", "Apply to all tracks",
                     "Auto-import advisory for all tracks", "Save advisory"],
     "the ordinary wizard still renders the whole step");
 lacks(ordinary.html, ["Nothing is missing on this step"], "the ordinary wizard narrates nothing");
+lacks(ordinary.html, ["Re-rate"], "and offers the same ONE advisory action");
 
 // --------------------------------------------------------------------------- #
 // 3b. the switch: manual importing off offers no path at all

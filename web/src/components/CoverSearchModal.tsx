@@ -97,6 +97,12 @@ interface Props {
    *  the Cover Art Archive is asked for the release's own front cover, which
    *  the policy prefers above every other candidate. */
   releaseMbid?: string;
+  /** The import wizard's album — a folder the library does not list yet, whose
+   *  cover the server writes only to a request that says so (the same opt-in
+   *  every other call the wizard makes passes). Left out, "Use this cover" is
+   *  refused with "album outside music folder" and the folder keeps the art it
+   *  arrived with, however well the row was picked. */
+  staged?: boolean;
   /** Candidates the import already fetched and staged (`cover_review` on):
    *  the modal opens showing these instead of searching, which is what turns
    *  "review" into a single pick. Absent → search as before. */
@@ -110,7 +116,7 @@ interface Props {
   initialNotes?: string[];
 }
 
-export default function CoverSearchModal({ albumPath, artist, album, onClose, onApplied, tracks, trackCount, releaseGroupMbid, releaseMbid, initialResults, initialProvider, initialChosen, initialNotes }: Props) {
+export default function CoverSearchModal({ albumPath, artist, album, onClose, onApplied, tracks, trackCount, releaseGroupMbid, releaseMbid, staged = false, initialResults, initialProvider, initialChosen, initialNotes }: Props) {
   const { t } = useI18n();
   const qc = useQueryClient();
   // The album's own track count for the identity check. The wizard states the
@@ -354,7 +360,7 @@ export default function CoverSearchModal({ albumPath, artist, album, onClose, on
         artist: r.artist ?? qArtist,
         album: r.title ?? qAlbum,
         rg: releaseGroupMbid,
-      });
+      }, staged);
       const name = res.path.split("/").pop();
       toast(res.warning ? `Cover saved as ${name} — ${res.warning}` : `Cover saved as ${name}`);
       onApplied?.();
@@ -392,7 +398,7 @@ export default function CoverSearchModal({ albumPath, artist, album, onClose, on
               key={selected.big || selected.small || ""}
               src={artUrl(selected.big || selected.small, { artist: selected.artist, album: selected.title })}
               alt="preview"
-              className="h-24 w-24 rounded-lg border border-border object-cover"
+              className="h-24 w-24 rounded-lg object-cover"
               referrerPolicy="no-referrer"
               onLoad={(e) => {
                 const el = e.currentTarget;
@@ -454,7 +460,7 @@ export default function CoverSearchModal({ albumPath, artist, album, onClose, on
             <img
               src={api.artUrl(caaRef)}
               alt="MusicBrainz reference"
-              className="h-11 w-11 rounded border border-border object-cover bg-zinc-950"
+              className="h-11 w-11 rounded object-cover bg-zinc-950"
               referrerPolicy="no-referrer"
               onError={() => setRefDead(caaRef)}
             />
@@ -788,7 +794,7 @@ export default function CoverSearchModal({ albumPath, artist, album, onClose, on
                       ? "border-accent ring-1 ring-accent"
                       : isPick
                         ? "border-accent/50"
-                        : "border-border hover:border-zinc-600"
+                        : "border-transparent hover:border-zinc-600"
                   } ${r.rejected ? "opacity-70" : ""} bg-raise`}
                   onClick={() => setSelected(r)}
                   title={why || r.title || undefined}

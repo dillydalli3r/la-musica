@@ -1578,8 +1578,9 @@ export default function PlayerBar() {
                 lyricsOpen ? "text-accent bg-raise" : "text-zinc-400 hover:text-white"
               }`}
               onClick={() => setLyricsOpen(!lyricsOpen)}
-              title="Lyrics — open the sidebar"
+              title={lyricsOpen ? "Lyrics — close the sidebar" : "Lyrics — open the sidebar"}
               aria-label="Lyrics"
+              aria-pressed={lyricsOpen}
             >
               <Mic2 className="h-4 w-4" />
             </button>

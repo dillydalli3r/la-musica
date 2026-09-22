@@ -1019,7 +1019,7 @@ export default function LibraryPage() {
                     <CoverImg
                       albumPath={al.path}
                       coverFile={al.cover_file}
-                      wrapperClass="h-9 w-9 rounded bg-raise border border-border overflow-hidden shrink-0"
+                      wrapperClass="h-9 w-9 rounded bg-raise overflow-hidden shrink-0"
                     />
                   </Link>
                   <div className="min-w-0 flex-1">
@@ -1102,7 +1102,7 @@ export default function LibraryPage() {
                             albumPath={al.path}
                             trackCover={t.cover_file}
                             albumCover={al.cover_file}
-                            wrapperClass="h-8 w-8 rounded bg-raise border border-border overflow-hidden shrink-0"
+                            wrapperClass="h-8 w-8 rounded bg-raise overflow-hidden shrink-0"
                           />
                           <TrackTitleCell
                             className="flex-1"
@@ -1355,7 +1355,7 @@ export default function LibraryPage() {
                             albumPath={tr.albumPath ?? tr.path.split("/").slice(0, -1).join("/")}
                             trackCover={tr.cover_file}
                             albumCover={tr.albumCover}
-                            wrapperClass="h-9 w-9 rounded bg-raise border border-border overflow-hidden shrink-0"
+                            wrapperClass="h-9 w-9 rounded bg-raise overflow-hidden shrink-0"
                           />
                         </td>
                       )}
@@ -1700,7 +1700,7 @@ function AlbumRowGroup({
                               <TrackCover
                                 albumPath={album.path}
                                 trackCover={t.cover_file}
-                                wrapperClass="h-8 w-8 rounded bg-raise border border-border overflow-hidden shrink-0"
+                                wrapperClass="h-8 w-8 rounded bg-raise overflow-hidden shrink-0"
                               />
                             </td>
                           )}

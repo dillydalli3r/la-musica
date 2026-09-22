@@ -64,24 +64,119 @@ DEFAULT_NAMING_SCRIPT = (
     "$if(%musicbrainz_releasegroupid%, [%musicbrainz_releasegroupid%])"
 )
 
-_ILLEGAL = '<>:"\\|?*'
+# THE filename rule of the whole app: every character a filesystem refuses in
+# a name, plus every ASCII control character. Export, organizer, Soulseek
+# writes, playlist files and the grader's expected-path check all come through
+# here — a second copy of this set anywhere is how a path the app WROTE stops
+# being a path the app can FIND again (the audit then reports "no such file"
+# for an album that is sitting right there).
+#
+# NUL (0x00) is deliberately NOT in the class: the OS refuses it in a path, so
+# it can never reach a file, while mlo.grader spells its UNKNOWN_RELEASE_TYPE
+# wildcard with it and passes that value through this very substitution — a
+# NUL stripped here would silently break the expected-path regex.
+_ILLEGAL_RE = re.compile(r'[<>:"/\\|?*\x01-\x1f]')
+
+# A trailing dot or space is invalid on Windows: the filesystem drops it on
+# write, so a name that keeps one is a name the app computes but cannot open.
+_TRAILING_RE = re.compile(r"[ .]+$")
+
+# Reserved device names, with or without an extension and in any case: Windows
+# cannot create CON, NUL, COM1, LPT9, "AUX.mp3" — whatever the folder.
+_RESERVED_RE = re.compile(r"(?i)^(CON|PRN|AUX|NUL|COM[1-9]|LPT[1-9])(\..*)?$")
+
 _UUID_RE = re.compile(r"[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}")
 
 
+def sanitize_segment(name):
+    """ONE file or folder name: every invalid character becomes "_".
+
+    The single rule every writer names files with. Illegal characters are
+    REPLACED, never dropped, so the mapping is readable and predictable:
+    "DECO*27" is "DECO_27", one invalid character is one "_" (a run of three
+    is "___"), and the result is a fixed point — sanitize_segment(x) ==
+    sanitize_segment(sanitize_segment(x)) — so organizing an already
+    organized library is a no-op instead of a rename.
+
+    A "/" here is the character the OS cannot have in a name, never a folder
+    boundary: callers that hold a whole relative path want sanitize_path.
+    """
+    text = _ILLEGAL_RE.sub("_", str(name or ""))
+    # Runs of blanks read as one blank (they are legal, just invisible). The
+    # trailing dot/space rule below must see the space the source actually
+    # ended with, so this only folds runs, it does not trim.
+    text = re.sub(r"\s+", " ", text)
+    if not text.strip(" "):
+        return ""                     # nothing but blanks: not a name at all
+    text = text.lstrip(" ")
+    # Trailing dot/space, one for one. A segment of nothing but dots cannot
+    # survive this either ("." -> "_", ".." -> "__"), which is what keeps a
+    # tag value from naming a parent directory.
+    text = _TRAILING_RE.sub(lambda m: "_" * len(m.group(0)), text)
+    # A reserved device name gets a trailing "_" on its stem: still readable
+    # ("AUX.mp3" -> "AUX_.mp3") and no longer reserved, and the result is a
+    # fixed point because the guarded name is gone.
+    reserved = _RESERVED_RE.match(text)
+    if reserved:
+        text = reserved.group(1) + "_" + (reserved.group(2) or "")
+    return text
+
+
 def sanitize_path(text):
-    """Sanitize each path segment (keeps the script's own '/' separators).
-    Illegal filename characters are replaced with '_' — never dropped — so
-    a value like "DECO*27" becomes "DECO_27" and every consumer (organizer,
-    grader's expected-path check, beets mlo_dir) derives identical paths."""
-    # drop empty bracket groups left by skipped conditionals
-    text = re.sub(r"\[\s*\]|\{\s*\}", "", text)
-    out = []
-    for seg in text.split("/"):
-        seg = seg.strip()
-        seg = "".join("_" if ch in _ILLEGAL else ch for ch in seg)
-        seg = re.sub(r"\s+", " ", seg).strip().rstrip(".")
-        out.append(seg)
-    return "/".join(s for s in out if s)
+    """A whole RELATIVE path: every "/"-separated name goes through
+    sanitize_segment, and the separators themselves survive — in a naming
+    script the "/" IS the folder structure. A "/" that arrives inside a tag
+    value becomes "_" before the script is joined (_run substitutes values
+    through sanitize_segment), so "AC/DC" names one file, never two levels."""
+    # Drop the bracket groups a skipped condition left EMPTY, together with
+    # the space that separated them: "Artist [%musicbrainz_albumartistid%]"
+    # with no id is the artist's name, not "Artist " — and a trailing blank is
+    # an invalid-name character below, so leaving it would spell the shipped
+    # artist folder "Artist_".
+    text = re.sub(r"\s*\[\s*\]|\s*\{\s*\}", "", text)
+    return "/".join(s for s in (sanitize_segment(seg) for seg in text.split("/")) if s)
+
+
+def name_key(name):
+    """The comparison key for ONE file name, shared by everything that has to
+    decide whether two names mean the same file.
+
+    A name recorded by another program — a CUE sheet's ``FILE "01. AC/DC -
+    Theme.flac"``, a rip log, an .accurip header, an older export — has to
+    resolve to the file this app wrote for it (``01. AC_DC - Theme.flac``).
+    Both sides go through the SAME rule, so the audit and the grading never
+    lose an album to a "no such file" the app invented by renaming it.
+    Sanitising BOTH sides is also what keeps this honest for a name that is
+    already legal-but-odd on disk: the underscore a name may or may not carry
+    stops being a difference.
+
+    The rule runs FIRST and the leaf last: a recorded name carries its "/" as
+    a character of the name, so splitting it off as a directory would drop
+    everything before the last one ("01. AC/DC - Theme.flac" would key as
+    "DC - Theme.flac" and never match the file on disk).
+    """
+    return os.path.basename(sanitize_segment(name))
+
+
+def cue_ref_names(ref):
+    """The names ONE cue-sheet FILE reference may denote, each keyed through
+    name_key — the read side of the same rule.
+
+    A reference is usually a bare leaf ("01 Theme.flac") and sometimes a path
+    ("CD1/01 Theme.flac"), whose LEAF is the file in the album folder. But a
+    "/" can also be a character OF the name: a sheet that still spells the rip's
+    "01. AC/DC - Theme.flac" refers to the file this app wrote as
+    "01. AC_DC - Theme.flac", and splitting that reference on the separator
+    first would throw away "01. AC" and match nothing. So both the whole
+    reference and its leaf are offered, in that order, and every caller accepts
+    either one.
+    """
+    text = str(ref or "")
+    names = [name_key(text)]
+    leaf = text.replace("\\", "/").rsplit("/", 1)[-1]
+    if leaf != text:
+        names.append(name_key(leaf))
+    return tuple(n for i, n in enumerate(names) if n and n not in names[:i])
 
 
 def _find_balanced(text, start):
@@ -265,14 +360,14 @@ def _run(tokens, variables):
             out.append(token[1])
         elif kind == "var":
             value = str(variables.get(token[1], "") or "")
-            # Tag values must never inject path separators or other illegal
-            # characters (a title like "Aerials / Arto" would otherwise split
-            # the filename into an unintended subfolder). Illegals become "_"
-            # — the same convention as sanitize_path, so the organizer, the
-            # grader's expected-path check and the beets mlo_dir field all
-            # compute identical paths. The script's OWN "/" separators
-            # (between %variables%) are untouched.
-            out.append(re.sub(r'[<>:"/\\|?*]', "_", value))
+            # Every substituted TAG VALUE is a name fragment, so it goes
+            # through the one rule (mlo.naming.sanitize_segment): a title like
+            # "Aerials / Arto" or "AC/DC" must not invent a folder level, and
+            # a control character or a reserved device name must not reach the
+            # path either. The script's OWN "/" separators (between
+            # %variables%) are literal tokens and stay untouched, so the
+            # structure the user typed still means structure.
+            out.append(sanitize_segment(value))
         else:
             out.append(_func(token[1], token[2], variables))
     return "".join(out)

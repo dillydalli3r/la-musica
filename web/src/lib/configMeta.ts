@@ -618,6 +618,11 @@ export const CONFIG_GROUPS: CfgGroup[] = [
         { k: "export_id3v1", label: "Also write ID3v1 (MP3)", type: "bool" },
         { k: "export_replaygain_mode", label: "ReplayGain in an export", type: "select", options: [["off", "Off"], ["tags", "Write ReplayGain tags (the player applies them)"], ["apply", "Bake the gain into the audio"]] },
         { k: "export_eq_profile", label: "Equalizer profile (preset or imported profile id, blank = none)", type: "text" },
+        /* "" is a real choice here, not a missing value: an export with nothing
+           saved writes lyrics the way the LIBRARY does (its own
+           `lyrics_format`), which is what `server.exporter.lyrics_mode`
+           resolves and what the Export page opens on. */
+        { k: "export_lyrics", label: "Lyrics in an export", type: "select", options: [["", "Follow the library's lyrics setting"], ["embedded", "Embedded in the file"], ["lrc", ".lrc files beside the audio"], ["both", "Both"]] },
         { k: "export_target", label: "Destination", type: "select", options: [["server", "A folder this machine can see"], ["zip", "A zip the client downloads"]] },
         { k: "export_manifest", label: "Write checksums.sha256 beside the export", type: "bool" },
         { k: "export_embed_covers", label: "Embed the cover into every exported file", type: "bool" },

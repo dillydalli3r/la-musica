@@ -15,10 +15,26 @@ GitHub. So this module reads THAT format instead of inventing one:
 
 Field order is free, the spellings F/Fc/freq are all accepted, ``dB``/``Hz``
 suffixes are optional, and keywords are case-insensitive — real files written
-by Peace and by hand use all of those. Anything this module cannot render is
-reported in ``unsupported`` rather than dropped, because a profile that
-silently loses its Convolution/Include half is not the curve the user asked
-for.
+by Peace and by hand use all of those. Peace saves its profiles with a UTF-8
+BOM on some systems and as UTF-16 on others, so the bytes on disk are decoded
+per encoding rather than assumed.
+
+Two kinds of line are treated differently, because they cost different things:
+
+* A line this module has no equivalent for (``Include:``, ``Convolution:``,
+  ``Device:``, a banner) is IGNORED and REPORTED in ``unsupported``: the curve
+  is what the user wrote, minus a feature the app cannot reproduce, and the
+  import result says which line that was.
+* A line that carries a BAND this parser cannot read — an unknown filter type,
+  a frequency that is not a number, a ``GraphicEQ`` pair that is not two
+  numbers — is an ERROR naming its line (``errors``). It is never dropped: a
+  profile that silently loses one of its bands is a different curve, which for
+  audio is worse than a refusal, so ``import_profile`` refuses the whole file
+  and the run refuses to apply such a profile from disk.
+
+Anything this module cannot render is reported rather than dropped, because a
+profile that silently loses its Convolution/Include half is not the curve the
+user asked for.
 
 Two APO constructs have no direct ffmpeg equivalent and are mapped:
 
@@ -36,12 +52,13 @@ Two APO constructs have no direct ffmpeg equivalent and are mapped:
   slope parameter is expressed as in every profile seen in the wild.
 """
 
+import codecs
 import math
 import os
 import re
 import time
 
-from mlo.paths import app_data_dir
+from mlo.paths import app_data_dir, safe_segment, slug_name
 
 # Imported profiles live beside the rest of the app state so they follow the
 # library: <music>/.mlo/data/eq/<slug>.txt.
@@ -77,10 +94,17 @@ _DEFAULT_Q = {"PK": 1.41, "LS": 0.7, "LSC": 0.7, "HS": 0.7, "HSC": 0.7,
 _GRAPHICEQ_Q = 1.41
 
 _NUMBER_RE = re.compile(r"[-+]?(?:\d+(?:\.\d*)?|\.\d+)")
-_PREAMP_RE = re.compile(r"^\s*preamp\s*:\s*(-?\d+(?:\.\d+)?)", re.IGNORECASE)
+# The preamp is matched by its NAME, not by "a name followed by a number": a
+# "Preamp: high" line must come back as an error naming the line, never fall
+# through to the ignored bucket, because the preamp is what keeps a boosted
+# curve from clipping.
+_PREAMP_RE = re.compile(r"^\s*preamp\s*:\s*(.*)$", re.IGNORECASE)
 _FILTER_RE = re.compile(r"^\s*filter\s*\d*\s*:(.*)$", re.IGNORECASE)
 _GRAPHIC_RE = re.compile(r"^\s*graphiceq\s*:(.*)$", re.IGNORECASE)
-_BAND_RE = re.compile(r"([-+]?(?:\d+(?:\.\d*)?|\.\d+))\s*([-+]?(?:\d+(?:\.\d*)?|\.\d+))")
+
+# The APO token that means "this slot holds no filter" ("Filter 3: ON None").
+# Peace writes one for every unused band, so it is skipped like a comment.
+_NONE_TOKEN = "none"
 
 # The ffmpeg filter each APO type renders to, and the shape of its arguments:
 #
@@ -106,20 +130,27 @@ def _num(value):
 
 
 def _band_to_q(bandwidth_octaves):
-    """APO's ``BW`` (bandwidth in octaves) as the Q ffmpeg's filters take."""
+    """APO's ``BW`` (bandwidth in octaves) as the Q ffmpeg's filters take, or
+    None when the file's own value cannot be one (a width of 0 or less)."""
     bw = float(bandwidth_octaves)
     if bw <= 0:
         return None
     return math.sqrt(2 ** bw) / (2 ** bw - 1)
 
 
-def _parse_filter(body):
-    """One ``Filter N: …`` body as a filter dict, or None when unreadable.
+# The filter types, spelled out for the sentence that refuses an unknown one.
+_TYPE_LIST = ", ".join(("PK", "LS", "HS", "LP", "HP", "BP", "NO", "LSC", "HSC"))
 
-    The tokens are scanned in the order the file wrote them, so any field
+
+def _parse_filter(body):
+    """One ``Filter N: …`` body as ``(filter, error)``.
+
+    ``filter`` is the band dict, the string ``"none"`` for APO's own empty slot
+    (``Filter 1: ON None``), or None with *error* saying what could not be
+    read. The tokens are scanned in the order the file wrote them, so any field
     order works and ``ON``/``OFF`` may sit wherever the writer put it. A token
-    this parser does not know means the filter is NOT what the user saved, so
-    the line is rejected (the caller reports it) instead of being guessed at.
+    this parser does not know is an ERROR, not a loss to report: guessing at it
+    (or dropping the band) would apply a curve the user did not write.
     """
     tokens = body.replace(",", " ").split()
     enabled, ftype, values = True, None, {}
@@ -130,6 +161,10 @@ def _parse_filter(body):
             enabled = token == "on"
             i += 1
             continue
+        if token == _NONE_TOKEN:
+            # The slot holds no filter at all — Peace writes one per unused
+            # band. Enabled or not, there is no curve here to render.
+            return "none", None
         if token in _TYPES and ftype is None:
             ftype = _TYPES[token]
             i += 1
@@ -138,45 +173,193 @@ def _parse_filter(body):
             i += 1
             continue
         if token in _KEYS:
+            name = _KEYS[token]
             if i + 1 >= len(tokens):
-                return None
+                return None, f"{token.capitalize()} has no value"
             value = _number(tokens[i + 1])
             if value is None:
-                return None
-            values[_KEYS[token]] = value
+                return None, (f"{token.capitalize()} needs a number, got "
+                              f"{tokens[i + 1]!r}")
+            values[name] = value
             i += 2
             continue
-        return None
-    if ftype is None or "fc" not in values:
-        return None
+        if ftype is None and token.isalpha():
+            # A word where the filter type goes: say what a type may be rather
+            # than only that this one was unknown.
+            return None, (f"unknown filter type {tokens[i]!r} (the types are "
+                          f"{_TYPE_LIST})")
+        return None, f"unknown word {tokens[i]!r}"
+    if ftype is None:
+        return None, f"no filter type (the types are {_TYPE_LIST})"
+    if "fc" not in values:
+        return None, "no frequency (Fc)"
     q = values.get("q")
-    if q is None and values.get("bw") is not None:
-        q = _band_to_q(values["bw"])
+    bw = values.get("bw")
+    converted = None
+    if q is None and bw is not None:
+        q = _band_to_q(bw)
+        if q is None:
+            return None, f"BW {_num(bw)} is not a usable bandwidth"
+        converted = bw
     if q is None or q <= 0:
         q = _DEFAULT_Q[ftype]
-    return {"type": ftype, "fc": values["fc"], "gain": values.get("gain", 0.0),
+    band = {"type": ftype, "fc": values["fc"], "gain": values.get("gain", 0.0),
             "q": q, "on": enabled}
+    if converted is not None:
+        # The file's own bandwidth, kept as provenance: the import result
+        # states the BW→Q conversion instead of looking exact.
+        band["bw"] = converted
+    return band, None
+
+
+def _parse_graphic(body):
+    """A ``GraphicEQ:`` band list as ``(pairs, error)``.
+
+    The bands are READ as ``frequency gain`` pairs, never assumed: Peace writes
+    31 of them and its own frequency ladder, AutoEQ writes 10 and a different
+    one, and neither is a fixed table this app could hard-code. A group that is
+    not exactly one pair is an error naming the group — the alternative is a
+    curve with a band silently missing from the middle of it.
+    """
+    pairs = []
+    for group in str(body or "").split(";"):
+        # A trailing ";" (Peace writes one) leaves an empty group, and the
+        # Hz/dB suffixes a hand-written file may carry mean nothing here.
+        tokens = [t for t in group.replace(",", " ").split()
+                  if t.lower() not in _UNITS]
+        if not tokens:
+            continue
+        if len(tokens) != 2:
+            return None, (f"expected one 'frequency gain' pair, got "
+                          f"{' '.join(tokens)!r}")
+        fc, gain = _number(tokens[0]), _number(tokens[1])
+        if fc is None or gain is None:
+            return None, (f"expected one 'frequency gain' pair, got "
+                          f"{' '.join(tokens)!r}")
+        pairs.append((fc, gain))
+    if not pairs:
+        return None, "no frequency/gain pairs"
+    return pairs, None
+
+
+# Peace's other export shape: ONE `FilterCurve:` line whose whole body is
+# `name="value"` pairs — `f0`…`fN` the frequencies, `v0`…`vN` the value at each
+# point (paired BY INDEX: there is no separate gain list), then the curve's
+# meta attributes. A real Peace export starts at 10 Hz and ends at 18.9 kHz on
+# no clean ladder, so the points are read, never assumed.
+_CURVE_RE = re.compile(r"^\s*filtercurve\s*:(.*)$", re.IGNORECASE)
+_ATTR_RE = re.compile(r'([A-Za-z_][A-Za-z0-9_]*)\s*=\s*"([^"]*)"')
+_POINT_RE = re.compile(r"^([fv])(\d+)$")
+
+# The curve's own attributes, lower-cased. Everything else an APO curve file
+# carries is reported rather than applied.
+_CURVE_META = ("filterlength", "interpolatelin", "interpolationmethod", "preamp")
+
+_MISSING_QUOTE = 'expected name="value"'
+
+
+def _parse_curve(body):
+    """One ``FilterCurve:`` body as ``(points, meta, unknown, error)``.
+
+    ``points`` is ``[(frequency_hz, gain_db), …]`` sorted by frequency, ``meta``
+    the curve's own attributes (``filterlength``, ``interpolatelin``,
+    ``interpolationmethod``, ``preamp``), ``unknown`` the attribute pairs this
+    module has no meaning for. Every failure — a value that is not a number, a
+    ``vN`` with no ``fN`` or the reverse, a token that is not a pair at all — is
+    an error naming the attribute: a curve is audio, and a silently different
+    one is worse than a refusal.
+    """
+    text = str(body or "")
+    freqs, gains = {}, {}
+    meta, unknown = {}, []
+    pos = 0
+    for m in _ATTR_RE.finditer(text):
+        stray = text[pos:m.start()].strip()
+        if stray:
+            return None, meta, unknown, f"{_MISSING_QUOTE}, got {stray!r}"
+        pos = m.end()
+        name, value = m.group(1), m.group(2)
+        key = name.lower()
+        point = _POINT_RE.match(key)
+        if point:
+            try:
+                number = float(value)
+            except ValueError:
+                return None, meta, unknown, f'{name}="{value}" is not a number'
+            (freqs if point.group(1) == "f" else gains)[int(point.group(2))] = number
+        elif key in _CURVE_META:
+            meta[key] = value
+        else:
+            unknown.append(f'{name}="{value}"')
+    stray = text[pos:].strip()
+    if stray:
+        return None, meta, unknown, f"{_MISSING_QUOTE}, got {stray!r}"
+    if not freqs:
+        return None, meta, unknown, 'no points (f0/v0 …)'
+    orphans = sorted(set(gains) - set(freqs))
+    if orphans:
+        return None, meta, unknown, (f"v{orphans[0]} has no f{orphans[0]} to pair "
+                                     "it with")
+    unpaired = sorted(set(freqs) - set(gains))
+    if unpaired:
+        return None, meta, unknown, (f"f{unpaired[0]} has no v{unpaired[0]} to pair "
+                                     "it with")
+    points = [(freqs[i], gains[i]) for i in sorted(freqs)]
+    return points, meta, unknown, None
+
+
+def _curve_band_q(freqs, i):
+    """The Q for point *i* of a curve ladder, from its own neighbours.
+
+    A ``FilterCurve`` is a sampled curve, not a band list: the spacing between
+    its points is what says how wide each band has to be for the chain to trace
+    it (a 50-point 10 Hz–19 kHz Peace curve is a ~1/4-octave ladder, where the
+    octave-wide Q 1.41 the ``GraphicEQ`` conversion uses would smear every point
+    into its neighbours). The ends use the one spacing they have.
+    """
+    lo = freqs[max(0, i - 1)]
+    hi = freqs[min(len(freqs) - 1, i + 1)]
+    if hi <= lo:
+        return _GRAPHICEQ_Q         # a one-point (or degenerate) curve
+    q = _band_to_q(math.log2(hi / lo) / 2.0)
+    return q if q else _GRAPHICEQ_Q
 
 
 def parse_apo(text, name=""):
     """An Equalizer APO / Peace profile as a structured profile.
 
     Returns ``{"name", "preamp_db", "filters": [{type, fc, gain, q, on}],
-    "unsupported": [str], "notes": [str]}``. Filters keep the FILE's order —
-    the chain that comes out has to sound like the chain the user wrote — and
-    an OFF filter stays in the list (with ``on`` False) so the UI can show
-    what was skipped.
+    "unsupported": [str], "errors": [str], "notes": [str], "empty": bool}``.
+    Filters keep the FILE's order — the chain that comes out has to sound like
+    the chain the user wrote — and an OFF filter stays in the list (with ``on``
+    False) so the UI can show what was skipped. ``Filter N: ON None`` is APO's
+    own empty slot: not a band, not a loss, skipped entirely.
 
-    ``unsupported`` names every line that was not rendered: ``Include:`` (a
-    profile that pulls in another file cannot be reproduced from one text
-    block), other APO constructs, and lines that are malformed. ``Channel:
-    all`` is the exception — it means "every channel", which is what the
-    rendered chain does, so it is not a loss.
+    ``unsupported`` names every line that was IGNORED without changing the
+    curve: ``Include:`` (a profile that pulls in another file cannot be
+    reproduced from one text block), other APO constructs, a Peace banner.
+    ``errors`` names every line that carries a band this module could not read,
+    with its line number, and the caller must REFUSE those rather than import
+    the remains — a curve missing the band that failed to parse is a different
+    curve. ``empty`` is True when the file held no filter and no preamp at all,
+    which is a profile that exports the audio unchanged, never a flat curve
+    standing in for one. ``Channel: all`` is not a loss: it means "every
+    channel", which is what the rendered chain does.
     """
     profile = {"name": str(name or ""), "preamp_db": 0.0, "filters": [],
-               "unsupported": [], "notes": []}
+               "unsupported": [], "errors": [], "notes": [], "empty": False}
     graphic_bands = 0
-    for raw in str(text or "").splitlines():
+    slope_shelves = 0
+    bw_filters = 0
+    curve_points = 0
+    curve_qs = []
+    curve_meta = {}
+    # A BOM can arrive from a FILE and from a paste through the API: Windows
+    # tools write one, and an un-stripped "\ufeffPreamp:" is a line this parser
+    # would otherwise have to call unknown — losing the preamp without saying
+    # why. Every encoding is handled here, on the text.
+    body = str(text or "").lstrip("\ufeff")
+    for lineno, raw in enumerate(body.splitlines(), 1):
         line = raw.strip()
         if not line or line.startswith("#") or line.startswith(";"):
             continue  # comments and blank lines carry nothing to render
@@ -184,33 +367,127 @@ def parse_apo(text, name=""):
             continue
         m = _PREAMP_RE.match(line)
         if m:
-            profile["preamp_db"] = float(m.group(1))
+            value = _number(m.group(1))
+            if value is None:
+                profile["errors"].append(
+                    f"line {lineno}: {line} — Preamp needs a number, got "
+                    f"{m.group(1).strip()!r}")
+            else:
+                profile["preamp_db"] = value
             continue
         m = _FILTER_RE.match(line)
         if m:
-            parsed = _parse_filter(m.group(1))
-            if parsed is None:
-                profile["unsupported"].append(line)
-            else:
+            parsed, why = _parse_filter(m.group(1))
+            if why:
+                profile["errors"].append(f"line {lineno}: {line} — {why}")
+            elif parsed != "none":
+                if parsed["type"] in ("LSC", "HSC"):
+                    slope_shelves += 1
+                if "bw" in parsed:
+                    bw_filters += 1
                 profile["filters"].append(parsed)
             continue
         m = _GRAPHIC_RE.match(line)
         if m:
-            for fc, gain in _BAND_RE.findall(m.group(1)):
-                profile["filters"].append(
-                    {"type": "PK", "fc": float(fc), "gain": float(gain),
-                     "q": _GRAPHICEQ_Q, "on": True})
-                graphic_bands += 1
+            pairs, why = _parse_graphic(m.group(1))
+            if pairs is None:
+                profile["errors"].append(f"line {lineno}: {line} — {why}")
+            else:
+                for fc, gain in pairs:
+                    profile["filters"].append(
+                        {"type": "PK", "fc": fc, "gain": gain,
+                         "q": _GRAPHICEQ_Q, "on": True})
+                    graphic_bands += 1
+            continue
+        m = _CURVE_RE.match(line)
+        if m:
+            points, meta, unknown, why = _parse_curve(m.group(1))
+            if points is None:
+                # The line is one long attribute list: the sentence names the
+                # attribute that failed instead of echoing a kilobyte of it.
+                profile["errors"].append(f"line {lineno}: FilterCurve — {why}")
+            else:
+                curve_meta.update(meta)
+                profile["unsupported"].extend(unknown)
+                freqs = [fc for fc, _ in points]
+                for i, (fc, gain) in enumerate(points):
+                    profile["filters"].append(
+                        {"type": "PK", "fc": fc, "gain": gain,
+                         "q": _curve_band_q(freqs, i), "on": True})
+                curve_points += len(points)
+                curve_qs.extend(_curve_band_q(freqs, i) for i in range(len(points)))
+                if meta.get("preamp") is not None:
+                    value = _number(meta["preamp"])
+                    if value is None:
+                        profile["errors"].append(
+                            f'line {lineno}: FilterCurve — Preamp="{meta["preamp"]}" '
+                            "is not a number")
+                    else:
+                        profile["preamp_db"] = value
             continue
         profile["unsupported"].append(line)
     if graphic_bands:
         profile["notes"].append(
             "GraphicEQ bands are rendered as peaking filters with Q 1.41 "
             "(AutoEQ's own conversion); %d band(s)" % graphic_bands)
+    if slope_shelves:
+        # APO's LSC/HSC take a slope; ffmpeg's shelf takes a Q. The slope and
+        # the Q are two spellings of the same shaped curve (APO's own shelf Q
+        # is what its slope produces), but the file's own value is not carried
+        # through, so the result says so instead of looking exact.
+        profile["notes"].append(
+            "LSC/HSC shelves are rendered as ffmpeg's LS/HS shelf with the "
+            "profile's own shelf Q; APO's slope parameter itself is not "
+            "carried over; %d filter(s)" % slope_shelves)
+    if bw_filters:
+        profile["notes"].append(
+            "BW (bandwidth in octaves) was converted to the Q ffmpeg's filters "
+            "take, with APO's own conversion; %d filter(s)" % bw_filters)
+    if curve_points:
+        qs = sorted(curve_qs)
+        profile["notes"].append(
+            "FilterCurve points are rendered as peaking filters, one per point, "
+            "with each band's Q taken from the ladder's own spacing (median "
+            "Q %.2f for this curve); the curve is exact AT the file's points "
+            "and an approximation between them; %d point(s)"
+            % (qs[len(qs) // 2], curve_points))
+        lin = str(curve_meta.get("interpolatelin", ""))
+        method = str(curve_meta.get("interpolationmethod", ""))
+        if lin == "1":
+            joins = "straight lines (InterpolateLin=1)"
+        elif method:
+            joins = ("a %s curve (InterpolateLin=%s, InterpolationMethod=%s)"
+                     % (method, lin or "0", method))
+        else:
+            joins = "a smooth curve (InterpolateLin=%s)" % (lin or "0")
+        profile["notes"].append(
+            "the file asks APO to join its points with %s, which a chain of "
+            "ffmpeg biquads cannot reproduce — those joins are approximated, "
+            "not flattened to straight lines or dropped" % joins)
+        length = str(curve_meta.get("filterlength", ""))
+        if length:
+            profile["notes"].append(
+                "APO applies this curve by convolution (%s taps, which is a "
+                "linear-phase FIR); this app renders minimum-phase peaking "
+                "bands instead, so the magnitude is close and the phase is not "
+                "the file's" % length)
     if profile["unsupported"]:
         profile["notes"].append(
             "%d line(s) could not be rendered and are listed in 'unsupported'"
             % len(profile["unsupported"]))
+    if profile["errors"]:
+        profile["notes"].append(
+            "%d line(s) carry a band that cannot be read and are listed in "
+            "'errors' — applying this profile would change the curve, so an "
+            "import of it is refused" % len(profile["errors"]))
+    if not profile["filters"] and not profile["preamp_db"]:
+        # Explicitly empty, and said out loud: "no filters" and "a flat curve"
+        # are different answers, and a user who imported the wrong file needs
+        # the first one.
+        profile["empty"] = True
+        profile["notes"].append(
+            "this profile holds no filters — the exported audio is left "
+            "unchanged")
     return profile
 
 
@@ -265,7 +542,7 @@ def to_af(profile):
 # ---------------------------------------------------------------------------
 
 _FLAT_TEXT = """
-# Flat: the explicit "no equaliser" choice. Shipped as a preset so the Export
+# Flat: the explicit "no equalizer" choice. Shipped as a preset so the Export
 # page can offer it in the same list as the real curves.
 """
 
@@ -298,7 +575,7 @@ Filter 3: ON HS Fc 6000 Hz Gain -2.0 dB Q 0.70
 """
 
 PRESETS = (
-    {"id": "flat", "label": "Flat (no equaliser)", "text": _FLAT_TEXT},
+    {"id": "flat", "label": "Flat (no equalizer)", "text": _FLAT_TEXT},
     {"id": "bass_shelf", "label": "Bass shelf (+6 dB below 105 Hz)",
      "text": _BASS_SHELF_TEXT},
     {"id": "presence", "label": "Vocal presence (+3 dB at 2.8 kHz)",
@@ -339,33 +616,31 @@ def eq_dir(music_folder=None):
     return os.path.join(app_data_dir(music_folder), EQ_DIRNAME)
 
 
-def slugify(name):
-    """The file name a profile is stored under: the user's name reduced to ONE
-    safe path segment. Letters, digits, ``-``, ``_`` and ``.`` survive; every
-    other character becomes ``_``."""
-    text = re.sub(r"[^0-9A-Za-z._ -]+", "_", str(name or "").strip())
-    text = re.sub(r"\s+", "_", text)
-    text = re.sub(r"_+", "_", text).strip("._-")
-    return text[:60]
+def decode_profile(raw):
+    """Profile text from the bytes a profile file holds.
 
-
-def _safe_id(eq_id):
-    """(*id*, None) when *eq_id* is a usable file stem, else (None, error).
-
-    The id comes from a URL and from a user-editable config value, so anything
-    that could name a file outside the eq folder is REFUSED rather than
-    sanitized: a caller that asked for "../../config" gets told no instead of
-    silently reading or deleting something in the data dir.
+    Windows tools write the encodings this has to survive: Equalizer APO and
+    Peace save UTF-8 with a BOM, and a profile that travelled through Notepad
+    or a forum paste can be UTF-16. Reading UTF-16 bytes as UTF-8 does not
+    fail — it produces a NUL-ridden first line that parses as a profile with no
+    filters at all, which is the one outcome worse than an error. So the BOM
+    decides, a clean UTF-8 read is next, and a Windows code page is the last
+    resort (it decodes anything).
     """
-    raw = str(eq_id or "").strip()
-    if not raw:
-        return None, "no profile id given"
-    if any(sep in raw for sep in ("/", "\\")) or ".." in raw or "\x00" in raw:
-        return None, f"invalid profile id: {raw!r}"
-    stem = slugify(raw)
-    if not stem:
-        return None, f"invalid profile id: {raw!r}"
-    return stem, None
+    if raw.startswith(codecs.BOM_UTF16_LE) or raw.startswith(codecs.BOM_UTF16_BE):
+        return raw.decode("utf-16")
+    if raw.startswith(codecs.BOM_UTF8):
+        return raw.decode("utf-8-sig")
+    try:
+        return raw.decode("utf-8")
+    except UnicodeDecodeError:
+        return raw.decode("cp1252", errors="replace")
+
+
+def read_profile(path):
+    """One profile file as text, decoded per its own encoding."""
+    with open(path, "rb") as f:
+        return decode_profile(f.read(MAX_PROFILE_BYTES + 1))
 
 
 def _profile_path(music_folder, stem):
@@ -380,7 +655,12 @@ def _imported_at(path):
 
 
 def list_profiles(music_folder):
-    """Every imported profile, newest first, unreadable files skipped."""
+    """Every imported profile, newest first, files that cannot be read skipped.
+
+    A file whose BAND lines cannot be read is still listed, with ``errors``
+    filled in: a profile the user imported has to be visibly unusable rather
+    than quietly vanish from the list it was imported into.
+    """
     folder = eq_dir(music_folder)
     try:
         names = sorted(os.listdir(folder))
@@ -392,8 +672,7 @@ def list_profiles(music_folder):
             continue
         path = os.path.join(folder, name)
         try:
-            with open(path, "r", encoding="utf-8", errors="replace") as f:
-                text = f.read(MAX_PROFILE_BYTES + 1)
+            text = read_profile(path)
         except OSError:
             continue
         stem = name[:-4]
@@ -407,20 +686,23 @@ def list_profiles(music_folder):
 
 
 def import_profile(music_folder, name, text):
-    """Store one pasted profile and return its row.
+    """Store one pasted or dropped profile and return its row.
 
     Re-importing the same name with the same text is a no-op (the file's
     timestamp, and so ``imported_at``, is left alone); with different text the
     stored profile is replaced, which is what re-importing after editing means.
     Raises ValueError with a message the UI can show for a name that is not a
-    plain name, text past the size cap, or a name that is a built-in preset's.
+    plain name, text past the size cap, a name that is a built-in preset's, or
+    a BAND line the parser cannot read — that last one refuses the whole file
+    and names the line, because storing the readable half would export a curve
+    the user never wrote.
     """
     raw = str(name or "").strip()
     if not raw:
         raise ValueError("a profile name is required")
     if any(sep in raw for sep in ("/", "\\")) or ".." in raw or "\x00" in raw:
         raise ValueError(f"invalid profile name: {raw!r} — a name cannot contain a path")
-    stem = slugify(raw)
+    stem = slug_name(raw)
     if not stem:
         raise ValueError(f"invalid profile name: {raw!r}")
     if stem in _PRESET_IDS:
@@ -433,13 +715,19 @@ def import_profile(music_folder, name, text):
         raise ValueError(
             "profile is %d KiB — the limit is %d KiB (that is not an Equalizer "
             "APO preset)" % (size // 1024, MAX_PROFILE_BYTES // 1024))
+    parsed = parse_apo(body, stem)
+    if parsed["errors"]:
+        more = len(parsed["errors"]) - 1
+        raise ValueError(
+            "profile not imported — " + parsed["errors"][0]
+            + (f" (and {more} more unreadable line(s))" if more else ""))
     folder = eq_dir(music_folder)
     path = _profile_path(music_folder, stem)
     try:
         os.makedirs(folder, exist_ok=True)
         if os.path.isfile(path):
-            with open(path, "r", encoding="utf-8", errors="replace") as f:
-                if f.read() == body:
+            with open(path, "rb") as f:
+                if decode_profile(f.read(MAX_PROFILE_BYTES + 1)) == body:
                     return _row(path, stem, body)
         with open(path, "w", encoding="utf-8", newline="\n") as f:
             f.write(body)
@@ -458,7 +746,7 @@ def _row(path, stem, text):
 
 def delete_profile(music_folder, eq_id):
     """Drop one imported profile. False when there is no such profile."""
-    stem, error = _safe_id(eq_id)
+    stem, error = safe_segment(eq_id, "profile id")
     if error:
         raise ValueError(error)
     path = _profile_path(music_folder, stem)
@@ -473,9 +761,11 @@ def find(music_folder, eq_id):
     """The profile *eq_id* names — a built-in preset, else an imported file —
     or None when nothing has that id.
 
-    A saved export default can outlive the profile it names (the user deleted
-    it, or the library moved), so a missing profile is a normal answer here and
-    the run reports it instead of exporting without the EQ.
+    A saved export config (server.exportconfigs) or a saved default can outlive
+    the profile it names — the user deleted or renamed it, or the library moved
+    — so a missing profile is a normal answer here and both the caller that
+    loads a config and the run itself report it instead of exporting without
+    the EQ.
     """
     raw = str(eq_id or "").strip()
     if not raw:
@@ -483,13 +773,12 @@ def find(music_folder, eq_id):
     preset = _preset(raw)
     if preset is not None:
         return preset
-    stem, error = _safe_id(raw)
+    stem, error = safe_segment(raw, "profile id")
     if error:
         return None
     path = _profile_path(music_folder, stem)
     try:
-        with open(path, "r", encoding="utf-8", errors="replace") as f:
-            text = f.read(MAX_PROFILE_BYTES + 1)
+        text = read_profile(path)
     except OSError:
         return None
     return _row(path, stem, text)
@@ -502,7 +791,10 @@ def catalog(music_folder):
         "presets": preset_rows(),
         "profiles": list_profiles(music_folder),
         "note": ("Equalizer APO / Peace profile text: Preamp, Filter lines "
-                 "(PK/LS/HS/LP/HP/BP/NO/LSC/HSC) and GraphicEQ band lists. "
-                 "Include: and any other line is reported as unsupported "
-                 "rather than applied."),
+                 "(PK/LS/HS/LP/HP/BP/NO/LSC/HSC, ON/OFF, BW instead of Q) and "
+                 "GraphicEQ band lists, in any field order, as UTF-8 (with or "
+                 "without a BOM) or UTF-16. Include: and any other line is "
+                 "reported as unsupported rather than applied; a band line that "
+                 "cannot be read is refused with its line number, never "
+                 "imported into a different curve."),
     }

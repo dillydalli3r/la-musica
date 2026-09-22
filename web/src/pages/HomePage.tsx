@@ -114,7 +114,7 @@ function ArtistShelf({ title, artists }: { title: string; artists?: HomeArtist[]
             <CoverImg
               albumPath={ar.cover_path}
               coverFile={ar.cover}
-              wrapperClass="h-20 w-20 rounded-full bg-raise border border-border overflow-hidden shrink-0"
+              wrapperClass="h-20 w-20 rounded-full bg-raise overflow-hidden shrink-0"
             />
             <div className="mt-2 text-sm font-medium truncate w-full">{ar.artist}</div>
             <div className="text-[11px] text-zinc-500 tabular-nums">

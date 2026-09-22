@@ -1472,7 +1472,7 @@ export default function AlbumPage() {
                       albumPath={data.path}
                       trackCover={tr.cover_file}
                       albumCover={data.cover_file}
-                      wrapperClass="h-8 w-8 rounded bg-raise border border-border overflow-hidden shrink-0"
+                      wrapperClass="h-8 w-8 rounded bg-raise overflow-hidden shrink-0"
                     />
                   </td>
                 )}
@@ -1700,7 +1700,7 @@ function CoverInfoModal({ albumPath, coverFile, onClose }: {
       width="max-w-sm"
     >
       <div className="flex flex-col gap-3">
-        <div className="rounded-lg overflow-hidden border border-border">
+        <div className="rounded-lg overflow-hidden">
           <CoverImg albumPath={albumPath} coverFile={coverFile} wrapperClass="aspect-square w-full bg-raise" />
         </div>
         {isLoading ? (

@@ -1,0 +1,6 @@
+﻿Filter Settings file
+
+Device: Speakers (Realtek(R) Audio)
+Channel: all
+Include: MyHeadphone.txt
+# a comment from Peace

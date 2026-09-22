@@ -188,35 +188,25 @@ export default function TagActionsMenu({
                 onClick: () => run(() => api.genresImport(paths), genresDone),
               },
               {
-                label: "Fetch advisory rating",
+                // ONE advisory entry, and it asks anyway: the sources are
+                // asked even for a file that already carries a 0/1/2, and what
+                // they state IS written — a source's answer can lower a rating
+                // (1 → 0), and a value an earlier run invented must not keep
+                // answering for a file nobody asked about (see
+                // `fetch_advisories`). A second, gentler entry would be the
+                // one that leaves such a value standing, and a user who
+                // presses THIS button is asking for the sources' answer. The
+                // label says so, which is the only guard a deliberate press
+                // needs; the fill-only pass a press must not get is the
+                // IMPORT's own automatic fetch, where nobody pressed anything.
+                label: "Fetch / refresh advisory rating",
                 icon: BadgeInfo,
                 disabled: !paths.length && !releaseMbid,
-                title: "Look the ITUNESADVISORY value up and write it — a file that already carries a value is kept, and the answer says so",
+                title: "Ask the configured advisory sources for the selection's ITUNESADVISORY and write what they state — files that already carry a value are asked too, and a source's answer can lower a rating",
                 onClick: () =>
-                  run(() => api.mbAdvisoryFetch({ paths, release_mbid: releaseMbid }), (r) =>
+                  run(() => api.mbAdvisoryFetch({ paths, release_mbid: releaseMbid, force: true }), (r) =>
                     advisoryOutcome(r)
                   ),
-              },
-              {
-                // The re-rate is its own entry, not a modifier: it asks even
-                // for files that already carry a 0/1/2 and what the sources
-                // state IS written — the only way a rating can go down — so it
-                // is confirmed before it runs.
-                label: "Re-rate advisory (ask anyway)…",
-                icon: RefreshCw,
-                disabled: !paths.length,
-                title: "Ask the advisory sources again for files that already carry a value, and write what they state — a source's answer can lower a rating",
-                onClick: () => {
-                  const n = paths.length;
-                  if (
-                    !window.confirm(
-                      `Re-rate ITUNESADVISORY for ${n} file(s) and write what the sources state?\n\n` +
-                        "This asks even for files that already carry a value, and a source's answer can lower a rating (1 → 0)."
-                    )
-                  )
-                    return;
-                  void run(() => api.mbAdvisoryFetch({ paths, force: true }), (r) => advisoryOutcome(r));
-                },
               },
               {
                 label: "Check instrumental",

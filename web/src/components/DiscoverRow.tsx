@@ -474,7 +474,7 @@ function RowCover({ item }: { item: DiscoverItem }) {
     : null;
   const candidates = [local, provider].filter((url): url is string => !!url);
   const src = candidates.find((url) => !failed.includes(url)) ?? null;
-  const box = "h-10 w-10 rounded bg-raise border border-border overflow-hidden shrink-0";
+  const box = "h-10 w-10 rounded bg-raise overflow-hidden shrink-0";
   if (!src) {
     return (
       <div
