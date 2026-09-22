@@ -1,6 +1,6 @@
 # la musica
 
-**v3.11.0** — a self-hosted app that *manages, optimizes, audits, grades and
+**v3.12.0** — a self-hosted app that *manages, optimizes, audits, grades and
 plays* your music library, from the browser, a desktop window or a phone.
 
 **la musica** (formerly Music Library Optimizer) is a FastAPI backend plus a
@@ -13,7 +13,7 @@ playlists, favourites, the beets library, the Soulseek config, measured loudness
 caches, and the runtime-installed external toolchain — lives in one hidden `.mlo`
 folder inside your music directory.
 
-Release notes for this version are in `local/release-notes-3.11.0.md` (older ones
+Release notes for this version are in `local/release-notes-3.12.0.md` (older ones
 follow `local/release-notes-<version>.md`); the grading and optimization contract
 is in [`docs/OPTIMIZATION-GRADING-SPEC.md`](docs/OPTIMIZATION-GRADING-SPEC.md).
 
