@@ -16,6 +16,14 @@ const VIZ_KEY = "mlo.np.viz";
 // was not looking at (#41). 100 % is the pane's own base size, which is what
 // it rendered before the control existed.
 const ZOOM_KEY = "mlo.lyrzoom.sidebar.v1";
+// 150 % is the new 100 % (the owner's rule): the pane's own base size is what
+// 100 % renders as, which is what 150 % used to render. The box's label is
+// unchanged and the saved number keeps its label, but the scale under it moved
+// once — so a saved 100 % comes out 1.5× larger than it used to, which is
+// exactly what was asked for. The fullscreen viewer reaches the same size with
+// no migration at all: it stores the multiplier (1.5) and only its LABEL is
+// rebased.
+const LYRIC_ZOOM_BASE = 1.5;
 
 /** A right-docked lyrics panel for the player bar's lyrics button: the
  * current track's lyrics with the same synced-line treatment as the
@@ -216,7 +224,7 @@ export default function LyricsSidebar({
         // shared scroller measures with offsetTop/offsetHeight (see
         // lib/lyrScroll), which are layout units and therefore blind to it, so
         // centering the active line stays correct at every size.
-        style={{ zoom: zoom / 100 }}
+        style={{ zoom: (zoom / 100) * LYRIC_ZOOM_BASE }}
         onWheel={(e) => {
           if (e.deltaY !== 0) takeOver();
         }}

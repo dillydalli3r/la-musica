@@ -31,6 +31,9 @@ const ORBS_KEY = "mlo.np.orbs"; // "1" = animated background
 const VIS_KEY = "mlo.np.vis"; // "1" = background pulses with the beat
 const VIZ_KEY = "mlo.np.viz"; // "1" = frequency-bar visualizer visible
 const ZOOM_KEY = "mlo.np.lyrzoom.v2"; // lyrics zoom multiplier (persisted)
+// 150 % is the new 100 %: the multiplier 1.5 (the shipped default) is what the
+// box now calls 100 %, because that is the size the pane was always read at.
+const LYRIC_ZOOM_BASE = 1.5;
 
 /** The ambience window, in dB, measured RELATIVE to this track's own rolling
  * loud reference — a fixed window cannot work across masters. On a real
@@ -1290,11 +1293,16 @@ export default function NowPlayingView(p: Props) {
                   </div>
                   <div className="flex items-center gap-2 px-2 py-1.5 text-xs text-zinc-300">
                     <span className="flex-1" title="Size of the lyrics pane — saved for every future visit">Zoom</span>
+                    {/* The stored value is a MULTIPLIER; the box speaks the new
+                        scale, where 100 % is what 150 % used to render (the
+                        owner's rule). The default 1.5 therefore SHOWS as 100 %,
+                        and nobody's saved size changes under them. */}
                     <LyricZoom
-                      pct={Math.round(lyricZoom * 100)}
+                      pct={Math.round((lyricZoom / LYRIC_ZOOM_BASE) * 100)}
                       onChange={(p) => {
-                        setLyricZoom(p / 100);
-                        persist(ZOOM_KEY, String(p / 100));
+                        const next = (p / 100) * LYRIC_ZOOM_BASE;
+                        setLyricZoom(next);
+                        persist(ZOOM_KEY, String(next));
                       }}
                     />
                   </div>
