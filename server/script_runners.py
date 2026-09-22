@@ -13,6 +13,7 @@ touching the rest of the library.
 No script ever raises out of here: a failing script comes back as
 ``{"id", "error"}`` so a chain can carry on and the import is never lost.
 """
+import contextlib
 import os
 import threading
 import traceback
@@ -332,6 +333,107 @@ def _apply_force(cfg, force, sid=None):
                 cfg[key] = bool(value)
 
 
+# --------------------------------------------------------------------------- #
+# The UI header bar: one line, one run painting it
+# --------------------------------------------------------------------------- #
+# A runner's own bar reaches the UI header through ONE process-wide hook
+# (``mlo.stats.progress_hook`` → server/main.py's relay → the WebSocket the bar
+# is drawn from), and a script REPLACES that hook while it runs so the runner's
+# own ticks are re-labelled as this run's step. Two chains used to be
+# impossible (one process-wide run lock), so a plain install/restore was
+# enough. Chains over DISJOINT albums may now overlap, and then two runs have
+# ticks in flight at once, so the installed hook is one dispatcher and the
+# thread a frame arrives on is what says which run it belongs to (every runner
+# ticks its bar from the thread that called it — the same thread that claimed
+# the bar). Only the run that has been in flight longest paints the header: the
+# bar is a single line, and two albums' numbers interleaved in it would be a
+# lie about both. Every run still writes its own in-progress row — that one is
+# keyed by job (``job_locks.publish(job=…)``) — so the run that does not own
+# the bar is still listed, with its own progress.
+_bars: dict[int, list] = {}       # chain thread id -> its emitters, innermost last
+_bars_lock = threading.Lock()
+_bar_base = None                  # the hook installed before the first claim
+
+
+def _bar_dispatch(done, total, desc):
+    """Route one runner frame to the run that is asking for it.
+
+    A frame from a thread no run is registered on (a runner that lets a pool
+    thread tick a shared bar) goes to the run in flight longest instead of
+    being dropped: the alternative freezes a bar that is still working, and the
+    row the frame also carries is keyed by job either way.
+    """
+    with _bars_lock:
+        ident = threading.get_ident()
+        stack = _bars.get(ident) or next(iter(_bars.values()), None)
+        emit = stack[-1] if stack else None
+    if emit is not None:
+        emit(done, total, desc)
+
+
+# Producers that are not a chain itself (the bulk importer's own mirror, a
+# download job's ticks) check the INSTALLED hook for this mark and stand down
+# rather than paint their numbers into a chain's bar.
+_bar_dispatch._mlo_chain = True
+
+
+def _bar_enter(emit):
+    """Claim the calling thread's bar slot, installing the dispatcher if it is
+    the first claim.
+
+    The hook the dispatcher replaces is remembered ONCE, by the first script in
+    flight, and restored by the last one out. Capturing it per script instead
+    (what the single-run swap did) is what would hand a second, overlapping
+    chain the first chain's own wrapper as its "relay": its frames would be
+    re-labelled as the other run's step, and once both were done the relay
+    stayed replaced by a wrapper whose run had finished.
+    """
+    global _bar_base
+    ident = threading.get_ident()
+    with _bars_lock:
+        if not _bars:
+            _bar_base = getattr(mlo_stats, "progress_hook", None)
+            mlo_stats.progress_hook = _bar_dispatch
+        _bars.setdefault(ident, []).append(emit)
+
+
+def _bar_leave():
+    """Give up the calling thread's bar slot; the last one out puts the relay back."""
+    global _bar_base
+    ident = threading.get_ident()
+    with _bars_lock:
+        stack = _bars.get(ident)
+        if stack:
+            stack.pop()
+            if not stack:
+                del _bars[ident]
+        if not _bars:
+            mlo_stats.progress_hook = _bar_base
+
+
+def _bar_relay(ident):
+    """The hook a frame from thread *ident* may paint the header bar with.
+
+    The run in flight longest is the one the header follows, from the first
+    frame of its first script to the last of its last, so two chains never
+    swap the line back and forth; the other runs get ``_no_bar`` (their frames
+    still reach their own in-progress row). A missing or non-callable base —
+    a suite that runs chains with no relay at all — is no bar for anyone, which
+    is also what keeps a frame from being handed back to the dispatcher that
+    called it (the recursion this used to swallow).
+    """
+    with _bars_lock:
+        owner, base = next(iter(_bars), None), _bar_base
+    if owner == ident and callable(base):
+        return base
+    return _no_bar
+
+
+def _no_bar(*_args, **_kwargs):
+    """The hook that goes nowhere: this run has no header bar to paint."""
+    return None
+
+
 def _run_with_progress(runner, cfg, label, chain=None, job=None):
     """Run *runner* with the UI's progress bar pointed at this script.
 
@@ -492,36 +594,49 @@ def run_script(sid, cfg, targets=None, force=None, skip_disabled=True, chain=Non
 
 
 class RunBusy(RuntimeError):
-    """Another run holds the library lock.
+    """Another run already holds the paths this one needs.
 
-    Scripts mutate the library in place, so two overlapping runs (a UI Run
-    All and an import chain, or two imports) must never touch the same album
-    at once: one would re-encode while the other renames or deletes. Every
-    entry point — `/api/run`, `imports.finish_album`, the bulk queue, the
-    Soulseek importer — funnels through `run_chain`, which is where the lock
-    lives.
+    Scripts mutate the library in place, so two overlapping runs over the SAME
+    album (a UI Run All and an import chain, or two imports of one release)
+    must never touch it at once: one would re-encode while the other renames
+    or deletes. Every entry point — `/api/run`, `imports.finish_album`, the
+    bulk queue, the Soulseek importer — funnels through `run_chain`, and the
+    gate there is the run's own path claim (:func:`held_paths`): the same
+    album-level claim the registry already makes against a delete, a move or a
+    tag write. Two chains over DISJOINT albums therefore run at the same time
+    — nothing in album B's scripts needs album A to be finished — while the
+    same album, and a library-wide Run All, serialize exactly as the
+    process-wide lock used to make them.
     """
 
 
-# One run at a time, process-wide.
-RUN_LOCK = threading.Lock()
-
-
 def held_paths(cfg, targets):
-    """The library paths a run is about to touch, for the lock registry.
+    """The library paths a run is about to touch: its claim, and its gate.
 
-    A scoped run holds its own targets. An unscoped one — Run All, an import
-    chain with no target — reads and rewrites whatever it finds, so it holds
-    the library root itself: that is the claim a delete, a move or a tag write
-    is refused against while the scripts are running.
+    A scoped run holds its own targets — an import holds the album it is
+    finishing, so a second chain over that album queues behind it while a
+    chain over another album does not wait at all. An unscoped one — Run All,
+    an import chain with no target — reads and rewrites whatever it finds, so
+    it holds the library root itself: that is the claim a delete, a move or a
+    tag write is refused against while the scripts are running, and it is what
+    makes a library-wide run block every scoped one.
+
+    The music folder is the fallback while the library root does not exist
+    (a fresh install, an emptied library): an unscoped run must still hold ONE
+    path, or two library-wide runs would have nothing to serialize on and
+    would both walk and rewrite the same library.
     """
     scope = targets if targets is not None else cfg.get("targets")
     paths = [os.path.normpath(str(t)) for t in (scope or []) if str(t).strip()]
     if paths:
         return paths
     folder = str(cfg.get("music_folder") or "").strip()
-    root = library_root(folder) if folder else None
-    return [root] if root and os.path.isdir(root) else []
+    if not folder:
+        return []
+    root = library_root(folder)
+    if root and os.path.isdir(root):
+        return [root]
+    return [folder] if os.path.isdir(folder) else []
 
 
 def run_label(ids):
@@ -549,19 +664,24 @@ def run_chain(cfg, ids, targets=None, force=None, progress=None, wait=False,
     learns the album is not there any more. The run works on a copy of *cfg*,
     so nothing else can tell it.
 
-    *wait* decides what happens when another chain holds the lock:
+    *wait* decides what happens when another chain holds what this one needs:
 
     * ``wait=False`` (the API's one-shot runs) raises `RunBusy` immediately —
       the caller answers 409 rather than queueing behind a long run.
-    * ``wait=True`` (imports) blocks until the lock frees, because an import
+    * ``wait=True`` (imports) blocks until the album frees, because an import
       must not silently skip its chain: the album is already on disk and the
       user asked for it to be finished. ``timeout`` (default 1 h) bounds the
       wait so a wedged run cannot hold an import forever.
 
-    The run claims the paths it works on in `server.job_locks` under the same
-    *wait* rule: a delete, a tag write or an organize landing on a folder these
-    scripts are rewriting is refused (409) instead of racing them. The claim
-    ends with the run — including when it raises or is cancelled.
+    Serialization follows the TARGETS, not the process (see :func:`held_paths`
+    and `RunBusy`): the run claims the paths it works on in
+    `server.job_locks` under the same *wait* rule, and that claim IS its gate —
+    so a chain scoped to album A never makes a chain scoped to album B wait,
+    while two chains over one album (or a library-wide Run All, which holds the
+    root) refuse or queue exactly as before. The claim also means a delete, a
+    tag write or an organize landing on a folder these scripts are rewriting is
+    refused (409) instead of racing them. The claim ends with the run —
+    including when it raises or is cancelled.
 
     A chain is also refused outright while the app is shutting down for an
     auto-update (see :mod:`server.interrupt_recovery`): every script and every
@@ -572,18 +692,24 @@ def run_chain(cfg, ids, targets=None, force=None, progress=None, wait=False,
     if interrupt_recovery.is_shutting_down():
         raise RunBusy("the app is shutting down for an update — nothing can "
                       "start now; retry when it is back up")
-    acquired = RUN_LOCK.acquire(blocking=False) if not wait else \
-        RUN_LOCK.acquire(timeout=3600 if timeout is None else timeout)
-    if not acquired:
-        raise RunBusy("a script run is already in progress")
-    try:
-        with job_locks.holding(held_paths(cfg, targets), kind="scripts",
-                               label=run_label(ids), wait=wait,
-                               timeout=timeout) as job:
-            return _run_chain_locked(cfg, ids, targets=targets, force=force,
-                                     progress=progress, final=final, job=job)
-    finally:
-        RUN_LOCK.release()
+    # The claim (and with it the gate) is taken INSIDE the stack, so the
+    # refusal is translated here — a PathLocked raised by the body would be
+    # some other job's collision, not this run's, and stays one.
+    with contextlib.ExitStack() as stack:
+        try:
+            job = stack.enter_context(
+                job_locks.holding(held_paths(cfg, targets), kind="scripts",
+                                  label=run_label(ids), wait=wait,
+                                  timeout=timeout))
+        except job_locks.PathLocked as e:
+            # The claim's own sentence — "Album is in use by Import Album
+            # (job-4) — wait for it to finish, then retry" — names what to wait
+            # for, which "a script run is already in progress" could not.
+            # RunBusy is the type every caller already answers with 409
+            # (`/api/run`) or "the chain could not start" (an import).
+            raise RunBusy(str(e)) from None
+        return _run_chain_locked(cfg, ids, targets=targets, force=force,
+                                 progress=progress, final=final, job=job)
 
 
 def _prune_empty_target_dirs(cfg):

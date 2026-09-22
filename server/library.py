@@ -399,7 +399,11 @@ def build_album(album_dir, cfg, light=False):
     # Every row carries the flag, so no reader has to treat "absent" as a case
     # of its own. A folder whose audio HAS arrived is a normal album: the
     # import that filled it cleared the framework marker on its way through.
-    res["pending"] = False
+    # A folder with NO audio is never a normal album, whatever its wish says —
+    # a wish wrongly marked "imported" (or a marker lost to an interrupted
+    # import) left a framework row rendering as a playable album with a play
+    # button over nothing, which is exactly what the owner saw on screen.
+    res["pending"] = not res.get("tracks")
     res["artwork"] = _album_artwork(album_dir, light=light)
     tc = res.get("total_checks", 0)
     res["grade_pct"] = round(100.0 * res.get("pass_count", 0) / tc, 1) if tc else None

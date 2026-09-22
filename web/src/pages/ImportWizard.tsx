@@ -24,7 +24,7 @@ import type {
   ImportBulkJob, ImportPrompt, ImportScriptsPreview, LyricsAutoResult, MBRelease, MatchSuggestion,
   ScriptRunResult, Track,
 } from "../types";
-import { DEFAULT_RUN_ALL, SCRIPT_LABEL, isScriptId } from "../lib/scripts";
+import { DEFAULT_RUN_ALL, SCRIPT_LABEL } from "../lib/scripts";
 import { fmtCounts, fmtSteps } from "../lib/fmt";
 import { GENRE_COUNT_MAX, GENRE_FAMILIES, canonicalGenre, familyOf, splitGenres } from "../lib/genres";
 
@@ -2502,32 +2502,35 @@ export default function ImportWizard() {
     }
   };
 
-  // The Done step's script list comes from lib/scripts.ts — the single source
-  // of truth every other script menu in the app already uses. This was an
-  // 8-entry list hardcoded here, and it silently drifted: AccurateRip, Format
-  // all, Remux videos, Key & BPM, Fetch lyrics and Beets were all missing.
-  // The default ticks were a hand-kept five of their own ([1, 2, 5, 7, 4]),
-  // which is neither the set nor the ORDER any other Run All surface uses —
-  // Done then ran Grade (4) before the scripts that write the tags it grades.
-  // They are now the app's own run order: run_all_order when the user set one,
-  // DEFAULT_RUN_ALL otherwise — the same list, in the same order, the
-  // Optimization page and the library's Run All run.
-  const postImportOrder = Array.isArray(cfg?.run_all_order) && (cfg.run_all_order as number[]).length
-    ? (cfg.run_all_order as number[]).filter(isScriptId)
-    : DEFAULT_RUN_ALL;
-  // The boxes are laid out in that order, and a script the user's order does
-  // not name still gets its box (at its factory position) instead of dropping
-  // off the list — the same completion the Settings page's Run All grid makes.
+  // The Finish step's script list IS the import chain, taken from the server
+  // that owns it: GET /api/import/scripts/preview answers
+  // server/imports.chain_for — `import_scripts` when the user set one,
+  // DEFAULT_CHAIN otherwise, both minus the scripts a family kept for a
+  // decision the user still has to make. This used to be cfg.run_all_order,
+  // which is the LIBRARY-WIDE Run All order the Optimization page runs: the
+  // scripts this step ran on the album just imported were a different, wider
+  // list than every other import path (the bulk queue, the Soulseek import,
+  // and the "Run the import chain" button beside it), so an album finished
+  // here came out of the wizard carrying scripts a plain import would not have
+  // run — and missing none of its own, because Run All is not what an import
+  // means. An empty chain is a real answer (`import_auto_scripts` off, or
+  // every id kept by hand): nothing runs, exactly as an import runs nothing.
+  const chainOrder = Array.isArray(cfg?.run_all_order) && (cfg.run_all_order as number[]).length ? (cfg.run_all_order as number[]) : DEFAULT_RUN_ALL;
+  // The boxes are laid out in the chain's own order, and a script the chain
+  // does not name still gets its box (in the factory Run All order) instead of
+  // dropping off the list: the ticked boxes are the user's OWN override here —
+  // "run these on Finish" — so a script the configured chain leaves out has to
+  // stay reachable from this step.
   const POST_IMPORT_SCRIPTS = [
-    ...postImportOrder,
-    ...DEFAULT_RUN_ALL.filter((id) => !postImportOrder.includes(id)),
+    ...chainOrder,
+    ...DEFAULT_RUN_ALL.filter((id) => !chainOrder.includes(id)),
   ].map((id) => ({ id, label: SCRIPT_LABEL[id] ?? `#${id}` }));
-  // Null = the boxes have not been touched, so they follow the configured
-  // order — which the config answers only after the first render.
+  // Null = the boxes have not been touched, so they ARE the chain — which the
+  // server answers only after the first render.
   const [runAfterImport, setRunAfterImport] = useState<number[] | null>(null);
-  const runAfterImportIds = runAfterImport ?? postImportOrder;
+  const runAfterImportIds = runAfterImport ?? chainOrder;
   const [scriptsRunning, setScriptsRunning] = useState(false);
-  const [runningAll, setRunningAll] = useState(false);
+  const [runningTicked, setRunningTicked] = useState(false);
 // Last action's outcome, shown in the step: a toast is gone by the time you
 // look back at a chain that took a minute to run.
 const [finishMsg, setFinishMsg] = useState<string | null>(null);
@@ -2547,39 +2550,48 @@ const rowsFromResults = (results: ScriptRunResult[]): RunRow[] =>
     note: r.reason,
   }));
 
-/** The user's own Run All — config.run_all_order, the same order the
- *  Optimization page runs — aimed at this wizard's album(s) only. */
-const runAllHere = async () => {
+/** Run the TICKED scripts right now, without leaving the wizard — the very
+ *  list Finish would run (the import chain until a box is changed), through
+ *  /api/run so a chosen subset can be run on its own. This is not Run All:
+ *  Run All is the library-wide order and stays on the Optimization page and in
+ *  the library's own menu. */
+const runTickedHere = async () => {
   const targets = albumTargets();
   if (!targets.length) {
     toast("Nothing imported yet");
     return;
   }
-  setRunningAll(true);
-  setFinishMsg("Running all scripts…");
+  // The boxes are the whole input: an empty chain (import_auto_scripts off)
+  // with nothing ticked would otherwise send a run of no scripts at all.
+  if (!runAfterImportIds.length) {
+    toast("Tick a script first");
+    return;
+  }
+  setRunningTicked(true);
+  setFinishMsg("Running the ticked scripts…");
   setRunRows(null);
   try {
-    // The boxes' own order — the app's Run All order, aimed at this wizard's
-    // album(s) only.
-    const order = postImportOrder;
-    setAct({ label: `Run all scripts — ${order.length} script(s) on ${targets.length} album(s)` });
-    const res = await api.run(order, targets);
+    // The boxes' own order, which is the import chain until the user changes
+    // them — aimed at this wizard's album(s) only. Sent as `runAfterImportIds`
+    // itself: the same expression Finish sends, so the two can never diverge.
+    setAct({ label: `Run scripts — ${runAfterImportIds.length} script(s) on ${targets.length} album(s)` });
+    const res = await api.run(runAfterImportIds, targets);
     const rows = rowsFromResults(res.results ?? []);
     setRunRows(rows);
     const failed = rows.filter((r) => !r.ok && !r.skipped);
     if (failed.length) toast.error(`${failed.length} script(s) failed — see the step`);
-    else toast.success("Run All finished");
+    else toast.success(`${runAfterImportIds.length} script(s) finished`);
     setFinishMsg(
       failed.length
-        ? `Run all: ${failed.length} of ${order.length} script(s) failed — ${failed[0].error}`
-        : `Run all: ${order.length} script(s) finished on ${targets.length} album${targets.length > 1 ? "s" : ""}`
+        ? `Scripts: ${failed.length} of ${runAfterImportIds.length} failed — ${failed[0].error}`
+        : `Scripts: ${runAfterImportIds.length} finished on ${targets.length} album${targets.length > 1 ? "s" : ""}`
     );
   } catch (e) {
-    setFinishMsg(`Run all failed — ${String(e)}`);
+    setFinishMsg(`Scripts failed — ${String(e)}`);
     toast.error(String(e));
   } finally {
     setAct(null);
-    setRunningAll(false);
+    setRunningTicked(false);
     qc.invalidateQueries({ queryKey: ["library"] });
     qc.invalidateQueries({ queryKey: ["album"] });
     qc.invalidateQueries({ queryKey: ["coverInfo", albumPath] });
@@ -2669,7 +2681,10 @@ const runAllScripts = async () => {
 const finish = async () => {
   try {
     // Same targets as the chain: an album opened via ?album= is just as real
-    // an import, it simply has nothing "uploaded".
+    // an import, it simply has nothing "uploaded". The ids are the import
+    // chain (the ticked boxes, which ARE the chain until changed), so Finish
+    // runs what a bulk or Soulseek import would have run on this album —
+    // nothing wider, and nothing narrower.
     const targets = albumTargets();
     if (runAfterImportIds.length && targets.length) {
       await api.run(runAfterImportIds, targets);
@@ -4477,7 +4492,7 @@ const finish = async () => {
                     checked={runAfterImportIds.includes(s.id)}
                     onChange={(e) =>
                       setRunAfterImport((ids) => {
-                        const current = ids ?? postImportOrder;
+                        const current = ids ?? chainOrder;
                         if (!e.target.checked) return current.filter((i) => i !== s.id);
                         // Back to its own place in the order shown, not the end
                         // of the list — the same rule Settings and the setup
@@ -4494,41 +4509,42 @@ const finish = async () => {
               ))}
             </div>
             <div className="text-[10px] text-zinc-600 mt-2">
-              Ticked by default in your Run All order (Settings → Script chain) — the same scripts, in the same
-              order, the Optimization page and the library's Run All run. Progress shows at the top of the window.
-              Scripts can also be run individually anytime from the album page.
+              Ticked by default: the import chain (Settings → Import) — the same scripts, in the same order, a bulk
+              or Soulseek import runs. Untick one to leave it out of this album's Finish, or tick one the chain does
+              not run. Progress shows at the top of the window. Scripts can also be run individually anytime from the
+              album page.
             </div>
             <div className="flex items-center gap-2 mt-3 flex-wrap">
               <button
                 className="btn-primary !py-1.5 text-xs tap"
-                onClick={runAllHere}
-                disabled={runningAll || scriptsRunning || (!albumPath && !uploaded.length)}
-                title="Run the scripts in the order set in Settings → Optimization, on this album only"
+                onClick={runTickedHere}
+                disabled={runningTicked || scriptsRunning || (!albumPath && !uploaded.length)}
+                title="Run exactly the ticked scripts above — the import chain until you change them — on this album, now"
               >
-                <Wand2 className={`h-3.5 w-3.5 ${runningAll ? "animate-spin" : ""}`} />
-                {runningAll ? "Running…" : "Run all scripts"}
+                <Wand2 className={`h-3.5 w-3.5 ${runningTicked ? "animate-spin" : ""}`} />
+                {runningTicked ? "Running…" : "Run ticked scripts"}
               </button>
               <button
                 className="btn-ghost !py-1.5 text-xs tap"
                 onClick={runAllScripts}
-                disabled={scriptsRunning || runningAll || (!albumPath && !uploaded.length)}
+                disabled={scriptsRunning || runningTicked || (!albumPath && !uploaded.length)}
                 title="Run the configured import chain — the same scripts a bulk or Soulseek import runs"
               >
                 <Wand2 className={`h-3.5 w-3.5 ${scriptsRunning ? "animate-spin" : ""}`} />
                 {scriptsRunning ? "Running…" : "Run the import chain"}
               </button>
               <span className="text-[10px] text-zinc-500">
-                Run all follows your Run All order; the chain runs the import chain in its configured order. Tick boxes
-                above to run just those on Done.
+                Finish runs the ticked scripts; the second button re-runs the import chain itself. Run All over the
+                library is not here — it lives on the Optimization page and in the library's own menu.
               </span>
             </div>
             {/* The bar over the chain, plus one row per chain id: a script
                 error is text in the step, not a toast that has already gone. */}
-            {(runningAll || scriptsRunning) && (
+            {(runningTicked || scriptsRunning) && (
               <div className="mt-2">
                 <ActionBar
                   active
-                  label={act?.label ?? (runningAll ? "Running all scripts…" : "Running the import chain…")}
+                  label={act?.label ?? (runningTicked ? "Running the ticked scripts…" : "Running the import chain…")}
                   done={progress?.done}
                   total={progress?.total}
                   steps={progress?.steps}

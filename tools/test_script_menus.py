@@ -111,7 +111,13 @@ RUN_ALL_SURFACES = {
     "mlo/cli.py": "run_all_order",
     "server/imports.py": "DEFAULT_RUN_ALL_ORDER",
     "web/src/pages/CheckStackPage.tsx": "run_all_order",
-    "web/src/pages/ImportWizard.tsx": "run_all_order",
+    # The wizard's Finish step runs the IMPORT CHAIN, not the library Run All
+    # order: the ids come from the chain preview (`imports.chain_for`, i.e.
+    # `import_scripts` or DEFAULT_CHAIN), the same list a bulk or Soulseek
+    # import runs. `check_wizard_finish_list` below holds that, and
+    # tools/check_import_minimum.mjs renders the step and reads the ticked
+    # boxes.
+    "web/src/pages/ImportWizard.tsx": "importScriptsPreview",
     "web/src/pages/LibraryPage.tsx": "run_all_order",
     "web/src/pages/OptimizationPage.tsx": "run_all_order",
     "web/src/pages/SettingsPage.tsx": "run_all_order",
@@ -206,6 +212,32 @@ def check_script_surfaces(check):
                            "web/src/api.ts"})         # the transport, not a menu
     check("every web surface that runs scripts is declared above", not undeclared,
           str(undeclared))
+
+
+def check_wizard_finish_list(check):
+    """The wizard's Finish list IS the import chain, not the library Run All.
+
+    The step used to read `cfg.run_all_order` — the order the Optimization page
+    and the library's Run All run — so the album being finished got a wider,
+    differently ordered list than every other import path (the bulk queue, the
+    Soulseek import, and the wizard's own "Run the import chain" button, all of
+    them `imports.chain_for`). It now takes its ids from the chain preview, so
+    `import_scripts` — or DEFAULT_CHAIN — decides what Finish runs; an empty
+    chain (`import_auto_scripts` off) runs nothing, exactly as an import does.
+
+    The rendered half of this is tools/check_import_minimum.mjs, which renders
+    this step against a previewed chain and reads the ticked boxes; this is the
+    half that holds the SOURCE to it."""
+    src = without_comments("web/src/pages/ImportWizard.tsx")
+    check("the wizard's Finish list comes from the import chain preview",
+          "importScriptsPreview" in src)
+    check("the wizard's Finish list is no longer the Run All order",
+          "run_all_order" not in src)
+    # ONE list, two senders: Finish itself and the button beside it both hand
+    # the runner `runAfterImportIds`, so they cannot drift apart again.
+    senders = re.findall(r"api\.run\(([^,]*),", src)
+    check("Finish and its button send the same list through /api/run",
+          senders == ["runAfterImportIds", "runAfterImportIds"], str(senders))
 
 
 def readme_scripts():
@@ -427,6 +459,9 @@ def main():
 
     print("script surfaces")
     check_script_surfaces(check)
+
+    print("wizard finish list")
+    check_wizard_finish_list(check)
 
     print("terminal runners")
     check_cli_runners(check)

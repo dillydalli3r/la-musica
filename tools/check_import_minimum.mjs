@@ -15,7 +15,10 @@
  *     away;
  *   * the ordinary wizard (no `?missing=`) renders the same step in full — no
  *     disclosure at all, which is the no-regression half;
- *   * a step with nothing missing says so instead of showing a form.
+ *   * a step with nothing missing says so instead of showing a form;
+ *   * the Finish step's script boxes ARE the import chain the server previews
+ *     (`GET /api/import/scripts/preview`): ticked on the chain's own ids in the
+ *     chain's own order, never on the library-wide Run All order.
  *
  * The second half loads the rendered markup in a real browser and clicks the
  * affordance: the collapsed blocks are invisible until then, visible after, and
@@ -109,12 +112,15 @@ const flatten = (html) => html.replace(/<!-- -->/g, "")
   .replace(/&lt;/g, "<").replace(/&gt;/g, ">")
   .replace(/\s+/g, " ");
 
-/** The wizard at one URL, with the library and the config it reads. */
-async function render(url, config = CONFIG) {
+/** The wizard at one URL, with the library and the config it reads. `extra`
+ *  seeds any further query the step under test reads by key (the Finish step
+ *  reads the import chain preview). */
+async function render(url, config = CONFIG, extra = {}) {
   const page = await server.ssrLoadModule("/src/pages/ImportWizard.tsx");
   const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } });
   qc.setQueryData(["config"], config);
   qc.setQueryData(["library"], LIBRARY);
+  for (const [key, data] of Object.entries(extra)) qc.setQueryData([key], data);
   const html = renderToString(
     React.createElement(QueryClientProvider, { client: qc },
       React.createElement(MemoryRouter, { initialEntries: [url] },
@@ -225,7 +231,42 @@ lacks(off.html, ["Save advisory", "Auto-import advisory for all tracks",
       "manual importing off offers no step to run");
 
 // --------------------------------------------------------------------------- #
-// 4. the affordance, clicked — and the order the user reads
+// 4. the Finish step runs the IMPORT CHAIN — never the library's Run All order
+// --------------------------------------------------------------------------- #
+// A CONFIGURED chain (import_scripts = the three ids below), which shares
+// neither its set nor its order with the 21-id Run All order: a page that
+// still read `run_all_order` cannot pass this by accident.
+const CHAIN = [14, 3, 4];
+const PREVIEW = { chain: CHAIN, count: CHAIN.length,
+                  labels: { 14: "Beets tagging", 3: "Optimize FLACs", 4: "Grade" } };
+const finish = await render(`/import?album=${encodeURIComponent(ALBUM)}&step=Finish`,
+                            CONFIG, { importScripts: PREVIEW });
+
+/** The Finish step's script grid, read off the rendered markup: every box's
+ *  own label and whether it is ticked, in the order the page lays them out. */
+const boxes = (html) => [...html.matchAll(/<input type="checkbox"([^>]*)>([^<]*)/g)]
+  .map(([, attrs, text]) => ({ checked: attrs.includes("checked"), label: text.trim() }));
+
+const grid = boxes(finish.html);
+const ticked = grid.filter((b) => b.checked).map((b) => b.label);
+const chainly = "Beets tagging → Optimize FLACs → Grade";
+check("the Finish step renders a box per script", grid.length === 21, `${grid.length} boxes`);
+check("the boxes are ticked on the import chain, and only on it",
+      ticked.join(" → ") === chainly, ticked.join(" → "));
+check("the chain's ids head the grid, in the chain's own order",
+      grid.slice(0, 3).map((b) => b.label).join(" → ") === chainly,
+      grid.slice(0, 3).map((b) => b.label).join(" → "));
+// A script the configured chain leaves out keeps its box — unticked, so it is
+// run only if the user asks for it — and the box it keeps is not the box the
+// Run All order would have put there.
+check("a script the chain does not name keeps its box, unticked",
+      grid.some((b) => b.label === "Remux videos (MKV)" && !b.checked));
+lacks(finish.open, ["Run all scripts"], "the Finish step offers no Run All of its own");
+has(finish.open, ["Run ticked scripts", "Run the import chain"],
+    "the Finish step runs the ticked boxes or the chain itself");
+
+// --------------------------------------------------------------------------- #
+// 5. the affordance, clicked — and the order the user reads
 // --------------------------------------------------------------------------- #
 let chromium;
 try {
@@ -284,5 +325,6 @@ if (failures.length) {
   process.exit(1);
 }
 console.log(`ok  the wizard's minimum entry mode shows the missing family's controls, ` +
-  `collapses the rest behind one affordance that reveals it, and leaves the ordinary ` +
-  `wizard untouched (${checks} checks)`);
+  `collapses the rest behind one affordance that reveals it, leaves the ordinary ` +
+  `wizard untouched, and runs the import chain — not the Run All order — from ` +
+  `its Finish step (${checks} checks)`);
