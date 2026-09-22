@@ -25,6 +25,11 @@ type DepTool = {
   /** The sentence explaining that, shown on the row. */
   install_note?: string | null;
   install_kind?: "deps" | "system" | "unsupported";
+  /** True when the copy this row describes was found in the app's PRE-MOVE
+   *  tools folder (<app folder>/.dependencies), which is still read so an
+   *  install made before the move keeps working. Nothing installs there any
+   *  more: a reinstall or update lands under the music folder. */
+  legacy_root?: boolean;
   /** What this row's ACTION column offers, decided by the backend so the page
    *  never has to work it out from `state` + `install_kind` itself: `install`
    *  and `update` are downloads (missing / behind upstream), `upgrade` means
@@ -37,8 +42,8 @@ type DepTool = {
 
 /** Sidebar "Dependencies" — the external binaries the scripts shell out to
  * (ffmpeg, yt-dlp, beets…). Mirrors the setup wizard's tool check, but always
- * reachable: inspect versions, pin installs into the app's .dependencies
- * folder, and pull updates in one click. */
+ * reachable: inspect versions, install into the music folder's .mlo/tools, and
+ * pull updates in one click. */
 export default function DependenciesPage() {
   const [busy, setBusy] = useState(false);
   // The row whose own Install/Update press is in flight. The page-level button
@@ -182,7 +187,7 @@ export default function DependenciesPage() {
         icon={Wrench}
         title="Dependencies"
         sticky
-        subtitle="External tools the scripts rely on. Missing ones are downloaded into the app's dependencies folder — nothing is installed system-wide."
+        subtitle="External tools the scripts rely on. Missing ones are downloaded into the music folder's .mlo/tools — nothing is installed system-wide."
         actions={
           <>
             <button className="btn-ghost !py-1 text-xs tap" onClick={refreshNow} disabled={busy || isLoading}>
@@ -361,7 +366,10 @@ export default function DependenciesPage() {
                       ? <span className="text-zinc-600 italic">Checking…</span>
                       : <span className="text-zinc-600 italic">Unknown</span>}
                 </td>
-                <td className="td text-[11px] text-zinc-600 font-mono truncate" title={t.path ?? ""}>
+                <td className="td text-[11px] text-zinc-600 font-mono truncate"
+                    title={t.legacy_root
+                      ? `${t.path ?? ""} — in the app's old tools folder; a reinstall or update lands under the music folder`
+                      : (t.path ?? "")}>
                   {t.path ? shortPath(t.path) : "—"}
                 </td>
                 {/* One row's own action, from the backend's `action` rather
@@ -371,7 +379,15 @@ export default function DependenciesPage() {
                     manager needs (this app never runs one), and `none` means
                     the row has nothing to do here — its chip and note say why.
                     The row's own note is the hover text, so a button can never
-                    promise more than the row it belongs to. */}
+                    promise more than the row it belongs to.
+
+                    `upgrade` is the ONLY case with a command to copy: it is
+                    the backend's word for "the OS package manager owns this
+                    one", so a row this app can download — every Linux row now,
+                    libjpeg-turbo and libjxl included — never offers a command
+                    instead of a button. A row with no install path AND no
+                    command (`unsupported`) shows nothing here; its chip and
+                    note are the whole answer. */}
                 <td className="td">
                   {t.action === "install" || t.action === "update" ? (
                     <button
@@ -390,7 +406,7 @@ export default function DependenciesPage() {
                       ) : null}
                       {t.action === "update" ? "Update" : "Install"}
                     </button>
-                  ) : t.upgrade_command ? (
+                  ) : t.action === "upgrade" && t.upgrade_command ? (
                     <button
                       className="btn-ghost !py-0.5 text-[11px] tap"
                       onClick={() => copyCommand(t.upgrade_command!)}
@@ -408,8 +424,9 @@ export default function DependenciesPage() {
       )}
 
       <div className="text-[10px] text-zinc-600">
-        Install downloads from the tool's GitHub releases into the dependencies folder; PATH-installed tools
-        (scoop etc.) are shown as ready. An INSTALLED tool takes the newest release{" "}
+        Install downloads from the tool's GitHub releases into the music folder's .mlo/tools; PATH-installed tools
+        (scoop etc.) are shown as ready. Tools installed before that move are still found in the app's old
+        .dependencies folder — the row's own note says so, and a reinstall puts them under the music folder. An INSTALLED tool takes the newest release{" "}
         <span className="text-zinc-500">Available</span> names — that is what the Update chip and its button
         offer — and a row already at that version is a no-op (nothing is downloaded). Only a FIRST install
         takes the reviewed pinned version in <span className="text-zinc-500">Latest</span>. A row the OS package

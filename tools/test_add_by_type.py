@@ -273,6 +273,42 @@ ok(not release_choice.type_matches("Album", ["Compilation"], ["album"]),
    "and a secondary type still decides the match")
 ok(not release_choice.type_matches("Album", [], ["album + compilation"]),
    "while a combined spelling is the group's WHOLE type, not its parts")
+# The one normalizer keeps a combined selection whole — an add's row and a
+# watch's stored selection alike.
+eq(release_choice.type_names(["Album + Compilation", "album", "album+compilation"]),
+   ["album + compilation", "album"],
+   "type_names keeps a combined SELECTION whole (lowercased, de-duplicated) in ask order")
+eq(release_choice.type_names(["Album; Live"]), ["album + live"],
+   "and reads MusicBrainz's own '; '-joined spelling as the same one selection")
+
+# --------------------------------------------------------------------------- #
+# 1b. a row's own list is expanded WHOLE by the background prepare
+# --------------------------------------------------------------------------- #
+print("\nthe background prepare expands the row it named")
+# The per-call bound is for a call that has to ANSWER (the auto-import route's
+# quick attempt, whose remainder a job redoes). The artist page's add works
+# OFF the request — the albums appear one at a time — so a bound there
+# truncated the row the button named ("Album + Compilation · 106" prepared 50
+# and called the other 56 "per-call limit reached — call again"), which is the
+# button failing while the endpoint answered 200.
+many = [{"id": rg_id(i), "title": f"Group {i}", "primary_type": "Album",
+         "secondary_types": [], "first_release_date": "2001-01-01"}
+        for i in range(60)]
+_real_browse, _real_group = intg.artist_browse, intg.group_targets
+intg.artist_browse = lambda *a, **kw: {"release_groups": many, "total": len(many)}
+intg.group_targets = lambda gid, mode, **kw: (
+    [{"mbid": rel_id(0), "title": "A Group"}], None)
+try:
+    capped, skipped_rows = intg.auto_import_targets(ARTIST, "artist", "best")
+    eq(len(capped), intg.BULK_MAX_GROUPS, "a bounded call still stops at the limit")
+    eq(sum("per-call limit" in (r["reason"] or "") for r in skipped_rows), 10,
+       "and reports the rest, never dropping them")
+    whole, nothing_skipped = intg.auto_import_targets(ARTIST, "artist", "best",
+                                                      limit=None)
+    eq(len(whole), len(many), "the unbounded call expands every group of the row")
+    eq(nothing_skipped, [], "with nothing left over to call again for")
+finally:
+    intg.artist_browse, intg.group_targets = _real_browse, _real_group
 
 # --------------------------------------------------------------------------- #
 # 2. "Add to library" records; "Download all" also starts the search now
@@ -342,13 +378,26 @@ eq(sorted(r["mbid"] for r in body["skipped"]),
    "and reports the groups the type filter left out")
 ok(all("type not requested" in r["reason"] for r in body["skipped"]),
    "each with the type it actually is", body["skipped"][:2])
-eq(started[-1]["types"], ["album", "compilation"],
-   "the background job got the normalized selection")
+eq(started[-1]["types"], ["album", "album + compilation"],
+   "the background job got the rows' selections, the compound one kept WHOLE")
 eq(started[-1]["download"], False, "and the add's own download flag")
 ok("Album + Compilation" in body["note"],
    "the note names the type it is preparing", body["note"])
 ok(len(mb_calls) > before,
    "which took ONE MusicBrainz browse (the one the page has already made)")
+
+started.clear()
+status, body = add(mbid=ARTIST, kind="artist", types=["Album + Compilation"])
+eq(status, 200, "the page's own combined spelling answers 200")
+eq(body["queued"], 1, "and counts exactly the groups of that WHOLE type")
+eq(sorted(r["mbid"] for r in body["skipped"]),
+   sorted([rg_id(0), rg_id(2), rg_id(3), rg_id(4)]),
+   "the plain album is skipped as the Album it is — the flattened reading "
+   "queued it beside the compilation")
+eq([s["reason"] for s in body["skipped"] if s["mbid"] == rg_id(0)],
+   ["release-group type not requested (Album)"], "and names the type it is")
+eq(started[-1]["types"], ["album + compilation"],
+   "while the background job prepares that one selection, not its two names")
 
 started.clear()
 status, body = add(mbid=ARTIST, kind="artist", types=["broadcast"])

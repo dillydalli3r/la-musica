@@ -153,17 +153,19 @@ ok(tr.get("checksum_status") == "NONE" and "LOG_CHECKSUM" not in tr.get("issues"
    f"…so the disc does not fail grading on it ({tr.get('checksum_status')} / "
    f"{tr.get('issues')})")
 
-# A MODERN log whose checksum line is gone is the opposite case: the header
-# says a checksum exists, so its absence is the edit this check exists to
-# catch and it must keep failing.
+# A MODERN log whose checksum line is gone is still read as 'missing' — the
+# reader names the case — but a log checksum is never REQUIRED (spec R27), so
+# its absence is not evidence against the rip and grading does not charge it.
+# Only a checksum the log CARRIES, and that does not verify, fails the disc.
 write_log_header("Exact Audio Copy V1.6 from 23. October 2020")
 state, detail = discs_mod.check_log_checksum(os.path.join(ALBUM, "CD-1.log"))
 ok(state == "missing",
-   f"an EAC 1.6 log with no checksum line is 'missing' ({state}: {detail})")
+   f"an EAC 1.6 log with no checksum line still reads 'missing' ({state}: {detail})")
 res = _grade_album(ALBUM, "EMBEDDED", _cfg(grade_check_log_checksum=True))
 tr = res["tracks"][0]
-ok(tr.get("checksum_status") == "FAKE" and "LOG_CHECKSUM" in tr.get("issues", []),
-   f"…and still fails grading ({tr.get('checksum_status')} / {tr.get('issues')})")
+ok(tr.get("checksum_status") == "NONE" and "LOG_CHECKSUM" not in tr.get("issues", []),
+   f"…but it is not required, so grading does not charge it "
+   f"({tr.get('checksum_status')} / {tr.get('issues')})")
 
 print("== a valid EAC log checksum outranks the stored verdict ==")
 import mlo.discs as _dm  # noqa: E402
@@ -188,9 +190,9 @@ try:
     # fix, and an album cannot be a pass beside a problem it lists (the case
     # below, where every leg is established, is the pass).
     ok(res["pass_count"] == res["total_checks"] - 1
-       and any("'accuraterip' leg" in i for i in res["issues"]),
+       and any("'accuraterip' evidence" in i for i in res["issues"]),
        f"a rip verified by its log is REAL, and the album is one check short "
-       f"while the AccurateRip leg is unestablished "
+       f"while the AccurateRip evidence is unestablished "
        f"({res['pass_count']}/{res['total_checks']}, {res['issues']})")
 finally:
     _dm.check_log_checksum = _real_check
@@ -203,9 +205,11 @@ tr = res["tracks"][0]
 ok(tr.get("accuraterip_status") == "REAL",
    f"the .accurip verdict is REAL ({tr.get('accuraterip_status')})")
 ok(res["pass_count"] == res["total_checks"] - 1
-   and any("'checksums' leg" in i for i in res["issues"]),
+   and any("'log-score' evidence" in i for i in res["issues"])
+   and not any("'checksums' evidence" in i for i in res["issues"]),
    f"an accurately-ripped disc reads REAL, and the album is one check short "
-   f"while the rip log — the checksums leg — is gone "
+   f"while the score leg has no LOG_GRADE — the .log's absence is NOT charged "
+   f"to the checksums evidence (R27) "
    f"({res['pass_count']}/{res['total_checks']}, {res['issues']})")
 
 print("== every leg established: the album passes ==")
@@ -320,20 +324,31 @@ else:
         return (str(tag[0]).strip().upper() if tag else ""), lines
 
     write_log(f"{real_crc:0>8}".upper())
-    # A log that cannot be trusted about ITSELF — a modern EAC log whose
-    # checksum line is gone, or one whose SHA256 does not verify — cannot be
-    # trusted about the CRCs it prints, so this leg fails even though the
-    # printed CRC matches the audio. It used to be exempted on the spot by
-    # that very match, which is how a doctored log still produced AUDIT=REAL.
-    for state in ("missing", "invalid"):
-        _dm.check_log_checksum = lambda _p, s=state: (s, f"stub {s}")
-        try:
-            verdict, _lines = audit_once()
-        finally:
-            _dm.check_log_checksum = _real_check
-        ok(verdict == "FAKE",
-           f"a log whose SHA256 is {state} fails the checksums leg even on "
-           f"matching CRCs ({verdict!r})")
+    # A log that contradicts itself about its own bytes — a checksum that does
+    # not verify — cannot be trusted about the CRCs it prints, so this leg
+    # fails even though the printed CRC matches the audio. It used to be
+    # exempted on the spot by that very match, which is how a doctored log
+    # still produced AUDIT=REAL.
+    _dm.check_log_checksum = lambda _p: ("invalid", "stub invalid")
+    try:
+        verdict, _lines = audit_once()
+    finally:
+        _dm.check_log_checksum = _real_check
+    ok(verdict == "FAKE",
+       f"a log whose SHA256 does not verify fails the checksums leg even on "
+       f"matching CRCs ({verdict!r})")
+
+    # …and an ABSENT checksum is the opposite case (R27): a log that carries
+    # none claims nothing, so it is not required and the disc is decided by
+    # its CRCs. The run still names the case in its log.
+    _dm.check_log_checksum = lambda _p: ("missing", "stub missing")
+    try:
+        verdict, lines = audit_once()
+    finally:
+        _dm.check_log_checksum = _real_check
+    ok(verdict == "REAL",
+       f"a log that carries no checksum is judged on its matching CRCs "
+       f"({verdict!r}, {[l for l in lines if 'not required' in l]})")
 
     # …and the pre-1.0-EAC exemption still holds, with the REAL reader (no
     # stub): EAC only began writing the log checksum in 1.0, so a 0.99-era log
@@ -430,9 +445,9 @@ else:
         ok(verdict == "",
            f"a CD whose AccurateRip leg cannot be evaluated keeps NO verdict "
            f"({verdict!r})")
-        ok(any("missing leg 'accuraterip'" in l for l in lines),
+        ok(any("missing 'accuraterip' evidence" in l for l in lines),
            f"…and the run names the leg that is missing "
-           f"({[l for l in lines if 'missing leg' in l]})")
+           f"({[l for l in lines if 'missing' in l]})")
     finally:
         _dm.grade_album_logs = _real_grade_logs
         _dm.check_log_checksum = _real_check

@@ -1394,7 +1394,13 @@ def check_log_checksum(log_path):
     'unsupported' — nothing claimed, nothing refuted, exactly like XLD. The
     version is never guessed from the log's date, and a 1.x log whose
     checksum line is gone stays 'missing': that is a log edited after EAC
-    signed it, which is the one signal this check exists to raise.
+    signed it, and the state exists so the run log can say so.
+
+    NEITHER 'missing' nor 'unsupported' is REQUIRED to be there: the rule the
+    callers follow (spec R30) is "a checksum that is PRESENT must verify,
+    an ABSENT one costs nothing" — so only 'invalid' fails a disc, and both
+    absent states are reported rather than charged. 'missing' remains
+    distinguishable from 'unsupported' so the warning names the right case.
     """
     try:
         if not log_path or not os.path.isfile(log_path):

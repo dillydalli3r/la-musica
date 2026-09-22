@@ -8,6 +8,7 @@ import { EmptyState, PageLoading } from "../components/Badges";
 import DiscoverRow, { NotesChips } from "../components/DiscoverRow";
 import { useI18n } from "../lib/i18n";
 import { albumRef, artistRef, trackRef } from "../lib/refs";
+import { fmtDuration } from "../lib/fmt";
 
 /** Rows per answer — the server's own ceiling is 200, and a chart is a front
  *  page rather than a catalogue: fifty is what a reader scrolls. */
@@ -157,6 +158,21 @@ export default function ChartsPage() {
             <div className="panel !p-0 overflow-hidden">
               <div className="px-3 py-2 border-b border-border/60 text-[11px] text-zinc-500">
                 {t("charts.rows", { n: libRows.length })}
+                {/* The window's own totals, next to the page's row count: the
+                    plays it holds and the time behind them (the played
+                    tracks' own lengths), so the two numbers a reader wants are
+                    not "however many rows the limit printed". */}
+                {libQ.data && libQ.data.plays_total > 0 && (
+                  <span title={libQ.data.listened_unknown > 0
+                    ? `${libQ.data.listened_unknown} play(s) have no length to add — their files are no longer in the library`
+                    : undefined}>
+                    {" · "}
+                    {t("charts.listened", {
+                      plays: libQ.data.plays_total,
+                      time: fmtDuration(libQ.data.listened_seconds),
+                    })}
+                  </span>
+                )}
               </div>
               <ul className="divide-y divide-border/60 stagger">
                 {libRows.map((row, i) => {

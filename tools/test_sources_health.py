@@ -84,7 +84,8 @@ ok(sorted(ids) == sorted(expected),
 ok(len(ids) == len(set((r["kind"], r["id"]) for r in rows)),
    "no (kind, id) pair is repeated — a shared id carries its own kind")
 
-ok(all(set(r) - {"synced", "rank", "notes"} == ROW_KEYS for r in rows),
+ok(all(set(r) - {"synced", "rank", "notes", "provides"} == ROW_KEYS
+       for r in rows),
    "every row carries exactly the documented keys")
 ok(all(r["kind"] in sh.KINDS for r in rows),
    f"every row declares a known kind (got {sorted({r['kind'] for r in rows})})")
@@ -116,9 +117,39 @@ ok([r.get("rank") for r in lyrics_rows] == [1, 2, 3, 4, 5, 6],
    f"({[r.get('rank') for r in lyrics_rows]})")
 ok(all(isinstance(r.get("notes"), str) and r["notes"] for r in lyrics_rows),
    "…and each one's own notes")
-ok(all("rank" not in r for r in rows if r["kind"] != "lyrics")
+ok(all("rank" not in r for r in rows if r["kind"] not in ("lyrics", "genre"))
    and all("notes" not in r for r in rows if r["kind"] not in ("lyrics", "discover")),
-   "no other kind borrows the lyrics-only keys")
+   "no other kind borrows the lyrics-only or discover-only keys")
+
+# `provides` is on EVERY row of EVERY kind — the wizard's Keys step renders
+# one line per provider saying what it gives the app, so a kind that quietly
+# skipped it would leave an unexplained row there.
+ok(all(isinstance(r.get("provides"), str) and r["provides"].strip()
+       for r in rows),
+   f"every row of every kind says what it provides "
+   f"({sorted({r['kind'] for r in rows if not r.get('provides')})} silent)")
+for kind in sh.KINDS:
+    got = sh.health_payload(cfg={}, kind=kind)["sources"]
+    ok(all(r.get("provides", "").strip() for r in got),
+       f"kind={kind} rows all carry their own `provides` ({len(got)})")
+
+# The genre rows ARE the chain the wizard asks, and the tray saves: the ids
+# follow `server.integrations.GENRE_SOURCES` in its own order, `rank` says the
+# 1-based position (so the list the user sees top-to-bottom IS the priority
+# order that gets saved back) and `provides` is the one line under each name.
+genre_rows = [r for r in rows if r["kind"] == "genre"]
+ok([r["id"] for r in genre_rows] == list(intg.GENRE_SOURCES),
+   f"the genre rows ARE GENRE_SOURCES, in registry order "
+   f"({[r['id'] for r in genre_rows]})")
+ok([r.get("rank") for r in genre_rows] == list(range(1, len(genre_rows) + 1)),
+   f"…ranked 1..N in that same order "
+   f"({[r.get('rank') for r in genre_rows]})")
+ok(all(isinstance(r.get("provides"), str) and r["provides"].strip()
+       for r in genre_rows),
+   "…each with a non-empty line saying what it contributes")
+ok([r["provides"] for r in genre_rows]
+   == [sh._GENRE_PROVIDES[pid] for pid in intg.GENRE_SOURCES],
+   "…and each line is that source's own entry, not a neighbour's")
 ok(all(r["label"] != r["id"] for r in rows),
    "every row has a real label, never the raw source id (the picker reads it)")
 ok(all(r["label"] for r in rows), "no row has an empty label")

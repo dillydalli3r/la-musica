@@ -71,9 +71,11 @@ LIB = {"folder": "C:/Music", "artists": [
          "meta": {"ALBUM": "Souvlaki", "ALBUMARTIST": "Slowdive"},
          "tracks": [
              {"path": A1, "tags": {"TITLE": "Alison", "ARTIST": "Slowdive",
-                                   "TRACKNUMBER": "1"}},
+                                   "TRACKNUMBER": "1"},
+              "tech": {"length": 213.0}},
              {"path": A2, "tags": {"TITLE": "Machine Gun", "ARTIST": "Slowdive",
-                                   "TRACKNUMBER": "2"}},
+                                   "TRACKNUMBER": "2"},
+              "tech": {"length": 300.0}},
          ]},
         {"path": "C:/Music/Slowdive/Pygmalion",
          "meta": {"ALBUM": "Pygmalion", "ALBUMARTIST": "Slowdive"},
@@ -88,7 +90,8 @@ LIB = {"folder": "C:/Music", "artists": [
          "meta": {"ALBUM": "Nowhere", "ALBUMARTIST": "Ride"},
          "tracks": [
              {"path": B1, "tags": {"TITLE": "Seagull", "ARTIST": "Ride",
-                                   "TRACKNUMBER": "1"}},
+                                   "TRACKNUMBER": "1"},
+              "tech": {"length": 240.0}},
          ]},
     ]},
 ]}
@@ -252,6 +255,18 @@ limited = api_plays.top_charts(kind="tracks", limit=2, lib=LIB, now=NOW)
 check(len(limited["items"]) == 2 and limited["items"][0]["title"] == "Alison",
       "limit bounds the page", titles(limited))
 
+# The window's own totals describe the WINDOW, not the page: 3 + 1 + 2 plays of
+# tracks whose measured lengths are 213 + 300 + 240 s.
+check(limited["plays_total"] == 6,
+      "the payload counts every play in the window, beyond the page",
+      limited["plays_total"])
+check(limited["listened_seconds"] == 3 * 213 + 300 + 2 * 240,
+      "and sums the played tracks' own lengths as the time listened",
+      limited["listened_seconds"])
+check(limited["listened_plays"] == 6 and limited["listened_unknown"] == 0,
+      "every one of them had a length to add",
+      (limited["listened_plays"], limited["listened_unknown"]))
+
 # a play whose album the library does not hold still counts, named by folder
 rec(GONE, 5)
 gone = api_plays.top_charts(kind="tracks", lib=LIB, now=NOW)
@@ -264,6 +279,11 @@ check(lost["plays"] == 5 and lost["in_library"] is False
 gone_albums = api_plays.top_charts(kind="albums", lib=LIB, now=NOW)
 check([t for t, _ in titles(gone_albums)][0] == "Unfiled",
       "and its album folds under that same folder", titles(gone_albums))
+
+check(gone["plays_total"] == 11 and gone["listened_seconds"] == 3 * 213 + 300 + 2 * 240
+      and gone["listened_unknown"] == 5,
+      "a play with no length behind it is counted, never guessed into the time",
+      (gone["plays_total"], gone["listened_seconds"], gone["listened_unknown"]))
 
 # ── 4. an empty history is a note, never a bare zero ────────────────────────
 print("== empty ==")

@@ -207,6 +207,7 @@ export default {
   "charts.online_note": "プロバイダーごとの順位を分けて表示",
   "charts.rows": "{n} 件",
   "charts.plays": "{n} 回再生",
+  "charts.listened": "{plays} 回再生 · 合計 {time}",
   "charts.play_one": "1 回再生",
   "charts.open_page": "ライブラリで開く",
   "charts.gone": "この再生のファイルはライブラリにありません",
@@ -255,11 +256,8 @@ export default {
   "donations.copied": "{coin}のアドレスをクリップボードにコピーしました。",
   "donations.copy_manual": "クリップボードにはセキュアコンテキストが必要なため、代わりにアドレスを選択しました — Ctrl+C（Mac では ⌘C）を押してください。",
   "donations.thanks": "ありがとうございます。これからも作り続ける、と書いた小さな山に積んでおきます。",
-  "donations.cats_title": "無給のスタッフ",
-  "donations.cat.paw": "コピーボタンに前足を伸ばす。届かない。もう一度伸ばす。この猫が寄付にいちばん近づいた瞬間です。",
-  "donations.cat.inspect": "ビットコインのアドレスを一文字ずつ音読中。見つけたタイプミスは2つ。実在したタイプミスは0個。",
-  "donations.cat.keyboard": "ブロック 700000 のころからキーボードの上に座りっぱなし。アドレスは無事でした。猫はあったかい。",
-  "donations.cat.box": "ウォレットが満杯かどうか確認中。それは段ボール箱です。それでも猫は引っ越してきました。",
+  "donations.cat_line": "寄付はうちの猫のごはんになります",
+  "donations.cat_alt": "開発者の猫",
 
   // —— Client setup wizard (desktop / iOS / Android shells) ————————————
   "client.title": "この端末をセットアップ",

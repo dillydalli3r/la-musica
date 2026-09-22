@@ -13,7 +13,7 @@ from .containers import (
     file_codec, _read_flac_tags, _write_flac_tags, _identity_missing, _enabled,
 )
 from .subproc import run_tool
-from .paths import AUDIO_EXTS, DEPS_DIR, trash_file
+from .paths import AUDIO_EXTS, tools_dir, trash_file
 from .tools import detect_all_tools, _version_is_older
 from .stats import (
     new_stats, _make_pbar, _pbar_skip, _pbar_update, _diff_bytes, _walk_files,
@@ -858,8 +858,8 @@ def run_optimize_flacs(config):
     convert = spec is not None and policy != CODEC_KEEP
 
     if not flac_tool and optimize_flac:
-        log(c("ERROR: Could not auto-detect flac.exe in .dependencies folder.", Color.RED))
-        log(f"Expected a folder like: {os.path.join(DEPS_DIR, 'flac v1.5.0')}")
+        log(c("ERROR: Could not auto-detect flac.exe in the tools folder.", Color.RED))
+        log(f"Expected a folder like: {os.path.join(tools_dir(), 'flac v1.5.0')}")
         return stats
 
     flac_exe = (flac_tool or {}).get("flac_exe")

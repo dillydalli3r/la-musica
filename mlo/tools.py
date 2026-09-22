@@ -1,8 +1,8 @@
-"""Auto-detection of external encoder tools in the .dependencies folder."""
+"""Auto-detection of external encoder tools in the app's tools folder."""
 import os
 import re
 
-from .paths import DEPS_DIR
+from .paths import tools_dirs
 
 # Vendored pip packages whose import name differs from the pip name.
 PIP_IMPORT_NAMES = {"yt-dlp": "yt_dlp"}
@@ -59,9 +59,26 @@ def _detect_tool(prefix, deps_dir):
     return cands[0][1], cands[0][2]
 
 
+def _detect_tool_dirs(prefix):
+    """(`version`, `folder`, `root`) of the newest install of *prefix*, or
+    three Nones when no tools folder holds one.
+
+    Reads EVERY tools folder (mlo.paths.tools_dirs), the current one first:
+    the tools moved from <app folder>/.dependencies to <music folder>/.mlo/tools,
+    and a lookup that only knew the new one would report a tool the user
+    installed before the move as missing — the row would then offer to install
+    something that is already there.
+    """
+    for root in tools_dirs():
+        version, folder = _detect_tool(prefix, root)
+        if folder:
+            return version, folder, root
+    return None, None, None
+
+
 _TOOLS_CACHE = None
-# The .dependencies folder as it looked when _TOOLS_CACHE was built. Installing
-# a tool adds a folder there, so the cache below re-detects instead of serving
+# The tools folders as they looked when _TOOLS_CACHE was built. Installing a
+# tool adds a folder there, so the cache below re-detects instead of serving
 # a stale "not installed" for the rest of the process — a session that installs
 # a tool through any path (Dependencies UI, CLI, auto-update) sees it at the
 # next detect_all_tools() call, not at the next restart.
@@ -70,16 +87,21 @@ _CACHE_LOCK = __import__("threading").Lock()
 
 
 def deps_dir_signature():
-    """Signature of the dependencies folder: changes when a tool is installed.
+    """Signature of the tools folders: changes when a tool is installed.
 
     detect_all_tools() keys its cache on this (and the per-module ffmpeg /
     ffprobe latches can do the same) so a mid-session install becomes visible
-    without a manual refresh_tool_cache() call.
+    without a manual refresh_tool_cache() call. Both folders are in it: an
+    install into the music folder has to invalidate the cache exactly like one
+    into the pre-move folder did.
     """
-    try:
-        return os.stat(DEPS_DIR).st_mtime_ns
-    except OSError:
-        return None
+    sig = []
+    for root in tools_dirs():
+        try:
+            sig.append(os.stat(root).st_mtime_ns)
+        except OSError:
+            sig.append(None)
+    return tuple(sig)
 
 
 def _store_tools_cache(tools, sig):
@@ -135,7 +157,7 @@ def _which_pair(exe_name):
 
 # How to ask each tool for its own version, and the fact that a PATH-installed
 # tool has to be ASKED: a distro package has no versioned folder name to read
-# (that is how a .dependencies install reports one, see _detect_tool), so the
+# (that is how an installed tool reports one, see _detect_tool), so the
 # Dependencies table showed "—" for flac, ffmpeg, rsgain, fpcalc, cjxl and
 # jpegtran — and a row with no installed version can never be compared with
 # what upstream ships, which is exactly what the table is for. The flags are the
@@ -190,7 +212,7 @@ def _system_entry(key, **paths):
 
 
 def _detect_system_tools():
-    """Non-Windows detection: .dependencies installs, then distro tools on PATH.
+    """Non-Windows detection: installs in a tools folder, then distro tools on PATH.
 
     Docker/Linux/macOS: the app's own installs (native binaries, pip packages)
     come first, and anything else is whatever the system provides — including
@@ -241,7 +263,7 @@ def _detect_system_tools():
 
     # slskd is the one dependency this app RUNS rather than invokes; the
     # Soulseek page starts it, and the capability report has to see the same
-    # install (server/soulseek.py resolves it from .dependencies on its own).
+    # install (server/soulseek.py resolves it from the tools folder on its own).
     slskd = shutil.which("slskd")
     if slskd:
         tools["slskd"] = _system_entry("slskd", slskd_exe=slskd)
@@ -257,9 +279,9 @@ def _detect_system_tools():
 
     # The rip-log scorer is a phar - the SAME file on every platform - so only
     # its runtime is platform-specific (see php above).
-    lc_version, lc_folder = _detect_tool("logchecker", DEPS_DIR)
+    lc_version, lc_folder, lc_root = _detect_tool_dirs("logchecker")
     if lc_folder:
-        phar = os.path.join(DEPS_DIR, lc_folder, "logchecker.phar")
+        phar = os.path.join(lc_root, lc_folder, "logchecker.phar")
         if os.path.isfile(phar):
             tools["logchecker"] = {
                 "version": lc_version,
@@ -281,7 +303,7 @@ def _detect_system_tools():
         if ytdlp:
             tools["yt-dlp"] = _system_entry("yt-dlp", ytdlp_exe=ytdlp)
 
-    # A native install under .dependencies LAST, so it wins over a copy on
+    # A native install in a tools folder LAST, so it wins over a copy on
     # PATH: it is the versioned one the Dependencies page reports and updates,
     # and without this the app could install oxipng or slskd and still call
     # them missing.
@@ -290,34 +312,40 @@ def _detect_system_tools():
     return tools
 
 
-# Which field a native install is reported under. These are the SAME names the
-# Windows detection uses, because they are what the consumers read: audit.py
-# takes `cli_exe`, accurip.py takes `arcue_exe`, and the capability report just
-# looks for a `*_exe`.
+# How a native install is reported: (field for the executable run_name() names,
+# extra (field, file) pairs for the rest). The field names are the SAME names
+# the Windows detection uses, because they are what the consumers read: audit.py
+# takes `cli_exe`, accurip.py takes `arcue_exe`, images.py reads `cjxl_exe` AND
+# `djxl_exe`, and the capability report just looks for a `*_exe`. The file the
+# first field points at is run_name()'s — the launcher where the install wrote
+# one, so what callers execute is what is detected.
 _DEPS_NATIVE_FIELDS = {
-    "oxipng": "oxipng_exe",
-    "slskd": "slskd_exe",
-    "audioauditor": "cli_exe",
-    "cuetools": "arcue_exe",
-    # rsgain and chromaprint became installable here when upstream's Linux
-    # assets were added (fetchdeps.LINUX_BINARIES). Without a field they would
-    # be installed into .dependencies and still not COUNT: detection would keep
-    # reporting the distro copy on PATH, so the row's amber Update would never
-    # clear and the new download would be invisible to mlo.loudness and
-    # mlo.acoustid (which read rsgain_exe / resolves fpcalc itself).
-    "rsgain": "rsgain_exe",
-    "chromaprint": "fpcalc_exe",
+    "oxipng": ("oxipng_exe", ()),
+    "slskd": ("slskd_exe", ()),
+    "audioauditor": ("cli_exe", ()),
+    "cuetools": ("arcue_exe", ()),
+    # rsgain, chromaprint, libjxl and libjpeg-turbo became installable here when
+    # upstream's Linux assets were added (fetchdeps.LINUX_BINARIES). Without an
+    # entry they would be installed into the tools folder and still not COUNT:
+    # detection would keep reporting the distro copy on PATH, so the row's amber
+    # Update would never clear and the new download would be invisible to
+    # mlo.loudness and mlo.acoustid (which read rsgain_exe / resolve fpcalc
+    # itself) and to images.py, which opens BOTH of libjxl's executables.
+    "rsgain": ("rsgain_exe", ()),
+    "chromaprint": ("fpcalc_exe", ()),
+    "libjxl": ("cjxl_exe", (("djxl_exe", "djxl"),)),
+    "libjpeg_turbo": ("jpegtran_exe", ()),
 }
 
 
 def _detect_deps_native():
-    """Tools installed as native binaries under .dependencies (POSIX only).
+    """Tools installed as native binaries under a tools folder (POSIX only).
 
     fetchdeps installs native Linux builds there (see fetchdeps.LINUX_BINARIES:
-    oxipng, slskd, AudioAuditor, CUETools through its mono launcher, and
-    upstream's rsgain and fpcalc) and the .exe scan above cannot see them. A
-    Windows host sharing this folder must never pick one up: an .exe-less
-    folder is a file it cannot execute.
+    oxipng, slskd, AudioAuditor, CUETools through its mono launcher, upstream's
+    rsgain, fpcalc, libjxl and libjpeg-turbo) and the .exe scan above cannot
+    see them. A Windows host sharing this folder must never pick one up: an
+    .exe-less folder is a file it cannot execute.
     """
     from .fetchdeps import INSTALL_PREFIX, LINUX_BINARIES, run_name
 
@@ -325,19 +353,27 @@ def _detect_deps_native():
     if os.name == "nt":
         return tools
     for key, spec in LINUX_BINARIES.items():
-        field = _DEPS_NATIVE_FIELDS.get(key)
-        if not field:
+        fields = _DEPS_NATIVE_FIELDS.get(key)
+        if not fields:
             continue
-        version, folder = _detect_tool(INSTALL_PREFIX.get(key, key), DEPS_DIR)
+        version, folder, root = _detect_tool_dirs(INSTALL_PREFIX.get(key, key))
         if not folder:
             continue
-        d = os.path.join(DEPS_DIR, folder)
-        # `run_name` is the launcher where the install wrote one (a Windows
-        # build under mono), so what callers execute is what is detected.
+        d = os.path.join(root, folder)
+        if not all(os.path.isfile(os.path.join(d, m)) for m in spec["markers"]):
+            continue
         exe = os.path.join(d, run_name(key))
-        if (all(os.path.isfile(os.path.join(d, m)) for m in spec["markers"])
-                and os.path.isfile(exe)):
-            tools[key] = {"version": version, field: exe}
+        if not os.path.isfile(exe):
+            continue
+        entry = {"version": version, fields[0]: exe}
+        for extra_field, name in fields[1]:
+            extra = os.path.join(d, name)
+            if not os.path.isfile(extra):
+                entry = None
+                break
+            entry[extra_field] = extra
+        if entry:
+            tools[key] = entry
     return tools
 
 
@@ -347,22 +383,22 @@ def detect_all_tools():
         if _TOOLS_CACHE is not None and _TOOLS_CACHE_SIG == sig:
             return _TOOLS_CACHE
 
-    # Off-Windows the tools are the app's own installs under .dependencies
+    # Off-Windows the tools are the app's own installs under its tools folders
     # (native binaries and pip packages - fetchdeps installs those there, see
-    # _detect_deps_native) plus the distro/Homebrew ones on PATH. The .exe
-    # scan below is Windows-only: a folder of Windows binaries must never be
-    # selected as an install on a host that cannot run them.
+    # _detect_deps_native) plus the distro/Homebrew ones on PATH. The .exe scan
+    # below is Windows-only: a folder of Windows binaries must never be selected
+    # as an install on a host that cannot run them.
     if os.name != "nt":
         return _store_tools_cache(_detect_system_tools(), sig)
 
     tools = {}
 
-    if not os.path.isdir(DEPS_DIR):
+    if not any(os.path.isdir(root) for root in tools_dirs()):
         return _store_tools_cache(_detect_system_tools(), sig)
 
-    fv, ff = _detect_tool("flac", DEPS_DIR)
+    fv, ff, deps_root = _detect_tool_dirs("flac")
     if ff:
-        d = os.path.join(DEPS_DIR, ff)
+        d = os.path.join(deps_root, ff)
         if os.path.isfile(os.path.join(d, "flac.exe")):
             tools["flac"] = {
                 "version": fv,
@@ -374,9 +410,9 @@ def detect_all_tools():
                 ),
             }
 
-    jv, jf = _detect_tool("libjxl", DEPS_DIR)
+    jv, jf, deps_root = _detect_tool_dirs("libjxl")
     if jf:
-        d = os.path.join(DEPS_DIR, jf)
+        d = os.path.join(deps_root, jf)
         if os.path.isfile(os.path.join(d, "cjxl.exe")):
             tools["libjxl"] = {
                 "version": jv,
@@ -388,45 +424,45 @@ def detect_all_tools():
                 ),
             }
 
-    lv, lf = _detect_tool("libjpeg-turbo", DEPS_DIR)
+    lv, lf, deps_root = _detect_tool_dirs("libjpeg-turbo")
     if lf:
-        d = os.path.join(DEPS_DIR, lf)
+        d = os.path.join(deps_root, lf)
         if os.path.isfile(os.path.join(d, "jpegtran.exe")):
             tools["libjpeg_turbo"] = {
                 "version": lv,
                 "jpegtran_exe": os.path.join(d, "jpegtran.exe"),
             }
 
-    ov, of = _detect_tool("oxipng", DEPS_DIR)
+    ov, of, deps_root = _detect_tool_dirs("oxipng")
     if of:
-        d = os.path.join(DEPS_DIR, of)
+        d = os.path.join(deps_root, of)
         if os.path.isfile(os.path.join(d, "oxipng.exe")):
             tools["oxipng"] = {
                 "version": ov,
                 "oxipng_exe": os.path.join(d, "oxipng.exe"),
             }
 
-    av, af = _detect_tool("audioauditor", DEPS_DIR)
+    av, af, deps_root = _detect_tool_dirs("audioauditor")
     if af:
-        d = os.path.join(DEPS_DIR, af)
+        d = os.path.join(deps_root, af)
         if os.path.isfile(os.path.join(d, "AudioAuditorCLI.exe")):
             tools["audioauditor"] = {
                 "version": av,
                 "cli_exe": os.path.join(d, "AudioAuditorCLI.exe"),
             }
 
-    rv, rf = _detect_tool("rsgain", DEPS_DIR)
+    rv, rf, deps_root = _detect_tool_dirs("rsgain")
     if rf:
-        d = os.path.join(DEPS_DIR, rf)
+        d = os.path.join(deps_root, rf)
         if os.path.isfile(os.path.join(d, "rsgain.exe")):
             tools["rsgain"] = {
                 "version": rv,
                 "rsgain_exe": os.path.join(d, "rsgain.exe"),
             }
 
-    fv2, ff2 = _detect_tool("ffmpeg", DEPS_DIR)
+    fv2, ff2, deps_root = _detect_tool_dirs("ffmpeg")
     if ff2:
-        d = os.path.join(DEPS_DIR, ff2)
+        d = os.path.join(deps_root, ff2)
         if (os.path.isfile(os.path.join(d, "ffmpeg.exe"))
                 and os.path.isfile(os.path.join(d, "ffprobe.exe"))):
             tools["ffmpeg"] = {
@@ -435,18 +471,18 @@ def detect_all_tools():
                 "ffprobe_exe": os.path.join(d, "ffprobe.exe"),
             }
 
-    pv, pf = _detect_tool("php", DEPS_DIR)
+    pv, pf, deps_root = _detect_tool_dirs("php")
     if pf:
-        d = os.path.join(DEPS_DIR, pf)
+        d = os.path.join(deps_root, pf)
         if os.path.isfile(os.path.join(d, "php.exe")):
             tools["php"] = {
                 "version": pv,
                 "php_exe": os.path.join(d, "php.exe"),
             }
 
-    yv, yf = _detect_tool("yt-dlp", DEPS_DIR)
+    yv, yf, deps_root = _detect_tool_dirs("yt-dlp")
     if yf:
-        d = os.path.join(DEPS_DIR, yf)
+        d = os.path.join(deps_root, yf)
         if os.path.isfile(os.path.join(d, "yt-dlp.exe")):
             tools["yt-dlp"] = {
                 "version": yv,
@@ -454,33 +490,33 @@ def detect_all_tools():
             }
 
     # fpcalc: the AcoustID fingerprinter. The Windows installer has always
-    # put it in .dependencies, but only the PATH scan could see it — so the
+    # put it in the tools folder, but only the PATH scan could see it — so the
     # Dependencies table said "ready" while every AcoustID lookup reported the
     # tool missing. Detected here like the rest, so both agree.
-    cv, cf = _detect_tool("chromaprint", DEPS_DIR)
+    cv, cf, deps_root = _detect_tool_dirs("chromaprint")
     if cf:
-        d = os.path.join(DEPS_DIR, cf)
+        d = os.path.join(deps_root, cf)
         if os.path.isfile(os.path.join(d, "fpcalc.exe")):
             tools["chromaprint"] = {
                 "version": cv,
                 "fpcalc_exe": os.path.join(d, "fpcalc.exe"),
             }
 
-    # slskd is a folder of its own under .dependencies (server/soulseek.py
+    # slskd is a folder of its own in the tools folder (server/soulseek.py
     # looks for the same slskd.exe through fetchdeps.installed_path), and the
     # capability report reads the detected tools, so it is detected here too.
-    sv, sf = _detect_tool("slskd", DEPS_DIR)
+    sv, sf, deps_root = _detect_tool_dirs("slskd")
     if sf:
-        d = os.path.join(DEPS_DIR, sf)
+        d = os.path.join(deps_root, sf)
         if os.path.isfile(os.path.join(d, "slskd.exe")):
             tools["slskd"] = {
                 "version": sv,
                 "slskd_exe": os.path.join(d, "slskd.exe"),
             }
 
-    lc_v, lc_f = _detect_tool("logchecker", DEPS_DIR)
+    lc_v, lc_f, deps_root = _detect_tool_dirs("logchecker")
     if lc_f:
-        d = os.path.join(DEPS_DIR, lc_f)
+        d = os.path.join(deps_root, lc_f)
         phar = os.path.join(d, "logchecker.phar")
         if os.path.isfile(phar):
             tools["logchecker"] = {
@@ -489,9 +525,9 @@ def detect_all_tools():
                 "php_exe": tools.get("php", {}).get("php_exe"),
             }
 
-    ct_v, ct_f = _detect_tool("cuetools", DEPS_DIR)
+    ct_v, ct_f, deps_root = _detect_tool_dirs("cuetools")
     if ct_f:
-        d = os.path.join(DEPS_DIR, ct_f)
+        d = os.path.join(deps_root, ct_f)
         # CUETools.exe is the main exe, may be in CUETools or nested
         exe = None
         arcue = None
@@ -530,7 +566,7 @@ def detect_all_tools():
             }
 
     # Fill gaps from system packages (Linux/macOS/Docker) so each tool
-    # category resolves even without the .dependencies downloader.
+    # category resolves even when no tool has been downloaded yet.
     system = _detect_system_tools()
     for key in ("flac", "libjxl", "libjpeg_turbo", "oxipng", "ffmpeg",
                 "rsgain", "chromaprint", "slskd", "yt-dlp", "php", "logchecker"):
@@ -580,37 +616,40 @@ def _version_sort_key(version):
 
 
 def _pip_pkg_dirs(pkg):
-    """[(version, dir)] for every vendored install of *pkg* under DEPS_DIR."""
-    if not os.path.isdir(DEPS_DIR):
-        return []
+    """[(version, dir)] for every vendored install of *pkg* in a tools folder."""
     top = PIP_IMPORT_NAMES.get(pkg, pkg)
-    try:
-        entries = os.listdir(DEPS_DIR)
-    except OSError:
-        return []
     out = []
-    for entry in entries:
-        full = os.path.join(DEPS_DIR, entry)
-        if not (os.path.isdir(full) and entry.lower().startswith(pkg.lower())):
+    for root in tools_dirs():
+        if not os.path.isdir(root):
             continue
-        if not os.path.isfile(os.path.join(full, top, "__init__.py")):
+        try:
+            entries = os.listdir(root)
+        except OSError:
             continue
-        out.append((_pkg_dist_version(full, pkg) or _pkg_folder_version(entry, pkg),
-                    full))
+        for entry in entries:
+            full = os.path.join(root, entry)
+            if not (os.path.isdir(full) and entry.lower().startswith(pkg.lower())):
+                continue
+            if not os.path.isfile(os.path.join(full, top, "__init__.py")):
+                continue
+            out.append((_pkg_dist_version(full, pkg) or _pkg_folder_version(entry, pkg),
+                        full))
     return out
 
 
 def python_pkg_path(pkg):
     """Vendored pip-package dir for *pkg* ('librosa', 'beets', 'yt-dlp').
 
-    Layout is '.dependencies/<pkg> vX.Y' (see fetchdeps.PIP_PACKAGES); the
+    Layout is '<tools folder>/<pkg> vX.Y' (see fetchdeps.PIP_PACKAGES); the
     import name can differ from the pip name (yt-dlp -> yt_dlp), hence
     PIP_IMPORT_NAMES.
 
-    The NEWEST version wins. An update installs a new `vX.Y` folder beside the
-    old one, and before this the first `sorted()` entry won — i.e. the oldest,
-    so the app kept importing the version an update had just replaced and the
-    Dependencies row kept reporting it.
+    The NEWEST version wins, across every tools folder an install may hold one
+    in (mlo.paths.tools_dirs — the pre-move folder is still read). An update
+    installs a new `vX.Y` folder beside the old one, and before this the first
+    `sorted()` entry won — i.e. the oldest, so the app kept importing the
+    version an update had just replaced and the Dependencies row kept reporting
+    it.
     """
     dirs = _pip_pkg_dirs(pkg)
     if not dirs:

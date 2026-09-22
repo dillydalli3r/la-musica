@@ -287,7 +287,12 @@ assert empty["counts"]["total"] == 0, empty["counts"]
 assert sorted(empty["sections"]) == ["completed", "failed", "in_progress",
                                      "needs_attention", "queued"], sorted(empty["sections"])
 assert empty["concurrency"] == CONCURRENCY, empty["concurrency"]
-assert empty["download_slots"] == 3, empty["download_slots"]
+# The three numbers the queue header reports, and what makes them coherent:
+# the app enforces its own two ceilings (releases at once, candidates per
+# release) and slskd's slot count is the product they need — 3 × 3 = 9 at the
+# defaults (see server.soulseek_auto._batch_width).
+assert empty["candidate_slots"] == 3, empty["candidate_slots"]
+assert empty["download_slots"] == 9, empty["download_slots"]
 
 with Patch(auto, load_config=lambda: dict(CFG),
            _search_queries=PIPE.search,
@@ -324,16 +329,27 @@ with Patch(auto, load_config=lambda: dict(CFG),
     assert {r["title"] for r in rows} == {"Intro", "Isles", "Nova"}, rows
 
     # --- a release waiting in the PIPELINE's own queue -------------------- #
-    # (its row is a different kind: nothing has started it yet)
+    # (its row is a different kind: nothing has started it yet, and it says so
+    # with `waiting` + its place in the line — the page groups those as Waiting)
     with Patch(auto, concurrency=lambda cfg=None: 0):
         auto.enqueue(release=_release("22222222-0000-0000-0000-000000000001",
                                       "Daft Punk", "Homework"))
+        auto.enqueue(release=_release("22222222-0000-0000-0000-000000000002",
+                                      "Daft Punk", "Discovery"))
     thin = _queue(client)
     pipeline_rows = [r for r in thin["sections"]["queued"] if r["kind"] == "pipeline"]
-    assert len(pipeline_rows) == 1, thin["sections"]["queued"]
-    assert pipeline_rows[0]["title"] == "Homework", pipeline_rows[0]
-    assert pipeline_rows[0]["source"] == "MusicBrainz", pipeline_rows[0]
+    assert len(pipeline_rows) == 2, thin["sections"]["queued"]
+    row = pipeline_rows[0]
+    assert row["title"] == "Homework", row
+    assert row["source"] == "MusicBrainz", row
+    # Not started, and honest about it: the flag the page groups on, the
+    # position it shows, and the reason in words.
+    assert row["waiting"] is True and row["position"] == 1, row
+    assert "free slot" in row["note"], row
+    assert pipeline_rows[1]["position"] == 2, pipeline_rows[1]
+    assert row["cancelable"] is True and row["clearable"] is False, row
     assert auto.drop_queued("22222222-0000-0000-0000-000000000001") is True
+    assert auto.drop_queued("22222222-0000-0000-0000-000000000002") is True
 
     # --- a download sitting in the download folder ------------------------ #
     ready_path = os.path.join(REDIRECT, "downloads", "peer", "Some Album")
@@ -629,7 +645,12 @@ os.makedirs(FIXTURE_READY, exist_ok=True)
 with Patch(auto, jobs=lambda: [dict(j) for j in FIXTURE_JOBS],
            queued=lambda: [{"release_mbid": "22222222", "key": "22222222",
                             "release": {"id": "22222222", "title": "Waiting Too",
-                                        "artists": [{"name": "Queue"}]}}]), \
+                                        "artists": [{"name": "Queue"}]},
+                            # The rest of the shape the REAL queued() publishes
+                            # (soulseek_auto.queued): where it is in the line and
+                            # what its row is called.
+                            "label": "Queue — Waiting Too", "wish_id": None,
+                            "source": "musicbrainz", "position": 1}]), \
      Patch(wishes, list_wishes=lambda: [dict(w) for w in FIXTURE_WISHES]), \
      Patch(import_queue, status=lambda: {
          "state": "running", "total": 2, "done": 1, "current": FIXTURE_READY,

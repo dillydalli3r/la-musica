@@ -321,6 +321,9 @@ const NEVER_CACHE_EXACT: Record<string, true> = {
   // pasting a file in: an offline copy would say "4 cookies saved" over a jar
   // that was just deleted.
   "/api/youtube/cookies": true,
+  // Same reason for the RYM jar: names of a cookie that was just
+  // replaced or cleared must never come from an offline copy.
+  "/api/rym/cookies": true,
 };
 const NEVER_CACHE_PREFIX = ["/api/auth/", "/api/soulseek/preview"];
 
@@ -445,6 +448,30 @@ export interface YoutubeCookies {
   browsers: string[];
   max_bytes: number;
   warnings: string[];
+}
+
+/** The RateYourMusic credential (`server/api_rym.py`): what the stored
+ *  `rym_cookie` holds. NAMES only — a `session` cookie is a live credential,
+ *  so no route returns a value — plus the server's own sentences about it (a
+ *  saved cookie with no `session` pair means RYM answers as a guest). */
+export interface RymCookies {
+  present: boolean;
+  /** cookie pairs in the stored `Cookie` header. */
+  lines: number;
+  /** the one host these cookies are ever sent to. */
+  sites: string[];
+  names: string[];
+  max_bytes: number;
+  warnings: string[];
+}
+
+/** What an import answers with: the same state, plus how many pairs the last
+ *  import actually stored (`0` when the file held no rateyourmusic.com cookie —
+ *  nothing was replaced) and whether the stored credential now carries RYM's
+ *  `session` cookie. */
+export interface RymCookiesSaveReply extends RymCookies {
+  stored: number;
+  session: boolean;
 }
 
 /** One credit row of `/api/credits`: who did what on a track or an album.
@@ -835,6 +862,14 @@ export interface SlskQueueItem {
   clearable: boolean;
   /** One line about what this row's state means right now. */
   note: string;
+  /** True on a "pipeline" row: the release has NOT started. It is waiting for a
+   *  free slot in the pipeline (see `position`), because
+   *  `soulseek_search_concurrency` releases are already running — the page
+   *  groups these rows as Waiting, which is a different thing from a wish
+   *  waiting for the network to answer. */
+  waiting?: boolean;
+  /** 1-based place in the waiting queue; on `waiting` rows only. */
+  position?: number;
   attempts?: number;
   /** Why a FAILED row stopped: "not_found" is never retried on its own, every
    *  other reason is worth another press once the cause is fixed. */
@@ -875,9 +910,11 @@ export interface SlskQueueItem {
 }
 
 /** `GET /api/queue` — every section with its rows, plus the counts the tab
- *  badges show. `running`/`concurrency` say how full the pipeline is, and
- *  `download_slots` is slskd's own transfer ceiling (what the concurrency is
- *  really bounded by once several downloads are in flight). */
+ *  badges show. The three numbers the pipeline runs on: `concurrency` releases
+ *  at once (the overflow WAITS), `candidate_slots` candidate downloads per
+ *  release, and `download_slots` — slskd's own transfer ceiling, which is the
+ *  product of the other two at the shipped defaults (3 × 3 = 9) and which the
+ *  app never relies on to hold either limit. */
 export interface SlskQueuePayload {
   sections: {
     queued: SlskQueueItem[];
@@ -892,6 +929,7 @@ export interface SlskQueuePayload {
   };
   running: number;
   concurrency: number;
+  candidate_slots: number;
   download_slots: number;
 }
 
@@ -1476,6 +1514,15 @@ export interface TopCharts {
     end_iso: string | null;
   };
   items: TopRow[];
+  /** The WINDOW's own totals — every play it holds, not the page's rows.
+   *  `listened_seconds` sums the played tracks' own measured lengths (a play
+   *  records a start, so the track's length is the time behind it), and
+   *  `listened_unknown` counts the plays with no length to add (a file the
+   *  library no longer holds) rather than guessing one. */
+  plays_total: number;
+  listened_seconds: number;
+  listened_plays: number;
+  listened_unknown: number;
   note: string;
 }
 
@@ -2515,12 +2562,19 @@ export const api = {
     json<{ ok: boolean; moved: string[]; failed?: { album: string; reason: string }[]; organized?: boolean; organize_error?: string; media_tagged?: number; converted?: number }>(`${API}/soulseek/import`, { method: "POST" }, 120000),
   soulseekAutoStatus: () =>
     json<SlskAutoJob>(`${API}/soulseek/auto`, undefined, 30000),
+  /** Start the auto-import for one release (or one browsed folder). With
+   *  `soulseek_search_concurrency` releases already running it does not fail:
+   *  the release TAKES ITS PLACE in the waiting queue and the reply says so —
+   *  `waiting` true, `position` where in the line it is and `queue_key` the id
+   *  its row is named by — with no `job`, because it starts by itself (and only
+   *  then) when one of the running releases finishes. */
   soulseekAutoStart: (body: { release_mbid?: string; queries?: string[]; username?: string; target_dir?: string }) =>
-    json<{ ok: boolean; job: SlskAutoJob }>(`${API}/soulseek/auto`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(body),
-    }, 180000),
+    json<{ ok: boolean; job?: SlskAutoJob; waiting?: boolean; position?: number; queue_key?: string }>(
+      `${API}/soulseek/auto`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(body),
+      }, 180000),
   soulseekAutoCancel: () =>
     json<{ ok: boolean }>(`${API}/soulseek/auto/cancel`, { method: "POST" }, 30000),
   /** Answer the "only lossy copies found" prompt (accept = download anyway). */
@@ -2544,12 +2598,6 @@ export const api = {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ username, password }),
     }, 90000),
-  mbGenresWrite: (paths: string[], count?: number) =>
-    json<{ ok: boolean; updated: number; genres: string[]; per_track: boolean }>(`${API}/mb/genres`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ paths, count }),
-    }, 120000),
   trackDownloadUrl: (path: string) => media(`${API}/track/download?path=${encodeURIComponent(path)}`),
   trackExportUrl: (path: string, codec: string, bitrate: number, level = 5) =>
     media(`${API}/track/export?path=${encodeURIComponent(path)}&codec=${encodeURIComponent(codec)}&bitrate=${bitrate}&level=${level}`),
@@ -2795,6 +2843,31 @@ export const api = {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(body),
     }, 60000),
+  /** Cancel EXACTLY these queue rows — the queue's own selection
+   *  (`item.id`: "pipeline:<key>" for a release still waiting, "job:<id>" for
+   *  a running one). One press, one call, and an honest answer: `cancelled` is
+   *  how many of the ids went, `ids` which, and `missed` the ones that had
+   *  already started, already finished or were never there. A release that has
+   *  not started never downloads a byte. */
+  queueCancelIds: (ids: string[]) =>
+    json<{ ok: boolean; cancelled: number; ids: string[]; missed: string[] }>(
+      `${API}/soulseek/downloads/cancel`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ ids }),
+      }, 60000),
+  /** "Clear all": empty the pipeline's WAITING queue — every release queued
+   *  behind the ones already running, dropped before it starts anything. A
+   *  RUNNING release is untouched (that is a cancel on its own row), and no
+   *  settled row, library album or slskd transfer is affected. Needs no daemon
+   *  (it is this app's own queue); `cleared`/`ids` say what went. */
+  queueClearWaiting: () =>
+    json<{ ok: boolean; cleared: number; ids: string[] }>(
+      `${API}/soulseek/downloads/clear`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ scope: "queued" }),
+      }, 60000),
 
   // Home page (recommendations + highlights)
   // `refresh` is the "Your library" card's button: the payload is TTL-cached
@@ -3301,6 +3374,21 @@ export const api = {
   /** Remove the jar (the mode setting is untouched). */
   youtubeCookiesDelete: () =>
     json<YoutubeCookies>(`${API}/youtube/cookies`, { method: "DELETE" }),
+  /** The stored RateYourMusic credential: the cookie names it holds, in the
+   *  order they are sent, no values. */
+  rymCookies: () => json<RymCookies>(`${API}/rym/cookies`),
+  /** Save the rateyourmusic.com cookies of a pasted or dropped cookies.txt
+   *  into `rym_cookie` (the credential the RYM scraper already reads). The
+   *  server validates it IS a Netscape cookie file first, so junk comes back
+   *  as a 400 instead of replacing a credential that worked — and a
+   *  well-formed export holding no RYM cookie stores nothing at all
+   *  (`stored: 0`) rather than clearing it. */
+  rymCookiesSave: (text: string) =>
+    json<RymCookiesSaveReply>(`${API}/rym/cookies`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ text }),
+    }, 60000),
   /** Write TITLE/TRACKNUMBER/DISCNUMBER onto video files from the match-assist
    *  panel (one assignment per video file). */
   videosMatch: (albumPath: string, assignments: { path: string; title: string; tracknumber?: number; discnumber?: number }[]) =>

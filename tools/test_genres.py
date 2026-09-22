@@ -4,7 +4,7 @@
 What this pins, with every HTTP seam stubbed (no network at all):
 
   * the DEFAULT priority list is an explicit, documented promise:
-    rateyourmusic → listenbrainz → musicbrainz → itunes → lastfm →
+    rateyourmusic → musicbrainz → listenbrainz → itunes → lastfm →
     theaudiodb → wikidata → bandcamp → discogs → deezer → spotify, equal to
     `mlo.config.DEFAULT_CONFIG["genre_sources"]`, with every per-track source
     ahead of every album-only one;
@@ -87,7 +87,7 @@ discovery._HOST_WAIT.clear()
 # The priority list the module documents and ships (see the GENRE_SOURCES
 # comment in server/integrations.py), spelled out here so a silent reorder
 # fails the run instead of passing unnoticed.
-DOCUMENTED_SOURCES = ["rateyourmusic", "listenbrainz", "musicbrainz", "itunes",
+DOCUMENTED_SOURCES = ["rateyourmusic", "musicbrainz", "listenbrainz", "itunes",
                       "lastfm", "theaudiodb", "wikidata", "bandcamp", "discogs",
                       "deezer", "spotify"]
 # Which of them can ever state a TRACK's own genre, and which only know the
@@ -482,24 +482,28 @@ clear()
 full_stack()
 got = chain(limit=20)
 
-# RateYourMusic's album genres first, then ListenBrainz's per-recording tags
-# (recognised genres first, then the agreed free tag) and its release-group /
-# artist buckets, then MusicBrainz, then iTunes, TheAudioDB (its own per-track
-# row, then the album row), Wikidata and Bandcamp.
+# RateYourMusic's album genres first, then MusicBrainz's own per-recording
+# answer and its release/release-group/artist tiers, then ListenBrainz's
+# per-recording tags and its release-group / artist buckets, then iTunes,
+# TheAudioDB (its own per-track row, then the album row), Wikidata and
+# Bandcamp — the shipped order, source by source.
 assert got["per_track"][(1, 1)] == [
     "Heavy Metal", "Groove Metal",                    # rateyourmusic (album)
-    "alternative metal", "post-metal", "sludge metal",  # listenbrainz recording
-    "progressive rock", "art rock",                   # listenbrainz rg → artist
+    "Alternative Metal",                              # musicbrainz (recording)
     "Rock",                                           # musicbrainz (release)
+    "Progressive Rock", "Art Rock",                   # musicbrainz (rg → artist)
+    "post-metal", "sludge metal",                     # listenbrainz (recording)
     "Hard Rock",                                      # itunes (per track)
     "Shoegaze", "Dream Pop",                          # theaudiodb (per track)
     "Post-Rock", "Epic",                              # theaudiodb (album)
     "Space Rock",                                     # wikidata (P136)
     "doom metal", "Stoner Rock",                      # bandcamp (album tags)
 ], got["per_track"][(1, 1)]
-# The tier order inside ListenBrainz holds: the release-group bucket is ahead
-# of MusicBrainz, and a later source cannot jump an earlier one.
-assert got["per_track"][(1, 1)].index("progressive rock") < got["per_track"][(1, 1)].index("Rock")
+# The source order holds across the whole merge: a source asked later can
+# never jump one asked earlier (MusicBrainz above ListenBrainz here, exactly
+# as the shipped list says).
+assert (got["per_track"][(1, 1)].index("Alternative Metal")
+        < got["per_track"][(1, 1)].index("post-metal"))
 # Mood words and tag-spam never become genres, at any level — the "melancholic"
 # tag Bandcamp's page carries is dropped here exactly like ListenBrainz's.
 for names in list(got["per_track"].values()) + list(got["per_source"].values()):
@@ -517,8 +521,8 @@ assert "sludge metal" in got["per_track"][(1, 1)]     # count 4 free tag kept
 from server import soulseek_auto
 
 assert soulseek_auto._parse_trackno(FILE_ONE) in got["per_track"]
-assert got["sources"][FILE_ONE] == ["rateyourmusic", "listenbrainz",
-                                    "musicbrainz", "itunes", "theaudiodb",
+assert got["sources"][FILE_ONE] == ["rateyourmusic", "musicbrainz",
+                                    "listenbrainz", "itunes", "theaudiodb",
                                     "wikidata", "bandcamp"], got["sources"]
 assert got["per_track_sources"][(1, 1)] == got["sources"][FILE_ONE]
 # `levels` reports the MOST SPECIFIC tier that answered this track — with
@@ -607,7 +611,9 @@ with contextlib.redirect_stdout(buf):
     got = chain(limit=6)
 assert got["notes"]["rateyourmusic"].startswith(
     "skipped: RateYourMusic refused this cookie"), got["notes"]
-assert got["per_track"][(1, 1)][0] == "alternative metal", got["per_track"]
+# MusicBrainz is asked before ListenBrainz in the shipped order, so its
+# own spelling of the recording's genre is what leads the merged list.
+assert got["per_track"][(1, 1)][0] == "Alternative Metal", got["per_track"]
 assert "rateyourmusic" not in got["sources"][FILE_ONE], got["sources"]
 assert buf.getvalue().count("rateyourmusic") == 1, buf.getvalue()
 
@@ -641,7 +647,9 @@ try:
 finally:
     intg.rym_genres = _real_rym
 assert got["notes"]["rateyourmusic"].startswith("failed: "), got["notes"]
-assert got["per_track"][(1, 1)][0] == "alternative metal", got["per_track"]
+# MusicBrainz is asked before ListenBrainz in the shipped order, so its
+# own spelling of the recording's genre is what leads the merged list.
+assert got["per_track"][(1, 1)][0] == "Alternative Metal", got["per_track"]
 
 # --------------------------------------------------------------------------- #
 # 3) RateYourMusic — per-track rows, title mapping, album fallback
@@ -958,15 +966,18 @@ try:
     calls = stub_json(both_router(lb_router(), wikidata_router()))
     stub_apple(apple_router({"1:1": ["Hard Rock"], "1:2": ["Nu Metal"]}))
     stub_mb(MB_DEFAULT)
-    first = chain(limit=6)
+    first = chain(limit=12)
     assert first["per_track"][(1, 1)][0] == "Heavy Metal", first["per_track"]
     rym_calls, json_calls = len(rym.calls), len(calls)
+    # The cap is what keeps the JSON sources in play: RateYourMusic and
+    # MusicBrainz alone fill a list of 6 under the shipped order, and a cache
+    # test with nothing cached beyond them would prove nothing about them.
     assert rym_calls and json_calls, (rym_calls, json_calls)
 
     # Forget the in-process memos only: what answers now is the DISK cache.
     intg._GENRE_CACHE.clear()
     discovery._CACHE.clear()
-    again = chain(limit=6)
+    again = chain(limit=12)
     assert again["per_track"] == first["per_track"], again["per_track"]
     assert again["sources"] == first["sources"], again["sources"]
     assert len(rym.calls) == rym_calls, rym.calls[rym_calls:]
@@ -978,10 +989,10 @@ finally:
 # 9) The default priority list is the documented one, both old defaults migrate
 # --------------------------------------------------------------------------- #
 assert list(intg.GENRE_SOURCES) == DOCUMENTED_SOURCES, intg.GENRE_SOURCES
-# The provider REGISTRY stays the full priority list — every source is still
-# selectable in Settings → Discovery and listed in Sources health. The SHIPPED
-# default asks only the two the app grades genres from.
-SHIPPED_DEFAULT = ["rateyourmusic", "musicbrainz"]
+# The registry and the SHIPPED default are the same list: every source is both
+# selectable in Settings → Discovery / listed in Sources health AND asked by
+# default, because the chain stops as soon as a track's list is complete.
+SHIPPED_DEFAULT = list(DOCUMENTED_SOURCES)
 assert list(mcfg.DEFAULT_CONFIG["genre_sources"]) == SHIPPED_DEFAULT, \
     mcfg.DEFAULT_CONFIG["genre_sources"]
 # Every per-track source sits above every album-only one, so a track's own
@@ -1175,8 +1186,8 @@ assert got["notes"]["theaudiodb"].startswith("failed: "), got["notes"]
 assert "bandcamp" not in got["per_source"], got["per_source"]
 assert "theaudiodb" not in got["per_source"], got["per_source"]
 # Everything else answered, in order, exactly as it did before the failure.
-assert got["sources"][FILE_ONE] == ["rateyourmusic", "listenbrainz",
-                                    "musicbrainz", "itunes", "wikidata"], got["sources"]
+assert got["sources"][FILE_ONE] == ["rateyourmusic", "musicbrainz",
+                                    "listenbrainz", "itunes", "wikidata"], got["sources"]
 assert got["per_track"][(1, 1)][0] == "Heavy Metal", got["per_track"]
 assert "Space Rock" in got["per_track"][(1, 1)], got["per_track"]
 

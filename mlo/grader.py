@@ -2931,23 +2931,22 @@ def _grade_album(album_dir, lyrics_format, cfg=None):
                     elif state == "invalid":
                         per_disc_checksum_map[disc_for_log] = "FAKE"
                     elif state == "missing":
-                        # Missing checksum is FAKE when verify required, else NONE for viewer — respect config
-                        if cfg.get("audit_verify_log_checksum", True):
-                            per_disc_checksum_map[disc_for_log] = "FAKE"
-                        else:
-                            per_disc_checksum_map[disc_for_log] = "NONE"
+                        # A log checksum is never required (spec R27): an absent
+                        # line is not evidence against the rip, so the disc
+                        # reads NONE here exactly like a 0.99-era EAC or XLD log
+                        # that never wrote one. mlo.audit logs the case by name.
+                        per_disc_checksum_map[disc_for_log] = "NONE"
                     elif state == "unsupported":
                         per_disc_checksum_map[disc_for_log] = "NONE"
                     elif state is None:
                         # Error / not found — leave as NONE
                         pass
-                # Album aggregate still needed for _realtime fallback — missing counts as invalid when required
+                # Album aggregate still needed for _realtime fallback. Only a
+                # checksum that failed to verify is a failure; an absent one is
+                # not (spec R27), so it leaves the aggregate at NONE.
                 if state == "ok":
                     has_csum = True
                 elif state == "invalid":
-                    has_invalid = True
-                    has_csum = True
-                elif state == "missing" and cfg.get("audit_verify_log_checksum", True):
                     has_invalid = True
                     has_csum = True
             if has_invalid:
@@ -3149,8 +3148,17 @@ def _grade_album(album_dir, lyrics_format, cfg=None):
                                              else "ok")
                 states = []
                 if cfg.get("audit_verify_log_checksum", True):
-                    states.append({"REAL": "ok", "FAKE": "fail"}.get(
-                        str(tr.get("checksum_status") or ""), "missing"))
+                    # Only a state this half actually reached counts: REAL (the
+                    # log's SHA256 verified) or FAKE (it did not). NONE is "this
+                    # log carries no checksum" — XLD, an EAC log older than 1.0,
+                    # or a line that was never written — and per spec R30 that is
+                    # not a missing leg to charge the album for. Reading it as
+                    # missing is what failed a 2008 rip whose log was written by
+                    # a version that had no checksum to write.
+                    log_state = {"REAL": "ok", "FAKE": "fail"}.get(
+                        str(tr.get("checksum_status") or ""))
+                    if log_state:
+                        states.append(log_state)
                 if cfg.get("grade_check_crc", True):
                     codes = set(tr.get("issues") or ())
                     states.append("fail" if "CRC_MISMATCH" in codes
@@ -3230,8 +3238,8 @@ def _grade_album(album_dir, lyrics_format, cfg=None):
             # is.
             _missing_wording = {
                 "log-score": "no LOG_GRADE tag scores the rip log",
-                "checksums": ("the rip log's own checksum does not verify and "
-                              "no CRC was compared with the audio"),
+                "checksums": ("the rip log states no CRC for these tracks, so "
+                              "nothing was compared with the audio"),
                 "accuraterip": ("no .accurip verdict verifies this disc — a "
                                 "pressing that is not in the AccurateRip "
                                 "database reads the same as a disc with no "
@@ -3240,7 +3248,8 @@ def _grade_album(album_dir, lyrics_format, cfg=None):
             for name in sorted(cd_legs_missing):
                 add_issue(
                     f"AUDIT readout: nothing established the CD verdict's "
-                    f"'{name}' leg for {len(cd_legs_missing[name])} track(s): "
+                    f"'{name}' evidence for "
+                    f"{len(cd_legs_missing[name])} track(s): "
                     f"{_missing_wording.get(name, 'no evidence')} — the stored "
                     f"verdict is shown as it is, not guessed (we could not "
                     f"check, which is not the same as a bad rip)", "album")

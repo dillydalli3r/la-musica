@@ -49,7 +49,8 @@ LEGACY_DATA_DIR = os.path.join(SCRIPT_DIR, "server", "data")
 # <music>/.mlo folder holding everything else — data/ (all app state),
 # downloads/ (completed transfers: one queue for the appliance, shared by
 # every user), incomplete/ (in-flight ones), trash/<user>/ (the
-# remove-from-library bin, one per user).
+# remove-from-library bin, one per user) and tools/ (the external tools the
+# installer fetches — see tools_dir).
 # The old top-level <music>/.mlo_data is now only a migration source
 # (LEGACY_MLO_DATA_DIR_NAME below).
 ARTISTS_DIR_NAME = "Artists"
@@ -58,6 +59,7 @@ MLO_DATA_DIR_NAME = "data"
 DOWNLOADS_DIR_NAME = "downloads"
 INCOMPLETE_DIR_NAME = "incomplete"
 TRASH_DIR_NAME = "trash"
+TOOLS_DIR_NAME = "tools"
 
 # The pre-.mlo state dir inside the music folder: still read by the
 # migration, still skipped by the scanner, never written to.
@@ -351,19 +353,65 @@ def legacy_state_dirs(music_folder=None):
     return out
 
 
+# The tools folder from BEFORE the move: <app folder>/.dependencies. Nothing
+# writes here any more — the tools travel with the music folder now (tools_dir)
+# — but it is still READ, so an install that predates the move keeps finding
+# the tools it already has instead of being told they are gone. It is also what
+# tools_dir() answers while no music folder is configured: a fresh install has
+# nowhere else to put them yet.
 DEPS_DIR = os.path.join(SCRIPT_DIR, ".dependencies")
 
 
+def tools_dir(music_folder=None):
+    """The folder holding the external tools: <music folder>/.mlo/tools.
+
+    The tools belong with the rest of the app's things, and the music folder is
+    where those live: as a constant beside the app they stayed behind whenever
+    the music folder moved, and an install whose app folder is read-only (a
+    packaged app) could not install a tool at all. Derived from the music folder
+    on every call for exactly that reason — a music-folder change must not leave
+    a stale path behind.
+
+    The pre-move root while no music folder is known (see legacy_tools_dir):
+    that is the one folder an unconfigured install can still write to.
+    """
+    root = mlo_root(music_folder)
+    return os.path.join(root, TOOLS_DIR_NAME) if root else DEPS_DIR
+
+
+def legacy_tools_dir():
+    """The pre-move tools root: <app folder>/.dependencies (read-only now).
+
+    Detection and the installer's "is it already installed?" question read it
+    (tools_dirs), so a tool installed before the move still works and its row
+    says which folder it came from. No install writes here again.
+    """
+    return DEPS_DIR
+
+
+def tools_dirs(music_folder=None):
+    """Every folder a tool install may be in, the current one first.
+
+    One entry when the two are the same folder, which is what an install with
+    no music folder configured sees (both functions answer DEPS_DIR then).
+    """
+    current = tools_dir(music_folder)
+    if os.path.normcase(os.path.abspath(current)) == os.path.normcase(
+            os.path.abspath(DEPS_DIR)):
+        return [current]
+    return [current, DEPS_DIR]
+
+
 def ensure_data_dirs():
-    """Create .dependencies/ next to the app and verify the app folder is
-    writable (so config.json can be saved there). Both the portable and the
-    installed versions keep everything in their own folder.
+    """Create the tools folder and verify the app folder is writable (so
+    config.json can be saved there). Both the portable and the installed
+    versions keep everything in their own folder.
 
     Returns None when OK, or a human-readable error string when the folder
     is not writable.
     """
     try:
-        os.makedirs(DEPS_DIR, exist_ok=True)
+        os.makedirs(tools_dir(), exist_ok=True)
         probe = os.path.join(SCRIPT_DIR, ".write_test")
         with open(probe, "w", encoding="utf-8") as f:
             f.write("")

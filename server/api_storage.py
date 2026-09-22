@@ -32,10 +32,10 @@ from typing import Any, Dict, List, Optional
 from fastapi import APIRouter, HTTPException
 
 from mlo.config import load_config
-from mlo.paths import (ALL_IMAGE_EXTS, DEPS_DIR, LIB_AUDIO_EXTS, SKIP_DIRS,
+from mlo.paths import (ALL_IMAGE_EXTS, LIB_AUDIO_EXTS, SKIP_DIRS,
                        app_data_dir,
                        downloads_dir, incomplete_dir, library_root, mlo_root,
-                       trash_root)
+                       tools_dir, tools_dirs, trash_root)
 # The one link test in the tree: the library walks use it too, so a junction
 # that would double-count (or loop) is recognised the same way here.
 from mlo.stats import _linked_dir
@@ -323,14 +323,22 @@ def storage_snapshot(cfg, folder: Optional[str]) -> Dict[str, Any]:
         if p == staging:
             stage_bytes, stage_files = row["bytes"], row["files"]
 
-    # The app's own tools folder (ffmpeg, slskd, the analysers — DEPS_DIR, a
-    # bundled dir or `.dependencies`). It is the one part of the app that is
-    # NOT under the music folder, so it is measured where it actually lives;
-    # an install that has not downloaded a tool yet has no such folder, which
-    # is a null row and contributes nothing rather than a zero.
-    deps_res = scan(DEPS_DIR)
-    skips.add(deps_res)
-    deps_row = _row(DEPS_DIR, deps_res)
+    # The app's own tools (ffmpeg, slskd, the analysers) live under the music
+    # folder now — <music>/.mlo/tools — and are measured in BOTH places they can
+    # be: that folder, and the pre-move <app folder>/.dependencies (see
+    # mlo.paths.tools_dirs), because an install that has not updated a tool
+    # since the move still keeps it there and it is still the app's footprint.
+    # One row, named for the current folder; an install that has downloaded no
+    # tool yet has neither folder, which is a null row and contributes nothing
+    # rather than a zero.
+    deps_rows = []
+    for root in tools_dirs(folder):
+        res = scan(root)
+        skips.add(res)
+        deps_rows.append(_row(root, res))
+    deps_row = _sum_rows(deps_rows) if any(deps_rows) else None
+    if deps_row:
+        deps_row["path"] = tools_dir(folder)
 
     # The volume to report is the one the library lives on; with no library
     # yet (an install before its music folder is set) it is the app's own data

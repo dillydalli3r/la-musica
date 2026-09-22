@@ -82,7 +82,7 @@ import urllib.error
 import urllib.parse
 import urllib.request
 
-from .paths import DEPS_DIR, LIB_AUDIO_EXTS
+from .paths import LIB_AUDIO_EXTS, tools_dirs
 from .stats import (is_audio_file, new_stats, _collect_targets, _find_albums,
                     _make_pbar, _pbar_skip, _pbar_update, worker_count)
 from .subproc import run_tool
@@ -181,24 +181,27 @@ def fpcalc_path(cfg=None):
     """Path to the fpcalc executable, or None.
 
     Order: explicit `acoustid_fpcalc_path` in cfg, then a versioned
-    .dependencies/chromaprint* install (the folder the Dependencies installer
-    and mlo.tools both read), then PATH.
+    chromaprint* install in a tools folder (the folder the Dependencies
+    installer writes and mlo.tools reads — the music folder's .mlo/tools, plus
+    the app's pre-move .dependencies, see mlo.paths.tools_dirs), then PATH.
     """
     cfg = cfg or {}
     explicit = cfg.get("acoustid_fpcalc_path")
     if explicit and os.path.isfile(explicit):
         return explicit
 
-    if os.path.isdir(DEPS_DIR):
+    for root in tools_dirs():
+        if not os.path.isdir(root):
+            continue
         try:
-            entries = sorted(os.listdir(DEPS_DIR))
+            entries = sorted(os.listdir(root))
         except OSError:
-            entries = []
+            continue
         for entry in entries:
             if not entry.lower().startswith("chromaprint"):
                 continue
             for name in ("fpcalc.exe", "fpcalc"):
-                cand = os.path.join(DEPS_DIR, entry, name)
+                cand = os.path.join(root, entry, name)
                 if os.path.isfile(cand):
                     return cand
 

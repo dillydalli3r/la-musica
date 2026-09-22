@@ -127,8 +127,13 @@ export default function NotificationBell() {
         // `z-20` — anchored in place it was clipped at the column's edge and
         // painted under the sidebar (the "unviewable tray": the text started
         // mid-word). Portaled to <body> and positioned from this button's own
-        // rect it stays above everything and inside the viewport.
+        // rect it stays above everything and inside the viewport — and pinned
+        // to the app's own 8 px viewport gutter, because the bell sits in the
+        // top bar's padded right cluster: aligning the tray to the BUTTON
+        // inherited that padding and left the tray visibly inset from the
+        // screen edge (#40).
         fixed
+        rightGap={8}
         panelClass="w-80 max-h-[70vh] overflow-y-auto p-1.5"
       >
         <div className="flex items-center justify-between gap-2 px-2.5 pt-1 pb-0.5">

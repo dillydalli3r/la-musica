@@ -53,9 +53,11 @@ def ai_configured(config):
 def ai_effort(config):
     """Reasoning effort for AI calls: HIGH by default — translation and
     transliteration quality beat latency here. MINIMAL disables thinking
-    entirely for speed."""
+    entirely for speed; MAX asks for the provider's own ceiling, which
+    `ai_chat` reaches by dropping a rung at a time (a compatible endpoint that
+    does not know the word falls back to HIGH before the field is dropped)."""
     raw = str(config.get("ai_effort") or "high").strip().lower()
-    return raw if raw in ("minimal", "low", "medium", "high") else "high"
+    return raw if raw in ("minimal", "low", "medium", "high", "max") else "high"
 
 
 def ai_chat(config, system, user, timeout=90.0):
@@ -75,17 +77,26 @@ def ai_chat(config, system, user, timeout=90.0):
         ],
     }
     # Reasoning effort (OpenAI-style field; Google's OpenAI-compatible
-    # endpoint maps it onto thinking budgets). Providers that reject the
-    # unknown field get one plain retry.
+    # endpoint maps it onto thinking budgets). The attempts are a LADDER, not
+    # one value plus a plain retry: MAX is the user asking for the provider's
+    # own ceiling, and not every compatible endpoint knows that word — so a
+    # rejection drops to HIGH before the field itself is dropped, which is
+    # "the highest this provider accepts" rather than "its default". Every
+    # other value behaves as it always did: the value, then no field at all.
     effort = ai_effort(config)
-    if effort != "minimal":
-        body["reasoning_effort"] = effort
-    r = httpx.post(f"{base}/chat/completions", json=body, headers=headers,
-                   timeout=timeout)
-    if r.status_code >= 400 and "reasoning_effort" in body:
-        body.pop("reasoning_effort")
+    attempts = [None] if effort == "minimal" else (
+        ["max", "high", None] if effort == "max" else [effort, None]
+    )
+    r = None
+    for value in attempts:
+        if value is None:
+            body.pop("reasoning_effort", None)
+        else:
+            body["reasoning_effort"] = value
         r = httpx.post(f"{base}/chat/completions", json=body, headers=headers,
                        timeout=timeout)
+        if r.status_code < 400:
+            break
     if r.status_code >= 400:
         # surface the provider's own message (bad key, unknown model, …)
         detail = (r.text or "").strip().replace("\n", " ")[:300]

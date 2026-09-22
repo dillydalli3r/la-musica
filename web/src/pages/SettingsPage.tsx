@@ -53,11 +53,12 @@ const TAG_FAMILIES = ["AUDIT", "LOG_GRADE", "REPLAYGAIN", "DYNAMIC_RANGE", "MEDI
  *  the same values when it loads the file) instead of an empty field. */
 const CFG_DEFAULTS: Record<string, unknown> = {
   mb_genre_count: 2,
-  genre_sources: ["rateyourmusic", "musicbrainz"],
+  genre_sources: ["rateyourmusic", "musicbrainz", "listenbrainz", "itunes", "lastfm", "theaudiodb", "wikidata", "bandcamp", "discogs", "deezer", "spotify"],
   advisory_auto_fetch: true,
   metadata_auto_fetch: true,
   metadata_review: false,
-  soulseek_download_slots: 3,
+  soulseek_download_slots: 9,
+  soulseek_candidate_slots: 3,
   soulseek_upload_slots: 2,
   soulseek_upload_limit_kib: 0,
   soulseek_download_limit_kib: 0,
@@ -462,6 +463,178 @@ function YoutubeCookieJar() {
           <span className="text-[10px] text-zinc-600">
             Up to {fmtBytes(jar?.max_bytes ?? 524288)} — a jar is a few dozen lines, so anything bigger is a browser profile folder,
             not a cookies.txt.
+          </span>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+/** The RateYourMusic cookie (Settings → Discovery): import the RYM cookies out
+ *  of a cookies.txt, see which ones are stored, clear the credential.
+ *
+ *  The row above stays exactly as it was — the credential is ONE config value
+ *  (`rym_cookie`), and this panel writes the very string that box accepts, so
+ *  the box keeps working and the two can never disagree (after an import the
+ *  stored value is pulled back into the form, or the next "Save all settings"
+ *  would post the old cookie over the new one).
+ *
+ *  What the box cannot do is the reason this exists: RYM's `session` cookie is
+ *  HttpOnly, so no script — and no "copy the Cookie header" from devtools —
+ *  can see it. A browser extension's Netscape `cookies.txt` export is the only
+ *  way a user can hand that cookie over, and only the rateyourmusic.com lines
+ *  of it are kept. No cookie VALUE is shown, toasted or posted by this panel:
+ *  the server answers with names, counts and sentences.
+ */
+function RymCookieJar({ onStored }: { onStored: (value: string) => void }) {
+  const qc = useQueryClient();
+  const { data: jar } = useQuery({ queryKey: ["rymCookies"], queryFn: api.rymCookies, retry: false });
+  const [text, setText] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [dragging, setDragging] = useState(false);
+
+  const save = async (body: string) => {
+    if (!body.trim()) {
+      toast.error("Nothing to save — paste the contents of cookies.txt first");
+      return;
+    }
+    setBusy(true);
+    try {
+      const r = await api.rymCookiesSave(body);
+      setText("");
+      if (r.stored > 0) {
+        toast.success(
+          `Cookie saved — ${r.stored} rateyourmusic.com cookie${r.stored === 1 ? "" : "s"}${r.session ? ", session included" : ""}`
+        );
+        // The import wrote the config, so the form has to follow it: the box
+        // above (and the next "Save all settings") must agree with what RYM is
+        // sent from now on. The value comes from the config, never from the
+        // import's answer, which is names and counts only.
+        const fresh = await api.config();
+        onStored(String(fresh.rym_cookie ?? ""));
+      } else {
+        toast.error("No rateyourmusic.com cookie in that file — nothing was stored");
+      }
+      // The server's own sentences come through as warnings: a stored cookie
+      // with no `session` pair means RYM answers as a guest, and a plain
+      // "saved!" would hide exactly that.
+      for (const w of r.warnings) toast(w);
+      qc.invalidateQueries({ queryKey: ["rymCookies"] });
+      qc.invalidateQueries({ queryKey: ["config"] });
+    } catch (e) {
+      toast.error(String(e));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const drop = async (e: DragEvent) => {
+    e.preventDefault();
+    setDragging(false);
+    const file = e.dataTransfer.files?.[0];
+    if (!file) return;
+    try {
+      await save(await file.text());
+    } catch (err) {
+      toast.error(String(err));
+    }
+  };
+
+  const remove = async () => {
+    setBusy(true);
+    try {
+      // Clearing goes through the ordinary config route: `rym_cookie` IS the
+      // credential, so "remove it" is "save it empty" — no second endpoint and
+      // no second place it could live.
+      await api.saveConfig({ rym_cookie: "" });
+      onStored("");
+      toast("Cookie cleared — RYM is asked as a guest again");
+      qc.invalidateQueries({ queryKey: ["rymCookies"] });
+      qc.invalidateQueries({ queryKey: ["config"] });
+    } catch (e) {
+      toast.error(String(e));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <div className="pt-2 border-t border-border space-y-2">
+      <div className="flex items-center gap-2 flex-wrap">
+        <span className="text-xs font-semibold uppercase tracking-wider text-zinc-500">Import from cookies.txt</span>
+        <span
+          className={`chip ${
+            jar?.present
+              ? "border-emerald-900/50 bg-emerald-950/30 text-emerald-300"
+              : "border-border bg-zinc-900 text-zinc-500"
+          }`}
+        >
+          {jar?.present ? `${jar.lines} cookie${jar.lines === 1 ? "" : "s"}` : "none saved"}
+        </span>
+        {jar?.present && (
+          <ConfirmButton
+            className="btn-ghost !py-0.5 text-[11px] tap ml-auto"
+            confirmLabel="Delete the RateYourMusic cookie?"
+            onConfirm={remove}
+            disabled={busy}
+          >
+            <Trash2 className="h-3 w-3" /> Delete
+          </ConfirmButton>
+        )}
+      </div>
+      <div className="text-[11px] text-zinc-600">
+        Signed in to rateyourmusic.com, export the browser's cookies to a <span className="text-zinc-400">cookies.txt</span> — the
+        Firefox extension <span className="text-zinc-400">"cookies.txt"</span> by Rob W writes exactly that file — then paste its
+        contents below or drop the file onto the box. It replaces the manual paste above: only the{" "}
+        <span className="text-zinc-400">rateyourmusic.com</span> cookies are kept (RYM's{" "}
+        <span className="text-zinc-400">session</span> cookie is HttpOnly, so this export is the only way to hand it over), and they
+        are sent to rateyourmusic.com and nowhere else.
+      </div>
+      {jar?.names?.length ? (
+        <div className="flex items-center gap-1.5 flex-wrap">
+          <span className="text-[10px] text-zinc-600">Cookies:</span>
+          {jar.names.map((n, i) => (
+            <span key={`${n}-${i}`} className="chip border-border bg-zinc-900 text-zinc-400">{n}</span>
+          ))}
+        </div>
+      ) : null}
+      {jar?.warnings?.map((w) => (
+        <div key={w} className="text-[10px] text-amber-400/90 border border-amber-900/40 bg-amber-950/20 rounded px-2 py-1">
+          {w}
+        </div>
+      ))}
+      <div
+        onDragOver={(e) => {
+          e.preventDefault();
+          setDragging(true);
+        }}
+        onDragLeave={() => setDragging(false)}
+        onDrop={drop}
+        className={`rounded-md border border-dashed p-2 ${dragging ? "border-accent bg-accent/5" : "border-border"}`}
+      >
+        <textarea
+          className="input w-full h-24 font-mono text-[10px] tap"
+          placeholder={"# Netscape HTTP Cookie File\n.rateyourmusic.com\tTRUE\t/\tTRUE\t…\tsession\t…\n\n(paste here, or drop cookies.txt on this box)"}
+          value={text}
+          onChange={(e) => setText(e.target.value)}
+          spellCheck={false}
+        />
+        <div className="flex items-center gap-2 flex-wrap mt-1.5">
+          <button
+            className="btn-primary !py-1 text-xs min-h-10 md:min-h-0 tap"
+            onClick={() => save(text)}
+            disabled={busy || !text.trim()}
+          >
+            {busy ? <Loader2 className="h-3 w-3 animate-spin" /> : <Check className="h-3 w-3" />} Save cookies
+          </button>
+          {text.trim() && (
+            <button className="btn-ghost !py-1 text-xs tap" onClick={() => setText("")} disabled={busy}>
+              <X className="h-3 w-3" /> Clear
+            </button>
+          )}
+          <span className="text-[10px] text-zinc-600">
+            Up to {fmtBytes(jar?.max_bytes ?? 524288)} — the export is the cookies.txt itself; a whole browser profile is bigger than
+            that.
           </span>
         </div>
       </div>
@@ -923,7 +1096,10 @@ export default function SettingsPage() {
         { k: "soulseek_web_port", label: "Web/API port", type: "number", min: 1024, max: 65535 },
         { k: "soulseek_up_limit", label: "Upload speed limit (kB/s, 0 = unlimited)", type: "number", min: 0, max: 100000 },
         { k: "soulseek_down_limit", label: "Download speed limit (kB/s, 0 = unlimited)", type: "number", min: 0, max: 100000 },
-        { k: "soulseek_download_slots", label: "Concurrent download slots", type: "number", min: 1, max: 20 },
+        {
+          k: "soulseek_download_slots", label: "Concurrent download slots (slskd)", type: "number", min: 1, max: 20,
+          help: "How many transfers slskd runs at once — the OUTER ceiling, and the only one of the three numbers that is slskd's rather than this app's. The app enforces `Releases … at once` × `Candidate downloads per release` (Wishes tab) itself; at the shipped defaults that product is 3 × 3 = 9, which is why this defaults to 9. Set it below the product and the app narrows each release's batch to fit (`slots ÷ releases`), so nothing you configure here ends up queued inside slskd.",
+        },
         { k: "soulseek_upload_slots", label: "Concurrent upload slots (empty/0 = slskd's own default, 10)", type: "number", min: 0, max: 20 },
         { k: "soulseek_upload_limit_kib", label: "Per-transfer upload limit (KiB/s, 0 = unlimited)", type: "number", min: 0, max: 1000000 },
         { k: "soulseek_download_limit_kib", label: "Per-transfer download limit (KiB/s, 0 = unlimited)", type: "number", min: 0, max: 1000000 },
@@ -990,8 +1166,12 @@ export default function SettingsPage() {
       fields: [
         { k: "wishes_enabled", label: "Run the wishes worker", type: "bool" },
         {
+          k: "soulseek_candidate_slots", label: "Candidate downloads per release", type: "number", min: 1, max: 20,
+          help: "How many candidate peers of ONE release may download at the same time (3 by default). The first that verifies good becomes the import and the others are cancelled and swept, and the NEXT candidate is only asked for when one of them lands or fails — so however many candidates a search turns up, one release never talks to more peers than this. Enforced by the app's own enqueueing; slskd's download slots (Soulseek tab) are only the outer ceiling on the transfers it produces.",
+        },
+        {
           k: "soulseek_search_concurrency", label: "Releases searched / downloaded at once", type: "number", min: 1, max: 8,
-          help: "The wishes worker fills up to this many wishes per pass, and a bulk auto-import run keeps this many jobs in flight. The transfers themselves are still capped by slskd's own download slots (Settings → Soulseek), so raising this only uses the queue harder, it does not open more connections than slskd allows.",
+          help: "Over this ceiling a release is NOT refused: it takes its place in the queue (Queue → Waiting, with its position) and starts by itself the moment one of the running releases finishes. The wishes worker fills up to this many wishes per pass, and a bulk auto-import run keeps this many jobs in flight. What it does not do on its own is open more connections: that is what `Candidate downloads per release` (per release) and slskd's own download slots add up to.",
         },
         { k: "wishes_interval_hours", label: "Search interval (hours)", type: "number", min: 1, max: 168 },
         { k: "wishes_max_attempts", label: "Max attempts per wish (0 = forever)", type: "number", min: 0, max: 1000 },
@@ -1030,7 +1210,7 @@ export default function SettingsPage() {
         { k: "discovery_timeout_s", label: "Request timeout (s)", type: "number", min: 3, max: 30 },
         {
           k: "rym_cookie", label: "RateYourMusic cookie", type: "password",
-          help: "Only needed when RYM answers with a challenge. Sign in to rateyourmusic.com, press F12 → Network → reload → click any request to rateyourmusic.com → Headers → Request Headers → copy everything after \"Cookie:\" and paste it here (newlines and the \"Cookie:\" label are handled for you). It is a session credential — do not share it, and paste a fresh one when RYM starts refusing, since signing out or clearing cookies invalidates it. Blank = RYM is skipped like any other unavailable source; MusicBrainz still resolves RYM links for well-known releases. Test it with the Sources panel's Test button.",
+          help: "Only needed when RYM answers with a challenge. Sign in to rateyourmusic.com, press F12 → Network → reload → click any request to rateyourmusic.com → Headers → Request Headers → copy everything after \"Cookie:\" and paste it here (newlines and the \"Cookie:\" label are handled for you). The import panel below is the easier way when you have it: a \"cookies.txt\" browser extension (the Firefox one is Rob W's cookies.txt) exports the cookies of a signed-in rateyourmusic.com profile, and only its rateyourmusic.com cookies land here — RYM's `session` cookie is HttpOnly, so that export is the only way to get it out of a browser at all. It is a session credential — do not share it, and paste a fresh one when RYM starts refusing, since signing out or clearing cookies invalidates it. Blank = RYM is skipped like any other unavailable source; MusicBrainz still resolves RYM links for well-known releases. Test it with the Sources panel's Test button.",
         },
         {
           k: "rym_links_auto", label: "Auto-find RateYourMusic links", type: "bool",
@@ -2327,6 +2507,7 @@ export default function SettingsPage() {
                 </div>
               )}
               {tab === "videos" && <YoutubeCookieJar />}
+              {tab === "discovery" && <RymCookieJar onStored={(v) => setCfg("rym_cookie", v)} />}
               {tab === "beets" && (
                 <div className="pt-2 border-t border-border space-y-2">
                   <div className="flex items-center gap-2 flex-wrap">

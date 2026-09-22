@@ -325,7 +325,11 @@ def generate_yaml(cfg=None):
     description = str(cfg.get("soulseek_description") or "").strip()
     listen_port = int(cfg.get("soulseek_listen_port") or 50000)
     web_port = int(cfg.get("soulseek_web_port") or 5030)
-    dl_slots = max(1, min(20, _int_setting(cfg, "soulseek_download_slots", 3)))
+    # Fallback 9 = the shipped default (soulseek_search_concurrency ×
+    # soulseek_candidate_slots, see server.soulseek_auto): the pipeline's own
+    # two ceilings are what the app enforces, and this is the slot count slskd
+    # needs to serve the product they promise.
+    dl_slots = max(1, min(20, _int_setting(cfg, "soulseek_download_slots", 9)))
     # slskd validates `transfers.upload.slots` as Range(1, int.MaxValue) and
     # EXITS when a value falls outside it (Program.TryValidate), so the "0 =
     # unlimited" the settings field documents was a config slskd refused to

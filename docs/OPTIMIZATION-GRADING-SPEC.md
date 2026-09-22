@@ -32,8 +32,8 @@ Grade script (4) over an album and reading the report.
   entry in an album's `issues` costs at least one failed check, so the dot, the
   percentage and the *N problems to fix* list can never disagree: an album
   cannot be a `PASS` while it displays a problem. A readout that names something
-  the grade would not charge — the CD legs' *nothing established* line (§5,
-  R26) — is charged as its own check rather than left as a note beside a green
+  the grade would not charge — the CD verdict's *nothing established … evidence* line
+  (§5, R26) — is charged as its own check rather than left as a note beside a green
   verdict, and the artist rollup carries its own `pass` flag (`failed == 0`)
   instead of deriving one from the ROUNDED `grade_pct`, which at a few thousand
   checks rounds one failure up to `100.0`.
@@ -305,7 +305,7 @@ group still renders (section *Other checks*).
 | Check id | Label | Default | Asserts |
 | --- | --- | --- | --- |
 | `grade_check_audit` | Require audit tag | ON | the track's audit verdict is REAL — missing or non-REAL fails (`AUDIT`). It ships **on** now: with the CD verdict decided by the rip's own evidence (§5, R21) an unaudited library is a library nobody has checked, which is the thing this check exists to say |
-| `grade_check_log_checksum` | Log checksum valid | ON | the rip log's EAC SHA256 verifies; a log that states none while `audit_verify_log_checksum` is on fails (`LOG_CHECKSUM`); XLD logs and EAC logs from BEFORE v1.0 pass (nothing claimed, nothing refuted — v1.0b1 is the release that introduced the checksum, and the version is read from the log's OWN header, so a modern EAC log with its checksum line removed is still a real tamper signal and still fails). The log file itself is never written, repaired or stripped: editing a log to make its checksum pass would destroy the only thing the checksum proves |
+| `grade_check_log_checksum` | Log checksum valid | ON | a log checksum that IS PRESENT must verify (`LOG_CHECKSUM`); one that is ABSENT is not required and costs nothing — XLD, EAC before v1.0 and a 1.0+ log whose `Log checksum` line is gone are judged by their per-track CRCs alone (R30) |
 | `grade_check_accuraterip` | AccurateRip verified (audit only) | ON | a `.accurip` whose verdict is not REAL marks the album's audit FAKE (and the track red). Together with `audit_require_accuraterip` it is what can turn the audit verdict FAKE; **it never adds a grade point** |
 | `grade_check_log_grade` | Log grade present & in range | ON | `LOG_GRADE` exists, is an integer 0-100 and is at least `grade_log_score_threshold` (default 100; 0 disables the threshold) |
 
@@ -405,13 +405,15 @@ evidence matters.
   passes: **(1) log score** — the disc's rip-log score (fresh from Logchecker,
   else the `LOG_GRADE` the tracks already carry) is at least
   `audit_log_score_threshold`; **(2) checksums** — the `.log`'s per-track
-  `Copy CRC` equals the track's decoded PCM AND the `.log`'s own EAC SHA256
-  verifies (a pre-1.0 EAC or XLD log is *unsupported*, which passes — nothing
-  claimed, nothing refuted); **(3) AccurateRip** — the `.accurip` verdict is
-  REAL. A leg that FAILS makes the verdict `FAKE` and the run log names the leg
-  and its reason. A leg that cannot be EVALUATED at all leaves the tag untouched
-  — no REAL, no FAKE — and the run prints `missing leg '<name>'` with the
-  reason, so "we could not check" is never reported as "your rip is bad".
+  `Copy CRC` equals the track's decoded PCM AND any EAC SHA256 the `.log`
+  carries verifies (a log that carries none — pre-1.0 EAC, XLD, a stripped line
+  — is *unsupported*/*missing*, and per R30 that is not required: nothing
+  claimed, nothing refuted, the disc is judged by its CRCs); **(3) AccurateRip**
+  — the `.accurip` verdict is REAL. A leg that FAILS makes the verdict `FAKE`
+  and the run log names the leg and its reason. A leg that cannot be EVALUATED
+  at all leaves the tag untouched — no REAL, no FAKE — and the run prints
+  `missing '<name>' evidence` with the reason, so "we could not check" is never
+  reported as "your rip is bad".
   **AudioAuditor never decides a CD in either direction**: its read is kept as
   evidence and a disagreement is logged as a warning
   (*AudioAuditor reports …, the rip's own evidence decides a CD*). It remains
@@ -451,11 +453,17 @@ evidence matters.
   beside a listed problem: an album whose AccurateRip leg has no `.accurip`
   behind it reads `FAIL` with that leg named, and the check clears when script 9
   establishes the leg or `audit_require_accuraterip` is switched off. The
-  evidence-satisfied reading survives only where it was written for: a track
-  carrying NO stamped verdict whose own evidence (a verifying `.log` checksum or
-  a REAL `.accurip`) proves the rip is reported `REAL`, with
-  `audit_verified` naming which source proved it. The readout applies with
-  `grade_check_audit` off, too.
+  sentence the album lists is *nothing established the CD verdict's `<leg>`
+  evidence for N track(s)* — the word is `evidence`, not `leg`: a reader
+  hovering a row has no reason to know the app's internal name for a component
+  of the CD verdict, and the reason clause that follows already names the
+  artefact that is missing. A leg whose own gate is switched off, or whose half
+  of the gate claims nothing (R30's absent log checksum), contributes **no
+  state** and is not charged. The evidence-satisfied reading survives only where
+  it was written for: a track carrying NO stamped verdict whose own evidence (a
+  verifying `.log` checksum or a REAL `.accurip`) proves the rip is reported
+  `REAL`, with `audit_verified` naming which source proved it. The readout
+  applies with `grade_check_audit` off, too.
 - **R27 — the log's own documentation never overrules a verified rip.** A log
   with no verifiable EAC SHA256, one the tool cannot score, or one below
   `audit_log_score_threshold` is reported as such, but a track whose CRC just
@@ -468,11 +476,22 @@ evidence matters.
   (`audit_fail_on_unscorable_log`, ON, applies only where a scorer exists).
 - **R30 — the rip's checksums are graded on their own terms**, independently of
   `grade_check_audit`: `grade_check_crc` (coverage plus CRC-32 equality) and
-  `grade_check_log_checksum` (the EAC SHA256 verifies, or states none while
-  `audit_verify_log_checksum` is on — but a log whose own header names an EAC
-  version older than 1.0 is judged by neither: it predates the checksum, so
-  nothing is claimed and nothing is refuted). Both can be switched off for a
-  collection whose logs predate EAC checksums.
+  `grade_check_log_checksum`. For the latter the rule is **present ⇒ must
+  verify, absent ⇒ not required**: a checksum the log carries and that does not
+  verify fails the disc (`LOG_CHECKSUM`, and the `checksums` evidence of the CD
+  verdict), while a log that carries none claims nothing and refutes nothing, so
+  it is judged by its per-track CRCs alone. That covers every way a log can
+  arrive without one — XLD, EAC older than 1.0, and a 1.0+ log whose
+  `==== Log checksum … ====` line is gone. `mlo.discs.check_log_checksum` still
+  reports the distinction (`unsupported` vs `missing`) so the run log can say
+  which case a log is in, and the `missing` case is logged as a warning; neither
+  is charged. Requiring an absent checksum is what failed an honest 2008 rip:
+  its log was written by a version that had no checksum to write, and "the
+  machine could not check" must not read as "your rip is bad" (R2). A
+  collection that wants the old strictness turns
+  `grade_check_log_checksum`/`audit_verify_log_checksum` off; with every
+  checksum that IS present still verified, both keys remain the escape hatch for
+  a collection whose logs must not be trusted at all.
 
 ## 6. Tag families and what writes them
 
@@ -803,24 +822,42 @@ table and the auto-update worker cannot disagree.
   available* counts exactly the rows whose chip is amber — one predicate, so the
   count and the table cannot disagree.
 - **R67 — what can be done is a separate fact.** `install_kind` is `deps` (the
-  installer fetches a pinned Windows build, a native Linux build or a pip
-  package into `.dependencies`), `system` (the OS package manager owns the
+  installer fetches a pinned Windows build, a native Linux build, a `.deb` or a
+  pip package into the tools folder), `system` (the OS package manager owns the
   tool) or `unsupported` (no build for this platform), and `action` is
   `install` / `update` / `upgrade` / `none`. A `deps` row installs and updates
   in-app, with the row's own button; a `system` row behind upstream offers
   `upgrade`, whose `upgrade_command` is the exact package-manager command for
   this host (`apt-get install --only-upgrade <pkg>`, built from
   `LINUX_PACKAGES`) — copied, never executed, because the app does not drive a
-  package manager.
+  package manager. `Copy command` is that row's alone: a row this host can
+  download never offers a command instead of its button, and a tool with no
+  install path and no command shows neither.
+- **R67a — the tools live with the library, and the old folder is still read.**
+  Every install goes to `<music>/.mlo/tools` (`mlo.paths.tools_dir`, derived
+  from the music folder on every call — a music-folder change must not leave a
+  stale path behind, which is what made a module-level constant the wrong shape
+  for it). Detection and the installer's "is it already installed?" question
+  read that folder AND the pre-move `<app folder>/.dependencies`
+  (`mlo.paths.legacy_tools_dir`), so a tool installed before the move is never
+  reported as missing; only the first is ever written, and the row's note says
+  when a copy came from the old one. On Linux, `deps` is also what `libjxl` and
+  `libjpeg_turbo` are: upstream's build for them is a `.tar.lz` (libjxl, fully
+  static, x86-64 only — it publishes no ARM asset at all, so an ARM host keeps
+  the distro package) and a `.deb` (libjpeg-turbo, one per architecture),
+  unpacked in app without dpkg or 7-Zip (`fetchdeps._extract_archive`). A `.deb`
+  whose binaries name their shared library by an absolute RPATH travels with
+  that library and is run through a launcher, so an install can never land a
+  tool the host cannot start.
 - **R68 — the page's own action is always on screen.** Install/Update-all is
   sticky (it does not scroll away with the first rows) and is disabled only when
   there is nothing this host can install, with the reason in its title. It never
   disappears, and it never offers a row this host cannot install.
 - **R69 — detection matches what the installer writes.** A tool installed into
-  `.dependencies` must be what detection reports (`mlo/tools.py`'s per-tool
-  `_exe` field map), or an update the installer performed would be invisible,
-  the row would keep reading the PATH copy, and its amber chip could never
-  clear.
+  the tools folder must be what detection reports (`mlo/tools.py`'s per-tool
+  `_exe` field map, native Linux builds included), or an update the installer
+  performed would be invisible, the row would keep reading the PATH copy, and
+  its amber chip could never clear.
 
 ---
 
@@ -884,6 +921,48 @@ user asked for, in the order they asked for it. `server/exporter.py` owns both.
   that needs a signed-in jar for any of them. The jar is validated as a Netscape
   cookie file on write, capped at 512 KiB, and reported back with its cookie
   count and domains.
+- **R81 — the RateYourMusic credential can be imported from a cookies.txt.**
+  RYM has no API: `rym_cookie` is the user's own signed-in session cookie, and
+  RYM's `session` cookie is HttpOnly — no script and no "copy the Cookie header"
+  from devtools can ever see it, so a browser extension's Netscape `cookies.txt`
+  export is the only way most users can hand it over at all. Settings →
+  Discovery therefore takes the file (pasted or dropped) as well as the manual
+  header paste: `POST /api/rym/cookies` parses it with the SAME parser the
+  yt-dlp jar uses (`server/api_youtube.parse_cookie_file` — one file-or-junk
+  rule for both), keeps ONLY the cookies whose host is `rateyourmusic.com` or a
+  subdomain of it (the export carries every site the profile holds), and writes
+  the survivors into `rym_cookie` in file order, as the exact
+  `name=value; name=value` string the manual box accepts, through the app's own
+  config writer — so `_rym_cookie`/`_rym_cookiejar` pick it up unchanged, the
+  box and the import cannot disagree, and a restart keeps it. `rym_cookie`
+  remains the ONE place the credential lives (no second file, no second config
+  key). A file with no `rateyourmusic.com` cookie stores NOTHING and says why
+  (a signed-out tab's export must not cost a working session); junk and an
+  oversize body are refused before any write; and no route — `GET
+  /api/rym/cookies` included — ever returns, logs or shows a cookie VALUE: the
+  panel is told the cookie NAMES, the count, whether `session` is among them
+  (without it RYM answers as a guest) and warnings as sentences.
+- **R82 — the download queue has exactly two limits, and the overflow WAITS.**
+  `soulseek_search_concurrency` (3) is how many RELEASES run at once and
+  `soulseek_candidate_slots` (3) is how many candidates of one release download
+  at once; both are enforced by the app itself, never delegated to slskd. A
+  release that arrives at the ceiling is NOT refused: it takes its place in the
+  pipeline's waiting queue (the Queue tab's **Waiting** group, one row per
+  release, with its 1-based `position` and its `waiting` flag on the polled
+  payload), is cancellable there without ever starting, and starts by itself
+  from the finish path of whichever release frees the slot
+  (`soulseek_auto._finish → _start_next`) — so it never depends on a second
+  user action. `POST /api/soulseek/downloads/cancel` takes `ids` (the
+  `pipeline:<key>` / `job:<id>` rows of one selection) and answers `cancelled`
+  + `ids` + `missed`; `POST /api/soulseek/downloads/clear` with
+  `scope: "queued"` is **Clear all**: it removes exactly the queued/waiting
+  releases, needs no running slskd, and leaves a RUNNING release alone (that is
+  a per-row cancel). slskd's own `soulseek_download_slots` is the OUTER ceiling
+  on the transfers this product creates and is shipped as the product itself
+  (3 × 3 = 9); a config whose slots are narrower than its other two settings
+  gets the per-release batch narrowed to fit (`slots ÷ releases`,
+  `soulseek_auto._batch_width`), so the app never asks slskd for more than it
+  will serve. The Queue tab reads all three numbers back in its header.
 - **R77 — the Soulseek port check states what it proves.** `GET
   /api/soulseek/port-check` returns five rows — `listen` (a real TCP connect
   plus a bind test), `mapping` (what the router itself lists, with its own words
@@ -993,7 +1072,7 @@ checks see or how they judge it.
 | `encoder_tags` | per-format map | which `ENCODER_*` markers `grade_check_encoder` requires (`ENCODER_QUALITY` / `ENCODER_VERSION` on, `ENCODER_PROGRAM` off, per format) |
 | `strip_unknown_tags` | ON | whether `grade_check_excess_tags` reports junk tags |
 | `mb_genre_count` | 2 (max 3) | `grade_check_genre_count` ceiling, and what script 8/10 trim to |
-| `genre_autofill` / `genre_sources` | ON / `[rateyourmusic, musicbrainz]` | which writers can satisfy the genre checks |
+| `genre_autofill` / `genre_sources` | ON / `[rateyourmusic, musicbrainz, listenbrainz, itunes, lastfm, theaudiodb, wikidata, bandcamp, discogs, deezer, spotify]` | which writers can satisfy the genre checks. The list is a PRIORITY list, asked in order and stopped as soon as a track's list is complete, and the shipped default is every source the app knows (R30a) |
 | `mood_enabled` / `mood_source` | ON / `hybrid` | whether script 8/16 writes `MOOD`/`ENERGY` at all |
 | `naming_script` | the shipped pattern | what `grade_check_naming` / `grade_check_filename_case` compare against |
 | `short_folder_names` | off | 8-char ids (both spellings are accepted) |
@@ -1011,7 +1090,7 @@ checks see or how they judge it.
 | `append_final_newline`, `keep_empty_cue_lines`, `keep_other_cue_lines`, `cue_file_type`, `keep_empty_accurip_lines` | off/off/off/`WAVE`/off | the canonical form the CUE/`.accurip` checks compare against |
 | `discs_rename_enabled` / `discs_rename_pattern` / `cue_fix_filenames` | ON / `CD-{n}` / ON | the disc-sheet naming and `FILE`-line rules |
 | `audit_require_accuraterip` | ON | together with `grade_check_accuraterip`, whether a `.accurip` verdict can turn the album audit FAKE |
-| `audit_verify_log_checksum` | ON | whether a log stating no EAC SHA256 fails `grade_check_log_checksum` (a log whose own header names an EAC version older than 1.0 is exempt either way — see R30) |
+| `audit_verify_log_checksum` | ON | whether a log's own EAC SHA256 is read at all: when on, a checksum the log CARRIES must verify or the disc fails, and one that is absent is reported (warning) but not required — 'unsupported' (XLD, EAC before 1.0) and 'missing' (a 1.0+ log with the line stripped) are indistinguishable to grading, only to the warning (see R30) |
 | `audit_check_cd_format` | ON | whether a `CD_FORMAT` failure turns the album audit FAKE |
 | `audit_verify_cd_checksums` / `audit_integrity` / `audit_cd_require_both` | ON | what script 6 verifies on a CD rip |
 | `audit_log_score_threshold` | 100 | the log score the audit accepts |
@@ -1065,8 +1144,10 @@ the viewer computes per-file sidecar grades; it adds no check).
   given host cannot do is reported by `GET /api/capabilities` and shown on the
   Dependencies page as a row with the reason and, where the OS package manager
   owns the tool, the exact command that installs or upgrades it — never as a
-  failed check. A tool with no build for this machine's architecture (libjxl and
-  libjpeg-turbo upstream ship none the app can unpack; rsgain has no ARM Linux
-  asset) stays a `system` row on Linux: it is graded normally when the distro
-  provides it, and its row says what upstream has and what the package manager
-  would install.
+  failed check. libjxl and libjpeg-turbo are installs of their own as well —
+  upstream's static `.tar.lz` and its `.deb` are unpacked in app, so the tools
+  left as a `system` row on Linux are the ones the distro really owns (flac,
+  ffmpeg, and rsgain or fpcalc on an architecture upstream publishes no build
+  for, plus libjxl on ARM, where no asset of any kind exists): each is graded
+  normally when the distro provides it, and its row says what upstream has and
+  what the package manager would install.

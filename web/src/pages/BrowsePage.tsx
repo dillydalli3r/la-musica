@@ -427,7 +427,7 @@ export default function BrowsePage() {
           {ratingText((tr as Track & { rating?: number }).rating ?? (tr.tags as Record<string, unknown>).RATING)}
         </td>
         <td className="td">
-          <GradeBadge pass={!!tr.grade_pass} score={null} audit={tr.audit} size="sm" />
+          <GradeBadge pass={!!tr.grade_pass} score={null} size="sm" />
         </td>
       </tr>
     );
@@ -464,7 +464,7 @@ export default function BrowsePage() {
         <td className={`td text-zinc-500${PHONE_HIDE}`}>{fmtDateCell(al.meta?.DATE, false)}</td>
         <td className={`td text-zinc-500 tabular-nums${PHONE_HIDE}`}>{al.track_count}</td>
         <td className="td">
-          <GradeBadge pass={al.pass} score={al.grade_pct} audit={al.audit_summary} size="sm" />
+          <GradeBadge pass={al.pass} score={al.grade_pct} size="sm" />
         </td>
         <td className={`td${PHONE_HIDE}`}>
           <MediaChip media={al.media} />

@@ -1,4 +1,5 @@
 import { useEffect, useRef } from "react";
+import { createPortal } from "react-dom";
 import type { ReactNode } from "react";
 import type { LucideIcon } from "lucide-react";
 import { X } from "lucide-react";
@@ -85,7 +86,16 @@ export default function Modal({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  return (
+  // Portalled to <body>, like Popover's fixed mode and the lyrics editor: a
+  // dialog is not a child of the row that opened it, and mounted in place it
+  // inherited whatever that row's subtree was doing. The track row's actions
+  // live in a `.row-hover` span whose opacity is gated on `.group:hover`, so
+  // the credits dialog — `fixed inset-0`, the whole screen — was blanked the
+  // moment the pointer left the window and painted back when it returned
+  // (#35). Rendering it out of that subtree also puts it above the fullscreen
+  // player honestly (it is z-[60] against the player's z-50), instead of
+  // depending on which container happened to hold the row.
+  return createPortal(
     <div
       className={`fixed inset-0 ${z} bg-black/70 backdrop-blur-sm flex items-center justify-center p-4`}
       onClick={onClose}
@@ -129,6 +139,7 @@ export default function Modal({
           <div className="shrink-0 border-t border-border px-5 py-3 [&>*]:flex-wrap [&>*]:gap-y-2">{footer}</div>
         )}
       </div>
-    </div>
+    </div>,
+    document.body
   );
 }

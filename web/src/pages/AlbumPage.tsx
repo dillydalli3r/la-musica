@@ -103,6 +103,10 @@ export default function AlbumPage() {
   // = search from scratch, staged rows = the import's own picks).
   const [coverSearch, setCoverSearch] = useState<{ results?: CoverResult[]; provider?: string | null } | null>(null);
   const [beetsBusy, setBeetsBusy] = useState(false);
+  // The genre chain is a live network walk over every ticked source, so the
+  // menu entry disables and renames itself while it runs (a second click used
+  // to start a second chain over the same files).
+  const [genresBusy, setGenresBusy] = useState(false);
   const [lyricsBusy, setLyricsBusy] = useState(false);
   const [issuesOpen, setIssuesOpen] = useState(false);
   const [coverInfoOpen, setCoverInfoOpen] = useState(false);
@@ -457,17 +461,30 @@ export default function AlbumPage() {
     toast.success(`Added ${selectedHere.length} track(s) to playlist`);
   };
 
-  /** Pull the top-voted MusicBrainz genres (count from Settings → Import)
-   * onto every track of this album, using the linked MB release. */
+  /** Import genres for the whole album through the CONFIGURED chain: every
+   *  source ticked in Settings → Import (or in the wizard's tray), in their
+   *  priority order, stopping as soon as a track's list is complete. The reply
+   *  carries what each source wrote (`per_source`) and why one stayed silent
+   *  (`notes`), so a blocked RateYourMusic is reported instead of leaving a
+   *  bare "0 updated". */
   const importGenres = async () => {
+    if (genresBusy) return;
+    setGenresBusy(true);
     try {
-      const r = await api.mbGenresWrite(data.tracks.map((t) => t.path));
+      const r = await api.genresImport(data.tracks.map((t) => t.path));
+      const who = Object.entries(r.per_source ?? {})
+        .filter(([, names]) => names.length)
+        .map(([name, names]) => `${name} ${names.length}`)
+        .join(", ");
+      const silent = Object.values(r.notes ?? {});
       toast(r.updated
-        ? `Imported ${r.genres.join(", ") || "genres"} on ${r.updated} track(s)${r.per_track ? " (per-track where available)" : ""}`
-        : "No genres found on the linked MusicBrainz release");
+        ? `${r.updated} track(s) updated${who ? ` — ${who}` : ""}${silent.length ? ` (${silent.join("; ")})` : ""}`
+        : `No genres to write${silent.length ? ` — ${silent.join("; ")}` : ""}`);
       invalidateLibrary(qc);
     } catch (e) {
       toast.error(String(e));
+    } finally {
+      setGenresBusy(false);
     }
   };
 
@@ -990,7 +1007,7 @@ export default function AlbumPage() {
                   title: "Tags & scripts",
                   items: [
                     { label: beetsBusy ? "Beets…" : "Tag with beets", icon: Disc3, onClick: beetsTagAlbum, disabled: beetsBusy },
-                    { label: "Import genres (MusicBrainz)", icon: Sparkles, onClick: importGenres },
+                    { label: genresBusy ? "Importing genres…" : "Import genres", icon: Sparkles, onClick: importGenres, disabled: genresBusy },
                     // A curated subset of the library scripts — the ones worth
                     // one click while looking at one album — but each one is
                     // NAMED by the registry (web/src/lib/scripts.ts) rather
@@ -1505,7 +1522,7 @@ export default function AlbumPage() {
                           {tr.issues.length}✗
                         </button>
                       )}
-                      <GradeBadge pass={verdictTrack(tr)} audit={tr.audit} size="sm" />
+                      <GradeBadge pass={verdictTrack(tr)} size="sm" />
                       <CachedMark path={tr.path} />
                       {(tr.is_video || isVideoFile(tr.file)) && (
                         <button

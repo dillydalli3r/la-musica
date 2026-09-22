@@ -207,6 +207,7 @@ export default {
   "charts.online_note": "die Rangliste jedes Anbieters, getrennt gehalten",
   "charts.rows": "{n} Zeilen",
   "charts.plays": "{n} Wiedergaben",
+  "charts.listened": "{plays} Wiedergaben · {time} gehört",
   "charts.play_one": "1 Wiedergabe",
   "charts.open_page": "In der Bibliothek öffnen",
   "charts.gone": "Die Datei dieser Wiedergabe ist nicht mehr in der Bibliothek",
@@ -255,11 +256,8 @@ export default {
   "donations.copied": "{coin}-Adresse in die Zwischenablage kopiert.",
   "donations.copy_manual": "Die Zwischenablage braucht einen sicheren Kontext, deshalb wurde die Adresse stattdessen markiert — drücke Strg+C (⌘C am Mac).",
   "donations.thanks": "Danke. Es landet auf dem kleinen Stapel mit der Aufschrift weiterbauen.",
-  "donations.cats_title": "Unbezahltes Personal",
-  "donations.cat.paw": "Tatzelt nach dem Kopieren-Knopf. Trifft nicht. Tatzelt wieder. Näher wird diese Katze einer Spende nie kommen.",
-  "donations.cat.inspect": "Liest die Bitcoin-Adresse laut vor, Zeichen für Zeichen. Zwei Tippfehler gefunden. Null Tippfehler gefunden.",
-  "donations.cat.keyboard": "Sitzt seit Block 700000 auf der Tastatur. Die Adresse hat überlebt; die Katze ist warm.",
-  "donations.cat.box": "Prüft, ob die Wallet voll ist. Es ist ein Pappkarton. Die Katze ist trotzdem eingezogen.",
+  "donations.cat_line": "Spende, um meine Katze zu füttern",
+  "donations.cat_alt": "Die Katze des Entwicklers",
 
   // —— Client setup wizard (desktop / iOS / Android shells) ————————————
   "client.title": "Dieses Gerät einrichten",

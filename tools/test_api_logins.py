@@ -222,6 +222,30 @@ check("ai: a keyless local server is still 'configured'",
       and cc.check("ai", {"ai_base_url": cap.base + "/v1",
                           "ai_model": "local"})[0] == "ok")
 
+# MAX is the user asking for the provider's own ceiling. The word is sent as
+# given, and an endpoint that does not know it costs a rung rather than the
+# setting: the ladder is max → high → (no field), so a refusal still lands on
+# the highest value that provider accepts instead of on its default.
+cap.clear()
+cap.route("POST", "/v1/chat/completions", AI_OK)
+ai_mod.ai_chat(dict(AI_CFG, ai_effort="max"), "sys", "user")
+sent = json.loads(cap.one("POST", "/v1/chat/completions")["body"])
+check("ai: effort MAX travels as reasoning_effort=max",
+      sent.get("reasoning_effort") == "max", json.dumps(sent.get("reasoning_effort")))
+
+cap.clear()
+cap.route("POST", "/v1/chat/completions",
+          {"error": {"message": "unknown value for reasoning_effort"}}, status=400)
+try:
+    ai_mod.ai_chat(dict(AI_CFG, ai_effort="max"), "sys", "user")
+    check("ai: a provider that refuses every rung still raises", False,
+          "ai_chat returned normally")
+except ValueError:
+    ladder = [json.loads(r["body"]).get("reasoning_effort", "absent")
+              for r in cap.sent("POST", "/v1/chat/completions")]
+    check("ai: the MAX ladder walks max → high → no field at all",
+          ladder == ["max", "high", "absent"], json.dumps(ladder))
+
 cap.clear()
 cap.route("POST", "/v1/chat/completions",
           {"error": {"message": "Incorrect API key provided",

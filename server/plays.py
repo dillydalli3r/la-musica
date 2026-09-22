@@ -267,11 +267,20 @@ def _library_index(lib):
             }
             for tr in alb.get("tracks") or []:
                 tags = tr.get("tags") or {}
+                tech = tr.get("tech") or {}
+                try:
+                    length = float(tech.get("length") or 0.0)
+                except (TypeError, ValueError):
+                    length = 0.0
                 tracks[api_path(tr.get("path"))] = {
                     "title": str(tags.get("TITLE") or "").strip(),
                     "artist": str(tags.get("ARTIST") or album_artist).strip(),
                     "album": albums[bpath]["title"],
                     "album_path": bpath,
+                    # The track's own duration, for the window's "time listened"
+                    # total: a play is a START, so the only honest length behind
+                    # it is the track's own (measured by the library scan).
+                    "length": length,
                 }
     return {"tracks": tracks, "albums": albums, "artists": artists}
 
@@ -340,6 +349,40 @@ def _folder_of(path):
     return head if sep else ""
 
 
+def _window_paths(conn, start, end, user):
+    """Every play the window holds, as `(path, at)` — the raw rows behind the
+    totals (`plays_total`, `listened_seconds`), which must cover the WHOLE
+    window rather than the `limit` rows the chart prints."""
+    sql = "SELECT path, started_at FROM plays WHERE user = ?"
+    args = [str(user or "")]
+    if start is not None:
+        sql += " AND started_at >= ?"
+        args.append(start)
+    if end is not None:
+        sql += " AND started_at < ?"
+        args.append(end)
+    with _lock:
+        rows = conn.execute(sql, args).fetchall()
+    return [(str(r["path"]), float(r["started_at"] or 0)) for r in rows]
+
+
+def _listened_seconds(paths, index):
+    """(seconds, plays_with_a_known_length) for a window's plays.
+
+    A play records WHEN a track started, so the time behind it is the track's
+    own duration — the number the library measured. A file the library no
+    longer holds has no length to add, and is reported in the second value
+    instead of being guessed at or dropped from the count."""
+    known_seconds = 0.0
+    known = 0
+    for path in paths:
+        length = (index["tracks"].get(api_path(path)) or {}).get("length") or 0.0
+        if length > 0:
+            known_seconds += float(length)
+            known += 1
+    return int(round(known_seconds)), known
+
+
 def top(period="all", kind="tracks", limit=DEFAULT_LIMIT, user="", cfg=None,
         lib=None, now=None):
     """The library's own most-played rows for one window.
@@ -363,11 +406,24 @@ def top(period="all", kind="tracks", limit=DEFAULT_LIMIT, user="", cfg=None,
         limit = DEFAULT_LIMIT
     limit = max(1, min(MAX_LIMIT, limit))
     start, end = window(period, now)
+    index = _library_index(_library(cfg, lib))
+    conn = _conn()
+    # The window's own totals, over EVERY play it holds rather than the `limit`
+    # rows below: "18 plays · ≈ 1 h 12 min listened" has to describe the window,
+    # not the page. A play is a start, so the time behind it is the track's own
+    # length; a play whose file the library no longer holds has no length to add
+    # and is counted (never guessed at) in `listened_unknown`.
+    window_paths = _window_paths(conn, start, end, user)
+    listened_seconds, listened_known = _listened_seconds(
+        [p for p, _at in window_paths], index)
     out = {"period": period, "kind": kind, "limit": limit,
            "window": window_payload(period, bounds=(start, end)), "items": [],
+           "plays_total": len(window_paths),
+           "listened_seconds": listened_seconds,
+           "listened_plays": listened_known,
+           "listened_unknown": len(window_paths) - listened_known,
            "note": ""}
 
-    conn = _conn()
     if kind == "tracks":
         groups = _grouped(conn, "path", start, end, user, limit)
     elif kind == "albums":
@@ -386,7 +442,6 @@ def top(period="all", kind="tracks", limit=DEFAULT_LIMIT, user="", cfg=None,
             % (period, "%d play%s" % (total, "" if total == 1 else "s")))
         return out
 
-    index = _library_index(_library(cfg, lib))
     if kind == "tracks":
         for path, plays in groups:
             known = index["tracks"].get(path) or {}

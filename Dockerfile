@@ -24,9 +24,17 @@ ENV PYTHONUNBUFFERED=1 \
 # Core audio/image tools for the optimization pipeline. These are the Linux
 # counterparts of the downloads in mlo/fetchdeps.py: the in-app installer
 # fetches the native Linux builds where upstream ships one (LINUX_BINARIES:
-# oxipng, slskd, AudioAuditor, and CUETools through the mono runtime) and points
-# at the system package for everything the distro provides (LINUX_PACKAGES), so
-# every tool the app knows is installable and runnable in this image.
+# oxipng, slskd, AudioAuditor, CUETools through the mono runtime, and upstream's
+# rsgain, fpcalc, libjxl and libjpeg-turbo) and points at the system package for
+# everything the distro provides (LINUX_PACKAGES), so every tool the app knows
+# is installable and runnable in this image.
+#
+# libjxl-tools / libjpeg-turbo-progs stay even though the installer can now
+# fetch both: they are this image's copies, on PATH from the first boot, so the
+# rows read Ready without a download — and they are the tools an ARM host has,
+# where upstream publishes no libjxl build at all (LINUX_BINARIES.libjxl is
+# x86-64 only). ffmpeg, flac, rsgain and libchromaprint-tools have no
+# fetchable Linux build of their own and are ONLY this.
 #
 # libsndfile1 / libgomp1 / libicu76 back the runtime-installed tools — librosa's
 # soundfile and numba imports; slskd's and AudioAuditor's .NET runtimes, which
@@ -73,11 +81,12 @@ COPY tools/ /app/tools/
 
 # Run unprivileged. uid/gid 1000 is the usual first desktop user, which is what
 # a bind-mounted ./music is normally owned by (docker-compose.yml documents the
-# alternatives). /app stays writable because Settings -> Dependencies installs
-# tools (beets, librosa) into /app/.dependencies at runtime.
+# alternatives). /app stays writable for config.json; the tools the Dependencies
+# page installs live under /music/.mlo/tools now, with the rest of the app's own
+# files, so /music is where an install needs to be able to write.
 RUN groupadd -g 1000 mlo \
     && useradd -u 1000 -g mlo -m -s /usr/sbin/nologin mlo \
-    && mkdir -p /music /app/.dependencies \
+    && mkdir -p /music \
     && chown -R mlo:mlo /app /music
 
 USER mlo
@@ -90,7 +99,7 @@ ENV HOME=/home/mlo
 # leaves it empty, and the server then reports its own code version instead of
 # claiming to be a release it is not. `tools/check_versions.py` keeps the
 # ARG default in step with mlo/__init__.py.
-ARG MLO_VERSION=3.10.2
+ARG MLO_VERSION=3.11.0
 ENV MLO_VERSION=${MLO_VERSION}
 # The commit the image was built from, and when. The release workflow passes
 # both; a plain `docker build` leaves them empty and the server then reports
@@ -107,10 +116,12 @@ LABEL org.opencontainers.image.version="${MLO_VERSION}" \
       org.opencontainers.image.title="la musica" \
       org.opencontainers.image.source="https://github.com/dillydalli3r/la-musica"
 
-# /music: the library (+ all app state under /music/.mlo).
-# /app/.dependencies: runtime-fetched tools - a volume so a new image does not
-# throw them away.
-VOLUME ["/music", "/app/.dependencies"]
+# /music: the library, all app state under /music/.mlo (data/, downloads/,
+# trash/) AND the tools the Dependencies page installs (/music/.mlo/tools) — one
+# volume, so a new image keeps the library and everything installed into it.
+# A pre-move install's /app/.dependencies is still READ when it is mounted (see
+# mlo.paths.legacy_tools_dir); nothing writes there any more.
+VOLUME ["/music"]
 EXPOSE 8000
 
 # No curl/wget in the slim image - probe with the Python that is already there.

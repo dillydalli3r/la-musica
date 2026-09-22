@@ -186,7 +186,8 @@ def _prime_identities(cfg):
 
 def _live_wish_ids():
     """Wish ids a RUNNING job is filling right now (a job parked on a question
-    counts: it is still that wish's acquisition).
+    counts: it is still that wish's acquisition), plus the ones whose job is
+    WAITING for a free pipeline slot.
 
     The job registry is process memory, so this answers "right now, in this
     app" — which is the question both callers ask: whether a 'searching' status
@@ -200,6 +201,10 @@ def _live_wish_ids():
         for j in soulseek_auto.jobs():
             if j.get("wish_id") and j.get("state") in ("running", "confirm"):
                 out.add(int(j["wish_id"]))
+        # A wish that took its place in the waiting queue has its acquisition in
+        # hand too — as a REQUEST rather than a job, because the pipeline was
+        # full when it was asked for.
+        out |= soulseek_auto.queued_wish_ids()
     except Exception:
         pass
     return out
@@ -338,6 +343,16 @@ def _run_one(wish, cfg):
         wishes.mark_wanted(wid, error=err,
                            attempts=int(wish.get("attempts") or 0) + 1)
         return "pending"
+    if r.get("waiting"):
+        # The pipeline is full and this wish has taken its place in the waiting
+        # queue (see soulseek_auto.start_job): it starts BY ITSELF the moment a
+        # slot frees, so the wish is left open, costs no attempt, and needs no
+        # retry of its own — the queue is holding it, not the network.
+        wishes.mark_wanted(
+            wid, error=f"waiting for a free pipeline slot (position "
+                       f"{r.get('position')})",
+            attempts=int(wish.get("attempts") or 0))
+        return "skipped"
     job_id = (r.get("job") or {}).get("id")
     _note(wid, label, job_id)
     st = _wait_job(job_id, _stopped)

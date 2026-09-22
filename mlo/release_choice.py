@@ -417,26 +417,37 @@ def _split_types(value):
 
 
 def type_names(values):
-    """*values* as MusicBrainz's own lowercase release-group type names.
+    """*values* as MusicBrainz's own lowercase release-group type SELECTIONS.
 
-    THE one place a caller-supplied type selection is normalized: a combined
-    spelling ("Album + Compilation", "album+compilation") is split into its
-    parts — the same rule `type_matches` and `_wanted_types` apply — names are
-    de-duplicated in the caller's order, and a name outside `mlo.naming`'s
-    published vocabulary raises ValueError. A filter that could never match
-    anything is a user error to REPORT, never a silent no-op that quietly
-    downloads nothing; `server.artist_watch.clean_types` stores a watch's own
-    selection through this, so a watch and an add read one vocabulary.
+    THE one place a caller-supplied type selection is normalized. Every value
+    the caller passed stays ONE selection: a combined spelling ("Album +
+    Compilation", "album+compilation", "Album; Compilation") is normalized in
+    place ("album + compilation") rather than split into the names it is made
+    of, because that is what the caller meant and what `type_matches` reads —
+    a selection naming several parts is the group's WHOLE type (an album that
+    IS a compilation), while the parts on their own read as "album OR
+    compilation" and queue the plain albums and the compilations of other
+    types nobody asked for. Every part is still validated against
+    `mlo.naming`'s published vocabulary, so a name outside it raises
+    ValueError — a filter that could never match anything is a user error to
+    REPORT, never a silent no-op that quietly downloads nothing — and the
+    selections are de-duplicated in the caller's order.
+    `server.artist_watch.clean_types` stores a watch's own selection through
+    this, so a watch and an add read one vocabulary, one selection at a time.
     """
     out = []
-    for name in (n for value in (values or ()) for n in _split_types(value)):
-        lowered = str(name).strip().lower()
-        if not lowered:
-            continue
-        if lowered not in RELEASE_TYPES:
-            raise ValueError(f"unknown release-group type {name!r}")
-        if lowered not in out:
-            out.append(lowered)
+    for value in (values or ()):
+        parts = []
+        for raw in _split_types(value):
+            part = str(raw).strip().lower()
+            if not part:
+                continue
+            if part not in RELEASE_TYPES:
+                raise ValueError(f"unknown release-group type {raw!r}")
+            parts.append(part)
+        selection = " + ".join(parts)
+        if selection and selection not in out:
+            out.append(selection)
     return out
 
 

@@ -1137,7 +1137,7 @@ export default function LibraryPage() {
                                 {t.issues.length}✗
                               </button>
                             )}
-                            <GradeBadge pass={!!t.grade_pass && !auditFails(t.audit)} audit={t.audit} size="sm" />
+                            <GradeBadge pass={!!t.grade_pass && !auditFails(t.audit)} size="sm" />
                             <CachedMark path={t.path} />
                             {t.tags.INSTRUMENTAL === "1" && (
                               <span className="chip bg-zinc-800 text-zinc-400 border border-border text-[9px] shrink-0">INST</span>
@@ -1289,7 +1289,7 @@ export default function LibraryPage() {
                         /* `aggregate.pass` (failed checks == 0), not a rounded
                            `grade_pct >= 100`: rounding could draw a green dot
                            over an artist whose album failed a check. */
-                        <td className="td"><GradeBadge pass={!!a.aggregate.pass && !auditFails(a.aggregate.audit_summary)} score={a.aggregate.grade_pct} audit={a.aggregate.audit_summary} /></td>
+                        <td className="td"><GradeBadge pass={!!a.aggregate.pass && !auditFails(a.aggregate.audit_summary)} score={a.aggregate.grade_pct} /></td>
                       )}
                     </tr>
                   );
@@ -1411,7 +1411,7 @@ export default function LibraryPage() {
                                 {tr.issues.length}✗
                               </button>
                             )}
-                            <GradeBadge pass={!!tr.grade_pass && !auditFails(tr.audit)} audit={tr.audit} size="sm" />
+                            <GradeBadge pass={!!tr.grade_pass && !auditFails(tr.audit)} size="sm" />
                             <CachedMark path={tr.path} />
                             {tr.is_video && <span title="Music video" className="shrink-0 inline-flex"><FileVideo className="h-3.5 w-3.5 text-zinc-500" /></span>}
                             {tr.tags.INSTRUMENTAL === "1" && (
@@ -1570,7 +1570,7 @@ function AlbumRowGroup({
     cells.push({
       id: "grade",
       cls: `td${phoneHide(ALBUM_PHONE_CLS, "grade")}`,
-      node: <GradeBadge pass={!!album.pass && !auditFails(album.audit_summary)} score={album.grade_pct} audit={album.audit_summary} />,
+      node: <GradeBadge pass={!!album.pass && !auditFails(album.audit_summary)} score={album.grade_pct} />,
     });
   if (visibleCols.includes("media"))
     cells.push({
@@ -1757,7 +1757,7 @@ function AlbumRowGroup({
                                     {t.issues.length}✗
                                   </button>
                                 )}
-                                <GradeBadge pass={!!t.grade_pass && !auditFails(t.audit)} audit={t.audit} size="sm" />
+                                <GradeBadge pass={!!t.grade_pass && !auditFails(t.audit)} size="sm" />
                                 <CachedMark path={t.path} />
                                 {t.is_video && <span title="Music video" className="shrink-0 inline-flex"><FileVideo className="h-3.5 w-3.5 text-zinc-500" /></span>}
                                 {t.tags.INSTRUMENTAL === "1" && (

@@ -1,7 +1,6 @@
 import { useRef } from "react";
 import { Coffee, Copy } from "lucide-react";
 import PageHeader from "../components/PageHeader";
-import Cats from "../components/Cats";
 import { toast } from "../store";
 import { useI18n, type MessageKey } from "../lib/i18n";
 
@@ -87,8 +86,6 @@ export default function DonationsPage() {
         <p className="text-xs leading-relaxed text-accent-soft">{t("donations.why_gated")}</p>
       </section>
 
-      <Cats ids={["paw"]} />
-
       <section className="space-y-3">
         <h2 className="text-sm font-semibold text-zinc-200">{t("donations.addresses_title")}</h2>
         <p className="text-xs leading-relaxed text-zinc-500">{t("donations.addresses_help")}</p>
@@ -125,9 +122,21 @@ export default function DonationsPage() {
         <p className="text-[11px] text-zinc-600">{t("donations.thanks")}</p>
       </section>
 
-      <section className="space-y-3">
-        <h2 className="text-sm font-semibold text-zinc-200">{t("donations.cats_title")}</h2>
-        <Cats ids={["box", "inspect", "keyboard"]} />
+      {/* The maintainer's cat, and the only ask on the page that needs no
+          address. It replaced the row of ASCII cats: the joke was worth the
+          space it took, but a photograph of the actual animal says the same
+          thing in one glance, and the page is a donations page — the reader
+          came for the addresses above (issue #44). */}
+      <section>
+        <div className="panel flex flex-col sm:flex-row items-center gap-4">
+          <img
+            src="/cat.jpg"
+            alt={t("donations.cat_alt")}
+            className="w-44 sm:w-48 h-auto rounded-lg ring-1 ring-black/40 shrink-0"
+            loading="lazy"
+          />
+          <p className="text-sm leading-relaxed text-zinc-300">{t("donations.cat_line")}</p>
+        </div>
       </section>
     </div>
   );

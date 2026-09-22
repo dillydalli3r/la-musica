@@ -150,13 +150,16 @@ os.makedirs(os.path.join(DEPS, "chromaprint v1.6.1"), exist_ok=True)
 BUNDLED = os.path.join(DEPS, "chromaprint v1.6.1", "fpcalc.exe")
 with open(BUNDLED, "wb") as fh:
     fh.write(b"MZ")
-real_deps = acoustid.DEPS_DIR
-acoustid.DEPS_DIR = DEPS
+# The lookup walks every tools folder the resolver names (mlo.paths.tools_dirs:
+# the music folder's .mlo/tools, then the app's pre-move .dependencies), so the
+# stub is on that resolver.
+real_deps = acoustid.tools_dirs
+acoustid.tools_dirs = lambda music_folder=None: [DEPS]
 try:
-    check("bundled .dependencies fpcalc is found",
+    check("a tools-folder fpcalc is found",
           acoustid.fpcalc_path({"acoustid_fpcalc_path": ""}) == BUNDLED)
 finally:
-    acoustid.DEPS_DIR = real_deps
+    acoustid.tools_dirs = real_deps
 
 # --------------------------------------------------------------------------- #
 # no key / no fpcalc: a NAMED skip, no lookup attempted

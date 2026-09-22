@@ -226,6 +226,7 @@ export default {
   "charts.online_note": "each provider's own ranking, kept separate",
   "charts.rows": "{n} rows",
   "charts.plays": "{n} plays",
+  "charts.listened": "{plays} plays · {time} listened",
   "charts.play_one": "1 play",
   "charts.open_page": "Open this in the library",
   "charts.gone": "This play's file is no longer in the library",
@@ -280,11 +281,8 @@ export default {
   "donations.copied": "{coin} copied to the clipboard.",
   "donations.copy_manual": "The clipboard needs a secure context, so the address has been selected instead — press Ctrl+C (⌘C on a Mac).",
   "donations.thanks": "Thank you. It goes on the small pile marked keep building.",
-  "donations.cats_title": "Unpaid staff",
-  "donations.cat.paw": "Paws at the Copy button. Misses. Paws again. This is the closest the cat will ever come to donating.",
-  "donations.cat.inspect": "Reads the Bitcoin address out loud, one character at a time. Two typos found. Zero typos found.",
-  "donations.cat.keyboard": "Has been sitting on the keyboard since block 700000. The address survived; the cat is warm.",
-  "donations.cat.box": "Checks whether the wallet is full. It is a cardboard box. The cat has moved in anyway.",
+  "donations.cat_line": "Donate to feed my cat",
+  "donations.cat_alt": "The maintainer's cat",
 
   // —— Client setup wizard (desktop / iOS / Android shells) ————————————
   "client.title": "Set up this device",

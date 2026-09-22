@@ -63,6 +63,7 @@ from server import api_stack
 from server import api_storage
 from server import api_soulseek
 from server import api_youtube
+from server import api_rym
 from server import auth as auth_mod
 from server import events as events_mod
 from server import job_locks
@@ -278,6 +279,7 @@ app.include_router(api_stack.router)
 app.include_router(api_storage.router)
 app.include_router(api_soulseek.router)
 app.include_router(api_youtube.router)
+app.include_router(api_rym.router)
 
 # Script 8 (Auto tagging) never imports a genre: it derives MOOD/ENERGY from
 # the audio, cross-references INSTRUMENTAL and derives the album advisory.
@@ -969,8 +971,9 @@ def fs_dirs(path: str = Query("")):
 
 @app.get("/api/dependencies")
 def dependencies(refresh: int = Query(0)):
-    """Installed external tools (.dependencies + PATH) vs. the pinned target
-    the installer fetches AND the newest release upstream actually has.
+    """Installed external tools (the music folder's .mlo/tools + PATH, and the
+    app's pre-move .dependencies) vs. the pinned target the installer fetches
+    AND the newest release upstream actually has.
 
     `refresh=1` re-checks GitHub now instead of waiting out the 30-minute TTL.
     Both are answered from a cache and re-fetched by a background thread, so
@@ -981,10 +984,20 @@ def dependencies(refresh: int = Query(0)):
     Also starts the auto-update loop: it is a background thread with nothing to
     do until something asks which tools are installed, and this is that call.
     """
-    from mlo.tools import DEPS_DIR
     from mlo import fetchdeps
+    from mlo.paths import tools_dir
     fetchdeps.ensure_auto_update_worker()
-    return {"deps_dir": str(DEPS_DIR),
+    # The folder this names is the one the page's "open the tools folder" button
+    # opens, and the OS opener refuses a path that is not there: an install that
+    # has downloaded nothing yet still answers with a real folder. It is inside
+    # the music folder, i.e. the app's own directory to create; a music folder
+    # that cannot be written to is not an error for a READ (the rows answer
+    # either way).
+    try:
+        os.makedirs(str(tools_dir()), exist_ok=True)
+    except OSError:
+        pass
+    return {"deps_dir": str(tools_dir()),
             **fetchdeps.dependencies_payload(refresh=bool(refresh))}
 
 
@@ -4801,26 +4814,48 @@ def soulseek_download_user(req: SoulseekUserDownloadRequest):
 
 
 class SoulseekCancelRequest(BaseModel):
-    username: str
-    transfer_ids: List[str]
+    """Transfers to drop in slskd, or QUEUE ROWS to cancel (see the route)."""
+    username: str = ""
+    transfer_ids: List[str] = []
+    # Queue-row ids in the shape GET /api/queue publishes: "pipeline:<key>" for
+    # a release still waiting and "job:<id>" for a running one. What the Queue
+    # tab's selection sends; `username`/`transfer_ids` keep working untouched.
+    ids: Optional[List[str]] = None
 
 
 @app.post("/api/soulseek/downloads/cancel")
 def soulseek_downloads_cancel(req: SoulseekCancelRequest):
-    """Drop transfers from slskd's list (per-file or whole-queue cancel).
-    The underlying DELETE carries ?remove=true because a cancelled transfer
-    otherwise stays queued and slskd keeps re-requesting the very files the
-    review step just deleted."""
-    from server import soulseek
+    """Drop transfers from slskd's list (per-file or whole-queue cancel), or
+    cancel exactly the queue rows named.
+
+    With `ids` (the Queue tab's selection — `cancel_rows`), the call acts on
+    those rows and NOTHING else: a WAITING release is dropped from the pipeline
+    queue before it ever starts, a RUNNING one is cancelled, and the answer says
+    how many of each went (`cancelled`, `ids`) and which of the given ids were
+    already gone (`missed`). slskd is not consulted at all for these: a release
+    that has not started has no transfers to drop.
+
+    The transfer form is unchanged: `username` + `transfer_ids` drop those
+    transfers in slskd, and 400s when either is missing. The underlying DELETE
+    carries ?remove=true because a cancelled transfer otherwise stays queued and
+    slskd keeps re-requesting the very files the review step just deleted."""
+    from server import soulseek, soulseek_auto
+    ids = [str(i) for i in (req.ids or []) if str(i).strip()]
+    if ids:
+        cancelled, missed = soulseek_auto.cancel_rows(ids)
+        return {"ok": True, "cancelled": len(cancelled),
+                "ids": cancelled, "missed": missed}
     if not (soulseek.is_running() or soulseek.web_up(load_config())):
         raise HTTPException(400, "slskd is not running")
-    ids = [str(t) for t in req.transfer_ids if str(t).strip()]
+    transfer_ids = [str(t) for t in req.transfer_ids if str(t).strip()]
+    if not req.username or not transfer_ids:
+        raise HTTPException(400, "username and transfer_ids required")
     try:
         # best effort per transfer: ids already gone must not fail the call
-        soulseek.cancel_downloads(req.username, ids)
+        soulseek.cancel_downloads(req.username, transfer_ids)
     except Exception as e:
         raise HTTPException(502, f"cancel failed: {e}")
-    return {"ok": True, "cancelled": len(ids)}
+    return {"ok": True, "cancelled": len(transfer_ids)}
 
 
 class SoulseekClearRequest(BaseModel):
@@ -4831,8 +4866,11 @@ class SoulseekClearRequest(BaseModel):
 
 # Scopes the clear route accepts. "failed" lives here rather than in a route
 # of its own because a second "Clear failed" button is a filter over the same
-# transfer list, not a different operation.
-_CLEAR_SCOPES = ("finished", "failed", "incomplete", "all")
+# transfer list, not a different operation. "queued" is the odd one out and
+# says why in the route: it is not about slskd's transfers at all, it is the
+# pipeline's own waiting queue (what a release does while the running ones hold
+# the slots), so it needs no daemon and drops nothing that has started.
+_CLEAR_SCOPES = ("finished", "failed", "incomplete", "all", "queued")
 
 
 @app.post("/api/soulseek/downloads/clear")
@@ -4848,6 +4886,12 @@ def soulseek_downloads_clear(req: SoulseekClearRequest):
       `?remove=true` and its staged partial deleted (the queue is the only
       record of what is still coming, so this is what the UI must confirm).
     - `all` — finished + failed + incomplete.
+    - `queued` — the pipeline's WAITING RELEASES (the Queue tab's "Clear all"):
+      every release queued behind the ones already running is dropped before it
+      ever starts, and nothing else is touched — a RUNNING release keeps its
+      transfers (that is a cancel, one row at a time), and no settled row, no
+      library album and no slskd transfer is affected. It needs no daemon, so
+      it does not require slskd to be up like the transfer scopes do.
 
     `username` narrows any scope; `states` still narrows by substring within
     what the scope selected. A request WITHOUT `scope` keeps the old behaviour
@@ -4856,14 +4900,20 @@ def soulseek_downloads_clear(req: SoulseekClearRequest):
 
     Best effort per transfer: one slskd refusal or one undeletable partial is
     reported in `failed`, never a 500."""
-    from server import soulseek
-    if not (soulseek.is_running() or soulseek.web_up(load_config())):
-        raise HTTPException(400, "slskd is not running")
+    from server import soulseek, soulseek_auto
     legacy = not str(req.scope or "").strip()
     scope = str(req.scope or "finished").strip().lower()
     if scope not in _CLEAR_SCOPES:
         raise HTTPException(400, f"unknown scope {req.scope!r} — expected one of "
                                  f"{', '.join(_CLEAR_SCOPES)}")
+    if scope == "queued":
+        # Checked BEFORE the daemon check: the waiting queue is this app's own
+        # list, and clearing it must work with slskd down.
+        got = soulseek_auto.clear_queued()
+        return {"ok": True, "cleared": got["cleared"],
+                "ids": [f"pipeline:{k}" for k in got["keys"]]}
+    if not (soulseek.is_running() or soulseek.web_up(load_config())):
+        raise HTTPException(400, "slskd is not running")
     wanted = [str(s).strip().lower() for s in (req.states or []) if str(s).strip()]
     try:
         tree = soulseek.downloads_state()
@@ -5923,7 +5973,14 @@ def soulseek_auto_start(req: SoulseekAutoRequest):
     release from Soulseek (see server/soulseek_auto.py for the pipeline).
 
     Accepts a release OR release-group MBID (a group resolves to its best
-    edition by the release-choice policy)."""
+    edition by the release-choice policy).
+
+    With `soulseek_search_concurrency` releases already running this does NOT
+    fail with a 409: the release takes its place in the pipeline's waiting
+    queue and the answer says so ({"ok": true, "waiting": true, "position": n,
+    "queue_key": …}, no `job`) — it starts by itself when one of the running
+    releases finishes, and the Queue tab lists it in its Waiting group until
+    then (or until it is cancelled there)."""
     from server import soulseek_auto
     if not req.release_mbid and not (req.username and req.target_dir):
         raise HTTPException(400, "release_mbid or username+target_dir required")
@@ -6351,82 +6408,13 @@ def _write_album_genres(files, names, per_track=None, limit=None):
     return updated
 
 
-@app.post("/api/mb/genres")
-def mb_genres_import(req: GenreImportRequest):
-    """Import genres from MUSICBRAINZ onto the given tracks.
-
-    The release (MUSICBRAINZ_ALBUMID) or release group (RELEASEGROUPID) on the
-    first track identifies the entity; per-track recording genres win over the
-    release's list, and the count is `mb_genre_count` (Settings → Import) —
-    the requested `count` may only LOWER it, never raise it past what grading
-    accepts. Other sources are
-    deliberately not consulted here — use
-    /api/genres/import for the full chain."""
-    from mlo.audio import AudioFile
-
-    cfg = load_config()
-    n = _autotag.genre_count(cfg, req.count)
-    _tag_paths_guard(req.paths)
-    files = _genre_files(req.paths)
-
-    probe = AudioFile(files[0])
-    mbid = str(probe.get_tag("MUSICBRAINZ_ALBUMID") or "").strip()
-    rgid = str(probe.get_tag("MUSICBRAINZ_RELEASEGROUPID") or "").strip()
-    if not mbid and not rgid:
-        raise HTTPException(400, "no MusicBrainz album/release-group ID on the track — import & link first")
-
-    release = None
-    if mbid:
-        try:
-            release = intg.release_lookup(mbid)
-        except Exception as e:
-            raise HTTPException(502, f"MusicBrainz lookup failed: {e}")
-
-    artist = str(probe.get_tag("ALBUMARTIST") or probe.get_tag("ARTIST") or "").strip()
-    album = str(probe.get_tag("ALBUM") or "").strip()
-    chain = intg.genre_chain(
-        artist=artist, album=album, limit=n, cfg=cfg, sources=["musicbrainz"],
-        release=release or {"id": "", "release_group_id": rgid, "genres": [],
-                            "artists": [], "media": []},
-        files=files,
-    )
-    names = chain.get("genres") or []
-    track_genres = {}
-    for t in (release or {}).get("media") or []:
-        g = t.get("genres") or []
-        if g:
-            track_genres[(int(t.get("disc") or 1), int(t.get("position") or 0))] = g
-
-    updated = _write_album_genres(files, names, track_genres, limit=n)
-    # The same report shape `/api/genres/import` answers with: what MusicBrainz
-    # said per source and track, which tier answered (this button is the one
-    # that legitimately ends up album-level when no recording carries a genre),
-    # and why a source was not asked.
-    levels = chain.get("levels") or {}
-    level_counts = chain.get("level_counts") or {}
-    notes = dict(chain.get("notes") or {})
-    wide = int(level_counts.get("album") or 0) + int(level_counts.get("artist") or 0)
-    if wide:
-        notes["genre level"] = (
-            f"{wide} track(s) answered at ALBUM or ARTIST level (their own "
-            f"recording states no genre); with genres per track = {n}, that is "
-            "often the whole answer")
-    return {"ok": True, "updated": updated, "genres": names,
-            "per_source": chain.get("per_source") or {},
-            "per_source_counts": chain.get("per_source_counts") or {},
-            "levels": levels,
-            "level_counts": level_counts,
-            "skipped": chain.get("skipped") or {},
-            "notes": notes,
-            "per_track": bool(track_genres)}
-
-
 class GenreChainImportRequest(BaseModel):
     paths: List[str]  # audio files (or one album dir)
     limit: Optional[int] = None  # defaults to mb_genre_count from settings
     # Which sources to ask. Omitted = every configured source in order (the
-    # chain, which the album/track menus use); the wizard passes exactly ONE
-    # so its two buttons are MusicBrainz and RateYourMusic, separately.
+    # chain, which every surface now uses); a caller may name a subset, and the
+    # wizard's single Import genres button passes none so it runs the
+    # configured chain.
     sources: Optional[List[str]] = None
     staged: bool = False  # the import wizard's not-yet-imported album
 

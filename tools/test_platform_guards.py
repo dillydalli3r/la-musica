@@ -464,8 +464,12 @@ with simulated_platform("posix"), tempfile.TemporaryDirectory() as tmp:
 from mlo import tools  # noqa: E402
 
 with simulated_platform("posix"), tempfile.TemporaryDirectory() as tmp:
-    real_deps = tools.DEPS_DIR
-    tools.DEPS_DIR = tmp
+    # Detection reads every tools folder through the resolver (mlo.paths
+    # .tools_dirs, imported by name into mlo.tools): pointing it at one temp
+    # folder is what makes the assertions below independent of what this
+    # machine happens to have installed.
+    real_dirs = tools.tools_dirs
+    tools.tools_dirs = lambda music_folder=None: [tmp]
     try:
         folder = os.path.join(tmp, "oxipng v10.2.0")
         os.makedirs(folder)
@@ -486,7 +490,7 @@ with simulated_platform("posix"), tempfile.TemporaryDirectory() as tmp:
         check("an .exe folder is not a native install",
               "slskd" not in tools._detect_deps_native())
     finally:
-        tools.DEPS_DIR = real_deps
+        tools.tools_dirs = real_dirs
 
 with simulated_platform("nt"):
     check("Windows never detects a native binary as a tool",
@@ -546,28 +550,32 @@ def rows_with(installed, target, upstream):
 
 
 with simulated_platform("posix"):
-    # libjpeg-turbo: the distro ships 2.1.5, upstream has 3.2.0, and upstream
-    # publishes no Linux build this app can unpack (the release is .deb only) —
-    # so the row is BEHIND and has to say so, with the one action that is
-    # actually available: the package manager's own command. The regression this
-    # pins: state was forced to `ok` for every distro row, so the row read a
-    # green Ready beside an amber Available whose update no button could make.
-    rows = rows_with({"libjpeg_turbo": "2.1.5", "oxipng": "10.2.0"},
-                     {"libjpeg_turbo": "apt: libjpeg-progs", "oxipng": "10.2.0"},
-                     {"libjpeg_turbo": "3.2.0", "oxipng": "10.2.1"})
-    jt = rows["libjpeg_turbo"]
+    # A distro tool: the distro ships flac, upstream has 1.5.0, and this app has
+    # no Linux build of it to fetch — so the row is BEHIND and has to say so,
+    # with the one action that is actually available: the package manager's own
+    # command. The regression this pins: state was forced to `ok` for every
+    # distro row, so the row read a green Ready beside an amber Available whose
+    # update no button could make.
+    #
+    # libjpeg-turbo used to be this file's example and is not any more: upstream
+    # publishes a .deb the installer unpacks now (LINUX_BINARIES), so its row is
+    # an app-managed download — asserted below, because that IS the change.
+    rows = rows_with({"flac": "1.4.3", "oxipng": "10.2.0"},
+                     {"flac": "apt: flac", "oxipng": "10.2.0"},
+                     {"flac": "1.5.0", "oxipng": "10.2.1"})
+    fl = rows["flac"]
     check("a distro tool behind upstream reads Update, not Ready",
-          jt["state"] == "update")
+          fl["state"] == "update")
     check("...and offers the upgrade the package manager performs",
-          jt["action"] == "upgrade"
-          and jt["upgrade_command"] == "apt-get install --only-upgrade libjpeg-progs")
+          fl["action"] == "upgrade"
+          and fl["upgrade_command"] == "apt-get install --only-upgrade flac")
     check("...and is never offered a download",
-          jt["installable"] is False)
+          fl["installable"] is False)
     check("...and carries the versions and the command in its note",
-          jt["note"] and "2.1.5" in jt["note"] and "3.2.0" in jt["note"]
-          and jt["upgrade_command"] in jt["note"])
+          fl["note"] and "1.4.3" in fl["note"] and "1.5.0" in fl["note"]
+          and fl["upgrade_command"] in fl["note"])
     check("...and still shows the newer upstream version",
-          jt["update_available"] is True and jt["upstream_version"] == "3.2.0")
+          fl["update_available"] is True and fl["upstream_version"] == "1.5.0")
 
     # oxipng is app-managed: Update IS actionable, so it must stay a download —
     # same state, different action, which is the whole point of the split.
@@ -578,13 +586,24 @@ with simulated_platform("posix"):
 
     # A distro row AT the upstream version is up to date, and its action column
     # stays empty: there is nothing to copy and nothing to press.
-    rows = rows_with({"libjpeg_turbo": "3.2.0"}, {"libjpeg_turbo": "apt: libjpeg-progs"},
+    rows = rows_with({"flac": "1.5.0"}, {"flac": "apt: flac"},
+                     {"flac": "1.5.0"})
+    fl = rows["flac"]
+    check("a distro tool at the upstream version reads Ready",
+          fl["state"] == "ok" and fl["action"] == "none"
+          and fl["upgrade_command"] is None
+          and fl["installable"] is False)
+
+    # libjpeg-turbo is the tool that moved: upstream's .deb is unpacked by this
+    # app now, so a behind row must offer its OWN install instead of the package
+    # manager's command (which is what it offered when the .deb was unusable).
+    rows = rows_with({"libjpeg_turbo": "2.1.5"}, {"libjpeg_turbo": "apt: libjpeg-progs"},
                      {"libjpeg_turbo": "3.2.0"})
     jt = rows["libjpeg_turbo"]
-    check("a distro tool at the upstream version reads Ready",
-          jt["state"] == "ok" and jt["action"] == "none"
-          and jt["upgrade_command"] is None
-          and jt["installable"] is False)
+    check("a libjpeg-turbo behind upstream is an app-managed download",
+          jt["state"] == "update" and jt["installable"] is True
+          and jt["install_kind"] == "deps" and jt["action"] == "update"
+          and jt["upgrade_command"] is None)
 
 
 # --------------------------------------------------------------------------- #

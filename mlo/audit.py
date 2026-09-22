@@ -1302,32 +1302,40 @@ def run_audit_library(config):
                     continue
             for lp, trs in logs_to_check:
                 state, detail = check_log_checksum(lp)
-                # When audit_verify_log_checksum is required (True by default), both
-                # 'invalid' and 'missing' EAC checksums must fail auditing – a CD rip
-                # without a verifiable SHA256 cannot be considered accurately ripped.
-                # 'unsupported' (XLD/non-EAC) has no checksum concept and stays PASS.
-                # 'ok' (valid) stays PASS.
+                # A log checksum is never REQUIRED (spec R30). A log that never
+                # carried one — XLD, or EAC older than 1.0 — claims nothing, so
+                # nothing is refuted and the disc is judged on its per-track
+                # CRCs alone. What IS required is that a checksum the log does
+                # carry verifies: 'invalid' is the rip log contradicting itself
+                # about its own bytes, and that fails the disc.
                 if state == "invalid":
                     checksum_failed.setdefault(d, []).append((lp, detail or "invalid SHA256"))
                 elif state == "missing":
-                    # EAC log claims no checksum line but should have one (required)
-                    checksum_failed.setdefault(d, []).append((lp, detail or "missing Log checksum"))
-                # 'ok', 'unsupported', None are passes
+                    # EAC writes the line from 1.0 on, so an absent line in a
+                    # 1.x log means it was edited after EAC signed it. Reported
+                    # — the run log names it — but never charged: "present ones
+                    # must match, absent ones are not required" is the rule, and
+                    # a charge here is the whole check required under another
+                    # name. mlo.discs.check_log_checksum keeps the distinction so
+                    # the viewer can still say which case a log is in.
+                    log(c(f"WARNING: {os.path.basename(lp)} carries no 'Log "
+                          f"checksum' line (EAC writes one from 1.0) — not "
+                          f"required, so the disc is judged on its CRCs",
+                          Color.YELLOW))
+                # 'ok' establishes the leg. 'unsupported' / 'missing' / None
+                # leave it to the per-track CRCs.
                 #
                 # The log's own SHA256 is the second half of the disc's
                 # "checksums" leg: a log that cannot be trusted about ITSELF
-                # cannot be trusted about the CRCs it prints. 'unsupported'
-                # (XLD, an EAC log older than 1.0) is neither: that version
-                # never wrote a checksum, so nothing is claimed and nothing is
-                # refuted — the leg is left to the per-track CRCs.
+                # cannot be trusted about the CRCs it prints.
                 for fp in trs:
                     if state == "ok":
                         set_leg(fp, "checksums", "ok")
-                    elif state in ("invalid", "missing"):
+                    elif state == "invalid":
                         set_leg(fp, "checksums", "fail",
-                                f"the rip log's EAC SHA256 is {state}")
+                                "the rip log's EAC SHA256 does not verify")
         if checksum_failed:
-            log(c(f"Audit FAIL on log checksum: {sum(len(v) for v in checksum_failed.values())} log(s) in {len(checksum_failed)} CD album(s) have invalid/missing SHA256 checksum — marking their disc(s) as failed (audit_verify_log_checksum on, required)", Color.RED))
+            log(c(f"Audit FAIL on log checksum: {sum(len(v) for v in checksum_failed.values())} log(s) in {len(checksum_failed)} CD album(s) carry an invalid SHA256 checksum — marking their disc(s) as failed (the log's own checksum must verify when it is present)", Color.RED))
             for d, lst in checksum_failed.items():
                 for lp, detail in lst:
                     # Determine the affected tracks FOR THIS LOG — per disc, not
@@ -1772,7 +1780,7 @@ def run_audit_library(config):
               f"these legs could not be evaluated here:", Color.YELLOW))
         for name in sorted(by_leg):
             why, paths = by_leg[name]
-            log(c(f"  missing leg '{name}' ({len(paths)} track(s)): {why}",
+            log(c(f"  missing '{name}' evidence ({len(paths)} track(s)): {why}",
                   Color.YELLOW))
         stats["errors"].append((
             "CD verdict",

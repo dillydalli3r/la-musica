@@ -66,6 +66,25 @@ _ADVISORY_LABELS = {
     "youtube-age": "YouTube (age gate)",
 }
 
+# What each advisory route states — one line per route, taken from its own
+# probe below (the field it reads and what it needs to run), never a claim the
+# probe does not make.
+_ADVISORY_PROVIDES = {
+    "deezer-isrc": "the sample ISRC's Deezer track and its explicit flag — "
+                   "keyless, asked first.",
+    "spotify-isrc": "the sample ISRC's Spotify explicit flag; needs client "
+                    "credentials, and a track Spotify does not have is its own "
+                    "answer.",
+    "apple-album": "the sample album's Apple edition and the "
+                   "collectionExplicitness it states.",
+    "itunes-song": "Apple's song search for the track, and its "
+                   "trackExplicitness.",
+    "discogs-parental": "the parental-advisory flag on the release's Discogs "
+                        "entry; needs a token.",
+    "youtube-age": "a track's YouTube video age gate; needs the video's id and "
+                   "yt-dlp.",
+}
+
 # Genre source labels — the spellings the settings UI already shows.
 _GENRE_LABELS = {
     "rateyourmusic": "RateYourMusic",
@@ -79,6 +98,57 @@ _GENRE_LABELS = {
     "bandcamp": "Bandcamp",
     "deezer": "Deezer",
     "spotify": "Spotify",
+}
+
+# What each genre source actually contributes — one line, the settings tray
+# shows it under the source's name so a tick reads as a choice rather than a
+# name. Each line is the source's own paragraph above
+# `server.integrations.GENRE_SOURCES` compressed to its point; the ORDER of
+# the rows (and so of these lines) is that registry's priority list, and the
+# rows carry `rank` — the 1-based position — for the same reason.
+_GENRE_PROVIDES = {
+    "rateyourmusic": "the release page's own curated genres, per track where "
+                     "the page states one",
+    "musicbrainz": "recording genres, then release, release group and artist — "
+                   "curated, and the app's identity anchor",
+    "listenbrainz": "crowdsourced recording tags, then release group and "
+                    "artist — free, MBID-native",
+    "itunes": "each track's own primaryGenreName — free and reliable for "
+              "mainstream releases",
+    "lastfm": "crowdsourced track tags, then artist tags — broad, needs a "
+              "free API key",
+    "theaudiodb": "per-track genres plus the album's own genre and mood — "
+                  "keyless",
+    "wikidata": "P136 on the recording, then the release group — curated but "
+                "sparse",
+    "bandcamp": "the album page's tags — strong for indie and self-released "
+                "records, album level only",
+    "discogs": "release styles and genres — curated, album level, needs a "
+               "token",
+    "deezer": "the album's genres only — album level, keyless",
+    "spotify": "artist-level genres — the last resort, needs a client id and "
+               "secret",
+}
+
+# What each credential row asks — one line, the check's own purpose, so the
+# wizard's Keys step can say what pasting a key buys without a second list to
+# keep in step with `server.credential_checks`.
+_CREDENTIAL_PROVIDES = {
+    "discogs": "proves the token with GET /oauth/identity — who it belongs to.",
+    "lastfm": "proves the key with chart.gettoptags — a chart, so nothing else "
+              "has to exist.",
+    "spotify": "proves the pair with the same client-credentials grant the "
+               "sources themselves need.",
+    "acoustid": "proves the application key with one lookup on a probe "
+                "fingerprint.",
+    "acoustid-user": "proves the user key with a real probe SUBMISSION — the "
+                     "one lookup a user key can answer.",
+    "soulseek": "reads slskd's own live state and the daemon's recorded "
+                "verdict on the login.",
+    "ai": "one tiny /chat/completions round trip with the key as a Bearer — "
+          "can cost money.",
+    "login": "this server's own gate: is anyone being asked to sign in, and "
+             "would the stored claim let them.",
 }
 
 # A probe returns (status, detail) and is wrapped by `_timed`, which is the
@@ -555,11 +625,15 @@ def _specs(kind=None):
         pid = src["id"]
         # All six providers are keyless: the captions one needs yt-dlp
         # *installed*, which is what the wizard has to check for it. `rank`
-        # (1-based, the registry's own order) and `notes` come straight from
-        # the registry so the wizard reads them from ONE payload.
+        # (1-based, the registry's own order), `notes` and `provides` all come
+        # straight from the registry so the wizard reads them from ONE payload:
+        # `notes` is the capability text the settings list shows and
+        # `provides` is the same sentence for the wizard's Keys step, which
+        # asks every kind of row "what do you provide to the app".
         specs.append({"id": pid, "kind": "lyrics", "label": src["label"],
                       "synced": True, "rank": src.get("rank"),
                       "notes": src.get("notes") or "",
+                      "provides": src.get("notes") or "",
                       "needs": ["yt-dlp"] if pid == "youtube" else [],
                       "probe": lambda cfg, p=pid: _probe_lyrics(p, cfg)})
 
@@ -569,14 +643,20 @@ def _specs(kind=None):
                  "youtube-age": ["yt-dlp"]}.get(pid, [])
         specs.append({"id": pid, "kind": "advisory",
                       "label": _ADVISORY_LABELS[pid], "needs": list(needs),
+                      "provides": _ADVISORY_PROVIDES.get(pid, ""),
                       "probe": lambda cfg, p=pid: _probe_advisory(p, cfg)})
 
-    for pid in intg.GENRE_SOURCES:
+    # The genre rows ARE the chain: `rank` is the registry's own 1-based
+    # position (what the tray shows as the priority order it saves back) and
+    # `provides` is what that source contributes. Both come from this one
+    # place, so a source reordered above GENRE_SOURCES renumbers itself here.
+    for rank, pid in enumerate(intg.GENRE_SOURCES, 1):
         needs = {"lastfm": ["lastfm_api_key"], "discogs": ["discogs_token"],
                  "rateyourmusic": ["rym_cookie"],
                  "spotify": ["spotify_client_id", "spotify_client_secret"],
                  }.get(pid, [])
-        specs.append({"id": pid, "kind": "genre",
+        specs.append({"id": pid, "kind": "genre", "rank": rank,
+                      "provides": _GENRE_PROVIDES.get(pid, ""),
                       "label": _GENRE_LABELS.get(pid, pid), "needs": list(needs),
                       "probe": lambda cfg, p=pid: _probe_genre(p, cfg)})
 
@@ -584,6 +664,7 @@ def _specs(kind=None):
         specs.append({"id": pid, "kind": "metadata",
                       "label": discovery.SOURCE_LABELS.get(pid, pid),
                       "needs": [],
+                      "provides": discovery.SOURCE_NOTES.get(pid, ""),
                       "probe": lambda cfg, p=pid: _probe_metadata(p, cfg)})
 
     # Links: the RYM pair an import writes onto the album's tracks. It needs
@@ -592,6 +673,9 @@ def _specs(kind=None):
     for pid in ("rateyourmusic",):
         specs.append({"id": pid, "kind": "links",
                       "label": _RYM_LABELS[pid], "needs": ["rym_cookie"],
+                      "provides": "the album and artist RateYourMusic links an "
+                                  "import writes onto the tracks — the same "
+                                  "cookie the genre row asks for.",
                       "probe": lambda cfg, p=pid: _probe_links(p, cfg)})
 
     # Discover: `server.discover` IS the registry for the /api/discover/*
@@ -603,7 +687,7 @@ def _specs(kind=None):
     for spec in discover_mod.SOURCES:
         specs.append({"id": spec["id"], "kind": "discover",
                       "label": spec["label"], "needs": list(spec["needs"]),
-                      "notes": spec["note"],
+                      "notes": spec["note"], "provides": spec["note"],
                       "probe": lambda cfg, p=spec["id"]: _probe_discover(p, cfg)})
 
     # Credentials: the logins every row above depends on, each asked through
@@ -618,6 +702,7 @@ def _specs(kind=None):
         specs.append({"id": spec["id"], "kind": "credentials",
                       "label": spec["label"], "needs": list(spec["needs"]),
                       "free": bool(spec["free"]),
+                      "provides": _CREDENTIAL_PROVIDES.get(spec["id"], ""),
                       "probe": lambda cfg, p=spec["id"]: _probe_credentials(p, cfg)})
 
     return [s for s in specs if kind is None or s["kind"] == kind]
@@ -685,6 +770,8 @@ def health_payload(cfg=None, kind=None, probe=False):
             row["synced"] = True
         if spec.get("rank") is not None:
             row["rank"] = spec["rank"]
+        if spec.get("provides"):
+            row["provides"] = spec["provides"]
         if spec.get("notes"):
             row["notes"] = spec["notes"]
         rows.append(row)

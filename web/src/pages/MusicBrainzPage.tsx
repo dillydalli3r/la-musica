@@ -24,10 +24,12 @@ import { toast } from "../store";
 /* In-app MusicBrainz browser: search across the four browsable entities and
  * drill into artist / release-group / release / recording pages. Everything
  * renders as column tables (same language as the library views), pages 100
- * rows at a time with load-more footers, keeps the previous results visible
- * while a new query loads, and prefetches entity pages on row hover. Bare
- * MusicBrainz IDs and musicbrainz.org links pasted into the search box are
- * detected and routed to their entity page. */
+ * rows at a time, keeps the previous results visible while a new query loads,
+ * and prefetches entity pages on row hover. Every paged list finishes ITSELF —
+ * see `AutoLoad`, which keeps fetching while there is more — because a list
+ * that stopped at its first page read as "MusicBrainz is missing these
+ * editions / groups". Bare MusicBrainz IDs and musicbrainz.org links pasted
+ * into the search box are detected and routed to their entity page. */
 
 const PAGE = 100;
 
@@ -274,25 +276,132 @@ function LoadError({ e }: { e: unknown }) {
   );
 }
 
-/** Footer under a paged list: what's shown, and a load-more control.
+/** Footer under a paged list: what is shown, and the REST of the pages.
  *
- *  `hasMore` is the server's own answer (the payload carries the offset of the
- *  next page, null at the end) rather than a guess from the row count: rows are
- *  de-duplicated, so a list can sit one row below `total` forever while there
- *  is nothing left to load. */
-function LoadMore({ loaded, total, busy, hasMore, onLoad }: {
-  loaded: number; total: number; busy: boolean; hasMore: boolean; onLoad: () => void;
+ *  Every list here is paged, and a list that stopped at the first page until
+ *  it was asked for the next one is what made a release group look like it was
+ *  missing editions (and an artist's discography look like it was missing
+ *  release groups, and their types with it). The tail therefore LOADS ITSELF:
+ *  a sentinel at the end of the list is watched with an IntersectionObserver,
+ *  and every time it is in view — with more to come, and nothing in flight —
+ *  the next page is fetched, until there is nothing left. Each pass re-checks,
+ *  so a sentinel that is still on screen after a page lands keeps going without
+ *  the user scrolling away and back.
+ *
+ *  The readout stays honest while it happens: it is the rows actually on
+ *  screen, and `hasMore`/`next` are the SERVER's own answer (the payload
+ *  carries the offset of the next page, null at the end) rather than a guess
+ *  from a row count, which would sit one row below `total` forever when
+ *  MusicBrainz repeats a row.
+ *
+ *  `all` skips the sentinel and fetches every page whether or not the tail is
+ *  on screen: the artist page's type chips and its by-release-type panel are
+ *  both derived from the LOADED groups, so that one discography has to be
+ *  complete before either can claim to name every type the artist has.
+ *
+ *  `next` is what proves a pass made progress. A pass that leaves it where it
+ *  was — an error, or a page MusicBrainz answered without advancing — ends the
+ *  automatic loading and leaves the button, because retrying the same offset
+ *  would spin there forever. The button is also what a browser without
+ *  IntersectionObserver gets; the two are never both rendered. */
+function AutoLoad({ loaded, total, next, busy, hasMore, all, onLoad }: {
+  loaded: number; total: number; next?: number | null; busy: boolean;
+  hasMore: boolean;
+  /** fetch every page, not only while the tail is on screen */
+  all?: boolean;
+  onLoad: () => void;
 }) {
+  const sentinel = useRef<HTMLDivElement | null>(null);
+  // The callback is a fresh closure every render; the pass reads it through a
+  // ref so its identity never re-triggers an effect.
+  const load = useRef(onLoad);
+  load.current = onLoad;
+  const [seen, setSeen] = useState(false);
+  const [stalled, setStalled] = useState(false);
+  // What the pass now in flight started from ("" while none is in flight), and
+  // whether that pass has actually been seen on the wire (`busy`). The second
+  // flag is what makes a duplicate effect run — StrictMode's double mount, or
+  // any render between "asked for" and "fetching" — harmless: without it, a
+  // run that happened before the fetch was observable looked like a pass that
+  // had ended without bringing anything, and the list stopped one page in.
+  const from = useRef("");
+  const onWire = useRef(false);
+  // One automatic second try: a pass that brought nothing stops the automatic
+  // loading, and a page that failed while MusicBrainz was busy is exactly the
+  // case nobody should have to click for. After a moment the sentinel tries
+  // once more; a second empty pass leaves the button for good.
+  const [retried, setRetried] = useState(false);
+  const canObserve = typeof IntersectionObserver !== "undefined";
+  const here = `${loaded}:${next}`;
+
+  useEffect(() => {
+    const el = sentinel.current;
+    if (!canObserve || !el || !hasMore) return;
+    const io = new IntersectionObserver(
+      (entries) => setSeen(entries.some((e) => e.isIntersecting)),
+      { rootMargin: "400px" },  // start before the tail is actually on screen
+    );
+    io.observe(el);
+    return () => io.disconnect();
+  }, [canObserve, hasMore]);
+
+  useEffect(() => {
+    if (!stalled || retried || !hasMore) return;
+    const t = setTimeout(() => { setRetried(true); setStalled(false); }, 4000);
+    return () => clearTimeout(t);
+  }, [stalled, retried, hasMore]);
+
+  // A page landing re-runs this, which is the whole auto-load: the sentinel
+  // may still be in view, so the next page follows on its own.
+  useEffect(() => {
+    if (busy) {
+      if (from.current) onWire.current = true;
+      return;
+    }
+    if (from.current) {
+      const moved = from.current !== here;
+      // Asked for, and nothing has happened yet: not an outcome at all.
+      if (!onWire.current && !moved) return;
+      onWire.current = false;
+      from.current = "";
+      if (!moved) {
+        setStalled(true);
+        return;
+      }
+      setStalled(false);
+    }
+    if (!hasMore || stalled || !canObserve || (!all && !seen)) return;
+    from.current = here;
+    onWire.current = false;
+    load.current();
+  }, [canObserve, all, seen, busy, hasMore, stalled, here]);
+
   if (!hasMore) return null;
+  const label = `showing ${loaded} of ${total}`;
+  if (!canObserve || stalled) {
+    return (
+      <button
+        className="w-full py-2 text-xs text-zinc-400 hover:text-white hover:bg-raise transition-colors disabled:opacity-50 flex items-center justify-center gap-1.5"
+        onClick={() => { setStalled(false); onLoad(); }}
+        disabled={busy}
+      >
+        {busy && <Loader2 className="h-3.5 w-3.5 animate-spin" />}
+        Load more — {label}
+      </button>
+    );
+  }
   return (
-    <button
-      className="w-full py-2 text-xs text-zinc-400 hover:text-white hover:bg-raise transition-colors disabled:opacity-50 flex items-center justify-center gap-1.5"
-      onClick={onLoad}
-      disabled={busy}
+    <div
+      ref={sentinel}
+      className="py-2 text-xs text-zinc-500 flex items-center justify-center gap-1.5"
     >
-      {busy && <Loader2 className="h-3.5 w-3.5 animate-spin" />}
-      Load more — showing {loaded} of {total}
-    </button>
+      {busy ? (
+        <>
+          <Loader2 className="h-3.5 w-3.5 animate-spin" />
+          Loading more — {label}
+        </>
+      ) : null}
+    </div>
   );
 }
 
@@ -1199,9 +1308,14 @@ export function MBSearchPage() {
                   </tbody>
                 </table>
               </div>
-              <LoadMore
+              {/* Keyed by the query: a new search is a new list, so the
+                  auto-load's own state (and a stall a previous search hit)
+                  starts over with it rather than leaking into the next one. */}
+              <AutoLoad
+                key={[type, q, searchMode, ptype, stype, artist, year, label, catno].join("|")}
                 loaded={rows.length}
                 total={total}
+                next={search.data?.pages.at(-1)?.next}
                 busy={search.isFetchingNextPage}
                 hasMore={search.hasNextPage}
                 onLoad={() => search.fetchNextPage()}
@@ -1237,25 +1351,30 @@ function byReleaseGroupType(groups: RGRow[]): { label: string; list: RGRow[] }[]
   return order.map((label) => ({ label, list: byLabel.get(label) as RGRow[] }));
 }
 
-/** One action row: the type it acts on (as MusicBrainz spells it), the type
- *  names the server is asked for, and how many of the artist's release groups
- *  it covers. `count` is null while the discography is still loading. */
+/** One action row: the type it acts on (as MusicBrainz spells it, a compound
+ *  "Album + Live" included), the type SELECTION the server is asked for, and
+ *  how many of the artist's release groups it covers. `count` is null while
+ *  the discography is still loading. */
 interface TypeActionRow { label: string; types: string[]; count: number | null }
 
 /** The artist's whole action block: one Add to library button for the
  *  discography and one for EVERY release-group type it actually has.
  *
- *  Each button sends the same request — an artist add scoped by `types`, the
- *  filter `mlo.release_choice.type_matches` applies server-side — and the
- *  server starts the search for each album as it records it, so one button is
- *  the whole action: the album is in the library and Soulseek is already
- *  looking for its audio. (There used to be a second "Download all" button;
- *  it differed only in a flag that asked for exactly this, so it said the same
- *  thing twice.) Each row owns its own busy state (a running add disables that
- *  row, never the page), and the server's own answer — what it queued, what it
- *  skipped and why, or the switch that stopped it — lands directly under the
- *  row that asked for it. The queue's own view is refetched on success, so the
- *  albums these buttons created show up there. */
+ *  `groups` is the page's own discography — the very list the type chips above
+ *  filter — so a row and a chip are one thing seen twice: a type the panel can
+ *  add is a type the chips can show, and the counts agree. Each row sends its
+ *  type as ONE selection ("Album + Live"), which the server matches against a
+ *  group's WHOLE type (primary + exactly those secondaries) through
+ *  `mlo.release_choice.type_matches`, and the server starts the search for
+ *  each album as it records it, so one button is the whole action: the album
+ *  is in the library and Soulseek is already looking for its audio. (There
+ *  used to be a second "Download all" button; it differed only in a flag that
+ *  asked for exactly this, so it said the same thing twice.) Each row owns its
+ *  own busy state (a running add disables that row, never the page), and the
+ *  server's own answer — what it queued, what it skipped and why, or the
+ *  switch that stopped it — lands directly under the row that asked for it.
+ *  The queue's own view is refetched on success, so the albums these buttons
+ *  created show up there. */
 function ArtistTypeActions({ artistId, mode, groups, total, loading }: {
   artistId: string; mode: ImportMode; groups: RGRow[]; total: number; loading: boolean;
 }) {
@@ -1366,14 +1485,18 @@ export function MBArtistPage() {
   const { id = "" } = useParams();
   const nav = useNavigate();
   const { warm: prefetch, cool: unprefetch } = useMbPrefetch();
-  // The release-type filter is the SERVER's (see artist_release_groups): it is
-  // part of the query key, so switching types asks MusicBrainz again instead of
-  // filtering a window that may not contain the type at all.
+  // Which release-group TYPE is selected. A chip FILTERS the one discography
+  // loaded below; it is not a new question to MusicBrainz. The type of a group
+  // is the pair (primary type, secondary types) MusicBrainz reports on every
+  // row, so a compound chip like "Album + Live" is answerable from the payload
+  // itself — and it can only be answered exactly, because the tail of the list
+  // loads EVERY page (see AutoLoad's `all`): an artist's types can sit past the
+  // first page, and a filter over a half-loaded discography is what this page
+  // used to get wrong.
   const [typeFilter, setTypeFilter] = useState<string>("All");
   const discography = useInfiniteQuery({
-    queryKey: ["mbArtist", id, typeFilter],
-    queryFn: ({ pageParam }) =>
-      api.mbArtist(id, pageParam as number, 300, typeFilter === "All" ? "" : typeFilter),
+    queryKey: ["mbArtist", id],
+    queryFn: ({ pageParam }) => api.mbArtist(id, pageParam as number, 300),
     initialPageParam: 0,
     // The server's own next offset (null at the end): it also knows which
     // rows MusicBrainz served, which a client-side row count does not.
@@ -1384,16 +1507,6 @@ export function MBArtistPage() {
   const { isLoading, error } = discography;
   const [mode, setMode] = useState<ImportMode>("best");
   const { busy, run } = useAddToLibrary();
-  // The action rows are about the WHOLE discography, whichever type chip is
-  // selected below, so they read their own browse of it (the server caches a
-  // MusicBrainz browse for 30 minutes, so this is one request per artist page,
-  // not one per artist). A chip filters the LIST; it never re-scopes a row.
-  const allGroups = useQuery<MBArtistBrowse>({
-    queryKey: ["mbArtistTypes", id],
-    queryFn: () => api.mbArtist(id, 0, 300),
-    enabled: !!id,
-    staleTime: 300000,
-  });
   // No reset-on-id effect: the artist id is a PATH param, and App keys the
   // route subtree by `location.pathname`, so another artist is a fresh mount
   // with the filter already back at "All".
@@ -1401,14 +1514,16 @@ export function MBArtistPage() {
   const groups: RGRow[] = (discography.data?.pages ?? []).flatMap((p) => p.release_groups ?? []);
   const rgTotal: number = discography.data?.pages.at(-1)?.total ?? groups.length;
 
-  // The filter is the SERVER's (see artist_release_groups): browse cannot
-  // filter by type at all, and filtering the loaded window is what made this
-  // page report an artist's albums as missing when they sat past the first
-  // page. So every loaded group already belongs to the selected type, and
-  // "All" is the unfiltered discography.
-  const shown = groups;
-  const sections = byReleaseGroupType(shown);
-  const typeGroups = allGroups.data?.release_groups ?? [];
+  // The chips, the sections below them and the "Add or download by release
+  // type" panel are ONE derivation over ONE discography: `byReleaseGroupType`
+  // names every group's type as MusicBrainz spells a compound one ("Album +
+  // Live" — primary type first, then its secondary types) and lists the rows
+  // of each. So a chip cannot name a type the panel does not, or the other way
+  // round, and "Album + Live" is the live albums only, never every album.
+  const sections = byReleaseGroupType(groups);
+  const selected = typeFilter === "All" ? sections
+    : sections.filter((s) => s.label === typeFilter);
+  const shown = selected.flatMap((s) => s.list);
 
   if (!id) return null;
   if (isLoading) return <PageLoading label="Asking MusicBrainz…" />;
@@ -1470,13 +1585,13 @@ export function MBArtistPage() {
         }
       />
       <div>
-        {typeGroups.length > 0 ? (
+        {groups.length > 0 ? (
           <ArtistTypeActions
             artistId={String(a.id)}
             mode={mode}
-            groups={typeGroups}
-            total={allGroups.data?.total ?? rgTotal}
-            loading={allGroups.isLoading}
+            groups={groups}
+            total={rgTotal}
+            loading={discography.isLoading}
           />
         ) : null}
         {groups.length === 0 ? (
@@ -1486,28 +1601,29 @@ export function MBArtistPage() {
               : `No ${typeFilter} release groups`}
             hint={typeFilter === "All"
               ? undefined
-              : "MusicBrainz's index holds no release group of that type for this artist — switch back to All."}
+              : "MusicBrainz holds no release group of that type for this artist — switch back to All."}
           />
         ) : (
           <>
             <div className="flex gap-1 flex-wrap mb-4">
-              {["All", ...PRIMARY_TYPES].map((p) => (
+              {[{ label: "All", count: rgTotal },
+                ...sections.map(({ label, list }) => ({ label, count: list.length }))]
+                .map(({ label, count }) => (
                 <button
-                  key={p}
+                  key={label}
                   className={`chip px-2.5 py-1 border ${
-                    typeFilter === p
+                    typeFilter === label
                       ? "bg-accent on-accent border-transparent font-semibold"
                       : "bg-raise border-border text-zinc-400 hover:text-white"
                   }`}
                   title={
-                    p === "All"
+                    label === "All"
                       ? "Every release group MusicBrainz holds for this artist"
-                      : `Ask MusicBrainz's index for this artist's ${p} release groups only`
+                      : `This artist's ${label} release groups — the same type the panel above adds`
                   }
-                  onClick={() => setTypeFilter(p)}
+                  onClick={() => setTypeFilter(label)}
                 >
-                  {p}
-                  {p === "All" && typeFilter === "All" ? ` (${rgTotal})` : ""}
+                  {label} ({count})
                 </button>
               ))}
             </div>
@@ -1516,7 +1632,7 @@ export function MBArtistPage() {
                 Showing {groups.length} of {rgTotal}{typeFilter === "All" ? "" : ` ${typeFilter}`} release groups
               </div>
             )}
-            {sections.map(({ label, list }) => (
+            {selected.map(({ label, list }) => (
               <div key={label} className="mb-5">
                 <div className="text-[11px] uppercase tracking-widest text-zinc-500 mb-1.5">
                   {label} · {list.length}
@@ -1560,11 +1676,17 @@ export function MBArtistPage() {
                 </div>
               </div>
             ))}
-            <LoadMore
+            {/* `all`: the chips above and the panel's rows are derived from
+                the groups loaded here, so this list fetches every page rather
+                than waiting for the tail to be scrolled into view — an
+                artist's compound types can live past the first page. */}
+            <AutoLoad
               loaded={groups.length}
               total={rgTotal}
+              next={discography.data?.pages.at(-1)?.next}
               busy={discography.isFetchingNextPage}
               hasMore={discography.hasNextPage}
+              all
               onLoad={() => discography.fetchNextPage()}
             />
           </>
@@ -1889,9 +2011,10 @@ export function MBReleaseGroupPage() {
               </tbody>
             </table>
           </div>
-          <LoadMore
+          <AutoLoad
             loaded={releasesAll.length}
             total={relTotal}
+            next={editions.data?.pages.at(-1)?.next}
             busy={editions.isFetchingNextPage}
             hasMore={editions.hasNextPage}
             onLoad={() => editions.fetchNextPage()}
@@ -2241,9 +2364,10 @@ export function MBRecordingPage() {
               </tbody>
             </table>
           </div>
-          <LoadMore
+          <AutoLoad
             loaded={releasesAll.length}
             total={relTotal}
+            next={appearances.data?.pages.at(-1)?.next}
             busy={appearances.isFetchingNextPage}
             hasMore={appearances.hasNextPage}
             onLoad={() => appearances.fetchNextPage()}

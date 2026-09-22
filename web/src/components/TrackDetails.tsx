@@ -444,11 +444,16 @@ function RoleGroups({ rows }: { rows: CreditRow[] }) {
               <li key={`${r.artist}-${i}`} className="flex flex-wrap items-center gap-1.5 text-xs">
                 {r.mbid ? (
                   <a
-                    href={`https://musicbrainz.org/artist/${r.mbid}`}
+                    // A work row's MBID is a WORK id, not an artist id: linking
+                    // it as /artist/<mbid> opened a 404 for every writing and
+                    // composition credit (#35). The server names the row's own
+                    // kind (`role`), so the URL is built from it instead of
+                    // assuming every credit is a performer.
+                    href={`https://musicbrainz.org/${r.role === "work" ? "work" : "artist"}/${r.mbid}`}
                     target="_blank"
                     rel="noreferrer"
                     className="text-zinc-200 hover:text-accent-soft underline decoration-dotted"
-                    title="Open the artist on MusicBrainz"
+                    title={`Open the ${r.role === "work" ? "work" : "artist"} on MusicBrainz`}
                   >
                     {r.artist}
                   </a>

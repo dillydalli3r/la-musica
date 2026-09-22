@@ -1,5 +1,5 @@
 import { Link } from "react-router-dom";
-import { Check, X, Disc3, CircleAlert, CheckCircle2, Loader2 } from "lucide-react";
+import { Check, X, Disc3, CircleAlert, ArrowDown, Loader2 } from "lucide-react";
 import { useCachedPaths } from "../lib/mediaCache";
 import { useI18n, type MessageKey } from "../lib/i18n";
 import type { AdvisoryFetchResult } from "../api";
@@ -12,28 +12,32 @@ type Translate = (key: MessageKey, vars?: Record<string, string | number>) => st
 
 /** The one condensed grade verdict: a small check (pass) or cross (fail)
  * and nothing else — grading stays out of the way; `score` (the old
- * percentage) and `audit` survive as hover details. */
+ * percentage) survives as a hover detail. */
 export function GradeBadge({
   pass,
   score,
-  audit,
   size = "md",
 }: {
   pass: boolean;
   score?: number | null;
-  audit?: string | null;
   size?: "sm" | "md";
 }) {
-  const detail: string[] = [];
-  if (score != null && !pass) detail.push(`${score}% of checks passed`);
-  const a = (audit ?? "").trim().toUpperCase();
-  if (a) detail.push(`audit ${a}`);
+  // One word for the verdict. The tooltip used to append `audit REAL` /
+  // `audit FAKE` — the app's internal name for the CD verdict, which a reader
+  // hovering a row should not have to learn (the audit chip in the track
+  // details says it where there is room to say it in full). The failing
+  // percentage stays: it is the number behind the cross.
+  const title = pass
+    ? "Pass"
+    : score != null
+      ? `Fail · ${score}% of checks passed`
+      : "Fail";
   return (
     <span
       className={`inline-flex items-center shrink-0 ${
         pass ? "text-emerald-600/70" : "text-red-400/90"
       }`}
-      title={detail.length ? detail.join(" · ") : pass ? "All checks passed" : "Grading failed — see details"}
+      title={title}
     >
       {pass ? (
         <Check className={size === "sm" ? "h-3 w-3" : "h-3.5 w-3.5"} />
@@ -378,11 +382,16 @@ export function PageLoading({ label = "Loading…" }: { label?: string }) {
   );
 }
 
-/** The downloaded mark for a track title: the same check the download button
- *  shows once the audio is in the offline cache (lib/mediaCache), rendered
- *  only while it is there — a track that was never downloaded gets NO mark,
- *  so the badge means "you can play this without the server" and nothing
- *  else. */
+/** The downloaded mark for a track title: a small down arrow, the same
+ *  download family the download buttons wear, rendered only while the audio
+ *  is in the offline cache (lib/mediaCache) — a track that was never
+ *  downloaded gets NO mark, so the badge means "you can play this without the
+ *  server" and nothing else.
+ *
+ *  It used to be a green circled check, which is what a passing grade looks
+ *  like two columns to the left: the reader saw two near-identical ticks and
+ *  could tell neither what was graded from what was downloaded (#39). The
+ *  grade keeps the check; the download takes the arrow. */
 export function CachedMark({ path, size = "sm" }: { path: string; size?: "sm" | "md" }) {
   const cached = useCachedPaths();
   if (!cached.has(path)) return null;
@@ -390,10 +399,10 @@ export function CachedMark({ path, size = "sm" }: { path: string; size?: "sm" | 
     <span
       role="img"
       aria-label="Downloaded"
-      title="Downloaded — plays without the server"
+      title="Downloaded"
       className="shrink-0 inline-flex text-emerald-500"
     >
-      <CheckCircle2 className={size === "sm" ? "h-3.5 w-3.5" : "h-4 w-4"} />
+      <ArrowDown className={size === "sm" ? "h-3.5 w-3.5" : "h-4 w-4"} />
     </span>
   );
 }

@@ -1397,9 +1397,14 @@ export interface SourceHealth {
   free: boolean;
   synced?: boolean;
   /** 1-based position in the built-in chain, and the registry's own blurb —
-   *  only lyrics rows carry these today. */
+   *  the lyrics rows and the genre rows carry these (a genre row's `rank` is
+   *  its position in the priority chain the tray saves). */
   rank?: number;
   notes?: string;
+  /** One line saying what this source provides the app — on every row of
+   *  every kind (the wizard's Keys step renders it under each name; the genre
+   *  tray reads it as the source's one-line description). */
+  provides?: string;
   needs: string[];
   configured: boolean;
   status: "ok" | "skipped" | "fail";

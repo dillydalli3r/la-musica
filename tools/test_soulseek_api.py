@@ -1104,6 +1104,101 @@ shutil.rmtree(REDIRECT, ignore_errors=True)
 assert not os.path.exists(LAYOUT) and not os.path.exists(MF2)
 
 # --------------------------------------------------------------------------- #
+# §C+ the queue's OWN two forms on the same two routes: cancel BY IDS (the
+# page's selection) and a "queued only" clear (the page's Clear all)
+# --------------------------------------------------------------------------- #
+# A pipeline with no room at all, plus ONE running job registered the way the
+# pipeline registers its own: nothing here starts a thread, so what these two
+# routes do to the WAITING queue is isolated from any real download.
+from server import soulseek_auto  # noqa: E402
+
+_real_concurrency = soulseek_auto.concurrency
+soulseek_auto.concurrency = lambda cfg=None: 0        # no room, ever → a
+                                                      # start always WAITS
+_RUN_ID = 999
+soulseek_auto._jobs[_RUN_ID] = dict(
+    soulseek_auto._IDLE_JOB, id=_RUN_ID, state="running", stage="Downloading…",
+    stage_key="downloading", cancel=False,
+    release={"id": "ffffffff-0000-0000-0000-000000000001"})
+soulseek_auto._order.append(_RUN_ID)
+
+RELEASE_A = {"id": "eeeeeeee-0000-0000-0000-000000000001", "title": "Waits One",
+             "artists": [{"name": "An Artist"}]}
+RELEASE_B = {"id": "eeeeeeee-0000-0000-0000-000000000002", "title": "Waits Two",
+             "artists": [{"name": "An Artist"}]}
+try:
+    _a = soulseek_auto.start_job(release=dict(RELEASE_A),
+                                 release_mbid=RELEASE_A["id"])
+    _b = soulseek_auto.start_job(release=dict(RELEASE_B),
+                                 release_mbid=RELEASE_B["id"])
+    assert _a.get("ok") is True and _a.get("waiting") is True \
+        and _a.get("position") == 1, _a           # never the old refusal
+    assert _b.get("waiting") is True and _b.get("position") == 2, _b
+    _id_a = f"pipeline:{RELEASE_A['id']}"
+    _id_b = f"pipeline:{RELEASE_B['id']}"
+
+    # By IDS: exactly the ids given go, and the ones that were not there are
+    # reported rather than silently counted.
+    r = _client.post("/api/soulseek/downloads/cancel",
+                     json={"ids": [_id_a, "job:999999", "not-an-id"]})
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["cancelled"] == 1 and body["ids"] == [_id_a], body
+    assert body["missed"] == ["job:999999", "not-an-id"], body
+    assert [q["key"] for q in soulseek_auto.queued()] == [RELEASE_B["id"]], \
+        soulseek_auto.queued()
+    assert soulseek_auto.job_state(_RUN_ID)["state"] == "running", \
+        "a row that was not in the ids must not be touched"
+
+    # ...and a RUNNING row cancels by id too (what the selection's Cancel does
+    # to a row that has started).
+    r = _client.post("/api/soulseek/downloads/cancel",
+                     json={"ids": [f"job:{_RUN_ID}"]})
+    assert r.status_code == 200 and r.json()["cancelled"] == 1, r.text
+    assert soulseek_auto._jobs[_RUN_ID]["cancel"] is True, "the running row kept its cancel flag"
+
+    # Clear all: the WAITING rows go in one press, and a running release does
+    # not (it is cancelled on its own row, never silently killed).
+    soulseek_auto._jobs[_RUN_ID]["cancel"] = False        # the row is put back
+    r = _client.post("/api/soulseek/downloads/clear", json={"scope": "queued"})
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["cleared"] == 1 and body["ids"] == [_id_b], body
+    assert soulseek_auto.queued() == [], soulseek_auto.queued()
+    assert soulseek_auto.job_state(_RUN_ID)["state"] == "running", \
+        "Clear all must leave a running release alone"
+
+    # It is this app's OWN queue, so it works with slskd down — while the
+    # transfer scopes still refuse without a daemon.
+    _was_running, _was_up = soulseek.is_running, soulseek.web_up
+    soulseek.is_running = lambda *a, **k: False
+    soulseek.web_up = lambda *a, **k: False
+    try:
+        r = _client.post("/api/soulseek/downloads/clear", json={"scope": "queued"})
+        assert r.status_code == 200 and r.json()["cleared"] == 0, r.text
+        r = _client.post("/api/soulseek/downloads/clear", json={"scope": "finished"})
+        assert r.status_code == 400, r.text
+        # ...and an unknown scope is still refused by name
+        r = _client.post("/api/soulseek/downloads/clear", json={"scope": "everything"})
+        assert r.status_code == 400 and "unknown scope" in r.text, r.text
+    finally:
+        soulseek.is_running, soulseek.web_up = _was_running, _was_up
+
+    # The transfer form of the cancel route is unchanged: both fields are
+    # required, and a missing one is a 400 rather than a 500.
+    r = _client.post("/api/soulseek/downloads/cancel",
+                     json={"username": "peer", "transfer_ids": []})
+    assert r.status_code == 400, r.text
+finally:
+    soulseek_auto.clear_queued()
+    soulseek_auto._jobs.pop(_RUN_ID, None)
+    try:
+        soulseek_auto._order.remove(_RUN_ID)
+    except ValueError:
+        pass
+    soulseek_auto.concurrency = _real_concurrency
+
+# --------------------------------------------------------------------------- #
 # The Soulseek status push (server/main.py)
 # --------------------------------------------------------------------------- #
 # The tab's dot is drawn from /api/soulseek/status; these pin the rule that a

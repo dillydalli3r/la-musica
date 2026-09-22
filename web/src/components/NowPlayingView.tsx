@@ -6,6 +6,7 @@ import {
 } from "lucide-react";
 import { api } from "../api";
 import VolumePct from "./VolumePct";
+import LyricZoom from "./LyricZoom";
 import { toast, useStore } from "../store";
 import { fmtTech, fmtPair, isVideoFile } from "../lib/fmt";
 import { AdvisoryMark } from "./Badges";
@@ -1279,21 +1280,14 @@ export default function NowPlayingView(p: Props) {
                     ))}
                   </div>
                   <div className="flex items-center gap-2 px-2 py-1.5 text-xs text-zinc-300">
-                    <span className="flex-1" title="Zoom the lyrics pane — saved for every future visit">Zoom</span>
-                    <input
-                      type="range"
-                      min={0.85}
-                      max={1.6}
-                      step={0.05}
-                      value={lyricZoom}
-                      onChange={(e) => {
-                        const v = Number(e.target.value);
-                        setLyricZoom(v);
-                        persist(ZOOM_KEY, String(v));
+                    <span className="flex-1" title="Size of the lyrics pane — saved for every future visit">Zoom</span>
+                    <LyricZoom
+                      pct={Math.round(lyricZoom * 100)}
+                      onChange={(p) => {
+                        setLyricZoom(p / 100);
+                        persist(ZOOM_KEY, String(p / 100));
                       }}
-                      className="w-28"
                     />
-                    <span className="w-9 text-right text-[10px] text-zinc-500 tabular-nums">{Math.round(lyricZoom * 100)}%</span>
                   </div>
                   <div className="text-[10px] uppercase tracking-wider text-zinc-500 px-1 pt-2 pb-1">Background</div>
                   <label className="flex items-center gap-2 px-2 py-1.5 rounded-md hover:bg-white/10 cursor-pointer text-xs text-zinc-300">

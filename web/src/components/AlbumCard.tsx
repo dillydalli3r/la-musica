@@ -2,7 +2,7 @@ import { Link } from "react-router-dom";
 import { Play } from "lucide-react";
 import { useStore } from "../store";
 import { statusFor } from "../lib/status";
-import { mediaCountryLabel, releaseCountries } from "./Badges";
+import { mediaShort, releaseCountries } from "./Badges";
 import { albumTech } from "../lib/fmt";
 import CoverImg from "./CoverImg";
 import FavHeart from "./FavHeart";
@@ -48,7 +48,6 @@ export default function AlbumCard({ al, artistName, selectable, selected, onSele
   const artist = artistName ?? al.artist ?? al.album_artist ?? al.path.split(/[\\/]/).slice(0, -1).pop() ?? "";
   const media = al.media || al.meta?.MEDIA;
   const countries = releaseCountries(al.meta?.RELEASECOUNTRY);
-  const mediaBadge = mediaCountryLabel(media, al.meta?.RELEASECOUNTRY);
   const { t } = useI18n();
   // The pending mark's own sentence (null for a complete album), used both for
   // the dot and for the reason the play button is off.
@@ -92,37 +91,42 @@ export default function AlbumCard({ al, artistName, selectable, selected, onSele
           const dr = al.meta?.["ALBUM DYNAMIC RANGE"] ?? null;
           return (
             <>
-              {/* quality bottom-left · media + release countries bottom-right ·
-                  DR top-left. The play button lives top-left below the DR chip
-                  so it can never cover the bitrate readout.
+              {/* One LEFT-aligned column of the three facts a reader scans a
+                  shelf for: which pressing it is, where it came from, what is
+                  inside. They used to be two corner chips with the release
+                  countries fused onto the medium and pushed to the right edge,
+                  so the same album's format chip moved with the length of its
+                  country list (#38). Bitrate sits at the BOTTOM, the line a
+                  reader's eye lands on first in a grid.
 
-                  The two bottom badges share ONE wrapping row: the media badge
-                  carries the release countries too, and a release tagged for
-                  several ("CD · US, CA, JP") needs the width to say so instead
-                  of a fixed corner chip it would overflow. The row itself is
-                  not clickable — only the badges are — so the cover link
-                  underneath still takes a click between them. */}
-              {(tech || mediaBadge) && (
-                <div className="absolute inset-x-1.5 bottom-1.5 flex flex-wrap items-end gap-1.5 pointer-events-none">
+                  The play button lives top-left below the DR chip, so this
+                  column can never cover it, and each row is its own badge so
+                  one long country list wraps inside its own line instead of
+                  stretching its neighbours. */}
+              {(media || countries.length > 0 || tech) && (
+                <div className="absolute bottom-1.5 left-1.5 max-w-[calc(100%-0.75rem)] flex flex-col items-start gap-1 pointer-events-none">
+                  {media && (
+                    <span
+                      className="pointer-events-auto max-w-full break-words text-[9px] font-semibold tracking-wide leading-snug rounded px-1 py-0.5 border border-white/10 bg-black/65 text-zinc-200"
+                      title={`Media: ${media}`}
+                    >
+                      {mediaShort(media)}
+                    </span>
+                  )}
+                  {countries.length > 0 && (
+                    <span
+                      className="pointer-events-auto max-w-full break-words text-[9px] tracking-wide leading-snug rounded px-1 py-0.5 border border-white/10 bg-black/65 text-zinc-300"
+                      title={`Released in ${countries.join(", ")}`}
+                    >
+                      {countries.join(", ")}
+                    </span>
+                  )}
                   {tech && (
                     <span
-                      className="pointer-events-auto shrink-0 bg-black/65 text-zinc-300 text-[9px] font-mono tracking-wide rounded px-1 py-0.5 border border-white/10"
+                      className="pointer-events-auto max-w-full break-words bg-black/65 text-zinc-300 text-[9px] font-mono tracking-wide rounded px-1 py-0.5 border border-white/10"
                       title={`Formats: ${albumTech(al.tracks)}`}
                     >
                       {tech}
-                    </span>
-                  )}
-                  {mediaBadge && (
-                    <span
-                      className="pointer-events-auto ml-auto shrink-0 max-w-full text-right text-[9px] font-semibold tracking-wide leading-snug break-words rounded px-1 py-0.5 border border-white/10 bg-black/65 text-zinc-200"
-                      title={[
-                        media ? `Media: ${media}` : "",
-                        countries.length ? `Released in ${countries.join(", ")}` : "",
-                      ]
-                        .filter(Boolean)
-                        .join(" · ")}
-                    >
-                      {mediaBadge}
                     </span>
                   )}
                 </div>

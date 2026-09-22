@@ -1,13 +1,16 @@
 #!/usr/bin/env python3
 """Regenerate every la musica icon set from ``desktop/icon-source.png``.
 
-Tauri's own ``icon`` command is the only producer of icons in this repo — it
-writes the desktop set (png/ico/icns) into ``desktop/src-tauri/icons/``, and it
-writes the native-project sets (``icons/ios/AppIcon-*.png``,
-``icons/android/mipmap-*/``) when the generated Xcode/Android projects are not
-there, or straight into ``src-tauri/gen/`` when they are. Drawing a second set
-with PIL here is what previously left the committed icons showing artwork that
-was not the app's logo, so this script now just drives that command.
+Tauri's own ``icon`` command is the only thing in this repo that draws an app
+icon — it writes the desktop set (png/ico/icns) into
+``desktop/src-tauri/icons/``, and it writes the native-project sets
+(``icons/ios/AppIcon-*.png``, ``icons/android/mipmap-*/``) when the generated
+Xcode/Android projects are not there, or straight into ``src-tauri/gen/`` when
+they are. Drawing a second set with PIL here is what previously left the
+committed icons showing artwork that was not the app's logo, so this script now
+just drives that command. (``tools/make_icons.py`` afterwards only sorts the
+ICNS element blocks the CLI writes out of a ``HashMap``, so a rerun is a no-op;
+that moves no pixel.)
 
 Run it on its own, or as part of a mobile build *after* ``tauri android init``
 / ``tauri ios init``, so the generated project picks the icons up

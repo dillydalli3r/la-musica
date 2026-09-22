@@ -18,8 +18,8 @@ except ImportError:
 from .subproc import run_tool
 from .paths import (
     VALID_EXTENSIONS, ALL_IMAGE_EXTS, LOSSLESS_IMAGE_EXTS, CONVERTIBLE_EXTENSIONS,
-    JPEG_QUALITY_MARKER, PNG_OPTIMIZATION_LEVEL, DEPS_DIR, LIB_AUDIO_EXTS,
-    library_root,
+    JPEG_QUALITY_MARKER, PNG_OPTIMIZATION_LEVEL, LIB_AUDIO_EXTS,
+    library_root, tools_dir,
 )
 from .stats import (
     new_stats, _make_pbar, _pbar_skip, _pbar_update, _diff_bytes,
@@ -2370,8 +2370,8 @@ def run_process_images(config):
     jxl_tool = tools.get("libjxl")
 
     if not jxl_tool:
-        log(c("WARNING: Could not auto-detect libjxl in .dependencies folder.", Color.RED))
-        log(f"Expected a folder like: {os.path.join(DEPS_DIR, 'libjxl v0.12.0')}")
+        log(c("WARNING: Could not auto-detect libjxl in the tools folder.", Color.RED))
+        log(f"Expected a folder like: {os.path.join(tools_dir(), 'libjxl v0.12.0')}")
         log("JPEG XL conversion is disabled for this run — in-place lossless")
         log("JPEG/PNG optimization and the cover rename pass still run.")
         cjxl_path = None

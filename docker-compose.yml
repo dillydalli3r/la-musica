@@ -9,7 +9,8 @@
 #     - D:/Music:/music                 # Windows (Docker Desktop)
 #
 # Everything the app writes lives under /music/.mlo (data/, downloads/, trash/)
-# except runtime-fetched tools, which go to the /app/.dependencies volume.
+# — the tools the Dependencies page installs (beets, librosa, yt-dlp, ffmpeg,
+# libjxl …) included, in /music/.mlo/tools. One bind mount carries all of it.
 #
 # Commands:
 #   docker compose up -d --build     # build from source and start
@@ -42,10 +43,13 @@
 # The compose project name is PINNED. It is derived from the FOLDER name
 # otherwise, and this repo's folder has already been renamed once (la-musica ->
 # MusicLibraryOptimizer -> back to la-musica): the middle name silently started a
-# second project whose `musiclibraryoptimizer_lamusica-dependencies` volume was
-# empty, while the real installs (beets, librosa, yt-dlp) sat in
-# `la-musica_lamusica-dependencies`. With the name pinned, the volumes and the
-# network follow the app, not the directory you happen to run compose from.
+# second project, and the volumes and networks compose names after the project
+# went with it — that install's runtime-fetched tools were nowhere to be found
+# while the real ones sat under the first project's name. (The named volume this
+# file used to declare for those tools is gone: they live in /music/.mlo/tools
+# now — see the mounts below — but the pin still matters for anything else
+# compose creates.) With the name pinned, the volumes and the network follow the
+# app, not the directory you happen to run compose from.
 name: la-musica
 
 services:
@@ -84,17 +88,26 @@ services:
       # ALL app state (config.json, playlists.db + wishes.db, slskd.yaml,
       # the beets config + beets-library.db, and the ReplayGain / RYM /
       # metadata caches) lives in /music/.mlo/data, beside the transient
-      # /music/.mlo/downloads and /music/.mlo/trash, so this one mount
-      # persists everything across rebuilds.
+      # /music/.mlo/downloads and /music/.mlo/trash AND the tools the
+      # Dependencies page installs (/music/.mlo/tools), so this one mount
+      # persists everything across rebuilds — the dependency volume this file
+      # used to declare is gone: a tool now travels with the library, not with
+      # the image.
       #
       # This IS the Soulseek share as well: slskd - the Soulseek client this
       # app runs - is configured with /music as its shared folder, so whatever
       # this mount points at is what other users search and browse. Point it at
       # the library, nothing narrower (a mount holding only part of the library
       # shares only that part) and never at the download folder.
-      - "F:/media/music:/music"
-      # Runtime-installed tools (Settings -> Dependencies: beets, librosa, ...).
-      - lamusica-dependencies:/app/.dependencies
+      #
+      # EDIT THIS LINE. The committed value is the repo-relative ./music (the
+      # folder this template ships beside), which is a placeholder, not a
+      # library: compose CREATES an empty ./music on the host if it is missing,
+      # and an app pointed at an empty folder shows an empty library. Absolute
+      # host paths are what a real install uses:
+      #   - /path/to/your/music:/music      # Linux/macOS
+      #   - D:/Music:/music                 # Windows (Docker Desktop)
+      - ./music:/music
     restart: unless-stopped
     # How long Docker waits after SIGTERM before it SIGKILLs the container.
     # This is the number that decides whether a script mid-album, an import
@@ -200,6 +213,3 @@ services:
       #   - WATCHTOWER_SCHEDULE=${WATCHTOWER_SCHEDULE:-0 0 4 * * *}
       # Timestamps in the updater's log follow the host's clock.
       - TZ=${TZ:-Etc/UTC}
-
-volumes:
-  lamusica-dependencies:

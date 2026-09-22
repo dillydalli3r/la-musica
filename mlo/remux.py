@@ -42,7 +42,6 @@ import os
 import tempfile
 import threading
 
-from .paths import DEPS_DIR
 from .stats import (
     _collect_targets,
     _make_pbar,

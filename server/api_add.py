@@ -195,7 +195,16 @@ def _targets(mbid, kind, mode, release_mbid="", cfg=None, types=None):
         picked = _group_edition_targets(mbid, release_mbid, mode, cfg)
         if picked is not None:
             return picked
-    return intg.auto_import_targets(mbid, kind, mode, types=types)
+    # No per-call bound: `auto_import_targets`'s default caps how many of an
+    # artist's release groups ONE call expands, which is the right shape for a
+    # request that has to answer. Every artist add that reaches this line runs
+    # on the background prepare instead (`_prepare_artist`), which exists
+    # precisely because one MusicBrainz browse per group takes minutes — so a
+    # bound there truncated the row the button named: "Album + Compilation ·
+    # 106 release group(s)" prepared 50 and reported the other 56 as "per-call
+    # limit reached — call again" for an action the user had already asked for
+    # in full. The row is the unit; it is expanded whole.
+    return intg.auto_import_targets(mbid, kind, mode, types=types, limit=None)
 
 
 def _create_all(targets, cfg, *, queries=None, title="", artist="", year=""):
@@ -319,12 +328,16 @@ def _pending_album_payload(row):
 
 
 def _types_filter(types):
-    """The request's `types` as MusicBrainz's own type names, or 400.
+    """The request's `types` as MusicBrainz's own type SELECTIONS, or 400.
 
-    `mlo.release_choice.type_names` is the ONE normalizer — it splits a
-    combined spelling ("Album + Compilation"), lowercases, and validates the
-    vocabulary — so a typo comes back as the name it did not recognize
-    instead of a filter that silently matches nothing.
+    `mlo.release_choice.type_names` is the ONE normalizer: it lowercases,
+    validates every part against the published vocabulary — so a typo comes
+    back as the name it did not recognize instead of a filter that silently
+    matches nothing — and keeps each selection WHOLE. "Album + Compilation"
+    therefore reaches the matcher as "album + compilation" and means an album
+    that IS a compilation (`mlo.release_choice.type_matches`), not "album or
+    compilation", which is what the artist page's own row would otherwise
+    queue: the plain albums, and every compilation of another type.
     """
     from mlo import release_choice
 

@@ -89,7 +89,7 @@ export const CONFIG_GROUPS: CfgGroup[] = [
         { k: "ai_base_url", label: "Base URL", type: "text", help: "e.g. https://api.openai.com/v1, http://localhost:1234/v1, or generativelanguage.googleapis.com" },
         { k: "ai_api_key", label: "API key", type: "password", help: "Sent as a Bearer token. Local servers (LM Studio, llama.cpp) usually ignore it — leave it empty there." },
         { k: "ai_model", label: "Model", type: "text", help: "The model id the endpoint expects, e.g. gpt-4o-mini or gemini-2.5-flash." },
-        { k: "ai_effort", label: "Reasoning effort", type: "select", options: [["high","High — best quality (default)"],["medium","Medium"],["low","Low"],["minimal","Minimal — no thinking, fastest"]] },
+        { k: "ai_effort", label: "Reasoning effort", type: "select", options: [["max","Max — the provider's highest thinking budget"],["high","High — best quality (default)"],["medium","Medium"],["low","Low"],["minimal","Minimal — no thinking, fastest"]] },
         { k: "lyrics_translation_langs", label: "Translation languages", type: "text", help: "Comma separated, e.g. en,de. The first is the reader's language (it decides when romanization is worth generating) and names the TRANSLATION tag; each language also gets its own .<lang>.lrc sidecar." },
         { k: "lyrics_xlit_enabled", label: "Transliterate non-Latin lyrics", type: "bool" },
         { k: "lyrics_translate_enabled", label: "Translate lyrics", type: "bool" },
@@ -355,7 +355,10 @@ export const CONFIG_GROUPS: CfgGroup[] = [
         { k: "soulseek_web_port", label: "Web/API port", type: "number", min: 1024, max: 65535 },
         { k: "soulseek_up_limit", label: "Upload speed limit (kB/s, 0 = unlimited)", type: "number", min: 0, max: 100000 },
         { k: "soulseek_down_limit", label: "Download speed limit (kB/s, 0 = unlimited)", type: "number", min: 0, max: 100000 },
-        { k: "soulseek_download_slots", label: "Concurrent download slots", type: "number", min: 1, max: 20 },
+        {
+          k: "soulseek_download_slots", label: "Concurrent download slots (slskd)", type: "number", min: 1, max: 20,
+          help: "How many transfers slskd runs at once — the OUTER ceiling, and the only one of the three numbers that is slskd's rather than this app's. The app enforces `Releases … at once` × `Candidate downloads per release` itself; at the shipped defaults that product is 3 × 3 = 9, which is why this defaults to 9. Set it below the product and the app narrows each release's batch to fit (`slots ÷ releases`), so nothing you configure here ends up queued inside slskd.",
+        },
         { k: "soulseek_upload_slots", label: "Concurrent upload slots (0 = unlimited)", type: "number", min: 0, max: 20 },
         { k: "soulseek_upload_limit_kib", label: "Per-transfer upload limit (KiB/s, 0 = unlimited)", type: "number", min: 0, max: 1000000 },
         { k: "soulseek_download_limit_kib", label: "Per-transfer download limit (KiB/s, 0 = unlimited)", type: "number", min: 0, max: 1000000 },
@@ -393,7 +396,14 @@ export const CONFIG_GROUPS: CfgGroup[] = [
       title: "Wishes (auto-fill)",
       blurb: "Releases saved to the library without downloading them. The background worker re-searches Soulseek for every open wish on the interval below and imports a release the moment a verified match appears.",
       fields: [
-        { k: "soulseek_search_concurrency", label: "Releases searched / downloaded at once", type: "number", min: 1, max: 8, help: "The wishes worker fills up to this many wishes per pass, and a bulk auto-import run keeps this many jobs in flight. The transfers themselves are still capped by slskd's own download slots (Soulseek group above), so raising this only uses the queue harder, it does not open more connections than slskd allows." },
+        {
+          k: "soulseek_candidate_slots", label: "Candidate downloads per release", type: "number", min: 1, max: 20,
+          help: "How many candidate peers of ONE release may download at the same time (3 by default). The first that verifies good becomes the import and the others are cancelled and swept, and the NEXT candidate is only asked for when one of them lands or fails — so however many candidates a search turns up, one release never talks to more peers than this. Enforced by the app's own enqueueing; slskd's download slots (Soulseek group above) are only the outer ceiling on the transfers it produces.",
+        },
+        {
+          k: "soulseek_search_concurrency", label: "Releases searched / downloaded at once", type: "number", min: 1, max: 8,
+          help: "Over this ceiling a release is NOT refused: it takes its place in the queue (Queue → Waiting, with its position) and starts by itself the moment one of the running releases finishes. The wishes worker fills up to this many wishes per pass, and a bulk auto-import run keeps this many jobs in flight. What it does not do on its own is open more connections: that is what `soulseek_candidate_slots` (per release) and slskd's own download slots add up to.",
+        },
         { k: "wishes_enabled", label: "Run the wishes worker", type: "bool" },
         { k: "wishes_interval_hours", label: "Search interval (hours)", type: "number", min: 1, max: 168 },
         { k: "wishes_max_attempts", label: "Max attempts per wish (0 = forever)", type: "number", min: 0, max: 1000 },
@@ -417,7 +427,7 @@ export const CONFIG_GROUPS: CfgGroup[] = [
         { k: "artist_image_sources", label: "Artist image sources (order)", type: "list", catalog: "discovery", help: "Used when fetching an artist image automatically; the picked image can still be overridden per artist." },
         { k: "description_sources", label: "Description sources (order)", type: "list", catalog: "discovery", help: "Used for artist and album descriptions." },
         { k: "discovery_timeout_s", label: "Request timeout (s)", type: "number", min: 3, max: 30 },
-        { k: "rym_cookie", label: "RateYourMusic cookie", type: "password", help: "Only needed when RYM answers with a challenge. Sign in to rateyourmusic.com, press F12 → Network → reload → click any request to rateyourmusic.com → Headers → Request Headers → copy everything after \"Cookie:\" and paste it here (newlines and the \"Cookie:\" label are handled for you). It is a session credential — do not share it, and paste a fresh one when RYM starts refusing, since signing out or clearing cookies invalidates it. Blank = RYM is skipped like any other unavailable source; MusicBrainz still resolves RYM links for well-known releases. Test it with the Sources panel's Test button." },
+        { k: "rym_cookie", label: "RateYourMusic cookie", type: "password", help: "Only needed when RYM answers with a challenge. Sign in to rateyourmusic.com, press F12 → Network → reload → click any request to rateyourmusic.com → Headers → Request Headers → copy everything after \"Cookie:\" and paste it here (newlines and the \"Cookie:\" label are handled for you). Settings' Discovery tab can also import it: a \"cookies.txt\" browser extension (the Firefox one is Rob W's cookies.txt) exports the cookies of a signed-in rateyourmusic.com profile, and only its rateyourmusic.com cookies land here — RYM's `session` cookie is HttpOnly, so that export is the only way to get it out of a browser at all. It is a session credential — do not share it, and paste a fresh one when RYM starts refusing, since signing out or clearing cookies invalidates it. Blank = RYM is skipped like any other unavailable source; MusicBrainz still resolves RYM links for well-known releases. Test it with the Sources panel's Test button." },
         { k: "rym_links_auto", label: "Auto-find RateYourMusic links", type: "bool", help: "Asks rateyourmusic.com for the album and artist pages during an import (and from the link editor's Auto-find button). An existing link is never overwritten, and when RYM refuses the request the import carries on untouched — the link is then left for you to paste by hand." },
         { k: "rym_archive_fallback", label: "Read archived RateYourMusic pages when the live site refuses", type: "bool", help: "With no cookie — or one RYM no longer accepts — the Wayback Machine is asked for the release page instead. An archived page can predate the release, so its genre list may be short; the live site is always tried first." },
         { k: "spotify_client_id", label: "Spotify client ID (optional)", type: "text", help: "Optional second advisory source (Spotify's ISRC lookup) behind Deezer and ahead of Apple. Empty = Spotify is skipped; an import never fails without it." },
@@ -469,9 +479,9 @@ export const CONFIG_GROUPS: CfgGroup[] = [
       blurb: "Genre importing from MusicBrainz and tag hygiene applied while optimizing. The genre inference below runs once per album during an import (with a model configured in the AI section), so its effort costs a slower import, never a slower app.",
       fields: [
         { k: "mb_genre_count", label: "Genres per track (import, trimming and grading)", type: "number", min: 1, max: 3, help: "One value, three consumers: an import writes up to this many genres onto a track (specific genres first, the derived FAMILY last), script 8 / the genre import / script 10 trim any excess off, and grading fails a track carrying more than this. Fewer is fine — the family is derived from the specific genre, so one specific genre is a complete answer and nothing is topped up with filler. A per-run import limit may only lower this. Default 2." },
-        { k: "genre_sources", label: "Genre sources — every ticked source is asked; unticked ones are never used", type: "multi", options: [], optionsFrom: "genres", help: "The genres the sources answer with are merged, deduped and capped at the count above, per track. MusicBrainz is the app's own identity anchor — it also supplies the family every list ends with — so leave it on in most setups." },
+        { k: "genre_sources", label: "Genre sources — priority order: asked top to bottom, stopped as soon as a track's list is full; unticked = never asked", type: "multi", options: [], optionsFrom: "genres", help: "A PRIORITY list, not a set: the sources are asked top to bottom and the chain stops as soon as a track's list is complete. The shipped default is every source the app knows (RateYourMusic first, then MusicBrainz — the order shown here, which the wizard's tray saves back in the same order), and an unticked source is NEVER asked. The genres the sources answer with are merged, deduped and capped at the count above, per track. MusicBrainz is the app's own identity anchor — it also supplies the family every list ends with — so leave it on in most setups." },
         { k: "ai_genre_inference", label: "Let a model rank the genres", type: "bool", help: "The model is given what the sources above already answered and picks which of them describe the track, most specific first. Needs a base URL and model in the AI section; with none configured the source list is used as it stands." },
-        { k: "ai_genre_effort", label: "Reasoning effort for that ranking", type: "select", options: [["high","High — reason, then research what the list misses (default)"],["medium","Medium"],["low","Low"],["minimal","Minimal — no thinking, fastest"]] },
+        { k: "ai_genre_effort", label: "Reasoning effort for that ranking", type: "select", options: [["max","Max — the provider's highest thinking budget"],["high","High — reason, then research what the list misses (default)"],["medium","Medium"],["low","Low"],["minimal","Minimal — no thinking, fastest"]] },
         { k: "ai_genre_research", label: "Let the model go beyond the fetched genres", type: "bool", help: "On, the model may name a genre the sources did not answer with when it knows the artist better than they do — the name must still be a MusicBrainz genre to survive. Off, the answer is strictly a re-ranking of what was fetched." },
         { k: "strip_unknown_tags", label: "Remove non-canonical tags on optimize (script 10)", type: "bool" },
       ],
@@ -674,6 +684,14 @@ export const OPEN_GROUPS: Record<string, true> = {
  *  above — the coverage test fails on a group no step renders. */
 export const SETUP_STEPS: SetupStep[] = [
   {
+    label: "Account",
+    title: "Your account",
+    blurb:
+      "This server's own login, asked FIRST because everything after it can be read by anyone who can reach the address. The password is required — the wizard will not move on without one. The name is optional: leave it as it is (admin) or blank it, and the install keeps an unnamed owner; either way it is editable later in Settings → Sign-in & security.",
+    panel: "password",
+    groups: ["Login gate"],
+  },
+  {
     label: "Folder",
     title: "Your music library",
     blurb:
@@ -770,9 +788,8 @@ export const SETUP_STEPS: SetupStep[] = [
     label: "Access",
     title: "Access & notifications",
     blurb:
-      "Where this server listens, who may read it, and which events it pushes to your clients. A server that only listens on this machine needs no password.",
-    panel: "password",
-    groups: ["Server & remote access", "Login gate", "Notifications"],
+      "Where this server listens, and which events it pushes to your clients. The login itself was the first step; this one is the address and the alerts.",
+    groups: ["Server & remote access", "Notifications"],
   },
   {
     label: "Done",

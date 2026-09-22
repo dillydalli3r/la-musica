@@ -1182,6 +1182,19 @@ try:
 finally:
     _discs.check_log_checksum = _ck_orig
 
+# …and the same goes for a 1.x log whose `Log checksum` line is gone (spec
+# R30: present ⇒ must verify, absent ⇒ not required). The reader still reports
+# 'missing' so the run log can name the case, but grading charges only a
+# checksum that was there and did not verify.
+_discs.check_log_checksum = lambda _p: ("missing", "no 'Log checksum' line")
+try:
+    res = _grade_album(cd_dir, "EMBEDDED", _ck_cfg)
+    ok("LOG_CHECKSUM" not in res["tracks"][0]["issues"],
+       f"an absent log checksum is not required, so it is not failed "
+       f"({res['tracks'][0]['issues']})")
+finally:
+    _discs.check_log_checksum = _ck_orig
+
 os.remove(log_path)
 
 md_dir = os.path.join(music, "Artists", "Artist", "Two Discs (2020)")

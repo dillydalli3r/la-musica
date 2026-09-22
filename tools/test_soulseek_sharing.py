@@ -243,7 +243,7 @@ for value, want in ((0, 10), (None, 10), ("", 10), ("4", 4), (20, 20), (-3, 1)):
     assert slots >= 1, "slskd refuses to boot on slots < 1"
 
 # ...and the same for the download slots, which the app clamps to 1..20
-for value, want in ((0, 1), (None, 3), ("7", 7), (99, 20)):
+for value, want in ((0, 1), (None, 9), ("7", 7), (99, 20)):
     cfg = dict(CFG)
     if value is None:
         cfg.pop("soulseek_download_slots", None)

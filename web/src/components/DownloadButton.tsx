@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import { useQueryClient } from "@tanstack/react-query";
-import { CheckCircle2, CircleDashed, Download, X } from "lucide-react";
+import { ArrowDown, ArrowDownToLine, CircleDashed, X } from "lucide-react";
 import ConfirmButton from "./ConfirmButton";
 import {
   CACHED_PATHS_KEY,
@@ -217,7 +217,10 @@ export default function DownloadButton({
   }
 
   if (state === "full") {
-    const tick = <CheckCircle2 className={`${iconCls} text-emerald-500`} />;
+    // The downloaded mark is the same small down arrow the rest of the app
+    // wears for "this audio is on this machine" (#39) — a tick here read as
+    // the passing-grade tick two columns over.
+    const tick = <ArrowDown className={`${iconCls} text-emerald-500`} />;
     // Bulk removal is worth a second click; one track is not. Icon-only
     // buttons arm IN PLACE (red + pulsing square) instead of growing a
     // label — nothing in the row changes size or shape.
@@ -272,7 +275,7 @@ export default function DownloadButton({
   const glyph = state === "partial" ? (
     <ProgressRing pct={pct} className="text-amber-400" />
   ) : (
-    <Download className={iconCls} />
+    <ArrowDownToLine className={iconCls} />
   );
 
   return (
@@ -303,7 +306,7 @@ export default function DownloadButton({
         </>
       ) : (
         <>
-          <Download className={iconCls} /> {label}
+          <ArrowDownToLine className={iconCls} /> {label}
         </>
       )}
     </button>

@@ -344,7 +344,6 @@ export default function ArtistPage() {
                     <GradeBadge
                       pass={!!data.aggregate.pass && !auditFails(data.aggregate.audit_summary)}
                       score={data.aggregate.grade_pct}
-                      audit={data.aggregate.audit_summary}
                     />
                     <span className="text-xs text-zinc-500">albums</span>
                   </span>
@@ -721,7 +720,6 @@ export default function ArtistPage() {
                             <GradeBadge
                               pass={!!al.pass && !auditFails(al.audit_summary)}
                               score={al.grade_pct}
-                              audit={al.audit_summary}
                               size="sm"
                             />
                           </>

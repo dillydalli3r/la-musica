@@ -1511,13 +1511,57 @@ try:
 finally:
     shutil.rmtree(run.ddir, ignore_errors=True)
 
-# (c) The batch is the user's 3 and never wider than the app's own release
-#     width, so a machine configured for one release at a time is not quietly
-#     handed three times its network load.
-assert soulseek_auto._batch_width({}) == 3, soulseek_auto._batch_width({})
-assert soulseek_auto._batch_width({"soulseek_search_concurrency": 1}) == 1
-assert soulseek_auto._batch_width({"soulseek_search_concurrency": 2}) == 2
-assert soulseek_auto._batch_width({"soulseek_search_concurrency": 8}) == 3
+# (c) One release's candidates at once are the user's `soulseek_candidate_slots`
+#     (3 by default) — the app's own per-release ceiling — narrowed only when
+#     slskd's transfer slots cannot carry what releases × candidates promises:
+#     the shipped defaults need 3 × 3 = 9 slots, and a config with fewer gets
+#     its batch narrowed (`slots // releases`) instead of queueing behind slskd.
+# The SHIPPED defaults, spelled out rather than passed as `{}`: an empty dict
+# is falsy, and these three read `load_config()` in that case — so `{}` would
+# assert whatever the machine's own config file happens to hold (this suite is
+# an offline contract and must not depend on it).
+from mlo.config import DEFAULT_CONFIG as _SHIPPED  # noqa: E402
+
+assert soulseek_auto.candidate_slots(dict(_SHIPPED)) == 3, soulseek_auto.candidate_slots(dict(_SHIPPED))
+assert soulseek_auto.download_slots(dict(_SHIPPED)) == 9, soulseek_auto.download_slots(dict(_SHIPPED))
+assert soulseek_auto._batch_width(dict(_SHIPPED)) == 3, soulseek_auto._batch_width(dict(_SHIPPED))
+assert soulseek_auto._batch_width({"soulseek_candidate_slots": 2}) == 2
+assert soulseek_auto._batch_width({"soulseek_candidate_slots": 20}) == 3
+assert soulseek_auto._batch_width({"soulseek_candidate_slots": 20,
+                                   "soulseek_download_slots": 20,
+                                   "soulseek_search_concurrency": 2}) == 10
+assert soulseek_auto._batch_width({"soulseek_search_concurrency": 3,
+                                   "soulseek_candidate_slots": 3,
+                                   "soulseek_download_slots": 4}) == 1
+assert soulseek_auto._batch_width({"soulseek_search_concurrency": 8,
+                                   "soulseek_candidate_slots": 3,
+                                   "soulseek_download_slots": 20}) == 2
+
+# (c2) ...and the cap is the APP's, enforced by its own enqueueing: with 2 the
+#      third-ranked peer of one release is not even ASKED FOR while the first
+#      two transfer. The first to fail is what makes room, so the batch only
+#      moves on to peerC once peerA is out — and since peerB then wins, peerC
+#      never transfers a byte (nothing of its had to be cancelled or swept).
+_CAP_CFG = dict(JOB_CFG, soulseek_candidate_slots=2)
+run = run_job(JOB_RELEASE, BATCH_ROWS, cfg=_CAP_CFG, keep_dir=True,
+              _verify_album=verify_bad("Batch A"))
+try:
+    assert run.job["state"] == "done" and run.imported, run.job
+    assert sorted(run.submitted()) == sorted(
+        f"Music/Batch {x}/{n}" for x in "AB"
+        for n in BATCH_FILES), run.submitted()
+    # peerC is nowhere: not queued, not cancelled, not asked for — nothing of
+    # its had to be swept, because nothing of its ever started.
+    assert not any("Batch C" in f for f in run.submitted()), run.submitted()
+    assert sorted(run.cancelled) == batch_files("A"), run.cancelled
+    # Exactly one peer was rejected (A, on its log/CRC evidence) and the next
+    # one in the window took the album.
+    _rejected, = run.job["attempts"]
+    assert _rejected["username"] == "peerA" and "verification failed" in _rejected["reason"], \
+        run.job["attempts"]
+    assert os.path.basename(run.imported[0]) == "Batch B", run.imported
+finally:
+    shutil.rmtree(run.ddir, ignore_errors=True)
 
 # (d) A folder that answers BOTH searches (the configured template and the
 #     broader second pass) is scored twice — and downloaded ONCE. Attempting it

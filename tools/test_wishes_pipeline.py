@@ -679,6 +679,189 @@ with pipeline_patches(), SLSK, Patch(intg, resolve_release=_resolve), \
     check("clearing a row that is not there answers 404", r.status_code == 404, r.text[:120])
     auto.cancel(parked_id)                   # do not leave the parked job waiting
 
+# --------------------------------------------------------------------------- #
+# The waiting queue: a release over the ceiling is never REFUSED — it takes its
+# place, keeps it, starts by itself when a running release finishes, and can be
+# cancelled or cleared while it waits
+# --------------------------------------------------------------------------- #
+print("\n== the pipeline's waiting queue ==")
+
+# A download stage held at a gate PER PEER, so "three running, the rest waiting"
+# is a state the test stands in rather than races against: each release gets its
+# own peer name (and so its own album folder on disk), and its gate is opened by
+# the test when that release is allowed to finish.
+GATES: dict = {}
+
+
+def _wait_release(tag, title):
+    return dict(REL, id=f"aaaaaaaa-0000-0000-0000-00000000000{tag}",
+                release_group_id=f"aaaaaaaa-0000-0000-0000-00000000000{tag}",
+                title=title)
+
+
+def _per_peer_candidates(results, release, cfg):
+    """PIPE's one candidate, renamed to a per-release peer (and so a per-release
+    album folder under the download dir) — that is what the gates key on."""
+    cands = PIPE.candidates(results, release, cfg)
+    tag = str(release.get("title") or "").replace(" ", "_")
+    for c in cands:
+        c["username"] = f"peer_{tag}"
+    return cands
+
+
+def _gated_wait(slsk_, ddir, username, wanted, timeout_s, cancel_check=None,
+                phase="download", queue_budget_s=None, on_start=None):
+    ev = GATES.get(str(username))
+    if ev is not None:
+        ev.wait(60)
+    return PIPE.wait_for_files(slsk_, ddir, username, wanted, timeout_s,
+                               cancel_check=cancel_check, on_start=on_start)
+
+
+WAIT_A = _wait_release(1, "Waits One")
+WAIT_B = _wait_release(2, "Waits Two")
+WAIT_C = _wait_release(3, "Waits Three")
+WAIT_D = _wait_release(4, "Waits Four")
+WAIT_E = _wait_release(5, "Waits Five")
+WAIT_F = _wait_release(6, "Waits Six")
+for _w in (WAIT_A, WAIT_B, WAIT_C, WAIT_D, WAIT_E, WAIT_F):
+    GATES[f"peer_{_w['title'].replace(' ', '_')}"] = threading.Event()
+
+
+def _gate(title):
+    """Let one release's download through (the gate its stage blocks on)."""
+    GATES[f"peer_{title.replace(' ', '_')}"].set()
+
+
+def _running_ids():
+    return {j["id"] for j in auto.jobs() if j["state"] == "running"}
+
+
+def _settled():
+    return all(j["state"] in ("done", "error", "cancelled") for j in auto.jobs())
+
+
+# The earlier blocks left the stubbed network empty-handed; these releases are
+# on it, so every job that starts really reaches its download stage.
+_FOUND_WAS = PIPE.found
+PIPE.found = True
+
+with pipeline_patches(_wait_for_files=_gated_wait,
+                      find_candidates=_per_peer_candidates), SLSK:
+    first_three = [auto.start_job(release=dict(r), release_mbid=r["id"],
+                                  source="soulseek")
+                   for r in (WAIT_A, WAIT_B, WAIT_C)]
+    check("three releases start at once — soulseek_search_concurrency",
+          all(r.get("ok") and (r.get("job") or {}).get("id") for r in first_three),
+          json.dumps([r.get("error") for r in first_three if not r.get("ok")]))
+    live = _running_ids()
+    check("...and they are exactly the registered jobs",
+          live == {r["job"]["id"] for r in first_three}, json.dumps(sorted(live)))
+
+    # The 4th release. The behaviour this replaces: ok=False, transient=True,
+    # "3 releases are already running (soulseek_search_concurrency)".
+    four = auto.start_job(release=dict(WAIT_D), release_mbid=WAIT_D["id"],
+                          source="soulseek")
+    check("the 4th release is NOT refused — it takes its place in the queue",
+          four.get("ok") is True and four.get("waiting") is True
+          and four.get("position") == 1, json.dumps(four))
+    check("...and no job is invented for it (there is no thread to run)",
+          _running_ids() == live
+          and [(q.get("key"), q.get("position")) for q in auto.queued()]
+          == [(WAIT_D["id"], 1)], json.dumps(auto.queued()))
+    section, row = row_for("pipeline", WAIT_D["id"])
+    check("the queue view shows it as a WAITING row, with its place and why",
+          section == "queued" and row and row["waiting"] is True
+          and row["position"] == 1 and "free slot" in row["note"],
+          json.dumps(row))
+    check("...cancellable there, and not something to 'clear'",
+          row["cancelable"] is True and row["clearable"] is False, json.dumps(row))
+
+    five = auto.start_job(release=dict(WAIT_E), release_mbid=WAIT_E["id"],
+                          source="soulseek")
+    check("a second waiter queues BEHIND the first (order is what it keeps)",
+          five.get("ok") is True and five.get("waiting") is True
+          and five.get("position") == 2, json.dumps(five))
+    check("...and the queue view lists them in that order",
+          [r["id"] for r in queue()["sections"]["queued"]
+           if r["kind"] == "pipeline"]
+          == [f"pipeline:{WAIT_D['id']}", f"pipeline:{WAIT_E['id']}"],
+          json.dumps(queue()["sections"]["queued"]))
+
+    # One of the three FINISHES. Nothing else happens: no enqueue, no second
+    # action of any kind — a finish must pull the queue on its own.
+    searches_before = PIPE.searches
+    _gate("Waits One")
+    wait_until(lambda: any((j.get("release") or {}).get("id") == WAIT_D["id"]
+                           and j["state"] == "running" for j in auto.jobs()),
+               what="the waiting release to start by itself")
+    started = [j for j in auto.jobs()
+               if (j.get("release") or {}).get("id") == WAIT_D["id"]]
+    check("the next waiter STARTS BY ITSELF when a running release finishes",
+          len(started) == 1 and started[0]["state"] == "running",
+          json.dumps(started))
+    check("...at the BACK of the same pipeline: the earlier three minus the one "
+          "that finished, plus it",
+          len(_running_ids()) == 3, json.dumps(sorted(_running_ids())))
+    check("...and it is out of the waiting queue, leaving the one behind it",
+          [(q["key"], q["position"]) for q in auto.queued()]
+          == [(WAIT_E["id"], 1)], json.dumps(auto.queued()))
+    check("...having really started its own search",
+          PIPE.searches > searches_before, PIPE.searches)
+
+    # A waiter is cancellable WITHOUT ever starting: cancel-by-ids acts on
+    # exactly the rows it is given and reports the rest.
+    done, missed = auto.cancel_rows([f"pipeline:{WAIT_E['id']}", "job:999999",
+                                     "nonsense"])
+    check("cancel-by-ids cancels EXACTLY the ids given, and reports the rest",
+          done == [f"pipeline:{WAIT_E['id']}"]
+          and missed == ["job:999999", "nonsense"],
+          json.dumps({"done": done, "missed": missed}))
+    check("...the cancelled waiter never started, and is gone from the queue",
+          auto.queued() == []
+          and not any((j.get("release") or {}).get("id") == WAIT_E["id"]
+                      for j in auto.jobs()),
+          json.dumps([q for q in auto.queued()]))
+
+    six = auto.start_job(release=dict(WAIT_F), release_mbid=WAIT_F["id"],
+                         source="soulseek")
+    check("a fresh waiter takes the place of the one that was cancelled",
+          six.get("waiting") is True and six.get("position") == 1,
+          json.dumps(six))
+
+    # CLEAR ALL: exactly the waiting rows go, and the running ones are untouched
+    # (a running download is cancelled on its own row, never silently killed).
+    alive = {(j["id"], j["state"]) for j in auto.jobs()}
+    before_clear = [j for j in auto.jobs() if j["state"] == "running"]
+    got = auto.clear_queued()
+    check("Clear all removes exactly the queued/waiting rows",
+          got["cleared"] == 1 and got["keys"] == [WAIT_F["id"]],
+          json.dumps(got))
+    check("...and leaves every running release alone",
+          auto.queued() == [] and _running_ids() == {j["id"] for j in before_clear}
+          and all(not j.get("cancel") for j in auto.jobs()),
+          json.dumps([{k: j.get(k) for k in ("id", "state", "cancel")}
+                      for j in auto.jobs()]))
+    check("...so the queue view has no waiting row left",
+          not [r for r in queue()["sections"]["queued"]
+               if r["kind"] == "pipeline"],
+          json.dumps(queue()["sections"]["queued"]))
+    check("...and the jobs that were running are the same ones, in the same states",
+          {(j["id"], j["state"]) for j in auto.jobs()} == alive,
+          json.dumps(sorted((j["id"], j["state"]) for j in auto.jobs())))
+
+    # Let the rest through: the release that WAITED still runs the whole
+    # pipeline once its turn came.
+    for _t in ("Waits Two", "Waits Three", "Waits Four"):
+        _gate(_t)
+    wait_until(_settled, timeout=60, what="every release to settle")
+    waited = [j for j in auto.jobs()
+              if (j.get("release") or {}).get("id") == WAIT_D["id"]]
+    check("the release that waited imports like any other once its turn came",
+          len(waited) == 1 and waited[0]["state"] == "done"
+          and (waited[0].get("result") or {}).get("imported") is True,
+          json.dumps(waited and waited[0].get("result")))
+
 shutil.rmtree(REDIRECT, ignore_errors=True)
 print(f"\n{len(FAILED)} failure(s)")
 sys.exit(1 if FAILED else 0)

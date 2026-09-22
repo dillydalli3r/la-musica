@@ -41,7 +41,11 @@ export default function TrackTitleCell({
   return (
     <div className={`flex items-center gap-1.5 min-w-0 ${className}`}>
       <div className="flex items-center gap-1.5 min-w-0 flex-1">{children}</div>
-      <div className="flex items-center gap-0.5 shrink-0">{trailing}</div>
+      {/* gap-1.5, the same as the title side: at gap-0.5 the actions menu sat
+          2 px from the star rating, so the `…` and the stars ran together as
+          one cluster while every other pair in the row was 6 px apart — the
+          spacing the eye reads as "these are separate controls" (#36). */}
+      <div className="flex items-center gap-1.5 shrink-0">{trailing}</div>
     </div>
   );
 }

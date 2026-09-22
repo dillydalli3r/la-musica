@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import { useQueryClient } from "@tanstack/react-query";
-import { CheckCircle2, Download, FileOutput } from "lucide-react";
+import { ArrowDown, ArrowDownToLine, FileOutput } from "lucide-react";
 import { api } from "../api";
 import { toast } from "../store";
 import { CACHED_PATHS_KEY, CACHED_SIZES_KEY, cacheTrack, isTrackCached, uncacheTrack } from "../lib/mediaCache";
@@ -107,7 +107,7 @@ export default function TrackDownloadExport({ path, title, compact, iconOnly, di
         title={cached ? "Downloaded — cached in the player · click to remove" : "Download — cache in the player for offline playback"}
         aria-label="Download"
       >
-        {cached ? <CheckCircle2 className="h-4 w-4 text-emerald-500" /> : <Download className="h-4 w-4" />}
+        {cached ? <ArrowDown className="h-4 w-4 text-emerald-500" /> : <ArrowDownToLine className="h-4 w-4" />}
         {!iconOnly && (cached ? " Downloaded" : " Download")}
       </button>
       <div className="relative">

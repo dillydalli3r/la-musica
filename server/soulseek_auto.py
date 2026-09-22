@@ -73,6 +73,15 @@ _lock = threading.RLock()
 # auto-import jobs, the bulk release queue and the import runner all report one
 # of these names, so server/api_queue.py — and every client drawn from it —
 # render the same word for the same state.
+#
+# A release WAITING for a free pipeline slot is deliberately NOT a stage of its
+# own, which is why there is no "waiting" in this tuple: it is `queued`, exactly
+# like a wish waiting for the network to answer, and what tells the two apart is
+# WHERE it waits and its PLACE in that line — the `waiting` flag and 1-based
+# `position` its row carries (see queued()/server.api_queue._bulk_rows), which
+# is what the page's Waiting group is drawn from. A second word here would have
+# to be rendered by every registry that speaks STAGES — the wishes list, the
+# import runner, the job rows — while saying nothing about the work itself.
 STAGES = ("queued", "searching", "downloading", "verifying", "importing",
           "completed", "failed", "needs_attention")
 
@@ -99,6 +108,14 @@ _KEEP_SETTLED = 40
 
 # How many releases run at once when nothing is configured.
 _CONCURRENCY_DEFAULT = 3
+# How many candidate downloads of ONE release run at once when nothing is
+# configured — three peers of one album transfer side by side, the first that
+# verifies good ends the batch.
+_CANDIDATE_SLOTS_DEFAULT = 3
+# slskd's own transfer ceiling when nothing is configured: the shipped default
+# is concurrency × candidate_slots (3 × 3), so the app's two ceilings can be
+# honoured without slskd queueing the difference.
+_DOWNLOAD_SLOTS_DEFAULT = 9
 
 # A job parked on a prompt waits here for the user's answer (confirm()):
 # "only lossy copies found" and "no usable results — add to wishes?".
@@ -222,20 +239,57 @@ def _active_locked():
     return [j for j in _jobs.values() if j["state"] in ("running", "confirm")]
 
 
-def concurrency(cfg=None):
-    """How many releases the pipeline may work on at the same time.
+def _clamped_int(cfg, key, default, lo, hi):
+    """One of the pipeline's own ceilings, whatever the config file holds.
 
-    The config key is clamped to 1..8 here as well as in mlo.config (a saved
-    value can be older than the range, or hand-edited). This is a ceiling on
-    SEARCHES and DOWNLOADS the pipeline runs itself; what slskd actually takes
-    off the network is still its own `soulseek_download_slots`, and everything
-    over that waits in slskd's queue."""
+    Clamped here as well as in mlo.config: a saved value can be older than the
+    configured range, or hand-edited."""
     try:
-        n = int((cfg or load_config()).get("soulseek_search_concurrency")
-                or _CONCURRENCY_DEFAULT)
+        n = int((cfg or load_config()).get(key) or default)
     except (TypeError, ValueError):
-        n = _CONCURRENCY_DEFAULT
-    return max(1, min(8, n))
+        n = default
+    return max(lo, min(hi, n))
+
+
+def concurrency(cfg=None):
+    """How many releases the pipeline may work on at the same time (1..8).
+
+    This is a ceiling the APP enforces: a release over it is not refused, it
+    waits in the pipeline's own queue (enqueue()/_start_next) and starts by
+    itself the moment one of the running ones finishes. Searches and downloads
+    both count against it. The outer ceiling on what slskd itself takes off the
+    network is `soulseek_download_slots` — see download_slots() for which of
+    the two actually enforces what."""
+    return _clamped_int(cfg, "soulseek_search_concurrency",
+                        _CONCURRENCY_DEFAULT, 1, 8)
+
+
+def candidate_slots(cfg=None):
+    """How many candidate downloads of ONE release may be in flight at once
+    (1..20).
+
+    The ceiling on the batch _try_batch runs: that many peers of one release
+    transfer at the same time, the first that verifies good ends the batch (the
+    losers are cancelled and swept), and the NEXT candidate is only asked for
+    when one of them lands or is rejected — so however many candidates the
+    search turned up, one release never talks to more peers than this. It is
+    enforced by the app's own enqueueing, never by slskd."""
+    return _clamped_int(cfg, "soulseek_candidate_slots",
+                        _CANDIDATE_SLOTS_DEFAULT, 1, 20)
+
+
+def download_slots(cfg=None):
+    """slskd's own concurrent-transfer ceiling (1..20).
+
+    Read here, written into slskd's YAML by server.soulseek.generate_yaml. It
+    is NOT how the two ceilings above are enforced — those are the app's own
+    promise and the app keeps them. This one is the outer ceiling slskd puts on
+    the transfers that promise produces, so the shipped default is exactly
+    concurrency × candidate_slots (3 × 3 = 9) and `_batch_width` narrows the
+    per-release batch when a config sets fewer slots than its other two
+    settings need."""
+    return _clamped_int(cfg, "soulseek_download_slots",
+                        _DOWNLOAD_SLOTS_DEFAULT, 1, 20)
 
 
 def job_stage(job):
@@ -289,10 +343,18 @@ def _stage(key, text=None):
         if text:
             _job["stage"] = str(text)
 
-# Bulk import queue (artist / release-group "download all"): extra releases wait
-# here and _finish() starts the next one — same machinery, no second pipeline.
-# The pipeline runs `soulseek_search_concurrency` of them at a time, so this
-# queue drains at that width instead of one release per finished download.
+# Bulk import queue (artist / release-group "download all", and any release
+# started while the pipeline is already full): the releases that have not
+# started yet WAIT here, and _finish() starts the next one — same machinery, no
+# second pipeline. The pipeline runs `soulseek_search_concurrency` of them at a
+# time, so a release over that ceiling keeps its place in this queue instead of
+# being refused, and starts by itself the moment one of the running ones
+# finishes.
+#
+# An item is the whole set of start_job() arguments plus a queue ticket: the
+# item IS the call, so a waiting release starts (or is cancelled) exactly as it
+# was asked for — a MusicBrainz release, a release group, a whole artist, a
+# peer's folder.
 #
 # Reentrant: enqueue() holds it while calling _start_next → start_job(), which
 # reports the new job through job_state() → queued() → this same lock. With a
@@ -301,15 +363,82 @@ def _stage(key, text=None):
 # _queue_lock so no later job could ever start. The same trap server.wishes
 # documents.
 _queue = []
+_queue_ticket = 0
 _queue_lock = threading.RLock()
 
 
-def _start_next():
+def _queue_key(item):
+    """The STABLE id a waiting release is named by in the queue.
+
+    Its release id when it has one, else the ticket it was given when it was
+    queued. Stable is the whole point: the queue view re-reads this list every
+    second and lets the user select rows BY this id, so an index (`#0`, `#1` …)
+    would move under their finger the moment an item ahead of it started."""
+    ticket = item.get("ticket")
+    return (_release_key(item.get("release_mbid"), item.get("release"))
+            or (f"#{ticket}" if ticket is not None else ""))
+
+
+def _queue_item(**kwargs):
+    """One waiting release: start_job's own arguments plus its queue ticket."""
+    global _queue_ticket
+    _queue_ticket += 1
+    return dict(kwargs, ticket=_queue_ticket)
+
+
+def _queue_item_label(item):
+    """What a waiting release's queue row is called: the release it is about, or
+    the peer folder a manual grab named (which has no release to name)."""
+    release = item.get("release") or {}
+    title = str(release.get("title") or "")
+    artists = release.get("artists") or []
+    artist = (str(artists[0].get("name") or "")
+              if artists and isinstance(artists[0], dict) else "")
+    if artist and title:
+        return f"{artist} — {title}"
+    if title or artist:
+        return title or artist
+    target = str(item.get("target_dir") or "").replace("\\", "/").rstrip("/")
+    user = str(item.get("username") or "")
+    folder = target.split("/")[-1] if target else ""
+    if user or folder:
+        return f"{user} · {folder}".strip(" ·")
+    return str(item.get("release_mbid") or "")
+
+
+def _append_waiting(item):
+    """Put `item` at the BACK of the waiting queue, unless its release is
+    already waiting there or already running; returns why not ("" when queued).
+
+    The running ids are read BEFORE taking the queue lock: the two module locks
+    are taken one at a time everywhere (see job_state()/cancel()), never
+    nested."""
+    key = _release_key(item.get("release_mbid"), item.get("release"))
+    running = _running_keys()
+    with _queue_lock:
+        if not key:
+            _queue.append(item)
+        elif key in running:
+            return "already being imported"
+        elif any(_release_key(i.get("release_mbid"), i.get("release")) == key
+                 for i in _queue):
+            return "already queued"
+        else:
+            _queue.append(item)
+    return ""
+
+
+def _start_next(started=None):
     """Fill the pipeline: start queued releases while there is capacity.
 
     Popping under the queue lock and STARTING without it keeps the two module
     locks from nesting in either direction (see job_state()/cancel()), which is
-    what makes concurrent jobs safe to start from a job's own finish path."""
+    what makes concurrent jobs safe to start from a job's own finish path.
+
+    Called from enqueue() AND from _finish(), so a release that finishes always
+    pulls the queue: a waiter never has to wait for the next user action to
+    start. `started` collects the job ids it launched — start_job uses it to
+    tell whether the release it had just queued started after all."""
     while True:
         with _queue_lock:
             if not _queue:
@@ -322,26 +451,36 @@ def _start_next():
             if not _queue or _queue[0] is not item:
                 continue          # another thread took it
             _queue.pop(0)
-        res = start_job(**item)
+        # The ticket is THIS queue's bookkeeping (the row's stable id), never
+        # part of the call start_job() takes.
+        res = start_job(**{k: v for k, v in item.items() if k != "ticket"})
         if res.get("ok"):
+            if started is not None and (res.get("job") or {}).get("id"):
+                started.append(res["job"]["id"])
             continue
-        # Only the TRANSIENT refusals put the item back: the pipeline filled up
-        # between the capacity check and the start, or the release is waiting on
-        # an album folder another job holds. The permanent ones ("already in
-        # your library", "already queued") used to be re-inserted at the head
-        # too, so a bulk download that reached a release imported in the
-        # meantime retried that same item forever: the pipeline went idle and
-        # the queue could not be emptied from the UI.
+        err = str(res.get("error") or "")
+        if res.get("transient") and ("already running" in err
+                                     or "being imported" in err
+                                     or "already queued" in err):
+            # A copy of this release is ALREADY in hand: another job is importing
+            # it right now (a manual run overtook the queue), or another thread
+            # queued it a moment ago. This copy has nothing left to do, and
+            # keeping it would download the same album a second time once that
+            # job settles. Drop it and carry on with the rest.
+            _log(f"queue: dropped {item.get('release_mbid') or 'item'} — {err}")
+            continue
         if res.get("transient"):
+            # Any other transient refusal is the pipeline being busy in a way
+            # that ends on its own, and the item has not failed: it goes back to
+            # the head of the queue and the next finish pulls it again.
             with _queue_lock:
                 if item not in _queue:
                     _queue.insert(0, item)
-            if "already running" not in str(res.get("error") or ""):
-                _log(f"queue: waiting on {item.get('release_mbid') or 'item'}"
-                     f" — {res.get('error')}")
+            _log(f"queue: waiting on {item.get('release_mbid') or 'item'}"
+                 f" — {err}")
             return
         _log(f"queue: dropped {item.get('release_mbid') or item.get('target_dir') or 'item'}"
-             f" — {res.get('error') or 'could not start'}")
+             f" — {err or 'could not start'}")
 
 
 def _release_key(release_mbid, release=None):
@@ -381,26 +520,13 @@ def enqueue(release_mbid=None, release=None, queries=None, kind=None, mode=None)
     imports the same album again. A duplicate is logged with its reason and the
     live queue depth is returned.
 
-    Returns the queue depth (0 when the release started right away)."""
-    item = {"release_mbid": release_mbid, "release": release,
-            "queries": queries, "kind": kind, "mode": mode}
-    key = _release_key(release_mbid, release)
-    # Read the running job's ids BEFORE taking the queue lock: the two locks
-    # are taken one at a time everywhere (see _start_next), never nested.
-    running = _running_keys()
-    dup = ""
-    with _queue_lock:
-        if not key:
-            _queue.append(item)
-        elif key in running:
-            dup = "already being imported"
-        elif any(_release_key(i.get("release_mbid"), i.get("release")) == key
-                 for i in _queue):
-            dup = "already queued"
-        else:
-            _queue.append(item)
+    Returns the queue depth (0 when the release started right away, more when
+    it is waiting behind the releases already running)."""
+    item = _queue_item(release_mbid=release_mbid, release=release,
+                       queries=queries, kind=kind, mode=mode)
+    dup = _append_waiting(item)
     if dup:
-        _log(f"{release_mbid or key}: {dup} — not queued again.")
+        _log(f"{release_mbid or _queue_key(item)}: {dup} — not queued again.")
         with _queue_lock:
             return len(_queue)
     _start_next()
@@ -410,34 +536,97 @@ def enqueue(release_mbid=None, release=None, queries=None, kind=None, mode=None)
 
 
 def queued():
-    """Pending bulk-import releases (running job excluded).
+    """Pending bulk-import releases (a running job excluded), in queue order.
 
-    Each entry carries its `key` — the release id it is deduped by, or `#n`
-    when it has none (a browsed folder) — which is what the queue view names
-    the row by and what drop_queued() takes."""
+    Each entry carries its `key` — the STABLE id its row is named by and the
+    selection is keyed by (the release id, or `#<ticket>` for a grab that has
+    none) — its 1-based `position` in the queue, and the `release` block it was
+    queued with, so a row that has not started still names what it is about."""
     with _queue_lock:
         return [{"release_mbid": i.get("release_mbid"),
-                 "key": _release_key(i.get("release_mbid"), i.get("release")) or f"#{n}",
-                 "release": i.get("release")}
+                 "key": _queue_key(i),
+                 "release": i.get("release"),
+                 "label": _queue_item_label(i),
+                 "wish_id": i.get("wish_id"),
+                 "source": i.get("source") or "",
+                 "position": n + 1}
                 for n, i in enumerate(_queue)]
 
 
 def drop_queued(ref):
-    """Take one waiting release out of the bulk queue; True when it was there.
+    """Take one waiting release out of the queue, by its queue key; True when it
+    was there.
 
     The queue view's cancel for a row that has not started yet, keyed the same
-    way the row is (`queued()`'s `key`). A release that already started is NOT
-    in this queue and answers False: stopping that is cancel(job_id), which the
-    caller does instead."""
+    way the row is (`queued()`'s `key`: the release id, or `#<ticket>`). A
+    release that already started is NOT in this queue and answers False:
+    stopping that is cancel(job_id), which the caller does instead."""
     key = str(ref or "")
     with _queue_lock:
         for index, item in enumerate(_queue):
-            mine = _release_key(item.get("release_mbid"), item.get("release"))
-            if key and (key == mine or key == f"#{index}"):
+            if key and key == _queue_key(item):
                 _queue.pop(index)
                 return True
     return False
 
+
+def clear_queued():
+    """Empty the waiting queue — "Clear all" on the Soulseek queue.
+
+    Everything queued or waiting goes in one press, and NOTHING else does: a
+    RUNNING release is untouched (that is cancel(job_id), which stops its
+    transfers), no settled row and no library album is affected. Answers the
+    keys it removed, in queue order, so the caller can say what went."""
+    with _queue_lock:
+        keys = [_queue_key(i) for i in _queue]
+        del _queue[:]
+    return {"cleared": len(keys), "keys": keys}
+
+
+def cancel_rows(ids):
+    """Cancel exactly the queue rows named, and say which ones they were.
+
+    `pipeline:<key>` is a release still WAITING — it is dropped before it ever
+    starts, so it never downloads a byte. `job:<id>` is a running one, stopped
+    the way cancel() stops it. Returns (cancelled, missed): a row that had
+    already started, had already finished, or was never there is reported as
+    missed instead of being counted as cancelled — a selection must act on
+    exactly the rows it was given, and say how many that was."""
+    done, missed = [], []
+    for raw in ids or []:
+        item_id = str(raw or "").strip()
+        kind, _, ref = item_id.partition(":")
+        if kind == "pipeline" and ref:
+            (done if drop_queued(ref) else missed).append(item_id)
+        elif kind == "job" and ref:
+            try:
+                jid = int(ref)
+            except ValueError:
+                missed.append(item_id)
+                continue
+            (done if cancel(jid) else missed).append(item_id)
+        else:
+            missed.append(item_id)
+    return done, missed
+
+
+
+def queued_wish_ids():
+    """Wish ids whose acquisition is sitting in the waiting queue right now.
+
+    The queue holds the whole start_job call, so a wish that had to wait for a
+    free slot is still that wish's acquisition — the wishes worker reads this
+    (server.wishes_worker._live_wish_ids) so it neither starts a second job for
+    the same wish nor reports the wish as idle while it is really in line."""
+    out = set()
+    with _queue_lock:
+        for item in _queue:
+            try:
+                if item.get("wish_id"):
+                    out.add(int(item["wish_id"]))
+            except (TypeError, ValueError):
+                continue
+    return out
 
 
 def _job_search_done():
@@ -616,11 +805,13 @@ def _finish(state, result=None):
         claim.release()
     _notify_finish(state, result or {}, release)
     _prune_downloads()
-    if state != "cancelled":
-        # Bulk import: this release is over, start the next one in the queue
-        # (which may be several, up to the concurrency ceiling).
-        # A cancelled job stops the queue instead (the user said stop).
-        _start_next()
+    # Bulk import: this release is over, so start the next one in the queue
+    # (which may be several, up to the ceiling). A CANCELLED job pulls the
+    # queue too: cancelling one row frees its slot exactly like a finish does,
+    # and leaving the waiters behind a cancelled row would be the wait that
+    # never ends. Only the GLOBAL stop empties the queue (see cancel()), so
+    # there is nothing left to start after it.
+    _start_next()
 
 
 def _notify_finish(state, result, release):
@@ -2823,30 +3014,44 @@ def _stamp_mb_tags(album_dir, release):
 # --------------------------------------------------------------------------- #
 # The orchestrator
 # --------------------------------------------------------------------------- #
-# How many candidates of ONE release are attempted at once. The user asked for
-# exactly this: "batch downloads at most 3 results for an album, and if one is
-# good that it just deletes the others and imports the good download" — up to
-# three peers transfer in parallel, the first that verifies good becomes the
-# import, and every other candidate's bytes stop and are swept rather than left
-# to keep arriving. The cap is ALSO bounded by the app's own release width
-# (`soulseek_search_concurrency`), see _batch_width.
-_BATCH_MAX = 3
+# How many candidates of ONE release are attempted at once: the app's own
+# `soulseek_candidate_slots`, and every candidate's bytes are asked for in one
+# go — up to that many peers transfer in parallel, the first that verifies good
+# becomes the import, and every other candidate's bytes stop and are swept
+# rather than left to keep arriving. The next candidate goes out only when one
+# of them lands or fails (see _try_batch and _run's batch loop), and the ceiling
+# is narrowed when slskd's transfer slots cannot carry it — see _batch_width.
 
 
+# The orchestrator
+# --------------------------------------------------------------------------- #
 def _batch_width(cfg=None):
-    """Candidates of ONE release attempted at once: _BATCH_MAX, and never wider
-    than the app's release width (`soulseek_search_concurrency`).
+    """Candidates of ONE release attempted at once — the app's per-release cap
+    (`soulseek_candidate_slots`), narrowed when slskd cannot take the load.
 
-    The two budgets bound different things — `concurrency()` is how many ALBUMS
-    the pipeline works on at once, this is how many peers one of those albums
-    talks to — so they MULTIPLY: with the default 3 the worst case is three
-    releases × three candidates = nine concurrent peer transfers, each of them
-    one album. Deriving the batch from the release width instead of fixing it at
-    three is what keeps that product from growing behind the user's back: a
-    machine configured to run ONE release at a time (the setting that exists to
-    serialize the pipeline) then runs one candidate at a time too, instead of
-    tripling its network load on the strength of a constant in here."""
-    return max(1, min(_BATCH_MAX, concurrency(cfg)))
+    The three numbers, and which one really enforces what:
+
+    * `soulseek_search_concurrency` — how many RELEASES run at once. Enforced by
+      the app: a release over the ceiling waits in the pipeline's queue and
+      starts by itself when one finishes (see _start_next).
+    * `soulseek_candidate_slots` — how many candidates of ONE release may be in
+      flight. Enforced by the app, here: _try_batch is handed this many peers
+      and asks for the next only when one of them lands or fails.
+    * `soulseek_download_slots` — the ceiling slskd itself enforces on
+      transfers. The app never relies on it (the two above are the promise) but
+      it must not be the smaller number either: the shipped default is exactly
+      concurrency × candidate_slots — 3 × 3 = 9 — and a config that sets fewer
+      slots than its other two settings need gets its per-release width
+      narrowed to fit (`slots // releases`), so the product can never be a claim
+      the network layer refuses to serve.
+
+    So the app's answer to "how many of one release's candidates download at
+    once" is `min(candidate_slots, download_slots // releases)` — the
+    user-configured per-release cap, unless the slots they configured for slskd
+    make the full product impossible."""
+    cfg = cfg or load_config()
+    return max(1, min(candidate_slots(cfg),
+                      max(1, download_slots(cfg) // concurrency(cfg))))
 
 
 def _batch_hint(ddir, attempt):
@@ -3248,9 +3453,13 @@ def start_job(release_mbid=None, release=None, queries=None, username=None,
     the release instead of a wish and its job side by side.
     source — who asked ("musicbrainz" / "soulseek" / "auto"), for that row.
 
-    Up to `soulseek_search_concurrency` jobs run at once; a further one is
-    refused with `transient` set (the caller should retry, the pipeline is
-    simply busy — that is not a failed release).
+    Up to `soulseek_search_concurrency` releases run at once. A release that
+    arrives while they all do TAKES ITS PLACE in the pipeline's waiting queue
+    instead of being refused: it keeps that place, it is cancellable there
+    without ever starting, and it starts by itself the moment one of the
+    running releases finishes (see _start_next). The answer says so —
+    {"ok": True, "waiting": True, "position": n, "queue_key": …} — and no
+    `job`, because there is no job yet.
 
     A release id already waiting in the bulk queue is refused: it is about to
     run anyway, and letting it through here both downloaded it twice and left
@@ -3291,43 +3500,66 @@ def start_job(release_mbid=None, release=None, queries=None, username=None,
                         "job": job_state()}
         except Exception:
             pass      # a library that cannot be read must not block the job
+    jid = 0
     with _lock:
-        active = len(_active_locked())
-        if active >= concurrency():
-            return {"ok": False, "transient": True,
-                    "error": f"{active} releases are already running "
-                             "(soulseek_search_concurrency)",
-                    "job": job_state()}
-        _seq += 1
-        jid = _seq
-        job = dict(_IDLE_JOB)
-        job.update({
-            "id": jid,
-            "state": "running", "stage": "Starting…", "stage_key": "queued",
-            "log": [], "attempts": [], "result": None, "confirm": None,
-            "search": None, "progress": None, "cancel": False,
-            # Its OWN list, not the one _IDLE_JOB carries: dict(_IDLE_JOB) is a
-            # shallow copy, so every job would otherwise share one list.
-            "leftovers": [],
-            "release": {"id": release_mbid} if release_mbid else None,
-            "wish_id": int(wish_id) if wish_id else None,
-            "source": str(source or ""), "label": "",
-            "started_at": time.time(), "ended_at": 0.0,
-            # Its OWN prompt plumbing: three jobs can park on three prompts.
-            "_event": threading.Event(), "_answer": {"accept": False}, "_claim": None,
-        })
-        _jobs[jid] = job
-        _order.append(jid)
-        _primary = jid
-        _prune_jobs_locked()
-    threading.Thread(target=_run, name=f"mlo-soulseek-auto-{jid}",
-                     kwargs=dict(release_mbid=release_mbid, release=release,
-                                 queries=queries, username=username,
-                                 target_dir=target_dir,
-                                 confirm_lossy=confirm_lossy,
-                                 kind=kind, mode=mode, job_id=jid),
-                     daemon=True).start()
-    return {"ok": True, "job": job_state(jid)}
+        if len(_active_locked()) < concurrency():
+            _seq += 1
+            jid = _seq
+            job = dict(_IDLE_JOB)
+            job.update({
+                "id": jid,
+                "state": "running", "stage": "Starting…", "stage_key": "queued",
+                "log": [], "attempts": [], "result": None, "confirm": None,
+                "search": None, "progress": None, "cancel": False,
+                # Its OWN list, not the one _IDLE_JOB carries: dict(_IDLE_JOB) is a
+                # shallow copy, so every job would otherwise share one list.
+                "leftovers": [],
+                "release": {"id": release_mbid} if release_mbid else None,
+                "wish_id": int(wish_id) if wish_id else None,
+                "source": str(source or ""), "label": "",
+                "started_at": time.time(), "ended_at": 0.0,
+                # Its OWN prompt plumbing: three jobs can park on three prompts.
+                "_event": threading.Event(), "_answer": {"accept": False}, "_claim": None,
+            })
+            _jobs[jid] = job
+            _order.append(jid)
+            _primary = jid
+            _prune_jobs_locked()
+    if jid:
+        threading.Thread(target=_run, name=f"mlo-soulseek-auto-{jid}",
+                         kwargs=dict(release_mbid=release_mbid, release=release,
+                                     queries=queries, username=username,
+                                     target_dir=target_dir,
+                                     confirm_lossy=confirm_lossy,
+                                     kind=kind, mode=mode, job_id=jid),
+                         daemon=True).start()
+        return {"ok": True, "job": job_state(jid)}
+    # The pipeline is full: WAIT, do not refuse. The release goes into the same
+    # queue a bulk download uses, carrying the exact call it was asked for, so
+    # it starts (or is cancelled) unchanged whenever its turn comes. This is
+    # what makes "three at once, the rest wait" true for EVERY entry point —
+    # the search box, a bulk "download all", the wishes worker — rather than
+    # only for the callers that happened to go through enqueue().
+    item = _queue_item(release_mbid=release_mbid, release=release, queries=queries,
+                       username=username, target_dir=target_dir,
+                       confirm_lossy=confirm_lossy, kind=kind, mode=mode,
+                       wish_id=wish_id, source=source)
+    dup = _append_waiting(item)
+    if dup:
+        return {"ok": False, "transient": True,
+                "error": f"this release is {dup}", "job": job_state()}
+    started = []
+    _start_next(started)      # a slot may have freed while we decided
+    with _queue_lock:
+        position = next((n + 1 for n, x in enumerate(_queue) if x is item), 0)
+    if not position:
+        # It did not have to wait after all: the race is one release wide, and
+        # the honest answer is the job that started.
+        return {"ok": True, "job": job_state(started[-1] if started else None)}
+    label = _queue_item_label(item) or "release"
+    _log(f"{label}: waiting for a free slot (position {position}).")
+    return {"ok": True, "waiting": True, "position": position,
+            "queue_key": _queue_key(item)}
 
 
 def _cancelled():

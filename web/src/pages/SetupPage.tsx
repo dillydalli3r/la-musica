@@ -21,7 +21,7 @@ import {
 } from "lucide-react";
 import { api, deviceUnavailable, installSummary, setToken, unavailableFeatures } from "../api";
 import FolderPicker from "../components/FolderPicker";
-import SourcesPanel from "../components/SourcesPanel";
+import SourcesPanel, { PANEL_OWNED_KEYS } from "../components/SourcesPanel";
 import AiTestButton from "../components/AiTestButton";
 import { toast } from "../store";
 import { LOCALES } from "../lib/i18n";
@@ -137,12 +137,18 @@ export default function SetupPage() {
     .filter((s) => s.kind === "genre")
     .map((s) => [s.id, `${s.label} — ${GENRE_LEVEL[s.id] ?? "per track"}`]);
 
+  // Fetched on EVERY step, not only the account one: the account step is the
+  // first step now and the rail locks the steps after it until a password
+  // exists, so that gate has to be right from the first render.
   const { data: auth } = useQuery({
     queryKey: ["auth", "status"],
     queryFn: api.authStatus,
-    enabled: step.panel === "password",
     retry: false,
   });
+  // A first run has no password: everything past the account step is off
+  // limits until one is set. Read from the server's own status, so a re-run of
+  // the wizard (or a second client) sees the same answer.
+  const accountMissing = !!auth && !auth.has_password;
 
   // Seeded — and RE-seeded — from the saved config: the Sources panel on the
   // step before this one writes keys of its own (the RYM cookie, the provider
@@ -171,6 +177,23 @@ export default function SetupPage() {
     });
     setMusicFolder(String(config.music_folder ?? ""));
   }, [config]);
+
+  // The account step's name field is OPTIONAL, so it arrives already holding
+  // the app's sensible default: `admin`. Clearing it is still allowed — a
+  // blank claim is the app's documented unnamed-owner install — but nobody has
+  // to invent a name to get past the first screen. Only a first run is
+  // touched: an install that has a password keeps whatever name it chose.
+  //
+  // `draft === null` is a dependency because the draft is seeded from the
+  // config in its own effect: `auth` usually answers FIRST (it is one small
+  // GET), and a prefill that only watched `auth` would find `draft` still
+  // null, return, and never run again — the field would sit empty on exactly
+  // the first run this is for. The dependency flips once (null -> object), so
+  // a name the user deliberately cleared is not re-filled.
+  useEffect(() => {
+    if (!auth || auth.has_password) return;
+    setDraft((d) => (d && !String(d.auth_username ?? "").trim() ? { ...d, auth_username: "admin" } : d));
+  }, [auth, draft === null]);
 
   // Validation runs against the step on screen only: a field the user has not
   // reached yet cannot block a save, and the message sits under the control
@@ -302,10 +325,69 @@ export default function SetupPage() {
       setCurrentPw("");
       setNewPw("");
       setConfirmPw("");
+      // The claim just changed the server's answer to "does this install have
+      // a password?" — which is what unlocks the rest of the rail and switches
+      // this panel from "set" to "change". Without the refetch the wizard kept
+      // the answer it had cached at page load, so the steps stayed locked after
+      // the very submit that should have opened them.
+      qc.invalidateQueries({ queryKey: ["auth", "status"] });
       toast.success(auth?.has_password ? "Password changed" : "Password set — every client will be asked to sign in");
+      // The account step is mandatory and is the first step: setting the
+      // password IS this step's "continue".
+      setIndex((i) => i + 1);
     } catch (err) {
       // The server's own words: "wrong password", "at least 8 characters".
       toast.error(err instanceof Error ? err.message : String(err));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  /**
+   * Save the Soulseek credentials and prove them: slskd performs the network
+   * handshake, so the only honest test is "start it and ask what the network
+   * says". The status payload is the Soulseek tab's own source of truth —
+   * `logged_in` names the account, `error` is slskd's own sentence
+   * (INVALIDPASS, empty credentials, a port it could not bind) — so Test and
+   * the tab can never disagree about what happened.
+   */
+  const testSoulseek = async () => {
+    setBusy(true);
+    try {
+      // Save first: the server builds slskd's config from the SAVED values, so
+      // testing an unsaved pair would test the previous login.
+      const changed = cfgChanges(draft ?? {}, config ?? {}, stepFields(step));
+      if (Object.keys(changed).length) {
+        await api.saveConfig(changed);
+        qc.invalidateQueries({ queryKey: ["config"] });
+      }
+      const started = await api.soulseekStart();
+      let last = await api.soulseekStatus();
+      if (!last.installed) {
+        toast.error("slskd is not installed on this host yet — install it on the Tools step first");
+        return;
+      }
+      // slskd's web API answers a few seconds before the network login does.
+      // The plain promise is the app's own idiom for this wait (see
+      // ImportWizard's retry loop): Promise.withResolvers is ES2024 and this
+      // tsconfig's lib predates it.
+      for (let i = 0; i < 30 && !last.logged_in && !last.error; i++) {
+        await new Promise((r) => setTimeout(r, 1000));
+        last = await api.soulseekStatus();
+      }
+      if (last.logged_in) {
+        toast.success(`Signed in as ${last.account || last.username || "your Soulseek account"}`);
+      } else if (last.error) {
+        toast.error(`slskd refused the login: ${last.error}`);
+      } else if (last.conflict) {
+        toast.error(
+          `Another slskd already holds port ${last.web_port}${last.conflict_username ? ` (signed in as ${last.conflict_username})` : ""} — stop it, or change the web port`
+        );
+      } else {
+        toast(started.message || "slskd started, but the Soulseek login has not answered yet — the Soulseek page shows the live state");
+      }
+    } catch (e) {
+      toast.error(String(e));
     } finally {
       setBusy(false);
     }
@@ -507,9 +589,27 @@ export default function SetupPage() {
     // text / password / number share one control shape: the wizard's own
     // label-over-input, with the value the config already holds.
     const isPassword = field.type === "password";
+    // The naming script is the one field in the wizard whose shipped value is
+    // a long template nobody wants to retype: a reset puts it back without
+    // resetting anything else (the page-level "Reset to defaults" is a
+    // different, much bigger hammer).
+    const canReset = field.k === "naming_script" && !!defaults;
     return (
       <label key={field.k} className="block">
-        <span className="text-xs text-zinc-500 uppercase">{field.label}</span>
+        <span className="text-xs text-zinc-500 uppercase flex items-center gap-2">
+          {field.label}
+          {canReset && (
+            <button
+              type="button"
+              className="btn-ghost !py-0.5 !px-1.5 text-[10px] normal-case"
+              onClick={() => setField(field.k, defaults?.naming_script ?? "")}
+              disabled={String(value ?? "") === String(defaults?.naming_script ?? "")}
+              title="Put the shipped naming script back — every directory the library is organized by follows it"
+            >
+              <RotateCcw className="h-3 w-3" /> Reset to default
+            </button>
+          )}
+        </span>
         <div className={isPassword ? "relative mt-1" : undefined}>
           <input
             className={`input${isPassword ? " !pr-9" : ""}`}
@@ -583,7 +683,14 @@ export default function SetupPage() {
             labels are single words and every chip jumps to its step. */}
         <div className="flex flex-wrap items-center gap-2 text-[11px] text-zinc-500 mb-4">
           {SETUP_STEPS.map((s, i) => (
-            <button key={s.label} type="button" className="flex items-center gap-2 tap" disabled={busy} onClick={() => setIndex(i)}>
+            <button
+              key={s.label}
+              type="button"
+              className="flex items-center gap-2 tap disabled:opacity-50"
+              disabled={busy || (accountMissing && i > 0)}
+              title={accountMissing && i > 0 ? "Set the password on the first step first" : undefined}
+              onClick={() => setIndex(i)}
+            >
               <span
                 className={`h-5 w-5 rounded-sm flex items-center justify-center text-[10px] border ${
                   i === index
@@ -734,9 +841,11 @@ export default function SetupPage() {
                             page offers (the backend's `action` field decides):
                             `install`/`update` press this row's install,
                             `upgrade` copies the package manager's command
-                            instead — a distro tool this app cannot download
-                            over — and `none` is nothing to do here, with the
-                            chip and install_note saying why. The row's own
+                            instead — the only row that HAS a command, and the
+                            only one this app cannot download over (every Linux
+                            row is installable now, libjpeg-turbo and libjxl
+                            included) — and `none` is nothing to do here, with
+                            the chip and install_note saying why. The row's own
                             note/install_note is the hover text, so the button
                             never promises more than the row it belongs to. */}
                         <td className="td">
@@ -755,7 +864,7 @@ export default function SetupPage() {
                               {busyDep === t.key ? <Loader2 className="h-3 w-3 animate-spin" /> : null}
                               {t.action === "update" ? "Update" : "Install"}
                             </button>
-                          ) : t.upgrade_command ? (
+                          ) : t.action === "upgrade" && t.upgrade_command ? (
                             <button
                               className="btn-ghost !py-0.5 text-[11px] tap"
                               onClick={() => copyCommand(t.upgrade_command!)}
@@ -774,23 +883,12 @@ export default function SetupPage() {
           )}
 
           {step.panel === "sources" && (
-            <>
-              <SourcesPanel />
-              {/* The cookie is in the Discovery group below, but HOW to get it
-                  is the part nobody remembers a second time. */}
-              <details className="rounded-md border border-border bg-bg/40 px-3 py-2">
-                <summary className="text-xs font-medium text-zinc-400 cursor-pointer select-none">
-                  Getting the RateYourMusic cookie
-                </summary>
-                <ol className="text-[11px] text-zinc-400 leading-relaxed list-decimal pl-5 mt-1.5 space-y-0.5">
-                  <li>Sign in to rateyourmusic.com in your browser (the login is what the scraper borrows).</li>
-                  <li>Press <code className="font-mono">F12</code> → <b>Network</b> → reload the page.</li>
-                  <li>Click any request to <code className="font-mono">rateyourmusic.com</code> → <b>Headers</b> → <b>Request Headers</b>.</li>
-                  <li>Copy everything after <code className="font-mono">Cookie:</code> and paste it into the field below (newlines and a stray <code className="font-mono">Cookie:</code> label are handled).</li>
-                  <li>Keep it to yourself — it is your session — and paste a fresh one if RYM later starts refusing.</li>
-                </ol>
-              </details>
-            </>
+            // The RYM "how to get the cookie" walkthrough that used to sit here
+            // is gone with the panel's own row hint carrying it: the cookie
+            // field is right there, and its hint names the browser steps (and
+            // now the cookies.txt extension the import accepts). One
+            // explanation, next to the control it explains.
+            <SourcesPanel />
           )}
 
           {step.panel === "password" && (
@@ -822,7 +920,7 @@ export default function SetupPage() {
                 </span>
                 <button className="btn-primary !py-1.5 text-xs" disabled={busy || !newPw || newPw !== confirmPw} title={newPw !== confirmPw ? "The passwords do not match" : undefined}>
                   {busy ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <KeyRound className="h-3.5 w-3.5" />}
-                  {auth?.has_password ? "Change password" : "Set password"}
+                  {auth?.has_password ? "Change password" : "Set password & continue"}
                 </button>
               </div>
             </form>
@@ -854,20 +952,32 @@ export default function SetupPage() {
               later" has one answer. */}
           {step.groups?.map((title) => {
             const group = cfgGroup(title);
+            // The Keys step is the one step whose credentials the sources
+            // panel ABOVE already prompts for, so the card below does not ask
+            // for them a second time: the same key editable twice on one
+            // screen is what made this step read as a wall of inputs. (Every
+            // other setting the group owns still shows here, and the panel is
+            // the same control Settings → Sources renders.)
+            const fields = step.panel === "sources"
+              ? group.fields.filter((f) => !PANEL_OWNED_KEYS.includes(f.k))
+              : group.fields;
             // A group whose fields are all hidden (Release tracklist: its only
             // setting is a force_* re-run switch) still belongs to a step — the
             // coverage test holds it there — but an empty card would only ask
             // the reader what they are missing.
-            if (!group.fields.length) return null;
-            const open = !!OPEN_GROUPS[title];
+            if (!fields.length) return null;
+            // The Keys step ships these folded: its job is the credentials
+            // above, and the provider orders/timeouts/priorities in the cards
+            // are answers a first run does not have yet.
+            const open = !!OPEN_GROUPS[title] && step.panel !== "sources";
             return (
               <details key={title} className="rounded-md border border-border bg-bg/40 px-3 py-2" open={open}>
                 <summary className="text-xs font-semibold text-zinc-300 cursor-pointer select-none">
                   {group.title}
-                  {!open && <span className="ml-2 font-normal text-[10px] text-zinc-600">{group.fields.length} settings — the defaults are fine</span>}
+                  {!open && <span className="ml-2 font-normal text-[10px] text-zinc-600">{fields.length} settings — the defaults are fine</span>}
                 </summary>
                 {group.blurb && <p className="text-[11px] text-zinc-500 mt-1 leading-relaxed">{group.blurb}</p>}
-                <div className="grid grid-cols-1 sm:grid-cols-2 gap-x-6 gap-y-2.5 mt-2">{group.fields.map(renderField)}</div>
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-x-6 gap-y-2.5 mt-2">{fields.map(renderField)}</div>
                 {/* The model is the one setting whose value cannot be checked by
                     reading it back, so the AI step keeps its own round trip —
                     sent from the DRAFT, so an unsaved URL/key/model can be
@@ -888,10 +998,30 @@ export default function SetupPage() {
             </button>
             {!isLast && (
               <div className="ml-auto flex flex-wrap justify-end gap-2">
-                <button className="btn-ghost" onClick={() => setIndex((i) => i + 1)} disabled={busy}>
-                  Skip for now
-                </button>
-                {step.panel === "folder" || step.panel === "dependencies" ? (
+                {step.panel === "slskd" && (
+                  <button
+                    className="btn-ghost"
+                    onClick={testSoulseek}
+                    disabled={busy}
+                    title="Save these credentials, start slskd and report what the Soulseek network answered — the same payload the Soulseek page's dot is drawn from"
+                  >
+                    Test login
+                  </button>
+                )}
+                {/* The account step is the one step the wizard will not let a
+                    first run skip: everything after it can be read by anyone
+                    who reaches this address, and the password is the only
+                    thing that decides who that is. */}
+                {!(step.panel === "password" && accountMissing) && (
+                  <button className="btn-ghost" onClick={() => setIndex((i) => i + 1)} disabled={busy}>
+                    Skip for now
+                  </button>
+                )}
+                {step.panel === "password" && accountMissing ? (
+                  <span className="text-[11px] text-amber-300 self-center">
+                    Choose a password to continue — the rest of the setup is behind it.
+                  </span>
+                ) : step.panel === "folder" || step.panel === "dependencies" ? (
                   <button className="btn-primary" onClick={() => setIndex((i) => i + 1)}>
                     Next <ArrowRight className="h-3.5 w-3.5" />
                   </button>

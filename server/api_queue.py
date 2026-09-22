@@ -381,28 +381,49 @@ def _wish_rows(wishes_list, jobs_by_wish, cfg=None):
 
 
 def _bulk_rows(queued):
-    """Releases waiting in the pipeline's own bulk queue (not started yet)."""
+    """Releases waiting in the pipeline's own queue (not started yet).
+
+    `waiting` and `position` are what tell these rows apart from the rest of
+    the "queued" section: a wish waiting for the network is being searched,
+    while these are waiting for one of the releases at the concurrency ceiling
+    to finish — the UI groups them as Waiting and says where in the line they
+    are. The id is `pipeline:<key>`, and the key is STABLE for the life of the
+    item (the release id, or `#<ticket>` for a grab that has none), which is
+    what lets the page key a selection by it while it re-polls every second."""
     rows = []
     for item in queued:
         release = item.get("release") or {}
         artists = release.get("artists") or []
         artist = str(artists[0].get("name") or "") if artists and isinstance(artists[0], dict) else ""
         key = str(item.get("key") or "")
+        position = int(item.get("position") or 0)
+        src = str(item.get("source") or "")
+        if not src:
+            # A release queued by MusicBrainz (the bulk routes) versus a peer's
+            # folder grabbed by hand, which has no release to name.
+            src = "musicbrainz" if (release or item.get("release_mbid")) else "soulseek"
         rows.append({
             "id": f"pipeline:{key}",
             "kind": "pipeline",
             "job_id": None,
-            "wish_id": None,
+            "wish_id": item.get("wish_id"),
             "stage": "queued",
-            "source_key": "musicbrainz",
-            "source": "MusicBrainz",
-            "title": str(release.get("title") or ""),
+            "source_key": src,
+            "source": {"musicbrainz": "MusicBrainz", "soulseek": "Soulseek",
+                       "auto": "Auto-import"}.get(src, "Soulseek"),
+            # A release nobody has resolved yet has no title; a folder grab has
+            # no release at all and is named by the peer·folder label instead.
+            "title": str(release.get("title") or "") or str(item.get("label") or ""),
             "artist": artist,
             "release_mbid": str(item.get("release_mbid") or release.get("id") or ""),
             "album_path": "",
             "progress": None,
             "reason": "",
-            "note": "Waiting for a free slot in the pipeline",
+            # Where it is in the line, and why it is there at all.
+            "waiting": True,
+            "position": position,
+            "note": f"Waiting for a free slot — position {position} in the queue"
+                    if position else "Waiting for a free slot in the pipeline",
             # The queued item carries the release it was queued with (a
             # MusicBrainz payload when the route resolved it), so a row that has
             # not started yet still names the exact edition it is waiting to
@@ -644,6 +665,7 @@ def build_queue(cfg=None):
         "counts": counts,
         "running": len([j for j in all_jobs if j["state"] in ("running", "confirm")]),
         "concurrency": soulseek_auto.concurrency(cfg),
+        "candidate_slots": soulseek_auto.candidate_slots(cfg),
         "download_slots": int(cfg.get("soulseek_download_slots") or 0),
     }
 

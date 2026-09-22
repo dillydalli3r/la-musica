@@ -64,6 +64,25 @@ const KEY_INFO: Record<string, { label: string; hint: string; url?: string; link
     link: "rateyourmusic.com",
     secret: true,
   },
+  // The AcoustID pair belongs HERE, in the wizard's Keys step: the application
+  // key is what makes fingerprint matching work at all, and the user key is
+  // what publishing a match needs — telling someone to go to Settings → Import
+  // in the middle of a first run is how an install ends up with neither.
+  acoustid_api_key: {
+    label: "AcoustID application key",
+    hint:
+      "Register an application (free) and copy its API key. It is what fingerprint matching uses to identify which release the AUDIO is — MusicBrainz and the wizard's AcoustID step both need it.",
+    url: "https://acoustid.org/new-application",
+    link: "acoustid.org — register an application",
+  },
+  acoustid_user_key: {
+    label: "AcoustID user key",
+    hint:
+      "Sign in at acoustid.org → your account → API keys, and copy YOUR user key (a different key from the application one). Only needed to publish a matched fingerprint pair back to AcoustID's database; lookups never use it.",
+    url: "https://acoustid.org/account",
+    link: "acoustid.org — your account",
+    secret: true,
+  },
 };
 
 /** The RYM rows carry the last response RYM gave the backend (`rym_last`):
@@ -90,8 +109,6 @@ const KEY_NAMES = Object.keys(KEY_INFO);
  *  name keys the panel never had to prompt for before). The chip says where
  *  to set it, so a row that cannot be filled in here is not a dead end. */
 const KEY_HOME: Record<string, string> = {
-  acoustid_api_key: "Settings → Import",
-  acoustid_user_key: "Settings → Import",
   soulseek_username: "the Soulseek tab",
   soulseek_password: "the Soulseek tab",
   ai_base_url: "Settings → AI",
@@ -100,9 +117,58 @@ const KEY_HOME: Record<string, string> = {
   auth_password_hash: "first-run setup, or Sign-in & security",
 };
 
+/** The config keys THIS panel is the editing surface for. The wizard's Keys
+ *  step hides these from the config groups it renders below, so a credential
+ *  has exactly one control on the screen (and the same one everywhere else:
+ *  the panel is what Settings → Sources shows too). */
+export const PANEL_OWNED_KEYS: string[] = Object.keys(KEY_INFO);
+
 /** `needs` mixes config keys with installed tools (yt-dlp): only the keys get
  *  an input, the tools are a dependency note. */
 const promptKeysOf = (row: SourceHealth) => row.needs.filter((k) => k in KEY_INFO);
+
+/** A panel row: one PROVIDER, whatever number of roles it serves. */
+type PanelRow = SourceHealth & { kinds: SourceKind[] };
+
+/** Fold the endpoint's one-row-per-ROLE list into one row per PROVIDER.
+ *
+ *  The same service is often reachable in more than one role — RateYourMusic
+ *  is a genre source AND the album-link source, Deezer and iTunes are genre
+ *  and metadata providers — and each role is its own row with its own `needs`.
+ *  Listed as-is, that is the SAME key asked for twice on one screen (and the
+ *  section reads as a duplicate). The first role that lists a provider owns the
+ *  row; the others become role chips on it, the needs are the union, and the
+ *  state is the worst of them (a role that failed is the row's state — hiding a
+ *  failure behind a sibling's OK is the one thing this must not do).
+ *
+ *  Testing stays per provider: every role of a credential reads the same key,
+ *  so one probe answers for all of them. */
+function mergeRoles(rows: SourceHealth[]): PanelRow[] {
+  const roles = new Map<string, SourceHealth[]>();
+  for (const r of rows) {
+    const list = roles.get(r.id);
+    if (list) list.push(r);
+    else roles.set(r.id, [r]);
+  }
+  const out: PanelRow[] = [];
+  const done = new Set<string>();
+  for (const r of rows) {
+    if (done.has(r.id)) continue;
+    done.add(r.id);
+    const all = roles.get(r.id)!;
+    const rank = { fail: 2, skipped: 1, ok: 0 } as const;
+    out.push({
+      ...r,
+      kinds: all.map((x) => x.kind),
+      needs: [...new Set(all.flatMap((x) => x.needs))],
+      configured: all.every((x) => x.configured),
+      status: all.reduce((worst, x) => (rank[x.status] > rank[worst] ? x.status : worst), "ok" as SourceHealth["status"]),
+      detail: [...new Set(all.map((x) => x.detail).filter(Boolean))].join(" · "),
+      ms: Math.max(...all.map((x) => x.ms || 0)),
+    });
+  }
+  return out;
+}
 
 /** Deezer and iTunes are a genre source AND a metadata provider — two rows
  *  share one id, so the row key (and the in-flight marker) carries the kind. */
@@ -201,7 +267,7 @@ export default function SourcesPanel({ only }: { only?: SourceKind } = {}) {
 
   if (isLoading) return <div className="text-xs text-zinc-500">Checking sources…</div>;
   if (error) return <div className="text-xs text-red-300">{String(error)}</div>;
-  const rows = (data?.sources ?? []).filter((r) => !only || r.kind === only);
+  const rows = mergeRoles((data?.sources ?? []).filter((r) => !only || r.kind === only));
   const groups = (Object.keys(KIND_LABEL) as SourceKind[])
     .filter((kind) => !only || kind === only)
     .map((kind) => [kind, rows.filter((r) => r.kind === kind)] as const)
@@ -247,6 +313,15 @@ export default function SourcesPanel({ only }: { only?: SourceKind } = {}) {
                     {row.label}
                   </span>
                   <StatusChip row={row} />
+                  {/* Every ROLE this one provider serves (see mergeRoles): the
+                      same service can be a genre source and a links source, and
+                      naming both is what keeps a second row from being needed
+                      for the second role. */}
+                  {row.kinds.length > 1 && (
+                    <span className="chip border border-white/15 bg-white/5 text-zinc-400" title="Roles this provider serves in this app">
+                      {row.kinds.join(" · ")}
+                    </span>
+                  )}
                   {row.needs.length > 0 && (
                     <span
                       className={`chip border ${
@@ -289,6 +364,10 @@ export default function SourcesPanel({ only }: { only?: SourceKind } = {}) {
                 </div>
 
                 {row.detail && <div className="text-[11px] text-zinc-500 break-words">{row.detail}</div>}
+                {/* What this provider actually contributes to the app — one
+                    line, from the backend's own registry, so the panel says
+                    what a key BUYS instead of only that one is missing. */}
+                {row.provides && <div className="text-[11px] text-zinc-400 break-words">{row.provides}</div>}
                 {/* Why RYM said no comes from the response itself: the status
                     code, whether Cloudflare's challenge marker was in the
                     body, the URL that was asked for and when. The sentence

@@ -479,7 +479,7 @@ else:
     # Its own release: the albums above are in the library by now, and the
     # route is supposed to CREATE a framework album, not report one it found.
     route_release = release_variant(7, "Route Add")
-    intg.auto_import_targets = lambda mbid, kind=None, mode="best", types=None: (
+    intg.auto_import_targets = lambda mbid, kind=None, mode="best", types=None, limit=None: (
         [{"mbid": route_release["id"], "title": route_release["title"]}], [])
     intg.resolve_release = lambda mbid: (route_release, route_release["id"])
     triggered = []
@@ -530,7 +530,7 @@ else:
     cross = release_variant(0, "Cross Id Add")
     group_wish = wishes.add_wish(cross["release_group_id"], title="Cross Id Add",
                                  artist="Test Artist 0", source="soulseek")
-    intg.auto_import_targets = lambda mbid, kind=None, mode="best", types=None: (
+    intg.auto_import_targets = lambda mbid, kind=None, mode="best", types=None, limit=None: (
         [{"mbid": cross["id"], "title": cross["title"]}], [])
     intg.resolve_release = lambda mbid: (cross, cross["id"])
     cross_add = client.post("/api/library/add",
@@ -542,12 +542,12 @@ else:
         or w["release_mbid"] == cross["release_group_id"]], [group_wish["id"]],
        "and the store still holds ONE row for that pressing")
     triggered.clear()
-    intg.auto_import_targets = lambda mbid, kind=None, mode="best", types=None: (
+    intg.auto_import_targets = lambda mbid, kind=None, mode="best", types=None, limit=None: (
         [{"mbid": route_release["id"], "title": route_release["title"]}], [])
     intg.resolve_release = lambda mbid: (route_release, route_release["id"])
 
     down_release = release_variant(2, "Download Add")
-    intg.auto_import_targets = lambda mbid, kind=None, mode="best", types=None: (
+    intg.auto_import_targets = lambda mbid, kind=None, mode="best", types=None, limit=None: (
         [{"mbid": down_release["id"], "title": down_release["title"]}], [])
     intg.resolve_release = lambda mbid: (down_release, down_release["id"])
     down = client.post("/api/library/add", json={
@@ -560,7 +560,7 @@ else:
     eq(down.json().get("note"), "Soulseek is searching for them now.",
        "and the reply says the search started")
     triggered.clear()
-    intg.auto_import_targets = lambda mbid, kind=None, mode="best", types=None: (
+    intg.auto_import_targets = lambda mbid, kind=None, mode="best", types=None, limit=None: (
         [{"mbid": route_release["id"], "title": route_release["title"]}], [])
     intg.resolve_release = lambda mbid: (route_release, route_release["id"])
 
@@ -598,8 +598,8 @@ else:
     intg.resolve_release = lambda mbid: (seventh, seventh["id"])
     policy_calls = []
     real_targets = intg.auto_import_targets
-    intg.auto_import_targets = lambda mbid, kind=None, mode="best": (
-        policy_calls.append(mbid) or real_targets(mbid, kind, mode))
+    intg.auto_import_targets = lambda mbid, kind=None, mode="best", limit=None: (
+        policy_calls.append(mbid) or real_targets(mbid, kind, mode, limit=limit))
     pick = client.post("/api/library/add", json={
         "mbid": seventh["release_group_id"], "kind": "release_group",
         "mode": "best", "release_mbid": seventh["id"]})

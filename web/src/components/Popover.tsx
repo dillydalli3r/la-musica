@@ -17,6 +17,7 @@ export default function Popover({
   panelClass = "w-56 p-1.5",
   shield = true,
   fixed = false,
+  rightGap,
 }: {
   open: boolean;
   onClose: () => void;
@@ -38,6 +39,13 @@ export default function Popover({
    *  edge AND painted under the sidebar: that is what made the notification
    *  tray unreadable. */
   fixed?: boolean;
+  /** Fixed mode only: pin the panel this many px from the VIEWPORT's right
+   *  edge instead of aligning its right edge to the trigger's. For a panel
+   *  whose trigger lives in a padded bar, aligning to the trigger inherits
+   *  that bar's own gutter, so the widest panel in the app (the notification
+   *  tray) floated a bar-padding away from the screen edge on a wide window
+   *  while every other edge-anchored surface sat at the app's 8 px gutter. */
+  rightGap?: number;
 }) {
   useEffect(() => {
     if (!open) return;
@@ -61,7 +69,9 @@ export default function Popover({
         // Distances/offsets, not one anchor: the panel keeps its alignment to
         // the trigger across a resize or a scroll, and every value is clamped
         // so the panel stays inside the viewport on a narrow window.
-        right: Math.max(8, window.innerWidth - box.right),
+        right: rightGap != null
+          ? Math.max(8, rightGap)
+          : Math.max(8, window.innerWidth - box.right),
         left: Math.min(Math.max(8, box.left), window.innerWidth - 8),
         center: Math.min(Math.max(box.width, box.left + box.width / 2), window.innerWidth - 8),
       });
@@ -73,7 +83,7 @@ export default function Popover({
       window.removeEventListener("resize", place);
       window.removeEventListener("scroll", place, true);
     };
-  }, [open, fixed]);
+  }, [open, fixed, rightGap]);
 
   if (!open) return null;
   const portaled = fixed && at;

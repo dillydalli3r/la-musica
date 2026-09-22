@@ -77,6 +77,12 @@ LEGACY_DEFAULT_GENRE_SOURCES = (
     [
         "musicbrainz", "rateyourmusic",
     ],
+    #   [3] the two-source chain, RateYourMusic before MusicBrainz — the
+    #       default until the owner asked for every source back, so an install
+    #       that never touched the list follows the new default too
+    [
+        "rateyourmusic", "musicbrainz",
+    ],
 )
 
 # The auto-import query templates previous releases shipped. Settings writes
@@ -859,11 +865,12 @@ DEFAULT_CONFIG = {
     "ai_model": "",
     # Reasoning effort for AI calls: HIGH is the default — maximum thinking
     # budget for transliteration/translation quality; MINIMAL disables
-    # thinking entirely for speed.
+    # thinking entirely for speed; MAX asks for the provider's own ceiling
+    # (server.ai.ai_chat drops to HIGH if the endpoint refuses the word).
     "ai_effort": "high",
     # AI genre inference — the one AI feature that runs during importing and
-    # tagging. The model is given the genres MusicBrainz and RateYourMusic
-    # already answered with (plus whatever the other configured sources know)
+    # tagging. The model is given the genres the configured sources (RateYourMusic
+    # and MusicBrainz first, then the rest) already answered with (plus whatever the other configured sources know)
     # and returns at most `mb_genre_count - 1` SPECIFIC genres, most specific
     # first: the family is not its to answer — the app derives it
     # (mlo.genre_vocab.parent_of) and puts it first, see mlo.genres. On by
@@ -874,7 +881,8 @@ DEFAULT_CONFIG = {
     # told to reason about the ranking and to look up anything the fetched
     # list does not cover before answering, which is what makes the specific
     # genres worth having over the source order. MINIMAL answers from the
-    # fetched list alone, for a fast import on a big backlog.
+    # fetched list alone, for a fast import on a big backlog; MAX asks for
+    # the provider's highest thinking budget.
     "ai_genre_effort": "high",
     # Let the model consult its own knowledge of the artist/album beyond the
     # genres it was handed (rather than re-ranking only what it was given).
@@ -998,7 +1006,17 @@ DEFAULT_CONFIG = {
     # A SPEED limit of 0 is "unlimited" (emitted as slskd's int.MaxValue); a
     # SLOT count of 0 is not a number of slots — slskd refuses a count below 1,
     # so a blank/0 slots value is left to slskd's own default.
-    "soulseek_download_slots": 3,
+    #
+    # What these slots are FOR: the app runs `soulseek_search_concurrency`
+    # releases at once, each downloading up to `soulseek_candidate_slots`
+    # candidates, and the app's own enqueueing is what holds those two limits
+    # (see server.soulseek_auto). slskd then takes the transfers they produce
+    # off the network, and it can only have this many in flight — so the
+    # shipped default is exactly that product, 3 × 3 = 9. A config with fewer
+    # slots than its other two settings need still gets the guarantee: the
+    # per-release width is narrowed to fit (`_batch_width`), so the app never
+    # asks slskd for more than it will serve.
+    "soulseek_download_slots": 9,
     "soulseek_upload_slots": 2,
     "soulseek_upload_limit_kib": 0,
     "soulseek_download_limit_kib": 0,
@@ -1065,14 +1083,20 @@ DEFAULT_CONFIG = {
     # few seconds while still scoring fifteen whole folders.
     "soulseek_auto_response_limit": 15,
     # How many releases the auto-importer works on AT THE SAME TIME — the
-    # wishes worker fills up to this many wishes in one pass, and a bulk
-    # "download all" run keeps this many jobs in flight. Searching is mostly
-    # waiting on the network, so one album at a time left the page showing a
-    # queue that only ever moved one item; the TRANSFERS themselves are still
-    # capped by slskd's own `soulseek_download_slots` / `soulseek_upload_slots`
-    # (slskd queues whatever they cannot take), which is why this can be
-    # raised without touching the network's own limits.
+    # wishes worker fills up to this many wishes in one pass, a bulk
+    # "download all" run keeps this many jobs in flight, and a release over the
+    # ceiling WAITS in the queue (it keeps its place, it is cancellable there,
+    # and it starts by itself when one of the running ones finishes) instead of
+    # being refused. Searching is mostly waiting on the network, so one album
+    # at a time left the page showing a queue that only ever moved one item.
     "soulseek_search_concurrency": 3,
+    # How many candidate downloads of ONE release run at the same time — three
+    # peers of one album transfer side by side, the first that verifies good
+    # becomes the import and the others are cancelled and swept, and the NEXT
+    # candidate is only asked for when one of them lands or fails. Enforced by
+    # the app's own enqueueing; `soulseek_download_slots` is only the outer
+    # ceiling slskd puts on the transfers it produces (see that key).
+    "soulseek_candidate_slots": 3,
     # Park an interactive job that found no usable folder and ask the user
     # whether to add the release to the wishes list, instead of failing the job
     # outright: a rare album is worth watching for, and the background wishes
@@ -1207,13 +1231,20 @@ DEFAULT_CONFIG = {
     # music, not more (GENRE_COUNT_MAX), and a merged "Rock; Alternative Rock;
     # Indie; Shoegaze; Post-Rock" list helps no one.
     "mb_genre_count": 2,
-    # Genre sources, in priority order. Two by default — RateYourMusic (what
-    # the release page itself says, the user's own first preference) and
-    # MusicBrainz (open data, keyless) — because they are the two the library
-    # actually agrees with; the rest of the registry is still available to add
-    # back in Settings → Discovery.
+    # Genre sources, in priority order — EVERY source the app knows, in the
+    # order the user asked for: RateYourMusic first (what the release page
+    # itself says), then MusicBrainz (open data, keyless, the identity
+    # anchor), then the rest of the registry in its documented order. The
+    # chain is a priority list that STOPS once a track's list is complete
+    # (`_genre_complete`), so shipping all of them costs nothing on a release
+    # the first two can answer and is what makes a rare pressing still get a
+    # genre. `soulseek` is the one source deliberately absent (peers advertise
+    # folders, not genres). Every position's rationale is documented above
+    # `server.integrations.GENRE_SOURCES`; `tools/test_genres.py` asserts the
+    # two lists are equal.
     "genre_sources": [
-        "rateyourmusic", "musicbrainz",
+        "rateyourmusic", "musicbrainz", "listenbrainz", "itunes", "lastfm",
+        "theaudiodb", "wikidata", "bandcamp", "discogs", "deezer", "spotify",
     ],
     # Optional keys for the genre sources that need one. Left empty the source
     # is skipped instead of guessed (Discogs' search endpoint requires a
@@ -1469,6 +1500,7 @@ _INT_RANGES = {
     "soulseek_auto_search_wait": (2, 300),
     "soulseek_auto_response_limit": (5, 500),
     "soulseek_search_concurrency": (1, 8),
+    "soulseek_candidate_slots": (1, 20),
     "wishes_interval_hours": (1, 168),
     "wishes_max_attempts": (0, 1000),
     # The not-found budget and the retry backoff's step (see the wishes block
@@ -1505,13 +1537,13 @@ _CHOICES = {
     "import_autonomy": {"automatic", "review"},
     "auth_mode": {"auto", "required", "off"},
     "advisory_fallback": {"0", "2", "none"},
-    "ai_genre_effort": {"minimal", "low", "medium", "high"},
+    "ai_genre_effort": {"minimal", "low", "medium", "high", "max"},
     "lrc_zero_timestamp_target": {"EMBEDDED", "LRC", "BOTH"},
     # Sync granularity required of (and targeted for) synced lyrics:
     # SYLLABLE = glued per-syllable ELRC tags, WORD = per-word ELRC tags,
     # LINE = plain [mm:ss.xx] line timestamps only.
     "lrc_sync_level": {"SYLLABLE", "WORD", "LINE"},
-    "ai_effort": {"minimal", "low", "medium", "high"},
+    "ai_effort": {"minimal", "low", "medium", "high", "max"},
     "cue_file_type": {"WAVE", "MP3"},
     "audiometa_key_notation": {"musical", "camelot", "openkey"},
     "video_preset": {"ultrafast", "superfast", "veryfast", "faster", "fast",

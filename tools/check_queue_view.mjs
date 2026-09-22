@@ -3,10 +3,11 @@
  *
  * `/api/queue` (server/api_queue.py) is one payload; this check renders the
  * ACTUAL page component with it — through Vite, in memory, no build output —
- * and asserts what a user would see: the five sections with their counts, a
- * downloading row with its progress, a finished download with its import
- * outcome, a parked row saying what it waits for, a failure with its reason,
- * the album link, the source chip and the per-item cancel.
+ * and asserts what a user would see: the six groups (the waiting queue first,
+ * then queued/searching) with their counts, a downloading row with its
+ * progress, a finished download with its import outcome, a parked row saying
+ * what it waits for, a failure with its reason, the album link, the source chip
+ * and the per-item cancel.
  *
  * It is the UI half of tools/test_queue_view.py, which owns the payload: that
  * test writes the real `build_queue()` output to a file and runs this script
@@ -83,13 +84,18 @@ try {
   // content, so the assertions read the flattened text.
   const flat = html.replace(/<!-- -->/g, "").replace(/\s+/g, " ");
   const want = [
-    ["queued section with its count", "Queued / searching · 3"],
+    ["the waiting group with its count", "Waiting · 1"],
+    ["a waiting row says where in the line it is", "Waiting · #1"],
+    ["the waiting group says why it waits", "starts by itself when one of them finishes"],
+    ["clear all for the waiting queue", "Clear all (1)"],
+    ["queued section with its count", "Queued / searching · 2"],
     ["in-progress section with its count", "In progress · 2"],
     ["needs-attention section", "Needs you · 2"],
     ["completed section with its count", "Completed · 2"],
     ["failed section with its count", "Failed · 2"],
     ["pipeline header counts", "3/3 running"],
-    ["slskd transfer ceiling named", "3 slskd transfer slot(s)"],
+    ["the per-release candidate ceiling named", "3 candidate(s) each"],
+    ["slskd transfer ceiling named", "9 slskd transfer slot(s)"],
     ["the downloading row's release", "Isles"],
     ["its artist", "Bicep"],
     ["byte-weighted progress", "50%"],

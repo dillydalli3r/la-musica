@@ -2,9 +2,9 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { useNavigate, useSearchParams } from "react-router-dom";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import {
-  ArrowDownUp, Download, Disc3, Eye, EyeOff, FolderInput, FolderOpen, Loader2, Play, Power, RefreshCw, Search,
+  ArrowDownUp, ArrowDown, ArrowDownToLine, Disc3, Eye, EyeOff, FolderInput, FolderOpen, Loader2, Play, Power, RefreshCw, Search,
   User, Zap, Square, FileCheck2, FileVideo, Music2, Save, Tag, Trash2, PackageOpen,
-  Star, Plus, CheckCircle2, CircleDashed, AlertTriangle, ExternalLink, RotateCw, ChevronDown, ChevronRight, Link2,
+  Star, Plus, CheckCircle2, CircleDashed, Clock, CheckSquare, AlertTriangle, ExternalLink, RotateCw, ChevronDown, ChevronRight, Link2,
   MessageSquare, X, Wand2, CheckCheck, MessageCircleQuestion,
 } from "lucide-react";
 import { api } from "../api";
@@ -13,6 +13,7 @@ import { toast } from "../store";
 import { EmptyState, PageLoading } from "../components/Badges";
 import PageHeader from "../components/PageHeader";
 import Modal from "../components/Modal";
+import ConfirmButton from "../components/ConfirmButton";
 import Segmented from "../components/Segmented";
 import type { DownloadEntry, ImportBulkJob, SlskReleaseIdentity } from "../types";
 import { fmtCount, fmtCounts, fmtPercent } from "../lib/fmt";
@@ -665,11 +666,15 @@ function AutoPanel({ initialMbid }: { initialMbid?: string }) {
       return;
     }
     try {
-      await api.soulseekAutoStart({
+      const r = await api.soulseekAutoStart({
         release_mbid: id,
         queries: queries.split(";").map((s) => s.trim()).filter(Boolean) || undefined,
       });
-      toast("Auto-import started");
+      // Over the ceiling it does not fail — it takes its place and starts by
+      // itself when a running release finishes (see the queue's Waiting group).
+      toast(r.waiting
+        ? `Queued — waiting for a free slot (position ${r.position})`
+        : "Auto-import started");
       refetch();
     } catch (e) {
       toast.error(String(e));
@@ -900,7 +905,7 @@ function AutoPanel({ initialMbid }: { initialMbid?: string }) {
               </div>
               <div className="flex flex-wrap items-center gap-2">
                 <button className="btn-primary !py-1 text-xs tap" onClick={() => answer(true)} disabled={answering}>
-                  <Download className="h-3.5 w-3.5" /> Download without logs
+                  <ArrowDownToLine className="h-3.5 w-3.5" /> Download without logs
                 </button>
                 <button className="btn-ghost !py-1 text-xs tap" onClick={() => answer(false)} disabled={answering}>
                   No, wait for a CD rip
@@ -925,7 +930,7 @@ function AutoPanel({ initialMbid }: { initialMbid?: string }) {
               </div>
               <div className="flex flex-wrap items-center gap-2">
                 <button className="btn-primary !py-1 text-xs tap" onClick={() => answer(true)} disabled={answering}>
-                  <Download className="h-3.5 w-3.5" /> Download lossy anyway
+                  <ArrowDownToLine className="h-3.5 w-3.5" /> Download lossy anyway
                 </button>
                 <button className="btn-ghost !py-1 text-xs tap" onClick={() => answer(false)} disabled={answering}>
                   No, wait for lossless
@@ -1106,8 +1111,11 @@ function BrowseModal({ username, onAuto, onClose }: {
   const auto = async (d: SlskBrowseDir) => {
     setBusy(d.directory);
     try {
-      await api.soulseekAutoStart({ username, target_dir: d.directory });
-      toast(`Auto-importing from ${username} · ${d.directory.split(/[\\/]/).filter(Boolean).pop() ?? ""}`);
+      const r = await api.soulseekAutoStart({ username, target_dir: d.directory });
+      const folder = d.directory.split(/[\\/]/).filter(Boolean).pop() ?? "";
+      toast(r.waiting
+        ? `${username} · ${folder} is queued — waiting for a free slot (position ${r.position})`
+        : `Auto-importing from ${username} · ${folder}`);
       qc.invalidateQueries({ queryKey: ["soulseekAuto"] });
       onAuto();
     } catch (e) {
@@ -1141,7 +1149,7 @@ function BrowseModal({ username, onAuto, onClose }: {
             onClick={queuePicked}
             title="Queue every file in the ticked folders"
           >
-            <Download className="h-3.5 w-3.5" /> Queue selected{picked.size > 0 ? ` (${picked.size})` : ""}
+            <ArrowDownToLine className="h-3.5 w-3.5" /> Queue selected{picked.size > 0 ? ` (${picked.size})` : ""}
           </button>
           <button
             className="btn-ghost !py-1 text-xs shrink-0 tap"
@@ -1207,7 +1215,7 @@ function BrowseModal({ username, onAuto, onClose }: {
                       onClick={() => queue(d)}
                       title="Queue every file in this folder"
                     >
-                      <Download className="h-3.5 w-3.5" /> <span className="hidden sm:inline">Download</span>
+                      <ArrowDownToLine className="h-3.5 w-3.5" /> <span className="hidden sm:inline">Download</span>
                     </button>
                     <button
                       className="btn-ghost !py-1 text-xs shrink-0 tap"
@@ -1230,7 +1238,7 @@ function BrowseModal({ username, onAuto, onClose }: {
                             onClick={() => queueFile(f)}
                             title="Queue this file on its own"
                           >
-                            <Download className="h-3 w-3" />
+                            <ArrowDownToLine className="h-3 w-3" />
                           </button>
                         </div>
                       ))}
@@ -1631,10 +1639,10 @@ const QUEUE_KEY = ["soulseekQueue"];
 const QUEUE_STAGE: Record<string, { label: string; cls: string; icon: typeof Star }> = {
   queued: { label: "Queued", cls: "bg-zinc-800/70 text-zinc-300 border-zinc-700", icon: CircleDashed },
   searching: { label: "Searching", cls: "bg-sky-900/40 text-sky-300 border-sky-800", icon: Search },
-  downloading: { label: "Downloading", cls: "bg-sky-900/40 text-sky-300 border-sky-800", icon: Download },
+  downloading: { label: "Downloading", cls: "bg-sky-900/40 text-sky-300 border-sky-800", icon: ArrowDownToLine },
   verifying: { label: "Verifying", cls: "bg-cyan-900/40 text-cyan-300 border-cyan-800", icon: FileCheck2 },
   importing: { label: "Importing", cls: "bg-sky-900/40 text-sky-300 border-sky-800", icon: FolderInput },
-  completed: { label: "Completed", cls: "bg-emerald-900/40 text-emerald-300 border-emerald-800", icon: CheckCircle2 },
+  completed: { label: "Completed", cls: "bg-emerald-900/40 text-emerald-300 border-emerald-800", icon: ArrowDown },
   failed: { label: "Failed", cls: "bg-red-950/60 text-red-300 border-red-900", icon: AlertTriangle },
   needs_attention: { label: "Needs you", cls: "bg-amber-900/40 text-amber-300 border-amber-800", icon: AlertTriangle },
 };
@@ -1724,9 +1732,15 @@ function ReleaseChips({ r }: { r?: SlskReleaseIdentity }) {
 
 /** One row of the queue: where it came from, what it is doing, how far along,
  *  and the one action that makes sense for it right now. */
-function QueueRow({ item, busy, onCancel, onRetry, onImport, onDismiss, onClear }: {
+function QueueRow({ item, busy, selected, onSelect, onCancel, onRetry, onImport, onDismiss, onClear }: {
   item: SlskQueueItem;
   busy: boolean;
+  /** Selection state, in select mode only (`onSelect` absent = no checkbox).
+   *  Keyed by `item.id`, which is the STABLE id its row is named by — the list
+   *  is re-read every second, so an index-keyed tick would move under the
+   *  user's finger. */
+  selected?: boolean;
+  onSelect?: (on: boolean) => void;
   onCancel: () => void;
   onRetry: () => void;
   onImport: () => void;
@@ -1748,13 +1762,28 @@ function QueueRow({ item, busy, onCancel, onRetry, onImport, onDismiss, onClear 
     : item.kind === "wish" && item.wish_id != null && item.stage !== "completed";
   const missing = item.missing_labels ?? [];
   return (
-    <div className="rounded-lg border border-border bg-card overflow-hidden">
+    <div className={`rounded-lg border bg-card overflow-hidden ${selected ? "border-sky-700" : "border-border"}`}>
       <div className="flex flex-wrap items-center gap-3 p-2.5">
+        {onSelect && (
+          <input type="checkbox" className="h-3.5 w-3.5 shrink-0 accent-sky-500 cursor-pointer tap"
+            checked={!!selected} onChange={(e) => onSelect(e.target.checked)}
+            title="Tick to include this row in the actions below" />
+        )}
         <div className="flex-1 min-w-0">
           <div className="flex flex-wrap items-center gap-2">
             <span className={`chip text-[9px] border ${st.cls}`}>
               <Icon className={`h-3 w-3 ${active ? "animate-pulse" : ""}`} /> {st.label}
             </span>
+            {/* Not started yet: it is in line behind the releases that are, and
+                it says where. The page groups these rows as Waiting, so the
+                two ideas — "queued, looking" and "queued, waiting its turn" —
+                never read the same. */}
+            {item.waiting && (
+              <span className="chip text-[9px] border border-amber-800 bg-amber-900/30 text-amber-300"
+                title="Not started: soulseek_search_concurrency releases are already running. This one starts by itself the moment one of them finishes.">
+                <Clock className="h-3 w-3" /> Waiting{item.position ? ` · #${item.position}` : ""}
+              </span>
+            )}
             <span className="chip text-[9px] border border-border bg-raise text-zinc-400" title={
               item.source_key === "musicbrainz"
                 ? "Saved from MusicBrainz — this queue searches it for you"
@@ -1803,7 +1832,7 @@ function QueueRow({ item, busy, onCancel, onRetry, onImport, onDismiss, onClear 
           {item.kind === "ready" && (
             <button className="btn-primary !py-1 text-xs tap" onClick={onImport} disabled={busy}
               title="Import this album all the way through (convert, tag, organize, then the chain)">
-              {busy ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Download className="h-3.5 w-3.5" />} Import
+              {busy ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <ArrowDownToLine className="h-3.5 w-3.5" />} Import
             </button>
           )}
           {/* MANUAL COMPLETION for a stalled album: the wizard opens ON this
@@ -1883,13 +1912,17 @@ function QueueRow({ item, busy, onCancel, onRetry, onImport, onDismiss, onClear 
   );
 }
 
-function QueueSection({ title, hint, rows, tone, empty, busyId, onCancel, onRetry, onImport, onDismiss, onClear, onClearSection }: {
+function QueueSection({ title, hint, rows, tone, empty, busyId, selected, onSelect, onCancel, onRetry, onImport, onDismiss, onClear, onClearSection }: {
   title: string;
   hint: string;
   rows: SlskQueueItem[];
   tone: string;
   empty: string;
   busyId: string | null;
+  /** The ticked row ids (see QueuePanel's select mode): a row draws a checkbox
+   *  only when `onSelect` is given, so select mode is one flag at the panel. */
+  selected?: Set<string>;
+  onSelect?: (id: string, on: boolean) => void;
   onCancel: (item: SlskQueueItem) => void;
   onRetry: (item: SlskQueueItem) => void;
   onImport: (item: SlskQueueItem) => void;
@@ -1922,6 +1955,8 @@ function QueueSection({ title, hint, rows, tone, empty, busyId, onCancel, onRetr
               key={item.id}
               item={item}
               busy={busyId === item.id}
+              selected={selected?.has(item.id)}
+              onSelect={onSelect ? (on) => onSelect(item.id, on) : undefined}
               onCancel={() => onCancel(item)}
               onRetry={() => onRetry(item)}
               onImport={() => onImport(item)}
@@ -1960,6 +1995,14 @@ function QueuePanel({ running }: { running: boolean }) {
     refetchInterval: running ? 3000 : 10000,
   });
   const [busyId, setBusyId] = useState<string | null>(null);
+  // SELECT MODE: the ticks are keyed by the row's own id — the STABLE one the
+  // server names it by ("job:3", "pipeline:<key>", …). The list is polled every
+  // few seconds and rows start, settle and drop out of it as it goes, so an
+  // index-keyed selection would move under the user's finger; an id that has
+  // left the list simply stops counting (see `selectedRows`).
+  const [selectMode, setSelectMode] = useState(false);
+  const [selected, setSelected] = useState<Set<string>>(new Set());
+  const [bulkBusy, setBulkBusy] = useState(false);
   const sections = data?.sections;
   // What the header says: the rows it is actually rendering, added up. The
   // server's own `counts` come off the same rows, so the two can never
@@ -2116,6 +2159,111 @@ function QueuePanel({ running }: { running: boolean }) {
   // and the only rows that button will touch.
   const finished = rows.filter((r) => r.clearable).length;
 
+  // The releases WAITING for a free slot, in the order they will start, and the
+  // rest of the "queued" section (a wish waiting for the network is being
+  // searched, which is a different thing from waiting its turn).
+  const waitingRows = (sections?.queued ?? []).filter((r) => r.waiting);
+  const queuedRows = (sections?.queued ?? []).filter((r) => !r.waiting);
+  // The ticked rows STILL in the list: the only ones a bulk action may touch,
+  // and the number its button reports. A tick whose row left the queue (it
+  // started, settled or was cancelled elsewhere) stops counting here.
+  const selectedRows = rows.filter((r) => selected.has(r.id));
+  const commitCount = selectedRows.filter(
+    (r) => (r.kind === "ready" && r.path) || r.clearable).length;
+
+  const toggleSelected = (id: string, on: boolean) => {
+    setSelected((prev) => {
+      const next = new Set(prev);
+      if (on) next.add(id);
+      else next.delete(id);
+      return next;
+    });
+  };
+
+  /** Cancel EXACTLY the ticked rows, by id (POST …/downloads/cancel): a release
+   *  that has not started is dropped before it downloads a byte, a running one
+   *  is stopped, and the server answers how many of the ids it acted on and
+   *  which ones had already gone. */
+  const cancelSelected = async () => {
+    if (selectedRows.length === 0) return;
+    setBulkBusy(true);
+    const ids = selectedRows.map((r) => r.id);
+    try {
+      const r = await api.queueCancelIds(ids);
+      toast(
+        r.cancelled === 1 && ids.length === 1
+          ? `${selectedRows[0].title || selectedRows[0].artist || "1 row"} — cancelled`
+          : `${r.cancelled} of ${ids.length} selected row(s) cancelled`
+            + (r.missed.length ? ` · ${r.missed.length} had already gone` : "")
+      );
+      setSelected(new Set());
+      refetch();
+    } catch (e) {
+      toast.error(String(e));
+    } finally {
+      setBulkBusy(false);
+    }
+  };
+
+  /** The stage-appropriate COMMIT for the ticked rows: a finished download is
+   *  IMPORTED (the only thing left to do with it), a settled row is taken off
+   *  the list, and a row still running or waiting has no commit at all — it is
+   *  skipped and counted as skipped rather than silently acted on. */
+  const commitSelected = async () => {
+    const ready = selectedRows.filter((r) => r.kind === "ready" && r.path);
+    const settled = selectedRows.filter((r) => r.clearable);
+    if (ready.length === 0 && settled.length === 0) return;
+    setBulkBusy(true);
+    let moved = 0, cleared = 0, failed = 0;
+    try {
+      for (const row of ready) {
+        try {
+          const r = await api.soulseekImportOne(row.path || "");
+          qc.setQueryData(IMPORT_RUN_KEY, r.status);
+          moved += 1;
+        } catch {
+          failed += 1;
+        }
+      }
+      for (const row of settled) {
+        try {
+          await api.queueClear({ id: row.id });
+          cleared += 1;
+        } catch {
+          failed += 1;
+        }
+      }
+      const parts = [
+        moved ? `${moved} import(s) started` : "",
+        cleared ? `${cleared} row(s) off the list` : "",
+        failed ? `${failed} refused` : "",
+      ].filter(Boolean);
+      toast(parts.join(" · ") || "Nothing on the selected rows to commit");
+      setSelected(new Set());
+      refetch();
+    } finally {
+      setBulkBusy(false);
+    }
+  };
+
+  /** Clear all: every QUEUED/WAITING release goes in one press, before any of
+   *  them starts. A running release is untouched — that is a cancel, on its own
+   *  row — and the server says how many waiting rows it removed. */
+  const clearWaiting = async () => {
+    setBulkBusy(true);
+    try {
+      const r = await api.queueClearWaiting();
+      toast(r.cleared
+        ? `${r.cleared} waiting release(s) taken off the queue`
+        : "Nothing was waiting to clear");
+      refetch();
+    } catch (e) {
+      toast.error(String(e));
+    } finally {
+      setBulkBusy(false);
+    }
+  };
+
   return (
     <div className="space-y-4">
       <div className="rounded-md border border-border bg-panel/60 p-2.5 flex flex-wrap items-center gap-2 text-xs">
@@ -2124,7 +2272,13 @@ function QueuePanel({ running }: { running: boolean }) {
         </span>
         <span className="text-[11px] text-zinc-500">
           {sections ? `${total} item(s)` : "…"}
+          {/* The three numbers the pipeline runs on, all shipped and all
+              editable in Settings → Soulseek: releases at once (the overflow
+              WAITS), candidates per release, and slskd's transfer slots — the
+              product of the other two, which the app never relies on to hold
+              either limit. */}
           {data ? ` · ${data.running}/${data.concurrency} running` : ""}
+          {data?.candidate_slots ? ` · ${data.candidate_slots} candidate(s) each` : ""}
           {data?.download_slots ? ` · ${data.download_slots} slskd transfer slot(s)` : ""}
           {/* When these numbers were fetched — the poll is not a live feed, and
               saying so is the difference between "0 items" and "0 items a
@@ -2135,6 +2289,21 @@ function QueuePanel({ running }: { running: boolean }) {
           the same queue for MusicBrainz releases, bulk auto-imports and manual grabs
         </span>
         <div className="ml-auto flex items-center gap-1 flex-wrap justify-end">
+          {waitingRows.length > 0 && (
+            <ConfirmButton
+              className="btn-ghost !py-0.5 !px-2 text-[11px] text-red-300 tap"
+              onConfirm={clearWaiting} disabled={bulkBusy}
+              confirmLabel={`Clear ${waitingRows.length} waiting?`}
+              title={`Empty the WAITING queue — the ${waitingRows.length} release(s) queued behind the ones running now go in one press, before any of them starts. A release that is RUNNING is not touched (cancel it on its own row), and nothing in your library, no settled row and no slskd transfer is affected.`}>
+              <Trash2 className="h-3 w-3" /> Clear all ({waitingRows.length})
+            </ConfirmButton>
+          )}
+          <button className="btn-ghost !py-0.5 !px-2 text-[11px] tap"
+            onClick={() => { setSelectMode((v) => !v); setSelected(new Set()); }}
+            disabled={bulkBusy}
+            title="Tick rows to act on several at once — cancel them, or import/commit them. The ticks are keyed by each row's own id, so they stay on the rows you picked while the list refreshes.">
+            <CheckSquare className="h-3 w-3" /> {selectMode ? "Done selecting" : "Select"}
+          </button>
           {finished > 0 && (
             <button className="btn-ghost !py-0.5 !px-2 text-[11px] tap"
               onClick={() => clear({ scope: "finished" })} disabled={busyId !== null}
@@ -2149,6 +2318,34 @@ function QueuePanel({ running }: { running: boolean }) {
           </button>
         </div>
       </div>
+
+      {/* Select mode's own bar: what is ticked, and the two things that can be
+          done to it. It acts on exactly the ticked rows (the ids the server
+          names them by) and says how many it affected. */}
+      {selectMode && (
+        <div className="rounded-md border border-sky-800 bg-sky-950/30 p-2 flex flex-wrap items-center gap-2 text-xs">
+          <span className="text-[11px] text-zinc-300">
+            {selectedRows.length} selected
+            {selected.size > selectedRows.length
+              ? ` · ${selected.size - selectedRows.length} left the queue` : ""}
+          </span>
+          <span className="text-[10px] text-zinc-500">
+            tick rows below — cancel acts on every ticked row, import/commit on
+            the finished ones
+          </span>
+          <button className="btn-ghost !py-0.5 !px-2 text-[11px] text-red-300 tap"
+            onClick={cancelSelected} disabled={bulkBusy || selectedRows.length === 0}
+            title="Cancel every TICKED row in one call, by their own ids: a release still waiting never starts, a running one stops at its next step. Nothing unticked is touched.">
+            {bulkBusy ? <Loader2 className="h-3 w-3 animate-spin" /> : <X className="h-3 w-3" />}
+            {" "}Cancel selected ({selectedRows.length})
+          </button>
+          <button className="btn-ghost !py-0.5 !px-2 text-[11px] tap"
+            onClick={commitSelected} disabled={bulkBusy || commitCount === 0}
+            title="Do the thing each ticked row is FOR: a finished download in the folder is imported into the library, and a settled row is taken off the list. Anything else is skipped — a running or waiting release has nothing to commit yet, and a row parked on a question is answered on its own row.">
+            <CheckCircle2 className="h-3 w-3" /> Import / commit selected ({commitCount})
+          </button>
+        </div>
+      )}
 
       {/* What the app is looking FOR, and the two controls the whole queue
           shares. A release that is not on the network yet belongs here rather
@@ -2198,25 +2395,51 @@ function QueuePanel({ running }: { running: boolean }) {
         <PageLoading />
       ) : (
         <>
+          {/* The waiting queue first: these releases have NOT started — they are
+              in line behind the releases at the pipeline's ceiling, in the order
+              they will run. Each one starts by itself when a slot frees, so this
+              group is read-and-cancel, not a list of things to press. */}
+          {waitingRows.length > 0 && (
+            <QueueSection
+              title="Waiting"
+              hint={`queued behind the ${data?.running ?? 0} release(s) running now — each starts by itself when one of them finishes`}
+              rows={waitingRows} tone="border-amber-800 text-amber-300"
+              empty=""
+              busyId={busyId}
+              selected={selectMode ? selected : undefined}
+              onSelect={selectMode ? toggleSelected : undefined}
+              onCancel={cancel} onRetry={retry} onImport={doImport} onDismiss={dismiss}
+              onClear={(item) => clear({ id: item.id }, item)}
+            />
+          )}
           <QueueSection
-            title="Queued / searching" hint="waiting for a slot, or looking right now"
-            rows={sections.queued} tone="border-amber-800 text-amber-300"
+            title="Queued / searching" hint="looking right now, or waiting for the network"
+            rows={queuedRows} tone="border-amber-800 text-amber-300"
             empty="nothing is waiting — paste a release above, or start an auto-import"
-            busyId={busyId} onCancel={cancel} onRetry={retry} onImport={doImport} onDismiss={dismiss}
+            busyId={busyId}
+            selected={selectMode ? selected : undefined}
+            onSelect={selectMode ? toggleSelected : undefined}
+            onCancel={cancel} onRetry={retry} onImport={doImport} onDismiss={dismiss}
             onClear={(item) => clear({ id: item.id }, item)}
           />
           <QueueSection
             title="In progress" hint="downloading, verifying or moving into the library"
             rows={sections.in_progress} tone="border-sky-800 text-sky-300"
             empty="nothing is downloading right now"
-            busyId={busyId} onCancel={cancel} onRetry={retry} onImport={doImport} onDismiss={dismiss}
+            busyId={busyId}
+            selected={selectMode ? selected : undefined}
+            onSelect={selectMode ? toggleSelected : undefined}
+            onCancel={cancel} onRetry={retry} onImport={doImport} onDismiss={dismiss}
             onClear={(item) => clear({ id: item.id }, item)}
           />
           {sections.needs_attention.length > 0 && (
             <QueueSection
               title="Needs you" hint="parked on a question, or waiting for a manual import"
               rows={sections.needs_attention} tone="border-amber-800 text-amber-300"
-              empty="" busyId={busyId} onCancel={cancel} onRetry={retry} onImport={doImport} onDismiss={dismiss}
+              empty="" busyId={busyId}
+              selected={selectMode ? selected : undefined}
+              onSelect={selectMode ? toggleSelected : undefined}
+              onCancel={cancel} onRetry={retry} onImport={doImport} onDismiss={dismiss}
               onClear={(item) => clear({ id: item.id }, item)}
               onClearSection={() => clear({ scope: "needs_attention" })}
             />
@@ -2225,7 +2448,10 @@ function QueuePanel({ running }: { running: boolean }) {
             title="Completed" hint="downloaded — and whether it made it into the library"
             rows={sections.completed} tone="border-emerald-800 text-emerald-300"
             empty="nothing has finished yet"
-            busyId={busyId} onCancel={cancel} onRetry={retry} onImport={doImport} onDismiss={dismiss}
+            busyId={busyId}
+            selected={selectMode ? selected : undefined}
+            onSelect={selectMode ? toggleSelected : undefined}
+            onCancel={cancel} onRetry={retry} onImport={doImport} onDismiss={dismiss}
             onClear={(item) => clear({ id: item.id }, item)}
             onClearSection={() => clear({ scope: "completed" })}
           />
@@ -2233,7 +2459,10 @@ function QueuePanel({ running }: { running: boolean }) {
             title="Failed" hint="gave up, with the reason"
             rows={sections.failed} tone="border-red-900 text-red-300"
             empty="nothing failed"
-            busyId={busyId} onCancel={cancel} onRetry={retry} onImport={doImport} onDismiss={dismiss}
+            busyId={busyId}
+            selected={selectMode ? selected : undefined}
+            onSelect={selectMode ? toggleSelected : undefined}
+            onCancel={cancel} onRetry={retry} onImport={doImport} onDismiss={dismiss}
             onClear={(item) => clear({ id: item.id }, item)}
             onClearSection={() => clear({ scope: "failed" })}
           />
@@ -2330,7 +2559,7 @@ function ReadyImports() {
           >
             {busyPath === a.path
               ? <Loader2 className="h-3 w-3 animate-spin" />
-              : <Download className="h-3 w-3" />} Import
+              : <ArrowDownToLine className="h-3 w-3" />} Import
           </button>
         </div>
       ))}
@@ -2411,7 +2640,7 @@ function ReviewPanel() {
             <RefreshCw className="h-3.5 w-3.5" />
           </button>
           <button className="btn-primary !py-1 text-xs tap" onClick={importAll} title="Ingest completed downloads into the library">
-            <Download className="h-3.5 w-3.5" /> Import completed
+            <ArrowDownToLine className="h-3.5 w-3.5" /> Import completed
           </button>
         </div>
       </div>
@@ -3473,7 +3702,7 @@ export default function SoulseekPage() {
                         onClick={() => downloadFile(g.files[0], true)}
                         title="Download this whole folder"
                       >
-                        <Download className="h-3.5 w-3.5" /> Folder
+                        <ArrowDownToLine className="h-3.5 w-3.5" /> Folder
                       </button>
                     </div>
                     {open && (
@@ -3496,7 +3725,7 @@ export default function SoulseekPage() {
                               onClick={() => downloadFile(f, false)}
                               title="Download this file"
                             >
-                              <Download className="h-3 w-3" />
+                              <ArrowDownToLine className="h-3 w-3" />
                             </button>
                           </div>
                         ))}

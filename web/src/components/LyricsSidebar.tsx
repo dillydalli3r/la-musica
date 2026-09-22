@@ -4,10 +4,18 @@ import { api } from "../api";
 import { parsePlayerLrc, parseLrc, splitStoredLines, hasLyricsText, activeLineRange, KaraokeWords, type LrcLine } from "./LyricsViewer";
 import { useLyricsFollow, LYRICS_PAD_BOTTOM, LYRICS_PAD_TOP } from "../lib/lyrScroll";
 import Visualizer from "./Visualizer";
+import LyricZoom, { LYRIC_ZOOM_MAX, LYRIC_ZOOM_MIN } from "./LyricZoom";
 
 // Shared with the fullscreen player: toggling the visualizer from either
 // surface keeps the same preference.
 const VIZ_KEY = "mlo.np.viz";
+
+// The sidebar's own lyric size — deliberately NOT the fullscreen player's key.
+// This pane is 380 px wide and renders 15 px lines, the fullscreen pane is the
+// whole window; one shared value would re-lay-out whichever surface the user
+// was not looking at (#41). 100 % is the pane's own base size, which is what
+// it rendered before the control existed.
+const ZOOM_KEY = "mlo.lyrzoom.sidebar.v1";
 
 /** A right-docked lyrics panel for the player bar's lyrics button: the
  * current track's lyrics with the same synced-line treatment as the
@@ -44,6 +52,13 @@ export default function LyricsSidebar({
     album?: string;
   } | null>(null);
   const [viz, setViz] = useState(() => localStorage.getItem(VIZ_KEY) !== "0");
+  // localStorage is user-writable, so the stored value is range-checked rather
+  // than trusted: a hand-edited "5" must not render the pane unreadable, and
+  // the box that writes it clamps for the same reason.
+  const [zoom, setZoom] = useState(() => {
+    const saved = Number(localStorage.getItem(ZOOM_KEY));
+    return saved >= LYRIC_ZOOM_MIN && saved <= LYRIC_ZOOM_MAX ? saved : 100;
+  });
   const toggleViz = () => {
     const v = !viz;
     setViz(v);
@@ -172,6 +187,13 @@ export default function LyricsSidebar({
           <div className="text-xs font-semibold truncate">{title}</div>
           {album && <div className="text-[10px] text-zinc-500 truncate">{album}</div>}
         </div>
+        <LyricZoom
+          pct={zoom}
+          onChange={(p) => {
+            setZoom(p);
+            localStorage.setItem(ZOOM_KEY, String(p));
+          }}
+        />
         <button
           className={`p-1.5 rounded-lg transition-colors ${viz ? "text-accent hover:text-accent-soft" : "text-zinc-500 hover:text-white"} hover:bg-raise`}
           onClick={toggleViz}
@@ -190,6 +212,11 @@ export default function LyricsSidebar({
       <div
         ref={scrollRef}
         className="relative flex-1 min-h-0 overflow-y-auto overscroll-contain px-5 py-4 no-scrollbar"
+        // CSS zoom on the pane, exactly like the fullscreen player's: the
+        // shared scroller measures with offsetTop/offsetHeight (see
+        // lib/lyrScroll), which are layout units and therefore blind to it, so
+        // centering the active line stays correct at every size.
+        style={{ zoom: zoom / 100 }}
         onWheel={(e) => {
           if (e.deltaY !== 0) takeOver();
         }}

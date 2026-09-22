@@ -1,7 +1,7 @@
 import { useState } from "react";
 import { useNavigate } from "react-router-dom";
 import {
-  Activity, BadgeInfo, Disc3, Ellipsis, Flame, Gauge, ImagePlus, Info, Languages, ListMusic, Music2, Music4,
+  Activity, BadgeInfo, Disc3, Ellipsis, Flame, Gauge, ImagePlus, Info, Languages, ListMusic, Music2,
   RefreshCw, ShieldCheck, Sparkles, Tags, UploadCloud, Users,
 } from "lucide-react";
 import type { LucideIcon } from "lucide-react";
@@ -15,9 +15,6 @@ import { DetailsDialog } from "./AlbumDetails";
 import { advisoryOutcome } from "./Badges";
 import { toast } from "../store";
 import type { LyricsPublishBatchResult, LyricsXlitResult, ScriptRunResult } from "../types";
-
-/** The subset of the API replies the menu reports back to the user. */
-type ActionCounts = { updated?: number; queued?: number };
 
 /** The one "tag actions" menu, mounted wherever a selection exists (artist /
  *  album / track level). Every entry re-runs on the CURRENT selection, so any
@@ -76,8 +73,26 @@ export default function TagActionsMenu({
       toast.error(String(e));
     }
   };
-  const json = (r: ActionCounts, unit: string) =>
-    typeof r.updated === "number" ? `${r.updated} ${unit} updated` : `${r.queued ?? 0} queued`;
+  /** The genre chain's own answer: how many files it wrote, which sources
+   *  contributed (and how many names each), and why each silent one stayed
+   *  silent — a blocked RateYourMusic reads as its own reason here instead of
+   *  as a bare "0 updated". */
+  const genresDone = (r: {
+    updated: number;
+    per_source?: Record<string, string[]>;
+    notes?: Record<string, string>;
+  }) => {
+    const who = Object.entries(r.per_source ?? {})
+      .filter(([, names]) => names.length)
+      .map(([name, names]) => `${name} ${names.length}`)
+      .join(", ");
+    const silent = Object.values(r.notes ?? {});
+    return [
+      r.updated ? `${r.updated} file(s) updated` : "No genres to write",
+      who,
+      silent.join("; "),
+    ].filter(Boolean).join(" — ");
+  };
   /** Script 17's own answer: the files it changed, what it left alone, its
    *  per-file errors, and the reason it changed nothing when it had nothing to
    *  work with (both switches off, no AI configured) — never a bare "done". */
@@ -160,17 +175,17 @@ export default function TagActionsMenu({
                 onClick: () => setTagsOpen(true),
               },
               {
-                label: "Import genres (all sources)",
+                // ONE entry, the configured chain: it asks every ticked source
+                // in priority order (Settings → Import, or the wizard's tray)
+                // and stops as soon as a track's list is complete. The
+                // MusicBrainz-only entry this replaced asked one source the
+                // chain already ranks for itself, so the user had to know the
+                // order to pick correctly.
+                label: "Import genres",
                 icon: Tags,
                 disabled: !paths.length,
-                title: "Ask every configured genre source for the selection's genres",
-                onClick: () => run(() => api.genresImport(paths), (r) => json(r, "album")),
-              },
-              {
-                label: "Import genres (MusicBrainz)",
-                icon: Music4,
-                disabled: !paths.length,
-                onClick: () => run(() => api.mbGenresWrite(paths), (r) => json(r, "track")),
+                title: "Ask every configured genre source for the selection's genres, in the configured priority order",
+                onClick: () => run(() => api.genresImport(paths), genresDone),
               },
               {
                 label: "Fetch advisory rating",

@@ -207,6 +207,7 @@ export default {
   "charts.online_note": "o ranking de cada provedor, mantido separado",
   "charts.rows": "{n} linhas",
   "charts.plays": "{n} reproduções",
+  "charts.listened": "{plays} reproduções · {time} ouvidos",
   "charts.play_one": "1 reprodução",
   "charts.open_page": "Abrir na biblioteca",
   "charts.gone": "O arquivo desta reprodução não está mais na biblioteca",
@@ -255,11 +256,8 @@ export default {
   "donations.copied": "Endereço {coin} copiado para a área de transferência.",
   "donations.copy_manual": "A área de transferência exige um contexto seguro, então o endereço foi selecionado — pressione Ctrl+C (⌘C no Mac).",
   "donations.thanks": "Obrigado. Vai para a pilha pequena marcada como continuar construindo.",
-  "donations.cats_title": "Equipe não remunerada",
-  "donations.cat.paw": "Dá patadas no botão Copiar. Erra. Dá patadas de novo. É o mais perto que este gato vai chegar de doar.",
-  "donations.cat.inspect": "Lê o endereço Bitcoin em voz alta, caractere por caractere. Dois erros de digitação encontrados. Zero erros de digitação encontrados.",
-  "donations.cat.keyboard": "Está sentado no teclado desde o bloco 700000. O endereço sobreviveu; o gato está quentinho.",
-  "donations.cat.box": "Confere se a carteira está cheia. É uma caixa de papelão. O gato se mudou para lá mesmo assim.",
+  "donations.cat_line": "Doe para alimentar meu gato",
+  "donations.cat_alt": "O gato do desenvolvedor",
 
   // —— Client setup wizard (desktop / iOS / Android shells) ————————————
   "client.title": "Configurar este dispositivo",

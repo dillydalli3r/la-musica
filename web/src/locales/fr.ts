@@ -207,6 +207,7 @@ export default {
   "charts.online_note": "le classement propre à chaque fournisseur, tenu à part",
   "charts.rows": "{n} lignes",
   "charts.plays": "{n} écoutes",
+  "charts.listened": "{plays} lectures · {time} écoutées",
   "charts.play_one": "1 écoute",
   "charts.open_page": "Ouvrir dans la bibliothèque",
   "charts.gone": "Le fichier de cette écoute n'est plus dans la bibliothèque",
@@ -255,11 +256,8 @@ export default {
   "donations.copied": "Adresse {coin} copiée dans le presse-papiers.",
   "donations.copy_manual": "Le presse-papiers exige un contexte sécurisé : l'adresse a donc été sélectionnée — appuyez sur Ctrl+C (⌘C sur Mac).",
   "donations.thanks": "Merci. Cela rejoint la petite pile étiquetée continuer à construire.",
-  "donations.cats_title": "Personnel non rémunéré",
-  "donations.cat.paw": "Donne des coups de patte au bouton Copier. Rate. Recommence. C'est ce qui ressemblera le plus, un jour, à un don.",
-  "donations.cat.inspect": "Lit l'adresse Bitcoin à voix haute, caractère par caractère. Deux fautes trouvées. Zéro faute trouvée.",
-  "donations.cat.keyboard": "Assis sur le clavier depuis le bloc 700000. L'adresse a survécu ; le chat est au chaud.",
-  "donations.cat.box": "Vérifie si le portefeuille est plein. C'est un carton. Le chat s'y est installé quand même.",
+  "donations.cat_line": "Faites un don pour nourrir mon chat",
+  "donations.cat_alt": "Le chat du développeur",
 
   // —— Client setup wizard (desktop / iOS / Android shells) ————————————
   "client.title": "Configurer cet appareil",

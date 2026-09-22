@@ -1,6 +1,6 @@
 # la musica
 
-**v3.10.2** — a self-hosted app that *manages, optimizes, audits, grades and
+**v3.11.0** — a self-hosted app that *manages, optimizes, audits, grades and
 plays* your music library, from the browser, a desktop window or a phone.
 
 **la musica** (formerly Music Library Optimizer) is a FastAPI backend plus a
@@ -10,9 +10,10 @@ fetches artist artwork and biographies, walks a multi-source lyrics chain, cache
 music for offline playback, exports to a device, and drives a managed Soulseek
 client whose auto-importer verifies what it downloaded. All app state — config,
 playlists, favourites, the beets library, the Soulseek config, measured loudness,
-caches — lives in one hidden `.mlo` folder inside your music directory.
+caches, and the runtime-installed external toolchain — lives in one hidden `.mlo`
+folder inside your music directory.
 
-Release notes for this version are in `local/release-notes-3.10.2.md` (older ones
+Release notes for this version are in `local/release-notes-3.11.0.md` (older ones
 follow `local/release-notes-<version>.md`); the grading and optimization contract
 is in [`docs/OPTIMIZATION-GRADING-SPEC.md`](docs/OPTIMIZATION-GRADING-SPEC.md).
 
@@ -33,16 +34,21 @@ docker compose down              # stop and remove
 ```
 
 `docker-compose.yml` is the template, and it ships one line you must edit: the
-bind mount that points at your library (`./music` in its comments,
-`F:/media/music:/music` as committed). What matters:
+bind mount that points at your library (committed as the placeholder
+`./music:/music`; replace it with an absolute host path such as
+`/path/to/your/music:/music` or `D:/Music:/music` — compose creates an empty
+`./music` if it does not exist, and an empty folder reads as an empty library).
+What matters:
 
 - Image `ghcr.io/dillydalli3r/la-musica:latest`, container `la-musica`, port
   `8000`, pinned compose project name. `MLO_MUSIC_FOLDER=/music` is the only
   environment variable it needs; `MLO_SERVER_HOST=0.0.0.0` makes the published
   port reachable and switches the login gate on for non-local clients.
-- Volumes: `/music` holds the library **and** all app state (`/music/.mlo/data`,
-  `…/downloads`, `…/trash`); `lamusica-dependencies` at `/app/.dependencies`
-  holds runtime-installed tools, so they survive a rebuild.
+- Volumes: `/music` holds the library **and** all app state — `data`, `downloads`,
+  `trash` and the runtime-installed toolchain (`/music/.mlo/tools`) — so one
+  bind mount carries the library, the settings and the tools, and they survive a
+  rebuild together. No second volume is needed; a `lamusica-dependencies` volume
+  from an older compose file is simply unused.
 - It runs unprivileged as `mlo`, uid/gid **1000**, `HOME=/home/mlo`, so the
   bind-mounted folder must be writable by uid 1000 or `.mlo` cannot be created.
   The healthcheck probes `http://127.0.0.1:8000/api/health` (30 s interval).
@@ -92,18 +98,27 @@ fifteen tools — `ffmpeg`, `flac`, `libjxl`, `libjpeg-turbo` (`jpegtran`),
 `oxipng`, `rsgain`, `AudioAuditor`, `Logchecker`, `php`,
 `CUETools`, `chromaprint` (`fpcalc`, optional — AcoustID), `librosa`, `beets`,
 `slskd`, `yt-dlp` — and shows each one's installed, pinned and upstream version.
-Per platform a row is `deps` (the installer fetches it), `system` (a distro
-package — `apt: flac`, no Install button) or `unsupported` (no build here, with
-the reason). Every `deps` row has its own **Install** / **Update** button, and
-the page-level **Update all** presses every missing or outdated row at once.
+They live in **`<music>/.mlo/tools`**, inside the library, so they travel with
+the music folder (and with the one mount a container has); a copy installed by
+an older release beside the app is still *read*, so an upgrade does not report
+every tool missing — the row says which folder it found it in.
+Per platform a row is `deps` (the installer fetches it) or `unsupported` (no
+build here, with the reason); a distro-owned tool is a `system` row whose button
+copies the package manager's command, which is the only kind of row that cannot
+be fetched in-app. Every `deps` row has its own **Install** / **Update** button,
+and the page-level **Update all** presses every missing or outdated row at once.
 A press fetches the NEWEST release the tool's own publisher has — GitHub,
 PyPI for the pip packages (`librosa`, `beets`, `yt-dlp` on Linux) and
 windows.php.net for `php` — while the pinned version is what a FIRST install
 fetches when no upstream answer is reachable; a row already at the newest known
 version is a no-op, and a copy newer than upstream is never downgraded (a
 PATH-installed `ffmpeg` from scoop is updated into the app's own toolchain
-folder, not in place). `dependencies_auto_update` (off by default) installs
-missing or outdated tools in the background.
+folder, not in place). `libjxl` and `libjpeg-turbo` are downloadable rows on
+Linux too: libjxl's static `tar.lz` and libjpeg-turbo's official `.deb` are
+unpacked by the installer (a raw-LZMA reader and an `ar` walk, no `lzip`/`dpkg`
+needed), with the `.deb`'s shared libraries kept beside a launcher.
+`dependencies_auto_update` (off by default) installs missing or outdated tools
+in the background.
 
 ### Configuration & credentials
 
@@ -162,8 +177,9 @@ album header's film button (or a track's "…" menu) searches YouTube through
 yt-dlp, drops the file into the album folder and tags it as that track's music
 video, so the matching panel is only needed for videos it did not download.
 An album's cover carries its own badges — the
-measured dynamic range, the release's formats/sample rate, and the medium with
-every country it was released in (`CD · US, CA`) — and every track row offers the
+measured dynamic range (top-left) and, down the bottom-left corner as three
+left-aligned rows, the medium, every country it was released in and the release's
+format/bitrate (`CD` / `US, CA` / `FLAC 16/44.1`) — and every track row offers the
 same "…" menu wherever it is listed: tagging (the tag editor, genre and advisory
 imports), its scripts (lyrics, re-audit, ReplayGain, re-encode, re-grade),
 credits, the stored readout and the track's own editor. A filled heart is drawn
@@ -245,7 +261,11 @@ narrow or heavily zoomed one, where the lyrics pane keeps a real minimum height
 instead of being squeezed under the fold. The lyrics pane carries its own scrim
 (and every line a tight text shadow) because the backdrop is a light additive
 color field: over a white cover the old 2 px blur at 60 % made the text
-unreadable, which is what the dim is tuned for now. ReplayGain is applied through the WebAudio gain stage in
+unreadable, which is what the dim is tuned for now. Both lyric surfaces — this
+pane and the right-docked sidebar viewer — carry the same size control: `−`, a
+percentage you can type into, `+`, 5 % a press (85-160 %), remembered per
+surface because a 380 px sidebar and a full-screen pane want different numbers.
+ReplayGain is applied through the WebAudio gain stage in
 **track**, **album** or **off** mode (`replaygain_mode`) with a preamp
 (`replaygain_preamp_db`, ±24 dB); a file without ReplayGain tags is measured on
 the fly with ffmpeg's EBU R128 meter when `replaygain_analyze_missing` is on
@@ -276,6 +296,22 @@ from an import); `import_auto_scripts` turns it off, `import_scripts` replaces i
 outright, and the chain only ever *fills* a tag, so what you typed in the wizard
 survives. **Bulk import** queues several
 albums with `import_bulk_concurrency` (2 by default, 1–8).
+
+The **Genres** step asks the whole configured chain with **one button**: every
+source the app knows, asked in the order `genre_sources` lists them —
+RateYourMusic first, then MusicBrainz, then the rest (ListenBrainz, iTunes,
+Last.fm, TheAudioDB, Wikidata, Bandcamp, Discogs, Deezer, Spotify) — merged
+per track, and the chain **stops as soon as a track's list is complete**, so the
+later sources cost nothing on an album the first two can answer and still answer
+for a pressing nothing else knows. The list is the PRIORITY list: the small tray
+next to that button (and Settings → Import) ticks sources in and out, and a
+ticking is saved in the chain's own order, so what you see top-to-bottom is what
+is asked first. A source that needs a credential is named as such and stays
+tickable — an uncredentialed source is skipped before any request and reported
+by name in the answer's `notes`, never silently dropped. The same chain runs
+wherever genres are imported (an album's `…` menu, a selection, the batch menu)
+and — with no click at all — on every import: `server/imports.py::_stamp_release`
+asks it for each album that lands.
 
 The **Advisory** step resolves `ITUNESADVISORY` from every applicable source —
 Deezer and Spotify by ISRC (every ISRC the file states *and* every one
@@ -344,11 +380,28 @@ aliases in the configured `beets_locale` (`ぴーなた` → `pinata`). It gates
 candidate on its rip log *before* requesting any album byte
 (`soulseek_auto_log_min_score`, default 100), ranks candidates towards the copy
 that arrives fastest — lossless first, then the match score, then the peer's own
-advertised speed and queue — and downloads up to **three** candidates of one
-release at once: the first that passes the same verification becomes the import
-and the others are cancelled and swept, so a peer that stalls does not cost the
-whole album. It verifies completeness (`soulseek_auto_complete_ratio`) and
-losslessness, and cleans up everything a rejected candidate left behind.
+advertised speed and queue — and downloads up to **three candidates of one
+release at once** (`soulseek_candidate_slots`): the first that passes the same
+verification becomes the import and the others are cancelled and swept, so a
+peer that stalls does not cost the whole album. The next candidate of that
+release is only asked for when one of the three lands or is rejected — the app
+never has more than that many of one release's peers transferring, however many
+the search turned up. It verifies completeness
+(`soulseek_auto_complete_ratio`) and losslessness, and cleans up everything a
+rejected candidate left behind.
+
+**Two limits, and what happens over them.** `soulseek_search_concurrency`
+(default 3) is how many *releases* the pipeline works on at once, and
+`soulseek_candidate_slots` (default 3) is how many *candidates of one release*
+download at once; **the app enforces both itself** — the fourth release is never
+refused, it takes its place in the queue's **Waiting** group (with its position,
+and cancellable there without ever starting a byte) and starts by itself the
+moment one of the running releases finishes. slskd's own
+`soulseek_download_slots` is the OUTER ceiling on the transfers that produces,
+which is why it defaults to 9 — the product of the two (3 × 3) — and a config
+that sets fewer slots than its two limits need gets each release's candidate
+batch narrowed to fit (`slots ÷ releases`) instead of queueing inside slskd. The
+Queue tab's header reads all three back.
 
 Adding a release to the library **starts its search immediately** and puts it on
 the **download queue**, which is the one surface for wanted releases: a row shows
@@ -367,6 +420,18 @@ re-marked pending, which is what keeps a filled album from reading as a wish
 again. *Import all completed*
 imports every finished download **sequentially**, with cancel finishing the album
 in flight (`GET /api/soulseek/import-all/status`).
+
+The queue's own controls follow from those two limits. **Clear all** empties the
+*queued/waiting* work in one press — every release that has not started goes,
+before it downloads a byte — and it does NOT touch a release that is already
+RUNNING (that is a cancel, on its own row), a finished row, or anything in your
+library. **Select** turns the rows into checkboxes: *Cancel selected* cancels
+exactly the ticked rows in one call (the ids the server names them by, so a tick
+stays on the row you picked while the list refreshes underneath it), and *Import
+/ commit selected* does what each ticked row is for — an album sitting finished
+in the download folder is imported, a settled row is taken off the list — with
+the count of what it acted on reported back. Waiting releases are their own
+group, in the order they will start, each with its position.
 
 The **listen port** is opened on the router by the app itself
 (`soulseek_upnp`, ON): slskd has no UPnP/NAT-PMP option — upstream closed the
@@ -438,8 +503,8 @@ they were before 3.7.0 (audit tag not required) for anyone who wants the old
 answer in one click. A verdict is binary: an album is `PASS` only when every enabled check
 passes, otherwise `FAIL` with the failed checks itemized — and every problem the
 page lists is charged, so an album can never show *N problems to fix* beside a
-green dot (a CD leg nothing established is a failed check of its own, not a note
-beside a pass). The summary counts
+green dot (a CD verdict whose own evidence nothing established is a failed
+check of its own, not a note beside a pass). The summary counts
 checks (`summary_pass` / `summary_total`) and reports `albums_passed` /
 `albums_failed`, plus `albums_audit_failed` for albums that pass every check
 while their audit is FAKE/Mix (the library badges those red on the Audit column).
@@ -749,7 +814,9 @@ listed in the app's bottom-left credits popover, in
 [`THIRD-PARTY-NOTICES.md`](THIRD-PARTY-NOTICES.md) and in
 `web/public/credits.json`. `/donations` carries two addresses with a copy button
 each — Litecoin `LRisZa9HYBKE2sUc3VELYZq2WnyYtG6Jvu`, Bitcoin
-`bc1qf2snsus59ydvmk8rwp09e698gxjdlmyxyrnycu` — and **nothing is gated behind it**.
+`bc1qf2snsus59ydvmk8rwp09e698gxjdlmyxyrnycu` — a photograph of the maintainer's
+cat with one line under it (*Donate to feed my cat*), and **nothing is gated
+behind it**.
 
 Legacy v1 (the Tkinter app, CLI and PyInstaller/Inno packaging) is archived on
 the `archive/legacy-v1.7` branch.

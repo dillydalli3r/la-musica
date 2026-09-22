@@ -45,14 +45,16 @@ ALBUM_A = os.path.join(MUSIC, "Artists", "Artist One", "Album A")
 ALBUM_B = os.path.join(MUSIC, "Artists", "Artist Two", "Album B")
 BAD = os.path.join(MUSIC, "Artists", "Unreadable")
 
-# The app's own tools folder (`mlo.paths.DEPS_DIR`) is whatever the machine
-# has: 1.2 GB of downloaded tools on a dev box, a symlinked toolchain on CI
-# (whose links the walk reports as unreadable folders — the card would then
-# warn about them), nothing at all in a fresh clone. The snapshot reports it
-# and folds it into `app_total`, so the test pins it at a fixture of its own:
-# the same assertions have to answer the same thing on every machine.
+# The app's own tools folders (mlo.paths.tools_dir + legacy_tools_dir) are
+# whatever the machine has: 1.2 GB of downloaded tools on a dev box, a
+# symlinked toolchain on CI (whose links the walk reports as unreadable folders
+# — the card would then warn about them), nothing at all in a fresh clone. The
+# snapshot reports them and folds them into `app_total`, so the test pins BOTH
+# resolvers at a fixture of its own: the same assertions have to answer the same
+# thing on every machine.
 DEPS = os.path.join(ROOT, "deps")
-api_storage.DEPS_DIR = DEPS
+api_storage.tools_dir = lambda music_folder=None: DEPS
+api_storage.tools_dirs = lambda music_folder=None: [DEPS]
 
 
 def make(path, size):

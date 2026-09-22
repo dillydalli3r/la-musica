@@ -95,37 +95,73 @@ def _conn():
                 except Exception:
                     _initialized = False
                     raise
+    elif not _has_schema(conn):
+        # The file this process opened has no tables: it was replaced under a
+        # running server. Heal it here, outside every lock (see _SCHEMA).
+        _ensure_schema(conn)
     return conn
+
+
+def _has_schema(conn):
+    """Whether this connection's file actually holds the app's tables.
+
+    `_initialized` is per PROCESS, so a database file that changes underneath a
+    running server — a restored backup, a wiped volume, a `.mlo/data` the user
+    deleted while the app was up — left every auth route answering
+    `no such table: users` until a restart (observed while verifying the
+    wizard's account step). One lookup in sqlite_master per connection makes
+    the store self-healing: the schema is created again the moment the file
+    needs it."""
+    try:
+        return conn.execute(
+            "SELECT name FROM sqlite_master WHERE type='table' AND name='users'"
+        ).fetchone() is not None
+    except sqlite3.Error:
+        return False
+
+
+# The tables and the in-place migrations, in one place: `_init` runs them once
+# per process under the init lock, and `_conn` runs them again — WITHOUT any
+# lock — when it finds a file that no longer has them. That second path must
+# not go through `_init`: `_init` takes the init lock and re-enters `_conn`,
+# so a recovery that happened inside that cycle deadlocked the whole auth
+# surface on `_init_lock` (nothing else can take it) instead of healing the
+# file. The statements are all idempotent.
+_SCHEMA = """
+CREATE TABLE IF NOT EXISTS sessions (
+    token_hash TEXT PRIMARY KEY,
+    created_at REAL NOT NULL,
+    expires_at REAL NOT NULL,
+    label      TEXT
+);
+CREATE TABLE IF NOT EXISTS users (
+    username TEXT PRIMARY KEY,
+    hash     TEXT,
+    created  REAL NOT NULL
+);
+"""
+# Migrations for databases written before users existed: the session's
+# username is added in place, and rows that predate it read back as "" — the
+# default/admin scope.
+_SCHEMA_MIGRATIONS = ("ALTER TABLE sessions ADD COLUMN username TEXT",)
+
+
+def _ensure_schema(conn):
+    """Create the tables and apply the migrations. Idempotent; locks nothing."""
+    conn.executescript(_SCHEMA)
+    for stmt in _SCHEMA_MIGRATIONS:
+        try:
+            conn.execute(stmt)
+        except sqlite3.OperationalError:
+            pass  # column already exists
+    conn.commit()
 
 
 def _init():
     with _lock:
         conn = _conn()
         try:
-            conn.executescript(
-                """
-                CREATE TABLE IF NOT EXISTS sessions (
-                    token_hash TEXT PRIMARY KEY,
-                    created_at REAL NOT NULL,
-                    expires_at REAL NOT NULL,
-                    label      TEXT
-                );
-                CREATE TABLE IF NOT EXISTS users (
-                    username TEXT PRIMARY KEY,
-                    hash     TEXT,
-                    created  REAL NOT NULL
-                );
-                """
-            )
-            # Migrations for databases written before users existed: the
-            # session's username is added in place, and rows that predate it
-            # read back as "" — the default/admin scope.
-            for stmt in ("ALTER TABLE sessions ADD COLUMN username TEXT",):
-                try:
-                    conn.execute(stmt)
-                except sqlite3.OperationalError:
-                    pass  # column already exists
-            conn.commit()
+            _ensure_schema(conn)
         finally:
             conn.close()
 

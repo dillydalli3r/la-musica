@@ -3501,12 +3501,14 @@ def bandcamp_album(artist="", album="", titles=None):
 #                     default ON), so this source answers on a default install
 #                     too; blocked or never archived, it reports exactly what
 #                     happened — see RYM_BASE and `_rym_note`.
-#   b. listenbrainz   recording tags → release-group → artist. Crowdsourced
+#   b. musicbrainz    recording → release → release group → artist. Curated
+#                     per recording, and the app's identity anchor. SECOND by
+#                     the user's own requirement — it sits above every other
+#                     keyless source, which is also what makes a default
+#                     install answer with open data when RYM has nothing.
+#   c. listenbrainz   recording tags → release-group → artist. Crowdsourced
 #                     PER RECORDING, free, no key, MBID-native (no title
 #                     guessing for a release MusicBrainz knows).
-#   c. musicbrainz    recording → release → release group → artist. Curated
-#                     per recording, and the app's identity anchor, but its
-#                     genre coverage is spotty.
 #   d. itunes         per-track `primaryGenreName`. Free, keyless, and its
 #                     per-track genre is reliable for mainstream releases.
 #   e. lastfm         track.getTopTags → artist.getTopTags. Crowdsourced per
@@ -3533,7 +3535,7 @@ def bandcamp_album(artist="", album="", titles=None):
 # `soulseek` is NOT in the default list: peers advertise folders and file
 # names, not genres, so it can never state one — it stays handled as a
 # documented no-op so a saved config listing it keeps working.
-GENRE_SOURCES = ["rateyourmusic", "listenbrainz", "musicbrainz", "itunes",
+GENRE_SOURCES = ["rateyourmusic", "musicbrainz", "listenbrainz", "itunes",
                  "lastfm", "theaudiodb", "wikidata", "bandcamp", "discogs",
                  "deezer", "spotify"]
 
@@ -4321,16 +4323,17 @@ def genre_chain(artist="", album="", release=None, limit=None, sources=None,
     """Per-track genres for a release, merged from the configured sources.
 
     The sources are asked IN ORDER until every track is full, and no further:
-    the default order (the priority list documented above `GENRE_SOURCES`) is
-    RateYourMusic (per track where its page states one, else album) →
-    ListenBrainz (recording → release group → artist) → MusicBrainz
-    (recording → release → release group → artist) → iTunes
-    (`primaryGenreName`, per track) → Last.fm (track → artist) → TheAudioDB
-    (`searchtrack.php` per track → album) → Wikidata (the recording's P136 →
-    release group/entity) → Bandcamp (album tags) → Discogs (release styles) →
-    Deezer (album genres) → Spotify (artist genres). `mlo.config` migrates
-    both previously shipped default lists onto this one, so an install that
-    never chose an order gets it; a customised list is honoured as written.
+    the default order (`GENRE_SOURCES`, and the shipped
+    `mlo.config.DEFAULT_CONFIG["genre_sources"]`) is RateYourMusic (per track
+    where its page states one, else album) → MusicBrainz (recording → release
+    → release group → artist) → ListenBrainz (recording → release group →
+    artist) → iTunes (`primaryGenreName`, per track) → Last.fm (track →
+    artist) → TheAudioDB (`searchtrack.php` per track → album) → Wikidata (the
+    recording's P136 → release group/entity) → Bandcamp (album tags) → Discogs
+    (release styles) → Deezer (album genres) → Spotify (artist genres).
+    `mlo.config` migrates every previously shipped default list onto this one,
+    so an install that never chose an order gets it; a customised list is
+    honoured as written.
 
     "Full" is the WRITER's own policy applied to the merged list
     (`_genre_complete`): at `mb_genre_count = 2` one good specific genre plus
@@ -5518,6 +5521,10 @@ _NO_EDITION = ("no edition eligible for auto-import (promotional/bootleg "
 # Release groups one bulk call expands: each costs a MusicBrainz browse
 # (1 req/s), so an artist with hundreds of groups would take minutes — the
 # remainder is reported as skipped instead of silently dropped or wedging.
+# It is the DEFAULT bound, for a call that has to answer (the auto-import
+# route's quick attempt); a caller working off the request passes
+# `limit=None` and expands every group its own row named (see
+# `auto_import_targets`).
 BULK_MAX_GROUPS = 50
 
 
@@ -5617,7 +5624,8 @@ def _kind_for(mbid):
     return {"release-group": "release_group"}.get(t, t) or None
 
 
-def auto_import_targets(mbid, kind=None, mode="best", types=None):
+def auto_import_targets(mbid, kind=None, mode="best", types=None,
+                        limit=BULK_MAX_GROUPS):
     """([{mbid,title}], [{mbid,reason}]) — what a bulk auto-import should queue.
 
     ONE resolution path, shared by the HTTP route's bounded quick attempt and
@@ -5634,6 +5642,15 @@ def auto_import_targets(mbid, kind=None, mode="best", types=None):
     not the Singles. An EMPTY selection is every type, exactly the behaviour
     every caller had before the filter existed; a group the filter leaves out
     is reported in the second list WITH its reason, never silently dropped.
+
+    `limit` is how many of an artist's release groups one call may EXPAND
+    (each costs a MusicBrainz browse, 1 req/s), the default being the bound a
+    call that has to answer keeps. `limit=None` expands every group the filter
+    keeps: that is what a caller working off the request (the artist page's
+    discography prepare, one album appearing at a time) owes the button that
+    named the type — with a bound there, the row's own list was truncated and
+    the rest came back as "call again" for an action the user had already
+    asked for in full.
 
     A user's own edition choice does NOT come through here: the route resolves
     it (`server.api_add._group_edition_targets`) so the group-membership check
@@ -5685,9 +5702,9 @@ def auto_import_targets(mbid, kind=None, mode="best", types=None):
         if gid.lower() in owned:
             skipped.append({"mbid": gid, "reason": "already in the library"})
             continue
-        if done >= BULK_MAX_GROUPS:
+        if limit is not None and done >= limit:
             skipped.append({"mbid": gid,
-                            "reason": f"per-call limit of {BULK_MAX_GROUPS} "
+                            "reason": f"per-call limit of {limit} "
                                       "release groups reached — call again"})
             continue
         sub, err = group_targets(gid, "best", types=types)

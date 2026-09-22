@@ -14,6 +14,7 @@ import { advisoryLine, advisoryOutcome } from "../components/Badges";
 import { LinkValidChip } from "../components/Links";
 import LyricsViewer, { parseLrc } from "../components/LyricsViewer";
 import CoverSearchModal from "../components/CoverSearchModal";
+import GenreSourcesTray from "../components/GenreSourcesTray";
 import CoverImg, { TrackCover } from "../components/CoverImg";
 import PageHeader from "../components/PageHeader";
 import { useI18n } from "../lib/i18n";
@@ -405,12 +406,12 @@ export default function ImportWizard() {
   const [genres, setGenres] = useState<Record<string, string[]>>({});
   const [discGenres, setDiscGenres] = useState<Record<number, string>>({});
   const [genreAddValues, setGenreAddValues] = useState<Record<string, string>>({});
-  /** Per-run import cap: which `limit` the next source run passes. Never
+  /** Per-run import cap: which `limit` the next genre run passes. Never
    *  above `mb_genre_count` — the server's own cap is what gets written. */
   const [genreLimit, setGenreLimit] = useState<number | null>(null); // null = the configured cap
-  /** What the last per-source genre import answered: how many tracks that
-   *  source updated, the names it wrote, and its own note when it stayed
-   *  silent (a blocked RateYourMusic says so here). */
+  /** What the last genre import answered: how many tracks it updated, the
+   *  names it wrote, which source wrote what, and each source's own note when
+   *  it stayed silent (a blocked RateYourMusic says so here). */
   const [genreJobResult, setGenreJobResult] = useState<{
     updated: number;
     genres: string[];
@@ -1369,33 +1370,34 @@ export default function ImportWizard() {
     }
   };
 
-  /** ONE genre source, written straight to the files.
+  /** ONE genre import: the CONFIGURED chain, in its own priority order.
    *
-   *  The wizard has exactly two of these — "Genres from MusicBrainz" and
-   *  "Genres from RateYourMusic" — each asking that source alone, so a
-   *  blocked or empty one is never hidden behind the other's answer. The
-   *  server reports what the source wrote (`updated`, the names, and its own
-   *  reason for staying silent) and the step re-reads the files, so what
-   *  Continue would save is what actually landed. */
-  const importGenresFrom = async (source: "musicbrainz" | "rateyourmusic") => {
+   *  `sources` is omitted, so the server walks `genre_sources` — every source
+   *  ticked in the tray beside the button — top to bottom, and STOPS as soon
+   *  as a track's list is complete, which is what makes asking all of them
+   *  cost nothing on an album RateYourMusic and MusicBrainz can already
+   *  answer. The reply reports what each source wrote (`per_source`) and why
+   *  one stayed silent (`notes`), so a blocked RateYourMusic is visible here
+   *  instead of being swallowed by a merged list, and the step re-reads the
+   *  files so what Continue would save is what actually landed. */
+  const importGenres = async () => {
     const targets = albumTargets();
     if (!targets.length) {
       toast("Nothing to import genres for yet");
       return;
     }
-    const label = source === "musicbrainz" ? "MusicBrainz" : "RateYourMusic";
     setBusy(true);
     setGenreError(null);
     setGenreJobResult(null);
-    setAct({ label: `Importing genres from ${label}…` });
+    setAct({ label: "Importing genres…" });
     try {
-      const res = await api.genresImport(targets, genreLimit ?? undefined, [source], staged);
+      const res = await api.genresImport(targets, genreLimit ?? undefined, undefined, staged);
       setGenreJobResult(res);
       const perSource = Object.entries(res.per_source ?? {})
         .filter(([, names]) => names.length)
         .map(([name, names]) => `${name} ${names.length}`)
         .join(", ");
-      // The source wrote the files: re-read them so the step shows what
+      // A source wrote the files: re-read them so the step shows what
       // landed instead of the state it had before.
       if (albumPath && stepTracks.length) {
         try {
@@ -1411,11 +1413,14 @@ export default function ImportWizard() {
         }
       }
       qc.invalidateQueries({ queryKey: ["library"] });
-      const note = res.notes?.[source];
+      // Every source that stayed silent, its own reason — the report below
+      // lists them one per line, and this puts them in the toast as well so a
+      // blocked RateYourMusic is not only a toast that says "0 updated".
+      const silent = Object.values(res.notes ?? {});
       toast(
         res.updated
-          ? `${label}: ${res.updated} track(s) updated${perSource ? ` — ${perSource}` : ""}${note ? ` (${note})` : ""}`
-          : `${label} had no genres to write${note ? ` — ${note}` : ""}`
+          ? `${res.updated} track(s) updated${perSource ? ` — ${perSource}` : ""}${silent.length ? ` (${silent.join("; ")})` : ""}`
+          : `No genres to write${silent.length ? ` — ${silent.join("; ")}` : ""}`
       );
     } catch (e) {
       setGenreError(String(e));
@@ -3894,22 +3899,19 @@ const finish = async () => {
           {minMode && !missingHere && <MinNothingMissing />}
           <MinBlock min={minMode} here={missingHere} mine="">
             <div className="flex items-center gap-2 flex-wrap">
+              {/* ONE button: it asks every source the user has ticked, in the
+                  priority order they read in the tray beside it — the two
+                  per-source buttons that used to sit here made the user pick a
+                  source the chain already ranks for them. */}
               <button
                 className="btn-ghost tap"
-                onClick={() => importGenresFrom("musicbrainz")}
+                onClick={importGenres}
                 disabled={busy || !albumTargets().length}
-                title="Ask MusicBrainz for this album's genres (recording → release → release group → artist) and write what it states"
+                title="Ask every ticked genre source, top to bottom, and write what they state — the chain stops as soon as a track's list is full"
               >
-                <CloudDownloadIcon /> Genres from MusicBrainz
+                <CloudDownloadIcon /> Import genres
               </button>
-              <button
-                className="btn-ghost tap"
-                onClick={() => importGenresFrom("rateyourmusic")}
-                disabled={busy || !albumTargets().length}
-                title="Ask RateYourMusic for this album's genres and write what its page states — a blocked RYM says so instead of writing a guess"
-              >
-                <CloudDownloadIcon /> Genres from RateYourMusic
-              </button>
+              <GenreSourcesTray />
               {/* The per-run limit can only LOWER the app's own cap: the server
                   writes and trims every genre list to `mb_genre_count`, so an
                   option above it would be a promise nothing keeps. */}
@@ -3930,8 +3932,9 @@ const finish = async () => {
                 </select>
               </label>
             </div>
-            {/* What the last source wrote — one source at a time, so a blocked
-                or empty one is never hidden behind the other's answer. */}
+            {/* What the last run wrote, per source — a blocked or empty one is
+                visible beside the ones that answered instead of hidden behind
+                the merged list. */}
             {genreError && (
               <div className="text-xs text-red-300" role="alert">
                 {genreError}
@@ -4005,7 +4008,9 @@ const finish = async () => {
               </div>
             )}
             <span className="text-xs text-zinc-500 -mt-1 block">
-              Genres are not fetched automatically — set the per-track limit, then ask MusicBrainz, RateYourMusic, or both.
+              Genres are not fetched automatically — set the per-track limit, then Import genres asks every source
+              ticked in the tray beside it, top to bottom, and stops as soon as a track's list is full (a source
+              that needs a login is skipped and says so until you set it).
               The app derives the family (rock, electronic…) from the specific genres and writes it in the first slot,
               the specific genres after it: at most {genreCap} genre value{genreCap === 1 ? "" : "s"} per track (Settings → Import).
             </span>

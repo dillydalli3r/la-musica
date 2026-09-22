@@ -79,12 +79,17 @@ def _domain_columns(domain: str):
     return name.lstrip(".").lower(), name.startswith(".")
 
 
-def parse_cookie_file(text: str):
+def parse_cookie_file(text: str, with_values: bool = False):
     """(cookies, error) for a Netscape cookie file's text.
 
-    ``cookies`` is ``[(domain, name)]``, one entry per accepted line, and
-    ``error`` is the sentence to show the user when the text is not a cookie
-    file at all (exactly one of the two is ever set).
+    ``cookies`` is ``[(domain, name)]`` — or ``[(domain, name, value)]`` when
+    *with_values* is set, for the one caller that re-serves the file's cookies
+    as a `Cookie` header rather than as a jar of their own (the RateYourMusic
+    credential, server/api_rym.py) — one entry per accepted line, and ``error``
+    is the sentence to show the user when the text is not a cookie file at all
+    (exactly one of the two is ever set). The value is only ever returned when
+    asked for: it is a live credential, and the yt-dlp jar's own state is
+    names, counts and domains.
 
     A file is accepted on EITHER proof, because both are real exports: the
     ``# Netscape HTTP Cookie File`` header (what curl, yt-dlp and every
@@ -120,7 +125,7 @@ def parse_cookie_file(text: str):
         if len(parts) != _COOKIE_COLUMNS:
             junk += 1
             continue
-        domain, flag, path, secure, expiry, name, _value = parts
+        domain, flag, path, secure, expiry, name, value = parts
         host, initial_dot = _domain_columns(domain)
         if not host or ("." not in host and host != "localhost"):
             junk += 1
@@ -141,7 +146,8 @@ def parse_cookie_file(text: str):
         if expiry.strip() and not _EXPIRY_RX.match(expiry.strip()):
             junk += 1
             continue
-        cookies.append((host, name.strip()))
+        cookies.append((host, name.strip(), value) if with_values
+                       else (host, name.strip()))
     if not cookies and not seen_header:
         detail = (" (found no cookie line at all)" if not junk
                   else f" ({junk} line(s) were not cookie lines)")

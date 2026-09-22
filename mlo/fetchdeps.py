@@ -1,18 +1,27 @@
 """Automatic dependency fetcher.
 
 Downloads the official builds of the external encoder toolchain from GitHub
-releases and installs them into .dependencies/ using exactly the layout the
+releases and installs them into the music folder's tools directory
+(<music>/.mlo/tools — see mlo.paths.tools_dir) using exactly the layout the
 auto-detection in tools.py expects:
 
-    .dependencies/
+    <music>/.mlo/tools/
         flac v1.5.0/           flac.exe, metaflac.exe      (Windows)
         oxipng v10.2.0/        oxipng.exe | oxipng        (Windows | Linux)
         slskd v0.26.0/         slskd.exe | slskd + wwwroot
+        libjpeg-turbo v3.2.0/  jpegtran.exe | jpegtran + bin/ + lib64/ (Linux)
+
+The tools used to live in <app folder>/.dependencies, next to the code. That
+folder is still READ (mlo.paths.legacy_tools_dir) so an install that predates
+the move keeps working, but nothing installs there any more: the tools belong
+with everything else this app owns, under the music folder.
 
 Asset sources:
     flac            xiph/flac          flac-<v>-win.zip
     libjxl          libjxl/libjxl      jxl-x64-windows-static.zip
+                                       jxl-linux-x86_64-static.tar.lz (static)
     libjpeg-turbo   libjpeg-turbo/...  libjpeg-turbo-<v>-vc-x64.exe (NSIS)
+                                       libjpeg-turbo-official_<v>_<arch>.deb
     oxipng          oxipng/oxipng      oxipng-<v>-x86_64-pc-windows-msvc.zip
                                        oxipng-<v>-x86_64-unknown-linux-musl.tar.gz
     slskd           slskd/slskd        slskd-<v>-win-x64.zip
@@ -26,12 +35,13 @@ the required binaries are copied out.
 
 Platforms: install_kind() is the single answer to how a tool installs here.
 Every tool has a Windows build; the ones upstream also ships a Linux build for
-(LINUX_BINARIES - oxipng, slskd) install natively there too; the rest are distro
-packages (LINUX_PACKAGES: flac, ffmpeg, …) or have no build this app can use
-(AudioAuditor, CUETools, Logchecker + php). An install the platform cannot
-perform is refused with that reason instead of downloading something that cannot
-run, and the Dependencies rows carry the same answer so the UI never shows an
-Install button for a tool that cannot be installed here.
+(LINUX_BINARIES - oxipng, slskd, AudioAuditor, rsgain, fpcalc, libjxl and
+libjpeg-turbo) install natively there too; the rest are distro packages
+(LINUX_PACKAGES: flac, ffmpeg, …) or have no build this app can use (CUETools
+and Logchecker need a runtime - see LINUX_RUNNERS). An install the platform
+cannot perform is refused with that reason instead of downloading something that
+cannot run, and the Dependencies rows carry the same answer so the UI never
+shows an Install button for a tool that cannot be installed here.
 
 The vendored pip packages (librosa, beets, yt-dlp) are platform-independent.
 Each archive's LICENSE/COPYING/README is copied next to the installed binaries
@@ -42,6 +52,7 @@ Standard-library only - no requests.
 
 import ctypes
 import json
+import lzma
 import os
 import re
 import shutil
@@ -54,7 +65,7 @@ import time
 import zipfile
 import urllib.request
 
-from .paths import DEPS_DIR
+from .paths import tools_dir, tools_dirs
 from .subproc import run_tool
 from .tools import (
     PIP_IMPORT_NAMES,
@@ -194,8 +205,7 @@ LINUX_BINARIES = {
             "arm64": r"^CUETools_[\d.]+\.zip$",
         },
         "markers": ("CUETools.ARCUE.exe",),
-        "runner": "mono",
-        "launcher": ("CUETools.ARCUE", "CUETools.ARCUE.exe"),
+        "launcher": ("CUETools.ARCUE", "CUETools.ARCUE.exe", "mono"),
     },
     "rsgain": {
         # One static x86-64 build — the v3.8 asset `rsgain-3.8-Linux.tar.xz`
@@ -218,6 +228,39 @@ LINUX_BINARIES = {
             "arm64": r"^chromaprint-fpcalc-\d+\.\d+(?:\.\d+)*-linux-arm64\.tar\.gz$",
         },
         "markers": ("fpcalc",),
+    },
+    "libjxl": {
+        # Upstream's static build is one .tar.lz holding tools/cjxl and
+        # tools/djxl (plus the licence texts); both are fully static — no
+        # PT_DYNAMIC at all — so nothing has to be on the host for them to run
+        # (verified by unpacking the v0.12.0 asset and reading its ELF
+        # headers). x86-64 ONLY: libjxl publishes no arm64 Linux asset of any
+        # kind, so this key stays x64 and an ARM host keeps the distro package
+        # in LINUX_PACKAGES rather than matching a pattern that cannot exist.
+        "patterns": {
+            "x64": r"^jxl-linux-x86_64-static\.tar\.lz$",
+        },
+        "markers": ("cjxl", "djxl"),
+    },
+    "libjpeg_turbo": {
+        # The .deb is the only Linux build upstream publishes, one per
+        # architecture, from the SAME release the Windows .exe comes from: an
+        # `ar` archive whose data.tar.xz holds the /opt/libjpeg-turbo prefix
+        # (verified by unpacking 3.2.0's amd64 package). Its binaries are
+        # dynamically linked against the libjpeg.so.62 that ships in that same
+        # prefix, and name it through an ABSOLUTE RPATH
+        # (/opt/libjpeg-turbo/lib64) which a copy into the tools folder cannot
+        # satisfy — so "lib_dir" brings the prefix's lib64 along and the
+        # launcher runs the binary with that folder on LD_LIBRARY_PATH (see
+        # lib_folder/_write_launcher). The launcher takes the binary's own
+        # name, so the real one is kept beside it as `jpegtran.bin`.
+        "patterns": {
+            "x64": r"^libjpeg-turbo-official_[\d.]+_amd64\.deb$",
+            "arm64": r"^libjpeg-turbo-official_[\d.]+_arm64\.deb$",
+        },
+        "markers": ("jpegtran",),
+        "lib_dir": "lib64",
+        "launcher": ("jpegtran", "jpegtran", 'env LD_LIBRARY_PATH="$(dirname "$0")/lib64"'),
     },
 }
 
@@ -253,10 +296,11 @@ PLATFORM_INDEPENDENT = {"librosa", "beets", "yt-dlp", "logchecker"}
 #
 # A key can be in BOTH this table and LINUX_BINARIES: upstream ships a build for
 # one architecture and the distro package covers the rest. rsgain publishes
-# x86-64 only, chromaprint publishes 64-bit ARM and x86-64 but nothing for a
-# 32-bit ARM host — install_kind() takes the download where a pattern matches
-# this machine and the package everywhere else, so no entry here is dead code
-# while its tool has a build for SOME architecture.
+# x86-64 only, libjxl ships a static x86-64 tarball and nothing for ARM, and
+# chromaprint publishes 64-bit ARM and x86-64 but nothing for a 32-bit ARM host
+# — install_kind() takes the download where a pattern matches this machine and
+# the package everywhere else, so no entry here is dead code while its tool has
+# a build for SOME architecture.
 LINUX_PACKAGES = {
     "flac": "flac",
     "libjxl": "libjxl-tools",
@@ -268,7 +312,7 @@ LINUX_PACKAGES = {
 }
 
 # Vendored pure-Python tools: installed with `pip install --target` into a
-# versioned .dependencies folder instead of shipping binaries. They are
+# versioned tools folder instead of shipping binaries. They are
 # imported by prepending the folder to sys.path (see tools.python_pkg_path).
 #
 # The pip NAME only. The version lives in PINNED (and in the version-stamped
@@ -408,7 +452,7 @@ def runner_missing(key, platform=None) -> str:
 def install_kind(key, platform=None, machine=None):
     """How *key* installs on *platform*: `deps` | `system` | `unsupported`.
 
-    `deps`        the installer fetches it into .dependencies (a pinned
+    `deps`        the installer fetches it into the tools folder (a pinned
                   Windows binary, a native Linux build or a pip package)
     `system`      the platform provides it as a distro package
     `unsupported` nothing to fetch: upstream ships no build for this platform,
@@ -431,7 +475,7 @@ def install_kind(key, platform=None, machine=None):
 
 
 def installable(key, platform=None, machine=None):
-    """Whether this platform can install *key* into .dependencies."""
+    """Whether this platform can install *key* into the tools folder."""
     return install_kind(key, platform=platform, machine=machine) == "deps"
 
 
@@ -495,12 +539,34 @@ def system_upgrade_command(key, platform=None):
 
 
 def launcher(key, platform=None):
-    """`(name, program, runner)` when an install of *key* is a Windows build
-    this platform runs through an interpreter, else None."""
+    """`(name, program, command)` when an install of *key* needs a wrapper on
+    this platform, else None.
+
+    Two installs need one, for the same reason — everything downstream runs ONE
+    executable at a path, so the wrapper is where the extra requirement lives:
+    a Windows build run through an interpreter (CUETools' console tool under
+    mono), and upstream's libjpeg-turbo .deb, whose binary names its shared
+    library by an absolute RPATH the copy cannot satisfy (so the wrapper puts
+    the lib folder that travelled with it on LD_LIBRARY_PATH, see lib_folder).
+    """
     spec = LINUX_BINARIES.get(key) or {}
     if _platform_of(platform) == "windows" or not spec.get("launcher"):
         return None
-    return (*spec["launcher"], spec["runner"])
+    return tuple(spec["launcher"])
+
+
+def lib_folder(key, platform=None):
+    """The folder of shared libraries an install of *key* has to carry beside
+    its binaries, or None.
+
+    libjpeg-turbo's .deb puts them in the `lib64` of the prefix its binaries
+    live in and links them by absolute path (see LINUX_BINARIES), so the folder
+    is copied into the install and named by the launcher above.
+    """
+    spec = LINUX_BINARIES.get(key) or {}
+    if _platform_of(platform) == "windows":
+        return None
+    return spec.get("lib_dir")
 
 
 def run_name(key, platform=None):
@@ -528,19 +594,25 @@ def markers(key, platform=None):
 TOOL_DIRS = INSTALL_PREFIX  # backward compat for app.py (use installed_path() for versioned folder)
 
 def installed_path(key):
-    """Return the actual versioned folder for an installed tool, or None."""
+    """Return the actual versioned folder for an installed tool, or None.
+
+    Every tools folder an install may live in is searched, the current one
+    first (see mlo.paths.tools_dirs): a slskd installed before the move is
+    still the slskd this app runs.
+    """
     prefix = INSTALL_PREFIX.get(key, key)
-    if not os.path.isdir(DEPS_DIR):
-        return None
-    # Find folder starting with prefix (e.g. "php v8.1.28")
-    try:
-        for entry in os.listdir(DEPS_DIR):
-            full = os.path.join(DEPS_DIR, entry)
+    for root in tools_dirs():
+        if not os.path.isdir(root):
+            continue
+        # Find folder starting with prefix (e.g. "php v8.1.28")
+        try:
+            entries = os.listdir(root)
+        except OSError:
+            continue
+        for entry in entries:
+            full = os.path.join(root, entry)
             if os.path.isdir(full) and entry.lower().startswith(prefix.lower()):
-                # Prefer exact prefix match with version
                 return full
-    except OSError:
-        pass
     return None
 
 # Exe files that must be present after installation.
@@ -566,7 +638,7 @@ SINGLE_EXE_TOOLS = {"audioauditor", "logchecker", "yt-dlp"}
 # Exact, pinned dependency versions. Every tool is downloaded from a specific
 # GitHub release tag (never "latest") so installs and CI builds are fully
 # reproducible. `tag` is the GitHub release tag, `asset` the exact file to
-# fetch, `version` the version label used in the .dependencies folder.
+# fetch, `version` the version label used in the install folder's name.
 PINNED = {
     "flac": {
         "tag": "1.5.0",
@@ -1091,6 +1163,32 @@ def _upstream_check_state():
         return _upstream_running, _upstream_done_at, _upstream_error
 
 
+def _legacy_root_of(key, info):
+    """The tools folder this tool was found in when it is NOT the one an
+    install writes to, else None.
+
+    Detection reads every folder in mlo.paths.tools_dirs — the music folder's
+    .mlo/tools first, then the pre-move <app folder>/.dependencies — and a copy
+    found in an older one is worth saying out loud: nothing writes there any
+    more, so a reinstall or update lands in the new folder, and the folder the
+    page's "open the tools folder" button opens would not hold the file this row
+    points at. Derived from the SAME list detection read, so the note cannot
+    drift from what was actually searched.
+    """
+    roots = tools_dirs()
+    paths = [v for v in (info or {}).values() if isinstance(v, str)]
+    if key in PIP_PACKAGES:
+        # A vendored pip package has no `*_exe` field to read the folder off.
+        pkg = pip_package_path(key)
+        if pkg:
+            paths.append(pkg)
+    for root in roots[1:]:
+        prefix = os.path.normcase(os.path.join(root, ""))
+        if any(os.path.normcase(p).startswith(prefix) for p in paths):
+            return root
+    return None
+
+
 def dependency_rows(refresh=False, block=False):
     """One row per tool - the single source of truth for the API, the CLI table
     and the auto-update worker, so all three agree on what "update" means.
@@ -1117,12 +1215,15 @@ def dependency_rows(refresh=False, block=False):
     two facts are their own fields —
       update_available  is a newer upstream release than what is installed (a)
       install_kind      what this host can do: `deps` = fetch into
-                        .dependencies, `system` = the OS package manager owns
+                        tools folder, `system` = the OS package manager owns
                         it, `unsupported` = nothing this app can fetch (b)
       action            what the row's action column offers — `install`,
                         `update` (both fetch a download), `upgrade` (copy
                         upgrade_command), `none` (nothing to do here) (c)
     — and `upgrade_command` carries the exact command for `action == upgrade`.
+    `legacy_root` is the fourth: the copy this row describes was found in the
+    pre-move tools folder rather than the music folder's (see _legacy_root_of),
+    which the note spells out for the user.
     """
     tools = detect_all_tools()
     installed = installed_versions()
@@ -1136,6 +1237,7 @@ def dependency_rows(refresh=False, block=False):
         iv = installed.get(key)
         have = iv or ver
         target = latest.get(key)
+        legacy_root = _legacy_root_of(key, info)
         entry = upstream.get(key) or {}
         uv = entry.get("version")
         err = entry.get("error")
@@ -1191,6 +1293,14 @@ def dependency_rows(refresh=False, block=False):
             note = "upstream has no versioned release (rolling build)"
         else:
             note = None
+        if legacy_root:
+            # Which folder it was found in is one more fact about the row, and
+            # the one a user needs to explain why the file they are looking at
+            # is not under the music folder: nothing writes to an older root any
+            # more, so the next install or update lands in the new one.
+            note = ((note + " · ") if note else "") + (
+                f"installed in the pre-move tools folder ({legacy_root}) — a "
+                f"reinstall or update lands under the music folder instead")
         out.append({
             "key": key,
             "name": name,
@@ -1211,6 +1321,11 @@ def dependency_rows(refresh=False, block=False):
             "installable": installable(key),
             "install_note": install_problem(key),
             "install_kind": kind,
+            # Whether the copy this row describes came from a PRE-MOVE tools
+            # folder (any root but the one this host installs into — see
+            # _legacy_root_of), which is still read so an install made before
+            # the move keeps working. The note names the folder itself.
+            "legacy_root": bool(legacy_root),
             # The action this row offers, and the exact command it copies (see
             # the docstring). Both are computed here so the page never has to
             # work out for itself what a row behind upstream can do.
@@ -1261,7 +1376,7 @@ def installed_versions():
 
 
 def pip_package_path(key):
-    """Folder of a vendored pip package (e.g. '.dependencies/librosa v0.11.0')
+    """Folder of a vendored pip package (e.g. '<tools>/librosa v0.11.0')
     when its top-level package dir is present, else None."""
     return python_pkg_path(key)
 
@@ -1399,28 +1514,204 @@ def _archive_suffix(asset):
     first Linux tarball this installer ever fetched.
     """
     lower = asset.lower()
-    for suffix in (".tar.gz", ".tar.xz", ".tar.bz2", ".tgz", ".tar",
-                   ".zip", ".7z", ".exe", ".phar"):
+    for suffix in (".tar.gz", ".tar.xz", ".tar.bz2", ".tar.lz", ".tgz", ".tar",
+                   ".zip", ".7z", ".exe", ".deb", ".phar"):
         if lower.endswith(suffix):
             return suffix
     return os.path.splitext(asset)[1]
 
 
+def _extract_tar(source, dest_dir, *, allow_absolute_links=False):
+    """Extract a tarball — a path, or an open file object — into *dest_dir*.
+
+    tarfile restores each entry's mode, which is what makes the unpacked binary
+    executable; `filter="data"` (3.12+) keeps that while refusing entries that
+    would escape dest_dir or carry device nodes, the same guarantee zipfile
+    gives. Compression is detected from the content (xz, gz, bz2), so a temp
+    file's name decides nothing.
+
+    `allow_absolute_links` relaxes exactly one of those rules, for the one
+    archive shape that needs it: a Debian package's data.tar carries absolute
+    symlinks into /usr/share/doc beside its binaries, and the data filter
+    refuses those outright (measured on libjpeg-turbo's .deb). The `tar` filter
+    keeps what matters — nothing is written outside *dest_dir* and no relative
+    link may point out of it — and only stores the absolute link as the link it
+    says it is. Nothing follows it: the install copies the binaries folder and
+    the lib folder, and a dangling link beside them is never traversed.
+    """
+    with tarfile.open(source) as tf:
+        try:
+            tf.extractall(dest_dir,
+                          filter="tar" if allow_absolute_links else "data")
+        except TypeError:          # Python < 3.12: no extraction filters
+            tf.extractall(dest_dir)
+
+
+_LZIP_MAGIC = b"LZIP"
+
+
+def _lzip_plain_bytes(archive_path, dest_path):
+    """Write the decompressed contents of an lzip file to *dest_path*.
+
+    libjxl publishes its static Linux build as `.tar.lz` and nothing else (see
+    LINUX_BINARIES), and **Python's lzma module cannot read lzip as a
+    container**: `lzma.open` knows .xz and the LZMA-alone header, so handing it
+    a lzip file fails with "Input format not supported by decoder" (measured
+    against the v0.12.0 asset). What lzip wraps is a raw LZMA1 stream though —
+    its own 6-byte header carries the magic, a version and the dictionary size,
+    and a 20-byte trailer follows the compressed data — so that is what is
+    decoded here, exactly as the `lzip` binary would: FORMAT_RAW with the
+    dictionary size from the header and lzip's fixed lc/lp/pb (3/0/2). No lzip
+    executable has to exist on the host for this, which is what makes the
+    install work in a container.
+
+    A lzip file is a SEQUENCE of members, and the libjxl asset really has two:
+    the tarball, then a 44-byte member holding tar's two empty end blocks
+    (measured). Each member is decoded in turn and the next one found after the
+    previous one's trailer, so the result is the whole tar stream. Anything
+    that is not lzip raises with the reason instead of leaving half a tarball
+    behind.
+    """
+    with open(archive_path, "rb") as fh:
+        data = fh.read()
+    with open(dest_path, "wb") as out:
+        pos = 0
+        while pos < len(data):
+            if data[pos:pos + 4] != _LZIP_MAGIC:
+                raise RuntimeError(
+                    f"{os.path.basename(archive_path)} is not an lzip archive "
+                    f"(no LZIP signature at byte {pos})")
+            code = data[pos + 5]
+            size = 1 << (code & 0x1F)
+            try:
+                member = lzma.LZMADecompressor(
+                    format=lzma.FORMAT_RAW,
+                    filters=[{"id": lzma.FILTER_LZMA1,
+                              "dict_size": size - (size // 16) * ((code >> 5) & 7),
+                              "lc": 3, "lp": 0, "pb": 2}])
+                out.write(member.decompress(data[pos + 6:]))
+            except lzma.LZMAError as e:
+                raise RuntimeError(
+                    f"could not decompress the lzip member at byte {pos}: {e}") from e
+            if not member.eof:
+                raise RuntimeError(
+                    f"the lzip member at byte {pos} is truncated")
+            # The trailer (crc, sizes) ends where the next member begins; the
+            # decoder hands back everything after the compressed stream, so the
+            # next magic is looked up from there.
+            tail = data.find(_LZIP_MAGIC, len(data) - len(member.unused_data))
+            pos = tail if tail > pos else len(data)
+
+
+def _zstd_decompress(src, dst):
+    """Copy a zstd-compressed file to *dst* plain, or say what is missing.
+
+    dpkg can compress a .deb's data member with zstd (the amd64/arm64
+    libjpeg-turbo packages ship xz, but the format is dpkg's own choice), and
+    Python's stdlib only learned to read zstd in 3.14 — so this names the
+    missing piece rather than writing a tar nothing can read.
+    """
+    try:
+        import zstandard
+    except ImportError as e:
+        raise RuntimeError(
+            "this .deb's data member is zstd-compressed and this Python has no "
+            "zstd reader — install the `zstandard` package and retry") from e
+    with open(src, "rb") as fh, open(dst, "wb") as out:
+        with zstandard.ZstdDecompressor().stream_reader(fh) as reader:
+            shutil.copyfileobj(reader, out)
+
+
+def _extract_deb(archive_path, dest_dir, log):
+    """Extract a Debian package's file tree without dpkg.
+
+    libjpeg-turbo publishes its Linux builds as .deb and nothing else (see
+    LINUX_BINARIES), and dpkg-deb is not on every host — and not on Windows at
+    all — so the wrapper is read here directly. It is a Unix `ar` archive: a
+    fixed 60-byte header per member (name, mtime, owner, mode, size in plain
+    decimal), odd-sized members padded by one byte, and only `data.tar.*` is the
+    file tree (`debian-binary` and `control.tar.*` are metadata). The data
+    member is itself a tarball and goes through _extract_tar like every other
+    asset, which is also what restores the file modes a package's binaries need
+    to be runnable.
+    """
+    fd, data_file = tempfile.mkstemp(prefix="mlo_deb_")
+    member = ""
+    try:
+        with open(archive_path, "rb") as fh, os.fdopen(fd, "wb") as out:
+            if fh.read(8) != b"!<arch>\n":
+                raise RuntimeError(
+                    f"{os.path.basename(archive_path)} is not a Debian package "
+                    f"(no ar signature)")
+            while True:
+                header = fh.read(60)
+                if len(header) < 60:
+                    raise RuntimeError(
+                        f"{os.path.basename(archive_path)} holds no data.tar member")
+                member = header[:16].decode("ascii", "replace").strip().rstrip("/")
+                try:
+                    size = int(header[48:58].decode("ascii").strip())
+                except ValueError:
+                    raise RuntimeError(
+                        f"unreadable ar member header for {member!r}")
+                if not member.startswith("data.tar"):
+                    fh.seek(size + (size % 2), os.SEEK_CUR)
+                    continue
+                log(f"  package data: {member} ({size} bytes)")
+                remaining = size
+                while remaining:
+                    chunk = fh.read(min(65536, remaining))
+                    if not chunk:
+                        raise RuntimeError(f"truncated ar member {member!r}")
+                    out.write(chunk)
+                    remaining -= len(chunk)
+                break
+        if member.endswith(".zst"):
+            plain = data_file + ".tar"
+            try:
+                _zstd_decompress(data_file, plain)
+                _extract_tar(plain, dest_dir, allow_absolute_links=True)
+            finally:
+                try:
+                    os.remove(plain)
+                except OSError:
+                    pass
+        else:
+            _extract_tar(data_file, dest_dir, allow_absolute_links=True)
+    finally:
+        try:
+            os.remove(data_file)
+        except OSError:
+            pass
+
+
 def _extract_archive(archive_path, dest_dir, log):
-    """Extract zip / tar / 7z / NSIS installer into dest_dir."""
+    """Extract zip / tar / lzip / deb / 7z / NSIS installer into dest_dir."""
     lower = archive_path.lower()
 
     if lower.endswith((".tar.gz", ".tgz", ".tar.xz", ".tar.bz2", ".tar")):
-        # Linux release assets are tarballs (oxipng) as often as zips. tarfile
-        # restores each entry's mode, which is what makes the unpacked binary
-        # executable; `filter="data"` (3.12+) keeps that while refusing entries
-        # that would escape dest_dir or carry device nodes, the same guarantee
-        # zipfile gives.
-        with tarfile.open(archive_path) as tf:
+        # Linux release assets are tarballs (oxipng) as often as zips.
+        _extract_tar(archive_path, dest_dir)
+        return
+
+    if lower.endswith(".tar.lz"):
+        # lzip is a decompression of its own (see _lzip_plain_bytes), so the
+        # members are written out as a plain tarball first and that goes through
+        # the same extraction as the others.
+        fd, plain = tempfile.mkstemp(prefix="mlo_lz_", suffix=".tar")
+        os.close(fd)
+        try:
+            _lzip_plain_bytes(archive_path, plain)
+            _extract_tar(plain, dest_dir)
+        finally:
             try:
-                tf.extractall(dest_dir, filter="data")
-            except TypeError:      # Python < 3.12: no extraction filters
-                tf.extractall(dest_dir)
+                os.remove(plain)
+            except OSError:
+                pass
+        return
+
+    if lower.endswith(".deb"):
+        _extract_deb(archive_path, dest_dir, log)
         return
 
     if lower.endswith(".zip"):
@@ -1492,6 +1783,12 @@ def _locate_binaries(root, key):
 
     if not candidates:
         return None
+    # Prefer a package's own binaries folder: a .deb's data.tar holds its whole
+    # prefix (bin/ beside lib64/, include/, doc/), and "…/bin" is where its
+    # executables are meant to be run from.
+    for cand in candidates:
+        if os.path.basename(cand).lower() in ("bin", "sbin"):
+            return cand
     # Prefer 64-bit layouts (flac zip ships Win64 + Win32 side by side).
     for cand in candidates:
         low = cand.lower()
@@ -1531,23 +1828,35 @@ def _copy_licence_files(root, dest_dir, log=print):
     return copied
 
 
-def _write_launcher(dest_dir, name, program, runner):
-    """Write *name* as a script that runs *program* under *runner*.
+def _write_launcher(dest_dir, name, program, command):
+    """Write *name* as a script that runs *program* under *command*.
 
-    CUETools ships Windows binaries, and its console tool runs under mono on
-    Linux (measured: CUETools.ARCUE.exe prints its usage under mono on trixie).
-    Everything downstream invokes ONE executable — `resolve_arcue_exe` returns a
-    path, `run_tool([exe, cue])` runs it — so the launcher is where the runtime
-    lives, rather than every caller learning about it.
+    Two installs need one (see launcher): CUETools ships Windows binaries and
+    its console tool runs under mono on Linux, and libjpeg-turbo's .deb binary
+    needs the lib folder that travelled with it on LD_LIBRARY_PATH, because the
+    RPATH it carries points into a prefix that does not exist here. Everything
+    downstream invokes ONE executable — `resolve_arcue_exe` returns a path,
+    `run_tool([exe, cue])` runs it, images.py runs `jpegtran_exe` — so the
+    launcher is where that requirement lives, rather than every caller learning
+    about it.
+
+    When the wrapper has to take the program's OWN name, the real file is kept
+    beside it as `<name>.bin` and the script runs that: the marker a detector
+    looks for stays the name of the thing it executes. Returns the name of the
+    file the script runs, so the caller can make sure it is executable.
     """
     path = os.path.join(dest_dir, name)
     program = os.path.basename(program)
+    if program == name:
+        os.replace(path, path + ".bin")
+        program += ".bin"
     with open(path, "w", encoding="utf-8", newline="\n") as fh:
         fh.write("#!/bin/sh\n"
-                 f"# Generated by la musica: {program} is a Windows build that\n"
-                 f"# runs under {runner} on this platform.\n"
-                 f'exec {runner} "$(dirname "$0")/{program}" "$@"\n')
+                 f"# Generated by la musica: this is how {program} is run on\n"
+                 f"# this platform (see mlo/fetchdeps.py).\n"
+                 f'exec {command} "$(dirname "$0")/{program}" "$@"\n')
     os.chmod(path, 0o755)
+    return program
 
 
 def _make_executable(dest_dir, marker_names):
@@ -1578,15 +1887,20 @@ def _existing_install(prefix, markers):
 
     Only a folder carrying every marker executable counts: a half-written or
     manually emptied folder is never treated as the install to reuse.
+
+    The CURRENT tools folder is the one searched (mlo.paths.tools_dir): an
+    install lands where this app keeps its tools from here on, and the pre-move
+    root stays a read-only fallback (mlo.paths.legacy_tools_dir).
     """
-    if not os.path.isdir(DEPS_DIR):
+    root = tools_dir()
+    if not os.path.isdir(root):
         return None
     rx = re.compile(rf"^{re.escape(prefix)}\s+v", re.IGNORECASE)
     found = [
-        entry for entry in os.listdir(DEPS_DIR)
+        entry for entry in os.listdir(root)
         if rx.match(entry)
-        and os.path.isdir(os.path.join(DEPS_DIR, entry))
-        and all(os.path.isfile(os.path.join(DEPS_DIR, entry, m)) for m in markers)
+        and os.path.isdir(os.path.join(root, entry))
+        and all(os.path.isfile(os.path.join(root, entry, m)) for m in markers)
     ]
     # A `vlatest` folder is the shipped layout for rolling releases: keep it
     # rather than renaming the install to the pinned version label.
@@ -1628,16 +1942,21 @@ def _rename_install(dest_dir, prefix, version, log=print):
 
 
 def _remove_older_versions(prefix, keep_dir):
-    if not os.path.isdir(DEPS_DIR):
+    root = tools_dir()
+    if not os.path.isdir(root):
         return
     # Versioned folders, `vlatest` included: a folder the installer can name
     # must also be one the stale-version pruner can reconcile, or every new
     # install leaves a second ffmpeg folder behind that is never cleaned up.
     # keep_dir (the install just verified to carry its marker executables) is
     # never touched.
+    #
+    # Only the CURRENT tools folder is pruned: the pre-move one is somebody
+    # else's install (this app no longer writes there), so an update must not
+    # delete it.
     rx = re.compile(rf"^{re.escape(prefix)}\s+v(?:\d|latest$)", re.IGNORECASE)
-    for entry in os.listdir(DEPS_DIR):
-        full = os.path.join(DEPS_DIR, entry)
+    for entry in os.listdir(root):
+        full = os.path.join(root, entry)
         if os.path.isdir(full) and rx.match(entry) and entry != keep_dir:
             shutil.rmtree(full, ignore_errors=True)
 
@@ -1655,7 +1974,7 @@ def _pip_python():
 
 
 def _install_pip_package(key, log=print, progress=None):
-    """Vendor a pure-Python tool into .dependencies with pip --target.
+    """Vendor a pure-Python tool into the tools folder with pip --target.
 
     Keeps the running interpreter's site-packages untouched (portable
     installs) and mirrors the versioned-folder layout of binary tools.
@@ -1676,7 +1995,7 @@ def _install_pip_package(key, log=print, progress=None):
         # anything upstream publishes — an update must never walk a copy back.
         log(f"{display} is already at v{installed} — nothing to install")
         return installed
-    dest_dir = os.path.join(DEPS_DIR, f"{key} v{target}")
+    dest_dir = os.path.join(tools_dir(), f"{key} v{target}")
     log(f"Downloading {display} v{target} (pip) …")
     cmd = [
         _pip_python(), "-m", "pip", "install",
@@ -1723,7 +2042,7 @@ def _install_php(log=print, progress=None):
         return installed
     zip_url = php_zip_url(version)
     log(f"Downloading {display} v{version} (php zip) …")
-    dest_dir = os.path.join(DEPS_DIR, f"php v{version}")
+    dest_dir = os.path.join(tools_dir(), f"php v{version}")
     fd, tmp_zip = tempfile.mkstemp(suffix=".zip")
     os.close(fd)
     workdir = tempfile.mkdtemp(prefix="mlo_php_")
@@ -1841,12 +2160,12 @@ def _install_one(key, log=print, progress=None):
     wanted = markers(key)
     installed = installed_versions().get(key)
     # "Already there" is what the DETECTOR says, PATH included — not only a
-    # .dependencies folder. A copy the user installed with scoop/apt is a copy
+    # tools folder. A copy the user installed with scoop/apt is a copy
     # the table calls Ready-or-Update, and an Install press on such a row used
     # to take the pin (no folder of ours = "first install"): the press
     # re-downloaded the version already on PATH, reported changed: false, and
     # the Update chip survived. A PATH copy NEWER than the pin was worse — it
-    # was "updated" downwards into .dependencies.
+    # was "updated" downwards into the tools folder.
     upstream = bool(installed or _existing_install(prefix, wanted))
     rel = _release(key, upstream)
     version = rel["version"]
@@ -1883,7 +2202,7 @@ def _install_one(key, log=print, progress=None):
 
     display = DISPLAY_NAMES[key]
     existing = _existing_install(prefix, wanted)
-    dest_dir = os.path.join(DEPS_DIR, existing or f"{prefix} v{version}")
+    dest_dir = os.path.join(tools_dir(), existing or f"{prefix} v{version}")
 
     tmp_archived_fd, tmp_archived = tempfile.mkstemp(
         suffix=_archive_suffix(asset))
@@ -1951,6 +2270,18 @@ def _install_one(key, log=print, progress=None):
                         f"{display} is running — {fname} is in use by another "
                         f"process, so it cannot be replaced. Stop it and "
                         f"install again ({type(e).__name__}: {e})") from e
+            # A prefix build puts its shared libraries in a SIBLING of the
+            # folder carrying the binaries and names them by an absolute RPATH
+            # (libjpeg-turbo's .deb does; see LINUX_BINARIES), so the folder
+            # travels too — the launcher written below is what points the
+            # binary at it. Without it the install "succeeded" and every run
+            # died on a library the host does not have.
+            libs = lib_folder(key)
+            if libs:
+                sibling = os.path.join(os.path.dirname(src), libs)
+                if os.path.isdir(sibling):
+                    shutil.copytree(sibling, os.path.join(dest_dir, libs),
+                                    symlinks=True, dirs_exist_ok=True)
             _copy_licence_files(workdir, dest_dir, log)
 
         names = {f.lower() for f in os.listdir(dest_dir)}
@@ -1958,9 +2289,11 @@ def _install_one(key, log=print, progress=None):
         if missing:
             raise RuntimeError(f"Installed folder is missing: {', '.join(missing)}")
         wrapped = launcher(key)
-        if wrapped:
-            _write_launcher(dest_dir, *wrapped)
-        _make_executable(dest_dir, list(wanted) + ([wrapped[0]] if wrapped else []))
+        # The file the launcher RUNS has to be executable too: a POSIX build
+        # unpacked from a zip has no mode, and jpegtran.bin is the real binary
+        # of an install whose wrapper took its name (see _write_launcher).
+        program = _write_launcher(dest_dir, *wrapped) if wrapped else None
+        _make_executable(dest_dir, list(wanted) + ([program] if program else []))
 
         # Before the pruner runs, and before anything reports a version: the
         # folder has to carry the version that is now in it.
@@ -1980,7 +2313,7 @@ def _install_one(key, log=print, progress=None):
 
 
 def refresh_tool_cache():
-    """Force re-detection of .dependencies on the next detect_all_tools().
+    """Force re-detection of the tools folders on the next detect_all_tools().
 
     The per-module latency caches latch too: mlo.audio and mlo.loudness each
     remember "no ffprobe/ffmpeg" for the life of the process, so installing
