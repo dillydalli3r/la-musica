@@ -36,6 +36,15 @@ the thing it is about — the album, the download folder, or this queue (see
 ``_notify_finish``): no acquisition is allowed to end in silence, whether it
 succeeded, found nothing, or gave up with a reason.
 
+ONE release is not on the network at all, and this module says so before it
+searches: a music video whose medium is DIGITAL MEDIA (its recordings
+MusicBrainz states are videos) is a set of YouTube uploads, so it is fetched
+through ``server.youtube`` instead of searched for — see ``acquisition_route``
+and ``_run_youtube``. That branch lives inside the same job, so its album takes
+the same import, the same queue row, the same stages and the same log as a
+downloaded folder; a music video on a DISC (DVD, Blu-ray, VHS, Video CD) and
+every audio release keep the Soulseek path unchanged.
+
 Progress is reported through mlo.stats.progress_hook (the same relay the
 WebSocket /ws/progress endpoint forwards to the UI) and mirrored into a
 pollable job state for the Soulseek page.
@@ -61,6 +70,9 @@ from mlo.stats import worker_count
 # network) or a Digital Media one (a set of YouTube uploads: see
 # acquisition_route).
 from mlo.release_choice import media_formats, video_formats
+# The library's definition of a track, for the one step that must see a
+# music-video album's files as tracks (the MB stamping below).
+from mlo.paths import LIB_AUDIO_EXTS
 # The app's own multi-value separator: RELEASECOUNTRY is written "; "-joined
 # (mlo.audio joins repeated fields with it, mlo.naming._first_multi reads the
 # first entry back), so the writer and the reader cannot disagree.
@@ -887,12 +899,21 @@ def _notify_finish(state, result, release):
             return
 
         if result.get("imported"):
-            events.emit("download_done", label,
-                        "Downloaded and imported into your library.",
+            body = "Downloaded and imported into your library."
+            # An album that is missing tracks must not read as a whole one.
+            # Only the YouTube branch ever sets `error_count` (its per-track
+            # failures), so this adds a sentence for it and changes nothing for
+            # a path that has no such count.
+            missing = int(result.get("error_count") or 0)
+            if missing:
+                body += (f" {missing} track(s) could not be fetched "
+                         f"({result.get('note') or 'see the job log'}).")
+            events.emit("download_done", label, body,
                         {"link": f"/album/{quote(album_path, safe='')}" if album_path
                                  else "/soulseek",
                          "release_mbid": mbid, "album_path": album_path,
-                         "imported": True})
+                         "imported": True,
+                         "error_count": missing})
             return
 
         events.emit("import_ready", label,
@@ -1437,6 +1458,13 @@ def release_queries(release, cfg, templates=None):
 _AUDIO_EXTS = {".flac", ".mp3", ".m4a", ".mp4", ".aac", ".ogg", ".oga", ".opus",
                ".wav", ".wma", ".aiff", ".aif", ".alac", ".ape", ".wv", ".shn",
                ".tta", ".mpc", ".mp2", ".mka", ".dsf", ".dff"}
+# The library's own definition of a track — audio PLUS the music-video
+# containers (mlo.paths.LIB_AUDIO_EXTS, the set server.main.is_audio_file and
+# the organizer/graders read). Stamping is the one place that wants it: a
+# music-video album's files must be stamped like any other album's, while the
+# SEARCH above keeps asking the network for audio (a peer folder is not made a
+# candidate by holding videos — see find_candidates).
+_LIB_AUDIO_EXTS = set(LIB_AUDIO_EXTS)
 # Lossless codecs a candidate folder can hold; everything else the network
 # offers (mp3, m4a/aac, ogg, opus, wma...) is lossy. Auto-import prefers
 # these folders, and only downloads lossy after the user says so.
@@ -2983,7 +3011,13 @@ def _stamp_mb_tags(album_dir, release):
     audio = []
     for root, _dirs, files in os.walk(album_dir):
         for f in sorted(files):
-            if os.path.splitext(f)[1].lower() in _AUDIO_EXTS:
+            # LIB_AUDIO_EXTS, not the search's own _AUDIO_EXTS: the list of
+            # files to STAMP is the library's definition of a track (audio +
+            # music-video containers), which is what organize, grading and MB
+            # matching read back. A music-video album arrives here either way —
+            # from the YouTube branch or from a peer folder of videos — and an
+            # album whose files nothing stamps is an album with no identity.
+            if os.path.splitext(f)[1].lower() in _LIB_AUDIO_EXTS:
                 audio.append(os.path.join(root, f))
 
     # match release tracks -> files (position first, then title+duration)
@@ -3011,14 +3045,37 @@ def _stamp_mb_tags(album_dir, release):
             used.add(hit)
             assign[hit] = t
 
-    def _write(af, key, value):
-        """Set a tag unless it already carries exactly this value."""
-        value = "" if value is None else str(value).strip()
-        if not value:
-            return
-        if str(af.get_tag(key) or "").strip() == value:
-            return
-        af.set_tag(key, value)
+    def _missing(af, path):
+        """The tags THIS file is missing or contradicts, as one mapping.
+
+        The rule `_write` applies per tag, lifted out so both write paths below
+        can share it: a value the file already carries is left alone (a
+        matching uploader's spelling survives), an empty one is never written.
+        """
+        want = {}
+
+        def add(key, value):
+            value = "" if value is None else str(value).strip()
+            if not value:
+                return
+            if str(af.get_tag(key) or "").strip() == value:
+                return
+            want[key] = value
+
+        for k, v in identity.items():
+            add(k, v)
+        # Album-level spelling of the chosen release (corrected when the
+        # uploader's tags say something else).
+        add("ALBUM", album_title)
+        add("ALBUMARTIST", artist_name)
+        t = assign.get(path)
+        if t:
+            add("MUSICBRAINZ_TRACKID", t.get("recording_mbid"))
+            add("TRACKNUMBER", t.get("position"))
+            add("DISCNUMBER", t.get("disc"))
+            add("TITLE", t.get("title"))
+            add("ARTIST", t.get("artist_credit"))
+        return want
 
     def _stamp_one(path):
         """Stamp ONE track's tags and land them in a SINGLE rewrite.
@@ -3030,6 +3087,13 @@ def _stamp_mb_tags(album_dir, release):
         for the one flush at the end instead. It is turned off even when a
         write raised, so a file is never left holding changes nobody saved.
 
+        A VIDEO container has no deferral to lean on — every set_tag on one is
+        an ffmpeg stream copy of its own, eighteen of them for this stamp, on a
+        file that can be gigabytes — so its whole block goes through
+        set_video_tags, the one-pass writer the video pipeline uses. That path
+        can also re-emit a raw container as MKV (af.tag_output_path), which is
+        the file the album now holds.
+
         True = this file carries the release identity now. The flush's own
         verdict IS that answer: deferred, a write that cannot land (a full
         disk, a read-only file) no longer raises out of set_tag, so calling it
@@ -3038,6 +3102,11 @@ def _stamp_mb_tags(album_dir, release):
             af = AudioFile(path)
             if af.audio is None:
                 return False
+            want = _missing(af, path)
+            if not want:
+                return True
+            if str(getattr(af, "kind", "")) == "video":
+                return bool(af.set_video_tags(want))
             # A stand-in for AudioFile (a test double) cannot defer: it writes
             # per tag, exactly as it did before. Same guard mlo.autotag,
             # mlo.audiometa and mlo.moods keep.
@@ -3046,19 +3115,8 @@ def _stamp_mb_tags(album_dir, release):
                 af.defer_save(True)
             stamped = False
             try:
-                for k, v in identity.items():
-                    _write(af, k, v)
-                # Album-level spelling of the chosen release (corrected when
-                # the uploader's tags say something else).
-                _write(af, "ALBUM", album_title)
-                _write(af, "ALBUMARTIST", artist_name)
-                t = assign.get(path)
-                if t:
-                    _write(af, "MUSICBRAINZ_TRACKID", t.get("recording_mbid"))
-                    _write(af, "TRACKNUMBER", t.get("position"))
-                    _write(af, "DISCNUMBER", t.get("disc"))
-                    _write(af, "TITLE", t.get("title"))
-                    _write(af, "ARTIST", t.get("artist_credit"))
+                for k, v in want.items():
+                    af.set_tag(k, v)
                 stamped = True
             finally:
                 if defer and af.defer_save(False) is False:
@@ -3722,7 +3780,8 @@ def _record_wish_attempt(wid, error, cfg):
     return delay
 
 
-def _ask_to_wish(release, queries, waited, cfg, confirm_lossy, error=""):
+def _ask_to_wish(release, queries, waited, cfg, confirm_lossy, error="",
+                 source=""):
     """Park the job on the "add to wishes?" prompt; add the wish if accepted.
 
     `waited` is the seconds the job's searches REALLY took (`_search_seconds`,
@@ -3749,7 +3808,13 @@ def _ask_to_wish(release, queries, waited, cfg, confirm_lossy, error=""):
     Returns the finished-job result when the wish was added, else None (the
     prompt did not apply, or the user declined); a cancelled job is reported by
     the caller's own `_cancelled()` check, which is the same check every other
-    prompt in this file uses."""
+    prompt in this file uses.
+
+    `source` is where this offer came FROM, recorded on the wish (server.wishes
+    SOURCES): "" for the two Soulseek dead ends, which the row labels by their
+    release as it always has, and "youtube" for the branch that looked on
+    YouTube — a wish the user accepts there is not one the network can answer
+    for, and the row must say so."""
     if not (confirm_lossy and release.get("id")
             and cfg.get("soulseek_auto_wish_prompt", True)):
         return None
@@ -3779,6 +3844,7 @@ def _ask_to_wish(release, queries, waited, cfg, confirm_lossy, error=""):
         artist=((release.get("artists") or [{}])[0].get("name", "")),
         year=str(release.get("date") or "")[:4],
         queries=list(queries),
+        source=source,
         # The release the job just resolved, so the new wish's own row can name
         # the exact pressing it is waiting for without a second lookup.
         release=release)
@@ -3817,7 +3883,7 @@ def _album_name(release):
 
 def _album_dir_name(release):
     """That name with the characters a filesystem refuses removed."""
-    return re.sub(r'[<>:"/\\|?*\x00-\x1f]', "", _album_name(release)).strip() or "Soulseek Import"
+    return _safe_component(_album_name(release))
 
 
 def _album_claim(release, cfg):
@@ -3889,6 +3955,271 @@ class _AlbumClaim:
         self._done.set()
 
 
+# --------------------------------------------------------------------------- #
+# YouTube — a DIGITAL music-video release
+# --------------------------------------------------------------------------- #
+# The YouTube route is the release's own medium's answer (acquisition_route
+# above) and it runs INSIDE the same job as the Soulseek path: the queue row,
+# the stages and the log are the ones the page already renders, and the album
+# goes through the same _import — so a music-video release the user asked for
+# comes out named, tagged and chained like any other download instead of in a
+# folder only yt-dlp knows about.
+#
+# Only the "search and download" half is different: there is no folder to find,
+# so every track of the release is looked up on YouTube by artist + title
+# (server.youtube.best_candidate — the artist's own channel preferred, lyric /
+# cover / tribute re-uploads rejected, the track's own length a ±5 s filter)
+# and downloaded with the app's one quality policy (best video+audio stream,
+# merged into MKV by the app's own ffmpeg). A track that cannot be found or
+# downloaded is THAT track's failure: the rest of the album is still imported,
+# and the job reports every one of them by name.
+
+
+def _safe_component(name, fallback="Soulseek Import"):
+    """One path segment with the characters a filesystem refuses removed."""
+    return re.sub(r'[<>:"/\\|?*\x00-\x1f]', "", str(name or "")).strip() or fallback
+
+
+def _youtube_album_dir(release, cfg):
+    """Where a YouTube album's tracks are staged before the import moves them.
+
+    The download dir's own `YouTube/` branch — under the folder the app shares
+    nothing from and sweeps, NOT the library: _import() moves the folder in, so
+    what stays here afterwards is a download whose import did not land, which a
+    retry can still use (exactly what the Soulseek path leaves behind)."""
+    from server import soulseek as slsk
+    return os.path.join(slsk.download_dir(cfg), "YouTube",
+                        _album_dir_name(release))
+
+
+def _youtube_filename(track, ext):
+    """The name a downloaded VIDEO gets inside the album folder.
+
+    `<disc>-<position> <title><ext>` — the shape the rest of the pipeline reads
+    a track's place out of: _parse_trackno takes the leading `1-02` as disc 2
+    track 1, and the naming script writes the same
+    `%discnumber%-$num(%tracknumber%,2) %title%` prefix. The UPLOAD's own title
+    is deliberately not used — "Artist - Song (Official Video)" is not a track
+    list, and MB stamping matches a file to its track by exactly this
+    number/title pair."""
+    disc = int(track.get("disc") or 1)
+    pos = int(track.get("position") or 0)
+    ext = str(ext or "")
+    if not ext:
+        ext = ".mkv"
+    elif not ext.startswith("."):
+        ext = "." + ext
+    return f"{disc}-{pos:02d} {_safe_component(track.get('title'), 'track')}{ext.lower()}"
+
+
+def _youtube_progress(done, total, text):
+    """The live block the queue renders while the YouTube branch works.
+
+    The same keys _progress_snapshot publishes, because it is the same queue
+    card — but the counts are TRACKS, not bytes: one yt-dlp call per track finds
+    AND downloads it, so there is no total size to weight a byte bar with and
+    inventing one would be a bar that means nothing."""
+    return {
+        "phase": str(text or ""), "username": "YouTube", "dir": "",
+        "files_done": int(done), "files_arrived": int(done),
+        "files_total": int(total), "bytes": 0, "size": 0,
+        "percent": round(done * 100.0 / total, 1) if total else 0,
+        "speed": None, "eta_s": None, "files": [],
+    }
+
+
+def _drop_youtube_staging(dest):
+    """Remove a cancelled YouTube job's staged files.
+
+    `dest` is this job's own folder — named after the album, whose library
+    folder the album claim serialises job against job — so nothing of anybody
+    else's is in it, and a cancelled music-video album does not leave gigabytes
+    of half a download behind. A FAILED job keeps its files instead: they are
+    what its retry downloads from, exactly like the Soulseek path's."""
+    try:
+        shutil.rmtree(dest, ignore_errors=True)
+    except Exception:
+        pass
+
+
+def _youtube_fetch(release, dest, cfg):
+    """Find and download every track of *release* from YouTube.
+
+    Returns (got, problems): one entry per downloaded track, in the release's
+    own track order, and one line per track that could not be found or
+    downloaded. A per-track failure is REPORTED, never raised — the other
+    tracks of a music-video collection are worth having, and the caller ends
+    the job on the count.
+
+    Tracks are fetched `worker_limit` at a time (the same setting every other
+    multi-file runner in the app obeys), each on a thread that re-binds the job
+    it reports into, so a few videos download side by side and their log lines
+    still land in THIS job."""
+    from concurrent.futures import ThreadPoolExecutor
+    from server import youtube
+
+    tracks = [t for t in (release.get("media") or []) if isinstance(t, dict)]
+    total = len(tracks)
+    artists = release.get("artists") or [{}]
+    artist = str((artists[0] or {}).get("name") or "") if artists else ""
+    owner = int(_job.get("id") or 0)
+    got = [None] * total
+    problems = []
+    lock = threading.Lock()
+    done = [0]
+
+    def one(i):
+        track = tracks[i]
+        _tl.jid = owner          # this thread's _log/_stage are THIS job's
+        title = str(track.get("title") or "")
+        by = str(track.get("artist_credit") or artist or "")
+        if _cancelled():
+            return
+        try:
+            seconds = float(track.get("length") or 0) / 1000.0 or None
+        except (TypeError, ValueError):
+            seconds = None
+        label = f"{by} — {title}".strip(" —") or f"track {i + 1}"
+        with lock:
+            _stage("downloading", f"YouTube: track {i + 1}/{total} — {label}")
+            _job["progress"] = _youtube_progress(done[0], total, label)
+        candidate = youtube.best_candidate(by, title, seconds, cfg)
+        if not candidate:
+            with lock:
+                problems.append(f"{label}: no usable YouTube upload found")
+            return
+        try:
+            fetched = youtube.download(candidate["url"], dest, cfg)
+        except Exception as e:
+            with lock:
+                problems.append(f"{label}: YouTube download failed ({e})")
+            return
+        path = str((fetched or {}).get("path") or "")
+        target = os.path.join(dest, _youtube_filename(
+            track, os.path.splitext(path)[1]))
+        try:
+            if path and os.path.abspath(path) != os.path.abspath(target):
+                os.replace(path, target)
+        except OSError as e:
+            with lock:
+                problems.append(f"{label}: could not name the download ({e})")
+            return
+        try:
+            size = os.path.getsize(target)
+        except OSError:
+            size = 0
+        if not size:
+            with lock:
+                problems.append(f"{label}: the download left no file")
+            return
+        got[i] = {"path": target, "track": track,
+                  "video_id": str(candidate.get("id") or ""),
+                  "url": str(candidate.get("url") or ""),
+                  "channel": str(candidate.get("channel") or ""),
+                  "height": (fetched or {}).get("height"),
+                  "abr": (fetched or {}).get("abr"), "size": size}
+        with lock:
+            done[0] += 1
+            quality = ""
+            if (fetched or {}).get("height"):
+                quality = f" ({int(fetched['height'])}p"
+                quality += (f", {int(fetched['abr'])} kbps audio)"
+                            if fetched.get("abr") else ")")
+            _log(f"  {done[0]}/{total} {os.path.basename(target)} — from "
+                 f"{candidate.get('channel') or 'YouTube'}{quality}")
+            _job["progress"] = _youtube_progress(done[0], total, label)
+
+    workers = worker_count(cfg, default=3, maximum=4, items=total)
+    with ThreadPoolExecutor(max_workers=workers) as ex:
+        list(ex.map(one, range(total)))
+    return [g for g in got if g], problems
+
+
+def _run_youtube(release, cfg, confirm_lossy):
+    """Fetch a Digital Media music-video release from YouTube and import it.
+
+    Runs INSTEAD of the search, inside the same job (see _run). Its outcomes
+    are the Soulseek path's own:
+
+    * every track downloaded — _import() (MB stamping, the naming script,
+      imports.finish_album) and a done job;
+    * SOME tracks — a music-video collection is routinely uploaded as a dozen
+      separate videos, so the album is imported from what came back and every
+      missing track is named in the log and counted in the result;
+    * NOTHING found — the same dead end a search that found nothing ends on
+      (_ask_to_wish: park and offer the wish list), never a silent success.
+    """
+    from server import youtube
+
+    total = len([t for t in (release.get("media") or []) if isinstance(t, dict)])
+    _log(f"{total} track(s) of this release are music videos published as "
+         f"Digital Media — fetching them from YouTube instead of searching "
+         f"Soulseek for a folder that cannot be there.")
+    if not youtube.enabled(cfg):
+        raise RuntimeError("YouTube downloads are disabled in Settings → Videos "
+                           "— enable them to fetch this music-video release")
+    if not youtube.ytdlp_available(cfg):
+        raise RuntimeError("yt-dlp is not available — install it under "
+                           "Dependencies to fetch this music-video release")
+
+    dest = _youtube_album_dir(release, cfg)
+    try:
+        os.makedirs(dest, exist_ok=True)
+    except OSError as e:
+        raise RuntimeError(f"cannot create the album folder {dest}: {e}")
+    _stage("searching", f"Finding {total} track(s) on YouTube…")
+    _log(f"YouTube: looking for {total} track(s) in "
+         f"{os.path.basename(dest)!r}…")
+    got, problems = _youtube_fetch(release, dest, cfg)
+    if _cancelled():
+        # The user said stop: what this job already fetched goes, exactly as
+        # the Soulseek path sweeps a cancelled candidate's bytes. A FAILED job
+        # keeps its files — they are what its retry downloads from.
+        _drop_youtube_staging(dest)
+        return _finish("cancelled")
+    if not got:
+        # Phrased in the app's own dead-end vocabulary ("nothing usable", see
+        # wishes._NOT_FOUND_HINTS) on purpose: this is "the network does not
+        # have it", not a transient outage, so the wish policy classifies the
+        # attempt as an empty search and stops re-asking on a timer.
+        msg = (f"Nothing usable found for “{release.get('title') or ''}” on "
+               f"YouTube — no usable upload for any of its {total} track(s) "
+               f"(see the log).")
+        for line in problems[:20]:
+            _log("  ✕ " + line)
+        wished = _ask_to_wish(release, [], 0, cfg, confirm_lossy, error=msg,
+                              source="youtube")
+        if _cancelled():
+            return _finish("cancelled")
+        if wished:
+            return _finish("done", wished)
+        raise RuntimeError(msg)
+
+    _stage("verifying", f"Checking {len(got)}/{total} file(s)…")
+    _log(f"  {len(got)}/{total} track file(s) are in the album folder.")
+    for line in problems[:20]:
+        _log("  ✕ " + line)
+    _stage("importing", "Importing into the library…")
+    result = _import(dest, release, cfg, _DIGITAL_MEDIA, source="YouTube")
+    # What did NOT come back, in the three places the user looks: the job log
+    # (below), the job's own note, and `error_count` for a caller that counts —
+    # an album missing two of its twelve videos must not read as a whole one.
+    result["error_count"] = len(problems)
+    result["problems"] = problems[:20]
+    if problems:
+        # The note names the tracks, not just the count: "2 of 12 missing" is
+        # not something a user can act on, "Second Video: no usable YouTube
+        # upload found" is.
+        result["note"] = (f"{len(problems)} of {total} track(s) were not "
+                          f"fetched from YouTube: "
+                          + "; ".join(problems[:3])
+                          + (f" (+{len(problems) - 3} more)"
+                             if len(problems) > 3 else ""))
+        _log(f"{len(problems)} of {total} track(s) could not be fetched from "
+             f"YouTube — the rest of the album is in the library.")
+    _finish("done", result)
+
+
 def _run(release_mbid=None, release=None, queries=None, username=None,
          target_dir=None, confirm_lossy=False, kind=None, mode=None, job_id=0):
     from server import soulseek as slsk
@@ -3905,9 +4236,9 @@ def _run(release_mbid=None, release=None, queries=None, username=None,
         # Media music-video release is fetched from YouTube, so the slskd
         # precondition below — and every search this job would otherwise run —
         # does not apply to it. Read from the payload the caller already holds
-        # when there is one; "" means "not decidable yet" (the release has to
-        # be resolved first), and the conservative answer is the Soulseek path,
-        # which is what every release took before this routing existed.
+        # when there is one; a payload that cannot answer yet (the release has
+        # to be resolved first) answers "soulseek", which is the conservative
+        # path every release took before this routing existed.
         route = acquisition_route(release)
         if route != _ROUTE_YOUTUBE:
             if not (slsk.is_running() or slsk.web_up(cfg)):
@@ -4453,6 +4784,41 @@ def _stamp_media(album_dir, media, cfg):
     return n, problems
 
 
+def _stamp_source(album_dir, source):
+    """Write SOURCE on the tracks of an album this app did not download from
+    the network.
+
+    MEDIA is written for every download by `_stamp_media`; WHERE the copy came
+    from normally is not this module's to decide — a Soulseek download is
+    tagged by the MEDIA/SOURCE pass (server.main) and a digital source by the
+    configured `digital_media_source_value` (mlo.lyrics' normalisation). An
+    album the YouTube branch fetched is neither, and the album must say so
+    itself rather than let a later pass call it "Digital": SOURCE is written
+    only where it is EMPTY, so a value the user chose is never overwritten.
+
+    Returns (stamped, problems), the same contract as `_stamp_media`: a tag
+    that cannot be written is reported, never swallowed."""
+    from mlo.audio import AudioFile
+    from server.main import is_audio_file
+    n, problems = 0, []
+    for root, _dirs, files in os.walk(album_dir):
+        for f in sorted(files):
+            if not is_audio_file(f):
+                continue
+            p = os.path.join(root, f)
+            try:
+                af = AudioFile(p)
+                if af.audio is None:
+                    problems.append(f"{f}: cannot be read for tagging")
+                    continue
+                if not str(af.get_tag("SOURCE") or "").strip():
+                    af.set_tag("SOURCE", source)
+                n += 1
+            except Exception as e:
+                problems.append(f"{f}: SOURCE tag not written ({str(e)[:80]})")
+    return n, problems
+
+
 def _cleanup_partial(ddir, local_files, remove_root=None):
     """Remove rejected partials so they don't linger in the download dir.
 
@@ -4796,11 +5162,14 @@ def _verify_acoustid(album_dir, release, cfg):
              "unverified, not rejected.")
 
 
-def _import(local_root, release, cfg, media):
+def _import(local_root, release, cfg, media, source=""):
     """Move the verified download into the library and run the pipeline.
 
     `media` is the medium already detected for this candidate — MEDIA is
-    stamped from it instead of re-detecting the medium of the whole folder."""
+    stamped from it instead of re-detecting the medium of the whole folder.
+    `source` is where the album came from, for the one caller whose origin the
+    rest of the app cannot infer (the YouTube branch): it is written as SOURCE
+    where the file does not already say something."""
     from mlo.paths import library_root, move_path
     from server import main as srv
     from server.main import OrganizeRequest
@@ -4854,6 +5223,11 @@ def _import(local_root, release, cfg, media):
     _stamped, tag_problems = _stamp_media(dest, media, cfg)
     for pr in tag_problems[:4]:
         _log("  ! " + pr)
+    if source:
+        _sourced, source_problems = _stamp_source(dest, source)
+        for pr in source_problems[:4]:
+            _log("  ! " + pr)
+        _log(f"Tagged the album's origin: SOURCE={source}.")
 
     organized = False
     organize_error = None
