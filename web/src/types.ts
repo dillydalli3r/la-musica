@@ -527,6 +527,9 @@ export interface MBTrack {
 
 export interface MBRelease {
   id: string;
+  /** The title in the reader's locale (`beets_locale`), when MusicBrainz states
+   *  one — rendered in parentheses beside the title. */
+  alias?: string;
   title: string;
   date: string;
   release_group_id: string | null;
@@ -611,6 +614,9 @@ export interface MBSearchRows {
 export interface MBReleaseRow {
   id: string;
   title: string;
+  /** The name/title in the reader's locale (`beets_locale`), when MusicBrainz
+   *  states one — rendered in parentheses beside the title. */
+  alias?: string;
   date?: string;
   country?: string;
   status?: string;
@@ -629,6 +635,8 @@ export interface MBReleaseRow {
 export interface MBReleaseGroupRow {
   id: string;
   title: string;
+  /** See MBReleaseRow.alias. */
+  alias?: string;
   primary_type?: string;
   secondary_types?: string[];
   first_release_date?: string;
@@ -638,6 +646,8 @@ export interface MBReleaseGroupRow {
 export interface MBArtistBrowse {
   id: string;
   name: string;
+  /** See MBReleaseRow.alias. */
+  alias?: string;
   disambiguation?: string;
   type?: string;
   country?: string;
@@ -655,6 +665,8 @@ export interface MBArtistBrowse {
 export interface MBReleaseGroupBrowse {
   id: string;
   title: string;
+  /** See MBReleaseRow.alias. */
+  alias?: string;
   disambiguation?: string;
   artist?: string;
   artist_mbid?: string | null;

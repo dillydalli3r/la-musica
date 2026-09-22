@@ -1,6 +1,6 @@
 # la musica
 
-**v3.12.0** — a self-hosted app that *manages, optimizes, audits, grades and
+**v3.13.0** — a self-hosted app that *manages, optimizes, audits, grades and
 plays* your music library, from the browser, a desktop window or a phone.
 
 **la musica** (formerly Music Library Optimizer) is a FastAPI backend plus a
@@ -13,7 +13,7 @@ playlists, favourites, the beets library, the Soulseek config, measured loudness
 caches, and the runtime-installed external toolchain — lives in one hidden `.mlo`
 folder inside your music directory.
 
-Release notes for this version are in `local/release-notes-3.12.0.md` (older ones
+Release notes for this version are in `local/release-notes-3.13.0.md` (older ones
 follow `local/release-notes-<version>.md`); the grading and optimization contract
 is in [`docs/OPTIMIZATION-GRADING-SPEC.md`](docs/OPTIMIZATION-GRADING-SPEC.md).
 
@@ -188,7 +188,14 @@ whether or not the row is hovered: a favourite is a state, not an action.
 The top search bar searches the library (with
 `composer:`, `person:`, `genre:` and `tag:` prefixes) or MusicBrainz, and
 `/mb/search` is a full in-app MusicBrainz browser (artists, release groups,
-releases, recordings) with *Auto-import* and *Add to library* actions. Entity pages carry
+releases, recordings) with *Auto-import* and *Add to library* actions — and it
+shows an entity's **alias in your locale** in parentheses beside its name
+(`宇多田ヒカル (Hikaru Utada)`), picked from MusicBrainz's own aliases by the same
+"Preferred locale for aliases" setting the beets import translates names with:
+an exact locale wins over a regional or script cousin (`en` before `en_PH`,
+`ja` before `ja-Latn`), then MusicBrainz's primary alias, and a search-hint
+alias is never shown. Every alias rides along in the request that was already
+being made, so nothing costs an extra MusicBrainz call. Entity pages carry
 grading and auditing detail, MusicBrainz + RateYourMusic links, cover
 upload/search, Wikipedia descriptions, manual tag editing, a lyrics editor, and a
 **Credits** view built from MusicBrainz `artist-rels` (falling back to the file's

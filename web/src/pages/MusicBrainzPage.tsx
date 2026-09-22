@@ -83,6 +83,18 @@ interface MBTrackRow {
 type SearchRow = MBSearchRowData & {
   lifeLabel?: string; tagsLabel?: string; lenLabel?: string; typeLabel?: string;
 };
+/** "Name (Alias)" — the entity as the reader's locale names it.
+
+ *  MusicBrainz states an entity's other-language names as aliases; the SERVER
+ *  picks the one in the configured `beets_locale` (Settings -> Import & tags)
+ *  and leaves it out when it would only repeat the name (see
+ *  `integrations.alias_for`), so this only adds the parentheses. */
+function withAlias(name: string | undefined, alias?: string): string {
+  const base = (name || "").trim();
+  const alt = (alias || "").trim();
+  return alt ? `${base} (${alt})` : base;
+}
+
 type RGRow = MBReleaseGroupRow;
 type RelRow = MBReleaseRow;
 const mbUrl = (type: string, id: string) =>
@@ -1537,7 +1549,7 @@ export function MBArtistPage() {
       <PageHeader
         back={{ to: "/mb/search", label: "MusicBrainz search" }}
         overline="MusicBrainz artist"
-        title={a.name}
+        title={withAlias(a.name, a.alias)}
         subtitle={[a.disambiguation, a.type, a.country, life].filter(Boolean).join(" · ")}
         chips={[...(a.genres ?? []), ...(a.tags ?? []).slice(0, 5)].slice(0, 8)}
         actions={
@@ -1652,7 +1664,7 @@ export function MBArtistPage() {
                             {(rg.first_release_date || "—").slice(0, 4)}
                           </span>
                           <span className="text-sm text-zinc-200 truncate flex-1">
-                            {rg.title}
+                            {withAlias(rg.title, rg.alias)}
                             {rg.secondary_types?.length ? (
                               <span className="text-zinc-500 text-xs"> ({rg.secondary_types.join(" + ")})</span>
                             ) : null}
@@ -1837,7 +1849,7 @@ export function MBReleaseGroupPage() {
       <PageHeader
         back={{ to: "/mb/search", label: "MusicBrainz search" }}
         overline="MusicBrainz release group"
-        title={rg.title}
+        title={withAlias(rg.title, rg.alias)}
         subtitle={[
           rg.artist,
           typeLabel,
@@ -1979,7 +1991,7 @@ export function MBReleaseGroupPage() {
                     </td>
                     <td className="td text-zinc-500 cell-nowrap">{r.date || "—"}</td>
                     <td className="td text-zinc-200">
-                      <span className="truncate">{r.title}</span>
+                      <span className="truncate">{withAlias(r.title, r.alias)}</span>
                       {r.disambiguation ? <span className="text-zinc-500"> ({r.disambiguation})</span> : null}
                     </td>
                     <td className="td text-zinc-500">
@@ -2073,7 +2085,7 @@ export function MBReleasePage() {
       <PageHeader
         back={{ to: "/mb/search", label: "MusicBrainz search" }}
         overline="MusicBrainz release"
-        title={r.title}
+        title={withAlias(r.title, r.alias)}
         subtitle={
           <>
             {artistMbid ? (
@@ -2316,7 +2328,7 @@ export function MBRecordingPage() {
                   >
                     <td className="td text-zinc-500 cell-nowrap">{rel.date || "—"}</td>
                     <td className="td text-zinc-200">
-                      <span className="truncate">{rel.title}</span>
+                      <span className="truncate">{withAlias(rel.title, rel.alias)}</span>
                     </td>
                     <td className="td text-zinc-500">
                       <span className="inline-flex flex-wrap items-center gap-1">

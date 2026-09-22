@@ -256,6 +256,91 @@ def detect_mbid(mbid):
     raise LookupError("no MusicBrainz entity found for this ID")
 
 
+# MusicBrainz alias `type` values that are not a NAME: "Search hint" aliases are
+# the search index's own spellings (misspellings, abbreviations) and belong to
+# queries, never to a page a reader is looking at.
+_ALIAS_SKIP_TYPES = frozenset({"search hint"})
+
+
+def _locale_preference(cfg=None):
+    """The locale the reader wants names in — `beets_locale`, folded.
+
+    The SAME setting the managed beets import translates names with
+    (Settings -> Import & tags: "Preferred locale for aliases"), so a page and
+    the files it will produce agree on what an entity is called.
+    """
+    cfg = cfg if isinstance(cfg, dict) else _release_cfg()
+    return str((cfg or {}).get("beets_locale") or "").strip().lower()
+
+
+def alias_for(aliases, cfg=None, name=""):
+    """The alias to show beside *name* in parentheses, or "".
+
+    MusicBrainz states an entity's other-language names as aliases, each with
+    its own `locale` and `type`. The ladder, in order:
+
+      1. an alias in the reader's locale flagged `primary` — MusicBrainz's own
+         "this is the name in this language",
+      2. any other alias in exactly that locale,
+      3. the same two again for a COUSIN locale: MusicBrainz separates a script
+         with a hyphen (`ja-Latn`) and a region with an underscore (`en_PH`), so
+         a reader who asked for `ja` is answered by its romanization and one who
+         asked for `en` by `en_PH` — only when the exact locale has nothing,
+      4. the entity's `primary` alias whatever its locale — a reader who chose
+         no locale, or whose locale this entity has no alias for, still gets
+         the name it is also known by rather than a foreign-language guess,
+      5. nothing, and the caller shows the name alone.
+
+    A search-hint alias is never chosen, and a value that only differs from the
+    name by case or spacing is "no alias": a page must not render "X (X)".
+    """
+    rows = [a for a in (aliases or []) if isinstance(a, dict)
+            and str(a.get("name") or "").strip()
+            and str(a.get("type") or "").strip().lower() not in _ALIAS_SKIP_TYPES]
+    if not rows:
+        return ""
+    want = _locale_preference(cfg)
+
+    def in_locale(alias):
+        got = str(alias.get("locale") or "").strip().lower()
+        if not got or not want:
+            return False
+        if got == want:
+            return True
+        # MusicBrainz separates a SCRIPT with a hyphen ("ja-Latn") and a REGION
+        # with an underscore ("en_PH"), so both are folded before the language
+        # prefix is compared: a reader who asked for `ja` wants the `ja-Latn`
+        # romanization, and one who asked for `en` wants `en_PH`.
+        def base(value):
+            return re.split(r"[-_]", value, 1)[0]
+        return base(got) == base(want)
+
+    def pick(candidates):
+        folded = str(name or "").strip().casefold()
+        for alias in candidates:
+            value = str(alias["name"]).strip()
+            if value.casefold() != folded:
+                return value
+        return ""
+
+    def is_exact(alias):
+        return str(alias.get("locale") or "").strip().lower() == want
+
+    if want:
+        # Exact locale before a cousin: a reader who asked for `en` wants the
+        # `en` alias, not `en_PH`, and one who asked for `ja` wants the `ja`
+        # alias before the `ja-Latn` romanization — the cousins are what is
+        # left when the exact one does not exist.
+        for candidates in ([a for a in rows if is_exact(a) and a.get("primary")],
+                           [a for a in rows if is_exact(a)],
+                           [a for a in rows if in_locale(a) and a.get("primary")],
+                           [a for a in rows if in_locale(a)]):
+            chosen = pick(candidates)
+            if chosen:
+                return chosen
+    return pick([a for a in rows if a.get("primary")])
+
+
 def _browse_collect(endpoint, extra_params, list_key, count_key, limit=300, offset=0):
     """Browse rows across MusicBrainz's 100-per-request pages.
 
@@ -404,7 +489,8 @@ def release_lookup(mbid):
     cache is what MB's etiquette asks for — this call used to bypass it)."""
     data = mb_get_cached(
         f"release/{mbid}",
-        {"inc": "artists+recordings+media+release-groups+artist-credits+genres+labels+isrcs", "fmt": "json"},
+        {"inc": "artists+recordings+media+release-groups+artist-credits+genres"
+                "+labels+isrcs+aliases", "fmt": "json"},
     )
     # Normalize media into a flat list of {disc, position, title, length, recording mbid, artist mbids}
     tracks = []
@@ -467,6 +553,9 @@ def release_lookup(mbid):
     return {
         "id": data.get("id"),
         "title": data.get("title"),
+        # The title in the reader's locale, when MusicBrainz states one (see
+        # `alias_for`) — the page shows it in parentheses beside the title.
+        "alias": alias_for(data.get("aliases"), None, data.get("title")),
         # MusicBrainz's own pressing comment ("Deluxe Edition", "2011
         # remaster") — empty when it states none, which is what every reader
         # treats as "no disambiguation".
@@ -5336,11 +5425,15 @@ def artist_identity(mbid):
     Deliberately split from the discography: MusicBrainz answers one request
     per second, so the artist page paints this header while the release
     groups are still being collected."""
-    data = mb_get_cached(f"artist/{mbid}", {"inc": "genres", "fmt": "json"})
+    data = mb_get_cached(f"artist/{mbid}",
+                         {"inc": "genres+aliases", "fmt": "json"})
     area = data.get("area") or {}
     return {
         "id": data.get("id"),
         "name": data.get("name"),
+        # The name in the reader's locale, when MusicBrainz has one (see
+        # `alias_for`): the page shows it in parentheses beside `name`.
+        "alias": alias_for(data.get("aliases"), None, data.get("name")),
         "disambiguation": data.get("disambiguation") or "",
         "type": data.get("type") or "",
         "country": area.get("name") or "",
@@ -5381,6 +5474,7 @@ def artist_release_groups(mbid, limit=100, offset=0, primary_type="", secondary_
                     {
                         "id": rg.get("id"),
                         "title": rg.get("title"),
+                        "alias": alias_for(rg.get("aliases"), None, rg.get("title")),
                         "primary_type": rg.get("primary_type") or "",
                         "secondary_types": rg.get("secondary_types") or [],
                         "first_release_date": rg.get("first_release_date") or "",
@@ -5390,8 +5484,12 @@ def artist_release_groups(mbid, limit=100, offset=0, primary_type="", secondary_
                 key=lambda g: g.get("first_release_date") or "9999",
             ),
         }
+    # `inc=aliases` on the browse: every row then carries its own aliases, so
+    # the alias costs no extra request (the search path below cannot — the
+    # search index returns no aliases at all).
     rgs, total, served = _browse_collect(
-        "release-group", {"artist": mbid}, "release-groups", "release-group-count",
+        "release-group", {"artist": mbid, "inc": "aliases"},
+        "release-groups", "release-group-count",
         limit=limit, offset=offset,
     )
     return {
@@ -5752,10 +5850,11 @@ def release_group_browse(mbid, limit=300, offset=0):
     """
     data = mb_get_cached(
         f"release-group/{mbid}",
-        {"inc": "artist-credits+genres", "fmt": "json"},
+        {"inc": "artist-credits+genres+aliases", "fmt": "json"},
     )
     rel_rows, total, served = _browse_collect(
-        "release", {"release-group": mbid, "inc": "media"}, "releases", "release-count",
+        "release", {"release-group": mbid, "inc": "media+aliases"},
+        "releases", "release-count",
         limit=limit, offset=offset,
     )
     # One config load for both readers of it (the ranking and the country
@@ -5778,6 +5877,7 @@ def release_group_browse(mbid, limit=300, offset=0):
         releases.append({
             "id": r.get("id"),
             "title": r.get("title"),
+            "alias": alias_for(r.get("aliases"), None, r.get("title")),
             "date": r.get("date") or "",
             "country": r.get("country") or "",
             "status": r.get("status") or "",
