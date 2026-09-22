@@ -252,9 +252,22 @@ assert eq_mod.to_af(curve).count("equalizer=") == 50, eq_mod.to_af(curve)
 
 # A 31-point curve with STRAIGHT lines, saved the way Notepad saves it: UTF-8
 # with a BOM and CRLF. (The count is the file's: nothing may assume 50.)
-linear_raw = fixture_bytes("filtercurve_linear_31_crlf.txt")
+#
+# The fixture on disk is LF, and must stay that way: a committed TEXT file
+# cannot promise its line endings, because git normalises them on checkout — a
+# CRLF fixture is LF on a Linux runner — so asserting CRLF on the fixture would
+# be testing git's checkout policy rather than this parser. The CRLF bytes are
+# therefore BUILT here, written to a scratch path and read back the way a real
+# file is, which holds on any checkout.
+linear_lf = fixture_bytes("filtercurve_linear_31.txt")
+assert linear_lf.startswith(b"\xef\xbb\xbf") and b"\r\n" not in linear_lf, linear_lf[:20]
+scratch_curve = os.path.join(tempfile.mkdtemp(prefix="mlo_eq_curve_"), "linear_crlf.txt")
+with open(scratch_curve, "wb") as f:
+    f.write(linear_lf.replace(b"\n", b"\r\n"))
+with open(scratch_curve, "rb") as f:
+    linear_raw = f.read()
 assert linear_raw.startswith(b"\xef\xbb\xbf") and b"\r\n" in linear_raw, linear_raw[:20]
-linear = fixture_profile("filtercurve_linear_31_crlf.txt")
+linear = eq_mod.parse_apo(eq_mod.decode_profile(linear_raw), "linear")
 assert linear["errors"] == [] and len(linear["filters"]) == 31, linear
 assert linear["filters"][0]["fc"] == 20.0 and linear["filters"][-1]["fc"] == 20000.0, linear
 # The band width comes from the FILE's own spacing: for this 31-point ladder
