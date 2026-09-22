@@ -226,8 +226,16 @@ LINUX_BINARIES = {
 # Logchecker phar is PHP). Without the interpreter there is nothing to install
 # — the row says which package provides it — and with it, the tool installs
 # and runs like any other.
+#
+# cuetools names THREE packages, not just the runtime: CUETools' ARCUE pass
+# loads System.Drawing to verify a disc, which mono-runtime does not provide —
+# without libgdiplus and mono's own System.Drawing assembly it dies on "Could
+# not load file or assembly 'System.Drawing'" and writes no .accurip at all.
+# `mono CUETools.ARCUE.exe` with no arguments still prints its usage, so the
+# installer cannot see the difference; the packages are named where the row
+# tells the user what to install.
 LINUX_RUNNERS = {
-    "cuetools": ("mono", "mono-runtime"),
+    "cuetools": ("mono", "mono-runtime libgdiplus libmono-system-drawing4.0-cil"),
     "logchecker": ("php", "php-cli"),
 }
 

@@ -34,6 +34,14 @@ ENV PYTHONUNBUFFERED=1 \
 # shows, since it is loaded by name). php-cli is the Logchecker phar's runtime
 # and mono-runtime runs CUETools' console tool (both verified here: the phar
 # scores a log, CUETools.ARCUE.exe prints its usage under mono).
+#
+# System.Drawing is the part mono-runtime does NOT bring: CUETools' ARCUE pass
+# loads it to verify a disc, so without libgdiplus and mono's own
+# System.Drawing assembly every AccurateRip run died on "Could not load file
+# or assembly 'System.Drawing'" and wrote no .accurip at all — a CD album then
+# graded as "no .accurip verdict verifies this disc", which is what a missing
+# generator and a disc absent from the AccurateRip database look like. Both
+# packages verified here: with them, ARCUE verifies a real disc under mono.
 RUN apt-get update && apt-get install -y --no-install-recommends \
         ffmpeg \
         flac \
@@ -43,6 +51,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         rsgain \
         php-cli \
         mono-runtime \
+        libgdiplus \
+        libmono-system-drawing4.0-cil \
         libsndfile1 \
         libgomp1 \
         libicu76 \
@@ -80,7 +90,7 @@ ENV HOME=/home/mlo
 # leaves it empty, and the server then reports its own code version instead of
 # claiming to be a release it is not. `tools/check_versions.py` keeps the
 # ARG default in step with mlo/__init__.py.
-ARG MLO_VERSION=3.9.0
+ARG MLO_VERSION=3.10.0
 ENV MLO_VERSION=${MLO_VERSION}
 # The commit the image was built from, and when. The release workflow passes
 # both; a plain `docker build` leaves them empty and the server then reports

@@ -29,6 +29,21 @@ import { GENRE_COUNT_MAX, GENRE_FAMILIES, canonicalGenre, familyOf, splitGenres 
 
 const STEPS = ["Select & separate", "Links", "Match", "Covers", "Genres", "Lyrics", "Advisory", "Finish"];
 
+/** THE row recipe of the wizard.
+ *
+ *  Every list row of the album's own items — the staged files, the release
+ *  hits, the matches, the per-track covers, genres, lyrics and advisory rows,
+ *  and the queue's albums — is this one string, so one step's rows cannot be
+ *  taller, denser or differently framed than another's. The steps used to
+ *  build their own: a file row was `px-2 py-1` with no frame where a track row
+ *  was `panel px-3 py-2`, and the same album read as two different lists from
+ *  one step to the next. */
+const ROW = "flex items-center gap-3 panel px-3 py-2";
+/** The same row for the steps whose rows carry several controls: they wrap on
+ *  a narrow window instead of overflowing. Padding, frame and type sizes stay
+ *  the row's own — only the height follows the content. */
+const ROW_WRAP = `${ROW} flex-wrap`;
+
 /** The wizard step each import family lives on, and the words for it — the
  *  same five families the server's own registry names (mlo/import_policy
  *  .FAMILIES), looked up by step NAME so a step a later edit inserts cannot
@@ -203,6 +218,28 @@ function inMusicFolder(p: string, folder: unknown): boolean {
 function extractMbid(value: string): string | null {
   const m = value.match(/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/i);
   return m ? m[0].toLowerCase() : null;
+}
+
+/** One release hit, as `/api/mb/search/releases` renders it. */
+type MBSearchHit = { id: string; title?: string; artist?: string; date?: string; catalog_number?: string; barcode?: string };
+
+/** Is `v` one of those hits? The endpoint answers with the raw MusicBrainz
+ *  shape, so the one field the wizard needs is checked rather than assumed. */
+function isSearchHit(v: unknown): v is MBSearchHit {
+  if (!v || typeof v !== "object" || !("id" in v)) return false;
+  return typeof v.id === "string";
+}
+
+/** A name folded to what a match compares: lowercase, accents stripped, every
+ *  run of punctuation and spacing collapsed — “System of a Down” and
+ *  “system of a down!” fold together, “Söme” and “Some” too. */
+function matchKey(s: string): string {
+  return s
+    .toLowerCase()
+    .normalize("NFKD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .replace(/[^a-z0-9]+/g, " ")
+    .trim();
 }
 
 /** Retry a transient network failure (MusicBrainz rate limits / blips). */
@@ -648,24 +685,138 @@ export default function ImportWizard() {
     }
   };
 
+  // The auto-search's own line in the Links step: what MusicBrainz answered
+  // when the album's tags carried no MBID. It describes the visit it opened
+  // on, so a new album (or a pick the user makes) drops it.
+  const [autoNote, setAutoNote] = useState("");
+  const autoSearched = useRef<string | null>(null);
+  useEffect(() => {
+    setAutoNote("");
+  }, [albumPath]);
+
+  /** The name MusicBrainz is asked about: the fetched release's title, else
+   *  the album tag the files carry, else the name the import was staged under.
+   *  Never the bare folder path — a library folder spells out dates, pressing
+   *  countries and label, and searching for that finds nothing.
+   *
+   *  Empty until the app has actually read the album (a release, or the
+   *  library payload's own rows): the staged name is a FALLBACK for an album
+   *  whose files carry no album tag, and on a flat file drop it defaults to a
+   *  track's file name — asking MusicBrainz about that finds nothing and
+   *  spends the one search the automatic run gets. */
+  const autoSearchName = (): string => {
+    if (!release && !trackList.length) return "";
+    const first = stepTracks[0]?.path ?? trackList[0]?.path;
+    return (
+      release?.title ||
+      (first ? findTrack(first)?.tags?.ALBUM : "") ||
+      uploaded[albumIndex]?.name ||
+      ""
+    ).trim();
+  };
+
+  /** Ask MusicBrainz for the release this album's own tags say it is.
+   *
+   *  The wizard's own fetch for an album with no MBID in its files: the tags
+   *  (or the name the import was staged under) still name the artist and the
+   *  album, so they are the query. A hit whose title AND artist match what the
+   *  files carry is fetched into the step, exactly as a tag-detected ID is;
+   *  anything less exact is left as the step's own search results for the user
+   *  to pick — a partial name never links a release. False = nothing was
+   *  prefilled (and, with no name to ask about, nothing was asked). */
+  const searchReleaseFromTags = async (): Promise<boolean> => {
+    const first = stepTracks[0]?.path;
+    const artist = (
+      (first && trackArtist(first)) ||
+      (release?.artists ?? []).map((a) => a.name).join(", ") ||
+      ""
+    ).trim();
+    const album = autoSearchName();
+    if (!album) return false;
+    setFetchStatus("Searching MusicBrainz for this album…");
+    try {
+      const query = artist
+        ? `release:"${album}" AND artist:"${artist}"`
+        : `release:"${album}"`;
+      const hits = await api.mbSearchReleases(query, "release");
+      const list = (Array.isArray(hits) ? hits : []).filter(isSearchHit);
+      const want = matchKey(album);
+      const who = matchKey(artist);
+      const exact = list.find((h) => matchKey(h.title ?? "") === want && (!who || matchKey(h.artist ?? "").includes(who)));
+      if (exact) {
+        setAutoNote(
+          `No MusicBrainz ID in the tags — MusicBrainz answers “${exact.title}”` +
+          `${exact.artist ? ` by ${exact.artist}` : ""}${exact.date ? ` (${exact.date.slice(0, 4)})` : ""} ` +
+          `for this album. Review it, then Continue — or pick another release below.`
+        );
+        setMbLink(`https://musicbrainz.org/release/${exact.id}`);
+        setReleaseId(exact.id);
+        pickRelease(exact.id);
+        return true;
+      }
+      setSearchMode("release");
+      setMbSearch(query);
+      setSearchHits(list);
+      setAutoNote(
+        list.length
+          ? `No MusicBrainz ID in the tags — ${list.length} release(s) on MusicBrainz match this album below; pick the right one.`
+          : `No MusicBrainz ID in the tags and MusicBrainz knows no release named “${album}”${artist ? ` by ${artist}` : ""} — paste a link, or search by track or catalog number.`
+      );
+      return false;
+    } catch (e) {
+      setAutoNote(`MusicBrainz search failed — ${e}`);
+      return false;
+    } finally {
+      setFetchStatus(null);
+    }
+  };
+
   // Auto-detect a Picard-tagged MusicBrainz release and fetch it
   // automatically when the Links step opens.
-  const autoDetected = useRef(false);
+  //
+  // The guard is the album path plus whether the attempt FINISHED, not a bare
+  // "ran once" flag: this effect's dependencies include the library payload,
+  // which the mount below refetches, so it re-runs mid-flight on a fresh load.
+  // The flag used to be set before the work, and the cancelled run's answer
+  // was dropped while the re-run returned early — leaving the step on
+  // "Scanning track tags…" with an empty release field forever, so the fetch
+  // never ran and the button had to be pressed by hand on every album.
+  const autoDetected = useRef<{ path: string | null; done: boolean }>({ path: null, done: false });
   const [detectStatus, setDetectStatus] = useState<"idle" | "scanning" | "found" | "none">("idle");
   useEffect(() => {
-    if (step !== 1 || !albumPath || releaseId || autoDetected.current) return;
+    if (step !== 1 || !albumPath || releaseId) return;
+    const attempt = autoDetected.current;
+    if (attempt.path === albumPath && attempt.done) return;
+    attempt.path = albumPath;
+    attempt.done = false;
     let cancelled = false;
-    autoDetected.current = true;
     setDetectStatus("scanning");
     (async () => {
       const id = await detectReleaseId();
+      // A newer run owns the step's state now; this one leaves `done` false so
+      // that run — or the next one — does the fetch.
       if (cancelled) return;
       if (!id) {
-        // not found now — allow retry when the library refreshes
-        autoDetected.current = false;
         setDetectStatus("none");
+        // No MBID in the tags either: the fetch the step offers runs here.
+        // Leaving step 0 ("Import … into library") IS the continue that used
+        // to be followed by remembering to press "Fetch release & auto-match"
+        // on every album, so the wizard asks MusicBrainz for the release the
+        // album's own tags name. Once per album (`autoSearched`).
+        //
+        // With no name to ask about yet, this is NOT the end of the attempt:
+        // the album's tags arrive with the library payload, which is why
+        // `done` stays false here and this effect runs again when they land.
+        const name = autoSearchName();
+        if (!name) return;
+        attempt.done = true;
+        if (autoSearched.current !== albumPath) {
+          autoSearched.current = albumPath;
+          searchReleaseFromTags();
+        }
         return;
       }
+      attempt.done = true;
       setDetectStatus("found");
       setDetectedFromTags(true);
       setMbLink(`https://musicbrainz.org/release/${id}`);
@@ -703,16 +854,27 @@ export default function ImportWizard() {
     }
   };
 
-  // Fetch button: falls back to tag detection when the field is empty.
+  // Fetch button: falls back to tag detection when the field is empty, and to
+  // the MusicBrainz search when the tags carry nothing either — a press that
+  // can do nothing at all would be the dead button this step already fixed
+  // once. Every press asks again: only the automatic run is once per album.
   const handleFetch = async () => {
     let id = releaseId || extractMbid(mbLink) || "";
     if (!id && albumPath) {
+      setDetectStatus("scanning");
       const detected = await detectReleaseId();
       if (detected) {
+        setDetectStatus("found");
         setDetectedFromTags(true);
         setMbLink(`https://musicbrainz.org/release/${detected}`);
         id = detected;
+      } else {
+        setDetectStatus("none");
       }
+    }
+    if (!id) {
+      if (albumPath) await searchReleaseFromTags();
+      return;
     }
     pickRelease(id);
   };
@@ -1149,6 +1311,8 @@ export default function ImportWizard() {
     const query = q ?? mbSearch;
     if (!query.trim()) return;
     setBusy(true);
+    // A hand search replaces what the automatic one said, so its note goes.
+    setAutoNote("");
     try {
       setSearchHits(await api.mbSearchReleases(query.trim(), searchMode));
     } catch (e) {
@@ -2511,7 +2675,7 @@ const finish = async () => {
   const switchAlbum = (i: number) => {
     setAlbumIndex(i);
     setAlbumPath(uploaded[i].path);
-    autoDetected.current = false;
+    autoDetected.current = { path: null, done: false };
     setDetectedFromTags(false);
     setRelease(null);
     setReleaseId("");
@@ -2867,7 +3031,7 @@ const finish = async () => {
               return (
                 <div
                   key={it.path || `new-${i}`}
-                  className="flex items-center gap-2 bg-panel rounded border border-border px-3 py-1.5 text-xs"
+                  className={`${ROW} text-xs`}
                 >
                   <Disc3 className="h-3.5 w-3.5 text-zinc-500 shrink-0" />
                   {uploaded.length ? (
@@ -3140,12 +3304,20 @@ const finish = async () => {
                   {detectStatus === "scanning" && (
                     <span className="animate-pulse">Scanning track tags for a MusicBrainz release ID…</span>
                   )}
-                  {detectStatus === "none" && (
+                  {detectStatus === "none" && !autoNote && (
                     <span>
                       No MusicBrainz release ID found in the track tags — paste a link, search, or{" "}
                       <button className="text-accent-soft underline underline-offset-2" onClick={detectFromTags}>rescan</button>
                     </span>
                   )}
+                </div>
+              )}
+              {/* What the fetch answered when the tags held no ID: the search
+                  ran itself when this step opened, so its result is said here
+                  rather than left to the user to discover. */}
+              {autoNote && detectStatus !== "scanning" && (
+                <div className="text-xs text-zinc-400" role="status">
+                  {autoNote}
                 </div>
               )}
               {detectStatus === "found" && releaseId && (
@@ -3185,7 +3357,7 @@ const finish = async () => {
               {artistHits.length > 0 && (
                 <div className="max-h-40 overflow-auto space-y-1">
                   {artistHits.map((a) => (
-                    <button key={a.id} className="w-full text-left px-3 py-2 rounded bg-panel hover:bg-raise text-sm flex items-center gap-2"
+                    <button key={a.id} className={`${ROW} w-full text-left text-sm hover:bg-raise`}
                       onClick={() => applyArtist(a.name)} title={`Search releases by ${a.name}`}>
                       <span className="flex-1 truncate min-w-0 text-zinc-200">{a.name}</span>
                       {a.type && <span className="chip bg-zinc-800 text-zinc-500 border border-border text-[10px]">{a.type}</span>}
@@ -3196,8 +3368,8 @@ const finish = async () => {
               {searchHits.length > 0 && (
                 <div className="max-h-48 overflow-auto space-y-1">
                   {searchHits.map((h) => (
-                    <button key={h.id} className="w-full text-left px-3 py-2 rounded bg-panel hover:bg-raise text-sm flex items-center gap-2"
-                      onClick={() => { setMbLink(`https://musicbrainz.org/release/${h.id}`); setReleaseId(h.id); }}>
+                    <button key={h.id} className={`${ROW} w-full text-left text-sm hover:bg-raise`}
+                      onClick={() => { setMbLink(`https://musicbrainz.org/release/${h.id}`); setReleaseId(h.id); setAutoNote(""); }}>
                       <span className="flex-1 truncate min-w-0">
                         <span className="text-zinc-200">{h.title}</span>
                         <span className="text-zinc-500"> — {h.artist} ({h.date})</span>
@@ -3277,7 +3449,7 @@ const finish = async () => {
 
       {/* ---------------- Step 2: matching ---------------- */}
       {step === 2 && (
-        <div className="space-y-3">
+        <div className="space-y-4">
           <div className="text-sm text-zinc-400">
             Confirm each local track's MusicBrainz track/disc. Unmatched rows stay blank — you can also fix them manually later on the track page.
           </div>
@@ -3292,14 +3464,14 @@ const finish = async () => {
             >
               {g.rows.map((s) => {
                 return (
-                  <div key={s.local} className="flex flex-wrap items-center gap-3 panel px-3 py-2">
+                  <div key={s.local} className={ROW_WRAP}>
                     <TrackNoBadge disc={discNoOf(s.local)} track={trackNoOf(s.local)} />
                     <span className="flex-1 truncate text-sm">{displayTitle(s.local)}</span>
                     <span className="min-w-0 truncate text-xs text-zinc-500">
                       {s.matched ? `${s.release_track!.disc}.${s.release_track!.position} ${s.release_track!.title}` : "no match"}
                     </span>
                     <select
-                      className="input !w-auto text-xs max-w-full tap"
+                      className="input !w-auto !py-1 text-xs max-w-full tap"
                       value={s.release_track ? `${s.release_track.disc}-${s.release_track.position}` : ""}
                       onChange={(e) => {
                         const [d, p] = e.target.value.split("-").map(Number);
@@ -3619,7 +3791,7 @@ const finish = async () => {
                     return (
                       <label
                         key={t.path}
-                        className={`flex items-center gap-3 panel px-3 py-2 cursor-pointer ${
+                        className={`${ROW} cursor-pointer ${
                           coverSel.has(t.path) ? "border-accent/60" : "border-border"
                         }`}
                       >
@@ -3706,7 +3878,7 @@ const finish = async () => {
 
       {/* ---------------- Step 4: genres ---------------- */}
       {step === 4 && (
-        <div className={minMode && missingHere ? "flex flex-col gap-3" : "space-y-3"}>
+        <div className={minMode && missingHere ? "flex flex-col gap-4" : "space-y-4"}>
           {minMode && !missingHere && <MinNothingMissing />}
           <MinBlock min={minMode} here={missingHere} mine="">
             <div className="flex items-center gap-2 flex-wrap">
@@ -3908,7 +4080,7 @@ const finish = async () => {
                   const typed = genreAddValues[t.path] ?? "";
                   const unknown = !!typed.trim() && !genreSuggestions.has(typed.trim().toLowerCase());
                   return (
-                    <div key={t.path} className="flex items-center gap-3 panel px-3 py-2">
+                    <div key={t.path} className={ROW}>
                       <TrackNoBadge disc={discNoOf(t.path)} track={trackNoOf(t.path)} />
                       <span className="flex-1 truncate text-sm">{displayTitle(t.path)}</span>
                       <div className="flex items-center gap-1.5 flex-wrap justify-end">
@@ -4076,8 +4248,8 @@ const finish = async () => {
               const hasDraft = hasLyrics(t);
               const open = lyrOpen.has(t.path);
               return (
-                <div key={t.path} className="panel px-3 py-2 space-y-2">
-                  <div className="flex flex-wrap items-center gap-2">
+                <div key={t.path} className={`${ROW} flex-col items-stretch space-y-2`}>
+                  <div className="flex flex-wrap items-center gap-3">
                     <TrackNoBadge disc={discNoOf(t.path)} track={trackNoOf(t.path)} />
                     <span className="flex-1 truncate text-sm">{displayTitle(t.path)}</span>
                     {hasDraft && (
@@ -4114,7 +4286,7 @@ const finish = async () => {
                       INSTRUMENTAL
                     </label>
                     <button
-                      className="btn-ghost !py-0.5 text-[11px] shrink-0 tap"
+                      className="btn-ghost !py-1 text-xs shrink-0 tap"
                       onClick={() => toggleLyricsRow(t.path)}
                       disabled={inst === "1"}
                       title={inst === "1" ? "Marked instrumental — uncheck INSTRUMENTAL to edit lyrics" : "Open the lyrics editor for this track"}
@@ -4156,7 +4328,7 @@ const finish = async () => {
 
       {/* ---------------- Step 6: advisory ---------------- */}
       {step === 6 && (
-        <div className={minMode && missingHere ? "flex flex-col gap-3" : "space-y-3"}>
+        <div className={minMode && missingHere ? "flex flex-col gap-4" : "space-y-4"}>
           {minMode && !missingHere && <MinNothingMissing />}
           <MinBlock min={minMode} here={missingHere} mine="">
             <div className="text-sm text-zinc-400">Set iTunes advisory per track: <b className="text-zinc-200">0</b> unrated/clean, <b className="text-zinc-200">1</b> explicit, <b className="text-zinc-200">2</b> safe edited version.</div>
@@ -4230,7 +4402,7 @@ const finish = async () => {
           </MinBlock>
           <MinBlock min={minMode} here={missingHere} mine="advisory">
             {stepTracks.map((t) => (
-              <div key={t.path} className="flex flex-wrap items-center gap-3 panel px-3 py-2">
+              <div key={t.path} className={ROW_WRAP}>
                 <TrackNoBadge disc={discNoOf(t.path)} track={trackNoOf(t.path)} />
                 <span className="flex-1 truncate text-sm">{displayTitle(t.path)}</span>
                 {!!t.tags.ITUNESADVISORY && !["0", "1", "2"].includes(t.tags.ITUNESADVISORY.trim()) && (
@@ -4246,7 +4418,7 @@ const finish = async () => {
                     <button
                       key={v}
                       onClick={() => setAdvisory((a) => ({ ...a, [t.path]: v }))}
-                      className={`px-2 sm:px-3 py-1.5 rounded text-xs border ${
+                      className={`px-2 sm:px-3 py-1 rounded text-xs border ${
                         (advisory[t.path] ?? t.tags.ITUNESADVISORY) === v
                           ? "bg-accent on-accent border-accent"
                           : "bg-panel text-zinc-400 border-border hover:border-accent/50"
@@ -4879,7 +5051,7 @@ function ImportFileRow({ f, gi, albums, groupFiles, selectable, excluded, onTogg
     return hit ? `track cover for ${hit.relPath.split("/").pop()}` : null;
   })();
   return (
-    <div className={`flex items-center gap-2 text-xs px-2 py-1 ${excluded ? "opacity-45" : ""}`}>
+    <div className={`${ROW} text-xs ${excluded ? "opacity-45" : ""}`}>
       {selectable && (
         <input
           type="checkbox"
@@ -4900,7 +5072,7 @@ function ImportFileRow({ f, gi, albums, groupFiles, selectable, excluded, onTogg
         {!excluded && coverFor && <span className="block text-[10px] text-accent-soft">→ {coverFor}</span>}
       </span>
       <select
-        className="input !w-auto !py-0.5 text-[11px] shrink-0 tap max-w-[45%]"
+        className="input !w-auto !py-1 text-xs shrink-0 tap max-w-[45%]"
         value={gi}
         onChange={(e) => onMove(Number(e.target.value))}
       >

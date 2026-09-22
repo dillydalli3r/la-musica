@@ -1,6 +1,6 @@
 # la musica
 
-**v3.9.0** — a self-hosted app that *manages, optimizes, audits, grades and
+**v3.10.0** — a self-hosted app that *manages, optimizes, audits, grades and
 plays* your music library, from the browser, a desktop window or a phone.
 
 **la musica** (formerly Music Library Optimizer) is a FastAPI backend plus a
@@ -12,7 +12,7 @@ client whose auto-importer verifies what it downloaded. All app state — config
 playlists, favourites, the beets library, the Soulseek config, measured loudness,
 caches — lives in one hidden `.mlo` folder inside your music directory.
 
-Release notes for this version are in `local/release-notes-3.9.0.md` (older ones
+Release notes for this version are in `local/release-notes-3.10.0.md` (older ones
 follow `local/release-notes-<version>.md`); the grading and optimization contract
 is in [`docs/OPTIMIZATION-GRADING-SPEC.md`](docs/OPTIMIZATION-GRADING-SPEC.md).
 
@@ -51,10 +51,14 @@ bind mount that points at your library (`./music` in its comments,
   `--build` is replaced by the published one on the first check; to keep building
   from source, start only the app (`docker compose up -d lamusica`).
 - `ffmpeg`, `flac`, `libjxl`, `jpegtran`, `fpcalc` and `rsgain` come from apt in
-  the image; `oxipng` and `slskd` install at runtime from their upstream Linux
-  builds. `CUETools`, `AudioAuditor` and `Logchecker` + `php` are Windows-only, so
-  AccurateRip generation, the Logchecker grade and the AudioAuditor audit are
-  unavailable in Docker.
+  the image — as do the runtimes the Windows-only tools run on: `mono-runtime`
+  (plus `libgdiplus` and mono's System.Drawing assembly, which CUETools'
+  verification loads) and `php-cli`. `oxipng`, `slskd`, `AudioAuditor` and
+  `Logchecker` then install at runtime from their upstream Linux builds, and so
+  does `CUETools` — upstream's Windows zip, run through the mono launcher the
+  installer writes. AccurateRip generation, the Logchecker grade and the
+  AudioAuditor audit therefore work in Docker like they do on Windows;
+  `GET /api/capabilities` says what a given server can actually do.
 
 ### From source
 
@@ -646,10 +650,13 @@ or a laptop on the network signs in. `X-Forwarded-For` is never trusted, and
   **anything already on the host** — another local user, a container neighbour —
   reads `.mlo/data/auth.db` and the config: the gate defends the network
   boundary, not a hostile local account.
-- **Docker cannot run the Windows-only tools** (CUETools, AudioAuditor,
-  Logchecker + php), so AccurateRip generation, the Logchecker grade and the
-  AudioAuditor audit are unavailable there — `GET /api/capabilities` says what a
-  given server can actually do.
+- **The Windows-only tools run in Docker through their runtimes** — CUETools
+  and AudioAuditor on the mono runtime the image installs (with `libgdiplus`
+  and mono's System.Drawing, which CUETools' verification loads), Logchecker on
+  its `php-cli`. They install at runtime from their Linux builds like every
+  other tool, so AccurateRip generation, the Logchecker grade and the
+  AudioAuditor audit work there; `GET /api/capabilities` says what a given
+  server can actually do.
 
 ## Architecture
 
