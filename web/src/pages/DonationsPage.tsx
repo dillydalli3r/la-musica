@@ -132,7 +132,7 @@ export default function DonationsPage() {
           <img
             src="/cat.jpg"
             alt={t("donations.cat_alt")}
-            className="w-44 sm:w-48 h-auto rounded-lg ring-1 ring-black/40 shrink-0"
+            className="w-44 sm:w-48 h-auto rounded-lg shrink-0"
             loading="lazy"
           />
           <p className="text-sm leading-relaxed text-zinc-300">{t("donations.cat_line")}</p>

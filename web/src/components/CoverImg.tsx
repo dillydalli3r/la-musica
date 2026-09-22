@@ -15,7 +15,7 @@ export default function CoverImg({
   albumPath,
   coverFile,
   staged = false,
-  wrapperClass = "h-9 w-9 rounded bg-raise border border-border overflow-hidden shrink-0",
+  wrapperClass = "h-9 w-9 rounded bg-raise overflow-hidden shrink-0",
 }: {
   albumPath: string;
   coverFile?: string | null;
@@ -82,7 +82,7 @@ export function TrackCover({
   albumCover,
   albumFallback = true,
   staged = false,
-  wrapperClass = "h-9 w-9 rounded bg-raise border border-border overflow-hidden shrink-0",
+  wrapperClass = "h-9 w-9 rounded bg-raise overflow-hidden shrink-0",
 }: {
   albumPath: string;
   trackCover?: string | null;

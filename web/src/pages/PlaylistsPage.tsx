@@ -232,7 +232,7 @@ function PlaylistGridCard({ playlist, trackMeta, onPlay }: {
       <div className="relative">
         <Link to={`/playlist/${playlist.id}`} title="Open the playlist page" className="block">
         <div
-          className="aspect-square w-full rounded-xl shadow-lg ring-1 ring-black/40 overflow-hidden relative"
+          className="aspect-square w-full rounded-xl shadow-lg overflow-hidden relative"
           style={{ background: coverGradient(playlist) }}
         >
           {/* cover mosaic: the first four tracks' artwork in a 2x2 grid —

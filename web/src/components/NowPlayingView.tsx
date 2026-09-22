@@ -149,6 +149,13 @@ interface LyricInk {
    *  bright, and a white halo there is a white outline around every glyph
    *  rather than legibility (see index.css). */
   shade: string;
+  /** The veil behind the reading surface, matched to this ink. A mid-grey
+   *  cover is the documented hard case: both inks sit equally far from the
+   *  field, so a faded line lands grey-on-grey whatever the polarity picks
+   *  (the reported "lyrics blend into the background"). The scrim moves the
+   *  FIELD instead of the ink — a light veil under dark lyrics, a dark one
+   *  under light — which keeps every ink step where the table put it. */
+  scrim: string;
   /** Karaoke syllables: under the playhead, already sung, still to come. The
    *  emphasis is the scale + glow, which works on either polarity; the
    *  colour has to follow the ink, because the default theme's `--accent` IS
@@ -163,6 +170,7 @@ const INK_ON_DARK: LyricInk = {
   dim: "text-zinc-300",
   plain: "text-zinc-100",
   shade: "np-shade-dark",
+  scrim: "bg-black/35",
   wordNow: "text-accent scale-110 [text-shadow:0_0_16px_rgba(255,255,255,0.4)]",
   wordSung: "text-white",
   wordNext: "text-white/75",
@@ -177,9 +185,10 @@ const INK_ON_LIGHT: LyricInk = {
   // white cover. One step nearer the ink keeps them readable while the blur,
   // the smaller scale and the active line's near-black still say which line is
   // playing.
-  dim: "text-zinc-700",
+  dim: "text-zinc-800",
   plain: "text-zinc-900",
   shade: "",
+  scrim: "bg-white/35",
   wordNow: "text-zinc-950 scale-110 [text-shadow:0_0_16px_rgba(0,0,0,0.4)]",
   wordSung: "text-zinc-950",
   wordNext: "text-zinc-950/75",
@@ -1460,7 +1469,7 @@ export default function NowPlayingView(p: Props) {
                    polarity once (text-shadow inherits), and every line takes
                    its colour from the same decision, so the ink is always
                    the near-opposite of the field behind it. */
-                className={`relative flex-1 min-h-0 overflow-y-auto overscroll-contain px-6 py-5 no-scrollbar ${ink.shade} transition-opacity duration-300 ${
+                className={`relative flex-1 min-h-0 overflow-y-auto overscroll-contain px-6 py-5 no-scrollbar ${ink.shade} ${ink.scrim} transition-opacity duration-300 ${
                   staleLyrics ? "opacity-50" : "opacity-100"
                 }`}
                 style={{ zoom: lyricZoom }}

@@ -360,13 +360,22 @@ def worker_count(config=None, default=None, maximum=None, items=None):
     competing encoder processes on a busy or slower disk.
     """
     config = config or {}
-    cpu = os.cpu_count() or 1
+    # `process_cpu_count` respects an affinity mask (a container's `--cpuset`,
+    # taskset) where `cpu_count` reports the host's cores; it is the honest
+    # answer to "how many can this process actually use" and Python 3.13 has
+    # it. Fall back to the older call on anything without it.
+    cpu = (getattr(os, "process_cpu_count", None) or os.cpu_count)() or 1
     try:
         requested = int(config.get("worker_limit", 0) or 0)
     except (TypeError, ValueError):
         requested = 0
     count = requested if requested > 0 else (default or cpu)
-    if maximum is not None:
+    # `maximum` bounds the AUTOMATIC count — it exists so an unattended Run All
+    # on a busy disk does not spawn one encoder per core. An EXPLICIT
+    # `worker_limit` is the user sizing the pools themselves ("lots of threads
+    # on this box"), so it is not clamped by a module's own ceiling: a 16-core
+    # machine that asks for 16 got 8 before this.
+    if maximum is not None and requested <= 0:
         count = min(count, maximum)
     if items is not None:
         count = min(count, max(1, int(items)))

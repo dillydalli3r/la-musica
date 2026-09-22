@@ -68,14 +68,14 @@ export default function AlbumCard({ al, artistName, selectable, selected, onSele
             <CoverImg
               albumPath={al.path}
               coverFile={al.cover_file}
-              wrapperClass="aspect-square w-full rounded-xl shadow-lg ring-1 ring-black/40 overflow-hidden"
+              wrapperClass="aspect-square w-full rounded-xl shadow-lg overflow-hidden"
             />
           </Link>
         ) : (
           <CoverImg
             albumPath={al.path}
             coverFile={al.cover_file}
-            wrapperClass="aspect-square w-full rounded-xl shadow-lg ring-1 ring-black/40 overflow-hidden"
+            wrapperClass="aspect-square w-full rounded-xl shadow-lg overflow-hidden"
           />
         )}
         {selectable && (

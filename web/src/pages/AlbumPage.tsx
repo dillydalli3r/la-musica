@@ -651,7 +651,7 @@ export default function AlbumPage() {
               <CoverImg
                 albumPath={data.path}
                 coverFile={data.cover_file}
-                wrapperClass="h-40 w-40 sm:h-56 sm:w-56 rounded-xl bg-raise overflow-hidden shadow-2xl ring-1 ring-black/40"
+                wrapperClass="h-40 w-40 sm:h-56 sm:w-56 rounded-xl bg-raise overflow-hidden shadow-2xl"
               />
               <input
                 ref={coverInput}
