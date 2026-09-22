@@ -465,7 +465,47 @@ export default function ImportWizard() {
   // A per-slice selector, like the library page: a bare useStore() would
   // re-render every step of the wizard on playback/queue/toast writes too.
   const progress = useStore((s) => s.progress);
-  const [act, setAct] = useState<{ label: string; kind?: "metadata"; done?: number; total?: number } | null>(null);
+  const [act, setAct] = useState<{ label: string; kind?: "metadata" | "run"; done?: number; total?: number } | null>(null);
+  // The relay frame that was already on screen when the current action
+  // started. Both surfaces show the LAST frame that reached them, so a frame
+  // older than this one belongs to whatever ran before the action — an
+  // import's stages, a finished run's report — and is never this action's.
+  const frameAtAct = useRef<typeof progress>(null);
+  /** Start an action whose numbers the ENGINE publishes (a script run): the
+   *  strip follows that run's own frames and shows none of the last producer's
+   *  while the run is still starting. */
+  const beginRun = (label: string) => {
+    frameAtAct.current = progress;
+    setAct({ label, kind: "run" });
+  };
+  // ---- what the wizard's ONE progress strip draws ------------------------
+  // Two sources: the action the wizard started, and the relay frame the engine
+  // publishes over the websocket the header bar also draws.
+  //
+  // An action that counts its own steps (the metadata rows, the per-album
+  // lyrics fetch) owns the strip outright. A RUN — the script chain, the
+  // ticked scripts — is the opposite case: its numbers are the engine's, and
+  // the run claims the surfaces with its own zero state the moment it really
+  // starts (server/script_runners.run_start_frame: "#1/N · <first script>"
+  // with the whole-step pair `steps`, which every frame of a chained run
+  // carries).
+  //
+  // So a run draws only frames that arrived after it began, and the label
+  // always names the numbers beside it: the run's own "#i/N · <script>" once
+  // its frames land; the frame's own desc while an import STAGE is what is
+  // actually running; and the action's own label — indeterminate bar, clock
+  // moving — while nothing of its own has arrived. What it may never draw is a
+  // stage's "4/8" under the chain's label, which is what a half-filled bar at
+  // the start of a chain was. `steps` is passed through rather than nulled, so
+  // the readout prints the run's own pair instead of a rounded count of the
+  // same numbers.
+  const runFrame = act?.kind === "run" && progress && progress !== frameAtAct.current ? progress : null;
+  const strip = runFrame
+    ? { label: runFrame.desc, frame: runFrame, steps: runFrame.steps ?? null }
+    : act?.kind === "run"
+      ? { label: act.label, frame: null, steps: null }
+      : { label: act?.label ?? progress?.desc ?? fetchStatus ?? "Working…",
+          frame: progress, steps: act ? null : progress?.steps };
   const qc = useQueryClient();
 
   // ---- Bulk queue (several albums at once) ------------------------------
@@ -2574,7 +2614,7 @@ const runTickedHere = async () => {
     // The boxes' own order, which is the import chain until the user changes
     // them — aimed at this wizard's album(s) only. Sent as `runAfterImportIds`
     // itself: the same expression Finish sends, so the two can never diverge.
-    setAct({ label: `Run scripts — ${runAfterImportIds.length} script(s) on ${targets.length} album(s)` });
+    beginRun(`Run scripts — ${runAfterImportIds.length} script(s) on ${targets.length} album(s)`);
     const res = await api.run(runAfterImportIds, targets);
     const rows = rowsFromResults(res.results ?? []);
     setRunRows(rows);
@@ -2616,7 +2656,7 @@ const runAllScripts = async () => {
   setRunRows(null);
   let stillMissing: string[] = [];
   try {
-    setAct({ label: `Import chain — ${scriptChain?.chain?.length ?? 0} script(s) on ${targets.length} album(s)` });
+    beginRun(`Import chain — ${scriptChain?.chain?.length ?? 0} script(s) on ${targets.length} album(s)`);
     const res = await api.importFinish(targets, {}, staged);
     // The chain's beets tagging / organize steps rename the album folder to
     // its canonical layout, so the path this wizard holds can be gone by the
@@ -3011,10 +3051,10 @@ const finish = async () => {
         <div className="panel px-3 py-2">
           <ActionBar
             active
-            label={act?.label ?? progress?.desc ?? fetchStatus ?? "Working…"}
-            done={act?.done ?? progress?.done}
-            total={act?.total ?? progress?.total}
-            steps={act ? null : progress?.steps}
+            label={strip.label}
+            done={act?.done ?? strip.frame?.done}
+            total={act?.total ?? strip.frame?.total}
+            steps={strip.steps}
           />
         </div>
       )}
@@ -4544,10 +4584,14 @@ const finish = async () => {
               <div className="mt-2">
                 <ActionBar
                   active
-                  label={act?.label ?? (runningTicked ? "Running the ticked scripts…" : "Running the import chain…")}
-                  done={progress?.done}
-                  total={progress?.total}
-                  steps={progress?.steps}
+                  // The same numbers the strip above draws — one source for
+                  // both bars, so the step's own bar can never disagree with
+                  // it (a stage's percentage under the chain's label is what
+                  // the two of them used to show).
+                  label={strip.label || (runningTicked ? "Running the ticked scripts…" : "Running the import chain…")}
+                  done={act?.done ?? strip.frame?.done}
+                  total={act?.total ?? strip.frame?.total}
+                  steps={strip.steps}
                 />
               </div>
             )}

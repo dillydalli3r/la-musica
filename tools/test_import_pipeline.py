@@ -383,7 +383,17 @@ progress_rows, hook_rows = [], []
 
 from mlo import stats as _stats
 _prev_hook = getattr(_stats, "progress_hook", None)
-_stats.progress_hook = lambda done, total, desc: hook_rows.append((done, total, desc))
+
+
+def _record_hook(done, total, desc, steps=None):
+    """The relay the header bar — and the wizard's progress strip — is drawn
+    from. Four arguments: a chained run's frames carry the whole-step pair, and
+    a hook that takes only three loses it silently (`job_locks.publish` retries
+    the 3-argument frame on a TypeError)."""
+    hook_rows.append((done, total, desc, steps))
+
+
+_stats.progress_hook = _record_hook
 try:
     out = imports.bulk_import(
         [{"path": a1}, {"path": a2}], CFG,
@@ -404,7 +414,27 @@ assert sorted(os.listdir(LIB)) == ["Album One", "Album Two"], os.listdir(LIB)
 assert len(progress_rows) == 2 and sorted(r[0] for r in progress_rows) == [1, 2], progress_rows
 assert all(r[1] == 2 for r in progress_rows), progress_rows
 assert all(r[3]["status"] == "imported" for r in progress_rows), progress_rows
-assert len(hook_rows) == 2, hook_rows
+# The hook was DRIVEN — and by WHAT is the check, never by how many frames
+# arrived. `bulk_import` runs `import_bulk_concurrency` albums at once (2
+# here), and the chain's pre-work announces itself phase by phase
+# (`imports._phase`: what an import shows while its chain is still starting),
+# so the two albums' frames interleave: every phase is announced ONCE PER
+# ALBUM, and each phase's first appearance comes after the phase before it —
+# the order the import works in. A row COUNT is satisfied by any producer that
+# happens to publish as many frames (and broken by one that publishes one
+# more), which is not what this line is here to say.
+PHASES = ["Looking up links…", "Fetching genres…", "Fetching advisories…",
+          "Checking instrumentals…", "Fetching metadata…", "Finding cover art…"]
+labels = [row[2] for row in hook_rows]
+assert all(labels.count(p) == 2 for p in PHASES), labels
+firsts = [labels.index(p) for p in PHASES]
+assert firsts == sorted(firsts), list(zip(PHASES, firsts))
+# …and a phase frame says only WHERE the import is: no count and no step pair,
+# so the wizard's strip draws it as an indeterminate bar under the phase's own
+# name rather than as a percentage of something — the pair belongs to a chain
+# that has actually started (tools/test_chain_bar.py pins both halves).
+phase_rows = [row for row in hook_rows if row[2] in PHASES]
+assert all(row[0] == 0 and row[1] == 0 and row[3] is None for row in phase_rows), phase_rows
 
 # re-running on the album that is already in the library is a no-op move
 again = imports.bulk_import([{"path": out["items"][0]["album_path"]}], CFG)

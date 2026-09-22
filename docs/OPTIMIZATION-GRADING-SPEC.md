@@ -217,6 +217,21 @@ once per FINISHED script — so the same run read as two different steps, and a
 single-script run showed a live bar over a row that said only "working" until it
 was over. A step is announced for every script the chain reaches, including one
 that was skipped or unavailable.
+**R78a — a strip never draws one producer's numbers under another's name.** The
+wizard's own progress strip (`web/src/pages/ImportWizard.tsx`) shows the action
+the user started and the relay frames above, and those two can disagree while a
+run is starting. So the strip follows the frames of the action that is RUNNING:
+an action that counts its own steps (the metadata rows, the per-album lyrics
+fetch) draws its own counts; an action whose numbers the engine publishes draws
+the relay's — the run's own text as the label, the `<at>/<of>` pair every frame
+of a chained run carries as the readout, its fraction as the bar — and while an
+import stage is still what is running, says so under the STAGE's own name. What
+it may never draw is an import stage's percentage under the chain's label, or a
+frame that was already on screen when the action began (the last finished
+producer's report): those leave the bar indeterminate under the action's own
+label, with the clock moving. Both of the wizard's chain bars (the strip and the
+Finish step's own) draw from that one reading, so they cannot disagree.
+`tools/test_chain_bar.py` pins it against the frames a real chain publishes.
 **R79 — the worker budget is what the WHOLE run costs.** `worker_limit`
 (Settings → Performance → "Worker threads", 0 = count them from the CPU) bounds
 the worker pools (`mlo.stats.worker_count`) and, through
