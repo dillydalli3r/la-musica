@@ -3219,4 +3219,40 @@ finally:
         soulseek_auto._jobs.update(_saved_jobs)
 print("  ok _finish keeps a job Importing while its chain runs")
 
+print("== an import never lands beside the same album ==")
+# The library folder is `<Artist - Album>`, and when that path is TAKEN the
+# question is which album holds it: the SAME release (its own album/release-group
+# ids, or the ids a framework album's marker was created with) must refuse —
+# downloading a release the library already holds is what put a second copy of
+# one album next to the first — while a DIFFERENT album with the same name keeps
+# the `(2)` escape, logged. A silent `(2)` is what made two releases out of one.
+import json as _json      # noqa: E402
+import tempfile as _tempfile  # noqa: E402
+
+_lib = _tempfile.mkdtemp(prefix="mlo_dest_")
+_dest_cfg = {"music_folder": _lib}
+_rel = {"id": "abc-123", "release_group_id": "rg-456",
+        "artists": [{"name": "Radiohead"}], "title": "OK Computer"}
+_dest = soulseek_auto._import_dest(_rel, _dest_cfg)
+assert _dest.replace("\\", "/").endswith("Artists/Radiohead - OK Computer"), _dest
+os.makedirs(_dest, exist_ok=True)
+
+# another album (unknown identity) with the same name: `(2)`, and never silently
+_lib2 = _tempfile.mkdtemp(prefix="mlo_dest_")
+_dest2_cfg = {"music_folder": _lib2}
+_dest2 = soulseek_auto._import_dest(_rel, _dest2_cfg)
+os.makedirs(_dest2, exist_ok=True)
+_second = soulseek_auto._import_dest(_rel, _dest2_cfg)
+assert _second.endswith("Radiohead - OK Computer (2)"), _second
+
+# the SAME release already there: refuse, and say where
+with open(os.path.join(_dest, ".mlo_pending.json"), "w", encoding="utf-8") as fh:
+    _json.dump({"release_id": "abc-123", "release_group_id": "rg-456"}, fh)
+try:
+    soulseek_auto._import_dest(_rel, _dest_cfg)
+    raise AssertionError("expected a refusal for a release already in the library")
+except RuntimeError as e:
+    assert "already in your library" in str(e), e
+print("  ok the same release is never imported beside itself")
+
 print("ok")

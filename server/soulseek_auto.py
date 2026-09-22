@@ -510,14 +510,19 @@ def _release_key(release_mbid, release=None):
     return str(release_mbid or (release or {}).get("id") or "").strip().lower()
 
 
+def _running_keys_locked():
+    """`_running_keys` for a caller that already holds ``_lock``."""
+    return {_release_key((j.get("release") or {}).get("id"))
+            for j in _active_locked()} - {""}
+
+
 def _running_keys():
     """Release ids the pipeline is working on right now.
 
     A SET: three jobs can be in flight, and a release being searched is just as
     much "already being imported" as one that is downloading."""
     with _lock:
-        return {_release_key((j.get("release") or {}).get("id"))
-                for j in _active_locked()} - {""}
+        return _running_keys_locked()
 
 
 def _queued_keys():
@@ -3636,8 +3641,19 @@ def start_job(release_mbid=None, release=None, queries=None, username=None,
         except Exception:
             pass      # a library that cannot be read must not block the job
     jid = 0
+    already = False
     with _lock:
-        if len(_active_locked()) < concurrency():
+        # RE-CHECK under the lock: the checks above read `_jobs` without it, so
+        # two requests arriving together (a double press, the wishes worker and
+        # a manual grab) both found the release "not running" and registered two
+        # jobs. The album-folder claim only made the second WAIT, and when the
+        # wait ended it searched, downloaded and imported the same album again —
+        # into `<Album> (2)`, because the first import's folder was there by
+        # then. Registration and the check now share one critical section, so
+        # the second caller is refused instead of duplicating the album.
+        if key and key in _running_keys_locked():
+            already = True
+        elif len(_active_locked()) < concurrency():
             _seq += 1
             jid = _seq
             job = dict(_IDLE_JOB)
@@ -3660,6 +3676,10 @@ def start_job(release_mbid=None, release=None, queries=None, username=None,
             _order.append(jid)
             _primary = jid
             _prune_jobs_locked()
+    if already:
+        return {"ok": False, "transient": True,
+                "error": "this release is already being imported",
+                "job": job_state()}
     if jid:
         threading.Thread(target=_run, name=f"mlo-soulseek-auto-{jid}",
                          kwargs=dict(release_mbid=release_mbid, release=release,
@@ -5198,6 +5218,54 @@ def _verify_acoustid(album_dir, release, cfg):
              "unverified, not rejected.")
 
 
+def _import_dest(release, cfg):
+    """Where this release's folder goes in the library — never a silent `(2)`.
+
+    The library lives in `<music folder>/Artists` (the music folder root is what
+    the Soulseek network is shared from, not where albums belong) and the folder
+    is `<Artist - Album>`. When that path is taken the question is WHICH album
+    holds it:
+
+    * the SAME release — its own `MUSICBRAINZ_ALBUMID`/`RELEASEGROUPID` tags, or
+      the ids a framework album's marker was created with — raises instead of
+      importing. Downloading a release the library already holds is what left a
+      second copy of one album beside the first; `start_job` refuses that
+      earlier, this is the last line of defence and it says so plainly;
+    * anything else — another album that happens to share the name, or a folder
+      with no identity at all — keeps the `(2)` escape, LOGGED, because two
+      different albums must both be importable.
+    """
+    from mlo.paths import library_root
+
+    folder = str(cfg.get("music_folder") or "").strip()
+    if not folder or not os.path.isdir(folder):
+        raise RuntimeError("music_folder is not configured")
+    safe = _album_dir_name(release)
+    dest = os.path.join(library_root(folder), safe)
+    if not os.path.exists(dest):
+        return dest
+    want = {str(release.get("id") or "").strip().lower(),
+            str(release.get("release_group_id") or "").strip().lower()} - {""}
+    got = set()
+    if want:
+        try:
+            from server.imports import _album_mbids
+            got = {i for i in _album_mbids(dest) if i}
+        except Exception:
+            got = set()      # a folder that cannot be read is not evidence
+    if want & got:
+        raise RuntimeError(
+            f"{safe!r} is already in your library ({dest}) — this release is "
+            f"not imported twice; remove, rename or import that folder by hand")
+    n = 2
+    while os.path.exists(dest):
+        _log(f"{safe!r} already holds a DIFFERENT album — importing as "
+             f"{safe} ({n})")
+        dest = os.path.join(library_root(folder), f"{safe} ({n})")
+        n += 1
+    return dest
+
+
 def _import(local_root, release, cfg, media, source=""):
     """Move the verified download into the library and run the pipeline.
 
@@ -5206,7 +5274,7 @@ def _import(local_root, release, cfg, media, source=""):
     `source` is where the album came from, for the one caller whose origin the
     rest of the app cannot infer (the YouTube branch): it is written as SOURCE
     where the file does not already say something."""
-    from mlo.paths import library_root, move_path
+    from mlo.paths import move_path
     from server import main as srv
     from server.main import OrganizeRequest
 
@@ -5214,15 +5282,7 @@ def _import(local_root, release, cfg, media, source=""):
     if not folder or not os.path.isdir(folder):
         raise RuntimeError("music_folder is not configured")
 
-    name = _album_name(release)
-    safe = _album_dir_name(release)
-    # the library lives in <music folder>/Artists — the music folder root is
-    # what the Soulseek network is shared from, not where albums belong.
-    dest = os.path.join(library_root(folder), safe)
-    n = 2
-    while os.path.exists(dest):
-        dest = os.path.join(library_root(folder), f"{safe} ({n})")
-        n += 1
+    dest = _import_dest(release, cfg)
 
     if not move_path(local_root, dest, log=_log):
         # mlo.paths.move_path never copies-then-fails: it retries a locked file

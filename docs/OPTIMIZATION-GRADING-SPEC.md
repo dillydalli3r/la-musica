@@ -1193,6 +1193,41 @@ user asked for, in the order they asked for it. `server/exporter.py` owns both.
   confirmed structure is not reported as a stray folder, while a folder merely
   NAMED `VIDEO_TS` still is.
 
+### 7.14 What an import promises: one release, one album folder, one run
+
+- **R89 — a release is imported ONCE, into ONE album folder, and its chain is
+  scoped to that album.** The queue reports "two separate releases" when any of
+  these leaks, so all three are rules:
+
+  * **The destination is identity-checked.** An import moves the album to
+    `<library root>/<Artist - Album>` (`_import_dest`). When that path is
+    already taken the question is WHICH album holds it: the SAME release — its
+    own `MUSICBRAINZ_ALBUMID`/`MUSICBRAINZ_RELEASEGROUPID` tags, or the ids a
+    framework album's `.mlo_pending.json` marker was created with
+    (`imports._album_mbids`, which reads the marker exactly because a framework
+    album has no tags yet) — **raises** instead of importing ("already in your
+    library"), because re-downloading a release the library already holds is
+    what left a second copy of one album beside the first. A DIFFERENT album
+    that happens to share the name keeps the `(2)` escape, and the log says so:
+    a silent `(2)` is the bug, not the escape.
+  * **A release cannot start twice.** `start_job` refuses a release already
+    waiting in the bulk queue (`_queued_keys`, under the queue lock) and one
+    already in the library (`wishes.owned_mbids`), and it RE-CHECKS the running
+    set inside the same critical section that registers the job
+    (`_running_keys_locked` under `_lock`): two requests arriving together — a
+    double press, the wishes worker and a manual grab — used to both find the
+    release "not running" and register two jobs, which the album-folder claim
+    only made WAIT, after which the second searched, downloaded and imported the
+    same album again.
+  * **Two jobs heading for one folder serialize, and the chain stays in its
+    album.** `job_locks` holds the folder `_import` names (before any `(2)`
+    suffix) for the job's whole life — search, download, verify, import — so two
+    editions of one album cannot move their files in at once; and the chain runs
+    as `script_runners.run_chain(targets=[album])`, which sets `cfg["targets"]`
+    for every script, so nothing in an import ever walks the library (`mlo/cli`'s
+    own Run All is the explicit, user-started library-wide path and is not what
+    an import runs).
+
 ## 8. Recommended runbook
 
 Nothing here is a substitute for the app's own Dependencies page: run it first

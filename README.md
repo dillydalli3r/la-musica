@@ -454,7 +454,12 @@ that sets fewer slots than its two limits need gets each release's candidate
 batch narrowed to fit (`slots ÷ releases`) instead of queueing inside slskd. The
 Queue tab's header reads all three back.
 
-Adding a release to the library **starts its search immediately** and puts it on
+A release is imported **once**, into one album folder: the destination is
+checked against the release's own MusicBrainz ids, so a download of an album the
+library already holds is refused with a sentence instead of appearing beside it
+as `… (2)` — and two jobs heading for one folder serialize on that folder while
+their chain runs scoped to it, never over the library. Adding a release to the
+library **starts its search immediately** and puts it on
 the **download queue**, which is the one surface for wanted releases: a row shows
 what the search is doing, and it stays **In progress** — never Completed — while
 the import chain it started is still running over the album. The durable
