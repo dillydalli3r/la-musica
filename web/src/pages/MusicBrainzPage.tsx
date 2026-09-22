@@ -10,6 +10,7 @@ import type {
   MBReleaseRow, MBRecordingBrowse, MBSearchField, MBSearchRow as MBSearchRowData, MBSearchRows,
 } from "../types";
 import { albumRef } from "../lib/refs";
+import { withAlias } from "../lib/mbtext";
 import { TABLE_FIT } from "../lib/columns";
 import { EmptyState, PageLoading } from "../components/Badges";
 import { MbIcon } from "../components/Links";
@@ -76,6 +77,9 @@ const MBID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/
 interface MBTrackRow {
   disc: number; position: number; title: string; length?: number | null;
   recording_mbid?: string | null; artist_credit?: string;
+  /** The title in the reader's locale (`locale`), when MusicBrainz states
+   *  one — rendered in parentheses beside the title. */
+  alias?: string;
 }
 /** One page-row of the search table: the server's row plus the display
  *  fields the table derives from it (a joined life span, a joined tag list,
@@ -83,18 +87,6 @@ interface MBTrackRow {
 type SearchRow = MBSearchRowData & {
   lifeLabel?: string; tagsLabel?: string; lenLabel?: string; typeLabel?: string;
 };
-/** "Name (Alias)" — the entity as the reader's locale names it.
-
- *  MusicBrainz states an entity's other-language names as aliases; the SERVER
- *  picks the one in the configured `beets_locale` (Settings -> Import & tags)
- *  and leaves it out when it would only repeat the name (see
- *  `integrations.alias_for`), so this only adds the parentheses. */
-function withAlias(name: string | undefined, alias?: string): string {
-  const base = (name || "").trim();
-  const alt = (alias || "").trim();
-  return alt ? `${base} (${alt})` : base;
-}
-
 type RGRow = MBReleaseGroupRow;
 type RelRow = MBReleaseRow;
 const mbUrl = (type: string, id: string) =>
@@ -996,7 +988,7 @@ export function MBSearchPage() {
         return (
           <>
             <td className="td">
-              <span className="font-medium text-zinc-100">{r.title}</span>
+              <span className="font-medium text-zinc-100">{withAlias(r.title, r.alias)}</span>
               {r.disambiguation ? <span className="text-zinc-500"> ({r.disambiguation})</span> : null}
             </td>
             <td className="td text-zinc-500">{r.type || "—"}</td>
@@ -1010,7 +1002,7 @@ export function MBSearchPage() {
         return (
           <>
             <td className="td">
-              <span className="font-medium text-zinc-100">{r.title}</span>
+              <span className="font-medium text-zinc-100">{withAlias(r.title, r.alias)}</span>
               {r.disambiguation ? <span className="text-zinc-500"> ({r.disambiguation})</span> : null}
             </td>
             {artist}
@@ -1023,7 +1015,7 @@ export function MBSearchPage() {
         return (
           <>
             <td className="td">
-              <span className="font-medium text-zinc-100">{r.title}</span>
+              <span className="font-medium text-zinc-100">{withAlias(r.title, r.alias)}</span>
               {r.disambiguation ? <span className="text-zinc-500"> ({r.disambiguation})</span> : null}
             </td>
             {artist}
@@ -1044,7 +1036,7 @@ export function MBSearchPage() {
         return (
           <>
             <td className="td">
-              <span className="font-medium text-zinc-100">{r.title}</span>
+              <span className="font-medium text-zinc-100">{withAlias(r.title, r.alias)}</span>
               {r.disambiguation ? <span className="text-zinc-500"> ({r.disambiguation})</span> : null}
             </td>
             {artist}
@@ -2186,7 +2178,7 @@ export function MBReleasePage() {
                       {t.position}
                     </span>
                     <div className="flex-1 min-w-0">
-                      <span className="text-sm text-zinc-200 truncate">{t.title}</span>
+                      <span className="text-sm text-zinc-200 truncate">{withAlias(t.title, t.alias)}</span>
                       {t.artist_credit && t.artist_credit !== artist && (
                         <span className="text-[11px] text-zinc-500"> — {t.artist_credit}</span>
                       )}

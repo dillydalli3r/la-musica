@@ -263,14 +263,25 @@ _ALIAS_SKIP_TYPES = frozenset({"search hint"})
 
 
 def _locale_preference(cfg=None):
-    """The locale the reader wants names in — `beets_locale`, folded.
+    """The locale the reader wants names in — `locale`, folded.
 
     The SAME setting the managed beets import translates names with
     (Settings -> Import & tags: "Preferred locale for aliases"), so a page and
     the files it will produce agree on what an entity is called.
     """
     cfg = cfg if isinstance(cfg, dict) else _release_cfg()
-    return str((cfg or {}).get("beets_locale") or "").strip().lower()
+    return str((cfg or {}).get("locale") or "").strip().lower()
+
+
+def _has_latin(value):
+    """Whether *value* carries a Latin letter — a romanization's tell.
+
+    MusicBrainz states a Japanese/Chinese/Korean/Cyrillic name's reading as an
+    alias in `*-Latn` or a translation in a Latin-script language; both contain
+    Latin letters while the name does not, which is what makes them the useful
+    parentheses for a reader who cannot read the script.
+    """
+    return any("a" <= ch.lower() <= "z" for ch in str(value or ""))
 
 
 def alias_for(aliases, cfg=None, name=""):
@@ -289,7 +300,12 @@ def alias_for(aliases, cfg=None, name=""):
       4. the entity's `primary` alias whatever its locale — a reader who chose
          no locale, or whose locale this entity has no alias for, still gets
          the name it is also known by rather than a foreign-language guess,
-      5. nothing, and the caller shows the name alone.
+      5. a Latin reading of a name that has none — MusicBrainz states a
+         romanization (`*-Latn`) or a translation as an alias, and for a reader
+         looking at `ロストアンブレラ` the useful parentheses are "Lost Umbrella";
+         a transliteration is preferred over a translation, then MusicBrainz's
+         own order decides,
+      6. nothing, and the caller shows the name alone.
 
     A search-hint alias is never chosen, and a value that only differs from the
     name by case or spacing is "no alias": a page must not render "X (X)".
@@ -338,7 +354,19 @@ def alias_for(aliases, cfg=None, name=""):
             chosen = pick(candidates)
             if chosen:
                 return chosen
-    return pick([a for a in rows if a.get("primary")])
+    chosen = pick([a for a in rows if a.get("primary")])
+    if chosen:
+        return chosen
+    # The last resort, and the one the Japanese/Chinese/Korean pages live on: a
+    # Latin reading of a name that has none. `ロストアンブレラ` with no locale
+    # configured and no primary alias is still best shown as "Lost Umbrella" —
+    # MusicBrainz's own order decides among equals, with a transliteration
+    # (`*-Latn`) preferred over a translation.
+    if not _has_latin(name):
+        latin = [a for a in rows if _has_latin(a.get("name"))]
+        latin.sort(key=lambda a: 0 if "latn" in str(a.get("locale") or "").lower() else 1)
+        return pick(latin)
+    return ""
 
 
 def _browse_collect(endpoint, extra_params, list_key, count_key, limit=300, offset=0):
@@ -511,6 +539,13 @@ def release_lookup(mbid):
                 "title": trk.get("title"),
                 "length": trk.get("length"),
                 "recording_mbid": rec.get("id"),
+                # Whether MusicBrainz states this recording IS a video. The
+                # acquisition branch reads it to tell a music-video release
+                # from an album: with the medium (media[].format) it is what
+                # decides that a Digital Media video release is fetched from
+                # YouTube rather than searched for on the network — see
+                # server.soulseek_auto.acquisition_route.
+                "video": bool(rec.get("video")),
                 "artist_mbids": [a["mbid"] for a in artists],
                 "artist_credit": "".join(
                     (ac.get("name", "") + (ac.get("joinphrase", "") or ""))
@@ -1351,7 +1386,7 @@ def youtube_age_advisory(video_id, cfg=None):
     ident = str(video_id or "").strip()
     if not _YOUTUBE_ID_RX.fullmatch(ident):
         return None
-    if not youtube._enabled(cfg):
+    if not youtube.enabled(cfg):
         return None
     module = youtube._load_ytdlp()
     if module is None:
@@ -3200,6 +3235,47 @@ def _mb_query(value):
     return re.sub(r'["\\]', " ", str(value or "")).strip()
 
 
+def attach_recording_aliases(release, mbid=""):
+    """Fill `tracks[].alias` on a release payload from ONE browse call.
+
+    MusicBrainz has no nested `inc` for aliases: a release lookup's
+    `inc=recordings` carries the recordings but never their aliases, and a
+    lookup per track would spend a request per row on a 1 req/s budget. The
+    BROWSE endpoint answers the whole release at once (`recording?release=<id>
+    &inc=aliases`, 100 rows a page) and is cached like every other MusicBrainz
+    read, so a release page costs one request the first time and none after.
+
+    Returns how many rows got an alias; a payload that fails to arrive leaves
+    every track as it was — no alias is better than a broken page.
+    """
+    # The payload carries the tracklist TWICE: `tracks` (the flat list the
+    # wizard and the importers read) and `media[].tracks` (the per-disc shape
+    # the release page renders), so both get the alias.
+    rows = [t for t in (release.get("tracks") or []) if isinstance(t, dict)]
+    for medium in (release.get("media") or []):
+        if isinstance(medium, dict):
+            rows.extend(t for t in (medium.get("tracks") or []) if isinstance(t, dict))
+    rid = str(mbid or release.get("id") or "").strip()
+    if not rows or not rid:
+        return 0
+    try:
+        data = mb_get_cached("recording", {"release": rid, "inc": "aliases",
+                                           "limit": 100, "fmt": "json"})
+    except Exception:
+        return 0
+    by_id = {r.get("id"): r for r in (data.get("recordings") or [])}
+    filled = 0
+    for track in rows:
+        row = by_id.get(track.get("recording_mbid"))
+        if not row:
+            continue
+        alias = alias_for(row.get("aliases"), None, track.get("title"))
+        if alias:
+            track["alias"] = alias
+            filled += 1
+    return filled
+
+
 def _mb_rym_relations(entity, mbid, inc="url-rels"):
     """(RYM urls, entity data) for one MusicBrainz MBID.
 
@@ -4824,7 +4900,11 @@ def search_releases(query, limit=10, mode="release"):
 def search_artists(query, limit=5):
     try:
         data = mb_get_cached("artist", {"query": query, "limit": limit, "fmt": "json"})
-        return [{"id": a.get("id"), "name": a.get("name"), "type": a.get("type")}
+        # The search index stores artists' aliases, so the top bar's dropdown
+        # can show "稲葉曇 (inabakumori)" without a second request per row (see
+        # `alias_for`).
+        return [{"id": a.get("id"), "name": a.get("name"), "type": a.get("type"),
+                 "alias": alias_for(a.get("aliases"), None, a.get("name"))}
                 for a in data.get("artists", [])]
     except Exception as e:
         return {"error": str(e)}
@@ -5344,11 +5424,19 @@ def search_mb(entity, query, limit=100, mode="free", offset=0,
         if item["id"] in seen:
             continue
         seen.add(item["id"])
+        title = item.get("title") or item.get("name")
         row = {
             "id": item.get("id"),
             "score": item.get("score"),
-            "title": item.get("title") or item.get("name"),
+            "title": title,
             "disambiguation": item.get("disambiguation") or "",
+            # The alias the reader's locale names this entity by, when the
+            # SEARCH INDEX states one — it does for artists (MusicBrainz stores
+            # their aliases in the index) and for nothing else, so a release
+            # group or a recording row simply carries "". Those rows show their
+            # alias once the page has fetched it (see `alias_for` and the
+            # release page's own browse call).
+            "alias": alias_for(item.get("aliases"), None, title),
         }
         if entity == "artist":
             area = item.get("area") or {}
@@ -5500,6 +5588,10 @@ def artist_release_groups(mbid, limit=100, offset=0, primary_type="", secondary_
             {
                 "id": rg.get("id"),
                 "title": rg.get("title"),
+                # This branch reads the BROWSE payload, which carries the
+                # aliases (`inc=aliases` above); the search branch above cannot
+                # — the index stores aliases for artists only.
+                "alias": alias_for(rg.get("aliases"), None, rg.get("title")),
                 "primary_type": rg.get("primary-type") or "",
                 "secondary_types": rg.get("secondary-types") or [],
                 "first_release_date": rg.get("first-release-date") or "",

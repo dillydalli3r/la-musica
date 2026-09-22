@@ -3314,7 +3314,12 @@ def mb_release_query(mbid: str = Query(...)):
     if not rid:
         raise HTTPException(400, "invalid MusicBrainz ID or URL")
     try:
-        return intg.release_lookup(rid)
+        release = intg.release_lookup(rid)
+        # The tracklist's aliases, in ONE browse call (MusicBrainz carries none
+        # inside the lookup): the page renders each track's title with the name
+        # it is also known by, exactly as the artist and release rows do.
+        intg.attach_recording_aliases(release, rid)
+        return release
     except Exception as e:
         raise HTTPException(502, f"MusicBrainz lookup failed: {e}")
 

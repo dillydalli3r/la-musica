@@ -384,7 +384,7 @@ still overrides the physical default for a CD a user sets it for. Search terms
 are stripped of the punctuation and typographic marks no share folder carries
 (full-width `！`, quotes, brackets) while non-Latin script is kept, and a release
 whose titles are in another locale opens extra searches using its MusicBrainz
-aliases in the configured `beets_locale` (`ぴーなた` → `pinata`). It gates a CD
+aliases in the configured `locale` (`ぴーなた` → `pinata`). It gates a CD
 candidate on its rip log *before* requesting any album byte
 (`soulseek_auto_log_min_score`, default 100), ranks candidates towards the copy
 that arrives fastest — lossless first, then the match score, then the peer's own

@@ -2108,7 +2108,7 @@ def _fake_mb_cached(endpoint, params=None, timeout=30.0, retries=5):
 try:
     _intg.mb_get_cached = _fake_mb_cached
     _mb_calls.clear()
-    _q = soulseek_auto.release_queries(CJK_RELEASE, {"beets_locale": "en"})
+    _q = soulseek_auto.release_queries(CJK_RELEASE, {"locale": "en"})
     # the alias-artist query is the template with `pinata` in the artist slot,
     # and the alias TITLE replaces the album: MusicBrainz' own English name for
     # the release group is what an English share folder carries.
@@ -2123,7 +2123,7 @@ try:
     # spelling of the artist (a different one — katakana against hiragana), and
     # the ja alias TITLE is the title itself, so no second query is added for it
     _mb_calls.clear()
-    _ja = soulseek_auto.release_queries(CJK_RELEASE, {"beets_locale": "ja"})
+    _ja = soulseek_auto.release_queries(CJK_RELEASE, {"locale": "ja"})
     assert _ja == ["ぴーなた アンタに言ってんの 2026",
                    "ピナタ アンタに言ってんの 2026"], _ja
     # A NAME ALREADY IN THE READER'S SCRIPT COSTS NO REQUEST AT ALL: "Job
@@ -2156,7 +2156,7 @@ try:
     _intg.mb_get_cached = _many
     _capped = soulseek_auto.release_queries(
         CJK_RELEASE,
-        {"beets_locale": "en",
+        {"locale": "en",
          "soulseek_auto_digital_queries": ["artist album year", "album", "artist",
                                            "album year", "artist year"]})
     _alias_extra = [q for q in _capped if "alias0" in q or "title0" in q]

@@ -107,14 +107,16 @@ MOOD_VALUES: Tuple[str, ...] = (
 # rather than a value to be mangled.
 AUDIT_VALUES: Tuple[str, ...] = ("REAL", "FAKE", "MIX")
 
-# Where a rip came from — the two values THIS APP writes: server.main stamps
-# "Soulseek" on a download, and the MEDIA/SOURCE pass fills the configured
-# digital source, whose shipped default is paths.DEFAULT_DIGITAL_SOURCE
-# ("Digital"). SOURCE is otherwise the user's own word — a custom digital
-# source, or a video id (server.integrations._YOUTUBE_TAG_KEYS reads SOURCE as
-# one) — and nothing outside this list is touched, so a source this table has
-# never heard of keeps the spelling its owner gave it.
-SOURCE_VALUES: Tuple[str, ...] = ("Soulseek", "Digital")
+# Where a rip came from — the values THIS APP writes: server.main stamps
+# "Soulseek" on a download, the MEDIA/SOURCE pass fills the configured digital
+# source, whose shipped default is paths.DEFAULT_DIGITAL_SOURCE ("Digital"),
+# and the auto-import's YouTube branch stamps "YouTube" on the album it
+# fetched (server.soulseek_auto, a music-video release whose medium is Digital
+# Media). SOURCE is otherwise the user's own word — a custom digital source, or
+# a video id (server.integrations._YOUTUBE_TAG_KEYS reads SOURCE as one) — and
+# nothing outside this list is touched, so a source this table has never heard
+# of keeps the spelling its owner gave it.
+SOURCE_VALUES: Tuple[str, ...] = ("Soulseek", "Digital", "YouTube")
 
 # tag -> its closed vocabulary, in the canonical spelling. This is what
 # server.tags_registry serves as a tag's enum and what the case check reads.

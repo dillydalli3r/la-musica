@@ -175,7 +175,14 @@ def ytdlp_available(config=None):
     return bool(exe and os.path.isfile(exe))
 
 
-def _enabled(config):
+def enabled(config):
+    """Whether YouTube downloads are on (Settings → Videos).
+
+    The acquisition branch (server.soulseek_auto's YouTube route) asks this
+    BEFORE it searches anything: with the switch off, `best_candidate` returns
+    None for every track, and a caller that cannot see the switch would report
+    "not found on YouTube" about a release it was never allowed to look for.
+    """
     return bool((config or {}).get("youtube_enabled", True))
 
 
@@ -402,7 +409,7 @@ def best_candidate(artist, title, want_seconds=None, config=None):
     the streams the download would take, so a caller can tell the user what
     quality it is about to fetch.
     """
-    if not _enabled(config):
+    if not enabled(config):
         return None
     query = " - ".join(
         p for p in (str(artist or "").strip(), str(title or "").strip()) if p)
@@ -508,7 +515,7 @@ def download(url, dest_dir, config=None):
     disabled, yt-dlp is missing, or the download fails. Callers hand the path
     to mlo.remux for the library's FLAC-audio normalisation.
     """
-    if not _enabled(config):
+    if not enabled(config):
         raise RuntimeError("YouTube downloads are disabled in Settings")
     dest_dir = os.path.abspath(dest_dir)
     os.makedirs(dest_dir, exist_ok=True)

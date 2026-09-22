@@ -912,7 +912,7 @@ DEFAULT_CONFIG = {
     "force_publish": False,
 
     # Managed beets tagging (Picard parity).
-    "beets_locale": "en",
+    "locale": "en",
     "beets_translations": True,
     "beets_work_movement": True,
     "beets_release_type_caps": True,
@@ -1603,6 +1603,7 @@ def normalize_config(user=None) -> dict:
                 user[k] = merged
         cfg.update(user)
 
+
     # The codec settings used to be split across three keys: the FLAC-only
     # `flac_level`, the lossless target `lossless_target_codec` and the on/off
     # `optimize_convert_lossless`. They are one target now (`library_codec`
@@ -1613,6 +1614,17 @@ def normalize_config(user=None) -> dict:
     # the new ones. Runs before validation, so a migrated value is normalized
     # like any other.
     saved = user if isinstance(user, dict) else {}
+
+    # The locale that decides what names and aliases are WRITTEN in used to be
+    # the beets import's own key (`beets_locale`). It is the app's ONE locale
+    # now — the MusicBrainz pages, the beets import and the Soulseek alias
+    # searches all read `locale` — so a saved value is carried over and the old
+    # key dropped. A value here is a DECISION, which is why it is carried
+    # whatever it says: "en" was the old shipped default and is the new one, so
+    # there is no default to tell apart from a choice.
+    if "locale" not in saved and str((saved or {}).get("beets_locale") or "").strip():
+        cfg["locale"] = saved["beets_locale"]
+    cfg.pop("beets_locale", None)
     if "library_codec_quality" not in saved:
         try:
             level = int(saved.get("flac_level"))

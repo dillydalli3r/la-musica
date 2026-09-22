@@ -1331,7 +1331,10 @@ export default function SettingsPage() {
       title: "Beets tagging (script 14)",
       blurb: "Managed beets import with Picard-parity behaviors: MusicBrainz matching, locale alias translations, WORK/MOVEMENT from work relationships, and release-type capitalization (EP uppercased). Files are organized by your naming script via the mlo_dir path hook. Runs as part of Run All; skipped quietly when beets isn't installed.",
       fields: [
-        { k: "beets_locale", label: "Preferred locale for aliases (e.g. en, ja, de)", type: "text" },
+        { k: "locale", label: "Locale for names and aliases (e.g. en, ja, de)", type: "text",
+          help: "The ONE locale the app writes and shows names in: the MusicBrainz"
+            + " pages' aliases, the beets import's alias translations and the"
+            + " Soulseek alias searches all read this value." },
         { k: "beets_translations", label: "Translate titles/names to preferred locale", type: "bool" },
         { k: "beets_work_movement", label: "Write WORK / MOVEMENT from work relationships", type: "bool" },
         { k: "beets_release_type_caps", label: "Capitalize release types (EP uppercased)", type: "bool" },

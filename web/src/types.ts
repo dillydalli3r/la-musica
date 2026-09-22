@@ -518,6 +518,9 @@ export interface MBTrack {
   position: number;
   disc: number;
   title: string;
+  /** The title in the reader's locale (`locale`), when MusicBrainz states one
+   *  — rendered in parentheses beside the title. */
+  alias?: string;
   length: number | null;
   recording_mbid: string | null;
   artist_mbids: string[];
@@ -527,7 +530,7 @@ export interface MBTrack {
 
 export interface MBRelease {
   id: string;
-  /** The title in the reader's locale (`beets_locale`), when MusicBrainz states
+  /** The title in the reader's locale (`locale`), when MusicBrainz states
    *  one — rendered in parentheses beside the title. */
   alias?: string;
   title: string;
@@ -568,6 +571,10 @@ export interface MBSearchRow {
   id: string;
   score?: number;
   title?: string;
+  /** The name/title in the reader's locale (`locale`), when the payload states
+   *  one — the search index carries aliases for ARTISTS only, so those rows
+   *  show it and the rest leave it out. */
+  alias?: string;
   disambiguation?: string;
   /** the credited artist — release groups, releases and recordings */
   artist?: string;
@@ -614,7 +621,7 @@ export interface MBSearchRows {
 export interface MBReleaseRow {
   id: string;
   title: string;
-  /** The name/title in the reader's locale (`beets_locale`), when MusicBrainz
+  /** The name/title in the reader's locale (`locale`), when MusicBrainz
    *  states one — rendered in parentheses beside the title. */
   alias?: string;
   date?: string;

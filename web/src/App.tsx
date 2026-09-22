@@ -12,7 +12,8 @@ import type { AuthStatus } from "./api";
 import type { Library as LibraryData } from "./types";
 import type { LucideIcon } from "lucide-react";
 import { albumRef, artistRef, trackRef } from "./lib/refs";
-import { useStore } from "./store";
+import { toast, useStore } from "./store";
+import { withAlias } from "./lib/mbtext";
 import CreditsFooter from "./components/Credits";
 import NotificationBell from "./components/NotificationBell";
 import ShortcutsOverlay from "./components/Shortcuts";
@@ -500,16 +501,23 @@ export default function App() {
     const st = autoStateNow ?? null;
     const prev = autoState.current;
     autoState.current = st;
-    // Only the running/confirm → done EDGE navigates. The ref holds that edge
+    // Only the running/confirm → done EDGE announces. The ref holds that edge
     // to one firing, so a later poll, a re-render or a reload of an old
-    // finished job cannot yank the user back into the wizard.
+    // finished job cannot re-announce it.
     if (st !== "done" || (prev !== "running" && prev !== "confirm")) return;
     // A wish handoff also ends "done" — but nothing landed on disk to tag.
     const job = qc.getQueryData<{ result?: { album_path?: string } | null }>(["soulseekAuto"]);
     const album = job?.result?.album_path ?? "";
     if (!album) return;
-    navigate(`/import?album=${encodeURIComponent(album)}`);
-  }, [autoStateNow, navigate, qc]);
+    // Say it landed, and NOTHING MORE. This used to open the import wizard on
+    // whatever page the user was on — the menu, cover and lyrics steps, one
+    // after another — which is exactly what a one-press `Add to library` that
+    // does the work by itself must not do. The album is in the library and the
+    // configured chain has run over it; anything a source could not supply
+    // arrives as a prompt (the bell, the queue's "Needs you" row, the wizard
+    // linked from there), so the screen the user did not ask for is gone.
+    toast(`Imported ${album.split(/[\\/]/).filter(Boolean).pop() || album} — it is in your library`);
+  }, [autoStateNow, qc]);
 
   // Global search lives in the top bar and drives the library filter from
   // anywhere — typing on another page jumps to the library. The dropdown
@@ -1076,23 +1084,23 @@ export default function App() {
                         external={mbUrl(mbLink[1] === "release-group" ? "release-group" : mbLink[1], mbLink[2])}
                       />
                     )}
-                    {mbArtistRows.map((a: { id: string; name: string; type?: string }) => (
+                    {mbArtistRows.map((a: { id: string; name: string; type?: string; alias?: string }) => (
                       <SearchHit
                         key={`a-${a.id}`}
                         to={`/mb/artist/${a.id}`}
                         icon={User}
-                        label={a.name}
+                        label={withAlias(a.name, a.alias)}
                         hint={a.type || t("page.artist")}
                         onGo={() => setSearchOpen(false)}
                         external={mbUrl("artist", a.id)}
                       />
                     ))}
-                    {mbRows.map((h: { id: string; title: string; artist?: string; date?: string }) => (
+                    {mbRows.map((h: { id: string; title: string; artist?: string; date?: string; alias?: string }) => (
                       <SearchHit
                         key={`r-${h.id}`}
                         to={`/mb/release/${h.id}`}
                         icon={Disc3}
-                        label={h.title || h.id}
+                        label={withAlias(h.title || h.id, h.alias)}
                         hint={h.artist || h.date || ""}
                         onGo={() => setSearchOpen(false)}
                         external={mbUrl("release", h.id)}

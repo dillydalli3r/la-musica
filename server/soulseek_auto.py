@@ -56,8 +56,11 @@ from mlo.config import DEFAULT_CONFIG, load_config
 from mlo.stats import worker_count
 # The medium accessor of the ONE release-choice policy: a release dict from any
 # payload (browse row, normalized row, full lookup) answers with its formats,
-# which is what decides whether a release is digital or a pressing.
-from mlo.release_choice import media_formats
+# which is what decides whether a release is digital or a pressing — and, with
+# `video_formats`, whether a music-video release is a DISC (a folder on the
+# network) or a Digital Media one (a set of YouTube uploads: see
+# acquisition_route).
+from mlo.release_choice import media_formats, video_formats
 # The app's own multi-value separator: RELEASECOUNTRY is written "; "-joined
 # (mlo.audio joins repeated fields with it, mlo.naming._first_multi reads the
 # first entry back), so the writer and the reader cannot disagree.
@@ -1099,6 +1102,70 @@ def _is_digital(release):
     return bool(formats) and all(f == _DIGITAL_MEDIA for f in formats)
 
 
+# Which network fetches a release — the two names `acquisition_route` answers
+# with. `soulseek` is the default and the ONLY answer for anything that is not
+# a Digital Media music-video release, which is what keeps an audio release (and
+# a music video on a disc) on exactly the path it had before YouTube was an
+# option.
+_ROUTE_SOULSEEK = "soulseek"
+_ROUTE_YOUTUBE = "youtube"
+
+
+def video_tracks(release):
+    """The release's own recordings that MusicBrainz states are VIDEOS.
+
+    server.integrations.release_lookup carries the recording's `video` flag
+    into every entry of `media`; a payload that states nothing (a browse row, a
+    hand-built dict, a release with no track list) answers [] — an unstated
+    medium never makes a release a video one.
+    """
+    out = []
+    media = release.get("media") if isinstance(release, dict) else None
+    if not isinstance(media, list):
+        return out
+    for entry in media:
+        if not isinstance(entry, dict):
+            continue
+        if entry.get("video"):
+            out.append(entry)
+            continue
+        # A payload whose `media` is a list of DISCS (`media[].tracks[]`) is
+        # read too: the flag lands wherever the payload puts the recordings.
+        for track in (entry.get("tracks") or ()):
+            if isinstance(track, dict) and track.get("video"):
+                out.append(track)
+    return out
+
+
+def acquisition_route(release):
+    """Which network fetches *release*: "soulseek" or "youtube".
+
+    THE ROUTING RULE, in one place, read where the release and its medium are
+    both in hand (server.soulseek_auto._run, before any search):
+
+    * a VIDEO release — one whose recordings MusicBrainz states are videos
+      (`video_tracks`) — published as DIGITAL MEDIA is fetched from YouTube:
+      those uploads are not folders on the Soulseek network, so a search for
+      one would only ever spend the user's time and end in "nothing found";
+    * a music video on a DISC (DVD / Blu-ray / VHS / Video CD — the formats
+      mlo.release_choice.is_video_format classifies) is a folder like any
+      pressing and keeps the Soulseek path, byte for byte;
+    * an AUDIO release is untouched: its recordings are not videos, so it is
+      never routed anywhere but Soulseek, digital medium or not.
+
+    A payload that cannot answer (no release yet, no medium, no track list)
+    answers "soulseek": the caller's job then behaves exactly as every job did
+    before this routing existed.
+    """
+    if not isinstance(release, dict) or not release:
+        return _ROUTE_SOULSEEK
+    if not video_tracks(release):
+        return _ROUTE_SOULSEEK
+    if video_formats(release):
+        return _ROUTE_SOULSEEK
+    return _ROUTE_YOUTUBE if _is_digital(release) else _ROUTE_SOULSEEK
+
+
 def _templates(cfg, key, default):
     """One configured template list: a ";"-separated string is accepted (the
     settings UI edits the list as one line), blanks are dropped, and an unset
@@ -1270,7 +1337,7 @@ def _alias_queries(release, cfg, templates, fields, catalogs, queries):
     queries it was stored with (server/wishes_worker), so an alias query that
     arrived later would never be searched again.
     """
-    locale = str(cfg.get("beets_locale") or "en").strip()
+    locale = str(cfg.get("locale") or "en").strip()
     artists = release.get("artists") or [{}]
     artist_mbid = (artists[0].get("mbid") if artists else "") or ""
     alias_artist = ""
@@ -3834,13 +3901,22 @@ def _run(release_mbid=None, release=None, queries=None, username=None,
     _tl.jid = int(job_id or 0)
     cfg = load_config()
     try:
-        if not (slsk.is_running() or slsk.web_up(cfg)):
-            raise RuntimeError("slskd is not running — start Soulseek first")
-        server = slsk.server_state(cfg)
-        if not (server or {}).get("isLoggedIn"):
-            raise RuntimeError("Soulseek is not logged in — set your Soulseek "
-                               "username and password in Settings → Soulseek, "
-                               "then restart slskd")
+        # WHICH NETWORK FETCHES THIS RELEASE (acquisition_route): a Digital
+        # Media music-video release is fetched from YouTube, so the slskd
+        # precondition below — and every search this job would otherwise run —
+        # does not apply to it. Read from the payload the caller already holds
+        # when there is one; "" means "not decidable yet" (the release has to
+        # be resolved first), and the conservative answer is the Soulseek path,
+        # which is what every release took before this routing existed.
+        route = acquisition_route(release)
+        if route != _ROUTE_YOUTUBE:
+            if not (slsk.is_running() or slsk.web_up(cfg)):
+                raise RuntimeError("slskd is not running — start Soulseek first")
+            server = slsk.server_state(cfg)
+            if not (server or {}).get("isLoggedIn"):
+                raise RuntimeError("Soulseek is not logged in — set your Soulseek "
+                                   "username and password in Settings → Soulseek, "
+                                   "then restart slskd")
         min_score = int(cfg.get("soulseek_auto_log_min_score", 100) or 100)
         ddir = slsk.download_dir(cfg)
 
@@ -3879,6 +3955,12 @@ def _run(release_mbid=None, release=None, queries=None, username=None,
                     "— it is neither a release nor a release group, or every "
                     "edition of it is ineligible for auto-import")
             release_mbid = rid
+        # The release is in hand now: ask the routing rule again (a job that
+        # arrived with only a MusicBrainz id could not answer before). A job
+        # that already took the slskd precondition above keeps it — that check
+        # is what every job has always passed — and this only ADDS the YouTube
+        # route for a release that could not be read earlier.
+        route = acquisition_route(release)
         is_cd = "CD" in (release.get("medium_formats") or [])
         # DIGITAL decides whether the broad `artist album year` second pass may
         # run at all (see the search block below): a pressing is searched by
@@ -3961,6 +4043,15 @@ def _run(release_mbid=None, release=None, queries=None, username=None,
                     })
             except Exception:
                 pass      # a library that cannot be read must not block the job
+
+        # ---- the network this release comes from -----------------------------
+        # A Digital Media music-video release is fetched from YouTube INSIDE
+        # this job — no search is sent to slskd at all, and the album it
+        # produces goes through the same _import below (MB stamping, the
+        # naming script, imports.finish_album) as a downloaded folder does.
+        # Everything else falls through to the search unchanged.
+        if route == _ROUTE_YOUTUBE:
+            return _run_youtube(release, cfg, confirm_lossy)
 
         # ---- candidates ------------------------------------------------------
         # The queries this job searched with and the window it waited out are

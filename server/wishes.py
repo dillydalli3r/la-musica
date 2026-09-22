@@ -42,9 +42,11 @@ TERMINAL_STATUSES = ("imported", "not_found")
 # Where a wish came from — one field, so every surface labels a row the same
 # way: "musicbrainz" is a framework album ("Add to library" on a MusicBrainz
 # entity), "soulseek" a want saved by hand from the Soulseek page, "auto" the
-# entry an auto-import job offers to save. "" is a wish saved before this was
-# recorded.
-SOURCES = ("musicbrainz", "soulseek", "auto")
+# entry an auto-import job offers to save, "youtube" the one an auto-import job
+# for a Digital Media music-video release offers (the release is fetched from
+# YouTube, not searched for on the network — server.soulseek_auto). "" is a
+# wish saved before this was recorded.
+SOURCES = ("musicbrainz", "soulseek", "auto", "youtube")
 
 
 def db_path():
