@@ -626,6 +626,72 @@ table td {
 .np-shade-dark {
   text-shadow: 0 1px 2px rgb(0 0 0 / 0.55), 0 0 8px rgb(0 0 0 / 0.35);
 }
+/* ------------------------------------------------------------------ */
+/* The fullscreen player's veils                                       */
+/* ------------------------------------------------------------------ */
+/* The player puts its text straight onto the artwork, so legibility has to
+   come from BETWEEN the glyphs and the picture — never from a panel: a flat
+   35 % scrim across the lyrics and another under the title read as boxes
+   pasted on the cover (the owner's "I don't want backgrounds on UI elements"
+   report; the photographed layout was two grey rectangles, one across the
+   lyrics and one under the title). A VEIL is what replaces them: the same
+   polarity tint the ink table already picks, now under a backdrop blur, weak
+   enough to keep the picture readable through it, and DISSOLVED at its edges
+   so nothing is drawn around the text.
+
+   `--np-veil` is the tint the polarity sets (zinc-950 under white ink, white
+   under near-black) and it INHERITS, so the fullscreen root stamps the
+   polarity once and every surface — the pane's layer, the metadata pill —
+   reads that one decision. The geometry class decides how the tint is drawn;
+   the prefixes are the build's job. */
+.np-veil {
+  backdrop-filter: blur(16px) saturate(1.05);
+}
+.np-veil-dark { --np-veil: 9 9 11; }
+.np-veil-light { --np-veil: 255 255 255; }
+/* The lyrics reading surface: a decorative layer inside the pane's BOX (not
+   the scroller), so it never scrolls with the lines. It is a ramp, not a
+   rectangle — nothing at the pane's left edge, full strength where the lines
+   start, back down to almost nothing by the right edge — plus a fade at the
+   top and bottom. That is what takes the drawn panel away: the pane's own
+   corners and sides are the backdrop, and the tint only ever sits under text.
+   No lyric can land on a thinned part of it: the scroller keeps 1.5rem of
+   padding and a leader spacer of a third of the pane's height. */
+.np-veil-pane {
+  pointer-events: none;
+  background: linear-gradient(
+    90deg,
+    rgb(var(--np-veil) / 0) 0,
+    rgb(var(--np-veil) / 0.42) 2.5rem,
+    rgb(var(--np-veil) / 0.34) 60%,
+    rgb(var(--np-veil) / 0.2) 85%,
+    rgb(var(--np-veil) / 0.05) 100%
+  );
+  mask-image: linear-gradient(
+    180deg,
+    transparent 0,
+    #000 2rem,
+    #000 calc(100% - 2rem),
+    transparent 100%
+  );
+}
+/* The metadata cluster (title / format / album / artist). Its tint holds
+   across the whole box — the tier contrast is measured against the pixels
+   just inside its edges (tools/check_np_metadata_contrast.cjs), so a fade
+   there would measure the bare ambience instead of the field the glyphs sit
+   on — and the veil is spread PAST the box as a blurred halo, which is what
+   takes the drawn rectangle away without thinning the field under the text. */
+.np-veil-pill {
+  background: rgb(var(--np-veil) / 0.35);
+  box-shadow: 0 0 3rem 1.25rem rgb(var(--np-veil) / 0.28);
+}
+/* The player's own menus (options, add-to-playlist) and the queue drawer:
+   frosted instead of an opaque `bg-zinc-950` slab over the artwork. They pin
+   their tint to the dark one themselves — their rows are zinc-300 on a dark
+   panel, so a light-polarity veil would invert them into unreadability. */
+.np-veil-panel {
+  background: rgb(var(--np-veil) / 0.72);
+}
 /* gentle breathing on the artwork glow */
 @keyframes glow-pulse {
   0%, 100% { opacity: 0.55; transform: scale(1); }

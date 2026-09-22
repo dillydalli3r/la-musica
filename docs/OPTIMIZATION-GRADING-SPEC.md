@@ -681,6 +681,23 @@ rating.
   the alias table) folds case, so `Shoegaze` and `shoegaze` are the same genre
   to everything that judges the value; the case rule is about the value the
   file stores, not about which genre it is.
+- **R41b — every label and reason the UI renders reads as a sentence, and a
+  genre name inside one uses the app's OWN spelling of it.** A reason line on a
+  Discover row, a recommendation row or an album card starts with a capital
+  letter (`Genre: …`, `Sounds like …`, `More from …`, `More release groups by …`,
+  `Similar to …`, `Chart #1 …`, `Most listened this month (… )`, `Same genre:`,
+  `Same family:`, `Same mood:`, `Same artist:`, `Energy 45 near 60`,
+  `Both 2007`), and the genre a line names is rendered through
+  `mlo.genres.display_name` — the same Title Case the stored tag and the
+  Discover genre list use (`server.discover._genre_display`, which leaves a
+  provider's compound label such as `Rap/Hip Hop` as published), so a line can
+  never read `Genre: alternative rock` beside a list that says `Alternative
+  Rock`. What is SENT as a search or seed parameter keeps its own spelling, and
+  machine-facing strings (query keys, JSON field names, log lines) are not
+  touched: this is about the words a person reads. `server.recommend._reasons`
+  and `server.discover`'s reason builders are the two places they are written;
+  the `basis` chip that says what a shelf was seeded from follows the same rule
+  (`Library genres: Shoegaze, Dream Pop · Top artists: …`).
 
 - **R92 — genres fall back LEVEL BY LEVEL, and the level that answered is never
   hidden.** MusicBrainz states a genre at four levels — the recording (per
@@ -797,6 +814,20 @@ rating.
   glides back to the middle of the row instead of jumping, and nothing is ever
   painted on top of the artwork. Pinned by
   `tools/check_fullscreen_player.cjs`.
+- **R52c — the fullscreen player paints no panel on the artwork; its text sits
+  on a veil.** Every floating surface of the player — the lyrics pane, the
+  metadata block, the queue drawer and the player's own popovers — draws a VEIL
+  rather than a background: the same polarity tint the ink table picks, under a
+  backdrop blur, at low alpha and dissolving at its edges (`np-veil`,
+  `np-veil-dark`/`np-veil-light`, `np-veil-pane`, `np-veil-pill`,
+  `np-veil-panel` in `web/src/index.css`; the polarity is stamped once on the
+  fullscreen root), so the picture stays visible behind the text and no
+  hard-edged slab is drawn over it. The pane keeps its glyph shadow for the dark
+  polarity, and R56c's keyboard `:focus-visible` rings are untouched.
+  Measured, not eyeballed: `tools/check_np_metadata_contrast.cjs` (every
+  metadata tier ≥ 4.5:1, 3:1 for the title, against the veil it now sits on) and
+  `tools/check_fullscreen_player.cjs` (nothing painted over the art, at every
+  window size it tries).
 
 ### 7.5 Covers
 
@@ -842,6 +873,28 @@ rating.
   `tools/check_fullscreen_player.cjs` (the computed border/ring/outline of the
   player's art and of an album-grid card, plus the focus ring on the card's
   cover link).
+- **R56d — a cover WRITE stores the image at the URL it was given, or nothing.**
+  `POST /api/cover/fromurl` and the import chain's cover step fetch exactly the
+  picked/chosen URL (`server.main._cover_url_bytes(..., substitute=False)` over
+  `server.artcache.fetch_art`): when that URL cannot be fetched the request
+  fails with its own sentence and no file is written. No other provider may
+  answer in its place — an image neither the user nor the ranking chose is how a
+  WRONG cover lands in the library, which is what happened when a row's URL was
+  replaced by the album edit page's own release-group art. The single repair
+  allowed is the same picture: an Apple storefront URL that answers HTTP 200
+  with an EMPTY body is fetched as the same artwork's largest `image/thumb`
+  transform (`server.integrations._artwork_big`, `source` "applemusic"), before
+  any provider tier — and that repair is the only tier a write may reach. The
+  cache is keyed, and only read, by THE URL THAT ANSWERED: an entry never holds
+  a picture its own URL does not serve, so a fallback fetched for one album can
+  never be served (or written) as another album's cover; entries from the older
+  format, which could hold one, are not read at all. Display paths may still
+  substitute (`substitute=True`), and the finder hands a row's OWN artist/title
+  as the identity that fallback may be asked about — never the open album's
+  release group. Pinned by `tools/test_artcache.py` (the keying, the repair, the
+  write's refusal to substitute, the format stamp) and `tools/test_covers.py`
+  (the autonomous step writes the winner's own bytes, and writes nothing when
+  its URL refuses).
 
 ### 7.6 Tag value spelling and spacing
 

@@ -1623,9 +1623,21 @@ def run_cover_step(album_dir, cfg=None):
         # lazily — exactly how server.api_discovery reaches `_in_music_folder`.
         from server.main import _cover_url_bytes, _write_cover_bytes, _sniff_image_ext
 
-        data, ctype = _cover_url_bytes(url, artist, album, rg)
+        # `substitute=False`: the policy chose THIS candidate for the album, so
+        # a provider that is not it must never answer — an image the ranking
+        # never saw is not the pick, and writing one would put art on the album
+        # that nobody (user or policy) asked for. Its own image, or nothing.
+        try:
+            data, ctype = _cover_url_bytes(url, substitute=False)
+        except ValueError as e:
+            # An ordinary outcome for a URL a CDN has stopped serving, not a
+            # failure of the step: the note says what happened and why nothing
+            # was written, and the next run (or the user's own pick) tries again.
+            out["note"] = str(e)
+            return out
         if not data:
-            out["note"] = "the cover image came back empty"
+            out["note"] = ("the chosen cover's own image came back empty — "
+                           "nothing was written in its place")
             return out
         res = _write_cover_bytes(album_dir, "cover", _sniff_image_ext(data, ctype), data)
         out["applied"] = {"cover": res.get("path")}

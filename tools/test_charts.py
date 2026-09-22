@@ -264,7 +264,7 @@ ok(all_tracks["sources_asked"][0] == "rym",
 ok([r["source"] for r in all_tracks["items"][:2]] == ["rym", "rym"]
    and all_tracks["items"][0]["rank"] == 1,
    "and its rows lead the page in RYM's own order")
-ok(all_tracks["items"][0]["reason"] == "chart #1 · Best songs of all time",
+ok(all_tracks["items"][0]["reason"] == "Chart #1 · Best songs of all time",
    f"a RYM row says which chart and where it sits "
    f"({all_tracks['items'][0]['reason']})")
 ok(set(by_source) == {"rym", "deezer", "itunes", "lastfm", "listenbrainz"},

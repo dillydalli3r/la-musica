@@ -11,8 +11,11 @@ answers fine.
 So every remote cover is served through `/api/art` (see `server/main.py`):
 the app fetches it, caches it, and — when the provider refuses us — asks a
 provider that does answer (Cover Art Archive by release-group MBID, then
-iTunes, then Deezer). The winner is cached under the ORIGINAL key, so the
-second view of that row is instant and offline.
+iTunes, then Deezer). Each answer is cached under THE URL THAT ANSWERED, so
+the second view of that row is instant and offline, and no cache entry ever
+holds a picture other than the one its own URL serves. `substitute=False` is
+what a cover WRITE asks for (see `server.main._cover_url_bytes`): the picked
+picture, or nothing — never a different cover standing in for it.
 
 Nothing here raises: a total failure is `(None, None, None)` and the UI keeps
 its own placeholder.
@@ -83,6 +86,12 @@ HEADER_RULES = (
 # Covers never change meaningfully, so a month is the app's usual slow-data TTL
 # (the same one the genre/Apple caches use).
 CACHE_TTL = 30 * 86400.0
+# What a sidecar says the entry it belongs to holds. An entry holds THE BYTES
+# THE URL ITSELF ANSWERED WITH — never a fallback provider's — and this stamp
+# is what makes that true across the format's own history: an entry written
+# when a fallback's image could be stored under the asked-for URL is not read,
+# so a cover somebody else's search poisoned stops being served.
+_CACHE_VERSION = 2
 # A total failure is remembered for minutes only: enough that a shelf full of
 # the same broken row makes ONE round of requests, short enough that a provider
 # coming back is picked up without a restart.
@@ -179,7 +188,12 @@ def _paths(d, key):
 
 
 def _read(key, d):
-    """The cached (data, content_type, source) for *key*, or None."""
+    """The cached (data, content_type, source) for *key*, or None.
+
+    *key* is the hash of the URL whose bytes the entry holds, and an entry
+    whose sidecar is not in the current format is not read at all: it may have
+    been written before an entry was guaranteed to be that URL's own answer.
+    """
     if not d:
         return None
     fp, meta = _paths(d, key)
@@ -196,7 +210,7 @@ def _read(key, d):
             side = {}
     except OSError:
         return None
-    if not data:
+    if not data or side.get("v") != _CACHE_VERSION:
         return None
     return data, side.get("content_type") or _sniff(data) or "image/jpeg", side.get("source") or "cache"
 
@@ -212,7 +226,8 @@ def _write(key, d, data, ctype, source, url):
     fp, meta = _paths(d, key)
     written = 0
     for path, blob in ((fp, data), (meta, json.dumps(
-            {"content_type": ctype, "source": source, "url": url}).encode("utf-8"))):
+            {"v": _CACHE_VERSION, "content_type": ctype, "source": source,
+             "url": url}).encode("utf-8"))):
         fd, tmp = tempfile.mkstemp(dir=d, suffix=".part")
         try:
             with os.fdopen(fd, "wb") as fh:
@@ -346,12 +361,11 @@ def _fallback_candidates(artist, album, rg, cfg, timeout):
     The last two tiers are ALBUM lookups (`/search/album`, entity=album), so
     they are asked only when there is an album to ask about. Asked with an
     artist alone they answer with whatever that artist's most popular release
-    is — a DIFFERENT album, which is the one thing a cover fetch must never
-    return: a row whose own URL failed would then be replaced by another
-    album's artwork, cached under the row's URL for a month and written to the
-    library by the next "Use this cover". A cover with no album name has no
-    album tier to fall back to; the Cover Art Archive's release-group tier
-    above is the one that answers by identity.
+    is — a DIFFERENT album, which is the one thing this module must never
+    hand a caller that cannot tell it apart from what it asked for. A cover
+    with no album name has no album tier to fall back to; the Cover Art
+    Archive's release-group tier above is the one that answers by identity, and
+    only a display path may reach either (a write passes `substitute=False`).
     """
     if rg:
         yield _caa_front(rg), "coverartarchive"
@@ -363,21 +377,52 @@ def _fallback_candidates(artist, album, rg, cfg, timeout):
                 yield url, source
 
 
-def _candidates(url, artist, album, rg, cfg, timeout):
-    """The original URL first, then the fallback tiers — LAZILY."""
+def _same_artwork(url):
+    """One more ``(url, source)`` for the SAME picture, or nothing.
+
+    Apple answers a storefront URL with an empty body when that copy of the
+    asset is not there while the same artwork's `image/thumb` transform is
+    (`integrations._artwork_big`). Trying it is not a substitution — it cannot
+    be another cover, only the picture the caller asked about at the largest
+    size Apple serves — which is why this tier runs before any provider
+    fallback and is the ONLY one a cover write is allowed.
+    """
+    bigger = intg._artwork_big(url)
+    if bigger and bigger != url:
+        yield bigger, "applemusic"
+
+
+def _candidates(url, artist, album, rg, cfg, timeout, substitute=True):
+    """The URLs to try, in order: the one asked about, the same artwork's
+    largest copy, and — only when substituting is allowed — the providers that
+    answer when that picture cannot be had at all."""
     yield url, "url"
-    yield from _fallback_candidates(artist, album, rg, cfg, timeout)
+    yield from _same_artwork(url)
+    if substitute:
+        yield from _fallback_candidates(artist, album, rg, cfg, timeout)
 
 
 def fetch_art(url, *, artist="", album="", release_group_mbid="", cfg=None,
-              timeout=20.0):
+              timeout=20.0, substitute=True):
     """Bytes, content type and source for one provider artwork URL.
 
-    `source` names who actually answered: "url" for the URL asked about, a
-    fallback id ("coverartarchive", "itunes", "deezer") otherwise — the winner
-    is cached under the original key, so the caller never learns of the swap on
-    the next view. A URL that is not on the allowlist, and a total failure,
-    both return ``(None, None, None)``.
+    `source` names who actually answered: "url" for the URL asked about, the
+    same picture's largest copy for an Apple URL whose own copy is missing
+    ("applemusic"), a fallback id ("coverartarchive", "itunes", "deezer")
+    otherwise. A URL that is not on the allowlist, and a total failure, both
+    return ``(None, None, None)``.
+
+    Every entry is written under THE URL THAT ANSWERED, so a cache hit is
+    always that URL's own bytes: a fallback's image can never be served for the
+    URL it stood in for, whoever asks for that URL next (another album's
+    finder, another album's cover write) and with whatever identity. The
+    fallback's own answer is still cached, so the next view of the row that
+    needed it costs no request.
+
+    `substitute=False` tries the URL and the same picture's largest copy and
+    NOTHING else. A caller that must not write a different picture than the one
+    it was given — a cover the user picked, a cover the policy chose for an
+    album — gets nothing rather than another provider's image.
     """
     url = str(url or "").strip()
     if not allowed(url):
@@ -393,13 +438,24 @@ def fetch_art(url, *, artist="", album="", release_group_mbid="", cfg=None,
     artist = str(artist or "").strip()
     album = str(album or "").strip()
     for candidate, source in _candidates(url, artist, album, release_group_mbid,
-                                         cfg, timeout):
+                                         cfg, timeout, substitute):
         if not allowed(candidate):
             continue
+        if candidate != url:
+            cached = _read(_key(candidate), d)
+            if cached:
+                return cached
         status, data, ctype = _get(candidate, headers_for(candidate), timeout)
         if data:
-            _write(key, d, data, ctype, source, url)
+            _write(_key(candidate), d, data, ctype, source, candidate)
             _FAILS.pop(key, None)
             return data, ctype, source
-    _FAILS[key] = time.time() + FAIL_TTL
+    if substitute:
+        # Every tier this call may ask was asked and nothing answered: remember
+        # that for minutes, so a shelf full of the same broken row makes ONE
+        # round of requests. An EXACT fetch (`substitute=False`) is not
+        # remembered — it asks about one URL and nothing else, and a later
+        # DISPLAY of that row may still be answered by the provider tiers this
+        # call was not allowed to reach.
+        _FAILS[key] = time.time() + FAIL_TTL
     return None, None, None

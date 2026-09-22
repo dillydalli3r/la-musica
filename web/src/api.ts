@@ -2469,14 +2469,10 @@ export const api = {
     url: string,
     track?: string,
     tracks?: string[],
-    identity?: { artist?: string | null; album?: string | null; rg?: string | null },
     staged = false
   ) =>
     json<CoverWriteResult>(
       `${API}/cover/fromurl?album=${encodeURIComponent(albumPath)}&url=${encodeURIComponent(url)}${coverQuery(track, tracks)}` +
-        (identity?.artist ? `&artist=${encodeURIComponent(identity.artist)}` : "") +
-        (identity?.album ? `&title=${encodeURIComponent(identity.album)}` : "") +
-        (identity?.rg ? `&rg=${encodeURIComponent(identity.rg)}` : "") +
         stagedQ(staged),
       { method: "POST" },
       120000

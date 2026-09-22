@@ -30,7 +30,7 @@ import threading
 from collections import Counter
 
 from mlo.genre_vocab import is_parent, parent_of
-from mlo.genres import canonical, split_stored
+from mlo.genres import canonical, display_name, split_stored
 
 # What each signal is worth. Genre names the music, so it carries almost half;
 # mood (the coarse label) and energy (the 0-100 arousal it was scored from)
@@ -96,7 +96,7 @@ def _genres(tags):
     """(specific genres, families) for one tag dict, canonically folded.
 
     A file that tags only `shoegaze` gets its family derived, so a shelf can
-    still say "same family: rock"; a file that tags both keeps them apart so
+    still say "Same family: rock"; a file that tags both keeps them apart so
     a shared family never counts as much as a shared specific genre.
     """
     raw = (tags or {}).get("GENRE")
@@ -322,22 +322,22 @@ def _reasons(src, cand):
     """
     out = []
     for name in sorted(src["specs"] & cand["specs"]):
-        out.append(f"same genre: {name}")
+        out.append(f"Same genre: {display_name(name)}")
     for name in sorted(src["fams"] & cand["fams"]):
-        out.append(f"same family: {name}")
+        out.append(f"Same family: {display_name(name)}")
     if src["mood"] and src["mood"] == cand["mood"]:
-        out.append(f"same mood: {cand['mood']}")
+        out.append(f"Same mood: {cand['mood']}")
     if src["energy"] is not None and cand["energy"] is not None:
         diff = abs(src["energy"] - cand["energy"])
         if diff <= NEAR_ENERGY:
-            out.append(f"energy {round(cand['energy'])} near {round(src['energy'])}")
+            out.append(f"Energy {round(cand['energy'])} near {round(src['energy'])}")
         else:
-            out.append(f"energy {round(cand['energy'])}")
+            out.append(f"Energy {round(cand['energy'])}")
     if src["year"] and cand["year"]:
-        out.append(f"both {cand['year']}" if src["year"] == cand["year"]
+        out.append(f"Both {cand['year']}" if src["year"] == cand["year"]
                    else f"{src['year']} near {cand['year']}")
     if src["artist_key"] and src["artist_key"] == cand["artist_key"]:
-        out.append(f"same artist: {cand['subtitle']}")
+        out.append(f"Same artist: {cand['subtitle']}")
     return out[:4]
 
 
@@ -435,7 +435,7 @@ def _seed_profile(entries):
     """The profile of a seed SET (a playlist, a favourites set, explicit refs).
 
     One artist is claimed only when every seed agrees on it: a mixed set that
-    pretended to have one would put "same artist" on rows that do not share
+    pretended to have one would put "Same artist" on rows that do not share
     one, and its weight is better spent on the tags the seeds do share.
     """
     keys = {e["artist_key"] for e in entries if e["artist_key"]}

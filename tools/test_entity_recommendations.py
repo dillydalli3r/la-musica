@@ -473,10 +473,10 @@ ok(set(titles) == {"Lush", "Cocteau Twins", "my bloody valentine", "Broadcast",
                    "Ride"},
    f"Deezer's related feed, ListenBrainz' similar artists and MusicBrainz's tag "
    f"search all contribute ({titles})")
-ok(by_title(artist)["Lush"]["reason"] == "sounds like Slowdive (Deezer)"
-   and by_title(artist)["Broadcast"]["reason"] == "sounds like Slowdive (ListenBrainz)",
+ok(by_title(artist)["Lush"]["reason"] == "Sounds like Slowdive (Deezer)"
+   and by_title(artist)["Broadcast"]["reason"] == "Sounds like Slowdive (ListenBrainz)",
    "each row's reason names the source that stated the relationship")
-ok(by_title(artist)["Ride"]["reason"] == "genre: shoegaze (MusicBrainz)"
+ok(by_title(artist)["Ride"]["reason"] == "Genre: Shoegaze (MusicBrainz)"
    and by_title(artist)["Ride"]["source"] == "musicbrainz",
    f"MusicBrainz answers an entity shelf with the entity's OWN genre, through "
    f"the same tag search the genre shelves use "
@@ -486,7 +486,7 @@ ok("Slowdive" not in titles,
 ok(by_title(artist)["Lush"]["score"] == 12994.0
    and by_title(artist)["Broadcast"]["score"] == 987.0,
    "the provider's own number rides along as `score`")
-ok(artist["basis"] == "artist: Slowdive (%s)" % ARTIST_SLOWDIVE,
+ok(artist["basis"] == "Artist: Slowdive (%s)" % ARTIST_SLOWDIVE,
    f"the basis names the seed AND the identity it came from ({artist['basis']})")
 ok(artist["sources_asked"] == ["musicbrainz", "deezer", "lastfm", "listenbrainz"],
    f"only the sources that can recommend artists are asked ({artist['sources_asked']})")
@@ -517,7 +517,7 @@ lush = by_title(seed_rows(seed_kind="artist", seed_mbid=ARTIST_SLOWDIVE,
                           seed_name="Slowdive", kind="artists"))
 ok(len([r for r in lush.values() if r["title"] == "Lush"]) == 1
    and lush["Lush"]["source"] == "deezer"
-   and lush["Lush"]["reason"] == "sounds like Slowdive (Deezer)"
+   and lush["Lush"]["reason"] == "Sounds like Slowdive (Deezer)"
    and lush["Lush"]["also_from"] == ["listenbrainz"]
    and lush["Lush"]["mbid"] == ARTIST_LUSH,
    f"two sources naming one artist are one row — preferred source's reason, "
@@ -540,7 +540,7 @@ ok(sorted(r["title"] for r in failed["items"]) == ["Broadcast", "Lush", "Ride"],
 print("== a seed with no id ==")
 fresh()
 by_name = seed_rows(seed_kind="artist", seed_name="Slowdive", kind="artists")
-ok(by_name["basis"] == "artist: Slowdive (by name)"
+ok(by_name["basis"] == "Artist: Slowdive (by name)"
    and "Broadcast" in [row["title"] for row in by_name["items"]],
    f"a page whose tags carry no id still seeds by name ({by_name['basis']})")
 ok(("resolve_artist_mbid", "Slowdive") in CALLS,
@@ -573,7 +573,7 @@ ok(album["items"] and all(set(row) == ROW_KEYS for row in album["items"]),
    "album rows carry the same one shape")
 ok("Spooky" in albums and "Heaven or Las Vegas" in albums and "Loveless" in albums,
    f"the related artists' records are the bridge to album rows ({sorted(albums)})")
-ok(albums["Spooky"]["reason"].startswith("more from Lush — sounds like Slowdive (Deezer)"),
+ok(albums["Spooky"]["reason"].startswith("More from Lush — sounds like Slowdive (Deezer)"),
    f"…and each says which relationship brought it ({albums['Spooky']['reason']})")
 ok("Sweetness and Light" not in albums,
    "a single is not passed off as an album (Deezer's albums_only)")
@@ -583,7 +583,7 @@ ok(albums["Souvlaki"]["owned"] is True
    f"a row the library OWNS is kept and carries its library path "
    f"({albums['Souvlaki']['owned']}, {albums['Souvlaki']['path']})")
 ok(albums["Pygmalion"]["source"] == "musicbrainz"
-   and albums["Pygmalion"]["reason"] == "more release groups by Slowdive (MusicBrainz)",
+   and albums["Pygmalion"]["reason"] == "More release groups by Slowdive (MusicBrainz)",
    f"MusicBrainz's browse request states the artist's own records, and says "
    f"exactly that — never that they are similar "
    f"({albums['Pygmalion']['reason']})")
@@ -594,7 +594,7 @@ ok("deezer" in albums["Pygmalion"]["also_from"]
    and albums["Pygmalion"]["score"] == 120000.0,
    f"the seed's own artist from Deezer is ONE row with MusicBrainz's, and "
    f"Deezer's own number survives the merge ({albums['Pygmalion']})")
-ok(albums["Just For A Day"]["reason"] == "genre: shoegaze (MusicBrainz)"
+ok(albums["Just For A Day"]["reason"] == "Genre: Shoegaze (MusicBrainz)"
    and albums["Just For A Day"]["mbid"] == RG_JUST_FOR_A_DAY,
    f"…and the release-group tag search adds what the artist's neighbours do "
    f"not hold ({albums['Just For A Day']['reason']})")
@@ -614,7 +614,7 @@ ok(len([r for r in album["items"] if r["title"] == "Souvlaki"]) == 1
    f"Deezer and Apple naming one album is ONE row ({albums['Souvlaki']['also_from']})")
 ok("Kalabi" not in {row["artist"] for row in album["items"]},
    "Apple's term search is filtered to the artist Apple NAMED, so a same-named act is out")
-ok(album["basis"] == "album: Slowdive — Souvlaki (%s)" % RG_SOUVLAKI,
+ok(album["basis"] == "Album: Slowdive — Souvlaki (%s)" % RG_SOUVLAKI,
    f"an album basis names artist and title ({album['basis']})")
 ok(album["notes"]["spotify"].startswith("skipped: no spotify_client_id")
    and not [sid for sid in ("musicbrainz", "deezer", "itunes") if sid in album["notes"]],
@@ -738,11 +738,11 @@ ok(tracks["Sweetness and Light"]["owned"] is False
    and tracks["Sweetness and Light"]["path"] is None,
    "a track it does not hold links nowhere")
 ok(tracks["Alison"]["source"] == "musicbrainz"
-   and tracks["Alison"]["reason"] == "more recordings by Slowdive (MusicBrainz)"
+   and tracks["Alison"]["reason"] == "More recordings by Slowdive (MusicBrainz)"
    and "deezer" in tracks["Alison"]["also_from"],
    f"the recordings MusicBrainz files under the artist are a labelled row of "
    f"their own, one row with Deezer's ({tracks['Alison']['reason']})")
-ok(tracks["Soon"]["reason"] == "genre: dream pop (MusicBrainz)",
+ok(tracks["Soon"]["reason"] == "Genre: Dream Pop (MusicBrainz)",
    f"the recording's OWN genre drives the tag search, not its artist's "
    f"({tracks['Soon']['reason']})")
 ok(unkeyed["notes"]["lastfm"] == "skipped: no lastfm_api_key"
@@ -768,7 +768,7 @@ keyed = seed_rows(seed_kind="track", seed_mbid=TRACK_ALISON, seed_name="Alison",
                   seed_artist="Slowdive", kind="tracks")
 keyed_rows = by_title(keyed)
 ok(keyed_rows["Vapour Trail"]["source"] == "lastfm"
-   and keyed_rows["Vapour Trail"]["reason"] == "sounds like Alison (Last.fm)"
+   and keyed_rows["Vapour Trail"]["reason"] == "Sounds like Alison (Last.fm)"
    and keyed_rows["Vapour Trail"]["score"] == 0.92,
    f"a keyed Last.fm answers a track seed with its own match "
    f"({keyed_rows['Vapour Trail']['score']})")
@@ -909,7 +909,7 @@ ok(rym_calls() == [("rym_charts", "tracks", "all", "", "Slowdive")],
    f"({rym_calls()})")
 rym_rows = [row for row in artist_tracks["items"] if row["source"] == "rym"]
 ok(rym_rows and all(set(row) == ROW_KEYS for row in rym_rows)
-   and rym_rows[0]["reason"] == "more from Slowdive (RateYourMusic chart)",
+   and rym_rows[0]["reason"] == "More from Slowdive (RateYourMusic chart)",
    f"…and its rows arrive in the shelf's shape, naming the relationship they "
    f"state ({rym_rows[0]['reason'] if rym_rows else None})")
 
@@ -950,13 +950,13 @@ CFG.pop("rym_archive_fallback", None)
 print("== merging two sources ==")
 shared = [
     {"kind": "artist", "title": "Lush", "artist": "Lush", "mbid": ARTIST_LUSH,
-     "_source": "deezer", "_reason": "sounds like Slowdive (Deezer)"},
+     "_source": "deezer", "_reason": "Sounds like Slowdive (Deezer)"},
     {"kind": "artist", "title": "Lush", "artist": "Lush", "mbid": ARTIST_LUSH,
-     "_source": "listenbrainz", "_reason": "sounds like Slowdive (ListenBrainz)"},
+     "_source": "listenbrainz", "_reason": "Sounds like Slowdive (ListenBrainz)"},
 ]
 merged = discover.merge_rows(shared)
 ok(len(merged) == 1 and merged[0]["_source"] == "deezer"
-   and merged[0]["_reason"] == "sounds like Slowdive (Deezer)"
+   and merged[0]["_reason"] == "Sounds like Slowdive (Deezer)"
    and merged[0]["_also"] == ["listenbrainz"],
    "two sources sharing an MBID are ONE row, the preferred source's reason kept")
 quiet = [
@@ -964,9 +964,9 @@ quiet = [
      "mbid": ARTIST_BROADCAST, "_source": "deezer"},
     {"kind": "artist", "title": "Broadcast", "artist": "Broadcast",
      "mbid": ARTIST_BROADCAST, "_source": "listenbrainz",
-     "_reason": "sounds like Slowdive (ListenBrainz)"},
+     "_reason": "Sounds like Slowdive (ListenBrainz)"},
 ]
-ok(discover.merge_rows(quiet)[0]["_reason"] == "sounds like Slowdive (ListenBrainz)",
+ok(discover.merge_rows(quiet)[0]["_reason"] == "Sounds like Slowdive (ListenBrainz)",
    "a row whose winner stated no reason takes the duplicate's rather than none")
 
 # --------------------------------------------------------------------------- #
@@ -982,13 +982,13 @@ library_rec = api_discover.recommended_list(seed="library", kind="albums", limit
 ok(set(library_rec) == {"items", "sources_asked", "notes", "basis"}
    and library_rec["items"]
    and all(set(row) == ROW_KEYS for row in library_rec["items"])
-   and library_rec["basis"].startswith("library genres:"),
+   and library_rec["basis"].startswith("Library genres:"),
    f"seed=library answers the same payload and row shape as before "
    f"({library_rec['basis']})")
 ok(all(row["owned"] is False for row in library_rec["items"]),
    "…and still drops what the library already holds (the shopping-list rule)")
 ok(discover.recommended_payload(cfg={}, seed_kind="", lib=LIBRARY)["basis"].startswith(
-    "library genres:"),
+    "Library genres:"),
    "an empty seed_kind is the library seed, exactly as the old call sent it")
 
 route_params = set(inspect.signature(api_discover.discover_recommended).parameters)

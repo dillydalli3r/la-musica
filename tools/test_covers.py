@@ -903,13 +903,16 @@ assert len(entry["covers"]["results"]) == 4, entry
 # The step reaches back into `server.main` for the cover page's own writer
 # (download + normalise + store), so that is what gets stubbed here.
 from server import main as srv_main
+# The genuine download the cover page itself uses — the last case in section 8
+# runs it against a stubbed HTTP seam, then puts the stub back.
+_REAL_URL_BYTES = srv_main._cover_url_bytes
 
 fetched = []
 written = []
 
 
-def fake_url_bytes(url, artist="", album="", rg=""):
-    fetched.append({"url": url, "artist": artist, "album": album, "rg": rg})
+def fake_url_bytes(url, artist="", substitute=True):
+    fetched.append({"url": url, "artist": artist, "substitute": substitute})
     return png(600, 600), "image/png"
 
 
@@ -939,9 +942,10 @@ assert asked[-1]["limit"] == imp.COVER_REVIEW_LIMIT, asked
 assert out["applied"] == {"cover": os.path.join(staged_album, "cover.png")}, out
 assert out["choice"]["big"] == "https://img.test/a0.jpg", out["choice"]
 assert "best of 5 candidate(s)" in out["note"], out["note"]
-# the winner went through the writer, with the album's identity
-assert fetched == [{"url": "https://img.test/a0.jpg", "artist": "Radiohead",
-                    "album": "OK Computer", "rg": ""}], fetched
+# the winner went through the writer, as an EXACT fetch: the policy chose this
+# candidate's image, so no other provider may answer in its place
+assert fetched == [{"url": "https://img.test/a0.jpg", "artist": "",
+                    "substitute": False}], fetched
 assert [w["album_dir"] for w in written] == [staged_album], written
 assert written[0]["stem"] == "cover" and written[0]["data"] == png(600, 600), written
 # the file is the writer's, and the staged set an earlier step left is untouched
@@ -1018,6 +1022,57 @@ out = imp.run_cover_step(gate_album, {"music_folder": MUSIC, "cover_review": Fal
 assert (out["fetched"], out["applied"]) == (False, {}), out
 assert fetched == [] and written == [], (fetched, written)
 assert "below the minimum 1200×1200" in out["note"], out["note"]
+
+# The write is EXACT: a chosen candidate whose own image cannot be fetched
+# writes NOTHING. The cover page's own download runs the real chain here (`_get`
+# stubbed, the disk cache in this test's own temp dir), with the album's
+# identity in hand — the CAA/iTunes/Deezer tiers would all answer — and its
+# image must be the answer, because that is how a WRONG cover used to land: the
+# art cache could hold a fallback's picture under the row's URL (fetched during
+# another album's search), and the next "use this cover" wrote it to the folder
+# as if it had been picked.
+from server import artcache as _artcache
+
+_real_cache_dir = _artcache.cache_dir
+_real_get = _artcache._get
+_art_cache = os.path.join(_TMP, "art_cache_write")
+_artcache.cache_dir = lambda music_folder=None: _art_cache
+_artcache._FAILS.clear()
+srv_main._cover_url_bytes = _REAL_URL_BYTES
+served = {}
+
+
+def fake_get(url, headers, timeout):
+    served[url] = served.get(url, 0) + 1
+    return (200, b"\x89PNG\r\n\x1a\n" + url.encode(), "image/png")
+
+
+_artcache._get = fake_get
+try:
+    dead_url = "https://static.qobuz.com/images/covers/aa/bb/dead_org.jpg"
+    stub_candidates({"source": "qobuz", "big": dead_url, "width": 1400,
+                     "height": 1400, "reasons": ["the best of what answered"]})
+    _artcache._get = lambda url, headers, timeout: (403, b"", "")
+    out = imp.run_cover_step(gate_album, {"music_folder": MUSIC, "cover_review": False})
+    assert (out["fetched"], out["applied"]) == (False, {}), out
+    assert written == [], written
+    assert "nothing was written" in out["note"], out["note"]
+
+    # …and when its own image IS there, those exact bytes are what lands.
+    live_url = "https://static.qobuz.com/images/covers/cc/dd/live_org.jpg"
+    stub_candidates({"source": "qobuz", "big": live_url, "width": 1400,
+                     "height": 1400, "reasons": ["the best of what answered"]})
+    _artcache._get = fake_get
+    out = imp.run_cover_step(gate_album, {"music_folder": MUSIC, "cover_review": False})
+    assert out["fetched"] is True, out
+    assert written[-1]["data"] == b"\x89PNG\r\n\x1a\n" + live_url.encode(), written[-1]
+finally:
+    imp.cover_candidates = real_candidates
+    srv_main._cover_url_bytes = fake_url_bytes
+    _artcache.cache_dir = _real_cache_dir
+    _artcache._get = _real_get
+    fetched.clear()
+    written.clear()
 
 stub_candidates({"source": "itunes", "big": "https://img.test/unmeasured.jpg",
                  "width": None, "height": None, "reasons": []})

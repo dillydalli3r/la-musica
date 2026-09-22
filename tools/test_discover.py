@@ -520,15 +520,15 @@ ok("My Bloody Valentine" in titles and "Cocteau Twins" in titles
    and "Lush" in titles,
    f"the similar-artist feeds contribute the artists it does not own ({titles})")
 by_title = {row["title"]: row for row in artists_rec["items"]}
-ok(by_title["Lush"]["reason"].startswith("sounds like Slowdive (Deezer)")
-   and by_title["Cocteau Twins"]["reason"].startswith("sounds like Slowdive (ListenBrainz)")
-   and by_title["My Bloody Valentine"]["reason"] == "genre: Shoegaze (MusicBrainz)",
+ok(by_title["Lush"]["reason"].startswith("Sounds like Slowdive (Deezer)")
+   and by_title["Cocteau Twins"]["reason"].startswith("Sounds like Slowdive (ListenBrainz)")
+   and by_title["My Bloody Valentine"]["reason"] == "Genre: Shoegaze (MusicBrainz)",
    f"each row records WHY it was suggested, its primary source's reason kept "
    f"({[r['reason'] for r in artists_rec['items']]})")
 ok(by_title["My Bloody Valentine"]["also_from"] == ["deezer"],
    "a row two sources named lists the other one in also_from")
-ok(artists_rec["basis"].startswith("library genres: Shoegaze")
-   and artists_rec["basis"].endswith("top artists: Slowdive, Ride"),
+ok(artists_rec["basis"].startswith("Library genres: Shoegaze")
+   and artists_rec["basis"].endswith("Top artists: Slowdive, Ride"),
    f"the basis names the seed the rows came from ({artists_rec['basis']})")
 ok(artists_rec["sources_asked"] == ["musicbrainz", "deezer", "lastfm",
                                    "listenbrainz"]
@@ -550,9 +550,9 @@ ok("Souvlaki" not in album_titles and "Just For A Day" not in album_titles,
 ok(set(album_titles) == {"Loveless", "Pygmalion", "Heaven or Las Vegas"},
    f"the artist's own records and the sitewide chart both contribute "
    f"({album_titles})")
-ok("more from Slowdive (Deezer)" in album_reasons
-   and "genre: Shoegaze (MusicBrainz)" in album_reasons
-   and "most listened this month (ListenBrainz)" in album_reasons,
+ok("More from Slowdive (Deezer)" in album_reasons
+   and "Genre: Shoegaze (MusicBrainz)" in album_reasons
+   and "Most listened this month (ListenBrainz)" in album_reasons,
    f"…and the album feeds record which one suggested what ({sorted(album_reasons)})")
 by_album = {row["title"]: row for row in albums_rec["items"]}
 ok(len(by_album) == len(albums_rec["items"])
@@ -566,8 +566,8 @@ rec_stubs(mb_rows("tracks", [
      "artist": "My Bloody Valentine", "first_release_date": "1990-01-01",
      "length": 400000}]))
 seeded = api_discover.recommended_list(seed="shoegaze", kind="tracks", limit=5)
-ok(seeded["basis"] == "genre: shoegaze" and seeded["items"]
-   and seeded["items"][0]["reason"] == "genre: shoegaze (MusicBrainz)",
+ok(seeded["basis"] == "Genre: Shoegaze" and seeded["items"]
+   and seeded["items"][0]["reason"] == "Genre: Shoegaze (MusicBrainz)",
    f"a genre seed records the genre as its basis and reason ({seeded['basis']})")
 ok(seeded["notes"]["listenbrainz"].startswith("skipped: ListenBrainz has no keyless")
    and seeded["notes"]["deezer"].startswith("skipped: Deezer has no genre called"),
@@ -643,7 +643,7 @@ ok({row["title"] for row in rym_rows} == {"Star Roving", "Sugar for the Pill"}
    and all(set(row) == ROW_KEYS for row in rym_rows),
    f"its rows arrive in the one recommendation shape, source and label "
    f"included ({[row['title'] for row in rym_rows]})")
-ok(rym_rows[0]["reason"] == "genre: shoegaze (RateYourMusic chart)"
+ok(rym_rows[0]["reason"] == "Genre: Shoegaze (RateYourMusic chart)"
    and rym_rows[0]["page_url"] == "https://rateyourmusic.com/song/slowdive/star-roving/",
    f"…each naming the chart it came from and linking RYM's own song page "
    f"({rym_rows[0]['reason']})")

@@ -1837,19 +1837,29 @@ async def proxy_art(url: str = Query(...), artist: str = Query(""),
                              "X-Art-Source": source or "url"})
 
 
-def _cover_url_bytes(url, artist="", album="", rg=""):
+def _cover_url_bytes(url, artist="", substitute=True):
     """Cover bytes for a caller-supplied URL.
 
     A provider URL goes through the art cache — its per-host headers are what
-    gets past a CDN that refuses the app, and its fallback is what answers at
-    all when the CDN refuses everybody on this network. Any other public image
-    URL is fetched directly, the way it always was.
+    gets past a CDN that refuses the app, its cache is what makes a re-pick
+    instant, and `artist` is the identity the fallback is asked about when the
+    CDN refuses everybody on this network (the artist-image path, where the
+    stand-in is the same artist's picture from another provider). Any other
+    public image URL is fetched directly, the way it always was.
+
+    `substitute=False` is what a cover WRITE asks for (`/api/cover/fromurl`,
+    the import chain's cover step): the bytes must be the picture the caller
+    named — the one the user picked, or the candidate the policy chose for the
+    album. Another provider's image standing in for it would be written to the
+    library as if it had been picked, which is exactly how a wrong cover lands
+    on an album; the caller gets an error instead.
     """
     if artcache.allowed(url):
         data, ctype, _source = artcache.fetch_art(
-            url, artist=artist, album=album, release_group_mbid=rg)
+            url, artist=artist, substitute=substitute)
         if not data:
-            raise ValueError("that image could not be fetched")
+            raise ValueError("that image could not be fetched — nothing was "
+                             "written in its place")
         return data, ctype
     return intg.fetch_image_bytes(url)
 
@@ -2281,14 +2291,14 @@ def cover_sources():
 async def cover_from_url(album: str = Query(...), url: str = Query(...),
                          track: Optional[str] = Query(None),
                          tracks: Optional[str] = Query(None),
-                         artist: str = "", title: str = "", rg: str = "",
                          staged: bool = Query(False)):
     """Download a cover image from a URL (e.g. a COV search result) and
     store it like an uploaded cover (album cover.*, one per-track sidecar, or
     one image mapped to a whole `tracks=` selection).
 
-    `artist`/`title`/`rg` are only used for provider URLs, where they are what
-    the fallback is asked about when the CDN itself refuses us.
+    The image at `url` is the image stored: no provider is asked in its place
+    (see `_cover_url_bytes`), so a pick that cannot be fetched fails here and
+    says so instead of landing some other cover on the album.
     """
     alb = os.path.normpath(album)
     if not os.path.isdir(alb):
@@ -2297,7 +2307,7 @@ async def cover_from_url(album: str = Query(...), url: str = Query(...),
     stem, selected = _cover_write_target(alb, track, tracks)
     try:
         data, ctype = await asyncio.to_thread(
-            _cover_url_bytes, url, artist.strip(), title.strip(), rg.strip())
+            _cover_url_bytes, url, substitute=False)
     except ValueError as e:
         raise HTTPException(400, str(e))
     except Exception as e:

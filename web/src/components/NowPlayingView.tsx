@@ -162,13 +162,16 @@ interface LyricInk {
    *  bright, and a white halo there is a white outline around every glyph
    *  rather than legibility (see index.css). */
   shade: string;
-  /** The veil behind the reading surface, matched to this ink. A mid-grey
-   *  cover is the documented hard case: both inks sit equally far from the
-   *  field, so a faded line lands grey-on-grey whatever the polarity picks
-   *  (the reported "lyrics blend into the background"). The scrim moves the
-   *  FIELD instead of the ink — a light veil under dark lyrics, a dark one
-   *  under light — which keeps every ink step where the table put it. */
-  scrim: string;
+  /** The polarity the player's veils tint with (`--np-veil`, index.css).
+   *  A mid-grey cover is the documented hard case: both inks sit equally far
+   *  from the field, so a faded line lands grey-on-grey whatever the polarity
+   *  picks (the reported "lyrics blend into the background"). The veil moves
+   *  the FIELD instead of the ink — a light tint under dark lyrics, a dark one
+   *  under light — which keeps every ink step where the table put it. It is
+   *  stamped on the fullscreen ROOT, because `--np-veil` inherits: the pane's
+   *  layer and the metadata pill both read the same decision instead of
+   *  carrying their own copy of it. */
+  veil: string;
   /** Karaoke syllables: under the playhead, already sung, still to come. The
    *  emphasis is the scale + glow, which works on either polarity; the
    *  colour has to follow the ink, because the default theme's `--accent` IS
@@ -183,7 +186,7 @@ const INK_ON_DARK: LyricInk = {
   dim: "text-zinc-300",
   plain: "text-zinc-100",
   shade: "np-shade-dark",
-  scrim: "bg-black/35",
+  veil: "np-veil-dark",
   wordNow: "text-accent scale-110 [text-shadow:0_0_16px_rgba(255,255,255,0.4)]",
   wordSung: "text-white",
   wordNext: "text-white/75",
@@ -201,7 +204,7 @@ const INK_ON_LIGHT: LyricInk = {
   dim: "text-zinc-800",
   plain: "text-zinc-900",
   shade: "",
-  scrim: "bg-white/35",
+  veil: "np-veil-light",
   wordNow: "text-zinc-950 scale-110 [text-shadow:0_0_16px_rgba(0,0,0,0.4)]",
   wordSung: "text-zinc-950",
   wordNext: "text-zinc-950/75",
@@ -921,7 +924,7 @@ export default function NowPlayingView(p: Props) {
   // and still legible on both. `ink.shade` is the pane's glyph shadow, which
   // only the dark polarity has — a light halo on a light field is an outline
   // around every glyph, not legibility.
-  // ... and the pane's own SCRIM, for the reason the pane has one: the polarity
+  // ... and the pane's own VEIL, for the reason the pane has one: the polarity
   // is decided from the COVER's colour, but the field this block actually sits
   // on is the ambience — the page's near-black under a 34 % cover wash. A light
   // cover therefore picks the light ink while the measured field beside the
@@ -929,13 +932,19 @@ export default function NowPlayingView(p: Props) {
   // grey-on-grey failure the pane fixed by veiling its own reading surface. The
   // veil moves the FIELD instead of the ink, so every tier keeps the step the
   // table gave it (tools/check_np_metadata_contrast.cjs measures the pixels:
-  // mid-grey fields went from 2.7:1 to 7.2:1 on the secondary lines, and the
-  // light-polarity case from 2.5:1 to 5.4:1).
+  // the secondary lines read 8.8:1 on the mid-grey cover and 5.9:1 on the light
+  // one, against 2.7:1 and 2.5:1 before any veil existed).
+  // The veil's FORM is `np-veil-pill` (index.css), not the `bg-white/35` box it
+  // used to be: the same tint under a backdrop blur, spread past the box as a
+  // blurred halo. A tinted rounded rectangle under the title read as a grey
+  // button pasted under the artwork — the owner's report — and a fade inside
+  // the box is not an option: the contrast above is measured against the pixels
+  // just inside its edges, which is the field the widest rows reach.
   const textBlock = (
     /* Every text row keeps a fixed height and is ALWAYS rendered —
        blanking a row while the next track's tags load is what made
        the block (and the title itself) shake on next/previous. */
-    <div className={`text-center w-[26rem] max-w-full min-w-0 rounded-2xl ${ink.shade} ${ink.scrim}`}>
+    <div className={`text-center w-[26rem] max-w-full min-w-0 rounded-2xl np-veil np-veil-pill ${ink.shade}`}>
       <div className="h-8 flex items-center justify-center gap-2" title={title}>
         <div className={`text-2xl font-bold truncate ${ink.active}`}>{title}</div>
         <AdvisoryMark value={freshTags?.ITUNESADVISORY ?? p.current.advisory} />
@@ -1013,6 +1022,7 @@ export default function NowPlayingView(p: Props) {
           onClose={() => setPlOpen(false)}
           align="center"
           placement="top"
+          frost
           panelClass="w-60 p-1.5 max-h-72 flex flex-col"
         >
             <div className="text-[10px] uppercase tracking-wider text-zinc-500 px-2 pt-1 pb-1">Playlists</div>
@@ -1114,7 +1124,10 @@ export default function NowPlayingView(p: Props) {
   );
 
   return (
-    <div className={`fixed inset-0 z-50 overflow-clip ${videoPath ? "bg-transparent" : "bg-zinc-950"} ${videoPath && !chromeVisible ? "cursor-none" : ""}`}>
+    /* `ink.veil` stamps the polarity tint on the ROOT: `--np-veil` inherits,
+       so the lyrics pane's veil and the metadata pill both read the cover's
+       ink decision (see index.css) instead of carrying their own. */
+    <div className={`fixed inset-0 z-50 overflow-clip ${ink.veil} ${videoPath ? "bg-transparent" : "bg-zinc-950"} ${videoPath && !chromeVisible ? "cursor-none" : ""}`}>
       {/* overflow-clip (not hidden): a hidden box is still a scroll container,
           so wheel / scrollIntoView can silently scroll the whole overlay and
           leave the view "stuck" half-rendered. Clip can never be scrolled. */}
@@ -1327,6 +1340,7 @@ export default function NowPlayingView(p: Props) {
               <Popover
                 open={options}
                 onClose={() => setOptions(false)}
+                frost
                 panelClass="w-72 max-w-[calc(100vw-1.5rem)] p-1.5"
               >
                   <div className="text-[10px] uppercase tracking-wider text-zinc-500 px-2 pt-1 pb-1">Lyrics</div>
@@ -1558,7 +1572,7 @@ export default function NowPlayingView(p: Props) {
               from assistive tech costs no tab stop. */}
           {!videoPath && layoutHasLyrics && (
             <div
-              className={`flex flex-col max-w-3xl overflow-clip transition-[width,max-height,opacity,transform] duration-300 ease-out ${
+              className={`relative flex flex-col max-w-3xl overflow-clip transition-[width,max-height,opacity,transform] duration-300 ease-out ${
                 paneOpen
                   ? "flex-1 min-h-[45vh] w-full lg:min-h-0 lg:h-full lg:max-w-none lg:flex-none lg:w-[56%] lg:ml-auto max-h-[100vh] opacity-100 translate-x-0"
                   : "flex-none min-h-0 max-h-0 w-0 max-w-0 opacity-0 translate-x-6 pointer-events-none"
@@ -1580,17 +1594,25 @@ export default function NowPlayingView(p: Props) {
                 else if (lyricsScrollRef.current) lyricsScrollRef.current.scrollTop = 0;
               }}
             >
+              {/* The legibility veil — a decorative layer of the pane's own
+                  BOX, not of the scroller below, so it stays put while the
+                  lyrics scroll through it. It carries the tint this cover's
+                  polarity chose plus a backdrop blur and dissolves at every
+                  edge (index.css `np-veil-pane`): the lyrics keep the contrast
+                  step the ink table gave them, and the pane draws no panel
+                  over the artwork. */}
+              <div aria-hidden className="np-veil np-veil-pane absolute inset-0" />
               <div
                 ref={lyricsScrollRef}
-                /* No panel: the lyrics sit straight on the ambience so the
-                   pane blends into the backdrop — the old scrim (45 %
-                   zinc-950 behind a backdrop blur) is what read as a border
-                   around the lyrics. Legibility is the ink's job instead:
-                   the pane carries the glyph shadow for this cover's
-                   polarity once (text-shadow inherits), and every line takes
-                   its colour from the same decision, so the ink is always
-                   the near-opposite of the field behind it. */
-                className={`relative flex-1 min-h-0 overflow-y-auto overscroll-contain px-6 py-5 no-scrollbar ${ink.shade} ${ink.scrim} transition-opacity duration-300 ${
+                /* No panel on the reading surface itself: what separates the
+                   glyphs from the cover is the veil above — a blurred tint,
+                   not a box (a `bg-white/35` rectangle here was what read as
+                   the grey slab in the owner's screenshot). The ink still
+                   carries its own half of the job: the scroller sets the glyph
+                   shadow for this polarity once (text-shadow inherits), and
+                   every line takes its colour from the same decision, so the
+                   ink is always the near-opposite of the field behind it. */
+                className={`relative flex-1 min-h-0 overflow-y-auto overscroll-contain px-6 py-5 no-scrollbar ${ink.shade} transition-opacity duration-300 ${
                   staleLyrics ? "opacity-50" : "opacity-100"
                 }`}
                 style={{ zoom: lyricZoom }}
@@ -1623,7 +1645,7 @@ export default function NowPlayingView(p: Props) {
       {/* up-next queue drawer — same features as the player bar's queue
           popover: CLEAR upcoming, per-track ✕, drag to reorder */}
       {queueOpen && (
-        <div role="dialog" aria-modal="true" aria-label="Up next queue" className="safe-np-queue absolute right-0 bottom-0 w-80 max-w-[85vw] z-20 bg-zinc-950 flex flex-col rounded-l-2xl border-l border-t border-border">
+        <div role="dialog" aria-modal="true" aria-label="Up next queue" className="safe-np-queue absolute right-0 bottom-0 w-80 max-w-[85vw] z-20 np-veil np-veil-dark np-veil-panel flex flex-col rounded-l-2xl border-l border-t border-border">
           <div className="flex items-center justify-between px-4 py-3 border-b border-white/10 gap-2">
             <div className="text-[11px] uppercase tracking-widest text-zinc-400 min-w-0 truncate">
               Queue · {queue.length} track{queue.length === 1 ? "" : "s"}

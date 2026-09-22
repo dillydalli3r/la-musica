@@ -1925,8 +1925,8 @@ export default function ImportWizard() {
     setBusy(true);
     try {
       const res = tracks?.length
-        ? await api.coverFromUrl(albumPath, u, undefined, tracks, undefined, staged)
-        : await api.coverFromUrl(albumPath, u, undefined, undefined, undefined, staged);
+        ? await api.coverFromUrl(albumPath, u, undefined, tracks, staged)
+        : await api.coverFromUrl(albumPath, u, undefined, undefined, staged);
       reportCover(res, tracks?.length ? `Cover assigned to ${tracks.length} track(s)` : "Album cover");
       refreshCovers();
     } catch (e) {

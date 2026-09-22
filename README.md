@@ -1,6 +1,6 @@
 # la musica
 
-**v3.17.0** — a self-hosted app that *manages, optimizes, audits, grades and
+**v3.18.0** — a self-hosted app that *manages, optimizes, audits, grades and
 plays* your music library, from the browser, a desktop window or a phone.
 
 **la musica** (formerly Music Library Optimizer) is a FastAPI backend plus a
@@ -213,6 +213,14 @@ stages them instead, for a library that would rather pick by eye. The album's re
 (`coverartarchive.org/release-group/<rg>/front-500`) — the image the finder shows
 beside the candidates, the wizard's preview, and what a candidate is preferred
 against; one release's own sleeve is a single edition's art, not the album's.
+**The cover you pick is the cover that is written**: the pick is fetched from the
+very URL you chose, and when that URL cannot be fetched the write says so and
+writes nothing rather than letting another provider's image stand in for it (an
+Apple storefront URL that answers empty is retried as the same artwork's largest
+copy, which is the same picture, not another cover). Each cached image belongs to
+the URL that served it, so a cover fetched for one album can never be handed to
+another album's write, and every candidate's thumbnail is asked about with that
+row's own artist and title — never the open album's release group.
 **Recommended (Local)** and
 **Home** are computed locally from the library's own tags (genre and family,
 mood, energy, era, artist) — no provider, no model, no network.
@@ -250,7 +258,7 @@ artist / track page it sits on) and explains its basis on screen — the online
 half of the pair of shelves an album, artist or track page shows, whose
 **RECOMMENDED (LOCAL)** half is scored from the library's own tags. On an
 entity shelf MusicBrainz answers through the entity's OWN genres
-(`genre: shoegaze (MusicBrainz)`, and `more release groups by …` for the
+(`Genre: Shoegaze (MusicBrainz)`, and `More release groups by …` for the
 artist's catalogue), Spotify adds the artist's albums and top tracks when its
 credentials are saved, Apple's keyless search and Deezer's similar-artist feed
 stand beside them — and a source that truly has nothing to say is reported in
@@ -270,14 +278,19 @@ timer, ReplayGain, visualizer, app-wide volume) plus a fullscreen player with
 animated karaoke lyrics. The fullscreen view is a two-column layout on a wide
 window (cover + controls, lyrics beside it) and a scrolling single column on a
 narrow or heavily zoomed one, where the lyrics pane keeps a real minimum height
-instead of being squeezed under the fold. The lyrics pane carries its own scrim
-(and every line a tight text shadow) because the backdrop is a light additive
-color field: over a white cover the old 2 px blur at 60 % made the text
-unreadable, which is what the dim is tuned for now. The title, the format line
-and the album/artist lines under the cover take that same ink decision and the
-same veil: the ambience is dark even under a light cover (measured, in
-`tools/check_np_metadata_contrast.cjs`), so a block with fixed white/grey steps
-put its secondary lines at ~2.5:1 on both polarities. Both lyric surfaces — this
+instead of being squeezed under the fold. Nothing floats over the art as a
+panel: the lyrics pane, the metadata block, the queue drawer and the player's
+own popovers each draw a *veil* — the same polarity tint the ink table picks,
+under a backdrop blur, at low alpha and dissolving at its edges — so the cover
+stays visible behind the text instead of being covered by a slab. The lyrics
+pane carries that veil (and every line a tight text shadow) because the backdrop
+is a light additive color field: over a white cover the old 2 px blur at 60 %
+made the text unreadable, which is what the veil is tuned for now. The title,
+the format line and the album/artist lines under the cover take that same ink
+decision and the same veil: the ambience is dark even under a light cover
+(measured, in `tools/check_np_metadata_contrast.cjs` — every metadata tier at
+4.5:1 or better, the title at 3:1), so a block with fixed white/grey steps put
+its secondary lines at ~2.5:1 on both polarities. Both lyric surfaces — this
 pane and the right-docked sidebar viewer — carry the same size control: `−`, a
 percentage you can type into, `+`, 5 % a press (85-160 %), remembered per
 surface because a 380 px sidebar and a full-screen pane want different numbers.

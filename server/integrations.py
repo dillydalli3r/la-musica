@@ -6682,6 +6682,16 @@ def _probe_dimensions(url, timeout=10.0):
         data = _probe_get(url, timeout=timeout)
         if data is None:
             return None                 # the URL could not be asked at all
+        if not data:
+            # An Apple URL whose own copy is missing (HTTP 200, empty body) is
+            # FETCHED, and therefore written, as the same artwork's largest
+            # transform (`server.artcache`'s own repair), so that is the copy
+            # this measures. Reporting the dead URL as an image with nothing
+            # behind it would reject a row the app can serve — and the size the
+            # policy ranks on would describe a file nobody can download.
+            bigger = _artwork_big(url)
+            if bigger and bigger != url:
+                data = _probe_get(bigger, timeout=timeout) or b""
         size = _image_size(data)
         out = {"format": _image_format(data), "bytes": len(data)}
         if size:
@@ -6703,7 +6713,11 @@ def image_dimensions(url, timeout=10.0):
     url = str(url or "").strip()
     if not url:
         return None
-    got = _genre_cached("cover_dim", url,
+    # The memo's OWN kind carries the producer's shape: an Apple URL that
+    # answers empty is now measured at the same artwork's largest copy (the one
+    # the app actually fetches), and an answer stored before that change would
+    # report a row's image as missing while it can be had.
+    got = _genre_cached("cover_dim2", url,
                         lambda: _probe_dimensions(url, timeout))
     return got if isinstance(got, dict) else None
 
@@ -6763,13 +6777,37 @@ DEEZER_API = "https://api.deezer.com"
 COVER_FALLBACKS = ("coverartarchive", "deezer", "itunes")
 
 
-def _artwork_big(url):
-    """`…/100x100bb.jpg` → `…/3000x3000bb.jpg` (Apple's largest artwork).
+# Apple serves one artwork asset under as many addresses as its stores name
+# it: the search's `artworkUrl100`, the cover finder's storefront URLs
+# (`a1.mzstatic.com/r40/…/<id>.png` plus the same asset's `…/<id>.png/500x0w.webp`
+# thumbnail), and the `image/thumb` address that serves any size of it. The
+# storefront's unmodified copy answers HTTP 200 with an EMPTY body when it is
+# not there (verified live: it is for In Rainbows' assets, while the SAME
+# asset's `image/thumb` transform answers 1.8 MB), so the shape is understood
+# here in one place, and both shapes are answered in the one form this app
+# fetches.
+_APPLE_ART_RE = re.compile(
+    r"^https?://(?:[\w.-]+\.)*mzstatic\.com/(?:image/thumb/|r40/|us/r30/)(.+)$", re.I)
+# A transform's size/crop segment — `3000x3000bb.jpg`, `500x0w.webp` — never the
+# asset's own file name (`634904032463.png`, `dj.dmofttoi.jpg`), which carries
+# no `<w>x<h>` at all.
+_APPLE_SIZE_RE = re.compile(r"/\d+x\d+\w*\.\w{2,5}$", re.I)
+_APPLE_BIG_FMT = "https://is1-ssl.mzstatic.com/image/thumb/%s/3000x3000bb.jpg"
 
-    `artworkUrl100` is the only artwork URL Apple's search returns, and the
-    same asset is served at any size in that segment.
+
+def _artwork_big(url):
+    """The largest copy of the SAME Apple artwork at *url*, or None.
+
+    `…/100x100bb.jpg` → `…/3000x3000bb.jpg` (Apple's largest artwork): one
+    asset, every size in that segment. None for a URL that is not an Apple
+    artwork address — there is nothing to repair, and a caller must not treat
+    one store's URL as another's.
     """
-    return re.sub(r"/\d+x\d+bb\.", "/3000x3000bb.", str(url or "")) or None
+    m = _APPLE_ART_RE.match(str(url or "").strip())
+    if not m:
+        return None
+    path = _APPLE_SIZE_RE.sub("", "/" + m.group(1)).lstrip("/")
+    return _APPLE_BIG_FMT % path if path else None
 
 
 def _name_rank(name, want):
@@ -6887,7 +6925,7 @@ def _itunes_covers(artist, album, limit, cfg=None, timeout=30.0):
     rows.sort(key=lambda a: (_name_rank(a.get("artistName"), want_artist),
                              _name_rank(a.get("collectionName"), want_album)))
     return [_cover_row("itunes", a["artworkUrl100"],
-                       _artwork_big(a["artworkUrl100"]),
+                       _artwork_big(a["artworkUrl100"]) or a["artworkUrl100"],
                        a.get("collectionName"), a.get("artistName"),
                        a.get("trackCount"), a.get("collectionViewUrl"),
                        front=True, kind="front", release_cover=True, rank=i)

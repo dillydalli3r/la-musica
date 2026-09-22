@@ -5,15 +5,20 @@ What this pins, with the one HTTP seam stubbed (no network at all):
 
   * only the allowlisted provider hosts are reachable through the proxy — the
     route would otherwise relay any address the server can see;
-  * a cached image is served without a request, and a cached winner is served
-    under the ORIGINAL key however the image was actually obtained;
+  * a cached image is served without a request, and every entry is keyed by THE
+    URL THAT ANSWERED: a fallback's image is cached under its own URL, never
+    under the row's, so it can never be served — or written to the library — as
+    that row's picture for whoever asks next;
+  * an Apple URL whose own copy is missing (HTTP 200, empty body) is repaired
+    with the SAME artwork's larger transform before any other provider is
+    considered, and that repair is all a cover WRITE (`substitute=False`) is
+    allowed: the picked picture or nothing, never a different cover;
   * a provider that refuses us (403) falls through to the next candidate, and
     the chain is Cover Art Archive → iTunes → Deezer, LAZILY: a tier is only
     asked when every tier before it failed;
   * the two album tiers (iTunes, Deezer) are asked only when there IS an album
     to ask about: asked with an artist alone they answer with whatever that
-    artist's most popular release is — a different album's cover, which is
-    cached under the row's URL and written to the library as the row's image;
+    artist's most popular release is — a different album's cover;
   * a total failure is `(None, None, None)` — never an exception — and is
     negatively cached for minutes, so a broken shelf row makes one round of
     requests, not one per render;
@@ -142,8 +147,8 @@ assert len(calls) == 1, calls
 
 
 # --------------------------------------------------------------------------- #
-# 4) A refusing provider falls through, and the WINNER is cached under the
-#    original key — the next view of that row is instant and offline.
+# 4) A refusing provider falls through, and the answer is cached under THE URL
+#    THAT ANSWERED — never under the URL it stood in for.
 # --------------------------------------------------------------------------- #
 reset()
 calls = stub_get({CAA: (200, JPEG, "image/jpeg")})
@@ -152,13 +157,97 @@ data, ctype, source = artcache.fetch_art(
 assert data == JPEG and ctype == "image/jpeg", (data, ctype)
 assert source == "coverartarchive", source
 assert [u for u, _h in calls] == [PRIMARY, CAA], calls
-# the second call answers from the cache keyed by the ORIGINAL url
+# the answering URL holds its own bytes…
+assert os.path.isfile(os.path.join(artcache.cache_dir(), artcache._key(CAA) + ".bin"))
+# …and the URL that was asked about holds NOTHING: an entry there would hold a
+# picture its own URL never served, and every later caller of that URL would
+# be handed it as that URL's image.
+assert not os.path.isfile(os.path.join(artcache.cache_dir(), artcache._key(PRIMARY) + ".bin"))
+# the next view of the same row answers the SAME bytes: the fallback's own
+# entry is what answers, so the fallback is not fetched twice — only the row's
+# own URL is asked again (a CDN that refused once may come back)
 before = len(calls)
 assert artcache.fetch_art(PRIMARY, artist="Radiohead", album="OK Computer",
                           release_group_mbid="rg-1")[0] == JPEG
-assert len(calls) == before, calls
-# …under its own key, so the fallback URL is not what was stored
-assert os.path.isfile(os.path.join(artcache.cache_dir(), artcache._key(PRIMARY) + ".bin"))
+again = [u for u, _h in calls[before:]]
+assert again == [PRIMARY], again
+
+# The reason that keying matters, as the bug it was: album A's search fetched a
+# row's URL, the CDN refused and album A's fallback image (ANOTHER ALBUM's
+# cover) was cached under that URL — so album B's cover write, asking for the
+# same row's URL, was answered with album A's image and wrote it to the wrong
+# album's folder. Each identity now reaches its own answer.
+reset()
+OTHER_CAA = "https://coverartarchive.org/release-group/rg-2/front-1200"
+calls = stub_get({CAA: (200, JPEG, "image/jpeg"), OTHER_CAA: (200, PNG, "image/png")})
+assert artcache.fetch_art(PRIMARY, artist="Radiohead", album="OK Computer",
+                          release_group_mbid="rg-1")[0] == JPEG
+data, _ctype, source = artcache.fetch_art(PRIMARY, artist="Radiohead",
+                                          album="Kid A", release_group_mbid="rg-2")
+assert (data, source) == (PNG, "coverartarchive"), (data, source)
+
+# --------------------------------------------------------------------------- #
+# 4b) A cover WRITE never receives another provider's image (`substitute=False`)
+# --------------------------------------------------------------------------- #
+reset()
+calls = stub_get({CAA: (200, JPEG, "image/jpeg")})
+assert artcache.fetch_art(PRIMARY, artist="Radiohead", album="OK Computer",
+                          release_group_mbid="rg-1", substitute=False) == \
+    (None, None, None)
+# the fallback was not even asked: nothing may be written but the URL's own
+# image, so there is nothing for it to contribute
+assert [u for u, _h in calls] == [PRIMARY], calls
+
+# --------------------------------------------------------------------------- #
+# 4c) An Apple URL whose own copy is missing is repaired with the SAME artwork
+# --------------------------------------------------------------------------- #
+# The cover finder's storefront URLs are `a1.mzstatic.com/r40/…/<id>.png`, and
+# for some assets that copy answers HTTP 200 with an EMPTY body while the same
+# asset's `image/thumb` transform serves it at 3000px (verified live). The
+# repair is not a substitution — same picture, larger — so it runs before any
+# provider fallback and is what a write is allowed to use too.
+APPLE_DEAD = "https://a1.mzstatic.com/r40/Music126/v4/dd/50/xx/634904032449.png"
+APPLE_BIG = ("https://is1-ssl.mzstatic.com/image/thumb/Music126/v4/dd/50/xx/"
+             "634904032449.png/3000x3000bb.jpg")
+reset()
+calls = stub_get({APPLE_BIG: (200, JPEG3000, "image/jpeg")})
+data, ctype, source = artcache.fetch_art(
+    APPLE_DEAD, artist="Radiohead", album="In Rainbows", release_group_mbid="rg-1")
+assert (data, source) == (JPEG3000, "applemusic"), (data, source)
+assert [u for u, _h in calls] == [APPLE_DEAD, APPLE_BIG], calls   # CAA never asked
+# and the url that DID answer is the one that keeps the entry
+assert os.path.isfile(os.path.join(artcache.cache_dir(), artcache._key(APPLE_BIG) + ".bin"))
+before = len(calls)
+assert artcache.fetch_art(APPLE_DEAD, artist="Radiohead", album="In Rainbows",
+                          release_group_mbid="rg-1")[0] == JPEG3000
+assert [u for u, _h in calls[before:]] == [APPLE_DEAD], calls[before:]
+# a write may use the repair — it cannot change which picture lands
+reset()
+calls = stub_get({APPLE_BIG: (200, JPEG3000, "image/jpeg")})
+assert artcache.fetch_art(APPLE_DEAD, substitute=False) == \
+    (JPEG3000, "image/jpeg", "applemusic")
+assert [u for u, _h in calls] == [APPLE_DEAD, APPLE_BIG], calls
+
+# --------------------------------------------------------------------------- #
+# 4d) An entry in an older cache format is not read
+# --------------------------------------------------------------------------- #
+# Entries written before this format could hold a fallback's image under the
+# asked-for URL, so they are ignored rather than served: that is what stops an
+# already-poisoned cache from answering after the fix.
+import json
+
+reset()
+calls = stub_get({PRIMARY: (200, JPEG, "image/jpeg")})
+artcache.fetch_art(PRIMARY)
+meta = os.path.join(artcache.cache_dir(), artcache._key(PRIMARY) + ".json")
+with open(meta, encoding="utf-8") as fh:
+    side = json.load(fh)
+side.pop("v", None)
+with open(meta, "w", encoding="utf-8") as fh:
+    json.dump(side, fh)
+before = len(calls)
+assert artcache.fetch_art(PRIMARY)[0] == JPEG
+assert len(calls) == before + 1, calls   # refetched, not trusted
 
 # The chain is CAA → iTunes → Deezer, and it is LAZY: with the Cover Art
 # Archive answering, neither of the other two is even asked for a URL.

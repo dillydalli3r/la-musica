@@ -150,7 +150,10 @@ ok(
 )
 ok(
     "...and it passes the caller's staged allowance",
-    "}, staged);" in modal and "staged?: boolean;" in modal and "staged = false" in modal,
+    # The write call itself must carry the allowance, whatever position or
+    # spelling it takes: without it the wizard's album — which is not in the
+    # library yet — is refused and the pick never reaches the folder.
+    "staged" in modal[modal.index("api.coverFromUrl("):modal.index("api.coverFromUrl(") + 200],
     "the modal must thread staged into api.coverFromUrl (see test_cover_preview.py §5)",
 )
 wizard = read("web/src/pages/ImportWizard.tsx")

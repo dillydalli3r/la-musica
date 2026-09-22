@@ -890,7 +890,7 @@ def genre_payload(cfg=None, genre="", kind="albums", source="all", limit=25,
             row["_source"] = spec["id"]
             rows.append(row)
 
-    items = [finalize_row(row, index, "genre: %s" % genre)
+    items = [finalize_row(row, index, "Genre: %s" % _genre_display(genre))
              for row in sort_rows(merge_rows(rows))]
     return {"genre": genre, "kind": kind, "source": source, "items": items,
             "sources_asked": asked.ids, "notes": asked.notes,
@@ -905,9 +905,9 @@ def _recommend_rows(sid, kind, cfg, genres, artists, limit, seed):
     """Rows ONE source recommends for these seeds, each carrying `_reason`.
 
     What the reason says is the source's own concept of a recommendation: a tag
-    chart is "genre: shoegaze (Last.fm tag)", a similar-artist feed is
-    "sounds like Slowdive (ListenBrainz)", a discography is "more from Slowdive
-    (Deezer)", and RateYourMusic's own chart for a genre is "genre: shoegaze
+    chart is "Genre: shoegaze (Last.fm tag)", a similar-artist feed is
+    "Sounds like Slowdive (ListenBrainz)", a discography is "More from Slowdive
+    (Deezer)", and RateYourMusic's own chart for a genre is "Genre: shoegaze
     (RateYourMusic chart)". Raises `_Skip` when the source needs a seed this
     request does not have (a genre it cannot filter by, an artist it cannot
     resolve)."""
@@ -921,7 +921,7 @@ def _recommend_rows(sid, kind, cfg, genres, artists, limit, seed):
             raise _Skip("needs a genre seed and this request has none")
         for genre in genres:
             take(_browse(sid, kind, genre, limit, 0, cfg)["rows"],
-                 "genre: %s (%s)" % (genre, SOURCE_LABELS[sid]))
+                 "Genre: %s (%s)" % (_genre_display(genre), SOURCE_LABELS[sid]))
         return rows
 
     if sid == "deezer":
@@ -929,17 +929,17 @@ def _recommend_rows(sid, kind, cfg, genres, artists, limit, seed):
             genre_id = discovery.deezer_genre_id(genre)
             if genre_id:
                 take(discovery.deezer_genre_browse(genre_id, kind, limit=limit)["rows"],
-                     "genre: %s (Deezer chart)" % genre)
+                     "Genre: %s (Deezer chart)" % _genre_display(genre))
         for artist in artists:
             if kind == "artists":
                 take(discovery.deezer_related_artists(artist, limit),
-                     "sounds like %s (Deezer)" % artist)
+                     "Sounds like %s (Deezer)" % artist)
             elif kind == "albums":
                 take(discovery.deezer_artist_albums(artist, limit, albums_only=True),
-                     "more from %s (Deezer)" % artist)
+                     "More from %s (Deezer)" % artist)
             else:
                 take(discovery.deezer_artist_top(artist, limit),
-                     "more from %s (Deezer)" % artist)
+                     "More from %s (Deezer)" % artist)
         if not rows:
             # Nothing came back: say WHICH half of Deezer could not help rather
             # than leaving the caller to guess from an empty list.
@@ -952,11 +952,11 @@ def _recommend_rows(sid, kind, cfg, genres, artists, limit, seed):
     if sid == "lastfm":
         for genre in genres:
             take(discovery.lastfm_tag_top(kind, genre, limit=limit, cfg=cfg)["rows"],
-                 "genre: %s (Last.fm tag)" % genre)
+                 "Genre: %s (Last.fm tag)" % _genre_display(genre))
         if kind == "artists":
             for artist in artists:
                 take(discovery.lastfm_similar_artists(artist, limit, cfg=cfg),
-                     "sounds like %s (Last.fm)" % artist)
+                     "Sounds like %s (Last.fm)" % artist)
         return rows
 
     if sid == "listenbrainz":
@@ -966,7 +966,7 @@ def _recommend_rows(sid, kind, cfg, genres, artists, limit, seed):
                 if not mbid:
                     continue
                 take(discovery.listenbrainz_similar_artists(mbid, limit),
-                     "sounds like %s (ListenBrainz)" % artist)
+                     "Sounds like %s (ListenBrainz)" % artist)
             return rows
         if seed != "library":
             # Its charts are sitewide, not genre-filtered, so they are NOT an
@@ -975,7 +975,7 @@ def _recommend_rows(sid, kind, cfg, genres, artists, limit, seed):
                         "needs a user token)")
         take(discovery.listenbrainz_top_releases(limit=limit) if kind == "albums"
              else discovery.listenbrainz_top_recordings(limit=limit),
-             "most listened this month (ListenBrainz)")
+             "Most listened this month (ListenBrainz)")
         return rows
 
     if sid == CHART_FIRST:
@@ -998,7 +998,7 @@ def _recommend_rows(sid, kind, cfg, genres, artists, limit, seed):
             if not integrations.rym_chart_states(got.get("chart"), genre):
                 raise _Skip('RateYourMusic has no genre called "%s" — its own '
                             "chart filter matched no such chart" % genre)
-            take(got["rows"], "genre: %s (RateYourMusic chart)" % genre)
+            take(got["rows"], "Genre: %s (RateYourMusic chart)" % _genre_display(genre))
         return rows
 
     raise _Skip("no recommendations from this source")
@@ -1130,7 +1130,7 @@ def _entity_basis(seed):
     """What the shelf was built from, in the payload's own words — and WHICH
     form of identity it was built from, because "by name" is a real answer to
     a real page and says the row's reach is only as good as that name."""
-    return "%s: %s (%s)" % (seed["kind"], _entity_subject(seed),
+    return "%s: %s (%s)" % (seed["kind"].capitalize(), _entity_subject(seed),
                             seed["mbid"] or "by name")
 
 
@@ -1201,7 +1201,7 @@ def _entity_rows(sid, kind, cfg, seed, limit):
                 found = [row for row in found
                          if str(row.get("mbid") or "") != artist_mbid
                          and discovery.norm(row.get("title")) != want]
-            take(found, "genre: %s (MusicBrainz)" % genre)
+            take(found, "Genre: %s (MusicBrainz)" % _genre_display(genre))
         # Then the browse request itself: "more from this artist" is the
         # artist's own records, which is NOT a similarity claim, and its own
         # reason says exactly that. An album shelf reads the release-group
@@ -1220,28 +1220,28 @@ def _entity_rows(sid, kind, cfg, seed, limit):
                 "primary_type": group.get("primary_type"),
                 "secondary_types": group.get("secondary_types"),
             }) for group in got.get("release_groups") or [] if group.get("id")],
-                "more release groups by %s (MusicBrainz)" % by)
+                "More release groups by %s (MusicBrainz)" % by)
         elif kind == "tracks" and artist_mbid:
             take(discovery.musicbrainz_artist_recordings(
                 artist_mbid, limit=ENTITY_BROWSE_ROWS)["rows"],
-                "more recordings by %s (MusicBrainz)" % by)
+                "More recordings by %s (MusicBrainz)" % by)
         return rows
 
     if sid == "deezer":
         if kind == "artists":
             take(discovery.deezer_related_artists(by, limit),
-                 "sounds like %s (Deezer)" % by)
+                 "Sounds like %s (Deezer)" % by)
         else:
             related = [a["name"] for a in
                        discovery.deezer_related_artists(by, RELATED_FANOUT)
                        if a.get("name")]
-            bridge(related, lambda name: "more from %s — sounds like %s (Deezer)"
+            bridge(related, lambda name: "More from %s — sounds like %s (Deezer)"
                    % (name, by))
             # The seed's OWN artist, beside the related ones: for an album or a
             # track page the records of the artist being read are the closest
             # answer Deezer states, and the rows the library does not hold are
             # the ones it is actually missing.
-            bridge([by], lambda name: "more from %s (Deezer)" % name)
+            bridge([by], lambda name: "More from %s (Deezer)" % name)
         if not rows:
             raise _Skip('Deezer knows no related artists for "%s"' % by)
         return rows
@@ -1266,7 +1266,7 @@ def _entity_rows(sid, kind, cfg, seed, limit):
                  if discovery.norm(row.get("artist")) == want]
         if not found:
             raise _Skip('Apple\'s search matched no album by "%s"' % by)
-        take(found, "more from %s (iTunes search)" % by)
+        take(found, "More from %s (iTunes search)" % by)
         return rows
 
     if sid == "lastfm":
@@ -1277,11 +1277,11 @@ def _entity_rows(sid, kind, cfg, seed, limit):
         # report here.
         if kind == "artists":
             take(discovery.lastfm_similar_artists(seed["name"], limit, cfg=cfg),
-                 "sounds like %s (Last.fm)" % seed["name"])
+                 "Sounds like %s (Last.fm)" % seed["name"])
         else:
             take(discovery.lastfm_similar_tracks(seed["artist"], seed["name"],
                                                  limit, cfg=cfg),
-                 "sounds like %s (Last.fm)" % seed["name"])
+                 "Sounds like %s (Last.fm)" % seed["name"])
         return rows
 
     if sid == "listenbrainz":
@@ -1296,7 +1296,7 @@ def _entity_rows(sid, kind, cfg, seed, limit):
             raise _Skip('could not resolve "%s" on MusicBrainz, and '
                         "ListenBrainz's feed is MBID-native" % by)
         take(discovery.listenbrainz_similar_artists(mbid, limit),
-             "sounds like %s (ListenBrainz)" % by)
+             "Sounds like %s (ListenBrainz)" % by)
         return rows
 
     if sid == "spotify":
@@ -1312,7 +1312,7 @@ def _entity_rows(sid, kind, cfg, seed, limit):
                  else discovery.spotify_artist_top_tracks(by, limit, cfg=cfg))
         if not found:
             raise _Skip('Spotify knows no artist called "%s"' % by)
-        take(found, "more from %s (Spotify)" % by)
+        take(found, "More from %s (Spotify)" % by)
         return rows
 
     if sid == CHART_FIRST:
@@ -1336,7 +1336,7 @@ def _entity_rows(sid, kind, cfg, seed, limit):
         if not found:
             raise _Skip('RateYourMusic knows no artist called "%s" — its own '
                         "chart filter matched no chart" % by)
-        take(found, "more from %s (RateYourMusic chart)" % by)
+        take(found, "More from %s (RateYourMusic chart)" % by)
         return rows
 
     # A source that declares an entity capability with no call wired above: a
@@ -1426,7 +1426,7 @@ def recommended_payload(cfg=None, seed="library", kind="albums", limit=20, lib=N
                 rows.append(row)
         _rym_archive_note(cfg, asked)
         items = _shelf_items(rows, index, limit,
-                             "similar to %s" % _entity_subject(entity),
+                             "Similar to %s" % _entity_subject(entity),
                              drop_owned=False)
         notes = asked.notes
         if not items:
@@ -1437,15 +1437,15 @@ def recommended_payload(cfg=None, seed="library", kind="albums", limit=20, lib=N
     if seed.lower() == "library":
         genres = _top_genres(index, SEED_GENRES)
         artists = _top_artists(index, SEED_ARTISTS)
-        basis = ("library genres: " + (", ".join(genres) or "none tagged")
-                 + " · top artists: " + (", ".join(artists) or "none"))
+        basis = ("Library genres: " + (", ".join(genres) or "none tagged")
+                 + " · Top artists: " + (", ".join(artists) or "none"))
         if not genres and not artists:
             return {"items": [], "sources_asked": [], "basis": basis,
                     "notes": {"recommended": "skipped: the library has no "
                                              "genres or artists to seed from"}}
     else:
         genres, artists = [seed], []
-        basis = "genre: %s" % seed
+        basis = "Genre: %s" % _genre_display(seed)
 
     rows = []
     for spec in SOURCES:
@@ -1470,7 +1470,7 @@ def recommended_payload(cfg=None, seed="library", kind="albums", limit=20, lib=N
             rows.append(row)
 
     _rym_archive_note(cfg, asked)
-    items = _shelf_items(rows, index, limit, "genre: %s" % seed, drop_owned=True)
+    items = _shelf_items(rows, index, limit, "Genre: %s" % _genre_display(seed), drop_owned=True)
     notes = asked.notes
     if not items:
         notes["recommended"] = _nothing_note(cfg, kind, "this seed")
@@ -1559,7 +1559,7 @@ def _chart_rows(sid, kind, period, limit, cfg):
             # RYM's OWN ranking is the row's reason: it states no play count,
             # so the chart position is the only score it has, and the chart's
             # name (from the page's own title) says which window it is.
-            row["_reason"] = "chart #%s%s" % (
+            row["_reason"] = "Chart #%s%s" % (
                 row.get("rank") or "?",
                 (" · %s" % name) if name else " (RateYourMusic)")
         note = ""
@@ -1649,11 +1649,11 @@ def charts_payload(cfg=None, period="all", kind="tracks", source="all",
         for row in found:
             row["_source"] = sid
             out = finalize_row(row, index, str(row.get("_reason")
-                                               or ("chart #%s on %s"
+                                               or ("Chart #%s on %s"
                                                    % (row.get("rank") or "?",
                                                       spec["label"]))))
             # The provider's own rank and score, on top of the shared row shape
-            # (which every Discover surface renders): "chart #3, 12.4M
+            # (which every Discover surface renders): "Chart #3, 12.4M
             # listeners" is the row's provenance, and it does not fit in a
             # field the shared shape already spends on something else.
             out["rank"] = _safe_int(row.get("rank"), 0)

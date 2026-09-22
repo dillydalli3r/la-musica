@@ -195,14 +195,17 @@ export default function CoverSearchModal({ albumPath, artist, album, onClose, on
 
   /** Every provider image on this screen goes through the app (`api.artUrl`):
    *  several cover CDNs — Deezer's above all — refuse the browser on some
-   *  networks, and the backend both gets past that and falls back to a
-   *  provider that answers. A result's OWN artist/title is the identity that
-   *  fallback is asked about (this album's, when a result states none). */
+   *  networks, the backend gets past that, and it repairs an Apple URL whose
+   *  own copy is missing with the SAME artwork's larger transform. A result's
+   *  OWN artist/title (this album's, when a result states none) is the only
+   *  identity handed over: the album's release group is THIS album's, and a
+   *  row about another release — the name search answers with karaoke and
+   *  tribute releases too — would then be replaced by this album's cover,
+   *  which is the one thing a candidate's thumbnail must never be. */
   const artUrl = (u: string | null | undefined, own?: { artist?: string | null; album?: string | null }) =>
     api.artUrl(u, {
       artist: own?.artist || qArtist.trim() || artist,
       album: own?.album || qAlbum.trim() || album,
-      rg: releaseGroupMbid,
     });
 
   /** Cover Art Archive's front cover for the album's release group — the one
@@ -353,20 +356,20 @@ export default function CoverSearchModal({ albumPath, artist, album, onClose, on
   const apply = async (r: CoverResult) => {
     if (!r.big && !r.small) return;
     setApplying(true);
-    setError(null);
     try {
       const perTrack = tracks?.length ? tracks : undefined;
-      const res = await api.coverFromUrl(albumPath, r.big || r.small!, undefined, perTrack, {
-        artist: r.artist ?? qArtist,
-        album: r.title ?? qAlbum,
-        rg: releaseGroupMbid,
-      }, staged);
+      const res = await api.coverFromUrl(albumPath, r.big || r.small!, undefined, perTrack, staged);
       const name = res.path.split("/").pop();
       toast(res.warning ? `Cover saved as ${name} — ${res.warning}` : `Cover saved as ${name}`);
       onApplied?.();
       onClose();
     } catch (e) {
-      setError(String(e));
+      // The write's own words, where the success message would have been. A
+      // write can fail on its own (a picked URL a CDN has stopped serving is
+      // refused rather than replaced — see the server's `substitute=False`),
+      // and that must not replace the candidates on screen with the finder's
+      // "search failed" panel: the search is fine.
+      toast.error(String(e));
     } finally {
       setApplying(false);
     }

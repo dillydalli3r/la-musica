@@ -21,6 +21,7 @@ export default function Popover({
   panelClass = "w-56 p-1.5",
   shield = true,
   fixed = false,
+  frost = false,
   rightGap,
   anchorRef,
 }: {
@@ -44,6 +45,14 @@ export default function Popover({
    *  edge AND painted under the sidebar: that is what made the notification
    *  tray unreadable. */
   fixed?: boolean;
+  /** Frosted panel for menus that float over the fullscreen player's artwork:
+   *  the blur-and-tint veil (`np-veil np-veil-dark np-veil-panel`,
+   *  index.css) instead of the opaque `bg-zinc-950` fill, so the cover stays
+   *  visible behind the panel. The tint is pinned to the DARK one whatever
+   *  cover is up: these rows are zinc-300, and a light-polarity veil would
+   *  invert them into unreadability. Every other caller keeps the solid panel
+   *  it was designed with. */
+  frost?: boolean;
   /** Fixed mode only: pin the panel this many px from the VIEWPORT's right
    *  edge instead of aligning its right edge to the trigger's. For a panel
    *  whose trigger lives in a padded bar, aligning to the trigger inherits
@@ -150,7 +159,9 @@ export default function Popover({
       }
       className={`anim-fade ${fixed ? "z-[60]" : "absolute z-50"} ${
         fixed ? "" : placement === "top" ? "bottom-full mb-1" : "mt-1"
-      } rounded-xl shadow-2xl bg-zinc-950 border border-white/10 ${
+      } rounded-xl shadow-2xl border border-white/10 ${
+        frost ? "np-veil np-veil-dark np-veil-panel" : "bg-zinc-950"
+      } ${
         fixed
           ? ""
           : align === "right"

@@ -137,10 +137,10 @@ assert calls(tracks) == calls(recommend.recommend(CONFIG, "track", "mb:alb-1-t0"
 albums = recommend.recommend(CONFIG, "album", "C:/lib/Alpha/Black")
 assert paths(albums) == ["C:/lib/Alpha/Black2", "C:/lib/Beta/Metal", "C:/lib/Delta/Loud"], paths(albums)
 assert all(r["kind"] == "album" for r in albums), albums
-assert albums[0]["reasons"][0] == "same genre: black metal", albums[0]
-assert albums[1]["reasons"][0] == "same family: metal", albums[1]
+assert albums[0]["reasons"][0] == "Same genre: Black Metal", albums[0]
+assert albums[1]["reasons"][0] == "Same family: Metal", albums[1]
 assert albums[0]["score"] > albums[1]["score"] > albums[2]["score"], albums
-assert albums[2]["reasons"][0] == "same mood: aggressive", albums[2]
+assert albums[2]["reasons"][0] == "Same mood: aggressive", albums[2]
 assert albums[0]["cover_path"] == "C:/lib/Alpha/Black2"
 # The record with no term in common (a different family, a different mood, no
 # ENERGY, an era outside ERA_SPAN) scores zero and is dropped, not ranked last.
@@ -174,7 +174,7 @@ assert recommend._seed_entries(idx, ["C:/nope", "mb:nope", ""]) == []
 
 multi = recommend.recommend(CONFIG, "tracks", seeds=[SEED, UNRELATED])
 assert paths(multi) == [SIBLING, FAMILY, LOUD], paths(multi)
-assert not any(r.startswith("same artist") for r in multi[1]["reasons"]), multi[1]
+assert not any(r.startswith("Same artist") for r in multi[1]["reasons"]), multi[1]
 assert calls(multi) == calls(recommend.recommend(CONFIG, "tracks", seeds=[UNRELATED, SEED]))
 # An album shelf from an explicit seed list drops the albums it was seeded with.
 assert paths(recommend.recommend(CONFIG, "albums", seeds=[SEED, SIBLING])) == \
