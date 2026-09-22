@@ -2202,10 +2202,17 @@ def _job_note(done, label, item):
 
 
 def _stats_hook(done, total, desc):
-    """Mirror progress into mlo.stats.progress_hook — the WS relay's source."""
+    """Mirror progress into mlo.stats.progress_hook — the WS relay's source.
+
+    Stands down while a script CHAIN holds the hook (`script_runners` marks its
+    own wrapper): the header would otherwise mix two albums' numbers, because
+    the bulk queue's per-album frames would be scaled into the running chain's
+    slice. The bulk job has its own row (`/api/import/bulk`, the ImportRunCard)
+    and does not need the header to speak for it at the same time.
+    """
     from mlo import stats as stats_mod
     hook = getattr(stats_mod, "progress_hook", None)
-    if callable(hook):
+    if callable(hook) and not getattr(hook, "_mlo_chain", False):
         try:
             hook(done, total, desc)
         except Exception:

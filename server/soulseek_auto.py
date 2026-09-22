@@ -4225,6 +4225,10 @@ def _run_youtube(release, cfg, confirm_lossy):
             return _finish("done", wished)
         raise RuntimeError(msg)
 
+    # The fetch is over: drop its block, or the queue keeps painting its last
+    # frame (100 % of the tracks) through verify and import.
+    with _lock:
+        _job["progress"] = None
     _stage("verifying", f"Checking {len(got)}/{total} file(s)…")
     _log(f"  {len(got)}/{total} track file(s) are in the album folder.")
     for line in problems[:20]:

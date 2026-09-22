@@ -415,6 +415,12 @@ def _run_with_progress(runner, cfg, label, chain=None, job=None):
         # half-finished step never reads as "1.9 of 18".
         emit(index - 1 + frac, count, text, (index, count))
 
+    # Marked so a producer that is NOT this chain (the bulk importer's own
+    # mirror, a download job's ticks) can tell that the header is already
+    # speaking for a run, and stand down instead of painting its frames into
+    # this chain's bar — the crosstalk that made the header count one album's
+    # files while another album's chain was talking.
+    hook._mlo_chain = True
     mlo_stats.progress_hook = hook
     try:
         if chained:

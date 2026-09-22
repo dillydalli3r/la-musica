@@ -332,6 +332,12 @@ def _run_one(wish, cfg):
             resolved = wishes.reconcile_with_library(cfg)
             if not resolved:
                 wishes.mark_imported(wid, "")
+                # The library already holds this album and reconcile could not
+                # tie it to a framework folder, so the placeholder would stand
+                # for ever beside the real album (and read as a second release).
+                # Nothing searches this wish again: take it down, like every
+                # other terminal end here does.
+                _drop_framework_album(wish, cfg)
                 _wish_found(wish)
             return "imported"
         if "already queued" in low or "already running" in low or "being imported" in low:
