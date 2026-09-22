@@ -604,6 +604,78 @@ def check_watch_queued():
 check_watch_queued()
 
 # --------------------------------------------------------------------------- #
+# (d2) the add-time prefetch finishes AFTER the import filled the album
+# --------------------------------------------------------------------------- #
+print("\n(d2) a prefetch that lands after the album was filled")
+
+
+def check_prefetch_after_fill():
+    """A prefetch must not put the marker back on a filled album.
+
+    "Add to library" creates the framework album and pre-fetches its page
+    content in the BACKGROUND (a discography's add does dozens), so an import
+    can fill and clear the album while those provider calls are still in
+    flight. The prefetch's own read-modify-write of the marker used to land on
+    the far side of that window: `save_pending(load_pending(folder) or {})`
+    re-created `.mlo_pending.json`, and the library read a real, finished album
+    as PENDING — with a track list and no playable tracks — until some later
+    import happened to clear it again.
+
+    The window is made deterministic here (the prefetch's READ is held until
+    the import has cleared the marker, then released), because it is a race
+    that only shows up when the provider calls are slow and the import is not.
+    """
+    row = pending_albums.create(release(5, "Prefetch Race"), CFG, prefetch=False)
+    folder = norm(row["album_path"])
+    ok(bool(pathmod.load_pending(folder)), "the framework album is pending")
+
+    real_load = pathmod.load_pending
+    real_links, real_meta, real_cands = (imports.prefetch_links,
+                                         imports.run_metadata_step,
+                                         imports.cover_candidates)
+    armed, waiting, go = threading.Event(), threading.Event(), threading.Event()
+    holder = {}
+
+    def load_then_wait(folder_):
+        info = real_load(folder_)
+        if info and armed.is_set() and threading.current_thread() is holder.get("t"):
+            waiting.set()
+            go.wait(15)
+        return info
+
+    imports.prefetch_links = lambda *a, **k: {}
+    imports.run_metadata_step = lambda *a, **k: {}
+    imports.cover_candidates = lambda *a, **k: None
+    pathmod.load_pending = load_then_wait
+    try:
+        make_wav(os.path.join(folder, "01 - One.wav"))
+        holder["t"] = threading.Thread(
+            target=lambda: imports.prefetch_album(folder, CFG), daemon=True)
+        armed.set()
+        holder["t"].start()
+        ok(waiting.wait(15),
+           "the prefetch read the marker while the album was still pending")
+
+        # …and the import finishes the album in that very window
+        ok(pending_albums.clear_if_filled(folder, CFG, chained=True)
+           and not real_load(folder),
+           "the import filled it and the marker went")
+        go.set()
+        holder["t"].join(15)
+    finally:
+        armed.clear()
+        go.set()
+        pathmod.load_pending = real_load
+        (imports.prefetch_links, imports.run_metadata_step,
+         imports.cover_candidates) = real_links, real_meta, real_cands
+
+    ok(not real_load(folder),
+       "and the finished album was NOT put back to pending by the prefetch")
+
+
+check_prefetch_after_fill()
+
+# --------------------------------------------------------------------------- #
 # (e) a manual drag-and-drop import
 # --------------------------------------------------------------------------- #
 print("\n(e) a manual (drag-and-drop) import")

@@ -745,19 +745,26 @@ def _caption_files(exe, video_id, tmpdir, flags):
         return []
 
 
-def _youtube_captions(exe, video_id):
+def _youtube_captions(exe, video_id, cookie_flags=()):
     """Time-synced captions for one video id, or None.
 
     Manual subtitles first — those are the ones a person typed; automatic ones
     are the (often misheard) fallback. yt-dlp writes into a temp dir that is
     removed again, so a fetch leaves nothing behind.
+
+    *cookie_flags* are yt-dlp's own `--cookies …` arguments when the user
+    configured a jar (see `_cookie_flags`): a video old enough to be age-gated
+    has captions too, and yt-dlp will not see them without the same cookies the
+    video download needs.
     """
     import tempfile
     with tempfile.TemporaryDirectory(prefix="mlo-yt-captions-") as tmp:
-        paths = _caption_files(exe, video_id, tmp, ("--write-subs",))
+        paths = _caption_files(exe, video_id, tmp,
+                               ("--write-subs", *cookie_flags))
         if not paths:
             paths = _caption_files(exe, video_id, tmp,
-                                   ("--write-subs", "--write-auto-subs"))
+                                   ("--write-subs", "--write-auto-subs",
+                                    *cookie_flags))
         for path in sorted(paths,
                            key=lambda p: (".en." not in os.path.basename(p).lower(), p)):
             try:
@@ -768,6 +775,23 @@ def _youtube_captions(exe, video_id):
             if lrc:
                 return lrc
     return None
+
+
+def _cookie_flags(cfg):
+    """yt-dlp's `--cookies …` arguments for *cfg*, or [] when none is set.
+
+    The captions fetch is the THIRD yt-dlp call site — the search and the video
+    download live in `server/youtube.py`, which owns the setting — and it needs
+    the same jar for the same reason: an age-gated video is exactly the kind
+    that has captions and no anonymous access. Imported lazily because `mlo/`
+    runs without `server/` in the CLI; a checkout that never configured cookies
+    loses nothing by that import failing.
+    """
+    try:
+        from server.youtube import cookie_args
+        return list(cookie_args(cfg or {}))
+    except Exception:
+        return []
 
 
 def _youtube(artist, title, album=None, duration=None, cfg=None, youtube_id=None):
@@ -786,7 +810,7 @@ def _youtube(artist, title, album=None, duration=None, cfg=None, youtube_id=None
     if not exe:
         _log_once("youtube", "yt-dlp is not installed — skipped")
         return None
-    synced = _youtube_captions(exe, youtube_id)
+    synced = _youtube_captions(exe, youtube_id, _cookie_flags(cfg))
     if not synced:
         return None
     return _hit(synced, _lrc_to_plain(synced), artist, title, None, None)

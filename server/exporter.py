@@ -27,36 +27,61 @@ overridable per run — see ``EXPORT_DEFAULTS``):
   knobs script 10 uses; ``mlo.format_all`` prepares the bytes).
 * ``id3v2`` / ``id3v1`` — ID3 version for MP3 exports ("2.3" is what older
   players and car stereos read) and whether to also write an ID3v1 chunk.
-* ``replaygain`` — measure each exported track with ffmpeg's EBU R128 meter
-  and write the ReplayGain 2.0 tags (track + album gain/peak) so a player
-  that honours them plays the export at the library's loudness. The
-  measurement rides along in the transcode pass (the ``ebur128`` filter is a
-  pass-through), so it costs no extra decode.
+* ``replaygain_mode`` — ``off`` does nothing, ``tags`` measures each exported
+  track with ffmpeg's EBU R128 meter and writes the ReplayGain 2.0 tags (track
+  + album gain/peak) so a player that honours them plays the export at the
+  library's loudness, and ``apply`` bakes the same measurement into the audio
+  itself with ffmpeg's ``volume`` filter, so a player that honours nothing
+  still plays level. ``tags`` rides along in the transcode pass (the
+  ``ebur128`` filter is a pass-through), so it costs no extra decode; ``apply``
+  has to know the gain BEFORE the encoder starts and therefore measures the
+  sources once up front. An applied file carries no ReplayGain tags at all —
+  a player that honoured them would apply the gain twice.
+* ``eq_profile`` — apply an Equalizer APO / Peace profile (a built-in preset or
+  an imported one, see ``mlo.eq``) while transcoding, after the ReplayGain
+  gain: the profile's preamp, then its filters in file order. ``""`` is no EQ.
 * ``clean_tags`` — write only the canonical tag set on transcodes instead of
   keeping the source's leftover frames.
 * ``playlists`` — write ``.m3u8`` playlists (UTF-8, relative paths) next to
   the exported albums plus one for the whole export.
 * ``sidecars`` — mirror cover.*/description.txt/artist image/.lrc/.cue/.log.
+* ``manifest`` — write ``checksums.sha256`` at the export root: one
+  "<sha256>  <relative path>" line per exported file, the format
+  ``sha256sum -c`` reads back.
 * ``verify`` — re-open every written file and prove it parses with the
   source's duration before calling the export done.
 * ``prune`` — sync mode: delete audio files under the export root that this
   run did not write.
 * ``workers`` — parallel transcode/copy workers (0 = automatic).
+* ``target`` — ``server`` writes into ``dest``/``subfolder`` (the drive picker
+  on a machine that has one), ``zip`` stages the same tree under the app's own
+  data dir and returns a single archive instead: a browser client cannot hand
+  the server a folder on the user's computer, and a download is the one form of
+  "save this to my machine" every browser has. ``dest``/``subfolder``/``prune``
+  have no meaning for a zip.
 
 Exports are idempotent: a destination that already is this source's export
-(same duration and track identity) is skipped on re-runs. Progress is
-reported through the shared ``mlo.stats.progress_hook`` so the UI header bar
-works exactly like it does for library scripts.
+(same duration and track identity) is skipped on re-runs. A run that REWROTE
+the audio (``apply``, an equalizer profile) stamps the file it wrote
+(``MLO_EXPORT_PROCESSING``) and compares that stamp on the next run, so
+changing the curve re-encodes rather than skipping the user's new setting.
+Progress is reported through the shared ``mlo.stats.progress_hook`` so the UI
+header bar works exactly like it does for library scripts.
 """
+import hashlib
 import math
 import os
 import shutil
 import subprocess
 import tempfile
 import threading
+import time
+import zipfile
 
+from mlo import eq as eq_mod
 from mlo.audio import AudioFile
 from mlo.naming import sanitize_path
+from mlo.paths import app_data_dir
 from mlo.stats import progress_hook, worker_count
 from mlo.subproc import tool_path
 from mlo.tools import detect_all_tools
@@ -237,14 +262,49 @@ EXPORT_DEFAULTS = {
     "embed_cover_resolution": 1200,
     "id3v2": "2.3",
     "id3v1": False,
-    "replaygain": False,
+    "replaygain_mode": "off",
+    "eq_profile": "",
     "clean_tags": True,
     "playlists": True,
     "sidecars": True,
+    "manifest": False,
     "verify": True,
     "prune": False,
     "workers": 0,
+    "target": "server",
 }
+
+# ReplayGain modes. "tags" is the tag-writing behaviour the export shipped with
+# (a player applies it), "apply" bakes the same gain into the samples (a player
+# that honours nothing still plays level).
+REPLAYGAIN_MODES = ("off", "tags", "apply")
+
+# The one thing a processing run needs that the copy codec cannot give it. The
+# API hands this exact text to the UI, so there is one wording for it.
+_PROCESSING_NEEDS_CODEC = (
+    "'Copy (original codec)' cannot rewrite the audio — ReplayGain \"apply\" and "
+    "an equalizer profile both filter the samples, which needs a real codec "
+    "(FLAC, ALAC, MP3, AAC, Opus, Vorbis, WAV, AIFF, WavPack or WMA)")
+
+# Tag recording WHAT audio processing an exported file went through. The audio
+# itself is the only place that answer lives: a processed export has the same
+# duration, the same tags and the same track identity as an unprocessed one, so
+# without this a re-run with a different equalizer curve would be skipped as
+# "already exported" and the user's new curve would never reach the device.
+# Players ignore an unknown tag.
+_PROCESSING_TAG = "MLO_EXPORT_PROCESSING"
+
+# The EBU R128 measurement, as one filter chain: ebur128 is a pass-through
+# analysis filter and astats rides along for a full-precision copy of the peak
+# (ebur128's summary rounds it to 0.1 dBFS). peak=sample, not peak=true: rsgain
+# writes sample peaks into REPLAYGAIN_*_PEAK, and an export carrying a true
+# peak disagreed with the tag script 7 puts on the same audio by up to 30%.
+_RG_FILTER = "ebur128=peak=sample,astats=measure_overall=Peak_level"
+
+# The four tags ReplayGain lives in. An applied export must carry NONE of them
+# (its gain is in the samples), so this is also the list a processing run drops.
+_RG_TAGS = ("REPLAYGAIN_TRACK_GAIN", "REPLAYGAIN_TRACK_PEAK",
+            "REPLAYGAIN_ALBUM_GAIN", "REPLAYGAIN_ALBUM_PEAK")
 
 _DRIVETYPE = {2: "removable", 3: "fixed", 4: "network", 5: "optical"}
 
@@ -318,6 +378,21 @@ def option_int(cfg, opts, name, low=0, high=None):
         value = int(EXPORT_DEFAULTS[name])
     value = max(low, value)
     return min(high, value) if high is not None else value
+
+
+def _replaygain_mode(cfg, opts):
+    """The run's ReplayGain mode: "off", "tags" or "apply".
+
+    A caller that still passes the boolean this option used to be gets the mode
+    it stood for (True = write the tags, False = do nothing); the stored config
+    key is migrated in mlo.config, so this is only the direct-call case. An
+    unrecognized value falls back to "off" rather than guessing at what a typo
+    meant.
+    """
+    if opts and "replaygain_mode" not in opts and "replaygain" in opts:
+        return "tags" if opts.get("replaygain") else "off"
+    mode = str(option(cfg, opts, "replaygain_mode") or "off").strip().lower()
+    return mode if mode in REPLAYGAIN_MODES else "off"
 
 
 def _default_quality(codec):
@@ -554,6 +629,11 @@ def _copy_once(src, dst, seen):
 # Text sidecars that belong to a track and travel with it.
 _TRACK_SIDECAR_EXTS = (".lrc", ".cue", ".log")
 
+# Sidecars an album folder holds as a whole, whatever they are named after:
+# the rip's .cue/.log, and the .accurip accuracy report every track of that rip
+# was checked against.
+_ALBUM_SIDECAR_EXTS = (".cue", ".log", ".accurip")
+
 
 def _mirror_sidecars(cfg, src_track, dst_track, seen):
     """Mirror an exported track's sidecars into the exported album folder.
@@ -581,14 +661,14 @@ def _mirror_sidecars(cfg, src_track, dst_track, seen):
         lowered = {}
 
     # Track-level sidecar ("01 - Song.lrc"), then the album-level artifacts:
-    # the rip's .cue/.log are normally named after the ALBUM, not the track,
-    # and grading wants them next to the exported tracks either way.
+    # the rip's .cue/.log/.accurip are normally named after the ALBUM, not the
+    # track, and grading wants them next to the exported tracks either way.
     for ext in _TRACK_SIDECAR_EXTS:
         name = stem + ext
         if _copy_once(os.path.join(src_dir, name), os.path.join(dst_dir, name), seen):
             copied += 1
     for real in sorted(lowered.values()):
-        if os.path.splitext(real)[1].lower() in (".cue", ".log"):
+        if os.path.splitext(real)[1].lower() in _ALBUM_SIDECAR_EXTS:
             if _copy_once(os.path.join(src_dir, real),
                           os.path.join(dst_dir, real), seen):
                 copied += 1
@@ -630,13 +710,18 @@ def _writer(path, id3v2="2.4", id3v1=False):
     return af
 
 
-def _write_tags(dst_path, src_af, id3v2="2.4", id3v1=False):
+def _write_tags(dst_path, src_af, id3v2="2.4", id3v1=False, drop=()):
     """Copy the source track's full semantic tag set onto the exported
     file (mutagen handles the per-format mapping via AudioFile.set_tag).
 
     ``id3v2``/``id3v1`` only mean anything for ID3 containers (MP3, raw AAC)
     and are what older players need: v2.3 instead of mutagen's v2.4 default,
-    plus optionally an ID3v1 chunk. Returns the number of tags written."""
+    plus optionally an ID3v1 chunk.
+
+    ``drop`` names tags the export must NOT inherit. The ReplayGain set is the
+    case that matters: an exported file whose gain is already in its samples
+    must not also carry the tags, or a player that honours them applies the
+    same correction a second time. Returns the number of tags written."""
     dst = _writer(dst_path, id3v2, id3v1)
     if dst.audio is None:
         return 0
@@ -645,6 +730,8 @@ def _write_tags(dst_path, src_af, id3v2="2.4", id3v1=False):
     try:
         for k, v in (src_af.all_tags() or {}).items():
             if v is None or str(v).strip() == "":
+                continue
+            if k in drop:
                 continue
             try:
                 if dst.set_tag(k, str(v)):
@@ -755,6 +842,180 @@ def _album_gain(measurements):
     energy = sum(10.0 ** ((v + 0.691) / 10.0) for v in lufs) / len(lufs)
     album_lufs = -0.691 + 10.0 * math.log10(energy)
     return RG2_REFERENCE_LUFS - album_lufs, (max(peaks) if peaks else None)
+
+
+def _measure_cmd(ffmpeg, path):
+    """ffmpeg arguments that DECODE *path* and report its loudness.
+
+    The same filter pair the transcode pass appends, so a gain measured here is
+    the gain those tags would carry — and the same one mlo.loudness measures a
+    library file with. ebur128 logs its summary at info level, hence no
+    ``-v error``.
+    """
+    return [ffmpeg, "-nostdin", "-hide_banner", "-nostats", "-i", tool_path(path),
+            "-map", "0:a:0", "-af", _RG_FILTER, "-f", "null", "-"]
+
+
+def _measure_sources(ffmpeg, paths, workers):
+    """EBU R128 measurement of every source, ahead of an ``apply`` run.
+
+    The tags mode can measure inside the encode (the ebur128 filter is a
+    pass-through), but ``volume`` has to be given a number before the encode
+    starts, so the one decode an apply run needs happens here and the encode
+    then reuses the numbers. Returns ``{path: measurement}``; a track that
+    could not be measured is absent, and the run fails it rather than guessing
+    a gain.
+    """
+    done = {"n": 0}
+    lock = threading.Lock()
+
+    def _one(path):
+        measurement = None
+        try:
+            proc = subprocess.run(
+                _measure_cmd(ffmpeg, path), capture_output=True, text=True,
+                creationflags=0x08000000 if os.name == "nt" else 0)
+            if proc.returncode == 0:
+                measurement = _rg_from_stderr(proc.stderr)
+        except Exception:
+            measurement = None  # unreadable source: the encode will report it
+        with lock:
+            done["n"] += 1
+            if callable(progress_hook):
+                try:
+                    progress_hook(done["n"], len(paths), "Measuring loudness")
+                except Exception:
+                    pass
+        return measurement
+
+    if workers > 1:
+        import concurrent.futures as _futures
+        with _futures.ThreadPoolExecutor(max_workers=workers) as pool:
+            return dict(zip(paths, pool.map(_one, paths)))
+    return {path: _one(path) for path in paths}
+
+
+def _whole_album(folder, selected):
+    """True when the selection holds every audio file in *folder*.
+
+    That is the case the ALBUM gain is for: one correction across the album
+    leaves its internal balance (the quiet ballad, the loud opener) exactly as
+    it was mastered. A selection that holds part of an album has no album
+    balance to preserve, so those tracks get their own gain.
+    """
+    try:
+        names = os.listdir(folder)
+    except OSError:
+        return False
+    files = {os.path.normcase(os.path.normpath(os.path.join(folder, name)))
+             for name in names
+             if os.path.splitext(name)[1].lower() in EXPORT_AUDIO_EXTS}
+    return bool(files) and files <= selected
+
+
+def _apply_gains(paths, measured):
+    """({path: gain_db}, tracks that may clip) for an ``apply`` run.
+
+    Every number comes from the ONE measurement pass the run already did — no
+    second decode. The album gain is used when the selection covers the whole
+    album (album folder), the track's own gain otherwise, and the peak from the
+    same measurement says which of them will push the export over full scale,
+    so the run can report that instead of shipping a clipped file silently.
+    """
+    selected = {os.path.normcase(os.path.abspath(p)) for p in paths}
+    groups = {}
+    for path in paths:
+        groups.setdefault(os.path.dirname(os.path.abspath(path)), []).append(path)
+    gains, clipping = {}, 0
+    for folder, members in groups.items():
+        album_gain = None
+        if _whole_album(folder, selected):
+            album_gain, _peak = _album_gain(
+                [measured[path] for path in members if measured.get(path)])
+        for path in members:
+            measurement = measured.get(path) or {}
+            gain = album_gain if album_gain is not None else measurement.get("gain_db")
+            gains[path] = gain
+            peak = measurement.get("peak")
+            if gain is not None and peak:
+                if gain > -20.0 * math.log10(peak):
+                    clipping += 1
+    return gains, clipping
+
+
+def _af_chain(gain_db, eq_filters):
+    """The ``-af`` chain for one track: the ReplayGain gain first (it sets the
+    level everything after it works on), then the equalizer's preamp and its
+    filters in file order. Empty when the run has nothing to apply."""
+    parts = []
+    if gain_db is not None:
+        # Two decimals, the same precision the REPLAYGAIN_*_GAIN tags carry.
+        parts.append(f"volume={gain_db:.2f}dB")
+    parts.extend(eq_filters)
+    return parts
+
+
+def _processing_signature(mode, eq_id):
+    """"replaygain=apply eq=bass_shelf", or "" when nothing rewrote the audio."""
+    parts = []
+    if mode == "apply":
+        parts.append("replaygain=apply")
+    if eq_id:
+        parts.append(f"eq={eq_id}")
+    return " ".join(parts)
+
+
+def _processing_key(af):
+    """The name *af*'s container can actually hold the stamp under.
+
+    A free-form name is a Vorbis comment, ID3 needs the TXXX spelling and MP4 a
+    freeform atom; any other spelling is refused by the writer (and on MP4 a
+    wrong one wrote a tag block nothing could read). A container with no tag set
+    this app can write (WAV) gets no stamp at all — a later run then re-encodes,
+    which is the right answer when the file cannot record what was done to it.
+    """
+    kind = getattr(af, "kind", "") or ""
+    if kind in ("flac", "ogg", "opus"):
+        return _PROCESSING_TAG
+    if kind == "mp4":
+        return "----:com.apple.iTunes:" + _PROCESSING_TAG
+    return "TXXX:" + _PROCESSING_TAG
+
+
+def _processing_of(path):
+    """The processing an exported file records, "" when it records none.
+
+    A custom tag comes back as its RAW container key (a lower-case Vorbis
+    comment, a TXXX frame, a freeform MP4 atom) rather than as a semantic name
+    get_tag knows, so the lookup is by suffix."""
+    try:
+        af = AudioFile(path)
+        for key, value in (af.all_tags() or {}).items():
+            if str(key).upper().endswith(_PROCESSING_TAG):
+                return str(value or "").strip()
+    except Exception:
+        pass
+    return ""
+
+
+def _write_processing_tag(path, signature, id3v2="2.4", id3v1=False):
+    """Record (or clear) what audio processing wrote this file. Never raises:
+    the stamp only decides whether a future run can skip the file, and a
+    failure here must not fail an export that is otherwise written."""
+    try:
+        af = _writer(path, id3v2, id3v1)
+        if af.audio is None:
+            return False
+        key = _processing_key(af)
+        if not signature:
+            if not _processing_of(path):
+                return False  # nothing to clear: do not rewrite the container
+            af.delete_tag(key)
+            return True
+        af.set_tag(key, signature)
+        return True
+    except Exception:
+        return False
 
 
 def _tag_identity(af, key):
@@ -916,6 +1177,138 @@ def _track_playlist_row(dst, af, seconds):
             seconds)
 
 
+def _write_manifest(root):
+    """Write ``checksums.sha256`` at the export root.
+
+    One ``<sha256>  <relative path>`` line per file under the root, sorted —
+    the format ``sha256sum -c`` reads back, so a user who copies the export to
+    a card (or unzips it) can prove the bytes survived the trip. That is the
+    one thing a tag cannot tell them. Returns the number of lines written, 0
+    when the manifest itself could not be written.
+    """
+    rows = []
+    try:
+        for folder, _dirs, names in os.walk(root):
+            for name in names:
+                path = os.path.join(folder, name)
+                if name == "checksums.sha256":
+                    continue
+                digest = hashlib.sha256()
+                try:
+                    with open(path, "rb") as f:
+                        for chunk in iter(lambda: f.read(1024 * 1024), b""):
+                            digest.update(chunk)
+                except OSError:
+                    continue
+                rel = os.path.relpath(path, root).replace(os.sep, "/")
+                rows.append(f"{digest.hexdigest()}  {rel}")
+    except OSError:
+        return 0
+    try:
+        with open(os.path.join(root, "checksums.sha256"), "w",
+                  encoding="utf-8", newline="\n") as f:
+            f.write("\n".join(sorted(rows)) + ("\n" if rows else ""))
+    except OSError:
+        return 0
+    return len(rows)
+
+
+def _zip_root(cfg):
+    """The staging folder of a zip export, as ``(id, folder)``.
+
+    A browser cannot hand the server a folder on the user's own computer, so
+    for a browser client the archive IS the destination: the export is staged
+    under the app's own data dir and zipped there. Every earlier staging folder
+    is removed first — the app keeps ONE built archive at a time, and the next
+    export replacing it is what makes the id (and the download URL) a single
+    well-known thing instead of a growing pile of exports nobody cleans up.
+    """
+    base = os.path.join(app_data_dir(cfg.get("music_folder")), "export_zip")
+    try:
+        for name in os.listdir(base):
+            victim = os.path.join(base, name)
+            if os.path.isdir(victim):
+                shutil.rmtree(victim, ignore_errors=True)
+            else:
+                try:
+                    os.remove(victim)
+                except OSError:
+                    pass
+    except OSError:
+        pass  # nothing built yet
+    run_id = time.strftime("%Y%m%d-%H%M%S")
+    root = os.path.join(base, run_id, "stage")
+    os.makedirs(root, exist_ok=True)
+    return run_id, root
+
+
+def _build_zip(run_id, root, exported):
+    """Zip the staged tree and drop it, returning the response's ``zip`` dict.
+
+    Members are the export's own relative paths, in sorted order, so the
+    archive opens as the tree the folder structure option describes — no extra
+    wrapper folder to click through. The archive keeps the human name so the
+    browser's download gets that name, and it lives beside the staging folder
+    rather than inside it (a zip cannot contain itself).
+    """
+    name = f"la-musica-export-{int(exported)}-tracks.zip"
+    folder = os.path.dirname(root)
+    target = os.path.join(folder, name)
+    members = []
+    for base, dirs, names in os.walk(root):
+        dirs.sort()
+        for member in sorted(names):
+            path = os.path.join(base, member)
+            members.append((path, os.path.relpath(path, root).replace(os.sep, "/")))
+    try:
+        with zipfile.ZipFile(target, "w", zipfile.ZIP_DEFLATED) as zf:
+            for path, rel in members:
+                zf.write(path, rel)
+    except OSError:
+        return None
+    shutil.rmtree(root, ignore_errors=True)
+    return {"id": run_id, "name": name, "bytes": os.path.getsize(target),
+            "files": len(members)}
+
+
+def _zip_folder(cfg, run_id):
+    """The staging folder of *run_id*, or None when the id is unusable.
+
+    The id comes from a URL, so it is validated before it is joined onto the
+    data dir: anything that could name a path outside it answers None (the
+    route turns that into a 404) instead of reading or deleting an arbitrary
+    file.
+    """
+    text = str(run_id or "")
+    if not text or any(sep in text for sep in ("/", "\\", "..", "\x00")):
+        return None
+    return os.path.join(app_data_dir((cfg or {}).get("music_folder")),
+                        "export_zip", text)
+
+
+def zip_path(cfg, run_id):
+    """The built archive for *run_id*, or None when there is not one."""
+    folder = _zip_folder(cfg, run_id)
+    if not folder:
+        return None
+    try:
+        for name in sorted(os.listdir(folder)):
+            if name.lower().endswith(".zip"):
+                return os.path.join(folder, name)
+    except OSError:
+        return None
+    return None
+
+
+def drop_zip(cfg, run_id):
+    """Delete the whole staging folder of *run_id*. False when there was none."""
+    folder = _zip_folder(cfg, run_id)
+    if not folder or not os.path.isdir(folder):
+        return False
+    shutil.rmtree(folder, ignore_errors=True)
+    return True
+
+
 def export_tracks(cfg, paths, dest, subfolder="Music", codec="copy",
                   quality="", structure="artist_album", **opts):
     """Run the export; returns a stats dict for the API response.
@@ -930,22 +1323,21 @@ def export_tracks(cfg, paths, dest, subfolder="Music", codec="copy",
     out = {"total": len(paths), "exported": 0, "skipped": 0, "failed": 0,
            "bytes": 0, "sidecars": 0, "playlists": 0, "verified": 0,
            "pruned": 0, "pruned_files": [], "warnings": [], "errors": [],
-           "error_count": 0, "estimated_bytes": None}
+           "error_count": 0, "estimated_bytes": None,
+           "processed": 0, "eq_applied": 0, "zip": None}
     if not paths:
         return out
-    if not dest or not os.path.isdir(dest):
+
+    target = str(option(cfg, opts, "target") or "server").strip().lower()
+    if target not in ("server", "zip"):
+        raise ValueError(f"unknown export target: {target}")
+    zip_target = target == "zip"
+    if not zip_target and (not dest or not os.path.isdir(dest)):
         out["errors"].append(f"Destination not found: {dest}")
         out["failed"] = out["total"]
         return out
 
-    root = os.path.abspath(os.path.join(dest, safe_subfolder(subfolder)))
     music_folder = os.path.abspath(cfg.get("music_folder") or "")
-    if music_folder and (root == music_folder
-                         or root.startswith(music_folder + os.sep)):
-        raise ValueError(
-            "destination is inside the music folder — export to a device or a "
-            "folder outside the library")
-    os.makedirs(root, exist_ok=True)
 
     spec = CODECS.get(codec)
     if spec is None:
@@ -962,15 +1354,64 @@ def export_tracks(cfg, paths, dest, subfolder="Music", codec="copy",
     progressive = bool(cfg.get("jpeg_progressive", True))
     id3v2 = str(option(cfg, opts, "id3v2"))
     id3v1 = bool(option(cfg, opts, "id3v1"))
-    replaygain = bool(option(cfg, opts, "replaygain"))
+    rg_mode = _replaygain_mode(cfg, opts)
+    rg_tags = rg_mode == "tags"
+    rg_apply = rg_mode == "apply"
+    eq_id = str(option(cfg, opts, "eq_profile") or "").strip()
     clean_tags = bool(option(cfg, opts, "clean_tags"))
     want_playlists = bool(option(cfg, opts, "playlists"))
     mirror_sidecars = bool(option(cfg, opts, "sidecars"))
+    want_manifest = bool(option(cfg, opts, "manifest"))
     verify = bool(option(cfg, opts, "verify"))
-    prune = bool(option(cfg, opts, "prune"))
+    prune = bool(option(cfg, opts, "prune")) and not zip_target
     workers = option_int(cfg, opts, "workers", 0, 64) or worker_count(
         cfg, default=max(2, (os.cpu_count() or 4) // 2), maximum=8, items=len(paths))
     workers = min(workers, max(1, len(paths)))
+
+    # The equalizer profile is resolved once: the chain is the same for every
+    # track, and a profile that cannot be found fails each track that asked for
+    # it rather than exporting the file without the curve the user chose. The
+    # app data dir is resolved from the CONFIGURED music folder (the same way
+    # the zip staging folder is), not from the absolute path above — an install
+    # with no folder yet keeps reading the legacy repo-local one.
+    eq_profile = eq_mod.find(cfg.get("music_folder") or "", eq_id) if eq_id else None
+    if eq_id and eq_profile is None:
+        eq_filters = []
+        eq_error = (f"equalizer profile {eq_id!r} not found — pick another "
+                    "profile or clear the equalizer option")
+    else:
+        eq_filters = eq_mod.chain(eq_profile) if eq_profile else []
+        eq_error = None
+    processing = _processing_signature(rg_mode, eq_id)
+    filtered_run = rg_apply or bool(eq_filters)
+
+    if codec == "copy" and filtered_run:
+        # A copied file IS the source's bytes: there is no decode to filter.
+        # Refused before anything is written, so the run fails with one message
+        # naming what has to change instead of every track failing on its own.
+        raise ValueError(_PROCESSING_NEEDS_CODEC)
+
+    out["replaygain_mode"] = rg_mode
+    out["eq_profile"] = eq_id
+    if zip_target and bool(option(cfg, opts, "prune")):
+        out["warnings"].append(
+            "prune applies to a device the export mirrors; a zip holds exactly "
+            "this run's selection, so it was ignored")
+
+    zip_id = ""
+    if zip_target:
+        # dest/subfolder name a place on the SERVER, which a browser client has
+        # no way to choose for the user; the archive below is the destination
+        # instead, so the library guard does not apply to it.
+        zip_id, root = _zip_root(cfg)
+    else:
+        root = os.path.abspath(os.path.join(dest, safe_subfolder(subfolder)))
+        if music_folder and (root == music_folder
+                             or root.startswith(music_folder + os.sep)):
+            raise ValueError(
+                "destination is inside the music folder — export to a device or a "
+                "folder outside the library")
+        os.makedirs(root, exist_ok=True)
 
     pre = _preflight(paths)
     out["estimated_bytes"] = _estimate_bytes(codec, quality, paths, pre)
@@ -986,6 +1427,19 @@ def export_tracks(cfg, paths, dest, subfolder="Music", codec="copy",
                 f"{free / 1024 ** 3:.2f} GB free")
             out["failed"] = out["total"]
             return out
+
+    apply_gains, clipping = (None, 0)
+    if rg_apply:
+        apply_gains, clipping = _apply_gains(paths, _measure_sources(ffmpeg, paths, workers))
+        if clipping:
+            out["warnings"].append(
+                "%d track(s) will clip after the applied ReplayGain gain — the "
+                "album's own balance is kept, so the level is not reduced per "
+                "track" % clipping)
+        out["warnings"].append(
+            "ReplayGain was applied to the audio (album gain for a whole album, "
+            "track gain otherwise) and REPLAYGAIN_* tags were stripped — a "
+            "player that applied them on top would correct the audio twice")
 
     state = {
         "lock": threading.Lock(),
@@ -1036,6 +1490,12 @@ def export_tracks(cfg, paths, dest, subfolder="Music", codec="copy",
 
     def _one(path):
         try:
+            if eq_error:
+                # The run asked for an equalizer profile that is not there any
+                # more (deleted, or a saved default from another library).
+                # Exporting without it would hand the user a different curve
+                # than the one they picked, so the track fails and says which.
+                raise RuntimeError(eq_error)
             if not os.path.isfile(path):
                 raise FileNotFoundError(path)
             src_ext = os.path.splitext(path)[1].lower()
@@ -1043,9 +1503,12 @@ def export_tracks(cfg, paths, dest, subfolder="Music", codec="copy",
             if af.audio is None:
                 raise RuntimeError(af.error or "unreadable")
             # "copy" keeps the source extension; explicit codecs use theirs,
-            # except FLAC→FLAC which is a bit-exact copy, not a re-encode.
+            # except FLAC→FLAC which is a bit-exact copy, not a re-encode — and
+            # that shortcut is exactly what a filtering run cannot use: a copied
+            # stream has no samples to filter, so such a run re-encodes instead
+            # (still lossless, and the gain/EQ it was asked for is applied).
             target_ext = ext or src_ext
-            if codec == "flac" and src_ext == ".flac":
+            if codec == "flac" and src_ext == ".flac" and not filtered_run:
                 target_ext, ffmpeg_use = ".flac", False
             elif codec == "copy":
                 ffmpeg_use = False
@@ -1098,10 +1561,17 @@ def export_tracks(cfg, paths, dest, subfolder="Music", codec="copy",
                         _account(dst, path, af, seconds, counted="skipped")
                         return
                 elif _same_export(af, dst, seconds, args):
-                    # already this source's export (transcode or an earlier
-                    # run of the same preset) — nothing to redo
-                    _account(dst, path, af, seconds, counted="skipped")
-                    return
+                    if not processing or _processing_of(dst) == processing:
+                        # already this source's export (a transcode, or an
+                        # earlier run of the same processing) — nothing to redo
+                        _account(dst, path, af, seconds, counted="skipped")
+                        return
+                    # This IS this source's export, but written by a DIFFERENT
+                    # processing run: the user changed the ReplayGain mode or
+                    # the equalizer curve. The audio depends on that choice, so
+                    # the file is encoded again rather than skipped — skipping
+                    # would leave the old curve on the device and report
+                    # success for work that never happened.
                 else:
                     # pre-existing file we cannot prove came from this source
                     # (stale preset output, or another track's file)
@@ -1110,6 +1580,16 @@ def export_tracks(cfg, paths, dest, subfolder="Music", codec="copy",
 
             measurement = None
             if ffmpeg_use:
+                gain = None
+                if rg_apply:
+                    gain = (apply_gains or {}).get(path)
+                    if gain is None:
+                        # Nothing measured means no number to apply, and
+                        # exporting the track unlevelled would be the opposite
+                        # of what the run was asked for.
+                        raise RuntimeError(
+                            "could not measure this track's loudness — "
+                            "ReplayGain 'apply' needs it to rewrite the audio")
                 fd, tmp = tempfile.mkstemp(suffix=target_ext,
                                            dir=os.path.dirname(dst))
                 os.close(fd)
@@ -1122,22 +1602,25 @@ def export_tracks(cfg, paths, dest, subfolder="Music", codec="copy",
                         # the source's leftover frames would otherwise ride
                         # along beside the canonical set written below
                         cmd += ["-map_metadata", "-1"]
-                    cmd += ["-map", "0:a:0"] + args + [tmp]
-                    if replaygain:
+                    filters = _af_chain(gain, eq_filters)
+                    cmd += ["-map", "0:a:0"]
+                    if filters:
+                        # one chain, in the order the run promises: the
+                        # ReplayGain gain first (it sets the level the rest of
+                        # the chain shapes), then the equalizer's preamp and
+                        # its filters. Both ride in this SAME encode — nothing
+                        # is transcoded twice to apply them.
+                        cmd += ["-af", ",".join(filters)]
+                    cmd += args + [tmp]
+                    if rg_tags:
                         # ebur128 is a pass-through analysis filter: the same
                         # decode that feeds the encoder also yields the
-                        # loudness summary, so ReplayGain costs no extra pass.
+                        # loudness summary, so the tags cost no extra pass.
                         # Its summary is logged at info level, hence -v info
-                        # (still no per-second stats: -nostats).
-                        #
-                        # peak=sample, not peak=true: rsgain writes sample
-                        # peaks into REPLAYGAIN_*_PEAK, and an export carrying
-                        # a true peak disagreed with the tag script 7 puts on
-                        # the same audio by up to 30%. astats rides along for
-                        # its full-precision copy of that same peak —
-                        # ebur128's summary rounds it to 0.1 dBFS.
-                        cmd += ["-map", "0:a:0",
-                                "-af", "ebur128=peak=sample,astats=measure_overall=Peak_level",
+                        # (still no per-second stats: -nostats). The filter
+                        # pair itself is _RG_FILTER, shared with the up-front
+                        # measurement an 'apply' run does.
+                        cmd += ["-map", "0:a:0", "-af", _RG_FILTER,
                                 "-f", "null", "-"]
                     else:
                         cmd += ["-v", "error"]
@@ -1156,9 +1639,17 @@ def export_tracks(cfg, paths, dest, subfolder="Music", codec="copy",
                             os.remove(tmp)
                         except OSError:
                             pass
-                if replaygain:
+                if rg_tags:
                     measurement = _rg_from_stderr(proc.stderr)
-                _write_tags(dst, af, id3v2=id3v2, id3v1=id3v1)
+                # Any run that REWROTE the audio drops the source's ReplayGain
+                # tags: after "apply" the gain is in the samples (a player that
+                # also honoured the tag would correct the file twice), and after
+                # an equalizer the level has moved, so the source's numbers no
+                # longer describe this file. The tags mode writes fresh ones
+                # right below, from the measurement of THIS encode.
+                _write_tags(dst, af, id3v2=id3v2, id3v1=id3v1,
+                            drop=_RG_TAGS if filtered_run else ())
+                _write_processing_tag(dst, processing, id3v2=id3v2, id3v1=id3v1)
                 if embed_covers:
                     _embed_cover(af, path, dst, embed_quality, embed_resolution,
                                  progressive, id3v2, id3v1)
@@ -1170,7 +1661,7 @@ def export_tracks(cfg, paths, dest, subfolder="Music", codec="copy",
                     _embed_cover(af, path, dst, embed_quality, embed_resolution,
                                  progressive, id3v2, id3v1)
 
-            if replaygain and measurement is None:
+            if rg_tags and measurement is None:
                 # copy/FLAC-to-FLAC path, or a transcode whose summary was
                 # missing: measure the source (mlo.loudness caches nothing,
                 # but it returns the source's own tags when they are complete)
@@ -1186,7 +1677,7 @@ def export_tracks(cfg, paths, dest, subfolder="Music", codec="copy",
                     if measurement["lufs"] is None and measurement["gain_db"] is not None:
                         from mlo.loudness import RG2_REFERENCE_LUFS
                         measurement["lufs"] = RG2_REFERENCE_LUFS - measurement["gain_db"]
-            if replaygain and measurement and measurement.get("gain_db") is not None:
+            if rg_tags and measurement and measurement.get("gain_db") is not None:
                 _write_rg_tags(dst, gain_db=measurement["gain_db"],
                                peak=measurement.get("peak"),
                                id3v2=id3v2, id3v1=id3v1)
@@ -1201,7 +1692,13 @@ def export_tracks(cfg, paths, dest, subfolder="Music", codec="copy",
                 out["bytes"] += os.path.getsize(dst)
                 if verify:
                     out["verified"] += 1
-                if replaygain and measurement and measurement.get("lufs") is not None:
+                if processing:
+                    # What THIS run rewrote, as opposed to what the device
+                    # already held: a skip is reported as a skip.
+                    out["processed"] += 1
+                    if eq_filters:
+                        out["eq_applied"] += 1
+                if rg_tags and measurement and measurement.get("lufs") is not None:
                     state["rg"].setdefault(_folder_key(dst), []).append(measurement)
         except Exception as e:
             _fail(path, e)
@@ -1218,8 +1715,10 @@ def export_tracks(cfg, paths, dest, subfolder="Music", codec="copy",
 
     # Album ReplayGain: one correction for the whole album, so its quiet and
     # loud tracks keep their relative levels. Written after every track of the
-    # album exists (the measurement is only complete then).
-    if replaygain and state["rg"]:
+    # album exists (the measurement is only complete then). Only the tag mode
+    # writes anything here — an applied run already has the album gain in its
+    # samples.
+    if rg_tags and state["rg"]:
         for folder, measurements in state["rg"].items():
             rows = state["groups"].get(folder, [])
             if len(measurements) != len(rows):
@@ -1274,6 +1773,22 @@ def export_tracks(cfg, paths, dest, subfolder="Music", codec="copy",
             fix_cue_filenames(folder, config=cfg)
         except Exception:
             pass
+
+    # Both of these describe the FINISHED export, so they come last: the
+    # manifest hashes the files as they will be shipped (a .cue that
+    # fix_cue_filenames just repointed is not the one that was copied), and the
+    # archive holds that same tree.
+    if want_manifest and state["written"]:
+        lines = _write_manifest(root)
+        if not lines:
+            out["warnings"].append(
+                "could not write the checksum manifest at the export root")
+    if zip_target:
+        out["zip"] = _build_zip(zip_id, root, out["exported"])
+        if out["zip"] is None:
+            out["warnings"].append(
+                "could not build the export archive — the export is staged in "
+                "the app's data folder")
 
     if callable(progress_hook):
         try:

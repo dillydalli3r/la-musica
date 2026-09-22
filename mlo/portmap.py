@@ -492,6 +492,30 @@ def _upnp_external_ip(igd, timeout=3.0):
     return args.get("NewExternalIPAddress", "").strip()
 
 
+def _entry_verdict(args, port, ip):
+    """One listed port-mapping entry as a verdict -> (state, verified, detail).
+
+    The entry is judged against the request it answers: a mapping to another
+    host, to another internal port or a disabled one is a real refusal, and only
+    an entry that matches is ever reported as `mapped`. Shared by the add path
+    below and by `read_port`, so both call the same listing `mapped`."""
+    client = args.get("NewInternalClient", "").strip()
+    internal = args.get("NewInternalPort", "").strip()
+    enabled = args.get("NewEnabled", "").strip()
+    if client and ip and client != ip:
+        return "refused", False, (f"external port {port} is mapped to {client}, "
+                                  f"not to this machine ({ip}) — another device "
+                                  f"holds it")
+    if internal and internal != str(port):
+        return "refused", False, (f"external port {port} is mapped to internal "
+                                  f"port {internal} instead")
+    if enabled not in ("", "1"):
+        return "refused", False, (f"the gateway lists the mapping as disabled "
+                                  f"(NewEnabled={enabled})")
+    return "mapped", True, (f"the gateway lists external port {port} -> "
+                            f"{client or ip}:{internal or port}")
+
+
 def _upnp_verify(igd, port, ip, timeout=3.0):
     """Was the mapping really made? -> (state, verified, detail).
 
@@ -515,21 +539,7 @@ def _upnp_verify(igd, port, ip, timeout=3.0):
     except GatewayUnreachable as e:
         return "mapped", False, (f"the gateway accepted the mapping; the check "
                                  f"could not be made ({e})")
-    client = args.get("NewInternalClient", "").strip()
-    internal = args.get("NewInternalPort", "").strip()
-    enabled = args.get("NewEnabled", "").strip()
-    if client and ip and client != ip:
-        return "refused", False, (f"external port {port} is mapped to {client}, "
-                                  f"not to this machine ({ip}) — another device "
-                                  f"holds it")
-    if internal and internal != str(port):
-        return "refused", False, (f"external port {port} is mapped to internal "
-                                  f"port {internal} instead")
-    if enabled not in ("", "1"):
-        return "refused", False, (f"the gateway lists the mapping as disabled "
-                                  f"(NewEnabled={enabled})")
-    return "mapped", True, (f"the gateway lists external port {port} -> "
-                            f"{client or ip}:{internal or port}")
+    return _entry_verdict(args, port, ip)
 
 
 def upnp_open(port, *, ip="", gateway="", description=DEFAULT_DESCRIPTION,
@@ -803,6 +813,102 @@ def natpmp_close(port, *, gateway="", timeout=1.0, attempts=3,
 # --------------------------------------------------------------------------- #
 # One entry point
 # --------------------------------------------------------------------------- #
+def read_port(port, *, ip="", gateway="", timeout=1.5, ssdp_addr=SSDP_ADDR,
+              ssdp_port=SSDP_PORT, pmp_port=NATPMP_PORT):
+    """What a gateway holds for TCP *port* right now -> the structured result.
+
+    One discovery answers both halves of the question a user asks of a port
+    ("is it forwarded, and can anything reach it"): whether the gateway currently
+    LISTS an entry for *port*, and what it states as its WAN address. UPnP's
+    `GetSpecificPortMappingEntry` is the only request that reads an entry back —
+    NAT-PMP has none (RFC 6886 §3.4 maps a port or drops it, and says nothing
+    about what is already there), so a mapping a NAT-PMP gateway granted is only
+    ever known from the answer that made it.
+
+    `state` is `mapped` only when the gateway lists the entry and it is this
+    machine's (the same judgment `upnp_open` applies to the entry it asks for);
+    `refused` carries the gateway's own words (UPnP 714 = no such entry in the
+    array, which is a router that really has no such mapping); `unsupported`
+    means a gateway answered but cannot read an entry back; `no_gateway` means
+    nothing answered on either method. `external_ip` is set only when a gateway
+    stated one, and `expires_at` only when it stated a lease (0 = it stated
+    none, so the entry does not expire).
+
+    A read never changes anything: nothing here adds or removes a mapping."""
+    port = int(port)
+    try:
+        igd, errors = discover_igd(timeout=timeout, ssdp_addr=ssdp_addr,
+                                   ssdp_port=ssdp_port)
+    except GatewayUnreachable as e:
+        igd, errors = None, [str(e)]
+    if igd is None:
+        gw = gateway or default_gateway()
+        wan = pmp_external_address(gw, timeout=min(timeout, 1.0),
+                                   pmp_port=pmp_port) if gw else ""
+        why = _joined(errors) or (f"no device answered the UPnP search on "
+                                  f"{ssdp_addr}:{ssdp_port}")
+        # A gateway that answers NAT-PMP can state its WAN address but still
+        # cannot be ASKED what it holds, so this is "cannot read back", never
+        # "no mapping" — reporting the second would tell the user their forward
+        # is missing when nothing here could have seen it.
+        return _out("unsupported" if (errors or wan) else "no_gateway",
+                    method="natpmp" if wan else "upnp", port=port,
+                    external=wan, gateway=gw if wan else "",
+                    attempts=[_attempt("upnp", bool(errors), False, f"UPnP: {why}"),
+                              _attempt("natpmp", bool(wan), False,
+                                       f"NAT-PMP stated the WAN address {wan}" if wan
+                                       else "NAT-PMP stated no WAN address")],
+                    detail=(f"UPnP: {why}. NAT-PMP cannot be asked what it holds "
+                            f"— it has no request that reads a mapping back — so a "
+                            f"mapping it granted can only be seen in the answer "
+                            f"that made it."))
+    internal = ip or local_ip(igd.get("from") or gateway)
+    device = igd.get("device") or igd["location"]
+    external = _upnp_external_ip(igd, timeout=timeout)
+    attempts = ([_attempt("upnp", True, True,
+                          f"{device} stated its WAN address as {external}")]
+                if external else [])
+    try:
+        args = soap(igd, "GetSpecificPortMappingEntry",
+                    {"NewRemoteHost": "", "NewExternalPort": str(port),
+                     "NewProtocol": "TCP"}, timeout=max(timeout, 3.0))
+    except GatewayRefused as e:
+        text = str(e)
+        if "714" in text or "NoSuchEntry" in text:
+            return _out("refused", method="upnp", port=port, ip=internal,
+                        external=external, gateway=igd.get("from", ""),
+                        attempts=attempts + [_attempt("upnp", True, False,
+                                                      f"{device}: {text}")],
+                        detail=f"{device} lists no mapping of port {port} ({text})")
+        return _out("unsupported", method="upnp", port=port, ip=internal,
+                    external=external, gateway=igd.get("from", ""),
+                    attempts=attempts + [_attempt("upnp", True, False,
+                                                  f"{device}: {text}")],
+                    detail=f"{device} cannot read a mapping back ({text})")
+    except GatewayUnreachable as e:
+        return _out("no_gateway", method="upnp", port=port, ip=internal,
+                    external=external, gateway=igd.get("from", ""),
+                    attempts=attempts + [_attempt("upnp", True, False,
+                                                  f"{device}: {e}")],
+                    detail=f"{device} stopped answering: {e}")
+    state, verified, detail = _entry_verdict(args, port, internal)
+    # The entry states what is LEFT of its lease, as a duration — not when it
+    # runs out — and 0 for an entry the gateway does not expire.
+    try:
+        lease = int(args.get("NewLeaseDuration") or 0)
+    except ValueError:
+        lease = 0
+    if state == "mapped" and lease > 0:
+        detail = f"{detail}, leased for another {lease}s"
+    return _out(state, ok=state == "mapped", method="upnp", port=port,
+                ip=args.get("NewInternalClient", "").strip() or internal,
+                external=external, gateway=igd.get("from", ""), verified=verified,
+                expires_at=(time.time() + lease) if state == "mapped" else 0.0,
+                attempts=attempts + [_attempt("upnp", True, state == "mapped",
+                                              f"{device}: {detail}")],
+                detail=f"{device}: {detail}")
+
+
 # The order a refusal is worth reporting in: the gateway's own words first, then
 # what this side did wrong, then a device that cannot map at all, and only then
 # the network where nothing answered.

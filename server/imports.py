@@ -1469,25 +1469,27 @@ def prefetch_album(album_dir, cfg=None):
         traceback.print_exc()
     # What the add pre-fetched is recorded in the framework marker: the page
     # (and the proof that this ran at add time, not at import time) reads it
-    # from there, and the marker is cleared by the import anyway.
+    # from there, and the marker is cleared by the import anyway. The write
+    # goes through `pending_albums.update_marker`, which refuses once the
+    # folder holds audio — this runs in the BACKGROUND (a discography's add
+    # pre-fetches dozens), so an import can fill and clear the album while
+    # these fetches are in flight, and a plain save would put the marker back
+    # and leave a finished album reading PENDING.
     try:
-        from mlo.paths import load_pending, save_pending
-        info = load_pending(album_dir) or {}
-        if info:
-            applied = (out.get("metadata") or {}).get("applied") or {}
-            chosen = (out.get("cover") or {}).get("choice") or {}
-            info["prefetched"] = {
-                "at": time.time(),
-                "artist_image": applied.get("artist_image"),
-                "artist_description": applied.get("artist_description"),
-                "album_description": applied.get("album_description"),
-                "cover_candidates": int((out.get("cover") or {}).get("candidates") or 0),
-                "cover_pick": chosen.get("big"),
-                "cover_source": chosen.get("source"),
-                "links": {"album": (out.get("links") or {}).get("album"),
-                          "artist": (out.get("links") or {}).get("artist")},
-            }
-            save_pending(album_dir, info)
+        from server import pending_albums
+        applied = (out.get("metadata") or {}).get("applied") or {}
+        chosen = (out.get("cover") or {}).get("choice") or {}
+        pending_albums.update_marker(album_dir, {"prefetched": {
+            "at": time.time(),
+            "artist_image": applied.get("artist_image"),
+            "artist_description": applied.get("artist_description"),
+            "album_description": applied.get("album_description"),
+            "cover_candidates": int((out.get("cover") or {}).get("candidates") or 0),
+            "cover_pick": chosen.get("big"),
+            "cover_source": chosen.get("source"),
+            "links": {"album": (out.get("links") or {}).get("album"),
+                      "artist": (out.get("links") or {}).get("artist")},
+        }})
     except Exception:
         traceback.print_exc()
     return out

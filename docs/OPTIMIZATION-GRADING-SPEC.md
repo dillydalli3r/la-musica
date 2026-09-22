@@ -755,6 +755,78 @@ table and the auto-update worker cannot disagree.
 
 ---
 
+### 7.9 Export processing and destination
+
+An export is a copy of the library, so nothing it does may reach back into the
+library files — and what it does to the EXPORTED copies has to be the thing the
+user asked for, in the order they asked for it. `server/exporter.py` owns both.
+
+- **R70 — the destination is the client's or the server's, and the client's is a
+  zip.** `export_target` is `zip` (the client downloads one archive) or `server`
+  (a folder the machine running this app can see, chosen with the drive picker).
+  The zip target stages the export under `<music>/.mlo/data/export_zip/<id>/`,
+  packs it with the `.m3u8` playlists and the manifest inside, answers
+  `zip: {id, name, bytes, files, url}` and serves it from
+  `GET /api/export/zip/{id}` with `Content-Disposition: attachment`; one archive
+  is kept at a time and a new export replaces it. `prune` is meaningless for a
+  zip and is reported as ignored rather than silently pruning the staging folder.
+- **R71 — ReplayGain has two modes and they are not the same thing.**
+  `export_replaygain_mode` is `off`, `tags` (measure with
+  `ebur128=peak=sample` + `astats` and write `REPLAYGAIN_*`) or `apply` (rewrite
+  the audio so the files are level). `apply` uses the ALBUM gain when the
+  selection covers a whole album — that is what keeps the album's internal
+  balance — and the track gain otherwise, rides the gain in the SAME encode
+  (`volume=<gain>dB`), and strips `REPLAYGAIN_*` from the output, because a
+  player would otherwise apply the gain twice. A track that would clip after the
+  gain is reported, never silently distorted.
+- **R72 — an equalizer profile is the user's own file, and its losses are
+  named.** `export_eq_profile` selects a built-in preset or a profile imported
+  from **Equalizer APO / Peace EQ** text (`mlo/eq.py`): `Preamp:`, `Filter N:
+  ON|OFF PK|LS|HS|LP|HP|LSC|HSC Fc … Gain … Q …`, `GraphicEQ:` band lists, free
+  field order, optional units, case-insensitive keywords. OFF filters are
+  skipped; anything the module cannot render (`Include:`, unknown constructs) is
+  REPORTED in `unsupported` rather than dropped, because a profile that silently
+  loses half its curve is not the curve the user asked for. Profiles live in
+  `<music>/.mlo/data/eq/` with a sanitized id and a 64 KiB cap.
+- **R73 — the chain order is ReplayGain gain → EQ preamp → EQ filters →
+  encoder**, and processing requires a real codec: a copied stream cannot be
+  filtered, so `copy` with `apply` or an EQ profile fails with one message that
+  the endpoint and the UI share (`_PROCESSING_NEEDS_CODEC`). A profile that
+  cannot be found fails the track naming it — never a silent export without the
+  curve the user selected.
+- **R74 — a processing change is not "the same export".** The skip/duplicate
+  decision carries a processing signature (`replaygain=apply eq=<id>`), so
+  re-exporting with a different curve re-encodes instead of being skipped as
+  identical to the previous run.
+- **R75 — sidecars and the manifest travel with the files.** The sidecar mirror
+  covers `.cue`, `.log`, `.accurip` and the `.lrc`/cover/description/artist-image
+  set, and `export_manifest` (ON) writes `checksums.sha256` listing every written
+  file with its hash, so a copied library can be proven intact at the other end.
+
+### 7.10 YouTube, cookies and the Soulseek port
+
+- **R76 — the app's yt-dlp calls honour ONE cookie setting.**
+  `youtube_cookies_mode` is `none`, `file` (the jar at
+  `<music>/.mlo/data/cookies.txt`, saved by pasting or dropping a Netscape
+  `cookies.txt` in Settings → Videos) or `browser` (`youtube_cookies_browser`,
+  e.g. `chrome`). The setting reaches BOTH yt-dlp paths (its Python API and the
+  vendored binary) at all three call sites — the search, the video download and
+  the YouTube-captions fetch — because an age-gated video is exactly the kind
+  that needs a signed-in jar for any of them. The jar is validated as a Netscape
+  cookie file on write, capped at 512 KiB, and reported back with its cookie
+  count and domains.
+- **R77 — the Soulseek port check states what it proves.** `GET
+  /api/soulseek/port-check` returns five rows — `listen` (a real TCP connect
+  plus a bind test), `mapping` (what the router itself lists, with its own words
+  and the lease), `address` (the LAN address the mapping points at vs the WAN
+  address the gateway states, so CGNAT is named as CGNAT), `self-connect`
+  (refused ⇒ `unknown`, never `fail`: a router without hairpinning refuses it
+  while the port may still be open) and `network` (slskd's signed-in state) —
+  each carrying `proves` and `cannot`. A definitive "open to the internet"
+  answer needs a probe from OUTSIDE the network, which this app does not ship,
+  and the payload says so. Nothing runs on its own: the probe is fired by the
+  page's *Test port* action.
+
 ## 8. Recommended runbook
 
 Nothing here is a substitute for the app's own Dependencies page: run it first

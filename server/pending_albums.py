@@ -395,6 +395,30 @@ def drop_placeholder_cover(folder):
     return _drop_placeholder_cover(folder, pathmod.load_pending(folder) or {})
 
 
+def update_marker(folder, fields):
+    """Merge *fields* into the framework marker — only while the album is still
+    waiting for its audio.
+
+    The read-modify-write is GUARDED, not merely idempotent, because its caller
+    (`server.imports.prefetch_album`) does provider fetches in the background:
+    an import that lands while those fetches are in flight clears the marker,
+    and a plain `save_pending(load_pending(folder) or {})` on the other side of
+    that window re-creates it — leaving a real, filled album reading PENDING for
+    ever (the library lists it with a track list and no playable tracks until
+    some later import happens to clear it again). The guard is the folder's own
+    audio: a folder that holds audio is not waiting for anything, so its marker
+    is left exactly as it is, whether the read raced the clear or not.
+
+    Returns True when the marker was written, False when there was nothing to
+    update or the album is no longer pending.
+    """
+    info = pathmod.load_pending(folder)
+    if not info or _audio_files(folder):
+        return False
+    info.update(fields or {})
+    return bool(pathmod.save_pending(folder, info))
+
+
 def clear_if_filled(folder, cfg=None, *, chained=True, chain_off=False):
     """End a framework album's pending state — the import has finished it.
 

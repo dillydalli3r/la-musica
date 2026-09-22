@@ -8,7 +8,7 @@ import {
   MessageSquare, X, Wand2, CheckCheck, MessageCircleQuestion,
 } from "lucide-react";
 import { api } from "../api";
-import type { ImportRunStatus, ReadyAlbum, SlskAutoFile, SlskStatus, SlskAutoProgress, SlskConversation, SlskDownloads, SlskMessage, SlskQueueItem, SlskQueueScope, SlskSearchProgress, SlskTransfer, StagingEntry, StagingRoot, StagingRootId } from "../api";
+import type { ImportRunStatus, ReadyAlbum, SlskAutoFile, SlskStatus, SlskAutoProgress, SlskConversation, SlskDownloads, SlskMessage, SlskPortCheck, SlskQueueItem, SlskQueueScope, SlskSearchProgress, SlskTransfer, StagingEntry, StagingRoot, StagingRootId } from "../api";
 import { toast } from "../store";
 import { EmptyState, PageLoading } from "../components/Badges";
 import PageHeader from "../components/PageHeader";
@@ -396,6 +396,64 @@ function ListenPortState({ state }: { state: SlskStatus["listen_port_state"] }) 
         </span>
       )}
     </span>
+  );
+}
+
+/** The port check's rows, as the server proved them (server/soulseek_port.py).
+
+ *  Every row is one thing that CAN be observed from here, and each carries the
+ *  server's own "what this proves / what it cannot" as its tooltip: a green
+ *  listener is not a promise that the internet reaches the port. The note under
+ *  the rows is the one thing no row can say — the outside half of the answer
+ *  needs a probe from outside this network, which this app does not ship. */
+const PORT_STATE_TONE: Record<string, string> = {
+  ok: "bg-emerald-900/40 text-emerald-300 border-emerald-800",
+  warn: "bg-amber-900/40 text-amber-300 border-amber-800",
+  fail: "bg-red-900/40 text-red-300 border-red-800",
+  unknown: "bg-zinc-800/70 text-zinc-400 border-zinc-700",
+};
+
+/** What the verdict means, in the page's own words: the state names alone read
+ *  as a promise about the internet, which no row here can make. */
+const PORT_VERDICT: Record<string, string> = {
+  ok: "the port answers here and the router lists a mapping for it",
+  warn: "something needs a look — the rows say which",
+  fail: "the port is not reachable as configured — the failing rows say why",
+  unknown: "not proven from this machine",
+};
+
+function PortCheckPanel({ result, onHide }: { result: SlskPortCheck; onHide: () => void }) {
+  return (
+    <div className="panel text-xs space-y-1.5">
+      <div className="flex items-center gap-2 flex-wrap">
+        <span className="text-[10px] uppercase tracking-widest text-zinc-500">Port check</span>
+        <span className={`chip text-[9px] border ${PORT_STATE_TONE[result.verdict] ?? PORT_STATE_TONE.unknown}`}>
+          port {result.port}
+        </span>
+        <span className="text-[11px] text-zinc-400">{PORT_VERDICT[result.verdict] ?? result.verdict}</span>
+        <span className="ml-auto text-[10px] text-zinc-600">
+          {String(result.checked_at ?? "").slice(0, 16).replace("T", " ")}
+        </span>
+        <button className="text-zinc-600 hover:text-white tap" onClick={onHide} title="Hide the port check">
+          <X className="h-3.5 w-3.5" />
+        </button>
+      </div>
+      {result.checks.map((c) => (
+        <div key={c.id} className="flex items-start gap-2">
+          <span
+            className={`chip text-[9px] border shrink-0 ${PORT_STATE_TONE[c.state] ?? PORT_STATE_TONE.unknown}`}
+            title={`proves: ${c.proves}\ncannot: ${c.cannot}`}
+          >
+            {c.state}
+          </span>
+          <div className="min-w-0">
+            <div className="text-[11px] text-zinc-300">{c.label}</div>
+            <div className="text-[10px] text-zinc-500">{c.detail}</div>
+          </div>
+        </div>
+      ))}
+      <div className="text-[10px] text-zinc-600">{result.note}</div>
+    </div>
   );
 }
 
@@ -2819,6 +2877,28 @@ export default function SoulseekPage() {
     }
   };
 
+  // The port check (server/api_soulseek.py) is asked for ON DEMAND and never on
+  // its own: it probes the router and tries a connection to the public address,
+  // which a page load has no business doing. `enabled: false` is what keeps
+  // react-query from fetching it before the button does, the answer then stays in
+  // the cache until the user hides it, and a second press probes again. The button
+  // is never disabled for a running transfer — the probe is read-only and takes no
+  // lock, which is the point of asking it while downloads are in flight.
+  const qc = useQueryClient();
+  const { data: portCheck, isFetching: portCheckBusy, refetch: probePort } = useQuery({
+    queryKey: ["soulseekPortCheck"],
+    queryFn: api.soulseekPortCheck,
+    enabled: false,
+  });
+  const testPort = async () => {
+    try {
+      const r = await probePort();
+      if (r.error) toast.error(String(r.error));
+    } catch (e) {
+      toast.error(String(e));
+    }
+  };
+
   const [query, setQuery] = useState("");
   const [recent, setRecent] = useState<string[]>(loadRecentSearches);
   const [browseUser, setBrowseUser] = useState<string | null>(null);
@@ -3177,8 +3257,24 @@ export default function SoulseekPage() {
           <span className="w-full flex flex-wrap items-center gap-2 text-[10px] text-zinc-600">
             <span className="uppercase tracking-widest">Listen port</span>
             <ListenPortState state={status.listen_port_state} />
+            <button
+              className="btn-ghost !py-1 !px-2 text-[10px] tap ml-auto"
+              onClick={testPort}
+              disabled={portCheckBusy}
+              title="Check the port from this machine: a listener here, what the router holds for it, the addresses, and a connection to the public address. Read-only, so it works while transfers run — a definite answer about the internet needs a probe from outside, which this app does not ship."
+            >
+              {portCheckBusy ? <Loader2 className="h-3 w-3 animate-spin" /> : <Zap className="h-3 w-3" />}
+              {portCheckBusy ? "Testing…" : "Test port"}
+            </button>
           </span>
         </div>
+      )}
+
+      {tab === "settings" && portCheck && (
+        <PortCheckPanel
+          result={portCheck}
+          onHide={() => qc.removeQueries({ queryKey: ["soulseekPortCheck"] })}
+        />
       )}
 
       {tab === "sharing" && (

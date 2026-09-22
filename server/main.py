@@ -36,6 +36,7 @@ from mlo import load_config, save_config
 from mlo.config import DEFAULT_CONFIG
 from mlo import layout as mlo_layout
 from mlo import stats as stats_mod
+from mlo import eq as eq_mod
 
 from server import library as lib_mod
 from server import mbresolve
@@ -60,6 +61,8 @@ from server import api_add
 from server import api_choice
 from server import api_stack
 from server import api_storage
+from server import api_soulseek
+from server import api_youtube
 from server import auth as auth_mod
 from server import events as events_mod
 from server import job_locks
@@ -268,6 +271,8 @@ app.include_router(api_jobs.router)
 app.include_router(api_media.router)
 app.include_router(api_stack.router)
 app.include_router(api_storage.router)
+app.include_router(api_soulseek.router)
+app.include_router(api_youtube.router)
 
 # Script 8 (Auto tagging) never imports a genre: it derives MOOD/ENERGY from
 # the audio, cross-references INSTRUMENTAL and derives the album advisory.
@@ -2971,7 +2976,7 @@ def _announce_run(ids, results, targets=None):
 # --------------------------------------------------------------------------- #
 class ExportRequest(BaseModel):
     paths: List[str] = []              # absolute audio file paths to export
-    dest: str                          # destination drive root (e.g. "E:\\")
+    dest: str = ""                     # destination drive root (e.g. "E:\\")
     subfolder: str = "Music"           # created under the drive root
     codec: str = "copy"                # any key of exporter.CODECS
     quality: str = ""                  # a preset key (V0/320/256/q8/…) or a number
@@ -2984,13 +2989,25 @@ class ExportRequest(BaseModel):
     embed_cover_resolution: Optional[int] = None
     id3v2: Optional[str] = None
     id3v1: Optional[bool] = None
-    replaygain: Optional[bool] = None
+    # "off" | "tags" (write the ReplayGain tags) | "apply" (rewrite the audio).
+    replaygain_mode: Optional[str] = None
+    eq_profile: Optional[str] = None   # a preset/profile id, "" = no EQ
     clean_tags: Optional[bool] = None
     playlists: Optional[bool] = None
     sidecars: Optional[bool] = None
+    manifest: Optional[bool] = None
     verify: Optional[bool] = None
     prune: Optional[bool] = None
     workers: Optional[int] = None
+    # "server" writes into dest/subfolder (needs a destination the SERVER can
+    # see), "zip" stages the same export under the app's data dir and hands
+    # back one archive — the only destination a browser can offer its user.
+    target: Optional[str] = None
+
+
+class EqImportRequest(BaseModel):
+    name: str = ""
+    text: str = ""
 
 
 # Fields of ExportRequest that are not run options (they are positional parts
@@ -3028,6 +3045,62 @@ def export_codecs():
     return {"codecs": exporter.codec_specs()}
 
 
+@app.get("/api/export/eq")
+def export_eq():
+    """The equalizer profiles an export can carry: the built-in presets plus
+    everything the user imported, with the filter chain each one renders to."""
+    return eq_mod.catalog(_music_folder())
+
+
+@app.post("/api/export/eq/import")
+def export_eq_import(req: EqImportRequest):
+    """Store one pasted Equalizer APO / Peace profile and return its row.
+
+    A name that could name a path outside the profile folder, a name that is a
+    built-in preset's, or a body past the size cap is a 400 — never a file
+    written somewhere else."""
+    try:
+        return eq_mod.import_profile(_music_folder(), req.name, req.text)
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+
+
+@app.delete("/api/export/eq/{profile_id}")
+def export_eq_delete(profile_id: str):
+    """Drop one imported profile. A profile that is not there is a 404 (the UI
+    may be showing a stale list); a name that could name another file is a 400."""
+    try:
+        removed = eq_mod.delete_profile(_music_folder(), profile_id)
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+    if not removed:
+        raise HTTPException(404, f"no such profile: {profile_id}")
+    return {"ok": True, "id": profile_id}
+
+
+@app.get("/api/export/zip/{zip_id}")
+def export_zip_download(zip_id: str):
+    """Stream the archive a zip export built.
+
+    An unknown id (a restart, a newer export that replaced it) is a 404 rather
+    than an empty file: the client can say the export is gone instead of saving
+    a zero-byte download. The response carries the archive's own human name as
+    the downloaded file name."""
+    path = exporter.zip_path(load_config(), zip_id)
+    if not path:
+        raise HTTPException(404, "no export archive with that id")
+    return FileResponse(path, media_type="application/zip",
+                        filename=os.path.basename(path))
+
+
+@app.delete("/api/export/zip/{zip_id}")
+def export_zip_delete(zip_id: str):
+    """Drop the built archive early (it is replaced by the next zip export)."""
+    if not exporter.drop_zip(load_config(), zip_id):
+        raise HTTPException(404, "no export archive with that id")
+    return {"ok": True, "id": zip_id}
+
+
 @app.post("/api/export")
 @job_locks.holds(lambda req: req.paths, kind="export", label="Export")
 def export_run(req: ExportRequest):
@@ -3040,9 +3113,16 @@ def export_run(req: ExportRequest):
     is exactly the collision the lock exists to prevent."""
     if not req.paths:
         raise HTTPException(400, "no tracks selected")
-    dest_root = os.path.abspath(req.dest)
-    if not os.path.isdir(dest_root):
-        raise HTTPException(400, f"destination not found: {req.dest}")
+    target = (req.target or "server").strip().lower()
+    if target not in ("server", "zip"):
+        raise HTTPException(400, f"unknown export target: {req.target}")
+    dest_root = ""
+    if target == "server":
+        # A zip export ignores dest (it stages under the app's own data dir),
+        # so only the drive target has a destination to check.
+        dest_root = os.path.abspath(req.dest)
+        if not os.path.isdir(dest_root):
+            raise HTTPException(400, f"destination not found: {req.dest}")
     for p in req.paths:
         if not _in_music_folder(p, _music_folder()):
             raise HTTPException(400, f"file outside music folder: {p}")
@@ -3059,6 +3139,10 @@ def export_run(req: ExportRequest):
         )
     except ValueError as e:      # an unusable destination (inside the library…)
         raise HTTPException(400, str(e))
+    if res.get("zip"):
+        # The archive is fetched by id, so the client needs the URL to hand the
+        # browser (a download, or a link the user can click).
+        res["zip"]["url"] = f"/api/export/zip/{res['zip']['id']}"
     return {"ok": res["failed"] == 0, **res}
 
 

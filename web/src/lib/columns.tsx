@@ -83,6 +83,97 @@ export const ALBUM_TRACK_COLS: Col[] = [
   { id: "bitrate", label: "Bitrate", sortKey: "tech.bitrate" },
   { id: "dr", label: "DR", sortKey: "tags.DYNAMIC RANGE" },
 ];
+/** A phone (390 px) table keeps the row's own name and drops the numbers: at
+ *  that width a row that keeps them squeezes the name to nothing, and the
+ *  table's own scroll wrapper cannot give it back.
+ *
+ *  The class has to sit on the header AND on the cells, or the fixed-layout
+ *  grid misaligns; `md` is where each column comes back. */
+export const PHONE_HIDE = " hidden md:table-cell";
+
+/** The track table's floors — one narrowest-usable width per column, in px,
+ *  same rule as the album table's own map: they are also the table's floor,
+ *  summed by TABLE_FIT's `min-w-max`, so a window wider than their sum shares
+ *  the extra out in proportion.
+ *
+ *  Shared by every table that lists whole tracks in library order: the
+ *  Library's Tracks view and the Export page's preview. They were two tables
+ *  with two sets of numbers until the export preview's `#` column was 32 px
+ *  wide — which is 8 px of content box after `td`'s px-3 padding, so a
+ *  two-digit track number wrapped onto two lines. */
+export const TRACK_COL_W: Record<string, string> = {
+  // 64 px, not the 48 a single digit suggests: 24 px of the column is the
+  // cell's own gutter, and what is left has to hold the widest number a row
+  // can show. Library rows print a track number ("10"), and a row without one
+  // is numbered by its position in the list ("200" in a full-library preview).
+  num: "w-16",
+  cover: "w-[52px]",
+  // `md:` like the album table's name column: on a phone the title is the only
+  // column left beside the cover, so it takes the whole row instead.
+  title: "md:w-[220px]",
+  artist: "w-[108px]",
+  album: "w-[112px]",
+  year: "w-16",
+  genre: "w-24",
+  media: "w-[88px]",
+  // 80 px, the same floor the album tracklist gives its length column: an
+  // hour-plus length is seven characters ("1:02:33"), which the old 64 px
+  // floor could only break onto a second line.
+  duration: "w-20",
+  bitrate: "w-[88px]",
+  dr: "w-12",
+  source: "w-20",
+  type: "w-20",
+  inst: "w-20",
+  composer: "w-[112px]",
+  lyricist: "w-[112px]",
+  remixer: "w-[96px]",
+  // The tracklist's own id for the same length column the Tracks view calls
+  // `duration` (see TRACK_PHONE_CLS).
+  dur: "w-20",
+};
+
+/** The track table's columns, in render order. */
+export const TRACK_COLS: Col[] = [
+  { id: "num", label: "#", sortKey: "tracknumber" },
+  { id: "cover", label: "", sortKey: "" },
+  { id: "title", label: "Title", sortKey: "tags.TITLE" },
+  { id: "artist", label: "Artist", sortKey: "artist" },
+  { id: "album", label: "Album", sortKey: "album" },
+  { id: "year", label: "Year", sortKey: "tags.DATE" },
+  { id: "genre", label: "Genre", sortKey: "tags.GENRE" },
+  { id: "media", label: "Media", sortKey: "tags.MEDIA" },
+  { id: "duration", label: "Duration", sortKey: "tech.length" },
+  { id: "bitrate", label: "Bitrate", sortKey: "tech.bitrate" },
+  // ReplayGain deliberately has NO column: it is playback metadata — the
+  // player applies it to keep loudness even between tracks. Only Dynamic
+  // Range is shown.
+  { id: "dr", label: "DR", sortKey: "tags.DYNAMIC RANGE" },
+  { id: "source", label: "Source", sortKey: "tags.SOURCE" },
+  { id: "type", label: "Type", sortKey: "is_video" },
+  { id: "inst", label: "INST", sortKey: "tags.INSTRUMENTAL" },
+  { id: "composer", label: "Composer", sortKey: "tags.COMPOSER", defHidden: true },
+  { id: "lyricist", label: "Lyricist", sortKey: "tags.LYRICIST", defHidden: true },
+  { id: "remixer", label: "Remixer", sortKey: "tags.REMIXER", defHidden: true },
+];
+
+/** Both track tables (the Tracks view, the export preview and every album
+ *  tracklist): only the cover and the title stay on a phone, every column id
+ *  named here folds at `md`. The tables name the length column differently
+ *  (`duration` in the Tracks view, `dur` in an album tracklist), which is why
+ *  both ids appear. */
+export const TRACK_PHONE_CLS: Record<string, string> = {
+  num: PHONE_HIDE, artist: PHONE_HIDE, album: PHONE_HIDE, year: PHONE_HIDE,
+  genre: PHONE_HIDE, media: PHONE_HIDE, duration: PHONE_HIDE, dur: PHONE_HIDE,
+  bitrate: PHONE_HIDE, dr: PHONE_HIDE, source: PHONE_HIDE, type: PHONE_HIDE,
+  inst: PHONE_HIDE, composer: PHONE_HIDE, lyricist: PHONE_HIDE, remixer: PHONE_HIDE,
+};
+
+/** Tag columns the user added fold with the built-ins they sit beside. */
+export function phoneHide(cls: Record<string, string>, id: string): string {
+  return cls[id] ?? (id.startsWith("tag:") ? PHONE_HIDE : "");
+}
+
 /** Visible-column ids per view, persisted in localStorage; toggle flips one id. */
 export function useColumnPrefs(key: string, defs: Col[]): [string[], (id: string) => void] {
   // v3: type/INST columns joined the default sets and credit columns became

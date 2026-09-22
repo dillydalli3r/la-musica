@@ -1,7 +1,7 @@
-import { useEffect, useState } from "react";
+import { useEffect, useState, type DragEvent } from "react";
 import { useNavigate } from "react-router-dom";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
-import { Bell, Save, RotateCcw, LayoutGrid, Settings as SettingsIcon, Check, Eye, EyeOff, ChevronDown, ChevronUp, Wand2, X, FolderOpen, Loader2 } from "lucide-react";
+import { Bell, Save, RotateCcw, LayoutGrid, Settings as SettingsIcon, Check, Eye, EyeOff, ChevronDown, ChevronUp, Wand2, X, FolderOpen, Loader2, Trash2 } from "lucide-react";
 import { api, deviceUnavailable, unavailableFeatures } from "../api";
 import ConfirmButton from "../components/ConfirmButton";
 import FolderPicker from "../components/FolderPicker";
@@ -14,6 +14,7 @@ import { applyAccent } from "../App";
 import { DEFAULT_RUN_ALL, SCRIPT_LABEL, isScriptId } from "../lib/scripts";
 import { LOCALES, applyConfigLocale, setLocale, useI18n } from "../lib/i18n";
 import { CODEC_CHOICES } from "../lib/codecMeta";
+import { fmtBytes } from "../lib/fmt";
 import { notificationState, requestNotifications, type NotifyState } from "../lib/notify";
 
 const ACCENT_OPTIONS: { id: string; name: string; color: string }[] = [
@@ -308,6 +309,161 @@ function CoverDefaults() {
           </button>
         )}
         {!dirty && <span className="text-[10px] text-zinc-600">Saved — a search with no overrides uses this.</span>}
+      </div>
+    </div>
+  );
+}
+
+/** The YouTube cookie jar (Settings → Videos): paste or drop a cookies.txt,
+ *  see what is in it, remove it.
+ *
+ *  This is the one part of the Videos tab the generic field renderer cannot
+ *  draw, because the value is a FILE: it arrives as text (pasted into the box
+ *  or dropped onto it) and the app owns the path it lands on
+ *  (<music>/.mlo/data/cookies.txt). So there is no path to type, no second
+ *  place a jar can live, and the server validates the text BEFORE it replaces
+ *  a jar that already works — a bad paste must not cost the user the cookies
+ *  that were doing their job.
+ */
+function YoutubeCookieJar() {
+  const qc = useQueryClient();
+  const { data: jar } = useQuery({ queryKey: ["youtubeCookies"], queryFn: api.youtubeCookies, retry: false });
+  const [text, setText] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [dragging, setDragging] = useState(false);
+
+  const save = async (body: string) => {
+    if (!body.trim()) {
+      toast.error("Nothing to save — paste the contents of cookies.txt first");
+      return;
+    }
+    setBusy(true);
+    try {
+      const r = await api.youtubeCookiesSave(body);
+      setText("");
+      toast.success(
+        `Cookie file saved — ${r.lines} cookie(s)${r.sites.length ? ` for ${r.sites.join(", ")}` : ""}`
+      );
+      // The server's own sentences about what the jar holds come through as
+      // warnings: a jar with no youtube.com cookie cannot sign anything in,
+      // and a plain "saved!" would hide exactly that.
+      for (const w of r.warnings) toast(w);
+      qc.invalidateQueries({ queryKey: ["youtubeCookies"] });
+    } catch (e) {
+      toast.error(String(e));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const drop = async (e: DragEvent) => {
+    e.preventDefault();
+    setDragging(false);
+    const file = e.dataTransfer.files?.[0];
+    if (!file) return;
+    try {
+      await save(await file.text());
+    } catch (err) {
+      toast.error(String(err));
+    }
+  };
+
+  const remove = async () => {
+    setBusy(true);
+    try {
+      await api.youtubeCookiesDelete();
+      toast("Cookie file removed — downloads run anonymously again");
+      qc.invalidateQueries({ queryKey: ["youtubeCookies"] });
+    } catch (e) {
+      toast.error(String(e));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <div className="pt-2 border-t border-border space-y-2">
+      <div className="flex items-center gap-2 flex-wrap">
+        <span className="text-xs font-semibold uppercase tracking-wider text-zinc-500">Cookie file</span>
+        <span
+          className={`chip ${
+            jar?.present
+              ? "border-emerald-900/50 bg-emerald-950/30 text-emerald-300"
+              : "border-border bg-zinc-900 text-zinc-500"
+          }`}
+        >
+          {jar?.present ? `${jar.lines} cookie${jar.lines === 1 ? "" : "s"}` : "none saved"}
+        </span>
+        {jar?.present && (
+          <span className="text-[10px] text-zinc-500">
+            {fmtBytes(jar.bytes)}
+            {jar.saved_at ? ` · saved ${new Date(jar.saved_at).toLocaleString()}` : ""}
+          </span>
+        )}
+        {jar?.present && (
+          <ConfirmButton
+            className="btn-ghost !py-0.5 text-[11px] tap ml-auto"
+            confirmLabel="Delete the cookie file?"
+            onConfirm={remove}
+            disabled={busy}
+          >
+            <Trash2 className="h-3 w-3" /> Delete
+          </ConfirmButton>
+        )}
+      </div>
+      <div className="text-[11px] text-zinc-600">
+        In the browser you are signed in to YouTube with, export its cookies to a <span className="text-zinc-400">cookies.txt</span>{" "}
+        (a "Get cookies.txt" extension writes exactly this file), then paste its contents below or drop the file onto the box.
+        yt-dlp reads the saved copy for age-gated, members-only and throttled videos — the jar belongs to this app, at{" "}
+        <span className="text-zinc-400">{jar?.path ?? "<music folder>/.mlo/data/cookies.txt"}</span>.
+      </div>
+      {jar?.sites?.length ? (
+        <div className="flex items-center gap-1.5 flex-wrap">
+          <span className="text-[10px] text-zinc-600">Domains:</span>
+          {jar.sites.map((s) => (
+            <span key={s} className="chip border-border bg-zinc-900 text-zinc-400">{s}</span>
+          ))}
+        </div>
+      ) : null}
+      {jar?.warnings?.map((w) => (
+        <div key={w} className="text-[10px] text-amber-400/90 border border-amber-900/40 bg-amber-950/20 rounded px-2 py-1">
+          {w}
+        </div>
+      ))}
+      <div
+        onDragOver={(e) => {
+          e.preventDefault();
+          setDragging(true);
+        }}
+        onDragLeave={() => setDragging(false)}
+        onDrop={drop}
+        className={`rounded-md border border-dashed p-2 ${dragging ? "border-accent bg-accent/5" : "border-border"}`}
+      >
+        <textarea
+          className="input w-full h-24 font-mono text-[10px] tap"
+          placeholder={"# Netscape HTTP Cookie File\n.youtube.com\tTRUE\t/\tTRUE\t…\tLOGIN_INFO\t…\n\n(paste here, or drop cookies.txt on this box)"}
+          value={text}
+          onChange={(e) => setText(e.target.value)}
+          spellCheck={false}
+        />
+        <div className="flex items-center gap-2 flex-wrap mt-1.5">
+          <button
+            className="btn-primary !py-1 text-xs min-h-10 md:min-h-0 tap"
+            onClick={() => save(text)}
+            disabled={busy || !text.trim()}
+          >
+            {busy ? <Loader2 className="h-3 w-3 animate-spin" /> : <Check className="h-3 w-3" />} Save cookie file
+          </button>
+          {text.trim() && (
+            <button className="btn-ghost !py-1 text-xs tap" onClick={() => setText("")} disabled={busy}>
+              <X className="h-3 w-3" /> Clear
+            </button>
+          )}
+          <span className="text-[10px] text-zinc-600">
+            Up to {fmtBytes(jar?.max_bytes ?? 524288)} — a jar is a few dozen lines, so anything bigger is a browser profile folder,
+            not a cookies.txt.
+          </span>
+        </div>
       </div>
     </div>
   );
@@ -720,8 +876,18 @@ export default function SettingsPage() {
       title: "Videos (script 11)",
       blurb: "Lossless remux: any video container → MKV with the video copied bit-exact and lossless audio converted to FLAC (level below); lossy audio (AC3/DTS/AAC) is copied rather than inflated into FLAC unless that is turned off. Captions/subtitles are always kept and verified — never removed. If the muxer refuses the video codec, H.264 is a last-resort fallback (off by default: it re-encodes the only copy). The original (e.g. the .VOB) is removed after a verified remux.",
       fields: [
-        { k: "youtube_enabled", label: "Fetch missing music videos from YouTube", type: "bool" },
+        { k: "youtube_enabled", label: "Fetch missing music videos from YouTube", type: "bool", help: "The master switch for every YouTube download: the album header's film button and a track's \"Download music video\" action both refuse to search while it is off. Script 11 itself never searches YouTube — it remuxes the video files already in the folder." },
         { k: "youtube_max_height", label: "Maximum video height (px, 0 = best available)", type: "number", min: 0, max: 4320 },
+        {
+          k: "youtube_cookies_mode", label: "Cookies for YouTube", type: "select",
+          options: [["none", "None — anonymous"], ["file", "A cookies file (saved below)"], ["browser", "Read from a browser"]],
+          help: "Your own YouTube session is the only thing that opens an age-gated or members-only video — without it YouTube answers \"Sign in to confirm your age\" — and it stops the throttling a fresh IP gets. None: nothing is sent. A cookies file: the jar saved in the box below this row, which you paste or drop there. Read from a browser: yt-dlp opens that browser's own cookie store — same machine, signed in to YouTube, and closed if its store is locked.",
+        },
+        {
+          k: "youtube_cookies_browser", label: "Browser to read cookies from", type: "select",
+          options: [["chrome", "Chrome"], ["chromium", "Chromium"], ["edge", "Edge"], ["firefox", "Firefox"], ["brave", "Brave"], ["opera", "Opera"], ["safari", "Safari"], ["vivaldi", "Vivaldi"], ["whale", "Whale"]],
+          help: "Which browser \"Read from a browser\" opens, using its DEFAULT profile. Pick the one you are signed in to YouTube with.",
+        },
         { k: "video_reencode_incompatible", label: "Allow H.264 video fallback (lossy re-encode, last resort)", type: "bool" },
         { k: "video_lossy_audio_copy", label: "Copy lossy audio streams instead of re-encoding to FLAC", type: "bool" },
         { k: "video_crf", label: "H.264 CRF (lower = better)", type: "number", min: 0, max: 51 },
@@ -2160,6 +2326,7 @@ export default function SettingsPage() {
                   <CoverDefaults />
                 </div>
               )}
+              {tab === "videos" && <YoutubeCookieJar />}
               {tab === "beets" && (
                 <div className="pt-2 border-t border-border space-y-2">
                   <div className="flex items-center gap-2 flex-wrap">

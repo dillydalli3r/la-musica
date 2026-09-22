@@ -1,11 +1,12 @@
 import { useState } from "react";
 import type { ReactNode } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
-import { AlertTriangle, FileOutput, HardDriveDownload, RotateCcw, Save } from "lucide-react";
-import { api } from "../api";
-import type { ExportCodecSpec, ExportForm } from "../api";
+import { AlertTriangle, Download, FileOutput, HardDrive, HardDriveDownload, RotateCcw, Save } from "lucide-react";
+import { api, IN_TAURI } from "../api";
+import type { ExportCodecSpec, ExportEq, ExportForm } from "../api";
 import { toast } from "../store";
-import { fmtDuration } from "../lib/fmt";
+import { fmtBytes, fmtDuration } from "../lib/fmt";
+import Segmented from "./Segmented";
 import Modal from "./Modal";
 
 /** The dropdown's synthetic entry for a codec's "custom value" field; the
@@ -20,9 +21,30 @@ export const STRUCTURES = [
   { v: "mirror", label: "Mirror library layout" },
 ];
 
+/** The two places an export can go. A browser cannot write to the server's
+ *  filesystem, so "download a .zip" is the mode that works everywhere; a server
+ *  folder is for a machine whose drives the user can actually see — a
+ *  self-hosted box, or the desktop shell, which runs beside the server. */
+export const DESTINATIONS = [
+  { id: "zip", label: "Download a .zip", icon: Download },
+  { id: "server", label: "Server folder", icon: HardDrive },
+] as const;
+
+/** The mode a form value resolves to. An empty saved value means "whichever
+ *  one this client can use": a browser has no server filesystem to write to,
+ *  so it downloads the archive; the desktop shell runs on the server's own
+ *  machine and writes to a folder. */
+export function resolveTarget(value: string): "server" | "zip" {
+  if (value === "zip" || value === "server") return value;
+  return IN_TAURI ? "server" : "zip";
+}
+
 /** Rendered while the saved defaults are still loading; the same shape and the
- * same first-run values the backend ships (server.exporter.EXPORT_DEFAULTS). */
+ * same first-run values the backend ships (server.exporter.EXPORT_DEFAULTS).
+ * `target` is left at the server's own default; `resolveTarget` turns a value
+ * the client cannot use into the one it can. */
 export const BLANK_FORM: ExportForm = {
+  target: "server",
   dest: "",
   subfolder: "Music",
   codec: "copy",
@@ -33,10 +55,12 @@ export const BLANK_FORM: ExportForm = {
   embed_cover_resolution: 1200,
   id3v2: "2.3",
   id3v1: false,
-  replaygain: false,
+  replaygain_mode: "off",
+  eq_profile: "",
   clean_tags: true,
   playlists: true,
   sidecars: true,
+  manifest: false,
   verify: true,
   prune: false,
   workers: 0,
@@ -131,6 +155,10 @@ export interface ExportCodecs {
 export interface ExportOptions {
   f: ExportForm;
   set: <K extends keyof ExportForm>(key: K, value: ExportForm[K]) => void;
+  /** Writes several fields in ONE update. Two `set` calls in the same handler
+   *  cannot both land when each derives the next form from the render it was
+   *  created in, so a handler that changes two fields uses this. */
+  setMany: (patch: Partial<ExportForm>) => void;
   customValue: string;
   setCustomValue: (v: string) => void;
   busy: boolean;
@@ -143,6 +171,11 @@ export interface ExportOptions {
   drives: ExportDrive[];
   selectedDrive: ExportDrive | null;
   overCapacity: boolean;
+  /** The mode this run will use, with a saved `target` this client cannot
+   *  honour already resolved to the one it can (see `resolveTarget`). */
+  target: "server" | "zip";
+  /** The server's equaliser presets and imported profiles. */
+  eq: ExportEq | undefined;
   /** The selection this form would export. */
   paths: string[];
   seconds: number;
@@ -164,15 +197,27 @@ export function useExportOptions(paths: string[], seconds = 0): ExportOptions {
   const { data: drivesData } = useQuery({ queryKey: ["exportDrives"], queryFn: api.exportDrives });
   const { data: specs } = useQuery({ queryKey: ["exportCodecs"], queryFn: api.exportCodecs });
   const { data: savedDefaults } = useQuery({ queryKey: ["exportDefaults"], queryFn: api.exportDefaults });
+  const { data: eq } = useQuery({ queryKey: ["exportEq"], queryFn: api.exportEq });
 
   const [form, setForm] = useState<ExportForm | null>(null);
   const [customValue, setCustomValue] = useState("192");
   const [busy, setBusy] = useState(false);
 
   const f = form ?? savedDefaults ?? BLANK_FORM;
+  /* Both writers take a FUNCTIONAL update: they derive the next form from what
+   * the state actually holds, never from the form this render closed over.
+   * The old shape — `setForm({ ...f, [key]: value })` — silently dropped all
+   * but the last write of any handler that wrote twice, and one does: picking
+   * a codec writes the codec and resets the quality, so the quality reset was
+   * applied to the UNCHANGED codec and the select could never leave "copy" —
+   * taking the Quality select (disabled for `copy`, which has no knobs) down
+   * with it. */
   const set = <K extends keyof ExportForm>(key: K, value: ExportForm[K]) =>
-    setForm({ ...f, [key]: value });
+    setForm((prev) => ({ ...(prev ?? savedDefaults ?? BLANK_FORM), [key]: value }));
+  const setMany = (fields: Partial<ExportForm>) =>
+    setForm((prev) => ({ ...(prev ?? savedDefaults ?? BLANK_FORM), ...fields }));
 
+  const target = resolveTarget(f.target);
   const spec = specs?.codecs?.[f.codec];
   const kbps = effectiveKbps(spec, f.quality, customValue);
   const estBytes = kbps !== null && seconds > 0 ? (seconds * kbps * 1000) / 8 : null;
@@ -188,17 +233,26 @@ export function useExportOptions(paths: string[], seconds = 0): ExportOptions {
       toast("Select something to export first");
       return false;
     }
-    const destRoot = drivesData?.drives.find((d) => d.root === f.dest)?.root;
-    if (!destRoot) {
-      toast("Choose a destination drive");
-      return false;
+    // The drive is only ours to require in server mode: a zip never touches a
+    // drive, and requiring one would block the run on a picker that mode hides.
+    let dest = "";
+    if (target === "server") {
+      const destRoot = drivesData?.drives.find((d) => d.root === f.dest)?.root;
+      if (!destRoot) {
+        toast("Choose a destination drive");
+        return false;
+      }
+      dest = destRoot;
     }
     setBusy(true);
-    toast(`Exporting ${paths.length} track(s)…`);
+    toast(target === "zip"
+      ? `Building a .zip of ${paths.length} track(s)…`
+      : `Exporting ${paths.length} track(s)…`);
     try {
       const r = await api.exportRun({
         ...f,
-        dest: destRoot,
+        target,
+        dest,
         quality: f.quality === CUSTOM ? customValue : f.quality || spec?.default || "",
         paths,
       });
@@ -212,6 +266,18 @@ export function useExportOptions(paths: string[], seconds = 0): ExportOptions {
       if (r.failed) toast.error(`Export finished with ${r.failed} failure(s): ${r.errors[0] ?? ""}`);
       else toast.success(`Exported ${r.exported} track(s)${extras ? ` (${extras})` : ""} · ${gb} GB`);
       if (r.warnings?.length) toast(r.warnings[0]);
+      // A zip run leaves nothing where the user can find it, so the finished
+      // archive is handed to the browser here — the same `<a download>` idiom
+      // the per-track export uses — and reported with its own size and count.
+      if (r.zip) {
+        const a = document.createElement("a");
+        a.href = api.exportZipUrl(r.zip.url);
+        a.download = r.zip.name;
+        document.body.appendChild(a);
+        a.click();
+        a.remove();
+        toast(`${r.zip.name} · ${r.zip.files} file(s) · ${fmtBytes(r.zip.bytes)} — your browser is saving it to its downloads`);
+      }
       return true;
     } catch (e) {
       toast.error(String(e));
@@ -238,55 +304,74 @@ export function useExportOptions(paths: string[], seconds = 0): ExportOptions {
   };
 
   return {
-    f, set, customValue, setCustomValue, busy, spec, kbps, estBytes,
-    specs, drives, selectedDrive, overCapacity, paths, seconds,
+    f, set, setMany, customValue, setCustomValue, busy, spec, kbps, estBytes,
+    specs, drives, selectedDrive, overCapacity, target, eq, paths, seconds,
     run, saveDefaults, resetDefaults,
     refreshDrives: () => void queryClient.invalidateQueries({ queryKey: ["exportDrives"] }),
   };
 }
 
-/** The whole export option surface — target drive/subfolder, codec + quality,
- *  folder structure, artwork, tag compatibility, ReplayGain, sidecars,
- *  playlists, verification, concurrency and sync mode — plus the run / save /
- *  reset row. The Export page and the per-page dialog both render exactly
- *  this, so the two can never drift apart. */
+/** The whole export option surface — where the files go, codec + quality,
+ *  folder structure, artwork, tag compatibility, audio processing (ReplayGain
+ *  and the equaliser), the files written beside the audio (playlists, sidecars,
+ *  a checksum manifest), verification, concurrency and sync mode — plus the
+ *  run / save / reset row. The Export page and the per-page dialog both render
+ *  exactly this, so the two can never drift apart.
+ *
+ *  The destination is a CHOICE, and each mode hides what does not exist in it
+ *  rather than disabling it: a zip never touches a drive, so the drive picker,
+ *  the subfolder and the sync switch are not drawn at all — a disabled control
+ *  still reads as an option. */
 export function ExportOptionsPanel({ e, hint }: {
   e: ExportOptions;
   /** Prepended above the options: what this particular run will export. */
   hint?: ReactNode;
 }) {
-  const { f, set, spec, kbps, estBytes, seconds, paths, busy } = e;
+  const { f, set, setMany, spec, kbps, estBytes, seconds, paths, busy, target, eq } = e;
+  const zip = target === "zip";
+  const eqSelected = [...(eq?.presets ?? []), ...(eq?.profiles ?? [])].find((p) => p.id === f.eq_profile);
   return (
     <div className="min-w-0">
       {hint && <div className="text-[11px] text-zinc-500 mb-3">{hint}</div>}
 
-      <div className="flex items-center justify-between mb-2">
-        <div className="text-xs font-bold text-zinc-300">Destination</div>
-        <button
-          className="btn !py-0.5 !px-2 text-[11px] tap"
-          onClick={e.refreshDrives}
-          title="Rescan the drives (a device plugged in after this opened)"
-        >
-          <RotateCcw className="h-3 w-3" />
-          Rescan
-        </button>
+      <div className="text-xs font-bold text-zinc-300 mb-2">Destination</div>
+      <Segmented value={target} onChange={(v) => set("target", v)} options={DESTINATIONS} className="mb-2" />
+      <div className="text-[11px] text-zinc-500 mb-2">
+        {zip
+          ? "The server builds a .zip and this browser saves it to its downloads folder. Nothing lands on the server, so there is no drive or subfolder to choose."
+          : "Written to a drive this machine can see; a re-run skips what is already there."}
       </div>
-      <select
-        className="input !py-1 text-xs w-full min-w-0 tap"
-        value={f.dest}
-        onChange={(ev) => set("dest", ev.target.value)}
-      >
-        <option value="">Choose a drive…</option>
-        {(e.drives ?? []).map((d) => (
-          <option key={d.root} value={d.root}>
-            {d.letter} {d.type !== "fixed" ? `(${d.type})` : ""} — {fmtGB(d.free)} free
-          </option>
-        ))}
-      </select>
-      <label className="flex items-center gap-2 mt-2 text-xs text-zinc-300">
-        <span className="shrink-0">Subfolder</span>
-        <input className="input !py-1 text-xs flex-1 min-w-0 tap" value={f.subfolder} onChange={(ev) => set("subfolder", ev.target.value)} />
-      </label>
+
+      {!zip && (
+        <>
+          <div className="flex items-center gap-2">
+            <select
+              className="input !py-1 text-xs flex-1 min-w-0 tap"
+              value={f.dest}
+              onChange={(ev) => set("dest", ev.target.value)}
+            >
+              <option value="">Choose a drive…</option>
+              {(e.drives ?? []).map((d) => (
+                <option key={d.root} value={d.root}>
+                  {d.letter} {d.type !== "fixed" ? `(${d.type})` : ""} — {fmtGB(d.free)} free
+                </option>
+              ))}
+            </select>
+            <button
+              className="btn !py-1 !px-2 tap"
+              onClick={e.refreshDrives}
+              title="Rescan the drives (a device plugged in after this opened)"
+            >
+              <RotateCcw className="h-3.5 w-3.5" />
+              <span className="sr-only">Rescan drives</span>
+            </button>
+          </div>
+          <label className="flex items-center gap-2 mt-2 text-xs text-zinc-300">
+            <span className="shrink-0">Subfolder</span>
+            <input className="input !py-1 text-xs flex-1 min-w-0 tap" value={f.subfolder} onChange={(ev) => set("subfolder", ev.target.value)} />
+          </label>
+        </>
+      )}
 
       <div className="text-[11px] text-zinc-500 mt-2 flex items-center gap-2 flex-wrap">
         <span>
@@ -294,10 +379,12 @@ export function ExportOptionsPanel({ e, hint }: {
           {seconds > 0 ? ` · ${fmtDuration(seconds)}` : ""}
         </span>
         {estBytes !== null && (
-          <span className="text-zinc-600">· ~{(estBytes / 1024 ** 3).toFixed(2)} GB after export</span>
+          <span className="text-zinc-600">
+            · ~{(estBytes / 1024 ** 3).toFixed(2)} GB {zip ? "in the archive" : "after export"}
+          </span>
         )}
       </div>
-      {e.overCapacity && (
+      {!zip && e.overCapacity && (
         <div className="flex items-start gap-2 mt-2 text-[11px] text-amber-300 border border-amber-500/30 bg-amber-500/10 rounded-md p-2">
           <AlertTriangle className="h-3.5 w-3.5 shrink-0 mt-0.5" />
           <span>
@@ -314,11 +401,12 @@ export function ExportOptionsPanel({ e, hint }: {
           <select
             className="input !py-1 text-xs min-w-0 tap"
             value={f.codec}
-            onChange={(ev) => {
-              set("codec", ev.target.value);
-              set("quality", "");
-            }}
+            /* ONE write, not two: the codec and the quality reset it triggers
+               have to land together, or the reset is applied to the codec this
+               render still held and the choice is lost. */
+            onChange={(ev) => setMany({ codec: ev.target.value, quality: "" })}
           >
+            {!e.specs && <option value={f.codec}>Loading codecs…</option>}
             {Object.entries(e.specs?.codecs ?? {}).map(([v, cs]) => (
               <option key={v} value={v}>{cs.label}</option>
             ))}
@@ -330,7 +418,10 @@ export function ExportOptionsPanel({ e, hint }: {
             className="input !py-1 text-xs min-w-0 tap"
             value={f.quality || spec?.default || ""}
             onChange={(ev) => set("quality", ev.target.value)}
-            disabled={!spec?.presets.length && !spec?.custom}
+            /* Disabled for a codec with no knobs (copy) AND while the codec
+               table is still on its way: an enabled box with nothing in it
+               reads as a control that does not work. */
+            disabled={!spec || (!spec.presets.length && !spec.custom)}
           >
             {/* copy has no knobs — a disabled placeholder keeps the box legible */}
             {!spec?.presets.length && !spec?.custom ? (
@@ -442,12 +533,55 @@ export function ExportOptionsPanel({ e, hint }: {
           hint="For players that read nothing else (short, latin-1 fields)."
         />
       </div>
-      <Opt
-        checked={f.replaygain}
-        onChange={(v) => set("replaygain", v)}
-        label="Write ReplayGain tags"
-        hint="Measures each track (ffmpeg EBU R128, one pass that rides along with the transcode) and stores track + album gain/peak, so the player matches your library's loudness."
-      />
+      {/* ---- audio processing ------------------------------------- */}
+      {/* The section the applied-audio work lives in: what a run does to the
+          SOUND, as opposed to what it writes beside it. */}
+      <div className="text-xs font-bold text-zinc-300 mt-4 mb-2">Audio processing</div>
+      <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+        <label className="text-[10px] text-zinc-500 flex flex-col gap-1">
+          ReplayGain
+          <select
+            className="input !py-1 text-xs min-w-0 tap"
+            value={f.replaygain_mode}
+            onChange={(ev) => set("replaygain_mode", ev.target.value)}
+          >
+            <option value="off">Off</option>
+            <option value="tags">Write tags — the player applies them</option>
+            <option value="apply">Apply to the audio — permanent</option>
+          </select>
+        </label>
+        <label className="text-[10px] text-zinc-500 flex flex-col gap-1">
+          Equaliser profile
+          <select
+            className="input !py-1 text-xs min-w-0 tap"
+            value={f.eq_profile}
+            onChange={(ev) => set("eq_profile", ev.target.value)}
+            disabled={!eq || (!eq.presets.length && !eq.profiles.length)}
+          >
+            <option value="">No equaliser</option>
+            {(eq?.presets ?? []).map((pr) => (
+              <option key={pr.id} value={pr.id}>{pr.label}</option>
+            ))}
+            {(eq?.profiles ?? []).map((pr) => (
+              <option key={pr.id} value={pr.id}>{pr.label}</option>
+            ))}
+          </select>
+        </label>
+      </div>
+      <div className="text-[10px] text-zinc-600 mt-1">
+        {f.replaygain_mode === "apply"
+          ? "Measures each track (ffmpeg EBU R128, one pass that rides along with the transcode) and writes the correction into the exported audio, so the levels match on every player — not just the ones that read ReplayGain tags."
+          : f.replaygain_mode === "tags"
+            ? "Measures each track (ffmpeg EBU R128, one pass that rides along with the transcode) and stores track + album gain/peak, so a player that reads ReplayGain matches your library's loudness. The audio itself is untouched."
+            : "No ReplayGain measurement or tags."}
+        {f.eq_profile && " The equaliser is applied to the exported audio."}
+        {eqSelected?.unsupported?.length
+          ? ` This profile uses ${eqSelected.unsupported.length} filter(s) this server cannot apply — those are skipped.`
+          : ""}
+      </div>
+
+      {/* ---- files written beside the audio ----------------------- */}
+      <div className="text-xs font-bold text-zinc-300 mt-4 mb-2">Files written beside the audio</div>
       <Opt
         checked={f.playlists}
         onChange={(v) => set("playlists", v)}
@@ -457,8 +591,14 @@ export function ExportOptionsPanel({ e, hint }: {
       <Opt
         checked={f.sidecars}
         onChange={(v) => set("sidecars", v)}
-        label="Copy covers, lyrics, cue, log and descriptions"
-        hint="cover.*, description.txt, .lrc, .cue, .log and the artist image travel with the tracks."
+        label="Copy covers, lyrics, cue, log, AccurateRip and descriptions"
+        hint="cover.*, description.txt, .lrc, .cue, .log, the .accurip files (the album's rip verification) and the artist image travel with the tracks."
+      />
+      <Opt
+        checked={f.manifest}
+        onChange={(v) => set("manifest", v)}
+        label="Write a checksum manifest (checksums.sha256)"
+        hint="One line per exported file — its SHA-256 and its path — at the root of the export, in the format `sha256sum -c` reads, so the device's copy can be verified later. Costs one read of everything the run just wrote."
       />
       <Opt
         checked={f.verify}
@@ -479,18 +619,28 @@ export function ExportOptionsPanel({ e, hint }: {
           ))}
         </select>
       </label>
-      <Opt
-        checked={f.prune}
-        onChange={(v) => set("prune", v)}
-        danger
-        label="Sync mode — remove audio the export does not write"
-        hint="Deletes audio files under the export folder that this run did not produce. Meant for mirroring a player: leave it off unless you want the destination to match this selection exactly."
-      />
+
+      {/* Sync deletes from a DRIVE this run wrote to. A zip run has no drive,
+          so the switch is not drawn there at all. */}
+      {!zip && (
+        <>
+          <div className="text-xs font-bold text-zinc-300 mt-4 mb-2">Sync</div>
+          <Opt
+            checked={f.prune}
+            onChange={(v) => set("prune", v)}
+            danger
+            label="Sync mode — remove audio the export does not write"
+            hint="Deletes audio files under the export folder that this run did not produce. Meant for mirroring a player: leave it off unless you want the destination to match this selection exactly."
+          />
+        </>
+      )}
 
       <div className="grid grid-cols-2 sm:grid-cols-[2fr_1fr_auto] gap-2 mt-4">
         <button className="btn-primary text-xs col-span-2 sm:col-span-1 tap" disabled={busy || !paths.length} onClick={e.run}>
           <HardDriveDownload className="h-3.5 w-3.5" />
-          {busy ? "Exporting…" : `Export ${paths.length || ""} track${paths.length === 1 ? "" : "s"}`}
+          {busy
+            ? "Exporting…"
+            : `${zip ? "Export & download" : "Export"} ${paths.length || ""} track${paths.length === 1 ? "" : "s"}`}
         </button>
         <button className="btn text-xs tap" disabled={busy} onClick={e.saveDefaults} title="Save these choices as the defaults for the next export">
           <Save className="h-3.5 w-3.5" />
@@ -502,7 +652,12 @@ export function ExportOptionsPanel({ e, hint }: {
       </div>
       <div className="text-[10px] text-zinc-600 mt-2">
         {f.codec === "copy"
-          ? "Copy keeps the original files bit-exact (an embed-cover pass still rewrites tags when art must change)."
+          ? f.replaygain_mode === "apply" || f.eq_profile
+            /* A copy run that also processes the audio is no longer a copy of
+               the bytes: saying "bit-exact" there would be a lie about the
+               files the user is about to get. */
+            ? "Copy keeps the original files bit-exact — except the ones the audio processing above changes: applying ReplayGain or an equaliser re-encodes those so the correction is in the audio."
+            : "Copy keeps the original files bit-exact (an embed-cover pass still rewrites tags when art must change)."
           : f.codec === "flac"
             ? "FLAC → FLAC exports are bit-copies; anything else is re-encoded with ffmpeg and fully re-tagged."
             : f.codec === "wav" || f.codec === "aiff"

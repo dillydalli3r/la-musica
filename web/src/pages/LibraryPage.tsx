@@ -15,6 +15,9 @@ import {
 import {
   ColumnResizer, ColumnsMenu, useColumnPrefs, useColumnWidths, useCustomColumns,
   customColValue, customCols, ALBUM_TRACK_COLS, ALBUM_TRACK_COL_W, ALBUM_TRACK_MIN_W, TABLE_FIT, TAG_COL_W,
+  // The track table's own columns, floors and phone folds — shared with the
+  // Export page's preview so the two tables cannot drift apart.
+  TRACK_COLS, TRACK_COL_W, TRACK_PHONE_CLS, PHONE_HIDE, phoneHide,
   type Col, type CustomCol,
 } from "../lib/columns";
 import { gradeSliver, statusFor, auditFails } from "../lib/status";
@@ -30,6 +33,7 @@ import StarRating from "../components/StarRating";
 import { ratingOf, useRatings, useSetRating, FOLDER_RATING_NOTE } from "../lib/ratings";
 import CoverImg, { TrackCover } from "../components/CoverImg";
 import FavHeart from "../components/FavHeart";
+import TrackTitleCell from "../components/TrackTitleCell";
 import AlbumCard from "../components/AlbumCard";
 import AlbumRow, { type AlbumRowCell } from "../components/AlbumRow";
 import StatsPanel from "../components/StatsPanel";
@@ -105,64 +109,9 @@ const ARTIST_COLS: Col[] = [
   { id: "grade", label: "Grade", sortKey: "aggregate.grade_pct" },
 ];
 
-/** The track table's floors — same rule as ALBUM_COL_W above, with a wider
- *  one for Title: that cell also carries the issue, grade, cached and favourite
- *  marks, so its floor has to leave the title text itself a readable column. */
-const TRACK_COL_W: Record<string, string> = {
-  num: "w-12",
-  cover: "w-[52px]",
-  // `md:` like the album table's name column: on a phone the title is the only
-  // column left beside the cover, so it takes the whole row instead.
-  title: "md:w-[220px]",
-  artist: "w-[108px]",
-  album: "w-[112px]",
-  year: "w-16",
-  genre: "w-24",
-  media: "w-[88px]",
-  // 80 px, the same floor the album tracklist gives its length column: an
-  // hour-plus length is seven characters ("1:02:33"), which the old 64 px
-  // floor could only break onto a second line.
-  duration: "w-20",
-  bitrate: "w-[88px]",
-  dr: "w-12",
-  source: "w-20",
-  type: "w-20",
-  inst: "w-20",
-  composer: "w-[112px]",
-  lyricist: "w-[112px]",
-  remixer: "w-[96px]",
-};
-
-const TRACK_COLS: Col[] = [
-  { id: "num", label: "#", sortKey: "tracknumber" },
-  { id: "cover", label: "", sortKey: "" },
-  { id: "title", label: "Title", sortKey: "tags.TITLE" },
-  { id: "artist", label: "Artist", sortKey: "artist" },
-  { id: "album", label: "Album", sortKey: "album" },
-  { id: "year", label: "Year", sortKey: "tags.DATE" },
-  { id: "genre", label: "Genre", sortKey: "tags.GENRE" },
-  { id: "media", label: "Media", sortKey: "tags.MEDIA" },
-  { id: "duration", label: "Duration", sortKey: "tech.length" },
-  { id: "bitrate", label: "Bitrate", sortKey: "tech.bitrate" },
-  // ReplayGain deliberately has NO column: it is playback metadata — the
-  // player applies it to keep loudness even between tracks. Only Dynamic
-  // Range is shown.
-  { id: "dr", label: "DR", sortKey: "tags.DYNAMIC RANGE" },
-  { id: "source", label: "Source", sortKey: "tags.SOURCE" },
-  { id: "type", label: "Type", sortKey: "is_video" },
-  { id: "inst", label: "INST", sortKey: "tags.INSTRUMENTAL" },
-  { id: "composer", label: "Composer", sortKey: "tags.COMPOSER", defHidden: true },
-  { id: "lyricist", label: "Lyricist", sortKey: "tags.LYRICIST", defHidden: true },
-  { id: "remixer", label: "Remixer", sortKey: "tags.REMIXER", defHidden: true },
-];
-
-/** A phone (390 px) table keeps the row's own name and drops the numbers: at
- *  that width a row that keeps them squeezes the name to nothing, and the
- *  table's own scroll wrapper cannot give it back.
- *
- *  The class has to sit on the header AND on the cells, or the fixed-layout
- *  grid misaligns; `md` is where each column comes back. */
-const PHONE_HIDE = " hidden md:table-cell";
+/** Which columns the album table folds on a phone (the shared `PHONE_HIDE`
+ *  class). The two TRACK tables' fold map is `TRACK_PHONE_CLS` in
+ *  lib/columns — shared with the Export page's preview. */
 const ALBUM_PHONE_CLS: Record<string, string> = {
   artist: PHONE_HIDE, year: PHONE_HIDE, tracks: PHONE_HIDE, rating: PHONE_HIDE,
   grade: PHONE_HIDE, media: PHONE_HIDE, dr: PHONE_HIDE, source: PHONE_HIDE,
@@ -172,23 +121,6 @@ const ALBUM_PHONE_CLS: Record<string, string> = {
 const ARTIST_PHONE_CLS: Record<string, string> = {
   albums: PHONE_HIDE, tracks: PHONE_HIDE, checks: PHONE_HIDE,
 };
-/** Both track tables (the Tracks view and every album tracklist): only the
- *  cover and the title stay on a phone, every column id named here folds at
- *  `md`. The two tables name the length column differently (`duration` in the
- *  Tracks view, `dur` in an album tracklist), and a column whose id is
- *  missing here is the one column that never folds — which is how the
- *  tracklist's `dur` used to ride along on a phone. */
-const TRACK_PHONE_CLS: Record<string, string> = {
-  num: PHONE_HIDE, artist: PHONE_HIDE, album: PHONE_HIDE, year: PHONE_HIDE,
-  genre: PHONE_HIDE, media: PHONE_HIDE, duration: PHONE_HIDE, dur: PHONE_HIDE,
-  bitrate: PHONE_HIDE, dr: PHONE_HIDE, source: PHONE_HIDE, type: PHONE_HIDE,
-  inst: PHONE_HIDE, composer: PHONE_HIDE, lyricist: PHONE_HIDE, remixer: PHONE_HIDE,
-};
-/** Tag columns the user added fold with the built-ins they sit beside. */
-function phoneHide(cls: Record<string, string>, id: string): string {
-  return cls[id] ?? (id.startsWith("tag:") ? PHONE_HIDE : "");
-}
-
 interface FlatAlbum extends Album {
   artist: string;
   video_count: number;
@@ -1172,37 +1104,45 @@ export default function LibraryPage() {
                             albumCover={al.cover_file}
                             wrapperClass="h-8 w-8 rounded bg-raise border border-border overflow-hidden shrink-0"
                           />
-                          <Link to={trackRef(t)} className="break-words hover:text-accent-soft flex-1 min-w-[8rem]"
-                            title="Click to play · Ctrl-click to open track page"
-                            onClick={(e) => entityLinkClick(e, () => navigate(trackRef(t)))}
+                          <TrackTitleCell
+                            className="flex-1"
+                            trailing={
+                              <>
+                                <span className="shrink-0"><FavHeart kind="track" id={t.path} mbid={t.tags.MUSICBRAINZ_TRACKID} iconClass="h-3.5 w-3.5" revealOnHover /></span>
+                                <span className="row-hover shrink-0" onClick={(e) => e.stopPropagation()}>
+                                  <TrackActionsMenu path={t.path} releaseMbid={t.tags.MUSICBRAINZ_ALBUMID} />
+                                </span>
+                                <StarRating size="sm" value={ratingOf(ratings, t.path)} onChange={(v) => setRating(t.path, v)} pending={pending(t.path)} />
+                                <span className="text-[10px] text-zinc-600 font-mono w-10 text-right shrink-0 cell-nowrap">{fmtDuration(t.tech.length)}</span>
+                              </>
+                            }
                           >
-                            {t.tags.TITLE ?? t.file}
-                          </Link>
-                          <LockedChip path={t.path} />
-                          {!!t.issues?.length && (
-                            <button
-                              className="text-[9px] text-red-400/70 shrink-0 hover:text-red-300"
-                              title={t.issues.join("\n")}
-                              onClick={(e) => {
-                                e.stopPropagation();
-                                setDetailTrack({ track: t, albumPath: al.path });
-                              }}
+                            <Link to={trackRef(t)} className="break-words hover:text-accent-soft min-w-0"
+                              title="Click to play · Ctrl-click to open track page"
+                              onClick={(e) => entityLinkClick(e, () => navigate(trackRef(t)))}
                             >
-                              {t.issues.length}✗
-                            </button>
-                          )}
-                          <GradeBadge pass={!!t.grade_pass && !auditFails(t.audit)} audit={t.audit} size="sm" />
-                          <AdvisoryMark value={t.tags.ITUNESADVISORY} />
-                          <CachedMark path={t.path} />
-                          <span className="shrink-0"><FavHeart kind="track" id={t.path} mbid={t.tags.MUSICBRAINZ_TRACKID} iconClass="h-3.5 w-3.5" revealOnHover /></span>
-                          <span className="row-hover shrink-0" onClick={(e) => e.stopPropagation()}>
-                            <TrackActionsMenu path={t.path} releaseMbid={t.tags.MUSICBRAINZ_ALBUMID} />
-                          </span>
-                          {t.tags.INSTRUMENTAL === "1" && (
-                            <span className="chip bg-zinc-800 text-zinc-400 border border-border text-[9px] shrink-0">INST</span>
-                          )}
-                          <StarRating size="sm" value={ratingOf(ratings, t.path)} onChange={(v) => setRating(t.path, v)} pending={pending(t.path)} />
-                          <span className="text-[10px] text-zinc-600 font-mono w-10 text-right shrink-0 cell-nowrap">{fmtDuration(t.tech.length)}</span>
+                              {t.tags.TITLE ?? t.file}
+                            </Link>
+                            <AdvisoryMark value={t.tags.ITUNESADVISORY} />
+                            <LockedChip path={t.path} />
+                            {!!t.issues?.length && (
+                              <button
+                                className="text-[9px] text-red-400/70 shrink-0 hover:text-red-300"
+                                title={t.issues.join("\n")}
+                                onClick={(e) => {
+                                  e.stopPropagation();
+                                  setDetailTrack({ track: t, albumPath: al.path });
+                                }}
+                              >
+                                {t.issues.length}✗
+                              </button>
+                            )}
+                            <GradeBadge pass={!!t.grade_pass && !auditFails(t.audit)} audit={t.audit} size="sm" />
+                            <CachedMark path={t.path} />
+                            {t.tags.INSTRUMENTAL === "1" && (
+                              <span className="chip bg-zinc-800 text-zinc-400 border border-border text-[9px] shrink-0">INST</span>
+                            )}
+                          </TrackTitleCell>
                         </div>
                       );
                     })}
@@ -1421,15 +1361,43 @@ export default function LibraryPage() {
                       )}
                       {trackCols.includes("title") && (
                         <td className="td">
-                          <div className="flex flex-wrap items-center gap-x-1.5 gap-y-0.5 min-w-0">
+                          <TrackTitleCell
+                            trailing={
+                              <>
+                                <span className="shrink-0" onClick={(e) => e.stopPropagation()}>
+                                  <FavHeart kind="track" id={tr.path} mbid={tr.tags.MUSICBRAINZ_TRACKID} iconClass="h-3.5 w-3.5" revealOnHover />
+                                </span>
+                                <span className="row-hover shrink-0" onClick={(e) => e.stopPropagation()}>
+                                  <TrackActionsMenu path={tr.path} releaseMbid={tr.tags.MUSICBRAINZ_ALBUMID} />
+                                </span>
+                                <button
+                                  className="text-zinc-500 hover:text-accent-soft shrink-0"
+                                  title="Grading & audit details"
+                                  onClick={(e) => {
+                                    e.stopPropagation();
+                                    setDetailTrack({ track: tr, albumPath: tr.path.split("/").slice(0, -1).join("/") });
+                                  }}
+                                >
+                                  <InfoIcon className="h-3.5 w-3.5" />
+                                </button>
+                                {/* the track's rating — the same fixed slot the
+                                    album page uses, so a column of ratings
+                                    reads straight down the page */}
+                                <span className="shrink-0" onClick={(e) => e.stopPropagation()}>
+                                  <StarRating size="sm" value={ratingOf(ratings, tr.path)} onChange={(v) => setRating(tr.path, v)} pending={pending(tr.path)} />
+                                </span>
+                              </>
+                            }
+                          >
                             <Link
                               to={trackRef(tr)}
-                              className="hover:text-accent-soft break-words flex-1 min-w-[8rem]"
+                              className="hover:text-accent-soft break-words min-w-0"
                               title="Click to play · Ctrl-click to open track page"
                               onClick={(e) => entityLinkClick(e, () => navigate(trackRef(tr)))}
                             >
                               {tr.tags.TITLE ?? tr.file}
                             </Link>
+                            <AdvisoryMark value={tr.tags.ITUNESADVISORY} />
                             <LockedChip path={tr.path} />
                             {!!tr.issues?.length && (
                               <button
@@ -1444,35 +1412,12 @@ export default function LibraryPage() {
                               </button>
                             )}
                             <GradeBadge pass={!!tr.grade_pass && !auditFails(tr.audit)} audit={tr.audit} size="sm" />
-                            <AdvisoryMark value={tr.tags.ITUNESADVISORY} />
                             <CachedMark path={tr.path} />
                             {tr.is_video && <span title="Music video" className="shrink-0 inline-flex"><FileVideo className="h-3.5 w-3.5 text-zinc-500" /></span>}
-                            <span className="shrink-0" onClick={(e) => e.stopPropagation()}>
-                              <FavHeart kind="track" id={tr.path} mbid={tr.tags.MUSICBRAINZ_TRACKID} iconClass="h-3.5 w-3.5" revealOnHover />
-                            </span>
-                            <span className="row-hover shrink-0" onClick={(e) => e.stopPropagation()}>
-                              <TrackActionsMenu path={tr.path} releaseMbid={tr.tags.MUSICBRAINZ_ALBUMID} />
-                            </span>
-                            <button
-                              className="text-zinc-500 hover:text-accent-soft shrink-0"
-                              title="Grading & audit details"
-                              onClick={(e) => {
-                                e.stopPropagation();
-                                setDetailTrack({ track: tr, albumPath: tr.path.split("/").slice(0, -1).join("/") });
-                              }}
-                            >
-                              <InfoIcon className="h-3.5 w-3.5" />
-                            </button>
                             {tr.tags.INSTRUMENTAL === "1" && (
                               <span className="chip bg-zinc-800 text-zinc-400 border border-border text-[10px] shrink-0">INST</span>
                             )}
-                            {/* the track's rating, beside the row's other
-                                marks — this cell wraps, so it never pushes
-                                into the column next door */}
-                            <span className="shrink-0" onClick={(e) => e.stopPropagation()}>
-                              <StarRating size="sm" value={ratingOf(ratings, tr.path)} onChange={(v) => setRating(tr.path, v)} pending={pending(tr.path)} />
-                            </span>
-                          </div>
+                          </TrackTitleCell>
                         </td>
                       )}
                       {trackCols.includes("artist") && <td className={`td text-zinc-400 break-words${phoneHide(TRACK_PHONE_CLS, "artist")}`}>{tr.artist}</td>}
@@ -1761,15 +1706,44 @@ function AlbumRowGroup({
                           )}
                           {trackCols.includes("title") && (
                             <td className="td">
-                              <div className="flex flex-wrap items-center gap-x-1.5 gap-y-0.5 min-w-0">
+                              <TrackTitleCell
+                                trailing={
+                                  <>
+                                    <span className="shrink-0" onClick={(e) => e.stopPropagation()}>
+                                      <FavHeart kind="track" id={t.path} mbid={t.tags.MUSICBRAINZ_TRACKID} iconClass="h-3.5 w-3.5" revealOnHover />
+                                    </span>
+                                    <span className="row-hover shrink-0" onClick={(e) => e.stopPropagation()}>
+                                      <TrackActionsMenu path={t.path} releaseMbid={t.tags.MUSICBRAINZ_ALBUMID} />
+                                    </span>
+                                    <button
+                                      className="text-zinc-500 hover:text-accent-soft shrink-0"
+                                      title="Grading & audit details"
+                                      onClick={(e) => {
+                                        e.stopPropagation();
+                                        onTrackDetails(t);
+                                      }}
+                                    >
+                                      <InfoIcon className="h-3.5 w-3.5" />
+                                    </button>
+                                    {/* the rating in the row's fixed slot —
+                                        the same x on every track of the album,
+                                        and out of the 80 px Dur column beside
+                                        it, which cannot hold both */}
+                                    <span className="shrink-0" onClick={(e) => e.stopPropagation()}>
+                                      <StarRating size="sm" value={ratingOf(ratings, t.path)} onChange={(v) => setRating(t.path, v)} pending={pending(t.path)} />
+                                    </span>
+                                  </>
+                                }
+                              >
                                 <Link
                                   to={trackRef(t)}
-                                  className="hover:text-accent-soft break-words flex-1 min-w-[8rem]"
+                                  className="hover:text-accent-soft break-words min-w-0"
                                   title="Click to play · Ctrl-click to open track page"
                                   onClick={(e) => entityLinkClick(e, () => navigate(trackRef(t)))}
                                 >
                                   {t.tags.TITLE ?? t.file}
                                 </Link>
+                                <AdvisoryMark value={t.tags.ITUNESADVISORY} />
                                 <LockedChip path={t.path} />
                                 {!!t.issues?.length && (
                                   <button
@@ -1784,35 +1758,12 @@ function AlbumRowGroup({
                                   </button>
                                 )}
                                 <GradeBadge pass={!!t.grade_pass && !auditFails(t.audit)} audit={t.audit} size="sm" />
-                                <AdvisoryMark value={t.tags.ITUNESADVISORY} />
                                 <CachedMark path={t.path} />
                                 {t.is_video && <span title="Music video" className="shrink-0 inline-flex"><FileVideo className="h-3.5 w-3.5 text-zinc-500" /></span>}
-                                <span className="shrink-0" onClick={(e) => e.stopPropagation()}>
-                                  <FavHeart kind="track" id={t.path} mbid={t.tags.MUSICBRAINZ_TRACKID} iconClass="h-3.5 w-3.5" revealOnHover />
-                                </span>
-                                <span className="row-hover shrink-0" onClick={(e) => e.stopPropagation()}>
-                                  <TrackActionsMenu path={t.path} releaseMbid={t.tags.MUSICBRAINZ_ALBUMID} />
-                                </span>
-                                <button
-                                  className="text-zinc-500 hover:text-accent-soft shrink-0"
-                                  title="Grading & audit details"
-                                  onClick={(e) => {
-                                    e.stopPropagation();
-                                    onTrackDetails(t);
-                                  }}
-                                >
-                                  <InfoIcon className="h-3.5 w-3.5" />
-                                </button>
                                 {t.tags.INSTRUMENTAL === "1" && (
                                   <span className="chip bg-zinc-800 text-zinc-400 border border-border text-[10px] shrink-0">INST</span>
                                 )}
-                                {/* the rating beside the row's other marks:
-                                    this cell wraps, the 80 px Dur column
-                                    beside it cannot */}
-                                <span className="shrink-0" onClick={(e) => e.stopPropagation()}>
-                                  <StarRating size="sm" value={ratingOf(ratings, t.path)} onChange={(v) => setRating(t.path, v)} pending={pending(t.path)} />
-                                </span>
-                              </div>
+                              </TrackTitleCell>
                             </td>
                           )}
                           {trackCols.includes("genre") && <td className={`td text-zinc-500 break-words${phoneHide(TRACK_PHONE_CLS, "genre")}`}>{t.tags.GENRE ?? "—"}</td>}

@@ -317,6 +317,10 @@ const NEVER_CACHE_EXACT: Record<string, true> = {
   "/api/soulseek/local-file": true,
   "/api/artist/image": true,
   "/api/jobs/locks": true,
+  // The cookie jar's state is what the user is looking at RIGHT NOW while
+  // pasting a file in: an offline copy would say "4 cookies saved" over a jar
+  // that was just deleted.
+  "/api/youtube/cookies": true,
 };
 const NEVER_CACHE_PREFIX = ["/api/auth/", "/api/soulseek/preview"];
 
@@ -424,6 +428,25 @@ function noteContainerSwap<T extends ContainerSwap>(r: T): T {
   return r;
 }
 
+/** The YouTube cookie jar (`server/api_youtube.py`): the settings that decide
+ *  whether yt-dlp sends cookies, plus what the jar on disk actually holds.
+ *  `warnings` are the server's own sentences about it (a jar with no
+ *  youtube.com cookie cannot sign a download in), shown as-is. */
+export interface YoutubeCookies {
+  mode: "none" | "file" | "browser";
+  browser: string;
+  present: boolean;
+  path: string;
+  bytes: number;
+  /** COOKIE lines that parsed — a jar's comments are not cookies. */
+  lines: number;
+  sites: string[];
+  saved_at: string | null;
+  browsers: string[];
+  max_bytes: number;
+  warnings: string[];
+}
+
 /** One credit row of `/api/credits`: who did what on a track or an album.
  *  `role` arrives already lower-cased and grouped-ready, `attributes` are the
  *  instrument / vocal part the relation stated, and `mbid` is empty on rows
@@ -460,6 +483,10 @@ export interface ExportCodecSpec {
 /** The Export page's form — the request body, and (key for key, under
  * `export_<field>`) the saved defaults it loads on open. */
 export interface ExportForm {
+  /** "server" writes under a drive on the server; "zip" builds one archive the
+   *  client downloads. A browser cannot write to the server's filesystem, so
+   *  it resolves an unusable/empty value to "zip" (see ExportDialog). */
+  target: string;
   dest: string;
   subfolder: string;
   codec: string;
@@ -470,13 +497,51 @@ export interface ExportForm {
   embed_cover_resolution: number;
   id3v2: string;
   id3v1: boolean;
-  replaygain: boolean;
+  /** "off" | "tags" (write ReplayGain tags, the player applies them) |
+   *  "apply" (bake the correction into the exported audio). */
+  replaygain_mode: string;
+  /** An equaliser preset or imported profile id; "" = none. */
+  eq_profile: string;
   clean_tags: boolean;
   playlists: boolean;
   sidecars: boolean;
+  /** Write `checksums.sha256` at the export root (sha256sum -c compatible). */
+  manifest: boolean;
   verify: boolean;
   prune: boolean;
   workers: number;
+}
+
+/** The archive a `target: "zip"` run built — one at a time, kept in the
+ *  server's own export folder until the next one replaces it (`id` is a run
+ *  stamp, not a durable key). */
+export interface ExportZip {
+  id: string;
+  name: string;
+  bytes: number;
+  files: number;
+  /** The server path to download it from ("/api/export/zip/<id>"). */
+  url: string;
+}
+
+/** One equaliser profile the server can bake into an export
+ *  (`GET /api/export/eq`): the built-in presets, and the profiles the user
+ *  imported. `unsupported` names filters the server's own processor skipped. */
+export interface ExportEqProfile {
+  id: string;
+  label: string;
+  preamp_db: number;
+  filters: Record<string, unknown>[];
+  imported_at?: string;
+  unsupported?: string[];
+  notes?: string;
+}
+
+export interface ExportEq {
+  presets: ExportEqProfile[];
+  profiles: ExportEqProfile[];
+  /** The server's own line about what applying a profile does, shown verbatim. */
+  note: string;
 }
 
 /** One item in <music folder>/.mlo/trash. `cover` is false when the cover
@@ -596,8 +661,39 @@ export interface SlskStatus {
       attempts: { method: string; answered: boolean; ok: boolean; detail: string }[];
       checked_at: number;
       in_flight: boolean;
+      /** When the lease a gateway granted runs out (0 = none was stated, so the
+       *  entry does not expire on its own). A confirmed mapping whose lease has
+       *  passed may be gone — the gateway drops the entry when it runs out. */
+      expires_at: number;
     };
   };
+}
+
+/** `/api/soulseek/port-check` — one row per thing this machine can actually
+ *  prove about the listen port (server/soulseek_port.py), for the "Test port"
+ *  button.
+ *
+ *  `proves`/`cannot` are part of every row on purpose: a green row is not a
+ *  promise that the internet reaches the port, and the pair is what says so where
+ *  the state alone would not be read as more than it is. `verdict` is the worst
+ *  row's state, or `ok` only when something accepts on the port AND the router
+ *  lists a mapping for it; `note` is what no row can say. */
+export interface SlskPortCheck {
+  ok: boolean;
+  port: number;
+  checks: {
+    id: string;
+    label: string;
+    state: "ok" | "warn" | "fail" | "unknown";
+    detail: string;
+    /** What a pass on this row means. */
+    proves: string;
+    /** What it can never tell, however green it is. */
+    cannot: string;
+  }[];
+  verdict: "ok" | "warn" | "fail" | "unknown";
+  note: string;
+  checked_at: string;
 }
 
 /** One file of the running auto-import download, as slskd reports it. */
@@ -2283,6 +2379,13 @@ export const api = {
   soulseekSharesRescan: () =>
     json<{ ok: boolean }>(`${API}/soulseek/shares/rescan`, { method: "POST" }, 60000),
   soulseekUploads: () => json<any>(`${API}/soulseek/uploads`),
+  /** The listen port's own check (server/api_soulseek.py): the listener here,
+   *  what the router holds for the port, the addresses both depend on, a
+   *  connection from this machine to the public address, and slskd's login —
+   *  each with what it proves. Every step is bounded on the server and nothing
+   *  there takes a lock, so it may be asked while a download runs; the outside
+   *  half of the answer needs a probe from outside, which this app does not ship. */
+  soulseekPortCheck: () => json<SlskPortCheck>(`${API}/soulseek/port-check`, undefined, 60000),
   soulseekStop: () =>
     json<{ ok: boolean; message: string }>(`${API}/soulseek/stop`, { method: "POST" }, 15000),
   soulseekSearch: (query: string) =>
@@ -2521,12 +2624,26 @@ export const api = {
    * table the backend owns. */
   exportCodecs: () => json<{ codecs: Record<string, ExportCodecSpec> }>(`${API}/export/codecs`),
   exportDefaults: () => json<ExportForm>(`${API}/export/defaults`),
+  /** The equaliser profiles an export can bake in, and the server's own line
+   *  about what applying one does. */
+  exportEq: () => json<ExportEq>(`${API}/export/eq`),
+  /** The archive a `target: "zip"` run built, as a URL an `<a download>` can
+   *  be pointed at. The token rides in the query string because a download
+   *  cannot send an Authorization header; on the web app (`BASE === ""`) the
+   *  path stays relative and the same-site cookie does the job. */
+  exportZipUrl: (url: string) => media(url.startsWith("/") ? `${BASE}${url}` : url),
   exportRun: (body: ExportForm & { paths: string[] }, timeoutMs = 1800000) =>
     json<{
       ok: boolean; total: number; exported: number; skipped: number; failed: number;
       bytes: number; sidecars: number; playlists: number; verified: number;
       pruned: number; pruned_files: string[]; warnings: string[];
       error_count: number; errors: string[]; estimated_bytes: number | null;
+      /** Present only for `target: "zip"` — what to hand the browser. */
+      zip: ExportZip | null;
+      /** What the run did with the audio: the mode it used, the profile id it
+       *  resolved, and how many files it processed / equalised. */
+      replaygain_mode: string; eq_profile: string;
+      processed: number; eq_applied: number;
     }>(`${API}/export`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
@@ -3158,13 +3275,29 @@ export const api = {
    *  music folder, which the caller swallows. */
   videoThumbUrl: (path: string, t: number, w = 160) =>
     media(`${API}/videos/thumb?path=${encodeURIComponent(path)}&t=${Math.max(0, Math.floor(t))}&w=${Math.round(w)}`),
-  /** Download a music video from YouTube for one track (web/digital media). */
+  /** Download a music video from YouTube for one track (web/digital media).
+   *  `ok: false` carries the server's reason in `error` (YouTube off, yt-dlp
+   *  missing, nothing acceptable found) rather than a bare failure. */
   videosDownloadYoutube: (body: { path?: string; artist: string; title: string; duration?: number }) =>
-    json<{ ok: boolean; file?: string; candidate?: Record<string, unknown> }>(`${API}/videos/download-youtube`, {
+    json<{ ok: boolean; file?: string; candidate?: Record<string, unknown>; error?: string }>(`${API}/videos/download-youtube`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(body),
     }, 900000),
+  /** The YouTube cookie jar: which mode is on and what the file holds. */
+  youtubeCookies: () => json<YoutubeCookies>(`${API}/youtube/cookies`),
+  /** Save a pasted or dropped cookies.txt. The server validates it IS a
+   *  Netscape cookie file first, so junk comes back as a 400 with the reason
+   *  instead of replacing a jar that worked. */
+  youtubeCookiesSave: (text: string) =>
+    json<YoutubeCookies>(`${API}/youtube/cookies`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ text }),
+    }, 60000),
+  /** Remove the jar (the mode setting is untouched). */
+  youtubeCookiesDelete: () =>
+    json<YoutubeCookies>(`${API}/youtube/cookies`, { method: "DELETE" }),
   /** Write TITLE/TRACKNUMBER/DISCNUMBER onto video files from the match-assist
    *  panel (one assignment per video file). */
   videosMatch: (albumPath: string, assignments: { path: string; title: string; tracknumber?: number; discnumber?: number }[]) =>

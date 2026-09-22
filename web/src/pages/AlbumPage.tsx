@@ -12,6 +12,7 @@ import Description from "../components/Description";
 import DownloadButton from "../components/DownloadButton";
 import { ExportButton } from "../components/ExportDialog";
 import FavHeart from "../components/FavHeart";
+import TrackTitleCell from "../components/TrackTitleCell";
 import { trackRef, entityLinkClick } from "../lib/refs";
 import { invalidateLibrary } from "../lib/invalidate";
 import { auditFails } from "../lib/status";
@@ -116,6 +117,8 @@ export default function AlbumPage() {
   // the track index the user assigned it to, plus the in-flight save flag.
   const [videoAssigned, setVideoAssigned] = useState<Record<string, number>>({});
   const [videoSaving, setVideoSaving] = useState(false);
+  // The album-level "download the missing videos" run (one at a time).
+  const [videosBusy, setVideosBusy] = useState(false);
   // album description (description.txt in the album folder): the edit buffer
   // and one busy flag for the fetch/save/clear trio
   const [descEditing, setDescEditing] = useState(false);
@@ -232,6 +235,10 @@ export default function AlbumPage() {
   // (album-level tag, then the API's own field) decides whether that is
   // offered at all.
   const digitalMedia = /digital|web|download/i.test(`${data.media ?? ""} ${data.meta?.MEDIA ?? ""}`);
+  // YouTube downloads are switchable off (Settings → Videos) and the server
+  // refuses them there, so the album's own button says why instead of firing
+  // a search that can only come back empty.
+  const youtubeOff = config?.youtube_enabled === false;
 
   /** The track a video row defaults to: the one whose length is closest (an
    *  untagged duration leaves the select empty rather than guessing). */
@@ -279,10 +286,18 @@ export default function AlbumPage() {
   };
 
   /** Download the music video for one track from YouTube (web/digital
-   *  releases only — see `digitalMedia`). */
-  const downloadVideo = async (tr: Track) => {
+   *  releases only — see `digitalMedia`), then tag it as THAT track's video.
+   *
+   *  The download lands in the album folder named after the YouTube upload,
+   *  so nothing about the file says which release track it is: the tag write
+   *  is what makes it this track's music video (it sorts, plays and grades
+   *  with the album from then on). It is the same /api/videos/match the
+   *  matching panel posts — one tag path, not a second one — and here the
+   *  assignment is certain, because the video was searched for by this
+   *  track's own artist and title. Returns whether a video was saved. */
+  const downloadVideo = async (tr: Track): Promise<boolean> => {
     const title = tr.tags.TITLE;
-    if (!title) return;
+    if (!title) return false;
     try {
       const r = await api.videosDownloadYoutube({
         path: tr.path,
@@ -290,16 +305,71 @@ export default function AlbumPage() {
         title,
         duration: tr.tech.length || undefined,
       });
-      toast(
-        r.ok
-          ? `Music video saved${r.file ? `: ${r.file.split(/[\\/]/).pop()}` : ""}`
-          : "No matching music video found"
-      );
+      if (!r.ok || !r.file) {
+        toast(r.error ? `No music video: ${r.error}` : "No matching music video found");
+        return false;
+      }
+      toast(`Music video saved: ${r.file.split(/[\\/]/).pop()}`);
+      try {
+        await api.videosMatch(data.path, [
+          {
+            path: r.file,
+            title,
+            tracknumber: tr.tracknumber ?? undefined,
+            discnumber: tr.discnumber ?? undefined,
+          },
+        ]);
+      } catch (e) {
+        // The file IS downloaded; only the tag write failed, and the matching
+        // panel can still record the assignment by hand — so say that rather
+        // than reporting the whole download as failed.
+        toast.error(`Downloaded, but tagging it as "${title}" failed: ${e}`);
+      }
       qc.invalidateQueries({ queryKey: ["videos", decoded] });
       qc.invalidateQueries({ queryKey: ["album", decoded] });
+      return true;
     } catch (e) {
       toast.error(String(e));
+      return false;
     }
+  };
+
+  /** Tracks of this album that have no music video yet.
+   *
+   *  A video is a track's when it carries the same TITLE — exactly what the
+   *  tag write above (and the matching panel's Save) produces — so a file
+   *  name that happens to look like a title never counts as a match. */
+  const albumVideos = data.tracks.filter((t) => t.is_video);
+  const missingVideos = data.tracks.filter((t) => {
+    const title = (t.tags.TITLE ?? "").trim().toLowerCase();
+    if (t.is_video || !title) return false;
+    return !albumVideos.some((v) => (v.tags.TITLE ?? "").trim().toLowerCase() === title);
+  });
+
+  /** Fetch this album's missing music videos, one at a time.
+   *
+   *  The SAME per-track call the row menu and the video overlay make, so
+   *  there is one download path and one definition of "this track's video".
+   *  Sequential on purpose: each video is a multi-hundred-megabyte download
+   *  plus a tag remux, and firing the whole album at once would put every one
+   *  of them on the same connection. */
+  const downloadMissingVideos = async () => {
+    if (!missingVideos.length) {
+      toast("Every track already has its music video");
+      return;
+    }
+    setVideosBusy(true);
+    let saved = 0;
+    try {
+      for (const [i, tr] of missingVideos.entries()) {
+        toast(`Music video ${i + 1}/${missingVideos.length}: ${tr.tags.TITLE}`);
+        if (await downloadVideo(tr)) saved++;
+      }
+    } finally {
+      setVideosBusy(false);
+      refetchVideos();
+    }
+    toast(`${saved} of ${missingVideos.length} music video(s) saved`);
   };
 
   const runScripts = async (ids: number[]) => {
@@ -854,6 +924,31 @@ export default function AlbumPage() {
                       current={(data.meta ?? {}) as Record<string, unknown>}
                       iconOnly
                     />
+                    {/* One album-level entry to the video download, for the
+                        whole release: the row menu and the video overlay both
+                        fetch a single track's video, and a digital album is
+                        missing every one of them at once. Same per-track call
+                        underneath (see downloadMissingVideos), so nothing here
+                        is a second download path. */}
+                    {digitalMedia && (
+                      <button
+                        className="btn-icon"
+                        onClick={downloadMissingVideos}
+                        disabled={videosBusy || youtubeOff || !missingVideos.length}
+                        title={
+                          youtubeOff
+                            ? "YouTube downloads are off (Settings → Videos)"
+                            : !missingVideos.length
+                              ? "No track here is missing a music video"
+                              : `Download ${missingVideos.length} missing music video${
+                                  missingVideos.length === 1 ? "" : "s"
+                                } from YouTube and tag ${missingVideos.length === 1 ? "it" : "them"} as this album's tracks`
+                        }
+                        aria-label="Download missing music videos"
+                      >
+                        {videosBusy ? <Loader2 className="h-4 w-4 animate-spin" /> : <Film className="h-4 w-4" />}
+                      </button>
+                    )}
                     <TagActionsMenu
                       paths={data.tracks.map((t) => t.path)}
                       albumPath={data.path}
@@ -1363,15 +1458,40 @@ export default function AlbumPage() {
                 )}
                 {trackCols.includes("title") && (
                   <td className="td">
-                    <div className="flex flex-wrap items-center gap-x-1.5 gap-y-0.5 min-w-0">
+                    <TrackTitleCell
+                      trailing={
+                        <>
+                          <span className="shrink-0" onClick={(e) => e.stopPropagation()}>
+                            <FavHeart kind="track" id={tr.path} mbid={tr.tags.MUSICBRAINZ_TRACKID} iconClass="h-3.5 w-3.5" title={undefined} revealOnHover />
+                          </span>
+                          {/* The "…": what this ONE file can be asked to do —
+                              tagging, its scripts (lyrics among them), credits
+                              and the stored readout. Hover-revealed like the
+                              heart beside it: a row's actions are not worth
+                              permanent space. */}
+                          <span className="row-hover shrink-0" onClick={(e) => e.stopPropagation()}>
+                            <TrackActionsMenu path={tr.path} releaseMbid={tr.tags.MUSICBRAINZ_ALBUMID} />
+                          </span>
+                          <span className="shrink-0" onClick={(e) => e.stopPropagation()}>
+                            <StarRating size="sm" value={ratingOf(ratings, tr.path)} onChange={(v) => setRating(tr.path, v)} pending={pending(tr.path)} />
+                          </span>
+                        </>
+                      }
+                    >
                       <Link
                         to={trackRef(tr)}
-                        className="hover:text-accent-soft break-words min-w-[8rem]"
+                        className="hover:text-accent-soft break-words min-w-0"
                         title="Click to play · Ctrl-click to open track page"
                         onClick={(e) => entityLinkClick(e, () => navigate(trackRef(tr)))}
                       >
                         {tr.tags.TITLE ?? tr.file}
                       </Link>
+                      {/* The marks that describe the FILE, directly beside the
+                          name they belong to — the EXPLICIT/CLEAN badge first,
+                          because it is the one a reader looks for by the title
+                          (the rating and the row's actions are in the fixed
+                          slot on the right; see TrackTitleCell). */}
+                      <AdvisoryMark value={tr.tags.ITUNESADVISORY} />
                       <LockedChip path={tr.path} />
                       {!!tr.issues?.length && (
                         <button
@@ -1386,7 +1506,6 @@ export default function AlbumPage() {
                         </button>
                       )}
                       <GradeBadge pass={verdictTrack(tr)} audit={tr.audit} size="sm" />
-                      <AdvisoryMark value={tr.tags.ITUNESADVISORY} />
                       <CachedMark path={tr.path} />
                       {(tr.is_video || isVideoFile(tr.file)) && (
                         <button
@@ -1422,26 +1541,7 @@ export default function AlbumPage() {
                           />
                         </span>
                       )}
-                      <span className="shrink-0" onClick={(e) => e.stopPropagation()}>
-                        <FavHeart kind="track" id={tr.path} mbid={tr.tags.MUSICBRAINZ_TRACKID} iconClass="h-3.5 w-3.5" title={undefined} revealOnHover />
-                      </span>
-                      {/* The "…": what this ONE file can be asked to do —
-                          tagging, its scripts (lyrics among them), credits and
-                          the stored readout. Hover-revealed like the heart
-                          beside it: a row's actions are not worth permanent
-                          space. */}
-                      <span className="row-hover shrink-0" onClick={(e) => e.stopPropagation()}>
-                        <TrackActionsMenu path={tr.path} releaseMbid={tr.tags.MUSICBRAINZ_ALBUMID} />
-                      </span>
-                      {/* The rating lives HERE, in the title cell, next to the
-                          other per-track marks — the same place the library
-                          page puts it. It used to sit inside the Dur column,
-                          which is 80px wide: the control and the time fought
-                          for it and "2:32" wrapped one character per line. */}
-                      <span className="shrink-0" onClick={(e) => e.stopPropagation()}>
-                        <StarRating size="sm" value={ratingOf(ratings, tr.path)} onChange={(v) => setRating(tr.path, v)} pending={pending(tr.path)} />
-                      </span>
-                    </div>
+                    </TrackTitleCell>
                   </td>
                 )}
                 {trackCols.includes("genre") && <td className="td text-zinc-500 break-words">{tr.tags.GENRE ?? "—"}</td>}

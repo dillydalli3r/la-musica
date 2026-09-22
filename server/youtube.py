@@ -44,6 +44,68 @@ DURATION_TOLERANCE = 5.0
 _DOWNLOAD_TIMEOUT = 4 * 60 * 60
 _PROBE_TIMEOUT = 5 * 60
 
+# Cookies: yt-dlp's two paths (the importable module and the vendored binary)
+# must honour the SAME setting, so the option is built here once and read by
+# both. A cookie jar is a credential — YouTube answers "Sign in to confirm
+# your age" and throttles an anonymous IP — and the only jar the app ever
+# reads is its own (`<music>/.mlo/data/cookies.txt`, written by Settings →
+# Videos through server/api_youtube.py): a user-typed path would go stale the
+# moment the library moved, and nothing else in the app writes one.
+# `COOKIES_BROWSERS` is also what mlo/config.py validates the setting against
+# and what the settings field lists, so the three cannot drift apart.
+COOKIES_MODES = ("none", "file", "browser")
+COOKIES_BROWSERS = ("chrome", "chromium", "edge", "firefox", "brave", "opera",
+                    "safari", "vivaldi", "whale")
+
+def cookies_path():
+    """The one cookie jar the app owns: <music>/.mlo/data/cookies.txt.
+
+    Imported lazily: mlo.paths resolves the music folder from the config, and
+    server/youtube.py is imported by modules that only want the constants.
+    """
+    from mlo.paths import app_data_dir
+    return os.path.join(app_data_dir(), "cookies.txt")
+
+def cookies_mode(config):
+    """The configured mode, always one of COOKIES_MODES."""
+    mode = str((config or {}).get("youtube_cookies_mode", "none") or "none")
+    mode = mode.strip().lower()
+    return mode if mode in COOKIES_MODES else "none"
+
+def cookies_browser(config):
+    """The configured browser, always one of COOKIES_BROWSERS."""
+    name = str((config or {}).get("youtube_cookies_browser", "chrome") or "")
+    name = name.strip().lower()
+    return name if name in COOKIES_BROWSERS else "chrome"
+
+def cookie_opts(config):
+    """yt-dlp Python-API cookie options for *config*; {} when off.
+
+    `none` adds NOTHING (never a null option yt-dlp would treat as a value),
+    and a mode whose input is not there yet adds nothing either: a `file` mode
+    with no jar would otherwise fail every download with yt-dlp's own "does
+    not exist" instead of just running without cookies.
+    """
+    mode = cookies_mode(config)
+    if mode == "file":
+        path = cookies_path()
+        return {"cookiefile": path} if os.path.isfile(path) else {}
+    if mode == "browser":
+        # A 1-tuple is yt-dlp's documented short form: the profile, keyring
+        # and container are optional, so the app never has to guess a profile.
+        return {"cookiesfrombrowser": (cookies_browser(config),)}
+    return {}
+
+def cookie_args(config):
+    """The binary's cookie flags for *config*; [] when off (see cookie_opts)."""
+    mode = cookies_mode(config)
+    if mode == "file":
+        path = cookies_path()
+        return ["--cookies", path] if os.path.isfile(path) else []
+    if mode == "browser":
+        return ["--cookies-from-browser", cookies_browser(config)]
+    return []
+
 # Channel names that mean "this is the artist's own upload".
 _OFFICIAL_HINTS = re.compile(r"\b(topic|vevo|official)\b", re.IGNORECASE)
 # Re-uploads that are not the release: the audio is either the same master
@@ -154,6 +216,7 @@ def _ydl_opts(config, outtmpl=None, flat=False):
     location = _ffmpeg_location()
     if location:
         opts["ffmpeg_location"] = location
+    opts.update(cookie_opts(config))
     return opts
 
 
@@ -248,7 +311,7 @@ def _search(query, config):
     try:
         proc = run_tool(
             [exe, "--dump-single-json", "--flat-playlist", "--no-warnings",
-             "--no-progress", url],
+             "--no-progress", *cookie_args(config), url],
             capture_output=True, text=True, encoding="utf-8",
             errors="replace", timeout=_PROBE_TIMEOUT,
         )
@@ -318,7 +381,8 @@ def _probe_formats(url, config):
         try:
             proc = run_tool(
                 [exe, "-j", "--no-warnings", "--no-progress",
-                 "-f", _format_selector(config), "-S", FORMAT_SORT, url],
+                 "-f", _format_selector(config), "-S", FORMAT_SORT,
+                 *cookie_args(config), url],
                 capture_output=True, text=True, encoding="utf-8",
                 errors="replace", timeout=_PROBE_TIMEOUT,
             )
@@ -420,6 +484,7 @@ def _download_binary(url, outtmpl, config):
     location = _ffmpeg_location()
     if location:
         cmd += ["--ffmpeg-location", location]
+    cmd += cookie_args(config)
     cmd += ["-j", "--no-simulate", url]
     try:
         proc = run_tool(cmd, capture_output=True, text=True, encoding="utf-8",

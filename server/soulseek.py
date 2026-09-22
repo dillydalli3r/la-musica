@@ -938,15 +938,19 @@ def portmap_state(cfg=None):
     out = {"enabled": enabled, "listen_port": port, "checked_at": checked_at,
            "in_flight": in_flight, "reason": reason, "state": "", "detail": "",
            "method": "", "verified": False, "external_ip": "", "internal_ip": "",
-           "gateway": "", "tried": [], "attempts": [], "mapped_port": attempted_port}
+           "gateway": "", "tried": [], "attempts": [], "mapped_port": attempted_port,
+           "expires_at": 0.0}
     if not enabled:
         out["state"] = "off"
         out["detail"] = ("Automatic port opening is off — the listen port has to "
                          "be forwarded on the router by hand.")
         return out
     state = str(result.get("state") or "")
+    # `expires_at` from the gateway's own answer: a lease it granted and has not
+    # had re-asked since may have run out, which is the one thing about a
+    # confirmed mapping that can go stale on its own.
     for key in ("detail", "method", "verified", "external_ip", "internal_ip",
-                "gateway", "tried", "attempts"):
+                "gateway", "tried", "attempts", "expires_at"):
         out[key] = result.get(key) or out[key]
     if state == "released":
         # A mapping this app made was removed and the switch is still on: no

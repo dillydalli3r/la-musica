@@ -121,6 +121,15 @@ missing or outdated tools in the background.
   to AcoustID — a different key from the same account), `ai_base_url` /
   `ai_api_key` / `ai_model` (script 17 and the genre ranking),
   `soulseek_username` / `soulseek_password`.
+- YouTube downloads send **your own cookies** when you tell them to.
+  `youtube_cookies_mode` is `none` (anonymous — the default, nothing is sent),
+  `file` (the jar saved on **Settings → Videos**: paste a `cookies.txt` or drop
+  the file on the box, and the app writes it to
+  `<music>/.mlo/data/cookies.txt` — the one path it owns, never one you type) or
+  `browser` (yt-dlp reads `youtube_cookies_browser`'s own cookie store). It is
+  what opens age-gated and members-only videos and stops the throttling a fresh
+  IP gets, and both yt-dlp paths — the importable module and the pinned binary —
+  honour it.
 - `GET /api/sources/health` lists every external source the app can ask (six
   lyrics, six advisory, eleven genre, four metadata, ten discover, one links —
   38 rows) with what each needs (`?probe=1` tests them). The RateYourMusic
@@ -144,7 +153,11 @@ missing or outdated tools in the background.
 Artists → albums → tracks, with live grade/audit badges, a search box, a *fail
 only* filter, bulk tag tools, custom tag columns and sortable/resizable columns
 (year, grade, audit, genre, advisory, duration, bitrate, dynamic range…); music
-videos are first-class tracks. An album's cover carries its own badges — the
+videos are first-class tracks — and a web/digital album can fetch its own: the
+album header's film button (or a track's "…" menu) searches YouTube through
+yt-dlp, drops the file into the album folder and tags it as that track's music
+video, so the matching panel is only needed for videos it did not download.
+An album's cover carries its own badges — the
 measured dynamic range, the release's formats/sample rate, and the medium with
 every country it was released in (`CD · US, CA`) — and every track row offers the
 same "…" menu wherever it is listed: tagging (the tag editor, genre and advisory
@@ -298,7 +311,17 @@ A managed slskd instance (autostart, shares = the library folder
 `<music>/Artists`, a share rescan scheduled whenever the library changes), with
 search & download UI, a live status
 dot, share browsing, bulk and whole-user downloads, transfer-level clearing and
-staging management (`GET /api/soulseek/staging`). The **auto-importer** searches
+staging management (`GET /api/soulseek/staging`). **Is the port open?** — the
+tab's *Test port* action (`GET /api/soulseek/port-check`) answers it with five
+rows that each say what they prove: a real TCP connection to the listen port
+here (plus a bind test to tell "nothing is listening" from "something else holds
+it"), what the ROUTER itself lists for that port with its own words and the
+lease, the LAN-vs-WAN address shape (a CGNAT is named as one instead of being
+blamed on a firewall), a self-connect through the public address (refused ⇒
+"unknown", because a router without NAT hairpinning refuses it while the port may
+still be open) and slskd's own signed-in state. A definite answer about the
+internet needs a probe from outside this network, which the app does not ship —
+and the panel says so. The **auto-importer** searches
 each release by what can only point at THAT release: a physical pressing (CD
 included) is searched by its catalog number and barcode
 (`soulseek_auto_physical_queries`) and, when it states neither, by its label and
@@ -330,7 +353,10 @@ the import lands, the downloaded copy is deleted
 (`soulseek_clear_downloads`, ON — the import MOVES the album into the library, so
 the download dir is only staging; a failed import keeps its files so its retry
 does not download them again), and a terminal failure removes the framework album
-the add created. *Import all completed*
+the add created. The add's page prefetch runs in the background, so an import can
+finish the album while it is still fetching: a folder that holds audio is never
+re-marked pending, which is what keeps a filled album from reading as a wish
+again. *Import all completed*
 imports every finished download **sequentially**, with cancel finishing the album
 in flight (`GET /api/soulseek/import-all/status`).
 
@@ -439,16 +465,35 @@ runbook — is
 
 ### Export, playlists, offline
 
-**Export** writes a playlist, albums, artists, tracks or the whole library to a
-drive as MP3 (VBR/CBR or custom), AAC, Opus, Vorbis, WAV, AIFF, ALAC, WavPack,
-WMA or a bit-exact `copy`, in `artist_album`, `album`, `flat` or `mirror` layout
-(`export_codec`, `export_structure`, `export_dest`, `export_subfolder`). Covers,
-ID3v2.3 plus optional ID3v1, ReplayGain track and album tags, `.m3u8` playlists,
-`.lrc`, `.cue`, `.log`, descriptions and the artist image travel with the files,
-and every written file is re-opened and verified. Sync mode (`export_prune`)
-removes audio the run did not write; exporting *into* the music folder is
-refused. **Playlists** are manual (drag-reorder, favourites, `.m3u8`
-import/export) or smart, driven by saved grade/audit/tag filters.
+**Export** writes a playlist, albums, artists, tracks or the whole library as MP3
+(VBR/CBR or custom), AAC, Opus, Vorbis, WAV, AIFF, ALAC, WavPack, WMA or a
+bit-exact `copy`, in `artist_album`, `album`, `flat` or `mirror` layout
+(`export_codec`, `export_structure`, `export_subfolder`). **Where it goes is a
+choice**: `export_target` is `zip` — the client downloads one archive (the only
+mode a browser can honour, and the default) — or `server`, a folder the machine
+running the app can see, picked with the drive list and the free-space readout
+(`export_dest`). Covers, ID3v2.3 plus optional ID3v1, `.m3u8` playlists, `.lrc`,
+`.cue`, `.log`, `.accurip`, descriptions and the artist image travel with the
+files, `export_manifest` writes a `checksums.sha256` beside them, and every
+written file is re-opened and verified. Sync mode (`export_prune`) removes audio
+the run did not write; exporting *into* the music folder is refused.
+
+**ReplayGain** is a mode, not a checkbox: `export_replaygain_mode` is `off`,
+`tags` (the portable choice — measure and write `REPLAYGAIN_*`) or `apply`, which
+rewrites the audio so the files themselves are level — the ALBUM gain for a
+whole-album selection (so the tracks keep their relative balance), the track gain
+otherwise, applied in the same encode, with the `REPLAYGAIN_*` tags stripped
+because a player would otherwise apply the gain twice. **An equalizer** rides
+along: `export_eq_profile` selects one of the built-in curves or a profile
+imported from **Equalizer APO / Peace EQ** (`Preamp:`, `Filter N: … PK|LS|HS|LP|HP
+Fc … Gain … Q …`, `GraphicEQ:` band lists — pasted or uploaded on the Export
+page, stored under `<music>/.mlo/data/eq/`). The order is ReplayGain gain → EQ
+preamp → EQ filters → encoder, the curve touches the EXPORTED copies only, and
+anything the profile cannot be rendered from (`Include:`, unknown constructs) is
+reported instead of silently dropped. Both processing modes need a real codec —
+a copied stream cannot be filtered — and say so. **Playlists** are manual
+(drag-reorder, favourites, `.m3u8` import/export) or smart, driven by saved
+grade/audit/tag filters.
 
 **Offline**: "Download" caches a track's audio in the service worker's media
 cache and warms the album/artist payloads around it, so the UI opens and a
@@ -651,10 +696,12 @@ Where the app stores what it fetches (all under `<music>/.mlo/`):
 | `POST /api/export`, `GET /api/export/codecs` `…/drives` `…/defaults` | multi-format export plus its codec table, drives and saved defaults |
 | `GET/POST/PATCH/DELETE /api/wishes…`, `POST /api/wishes/{id}/search` `…/search-all` `…/reconcile` `…/import` | the wishlist and its worker |
 | `GET /api/sources/health` `…/{id}`, `GET /api/capabilities`, `GET /api/dependencies` | every external source with its `needs`/`configured` state (`?probe=1`); what this server can run; the tool table with installed/pinned/upstream versions |
+| `GET/POST/DELETE /api/youtube/cookies` | the yt-dlp cookie jar: which mode is on and what the file holds, save a pasted/dropped `cookies.txt` (validated as a Netscape cookie file first), delete it |
 | `POST /api/mb/match` `…/assign` `…/auto-import` `…/advisory/fetch`, `POST /api/genres/import`, `GET /api/genres/facets` | MusicBrainz matching, tag writes, queued downloads, advisory resolution; genre import and Genres-page facets |
 | `POST /api/import/upload` `…/commit` `…/acoustid` `…/finish` `…/bulk`, `POST /api/lyrics/auto` `…/write` `…/embed` `…/wordsync`, `GET /api/lyrics/find` `…/providers` | the import pipeline, its fingerprint step, the chain and the bulk queue; the lyrics chain, previews and writes |
 | `GET /api/cover/search` `…/sources`, `POST /api/cover` `…/fromurl` | cover meta-search, upload and save-as-cover |
 | `POST /api/soulseek/download-bulk` `…/download-user` `…/search/cancel`, `GET /api/soulseek/ready`, `POST …/import-one` `…/import-all` `GET …/import-all/status` `POST …/import-all/cancel` | Soulseek downloads, the ready list and the sequential importer |
+| `GET /api/soulseek/port-check` | the listen port's own check (the tab's "Test port"): a real TCP connection to the port here, what the router holds for it (`GetSpecificPortMappingEntry`, the gateway's own words), the LAN/WAN address shape (a CGNAT or double NAT setup named as such), a connection from here to the public address, and slskd's login — every row states what it proves and what it cannot, and a definite answer about the internet needs a probe from outside, which this app does not ship |
 | `WS /ws/progress` `WS /ws/events` | live script progress; the notification channel (every published kind — `wish_found`, `download_started`, `download_done`, `upload_started`, `import_ready`, `script_done`, `grade_done`, `update_available`, …), `?since=` replays the 100-event ring |
 
 ## Tests & development

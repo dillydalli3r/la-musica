@@ -745,6 +745,18 @@ DEFAULT_CONFIG = {
     # whatever the source offers (best).
     "youtube_enabled": True,
     "youtube_max_height": 0,
+    # Cookies for yt-dlp: the user's own browser session, which is the only
+    # thing that opens an age-gated, members-only or rate-limited video —
+    # YouTube answers "Sign in to confirm your age" without one, and a fresh
+    # IP gets throttled. `none` is the default because a cookie jar is a
+    # credential and sending one is the user's decision, never a default.
+    # `file` reads the ONE jar the app owns (<music>/.mlo/data/cookies.txt,
+    # written by Settings → Videos; see server/api_youtube.py) and `browser`
+    # lets yt-dlp read the browser's own store. Both yt-dlp paths
+    # (server/youtube.py: the importable module and the vendored binary)
+    # honour whichever is set.
+    "youtube_cookies_mode": "none",
+    "youtube_cookies_browser": "chrome",
 
     # Library codec target (script 3 and every import). The library's audio
     # format is a SETTING, not an assumption: `library_codec` names what the
@@ -1319,10 +1331,25 @@ DEFAULT_CONFIG = {
     # tags — a plain byte-for-byte copy stays byte-for-byte.
     "export_id3v2": "2.3",
     "export_id3v1": False,
-    # Measure each exported track with ffmpeg's EBU R128 meter (the same meter
-    # script 7 writes tags from) and store ReplayGain 2.0 track + album tags,
-    # so a player that honours them plays the export at the library's loudness.
-    "export_replaygain": False,
+    # What an exported file does about loudness. "off" leaves the audio alone,
+    # "tags" measures each exported track with ffmpeg's EBU R128 meter (the
+    # same meter script 7 writes tags from) and stores ReplayGain 2.0 track +
+    # album tags, so a player that honours them plays the export at the
+    # library's loudness, and "apply" bakes that same gain into the samples —
+    # for a player that honours nothing. An applied export carries no
+    # REPLAYGAIN_* tags: the gain is in the audio, and a player applying the
+    # tags on top would correct it twice.
+    "export_replaygain_mode": "off",
+    # An Equalizer APO / Peace profile applied while transcoding (see mlo.eq):
+    # a built-in preset id or an imported profile's, "" = no EQ. The profile's
+    # preamp and filters are rendered into the same ffmpeg filter chain as the
+    # ReplayGain gain above.
+    "export_eq_profile": "",
+    # Where an export goes: "server" (a drive/folder this machine can see, the
+    # drive picker on the Export page) or "zip" (staged in the app's data dir
+    # and handed back as one archive — the only destination a browser can offer
+    # the user of a different machine).
+    "export_target": "server",
     # Write only the canonical tag set on transcodes instead of letting the
     # source's leftover frames ride along beside it.
     "export_clean_tags": True,
@@ -1332,6 +1359,9 @@ DEFAULT_CONFIG = {
     # Mirror cover.*/description.txt/artist image/.lrc/.cue/.log next to the
     # exported audio.
     "export_sidecars": True,
+    # Write checksums.sha256 (sha256<2 spaces>relative path, what `sha256sum -c`
+    # reads back) at the export root, so a copy to a card can be proven intact.
+    "export_manifest": False,
     # Re-open every written file and prove it parses (and has the source's
     # duration) before the export reports success.
     "export_verify": True,
@@ -1488,11 +1518,24 @@ _CHOICES = {
                      "medium", "slow", "slower", "veryslow"},
     "mood_source": {"audio", "provider", "hybrid"},
     "replaygain_mode": {"track", "album", "off"},
+    # The export's own loudness/equalizer/destination choices (see
+    # DEFAULT_CONFIG): a stored typo falls back to the shipped default rather
+    # than reaching ffmpeg or the exporter as an unknown mode.
+    "export_replaygain_mode": {"off", "tags", "apply"},
+    "export_target": {"server", "zip"},
     # The library's audio codec target and what the optimisation pass may do
     # with it — the values mlo.containers.CODECS and mlo.flac define.
     "library_codec": {"flac", "alac", "wav", "aiff", "mp3", "aac", "ogg",
                       "opus", "keep"},
     "library_codec_optimize": {"all", "lossless_to_lossy", "keep"},
+    # How yt-dlp gets the user's cookies, and which browser's store it reads
+    # in browser mode. The browser list is yt-dlp's own (server/youtube.py
+    # holds the same tuple as COOKIES_BROWSERS, so the validator, the settings
+    # field and the module cannot drift apart).
+    "youtube_cookies_mode": {"none", "file", "browser"},
+    "youtube_cookies_browser": {"chrome", "chromium", "edge", "firefox",
+                                "brave", "opera", "safari", "vivaldi",
+                                "whale"},
 }
 
 
@@ -1554,6 +1597,17 @@ def normalize_config(user=None) -> dict:
     cfg.pop("flac_level", None)
     cfg.pop("lossless_target_codec", None)
     cfg.pop("optimize_convert_lossless", None)
+
+    # An export's ReplayGain used to be one boolean (export_replaygain). It is
+    # a three-way choice now (export_replaygain_mode) because "write the tags"
+    # and "rewrite the audio" are different jobs: a player that honours tags
+    # applies them, a player that honours nothing needs the gain in the
+    # samples. A saved true becomes "tags" — precisely what it used to do —
+    # and a saved false becomes "off".
+    if "export_replaygain_mode" not in saved and "export_replaygain" in saved:
+        cfg["export_replaygain_mode"] = (
+            "tags" if _as_bool(saved.get("export_replaygain"), False) else "off")
+    cfg.pop("export_replaygain", None)
 
     for key in _BOOL_KEYS:
         cfg[key] = _as_bool(cfg.get(key), DEFAULT_CONFIG.get(key, False))
