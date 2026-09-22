@@ -134,7 +134,13 @@ last scan" the Library page warns from), which is what lets the import chain run
 it per album — after 14 (beets has put the folder in its canonical place) and
 before 4 (so the grade reads the fixed layout). A library-wide Run All still
 gets the whole-folder pass and the stored report. `import_auto_scripts` (ON) off
-still means "run nothing after import".
+still means "run nothing after import". **Every path that finishes an import
+runs this chain and no wider one** — the bulk queue, the Soulseek import, and
+the wizard's Finish step, whose script boxes ARE the chain (the ticked ids it
+runs, and `Run the import chain` beside them) rather than the library-wide Run
+All order; unticking a box is the user's own override for that one album. A
+script the configured chain leaves out keeps its box, unticked, so nothing the
+step used to offer became unreachable.
 **R10 — a failing script is reported, never fatal**: the chain carries on and
 per-script results are returned (`server/script_runners.py`).
 **R10a — a script's report counts each file ONCE.** Every file a script looked
@@ -1320,7 +1326,7 @@ and install what the platform supports.
    **A run has one scope, and it is the same for every script in it**: a
    library-wide run (the Optimize page's *Run All*, the CLI) makes every script
    discover the whole library for itself, and a targeted run (a selection, the
-   wizard's *Run all scripts here*) makes every script work only on those
+   wizard's *Run ticked scripts*) makes every script work only on those
    targets. A script must never be handed an empty target list and left to
    report "nothing to do" — a run that changed nothing must be able to say why
    in terms of the files it looked at, not in terms of a scope it never had.

@@ -2515,7 +2515,7 @@ export default function ImportWizard() {
   // run — and missing none of its own, because Run All is not what an import
   // means. An empty chain is a real answer (`import_auto_scripts` off, or
   // every id kept by hand): nothing runs, exactly as an import runs nothing.
-  const chainOrder = Array.isArray(cfg?.run_all_order) && (cfg.run_all_order as number[]).length ? (cfg.run_all_order as number[]) : DEFAULT_RUN_ALL;
+  const chainOrder = scriptChain?.chain ?? [];
   // The boxes are laid out in the chain's own order, and a script the chain
   // does not name still gets its box (in the factory Run All order) instead of
   // dropping off the list: the ticked boxes are the user's OWN override here —
