@@ -653,6 +653,34 @@ Even a forced re-rate rewrites only with evidence: the invented
   to everything that judges the value; the case rule is about the value the
   file stores, not about which genre it is.
 
+- **R92 — genres fall back LEVEL BY LEVEL, and the level that answered is never
+  hidden.** MusicBrainz states a genre at four levels — the recording (per
+  track), the release, the release group and the artist — and the app asks all
+  four, merging them in exactly that order (`integrations.genre_cascade`): a
+  track whose own recording carries genres keeps them first, and everything it
+  does not state is filled from the release, then the release GROUP, then the
+  ARTIST. So a MusicBrainz genre is usable even when the specific track has
+  none, which is the case that matters on a young catalogue. `genre_cascade`
+  reports the four levels' availability (`levels`) and, per track, which level
+  answered (`source`) and which were used (`levels_used`), and the genre chain's
+  MusicBrainz source resolves the same way (recording → release → release group
+  → artist, `_genre_source_answers`). Nothing is invented: an empty cascade is
+  an empty answer, not a guessed genre.
+- **R93 — every source answers at the finest level it has.** The chain
+  (`integrations.genre_chain`, `mlo.config["genre_sources"]`) asks its sources
+  in the configured priority order and stops once the writer's policy can write
+  a COMPLETE list, so the entries below the answering one are fallbacks, not a
+  second opinion. Each source's own level is fixed and documented in
+  `GENRE_SOURCES`: rateyourmusic per track where its page states one, else
+  album, then artist; musicbrainz per recording, then release, then release
+  group, then artist; listenbrainz per recording, then release group, then
+  artist; itunes per-track `primaryGenreName`; lastfm
+  `track.getTopTags` → `artist.getTopTags`; theaudiodb per track;
+  wikidata on the recording entity; bandcamp, discogs and deezer at ALBUM level
+  (those services state no finer one) and spotify at ARTIST level. A source
+  marked per-track that cannot answer per track answers nothing rather than
+  passing an album's list off as a track's.
+
 ### 7.3 ReplayGain and dynamic range
 
 - **R42** — the ReplayGain family is complete or absent: a file carrying any of

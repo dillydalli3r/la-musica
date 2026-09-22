@@ -313,7 +313,18 @@ The **Genres** step asks the whole configured chain with **one button**: every
 source the app knows, asked in the order `genre_sources` lists them —
 RateYourMusic first, then MusicBrainz, then the rest (ListenBrainz, iTunes,
 Last.fm, TheAudioDB, Wikidata, Bandcamp, Discogs, Deezer, Spotify) — merged
-per track, and the chain **stops as soon as a track's list is complete**, so the
+per track, each source asked at the finest level it has: **MusicBrainz falls
+back inside its own answer** — a track whose recording carries genres keeps
+them, and anything it does not state is filled from the release, then the
+release **group**, then the **artist** — so a MusicBrainz genre is usable even
+when that particular track has none, and the answer says which level spoke
+(`genre_cascade`'s `levels`/`source`). The same ladder runs for the other
+per-track sources (ListenBrainz per recording → release group → artist, iTunes
+and TheAudioDB per track, Last.fm `track.getTopTags` → `artist.getTopTags`),
+while Bandcamp, Discogs and Deezer only state an album's genres and Spotify an
+artist's — a source that cannot answer per track answers nothing rather than
+passing an album's list off as a track's. And the chain **stops as soon as a
+track's list is complete**, so the
 later sources cost nothing on an album the first two can answer and still answer
 for a pressing nothing else knows. The list is the PRIORITY list: the small tray
 next to that button (and Settings → Import) ticks sources in and out, and a
