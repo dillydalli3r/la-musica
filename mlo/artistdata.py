@@ -762,7 +762,7 @@ def run_optimize_artist_images(config):
     quality and reported as before -> after. It never upscales, never deletes a
     corrupt file and leaves a conforming image byte for byte alone, so running it
     again — alone or as part of Run All — changes nothing."""
-    from .stats import _make_pbar, _pbar_skip, _pbar_update, new_stats
+    from .stats import _make_pbar, _pbar_skip, _pbar_update, new_stats, worker_count
     from .ui import Color, c, log, print_header
 
     config = config or {}
@@ -783,13 +783,26 @@ def run_optimize_artist_images(config):
 
     counts = {"ok": 0, "skip": 0, "fail": 0}
     pbar = _make_pbar(len(folders), "Artist images", unit="image")
-    for folder in folders:
-        where = os.path.basename(folder.rstrip("\\/")) or folder
+
+    def _one(folder):
+        """One artist's image, or the error that stopped it.
+
+        Every folder carries its OWN image file (`artist.jpg`/`.png` beside the
+        album folders), written through `mlo.atomic`, so two folders share
+        nothing — and the work is a decode plus an encode, which is what Pillow
+        releases the GIL inside. The pass used to walk artist after artist on
+        the runner thread, so a library of a few thousand artists re-encoded one
+        image at a time; it is the same pool the other passes use now, and the
+        tally below still happens HERE, in order, so the log reads as it did.
+        """
         try:
-            res = optimize_artist_image(folder, config)
+            return optimize_artist_image(folder, config)
         except Exception as e:
-            res = {"path": None, "before": None, "after": None,
-                   "changed": False, "error": str(e), "reason": ""}
+            return {"path": None, "before": None, "after": None,
+                    "changed": False, "error": str(e), "reason": ""}
+
+    def _tally(folder, res):
+        where = os.path.basename(folder.rstrip("\\/")) or folder
         stats["total_scanned"] += 1
         if res["error"]:
             stats["error_count"] += 1
@@ -807,6 +820,19 @@ def run_optimize_artist_images(config):
         else:
             stats["unchanged_count"] += 1
             _pbar_update(pbar, counts)
+
+    workers = worker_count(config, default=4, maximum=8, items=len(folders))
+    if len(folders) == 1 or workers == 1:
+        for folder in folders:
+            _tally(folder, _one(folder))
+    else:
+        # Results are consumed IN ORDER while the pool fills the next ones, so
+        # the progress bar and the log move as the work finishes rather than in
+        # one burst at the end.
+        from concurrent.futures import ThreadPoolExecutor
+        with ThreadPoolExecutor(max_workers=workers) as ex:
+            for folder, res in zip(folders, ex.map(_one, folders)):
+                _tally(folder, res)
     if pbar:
         pbar.close()
     log(c(f"artist images: {stats['modified_count']} re-encoded · "

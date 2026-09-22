@@ -847,6 +847,60 @@ def check_fsync_dir(tmp):
            "the directory fsync still opens + fsyncs the folder on POSIX")
 
 
+def check_artist_image_lanes(tmp):
+    """Script 19: one artist image at a time, or a pool of them.
+
+    Every artist folder carries its own image file, written atomically, so the
+    folders share nothing — and the work is a decode plus an encode, which is
+    what Pillow releases the GIL inside. The pass walked artist after artist on
+    the runner thread. The fake stands in for the re-encode so this measures the
+    LANES and not Pillow.
+    """
+    import time
+    from mlo import artistdata
+
+    root = os.path.join(tmp, "artist_lanes_lib", "Artists")
+    for i in range(6):
+        folder = os.path.join(root, f"Artist {i:02d}")
+        os.makedirs(folder)
+        make_image(os.path.join(folder, "artist.png"), (64, 64), fmt="PNG")
+    LATENCY = 0.12
+    seen = []
+
+    def fake_optimize(folder, config):
+        seen.append(folder)
+        time.sleep(LATENCY)
+        return {"path": os.path.join(folder, "artist.png"), "before": (64, 64),
+                "after": (64, 64), "changed": True, "reason": "re-fitted",
+                "error": ""}
+
+    real = artistdata.optimize_artist_image
+    artistdata.optimize_artist_image = fake_optimize
+
+    def run(worker_limit):
+        c = cfg(music_folder=os.path.join(tmp, "artist_lanes_lib"),
+                worker_limit=worker_limit)
+        t0 = time.perf_counter()
+        st = artistdata.run_optimize_artist_images(c)
+        return st, time.perf_counter() - t0
+
+    try:
+        seq_stats, t_seq = run(1)
+        par_stats, t_par = run(0)
+    finally:
+        artistdata.optimize_artist_image = real
+
+    ok(len(seen) == 12, f"script 19: both runs visit every artist ({len(seen)})")
+    ok(seq_stats["modified_count"] == par_stats["modified_count"] == 6,
+       f"script 19: every image is re-fitted either way "
+       f"({seq_stats['modified_count']}/{par_stats['modified_count']} of 6)")
+    ok(seq_stats["error_count"] == par_stats["error_count"] == 0,
+       "script 19: and neither run reports a failure")
+    ok(t_par < t_seq * 0.6,
+       f"script 19: 6 images x {LATENCY * 1000:.0f} ms take {t_par:.2f} s with "
+       f"lanes vs {t_seq:.2f} s one at a time ({t_seq / t_par:.1f}x)")
+
+
 def main():
     print("Script optimization audit (measurements, not claims)")
     tmp = tempfile.mkdtemp(prefix="mlo_script_opt_")
@@ -867,6 +921,7 @@ def main():
         ("script 5  Process images (converted PNG)", check_images_converted_png_optimized),
         ("script 11 Remux videos", check_remux_single_probe),
         ("script 13 Fetch lyrics (lanes)", check_lyrics_fetch_concurrency),
+        ("script 19 Artist images (lanes)", check_artist_image_lanes),
         ("script 18 Publish lyrics (lanes)", check_publish_concurrency),
         ("all       atomic sidecar writes", check_fsync_dir),
     ]
