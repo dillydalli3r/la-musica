@@ -240,6 +240,29 @@ assert pick([rel("year", date="1983"), rel("full", date="1983-09-13")],
             group(first_release_date="1983-09-13"), cfg=cfg()) == "full"
 assert pick([rel("y83", date="1983"), rel("full94", date="1994-03-01")],
             group(first_release_date="1983-09-13"), cfg=cfg()) == "y83"
+# The rungs are exact: a day beats a month beats a year, and the reason names
+# the part MusicBrainz actually omitted — "1983-06" is not "only the year",
+# and a reason that said so would read as a bug in the data.
+rungs = [rel("day", date="1983-09-13"), rel("month", date="1983-09"),
+         rel("year", date="1983")]
+assert order(rungs, group(first_release_date="1983"), cfg=cfg()) == \
+    ["day", "month", "year"], order(rungs, group(first_release_date="1983"), cfg=cfg())
+assert pick(rungs, group(first_release_date="1983"), cfg=cfg()) == "day"
+assert pick(rungs[1:], group(first_release_date="1983"), cfg=cfg()) == "month"
+_date_reasons = {c.release_mbid: " ".join(c.reasons)
+                 for c in rc.rank_releases(group(first_release_date="1983"), rungs, cfg())}
+assert "only the month" in _date_reasons["month"], _date_reasons["month"]
+assert "only the year" in _date_reasons["year"], _date_reasons["year"]
+assert "only the" not in _date_reasons["day"], _date_reasons["day"]
+# Two reissues a decade apart are never a TIE: the distance penalty must not
+# flatten out. A linear term that reached zero at a nine-year gap let a 2016 CD
+# beat a 2011 one on nothing but MusicBrainz's listing order — live, "The Dark
+# Side of the Moon" came back as a 2016 reissue and the album folder was named
+# 2016 — so the gap term is strictly decreasing at every distance.
+assert pick([rel("cd11", date="2011-09-26"), rel("cd16", date="2016-01-08")],
+            group(first_release_date="1973-03-24"), cfg=cfg()) == "cd11"
+assert pick([rel("cd16", date="2016-01-08"), rel("cd11", date="2011-09-26")],
+            group(first_release_date="1973-03-24"), cfg=cfg()) == "cd11"
 # An edition with no date at all ranks after every dated one.
 assert pick([rel("undated", date=""), rel("dated", date="1997-01-20")], cfg=cfg()) == "dated"
 # A pressing that predates the group's stated first date is still the original.
@@ -386,9 +409,11 @@ assert body["policy"]["medium_order"] == cfg()["auto_import_medium_order"]
 assert body["policy"]["preferred_country"] == ""
 assert body["policy"]["prefer_original_edition"] is True
 assert body["policy"]["status_order"] == ["official", "promotion", "bootleg"]
-assert len(body["policy"]["rules"]) == 9, body["policy"]["rules"]
+assert len(body["policy"]["rules"]) == 10, body["policy"]["rules"]
 assert any("box set" in r for r in body["policy"]["rules"]), body["policy"]["rules"]
 assert any("COMPRESSED derivative" in r for r in body["policy"]["rules"]), \
+    body["policy"]["rules"]
+assert any("release date in full" in r for r in body["policy"]["rules"]), \
     body["policy"]["rules"]
 
 # `prefer` is the user's own edition: it is the pick, and its reasons say the

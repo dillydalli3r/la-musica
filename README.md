@@ -380,6 +380,14 @@ a DVDRip or an x264 re-encode ranks under a remux or a full disc of the same
 release group, and a folder holding a `VIDEO_TS`/`BDMV` structure beside a
 700 MB re-encode keeps the disc's feature, never the re-encode. Turn the
 setting off and the other rules decide, exactly as they did before it existed.
+**The original pressing wins the date, exactly**: an edition is scored by how
+close it sits to the release group's own first release date, the penalty for
+distance is strictly increasing in the gap — never flat, so two reissues a
+decade apart are not a tie that MusicBrainz's listing order gets to settle —
+and among editions of the same year the one that states its release date **in
+full** (`YYYY-MM-DD`) beats one that states only its month or its year, because
+the album folder is named after that date.
+
 **Where a release is fetched from is decided by the release itself**, from the
 recordings' own `video` flag and the medium MusicBrainz publishes: a music-video
 release on **Digital Media** cannot be on Soulseek as a folder — no disc, no log,

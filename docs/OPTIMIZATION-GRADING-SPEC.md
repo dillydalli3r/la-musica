@@ -1053,7 +1053,14 @@ user asked for, in the order they asked for it. `server/exporter.py` owns both.
   CD/digital media, so a 3-CD anniversary box no longer outranks the plain CD it
   contains), the **disc-versus-re-encode** rule (R85), the **track count** (an
   edition short of the release group's own count is penalised), the **release
-  date**, the **clean/edited-edition** rule (`prefer_original_edition`: the
+  date** — the group's own `first-release-date` is the reference, the penalty
+  for distance is strictly increasing in the gap and NEVER flat (two reissues a
+  decade apart are never a tie, which is what a linear term that reached zero
+  at a nine-year gap let happen: a live "The Dark Side of the Moon" browse came
+  back as a 2016 reissue over the 1988 CD, and the album folder was named 2016)
+  and an edition that states its date in FULL (`YYYY-MM-DD`) beats one stating
+  only its month or year, because the folder is named after that date — the
+  **clean/edited-edition** rule (`prefer_original_edition`: the
   original beats a later reissue unless the later one is materially more
   complete), the **plain-release** rule (a plain release beats a disambiguated
   one) and **prefer_release_country**, which only ever breaks a tie. The order is

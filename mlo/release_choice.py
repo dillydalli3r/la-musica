@@ -153,6 +153,9 @@ _RULES = (
     "below the disc's own streams, which are taken as they are",
     "the original edition beats a later reissue unless the later one is "
     "materially more complete",
+    "an edition that states its release date in full (YYYY-MM-DD) beats one "
+    "that states only its month or its year — the album folder is named "
+    "after it",
     "prefer_release_country only ever breaks a tie",
     "prefer_original_edition prefers the original over a clean/edited edition",
     "a plain release beats a disambiguated one when everything else ties",
@@ -565,12 +568,25 @@ def medium_rank(rel, order):
     return best, label
 
 
+def _stated_granularity(date):
+    """What MusicBrainz actually STATES: "day", "month", "year" or "".
+
+    The release date field is free text that may carry any of the three
+    (a browse payload famously has "1973" for a pressing and "1973-03-01"
+    for the next one), and the difference is the difference between a folder
+    named after a year and one named after the day.
+    """
+    return {10: "day", 7: "month", 4: "year"}.get(
+        len(str(date or "").strip()), "")
+
+
 def _date_precision(date):
     """How much of the date MusicBrainz states: 1.0 day, 0.66 month, 0.33
     year, 0.0 nothing. The album folder is named after this date, so an
-    edition stating only "1983" pins the folder to a year."""
-    length = len(str(date or "").strip())
-    return {10: 1.0, 7: 0.66}.get(length, 0.33 if length == 4 else 0.0)
+    edition stating only "1983" pins the folder to a year — and among
+    editions of the same year the fully-dated one is the edition to take."""
+    return {"day": 1.0, "month": 0.66, "year": 0.33}.get(
+        _stated_granularity(date), 0.0)
 
 
 def _year(date):
@@ -586,9 +602,11 @@ def _release_date_level(date, ctx):
 
     The group's first release date is the reference; an edition from that year
     (or earlier — a pressing can predate the group's stated date) is the
-    original, and every year of distance costs a fixed step that is larger
-    than the whole precision bonus, so an earlier year-only edition still beats
-    a later, fully-dated one. An undated edition sorts after every dated one.
+    original, and the penalty for distance is strictly increasing in the gap
+    while staying smaller than the precision bonus at ANY gap, so an earlier
+    year-only edition always beats a later, fully-dated one and two reissues a
+    decade apart are never a tie. An undated edition sorts after every dated
+    one.
     """
     year = _year(date)
     if year is None:
@@ -596,8 +614,18 @@ def _release_date_level(date, ctx):
     if ctx.first_year is None:
         return (0.5, f"released {date}" if date else "no release date on MusicBrainz")
     gap = max(0, year - ctx.first_year)
-    level = 0.9 * max(0.0, 1.0 - gap / 9.0) + 0.1 * _date_precision(date)
-    vague = "" if _date_precision(date) >= 1.0 else " (MusicBrainz states only the year)"
+    # Hyperbolic, NOT a line that can reach zero: a linear term hit 0 at a
+    # nine-year gap, so every edition more than nine years after the original
+    # scored the same and a 2016 CD could beat a 2011 one on nothing but
+    # MusicBrainz's listing order — which is how "The Dark Side of the Moon"
+    # came back as a 2016 reissue and the album folder was named 2016. This
+    # term is strictly decreasing in the gap and never flat.
+    level = 0.9 / (1.0 + gap / 9.0) + 0.1 * _date_precision(date)
+    # Say WHICH part is missing: "1983-06" is not "only the year", and a
+    # reason that names the wrong field reads as a bug in the data.
+    stated = _stated_granularity(date)
+    vague = (f" (MusicBrainz states only the {stated})"
+             if stated in ("month", "year") else "")
     if not gap:
         reason = (f"original release date {ctx.first_date}" if ctx.first_date
                   else f"earliest edition offered, {date}")
