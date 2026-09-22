@@ -6,7 +6,16 @@
  * so playback keeps working with the server unreachable. Everything else
  * passes straight through to the network untouched.
  */
+/* Two caches, two lifecycles. `mlo-media-v2` holds what the user downloaded
+ * — media streams, artwork, lyrics, the payloads a download warms — and
+ * `web/src/lib/mediaCache.ts` writes into the same name from the page. The
+ * shell below (the document, the hashed bundles, the icon) is versioned on its
+ * own: 3.11.0 replaced the app icon, and a single shared name would have
+ * forced the choice between serving the old artwork forever and making every
+ * downloaded track look undownloaded. */
 const CACHE_NAME = "mlo-media-v2";
+const SHELL_CACHE = "mlo-shell-v1";
+const KEPT_CACHES = new Set([CACHE_NAME, SHELL_CACHE]);
 
 /** The URL the shell is cached under: one document for every client-side
  *  route, which is what the server's SPA fallback serves. */
@@ -85,7 +94,7 @@ self.addEventListener("activate", (event) => {
   event.waitUntil(
     (async () => {
       const names = await caches.keys();
-      await Promise.all(names.filter((n) => n !== CACHE_NAME).map((n) => caches.delete(n)));
+      await Promise.all(names.filter((n) => !KEPT_CACHES.has(n)).map((n) => caches.delete(n)));
       // The shell is precached here rather than in `install`: a worker that
       // has been updated (or one installed while the server was down) still
       // needs a document to open, and this runs on every activation.
@@ -106,7 +115,7 @@ self.addEventListener("activate", (event) => {
  *  unreachable with the server down, which is the one moment the downloaded
  *  music is supposed to matter. */
 async function precacheShell() {
-  const cache = await caches.open(CACHE_NAME);
+  const cache = await caches.open(SHELL_CACHE);
   const resp = await fetch(SHELL_URL, { cache: "reload" });
   if (!resp.ok) return;
   const html = await resp.clone().text();
@@ -204,7 +213,7 @@ self.addEventListener("fetch", (event) => {
   if (req.mode === "navigate") {
     event.respondWith(
       (async () => {
-        const cache = await caches.open(CACHE_NAME);
+        const cache = await caches.open(SHELL_CACHE);
         try {
           const resp = await fetch(req);
           if (resp.ok) await cache.put(SHELL_URL, resp.clone());
@@ -221,7 +230,7 @@ self.addEventListener("fetch", (event) => {
   if (sameOrigin && STATIC_RE.test(url.pathname)) {
     event.respondWith(
       (async () => {
-        const cache = await caches.open(CACHE_NAME);
+        const cache = await caches.open(SHELL_CACHE);
         const hit = await cache.match(req);
         if (hit) return hit;
         const resp = await fetch(req);
