@@ -127,7 +127,7 @@ if FFMPEG:
     real_crc = discs_mod._audio_crc32(FFMPEG, TRACK)
 
 print("== a log that predates EAC checksums is not missing one ==")
-def write_log_header(header):
+def write_log_header(header, crc="00000000"):
     """A rip log with the EAC version the header names and NO checksum line:
     what the version rule reads is the header, never the log's date."""
     with open(os.path.join(ALBUM, "CD-1.log"), "w", encoding="utf-8") as fh:
@@ -136,7 +136,7 @@ def write_log_header(header):
                  "---------------------------------------------------------\n"
                  "  1  | 00:00.00 | 00:00.10 | 0 | 8\n\n"
                  "Track  1\n"
-                 "     Copy CRC 00000000\n")
+                 f"     Copy CRC {crc}\n")
 
 
 # Spec §3: "XLD and older EAC logs pass (nothing claimed, nothing refuted)".
@@ -227,6 +227,7 @@ elif not FFMPEG or not real_crc:
 else:
     write_log(f"{real_crc:0>8}".upper())
     from mutagen.flac import FLAC as MF
+    import mlo.audit as _audit_mod
     from mlo.audit import run_audit_library
     f = MF(TRACK)
     f["AUDIT"] = ["FAKE"]
@@ -234,49 +235,183 @@ else:
     # The other CD gates are switched off so this isolates ONE rule: the
     # matching .log CRC vs AudioAuditor's spectral verdict. The fixture is a
     # synthetic tone, so a real AudioAuditor reports "fake lossless" — exactly
-    # the disagreement a CD rip must survive.
-    run_audit_library({"music_folder": TMP, "audit_verify_cd_checksums": True,
-                       "audit_cd_require_both": True, "write_audit_tag": True,
-                       "audit_integrity": True, "grade_verbose": False,
-                       "audit_require_accuraterip": False,
-                       "audit_verify_log_checksum": False,
-                       "audit_log_score_threshold": 0})
+    # the disagreement a CD rip must survive: the verdict stays REAL and the
+    # disagreement is recorded as a WARNING (never as a verdict of its own).
+    _aa_lines = []
+    _real_audit_log = _audit_mod.log
+    _audit_mod.log = lambda msg, *a, **k: _aa_lines.append(str(msg))
+    try:
+        run_audit_library({"music_folder": TMP, "audit_verify_cd_checksums": True,
+                           "audit_cd_require_both": True, "write_audit_tag": True,
+                           "audit_integrity": True, "grade_verbose": False,
+                           "audit_require_accuraterip": False,
+                           "audit_verify_log_checksum": False,
+                           "audit_log_score_threshold": 0})
+    finally:
+        _audit_mod.log = _real_audit_log
     verdict = str((MF(TRACK).get("AUDIT") or [""])[0]).strip().upper()
     ok(verdict == "REAL",
        f"a CRC-verified rip is REAL even when AudioAuditor says otherwise "
        f"({verdict})")
+    ok(any("AudioAuditor reports" in l and "warning only" in l for l in _aa_lines),
+       f"…and the disagreement is recorded as a warning, not a verdict "
+       f"({[l for l in _aa_lines if 'AudioAuditor reports' in l]})")
 
-print("== a CRC-verified rip needs no verifiable log SHA256 ==")
+print("== the rip log's own SHA256 is one of the three legs ==")
 if not HAS_AA:
     print("  skipped: AudioAuditorCLI not installed (Windows-only)")
 elif not FFMPEG or not real_crc:
     print("  skipped: no ffmpeg")
 else:
-    # The user's rule: the .log's per-track CRCs matching the audio is proof
-    # enough — a log WITHOUT a verifiable EAC SHA256 (older EAC, an edited
-    # log) must not fail tracks it just proved intact.
-    write_log(f"{real_crc:0>8}".upper())
     from mutagen.flac import FLAC as MF
 
-    from mlo.audit import run_audit_library
-    f = MF(TRACK)
-    f["AUDIT"] = ["FAKE"]
-    f.save()
+    def audit_once(**over):
+        """Run script 6 over the fixture and return (AUDIT tag, log lines).
+
+        The tag is cleared first, so "no verdict written" is distinguishable
+        from a FAKE: every row below asserts WHICH of the two a run produced.
+        Only the keys a row is about are overridden — the three legs have
+        their own settings and a verdict that is always REAL would prove
+        nothing about them.
+        """
+        cfg = {"music_folder": TMP, "audit_verify_cd_checksums": True,
+               "audit_cd_require_both": True, "write_audit_tag": True,
+               "audit_integrity": False, "grade_verbose": False,
+               "audit_require_accuraterip": False,
+               "audit_verify_log_checksum": True,
+               "audit_log_score_threshold": 0}
+        cfg.update(over)
+        f = MF(TRACK)
+        if "AUDIT" in f:
+            del f["AUDIT"]
+        f.save()
+        lines = []
+        _real_audit_log = _audit_mod.log
+        _audit_mod.log = lambda msg, *a, **k: lines.append(str(msg))
+        try:
+            run_audit_library(cfg)
+        finally:
+            _audit_mod.log = _real_audit_log
+        tag = MF(TRACK).get("AUDIT")
+        return (str(tag[0]).strip().upper() if tag else ""), lines
+
+    write_log(f"{real_crc:0>8}".upper())
+    # A log that cannot be trusted about ITSELF — a modern EAC log whose
+    # checksum line is gone, or one whose SHA256 does not verify — cannot be
+    # trusted about the CRCs it prints, so this leg fails even though the
+    # printed CRC matches the audio. It used to be exempted on the spot by
+    # that very match, which is how a doctored log still produced AUDIT=REAL.
     for state in ("missing", "invalid"):
         _dm.check_log_checksum = lambda _p, s=state: (s, f"stub {s}")
         try:
-            run_audit_library({"music_folder": TMP, "audit_verify_cd_checksums": True,
-                               "audit_cd_require_both": True, "write_audit_tag": True,
-                               "audit_integrity": True, "grade_verbose": False,
-                               "audit_require_accuraterip": False,
-                               "audit_verify_log_checksum": True,
-                               "audit_log_score_threshold": 0})
+            verdict, _lines = audit_once()
         finally:
             _dm.check_log_checksum = _real_check
-        verdict = str((MF(TRACK).get("AUDIT") or [""])[0]).strip().upper()
-        ok(verdict == "REAL",
-           f"a log whose checksum is {state} still passes on its matching "
-           f"track CRCs ({verdict})")
+        ok(verdict == "FAKE",
+           f"a log whose SHA256 is {state} fails the checksums leg even on "
+           f"matching CRCs ({verdict!r})")
+
+    # …and the pre-1.0-EAC exemption still holds, with the REAL reader (no
+    # stub): EAC only began writing the log checksum in 1.0, so a 0.99-era log
+    # claims nothing and refutes nothing — the leg is decided by the CRCs.
+    write_log_header("Exact Audio Copy V0.99 prebeta 4 from 23. January 2008",
+                     f"{real_crc:0>8}".upper())
+    verdict, _lines = audit_once()
+    ok(verdict == "REAL",
+       f"a log that predates EAC checksums is REAL on its matching CRCs "
+       f"({verdict!r})")
+
+print("== the CD verdict is the AND of its three legs ==")
+# One row per combination (Requirements 3): the rip log's SCORE
+# (audit_log_score_threshold / Logchecker), the disc's CHECKSUMS (the .log's
+# Copy CRC against the audio, plus the log's own SHA256), and ACCURATERIP (the
+# .accurip). REAL only when all three pass; any leg failing is FAKE. The legs
+# are driven with the suite's own stubs: grade_album_logs for the score, the
+# log's Copy CRC + check_log_checksum for the checksums, and the .accurip
+# itself for AccurateRip.
+if not HAS_AA:
+    print("  skipped: AudioAuditorCLI not installed (Windows-only)")
+elif not FFMPEG or not real_crc:
+    print("  skipped: no ffmpeg")
+else:
+    _real_grade_logs = _dm.grade_album_logs
+
+    _SCORE = [True]
+
+    def score():
+        """A Logchecker score for every disc, so a row can put the score leg
+        above or below the threshold without a scorer on the machine."""
+        return ({1: (100 if _SCORE[0] else 40)}, [], [])
+
+    def set_score(ok):
+        _SCORE[0] = ok
+
+    _dm.grade_album_logs = lambda *a, **k: score()
+
+    def row(score_ok, crc_ok, ar, crc=None):
+        """(expected verdict, what the row drove) for one combination."""
+        set_score(score_ok)
+        write_log((f"{real_crc:0>8}".upper() if crc_ok else "00000000")
+                  if crc is None else crc)
+        _dm.check_log_checksum = (
+            (lambda _p: ("ok", None)) if crc_ok
+            else (lambda _p: ("invalid", "stub invalid")))
+        ap = os.path.join(ALBUM, "CD-1.accurip")
+        if os.path.isfile(ap):
+            os.remove(ap)
+        if ar is not None:
+            write_accurip("Accurately ripped" if ar else "No match")
+        verdict, lines = audit_once(audit_require_accuraterip=True,
+                                    audit_verify_log_checksum=True,
+                                    audit_log_score_threshold=100)
+        return verdict, lines
+
+    try:
+        # Each row is (score, checksums, AccurateRip) -> the ONE combination
+        # that reaches REAL is all three passing.
+        for score_ok, crc_ok, ar in ((True, True, True),
+                                     (False, True, True),
+                                     (True, False, True),
+                                     (True, True, False),
+                                     (False, False, True),
+                                     (False, True, False),
+                                     (True, False, False),
+                                     (False, False, False)):
+            verdict, _lines = row(score_ok, crc_ok, ar)
+            want = "REAL" if (score_ok and crc_ok and ar) else "FAKE"
+            ok(verdict == want,
+               f"score={'100' if score_ok else '40'}, CRCs="
+               f"{'match' if crc_ok else 'mismatch'}, "
+               f"AccurateRip={'pass' if ar else 'fail'} → {want} "
+               f"({verdict!r})")
+        # The .accurip's verdict is read from the FILE, and a "No match" is a
+        # leg failure even when the .log CRC just matched the audio. With no
+        # .accurip AND no CUETools to make one the leg cannot be evaluated at
+        # all — "cannot check" is not "did not match", so the file keeps NO
+        # verdict and the run names the leg it could not evaluate.
+        set_score(True)
+        write_log(f"{real_crc:0>8}".upper())
+        os.remove(os.path.join(ALBUM, "CD-1.accurip"))
+        _dm.check_log_checksum = lambda _p: ("ok", None)
+        import mlo.accurip as _accurip_mod
+
+        _real_arcue = _accurip_mod.resolve_arcue_exe
+        _accurip_mod.resolve_arcue_exe = lambda _tools: None
+        try:
+            verdict, lines = audit_once(audit_require_accuraterip=True,
+                                        audit_verify_log_checksum=True,
+                                        audit_log_score_threshold=100)
+        finally:
+            _accurip_mod.resolve_arcue_exe = _real_arcue
+        ok(verdict == "",
+           f"a CD whose AccurateRip leg cannot be evaluated keeps NO verdict "
+           f"({verdict!r})")
+        ok(any("missing leg 'accuraterip'" in l for l in lines),
+           f"…and the run names the leg that is missing "
+           f"({[l for l in lines if 'missing leg' in l]})")
+    finally:
+        _dm.grade_album_logs = _real_grade_logs
+        _dm.check_log_checksum = _real_check
 
 print("== the viewer trusts the rip's evidence over a stale tag ==")
 if not FFMPEG or not real_crc:
@@ -287,18 +422,43 @@ else:
     # rip must not render FAKE off a tag written by an older run.
     write_log(f"{real_crc:0>8}".upper())
     from mutagen.flac import FLAC as MF
-    f = MF(TRACK)
-    f["AUDIT"] = ["FAKE"]
-    f.save()
-    _dm.check_log_checksum = lambda _p: ("ok", None)
-    try:
-        res = _grade_album(ALBUM, "EMBEDDED", _cfg(grade_check_audit=False))
-    finally:
-        _dm.check_log_checksum = _real_check
-    tr = res["tracks"][0]
+
+    def _grade_now(with_tag):
+        f = MF(TRACK)
+        if with_tag:
+            f["AUDIT"] = ["FAKE"]
+        elif "AUDIT" in f:
+            del f["AUDIT"]
+        f.save()
+        _dm.check_log_checksum = lambda _p: ("ok", None)
+        try:
+            # audit_log_score_threshold 0: the suite's own script-6 runs above
+            # wrote LOG_GRADE=0 for this synthetic log, and the score leg is
+            # not what these two cases are about (they are about the
+            # checksum/evidence reading).
+            return _grade_album(ALBUM, "EMBEDDED",
+                                _cfg(grade_check_audit=False,
+                                     audit_log_score_threshold=0))
+        finally:
+            _dm.check_log_checksum = _real_check
+
+    # R26's own case: the track carries NO stamped verdict and its rip log
+    # verifies, so the readout is REAL on that evidence alone.
+    tr = _grade_now(with_tag=False)["tracks"][0]
     ok(tr.get("audit") == "REAL",
-       f"a verified rip reads REAL in the viewer with the AUDIT check off "
-       f"({tr.get('audit')})")
+       f"an UNSTAMPED verified rip reads REAL in the viewer with the AUDIT "
+       f"check off ({tr.get('audit')}, {tr.get('audit_verified')})")
+
+    # …and the aligned case: the verdict needs all three legs, so a stamped
+    # tag is never overruled into REAL by one leg, and the readout NAMES the
+    # legs nothing established instead (here: no LOG_GRADE, no .accurip — this
+    # fixture has neither, and "we could not check" must not read as REAL).
+    tr = _grade_now(with_tag=True)["tracks"][0]
+    ok(tr.get("audit") != "REAL"
+       and sorted(tr.get("audit_legs_missing") or []) == ["accuraterip"],
+       f"a stamped CD with a leg nothing established is not overruled into "
+       f"REAL, and the readout names the missing legs "
+       f"({tr.get('audit')}, {tr.get('audit_legs')})")
 
 shutil.rmtree(TMP, ignore_errors=True)
 print()

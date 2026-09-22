@@ -76,11 +76,22 @@ TAG_FAMILY = {
     "MOVEMENTNUMBER": "identity", "COMPOSER": "identity",
     "LYRICIST": "identity", "REMIXER": "identity", "COMMENT": "identity",
     "COPYRIGHT": "identity", "ITUNESADVISORY": "identity",
+    # The rest of the credit table MusicBrainz states on a recording (and on
+    # its work): who played what, who produced, engineered, mixed, arranged,
+    # conducted or directed it. People, so they are identity — the same family
+    # as the composer and the lyricist they stand beside.
+    "PERFORMER": "identity", "PRODUCER": "identity", "ENGINEER": "identity",
+    "MIXER": "identity", "ARRANGER": "identity", "DJMIXER": "identity",
+    "CONDUCTOR": "identity", "WRITER": "identity", "DIRECTOR": "identity",
+    "COMPOSERSORT": "identity", "MUSICBRAINZ_COMPOSERID": "identity",
     # The release the track came from, its identifiers and its medium.
     "ALBUM": "release", "DATE": "release", "ORIGINALDATE": "release",
     "ORIGINALYEAR": "release", "RELEASETYPE": "release",
     "RELEASESTATUS": "release", "RELEASECOUNTRY": "release",
     "CATALOGNUMBER": "release", "BARCODE": "release", "SCRIPT": "release",
+    # The release's own ASIN, the language its text is in and each medium's
+    # title — release facts, from the same release request as the barcode.
+    "ASIN": "release", "LANGUAGE": "release", "DISCSUBTITLE": "release",
     "LABEL": "release", "TRACKTOTAL": "release", "DISCTOTAL": "release",
     "ISRC": "release", "LICENSE": "release", "MEDIA": "release",
     "SOURCE": "release", "ALBUMITUNESADVISORY": "release",
@@ -109,7 +120,7 @@ TAG_FAMILY = {
     "INTEGRITY": "provenance", "AUDIO_MD5": "provenance",
     "LOG_CRC": "provenance", "LOG_GRADE": "provenance",
     "ENCODER_PROGRAM": "provenance", "ENCODER_QUALITY": "provenance",
-    "ENCODER_VERSION": "provenance",
+    "ENCODER_VERSION": "provenance", "ENCODEDBY": "provenance",
     # The listener's own stars — see FAMILIES above.
     "RATING": "opinion",
 }
@@ -139,6 +150,24 @@ TAG_INFO = {
     "COMPOSER": ("Composer", "Who wrote the music (the performer is ARTIST)."),
     "LYRICIST": ("Lyricist", "Who wrote the words."),
     "REMIXER": ("Remixer", "Who remixed this version."),
+    "PERFORMER": ("Performer", "Who played on the track, \"Name (instrument)\" per value — several "
+                                "performers are several values, one per instrument."),
+    "PRODUCER": ("Producer", "Who produced the recording; several producers are several values."),
+    "ENGINEER": ("Engineer", "Who engineered the recording (recording engineer, not the mixer)."),
+    "MIXER": ("Mixer", "Who mixed the recording."),
+    "ARRANGER": ("Arranger", "Who arranged the music (MusicBrainz's arranger, instrument arranger and "
+                             "orchestrator relationships)."),
+    "DJMIXER": ("DJ-mixer", "Who DJ-mixed the track — the continuous mix, not a remix."),
+    "CONDUCTOR": ("Conductor", "Who conducted the orchestra, band or choir on the recording."),
+    "WRITER": ("Writer", "Who wrote the work when MusicBrainz does not say composer or lyricist."),
+    "DIRECTOR": ("Director", "Director of the video (or audio) recording — a music-video credit."),
+    "COMPOSERSORT": ("Composer sort", "Sort spelling of the composer list, in the same order as COMPOSER."),
+    "MUSICBRAINZ_COMPOSERID": ("MB composer id", "MusicBrainz artist id of each composer, in the same "
+                                                  "order as COMPOSER."),
+    "ASIN": ("ASIN", "Amazon identifier of the release, as MusicBrainz states it."),
+    "LANGUAGE": ("Language", "Language of the release's text, ISO 639-3 (eng, deu, …)."),
+    "DISCSUBTITLE": ("Disc title", "This medium's own title (\"Disc 2: The Rarities\") — per disc, so "
+                                   "a multi-disc release can name each one."),
     "COMMENT": ("Comment", "Free-text note on the file."),
     "COPYRIGHT": ("Copyright", "The release's copyright line."),
     "ITUNESADVISORY": ("Advisory", "Content rating: 0 clean, 1 explicit, 2 cleaned."),
@@ -197,6 +226,9 @@ TAG_INFO = {
     "ENCODER_PROGRAM": ("Encoder program", "Which encoder produced the file (FLAC only)."),
     "ENCODER_QUALITY": ("Encoder quality", "Encoder setting the file was produced with."),
     "ENCODER_VERSION": ("Encoder version", "Version of that encoder."),
+    "ENCODEDBY": ("Encoded by", "The byline the encoder itself wrote into the file (ID3 TENC, "
+                                "the MP4 \u00a9too atom, the ENCODEDBY comment) — what made "
+                                "the file, not this app's conversion markers."),
     "RATING": ("Rating", "Your own stars — 0-5 with halves — stored in the file as Picard's RATING, "
                           "0-100 (one half-star = 10). An opinion, so nothing grades it; the app keeps "
                           "its own copy and heals it after a rename."),
@@ -249,9 +281,29 @@ TAG_WRITER = {
     "ENCODER_PROGRAM": _script(3),
     "ENCODER_QUALITY": _script(3),
     "ENCODER_VERSION": _script(3),
+    # Nothing here writes it: it is the encoder's own byline, recorded by
+    # whatever made the file.
+    "ENCODEDBY": "the encoder that produced the file",
     # The ratings API (server.ratings) is the only writer, and it writes on the
     # click itself — no script pass touches an opinion.
     "RATING": "the ratings API (server.ratings) — the star you clicked",
+    # MusicBrainz credits and the release facts no naming script reads: both
+    # MusicBrainz paths write them through one helper (mlo.autotag), the beets
+    # import per album and Auto Tagging when it already asks about a release.
+    "PERFORMER": f"{_RELEASE_WRITER} · {_AUTOTAG} credits",
+    "PRODUCER": f"{_RELEASE_WRITER} · {_AUTOTAG} credits",
+    "ENGINEER": f"{_RELEASE_WRITER} · {_AUTOTAG} credits",
+    "MIXER": f"{_RELEASE_WRITER} · {_AUTOTAG} credits",
+    "ARRANGER": f"{_RELEASE_WRITER} · {_AUTOTAG} credits",
+    "DJMIXER": f"{_RELEASE_WRITER} · {_AUTOTAG} credits",
+    "CONDUCTOR": f"{_RELEASE_WRITER} · {_AUTOTAG} credits",
+    "WRITER": f"{_RELEASE_WRITER} · {_AUTOTAG} credits",
+    "DIRECTOR": f"{_RELEASE_WRITER} · {_AUTOTAG} credits",
+    "COMPOSERSORT": f"{_RELEASE_WRITER} · {_AUTOTAG} credits",
+    "MUSICBRAINZ_COMPOSERID": f"{_RELEASE_WRITER} · {_AUTOTAG} credits",
+    "ASIN": f"{_RELEASE_WRITER} · {_AUTOTAG} release facts",
+    "LANGUAGE": f"{_RELEASE_WRITER} · {_AUTOTAG} release facts",
+    "DISCSUBTITLE": f"{_RELEASE_WRITER} · {_AUTOTAG} release facts",
 }
 DEFAULT_WRITER = _RELEASE_WRITER
 

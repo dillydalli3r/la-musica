@@ -152,6 +152,11 @@ ISO_CFG = {
     "grade_check_replaygain": False,
     "grade_check_acoustid": False,
     "grade_check_album_description": False,
+    # Tag-value CASE: every fixture here spells its GENRE the way the
+    # vocabulary publishes it ("shoegaze"), and the GENRE half of this check
+    # now cares — a tag is stored in the capitalization the writers produce.
+    # Off for these cases, switched on in its own block below.
+    "grade_check_tag_case": False,
 }
 
 tmp = tempfile.mkdtemp(prefix="mlo_naming_test_")
@@ -521,6 +526,33 @@ ok("GENRE_ORDER" in res["tracks"][0]["issues"]
    and any(i.startswith("duplicate") for i in res["issues"]),
    f"a repeated genre fails with the duplicate wording (got {res['issues']})")
 
+# The tag as the app STORES it is the repeated field read above; the form
+# another tagger leaves behind is ONE value with the names "; "-joined, and the
+# order rule reads that the same way (a "; " is MLO's own multi-value
+# separator, so the two spellings are the same list).
+set_tags(flac, {"GENRE": "shoegaze; dream pop; rock"})
+res = _grade_album(album, "EMBEDDED", ord_cfg)
+ok("GENRE_ORDER" in res["tracks"][0]["issues"]
+   and any(i.startswith("family genre must be the first one") for i in res["issues"]),
+   f"a '; '-joined value is read as the names inside it (got {res['issues']})")
+set_tags(flac, {"GENRE": "rock; shoegaze; dream pop"})
+res = _grade_album(album, "EMBEDDED", ord_cfg)
+ok("GENRE_ORDER" not in res["tracks"][0]["issues"],
+   f"and the same names in order pass (got {res['tracks'][0]['issues']})")
+
+# A family is the FIRST slot, so the same family twice is the same defect seen
+# from the other side: the second one is not a specific genre, it is a repeat
+# of the head, and a specific genre that IS the family ("rock, rock") is that
+# repeat under another name. Both are reported — the hierarchy AND the
+# duplicate — because a reader acting on either line must be able to see it.
+set_multi(flac, "GENRE", ["rock", "rock", "shoegaze"])
+res = _grade_album(album, "EMBEDDED", ord_cfg)
+ok("GENRE_ORDER" in res["tracks"][0]["issues"]
+   and any(i.startswith("family genre must be the first one") for i in res["issues"])
+   and any(i.startswith("duplicate") for i in res["issues"]),
+   f"a family in the first slot twice is both a hierarchy and a duplicate "
+   f"problem (got {res['issues']})")
+
 # The OVERFLOW is the count check's business, not this one's: two checks may
 # not both fail one track over the same list.
 set_multi(flac, "GENRE", ["rock", "shoegaze", "dream pop", "post-britpop"])
@@ -573,6 +605,68 @@ res = _grade_album(album, "EMBEDDED",
                         grade_check_genre_order=True))
 ok("GENRE_ORDER" not in res["tracks"][0]["issues"],
    f"an unknown name is not an ORDER failure (got {res['tracks'][0]['issues']})")
+
+# ----------------------------------------------------------------------
+# Genre CAPITALIZATION (grade_check_tag_case → issue GENRE_CASE)
+# ----------------------------------------------------------------------
+print("== genre capitalization ==")
+# GENRE is the one tag whose canonical spelling mlo.tagtext cannot state: it is
+# an OPEN, MULTI-VALUE tag, so its canonical form is per NAME (one call of
+# mlo.genres.display_name each) and it is deliberately absent from
+# CANONICAL_CASE. Nothing else reports a name stored the vocabulary's own way —
+# the vocabulary check folds case and the order check only looks at the family
+# slot — so "metal; alternative metal" graded clean while every genre writer
+# would have stored "Metal; Alternative Metal".
+case_cfg = dict(mood_cfg, grade_check_genre_count=False,
+                grade_check_tag_case=True)
+set_multi(flac, "GENRE", ["metal", "alternative metal"])
+res = _grade_album(album, "EMBEDDED", case_cfg)
+ok("GENRE_CASE" in res["tracks"][0]["issues"],
+   f"a lowercase genre fails the case check (got {res['tracks'][0]['issues']})")
+ok(any("GENRE 'metal' → 'Metal'" in i for i in res["issues"])
+   and any("GENRE 'alternative metal' → 'Alternative Metal'" in i
+           for i in res["issues"]),
+   f"the issue names each value AND the spelling the writers produce "
+   f"(got {res['issues']})")
+ok(res["total_checks"] - res["pass_count"] == 1,
+   f"and costs exactly one grade point, like every other value this check "
+   f"finds wrong ({res['pass_count']}/{res['total_checks']})")
+# ONE check per track: it is the tag-case check that owns the rule, so its
+# switch is what turns the genre half off — and the check then leaves the
+# denominator with it.
+res_off = _grade_album(album, "EMBEDDED",
+                       dict(case_cfg, grade_check_tag_case=False))
+ok("GENRE_CASE" not in res_off["tracks"][0]["issues"]
+   and res_off["total_checks"] == res["total_checks"] - 1
+   and res_off["pass_count"] == res_off["total_checks"],
+   f"grade_check_tag_case=False stops grading it ({res_off['total_checks']})")
+# An unknown name is the VOCABULARY check's business: the writers keep it as it
+# was typed (display_name leaves "Nonsense" alone), so a case complaint about
+# it would be a second failure for one defect.
+set_multi(flac, "GENRE", ["Nonsense"])
+res = _grade_album(album, "EMBEDDED", dict(case_cfg, grade_check_genre_vocab=True))
+ok("GENRE_CASE" not in res["tracks"][0]["issues"],
+   f"an unknown name is not re-reported as a case problem "
+   f"(got {res['tracks'][0]['issues']})")
+
+# …and script 10 clears it: the grade and the fixer ask the SAME function
+# (mlo.genres.display_name), so a value the grade fails is one the writer
+# rewrites. What is graded here is what Format all produces.
+set_multi(flac, "GENRE", ["metal", "alternative metal"])
+from server import script_runners as _script_runners  # noqa: E402
+
+_script_runners.run_script(10, {"music_folder": tmp, "targets": [flac],
+                                "mb_genre_count": 2, "grade_verbose": False})
+from mutagen.flac import FLAC as _FLAC  # noqa: E402
+
+_fixed_genres = list(_FLAC(flac)["GENRE"])
+ok(_fixed_genres == ["Metal", "Alternative Metal"],
+   f"script 10 stores the writers' capitalization, family first "
+   f"({_fixed_genres})")
+res = _grade_album(album, "EMBEDDED", case_cfg)
+ok("GENRE_CASE" not in res["tracks"][0]["issues"]
+   and res["pass_count"] == res["total_checks"],
+   f"and the grade clears on it ({res['pass_count']}/{res['total_checks']})")
 
 set_tags(flac, dict(NO_MOOD, MOOD="melancholic"))
 

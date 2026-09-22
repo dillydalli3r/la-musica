@@ -597,20 +597,23 @@ export async function cachedPaths(): Promise<string[]> {
   return [...new Set((await cachedTracks()).map((t) => t.path))];
 }
 
-/** Total cached bytes (Content-Length sums), for a storage readout. */
-export async function cachedBytes(): Promise<number> {
+/** Bytes of every stored entry (Content-Length sums), keyed by the URL it is
+ *  filed at — the per-key form of the storage readout, so a view can size ONE
+ *  album of the cache and not only the whole of it. The total is the sum of
+ *  these: one sweep of Cache Storage answers both. */
+export async function cachedEntrySizes(): Promise<Record<string, number>> {
   try {
     const c = await cache();
-    let total = 0;
+    const sizes: Record<string, number> = {};
     for (const req of await c.keys()) {
       const r = await c.match(req);
       if (!r) continue;
       const len = r.headers.get("content-length");
-      total += len ? Number(len) : (await r.clone().blob()).size;
+      sizes[req.url] = len ? Number(len) : (await r.clone().blob()).size;
     }
-    return total;
+    return sizes;
   } catch {
-    return 0;
+    return {}; // Cache Storage unavailable (insecure context)
   }
 }
 
@@ -737,11 +740,18 @@ export async function forgetAlbumArtwork(
   }
 }
 
-/** The query key for the cached-track snapshot. One key, so CachedTracksView,
- *  the download controls and every downloaded mark on a title read the SAME
- *  list — a download anywhere shows up everywhere on the next invalidation.
- *  (The stored value is `cachedTracks()`, identity rows included.) */
+/** The query key for the cached-track snapshot. One key, so the Downloads
+ *  page, the download controls and every downloaded mark on a title read the
+ *  SAME list — a download anywhere shows up everywhere on the next
+ *  invalidation. (The stored value is `cachedTracks()`, identity rows
+ *  included.) */
 export const CACHED_PATHS_KEY = ["cachedPaths"] as const;
+
+/** The query key for the cache's byte sizes. Its own key rather than a value
+ *  hung off the track snapshot: it is the one readout that costs a sweep of
+ *  Cache Storage, so it is only asked for by the page that shows bytes, and a
+ *  download or a removal invalidates it just as explicitly. */
+export const CACHED_SIZES_KEY = ["cachedSizes"] as const;
 
 /** Paths of cached tracks, resolved against where the library keeps them NOW.
  *

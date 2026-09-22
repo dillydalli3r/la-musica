@@ -11,7 +11,6 @@ import { api } from "../api";
 import type { ImportRunStatus, ReadyAlbum, SlskAutoFile, SlskStatus, SlskAutoProgress, SlskConversation, SlskDownloads, SlskMessage, SlskQueueItem, SlskQueueScope, SlskSearchProgress, SlskTransfer, StagingEntry, StagingRoot, StagingRootId } from "../api";
 import { toast } from "../store";
 import { EmptyState, PageLoading } from "../components/Badges";
-import CachedTracksView from "../components/CachedTracksView";
 import PageHeader from "../components/PageHeader";
 import Modal from "../components/Modal";
 import Segmented from "../components/Segmented";
@@ -2840,17 +2839,24 @@ export default function SoulseekPage() {
   // EVERYTHING on its way into the library (wishes, bulk auto-imports, manual
   // grabs, imports). The badge on Downloads counts active transfers so
   // progress is visible from any tab.
-  type TabId = "queue" | "search" | "auto" | "downloads" | "cached" | "messages" | "sharing" | "settings";
+  type TabId = "queue" | "search" | "auto" | "downloads" | "messages" | "sharing" | "settings";
   const TAB_LIST: { id: TabId; label: string }[] = [
     { id: "queue", label: "Queue" },
     { id: "search", label: "Search" },
     { id: "auto", label: "Auto-import" },
     { id: "downloads", label: "Downloads" },
-    { id: "cached", label: "Cached tracks" },
     { id: "messages", label: "Messages" },
     { id: "sharing", label: "Sharing" },
     { id: "settings", label: "Settings" },
   ];
+  // The cached tracks used to be a tab here. That list is the Downloads page's
+  // now, so a link that still names the old tab lands on it instead of falling
+  // back to the queue: the reader asked for their downloads either way.
+  const wantCached = params.get("tab") === "cached";
+  const navigate = useNavigate();
+  useEffect(() => {
+    if (wantCached) navigate("/downloads", { replace: true });
+  }, [wantCached, navigate]);
   const [tab, setTab] = useState<TabId>(() => {
     // A link can name the tab it wants: a queue row's "Answer…" opens the tab
     // the parked question is answered on (`/soulseek?tab=auto`), and the
@@ -3452,8 +3458,6 @@ export default function SoulseekPage() {
           <StagingPanel />
         </>
       )}
-
-      {tab === "cached" && <CachedTracksView />}
 
       {tab === "messages" && <MessagesPanel running={running} />}
 

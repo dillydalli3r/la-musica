@@ -158,6 +158,22 @@ os.makedirs(os.path.join(MF, "Artists", "Caps", "Untagged"), exist_ok=True)
 with open(os.path.join(MF, "Artists", "Caps", "Untagged", "1-01 Song.flac"), "wb") as f:
     f.write(b"\0" * 8192)
 
+# an artist folder with NO album folder in it: the artist's own image and
+# description are everything it holds, and the library still lists it as an
+# artist (the `empty_artist` finding, and the one row the panel may remove).
+SOLO = os.path.join(MF, "Artists", "Solo")
+os.makedirs(SOLO, exist_ok=True)
+for _name in ("artist.jpg", "description.txt"):
+    with open(os.path.join(SOLO, _name), "wb") as f:
+        f.write(b"x")
+
+# …and the near miss: a folder that holds AUDIO is never that finding — its
+# audio is a problem of its own (audio_in_artist), and nothing may offer to
+# remove a folder with music in it.
+os.makedirs(os.path.join(MF, "Artists", "Loose"), exist_ok=True)
+with open(os.path.join(MF, "Artists", "Loose", "1-01 Song.flac"), "wb") as f:
+    f.write(b"x")
+
 
 def listing():
     """Every relative path under the music folder, before and after the scan."""
@@ -225,6 +241,68 @@ ok(res["counts"].get("stray_file") == 1,
 ok("wrong_case" not in {i["kind"] for i in issues
                         if i["path"] in ("Artists/Good/Good Album", "Artists/Caps/Empty")},
    "the untouched issue kinds did not gain rows of their own")
+
+print("== empty artist (an artist folder with no album) ==")
+ea = [i for i in issues if i["kind"] == "empty_artist"]
+ok(res["counts"].get("empty_artist") == 1
+   and [i["path"] for i in ea] == ["Artists/Solo"],
+   f"the artist folder holding no album folder is the only empty_artist row "
+   f"({[i['path'] for i in ea]})")
+ok(bool(ea[0]["detail"]) and "no album folder" in ea[0]["detail"]
+   and "Solo" in ea[0]["detail"],
+   f"the row says which folder and why ({ea[0]['detail']})")
+ok("Trash" in ea[0]["hint"],
+   f"the hint names the Trash — the only removal this app offers a user "
+   f"({ea[0]['hint']})")
+# The near miss: audio anywhere beneath keeps a folder out of this finding.
+ok(not any(i["path"] == "Artists/Loose" for i in ea)
+   and res["counts"].get("audio_in_artist") == 1,
+   f"a folder holding audio is audio_in_artist, never an empty artist "
+   f"({[i['kind'] for i in issues if i['path'] == 'Artists/Loose']})")
+
+# The grade fails the same folder — the finding and the grade are one answer
+# about one folder (mlo.layout.empty_artist, which both ask).
+from mlo.grader import grade_artist  # noqa: E402
+
+g = grade_artist(SOLO, {})
+ok([i["code"] for i in g["issues"]] == ["ARTIST_EMPTY"] and g["pass"] is False,
+   f"grade_artist fails it with ARTIST_EMPTY ({g['issues']})")
+g2 = grade_artist(os.path.join(MF, "Artists", "Good"), {})
+ok("ARTIST_EMPTY" not in [i["code"] for i in g2["issues"]] and g2["checks"] == 2,
+   f"and an artist that holds an album is graded on its own artefacts, not "
+   f"failed for the folder ({g2['checks']} checks, {[i['code'] for i in g2['issues']]})")
+
+print("== removing an empty artist goes through the Trash ==")
+BIN = os.path.join(MF, ".mlo", "trash")
+r = _client.post("/api/library/layout/remove-empty-artist", json={"path": SOLO})
+ok(r.status_code == 200, f"the route accepts it ({r.status_code}: {r.text[:160]})")
+dest = str(r.json().get("trash") or "")
+ok(not os.path.exists(SOLO), "the artist folder is gone from Artists/")
+ok(os.path.isdir(dest)
+   and os.path.normcase(dest).startswith(os.path.normcase(BIN)),
+   f"…and landed in <music>/.mlo/trash/<user>/ ({dest})")
+ok(os.path.isfile(os.path.join(dest, "artist.jpg"))
+   and os.path.isfile(os.path.join(dest, "description.txt")),
+   f"every file travelled with it — nothing was deleted "
+   f"({sorted(os.listdir(dest))})")
+with open(os.path.join(os.path.dirname(dest), ".mlo_manifest.json"),
+          encoding="utf-8") as f:
+    manifest = json.load(f)
+entries = manifest.get("entries", manifest)
+ok(str(entries.get(os.path.basename(dest), {}).get("origin", "")).replace("\\", "/")
+   == SOLO.replace("\\", "/"),
+   f"its origin is recorded, so the Trash page can put it back ({manifest})")
+
+# The guards: the route re-derives the finding instead of trusting the panel.
+for path, what in ((os.path.join(MF, "Artists", "Good"), "an artist with an album"),
+                   (os.path.join(MF, "Artists", "Loose"), "a folder holding audio"),
+                   (MF, "the music folder itself")):
+    r2 = _client.post("/api/library/layout/remove-empty-artist", json={"path": path})
+    ok(r2.status_code == 400,
+       f"{what} is refused, not moved ({r2.status_code}: {r2.text[:120]})")
+ok(os.path.isdir(os.path.join(MF, "Artists", "Good"))
+   and os.path.isdir(os.path.join(MF, "Artists", "Loose")),
+   "and both are still on disk")
 
 print("== read-only ==")
 # Read-only means the LIBRARY is untouched: the scan renames, moves and

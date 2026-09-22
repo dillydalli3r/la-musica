@@ -1,6 +1,6 @@
 # la musica
 
-**v3.7.0** — a self-hosted app that *manages, optimizes, audits, grades and
+**v3.8.0** — a self-hosted app that *manages, optimizes, audits, grades and
 plays* your music library, from the browser, a desktop window or a phone.
 
 **la musica** (formerly Music Library Optimizer) is a FastAPI backend plus a
@@ -12,7 +12,7 @@ client whose auto-importer verifies what it downloaded. All app state — config
 playlists, favourites, the beets library, the Soulseek config, measured loudness,
 caches — lives in one hidden `.mlo` folder inside your music directory.
 
-Release notes for this version are in `local/release-notes-3.7.0.md` (older ones
+Release notes for this version are in `local/release-notes-3.8.0.md` (older ones
 follow `local/release-notes-<version>.md`); the grading and optimization contract
 is in [`docs/OPTIMIZATION-GRADING-SPEC.md`](docs/OPTIMIZATION-GRADING-SPEC.md).
 
@@ -388,8 +388,11 @@ characters for paths that need the room.
 
 **68 checks** across tracks, albums, artist folders and folders, all toggleable
 on the **Grading** page with a live filter, enable/disable-all and the **Strict /
-Balanced / Relaxed** presets; `grade_check_audit` is the only check that ships
-**off**. A verdict is binary: an album is `PASS` only when every enabled check
+Balanced / Relaxed** presets. Grading ships **strict**: every check is on in the
+factory defaults — `grade_check_audit` (the AUDIT-tag requirement) included, and
+every file category admitted — and the **Balanced** preset is those defaults as
+they were before 3.7.0 (audit tag not required) for anyone who wants the old
+answer in one click. A verdict is binary: an album is `PASS` only when every enabled check
 passes, otherwise `FAIL` with the failed checks itemized. The summary counts
 checks (`summary_pass` / `summary_total`) and reports `albums_passed` /
 `albums_failed`, plus `albums_audit_failed` for albums that pass every check

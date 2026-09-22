@@ -290,6 +290,16 @@ def should_write_audio_tag(config, tag_name, filepath=None, filetype=None):
         return True
     return bool(ft.get(family, True))
 
+# The grading keys 3.7.0 turned ON in DEFAULT_CONFIG, where grading shipped
+# strict: the audit-tag requirement (an unaudited album used to pass) and the
+# "other" file category (an unclassified file used to fail the album). They
+# are named HERE because they are the entire difference between the Strict and
+# Balanced presets — `server.api_stack.BALANCED_OFF` is this list, so the two
+# stay one name apart instead of two hand-kept copies of the same sixty
+# booleans, and a test can show Strict IS the shipped defaults rather than a
+# second opinion about them.
+STRICT_DEFAULT_KEYS = ("grade_check_audit", "grade_include_other")
+
 DEFAULT_CONFIG = {
     # The first-run wizard supplies this; never ship a developer-specific
     # library path in the application defaults.
@@ -452,18 +462,26 @@ DEFAULT_CONFIG = {
     # whose ratings belong to someone else's player wants.
     "write_rating_tags": True,
 
-    # Grading
+    # Grading ships STRICT: a fresh install grades every file it holds with
+    # every check, and the two keys this release moved are named below so the
+    # Strict and Balanced presets stay one list apart instead of two hand-kept
+    # copies of the same sixty booleans (server/api_stack.py:BALANCED_OFF).
     "grade_verbose": True,
     # What file categories are allowed when grading an album folder. A
-    # folder with files of a disallowed category fails grading. 'other' is
-    # opt-in: by default any file that is not music/cover/cue/log/lrc fails.
+    # folder with files of a disallowed category fails grading. Every
+    # category ships allowed: the grade is meant to see the whole folder, and
+    # a category left out is the one thing grading never looks at.
     "grade_include_music": True,
     "grade_include_cover": True,
     "grade_include_cue": True,
     "grade_include_log": True,
     "grade_include_lrc": True,
     "grade_include_accurip": True,
-    "grade_include_other": False,
+    # An unclassified file (.txt/.pdf/.m3u) is allowed, which is what the
+    # disallowed-files check reads: with this ON nothing else grades such a
+    # file, so the layout scan's `stray_file` (script 20) is where it is still
+    # reported. OFF is what makes one fail the album (grade_check_disallowed).
+    "grade_include_other": True,
     # Remuxed music videos (MKV sidecars from script 11) are allowed by default.
     "grade_include_video": True,
     # Configurable strict checks for grading (all on by default, per request)
@@ -493,7 +511,13 @@ DEFAULT_CONFIG = {
     "grade_check_unreadable": True,
     "grade_check_missing_tags": True,
     "grade_check_encoder": True,
-    "grade_check_audit": False,
+    # AUDIT must read REAL. It ships ON (it used to ship off, so an unaudited
+    # library was never failed): the verdict it grades is the rip's OWN
+    # evidence — the .log's CRC vs the decoded PCM, then AccurateRip — never
+    # AudioAuditor's spectral opinion, so this cannot fail a disc that
+    # verified itself, only one nothing verified. Turn off 'Require audit tag'
+    # to grade an unaudited library (that is the Balanced preset's answer).
+    "grade_check_audit": True,
     "grade_check_instrumental": True,
     "grade_check_lyrics": True,
     "grade_check_lyrics_format": True,

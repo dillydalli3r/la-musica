@@ -194,7 +194,7 @@ const CHECK_DESC: Record<string, string> = {
   grade_check_crc: "Every track must be covered by a per-track CRC in its own disc's .log, and that CRC must match the CRC of the track's decoded audio — coverage alone is not enough (issue codes CRC / CRC_MISMATCH).",
   grade_check_artist_image: "The artist folder must hold an artist.jpg / artist.png that decodes, matches the configured artist_image_aspect (±2%) and stays under the artist_image_target_size ceiling (issue codes ARTIST_IMAGE_MISSING / _CORRUPT / _FORMAT / _OVERSIZED / _ASPECT / _UPSCALED). An image below the target is reported as a note and passes — nothing here upscales. Script 19 (Optimize artist images) fixes every one of them.",
   grade_check_artist_description: "The artist folder must hold a non-blank description.txt (issue code ARTIST_DESCRIPTION_MISSING).",
-  grade_check_audit: "Tracks must carry an AUDIT tag (run Audit Library). Off by default so unaudited libraries aren't auto-failed.",
+  grade_check_audit: "Tracks must carry an AUDIT tag (run Audit Library). ON by default — the verdict is the rip's OWN evidence (the .log's per-track CRC against the decoded audio, then AccurateRip), never a spectral guess, so it fails only a disc nothing verified. Off, an unaudited library is never failed for the tag.",
   grade_check_log_checksum: "The rip .log's own EAC SHA256 must verify. A log that does not verify — or that states no checksum while 'verify log checksum' is on — fails grading (issue code LOG_CHECKSUM), independently of the audit tag. XLD and older EAC logs that carry no checksum concept pass.",
   grade_check_accuraterip: "A .accurip whose verdict is not REAL marks the album's AUDIT FAKE (and each affected track red) — grading itself is reserved to tagging, so this key never costs a grade point. Turn on 'Require audit tag' for that verdict to fail the album.",
   grade_check_log_grade: "LOG_GRADE tag must exist and be 0–100.",
@@ -227,7 +227,7 @@ const CHECK_DESC: Record<string, string> = {
   grade_include_lrc: ".lrc sidecars count toward the grade.",
   grade_include_accurip: ".accurip files count toward the grade.",
   grade_include_video: "MKV/MP4 music videos count toward the grade.",
-  grade_include_other: "Anything unclassified counts toward the grade. Off by default.",
+  grade_include_other: "Unclassified files (.txt/.pdf/.m3u, …) are allowed to sit in an album folder. Nothing else grades them — the layout scan (script 20) is what reports them as stray files. Turn this off and one fails the album instead (Disallowed file types).",
 };
 
 /** Numeric settings shown alongside the toggles. */
@@ -260,6 +260,20 @@ const GRADING_TOGGLES = (reg: TagRegistry | undefined) => reg?.checks.map((c) =>
  *  checks on, but choosing what counts toward a grade is the user's call. */
 const CHECK_KEYS = (reg: TagRegistry | undefined) =>
   (reg?.checks ?? []).filter((c) => !c.key.startsWith("grade_include_")).map((c) => c.key);
+
+/** What the Balanced preset puts BACK: the grading keys 3.7.0 turned on when
+ *  it made grading strict by default (the audit-tag requirement and the
+ *  "other" file category). Balanced is therefore the factory defaults as an
+ *  install had them BEFORE that — the same list, one name apart — and NOT a
+ *  second hand-kept copy of the sixty defaults it shares with Strict.
+ *
+ *  `server.api_stack.BALANCED_OFF` is the server's half of the same list and
+ *  is what /api/stack reports per check; tools/test_check_stack.py fails if
+ *  the two ever disagree, exactly as it does for `relaxedOff` below. */
+const balancedOff = [
+  "grade_check_audit",
+  "grade_include_other",
+];
 
 /** The registry checks one group shows, in registry order. */
 const groupChecks = (
@@ -352,8 +366,11 @@ export default function GradingPage() {
       return next;
     });
 
-  /** Named presets: a one-click starting point that is still fully editable. */
-  const [preset, setPreset] = useState<"strict" | "balanced" | "relaxed">("balanced");
+  /** Named presets: a one-click starting point that is still fully editable.
+   *  The control starts on Strict because that IS what a fresh install's
+   *  config holds (mlo/config.py ships every check on); it tracks the last
+   *  preset clicked after that. */
+  const [preset, setPreset] = useState<"strict" | "balanced" | "relaxed">("strict");
   const applyPreset = (name: "strict" | "balanced" | "relaxed") => {
     const d = defaults as Record<string, unknown> | undefined;
     if (!d) return;
@@ -373,15 +390,15 @@ export default function GradingPage() {
       const next = { ...(c ?? {}) };
       for (const k of GRADING_KEYS(reg)) if (d[k] !== undefined) next[k] = d[k];
       if (name === "strict") for (const k of CHECK_KEYS(reg)) next[k] = true;
-      else if (name === "relaxed") for (const k of relaxedOff) next[k] = false;
+      else for (const k of name === "balanced" ? balancedOff : relaxedOff) next[k] = false;
       return next;
     });
-    toast(name === "balanced" ? "Defaults loaded — Save to apply" : `${name[0].toUpperCase() + name.slice(1)} preset loaded — Save to apply`);
+    toast(`${name[0].toUpperCase() + name.slice(1)} preset loaded — Save to apply`);
   };
 
   const PRESETS: { id: "strict" | "balanced" | "relaxed"; label: string; title: string; icon: typeof ShieldCheck }[] = [
-    { id: "strict", label: "Strict", title: "Enable every check", icon: ShieldCheck },
-    { id: "balanced", label: "Balanced", title: "Factory defaults", icon: ToggleRight },
+    { id: "strict", label: "Strict", title: "Every check on — what a fresh install ships", icon: ShieldCheck },
+    { id: "balanced", label: "Balanced", title: "The factory defaults as they were before 3.7.0 (audit tag not required)", icon: ToggleRight },
     { id: "relaxed", label: "Relaxed", title: "Only the essential checks", icon: SunMedium },
   ];
 

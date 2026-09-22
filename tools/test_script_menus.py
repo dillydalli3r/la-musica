@@ -99,6 +99,115 @@ def python_default_run_all():
     return [int(n) for n in re.findall(r"\d+", m.group(1))]
 
 
+# The surfaces that RUN a list of scripts (a chain / Run All), and the token
+# each one has to read it from. `web/src/lib/scripts.ts` and `mlo/config.py`
+# are where the order is DEFINED; the list here is everyone else, because a
+# surface that keeps its own copy is how the wizard's on-Done list came to run
+# Grade before the scripts that write the tags it grades, and how a newly added
+# script could be missing from one menu and present in the next. A surface that
+# runs a list belongs HERE — the discovery check at the bottom of
+# `check_script_surfaces` fails on a web caller this table does not name.
+RUN_ALL_SURFACES = {
+    "mlo/cli.py": "run_all_order",
+    "server/imports.py": "DEFAULT_RUN_ALL_ORDER",
+    "web/src/pages/CheckStackPage.tsx": "run_all_order",
+    "web/src/pages/ImportWizard.tsx": "run_all_order",
+    "web/src/pages/LibraryPage.tsx": "run_all_order",
+    "web/src/pages/OptimizationPage.tsx": "run_all_order",
+    "web/src/pages/SettingsPage.tsx": "run_all_order",
+    # The wizard's step renders the `run_all_order` field declared in
+    # lib/configMeta.ts (its `value` arrives already loaded), so the canonical
+    # names it works with here are the shared TS list and its anchors.
+    "web/src/pages/SetupPage.tsx": "DEFAULT_RUN_ALL",
+}
+
+# The surfaces that offer ONE script at a time, and the registry each takes its
+# names from ("" = the labels are action phrasings, so only the ids are
+# checked). Ordering is meaningless for a single script; what can drift is the
+# NUMBER a menu runs and the NAME it prints, so both are held against the
+# canonical registry.
+PER_SCRIPT_MENUS = {
+    "web/src/components/TagActionsMenu.tsx": "",
+    "web/src/pages/AlbumPage.tsx": "SCRIPT_LABEL",
+    "web/src/pages/LibraryPage.tsx": "SCRIPTS",
+}
+
+ALL_SURFACES = set(RUN_ALL_SURFACES) | set(PER_SCRIPT_MENUS)
+
+# Three or more DISTINCT script numbers in one literal is a list somebody
+# typed. Distinctness is what separates one from a column of unrelated numbers
+# (a worker-count dropdown, an RGB triple): those repeat or fall outside 1..21.
+ID_LIST = re.compile(r"\[\s*(\d+)\s*(?:,\s*\d+\s*)+?\]")
+RUN_ONE_ID = re.compile(r"(?:api\.run|runScripts)\(\[(\d+)\]")
+
+
+def without_comments(rel):
+    """*rel*'s source minus its comments: a list QUOTED in a comment is an
+    explanation of what the code used to do, not a second list."""
+    src = read(rel)
+    if rel.endswith((".ts", ".tsx")):
+        src = re.sub(r"/\*.*?\*/", "", src, flags=re.S)
+        return "\n".join(line.split("//")[0] for line in src.splitlines())
+    return "\n".join(line.split("#")[0] for line in src.splitlines())
+
+
+def handwritten_id_lists(rel):
+    """The script-id literals *rel* types into its own code (comments aside)."""
+    out = []
+    for m in ID_LIST.finditer(without_comments(rel)):
+        ids = [int(n) for n in re.findall(r"\d+", m.group(0))]
+        if len(ids) >= 3 and len(set(ids)) == len(ids) and all(1 <= n <= 21 for n in ids):
+            out.append(ids)
+    return out
+
+
+def web_run_callers():
+    """Every web source file that hands the runner a list of scripts."""
+    out = {}
+    root = os.path.join(ROOT, "web", "src")
+    for folder, _dirs, files in os.walk(root):
+        if "node_modules" in folder:
+            continue
+        for name in files:
+            if not name.endswith((".ts", ".tsx")):
+                continue
+            rel = os.path.relpath(os.path.join(folder, name), ROOT).replace("\\", "/")
+            if "api.run(" in read(rel):
+                out[rel] = rel
+    return out
+
+
+def check_script_surfaces(check):
+    """Every surface that builds a script list derives it from the canonical
+    order — or, for a one-script menu, names registry ids and registry labels.
+
+    The two tables above are the whole point: a list built anywhere else is
+    what drifts, and the discovery check at the bottom refuses a web caller
+    that is not in one of them, so the next surface has to be declared here
+    instead of quietly running its own list."""
+    for rel, token in sorted(RUN_ALL_SURFACES.items()):
+        src = read(rel)
+        check(f"{rel} reads the canonical order ({token})", token in src)
+        typed = handwritten_id_lists(rel)
+        check(f"{rel} keeps no run order of its own", not typed, str(typed))
+    for rel, token in sorted(PER_SCRIPT_MENUS.items()):
+        src = read(rel)
+        if token:
+            check(f"{rel} takes its script names from the registry ({token})",
+                  token in src)
+        ids = sorted({int(n) for n in RUN_ONE_ID.findall(src)})
+        check(f"every id {rel} runs by itself is a real script",
+              set(ids) <= set(EXPECTED_SCRIPTS),
+              str(sorted(set(ids) - set(EXPECTED_SCRIPTS))))
+        typed = handwritten_id_lists(rel)
+        check(f"{rel} keeps no run order of its own", not typed, str(typed))
+    undeclared = sorted(set(web_run_callers()) - ALL_SURFACES
+                        - {"web/src/lib/scripts.ts",  # the canonical list itself
+                           "web/src/api.ts"})         # the transport, not a menu
+    check("every web surface that runs scripts is declared above", not undeclared,
+          str(undeclared))
+
+
 def readme_scripts():
     src = read("README.md")
     return {int(m.group(1)) for m in re.finditer(r"^\|\s*(\d+)\s*\|", src, re.M)}
@@ -213,6 +322,17 @@ def check_import_chain(check):
     check("every id the chain returns exists in RUNNERS",
           bool(got) and set(got) <= runners,
           f"{got} vs {sorted(runners)}")
+    # A saved import_scripts list is the user's own override and is honoured as
+    # written — a subset stays a subset, in the order it was typed, rather than
+    # being completed back to DEFAULT_CHAIN (the two are different decisions:
+    # "drop these from my import" is not "run everything again").
+    partial = imports.chain_for({"import_scripts": [4, 12]})
+    check("a saved import_scripts subset is honoured as written",
+          partial == [4, 12], str(partial))
+    check("an id an older release removed cannot come back as a chain entry",
+          all(1 <= sid <= imports.SCRIPT_ID_MAX for sid in
+              imports.chain_for({"import_scripts": [99, -3, "x", 1]})),
+          str(imports.chain_for({"import_scripts": [99, -3, "x", 1]})))
     check("the built-in chain is all real runners",
           set(imports.DEFAULT_CHAIN) <= runners, str(imports.DEFAULT_CHAIN))
     check("the built-in chain writes the tracklist after the tagging step",
@@ -304,6 +424,9 @@ def main():
 
     print("import chain")
     check_import_chain(check)
+
+    print("script surfaces")
+    check_script_surfaces(check)
 
     print("terminal runners")
     check_cli_runners(check)

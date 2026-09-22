@@ -7760,6 +7760,64 @@ def library_layout_report():
     return mlo_layout.load_report(load_config())
 
 
+@app.post("/api/library/layout/remove-empty-artist")
+def library_layout_remove_empty_artist(req: AlbumRemove, request: Request = None):
+    """Move an album-less artist folder into <music>/.mlo/trash/<user>/.
+
+    The one thing the layout panel may act on, and the removal goes through the
+    app's own Trash — never shutil.rmtree — so it is recoverable from the Trash
+    page like any album the library removed.
+
+    The finding is re-derived HERE, from the folder itself, instead of trusting
+    the panel: an artist folder is removable only while mlo.layout's
+    `empty_artist` says so — no album folder under it, and no audio anywhere
+    beneath. A folder that gained an album since the scan, or that was never
+    one of these, is refused, not moved.
+    """
+    cfg = load_config()
+    folder = cfg.get("music_folder") or ""
+    if not folder or not os.path.isdir(folder):
+        raise HTTPException(400, "music_folder not set or not found")
+    p = os.path.normpath(req.path)
+    if not os.path.isdir(p):
+        raise HTTPException(404, "artist folder not found")
+    if not _in_music_folder(p, folder):
+        raise HTTPException(400, "artist folder outside music folder")
+    lib = library_root(folder)
+    # Directly inside <music>/Artists: an album folder is not an artist folder,
+    # and nothing above Artists/ is ever removable through this route.
+    if not lib or os.path.normcase(os.path.dirname(p)) != os.path.normcase(
+            os.path.normpath(lib)):
+        raise HTTPException(400, "not an artist folder (must sit in Artists/)")
+    if not mlo_layout.empty_artist(p):
+        raise HTTPException(
+            400, "this artist folder is not an empty artist — it holds an album "
+                 "or audio, and this route never moves an artist with music")
+    trash = os.path.normpath(trash_dir(folder, auth_mod.current_user(request)))
+    os.makedirs(trash, exist_ok=True)
+    name = os.path.basename(p) or "artist"
+    dest = os.path.normpath(os.path.join(trash, name))
+    n = 2
+    while os.path.exists(dest):
+        dest = os.path.normpath(os.path.join(trash, f"{name} ({n})"))
+        n += 1
+    if not move_path(p, dest):
+        raise HTTPException(
+            500,
+            f"could not move {name} to the trash — a file inside it is still "
+            f"in use (stop playback and retry)")
+    entries = _manifest_read(trash)
+    entries[os.path.basename(dest)] = {
+        "origin": p.replace("\\", "/"),
+        "at": time.strftime("%Y-%m-%dT%H:%M:%S"),
+    }
+    _manifest_write(trash, entries)
+    tagcache.invalidate_all()
+    mbresolve.invalidate()
+    _refresh_slskd_shares_soon()
+    return {"ok": True, "trash": dest.replace("\\", "/")}
+
+
 # --------------------------------------------------------------------------- #
 # WebSocket + static
 # --------------------------------------------------------------------------- #

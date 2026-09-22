@@ -4,6 +4,7 @@ import { CheckCircle2, CircleDashed, Download, X } from "lucide-react";
 import ConfirmButton from "./ConfirmButton";
 import {
   CACHED_PATHS_KEY,
+  CACHED_SIZES_KEY,
   cachedFlags,
   cancelDownloads,
   downloadTracks,
@@ -117,7 +118,7 @@ export default function DownloadButton({
     setHave(n);
     setState(n === 0 ? "none" : n === paths.length ? "full" : "partial");
     qc.invalidateQueries({ queryKey: CACHED_PATHS_KEY });
-    qc.invalidateQueries({ queryKey: ["cachedBytes"] });
+    qc.invalidateQueries({ queryKey: CACHED_SIZES_KEY });
   };
 
   const download = async () => {

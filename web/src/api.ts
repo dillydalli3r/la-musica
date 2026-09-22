@@ -2091,6 +2091,16 @@ export const api = {
    *  walk-free, which is why the Library page can afford to ask on load. */
   libraryLayoutReport: () => json<LayoutSnapshot>(`${API}/library/layout/report`),
 
+  /** Move an album-less artist folder into the app's Trash. The server
+   *  re-derives the finding, so a folder that gained an album since the scan
+   *  is refused instead of moved. */
+  libraryLayoutRemoveEmptyArtist: (path: string) =>
+    json<{ ok: boolean; trash: string }>(`${API}/library/layout/remove-empty-artist`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ path }),
+    }),
+
   namingPreview: (script: string, shortFolderNames: boolean, sample?: Record<string, string>) =>
     json<{ path: string | null; ok: boolean; error?: string }>(`${API}/naming/preview`, {
       method: "POST",

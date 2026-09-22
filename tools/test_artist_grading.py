@@ -104,7 +104,11 @@ def image_bytes(w=100, h=100, fmt="PNG"):
 # --------------------------------------------------------------------------- #
 print("== grade_artist ==")
 ART = os.path.join(MF, "Artists", "Artist")
-os.makedirs(ART, exist_ok=True)
+# An artist folder is only a graded artist while it holds an album: a folder
+# with nothing but the artist's own image and description IS the ARTIST_EMPTY
+# finding (asserted on its own folder below). One audio file in one album
+# folder is the smallest thing that makes this one an artist with music.
+write(os.path.join(ART, "Ripped (2020)", "01 - Song.flac"))
 IMAGE = write(os.path.join(ART, "artist.jpg"), image_bytes(fmt="JPEG"))
 DESC = write(os.path.join(ART, "description.txt"), b"A band from nowhere.\n")
 
@@ -181,6 +185,30 @@ ok(res["artwork"] == {"image": False, "image_file": None, "description": False},
 ok(grade_artist("", {})["issues"][0]["code"] == "ARTIST_FOLDER_MISSING",
    "an empty path fails the same way instead of raising")
 
+# An artist folder with NO album folder in it is not a graded artist: the same
+# shape as an absent folder (one issue, no checks invented), because a perfect
+# image and description describe an artist, never an album. The removal the
+# layout panel offers for it goes through the Trash.
+solo = os.path.join(MF, "Artists", "Solo")
+os.makedirs(solo, exist_ok=True)
+write(os.path.join(solo, "artist.jpg"), image_bytes(fmt="JPEG"))
+write(os.path.join(solo, "description.txt"), b"A band from nowhere.\n")
+res = grade_artist(solo, {})
+ok([i["code"] for i in res["issues"]] == ["ARTIST_EMPTY"],
+   f"an artist folder with no album folder reports ARTIST_EMPTY "
+   f"({res['issues']})")
+ok(res["pass"] is False and res["checks"] == 0 and res["pct"] == 0.0,
+   f"and FAILS without grading the artefacts as if it held an album ({res})")
+ok(res["artwork"]["image"] is True and res["artwork"]["description"] is True,
+   f"…while its artwork is still reported ({res['artwork']})")
+
+# An album folder with audio under it is what makes it a graded artist again:
+# the album's own problems are the album grader's to report, not this one's.
+write(os.path.join(solo, "Album (2020)", "01 - Song.flac"))
+res = grade_artist(solo, {})
+ok(res["issues"] == [] and res["pass"] is True and res["checks"] == 2,
+   f"an album folder clears it ({res['pass_count']}/{res['checks']})")
+
 # --------------------------------------------------------------------------- #
 # grader file classification (album side)
 # --------------------------------------------------------------------------- #
@@ -218,7 +246,9 @@ ok(not {i["kind"] for i in res["issues"]}
       "audio_in_artist", "audio_at_root", "unexpected_folder"},
    f"no shape issues for the sidecars ({res['issues']})")
 ok(res["total"] == 0, f"a clean library reports nothing at all ({res['issues']})")
-ok(res["albums"] == 1 and res["artists"] == 1 and res["audio_files"] == 1,
+# Three album folders under two artists: the fixtures above (Artist's Ripped,
+# Artist's Album from this block, and Solo's) are all part of this tree.
+ok(res["albums"] == 3 and res["artists"] == 2 and res["audio_files"] == 3,
    f"the fixture was really scanned ({res['albums']} album, "
    f"{res['artists']} artist, {res['audio_files']} audio)")
 

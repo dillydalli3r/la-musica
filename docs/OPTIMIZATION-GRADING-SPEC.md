@@ -47,10 +47,14 @@ Grade script (4) over an album and reading the report.
   anywhere beneath it (including one that holds only a `cover.*`, `.cue`, `.log`,
   `.lrc` or `.accurip`) is reported as `EMPTY_FOLDER` with one failed check, so
   an album whose audio is gone cannot hide from the counts.
-- **R7 — artist folders have their own grade.** `grade_artist()` evaluates only
-  `grade_check_artist_image` and `grade_check_artist_description`; with both
-  switched off it reports 100 % and `pass: true` (nothing graded is nothing
-  failed). An absent artist folder is `ARTIST_FOLDER_MISSING`.
+- **R7 — artist folders have their own grade.** `grade_artist()` evaluates
+  `grade_check_artist_image` and `grade_check_artist_description`, and fails an
+  artist folder that holds NO album folder at all (`EMPTY_ARTIST`): a folder
+  carrying only the artist's own image and description is not an artist in this
+  library — nothing of theirs is here — so it cannot pass as one. With both
+  checks switched off an artist that DOES hold an album reports 100 % and
+  `pass: true` (nothing graded is nothing failed). An absent artist folder is
+  `ARTIST_FOLDER_MISSING`.
 - **R7a — the artist image is judged on its decoded pixels**, never on its name
   or suffix: Pillow reads the stored file, and every issue names the numbers it
   judged. OVERSIZED fails (`image_policy()`'s ceiling: `artist_image_target_size`,
@@ -76,7 +80,7 @@ An issue is `{code, label, where, reason}` for album-level and artist problems
 | `UNREADABLE` | the file could not be opened/decoded |
 | `TITLE`, `ARTIST`, `ALBUM`, `ALBUMARTIST`, `DATE`, `TRACKNUMBER`, `DISCNUMBER`, `GENRE`, `MOOD`, `ENERGY`, `ITUNESADVISORY`, `INSTRUMENTAL`, `DYNAMIC RANGE`, `REPLAYGAIN_*`, `INITIALKEY`, `BPM`, `MEDIA`, `SOURCE`, `ENCODER_*`, `ACOUSTID_ID`, `ACOUSTID_FINGERPRINT`, `LOG_GRADE` | the tag (or its presence check) failed; the tag's own name is the code |
 | `MOOD_MISSING`, `ENERGY_MISSING`, `GENRE_MISSING` | the per-tag presence checks (`TAG_PRESENCE_CHECKS`) |
-| `GENRE_COUNT`, `GENRE_ORDER`, `GENRE_VOCAB` | genre count, arrangement and vocabulary |
+| `GENRE_COUNT`, `GENRE_ORDER`, `GENRE_VOCAB`, `GENRE_CASE` | genre count, arrangement, vocabulary, and the spelling every writer produces (`metal` → `Metal`) |
 | `TAGS` | excess tags |
 | `PATH`, `PATH_CASE` | naming-script mismatch / case-only mismatch |
 | `LYRICS` | lyrics missing, wrongly formatted, or present on an instrumental |
@@ -88,7 +92,7 @@ An issue is `{code, label, where, reason}` for album-level and artist problems
 | `LOG_CHECKSUM` | the rip log's EAC SHA256 does not verify |
 | `AUDIT` | the audit tag is missing or not REAL (with `grade_check_audit` on) |
 | `EMPTY_FOLDER`, `EXPECTED_TRACKS_MISSING` | folder/release-level failures |
-| `ARTIST_IMAGE_MISSING`, `ARTIST_IMAGE_CORRUPT`, `ARTIST_IMAGE_FORMAT`, `ARTIST_IMAGE_OVERSIZED`, `ARTIST_IMAGE_ASPECT`, `ARTIST_IMAGE_UPSCALED`, `ARTIST_DESCRIPTION_MISSING`, `ARTIST_FOLDER_MISSING` | artist-folder failures (script 19 clears the image ones) |
+| `ARTIST_IMAGE_MISSING`, `ARTIST_IMAGE_CORRUPT`, `ARTIST_IMAGE_FORMAT`, `ARTIST_IMAGE_OVERSIZED`, `ARTIST_IMAGE_ASPECT`, `ARTIST_IMAGE_UPSCALED`, `ARTIST_DESCRIPTION_MISSING`, `ARTIST_FOLDER_MISSING`, `EMPTY_ARTIST` | artist-folder failures (script 19 clears the image ones). `EMPTY_ARTIST` is an artist folder holding NO album folder — only the artist's own image/description: the artist is not in the library, so the folder is not a graded artist. Script 20 reports it and the Optimization page can remove it to the Trash |
 | `ARTIST_IMAGE_UNDERSIZED` | informational note on an artist image below `artist_image_target_size` — reported, never failing |
 
 ---
@@ -166,8 +170,11 @@ reports how many were removed.
 
 ## 3. Grading checks
 
-68 keys exist; `grade_check_audit` is the only check that ships **off** and
-`grade_include_other` the only category that ships **off**. Every check is
+68 keys exist; **every one of them ships ON**, checks and file categories
+alike. A fresh install grades strictly without anyone pressing a preset: the
+two that used to ship off (`grade_check_audit`, `grade_include_other`) are
+named in `mlo/config.py::STRICT_DEFAULT_KEYS` so the change is visible rather
+than implied. Every check is
 toggleable on the Grading page; a check the registry knows and the page does not
 group still renders (section *Other checks*).
 
@@ -219,7 +226,7 @@ group still renders (section *Other checks*).
 
 | Check id | Label | Default | Asserts |
 | --- | --- | --- | --- |
-| `grade_check_audit` | Require audit tag | **off** | the track's audit verdict is REAL — missing or non-REAL fails (`AUDIT`). Off by default so an unaudited library is not auto-failed |
+| `grade_check_audit` | Require audit tag | ON | the track's audit verdict is REAL — missing or non-REAL fails (`AUDIT`). It ships **on** now: with the CD verdict decided by the rip's own evidence (§5, R21) an unaudited library is a library nobody has checked, which is the thing this check exists to say |
 | `grade_check_log_checksum` | Log checksum valid | ON | the rip log's EAC SHA256 verifies; a log that states none while `audit_verify_log_checksum` is on fails (`LOG_CHECKSUM`); XLD logs and EAC logs from BEFORE v1.0 pass (nothing claimed, nothing refuted — v1.0b1 is the release that introduced the checksum, and the version is read from the log's OWN header, so a modern EAC log with its checksum line removed is still a real tamper signal and still fails). The log file itself is never written, repaired or stripped: editing a log to make its checksum pass would destroy the only thing the checksum proves |
 | `grade_check_accuraterip` | AccurateRip verified (audit only) | ON | a `.accurip` whose verdict is not REAL marks the album's audit FAKE (and the track red). Together with `audit_require_accuraterip` it is what can turn the audit verdict FAKE; **it never adds a grade point** |
 | `grade_check_log_grade` | Log grade present & in range | ON | `LOG_GRADE` exists, is an integer 0-100 and is at least `grade_log_score_threshold` (default 100; 0 disables the threshold) |
@@ -234,7 +241,7 @@ group still renders (section *Other checks*).
 | `grade_check_cover_crop` | Cover aspect ratio (squareness) | ON | `|w/h − 1| ≤ cover_crop_threshold` (an aspect test, not crop detection) |
 | `grade_check_sidecar_cover` | Per-track sidecar covers | ON | per-track covers meet the same rules |
 | `grade_check_tag_spaces` | Tags — no padding | ON | no leading/trailing space or tab, and no run of 2+ internal spaces, in a single-line tag value (a value carrying a newline is never judged — its whitespace is text) |
-| `grade_check_tag_case` | Tag value capitalisation | ON | `MEDIA`, `SOURCE`, `RELEASETYPE`, `RELEASESTATUS`, `AUDIT`, `RELEASECOUNTRY`, `SCRIPT` and `MOOD` hold the canonical spelling `mlo/tagtext.py` writes (`TAG_CASE`). Free text — `TITLE`, `ALBUM`, `ARTIST`, `LABEL`, lyrics — is never touched |
+| `grade_check_tag_case` | Tag value capitalisation | ON | `MEDIA`, `SOURCE`, `RELEASETYPE`, `RELEASESTATUS`, `AUDIT`, `RELEASECOUNTRY`, `SCRIPT` and `MOOD` hold the canonical spelling `mlo/tagtext.py` writes (`TAG_CASE`), and every name in `GENRE` holds the form every genre writer ends on — `mlo/genres.py::display_name` of the name's canonical spelling (`GENRE_CASE`, e.g. `metal` → `Metal`). GENRE is deliberately NOT in `CANONICAL_CASE`: it is an open, multi-value tag whose canonical form is per name, not a closed vocabulary. Free text — `TITLE`, `ALBUM`, `ARTIST`, `LABEL`, lyrics — is never touched |
 | `grade_check_tag_blank_lines` | Tags — no blank lines | ON | no blank line inside a tag value (`LYRICS` exempt) |
 | `grade_check_lyrics_spaces` | Lyrics — no padding | ON | no leading/trailing space on a lyric line |
 | `grade_check_lyrics_blank_lines` | Lyrics — blank line rules | ON | blank lines match the formatter's canonical output |
@@ -252,8 +259,7 @@ group still renders (section *Other checks*).
 | `grade_include_description` | Album description | ON | `description.txt` is the app's own file category, not a stray file |
 | `grade_include_cue` / `grade_include_log` / `grade_include_lrc` / `grade_include_accurip` | CUE sheets / Log files / LRC lyrics / AccurateRip files | ON | those sidecars participate |
 | `grade_include_video` | Remuxed videos | ON | MKV/MP4 music videos participate |
-| `grade_include_other` | Other files | **off** | unclassified files (`.txt`, `.pdf`, `.m3u`, …) participate |
-| `grade_include_other` | Other files | **off** | unclassified files (`.txt`, `.pdf`, `.m3u`, …) participate |
+| `grade_include_other` | Other files | ON | unclassified files (`.txt`, `.pdf`, `.m3u`, …) participate |
 
 **R14 — `VIDEO_SKIP_TAGS` never apply to a music video**: `REPLAYGAIN_*` and
 `DYNAMIC RANGE` are not written into video containers by any script, so they are
@@ -262,6 +268,12 @@ not graded there. Videos are still graded on tags, links, naming and format.
 (which reads `TAG_ALLOWLIST` = `TAG_MAP` + encoder markers + `BEETS_TAGS` +
 `BEETS_ID3_FRAMES`) is used by the grade *and* by the Optimize/Format All strip
 pass, so a strip can never leave what the grade flags or delete what it needs.
+**R15a — the metadata import is complete, and complete means allowlisted.**
+Every MusicBrainz field with a home in the container's tag system is written
+(§6), and every one of them goes into that SAME predicate — so a credit the app
+wrote is never reported as an excess tag and never stripped by script 10, while
+a genuinely foreign tag still is. A field with no home is not invented under an
+ad-hoc key; the writer reports what it could not place.
 **R16 — ReplayGain and AcoustID are opt-in families** (R42): absence is never a
 failure, a half-written set always is.
 **R17 — CD vs Digital Media vs other.** `_is_cd()` is exactly `MEDIA == "cd"`
@@ -282,9 +294,17 @@ graded, taggable track rather than an invisible one.
 
 The three presets are one-click starting points on the Grading page; they edit
 the local config copy and only take effect on **Save** (`POST /api/config`).
-**R18 — Strict** loads the defaults and then sets every `grade_check_*` check to
-`true` (file-category keys are deliberately untouched).
-**R19 — Balanced** loads the defaults (`GET /api/config/defaults`).
+**R18 — the SHIPPED defaults ARE Strict**: every `grade_check_*` and every
+`grade_include_*` key ships `true` (68 of 68), so a fresh install grades
+strictly with nobody pressing anything. The two that used to ship off —
+`grade_check_audit` and `grade_include_other` — are named in
+`mlo/config.py::STRICT_DEFAULT_KEYS`, so the change is a readable fact rather
+than an implied one. **R18a — Strict** is therefore the identity preset (load
+the defaults and set every `grade_check_*` true): it is what a fresh install
+already has, and pressing it on an edited config restores it.
+**R19 — Balanced** is the pre-strict set: the defaults with `grade_check_audit`
+and `grade_include_other` off — the one-click way back to the old behaviour for
+a collection nobody has audited.
 **R20 — Relaxed** loads the defaults and then switches these 18 keys **off**:
 `grade_check_tag_spaces`, `grade_check_tag_case`, `grade_check_lyrics_spaces`,
 `grade_check_cue_spaces`, `grade_check_cover_crop`, `grade_check_lyrics_zero`,
@@ -302,13 +322,23 @@ the local config copy and only take effect on **Save** (`POST /api/config`).
 The audit verdict is the one grade input that is *derived*, and the order of
 evidence matters.
 
-- **R21 — a rip's own numbers outrank the spectral detectors.** For `MEDIA=CD`
-  the order is: (1) the album `.log`'s per-track `Copy CRC` compared against the
-  track's decoded PCM — a match is `AUDIT=REAL` written immediately, without
-  waiting for AudioAuditor and without needing any tool a Linux/Docker install
-  lacks; (2) a REAL `.accurip` verdict; (3) AudioAuditor, only when neither
-  applies, and only as *evidence*, never as a verdict that overrules a verified
-  rip (a disagreement is recorded as a warning).
+- **R21 — a CD's verdict is its rip's OWN evidence, and only that.** For
+  `MEDIA=CD`, script 6 writes `AUDIT=REAL` exactly when every enabled leg
+  passes: **(1) log score** — the disc's rip-log score (fresh from Logchecker,
+  else the `LOG_GRADE` the tracks already carry) is at least
+  `audit_log_score_threshold`; **(2) checksums** — the `.log`'s per-track
+  `Copy CRC` equals the track's decoded PCM AND the `.log`'s own EAC SHA256
+  verifies (a pre-1.0 EAC or XLD log is *unsupported*, which passes — nothing
+  claimed, nothing refuted); **(3) AccurateRip** — the `.accurip` verdict is
+  REAL. A leg that FAILS makes the verdict `FAKE` and the run log names the leg
+  and its reason. A leg that cannot be EVALUATED at all leaves the tag untouched
+  — no REAL, no FAKE — and the run prints `missing leg '<name>'` with the
+  reason, so "we could not check" is never reported as "your rip is bad".
+  **AudioAuditor never decides a CD in either direction**: its read is kept as
+  evidence and a disagreement is logged as a warning
+  (*AudioAuditor reports …, the rip's own evidence decides a CD*). It remains
+  the verdict for every non-CD file, where there is nothing else to go on.
+  `AUDIOAUDITOR_OVERRIDE` still wins over all of it (R25).
 - **R22 — a verdict needs evidence, and is bound to its file.** Script 6 writes
   a verdict only where something verified it; a missing tool, a timeout or an
   `info`-only answer leaves the tag untouched and reports the file as
@@ -325,12 +355,18 @@ evidence matters.
   writes it; when it is set, per-track verdicts and the album's all-REAL gate
   both agree with it, and a forced re-audit reproduces the user's call instead of
   erasing it. *Auto* clears the tag and hands the track back to the detectors.
-- **R26 — the graded AUDIT requirement is satisfied by the rip's evidence.**
-  With `grade_check_audit` on, a CD track whose log CRC or `.accurip` verifies
-  satisfies the requirement even when the stored tag still says FAKE from an
-  older run; the live readout (library, album and track pages) reports `REAL` and
-  the track's `audit_verified` names which source proved it. The readout applies
-  with the check off, too.
+- **R26 — the readout and the written verdict are the same rule.** For a CD the
+  live readout (library, album and track pages) computes the same three legs
+  R21 does: all three pass → `REAL`, any leg fails → `FAKE` with the leg named,
+  and a leg that could not be evaluated is named as *missing* and the stored
+  verdict is shown as it is rather than guessed — one absence never costs two
+  checks, because each leg's own artefact already has its own graded check
+  (`LOG_GRADE`, `CRC` / `LOG_CHECKSUM`, `AccurateRip`). The
+  evidence-satisfied reading survives only where it was written for: a track
+  carrying NO stamped verdict whose own evidence (a verifying `.log` checksum or
+  a REAL `.accurip`) proves the rip is reported `REAL`, with
+  `audit_verified` naming which source proved it. The readout applies with
+  `grade_check_audit` off, too.
 - **R27 — the log's own documentation never overrules a verified rip.** A log
   with no verifiable EAC SHA256, one the tool cannot score, or one below
   `audit_log_score_threshold` is reported as such, but a track whose CRC just
@@ -376,6 +412,8 @@ The default writer of everything else is *Beets tagging (14) · import*.
 | `ACOUSTID_ID`, `ACOUSTID_FINGERPRINT` | provenance | the import wizard's AcoustID apply (fingerprint match) — the PAIR in one save, verified by re-read — and Fix AcoustID pairs (21) for a file already holding half of one | `grade_check_acoustid` |
 | `ENCODER_PROGRAM`, `ENCODER_QUALITY`, `ENCODER_VERSION` | provenance | Optimize FLACs (3) | `grade_check_encoder` |
 | `MUSICBRAINZ_*`, `RATEYOURMUSIC_*`, `RELEASETYPE`, `CATALOGNUMBER`, `LABEL`, `BARCODE`, `ISRC`, `WORK`, `MOVEMENT`, … | release | Beets tagging (14) · import · MusicBrainz writes | `grade_check_album_tags`, `grade_check_mb_links`, `grade_check_rym_links`, `grade_check_naming` |
+| `PERFORMER`, `PRODUCER`, `ENGINEER`, `MIXER`, `ARRANGER`, `DJMIXER`, `CONDUCTOR`, `WRITER`, `DIRECTOR`, `COMPOSERSORT`, `MUSICBRAINZ_COMPOSERID` | release | Beets tagging (14, `beets_credits`) · Auto tagging (8) — the release's own artist/recording/work relations, fetched in ONE request per album | `grade_check_excess_tags` (allowlisted, never foreign) |
+| `ASIN`, `LANGUAGE`, `DISCSUBTITLE`, `LICENSE`, `ENCODEDBY` | release | Beets tagging (14) · Auto tagging (8) | `grade_check_excess_tags` |
 
 Notes that are easy to get wrong: `MEDIA`/`SOURCE` belong to script 1, not to
 script 8; `ACOUSTID_*` are written by the wizard's AcoustID apply — the
@@ -392,6 +430,19 @@ single-line value gets its spacing collapsed, and script 10 re-applies both over
 an existing library. The writers' rules and the grader's `grade_check_tag_case`
 / `grade_check_tag_spaces` are the same functions, so the import can never
 produce a value the grade would fail.
+
+**The MusicBrainz import writes the release's metadata, not a subset of it**
+(R15a). Every field MusicBrainz states that has a home in the container's tag
+system is written — the identity and release tags, the whole credit set
+(performer/producer/engineer/mixer/arranger/conductor/writer/director with their
+roles, the composer id and sort name, from the release's artist, recording and
+work relations, fetched in ONE request per album), `ASIN`, `LANGUAGE`,
+`DISCSUBTITLE`, `LICENSE`, `BARCODE` and the full per-track `ISRC` list — and
+each one is in the SAME `tag_key_allowed()` allowlist the excess-tags check and
+the Format-All strip pass read, so a credit the app wrote is never reported as
+foreign and never stripped. A field with no home in the container's tag system
+(packaging, per-catalogue-entry labels, annotations) is not invented under an
+ad-hoc key: it stays out, and the writer says which fields it could not place.
 
 The two advisory tags answer to **different switches**, because different things
 write them: `ITUNESADVISORY` to `advisory_auto_fetch` (the provider fetch — the
@@ -460,10 +511,14 @@ Even a forced re-rate rewrites only with evidence: the invented
   explicit exceptions (small connectives lowercased; `IDM`, `EDM`, `UK`, `R&B`,
   `DnB`, `DJ`, … upper-cased; each hyphenated chunk capitalized): every writer
   ends in `mlo/genres.py::display_name`, so a file holds `Rock; Shoegaze` and
-  not MusicBrainz's own lowercase `rock`. The *vocabulary* comparison
-  (`mlo/genre_vocab.py::canonical`, the grader's `GENRE_VOCAB` check, the alias
-  table) folds case, so `Shoegaze` and `shoegaze` are the same genre to
-  everything that judges the value.
+  not MusicBrainz's own lowercase `rock`. **The display form is GRADED**: every
+  name in the tag must equal `display_name` of its canonical spelling, and a
+  lowercase name fails `grade_check_tag_case` as `GENRE_CASE` (naming the value
+  and the spelling it should have) — script 10 rewrites it. The *vocabulary*
+  comparison (`mlo/genre_vocab.py::canonical`, the grader's `GENRE_VOCAB` check,
+  the alias table) folds case, so `Shoegaze` and `shoegaze` are the same genre
+  to everything that judges the value; the case rule is about the value the
+  file stores, not about which genre it is.
 
 ### 7.3 ReplayGain and dynamic range
 
@@ -475,7 +530,15 @@ Even a forced re-rate rewrites only with evidence: the invented
 - **R43** — script 7 writes the album gain/peak and the track gain/peak for FLAC
   and MP4 alike, using the ReplayGain 2.0 reference of **−18 LUFS**;
   `replaygain_skip_existing` (ON) leaves already-tagged files alone unless
-  `force_dr_replaygain` is set.
+  `force_dr_replaygain` is set. **The peak is the SAMPLE peak**, which is what
+  rsgain (the writer) stores and what the ecosystem's readers expect: the
+  on-demand measurement and the export writer must not measure true peak
+  instead, or a file's own tag, its cached value and its export disagree about
+  the same audio — measured at up to +39.6 % before this was pinned
+  (`ebur128=peak=sample`, the sample-peak value read from `astats`).
+  The GAIN is EBU R128 / ITU-R BS.1770 integrated loudness, verified within
+  ±0.05 dB of rsgain's own number (the print resolution either implementation
+  can produce).
 - **R44** — DR expectations are the two tags the meter writes: `DYNAMIC RANGE`
   per track and `ALBUM DYNAMIC RANGE` per album (the meter's *Official DR value*,
   typically rendered `DR<n>`); they are graded through the required-tag sweep and
@@ -605,6 +668,13 @@ and install what the platform supports.
    files that already carry the work, so a second *Run All* is safe and cheap.
    To redo a specific thing use its force flag (§2, R11) — that is the only way
    a script revisits work it has done.
+   **A run has one scope, and it is the same for every script in it**: a
+   library-wide run (the Optimize page's *Run All*, the CLI) makes every script
+   discover the whole library for itself, and a targeted run (a selection, the
+   wizard's *Run all scripts here*) makes every script work only on those
+   targets. A script must never be handed an empty target list and left to
+   report "nothing to do" — a run that changed nothing must be able to say why
+   in terms of the files it looked at, not in terms of a scope it never had.
 
 Safe to re-run at any time: **4** and **20** (both read-only), 2, 1, 5, 6, 7, 8,
 9, 10, 12, 13, 15, 16, 17, 21 (it acts only on a file holding half a pair).
@@ -640,9 +710,9 @@ checks see or how they judge it.
 
 | Key | Default | Effect on grading |
 | --- | --- | --- |
-| `grade_check_*` (59 keys) | all ON except `grade_check_audit` | switch one check on/off |
+| `grade_check_*` (59 keys) | all ON | switch one check on/off — every one ships on, including `grade_check_audit` (`mlo/config.py::STRICT_DEFAULT_KEYS`) |
 | `grade_include_music`, `grade_include_cover`, `grade_include_description`, `grade_include_cue`, `grade_include_log`, `grade_include_lrc`, `grade_include_accurip`, `grade_include_video` | ON | a file category participates; off means its files are also "disallowed" for `grade_check_disallowed` |
-| `grade_include_other` | off | unclassified files participate |
+| `grade_include_other` | ON | unclassified files participate |
 | `grade_log_score_threshold` | 100 | minimum `LOG_GRADE` for `grade_check_log_grade` (0 disables the threshold) |
 | `grade_verbose` | ON | per-track detail in the Grade report |
 | `grader_cover_size_tolerance_px` | 0 | pixel tolerance on the cover size test |
@@ -705,6 +775,15 @@ the viewer computes per-file sidecar grades; it adds no check).
   `DEFAULT_CONFIG`, so a new check appears on the Grading page the day it exists
   even if this document has not caught up. The registry raises when a claim here
   points at a key the config does not hold.
+- **Every external tool the engine drives stops at Windows' 260-character
+  MAX_PATH** (they open files through the MSVC CRT), and a library named by the
+  shipped script reaches that on its own — the artist folder carries an id, the
+  album folder three more plus the dates and the media. `mlo/subproc.tool_path`
+  is what bridges a longer path (the volume's 8.3 alias, else a temporary
+  junction in `%TEMP%\mlo-longpath`), and it is applied to every `run_tool`
+  argv. When it cannot bridge, the tool sees a path it cannot open and reports
+  *it* — so a step that "found nothing" or "could not decode" on a long-path
+  library is a bridge failure, not an empty library.
 - Detection is heuristic where the evidence is: AudioAuditor's spectral
   detectors can disagree with a provably intact rip, which is why a verified CD
   rip outranks them (R21) and why `AUDIOAUDITOR_OVERRIDE` exists (R25).

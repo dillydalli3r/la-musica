@@ -107,6 +107,7 @@ def generate_config(cfg=None):
         f"    translations: {'yes' if cfg.get('beets_translations', True) else 'no'}",
         f"    work_movement: {'yes' if cfg.get('beets_work_movement', True) else 'no'}",
         f"    release_type_caps: {'yes' if cfg.get('beets_release_type_caps', True) else 'no'}",
+        f"    credits: {'yes' if cfg.get('beets_credits', True) else 'no'}",
         "",
         "musicbrainz:",
         "  enabled: yes",

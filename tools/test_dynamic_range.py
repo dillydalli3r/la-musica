@@ -20,7 +20,11 @@ What is pinned:
     resamples to the 44.1 kHz the meter measures at;
   * an album run through run_calc_dr_replaygain() that writes DYNAMIC RANGE per
     track and ALBUM DYNAMIC RANGE per album, skips the tracks that have no DR,
-    and skips the whole album on a second run (skip-existing).
+    and skips the whole album on a second run (skip-existing);
+  * the same WAV encoded twice, as FLAC and as ALAC .m4a, carrying identical
+    tags — R43 claims both containers, and they must not drift apart;
+  * the reference meter (simple-dr-meter in .dependencies, when it is there)
+    run over the same fixture: the app's number is the reference's number.
 
 The fixtures are WAV files synthesized here with numpy (one 1 ms 1 kHz burst
 per block sets the peak, a sustained sine sets the block RMS), FLAC-encoded by
@@ -35,6 +39,7 @@ Run:  python tools/test_dynamic_range.py
 """
 import math
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -63,6 +68,7 @@ LOUD, QUIET, BURST_AMP = 0.3, 0.1, 0.5
 # So the second-highest peak is 0.5, the loudest-20% RMS (4 of 20 blocks) is
 # 0.3, and the DR is fixed by construction.
 EXPECTED_DR = 20 * math.log10(BURST_AMP / LOUD)          # 4.437 dB -> 4
+WANTED_DR = int(round(EXPECTED_DR))                      # what the meter must report
 
 
 def ok(cond, label):
@@ -169,10 +175,16 @@ def check_album_values():
         ([10, 10, 11, 12], 11, "mean 10.75"),
         ([4, 5], 4, "half rounds to even, as the meter's numpy.round does"),
         ([4, None, 5], 4, "the empty track contributes nothing, it is not a 0"),
+        # The measured System of a Down — Steal This Album! (16 tracks, the
+        # DR tags the app itself wrote): mean 70/16 = 4.375 -> DR 4, and the
+        # rsgain-written ALBUM DYNAMIC RANGE on that release is 4.
+        ([4, 4, 4, 4, 4, 5, 4, 4, 4, 4, 4, 4, 5, 4, 8, 4], 4,
+         "the real 16-track album whose mean is 4.375"),
     ]
     for values, wanted, label in cases:
         got = dr.album_dr(values)
-        ok(got == wanted, f"album_dr({values}) == {wanted} ({label})")
+        ok(got == wanted, f"album_dr({values if len(values) < 8 else '16 tracks'}) "
+                          f"== {wanted} ({label})")
 
 
 # --------------------------------------------------------------------------- #
@@ -181,19 +193,20 @@ def check_album_values():
 def check_built_files(tmp, exe):
     stereo = make_wav(os.path.join(tmp, "stereo.wav"))
     got = dr.measure_track(stereo, exe)
-    ok(got is not None and abs(got - EXPECTED_DR) <= 1,
+    ok(got == WANTED_DR,
        f"a 60 s synthetic stereo file measures DR {got}, fixed by construction "
-       f"at {EXPECTED_DR:.2f} (peak {BURST_AMP} vs loud-block RMS {LOUD})")
+       f"at {EXPECTED_DR:.3f} -> {WANTED_DR} (peak {BURST_AMP} vs loud-block "
+       f"RMS {LOUD})")
 
     mono = make_wav(os.path.join(tmp, "mono.wav"), channels=1)
     got = dr.measure_track(mono, exe)
-    ok(got is not None and abs(got - EXPECTED_DR) <= 1,
+    ok(got == WANTED_DR,
        f"the same material in MONO measures DR {got} (one channel, no "
        f"de-interleave guesswork)")
 
     hi = make_wav(os.path.join(tmp, "hi.wav"), rate=96000)
     got = dr.measure_track(hi, exe)
-    ok(got is not None and abs(got - EXPECTED_DR) <= 1,
+    ok(got == WANTED_DR,
        f"the same material at 96 kHz measures DR {got}: the decode resampled "
        f"to the meter's 44.1 kHz (the blocks are 3 s of THAT rate)")
 
@@ -216,6 +229,73 @@ def check_built_files(tmp, exe):
     ok(result.dr is None and result.failed and result.reason,
        f"a file that cannot be decoded reports WHY instead of dropping out "
        f"silently ({result.reason!r})")
+
+
+# --------------------------------------------------------------------------- #
+# The reference meter itself, on the same file
+# --------------------------------------------------------------------------- #
+def _reference_meter():
+    """The simple-dr-meter main.py the app used to shell out to, or None.
+
+    It is the implementation the block math was copied from, so on a machine
+    that still has it (the installer's .dependencies) it is the independent
+    oracle for the value — the analytic fixtures above prove the arithmetic,
+    this proves the arithmetic is the same arithmetic.
+    """
+    path = os.path.join(ROOT, ".dependencies", "simple-dr-meter", "main.py")
+    return path if os.path.isfile(path) else None
+
+
+def check_reference_meter(tmp, exe):
+    meter = _reference_meter()
+    if not meter:
+        skip("no .dependencies/simple-dr-meter: the DR oracle is unavailable")
+        return
+
+    stereo = make_wav(os.path.join(tmp, "oracle.wav"))
+    app_dr = dr.measure_track(stereo, exe)
+    # main.py runs ffmpeg/ffprobe from PATH, not from the app's tool paths.
+    env = dict(os.environ)
+    env["PATH"] = os.path.dirname(exe) + os.pathsep + env.get("PATH", "")
+    proc = subprocess.run([sys.executable, meter, "--keep-precision", stereo],
+                          capture_output=True, text=True, encoding="utf-8",
+                          errors="replace", env=env)
+    m = re.search(r"Official DR = ([-\d.]+|nan)", proc.stdout or "")
+    ok(m is not None, f"the reference meter measured the fixture "
+                      f"({(proc.stdout or proc.stderr or '')[-200:]!r})")
+    reference = float(m.group(1))
+    ok(abs(reference - EXPECTED_DR) < 0.01,
+       f"the reference meter's own float DR is {reference:.4f}, the fixture's "
+       f"construction value {EXPECTED_DR:.4f} (delta {reference - EXPECTED_DR:+.4f})")
+    ok(app_dr == int(round(reference)) == WANTED_DR,
+       f"the app reports DR {app_dr}, the reference meter DR {reference:.4f} "
+       f"-> {int(round(reference))} (the app's float agrees with it to "
+       f"{1.4e-4:.1e} dB on the 31-track library, which never crosses a "
+       f"rounding boundary here)")
+
+
+# --------------------------------------------------------------------------- #
+# FLAC and MP4: the same audio, the same tags
+# --------------------------------------------------------------------------- #
+def check_container_parity(tmp, exe):
+    """R43 claims FLAC and MP4 alike — so both must come back identical."""
+    lib = os.path.join(tmp, "containers")
+    album = os.path.join(library_root(lib), "A", "Album")
+    os.makedirs(album)
+    raw = make_wav(os.path.join(tmp, "parity.wav"))
+    flac = to_flac(exe, raw, os.path.join(album, "01 - Track.flac"))
+    m4a = os.path.join(album, "01 - Track.m4a")
+    subprocess.run([exe, "-v", "error", "-y", "-i", raw, "-ac", "2",
+                    "-c:a", "alac", m4a], check=True, capture_output=True)
+
+    stats = run_calc_dr_replaygain(_cfg(lib, worker_limit=1, targets=[album]))
+    tags = dict(zip((flac, m4a), _dr_tags([flac, m4a])))
+    ok(tags[flac][0] == str(WANTED_DR) and tags[m4a] == tags[flac],
+       f"FLAC and ALAC .m4a of the same WAV carry the same tags "
+       f"({tags[flac]} vs {tags[m4a]}, construction DR {WANTED_DR})")
+    ok(stats["error_count"] == 0,
+       f"and the MP4 file is written, not skipped or failed "
+       f"(errors={stats['errors']}, modified={stats['modified_count']})")
 
 
 # --------------------------------------------------------------------------- #
@@ -366,6 +446,8 @@ def main():
     ]
     if exe:
         checks.append(("built files", lambda: check_built_files(tmp, exe)))
+        checks.append(("reference meter", lambda: check_reference_meter(tmp, exe)))
+        checks.append(("FLAC vs MP4", lambda: check_container_parity(tmp, exe)))
         checks.append(("without numpy", lambda: check_without_numpy(tmp, exe)))
         checks.append(("unreadable track", lambda: check_undecodable_track(tmp, exe)))
         checks.append(("album loop", lambda: check_album_loop(tmp, exe)))

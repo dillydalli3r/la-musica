@@ -481,10 +481,16 @@ def run_calc_dr_replaygain(config):
 RG2_REFERENCE_LUFS = -18.0
 
 # ffmpeg summary block (see parse_ebur128). Anchored at line start so the
-# per-second progress lines — which carry their own "I:" and "FTPK:"/"TPK:"
-# fields — can never be mistaken for the summary values.
+# per-second progress lines — which carry their own "I:" and "SPK:" fields —
+# can never be mistaken for the summary values.
 EBUR128_I_RE = re.compile(r"^\s*I:\s*(-?\d+(?:\.\d+)?)\s*LUFS", re.MULTILINE)
 EBUR128_PEAK_RE = re.compile(r"^\s*Peak:\s*(-?\d+(?:\.\d+)?)\s*dBFS", re.MULTILINE)
+
+# The same peak again, from the astats filter that rides along in the same
+# decode. ffmpeg's ebur128 summary rounds the peak to 0.1 dBFS, which is up to
+# 0.6% of the value, while the REPLAYGAIN_*_PEAK tag beside it carries six
+# decimals; astats prints it to 1e-6 dB, so it is preferred when present.
+ASTATS_PEAK_RE = re.compile(r"Peak level dB:\s*(-?\d+(?:\.\d+)?)")
 
 _FFMPEG_CACHE = {"exe": None, "checked": False}
 # One store rewrites the whole cache file, so the read-modify-write of
@@ -513,12 +519,19 @@ def _tag_float(v):
 
 
 def parse_ebur128(text):
-    """Parse an ffmpeg ``ebur128=peak=true`` log.
+    """Parse an ffmpeg ``ebur128=peak=sample,astats`` log.
 
     Returns ``{"lufs": float, "peak": float}`` — integrated loudness in LUFS
-    and the true peak as a LINEAR value (``10 ** (dBFS / 20)``), the unit the
+    and the peak as a LINEAR value (``10 ** (dBFS / 20)``), the unit the
     REPLAYGAIN_*_PEAK tags and ReplayGain's clip protection use — or None
     when the log holds no summary block (decoder failure, truncated output).
+
+    That peak is the SAMPLE peak, because that is the metric the tag it is
+    kept beside carries: rsgain writes sample peaks unless asked for true
+    ones, so a true peak here disagreed with the file's own
+    REPLAYGAIN_*_PEAK by up to 30% and clip protection clamped a hot master
+    to a ceiling its own tag contradicted. The astats line is preferred over
+    ebur128's because ebur128 rounds it to 0.1 dBFS.
 
     Only the block after the last ``Summary:`` counts: every progress line
     prints an ``I:`` field too, and the last of those is not a measurement of
@@ -528,22 +541,39 @@ def parse_ebur128(text):
         return None
     tail = text.rsplit("Summary:", 1)[-1]
     m = EBUR128_I_RE.search(tail)
-    p = EBUR128_PEAK_RE.search(tail)
-    if not m or not p:
+    if not m:
         return None
+    # astats prints one "Peak level dB" per channel and then an overall line;
+    # in dB the largest IS the overall peak, whatever order they come in.
+    exact = ASTATS_PEAK_RE.findall(tail)
+    if exact:
+        peak_db = max(float(v) for v in exact)
+    else:
+        p = EBUR128_PEAK_RE.search(tail)
+        if not p:
+            return None
+        peak_db = float(p.group(1))
     return {"lufs": float(m.group(1)),
-            "peak": 10.0 ** (float(p.group(1)) / 20.0)}
+            "peak": 10.0 ** (peak_db / 20.0)}
 
 
 def _measure_file(path):
-    """EBU R128 measurement of one file ({"lufs","peak"}), or None."""
+    """EBU R128 measurement of one file ({"lufs","peak"}), or None.
+
+    peak=sample, not peak=true: the tag this value sits beside is rsgain's
+    sample peak (see parse_ebur128). astats is chained in the same decode for
+    its full-precision copy of that peak — it is a pass-through, so the
+    loudness ebur128 measures is untouched.
+    """
     exe = _ffmpeg_exe()
     if not exe:
         return None
     try:
         proc = run_tool(
             [exe, "-hide_banner", "-nostats", "-nostdin", "-i", path,
-             "-map", "0:a:0", "-af", "ebur128=peak=true", "-f", "null", "-"],
+             "-map", "0:a:0",
+             "-af", "ebur128=peak=sample,astats=measure_overall=Peak_level",
+             "-f", "null", "-"],
             capture_output=True, text=True, encoding="utf-8",
             errors="replace", timeout=600,
         )

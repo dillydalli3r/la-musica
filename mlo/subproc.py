@@ -74,10 +74,30 @@ def _junction_for(directory):
             return hit
         try:
             os.makedirs(_BRIDGE_ROOT, exist_ok=True)
-            link = os.path.join(_BRIDGE_ROOT, f"d{len(_bridges) + 1}")
-            if os.path.exists(link):
+            # The link name is DERIVED FROM THE FOLDER, not from how many
+            # bridges this process has made: a sequential d1/d2/… is reused by
+            # the next process for a different folder, so two processes
+            # bridging at once would each delete the other's link and point it
+            # at their own folder — the tools would then read the wrong album.
+            import hashlib
+            stamp = hashlib.sha1(key.encode("utf-8", "replace")).hexdigest()[:12]
+            link = os.path.join(_BRIDGE_ROOT, f"d{stamp}")
+            # lexists, NOT exists: a junction whose target has gone is a
+            # dangling link, and exists() follows the link and says no. The
+            # stale entry then stayed, `mklink` refused the occupied path, and
+            # this returned "" — silently leaving every long path in the
+            # library unbridged, which is how `flac -t` came to fail on every
+            # file and stamp the whole library AUDIT=FAKE. One stale entry in
+            # %TEMP% disabled the bridge for every later run.
+            if os.path.lexists(link):
                 try:
-                    os.rmdir(link)
+                    # A junction is a DIRECTORY entry and rmdir removes it
+                    # without touching what it points at; isdir() follows the
+                    # link, so the decision has to come from lstat.
+                    if stat.S_ISDIR(os.lstat(link).st_mode):
+                        os.rmdir(link)
+                    else:
+                        os.remove(link)
                 except OSError:
                     return ""
             made = subprocess.run(

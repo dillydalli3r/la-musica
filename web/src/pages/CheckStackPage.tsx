@@ -206,8 +206,10 @@ export default function CheckStackPage() {
 
   /** A named preset is applied locally and written by Save: its membership is
    *  the server's own answer per check (`presets`), so it can never disagree
-   *  with what Settings → Grading's preset does. */
-  const [preset, setPreset] = useState<"strict" | "balanced" | "relaxed">("balanced");
+   *  with what Settings → Grading's preset does. It starts on Strict because
+   *  that is what a fresh install's config holds (the shipped defaults have
+   *  every check on); after that it tracks the last preset clicked. */
+  const [preset, setPreset] = useState<"strict" | "balanced" | "relaxed">("strict");
   const applyPreset = (pid: "strict" | "balanced" | "relaxed") => {
     if (!stack) return;
     setPreset(pid);

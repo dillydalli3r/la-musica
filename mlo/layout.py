@@ -100,6 +100,38 @@ def _has_audio(d):
     return False
 
 
+def artist_album_folders(artist_dir):
+    """The album folders directly inside an artist folder, by name.
+
+    An album folder is a DIRECTORY the artist folder holds. Files are not
+    albums: an artist folder with no albums holds the artist's own artist.jpg
+    and description.txt and nothing else, which is exactly the `empty_artist`
+    shape. This is the ONE definition of the question — the scan's finding,
+    the artist grade (mlo.grader.grade_artist) and the remove-empty-artist
+    route all ask it, so a folder one of them refuses to act on is never one
+    another reports as removable.
+    """
+    try:
+        return sorted(n for n in os.listdir(artist_dir)
+                      if os.path.isdir(os.path.join(artist_dir, n)))
+    except OSError:
+        return []
+
+
+def empty_artist(artist_dir) -> bool:
+    """Whether *artist_dir* is the scan's `empty_artist` finding.
+
+    True when the artist folder holds no album folder AND no audio anywhere
+    beneath it. A folder holding ANY audio is never this finding: that audio is
+    a different problem (audio_in_artist, audio_in_artists, empty_album), and
+    the removal this finding offers must never be offered for a folder that
+    holds music.
+    """
+    if not os.path.isdir(artist_dir) or artist_album_folders(artist_dir):
+        return False
+    return not _has_audio(artist_dir)
+
+
 def _case_only(expected, actual):
     """Whether two names are the SAME name in different letter case.
 
@@ -435,6 +467,24 @@ def scan_library(cfg=None, stats=None):
                         "weight in the library"))
                     closed(reported=True)
             closed(reported=len(issues) > rows_before)
+
+        # ---- 5. the artist folder itself -----------------------------------
+        # An artist folder holding NO album folder at all is a dead artist:
+        # nothing under it can be graded, the library still lists it, and the
+        # artist's own image and description are the only things in it. A
+        # folder with ANY audio anywhere beneath is never this finding — that
+        # audio is a real problem the rows above already name
+        # (audio_in_artist / audio_in_artists / empty_album) — which is what
+        # empty_artist() decides, the same question the grade and the removal
+        # route ask.
+        if empty_artist(p):
+            opened()
+            issues.append(_issue(
+                "empty_artist", p, folder,
+                "artist folder \u201c%s\u201d holds no album folder" % name,
+                "remove it to the Trash (Optimize → Library layout → remove), "
+                "or put one of the artist's albums inside it"))
+            closed(reported=True)
 
     out["artists"] = sum(1 for n in artist_names
                          if os.path.isdir(os.path.join(lib, n)) and not n.startswith("."))

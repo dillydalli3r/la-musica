@@ -156,6 +156,43 @@ dones = re.findall(r'panel: "done"', steps_src)
 check(len(folders) == 1, f"want exactly one folder step, found {len(folders)}")
 check(len(dones) == 1, f"want exactly one closing step, found {len(dones)}")
 
+# 8. Grading ships STRICT: the shipped defaults ARE the "Strict" preset, so a
+#    fresh install grades every check without anyone pressing anything.
+#
+#    The checks come from mlo/grader.py's own gate helper (check_gates() reads
+#    the names that module mentions), never from a list kept here: a check
+#    added to the grader is covered the day it exists, and one that ships off
+#    is named in the failure instead of hiding. The Strict preset is defined as
+#    "every real check on" (server/api_stack.preset_value), so the comparison
+#    is the defaults' enabled count against that whole set.
+from mlo.grader import check_gates  # noqa: E402 — needs ROOT on sys.path
+
+CHECK_PREFIX = "grade_check_"
+check_keys = [k for k in check_gates() if k.startswith(CHECK_PREFIX)]
+shipped_on = [k for k in check_keys if DEFAULT_CONFIG.get(k)]
+shipped_off = sorted(set(check_keys) - set(shipped_on))
+check(
+    bool(check_keys) and not shipped_off,
+    "the shipped defaults grade at least as strictly as the Strict preset: "
+    f"{len(shipped_on)}/{len(check_keys)} checks on"
+    + (", shipped off: " + ", ".join(shipped_off) if shipped_off else ""),
+)
+check(
+    DEFAULT_CONFIG.get("grade_check_audit") is True,
+    "'Require audit tag' ships ON (the one check that used to ship off — the "
+    "verdict it grades is the rip's own log-CRC / AccurateRip evidence, so it "
+    "cannot fail a disc that verified itself)",
+)
+# A category is not a check (a preset leaves it alone), but a file class no
+# category admits is a class the grade never looks at: they ship allowed.
+cat_keys = sorted(k for k in DEFAULT_CONFIG if str(k).startswith("grade_include_"))
+cat_off = [k for k in cat_keys if not DEFAULT_CONFIG[k]]
+check(
+    bool(cat_keys) and not cat_off,
+    "every file category ships allowed, so no file class is outside the grade"
+    + (", off: " + ", ".join(cat_off) if cat_off else ""),
+)
+
 if failures:
     print("test_setup_coverage: FAIL")
     for line in failures:

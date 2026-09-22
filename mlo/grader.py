@@ -18,6 +18,11 @@ from .genres import issues as genre_issues
 # The vocabulary predicate the genre writers canonicalize with, so the
 # grade_check_genre_vocab check asks the SAME question of a name they do.
 from .genres import canonical as genre_canonical, iter_names
+# …and their capitalization, for the GENRE half of grade_check_tag_case:
+# GENRE is an open multi-value tag whose canonical form is PER NAME
+# (mlo.genres.display_name), so it has no entry in mlo.tagtext.CANONICAL_CASE
+# and the value rule that lives there cannot answer for it.
+from .genres import display_name as genre_display_name
 # The tag CANONICAL-VALUE rule (spelling + spacing) the writers apply on every
 # write (mlo.audio), so grade_check_tag_case / grade_check_tag_spaces can only
 # ever fail what those writers would have fixed — and the case check is the
@@ -1974,6 +1979,16 @@ def _grade_album(album_dir, lyrics_format, cfg=None):
         # those writers would have rewritten — a vocabulary's unknown value
         # comes back unchanged and passes.
         #
+        # GENRE is the one tag that rule cannot answer for: it is an OPEN
+        # multi-value tag, and its canonical form is per NAME (a writer
+        # capitalizes each name on its own, mlo.genres.display_name) rather
+        # than per value, so it is deliberately absent from CANONICAL_CASE and
+        # is asked of the genre writers' own function here. Without it a
+        # library could carry "metal; alternative metal" — a real defect no
+        # other check reports, because the vocabulary and order rules fold
+        # case — while every writer would have stored "Metal; Alternative
+        # Metal".
+        #
         # Free text is never looked at: TITLE, ALBUM, ARTIST, ALBUMARTIST,
         # LABEL, COMMENT and the lyrics have no canonical form, which is what
         # keeps "AC/DC" and "k.d. lang" out of this check. The tags a filetype
@@ -1993,11 +2008,30 @@ def _grade_album(album_dir, lyrics_format, cfg=None):
                     if not should_write_audio_tag(cfg, tag_key, filepath=ap):
                         continue
                     wrong.append(f"{tag_key} {raw_val!r} → {fixed!r}")
-                if wrong:
+                # Read through the app's own reader for the tag (iter_names =
+                # mlo.genres.split_stored), so a list another tagger joined
+                # into one value is judged name by name like a repeated field.
+                # An unrecognised name is compared with the spelling the
+                # writer would still give it: display_name, not the verbatim
+                # name the vocabulary check already reports.
+                genre_wrong = []
+                if should_write_audio_tag(cfg, "GENRE", filepath=ap):
+                    for name in iter_names(af.tag_values("GENRE")):
+                        expected = genre_display_name(
+                            genre_canonical(name) or name)
+                        if name != expected:
+                            genre_wrong.append(f"GENRE {name!r} → {expected!r}")
+                if wrong or genre_wrong:
                     failed_checks += 1
-                    add_issue("Tag case: " + ", ".join(wrong)
-                              + " (run Format all (script 10))", basename)
+                    if wrong:
+                        add_issue("Tag case: " + ", ".join(wrong)
+                                  + " (run Format all (script 10))", basename)
+                    if genre_wrong:
+                        add_issue("Genre case: " + ", ".join(genre_wrong)
+                                  + " (run Format all (script 10))", basename)
                     track["issues"].append("TAG_CASE")
+                    if genre_wrong:
+                        track["issues"].append("GENRE_CASE")
             except Exception as e:
                 unavailable("Tag case check", e, basename)
 
@@ -3073,51 +3107,123 @@ def _grade_album(album_dir, lyrics_format, cfg=None):
                         continue
                 except Exception:
                     tr["accuraterip_status"] = accuraterip_status
-                # Per-track realtime audit for viewer highlighting: missing/FAKE accurip makes track AUDIT FAKE
-                # when audit_require_accuraterip is required (True by default, per user request).
-                # This ensures library viewer highlights tracks red like their album when .accurip is missing,
-                # even though the stored AUDIT tag may still be REAL until the next Audit Library run.
+                # The per-track AUDIT readout is decided in one place below
+                # (the three legs), so nothing is marked FAKE here: marking a
+                # leg NONE as FAKE is what made "nobody could check this
+                # pressing" read exactly like "your rip is bad".
+            # ---- the three legs of a MEDIA=CD verdict ----------------------
+            # Script 6 writes a CD's verdict from exactly three legs
+            # (mlo.audit.run_audit_library — spec R21), so the readout below
+            # asks the SAME question: the rip log's score, the disc's
+            # checksums, and AccurateRip. Reading the library by a different
+            # rule is how a disc could show REAL while the run that stamped it
+            # decided otherwise.
+            def _cd_legs(tr):
+                """{leg name: 'ok' | 'fail' | 'missing'} for one CD track.
+
+                A leg whose setting is off is absent (the same escape hatch
+                mlo.audit applies), and a leg nothing established is
+                'missing' — reported by name, never counted as a failure:
+                "we could not check" is not "your rip is bad".
+                """
+                legs = {}
                 try:
-                    if _is_video_file(tr.get("file")):
-                        pass
+                    threshold = int(cfg.get("audit_log_score_threshold", 100) or 0)
+                except (TypeError, ValueError):
+                    threshold = 0
+                if threshold > 0:
+                    grade = str(tr.get("log_grade") or "").strip()
+                    if not (grade.isdigit() and 0 <= int(grade) <= 100):
+                        legs["log-score"] = "missing"
                     else:
-                        if _is_cd(media_summary) and cfg.get("audit_require_accuraterip", True) and cfg.get("grade_check_accuraterip", True):
-                            if tr.get("accuraterip_status") in ("NONE", "FAKE"):
-                                tr["audit"] = "FAKE"
-                        if _is_cd(media_summary) and cfg.get("audit_verify_log_checksum", True) and cfg.get("grade_check_log_checksum", True):
-                            if tr.get("checksum_status") == "FAKE":
-                                tr["audit"] = "FAKE"
-                except Exception:
-                    pass
-            # Second pass for tracks where accurip_status was set via per_map continue path: ensure audit override there too
-            for tr in tracks:
-                if _is_video_file(tr.get("file")):
-                    continue
-                try:
-                    if _is_cd(media_summary) and cfg.get("audit_require_accuraterip", True) and cfg.get("grade_check_accuraterip", True):
-                        if tr.get("accuraterip_status") in ("NONE", "FAKE"):
-                            if tr.get("audit") != "FAKE":
-                                tr["audit"] = "FAKE"
-                    if _is_cd(media_summary) and cfg.get("audit_verify_log_checksum", True) and cfg.get("grade_check_log_checksum", True):
-                        if tr.get("checksum_status") == "FAKE" and tr.get("audit") != "FAKE":
-                            tr["audit"] = "FAKE"
-                except Exception:
-                    pass
-            # ---- the CD's own evidence is the last word on its AUDIT -------
-            # A rip whose .log verifies, or whose .accurip verifies, is intact
-            # on that evidence alone: the stored tag (AudioAuditor's spectral
-            # verdict, or a stale FAKE from an earlier run) is corrected here,
-            # for the viewer, whether or not the AUDIT check is graded — a
-            # provably good CD must not render red. The per-track CRC match
-            # it is graded on is proven by script 6, which writes the tag.
+                        legs["log-score"] = ("fail" if int(grade) < threshold
+                                             else "ok")
+                states = []
+                if cfg.get("audit_verify_log_checksum", True):
+                    states.append({"REAL": "ok", "FAKE": "fail"}.get(
+                        str(tr.get("checksum_status") or ""), "missing"))
+                if cfg.get("grade_check_crc", True):
+                    codes = set(tr.get("issues") or ())
+                    states.append("fail" if "CRC_MISMATCH" in codes
+                                  else ("missing" if "CRC" in codes else "ok"))
+                if states:
+                    legs["checksums"] = ("fail" if "fail" in states
+                                         else ("missing" if "missing" in states
+                                               else "ok"))
+                if cfg.get("audit_require_accuraterip", True):
+                    legs["accuraterip"] = {"REAL": "ok", "FAKE": "fail"}.get(
+                        str(tr.get("accuraterip_status") or ""), "missing")
+                return legs
+
+            def _cd_leg_reason(name, tr):
+                """Why a leg failed, in the words mlo.audit's verdict uses."""
+                if name == "accuraterip":
+                    if str(tr.get("accuraterip_status") or "") == "NONE":
+                        return ("the .accurip holds no AccurateRip verdict — "
+                                "the pressing is not in the database, so "
+                                "nothing was checked")
+                    return "AccurateRip reports the track does not match"
+                if name == "checksums":
+                    return ("the rip log's checksum does not match the audio")
+                return "the rip log's score is below audit_log_score_threshold"
+
+            # ---- the rip's own evidence decides the CD's readout -----------
+            # All three legs passing reads REAL; a FAILING leg reads FAKE and
+            # names itself; a MISSING leg does not lower a stamped verdict on
+            # its own (it is named in the album's issues instead) and, for a
+            # track carrying NO stamped verdict, R26's reading still applies —
+            # its own verified evidence (a verifying .log checksum or a REAL
+            # .accurip) is what a user sees for a disc script 6 has not
+            # stamped yet.
+            cd_legs_missing = {}
             for tr in tracks:
                 if not _is_cd(media_summary) or _is_video_file(tr.get("file")):
                     continue
-                if (tr.get("checksum_status") == "REAL"
-                        or tr.get("accuraterip_status") == "REAL"):
+                legs = _cd_legs(tr)
+                tr["audit_legs"] = legs
+                failed = sorted(n for n, state in legs.items() if state == "fail")
+                missing = sorted(n for n, state in legs.items() if state == "missing")
+                # The verdict the file actually carries: `audit` is the
+                # stored tag as read, and nothing has rewritten it yet.
+                stored_tag = str(tr.get("audit") or "").strip()
+                if failed:
+                    tr["audit"] = "FAKE"
+                    tr["audit_verified"] = "; ".join(
+                        _cd_leg_reason(n, tr) for n in failed)
+                elif legs and not missing:
                     tr["audit"] = "REAL"
-                    tr["audit_verified"] = ("log-checksum" if tr.get("checksum_status") == "REAL"
-                                            else "accuraterip")
+                    tr["audit_verified"] = ("all three legs: "
+                                            + ", ".join(sorted(legs)))
+                elif not stored_tag and (tr.get("checksum_status") == "REAL"
+                                         or tr.get("accuraterip_status") == "REAL"):
+                    tr["audit"] = "REAL"
+                    tr["audit_verified"] = (
+                        "log-checksum" if tr.get("checksum_status") == "REAL"
+                        else "accuraterip")
+                for name in missing:
+                    cd_legs_missing.setdefault(name, []).append(tr.get("file"))
+                    if tr.get("audit_legs_missing") is None:
+                        tr["audit_legs_missing"] = missing
+            # The missing legs are named ONCE for the album, and they cost
+            # nothing extra: the artefact behind each one already has its own
+            # graded check (LOG_GRADE, CRC / log checksum, AccurateRip), so
+            # failing them again here would charge one absence twice.
+            _missing_wording = {
+                "log-score": "no LOG_GRADE tag scores the rip log",
+                "checksums": ("the rip log's own checksum does not verify and "
+                              "no CRC was compared with the audio"),
+                "accuraterip": ("no .accurip verdict verifies this disc — a "
+                                "pressing that is not in the AccurateRip "
+                                "database reads the same as a disc with no "
+                                ".accurip"),
+            }
+            for name in sorted(cd_legs_missing):
+                add_issue(
+                    f"AUDIT readout: nothing established the CD verdict's "
+                    f"'{name}' leg for {len(cd_legs_missing[name])} track(s): "
+                    f"{_missing_wording.get(name, 'no evidence')} — the stored "
+                    f"verdict is shown as it is, not guessed (we could not "
+                    f"check, which is not the same as a bad rip)", "album")
             # ---- CD verification resolves the deferred AUDIT requirement --
             # A rip whose .log CRC verifies, or whose .accurip verifies, is
             # REAL on that evidence alone: the stored tag (AudioAuditor's
@@ -3140,11 +3246,19 @@ def _grade_album(album_dir, lyrics_format, cfg=None):
                         tr["values"]["AUDIT"] = "REAL"
                     continue
                 failed_checks += 1
+                # Which leg the verdict is missing, in the same words the
+                # readout and mlo.audit's run log use: a disc nobody could
+                # check must not read like a disc that failed.
+                _legs = tr.get("audit_legs") or _cd_legs(tr)
+                _short = ", ".join(sorted(
+                    n for n, state in _legs.items() if state in ("fail", "missing")
+                )) or "no leg could verify it"
                 if not stored_tag:
-                    add_issue("Missing AUDIT tag (run Audit Library)", basename)
+                    add_issue(f"Missing AUDIT tag (run Audit Library) — the CD "
+                              f"verdict needs: {_short}", basename)
                 else:
-                    add_issue(f"AUDIT tag is {stored_tag.upper()} (not REAL)",
-                              basename)
+                    add_issue(f"AUDIT tag is {stored_tag.upper()} (not REAL) — "
+                              f"the CD verdict needs: {_short}", basename)
                 tr["issues"].append("AUDIT")
 
             # ---- manual override wins over every derived verdict ----------
@@ -3863,9 +3977,9 @@ def _artist_image_issues(folder, image_file, cfg, where):
 
 
 def grade_artist(artist_dir, cfg=None) -> dict:
-    """Grade an artist folder on the two things that apply to it at all:
-    its image and its description (ARTIST_CHECKS). Album-level checks — tags,
-    logs, covers — never run here.
+    """Grade an artist folder on the things that apply to it: its image, its
+    description (ARTIST_CHECKS), and that it holds an album at all. Album-level
+    checks — tags, logs, covers — never run here.
 
     The image check is judged on the decoded file (the configured aspect and
     size, the format, decodability, and whether the pixels were enlarged after
@@ -3875,8 +3989,11 @@ def grade_artist(artist_dir, cfg=None) -> dict:
 
     *pct* is 100 with both checks disabled: nothing graded is nothing failed,
     so *pass* is True there (the album rule reports the same 100% for an album
-    whose checks are all switched off). An unreadable/absent folder is the one
-    hard failure (a single ARTIST_FOLDER_MISSING issue, never an exception).
+    whose checks are all switched off). Two folder-level verdicts never go
+    through that arithmetic — an unreadable/absent folder
+    (ARTIST_FOLDER_MISSING) and a folder holding no album at all
+    (ARTIST_EMPTY) each report one issue and invent no checks, because neither
+    is a folder this app can grade whatever the settings say.
     """
     cfg = cfg or {}
     folder = str(artist_dir or "")
@@ -3900,12 +4017,33 @@ def grade_artist(artist_dir, cfg=None) -> dict:
         return out
 
     from .artistdata import has_description, image_path
+    # The album-folder question is mlo.layout's (the scanner reports the same
+    # folder as `empty_artist`), so the grade and the scan answer it alike.
+    from .layout import artist_album_folders
     image_file = image_path(folder)
     out["artwork"] = {
         "image": bool(image_file),
         "image_file": image_file,
         "description": has_description(folder),
     }
+
+    # An artist folder holding no album folder at all is not a graded artist:
+    # its image and description are the artist's own cover, nothing under it
+    # can be graded as music, and the library still lists it as an artist. It
+    # fails the way an absent folder does — one issue, no checks invented —
+    # because the artefact checks describe a folder that can hold an album, and
+    # reporting image/description grades for one that cannot would be a score
+    # for the wrong question. `mlo.layout` reports the same folder as
+    # `empty_artist`, and the removal the panel offers goes through the Trash.
+    if not artist_album_folders(folder):
+        out["issues"].append({
+            "code": "ARTIST_EMPTY", "label": "Artist albums", "where": where,
+            "reason": "no album folder in this artist folder — nothing here is "
+                      "an album, so there is nothing to grade as music. Add "
+                      "one of the artist's albums, or remove the folder to the "
+                      "Trash (Optimize → Library layout → remove)",
+        })
+        return out
 
     for check in ARTIST_CHECKS:
         if not cfg.get(check["key"], True):

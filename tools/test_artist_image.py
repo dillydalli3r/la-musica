@@ -37,6 +37,13 @@ MUSIC = os.path.join(TMP, "music")
 ARTIST = os.path.join(MUSIC, "Artists", "Some Artist")
 os.makedirs(ARTIST)
 os.makedirs(os.path.join(MUSIC, ".mlo", "data"))
+# An artist folder is only graded while it holds an album folder — one with
+# nothing but the artist's own image and description is the ARTIST_EMPTY case
+# (tools/test_artist_grading.py pins that on its own folder). This fixture is
+# about the IMAGE, so it holds one.
+os.makedirs(os.path.join(ARTIST, "Album (2020)"))
+with open(os.path.join(ARTIST, "Album (2020)", "01 - Song.flac"), "wb") as fh:
+    fh.write(b"x")
 # The description check is not what this file is about; keeping it satisfied
 # means every result below is the IMAGE check's own verdict.
 with open(os.path.join(ARTIST, "description.txt"), "w", encoding="utf-8") as fh:

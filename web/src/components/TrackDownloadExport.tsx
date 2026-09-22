@@ -3,7 +3,7 @@ import { useQueryClient } from "@tanstack/react-query";
 import { CheckCircle2, Download, FileOutput } from "lucide-react";
 import { api } from "../api";
 import { toast } from "../store";
-import { CACHED_PATHS_KEY, cacheTrack, isTrackCached, uncacheTrack } from "../lib/mediaCache";
+import { CACHED_PATHS_KEY, CACHED_SIZES_KEY, cacheTrack, isTrackCached, uncacheTrack } from "../lib/mediaCache";
 import Popover from "./Popover";
 
 /** Codec choices for per-track exports; lossy codecs expose a bitrate. */
@@ -70,7 +70,7 @@ export default function TrackDownloadExport({ path, title, compact, iconOnly, di
       }
       // The title marks and the downloads page read the shared snapshot.
       qc.invalidateQueries({ queryKey: CACHED_PATHS_KEY });
-      qc.invalidateQueries({ queryKey: ["cachedBytes"] });
+      qc.invalidateQueries({ queryKey: CACHED_SIZES_KEY });
     } catch (e) {
       toast.error(`Cache failed: ${e instanceof Error ? e.message : e}`);
     } finally {

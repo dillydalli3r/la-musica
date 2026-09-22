@@ -6,12 +6,25 @@ whole folder — so the on-demand path must (a) trust the four tags when they
 are all there, (b) measure with ffmpeg's EBU R128 filter when they are not,
 (c) never raise, (d) cache a measurement so replaying a track costs one
 stat(), and (e) bound the wait for that measurement on a playback request,
-which is the one caller that cannot afford to hold a track at the click. The
-batch shell-out paths (rsgain / simple-dr-meter) are untouched and untested
-here: they need the tools installed.
+which is the one caller that cannot afford to hold a track at the click.
+
+Two things about the measurement itself are pinned too, because they are the
+ones that decide whether an on-demand value and the tag script 7 writes
+through rsgain are the same number:
+
+  * the peak is the SAMPLE peak, not the true peak. rsgain writes sample
+    peaks into REPLAYGAIN_*_PEAK unless asked otherwise, so a true peak here
+    disagreed with the file's own tag by up to 30%. The fixture is a
+    45°-phase sine at fs/4, whose samples all land on ±0.7071 of its
+    amplitude: sample peak 11585/32768 = 0.3535, true peak 0.5, so a
+    true-peak measurement misses by 41%;
+  * a file with nothing to measure — silent, undecodable — answers None
+    rather than a number. The gain rsgain itself reports is the oracle for
+    the rest, when rsgain is installed.
 
 Run:  python tools/test_replaygain.py
 """
+import array
 import os
 import shutil
 import subprocess
@@ -19,10 +32,12 @@ import sys
 import tempfile
 import threading
 import time
+import wave
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from mlo import loudness
+from mlo.tools import detect_all_tools
 from mlo.config import DEFAULT_CONFIG
 
 # ----------------------------------------------------------------------
@@ -54,10 +69,34 @@ size=N/A time=00:00:03.00 bitrate=N/A speed= 308x elapsed=0:00:00.00
 parsed = loudness.parse_ebur128(EBUR128_LOG)
 assert parsed is not None, parsed
 assert parsed["lufs"] == -21.1, parsed
-# True peak comes back LINEAR (the unit of the REPLAYGAIN_*_PEAK tags):
+# The peak comes back LINEAR (the unit of the REPLAYGAIN_*_PEAK tags):
 # 10 ** (-18.1 / 20) = 0.1245
 assert abs(parsed["peak"] - 10 ** (-18.1 / 20)) < 1e-12, parsed
 assert round(parsed["peak"], 4) == 0.1245, parsed
+
+# The astats lines that ride along with the ebur128 summary carry the same
+# peak to 1e-6 dB where the summary rounds it to 0.1 dBFS, so they win. The
+# value is 20*log10(11585/32768) = -9.031078, the real peak of a 16-bit file
+# whose loudest sample is 11585 — a 45°-phase sine at fs/4, 0.70710678 of its
+# amplitude, so the tag that peak belongs in reads 0.353546.
+ASTATS_TAIL = """
+[Parsed_astats_1 @ 000002143c8942c0] Channel: 1
+[Parsed_astats_1 @ 000002143c8942c0] Peak level dB: -9.031078
+[Parsed_astats_1 @ 000002143c8942c0] Channel: 2
+[Parsed_astats_1 @ 000002143c8942c0] Peak level dB: -12.000000
+[Parsed_astats_1 @ 000002143c8942c0] Overall
+[Parsed_astats_1 @ 000002143c8942c0] Peak level dB: -9.031078
+"""
+exact = loudness.parse_ebur128(EBUR128_LOG + ASTATS_TAIL)
+assert exact is not None, exact
+assert abs(exact["peak"] - 10 ** (-9.031078 / 20)) < 1e-12, exact
+assert abs(exact["peak"] - 11585 / 32768) < 1e-6, exact
+assert exact["lufs"] == -21.1, exact
+# ...and a silent channel's "-inf" is not a measurement, so the ebur128
+# summary line is the fallback rather than a peak of 0.
+assert abs(loudness.parse_ebur128(
+    EBUR128_LOG + "\n[Parsed_astats_1 @ 0] Peak level dB: -inf\n")["peak"]
+    - 10 ** (-18.1 / 20)) < 1e-12
 
 # A log with progress lines only (decoder died) is not a measurement, and a
 # negative/zero peak must not be clamped away by the parser.
@@ -343,8 +382,9 @@ finally:
 
 
 # ----------------------------------------------------------------------
-# Real decoder (optional): a tagless FLAC measured end to end. Skipped when
-# ffmpeg is not installed — nothing here needs the network or rsgain.
+# Real decoder (optional): the peak metric, the files with no measurement,
+# and — the reference — the gain and peak rsgain reports for the same file.
+# Skipped when ffmpeg is not installed; nothing here needs the network.
 # ----------------------------------------------------------------------
 ffmpeg = loudness._ffmpeg_exe()
 if not ffmpeg:
@@ -368,6 +408,58 @@ else:
         with open(bad, "wb") as f:
             f.write(b"not audio" * 100)
         assert loudness.analyze_file(bad) is None
+
+        # A silent file has nothing to measure, so it gets NO number: the
+        # ffmpeg summary is "-inf" LUFS and "-inf" peak, and neither is a
+        # gain. (A 0.0 dB gain would play silence at unity, which is right
+        # only by accident and wrong the moment the file is not silent.)
+        silent = os.path.join(root, "silent.wav")
+        with wave.open(silent, "wb") as w:
+            w.setnchannels(1)
+            w.setsampwidth(2)
+            w.setframerate(44100)
+            w.writeframes(b"\x00\x00" * (44100 * 3))
+        assert loudness.analyze_file(silent) is None, loudness.analyze_file(silent)
+
+        # The peak metric. A 45°-phase sine at fs/4 is [S, S, -S, -S] at
+        # 44.1 kHz: every sample sits at 0.7071 of the sine's amplitude, so
+        # the SAMPLE peak is S/32768 = 0.35355 and the TRUE peak is 0.5.
+        # Measuring 0.5 here means peak=true came back (the bug), 0.35355
+        # means the sample peak — the number in the REPLAYGAIN_*_PEAK tag.
+        S = 11585
+        inter_sample = os.path.join(root, "inter-sample.wav")
+        samples = array.array("h", [S, S, -S, -S] * (44100 * 3 // 4))
+        if sys.byteorder != "little":
+            samples.byteswap()
+        with wave.open(inter_sample, "wb") as w:
+            w.setnchannels(1)
+            w.setsampwidth(2)
+            w.setframerate(44100)
+            w.writeframes(samples.tobytes())
+        peak = loudness.analyze_file(inter_sample)
+        assert peak is not None, peak
+        assert abs(peak["peak"] - S / 32768) <= 1e-4, peak
+        assert peak["peak"] < 0.45, (
+            "the true peak of this fixture is 0.5, so anything near it is the "
+            "wrong metric: %r" % (peak,))
+
+        # The oracle: rsgain scans the same file (-s s writes nothing) and
+        # prints the gain it would tag it with and the sample peak it would
+        # store. Both have to match.
+        rsgain = (detect_all_tools().get("rsgain") or {}).get("rsgain_exe")
+        if not rsgain:
+            print("note: rsgain not installed — gain/peak cross-check skipped")
+        else:
+            scan = subprocess.run([rsgain, "custom", "-s", "s", "-O", "-q",
+                                   inter_sample],
+                                  capture_output=True, text=True,
+                                  encoding="utf-8", errors="replace")
+            lines = [l for l in (scan.stdout or "").splitlines() if l.strip()]
+            assert len(lines) == 2, (scan.returncode, scan.stdout, scan.stderr)
+            _name, rs_lufs, rs_gain, rs_peak = lines[1].split("\t")[:4]
+            assert abs(peak["gain_db"] - float(rs_gain)) <= 0.1, (peak, rs_gain)
+            assert abs(peak["peak"] - float(rs_peak)) <= 1e-4, (peak, rs_peak)
+            assert float(rs_gain) == loudness.RG2_REFERENCE_LUFS - float(rs_lufs), lines[1]
     finally:
         shutil.rmtree(root, ignore_errors=True)
 

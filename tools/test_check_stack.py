@@ -12,9 +12,11 @@ written):
     three sets must be equal, with no orphans on either side: a check the
     grader reads that nothing can set, or a check DEFAULT_CONFIG holds that no
     grader step reads, fails here instead of hiding.
-  * the groups and the "relaxed" preset match web/src/pages/GradingPage.tsx
-    key for key, so the MAINTAIN page and the Grading page can never disagree
-    about where a check belongs or what a preset turns off.
+  * the groups and the "relaxed" / "balanced" presets match
+    web/src/pages/GradingPage.tsx key for key, so the MAINTAIN page and the
+    Grading page can never disagree about where a check belongs or what a
+    preset turns off — and "strict" is shown to BE the shipped defaults
+    (every real check on), not a second opinion about them.
   * every audit step DEFAULT_CONFIG holds is READ by mlo.audit, and the
     detector steps are mlo.audit's own DETECTOR_NO_FLAGS table.
   * PUT writes the config keys the grader itself reads (`grade_check_*`,
@@ -82,7 +84,7 @@ except Exception as e:  # pragma: no cover - a missing extra is a SKIP
     raise SystemExit(2)
 
 from mlo.cli import SCRIPTS, SCRIPT_GATES  # noqa: E402
-from mlo.config import DEFAULT_CONFIG, load_config  # noqa: E402
+from mlo.config import DEFAULT_CONFIG, STRICT_DEFAULT_KEYS, load_config  # noqa: E402
 from mlo.grader import check_gates  # noqa: E402
 from server import api_stack, script_runners  # noqa: E402
 from server.script_runners import RUNNERS  # noqa: E402
@@ -128,6 +130,14 @@ def ts_groups():
 def ts_relaxed_off():
     src = read("web/src/pages/GradingPage.tsx")
     m = re.search(r"const relaxedOff = \[(.*?)\];", src, re.S)
+    return set(re.findall(r'"(grade_[a-z_]+)"', m.group(1))) if m else set()
+
+
+def ts_balanced_off():
+    """GradingPage.tsx's own `balancedOff` — the keys the Balanced preset
+    puts back, which the server must agree are exactly `BALANCED_OFF`."""
+    src = read("web/src/pages/GradingPage.tsx")
+    m = re.search(r"const balancedOff = \[(.*?)\];", src, re.S)
     return set(re.findall(r'"(grade_[a-z_]+)"', m.group(1))) if m else set()
 
 
@@ -238,6 +248,20 @@ check("the relaxed preset turns off exactly GradingPage's relaxedOff list",
       api_stack.RELAXED_OFF == ts_relaxed_off(),
       f"stack-only: {sorted(api_stack.RELAXED_OFF - ts_relaxed_off())}, "
       f"page-only: {sorted(ts_relaxed_off() - api_stack.RELAXED_OFF)}")
+check("balanced puts back exactly GradingPage's balancedOff list",
+      api_stack.BALANCED_OFF == ts_balanced_off(),
+      f"stack-only: {sorted(api_stack.BALANCED_OFF - ts_balanced_off())}, "
+      f"page-only: {sorted(ts_balanced_off() - api_stack.BALANCED_OFF)}")
+check("and that list is the keys 3.7.0's strict defaults moved",
+      api_stack.BALANCED_OFF == frozenset(STRICT_DEFAULT_KEYS),
+      f"{sorted(api_stack.BALANCED_OFF)} vs {sorted(STRICT_DEFAULT_KEYS)}")
+check("strict is the shipped defaults: every real check ships ON",
+      all(c["default"] for c in checks
+          if not c["key"].startswith("grade_include_")))
+check("the audit-tag requirement ships ON",
+      DEFAULT_CONFIG["grade_check_audit"] is True
+      and "grade_check_audit" in presets["strict"]["keys"]
+      and "grade_check_audit" not in presets["balanced"]["keys"])
 
 from mlo.audit import DETECTOR_NO_FLAGS  # noqa: E402
 
@@ -348,8 +372,15 @@ check("strict leaves the file-category permissions alone",
       all(strict[c["key"]] is c["default"] for c in checks
           if c["key"].startswith("grade_include_")))
 r = put({"preset": "balanced"})
-check("balanced restores the factory defaults",
-      all(load_config()[c["key"]] is c["default"] for c in checks))
+bal = load_config()
+check("balanced restores the defaults as they were before strict grading",
+      all(bal[c["key"]] is (c["default"] and c["key"] not in api_stack.BALANCED_OFF)
+          for c in checks))
+check("balanced is NOT strict: the audit tag and the 'other' category are off",
+      bal["grade_check_audit"] is False and bal["grade_include_other"] is False
+      and all(bal[c["key"]] is True for c in checks
+              if c["key"] not in api_stack.BALANCED_OFF
+              and not c["key"].startswith("grade_include_")))
 r = put({"preset": "relaxed"})
 relaxed = load_config()
 check("relaxed switches off exactly its own list",

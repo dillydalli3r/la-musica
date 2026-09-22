@@ -23,7 +23,7 @@ import type {
   ImportBulkJob, ImportPrompt, ImportScriptsPreview, LyricsAutoResult, MBRelease, MatchSuggestion,
   ScriptRunResult, Track,
 } from "../types";
-import { SCRIPTS, DEFAULT_RUN_ALL, SCRIPT_LABEL, isScriptId } from "../lib/scripts";
+import { DEFAULT_RUN_ALL, SCRIPT_LABEL, isScriptId } from "../lib/scripts";
 import { fmtCounts, fmtSteps } from "../lib/fmt";
 import { GENRE_COUNT_MAX, GENRE_FAMILIES, canonicalGenre, familyOf, splitGenres } from "../lib/genres";
 
@@ -2340,7 +2340,13 @@ export default function ImportWizard() {
   const postImportOrder = Array.isArray(cfg?.run_all_order) && (cfg.run_all_order as number[]).length
     ? (cfg.run_all_order as number[]).filter(isScriptId)
     : DEFAULT_RUN_ALL;
-  const POST_IMPORT_SCRIPTS = SCRIPTS.map((s) => ({ id: s.ids[0], label: s.label }));
+  // The boxes are laid out in that order, and a script the user's order does
+  // not name still gets its box (at its factory position) instead of dropping
+  // off the list — the same completion the Settings page's Run All grid makes.
+  const POST_IMPORT_SCRIPTS = [
+    ...postImportOrder,
+    ...DEFAULT_RUN_ALL.filter((id) => !postImportOrder.includes(id)),
+  ].map((id) => ({ id, label: SCRIPT_LABEL[id] ?? `#${id}` }));
   // Null = the boxes have not been touched, so they follow the configured
   // order — which the config answers only after the first render.
   const [runAfterImport, setRunAfterImport] = useState<number[] | null>(null);
@@ -2378,9 +2384,9 @@ const runAllHere = async () => {
   setFinishMsg("Running all scripts…");
   setRunRows(null);
   try {
-    const order = Array.isArray(cfg?.run_all_order) && (cfg.run_all_order as number[]).length
-      ? (cfg.run_all_order as number[]).filter(isScriptId)
-      : DEFAULT_RUN_ALL;
+    // The boxes' own order — the app's Run All order, aimed at this wizard's
+    // album(s) only.
+    const order = postImportOrder;
     setAct({ label: `Run all scripts — ${order.length} script(s) on ${targets.length} album(s)` });
     const res = await api.run(order, targets);
     const rows = rowsFromResults(res.results ?? []);
@@ -4287,7 +4293,14 @@ const finish = async () => {
                     onChange={(e) =>
                       setRunAfterImport((ids) => {
                         const current = ids ?? postImportOrder;
-                        return e.target.checked ? [...current, s.id] : current.filter((i) => i !== s.id);
+                        if (!e.target.checked) return current.filter((i) => i !== s.id);
+                        // Back to its own place in the order shown, not the end
+                        // of the list — the same rule Settings and the setup
+                        // wizard apply to the same order, so re-ticking a box
+                        // cannot move a script behind the one it feeds.
+                        const order = POST_IMPORT_SCRIPTS.map((x) => x.id);
+                        const at = current.filter((i) => order.indexOf(i) < order.indexOf(s.id)).length;
+                        return [...current.slice(0, at), s.id, ...current.slice(at)];
                       })
                     }
                   />

@@ -1,7 +1,7 @@
 /** Table sorting: toggle state, row comparison, and the sortable header.
  *
  * Imported by the library/cached/trash/favorites tables and album
- * tracklists (see LibraryPage, AlbumPage, CachedTracksView). */
+ * tracklists (see LibraryPage, AlbumPage, DownloadsPage). */
 
 import { ArrowDown, ArrowUp, ArrowUpDown } from "lucide-react";
 import type { CSSProperties, ReactNode } from "react";

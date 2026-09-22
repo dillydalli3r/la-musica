@@ -27,7 +27,7 @@ from concurrent.futures import ThreadPoolExecutor
 
 from .audio import AudioFile
 from .config import should_write_audio_tag
-from .paths import AUDIO_EXTS, DEPS_DIR, app_data_dir
+from .paths import AUDIO_EXTS, DEPS_DIR, app_data_dir, is_video_file
 from .stats import (
     new_stats, _make_pbar, _pbar_update, _collect_targets, _walk_files,
     _diff_bytes, worker_count,
@@ -520,15 +520,28 @@ def run_audit_library(config):
         cd_album_map[album_dir] = is_cd
 
     # ------------------------------------------------------------------
-    # CD rip verification — the .log CRC is the AUTHORITATIVE integrity source
-    # for MEDIA=CD: a rip whose printed CRCs match the audio is REAL even when
-    # AudioAuditor's spectral read disagrees (a synthetic tone, an unusual
-    # master — AudioAuditor is not a fact). `audit_cd_require_both` decides
-    # only whether AudioAuditor is ALSO run over CD files, where its warnings
-    # are kept and its verdict decides for a disc neither the .log nor a REAL
-    # .accurip could verify. Files that cannot be verified get NO verdict at
-    # all (grading fails them). AudioAuditor is otherwise never run on CD
-    # rips; it is reserved for every other release type.
+    # CD rip verification — a MEDIA=CD verdict is the AND of three legs,
+    # every one of them the rip's OWN evidence:
+    #
+    #   1. the rip log's score (`audit_log_score_threshold`, written per disc
+    #      by Logchecker as LOG_GRADE),
+    #   2. the disc's checksums — the .log's per-track `Copy CRC` against the
+    #      decoded PCM, and the .log's own EAC SHA256 (audit_verify_log_checksum),
+    #   3. AccurateRip (audit_require_accuraterip), read from the .accurip.
+    #
+    # Each leg is recorded as it is established (cd_legs) and the phase at the
+    # end of the CD section is the ONLY place that turns them into an AUDIT
+    # tag. A leg a machine cannot evaluate leaves the file without a verdict
+    # and is reported by name; a leg the user switched off is not required.
+    #
+    # AudioAuditor's spectral detectors have no vote on a CD in either
+    # direction: its verdict used to decide for a disc neither the .log nor a
+    # REAL .accurip could verify, and a "fake lossless" read of a synthetic
+    # tone could outvote a log that had just proved the disc intact. It stays
+    # EVIDENCE — a disagreement is reported as a warning — and it remains the
+    # verdict for every other release type, where there is nothing else to go
+    # on. `audit_cd_require_both` only decides whether it is run over
+    # MEDIA=CD at all.
     # ------------------------------------------------------------------
     # Default True, matching mlo.config.DEFAULT_CONFIG: a partial cfg must
     # not audit a CD more leniently than the shipped app does.
@@ -536,7 +549,27 @@ def run_audit_library(config):
     cd_files = set()
     unverified_cd = {}
     checksum_verified = {}
-    checksum_verified_canon = {}
+    # The three legs of a MEDIA=CD verdict, keyed by canonical path: the gate
+    # that establishes a leg records it here, and the verdict phase at the end
+    # of the CD section is the one place that reads them. A leg whose key is
+    # absent was switched off by config; "unknown" is a leg nothing on this
+    # machine could evaluate — reported, never guessed.
+    cd_legs = {}
+
+    def set_leg(path, name, state, why=""):
+        """Record one leg of one track's CD verdict.
+
+        A definite failure outranks "unknown", which outranks "ok": a track
+        whose log cannot be scored AND whose log checksum is wrong is a
+        failure, not an incomplete answer. Two gates may feed one leg (the
+        per-track CRCs and the log's own SHA256 are both "the disc's
+        checksums"), so the stronger state is what survives.
+        """
+        legs = cd_legs.setdefault(_ev_key(path), {})
+        rank = {"ok": 0, "unknown": 1, "fail": 2}
+        current = legs.get(name)
+        if current is None or rank[state] >= rank[current[0]]:
+            legs[name] = (state, why if state != "ok" else "")
     # Album dir -> {disc number (None when the name carries none): verdict}.
     # Parsing is a text read, so this runs even when the log CRC cannot be
     # computed. Per DISC, not per album: the album-wide version marked every
@@ -572,25 +605,6 @@ def run_audit_library(config):
         ar_disc_verdicts[album_dir] = verdicts
         return verdicts
 
-    def _disc_accurip_verified(album_dir, path):
-        """The .accurip verdict for the disc *path* itself belongs to.
-
-        A numbered log (CD-2.accurip) is looked up by the file's own D-TT
-        number, so disc 2 can no longer pass on disc 1's verdict. A track
-        whose name carries no disc number — a plain "01 Title.flac", or an
-        album with no D-TT structure at all — falls back to the album-wide
-        answer, which is exactly the one .accurip such an album has.
-        """
-        verdicts = _album_accurip_verdicts(album_dir)
-        if not verdicts:
-            return False
-        from .discs import disc_of_filename
-        disc_n = disc_of_filename(os.path.basename(path))
-        if disc_n is not None and disc_n in verdicts:
-            return verdicts[disc_n] is True
-        if disc_n is None:
-            return all(verdicts.values())
-        return False
     # Whether a CD could be verified at all on this machine, and whether
     # CUETools could make the .accurip in the first place: both decide later
     # whether "not verified" is evidence or just a missing tool.
@@ -609,6 +623,14 @@ def run_audit_library(config):
             log(c("WARNING: ffmpeg not found - CD checksum verification "
                   "unavailable.", Color.YELLOW))
             stats["errors"].append(("CD checksum", "ffmpeg not found"))
+            # The leg is UN-EVALUATED, not absent: the user did not switch it
+            # off, this machine just cannot decode the audio to compare it with
+            # the rip log's CRCs. Recorded so the verdict phase reports the
+            # missing leg by name instead of deciding a CD on two legs.
+            for _p in cd_files:
+                set_leg(_p, "checksums", "unknown",
+                        "no ffmpeg to decode the audio and compare it with the "
+                        "rip log's CRCs")
         else:
             cd_verify_ran = True
             from .discs import verify_album_checksums
@@ -638,21 +660,23 @@ def run_audit_library(config):
                         continue
                     _pbar_update(crc_pbar, crc_counts)
                     for path, verdict in res.items():
-                        # The .log CRC is written as soon as it is known: a
-                        # verified rip must carry REAL even when AudioAuditor
-                        # is missing (it is a Windows-only tool) or its
-                        # spectrogram detectors disagree. AA can only ADD
-                        # warning flags to a file the log could not verify.
-                        if config.get("write_audit_tag", True) and should_write_audio_tag(config, "AUDIT", filepath=path):
-                            changed, b_rem, b_add, err = _write_audit_tag(path, verdict)
-                            if err:
-                                stats["errors"].append((os.path.basename(path), err))
-                            elif changed:
-                                stats["modified_count"] += 1
-                                stats["total_bytes_removed"] += b_rem
-                                stats["total_bytes_added"] += b_add
+                        # The .log CRC is the FIRST of the three legs a CD
+                        # verdict is the AND of, not the verdict itself. It
+                        # used to be written as AUDIT=REAL on its own, which is
+                        # how a rip whose log scored 40/100 and whose .accurip
+                        # said "No match" could still be tagged REAL.
                         checksum_verified[path] = verdict
-                        checksum_verified_canon[_ev_key(path)] = verdict
+                        set_leg(path, "checksums",
+                                "ok" if verdict == "REAL" else "fail",
+                                "" if verdict == "REAL" else
+                                "the rip log's CRC does not match the track's "
+                                "audio")
+                    for path, why in unver.items():
+                        # Not a mismatch: nothing decoded the audio to compare
+                        # against. Recorded as an un-evaluated leg — it is the
+                        # missing half of the evidence, not evidence against
+                        # the rip.
+                        set_leg(path, "checksums", "unknown", why)
                     unverified_cd.update(unver)
             if crc_pbar:
                 crc_pbar.close()
@@ -924,51 +948,23 @@ def run_audit_library(config):
             # CLI could not decide, and a non-answer must not become FAKE).
             tag_value = _audit_tag_value(severity, cli_status)
 
-            # When bothrequired, the final AUDIT is the AND of the two sources.
-            # checksum must be REAL and AA must be Valid/REAL; otherwise FAKE.
-            # .log CRC is authoritative, so an unverified log also means FAKE.
-            # Preserve warning flags (Valid+clipping etc.) when both are REAL.
-            # Every CD file enters this branch, not only the ones the CRC pass
-            # reached: with no ffmpeg to decode them the CRC map is empty, and
-            # gating on it left AudioAuditor's spectral read as the whole
-            # verdict for a MEDIA=CD library.
-            if require_both and canon(path) in cd_canon:
-                # Look every CD verdict up by its canonical path: the tool
-                # reports its own spelling of the same file (case, separator,
-                # 8.3 name), and a raw string compare silently missed it —
-                # which left the AA verdict standing on its own.
-                _ck = canon(path)
-                chk = checksum_verified_canon.get(_ck)
-                orig_severity = severity
-                orig_reason = reason
-                # Integrity first: a rip whose .log CRC verifies is REAL, and
-                # so is one whose .accurip verifies. The CRC is authoritative
-                # for a CD — the user's rule, and what makes a synthetic-tone
-                # fixture survive a real AudioAuditor's "fake lossless"
-                # verdict. `audit_cd_require_both` decides only whether AA is
-                # ALSO run over these files (its warnings are kept, and it
-                # decides when neither source verified); it is not a veto, and
-                # the branch that read it as one was unreachable — `chk !=
-                # "REAL"` is the exact negation of this test.
-                _known = canon_files.get(_ck, path)
-                _album_dir = os.path.dirname(_known)
-                if chk == "REAL" or _disc_accurip_verified(_album_dir, _known):
-                    tag_value = "REAL"
-                    severity = "warn" if orig_severity == "warn" else "ok"
-                    reason = orig_reason if severity == "warn" else ""
-                elif cd_verify_ran or _album_accurip_verdicts(_album_dir) or ar_generator:
-                    tag_value = "FAKE"
-                    severity = "fail"
-                    reason = f"CD log not REAL ({unverified_cd.get(path, chk or 'no CRC')})"
-                else:
-                    # Nothing on this machine could verify a CD: no ffmpeg for
-                    # the .log CRC, no .accurip to read and no CUETools to make
-                    # one. "Cannot check" is not "did not match" — keep whatever
-                    # AudioAuditor itself said (often no verdict at all) instead
-                    # of writing a FAKE that every later run then skips.
-                    pass
-                # Ensure status counts reflect the AA side already counted;
-                # the final tag is what grading will use.
+            # A MEDIA=CD verdict is NEVER AudioAuditor's to make, in either
+            # direction. The three legs recorded by the gates around this loop
+            # decide it, in the verdict phase at the end of the CD section: a
+            # spectral "fake lossless" read of a synthetic tone cannot unmake a
+            # rip whose own evidence checks out, and no spectral "Valid" can
+            # stand in for evidence that is missing. What the tool has to say
+            # is kept as EVIDENCE — a disagreement with a disc the log or the
+            # .accurip verified is reported as a warning below, never written
+            # as a verdict — and for every other release type it remains the
+            # verdict, because there is nothing else to go on there.
+            if canon(path) in cd_canon:
+                tag_value = None
+                if severity == "fail":
+                    severity = "warn"
+                    aa_status = cli_status or "a problem"
+                    reason = (f"AudioAuditor reports {aa_status}, the rip's "
+                              f"own evidence decides a CD (warning only)")
 
             # Integrity check — use canon for Windows 8.3 / case variant safety
             if canon(path) in canon_failed and should_write_audio_tag(config, "AUDIT", filepath=path):
@@ -1217,12 +1213,17 @@ def run_audit_library(config):
                         for fp in discs_here.get(disc_n, ()):
                             if fp not in files:
                                 continue
-                            # The log's GRADE measures how much of the rip the log
-                            # documents, not whether the audio is the audio that was
-                            # ripped: a track whose .log CRC just matched the file is
-                            # intact whatever the score says.
-                            if checksum_verified_canon.get(_canon2(fp)) == "REAL":
-                                continue
+                            # The log's GRADE measures how much of the rip the
+                            # log documents, not whether the audio is the audio
+                            # that was ripped — so this is ONE leg of the CD
+                            # verdict (the log's own score), never a short
+                            # circuit past the other two. It used to be skipped
+                            # for a track its .log CRC had just verified, which
+                            # is how a disc with no gradeable log could still
+                            # be tagged REAL.
+                            set_leg(fp, "log-score", "fail",
+                                    "the .log could not be graded "
+                                    "(LOG_GRADE missing)")
                             mark_fake(fp, "unscorable .log (LOG_GRADE missing)",
                                       "unscorable .log")
 
@@ -1307,6 +1308,19 @@ def run_audit_library(config):
                     # EAC log claims no checksum line but should have one (required)
                     checksum_failed.setdefault(d, []).append((lp, detail or "missing Log checksum"))
                 # 'ok', 'unsupported', None are passes
+                #
+                # The log's own SHA256 is the second half of the disc's
+                # "checksums" leg: a log that cannot be trusted about ITSELF
+                # cannot be trusted about the CRCs it prints. 'unsupported'
+                # (XLD, an EAC log older than 1.0) is neither: that version
+                # never wrote a checksum, so nothing is claimed and nothing is
+                # refuted — the leg is left to the per-track CRCs.
+                for fp in trs:
+                    if state == "ok":
+                        set_leg(fp, "checksums", "ok")
+                    elif state in ("invalid", "missing"):
+                        set_leg(fp, "checksums", "fail",
+                                f"the rip log's EAC SHA256 is {state}")
         if checksum_failed:
             log(c(f"Audit FAIL on log checksum: {sum(len(v) for v in checksum_failed.values())} log(s) in {len(checksum_failed)} CD album(s) have invalid/missing SHA256 checksum — marking their disc(s) as failed (audit_verify_log_checksum on, required)", Color.RED))
             for d, lst in checksum_failed.items():
@@ -1344,13 +1358,10 @@ def run_audit_library(config):
                     for fp in affected:
                         if fp not in files:
                             continue
-                        # A track whose .log CRC was verified against the audio is
-                        # intact by its own evidence: the log's per-track checksum
-                        # matched, so the missing/unverifiable SHA256 of the LOG
-                        # FILE says nothing about the audio. Same rule the
-                        # AccurateRip gate below applies.
-                        if checksum_verified_canon.get(_canon2(fp)) == "REAL":
-                            continue
+                        # No exemption for a track whose .log CRC matched: the
+                        # verdict is the AND of the three legs, and a log that
+                        # cannot be trusted about itself is exactly what this
+                        # leg records (set_leg above).
                         mark_fake(
                             fp,
                             f"log checksum invalid ({os.path.basename(lp)}: {detail or 'mismatch'})",
@@ -1405,10 +1416,20 @@ def run_audit_library(config):
                     # this is a property of the machine, not of the rip, and
                     # failing the whole CD library for a missing dependency was
                     # the missing-tool-reads-as-failure bug.
-                    if ar_generator:
-                        for fp in trs:
-                            if fp in files:
-                                ar_failed_per_file[fp] = "Missing .accurip file (CUETools)"
+                    for fp in trs:
+                        if fp not in files:
+                            continue
+                        if ar_generator:
+                            ar_failed_per_file[fp] = "Missing .accurip file (CUETools)"
+                            set_leg(fp, "accuraterip", "fail",
+                                    "no .accurip file for the disc — nothing "
+                                    "was checked (run AccurateRip (script 9))")
+                        else:
+                            # No file and no tool that could make one: the leg
+                            # is un-evaluated, so the file keeps no verdict and
+                            # the run names this leg as the missing one.
+                            set_leg(fp, "accuraterip", "unknown",
+                                    "no .accurip and no CUETools to make one")
                     continue
                 ar_files_seen += 1
                 try:
@@ -1417,6 +1438,8 @@ def run_audit_library(config):
                     for fp in trs:
                         if fp in files:
                             ar_failed_per_file[fp] = f"cannot read .accurip: {e}"
+                            set_leg(fp, "accuraterip", "fail",
+                                    f"the .accurip cannot be read: {e}")
                     continue
                 # Use per-track parser for accurate per-track verdicts
                 try:
@@ -1443,10 +1466,28 @@ def run_audit_library(config):
                         for fp in trs:
                             if fp in files:
                                 ar_failed_per_file[fp] = overall_detail or "AccurateRip mismatch in .accurip (No match)"
+                                set_leg(fp, "accuraterip", "fail",
+                                        "the .accurip reports No match")
                     elif overall_st == "NONE":
                         for fp in trs:
                             if fp in files:
                                 ar_failed_per_file[fp] = overall_detail or "Missing/unscorable AccurateRip in .accurip"
+                                # A database MISS is not a mismatch: this
+                                # pressing is not in AccurateRip at all, so
+                                # the leg cannot pass and nothing was refuted.
+                                # The verdict is still not REAL (the rule
+                                # needs AccurateRip to pass) but the reason
+                                # says which of the two it is, so the user
+                                # reads "nobody could check this disc" and
+                                # not "your rip is bad".
+                                set_leg(fp, "accuraterip", "fail",
+                                        "the .accurip holds no AccurateRip "
+                                        "verdict — this pressing is not in the "
+                                        "database, so nothing was checked")
+                    else:
+                        for fp in trs:
+                            if fp in files:
+                                set_leg(fp, "accuraterip", "ok")
                     continue
                 # Per-track: map each file's track number to its status
                 for fp in trs:
@@ -1466,17 +1507,18 @@ def run_audit_library(config):
                             st = "NONE"
                         if st == "FAKE":
                             ar_failed_per_file[fp] = "AccurateRip No match in .accurip"
+                            set_leg(fp, "accuraterip", "fail",
+                                    "AccurateRip reports No match for the track")
                         elif st == "NONE":
                             ar_failed_per_file[fp] = "Track not present in AccurateRip database"
+                            set_leg(fp, "accuraterip", "fail",
+                                    "the track is not in the AccurateRip "
+                                    "database — nothing was checked for it")
+                        else:
+                            set_leg(fp, "accuraterip", "ok")
                         # REAL → pass, do not add
                     except Exception:
                         continue
-        # A rip whose .log CRC verified is intact by its own evidence:
-        # AccurateRip not knowing that pressing — an absent .accurip, a
-        # "not present in database" track — is not evidence against it.
-        for _fp in [p for p in ar_failed_per_file
-                    if checksum_verified.get(p) == "REAL"]:
-            ar_failed_per_file.pop(_fp, None)
         if ar_failed_per_file:
             # Group by album for log header
             by_album = {}
@@ -1497,46 +1539,110 @@ def run_audit_library(config):
             stats["errors"].append(("AccurateRip",
                                     "CUETools/ffmpeg not installed - .accurip not checked"))
 
-    # Audit FAIL on Logchecker score below threshold
-    # --------------------------------------------------------------
-    if int(config.get("audit_log_score_threshold", 100) or 0) > 0 and cd_candidate_dirs and log_scores:
-        try:
-            thr_a = int(config.get("audit_log_score_threshold", 100) or 0)
-            thr_a = max(0, min(100, thr_a))
-        except Exception:
-            thr_a = 0
-        if thr_a > 0:
-            from .discs import album_discs as _ad_thr
-            thr_failed = {}  # album_dir -> list disc nums
-            for d, scores in list(log_scores.items()):
-                for disc_n, sc in scores.items():
-                    try:
-                        if int(sc) < thr_a:
-                            thr_failed.setdefault(d, []).append((disc_n, sc))
-                    except Exception:
+    # ---- the third leg: the rip log's own SCORE ---------------------------
+    # Logchecker scores each disc's rip log 0-100 (written to LOG_GRADE).
+    # `audit_log_score_threshold` at 0 leaves the leg unrequired; past it the
+    # score must reach the threshold. A disc whose log could not be scored at
+    # all is an UN-EVALUATED leg — reported by name, never guessed: writing
+    # FAKE would blame the rip for a missing scorer or a log nobody graded,
+    # and the gate above is what fails a log that is missing or ungradeable.
+    try:
+        thr_a = int(config.get("audit_log_score_threshold", 100) or 0)
+        thr_a = max(0, min(100, thr_a))
+    except Exception:
+        thr_a = 0
+    if thr_a > 0 and cd_candidate_dirs:
+        from .discs import album_discs as _ad_thr
+
+        def _discs_of(album_dir):
+            """{disc number: [tracks]} for one CD album, with the single-disc
+            fallback the other CD phases use: an album whose files carry no
+            disc number still has one disc, and its one .log still scores."""
+            try:
+                discs_here = _ad_thr(album_dir) or {}
+            except Exception:
+                discs_here = {}
+            if not discs_here:
+                try:
+                    aud = [os.path.join(album_dir, f)
+                           for f in os.listdir(album_dir)
+                           if f.lower().endswith(CD_AUDIO_EXTS)]
+                except OSError:
+                    aud = []
+                if aud:
+                    discs_here = {1: aud}
+            return discs_here
+
+        def _stored_log_grade(trs):
+            """The 0-100 LOG_GRADE the tracks of one disc already carry.
+
+            `grade_album_logs` SKIPS a disc whose tracks all hold a valid
+            LOG_GRADE (no reason to re-score the same log), so an empty score
+            map means either "this disc was already graded" or "nothing could
+            score it" — and the FILE says which, the same way the scorer itself
+            trusts a stored grade. Returns None unless every track carries the
+            same 0-100 value, so a half-written grade is never read as a score.
+            """
+            values = set()
+            for p in trs:
+                try:
+                    val = str(AudioFile(p).get_tag("LOG_GRADE") or "").strip()
+                except Exception:
+                    return None
+                if not (val.isdigit() and 0 <= int(val) <= 100):
+                    return None
+                values.add(val)
+            return int(values.pop()) if len(values) == 1 else None
+
+        log_ok, log_below, log_unscored = {}, {}, {}
+        for d in cd_candidate_dirs:
+            scores = log_scores.get(d) or {}
+            unscorable = set(log_unscorable.get(d) or ())
+            for disc_n, trs in sorted(_discs_of(d).items()):
+                sc = None if disc_n in unscorable else scores.get(disc_n)
+                if sc is None and disc_n not in unscorable:
+                    sc = _stored_log_grade(trs)
+                if not isinstance(sc, int):
+                    log_unscored.setdefault(d, []).append((disc_n, trs, sc))
+                elif sc < thr_a:
+                    log_below.setdefault(d, []).append((disc_n, sc, trs))
+                else:
+                    log_ok.setdefault(d, []).append((disc_n, sc, trs))
+
+        total_below = sum(len(v) for v in log_below.values())
+        if total_below:
+            log(c(f"Audit FAIL on log score threshold: {total_below} disc(s) in {len(log_below)} CD album(s) below {thr_a}/100 — marking their disc(s) as failed (audit_log_score_threshold on)", Color.RED))
+        for d, lst in log_below.items():
+            for disc_n, sc, trs in lst:
+                for fp in trs:
+                    if fp not in files:
                         continue
-            if thr_failed:
-                log(c(f"Audit FAIL on log score threshold: {sum(len(v) for v in thr_failed.values())} disc(s) in {len(thr_failed)} CD album(s) below {thr_a}/100 — marking their disc(s) as failed (audit_log_score_threshold on)", Color.RED))
-                for d, lst in thr_failed.items():
-                    for disc_n, sc in lst:
-                        # The disc numbers here come from grade_album_logs, i.e.
-                        # from the same album_discs map, so the tracks of the
-                        # disc are known. A disc this map cannot resolve is left
-                        # alone rather than marking the whole album on a guess.
-                        try:
-                            affected = (_ad_thr(d) or {}).get(disc_n) or []
-                        except Exception:
-                            affected = []
-                        for fp in affected:
-                            if fp not in files:
-                                continue
-                            # Same rule as the other log gates: a track whose
-                            # .log CRC matched the audio is intact, whatever
-                            # the log's completeness score says about the log.
-                            if checksum_verified_canon.get(_canon2(fp)) == "REAL":
-                                continue
-                            mark_fake(fp, f"log score {sc} below threshold {thr_a}",
-                                      f"log score < {thr_a}")
+                    set_leg(fp, "log-score", "fail",
+                            f"the rip log scores {sc}/100, below the "
+                            f"{thr_a}/100 threshold")
+                    mark_fake(fp, f"log score {sc} below threshold {thr_a}",
+                              f"log score < {thr_a}")
+        for d, lst in log_ok.items():
+            for disc_n, sc, trs in lst:
+                for fp in trs:
+                    if fp in files:
+                        set_leg(fp, "log-score", "ok")
+        # Nothing here scored this disc: say which of the two reasons it is, so
+        # the missing leg the verdict phase reports is actionable.
+        for d, lst in log_unscored.items():
+            for disc_n, trs, sc in lst:
+                if sc is None and scorer_present:
+                    why = ("no rip-log score: the tracks carry no LOG_GRADE and "
+                           "Logchecker did not produce one for this .log")
+                elif sc is None:
+                    why = ("no rip-log score: the tracks carry no LOG_GRADE and "
+                           "Logchecker/PHP is not installed, so none could be "
+                           "produced")
+                else:
+                    why = f"the rip log's score is not a number ({sc!r})"
+                for fp in trs:
+                    if fp in files:
+                        set_leg(fp, "log-score", "unknown", why)
 
 
     # Audit FAIL on CD not 16-bit 44.1 kHz (true CD-DA) — independent of the
@@ -1586,6 +1692,87 @@ def run_audit_library(config):
                 mark_fake(fp, f"not 16-bit 44.1 kHz ({detail2})",
                           "not 16-bit 44.1 kHz")
 
+
+    # ---- the one place a MEDIA=CD verdict is written ------------------------
+    # REAL exactly when the three legs all pass: the rip log scores at/above
+    # `audit_log_score_threshold`, the disc's checksums match the audio (the
+    # per-track CRCs, and the log's own EAC SHA256 when
+    # `audit_verify_log_checksum` is on), and AccurateRip passes
+    # (`audit_require_accuraterip`). Each leg is required only while its own
+    # setting requires it — switching one off is an escape hatch, and it
+    # removes that leg rather than weakening the other two.
+    #
+    # One leg failing is a FAKE: the evidence is against the rip. One leg the
+    # machine could not evaluate (no ffmpeg to decode, no .accurip and no
+    # CUETools to make one, no Logchecker to score the log) leaves the file
+    # WITHOUT a verdict and names the missing leg in the run log — writing
+    # REAL would claim evidence nobody produced, and writing FAKE would blame
+    # the rip for a tool that is not installed.
+    #
+    # AudioAuditor has no vote here at all: its read is kept as evidence (a
+    # disagreement is reported as a warning by the audit loop above) and it
+    # decides every release type that is not a CD.
+    cd_verdict_unresolved = []
+    cd_verdict_failed = {}
+    for fp in sorted(cd_files):
+        if is_video_file(fp):
+            continue
+        if not should_write_audio_tag(config, "AUDIT", filepath=fp):
+            continue
+        legs = cd_legs.get(_ev_key(fp))
+        if not legs:
+            # Every leg switched off: nothing says anything about a CD, so the
+            # tag it already carries is left exactly as it was.
+            continue
+        failed = sorted(name for name, (state, _why) in legs.items()
+                        if state == "fail")
+        if failed:
+            verdict = "FAKE"
+            for name in failed:
+                why, count = cd_verdict_failed.get(name, (legs[name][1], 0))
+                cd_verdict_failed[name] = (why, count + 1)
+        elif any(state == "unknown" for state, _why in legs.values()):
+            cd_verdict_unresolved.append((fp, legs))
+            continue
+        else:
+            verdict = "REAL"
+        if not config.get("write_audit_tag", True):
+            continue
+        changed, b_rem, b_add, err = _write_audit_tag(fp, verdict)
+        if err:
+            stats["errors"].append((os.path.basename(fp), err))
+        elif changed:
+            stats["modified_count"] += 1
+            stats["total_bytes_removed"] += b_rem
+            stats["total_bytes_added"] += b_add
+
+    if cd_verdict_failed:
+        # Which leg cost the verdict, by name and reason: a CD is FAKE because
+        # of one line of its own evidence, and the run log has to say which —
+        # "the disc is not in the AccurateRip database" and "the .log CRC does
+        # not match the audio" are different problems for the user.
+        log(c("CD verdict FAKE — the leg(s) that failed:", Color.RED))
+        for name in sorted(cd_verdict_failed):
+            why, count = cd_verdict_failed[name]
+            log(c(f"  {name} ({count} track(s)): {why}", Color.RED))
+
+    if cd_verdict_unresolved:
+        by_leg = {}
+        for fp, legs in cd_verdict_unresolved:
+            for name, (state, why) in legs.items():
+                if state == "unknown":
+                    by_leg.setdefault(name, (why, []))[1].append(fp)
+        log(c(f"CD evidence incomplete: {len(cd_verdict_unresolved)} CD "
+              f"track(s) keep no AUDIT verdict — a verdict needs evidence, and "
+              f"these legs could not be evaluated here:", Color.YELLOW))
+        for name in sorted(by_leg):
+            why, paths = by_leg[name]
+            log(c(f"  missing leg '{name}' ({len(paths)} track(s)): {why}",
+                  Color.YELLOW))
+        stats["errors"].append((
+            "CD verdict",
+            "incomplete evidence — no verdict written for "
+            + ", ".join(sorted(by_leg))))
 
     # .log CRC verdicts never pass through the AudioAuditor loop above, so
     # count them for the summary — otherwise a CRC-only CD library reports

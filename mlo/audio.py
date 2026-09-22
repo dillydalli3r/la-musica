@@ -279,6 +279,23 @@ TAG_MAP = {
         "mp3": ("TXXX", "INSTRUMENTAL"),
         "mp4": ("freeform", "com.apple.iTunes", "INSTRUMENTAL"),
     },
+    # --- The container's own encoder byline ------------------------------ #
+    # The string the encoder itself wrote into the file: ID3's TENC ("encoded
+    # by"), the ©too atom iTunes and ffmpeg write, the ENCODEDBY Vorbis
+    # comment. It is Picard's own "Encoded By" tag, and it is a DIFFERENT fact
+    # from the app's ENCODER_PROGRAM / ENCODER_QUALITY / ENCODER_VERSION
+    # markers (script 3's record of the conversion it performed), which is why
+    # it gets a name of its own: `grade_check_encoder` requires the marker trio
+    # together, and a plain iTunes-encoded .m4a that only ever carried ©too
+    # must not be read as having "the program but not the settings". Without an
+    # entry here the atom was invisible AND flagged: every .m4a written by
+    # iTunes or ffmpeg failed the excess-tag grade for the encoder's own
+    # byline, while the same string in an MP3 (TENC) was accepted.
+    "ENCODEDBY": {
+        "flac": "ENCODEDBY",
+        "mp3": ("TENC", None),
+        "mp4": "\xa9too",
+    },
     # Medium of the release. ID3's standard frame is TMED (what beets and
     # Picard write); TXXX:MEDIA is this app's older spelling, still read.
     "MEDIA": {
@@ -391,6 +408,127 @@ TAG_MAP = {
         "mp3": ("TXXX", "MusicBrainz Release Track Id"),
         "mp4": ("freeform", "com.apple.iTunes", "MusicBrainz Release Track Id"),
     },
+    # --- MusicBrainz relationships ------------------------------------- #
+    # The credit roles MusicBrainz states on a recording (or on its work) and
+    # Picard writes out. The app pulled only COMPOSER/LYRICIST/REMIXER of the
+    # whole role table before these entries existed, so an import dropped the
+    # performers, the producers, the engineers and the mixers the release
+    # actually credits. Values are LISTS — a track has several performers and
+    # usually several engineers — so they are written as repeated fields
+    # (Vorbis comments, an ID3 text list, one MP4 atom per value), exactly
+    # like every other multi-value tag here.
+    #
+    # The names are Picard's own (its internal `performer:instrument`,
+    # `producer`, `engineer`, `mixer`, `arranger`, `djmixer`, `conductor`,
+    # `writer`), because a file has to be legible to the tagger the app
+    # documents as its interchange partner, and the ID3 spellings are Picard's
+    # too: TIPL (the ID3v2.4 "involved people" list, IPLS in v2.3) carries the
+    # role in the frame's own (role, person) pairs, so PRODUCER and MIXER share
+    # ONE frame and the tag layer reads and writes them per role (see
+    # _PEOPLE_FRAMES). TMCL is its musician-credits twin: it holds the
+    # instrument each performer played, which is why PERFORMER's value carries
+    # the instrument in parentheses — Picard's own Vorbis spelling.
+    #
+    # MP4: Picard has no atom for the performer list, so PERFORMER and the
+    # roles without a documented atom use the iTunes freeform form the rest of
+    # this table already uses for non-standard fields — the one place an MP4
+    # can hold them at all.
+    "PERFORMER": {
+        "flac": "PERFORMER",
+        "mp3": ("TMCL", None),
+        "mp4": ("freeform", "com.apple.iTunes", "PERFORMER"),
+    },
+    "PRODUCER": {
+        "flac": "PRODUCER",
+        "mp3": ("TIPL", "producer"),
+        "mp4": ("freeform", "com.apple.iTunes", "PRODUCER"),
+    },
+    "ENGINEER": {
+        "flac": "ENGINEER",
+        "mp3": ("TIPL", "engineer"),
+        "mp4": ("freeform", "com.apple.iTunes", "ENGINEER"),
+    },
+    "MIXER": {
+        "flac": "MIXER",
+        "mp3": ("TIPL", "mix"),
+        "mp4": ("freeform", "com.apple.iTunes", "MIXER"),
+    },
+    # "Arranger" is the freeform name beets' mediafile reads and writes for
+    # this role (mediafile's own spellings: TIPL:arranger, ARRANGER,
+    # ----:com.apple.iTunes:Arranger) — freeform reads are case-insensitive,
+    # so listing Picard's uppercase name still reads a beets-tagged file.
+    "ARRANGER": {
+        "flac": "ARRANGER",
+        "mp3": ("TIPL", "arranger"),
+        "mp4": ("freeform", "com.apple.iTunes", "ARRANGER"),
+    },
+    "DJMIXER": {
+        "flac": "DJMIXER",
+        "mp3": ("TIPL", "DJ-mix"),
+        "mp4": ("freeform", "com.apple.iTunes", "DJMIXER"),
+    },
+    # Conductor is a real ID3 frame (TPE3, "conductor/performer refinement"),
+    # not a TIPL pair, and MP4 holds it in the freeform atom Picard names.
+    "CONDUCTOR": {
+        "flac": "CONDUCTOR",
+        "mp3": ("TPE3", None),
+        "mp4": ("freeform", "com.apple.iTunes", "CONDUCTOR"),
+    },
+    # The work's writer, when MusicBrainz does not say composer or lyricist.
+    "WRITER": {
+        "flac": "WRITER",
+        "mp3": ("TXXX", "Writer"),
+        "mp4": ("freeform", "com.apple.iTunes", "WRITER"),
+    },
+    # Music videos: the director relationship. Atom name is Picard's (©dir).
+    "DIRECTOR": {
+        "flac": "DIRECTOR",
+        "mp3": ("TXXX", "DIRECTOR"),
+        "mp4": "\xa9dir",
+    },
+    # The composers' own sort spellings, the parallel list to COMPOSER.
+    "COMPOSERSORT": {
+        "flac": "COMPOSERSORT",
+        "mp3": ("TSOC", None),
+        "mp4": "soco",
+    },
+    # Picard's per-credit id for the composer list (multi-value, in the same
+    # order as COMPOSER) — the one credit whose MusicBrainz id Picard defines
+    # a tag for.
+    "MUSICBRAINZ_COMPOSERID": {
+        "flac": "MUSICBRAINZ_COMPOSERID",
+        "mp3": ("TXXX", "MusicBrainz Composer Id"),
+        "mp4": ("freeform", "com.apple.iTunes", "MusicBrainz Composer Id"),
+    },
+    # --- Release facts the import fetched and never wrote ---------------- #
+    # The ASIN of the release (MusicBrainz `asin`), Picard's spelling.
+    "ASIN": {
+        "flac": "ASIN",
+        "mp3": ("TXXX", "ASIN"),
+        "mp4": ("freeform", "com.apple.iTunes", "ASIN"),
+    },
+    # Language of the release's text representation (MusicBrainz's
+    # `text-representation.language`, ISO 639-3 — beets writes this pair from
+    # the same field, which is why SCRIPT above is already here). Picard's
+    # `language` tag means the related WORK's lyric language instead; a file
+    # tagged by both keeps whichever value is already there, because every
+    # writer here fills an empty tag and never replaces one.
+    "LANGUAGE": {
+        "flac": "LANGUAGE",
+        "mp3": ("TLAN", None),
+        "mp4": ("freeform", "com.apple.iTunes", "LANGUAGE"),
+    },
+    # A medium's own title ("Disc 2: The Rarities"), MusicBrainz's medium
+    # `title`. TSST is the ID3v2.4 frame for it — and ID3v2.3 has no disc-title
+    # frame at all, which is why the TXXX spelling is listed second: mutagen's
+    # v2.3 conversion DELETES TSST (see _V24_ONLY_FRAMES), so a v2.3 file takes
+    # the freeform one and the tag survives the save instead of being written
+    # and then dropped.
+    "DISCSUBTITLE": {
+        "flac": "DISCSUBTITLE",
+        "mp3": (("TSST", None), ("TXXX", "DISCSUBTITLE")),
+        "mp4": ("freeform", "com.apple.iTunes", "DISCSUBTITLE"),
+    },
     # The work (composition) a classical track performs; its movement tags
     # below are only meaningful next to it.
     "MUSICBRAINZ_WORKID": {
@@ -415,6 +553,122 @@ TAG_MAP = {
         "mp4": ("freeform", "com.apple.iTunes", "RATEYOURMUSIC_ARTIST"),
     },
 }
+
+# ID3 frames mutagen's v2.3 conversion DELETES rather than converts (see
+# ID3.update_to_v23's own list, minus the four it converts: TIPL/TMCL to
+# IPLS, TDOR to TORY, TDRC to TYER/TDAT). A write into one of these on a file
+# that is saved back as v2.3 is a write no reader ever sees: set_tag picks the
+# TAG_MAP entry's alternative spelling instead, and the readers already accept
+# both (see _mp3_specs).
+_V24_ONLY_FRAMES = frozenset({
+    "ASPI", "EQU2", "RVA2", "SEEK", "SIGN", "TDEN", "TDRL", "TDTG", "TMOO",
+    "TPRO", "TSOA", "TSOP", "TSOT", "TSST",
+})
+
+# ID3v2.4's two "people list" frames, IPLS being their ID3v2.3 spelling:
+# TIPL ("involved people", the producer/engineer/mixer/arranger/DJ-mix roles
+# Picard writes) and TMCL ("musician credits", the instrument each performer
+# played). They are the ONE frame shape whose value is a list of
+# (role, person) pairs rather than text, so every reader and writer here
+# branches on them instead of on `text` — reading a TIPL frame as text yields
+# "producer; Rick Rubin; engineer; …", which is both unreadable as a credit
+# and unwritable back.
+_PEOPLE_FRAMES = ("TIPL", "TMCL", "IPLS")
+
+
+def _people_pairs(frame):
+    """The (role, person) pairs a people-list frame holds ([] for any other
+    frame, so callers need no type test of their own)."""
+    pairs = getattr(frame, "people", None)
+    if not pairs:
+        return []
+    out = []
+    for pair in pairs:
+        try:
+            role, person = pair
+        except (TypeError, ValueError):
+            continue          # a malformed pair is not a credit
+        out.append((str(role), str(person)))
+    return out
+
+
+# The frame names one people list can be stored under. ID3v2.3 has no TMCL:
+# it keeps musician credits in the SAME IPLS frame as the involvement roles,
+# and mutagen renames IPLS <-> TIPL as it loads and saves, so one list of
+# credits appears under any of these names depending on which version the file
+# arrived in and whether the app has already converted it in memory. Every
+# lookup below therefore reads the whole family — without this, a v2.3 file's
+# credits vanish from the readers the moment the app converts the frame.
+_PEOPLE_FRAME_FAMILY = ("TIPL", "TMCL", "IPLS")
+
+
+def _people_role_owner(role):
+    """(TAG_MAP name, is_wildcard) for one role in a people list.
+
+    A role a tag names outright belongs to that tag — TIPL's "producer" pairs
+    are PRODUCER's, and only its. Every other role is a musician credit: the
+    role IS the instrument (TMCL's shape), so it belongs to PERFORMER, the tag
+    that owns the musician list. That fallback is also what keeps a v2.3
+    file's credits readable, because v2.3 stores the instruments in the very
+    same frame as the involvement roles and no reader can tell the two lists
+    apart there.
+    """
+    want = str(role).upper()
+    wild = None
+    for name, spec in TAG_MAP.items():
+        for frame_type, desc in _mp3_specs(spec):
+            if frame_type not in _PEOPLE_FRAME_FAMILY:
+                continue
+            if desc in (None, ""):
+                wild = wild or name
+            elif str(desc).upper() == want:
+                return name, False
+    return (wild, True) if wild else (None, False)
+
+
+def _performer_text(person, role):
+    """One performer credit as stored: Picard's `Name (instrument)`.
+
+    The instrument is what tells two credits on the same track apart, and a
+    performer MusicBrainz states without one is the bare name — never
+    "Name ()", which no reader could turn back into a credit.
+    """
+    person = str(person).strip()
+    role = str(role or "").strip()
+    return f"{person} ({role})" if person and role else person
+
+
+def _split_performer(text):
+    """("drums (drum set)", "John Dolmayan") from "John Dolmayan (drums (drum set))".
+
+    The inverse of _performer_text, so a PERFORMER value that went to disk
+    through tag_values() comes back to TMCL as the pair it was printed from.
+    The role is the FIRST trailing " (…)" group that is balanced and reaches
+    the end of the value — MusicBrainz's own instrument names carry parentheses
+    ("drums (drum set)", "guitar (12 string)"), so splitting at the last " ("
+    would cut the instrument in half. A value with no such group (a name that
+    merely contains parentheses) keeps its whole text and an empty role.
+    """
+    text = str(text).strip()
+    if not text.endswith(")"):
+        return "", text
+    start = text.find(" (")
+    while start > 0:
+        tail = text[start + 1:]
+        depth = 0
+        for i, ch in enumerate(tail):
+            if ch == "(":
+                depth += 1
+            elif ch == ")":
+                depth -= 1
+                if depth == 0 and i != len(tail) - 1:
+                    depth = -1     # closes early: this group is part of the name
+                    break
+        if depth == 0:
+            return tail[1:-1].strip(), text[:start].strip()
+        start = text.find(" (", start + 1)
+    return "", text
+
 
 # Containers whose tags are ID3v2 frames — mutagen's MP3 and ID3 objects share
 # one frame API, so every ID3 branch below serves all of them. Raw ADTS .aac is
@@ -1109,9 +1363,18 @@ class AudioFile:
 
         UFID is the one binary frame a semantic tag maps to: its payload is
         the MusicBrainz id itself, the owner names the authority.
+
+        A people-list frame (TIPL / TMCL) is read by ROLE: a tag with a fixed
+        role (PRODUCER is TIPL's "producer" entries) returns just those pairs'
+        people, and a tag that owns every role of its frame (PERFORMER over
+        TMCL) returns each pair as "Name (instrument)" — the shape its Vorbis
+        spelling stores, so one value means the same thing in every container.
         """
         if frame_type == "USLT":
             return self.get_lyrics()
+        if frame_type in _PEOPLE_FRAMES:
+            vals = self._id3_people_values(desc)
+            return "; ".join(vals) if vals else None
         if frame_type == "UFID":
             frame = self.audio.tags.get(f"UFID:{desc}")
             data = getattr(frame, "data", None) if frame is not None else None
@@ -1129,6 +1392,109 @@ class AudioFile:
             return self._id3_text(frame)
         return None
 
+    def _id3_people_frames(self):
+        """Every stored people-list frame object (TIPL / TMCL / IPLS are one
+        list of credits under three names — see _PEOPLE_FRAME_FAMILY)."""
+        frames = []
+        for name in _PEOPLE_FRAME_FAMILY:
+            frames.extend(self.audio.tags.getall(name))
+        return frames
+
+    def _id3_people_values(self, desc):
+        """One people list's values for a tag's spec, in file order.
+
+        A role-fixed tag (PRODUCER claims the "producer" pairs) yields its own
+        pairs' people; a tag that owns every other role (PERFORMER) yields each
+        of those pairs rendered the way its Vorbis spelling stores it, so
+        `tag_values` hands a writer back exactly the pieces `set_tag` splits
+        again — and one credit list means the same thing in every container.
+        """
+        wild = desc in (None, "")
+        want = "" if wild else str(desc).strip().lower()
+        out = []
+        for frame in self._id3_people_frames():
+            for role, person in _people_pairs(frame):
+                if wild:
+                    if not _people_role_owner(role)[1]:
+                        continue
+                    person = _performer_text(person, role)
+                elif role.strip().lower() != want:
+                    continue
+                out.append(person)
+        return out
+
+    def _id3_set_people(self, frame_type, desc, values):
+        """Write one tag's credits into the file's people list.
+
+        The list is shared by SEVERAL tags — PRODUCER, ENGINEER, MIXER,
+        ARRANGER and DJMIXER all live in TIPL, and PERFORMER holds every
+        musician credit beside them — so a write replaces only the pairs THIS
+        tag owns and carries the rest over untouched: writing the producers
+        must not delete the engineers a previous import (or Picard, or beets)
+        put in the same frame. A tag that owns every remaining role (PERFORMER)
+        takes the role back out of each value, because for a musician credit
+        the instrument IS part of the value.
+
+        The whole family of frames is replaced by ONE frame of *frame_type*:
+        mutagen merges TIPL and TMCL back into IPLS anyway when a v2.3 file is
+        written, and a file is better off with one list than with the same
+        credits split across two spellings of it.
+        """
+        wild = desc in (None, "")
+        want = "" if wild else str(desc).strip().lower()
+
+        def _is_mine(role):
+            """Whether a stored pair belongs to the tag being written: the
+            pairs a fixed-role tag names, or — for the tag that owns every
+            musician credit — the pairs no other tag claims. Getting this
+            wrong either deletes a sibling tag's credits or leaves the tag's
+            own old ones behind."""
+            if wild:
+                return _people_role_owner(role)[1]
+            return role.strip().lower() == want
+
+        pairs = []
+        for v in values:
+            role, person = _split_performer(v) if wild else (str(desc), str(v))
+            if str(person).strip():
+                pairs.append((str(role).strip(), str(person).strip()))
+
+        kept = {}
+        for name in _PEOPLE_FRAME_FAMILY:
+            frames = self.audio.tags.getall(name)
+            if not frames:
+                continue
+            kept[name] = [(r, p) for frame in frames
+                          for r, p in _people_pairs(frame) if not _is_mine(r)]
+
+        # The frame each tag writes into. Picard's ID3v2.4 split is kept — the
+        # involvement roles in TIPL, the musician credits in TMCL — because
+        # that is where beets and Picard READ them from (mediafile reads
+        # TIPL:arranger, and a frame folded into the other one would be
+        # invisible to both). A file that carries IPLS instead (the ID3v2.3
+        # list, which mutagen answers from v2.3 files and which v2.3 files are
+        # written back as) takes everything into IPLS: mutagen merges TIPL and
+        # TMCL into IPLS on the save, and it DROPS them when an IPLS frame is
+        # already there — so writing beside an existing IPLS lost the credits
+        # that were just written.
+        target = "IPLS" if self.audio.tags.getall("IPLS") else frame_type
+        for name, pairs_kept in kept.items():
+            self.audio.tags.delall(name)
+            if pairs_kept:
+                frame_cls = Frames.get(name)
+                if frame_cls is not None:
+                    self.audio.tags.add(frame_cls(
+                        encoding=Encoding.UTF8,
+                        people=[[r, p] for r, p in pairs_kept]))
+        if pairs:
+            frame_cls = Frames.get(target)
+            if frame_cls is None:
+                return False
+            self.audio.tags.add(frame_cls(
+                encoding=Encoding.UTF8,
+                people=[[r, p] for r, p in kept.get(target, []) + pairs]))
+        return True
+
     @staticmethod
     def _mp3_canonical(frame_type, desc=""):
         """TAG_MAP name for a stored ID3 frame, or None.
@@ -1136,12 +1502,18 @@ class AudioFile:
         Descriptions (and UFID owners) are compared case-insensitively:
         taggers disagree on their case and every spelling of a field must
         read back under the same semantic name.
+
+        A people-list frame whose entry names no role (PERFORMER's TMCL spec)
+        owns EVERY role of that frame: the roles inside it are not a
+        description to match, they are the value.
         """
         want = "" if desc in (None, "") else str(desc).upper()
         for name, spec in TAG_MAP.items():
             for ft, od in _mp3_specs(spec):
                 if ft != frame_type:
                     continue
+                if od in (None, "") and ft in _PEOPLE_FRAMES:
+                    return name
                 got = "" if od in (None, "") else str(od).upper()
                 if got == want:
                     return name
@@ -1435,6 +1807,34 @@ class AudioFile:
                         data = getattr(frame, "data", b"") or b""
                         out[canonical or f"UFID:{owner}"] = data.decode(
                             "ascii", "replace")
+                    elif getattr(frame, "people", None) is not None:
+                        # A people-list frame (TIPL / TMCL — PairedTextFrame,
+                        # NOT a TextFrame, so it never reached the branch
+                        # below): its value is the (role, person) pairs, not
+                        # the flattened text `_id3_text` would join into
+                        # "producer; Alice; …". Each pair is named by the tag
+                        # that owns its ROLE (PRODUCER, MIXER, …); PERFORMER
+                        # owns every role of TMCL, so its values keep the
+                        # instrument in parentheses — the shape its Vorbis
+                        # spelling stores — and a Picard-tagged file reads back
+                        # as the credits it holds instead of one frame no
+                        # reader can turn into a credit.
+                        pairs = _people_pairs(frame)
+                        for role, person in pairs:
+                            name, wild = _people_role_owner(role)
+                            key = name or f"{fid}:{role}"
+                            value = (person if name and not wild
+                                     else _performer_text(person, role))
+                            if value and out.get(key):
+                                out[key] = f"{out[key]}; {value}"
+                            else:
+                                out.setdefault(key, value)
+                        if not pairs:
+                            # A frame holding no pairs at all: nothing to name
+                            # it by, so it stays visible as the raw frame the
+                            # excess check judges rather than vanishing.
+                            key, preview = self._id3_frame_key(frame)
+                            out.setdefault(key, preview)
                     elif isinstance(frame, TextFrame):
                         canonical = self._mp3_canonical(fid)
                         out[canonical or fid] = self._id3_text(frame) or ""
@@ -1524,6 +1924,15 @@ class AudioFile:
                     if frame_type in ("USLT", "UFID"):
                         value = self._id3_read(frame_type, desc)
                         return [value] if value else []
+                    if frame_type in _PEOPLE_FRAMES:
+                        # The pieces are the list's own (role, person) pairs —
+                        # a repeated credit list has to come back as several
+                        # values, or a writer feeding the pieces to set_tag
+                        # stores the whole "; "-joined list as ONE performer.
+                        out.extend(self._id3_people_values(desc))
+                        if out:
+                            return out
+                        continue
                     for frame in self.audio.tags.getall(frame_type):
                         if frame_type == "TXXX" and (
                                 str(frame.desc).upper() != str(desc or "").upper()):
@@ -1800,6 +2209,14 @@ class AudioFile:
 
             elif kind in _ID3_KINDS:
                 specs = _mp3_specs(spec)
+                if self.id3_version != 4:
+                    # The file is written back as v2.3, whose conversion drops
+                    # the frames in _V24_ONLY_FRAMES outright: prefer the
+                    # entry's spelling that survives it (see DISCSUBTITLE).
+                    safe = tuple(s for s in specs
+                                 if s[0] not in _V24_ONLY_FRAMES)
+                    if safe:
+                        specs = safe + tuple(s for s in specs if s not in safe)
                 frame_type, desc = specs[0]
                 if self.audio.tags is None:
                     self.audio.add_tags()
@@ -1826,6 +2243,10 @@ class AudioFile:
                         UFID(owner=str(desc),
                              data=value.encode("ascii", "replace"))
                     )
+                elif frame_type in _PEOPLE_FRAMES:
+                    if not self._id3_set_people(frame_type, desc,
+                                                values or [value]):
+                        return False
                 elif frame_type == "TXXX":
                     for frame in list(self.audio.tags.getall("TXXX")):
                         if frame.desc.upper() == desc.upper():
@@ -1988,6 +2409,20 @@ class AudioFile:
                                     changed = True
                                 except Exception:
                                     pass
+                    elif frame_type in _PEOPLE_FRAMES:
+                        # One ROLE's pairs, not the whole list: TIPL holds five
+                        # different tags' credits, so deleting the producers
+                        # must leave the engineers standing.
+                        wild = desc in (None, "")
+                        want = "" if wild else str(desc).strip().lower()
+                        mine = sum(
+                            1 for f in self._id3_people_frames()
+                            for r, _p in _people_pairs(f)
+                            if (_people_role_owner(r)[1] if wild
+                                else r.strip().lower() == want))
+                        if mine:
+                            self._id3_set_people(frame_type, desc, [])
+                            changed = True
                     elif frame_type == "COMM":
                         # Remove only the English/undescribed comment.
                         for frame in list(self.audio.tags.getall("COMM")):

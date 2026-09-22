@@ -236,6 +236,17 @@ _DATE_TAGS = ("DATE", "ORIGINALDATE")
 # reason, exactly like the per-track ids in the loop.
 _EXTRA_RELEASE_TAGS = (
     ("RELEASESTATUS", "status"),
+    # The rest of the release's own facts: its barcode and ASIN, the language
+    # and script its text is in, the licence it is published under and each
+    # medium's own title. All of them are single values MusicBrainz states on
+    # the release (or, for the disc title, on its medium), all of them have a
+    # home in the container's tag system, and none of them names the album
+    # folder — so they belong here rather than in the prescan.
+    ("BARCODE", "barcode"),
+    ("ASIN", "asin"),
+    ("SCRIPT", "script"),
+    ("LANGUAGE", "language"),
+    ("LICENSE", "license"),
 )
 
 # Per-track slots this stage matches against the release (or the manifest):
@@ -245,8 +256,78 @@ _PER_TRACK_TAGS = ("MUSICBRAINZ_TRACKID", "MUSICBRAINZ_ARTISTID")
 # release_lookup's own `inc` list, so the album's release comes back with its
 # label-info (label + catalog numbers) and the release group's types in ONE
 # request that the browser cache then holds for every later album.
+#
+# The four relationship includes are what makes the CREDITS reachable: without
+# them MusicBrainz answers with the tracklist and nothing about who played,
+# produced, engineered or mixed it. `recording-level-rels` is what asks for
+# each recording's own relations inside the same release response (one request
+# per album, not one per track — the app rate-limits itself to one request a
+# second), and `work-rels`/`work-level-rels` bring the work each track
+# performs, which is where its composers and lyricists live. `url-rels` is
+# what carries the licence relationship.
 _RELEASE_INC = ("artists+recordings+media+release-groups+artist-credits"
-                "+genres+labels+isrcs")
+                "+genres+labels+isrcs+recording-level-rels+artist-rels"
+                "+work-rels+work-level-rels+url-rels")
+
+
+# ----------------------------------------------------------------------
+# The rest of the credit table: who played, produced, engineered, mixed
+# ----------------------------------------------------------------------
+# MusicBrainz keeps a recording's people in its relation list: every entry
+# names a relation TYPE (producer, engineer, mix, arranger, conductor,
+# remixer, …) and the artist it credits. The app wrote COMPOSER, LYRICIST and
+# REMIXER out of that whole table, so a file carried the song but not the
+# people who made it — no performer, no producer, no engineer, no mixer.
+# Each type below has a tag in the app's own vocabulary (mlo.audio.TAG_MAP,
+# Picard's names), and the value is a LIST: several people share one role on
+# one track, and they are stored as repeated fields rather than a joined blob.
+# "audio director"/"video director" are MusicBrainz's two names for the one
+# DIRECTOR credit Picard defines.
+_CREDIT_ROLES = (
+    ("producer", "PRODUCER"),
+    ("engineer", "ENGINEER"),
+    ("mix", "MIXER"),
+    ("arranger", "ARRANGER"),
+    ("DJ-mix", "DJMIXER"),
+    ("conductor", "CONDUCTOR"),
+    ("remixer", "REMIXER"),
+    ("director", "DIRECTOR"),
+    ("audio director", "DIRECTOR"),
+)
+
+# The performer subtypes. Their relation's ATTRIBUTES name what was performed
+# — the instrument, the kind of voice — and that is part of the credit, so it
+# goes in the value in Picard's own "Name (instrument)" spelling: the same
+# person on guitar and on drums is two different credits, and "guitar (12
+# string)" must survive as the instrument it is. The dict's value is what a
+# relation with no attribute at all means ("vocal" with no vocal type is
+# simply vocals).
+_PERFORMER_TYPES = {
+    "instrument": "",
+    "vocal": "vocals",
+    "performing orchestra": "orchestra",
+    "concertmaster": "concertmaster",
+    "chorus master": "chorus master",
+}
+
+# The work's own relation list: the songwriting credits. MusicBrainz states
+# them on the WORK (a work has composers and lyricists; a recording has
+# performers), which is why they arrive inside the recording's "performance"
+# relation to it. WRITER is Picard's "used when uncertain whether composer or
+# lyricist".
+_WORK_ROLES = (
+    ("composer", "COMPOSER"),
+    ("lyricist", "LYRICIST"),
+    ("writer", "WRITER"),
+)
+
+# A work whose type MusicBrainz calls a movement (or a part) is not a work the
+# track "is": it is one movement OF a work, and the app has the tags for that
+# distinction (MOVEMENT / MOVEMENTNUMBER beside WORK). The same rule the beets
+# plugin's work/movement pass applies, so both paths file a movement the same
+# way.
+_MOVEMENT_WORK_TYPES = ("movement", "part")
+
 
 
 # ----------------------------------------------------------------------
@@ -322,6 +403,146 @@ def _country_upgrade(have, codes):
     return list(codes)
 
 
+def _artist_credit(rel):
+    """(name, MusicBrainz id) of the artist one relation credits."""
+    artist = rel.get("artist") or {}
+    return (str(artist.get("name") or "").strip(),
+            str(artist.get("id") or "").strip())
+
+
+def _add_credit(out, tag, value):
+    """Append one credit to *tag*'s list in *out*, dropping repeats."""
+    value = str(value or "").strip()
+    if not value:
+        return
+    values = out.setdefault(tag, [])
+    if value not in values:
+        values.append(value)
+
+
+def _relation_credits(relations, roles):
+    """{tag: [values]} for one relation list and the role table it answers to.
+
+    A recording's relations are read against _CREDIT_ROLES (the performance
+    and production roles), a WORK's against _WORK_ROLES (its songwriters) —
+    the two lists hold different relationship types, and reading one with the
+    other's table would silently drop every credit on it. Every artist
+    relation the table has a tag for becomes one value, in MusicBrainz's own
+    order. A person MusicBrainz credits twice — once on the release and once
+    on the recording, or with two instruments — is credited once per distinct
+    credit: the tag is a LIST of credits, not a tally, and the same pair
+    written twice would make every reader show a duplicate.
+    """
+    out = {}
+    for rel in relations or []:
+        if not isinstance(rel, dict) or rel.get("target-type") != "artist":
+            continue
+        name, _mbid = _artist_credit(rel)
+        if not name:
+            continue
+        rtype = str(rel.get("type") or "").strip()
+        if rtype in _PERFORMER_TYPES:
+            attrs = [str(a).strip() for a in (rel.get("attributes") or [])
+                     if str(a).strip()]
+            role = " ".join(attrs) or _PERFORMER_TYPES[rtype]
+            _add_credit(out, "PERFORMER", f"{name} ({role})" if role else name)
+            continue
+        for mb_type, tag in roles:
+            if rtype == mb_type:
+                _add_credit(out, tag, name)
+                break
+    return out
+
+
+def _work_credits(recording):
+    """The songwriting credits a recording's work states.
+
+    Returns (credits, work_title, work_mbid, movement, movement_number):
+    the composer/lyricist/writer credits, the work the track performs (and
+    whether MusicBrainz calls that work a movement, in which case its title
+    belongs in MOVEMENT rather than WORK), and the per-composer MusicBrainz
+    ids Picard keeps in a parallel list to COMPOSER. A recording with no
+    performance relation — the common case for a pop song — answers
+    ({}, "", "", "", ""), and nothing is written.
+    """
+    credits = {}
+    work, work_mbid, movement, number = "", "", "", ""
+    for rel in recording.get("relations") or []:
+        if not isinstance(rel, dict) or rel.get("target-type") != "work":
+            continue
+        if str(rel.get("type") or "").strip() != "performance":
+            continue
+        node = rel.get("work") or {}
+        title = str(node.get("title") or "").strip()
+        if not work and title:
+            work = title
+            work_mbid = str(node.get("id") or "").strip()
+            if str(node.get("type") or "").strip().lower() in _MOVEMENT_WORK_TYPES:
+                movement, work = title, ""
+                number = str(rel.get("number") or "").strip()
+        for tag, values in _relation_credits(node.get("relations"),
+                                             _WORK_ROLES).items():
+            for value in values:
+                _add_credit(credits, tag, value)
+        # The composer ids ride in the same order as the names above, which is
+        # what makes the parallel list usable: a reader resolves the nth id to
+        # the nth composer.
+        for sub in node.get("relations") or []:
+            if not isinstance(sub, dict):
+                continue
+            if str(sub.get("type") or "").strip() != "composer":
+                continue
+            _add_credit(credits, "MUSICBRAINZ_COMPOSERID", _artist_credit(sub)[1])
+    return credits, work, work_mbid, movement, number
+
+
+def _release_license(release):
+    """The licence URL *release* is published under, or "".
+
+    MusicBrainz keeps a licence as a url relationship with the type "license"
+    — on the release for a release-wide licence, on the recording when only
+    one track is under it. The first one stated wins, so a file carries the
+    licence the release actually names rather than all of them.
+    """
+    for rel in release.get("relations") or []:
+        if not isinstance(rel, dict) or rel.get("target-type") != "url":
+            continue
+        if str(rel.get("type") or "").strip() != "license":
+            continue
+        url = (rel.get("url") or {}).get("resource") if isinstance(
+            rel.get("url"), dict) else rel.get("url")
+        if str(url or "").strip():
+            return str(url).strip()
+    return ""
+
+
+def _track_credits(recording):
+    """EVERY credit one recording states, as {tag: [values]}.
+
+    The recording's own relation list (performers with their instrument,
+    producers, engineers, mixers, arrangers, DJ-mixers, conductors, remixers,
+    directors) plus what its WORK states (composers, lyricists, writers, and
+    the work itself — its title, its id, and its movement number when
+    MusicBrainz calls the work a movement rather than a work the track "is"),
+    plus a licence stated for this recording rather than for its release. The
+    one reader both writers of these tags use.
+    """
+    credits = _relation_credits(recording.get("relations"), _CREDIT_ROLES)
+    work_credits, work, work_mbid, movement, number = _work_credits(recording)
+    for tag, values in work_credits.items():
+        for value in values:
+            _add_credit(credits, tag, value)
+    if work or movement:
+        _add_credit(credits, "MUSICBRAINZ_WORKID", work_mbid)
+        if movement:
+            _add_credit(credits, "MOVEMENT", movement)
+            _add_credit(credits, "MOVEMENTNUMBER", number)
+        else:
+            _add_credit(credits, "WORK", work)
+    _add_credit(credits, "LICENSE", _release_license(recording))
+    return credits
+
+
 def _cached_release(mbid):
     """`release_lookup`'s payload for *mbid* over the app's CACHED MB access.
 
@@ -374,15 +595,26 @@ def _cached_release(mbid):
             rec = trk.get("recording") or {}
             artists = [ac["artist"]["id"] for ac in trk.get("artist-credit") or []
                        if ac.get("artist")]
+            # The people behind the track. ONE release request carried them
+            # (see _RELEASE_INC): the recording's own relations hold the
+            # performer/producer/engineer/mixer/arranger/DJ-mix/conductor
+            # credits, its work relation holds the songwriters and the work
+            # itself. Read here, next to the ids, so both writers of these tags
+            # — this stage and the beets plugin — read one shape.
+            credits = _track_credits(rec)
             tracks[(disc, int(pos))] = {
                 "recording_mbid": str(rec.get("id") or ""),
                 "artist_mbid": str(artists[0] if artists else ""),
                 # The id of this POSITION (distinct from the recording) and
                 # the ISRCs MusicBrainz knows for it: `inc` above already
-                # fetched both, and they were parsed away — the naming script
-                # reads the first, the ISRC tag the second.
+                # fetched both, and they are what the naming script and the
+                # ISRC tag read — EVERY one of them, because a recording
+                # published in several territories carries an ISRC per
+                # territory and the tag is a list.
                 "release_track_mbid": str(trk.get("id") or ""),
-                "isrcs": [str(x) for x in (trk.get("isrcs") or [])],
+                "isrcs": [str(x) for x in (rec.get("isrcs")
+                                           or trk.get("isrcs") or [])],
+                "credits": credits,
             }
     album_artists = [ac["artist"]["id"] for ac in data.get("artist-credit") or []
                      if ac.get("artist")]
@@ -415,6 +647,20 @@ def _cached_release(mbid):
         # %media%
         "medium": next((str(m.get("format") or "")
                         for m in data.get("media") or []), ""),
+        # The release's text representation (MusicBrainz keeps language and
+        # script together) and its barcode / ASIN / licence — single values
+        # the release states, absent from the payload when it states none.
+        "language": str((data.get("text-representation") or {})
+                        .get("language") or ""),
+        "script": str((data.get("text-representation") or {}).get("script") or ""),
+        "barcode": str(data.get("barcode") or ""),
+        "asin": str(data.get("asin") or ""),
+        "license": _release_license(data),
+        # Each medium's own title ("Disc 2: The Rarities"), by disc number:
+        # DISCSUBTITLE is a per-DISC tag, so the writer picks the entry for
+        # the file's own disc rather than repeating disc 1's title everywhere.
+        "medium_titles": {int(m.get("position") or 1): str(m.get("title") or "")
+                          for m in data.get("media") or []},
     }
 
 
@@ -462,8 +708,139 @@ def _slot_open(af, tag):
     return False
 
 
+def mb_track_tags(release, slot, disc=1, album_artist_mbid=""):
+    """EVERY MusicBrainz value ONE track's file should carry, as (tag, value).
+
+    The album-level values every file of the release repeats (its identity:
+    label, catalog number, barcode, country list, type, status, medium, both
+    dates, ids — plus the facts no naming script reads: ASIN, language, script,
+    licence and this disc's own title), and the per-track ones: the two track
+    ids, the artist, EVERY ISRC the recording states, and the credit table —
+    each shared role as a LIST, so several performers or producers survive as
+    repeated fields rather than one joined blob. Values the release does not
+    state are absent, never empty: a release that credits no producer must not
+    produce a blank PRODUCER.
+
+    *slot* is the release payload's entry for this file's (disc, position), or
+    {} for a track MusicBrainz does not list — the credits then belong to
+    nobody and only the album-level values are written. This is the one reader
+    of the payload both MusicBrainz paths use (the Auto Tagging stage and the
+    beets import plugin), so a field means the same thing on either.
+    """
+    values = []
+    for tag, key in _RELEASE_TAGS:
+        # RELEASECOUNTRY is the one tag whose value is a LIST — every country
+        # the release states, its own first event first. set_tag writes a list
+        # as repeated fields (Vorbis comments, an ID3 text list, one MP4 atom
+        # per value) and get_tag reads them back "; "-joined, which is the
+        # same value the importer's own stamper writes.
+        value = (_release_country_codes(release) if tag == "RELEASECOUNTRY"
+                 else str(release.get(key) or "").strip())
+        if value:
+            values.append((tag, value))
+    for tag, key in _EXTRA_RELEASE_TAGS:
+        value = str(release.get(key) or "").strip()
+        if value:
+            values.append((tag, value))
+    title = str((release.get("medium_titles") or {}).get(int(disc or 1)) or "")
+    if title:
+        values.append(("DISCSUBTITLE", title))
+
+    slot = slot or {}
+    values.append(("MUSICBRAINZ_TRACKID", slot.get("recording_mbid") or ""))
+    values.append(("MUSICBRAINZ_ARTISTID",
+                   slot.get("artist_mbid") or album_artist_mbid))
+    # The id of this track's POSITION on this release — a different id from
+    # the recording id above, and the one beets/Picard write to every file.
+    values.append(("MUSICBRAINZ_RELEASETRACKID", slot.get("release_track_mbid") or ""))
+    # EVERY ISRC the recording states, as the list it is: one recording is
+    # published in several territories under several ISRCs, and the country
+    # prefixes are what tell them apart.
+    values.append(("ISRC", list(slot.get("isrcs") or [])))
+    for tag, credited in (slot.get("credits") or {}).items():
+        values.append((tag, list(credited)))
+    return values
+
+
+def write_mb_tags(af, values, config=None, replace=None):
+    """Write MusicBrainz-derived values onto ONE open file.
+
+    The one writer both MusicBrainz paths use — this stage and the beets
+    import plugin — so a field written by either lands the same way: an EMPTY
+    value is skipped (a release that states no ISRC must not produce a blank
+    ISRC tag, which every later run would report as "written"), a tag that
+    already holds a value is KEPT (another pressing's label, or ids another
+    tagger wrote, are the album's own business), and every write honours the
+    per-tag gates. A LIST is passed through to set_tag, which stores it as
+    repeated container fields.
+
+    *replace* is the pass's own rule for the tags it may change WITHOUT them
+    being empty — ``(tag, have, want) -> value`` (see _fill_release_tags: the
+    two dates are sharpened and the country widened).
+
+    Returns ``(written, refused)``: how many tags were written, and the
+    ``(tag, reason)`` pairs the file's own writer REFUSED — a tag a container
+    cannot hold, a read-only file, a full disk. The caller reports them per
+    file; swallowing them is what makes a file that was never tagged read
+    exactly like a release with nothing to say.
+    """
+    written = 0
+    refused = []
+    for tag, value in values:
+        try:
+            value = _clean_value(value)
+            if value is None:
+                continue
+            have = str(af.get_tag(tag) or "").strip()
+            if have:
+                if replace is None:
+                    continue
+                value = _clean_value(replace(tag, have, value))
+                if value is None:
+                    continue
+            if not should_write_audio_tag(config, tag, filepath=af.path):
+                continue
+            if af.set_tag(tag, value):
+                written += 1
+            else:
+                refused.append((tag, str(getattr(af, "error", "") or "refused")))
+        except Exception as e:  # noqa: BLE001 — one tag never stops the rest
+            refused.append((tag, f"{type(e).__name__}: {e}"))
+    return written, refused
+
+
+def _clean_value(value):
+    """The value to store for one tag, or None when there is nothing to store.
+
+    A LIST (several performers, several ISRCs) is trimmed per value and comes
+    back as the list; an empty answer — a release that states nothing for this
+    tag — is None, because a blank tag is not a value.
+    """
+    if isinstance(value, (list, tuple, set)):
+        values = [str(v).strip() for v in value if str(v).strip()]
+        return values or None
+    text = str(value or "").strip()
+    return text or None
+
+
+def _mb_replace(tag, have, want):
+    """The value a NON-EMPTY MusicBrainz tag should be changed to ("" to keep it).
+
+    Two tags are not merely filled. DATE and ORIGINALDATE are SHARPENED to
+    MusicBrainz's spelling when the tag holds a coarser form of the same date
+    ("1980" -> "1980-10-01", see fuller_date): those two name the album
+    folder, so a year-only value would pin it there for good. RELEASECOUNTRY is
+    WIDENED to the release's whole country set when the value it holds is a
+    strict subset of it ("US" -> "US; CA; XE", see _country_upgrade). Every
+    other tag keeps what it has — another tagger's value is never overwritten.
+    """
+    if tag == "RELEASECOUNTRY":
+        return _country_upgrade(have, want)
+    return fuller_date(have, want)
+
+
 def _fill_release_tags(info, config, album_dir):
-    """Fill each track's EMPTY MusicBrainz release identity tags.
+    """Fill each track's MusicBrainz tags from the album's release.
 
     Album-level facts the naming script reads per track (label, catalog
     number, country, type, both DATES, medium + the release's own ids) are
@@ -473,8 +850,16 @@ def _fill_release_tags(info, config, album_dir):
     matched), then the release payload's tracklist. A track with no
     counterpart is left alone and counted.
 
+    The SAME request also carries everything else MusicBrainz states about the
+    release and its tracks (see mb_track_tags): the credit table with each
+    shared role as the list it is, the work's songwriters, every ISRC, and the
+    release facts no naming script reads (barcode, ASIN, language, script,
+    licence, each medium's title). Those ride along on a request made for
+    another reason and are never a reason to make one — an album that already
+    carries every prescan slot costs nothing, exactly as before.
+
     A tag that already holds a value is never touched — another pressing's
-    label, or ids another tagger wrote, are the album's own business — with
+    label, a credit another tagger wrote, are the album's own business — with
     TWO exceptions. DATE and ORIGINALDATE are SHARPENED to MusicBrainz's
     spelling when the tag holds a coarser form of the same date ("1980" →
     "1980-10-01", see fuller_date): those two name the album folder, so a
@@ -483,7 +868,8 @@ def _fill_release_tags(info, config, album_dir):
     strict subset of it ("US" → "US; CA; XE", see _country_upgrade): the tag
     holds a LIST and a file written before it could would otherwise keep the
     release's first event forever. Returns (written, note) — the album's
-    report line, including the "nothing written" cases.
+    report line, including the "nothing written" cases and every tag a file
+    REFUSED (a container that cannot hold it, a failed save), named per file.
     """
     manifest = load_expected_tracks(album_dir)
     mbid = ""
@@ -514,46 +900,45 @@ def _fill_release_tags(info, config, album_dir):
     if not release:
         return 0, "release tags: MusicBrainz had no answer"
 
-    values = []
-    for tag, key in _RELEASE_TAGS + _EXTRA_RELEASE_TAGS:
-        # RELEASECOUNTRY is the one tag whose value is a LIST — every country
-        # the release states, its own first event first. set_tag writes a list
-        # as repeated fields (Vorbis comments, an ID3 text list, one MP4 atom
-        # per value) and get_tag reads them back "; "-joined, which is the
-        # same value the importer's own stamper writes.
-        value = (_release_country_codes(release) if tag == "RELEASECOUNTRY"
-                 else str(release.get(key) or "").strip())
-        if value:
-            values.append((tag, value))
-
     # recording id per (disc, position): the manifest wins — its release_id is
     # the one the album was matched against
     manifest_ids = {t["disc"] * 1000 + t["position"]: t["recording_mbid"]
                     for t in manifest["tracks"] if t.get("recording_mbid")}
-    if not values and not release["tracks"] and not manifest_ids:
+    if not any(_clean_value(
+            _release_country_codes(release) if tag == "RELEASECOUNTRY"
+            else str(release.get(key) or "").strip())
+            for tag, key in _RELEASE_TAGS + _EXTRA_RELEASE_TAGS) \
+            and not release["tracks"] and not manifest_ids:
+        # Nothing to write: the release states no identity, no extra fact and
+        # no tracklist this album can be matched against.
         return 0, "release tags: release carries none"
 
     written = 0
     unmatched = 0
+    refused = []
     for d in info:
         af = d["af"]
+        if getattr(af, "audio", True) is None:
+            # A container this app cannot tag at all (mutagen has no writer for
+            # it — an .wv, an unreadable file). Named per file: reporting
+            # "0 written" without it is exactly the silent answer that hides a
+            # file which can never carry the metadata.
+            refused.append(f"{os.path.basename(af.path)}: container is not taggable")
+            continue
         key = _track_position(af, af.path)
-        slot = release["tracks"].get(key) or {}
+        slot = dict(release["tracks"].get(key) or {})
         track_mbid = (manifest_ids.get(key[0] * 1000 + key[1])
                       or slot.get("recording_mbid") or "")
         if not track_mbid and not slot:
             unmatched += 1
-        per_track = [
-            ("MUSICBRAINZ_TRACKID", track_mbid),
-            ("MUSICBRAINZ_ARTISTID",
-             slot.get("artist_mbid") or release["album_artist_mbid"]),
-            # The id of this track's POSITION on this release (the recording
-            # id above is a different id) and the ISRC of the track: both
-            # arrived with the same payload and are filled only where empty,
-            # gate included, through the same loop below.
-            ("MUSICBRAINZ_RELEASETRACKID", slot.get("release_track_mbid") or ""),
-            ("ISRC", (slot.get("isrcs") or [""])[0]),
-        ]
+        # The manifest's recording id is the one the album was MATCHED
+        # against, so it wins over the release payload's own tracklist.
+        slot["recording_mbid"] = track_mbid or slot.get("recording_mbid") or ""
+        # Everything this file should carry — the album-level identity, the
+        # extras and the whole credit table — from the ONE release request
+        # made above.
+        per_track = mb_track_tags(release, slot, disc=key[0],
+                                  album_artist_mbid=release["album_artist_mbid"])
         # ONE container rewrite per file. Each set_tag used to save the whole
         # file for itself, so filling twelve tags on a 30 MB track rewrote it
         # twelve times; the flush below is where all of them land. A handle
@@ -562,39 +947,9 @@ def _fill_release_tags(info, config, album_dir):
         defer = hasattr(af, "defer_save")
         if defer:
             af.defer_save(True)
-        pending = 0
         try:
-            for tag, value in values + per_track:
-                try:
-                    have = str(af.get_tag(tag) or "").strip()
-                    if have:
-                        # A tag that already holds a value is never overwritten.
-                        # Two exceptions. A DATE MusicBrainz spells more
-                        # precisely: the album folder is named after it, so a
-                        # bare year would otherwise pin the folder there for
-                        # good — fuller_date can only add detail. And a
-                        # RELEASECOUNTRY holding a strict subset of the
-                        # release's countries, which gains the rest —
-                        # _country_upgrade only ever widens, so a country the
-                        # release does not state survives it.
-                        if tag == "RELEASECOUNTRY":
-                            value = _country_upgrade(have, value)
-                        else:
-                            value = fuller_date(have, value)
-                        if not value:
-                            continue
-                    if not str(value or "").strip():
-                        # An empty answer is not a value. Writing it produced a
-                        # blank tag AND counted as "written" on every run — an
-                        # unmatched track, or a release that simply has no
-                        # artist/ISRC/status for this file, looked tagged.
-                        continue
-                    if not should_write_audio_tag(config, tag, filepath=af.path):
-                        continue      # the same gate every write here honours
-                    if af.set_tag(tag, value):
-                        pending += 1
-                except Exception:
-                    continue
+            pending, refusals = write_mb_tags(af, per_track, config,
+                                              replace=_mb_replace)
         finally:
             # The one write of this file. A failed flush wrote nothing, so the
             # tags never reached the disk and must not be reported as written;
@@ -603,11 +958,24 @@ def _fill_release_tags(info, config, album_dir):
             if defer and af.defer_save(False) is not True:
                 pending = 0
         written += pending
+        name = os.path.basename(af.path)
+        if defer and not pending and refusals:
+            # A flush that wrote nothing puts every applied tag back in the
+            # refused list: the file never changed, so nothing landed.
+            refusals = [(tag, "the container write failed")
+                        for tag, _reason in refusals]
+        refused.extend(f"{name}: {tag} ({reason})" for tag, reason in refusals)
     if not written:
+        if refused:
+            return 0, "release tags: refused — " + "; ".join(refused[:4]) + (
+                f" (+{len(refused) - 4} more)" if len(refused) > 4 else "")
         return 0, "release tags: nothing to fill"
     note = f"release tags={written}"
     if unmatched:
         note += f" ({unmatched} track(s) not in the release)"
+    if refused:
+        note += " — refused: " + "; ".join(refused[:4]) + (
+            f" (+{len(refused) - 4} more)" if len(refused) > 4 else "")
     return written, note
 
 
@@ -623,10 +991,15 @@ def run_auto_tagging(config):
     if config.get("auto_advisory", True):
         log("  ALBUMITUNESADVISORY: from per-track ITUNESADVISORY "
             "(any explicit -> 1, else any safe -> 2, else 0)")
-    log("  MUSICBRAINZ release identity: label, catalog number, country, type, "
-        "medium + missing MBIDs (release id, release-group id, artist ids, "
-        "per-track recording id) filled from the cached release — only where "
-        "a tag is EMPTY")
+    log("  MUSICBRAINZ release identity: label, catalog number, barcode, "
+        "country, type, status, language, script, ASIN, licence, medium + "
+        "missing MBIDs (release id, release-group id, artist ids, per-track "
+        "recording id, release-track id) filled from the cached release — "
+        "only where a tag is EMPTY")
+    log("  MUSICBRAINZ credits: performers (with their instrument), producers, "
+        "engineers, mixers, arrangers, DJ-mixers, conductors, directors, the "
+        "work's composers/lyricists/writers and the ISRCs — each role written "
+        "as the LIST it is (repeated fields, never a joined blob)")
     log("  RELEASECOUNTRY: every country the release states, \"; \"-joined "
         "(the tag holds a LIST, MusicBrainz's first event first) — a file "
         "holding one of them gains the rest")

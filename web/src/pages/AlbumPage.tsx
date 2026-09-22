@@ -16,6 +16,7 @@ import { trackRef, entityLinkClick } from "../lib/refs";
 import { invalidateLibrary } from "../lib/invalidate";
 import { auditFails } from "../lib/status";
 import { isVideoFile } from "../lib/fmt";
+import { SCRIPT_LABEL } from "../lib/scripts";
 import BulkTagsDialog from "../components/BulkTagsDialog";
 import Modal from "../components/Modal";
 import MoreLikeThis from "../components/MoreLikeThis";
@@ -895,14 +896,24 @@ export default function AlbumPage() {
                   items: [
                     { label: beetsBusy ? "Beets…" : "Tag with beets", icon: Disc3, onClick: beetsTagAlbum, disabled: beetsBusy },
                     { label: "Import genres (MusicBrainz)", icon: Sparkles, onClick: importGenres },
-                    { label: "Format lyrics", icon: FileMusic, onClick: () => runScripts([1]) },
-                    { label: "Format CUEs", icon: FileMusic, onClick: () => runScripts([2]) },
-                    { label: "Optimize FLACs", icon: FileMusic, onClick: () => runScripts([3]) },
-                    { label: "Process images", icon: FileMusic, onClick: () => runScripts([5]) },
-                    { label: "Audit", icon: ShieldCheck, onClick: () => runScripts([6]) },
-                    { label: "DR & ReplayGain", icon: FileMusic, onClick: () => runScripts([7]) },
-                    { label: "Auto tagging", icon: FileMusic, onClick: () => runScripts([8]) },
-                    { label: "Grade", icon: FileMusic, onClick: () => runScripts([4]) },
+                    // A curated subset of the library scripts — the ones worth
+                    // one click while looking at one album — but each one is
+                    // NAMED by the registry (web/src/lib/scripts.ts) rather
+                    // than by a string typed here: this list used to spell
+                    // every label itself, so a script the app renamed, or a
+                    // number that changed meaning, would have left this menu
+                    // quietly wrong. Running scripts in a chain is not what a
+                    // single-album menu is for; the order lives in one place
+                    // (Settings → Script chain) and every Run All surface
+                    // reads it from there.
+                    { label: SCRIPT_LABEL[1], icon: FileMusic, onClick: () => runScripts([1]) },
+                    { label: SCRIPT_LABEL[2], icon: FileMusic, onClick: () => runScripts([2]) },
+                    { label: SCRIPT_LABEL[3], icon: FileMusic, onClick: () => runScripts([3]) },
+                    { label: SCRIPT_LABEL[5], icon: FileMusic, onClick: () => runScripts([5]) },
+                    { label: SCRIPT_LABEL[6], icon: ShieldCheck, onClick: () => runScripts([6]) },
+                    { label: SCRIPT_LABEL[7], icon: FileMusic, onClick: () => runScripts([7]) },
+                    { label: SCRIPT_LABEL[8], icon: FileMusic, onClick: () => runScripts([8]) },
+                    { label: SCRIPT_LABEL[4], icon: FileMusic, onClick: () => runScripts([4]) },
                     { label: "Remux videos", icon: FileVideo, hidden: rawVideos.length === 0, onClick: convertVideos, disabled: remuxing },
                   ],
                 },

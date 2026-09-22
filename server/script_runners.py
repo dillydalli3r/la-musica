@@ -674,6 +674,16 @@ def _follow_moved_targets(cfg, audio_names):
     still there afterwards, holding the covers / .cue / .log it left behind —
     which is exactly the empty-of-audio folder that made the tail a no-op.
     """
+    if cfg.get("targets") is None:
+        # A LIBRARY-WIDE run has no targets to follow: every script in it
+        # discovers the library for itself, so there is nothing here to
+        # re-point. Writing the empty list below would flip every LATER script
+        # onto the targeted branch — a config that names no targets is not the
+        # same as a config that names none — and the whole tail of the chain
+        # would report "nothing to do" while doing nothing at all. That is the
+        # failure this function exists to prevent, so it must not be the thing
+        # that causes it.
+        return
     targets = cfg.get("targets") or []
     out = []
     for t in targets:

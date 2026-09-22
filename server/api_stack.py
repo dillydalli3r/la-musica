@@ -43,8 +43,8 @@ from pydantic import BaseModel
 from server.tags_registry import _humanize, registry
 
 from mlo.cli import SCRIPTS, SCRIPT_GATES
-from mlo.config import (DEFAULT_CONFIG, DEFAULT_RUN_ALL_ORDER, load_config,
-                        normalize_config, save_config)
+from mlo.config import (DEFAULT_CONFIG, DEFAULT_RUN_ALL_ORDER, STRICT_DEFAULT_KEYS,
+                        load_config, normalize_config, save_config)
 from mlo.grader import check_gates
 from server.script_runners import RUNNERS
 
@@ -195,11 +195,23 @@ PRESETS = (
     ("strict", "Strict", "Every check on (the file-category permissions keep "
                          "their configured value — what counts toward a grade "
                          "is the user's call)"),
-    ("balanced", "Balanced", "The factory defaults, check by check"),
+    ("balanced", "Balanced", "The factory defaults as they were before 3.7.0 "
+                             "made grading strict: the same list, with the "
+                             "audit tag not required and unclassified files "
+                             "still failing the album"),
     ("relaxed", "Relaxed", "Only the essential checks: the strict formatting "
                            "family, the identity links and the content checks "
                            "nothing breaks without"),
 )
+
+# The defaults 3.7.0 moved — `mlo.config.STRICT_DEFAULT_KEYS`, the checks it
+# turned ON when grading went strict. "Balanced" is what an install had
+# BEFORE that, so it is the shipped defaults minus exactly these: one name
+# here is the whole difference between the two presets, which is what keeps
+# them from being two hand-kept copies of the same sixty booleans.
+# Pinned against GradingPage.tsx's own `balancedOff` list by
+# tools/test_check_stack.py, the same way RELAXED_OFF is.
+BALANCED_OFF = frozenset(STRICT_DEFAULT_KEYS)
 
 # The checks "relaxed" switches off. Pinned against GradingPage.tsx's own
 # `relaxedOff` list by tools/test_check_stack.py, so the two presets cannot
@@ -221,11 +233,12 @@ def preset_value(pid: str, key: str, default: bool) -> bool:
     """The value *pid* gives *key*. "strict" turns every real check on and
     leaves the file-category permissions at their configured value (a preset
     may force checks on; choosing what counts toward a grade is the user's
-    call — the same rule Settings -> Grading applies)."""
+    call — the same rule Settings -> Grading applies). "balanced" is the
+    shipped defaults, with the keys 3.7.0 moved put back the way they were."""
     if pid == "strict":
         return True if not key.startswith("grade_include_") else default
     if pid == "balanced":
-        return default
+        return default and key not in BALANCED_OFF
     return default and key not in RELAXED_OFF
 
 

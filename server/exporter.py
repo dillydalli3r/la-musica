@@ -1129,7 +1129,15 @@ def export_tracks(cfg, paths, dest, subfolder="Music", codec="copy",
                         # loudness summary, so ReplayGain costs no extra pass.
                         # Its summary is logged at info level, hence -v info
                         # (still no per-second stats: -nostats).
-                        cmd += ["-map", "0:a:0", "-af", "ebur128=peak=true",
+                        #
+                        # peak=sample, not peak=true: rsgain writes sample
+                        # peaks into REPLAYGAIN_*_PEAK, and an export carrying
+                        # a true peak disagreed with the tag script 7 puts on
+                        # the same audio by up to 30%. astats rides along for
+                        # its full-precision copy of that same peak —
+                        # ebur128's summary rounds it to 0.1 dBFS.
+                        cmd += ["-map", "0:a:0",
+                                "-af", "ebur128=peak=sample,astats=measure_overall=Peak_level",
                                 "-f", "null", "-"]
                     else:
                         cmd += ["-v", "error"]

@@ -312,6 +312,7 @@ const LAYOUT_KINDS: { kind: string; label: string; bad: boolean }[] = [
   { kind: "unexpected_folder", label: "Unexpected folder in the music folder root", bad: true },
   { kind: "unexpected_subfolder", label: "Unexpected folder inside an album", bad: true },
   { kind: "empty_album", label: "Album folder with no audio", bad: true },
+  { kind: "empty_artist", label: "Artist folder with no albums", bad: true },
   { kind: "wrong_case", label: "Name capitalization differs from the naming script", bad: true },
   { kind: "legacy_state_file", label: "Leftover from the old .mlo_data layout", bad: false },
   { kind: "stray_in_artists", label: "Stray file directly in Artists/", bad: false },
@@ -322,9 +323,11 @@ const LAYOUT_KINDS: { kind: string; label: string; bad: boolean }[] = [
 /** Library-layout audit: every place the music folder does not match
  *  `Artists/<Artist>/<Album>/<files>`.
  *
- *  Deliberately read-only. A wrong guess here moves somebody's music, so the
- *  panel reports what is where and how to fix it; the moving stays a decision
- *  the user makes with their own file manager. */
+ *  Read-only but for ONE row. A wrong guess here moves somebody's music, so
+ *  the panel reports what is where and how to fix it, and the moving stays a
+ *  decision the user makes with their own file manager — except an artist
+ *  folder with no albums, which cannot hold music at all and is removable to
+ *  the app's Trash (never deleted, always restorable). */
 function LayoutPanel() {
   const [report, setReport] = useState<LayoutReport | null>(null);
   // When the report on screen was scanned, and whether it is about a music
@@ -398,6 +401,28 @@ function LayoutPanel() {
   const byKind = (kind: string): LayoutIssue[] =>
     (report?.issues ?? []).filter((i) => i.kind === kind);
 
+  // The ONE row this panel may act on. An artist folder with no albums holds
+  // nothing but the artist's own image and description, so removing it cannot
+  // lose music — and it goes to the app's Trash, never to a delete, which is
+  // what keeps it recoverable from the Trash page. Every other row stays
+  // read-only: a wrong guess there moves somebody's music.
+  const removeEmptyArtist = async (path: string) => {
+    setBusy(true);
+    try {
+      const r = await api.libraryLayoutRemoveEmptyArtist(path);
+      toast.success(`Moved to the Trash: ${r.trash}`);
+      // Re-scan instead of editing the report in place: the panel's numbers
+      // are the server's answer, and a row removed locally would leave the
+      // counts and the Library page's warning describing a folder that is no
+      // longer there.
+      await scan();
+    } catch (e) {
+      toast.error(String(e));
+    } finally {
+      setBusy(false);
+    }
+  };
+
   return (
     <div className="panel">
       <div className="flex items-center gap-2 flex-wrap">
@@ -425,7 +450,11 @@ function LayoutPanel() {
       <div className="text-[10px] text-zinc-600 mt-1.5">
         Walks the whole music folder and reports anything that is not
         <span className="font-mono text-zinc-500"> Artists/&lt;Artist&gt;/&lt;Album&gt;/ </span>
-        — misplaced files, unexpected folders, empty albums. Read-only: nothing is moved or deleted.
+        — misplaced files, unexpected folders, empty albums, artist folders with
+        no albums. It moves nothing: an artist folder with no albums can be
+        <span className="font-mono text-zinc-500"> removed </span>
+        to the Trash, where the Trash page can restore it, and every other row is
+        yours to fix.
       </div>
 
       {/* A stored report of ANOTHER music folder is not this library's state:
@@ -485,6 +514,24 @@ function LayoutPanel() {
                           >
                             {copied === i.abs ? "copied" : "copy path"}
                           </button>
+                          {/* The one action this panel offers, and only on the
+                              kind that cannot hold music: an artist folder with
+                              no albums. It moves the folder into the app's
+                              Trash (nothing is deleted), so the Trash page can
+                              put it back — every other row stays read-only. */}
+                          {kind === "empty_artist" && (
+                            <button
+                              className="btn-ghost !px-1.5 !py-0.5 text-[10px] tap shrink-0 text-red-300"
+                              disabled={busy}
+                              onClick={() => removeEmptyArtist(i.abs)}
+                              title={
+                                `Move ${i.abs} to the Trash — nothing is deleted, ` +
+                                `the Trash page can restore it`
+                              }
+                            >
+                              remove
+                            </button>
+                          )}
                         </div>
                         <div className="text-zinc-500">{i.detail} — {i.hint}</div>
                       </div>

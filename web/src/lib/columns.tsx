@@ -1,7 +1,7 @@
 /** Column defs, visibility/width prefs, and the columns chooser + resizer.
  *
  * Imported by the library/album/cached/trash tables and their tracklists
- * (see AlbumPage, LibraryPage, CachedTracksView, TrashPage, FavoritesPage).
+ * (see AlbumPage, LibraryPage, DownloadsPage, TrashPage, FavoritesPage).
  * Column visibility and widths persist per view in localStorage. */
 
 import { useEffect, useRef, useState } from "react";

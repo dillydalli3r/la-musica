@@ -54,6 +54,48 @@ _MB_LAST = 0.0
 _MB_CACHE = {}
 
 
+def _album_release(items):
+    """The MusicBrainz release payload for one album, or None.
+
+    mlo.autotag owns the parse — and the server's own cache — so the credit
+    tags this plugin writes and the ones the Auto Tagging stage writes come
+    from ONE reader, and a field means the same thing on either path. A missing
+    album id, an unavailable server module or a refused request all answer
+    None: the caller then writes nothing rather than guessing at credits.
+    """
+    mbid = ""
+    for item in items:
+        mbid = str(getattr(item, "mb_albumid", "") or "").strip()
+        if mbid:
+            break
+    if not mbid:
+        return None
+    try:
+        from mlo.autotag import _cached_release
+    except Exception:
+        return None
+    try:
+        return _cached_release(mbid)
+    except Exception:
+        return None
+
+
+def _item_slot(item):
+    """(disc, position) of a beets item — the key a release's tracks use.
+
+    beets' own numbers first; the item's title/naming is never used, because
+    a track MusicBrainz does not list must stay unmatched rather than take
+    another track's credits.
+    """
+    def _int(value, default=0):
+        try:
+            return int(value)
+        except (TypeError, ValueError):
+            return default
+
+    return _int(item.disc, 1) or 1, _int(item.track, 0)
+
+
 def mb_get(path, params):
     """Rate-limited (1 req/s) MusicBrainz ws/2 GET with an in-process cache."""
     global _MB_LAST
@@ -382,6 +424,12 @@ class MloPlugin(BeetsPlugin):
             "translations": True,
             "work_movement": True,
             "release_type_caps": True,
+            # The credit table (performer/producer/engineer/mixer/arranger/
+            # DJ-mixer/conductor/director), the work's songwriters and the
+            # release facts beets has no mediafile field for. Costs ONE
+            # MusicBrainz request per imported album; off, an import writes
+            # only what beets itself carries.
+            "credits": True,
         })
         # Per-instance maps (BeetsPlugin.__init__ creates them).
         # $mlo_file caches the routed item; $mlo_dir{$mlo_file} then yields
@@ -425,6 +473,7 @@ class MloPlugin(BeetsPlugin):
     def on_album_imported(self, lib, album):
         do_work = bool(self.config["work_movement"].get(True))
         do_caps = bool(self.config["release_type_caps"].get(True))
+        do_credits = bool(self.config["credits"].get(True))
 
         try:
             from mlo.audio import AudioFile
@@ -437,7 +486,13 @@ class MloPlugin(BeetsPlugin):
                  or getattr(album, "releasetype", None))
         capped = _cap_releasetypes(types) if do_caps else None
 
-        for item in album.items():
+        items = list(album.items())
+        # ONE release request for the whole album (see _album_release): the
+        # credits of every track arrive together with the release facts beets'
+        # own mediafile fields have no home for.
+        release = _album_release(items) if do_credits else None
+
+        for item in items:
             path = item.path
             if isinstance(path, bytes):
                 path = path.decode("utf-8", "replace")
@@ -457,8 +512,40 @@ class MloPlugin(BeetsPlugin):
                     af.set_tag("RELEASETYPE", value)
                     changed = True
 
-            # 2) Classical works / movements
-            if do_work:
+            # 2) Everything else MusicBrainz states about this track: the
+            #    credit roles beets has no mediafile field for (performer with
+            #    its instrument, producer, engineer, mixer, arranger, DJ-mixer,
+            #    conductor, director), the work's songwriters and composer ids,
+            #    EVERY ISRC, and the release facts the naming script does not
+            #    read (barcode, ASIN, language, script, licence, disc title).
+            #    Same writer as the Auto Tagging stage, so both paths store one
+            #    vocabulary; a tag beets or the file already carries is kept.
+            if release:
+                disc, position = _item_slot(item)
+                slot = (release.get("tracks") or {}).get((disc, position)) or {}
+                try:
+                    from mlo.autotag import mb_track_tags, write_mb_tags
+                    written, refused = write_mb_tags(af, mb_track_tags(
+                        release, slot, disc=disc,
+                        album_artist_mbid=release.get("album_artist_mbid") or ""))
+                    if written:
+                        changed = True
+                    for tag, reason in refused:
+                        # A tag the container refused is reported, not
+                        # swallowed: "beets tagged it" must not be claimed for
+                        # a file that never changed.
+                        self._log.warning("MusicBrainz {0} refused on {1}: {2}",
+                                          tag, os.path.basename(path), reason)
+                except Exception as e:  # noqa: BLE001
+                    self._log.warning("MusicBrainz credits failed for {0}: {1}",
+                                      os.path.basename(path), e)
+
+            # 3) Classical works / movements — for a track the release payload
+            #    above did not already place (it carries the same relationship
+            #    when the release states one, and the payload is what a whole
+            #    album costs; the per-track lookup is the fallback, not the
+            #    first choice).
+            if do_work and not (af.get_tag("WORK") or af.get_tag("MOVEMENT")):
                 try:
                     found = _work_for_recording(str(item.mb_trackid or ""))
                     if found:
