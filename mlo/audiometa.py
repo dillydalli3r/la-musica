@@ -140,7 +140,7 @@ def _fold_bpm(v):
     return v
 
 
-def _detect_bpm(y, sr):
+def _detect_bpm(y, sr, onset=None):
     """BPM from two independent estimators, preferring their agreement.
 
     1. the autocorrelation tempogram estimate (librosa tempo),
@@ -151,12 +151,17 @@ def _detect_bpm(y, sr):
     agreement are stronger than either alone); on disagreement the
     beat-interval median wins — it is measured, not interpolated. Both are
     folded into the 70-180 range before combining. Returns None on failure.
+
+    *onset* is the onset envelope of ``y`` when the caller already computed it
+    (mlo.moods measures the same signal at the same hop): the mel spectrogram
+    behind it is one of the expensive steps of the analysis.
     """
     import numpy as np
     import librosa
 
     hop = 512
-    onset = librosa.onset.onset_strength(y=y, sr=sr, hop_length=hop)
+    if onset is None:
+        onset = librosa.onset.onset_strength(y=y, sr=sr, hop_length=hop)
     tempo_fn = getattr(librosa.feature, "tempo", None) or getattr(librosa.beat, "tempo", None)
     t_est = None
     if tempo_fn is not None:
@@ -185,7 +190,7 @@ def _detect_bpm(y, sr):
     return int(round(folded[-1]))
 
 
-def _detect_key(y, sr):
+def _detect_key(y, sr, y_harmonic=None):
     """Musical key from the harmonic part of the signal.
 
     Accuracy comes from four choices:
@@ -196,14 +201,22 @@ def _detect_key(y, sr):
       * three published key profiles (Krumhansl-Schmuckler, Temperley,
         Albrecht-Shanahan) are correlated and their scores averaged.
     Returns (tonic, minor) or None.
+
+    *y_harmonic* is that harmonic component when the caller already separated
+    it (mlo.moods does, from the same ``librosa.effects.hpss`` with the same
+    margin): harmonic-percussive separation is the single most expensive step
+    in the analysis and this used to compute a second identical one.
     """
     import numpy as np
     import librosa
 
-    try:
-        y_h = librosa.effects.harmonic(y, margin=3.0)
-    except Exception:
-        y_h = y
+    if y_harmonic is not None:
+        y_h = y_harmonic
+    else:
+        try:
+            y_h = librosa.effects.harmonic(y, margin=3.0)
+        except Exception:
+            y_h = y
     chroma = librosa.feature.chroma_cqt(y=y_h, sr=sr, hop_length=2048)
     chroma = np.asarray(chroma)
     if chroma.size == 0:

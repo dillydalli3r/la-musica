@@ -1216,86 +1216,117 @@ def run_auto_tagging(config):
 
         return album, modified, notes, advisory_value, info
 
-    def process_album_full(album):
-        """`process_album` plus the mood/genre stages.
+    def mood_genre_for_track(item):
+        """The two PER-TRACK stages of Auto tagging: the GENRE cap and MOOD.
 
-        The mood classifier and the genre hook both need the tags the first
-        pass already read, so they reuse its parsed handles — a track is
-        never opened twice (the librosa decode is the expensive part).
+        Split out of the album loop so they can run on a pool of their own:
+        this is the decode-bound half of the script (librosa, seconds per
+        track), and keeping it behind one album's worker meant a run over a
+        single album — every import — analysed its tracks strictly one after
+        another no matter how many workers the run was allowed. Script 16
+        (Mood & Energy) has always pooled per file; this is the same shape.
         """
-        _, modified, notes, advisory_value, info = process_album(album)
-        notes = list(notes or [])
-
+        album, d = item
+        af = d["af"]
+        path = af.path
         mood_modified = 0
         genre_trimmed = 0
-        for d in info:
-            af = d["af"]
-            path = af.path
-            if do_genre:
-                # GENRE is never IMPORTED here: this script does not ask any
-                # provider for a genre, and it does not invent the family of
-                # what it finds either. Genres come from the import pipeline
-                # (server/imports.py, the genre chain) or from a manual edit —
-                # a background pass that silently rewrites a deliberate tag is
-                # exactly what the user does not want. What is left is the one
-                # job the writer must do on every track: bring a list that
-                # exceeds `mb_genre_count` down to it, the same cap the
-                # importer, the format pass and the grader use.
-                try:
-                    if trim_genres(af, genre_cap):
-                        genre_trimmed += 1
-                except Exception:
-                    pass
-            if do_mood:
-                try:
-                    # The decode is the expensive part (librosa, seconds per
-                    # track), so an already-correct tag short-circuits exactly
-                    # like the GENRE branch above: re-running Auto tagging, or
-                    # importing the same album again, must not re-analyse the
-                    # library for nothing. A track tagged before ENERGY
-                    # existed is analysed once more to backfill it.
-                    has_mood = bool(str(af.get_tag("MOOD") or "").strip())
-                    wants_energy = should_write_audio_tag(
-                        config, "ENERGY", filepath=path)
-                    has_energy = bool(str(af.get_tag("ENERGY") or "").strip())
-                    if not force and has_mood and (not wants_energy or has_energy):
-                        continue
+        if do_genre:
+            # GENRE is never IMPORTED here: this script does not ask any
+            # provider for a genre, and it does not invent the family of
+            # what it finds either. Genres come from the import pipeline
+            # (server/imports.py, the genre chain) or from a manual edit —
+            # a background pass that silently rewrites a deliberate tag is
+            # exactly what the user does not want. What is left is the one
+            # job the writer must do on every track: bring a list that
+            # exceeds `mb_genre_count` down to it, the same cap the
+            # importer, the format pass and the grader use.
+            try:
+                if trim_genres(af, genre_cap):
+                    genre_trimmed += 1
+            except Exception:
+                pass
+        if do_mood:
+            try:
+                # The decode is the expensive part (librosa, seconds per
+                # track), so an already-correct tag short-circuits exactly
+                # like the GENRE branch above: re-running Auto tagging, or
+                # importing the same album again, must not re-analyse the
+                # library for nothing. A track tagged before ENERGY
+                # existed is analysed once more to backfill it.
+                has_mood = bool(str(af.get_tag("MOOD") or "").strip())
+                wants_energy = should_write_audio_tag(
+                    config, "ENERGY", filepath=path)
+                has_energy = bool(str(af.get_tag("ENERGY") or "").strip())
+                if force or not has_mood or (wants_energy and not has_energy):
                     genre = af.get_tag("GENRE") or ""
                     if moods.apply_mood_tags(af, path, config, genre=genre):
                         mood_modified += 1
+            except Exception:
+                pass
+        return album, mood_modified, genre_trimmed
+
+    counts = {"ok": 0, "skip": 0, "fail": 0}
+    pbar = _make_pbar(len(album_dirs), "AutoTag", unit="album")
+    workers = worker_count(config, default=8, maximum=8, items=len(album_dirs))
+    # Stage 1: the album-level work (release identity, instrumental, advisory).
+    album_results = {}
+    with ThreadPoolExecutor(max_workers=workers) as ex:
+        futures = {ex.submit(process_album, a): a for a in sorted(album_dirs)}
+        for fut in as_completed(futures):
+            album = futures[fut]
+            try:
+                album_results[album] = fut.result()
+            except Exception as e:
+                album_results[album] = e
+    # Stage 2: every track of every album, one pool — see mood_genre_for_track.
+    per_album = {}
+    track_work = [(album, d)
+                  for album in sorted(album_results)
+                  for d in ((album_results[album][4] or [])
+                            if not isinstance(album_results[album], Exception) else [])]
+    if track_work:
+        # Sized by TRACKS, not albums: the work waiting here is one decode per
+        # track, and an album count of 1 would otherwise pin a 15-track album
+        # to a single lane (the import case, exactly).
+        track_workers = worker_count(config, default=8, maximum=8,
+                                     items=len(track_work))
+        with ThreadPoolExecutor(max_workers=track_workers) as ex:
+            futures = {ex.submit(mood_genre_for_track, item): item[0]
+                       for item in track_work}
+            for fut in as_completed(futures):
+                try:
+                    album, mood_modified, genre_trimmed = fut.result()
                 except Exception:
                     continue
-
+                tally = per_album.setdefault(album, [0, 0])
+                tally[0] += mood_modified
+                tally[1] += genre_trimmed
+    for album in sorted(album_dirs):
+        result = album_results.get(album)
+        if isinstance(result, Exception) or result is None:
+            stats["total_scanned"] += 1
+            stats["error_count"] += 1
+            stats["errors"].append(
+                (os.path.basename(album), str(result or "no result")))
+            _pbar_update(pbar, counts, kind="fail")
+            continue
+        _album, modified, notes, advisory_value, _info = result
+        notes = list(notes or [])
+        mood_modified, genre_trimmed = per_album.get(album, (0, 0))
         modified = (modified or 0) + mood_modified + genre_trimmed
         if mood_modified:
             notes.append("mood")
         if genre_trimmed:
             notes.append(f"genre trimmed to {genre_cap}")
-        return album, modified, notes, advisory_value, info
-
-    counts = {"ok": 0, "skip": 0, "fail": 0}
-    pbar = _make_pbar(len(album_dirs), "AutoTag", unit="album")
-    workers = worker_count(config, default=8, maximum=8, items=len(album_dirs))
-    with ThreadPoolExecutor(max_workers=workers) as ex:
-        futures = {ex.submit(process_album_full, a): a for a in sorted(album_dirs)}
-        for fut in as_completed(futures):
-            album = futures[fut]
-            try:
-                _album, modified, notes, advisory_value, _info = fut.result()
-            except Exception as e:
-                stats["total_scanned"] += 1
-                stats["error_count"] += 1
-                stats["errors"].append((os.path.basename(album), str(e)))
-                _pbar_update(pbar, counts, kind="fail")
-                continue
-            if modified:
-                stats["total_scanned"] += 1
-                stats["modified_count"] += 1
-                log(f"  {os.path.basename(_album)} ({', '.join(notes)})")
-                _pbar_update(pbar, counts, kind="ok")
-            else:
-                stats["skipped_count"] += 1
-                _pbar_skip(pbar, counts)
+        if modified:
+            stats["total_scanned"] += 1
+            stats["modified_count"] += 1
+            log(f"  {os.path.basename(_album)} ({', '.join(notes)})")
+            _pbar_update(pbar, counts, kind="ok")
+        else:
+            stats["skipped_count"] += 1
+            _pbar_skip(pbar, counts)
 
     if pbar:
         pbar.close()

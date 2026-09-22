@@ -55,6 +55,9 @@ _LOG_PREFIX = "[mlo] interrupted-run recovery:"
 
 _shutting_down = threading.Event()
 _shutdown_started_at = None
+# Signal handlers this module replaced, by signal number (see
+# install_signal_grace): the original is called after the flag is set.
+_PREV_HANDLERS: dict = {}
 _lock = threading.Lock()
 
 
@@ -384,6 +387,50 @@ def wait_for_jobs(grace=GRACE_SECONDS, *, log=None, poll=0.5) -> list:
         time.sleep(max(0.05, float(poll)))
         jobs = running_jobs()
     return jobs
+
+
+def install_signal_grace() -> bool:
+    """Set the shutdown flag the moment SIGTERM/SIGINT arrives.
+
+    Uvicorn's own handler waits for the run's background task BEFORE the
+    lifespan teardown, and `begin_shutdown` lives in that teardown — so a chain
+    that ran long enough held the container open on its own: `docker stop` was
+    measured waiting 96 s for one, and a chain longer than the compose stop
+    grace would meet SIGKILL with the app's ordered abort never having run at
+    all. This handler sets the flag on the signal itself (a running chain then
+    stops at the next SCRIPT boundary — never mid-write) and hands the signal
+    straight over to the handler that was already installed, so uvicorn's
+    graceful shutdown is unchanged.
+
+    Only the main thread may install signal handlers, so a test client or an
+    embedding host — which runs the app on a worker thread — is left alone and
+    this returns False.
+    """
+    import signal as _signal
+
+    if threading.current_thread() is not threading.main_thread():
+        return False
+    installed = False
+    for name in ("SIGTERM", "SIGINT"):
+        sig = getattr(_signal, name, None)
+        if sig is None or sig in _PREV_HANDLERS:
+            continue
+        try:
+            _PREV_HANDLERS[sig] = _signal.getsignal(sig)
+
+            def _handler(signum, _frame, _sig=sig):
+                begin_shutdown()
+                previous = _PREV_HANDLERS.get(_sig)
+                if callable(previous):
+                    return previous(signum, _frame)
+                # Nothing to hand over to: behave like the default would.
+                _signal.signal(_sig, _signal.SIG_DFL)
+
+            _signal.signal(sig, _handler)
+            installed = True
+        except Exception:
+            continue
+    return installed
 
 
 def _write_journal(jobs, *, log=None) -> str:

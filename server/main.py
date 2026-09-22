@@ -92,6 +92,11 @@ async def _lifespan(app: FastAPI):
     try:
         from server import interrupt_recovery
         interrupt_recovery.startup_recovery(load_config())
+        # …and make the NEXT signal (the auto-updater's SIGTERM, or the
+        # container's stop) set the shutdown flag immediately instead of at the
+        # teardown uvicorn only reaches once the running chain is over, so a
+        # run stops at a script boundary and says which scripts it did not run.
+        interrupt_recovery.install_signal_grace()
     except Exception as e:
         print(f"[mlo] interrupted-run recovery failed: {e}")
     # Optionally bring up the managed slskd process with the backend.

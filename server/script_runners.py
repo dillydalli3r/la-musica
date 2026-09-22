@@ -798,6 +798,7 @@ def _follow_moved_targets(cfg, audio_names, claimed=(), misses=None):
 
 def _run_chain_locked(cfg, ids, targets=None, force=None, progress=None,
                       final=None, job=None):
+    from server import interrupt_recovery
     cfg = dict(cfg)
     if targets is not None:
         cfg["targets"] = [os.path.normpath(str(t)) for t in targets]
@@ -813,6 +814,21 @@ def _run_chain_locked(cfg, ids, targets=None, force=None, progress=None,
     # per remaining script (see _follow_moved_targets).
     misses: set = set()
     for done, sid in enumerate(ids, 1):
+        if interrupt_recovery.is_shutting_down():
+            # The auto-updater is restarting this container: stop at a SCRIPT
+            # BOUNDARY instead of letting the run carry on into Docker's
+            # SIGKILL. Uvicorn waits for this background task BEFORE the
+            # lifespan teardown, so a chain that ignored the flag held the
+            # container open past its stop grace (measured: a 13 s chain kept
+            # `docker stop` waiting for it, with the app's own 120 s grace —
+            # and its journal — never reached). Nothing is half-written either
+            # way (every write is atomic), but this way the run SAYS what it
+            # did not do instead of the log simply stopping.
+            left = [RUNNERS.get(s, (f"Script {s}", None))[0]
+                    for s in ids[done - 1:]]
+            log(f"stopping for an update: {len(left)} script(s) not run — "
+                + ", ".join(left))
+            break
         result = run_script(sid, cfg, chain=(done, total), job=job)
         results.append(result)
         _follow_moved_targets(cfg, audio_names, _claimed_targets(result),

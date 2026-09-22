@@ -177,11 +177,28 @@ def _norm(value, lo, hi):
 
 
 def _features(y, sr):
-    """Raw feature dict for one mono signal. Raises on librosa failure."""
+    """Raw feature dict for one mono signal. Raises on librosa failure.
+
+    The centroid, the mel band behind the onset envelope and the
+    harmonic/percussive split all come from ONE magnitude STFT, and the split
+    is computed ONCE and handed down to the tempo and key detectors — those
+    transforms used to be recomputed inside each of them (two complete
+    harmonic-percussive separations per track), which is most of what this
+    script used to cost. Every value below is the one this dict always
+    carried.
+    """
     import numpy as np
     import librosa
 
     duration = float(y.size) / sr
+    # The magnitude STFT is shared by the centroid, the mel band the onset
+    # envelope is built on, and the harmonic/percussive split below.
+    # `librosa.feature.rms` is NOT taken from it: its S-path is a Parseval
+    # estimate with the DC/Nyquist terms halved, which is not the
+    # rectangular-frame RMS its y-path measures (4.3 dB apart on real
+    # tracks), so this one keeps reading `y` and returns the same number it
+    # always did.
+    mag = np.abs(librosa.stft(y, n_fft=2048, hop_length=512))
     rms = np.asarray(librosa.feature.rms(y=y)[0], dtype=float)
     rms_mean = float(rms.mean()) if rms.size else 0.0
     if rms.size >= 4:
@@ -192,24 +209,37 @@ def _features(y, sr):
 
     level_db = 20.0 * math.log10(max(rms_mean, 1e-9))
     onset_rate = 0.0
+    onset_env = None
     if level_db >= ONSET_FLOOR_DB:
-        onset_env = librosa.onset.onset_strength(y=y, sr=sr)
+        # The mel band comes out of the SAME magnitude STFT (a power spectrum
+        # is what melspectrogram would build from `y`), and the envelope is
+        # the one the tempo detector below wants as well.
+        onset_env = librosa.onset.onset_strength(
+            S=librosa.power_to_db(
+                librosa.feature.melspectrogram(S=mag ** 2, sr=sr)),
+            sr=sr, hop_length=512)
         try:
             onsets = librosa.onset.onset_detect(onset_envelope=onset_env, sr=sr)
             onset_rate = float(len(onsets)) / max(duration, 1e-6)
         except Exception:
             onset_rate = 0.0
 
-    centroid_hz = float(np.asarray(librosa.feature.spectral_centroid(y=y, sr=sr)).mean())
+    centroid_hz = float(np.asarray(
+        librosa.feature.spectral_centroid(S=mag, sr=sr)).mean())
+    y_h = None
     try:
-        _, y_perc = librosa.effects.hpss(y)
+        # ONE split, used twice: the percussive energy here and the harmonic
+        # signal the key detector reads its chroma from. Those were two
+        # complete hpss passes (each a pair of scipy median filters over the
+        # whole spectrogram) and the second one computed exactly this.
+        y_h, y_perc = librosa.effects.hpss(y)
         total = float(np.sum(y * y))
         percussive = float(np.sum(y_perc * y_perc)) / total if total > 0 else 0.0
     except Exception:
         percussive = 0.0
 
-    tempo = _detect_bpm(y, sr)
-    key = _detect_key(y, sr)
+    tempo = _detect_bpm(y, sr, onset=onset_env)
+    key = _detect_key(y, sr, y_harmonic=y_h)
     return {
         "duration": round(duration, 3),
         "rms_db": round(20.0 * math.log10(max(rms_mean, 1e-9)), 2),

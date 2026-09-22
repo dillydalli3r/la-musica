@@ -200,7 +200,7 @@ unavailable rather than silently passing.
 **R13 — scripts clean up after themselves**: folders a run emptied are pruned
 bottom-up (never a folder that holds anything, never the music root), and the run
 reports how many were removed.
-**R14 — a run's progress is written ONCE, to both surfaces that show it.** The
+**R78 — a run's progress is written ONCE, to both surfaces that show it.** The
 header bar (a WebSocket push from `mlo.stats.progress_hook`) and MAINTAIN → In
 progress (a 2 s poll of `server.job_locks`) are two transports for one fact, so
 every frame goes through `job_locks.publish`: the row shows the same step text
@@ -211,17 +211,38 @@ once per FINISHED script — so the same run read as two different steps, and a
 single-script run showed a live bar over a row that said only "working" until it
 was over. A step is announced for every script the chain reaches, including one
 that was skipped or unavailable.
-**R15 — the worker budget is what the WHOLE run costs.** `worker_limit`
+**R79 — the worker budget is what the WHOLE run costs.** `worker_limit`
 (Settings → Performance → "Worker threads", 0 = count them from the CPU) bounds
 the worker pools (`mlo.stats.worker_count`) and, through
 `mlo.stats.tool_threads`, the thread count each worker's native tool is given:
-cjxl's `--num_threads`, rsgain's `-m`, the ffmpeg decode fallback's `-threads`.
-A pool of 2 encoders each claiming every core was still a 16-thread run — which
-a container turns into CPU throttling, i.e. a slower run, not a faster one.
+cjxl's `--num_threads`, the ffmpeg decode fallback's `-threads`. A pool of 2
+encoders each claiming every core was still a 16-thread run — which a container
+turns into CPU throttling, i.e. a slower run, not a faster one.
 Nested pools DIVIDE the same budget instead of multiplying it: the CD checksum
 decoders take one album's share of the audit pool (`worker_limit=2` used to start
 eight of them, one constant 4 per album), and a copy of a chain's own parallelism
-is never added on top.
+is never added on top. **A pool is sized by the ITEMS it has**, not by the
+container they came in: Auto tagging's mood/energy stage decodes one track at a
+time and is pooled per TRACK (script 16's shape), so a single-album import uses
+the budget it was given instead of one lane per album — 15 tracks that used to be
+analysed strictly one after another now take what two lanes can carry.
+**R80 — an auto-updater restart cannot tear a file.** The bundled watchtower
+service replaces this container's image whenever a release appears, so `SIGTERM`
+— and `SIGKILL` once `stop_grace_period` runs out — can land at any moment,
+including inside a write. Every writer therefore goes through `mlo.atomic` (temp
+file beside the destination, fsync, ONE `os.replace`), and a file a killed run
+leaves behind is the old file or the new one, never a half-written one. The last
+writer that could not say that was `rsgain`: `rsgain easy` rewrites a track's
+tags IN PLACE (TagLib has no other mode), so ReplayGain is now measured with a
+scan and stored by the app's own writer (R43). `server.interrupt_recovery` then
+sweeps this app's own leftover temp files, reconciles a framework album whose
+audio arrived and reports the jobs a shutdown had to abandon, so the next start
+says what happened instead of guessing. A chain also stops at a **script
+boundary** once the shutdown has begun: uvicorn waits for the run's background
+task BEFORE the lifespan teardown, so a chain that ignored the flag held the
+container open past its stop grace (measured: a 13 s chain delayed `docker stop`
+by itself, leaving the app's own 120 s wait and its journal unreachable) — it now
+names the scripts it did not run and lets the container go.
 
 ---
 
@@ -598,8 +619,15 @@ Even a forced re-rate rewrites only with evidence: the invented
 - **R43** — script 7 writes the album gain/peak and the track gain/peak for FLAC
   and MP4 alike, using the ReplayGain 2.0 reference of **−18 LUFS**;
   `replaygain_skip_existing` (ON) leaves already-tagged files alone unless
-  `force_dr_replaygain` is set. **The peak is the SAMPLE peak**, which is what
-  rsgain (the writer) stores and what the ecosystem's readers expect: the
+  `force_dr_replaygain` is set. **rsgain measures; the app writes.** The scan is
+  `rsgain custom -s s -a -O` — one album per call, because `custom -a` averages
+  everything it is handed into ONE album row — and the four tags are stored
+  through the app's atomic writer, with the text rsgain prints (gain as
+  `<n.nn> dB`, peak as the linear value, verified character for character against
+  the tags `rsgain easy` stores). `rsgain easy` is never pointed at a library
+  file: it writes in place, which a SIGKILL mid-write can tear (R80).
+  **The peak is the SAMPLE peak**, which is what rsgain measures and what the
+  ecosystem's readers expect: the
   on-demand measurement and the export writer must not measure true peak
   instead, or a file's own tag, its cached value and its export disagree about
   the same audio — measured at up to +39.6 % before this was pinned

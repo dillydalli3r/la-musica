@@ -23,10 +23,10 @@ docstrings of mlo.atomic / server.interrupt_recovery:
    could not finish so the next start reconciles exactly those jobs.
 
 The library is a throwaway folder with files the app wrote itself (ffmpeg makes
-the audio); nothing here touches a real music folder, and the failure that
-cannot be fixed — a third-party tool rewriting a file in place, see
-mlo.loudness._run_rsgain — is documented in the audit rather than tested,
-because no test can make it safe.
+the audio); nothing here touches a real music folder. The one writer that used to
+be unfixable — a third-party tool rewriting a file in place, which rsgain's
+``easy`` mode did — now scans instead and the app writes (section 1c), so every
+write in this app is atomic and every one of them is checked here.
 
 Run:  python tools/test_interrupt_safety.py
 """
@@ -336,6 +336,80 @@ else:
           all(atomic.is_temp_name(n) for n in temps), str(temps))
 
 # ---------------------------------------------------------------------------
+# 1c. rsgain is handed a scan, never a file to rewrite
+# ---------------------------------------------------------------------------
+section("1c. the ReplayGain pass asks rsgain to SCAN, and writes the tags itself")
+
+# `rsgain easy` rewrites a track's tags IN PLACE (TagLib has no other mode), so
+# a SIGKILL inside it is the one write no rename can make safe. The batch pass
+# must ask for a scan — `custom -s s`, whose printed table is the text rsgain
+# would have stored — and put the four tags on the file through mlo.atomic like
+# every other writer here. The stub below answers as rsgain does and records
+# what it was asked for; a run that regressed to `easy` fails the first check.
+from types import SimpleNamespace                                          # noqa: E402
+import mlo.loudness as _loudness                                           # noqa: E402
+from mlo.config import DEFAULT_CONFIG                                      # noqa: E402
+from mlo.tools import detect_all_tools                                     # noqa: E402
+
+rg_album = os.path.join(music, "rg-album")
+os.makedirs(rg_album, exist_ok=True)
+rg_tracks = [os.path.join(rg_album, f"{i:02d} - Track.flac") for i in (1, 2)]
+rg_built = all(os.path.isfile(t) and os.path.getsize(t) > 0 for t in rg_tracks) \
+    or all(make_track(t) for t in rg_tracks)
+rg_calls = []
+_real_run_tool = _loudness.run_tool
+
+
+def _fake_rsgain(cmd, **_kw):
+    rg_calls.append(list(cmd))
+    rows = ["Filename\tLoudness (LUFS)\tGain (dB)\tPeak\t Peak (dB)"
+            "\tPeak Type\tClipping Adjustment?"]
+    for path in cmd[cmd.index("-q") + 1:]:
+        rows.append(f"{os.path.basename(path)}\t-20.00\t-2.50\t0.500000"
+                    f"\t-6.02\tSample\tN")
+    rows.append("Album\t-20.00\t-2.50\t0.500000\t-6.02\tSample\tN")
+    return SimpleNamespace(returncode=0, stdout="\n".join(rows) + "\n", stderr="")
+
+
+if not rg_built:
+    check("the ReplayGain fixture could be built (ffmpeg present)", False)
+elif not (detect_all_tools().get("rsgain") or {}).get("rsgain_exe"):
+    print("note: rsgain is not installed — the scan-only contract was not checked")
+else:
+    cfg = dict(DEFAULT_CONFIG)
+    cfg.update(music_folder=music, targets=[rg_album], worker_limit=1,
+               dr_replaygain_enabled=True, write_replaygain_tags=True,
+               write_dynamic_range_tags=False, replaygain_skip_existing=False,
+               force_dr_replaygain=False)
+    _loudness.run_tool = _fake_rsgain
+    try:
+        rg_stats = _loudness.run_calc_dr_replaygain(cfg)
+    finally:
+        _loudness.run_tool = _real_run_tool
+    scans_only = bool(rg_calls) and all(
+        "easy" not in c and "-s" in c and c[c.index("-s") + 1] == "s"
+        for c in rg_calls)
+    check("every rsgain call is a SCAN (`custom -s s`), never `easy`",
+          scans_only, str([c[:4] for c in rg_calls]))
+    check("the scan is asked for the album's own files, album gain included",
+          all("-a" in c and "-O" in c for c in rg_calls)
+          and len(rg_calls[0]) - rg_calls[0].index("-q") - 1 == len(rg_tracks),
+          str(rg_calls[0] if rg_calls else "no call"))
+    values = {os.path.basename(t): str(AudioFile(t).get_tag("REPLAYGAIN_TRACK_GAIN") or "")
+              for t in rg_tracks}
+    albums = {str(AudioFile(t).get_tag("REPLAYGAIN_ALBUM_GAIN") or "")
+              for t in rg_tracks}
+    check("the four tags the SCAN reported landed on the files, written by the app",
+          all(v == "-2.50 dB" for v in values.values())
+          and albums == {"-2.50 dB"},
+          f"track={values} album={albums}")
+    check("the pass reports the files it wrote", rg_stats.get("modified_count") == 2,
+          str(rg_stats))
+    temps = leftover_temps(rg_album)
+    check("the atomic write left no temp file behind",
+          all(atomic.is_temp_name(n) for n in temps), str(temps))
+
+# ---------------------------------------------------------------------------
 # 2. An interrupted run is recoverable, and says so
 # ---------------------------------------------------------------------------
 section("2. the startup sweep reconciles what a killed run left")
@@ -526,6 +600,38 @@ try:
     check("the next start reports the abandoned jobs and clears the journal",
           len(rows["jobs"]) == len(recorded["jobs"]) and not os.path.exists(journal),
           str(rows["jobs"]))
+
+    # -----------------------------------------------------------------
+    # A chain that is RUNNING when the shutdown begins must stop at a script
+    # boundary — uvicorn waits for the run's background task before the
+    # lifespan teardown, so a chain that ignored the flag is what held the
+    # container open past its stop grace (measured: `docker stop` waited 96 s
+    # for one). The shutdown flag is already set above, so a chain entered
+    # here is exactly the chain that was running when the signal landed.
+    # -----------------------------------------------------------------
+    section("3b. a run in flight stops at a script boundary, and says so")
+
+    started = []
+    real_run_script = script_runners.run_script
+
+    def _counting_run_script(sid, cfg, **_kw):
+        started.append(sid)
+        return {"script": sid, "stats": {}, "targets": []}
+
+    script_runners.run_script = _counting_run_script
+    said = io.StringIO()
+    try:
+        with contextlib.redirect_stdout(said):
+            results = script_runners._run_chain_locked(
+                {"music_folder": music, "targets": None}, [1, 2, 3])
+    finally:
+        script_runners.run_script = real_run_script
+    out = said.getvalue()
+    check("no further script is started once the shutdown has begun",
+          started == [], str(started))
+    check("the chain says how many scripts it did not run, by name",
+          "not run" in out and "Format lyrics" in out, out.strip()[-200:])
+    check("...and returns no result for them", results == [], str(results))
 
     # nothing running: the same shutdown waits zero time and records nothing
     q.status = real_status

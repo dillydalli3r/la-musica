@@ -113,9 +113,15 @@ services:
     #
     # It is deliberately not longer: an update should not hang for a quarter of
     # an hour behind a long "Format All" run, and nothing is lost by cutting
-    # one short — every write is atomic (mlo/atomic.py), so a killed run leaves
-    # the old file or the new one, and the next start sweeps its temp files and
-    # reports the interrupted job.
+    # one short — every write is atomic (mlo/atomic.py: temp file, fsync, ONE
+    # os.replace), so a killed run leaves the old file or the new one, and the
+    # next start sweeps its temp files and reports the interrupted job.
+    #
+    # "Every" is now literal. rsgain used to be the exception: `rsgain easy`
+    # rewrites a track's tags IN PLACE, and a SIGKILL inside that can tear the
+    # file past repair. Script 7 measures ReplayGain with a scan (`custom -s s`,
+    # the same measurement in the same time) and stores the tags itself, so no
+    # external tool is ever handed a library file to write.
     stop_grace_period: 3m
     # Opt in to watchtower's automatic updates (WATCHTOWER_LABEL_ENABLE=true).
     labels:
