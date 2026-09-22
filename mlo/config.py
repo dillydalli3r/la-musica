@@ -1135,6 +1135,13 @@ DEFAULT_CONFIG = {
     # else is on offer. Off = a clean edition ranks on the other rules like any
     # other edition.
     "prefer_original_edition": True,
+    # A COMPRESSED derivative of a disc (a BDRip/DVDRip/x264 re-encode) sorts
+    # below the disc's own streams — a remux, a full disc — in the
+    # release-choice policy (mlo/release_choice.py) and decides which file the
+    # disc-folder rule keeps when a VIDEO_TS/BDMV structure sits beside a
+    # re-encode of the same feature. OFF = the tier scores nothing, so the
+    # other eight tiers decide exactly as they did before the rule existed.
+    "prefer_disc_streams": True,
     # Covers: fetch and write cover art during import when the album has none.
     # On by default — a downloaded album without a cover grades as incomplete,
     # and the finder's provider chain (Cover Art Archive → Deezer → Apple) can

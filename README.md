@@ -380,6 +380,26 @@ a DVDRip or an x264 re-encode ranks under a remux or a full disc of the same
 release group, and a folder holding a `VIDEO_TS`/`BDMV` structure beside a
 700 MB re-encode keeps the disc's feature, never the re-encode. Turn the
 setting off and the other rules decide, exactly as they did before it existed.
+**Where a release is fetched from is decided by the release itself**, from the
+recordings' own `video` flag and the medium MusicBrainz publishes: a music-video
+release on **Digital Media** cannot be on Soulseek as a folder — no disc, no log,
+no CRC — so it is fetched from YouTube with yt-dlp *inside the same auto-import
+job*, with no search at all. One query per track through the filter the film
+button already uses (achieved length, lyric/cover/tribute rows refused), into
+`<downloads>/YouTube/<Artist - Album>`, renamed to `<disc>-<NN> <title>` before
+the import so nothing is named after an upload title, and then the SAME import
+the Soulseek path runs: MB stamping, `MEDIA=Digital Media`, `SOURCE=YouTube`
+(the closed vocabulary, so the grader's Digital Media rule is satisfied), the
+naming script, and the configured post-import chain in the background. A
+music-video collection is routinely a dozen separate uploads, so a partial
+result is a normal outcome — the album imports from what came back and every
+missing track is named in the log and counted in the job's result — and finding
+NOTHING ends on the same wish offer an empty search does, never a silent
+success. A music video on a DISC (DVD, Blu-ray, VHS, Video CD — what
+`mlo.release_choice.is_video_format` classifies) keeps the Soulseek path byte for
+byte, an audio release is never routed anywhere, and a medium that is unstated or
+unknown is never guessed at.
+
 The **auto-importer** searches
 each release by what can only point at THAT release: a physical pressing (CD
 included) is searched by its catalog number and barcode

@@ -1041,6 +1041,86 @@ user asked for, in the order they asked for it. `server/exporter.py` owns both.
   reader scrolls, and the fallback button stays for the two cases where the
   observer cannot run (no `IntersectionObserver`, or a stalled fetch).
 
+### 7.12 What enters the library: the edition, the source, and the name in your language
+
+- **R84 — one deterministic policy decides which edition is fetched.** The nine
+  tiers of `mlo/release_choice.py`, in the order they are scored
+  (`_TIER_NAMES`): release **status** (official → promotion → bootleg — an
+  unofficial edition is chosen only when nothing official exists), the
+  configured **medium** order (`auto_import_medium_order`: CD, then the other
+  physical media, digital last), the **box-set** rule (an edition carrying
+  DVD/Blu-ray media, or one disc after another, sorts below the album's own
+  CD/digital media, so a 3-CD anniversary box no longer outranks the plain CD it
+  contains), the **disc-versus-re-encode** rule (R85), the **track count** (an
+  edition short of the release group's own count is penalised), the **release
+  date**, the **clean/edited-edition** rule (`prefer_original_edition`: the
+  original beats a later reissue unless the later one is materially more
+  complete), the **plain-release** rule (a plain release beats a disambiguated
+  one) and **prefer_release_country**, which only ever breaks a tie. The order is
+  fixed and total: equal scores are broken by MusicBrainz's own listing order,
+  never by chance, and `_deciding_reason` names the tier that decided
+  (`"the disc-versus-re-encode rule"`). The SAME module serves the release-group
+  page's ranking, `group_targets`, `resolve_release`, `auto_import_targets`,
+  `pick_releases`, the artist watch and `GET /api/mb/release-choice`, so a page
+  and the downloader cannot disagree about which edition "this album" means.
+- **R85 — a compressed derivative of a disc sorts below the disc's own streams**
+  (`prefer_disc_streams`, shipped **ON**; Settings → Import & tags). A `BDRip`,
+  a `DVDRip` or an `x264` re-encode is somebody's lossy derivative of a source
+  that usually still exists — a remux, a full disc — so it ranks below it. The
+  markers, read from the same two fields the clean-edition rule reads (the
+  release title and MusicBrainz's disambiguation comment), are `bdrip`, `brrip`,
+  `dvdrip`/`dvd-rip`, `webrip`, `web-dl`, `hdtv`, `hdtvrip`, `x264`, `x265`,
+  `xvid`, `divx`, `microhd`, `halfcd`/`half-cd`, `re-encode`/`re-encoded` and
+  `compressed`. Deliberately NOT markers: `remux`, `bdmv`, `dvd`, `blu-ray`
+  (those name the disc ITSELF — what wins) and codec names such as `h264` or
+  `hevc`, which a remux carries just as well. With the setting **off** the tier
+  scores every candidate the same, so the other eight decide exactly as they did
+  before the rule existed. It is not a grade key: it decides which file the
+  grade is computed on, and the same switch decides the disc-folder case of
+  §7.13.
+- **R86 — a music-video release published as Digital Media is fetched from
+  YouTube, inside the same auto-import job.** `server.soulseek_auto` routes by
+  the release itself (`acquisition_route`, reading `video_tracks` — the
+  recordings' own MusicBrainz `video` flag, carried on each track of the payload
+  `server/integrations.release_lookup` returns): video recordings on Digital
+  Media take the YouTube branch, video recordings on a DISC (what
+  `mlo.release_choice.is_video_format` classifies: DVD, Blu-ray, VHS, Video CD,
+  LaserDisc…) and EVERY audio release keep the Soulseek path byte for byte, and
+  an unstated or unknown medium is never guessed at. The route is read before
+  the "slskd is not running" precondition, so a YouTube release needs no
+  Soulseek at all, and the branch starts after the album-folder claim, re-check
+  and queue row the Soulseek path already had. One `youtube.best_candidate`
+  search per track (the length filter and the lyric/cover/tribute rejection),
+  downloaded into `<downloads>/YouTube/<Artist - Album>`, renamed to
+  `<disc>-<NN> <title>.<ext>` — the shape `_parse_trackno` reads disc and
+  position back out of, and the naming script writes itself; nothing is named
+  after an upload title. Then the SAME `_import` the Soulseek path calls: MB
+  stamping, `MEDIA=Digital Media`, `SOURCE=YouTube` (the closed vocabulary of
+  `mlo.tagtext.SOURCE_VALUES`, so the Digital Media SOURCE rule of §3 is
+  satisfied rather than dodged), the naming script and the configured
+  post-import chain in the background. A collection that is a dozen separate
+  uploads imports from what came back — every missing track is named in the log
+  and counted in the job's result — and a run that finds NOTHING ends on the
+  same wish offer an empty search does (`source="youtube"`), never as a silent
+  success. YouTube disabled (`youtube_enabled`) or yt-dlp missing fails the job
+  with that sentence, not with an empty album.
+- **R87 — the alias in your locale is what the app shows beside a MusicBrainz
+  name.** `locale` (default `en`; the old `beets_locale` is migrated into it, so
+  one setting now serves both) drives `server.integrations.alias_for`, whose
+  ladder is exact — an alias whose `locale` equals the setting, `primary` first
+  — then a COUSIN locale (MusicBrainz separates a script with a hyphen, `ja-Latn`,
+  and a region with an underscore, `en_PH`; a reader who asked for `ja` wants the
+  romanization and one who asked for `en` wants `en_PH`, but only when the exact
+  locale has nothing), then the entity's `primary` alias whatever its locale, and
+  last any alias whose name actually differs from the entity's own (the
+  Japanese/Chinese/Korean case). An alias flagged as a search hint is never
+  shown, and an alias identical to the name would not be repeated in
+  parentheses. The alias rides along in the MusicBrainz request that was already
+  being made — no second call, ever — and the browser, entity and release-group
+  pages and the credits panel show it (`宇多田ヒカル (Hikaru Utada)`), while the
+  SAME setting is what translates non-Latin names for the Soulseek searches and
+  the beets import.
+
 ## 8. Recommended runbook
 
 Nothing here is a substitute for the app's own Dependencies page: run it first
@@ -1182,7 +1262,10 @@ Two keys deliberately do **not** change a verdict on their own:
 `grade_check_accuraterip` (AUDIT-only, R5) and `show_sidecar_files` —
 deliberately NOT in the table above: it only makes the viewer list a file's
 sidecar siblings (`cue`/`log`/`lrc`/`.accurip`) and compute their grades, and it
-adds no check.
+adds no check. The ACQUISITION keys are not grade keys either — they choose
+which file a verdict is later computed on, never the verdict itself:
+`prefer_disc_streams` and the other release-choice keys (R84/R85),
+`soulseek_auto_*`, `wishes_*`, `youtube_*` (R76), and `locale` (R87).
 
 ---
 
