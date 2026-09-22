@@ -703,9 +703,11 @@ export default function ArtistPage() {
                   >
                     {albums.map((al) => (
                       // the library's own album card (cover, title, artist,
-                      // year, verdict dot, play, heart) plus the two facts
-                      // this page states per release: folder track count and
-                      // the album grade verdict
+                      // year, verdict dot, play, heart) plus the one fact this
+                      // page states per release: the album's grade verdict.
+                      // The folder's track count is deliberately NOT printed —
+                      // it is noise on a grid of albums (and the track list is
+                      // one click away).
                       <AlbumCard
                         key={al.path}
                         al={al}
@@ -713,16 +715,11 @@ export default function ArtistPage() {
                         selected={selected.has(al.path)}
                         onSelect={toggleSel}
                         extraMeta={
-                          <>
-                            <span className="shrink-0 tabular-nums" title={`${al.track_count} track${al.track_count === 1 ? "" : "s"} in this folder`}>
-                              {al.track_count} tr
-                            </span>
-                            <GradeBadge
+                          <GradeBadge
                               pass={!!al.pass && !auditFails(al.audit_summary)}
                               score={al.grade_pct}
-                              size="sm"
-                            />
-                          </>
+                            size="sm"
+                          />
                         }
                       />
                     ))}

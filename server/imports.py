@@ -171,8 +171,13 @@ def finish_album(album_dir, cfg=None, progress=None, force=None, release=None):
 
     A failing script is reported, never raised: the album is already imported.
     An import whose chain did not run is never reported as an ordinary success.
-    Nothing is emitted from here: every caller already reports its own outcome
-    (see ``server.events``), and a second emitter would double-report the same
+    TWO notifications are emitted from here — `import_started` on the way in and
+    `import_done` (with ``chain_summary``'s wording) where every path ends, in
+    `_report_gaps` — because this IS the single entry point every import path
+    reaches, so emitting here announces all of them once and only once. Both are
+    user-switchable (`notify_import_start` / `notify_import_done`, Settings →
+    Notifications, on by default). Callers still report their own outcome (see
+    ``server.events``) for the phases this function knows nothing about
     import.
 
     The staged work is gated by its OWN keys, not by the chain switch:
@@ -197,6 +202,7 @@ def finish_album(album_dir, cfg=None, progress=None, force=None, release=None):
     left out of the library, and a prompt is withdrawn by the next import of
     the same album (the call that resolves the gaps is the one that clears it).
     """
+    _announce_import("import_started", album_dir, cfg=cfg)
     cfg = cfg or load_config()
     path = os.path.normpath(str(album_dir))
     out = {"path": path, "scripts": [], "chain": [], "errors": [],
@@ -456,6 +462,32 @@ def _clear_pending(path, cfg, *, chained, chain_off=False):
         traceback.print_exc()
 
 
+def _announce_import(kind, path, out=None, cfg=None):
+    """One notification for the import phase — never fatal to the import.
+
+    `import_started` when `finish_album` picks an album up, `import_done` with
+    the chain's own one-line summary when it has been over it. Emitted from the
+    ONE entry point and the ONE exit every path passes (`_report_gaps`), so the
+    wizard, the bulk queue, the panel's import and the auto-import's chain all
+    announce the same way — and a config that switched them off says so through
+    `events._notify_configured`, like every other kind.
+    """
+    try:
+        from server import events
+        name = os.path.basename(os.path.normpath(path or "")) or path
+        if kind == "import_started":
+            events.emit("import_started", f"Importing {name}",
+                        "Moving the album into the library and running the "
+                        "configured chain.",
+                        data={"path": path, "link": f"/album/{path}"}, config=cfg)
+            return
+        summary = chain_summary(out or {}) or "Import finished."
+        events.emit("import_done", f"Imported {name}", summary,
+                    data={"path": path, "link": f"/album/{path}"}, config=cfg)
+    except Exception:
+        traceback.print_exc()
+
+
 def _report_gaps(out, cfg, policy, path):
     """End an import: report what it could not finish, and raise ONE prompt.
 
@@ -476,6 +508,7 @@ def _report_gaps(out, cfg, policy, path):
     that ran no chain decided nothing, so it reports nothing (the same early
     return the function always had for `import_auto_scripts` off).
     """
+    _announce_import("import_done", path, out, cfg=cfg)
     gaps = import_policy.gaps(path, import_policy.effective_config(cfg),
                               steps={"advisory": out.get("advisory"),
                                      "cover": out.get("cover")})

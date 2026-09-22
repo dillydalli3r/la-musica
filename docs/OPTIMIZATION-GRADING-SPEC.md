@@ -1228,6 +1228,29 @@ user asked for, in the order they asked for it. `server/exporter.py` owns both.
     own Run All is the explicit, user-started library-wide path and is not what
     an import runs).
 
+### 7.15 Notifications and the player's own immediacy
+
+- **R90 — every import announces itself, and the switches are yours.**
+  `server/imports.finish_album` is the single call every import path makes (the
+  wizard's finish, the downloads panel, the sequential import queue, the bulk
+  queue, the Soulseek auto-importer and the wish/artist-watch pipeline behind
+  it), and it emits two events through `server.events`: `import_started` on the
+  way in and `import_done` where every path ends (`_report_gaps`), carrying the
+  chain's own one-line summary (`chain_summary`). Both are switchable
+  (`notify_import_start` / `notify_import_done`, Settings → Notifications, ON by
+  default), like the download phase's `notify_soulseek_download_start` and
+  `notify_download_done` and the add-time `album_pending`; a kind with no key in
+  `events._notify_configured` is unconditional by design (an outcome the user
+  must be able to see). Notifications go to the persisted tray for every kind,
+  and an OS notification for the kinds in `notifications.ts`'s `OS_KINDS`.
+- **R91 — selecting a track silences the outgoing one at once.** The player's
+  load effect (`web/src/components/PlayerBar.tsx`) pauses the ACTIVE element the
+  moment the index changes, before the new source is fetched and decoded — a
+  switch used to leave the old track playing until the new one was ready, which
+  reads as "nothing happened". Skipped when a gapless swap already started the
+  next track on the other element, where pausing would cut the song that just
+  began.
+
 ## 8. Recommended runbook
 
 Nothing here is a substitute for the app's own Dependencies page: run it first

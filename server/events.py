@@ -95,6 +95,8 @@ def _notify_configured(kind: str, cfg: dict) -> bool:
         "wish_found": "notify_wish_found",
         "download_done": "notify_download_done",
         "import_ready": "notify_import_ready",
+        "import_started": "notify_import_start",
+        "import_done": "notify_import_done",
         "download_started": "notify_soulseek_download_start",
         "upload_started": "notify_soulseek_upload_start",
     }.get(kind)

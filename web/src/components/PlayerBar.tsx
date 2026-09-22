@@ -451,6 +451,13 @@ export default function PlayerBar() {
     // A pure reorder (queueMove / remove around the playing row) resolves
     // to the SAME track — reloading it would restart the song from zero.
     if (track.path === loadedPath.current) return;
+    // Switching tracks must FEEL immediate: silence the outgoing audio the
+    // moment the selection changes, before the new source is fetched and
+    // decoded. Without this the old track kept playing until the new one was
+    // ready, which reads as "nothing happened". Skipped when a gapless swap has
+    // already started the next track on the other element — pausing there would
+    // cut the song that just began.
+    if (!swapped.current) media()?.pause();
     // A job is rewriting this file right now, so there is no stream to load:
     // the server answers 409 with the sentence below, and handing that to an
     // <audio> element would only be silence. `loadedPath` is deliberately NOT

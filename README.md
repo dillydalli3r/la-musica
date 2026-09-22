@@ -460,7 +460,7 @@ library already holds is refused with a sentence instead of appearing beside it
 as `… (2)` — and two jobs heading for one folder serialize on that folder while
 their chain runs scoped to it, never over the library. Adding a release to the
 library **starts its search immediately** and puts it on
-the **download queue**, which is the one surface for wanted releases: a row shows
+the **download queue**, Notifications cover the whole way in, switchable in Settings → Notifications (on by default): the add itself, the download starting and finishing, and the import starting and finishing with the chain's own summary. which is the one surface for wanted releases: a row shows
 what the search is doing, and it stays **In progress** — never Completed — while
 the import chain it started is still running over the album. The durable
 behaviour behind it (re-searching on

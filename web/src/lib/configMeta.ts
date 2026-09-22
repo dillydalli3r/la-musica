@@ -649,6 +649,8 @@ export const CONFIG_GROUPS: CfgGroup[] = [
         { k: "notify_wish_found", label: "Wish found on Soulseek", type: "bool" },
         { k: "notify_download_done", label: "Download finished", type: "bool" },
         { k: "notify_import_ready", label: "Album ready to import", type: "bool" },
+        { k: "notify_import_start", label: "Notify when an import starts", type: "bool", help: "One notification per album when the import chain picks it up — from Add to library, the wizard or the panel." },
+        { k: "notify_import_done", label: "Notify when an import finishes", type: "bool", help: "One notification per album when the chain has been over it, with its one-line summary (how many scripts ran, what failed)." },
         { k: "notify_soulseek_download_start", label: "Soulseek download started", type: "bool" },
         { k: "notify_soulseek_upload_start", label: "A peer started downloading from you", type: "bool" },
       ],

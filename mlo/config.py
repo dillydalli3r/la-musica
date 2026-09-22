@@ -1452,6 +1452,10 @@ DEFAULT_CONFIG = {
     "notify_wish_found": True,
     "notify_download_done": True,
     "notify_import_ready": True,
+    # The import phase itself: started when the chain picks the album up, done
+    # when it has been over it (the chain's own one-line summary rides along).
+    "notify_import_start": True,
+    "notify_import_done": True,
     "notify_soulseek_download_start": True,
     "notify_soulseek_upload_start": True,
     # UI language for the web app and the client shells. English is the

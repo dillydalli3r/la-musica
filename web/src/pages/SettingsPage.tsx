@@ -1532,6 +1532,8 @@ export default function SettingsPage() {
     { k: "notify_wish_found", label: "Wish found on Soulseek" },
     { k: "notify_download_done", label: "Download finished" },
     { k: "notify_import_ready", label: "Album ready to import" },
+    { k: "notify_import_start", label: "Import started (moving in, then the chain)" },
+    { k: "notify_import_done", label: "Import finished (with the chain's summary)" },
     { k: "notify_soulseek_download_start", label: "Soulseek download started" },
     { k: "notify_soulseek_upload_start", label: "A peer started downloading from you" },
   ];

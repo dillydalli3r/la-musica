@@ -5331,6 +5331,24 @@ def _import(local_root, release, cfg, media, source=""):
     try:
         r = srv.organize(OrganizeRequest(paths=[dest], dry_run=False))
         res = (r.get("results") or [{}])[0] if isinstance(r, dict) else r.results[0]
+        # organize reports ok:True with its per-file failures in `errors` — a
+        # locked track's file stays behind while the rest move in, and the
+        # staging folder left holding audio is a SECOND album by the app's own
+        # definition ("an album is the directory that holds audio"). Reporting
+        # that as a successful import also let the download dir be cleared, i.e.
+        # the unmoved files deleted. Treat any failure as the import's own: the
+        # download is left intact, the panel offers it again, and the file-level
+        # organizer completes it.
+        _move_errors = [str(e) for e in (res.get("errors") or [])]
+        if _move_errors:
+            for line in _move_errors[:5]:
+                _log("  ! organize: " + line)
+            if len(_move_errors) > 5:
+                _log(f"  ! organize: +{len(_move_errors) - 5} more")
+            raise RuntimeError(
+                f"{len(_move_errors)} file(s) could not be moved into the "
+                f"library — the download is left intact so nothing is lost; "
+                f"import it again from the queue")
         if isinstance(res, dict) and res.get("error"):
             organize_error = res["error"]
         else:
