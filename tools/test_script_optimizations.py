@@ -901,6 +901,264 @@ def check_artist_image_lanes(tmp):
        f"lanes vs {t_seq:.2f} s one at a time ({t_seq / t_par:.1f}x)")
 
 
+def check_accurip_album_lanes(tmp):
+    """Script 9: one CD album at a time, or a pool of them.
+
+    An album's AccurateRip pass owns its folder, its cue and its CD-{n} files,
+    and its slow half is one decode + CUETools verification per track. The fake
+    stands in for that half (`_generate_via_cuetools`) so this measures the
+    LANES, not ffmpeg — the same trick script 19's check uses for the
+    re-encode.
+    """
+    import time
+
+    from mlo import accurip
+    from mlo.accurip import resolve_arcue_exe
+
+    if not FFMPEG_EXE or not resolve_arcue_exe():
+        return skip("script 9: album lanes (no ffmpeg/CUETools to detect)")
+
+    lib = os.path.join(tmp, "accurip_lanes_lib")
+    for i in range(4):
+        album = os.path.join(lib, "Artists", "Artist", f"Album {i:02d}")
+        os.makedirs(album)
+        for t in (1, 2):
+            make_flac(os.path.join(album, f"{t:02d} - Song.flac"), 1,
+                      {"TITLE": f"Song {t}", "ARTIST": "Artist",
+                       "ALBUMARTIST": "Artist", "ALBUM": f"Album {i:02d}",
+                       "TRACKNUMBER": str(t), "MEDIA": "CD"})
+
+    LATENCY = 0.15
+    # What CUETools returns for a synthetic pressing: a log that says the disc
+    # is not in the database, which is what the parser and the writer expect.
+    fake_log = ("[CUETools log; Date: 1/1/2020 1:00:00 AM; Version: 2.2.6]\n"
+                "[AccurateRip ID: 000001c2-000004b1-06000402] disk not present "
+                "in database.\n")
+    seen = []
+
+    def fake_generate(ffmpeg_exe, arcue_exe, album_dir, disc_num, track_paths,
+                      cue_path, config, transport=None):
+        seen.append(album_dir)
+        time.sleep(LATENCY)
+        return fake_log
+
+    real = accurip._generate_via_cuetools
+    accurip._generate_via_cuetools = fake_generate
+
+    def run(worker_limit):
+        c = cfg(music_folder=lib, worker_limit=worker_limit, force_accurip=True)
+        t0 = time.perf_counter()
+        st = accurip.run_generate_accurip(c)
+        return st, time.perf_counter() - t0
+
+    try:
+        seq_stats, t_seq = run(1)
+        par_stats, t_par = run(0)
+    finally:
+        accurip._generate_via_cuetools = real
+
+    ok(len(seen) == 8,
+       f"script 9: both runs verify every CD album ({len(seen)} of 8)")
+    ok(seq_stats["modified_count"] == par_stats["modified_count"] == 4,
+       f"script 9: every album gets its .accurip either way "
+       f"({seq_stats['modified_count']}/{par_stats['modified_count']} of 4)")
+    ok(seq_stats["error_count"] == par_stats["error_count"] == 0,
+       "script 9: and neither run reports a failure")
+    ok(t_par < t_seq * 0.6,
+       f"script 9: 4 albums x {LATENCY * 1000:.0f} ms of verification take "
+       f"{t_par:.2f} s with lanes vs {t_seq:.2f} s one at a time "
+       f"({t_seq / t_par:.1f}x)")
+
+
+def check_layout_scan_lanes(tmp):
+    """Script 20: one artist folder at a time, or a pool of them.
+
+    What a whole-library scan spends its time on is the tag read behind the
+    `wrong_case` comparison — one container per album, through the server's tag
+    cache; everything else is a directory listing. The fake stands in for that
+    read and hands back the folder's own names in the wrong case, so every
+    artist and album also produces a row: the pooled walk has to report the same
+    rows, in the same order, with the same counters as the serial one.
+    """
+    import time
+
+    from mlo import layout
+    from mlo.stats import new_stats
+
+    lib = os.path.join(tmp, "layout_lanes_lib")
+    # Six artist folders, one of them holding TWO albums: the artist's own row
+    # must be reported once, not once per album of that artist.
+    for i in range(6):
+        for a in range(2 if i == 0 else 1):
+            album = os.path.join(lib, "Artists", f"Artist {i:02d}",
+                                 f"Album {i:02d}{'' if a == 0 else 'b'}")
+            os.makedirs(album)
+            make_flac(os.path.join(album, "01 - Song.flac"), 1,
+                      {"TITLE": "Song", "ARTIST": f"Artist {i:02d}",
+                       "ALBUMARTIST": f"Artist {i:02d}",
+                       "ALBUM": f"Album {i:02d}", "TRACKNUMBER": "1"})
+
+    LATENCY = 0.12
+    seen = []
+
+    def fake_tags(path):
+        seen.append(path)
+        time.sleep(LATENCY)
+        album_dir = os.path.dirname(path)
+        artist_dir = os.path.dirname(album_dir)
+        return {"ALBUMARTIST": os.path.basename(artist_dir).lower(),
+                "ARTIST": os.path.basename(artist_dir).lower(),
+                "ALBUM": os.path.basename(album_dir).lower(),
+                "TITLE": "Song", "TRACKNUMBER": "1"}
+
+    real = layout._track_tags
+    layout._track_tags = fake_tags
+
+    def run(worker_limit):
+        c = cfg(music_folder=lib, worker_limit=worker_limit,
+                naming_script="%albumartist%/%album%/%tracknumber% %title%")
+        st = new_stats()
+        t0 = time.perf_counter()
+        out = layout.scan_library(c, st)
+        return out, st, time.perf_counter() - t0
+
+    try:
+        seq_out, seq_stats, t_seq = run(1)
+        par_out, par_stats, t_par = run(0)
+    finally:
+        layout._track_tags = real
+
+    seq_rows = [i["path"] for i in seq_out["issues"]]
+    par_rows = [i["path"] for i in par_out["issues"]]
+    ok(par_rows == seq_rows and seq_rows,
+       f"script 20: the pooled walk reports the same rows in the same order as "
+       f"the serial one ({len(seq_rows)} rows, same={par_rows == seq_rows})")
+    ok(len(seq_rows) == 13,
+       f"script 20: six artist rows + seven album rows, the shared artist "
+       f"reported once ({seq_rows})")
+    ok((par_out["albums"], par_out["artists"], par_out["audio_files"])
+       == (seq_out["albums"], seq_out["artists"], seq_out["audio_files"])
+       == (7, 6, 7),
+       f"script 20: and the same report counts "
+       f"({par_out['albums']} albums, {par_out['artists']} artists, "
+       f"{par_out['audio_files']} audio files)")
+    ok((par_stats["total_scanned"], par_stats["unchanged_count"],
+        par_stats["skipped_count"], par_stats["error_count"])
+       == (seq_stats["total_scanned"], seq_stats["unchanged_count"],
+           seq_stats["skipped_count"], seq_stats["error_count"]),
+       f"script 20: the lane merge adds up to the serial run's stats "
+       f"({par_stats['total_scanned']} scanned, "
+       f"{par_stats['skipped_count']} skipped)")
+    ok(len(seen) == 14,
+       f"script 20: one tag read per album per run, both times "
+       f"({len(seen)} of 14)")
+    ok(t_par < t_seq * 0.6,
+       f"script 20: 7 albums x {LATENCY * 1000:.0f} ms of tag reads take "
+       f"{t_par:.2f} s with lanes vs {t_seq:.2f} s one artist at a time "
+       f"({t_seq / t_par:.1f}x)")
+
+
+# --------------------------------------------------------------------------- #
+# Script 1 — Format lyrics: the album pass reused nothing, so every container
+# was opened twice (once per file pass, once for MEDIA/SOURCE), and the albums
+# were found with a second walk of the library the file pass had already made.
+# --------------------------------------------------------------------------- #
+def check_lyrics_one_open_per_track(tmp):
+    """An album whose tags are already correct is read ONCE per track."""
+    from mlo import lyrics as mlo_lyrics
+
+    album = os.path.join(tmp, "lyrics_media")
+    os.makedirs(album)
+    for n in (1, 2):
+        make_flac(os.path.join(album, f"0{n} - Track.flac"), 1,
+                  {"TITLE": f"Track {n}", "ARTIST": "A", "ALBUM": "B",
+                   "TRACKNUMBER": str(n), "MEDIA": "Digital Media",
+                   "SOURCE": "Web"})
+
+    opens, restore = count_calls(mlo_lyrics, "AudioFile")
+    try:
+        stats = mlo_lyrics.run_format_lyrics(
+            cfg(music_folder=album, targets=[album]))
+    finally:
+        restore()
+
+    ok(len(opens) == 2,
+       f"script 1: one open per track for a 2-track album that needs no write "
+       f"(was 2 per track: the lyrics pass and then the MEDIA/SOURCE pass, "
+       f"measured {len(opens)})")
+    ok(stats["modified_count"] == 0 and stats["error_count"] == 0,
+       f"script 1: and the album is reported unused ({stats['modified_count']} "
+       f"modified, {stats['error_count']} failed)")
+
+
+def check_lyrics_album_pass_still_reads(tmp):
+    """A MEDIA/SOURCE pass over a folder whose files the file pass did NOT open
+    (a target that is one track of an album) still reads them: the answer comes
+    from the sibling, so the reuse must not become a blind spot."""
+    from mlo import lyrics as mlo_lyrics
+
+    album = os.path.join(tmp, "lyrics_media_partial")
+    os.makedirs(album)
+    one = make_flac(os.path.join(album, "01 - Track.flac"), 1,
+                    {"TITLE": "One", "ARTIST": "A", "ALBUM": "B",
+                     "TRACKNUMBER": "1", "MEDIA": "Digital Media"})
+    make_flac(os.path.join(album, "02 - Track.flac"), 1,
+              {"TITLE": "Two", "ARTIST": "A", "ALBUM": "B",
+               "TRACKNUMBER": "2", "MEDIA": "Digital Media", "SOURCE": "Web"})
+
+    mlo_lyrics.run_format_lyrics(
+        cfg(music_folder=album, targets=[one], fill_empty_source=True,
+            digital_media_source_value="CD"))
+
+    from mutagen.flac import FLAC
+    got = (FLAC(one).get("SOURCE") or [""])[0]
+    ok(got == "Web",
+       f"script 1: the SOURCE the album pass filled in is the sibling's, not "
+       f"the fallback (got {got!r})")
+
+
+# --------------------------------------------------------------------------- #
+# Script 10 — Format all: the prepared album cover was cached in a plain dict
+# that every pool thread read and wrote.
+# --------------------------------------------------------------------------- #
+def check_format_all_cover_prepared_once(tmp):
+    """The album's cover is read and prepared once, not once per track."""
+    if not HAS_PIL:
+        return skip("script 10: cover cache (Pillow missing)")
+    import time
+
+    from mlo import format_all
+
+    album = os.path.join(tmp, "formatall_cover_cache")
+    os.makedirs(album)
+    for n in range(1, 5):
+        make_flac(os.path.join(album, f"0{n} - Track.flac"), 1,
+                  {"TITLE": f"Track {n}", "ARTIST": "A", "ALBUM": "B",
+                   "TRACKNUMBER": str(n)})
+    make_image(os.path.join(album, "cover.jpg"), (600, 600))
+
+    real_prepare = format_all._prepare_embedded_cover
+    prepared = []
+
+    def slow_prepare(album_dir, config):
+        """The real work, with a window for the sibling tracks to race in."""
+        prepared.append(album_dir)
+        time.sleep(0.05)
+        return real_prepare(album_dir, config)
+
+    format_all._prepare_embedded_cover = slow_prepare
+    try:
+        format_all.run_format_all(
+            cfg(music_folder=album, targets=[album], embed_covers=True))
+    finally:
+        format_all._prepare_embedded_cover = real_prepare
+
+    ok(len(prepared) == 1,
+       f"script 10: the album cover is prepared ONCE for 4 tracks (the cache "
+       f"was shared unguarded, so each track could read it for itself; "
+       f"measured {len(prepared)}: {prepared})")
+
+
 def main():
     print("Script optimization audit (measurements, not claims)")
     tmp = tempfile.mkdtemp(prefix="mlo_script_opt_")
@@ -923,6 +1181,11 @@ def main():
         ("script 13 Fetch lyrics (lanes)", check_lyrics_fetch_concurrency),
         ("script 19 Artist images (lanes)", check_artist_image_lanes),
         ("script 18 Publish lyrics (lanes)", check_publish_concurrency),
+        ("script 9  AccurateRip (lanes)", check_accurip_album_lanes),
+        ("script 20 Scan library layout (lanes)", check_layout_scan_lanes),
+        ("script 1  Format lyrics (one open)", check_lyrics_one_open_per_track),
+        ("script 1  Format lyrics (album pass reads)", check_lyrics_album_pass_still_reads),
+        ("script 10 Format all (cover cache)", check_format_all_cover_prepared_once),
         ("all       atomic sidecar writes", check_fsync_dir),
     ]
     bad = 0

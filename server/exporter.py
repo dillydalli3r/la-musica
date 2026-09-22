@@ -9,14 +9,24 @@ MP3 player / DAP.
 
 Output layout options:
 
-* ``artist_album`` — "<Artist>/<Album>/NN - Title.<ext>" (default)
+* ``albumartist_album_disc`` — "<Album artist>/<Album>/D-NN Title.<ext>", the
+                     shipped default, spelled as the naming script
+                     "%albumartist%/%album%/%discnumber%-$num(%tracknumber%,2)
+                     %title%" (mlo.naming — the grammar the library's own
+                     organizer writes its paths with)
 * ``album``        — "<Album>/NN - Title.<ext>"
 * ``flat``         — "<Artist - NN - Title>.<ext>" in one folder
 * ``mirror``       — the track's relative path inside the music folder,
                      re-extensioned (keeps the library's own organization)
+* ``custom``       — the structure the user typed (``structure_script``), a
+                     naming script too, so the page offers one grammar
 
-Multi-disc albums get a "D-" prefix on the file name (the library's own
-"D-NN Title" convention), so two discs can never collide on "01 - Intro".
+``album`` and ``flat`` prefix a multi-disc album's file name with its disc
+number ("1-01 - Intro"): two discs must never collide on "01 - Intro". The
+shipped ``albumartist_album_disc`` writes the library's OWN file name instead
+— "1-01 Title", disc number included for a single-disc album as well, exactly
+as ``mlo.naming``'s default script does — so an exported tree reads like the
+library it was copied from.
 
 Compatibility options (all defaulted from ``export_*`` config keys, all
 overridable per run — see ``EXPORT_DEFAULTS``):
@@ -82,6 +92,7 @@ import time
 import zipfile
 
 from mlo import eq as eq_mod
+from mlo import naming
 from mlo.audio import AudioFile
 from mlo.naming import sanitize_path
 from mlo.paths import app_data_dir
@@ -504,16 +515,175 @@ def _tracknum(af):
     return num.zfill(2) if num.isdigit() else "00"
 
 
-def _target_relpath(path, af, structure, music_folder, ext, disc=""):
-    """Destination relative path for one track under the export root."""
-    stem = os.path.splitext(os.path.basename(path))[0]
-    artist = (af.get_tag("ALBUMARTIST") or af.get_tag("ARTIST") or "").strip() \
-        or (os.path.basename(os.path.dirname(os.path.dirname(path))) if structure != "flat" else "")
-    album = (af.get_tag("ALBUM") or "").strip() \
-        or (os.path.basename(os.path.dirname(path)) if structure != "flat" else "")
-    title = (af.get_tag("TITLE") or "").strip() or stem
-    nn = _tracknum(af)
+# --------------------------------------------------------------------------- #
+# Folder structures
+# --------------------------------------------------------------------------- #
+# A structure is a key of the Export page's dropdown. The shipped layout and
+# the user's own are naming SCRIPTS (mlo.naming — the grammar the library's own
+# organizer builds paths with), so a custom structure is the same kind of thing
+# the default is: one evaluator, one vocabulary and one set of rules for both.
+# The user's own script lives in the `export_structure_script` config key.
+DEFAULT_STRUCTURE = "albumartist_album_disc"
+STRUCTURE_SCRIPTS = {
+    # The library's own tree, stripped of what a device has no use for (the id
+    # brackets, the release-type/date parts of the album folder):
+    # ALBUMARTIST, never the track's own ARTIST — a compilation is ONE artist
+    # folder, not one per track — and the library's disc-numbered file name,
+    # "1-01 Title". %discnumber% is written for a single-disc album too
+    # (mlo.naming supplies "1" when the tag is missing, exactly as the
+    # library's default script does): an export then reads like the library it
+    # was copied from, and a two-disc album cannot collide on "01 - Intro".
+    "albumartist_album_disc": ("%albumartist%/%album%/"
+                               "%discnumber%-$num(%tracknumber%,2) %title%"),
+}
+# The dropdown value that means "the script the user typed".
+CUSTOM_STRUCTURE = "custom"
+# Every key the API accepts, in the order the Export page's dropdown shows
+# them: the shipped layout, the hand-built ones (which keep the exact spelling a
+# saved `export_structure` pins) and the user's own last.
+STRUCTURES = tuple(STRUCTURE_SCRIPTS) + ("album", "flat", "mirror", CUSTOM_STRUCTURE)
 
+# What the Export page's dropdown calls each one. The page renders THIS (see
+# structure_menu) rather than a list of its own: a structure the exporter would
+# refuse must not be on offer, and a label is the only place the shipped file
+# name is spelled out.
+STRUCTURE_LABELS = {
+    "albumartist_album_disc": "Album artist / Album / 1-01 Title",
+    "album": "Album / 01 - Title",
+    "flat": "Flat — one folder",
+    "mirror": "Mirror library layout",
+    CUSTOM_STRUCTURE: "Custom — your own tag fields…",
+}
+
+# The %fields% a structure script may use: every variable the naming grammar
+# can supply for one track. A custom structure is checked against this, and
+# the Export page lists it beside the field it types into.
+STRUCTURE_FIELDS = frozenset(naming.track_variables({}))
+
+# The pretend track a structure PREVIEW is evaluated on. Same sample, same
+# idea as the Settings naming-script preview (GET /api/naming/preview), so a
+# user comparing the two screens sees the same shapes.
+_PREVIEW_TAGS = {
+    "ALBUMARTIST": "System of a Down", "ARTIST": "System of a Down",
+    "ALBUM": "Toxicity", "DATE": "2001-09-04", "ORIGINALDATE": "2001-08-27",
+    "RELEASETYPE": "album", "RELEASECOUNTRY": "US", "MEDIA": "CD",
+    "CATALOGNUMBER": "CK 62240", "DISCNUMBER": "1", "TRACKNUMBER": "4",
+    "TITLE": "Psycho", "GENRE": "Alternative Metal",
+    "LABEL": "American Recordings",
+}
+
+
+def structure_menu():
+    """The Export page's folder-structure menu and the grammar a custom one is
+    written in: every key the page may send with the label to show it under,
+    plus the %fields% and $functions a script may use.
+
+    Served rather than hard-coded in the page so the dropdown, the field hint
+    and the validator cannot disagree — a structure offered by the UI but
+    refused by the run is exactly the drift this table prevents.
+    """
+    return {
+        "structures": [{"v": key, "label": STRUCTURE_LABELS[key]} for key in STRUCTURES],
+        "fields": sorted(STRUCTURE_FIELDS),
+        "functions": list(naming.FUNCTIONS),
+    }
+
+
+def script_for_structure(structure, typed=""):
+    """The naming script *structure* evaluates, or "" for a hand-built layout.
+
+    ``typed`` is what the user wrote in the custom field (the
+    ``export_structure_script`` config value); it is used only by the
+    ``custom`` structure."""
+    if str(structure or "").strip() == CUSTOM_STRUCTURE:
+        return str(typed or "").strip()
+    return STRUCTURE_SCRIPTS.get(str(structure or "").strip(), "")
+
+
+def structure_error(structure, script=""):
+    """The sentence that refuses a folder structure, or "" when it is usable.
+
+    Refused: a layout the app does not have, and a custom script that is
+    empty, names a %field% or $function the grammar does not implement, or
+    evaluates to nothing. Each of those would otherwise produce a broken tree
+    rather than an error — an unknown field reads as an empty tag (so its
+    folder silently disappears) and an empty script writes every file into the
+    export root under a name with no extension.
+    """
+    key = str(structure or "").strip()
+    if key != CUSTOM_STRUCTURE:
+        if key in STRUCTURES:
+            return ""
+        return ("unknown folder structure %r — pick one of: %s"
+                % (key, ", ".join(STRUCTURES)))
+    text = script_for_structure(key, script)
+    if not text:
+        return ("a custom folder structure needs a script — e.g. "
+                "%albumartist%/%album%/%discnumber%-$num(%tracknumber%,2) %title%")
+    fields, calls = naming.script_vocabulary(text)
+    unknown = sorted({f for f in fields if f not in STRUCTURE_FIELDS})
+    if unknown:
+        return ("the custom folder structure uses %%%s%%, which is not a field "
+                "this app knows — the fields are: %s"
+                % (unknown[0], ", ".join(sorted(STRUCTURE_FIELDS))))
+    unknown = sorted({c for c in calls if c not in naming.FUNCTIONS})
+    if unknown:
+        return ("the custom folder structure calls $%s(...), which is not a "
+                "function of the naming grammar — the functions are: %s"
+                % (unknown[0], ", ".join(naming.FUNCTIONS)))
+    if not naming.eval_script(text, naming.track_variables(_PREVIEW_TAGS)):
+        return ("the custom folder structure produced nothing for a normal "
+                "track — give it a field that is always there (%title%) or a "
+                "$if() fallback")
+    return ""
+
+
+def preview_structure(script, ext=""):
+    """``{ok, path, error}`` for a user-typed folder structure.
+
+    The path the sample track would land in (with the run's own extension on
+    the end), or the sentence that refuses it — the same validation and the
+    same evaluator the run itself uses, so the Export page can never preview a
+    structure that would be refused at the start of a run.
+    """
+    problem = structure_error(CUSTOM_STRUCTURE, script)
+    if problem:
+        return {"ok": False, "path": "", "error": problem}
+    path = naming.eval_script(str(script).strip(), naming.track_variables(_PREVIEW_TAGS))
+    return {"ok": True, "path": path + str(ext or ""), "error": ""}
+
+
+def _structure_variables(path, af):
+    """The naming variables for one export source.
+
+    The file's own tags (mlo.naming reads them by their semantic names), with
+    the export's fallbacks filled in for the ones the grammar reads: an export
+    is a copy service pointed at files the user picked, so an untagged file has
+    to land somewhere sensible — the artist and album folders it already sits
+    in stand in for the missing tags and its own file name for a missing
+    title, the way the hand-built layouts have always done it.
+    """
+    tags = dict(af.all_tags() or {})
+    folder = os.path.dirname(path)
+    if not str(tags.get("ALBUMARTIST") or "").strip() \
+            and not str(tags.get("ARTIST") or "").strip():
+        tags["ALBUMARTIST"] = os.path.basename(os.path.dirname(folder)) or "Unknown Artist"
+    if not str(tags.get("ALBUM") or "").strip():
+        tags["ALBUM"] = os.path.basename(folder) or "Unknown Album"
+    if not str(tags.get("TITLE") or "").strip():
+        tags["TITLE"] = os.path.splitext(os.path.basename(path))[0]
+    return naming.track_variables(tags)
+
+
+def _scripted_relpath(path, af, script, ext):
+    """One source's destination under a naming-script structure, or "" when
+    the script produced nothing for it (the run reports that file)."""
+    rel = naming.eval_script(script, _structure_variables(path, af))
+    return rel.replace("/", os.sep) + ext if rel else ""
+
+
+def _target_relpath(path, af, structure, music_folder, ext, disc="", script=""):
+    """Destination relative path for one track under the export root."""
     if structure == "mirror" and music_folder:
         try:
             rel = os.path.relpath(path, music_folder)
@@ -527,23 +697,31 @@ def _target_relpath(path, af, structure, music_folder, ext, disc=""):
             # became "_" (the whole tree flattened into a single file name).
             rel = (os.path.splitext(rel)[0] + ext).replace("\\", "/")
             return sanitize_path(rel).replace("/", os.sep)
-    if structure == "flat":
-        base = f"{disc}{nn} - {title}"
-        if artist:
-            base = f"{artist} - {base}"
-        return sanitize_path(f"{base}{ext}")
-    if structure == "album":
-        album = album or "Unknown Album"
-        return os.path.join(sanitize_path(album),
+    if structure in ("flat", "album"):
+        # The hand-built layouts, unchanged since they shipped: a saved
+        # `export_structure` pins their exact spelling, so they keep the
+        # folder-derived fallbacks for an untagged file and the " - " file name
+        # the library's own script does not use.
+        stem = os.path.splitext(os.path.basename(path))[0]
+        artist = (af.get_tag("ALBUMARTIST") or af.get_tag("ARTIST") or "").strip() \
+            or (os.path.basename(os.path.dirname(os.path.dirname(path)))
+                if structure != "flat" else "")
+        album = (af.get_tag("ALBUM") or "").strip() \
+            or (os.path.basename(os.path.dirname(path)) if structure != "flat" else "")
+        title = (af.get_tag("TITLE") or "").strip() or stem
+        nn = _tracknum(af)
+        if structure == "flat":
+            base = f"{disc}{nn} - {title}"
+            if artist:
+                base = f"{artist} - {base}"
+            return sanitize_path(f"{base}{ext}")
+        return os.path.join(sanitize_path(album or "Unknown Album"),
                             sanitize_path(f"{disc}{nn} - {title}{ext}"))
-    # artist_album (default) — fall back to folder-derived names so files
-    # with missing tags still export into a sensible layout.
-    artist = artist or "Unknown Artist"
-    album = album or "Unknown Album"
-    return os.path.join(
-        sanitize_path(artist), sanitize_path(album),
-        sanitize_path(f"{disc}{nn} - {title}{ext}"),
-    )
+    # albumartist_album_disc (the shipped default) and every custom structure
+    # are naming scripts: the tree is the grammar's business. The disc number
+    # is the script's own %discnumber% (always written, "1" when untagged), so
+    # the `disc` prefix the layouts above take is unused here.
+    return _scripted_relpath(path, af, script or STRUCTURE_SCRIPTS[DEFAULT_STRUCTURE], ext)
 
 
 def _preflight(paths):
@@ -1310,16 +1488,28 @@ def drop_zip(cfg, run_id):
 
 
 def export_tracks(cfg, paths, dest, subfolder="Music", codec="copy",
-                  quality="", structure="artist_album", **opts):
+                  quality="", structure="", structure_script="", **opts):
     """Run the export; returns a stats dict for the API response.
+
+    ``structure`` is one of ``STRUCTURES`` (empty = the shipped one) and
+    ``structure_script`` the naming script a ``custom`` structure evaluates.
 
     ``opts`` holds per-run overrides of the compatibility options (see
     ``EXPORT_DEFAULTS``); each falls back to its ``export_<name>`` config value.
 
     Raises ValueError when the destination is unusable in a way that would
-    destroy library data (it lies inside the music folder) — the caller
+    destroy library data (it lies inside the music folder), when the codec is
+    unknown, and when the folder structure cannot name a path — the caller
     turns that into a 4xx, and a run must never start."""
     opts = {k: v for k, v in opts.items() if v is not None}
+    structure = str(structure or "").strip() or DEFAULT_STRUCTURE
+    problem = structure_error(structure, structure_script)
+    if problem:
+        # Refused before the destination is created: a structure that cannot
+        # name a path would otherwise write into the root, or write nothing at
+        # all, and leave a tree behind that nobody asked for.
+        raise ValueError(problem)
+    script = script_for_structure(structure, structure_script)
     # The job this export belongs to (the route holds one, kind="export"), read
     # HERE: the ticks below come from pool threads, which are not inside it.
     # job_locks.publish then writes the in-progress row and the header bar from
@@ -1417,6 +1607,23 @@ def export_tracks(cfg, paths, dest, subfolder="Music", codec="copy",
                 "destination is inside the music folder — export to a device or a "
                 "folder outside the library")
         os.makedirs(root, exist_ok=True)
+
+    if script:
+        # The script must name a path for a REAL track, not only for the sample
+        # the preview uses: "%catalognumber%" produces a path for the sample and
+        # nothing at all for a library that has no catalog numbers. Checked
+        # once, up front, so a run refuses with a sentence instead of writing
+        # the whole selection into the export root.
+        try:
+            probe = AudioFile(paths[0])
+        except Exception:
+            probe = None
+        if probe is not None and probe.audio is not None and not _scripted_relpath(
+                paths[0], probe, script, ""):
+            raise ValueError(
+                f"the folder structure produced no path for "
+                f"{os.path.basename(paths[0])!r} — give it a field that is always "
+                "there (%title%) or a $if() fallback")
 
     pre = _preflight(paths)
     out["estimated_bytes"] = _estimate_bytes(codec, quality, paths, pre)
@@ -1522,7 +1729,14 @@ def export_tracks(cfg, paths, dest, subfolder="Music", codec="copy",
             disc = ""
             if pre["disc_albums"].get(album_dir):
                 disc = f"{_disc_of(af)}-"
-            rel = _target_relpath(path, af, structure, music_folder, target_ext, disc)
+            rel = _target_relpath(path, af, structure, music_folder, target_ext, disc, script)
+            if not rel:
+                # A script that names nothing for THIS file (a tag it needs is
+                # empty and it has no fallback): the file fails and says why,
+                # rather than landing in the export root under a bare ".mp3".
+                raise RuntimeError(
+                    "the folder structure produced no path for this file — add "
+                    f"a $if() fallback to {script!r}")
             dst = os.path.join(root, rel)
             os.makedirs(os.path.dirname(dst), exist_ok=True)
             seconds = pre["durations"].get(path) or _duration(af)

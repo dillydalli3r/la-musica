@@ -277,8 +277,8 @@ try:
     assert any("stripped" in w for w in applied["warnings"]), applied["warnings"]
 
     out_dir = os.path.join(DEST_APPLY, "Music", "Artist One", "Album A")
-    out_quiet = os.path.join(out_dir, "01 - Quiet.flac")
-    out_loud = os.path.join(out_dir, "02 - Loud.flac")
+    out_quiet = os.path.join(out_dir, "1-01 Quiet.flac")
+    out_loud = os.path.join(out_dir, "1-02 Loud.flac")
     assert os.path.isfile(out_quiet) and os.path.isfile(out_loud), os.listdir(out_dir)
     # FLAC→FLAC is normally a bit-exact copy; a filtering run has to re-encode,
     # which is what makes the gain audible at all.
@@ -339,7 +339,7 @@ try:
                                   replaygain_mode="apply", **BASE)
     assert solo["failed"] == 0 and solo["processed"] == 1, solo
     solo_lufs = lufs(os.path.join(DEST_ONE, "Music", "Artist One", "Album A",
-                                  "02 - Loud.flac"))
+                                  "1-02 Loud.flac"))
     print(f"    track gain: the same track alone lands on {solo_lufs:.2f} LUFS")
     assert abs(solo_lufs - RG2_REFERENCE_LUFS) < 0.7, solo_lufs
     assert abs(solo_lufs - app_loud) > 0.5, (solo_lufs, app_loud)
@@ -352,13 +352,13 @@ try:
     assert tagged["failed"] == 0, tagged["errors"]
     assert tagged["processed"] == 0 and tagged["replaygain_mode"] == "tags", tagged
     tagged_af = AudioFile(os.path.join(DEST_TAGS, "Music", "Artist One", "Album A",
-                                       "01 - Quiet.flac"))
+                                       "1-01 Quiet.flac"))
     for key in exporter._RG_TAGS:
         assert tagged_af.get_tag(key), (key, tagged_af.all_tags())
     # Writing tags is not rewriting audio: the export is the source's bytes (the
     # audio part of them) and it is not stamped as processed.
     assert exporter._processing_of(os.path.join(
-        DEST_TAGS, "Music", "Artist One", "Album A", "01 - Quiet.flac")) == ""
+        DEST_TAGS, "Music", "Artist One", "Album A", "1-01 Quiet.flac")) == ""
     assert not tagged["warnings"], tagged["warnings"]
 
     # ---------------------------------------------------- equalizer profile
@@ -380,8 +380,8 @@ try:
     assert equalised["eq_applied"] == 1 and equalised["processed"] == 1, equalised
     assert equalised["eq_profile"] == "test_bass", equalised
 
-    ref = os.path.join(DEST_NOEQ, "Music", "Artist One", "Album A", "02 - Loud.flac")
-    eqd = os.path.join(DEST_EQ, "Music", "Artist One", "Album A", "02 - Loud.flac")
+    ref = os.path.join(DEST_NOEQ, "Music", "Artist One", "Album A", "1-02 Loud.flac")
+    eqd = os.path.join(DEST_EQ, "Music", "Artist One", "Album A", "1-02 Loud.flac")
     assert os.path.getsize(ref) == os.path.getsize(loud), "no EQ stays a bit copy"
     low_ref, low_eq = band_lufs(ref, 40, 150), band_lufs(eqd, 40, 150)
     mid_ref, mid_eq = band_lufs(ref, 1000, 3000), band_lufs(eqd, 1000, 3000)
@@ -401,7 +401,7 @@ try:
     lines = open(manifest_path, encoding="utf-8").read().splitlines()
     assert len(lines) == 1, lines
     digest, rel = lines[0].split("  ", 1)
-    assert rel == "Artist One/Album A/02 - Loud.flac", rel
+    assert rel == "Artist One/Album A/1-02 Loud.flac", rel
     with open(ref, "rb") as f:
         assert hashlib.sha256(f.read()).hexdigest() == digest, lines
 
@@ -431,7 +431,7 @@ try:
                                        playlists=False, sidecars=False, verify=True)
     assert first_mp3["exported"] == 1 and first_mp3["eq_applied"] == 1, first_mp3
     mp3_out = os.path.join(DEST_MP3, "Music", "Artist One", "Album A",
-                           "02 - Loud.mp3")
+                           "1-02 Loud.mp3")
     assert exporter._processing_of(mp3_out) == "eq=test_bass", \
         AudioFile(mp3_out).all_tags()
     again_mp3 = exporter.export_tracks(CFG, [loud], DEST_MP3, codec="mp3",
@@ -547,7 +547,7 @@ try:
 
     # ---------------------------------------------------- zip target
     zip_body = {"paths": [quiet, loud], "dest": "", "target": "zip",
-                "codec": "flac", "quality": "", "structure": "artist_album",
+                "codec": "flac", "quality": "", "structure": exporter.DEFAULT_STRUCTURE,
                 "manifest": True, "playlists": True, "sidecars": False,
                 "embed_covers": False, "verify": True, "workers": 1}
     run = client.post("/api/export", json=zip_body)
@@ -569,8 +569,8 @@ try:
         names = sorted(zf.namelist())
         # The archive opens as the folder structure the run asked for — the
         # selection, its playlist and the checksum manifest, nothing else.
-        assert names == ["Artist One/Album A/01 - Quiet.flac",
-                         "Artist One/Album A/02 - Loud.flac",
+        assert names == ["Artist One/Album A/1-01 Quiet.flac",
+                         "Artist One/Album A/1-02 Loud.flac",
                          "Artist One/Album A/Album A.m3u8",
                          "all.m3u8", "checksums.sha256"], names
         manifest = zf.read("checksums.sha256").decode("utf-8").splitlines()
@@ -580,7 +580,7 @@ try:
             assert rel in names, (rel, names)
             assert hashlib.sha256(zf.read(rel)).hexdigest() == digest, rel
         # The audio in the archive is the real, playable export.
-        assert zf.read("Artist One/Album A/01 - Quiet.flac")[:4] == b"fLaC"
+        assert zf.read("Artist One/Album A/1-01 Quiet.flac")[:4] == b"fLaC"
     print(f"    zip: {first['name']} ({first['bytes']} bytes) members {names}")
 
     # A new export replaces the kept one, and the old id stops answering.

@@ -20,7 +20,12 @@ every external source that can speak about genres:
   on — seeded by that entity's own MusicBrainz id when its tags carry one and
   by artist+title when they do not; an entity shelf is what the page is LIKE,
   so a row the library owns is KEPT and marked (`owned`, `path`) rather than
-  dropped, and every source that cannot answer about an entity says why.
+  dropped. A source whose entity feed answers a page of ANOTHER kind — Last.fm
+  states similar ARTISTS and similar TRACKS, ListenBrainz only the artists one,
+  Discogs and RateYourMusic state no similarity at all — is NOT a failure
+  there: it is left out of the asking and named once, compactly, in
+  `not_applicable` (see `entity_limit`), because a feed a provider does not
+  publish is a fact about the provider, not about this request.
 * **charts** — what the sources RANK, for one window (all-time / this year /
   this month / this week) and one kind. Unlike the two browse endpoints the
   rows are NOT merged: a chart's rank is its data, so each source's rows keep
@@ -34,10 +39,11 @@ every external source that can speak about genres:
 
 `SOURCES` below is the ONE place a source is described: its label, what it can
 answer for which kind, whether it publishes a genre list or a recommendation
-feed, which kinds it recommends for a genre seed (`rec_kinds`) and for ONE
-entity (`entity_kinds` — the same list unless its entity answer is not a genre
-search), which kinds it charts and for which windows, and the credential it
-needs.
+feed, which kinds it recommends for a genre seed (`rec_kinds`) and what it can
+say about ONE entity (`entity_kinds` — the ROW kinds its entity feed produces,
+which is its `rec_kinds` only where the two coincide; `entity_limit` states
+which PAGE each feed is seeded by), which kinds it charts and for which windows,
+and the credential it needs.
 The endpoints are driven from it, so a source added there cannot be half-wired —
 and `sources_health` reads it so the Sources panel probes exactly the same set.
 
@@ -54,7 +60,11 @@ Honesty rules, which every answer here follows:
 * a source that cannot answer a request at all (Deezer files music under 22
   broad genres, TheAudioDB publishes no browse) says so in `notes`, as does a
   chart source asked for a window it does not publish, instead of returning
-  rows it cannot stand behind;
+  rows it cannot stand behind. An ENTITY shelf is the one place this does not
+  apply, and the reason is not a courtesy: a source whose entity feed answers a
+  page of ANOTHER kind cannot answer by construction, so it is not asked and
+  not reported as a skip — it goes to `not_applicable` as information (see
+  `entity_limit`);
 * an unknown genre or source is an EMPTY list, not an error — and never a
   guessed row;
 * counts only ever come from the library: a source that merely names a genre
@@ -140,10 +150,17 @@ def _source(sid, label, note, kinds=(), *, rec_kinds=(), entity_kinds=None,
 # the page. `kinds` is what the source can LIST for a genre; `rec_kinds` is
 # what it can RECOMMEND for a GENRE seed (ListenBrainz has no genre filter at
 # all, so it lists nothing but still recommends through its similar-artists
-# feed and charts); `entity_kinds` is what it can say about ONE ENTITY — the
-# page a shelf sits on — and only differs where a source's entity answer is
-# NOT a genre search: Spotify's genre search serves albums only, while its
-# artist-level albums and top tracks answer an album and a track page, and
+# feed and charts); `entity_kinds` is the ROW kinds a source's entity feed
+# produces about the page a shelf sits on, and it is separate from `rec_kinds`
+# wherever a source's entity answer is not a genre search at all: Spotify's
+# genre search serves albums only while its artist-level albums and top tracks
+# answer an album and a track page, Last.fm states similar ARTISTS and similar
+# TRACKS (never a similar-album feed, so an album page cannot be answered at
+# all), ListenBrainz publishes only the artists one, and Discogs — a release
+# browse by style — has no similar-entity feed in the first place. Which PAGE
+# seeds each of those feeds is the other half of the rule and lives in
+# `_ENTITY_SEED`/`entity_limit` below, which is what keeps a source out of a
+# page it cannot answer AND says so in the shelf's own words;
 # neither Apple nor Spotify publishes a related-ARTIST feed at all;
 # `charts` is what it can RANK for the Charts page, with the windows it really
 # publishes in `chart_periods` — a source is asked for a period it does not
@@ -176,19 +193,20 @@ SOURCES = (
             "Tag charts: the most-listened albums, artists and tracks under a "
             "tag, its top tag list, similar artists/tracks, and its sitewide "
             "all-time charts.",
-            KINDS, rec_kinds=KINDS, genres=True, needs=("lastfm_api_key",),
+            KINDS, rec_kinds=KINDS, entity_kinds=("artists", "tracks"),
+            genres=True, needs=("lastfm_api_key",),
             charts=KINDS, chart_periods=("all",)),
     _source("listenbrainz", "ListenBrainz",
             "Similar artists (Labs, keyless) and the sitewide most-listened "
             "charts, with this week / this month / this year / all-time "
             "windows. LB Radio itself needs a user token (verified 401), so it "
             "is not wired, and there is no keyless genre filter.",
-            (), rec_kinds=KINDS,
+            (), rec_kinds=KINDS, entity_kinds=("artists",),
             charts=KINDS, chart_periods=("all", "year", "month", "week")),
     _source("discogs", "Discogs",
             "Release browse by style/genre. Anonymous search answers it; a "
             "discogs_token only raises its rate limit.",
-            ("albums",), rec_kinds=("albums",)),
+            ("albums",), rec_kinds=("albums",), entity_kinds=()),
     _source("wikidata", "Wikidata",
             "States an entity's genres (P136) for a known artist or release — "
             "a description source, never a list."),
@@ -254,10 +272,12 @@ class _Asked:
     """Who was asked, and what each one said when it could not answer.
 
     `ids` is the answer's `sources_asked`; `notes` holds ONLY the sources that
-    did not answer — `skipped: …` for a missing credential or a capability the
-    source does not have, `failed: …` for a call that raised. A source that
+    did not answer — `skipped: …` for a missing credential or an answer the
+    source did not have, `failed: …` for a call that raised. A source that
     answered has no note, so an empty note map means every asked source
-    answered."""
+    answered. A source that was not asked because a feed for it does not exist
+    is NOT here: an entity shelf reports that in `not_applicable` (see
+    `entity_limit`)."""
 
     def __init__(self):
         self.ids = []
@@ -984,16 +1004,88 @@ def _recommend_rows(sid, kind, cfg, genres, artists, limit, seed):
     raise _Skip("no recommendations from this source")
 
 
-# What a source that CANNOT answer about an entity says instead: one honest
-# sentence each, kept beside the registry so a reader of `notes` learns the
-# provider's own limit instead of guessing from an empty list. A source that
-# declares no entity capability is never asked at all; anything not named here
-# and not handled below falls through to the generic sentence. MusicBrainz and
-# Spotify used to be listed here and are implemented instead — a note is for a
-# source that HAS no such feed, not for one nobody wrote the call for.
-_ENTITY_NOTES = {
+# Which PAGE an entity feed is seeded by, where that is not the page it
+# produces rows about: a similar-TRACKS feed is asked about a track, never
+# about the album that contains it, and RateYourMusic's chart is narrowed by
+# an ARTIST, so the one page it answers is an artist's own ranked songs. A page
+# of another kind cannot be answered by such a feed AT ALL — which is a fact
+# about the provider, not a failure of the request, and `entity_limit` below
+# reports it as information rather than as a `skipped:` note. A source with no
+# entry here is seeded by the page it answers about (every artist's-own-records
+# bridge is).
+_ENTITY_SEED = {"lastfm": {"artists": "artist", "tracks": "track"},
+                "rym": {"tracks": "artist"}}
+
+# A page kind as the short marker says it — PAGE words, not row kinds: the
+# marker tells the reader which PAGE a source can be asked about.
+_PAGE_WORD = {"artists": "artist", "albums": "album", "tracks": "track"}
+
+# The full sentence for a source that publishes no feed for the kind asked
+# about, in that provider's own terms where one is already written down here
+# (`%s` is the ROW kind, upper-cased: the sentences are the ones these sources
+# were reported with before this rule existed, so nothing a reader learned
+# changes). A source with no entry gets the generic sentence below.
+_ENTITY_FEEDS = {
+    "lastfm": "Last.fm's entity feeds are similar ARTISTS and similar "
+              "TRACKS — it has no similar-%s feed",
+    "listenbrainz": "ListenBrainz's Labs feed is similar ARTISTS — it "
+                    "publishes no similar-%s feed",
     "discogs": "Discogs browses by style, and publishes no similar-entity feed",
 }
+
+
+def _page_words(kinds):
+    """`artist & track` for ("artists", "tracks") — the page kinds a feed
+    answers, as the short marker names them."""
+    return " & ".join(_PAGE_WORD.get(kind, kind) for kind in kinds)
+
+
+def _article(kind):
+    """`an` for the page kinds that start with a vowel ("this is an ALBUM
+    page"), so a sentence about a page never reads like a template."""
+    return "an" if kind[:1].lower() in "aeiou" else "a"
+
+
+def entity_limit(spec, seed_kind, kind):
+    """(short, why) when this source cannot answer about THIS page, else ("", "").
+
+    `short` is the compact marker printed beside the source's name ("artist
+    pages only", "no similar-entity feed"); `why` is one full sentence for the
+    tooltip. This is the ONE place an entity feed's limits are stated, and it
+    is read twice: `recommended_payload` leaves such a source out of the asking
+    (there is no request to make — a similar-artists feed cannot be asked about
+    an album), and the shelf reports it in `not_applicable`, as INFORMATION. A
+    source that cannot answer by construction is never a failure, and a
+    sentence longer than the pill it sits in is never a reason to call it one.
+    """
+    sid = spec["id"]
+    if kind in spec["entity_kinds"]:
+        # The ROW kind is one this feed produces; whether THIS page can seed it
+        # is the remaining question (see `_ENTITY_SEED`).
+        need = _ENTITY_SEED.get(sid, {}).get(kind)
+        if not need or need == seed_kind:
+            return "", ""
+        if sid == CHART_FIRST:
+            # Its chart filter IS its feed: a chart narrowed by an artist is
+            # not a similarity claim about whoever is being read.
+            return ("%s pages only" % _page_words((need,)),
+                    "RateYourMusic charts filter by GENRE and by ARTIST — it "
+                    "states no similar-%s feed" % kind)
+        return ("%s pages only" % _page_words((need,)),
+                "%s's similar-%s feed is asked about %s %s page — this is %s %s "
+                "page" % (spec["label"], kind.upper(), _article(need), need,
+                          _article(seed_kind), seed_kind))
+    short = ("no similar-entity feed" if not spec["entity_kinds"]
+             else "%s pages only" % _page_words(spec["entity_kinds"]))
+    said = _ENTITY_FEEDS.get(sid)
+    if said:
+        return short, (said % kind.upper() if "%s" in said else said)
+    if spec["entity_kinds"]:
+        return short, ("%s's entity feed answers %s pages — it publishes no "
+                       "similar-%s feed"
+                       % (spec["label"], _page_words(spec["entity_kinds"]),
+                          kind.upper()))
+    return short, "%s publishes no similar-entity feed" % spec["label"]
 
 
 def entity_seed(seed_kind, mbid="", name="", artist=""):
@@ -1050,8 +1142,10 @@ def _entity_rows(sid, kind, cfg, seed, limit):
     list is the bridge to rows of another kind (their albums, their top
     tracks) — never a genre chart or a sitewide chart passed off as "like this
     page". Every row's reason names the provider and the relationship it
-    states, and a source with no entity feed at all raises `_Skip` with its own
-    sentence instead of returning nothing quietly."""
+    states. The caller asks only about pages this source's feed can be seeded
+    by (`entity_limit`), so a `_Skip` raised HERE is an answer it did not have
+    — a name nothing resolves, a provider that knows no such artist — never a
+    capability the provider does not publish."""
     rows = []
     by = seed["artist"] or seed["name"]
 
@@ -1176,26 +1270,26 @@ def _entity_rows(sid, kind, cfg, seed, limit):
         return rows
 
     if sid == "lastfm":
-        if kind == "artists" and seed["kind"] == "artist":
+        # Two feeds, and ONCE EACH: its similar-artists feed is seeded by an
+        # artist page and its similar-tracks feed by a track page — the
+        # capability gate (`entity_limit`) has already refused every page that
+        # cannot seed the one this kind asks for, so there is no third case to
+        # report here.
+        if kind == "artists":
             take(discovery.lastfm_similar_artists(seed["name"], limit, cfg=cfg),
                  "sounds like %s (Last.fm)" % seed["name"])
-        elif kind == "tracks" and seed["kind"] == "track":
+        else:
             take(discovery.lastfm_similar_tracks(seed["artist"], seed["name"],
                                                  limit, cfg=cfg),
                  "sounds like %s (Last.fm)" % seed["name"])
-        else:
-            raise _Skip("Last.fm's entity feeds are similar ARTISTS and similar "
-                        "TRACKS — it has no similar-%s feed" % kind)
         return rows
 
     if sid == "listenbrainz":
-        if kind != "artists":
-            raise _Skip("ListenBrainz's Labs feed is similar ARTISTS — it "
-                        "publishes no similar-%s feed" % kind)
         # Labs is MBID-native, and a page carrying no id is resolved by NAME
         # through MusicBrainz first (the same resolve the library-seeded shelf
         # uses). A name that resolves to nothing says so, rather than handing
-        # back another artist's neighbours.
+        # back another artist's neighbours. Only similar ARTISTS exists, which
+        # the gate has already checked this page for.
         mbid = seed["mbid"] if seed["kind"] == "artist" else ""
         mbid = mbid or discovery.resolve_artist_mbid(by, cfg)
         if not mbid:
@@ -1213,19 +1307,12 @@ def _entity_rows(sid, kind, cfg, seed, limit):
         # Apple's own-artist bridges make. An artist shelf is left to the
         # sources that DO publish a related feed (this source is not asked
         # about one: see `entity_kinds`).
-        if kind == "albums":
-            found = discovery.spotify_artist_albums(by, limit, cfg=cfg)
-            if not found:
-                raise _Skip('Spotify knows no artist called "%s"' % by)
-            take(found, "more from %s (Spotify)" % by)
-        elif kind == "tracks":
-            found = discovery.spotify_artist_top_tracks(by, limit, cfg=cfg)
-            if not found:
-                raise _Skip('Spotify knows no artist called "%s"' % by)
-            take(found, "more from %s (Spotify)" % by)
-        else:
-            raise _Skip("Spotify publishes no similar-artist feed — it states "
-                        "an artist's own albums and top tracks")
+        found = (discovery.spotify_artist_albums(by, limit, cfg=cfg)
+                 if kind == "albums"
+                 else discovery.spotify_artist_top_tracks(by, limit, cfg=cfg))
+        if not found:
+            raise _Skip('Spotify knows no artist called "%s"' % by)
+        take(found, "more from %s (Spotify)" % by)
         return rows
 
     if sid == CHART_FIRST:
@@ -1234,14 +1321,9 @@ def _entity_rows(sid, kind, cfg, seed, limit):
         # narrowed to `/a:<artist>/`. There is no similar-track feed and no
         # similar-album feed to ask about an album or a track page, and RYM's
         # album charts are a different page shape this scraper does not read,
-        # so an artist page is the one entity it answers for (see the registry's
-        # `entity_kinds`, which is what keeps the rest from asking at all).
-        if kind not in integrations.RYM_CHART_KINDS:
-            raise _Skip("RateYourMusic charts only: "
-                        + ", ".join(integrations.RYM_CHART_KINDS))
-        if seed["kind"] != "artist":
-            raise _Skip("RateYourMusic charts filter by GENRE and by ARTIST — "
-                        "it states no similar-%s feed" % kind)
+        # so an artist page is the one entity it answers for — its
+        # `entity_kinds` is RYM_CHART_KINDS in full, and the gate has refused
+        # every page that is not that artist's own.
         got = integrations.rym_charts(kind=kind, period="all", limit=limit,
                                      cfg=cfg, artist=by)
         # Rows are kept only when RYM's OWN artist field is the name asked for:
@@ -1257,7 +1339,11 @@ def _entity_rows(sid, kind, cfg, seed, limit):
         take(found, "more from %s (RateYourMusic chart)" % by)
         return rows
 
-    raise _Skip(_ENTITY_NOTES.get(sid) or "no entity recommendations from this source")
+    # A source that declares an entity capability with no call wired above: a
+    # bug in this module, reported rather than quietly dropped (every OTHER
+    # reason a source is not asked is the capability gate's, and it says so in
+    # `not_applicable` before this is reached).
+    raise _Skip("no entity recommendations from this source")
 
 
 def recommended_payload(cfg=None, seed="library", kind="albums", limit=20, lib=None,
@@ -1279,8 +1365,12 @@ def recommended_payload(cfg=None, seed="library", kind="albums", limit=20, lib=N
     `entity_seed`). An entity shelf KEEPS the rows the library owns — it is a
     statement of what this page is like, so "you already have this one" is an
     answer, and the row carries its library `path` for it — and every source
-    that cannot speak about an entity is listed in `notes` with its own
-    reason."""
+    that was asked and could not answer is listed in `notes` with its own
+    reason. A source whose entity feed cannot be seeded by this page at all is
+    NOT asked and NOT in `notes`: it is reported once, compactly, in
+    `not_applicable` (`{id, label, short, why}` — the short marker beside the
+    name, the full sentence for the tooltip), because a limit the provider
+    publishes is information, not a failed request."""
     seed = str(seed or "library").strip() or "library"
     kind = str(kind or "").strip().lower()
     limit = max(1, min(MAX_LIMIT, int(limit or 20)))
@@ -1295,10 +1385,26 @@ def recommended_payload(cfg=None, seed="library", kind="albums", limit=20, lib=N
             # rows: an empty shelf that explains itself beats a shelf about
             # another page.
             return {"items": [], "sources_asked": [], "basis": basis,
-                    "notes": {"recommended": "skipped: %s" % why}}
+                    "notes": {"recommended": "skipped: %s" % why},
+                    "not_applicable": []}
         rows = []
+        # Sources that cannot speak about THIS page at all. They are NOT asked
+        # and NOT a `skipped:` note: a feed a provider does not publish is not
+        # a failure of this request, and an amber chip whose sentence is longer
+        # than its pill reads as one. They are reported once, compactly, in
+        # `not_applicable` — the short marker beside the name, the provider's
+        # own sentence in the tooltip — which is the one surface that cannot be
+        # mistaken for an error.
+        not_applicable = []
         for spec in SOURCES:
-            if kind not in spec["entity_kinds"]:
+            if kind not in spec["rec_kinds"] and kind not in spec["entity_kinds"]:
+                # Not part of this kind's shelf conversation at all (a chart
+                # source, a description source): nothing to say about it.
+                continue
+            short, cannot = entity_limit(spec, entity["kind"], kind)
+            if cannot:
+                not_applicable.append({"id": spec["id"], "label": spec["label"],
+                                       "short": short, "why": cannot})
                 continue
             asked.ask(spec["id"])
             skip = _source_skip(spec, cfg)
@@ -1326,7 +1432,7 @@ def recommended_payload(cfg=None, seed="library", kind="albums", limit=20, lib=N
         if not items:
             notes["recommended"] = _nothing_note(cfg, kind, "this %s" % entity["kind"])
         return {"items": items, "sources_asked": asked.ids, "notes": notes,
-                "basis": basis}
+                "basis": basis, "not_applicable": not_applicable}
 
     if seed.lower() == "library":
         genres = _top_genres(index, SEED_GENRES)

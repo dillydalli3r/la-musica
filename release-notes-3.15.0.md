@@ -57,6 +57,23 @@ to the download phase's existing switches. The add itself (`album_pending`) had
 no switch and no OS notification; it is in the tray for every kind, and the new
 keys are in the wizard's group too.
 
+## What an import stops inheriting from the peer
+
+An import decides four families for itself — the lyrics the fetch found, the
+release's genres, the advisory pipeline's rating and the album's own cover art —
+and until now it *filled* those tags, so a download arrived carrying the peer's
+values and kept every one of them: the peer's genre, its rating, its lyric (the
+fetch skips a track that already has one) and the art baked into its files.
+
+`server/imports.py::drop_arrived_values` is now the import's first tag-writing
+pass, before the family steps and before the chain: it empties those four slots,
+which is what lets the writers — unchanged, still fill-only, so a user's own edit
+keeps surviving their `/run` and the wizard's steps — land what the import found.
+A family kept in **Settings → Import pipeline → Decide by hand** is left exactly
+as it arrived, and **`import_keep_synced_lyrics`** (new, off) is the lyric
+family's one exception: a track whose lyric already carries timestamps keeps it
+and the fetch skips that track.
+
 ## Smaller, and just as visible
 
 - **An alias is a translation, not decoration.** MusicBrainz flags レディオヘッド

@@ -177,12 +177,21 @@ class _SettingsPageState extends State<SettingsPage> {
         config['library_codec_optimize']?.toString() ?? 'lossless_to_lossy';
   }
 
-  Future<void> _save(String what, Map<String, dynamic> patch) async {
+  Future<void> _save(
+    String what,
+    Map<String, dynamic> patch, {
+    Future<void> Function()? after,
+  }) async {
     final state = AppScope.of(context);
     final messenger = ScaffoldMessenger.of(context);
     setState(() => _saving = true);
     try {
       await state.saveConfig(patch);
+      // A setting the PLAYER reads has to reach the decoder that is already
+      // running, not only the next track it loads — `after` is where such a
+      // save re-applies itself (ReplayGain calls the playback controller's
+      // refreshGain, which had no caller at all before this).
+      if (after != null) await after();
       messenger.showSnackBar(SnackBar(content: Text('$what saved.')));
     } on ApiException catch (e) {
       messenger.showSnackBar(SnackBar(content: Text(e.message)));
@@ -208,7 +217,7 @@ class _SettingsPageState extends State<SettingsPage> {
       'replaygain_preamp_db': preamp,
       'replaygain_analyze_missing': _measureMissing,
       'replaygain_clip_protection': _clipProtection,
-    });
+    }, after: AppScope.playbackOf(context).refreshGain);
   }
 
   void _saveTagging() => _save('Tagging', {
@@ -325,15 +334,34 @@ class _SettingsPageState extends State<SettingsPage> {
             child: _labeled(
               'Gain mode',
               muted,
-              SegmentedButton<String>(
-                segments: const [
-                  ButtonSegment(value: 'track', label: Text('Track')),
-                  ButtonSegment(value: 'album', label: Text('Album')),
-                  ButtonSegment(value: 'off', label: Text('Off')),
+              Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  SegmentedButton<String>(
+                    segments: const [
+                      ButtonSegment(value: 'track', label: Text('Track')),
+                      ButtonSegment(value: 'album', label: Text('Album')),
+                      ButtonSegment(value: 'off', label: Text('Off')),
+                    ],
+                    selected: {_rgMode},
+                    onSelectionChanged: (selection) =>
+                        setState(() => _rgMode = selection.first),
+                  ),
+                  // The degradation has to be visible rather than silent: album
+                  // gain comes from REPLAYGAIN_ALBUM_GAIN, and an album whose
+                  // files carry none (or were measured on the fly, which has no
+                  // album pass) is normalised track by track — the player's own
+                  // readout names the fallback when it happens.
+                  if (_rgMode == 'album')
+                    const Padding(
+                      padding: EdgeInsets.only(top: 8),
+                      child: Text(
+                        'Album gain comes from the REPLAYGAIN_ALBUM_GAIN tags. An album that '
+                        'carries none falls back to each track\'s own gain, and the player says so.',
+                        style: TextStyle(fontSize: 11),
+                      ),
+                    ),
                 ],
-                selected: {_rgMode},
-                onSelectionChanged: (selection) =>
-                    setState(() => _rgMode = selection.first),
               ),
             ),
           ),

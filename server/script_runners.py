@@ -338,35 +338,41 @@ def _apply_force(cfg, force, sid=None):
 # --------------------------------------------------------------------------- #
 # A runner's own bar reaches the UI header through ONE process-wide hook
 # (``mlo.stats.progress_hook`` → server/main.py's relay → the WebSocket the bar
-# is drawn from), and a script REPLACES that hook while it runs so the runner's
-# own ticks are re-labelled as this run's step. Two chains used to be
-# impossible (one process-wide run lock), so a plain install/restore was
-# enough. Chains over DISJOINT albums may now overlap, and then two runs have
-# ticks in flight at once, so the installed hook is one dispatcher and the
-# thread a frame arrives on is what says which run it belongs to (every runner
-# ticks its bar from the thread that called it — the same thread that claimed
-# the bar). Only the run that has been in flight longest paints the header: the
-# bar is a single line, and two albums' numbers interleaved in it would be a
-# lie about both. Every run still writes its own in-progress row — that one is
-# keyed by job (``job_locks.publish(job=…)``) — so the run that does not own
-# the bar is still listed, with its own progress.
-_bars: dict[int, list] = {}       # chain thread id -> its emitters, innermost last
+# is drawn from), and a script used to REPLACE that hook while it ran so the
+# runner's ticks came out labelled as this run's step. Two chains were
+# impossible then (one process-wide run lock), so a plain install/restore was
+# enough and nothing had to say which run a frame belonged to. Chains over
+# disjoint albums may now overlap, so the installed hook is one dispatcher and
+# the THREAD a frame arrives on is what identifies its run: a run is registered
+# for the whole chain (every runner ticks its bar from the thread that called
+# it, and the chain's own step announcements come from that thread too), never
+# for one script — a step that never entered its runner still has to move the
+# header, and a frame published between two scripts has to stay this run's.
+#
+# Only the run that has been in flight longest paints the header: the bar is a
+# single line, and two albums' numbers interleaved in it would be a lie about
+# both. Every run keeps writing its own in-progress ROW, which is keyed by job
+# (``job_locks.publish(job=…)``) and therefore never needs guessing.
+#
+# honey: one run per thread. A chain started from inside another chain's script
+# would take that thread's slot (`run_chain` is called by `/api/run`, an import
+# and the bulk queue — each from its own thread — so nothing does).
+_bars: dict[int, dict] = {}       # chain thread id -> that run's bar context
 _bars_lock = threading.Lock()
-_bar_base = None                  # the hook installed before the first claim
+_bar_base = None                  # the hook installed before the first run claimed the bar
 
 
 def _bar_dispatch(done, total, desc):
-    """Route one runner frame to the run that is asking for it.
+    """Send one runner frame to the run whose thread it arrived on.
 
-    A frame from a thread no run is registered on (a runner that lets a pool
-    thread tick a shared bar) goes to the run in flight longest instead of
-    being dropped: the alternative freezes a bar that is still working, and the
-    row the frame also carries is keyed by job either way.
+    A frame from a thread no run is registered on — a runner that lets a pool
+    thread tick a bar shared with it — is DROPPED: with two runs in flight
+    there is nothing that says whose it was, and a number painted onto the
+    wrong run's bar (or row) is worse than a missing tick.
     """
     with _bars_lock:
-        ident = threading.get_ident()
-        stack = _bars.get(ident) or next(iter(_bars.values()), None)
-        emit = stack[-1] if stack else None
+        ctx = _bars.get(threading.get_ident())
+    emit = (ctx or {}).get("emit")
     if emit is not None:
         emit(done, total, desc)
 
@@ -377,56 +383,85 @@ def _bar_dispatch(done, total, desc):
 _bar_dispatch._mlo_chain = True
 
 
-def _bar_enter(emit):
-    """Claim the calling thread's bar slot, installing the dispatcher if it is
-    the first claim.
+def _bar_context():
+    """A fresh bar context — one per RUN (see run_chain), not per script."""
+    return {"joined": False, "ident": None, "emit": None, "publish": None}
 
-    The hook the dispatcher replaces is remembered ONCE, by the first script in
-    flight, and restored by the last one out. Capturing it per script instead
-    (what the single-run swap did) is what would hand a second, overlapping
-    chain the first chain's own wrapper as its "relay": its frames would be
-    re-labelled as the other run's step, and once both were done the relay
-    stayed replaced by a wrapper whose run had finished.
+
+def _bar_attach(bar, emit, publish):
+    """Put this run on the header bar, with *emit* handling its runner frames.
+
+    *emit* re-labels a runner's own tick as this script's step; *publish* is
+    the run's frame writer (``job_locks.publish`` with this run's job and the
+    bar relay it is entitled to), which is what a frame from the CHAIN itself —
+    a step that never entered its runner — goes through.
+
+    The hook the dispatcher replaces is remembered ONCE, by the first run in
+    flight, and restored by the last one out. Capturing it per script (what the
+    single-run swap did) is what would hand a second, overlapping chain the
+    first chain's own wrapper as its "relay": its frames would be re-labelled
+    as the other run's step, and once both were done the relay stayed replaced
+    by a wrapper whose run had finished.
     """
     global _bar_base
-    ident = threading.get_ident()
     with _bars_lock:
         if not _bars:
             _bar_base = getattr(mlo_stats, "progress_hook", None)
             mlo_stats.progress_hook = _bar_dispatch
-        _bars.setdefault(ident, []).append(emit)
+        bar["joined"] = True
+        bar["ident"] = threading.get_ident()
+        bar["emit"] = emit
+        bar["publish"] = publish
+        _bars[bar["ident"]] = bar
 
 
-def _bar_leave():
-    """Give up the calling thread's bar slot; the last one out puts the relay back."""
+def _bar_release(bar):
+    """Take this run off the bar; the last run out puts the relay back.
+
+    Safe on a run that never attached (a headless caller has no bar to give up)
+    and safe to call twice."""
     global _bar_base
-    ident = threading.get_ident()
     with _bars_lock:
-        stack = _bars.get(ident)
-        if stack:
-            stack.pop()
-            if not stack:
-                del _bars[ident]
-        if not _bars:
+        if bar.get("joined") and _bars.get(bar["ident"]) is bar:
+            del _bars[bar["ident"]]
+        was = bar.get("joined")
+        bar["joined"] = False
+        if was and not _bars:
             mlo_stats.progress_hook = _bar_base
 
 
-def _bar_relay(ident):
-    """The hook a frame from thread *ident* may paint the header bar with.
+def _bar_relay(bar):
+    """The hook this run may paint the header bar with.
 
-    The run in flight longest is the one the header follows, from the first
-    frame of its first script to the last of its last, so two chains never
-    swap the line back and forth; the other runs get ``_no_bar`` (their frames
-    still reach their own in-progress row). A missing or non-callable base —
-    a suite that runs chains with no relay at all — is no bar for anyone, which
-    is also what keeps a frame from being handed back to the dispatcher that
-    called it (the recursion this used to swallow).
+    The run in flight longest owns the bar: the header follows it from its
+    first frame to its last instead of switching between two runs, and the
+    others get ``_no_bar`` — their frames still reach their own in-progress
+    row, which is the surface that names one run at a time. A missing or
+    non-callable base (a suite running chains with no relay at all) is no bar
+    for anyone, which is also what keeps a frame from being handed back to the
+    dispatcher that called it (the recursion this used to swallow).
     """
     with _bars_lock:
         owner, base = next(iter(_bars), None), _bar_base
-    if owner == ident and callable(base):
+    if bar.get("ident") == owner and callable(base):
         return base
     return _no_bar
+
+
+def _bar_frame(bar, done, total, text, job=None, steps=None):
+    """One frame from the RUN itself, not from a script's bar.
+
+    A step that never entered its runner (a switched-off feature, an
+    unavailable module) has no script bar to be labelled by, so it goes
+    through the run's own frame writer while it has one — attributed to this
+    run and painted only if it owns the bar — and writes its in-progress row
+    alone when it has none (a chain that never got as far as a runner).
+    """
+    publish = (bar or {}).get("publish")
+    if publish is not None:
+        publish(done, total, text, steps)
+        return
+    job_locks.publish(done, total, text, steps, job=job)
 
 
 def _no_bar(*_args, **_kwargs):
@@ -434,7 +469,7 @@ def _no_bar(*_args, **_kwargs):
     return None
 
 
-def _run_with_progress(runner, cfg, label, chain=None, job=None):
+def _run_with_progress(runner, cfg, label, chain=None, job=None, bar=None):
     """Run *runner* with the UI's progress bar pointed at this script.
 
     Every runner builds its own tqdm-style bar, and that bar is what the UI
@@ -462,9 +497,10 @@ def _run_with_progress(runner, cfg, label, chain=None, job=None):
     finished (`done >= total`), so the header flipped to indeterminate and the
     front-end cleared it while the run was still going.
 
-    ponytail: one process-wide hook swapped for the duration of the call —
-    script runs are serialized by RUN_LOCK, so nothing else can observe the
-    swap, and the original hook is restored in `finally` even on a raise.
+    ponytail: the header bar is ONE process-wide hook, so it is painted by one
+    run at a time — see the dispatch block above for how two overlapping chains
+    share it without ever showing each other's numbers; the in-progress row is
+    per run and always this run's.
     """
     prior = getattr(mlo_stats, "progress_hook", None)
     # The run this script belongs to, resolved HERE (the chain's own context)
@@ -474,6 +510,11 @@ def _run_with_progress(runner, cfg, label, chain=None, job=None):
     job = job_locks.current()
     if not callable(prior) and job is None:
         return runner(cfg)          # a headless caller (CLI/tests): no UI bar
+    # A chain hands in its run's bar (run_chain); a lone script (a caller of
+    # `run_script` on its own) gets one for the length of this call.
+    lone = bar is None
+    if lone:
+        bar = _bar_context()
     index, count = chain or (0, 0)
     chained = count > 1
     # How far into its own slice this script has been seen to be. Monotonic:
@@ -493,10 +534,11 @@ def _run_with_progress(runner, cfg, label, chain=None, job=None):
         reads as two different steps depending on where you look. *steps* is
         the chain's whole-script pair, sent beside the fractional position:
         the bar draws the fraction, the readout prints "3/18" with no decimal
-        in it. The RELAY is passed explicitly (`prior`): the installed hook is
-        this wrapper itself while the script runs, so handing the frame back to
-        it would feed the wrapper its own text."""
-        job_locks.publish(done, total, text, steps, job=job, hook=prior)
+        in it. The bar's relay is asked for explicitly (`_bar_relay`), never
+        taken from the installed hook: that hook is the dispatcher which called
+        this very function, so handing a frame back to it would feed the run
+        its own text."""
+        job_locks.publish(done, total, text, steps, job=job, hook=_bar_relay(bar))
 
     def hook(done, total, detail):
         last[0], last[1] = done, total
@@ -517,13 +559,13 @@ def _run_with_progress(runner, cfg, label, chain=None, job=None):
         # half-finished step never reads as "1.9 of 18".
         emit(index - 1 + frac, count, text, (index, count))
 
-    # Marked so a producer that is NOT this chain (the bulk importer's own
-    # mirror, a download job's ticks) can tell that the header is already
-    # speaking for a run, and stand down instead of painting its frames into
-    # this chain's bar — the crosstalk that made the header count one album's
-    # files while another album's chain was talking.
-    hook._mlo_chain = True
-    mlo_stats.progress_hook = hook
+    # The installed hook is the chain dispatcher (marked so a producer that is
+    # NOT a chain — the bulk importer's own mirror, a download job's ticks —
+    # can tell that a header bar is already speaking for a run and stand down
+    # instead of painting its frames into it): this script hands its bar and its
+    # frame writer to the run's context, which is what tells two overlapping
+    # chains apart and keeps the chain's own step frames this run's.
+    _bar_attach(bar, hook, emit)
     try:
         if chained:
             # Claim the bar at this script's slice — determinate from the very
@@ -550,11 +592,15 @@ def _run_with_progress(runner, cfg, label, chain=None, job=None):
             # of its total (a run that stopped early, a sub-bar left open).
             # Both must finish the header rather than leave it looking hung.
             emit(1, 1, label)
-        mlo_stats.progress_hook = prior
+        # A chain releases its bar once, at the end of the RUN (run_chain): the
+        # next script of it re-attaches, and the frames the chain publishes
+        # between two scripts have to stay this run's.
+        if lone:
+            _bar_release(bar)
 
 
 def run_script(sid, cfg, targets=None, force=None, skip_disabled=True, chain=None,
-               job=None):
+               job=None, bar=None):
     """Run one script against *cfg* and report what happened.
 
     *chain* ``(index, count)`` is passed by :func:`run_chain` so a step of a
@@ -586,7 +632,8 @@ def run_script(sid, cfg, targets=None, force=None, skip_disabled=True, chain=Non
     try:
         return {"id": sid, "name": getattr(runner, "__name__", ""),
                 "label": label,
-                "stats": _run_with_progress(runner, cfg, label, chain, job=job)}
+                "stats": _run_with_progress(runner, cfg, label, chain, job=job,
+                                            bar=bar)}
     except Exception as e:
         traceback.print_exc()
         return {"id": sid, "name": getattr(runner, "__name__", ""),
@@ -695,7 +742,11 @@ def run_chain(cfg, ids, targets=None, force=None, progress=None, wait=False,
     # The claim (and with it the gate) is taken INSIDE the stack, so the
     # refusal is translated here — a PathLocked raised by the body would be
     # some other job's collision, not this run's, and stays one.
+    bar = _bar_context()
     with contextlib.ExitStack() as stack:
+        # The run's bar goes back with the run, however it ends — including on
+        # a raise — so the header never keeps a finished run's slot.
+        stack.callback(_bar_release, bar)
         try:
             job = stack.enter_context(
                 job_locks.holding(held_paths(cfg, targets), kind="scripts",
@@ -709,7 +760,8 @@ def run_chain(cfg, ids, targets=None, force=None, progress=None, wait=False,
             # (`/api/run`) or "the chain could not start" (an import).
             raise RunBusy(str(e)) from None
         return _run_chain_locked(cfg, ids, targets=targets, force=force,
-                                 progress=progress, final=final, job=job)
+                                 progress=progress, final=final, job=job,
+                                 bar=bar)
 
 
 def _prune_empty_target_dirs(cfg):
@@ -866,8 +918,13 @@ def _follow_moved_targets(cfg, audio_names, claimed=(), misses=None):
     A move that ALSO renamed every file cannot be followed that way — beets
     does exactly that on an import, naming each track from its tags — so
     *claimed* (what the script that just ran said it moved the audio into, see
-    :func:`_claimed_targets`) is asked before the chain gives up. Without it
-    the download folder stayed the target and the whole tag-writing tail of the
+    :func:`_claimed_targets`) is asked FIRST: it is the mover's own answer and
+    it costs nothing, where the identity lookup behind it is a walk of the
+    whole library that a scoped import (every import) must never pay for. The
+    walk is therefore only the fallback for a mover that did not report where
+    the audio went — nothing else can answer for a folder a script renamed out
+    from under the chain. Without one of the two answers the download folder
+    stayed the target and the whole tag-writing tail of the
     chain ran against a folder that no longer holds the album, which is how an
     import ended up looking finished while every later script had written
     nothing. When neither answer exists the target stays put and the chain says
@@ -910,10 +967,10 @@ def _follow_moved_targets(cfg, audio_names, claimed=(), misses=None):
                 f"nothing to run on")
             out.append(t)
             continue
-        moved = _find_moved_album(names, str(cfg.get("music_folder") or ""))
+        moved = _take_claimed(claimed, names,
+                              live | {os.path.normcase(p) for p in out})
         if not moved:
-            moved = _take_claimed(claimed, names,
-                                  live | {os.path.normcase(p) for p in out})
+            moved = _find_moved_album(names, str(cfg.get("music_folder") or ""))
         if moved:
             log(f"Album moved: {t} → {moved}; the rest of the chain follows it")
             audio_names[moved] = names
@@ -929,7 +986,7 @@ def _follow_moved_targets(cfg, audio_names, claimed=(), misses=None):
 
 
 def _run_chain_locked(cfg, ids, targets=None, force=None, progress=None,
-                      final=None, job=None):
+                      final=None, job=None, bar=None):
     from server import interrupt_recovery
     cfg = dict(cfg)
     if targets is not None:
@@ -961,7 +1018,7 @@ def _run_chain_locked(cfg, ids, targets=None, force=None, progress=None,
             log(f"stopping for an update: {len(left)} script(s) not run — "
                 + ", ".join(left))
             break
-        result = run_script(sid, cfg, chain=(done, total), job=job)
+        result = run_script(sid, cfg, chain=(done, total), job=job, bar=bar)
         results.append(result)
         _follow_moved_targets(cfg, audio_names, _claimed_targets(result),
                               misses)
@@ -969,9 +1026,11 @@ def _run_chain_locked(cfg, ids, targets=None, force=None, progress=None,
         # Every step ends announced, including one that never entered its
         # runner (a switched-off feature, an unavailable module): the header
         # bar and the in-progress row both move to this step, so neither can
-        # be left showing a script the run has already left behind.
-        job_locks.publish(done, total, f"#{done}/{total} · {label}",
-                          (done, total), job=job)
+        # be left showing a script the run has already left behind. It goes
+        # through the RUN's own frame writer (see _bar_frame), which is what
+        # keeps the announcement this run's when another chain is in flight.
+        _bar_frame(bar, done, total, f"#{done}/{total} · {label}", job=job,
+                   steps=(done, total))
         if progress is not None:
             try:
                 progress(done, total, label, result)

@@ -830,17 +830,25 @@ export default function App() {
             </button>
           </span>
         </div>
-        {NAV_GROUPS.map((group) => (
+        {NAV_GROUPS.map((group, gi) => (
           <div key={group.labelKey} className="flex flex-col gap-1">
-            {/* Section label: fades to a hairline divider when collapsed, so
-                the rail keeps its rhythm without a jump in icon positions. */}
-            {collapsed ? (
-              <div className="mx-2 my-1 border-t border-border/60" />
-            ) : (
-              <div className="px-3 pt-2 pb-0.5 text-[10px] font-semibold uppercase tracking-wider text-zinc-600">
-                {t(group.labelKey)}
-              </div>
-            )}
+            {/* Section label: one box in BOTH states, so collapsing never
+                moves an icon — collapsed it only turns invisible, and
+                truncates because the narrower rail must not rewrap the name
+                into a taller box. A group after the first then swaps its name
+                for a hairline; the FIRST group keeps nothing, because the
+                header's own border-b is already the rule above the nav (a
+                hairline here stacked a second line 13px under it). */}
+            <div
+              className={`relative px-3 pt-2 pb-0.5 text-[10px] font-semibold uppercase tracking-wider text-zinc-600 ${
+                collapsed ? "invisible truncate" : ""
+              }`}
+            >
+              {t(group.labelKey)}
+              {collapsed && gi > 0 && (
+                <div className="visible absolute inset-x-2 top-1/2 -translate-y-1/2 border-t border-border/60" />
+              )}
+            </div>
             {group.items.map(({ to, labelKey, icon: Icon, end }) => (
               <NavLink
                 key={to}

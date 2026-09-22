@@ -231,8 +231,9 @@ class _RecommendedPageState extends State<RecommendedPage> {
             child: Text(basis, style: TextStyle(fontSize: 11, color: muted)),
           ),
         // The provider notes come before the rows AND before the empty state:
-        // a short list is explained by which sources answered.
-        DiscoverNotes(notes: result.notes),
+        // a short list is explained by which sources answered — and a source
+        // whose feed does not exist for this page is information, not a skip.
+        DiscoverNotes(notes: result.notes, notApplicable: result.notApplicable),
         if (result.items.isEmpty)
           EmptyHint(
             text:

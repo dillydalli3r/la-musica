@@ -11,9 +11,14 @@ server half of that agreement:
     accepts as run options, and /api/export/defaults supplies a value for every
     one of them (a renamed or dropped field would silently turn a knob into a
     no-op);
-  * the DIALOG'S DEFAULT REQUEST — copy, Artist/Album layout, "Music"
-    subfolder, the shipped export_* defaults — runs end to end against a stub
-    target through the real endpoint;
+  * the DIALOG'S DEFAULT REQUEST — copy, the shipped Album artist / Album /
+    "1-01 Title" layout, "Music" subfolder, the shipped export_* defaults —
+    runs end to end against a stub target through the real endpoint;
+  * the folder-structure menu is the exporter's own table, a CUSTOM structure
+    is previewed through the same evaluator the run uses and then written
+    exactly as previewed, and a %field% the app does not know is refused with a
+    sentence (in the preview and at the start of a run) instead of quietly
+    shortening the tree;
   * ONE track stays ONE FILE: the audio is written on its own, never inside an
     archive;
   * many tracks write one file each plus the .m3u8 playlists and sidecars the
@@ -69,7 +74,7 @@ def dialog_body(paths, dest, **over):
     (server.exporter.EXPORT_DEFAULTS, which /api/export/defaults serves) plus
     the page's own selection and target drive."""
     body = {"paths": paths, "dest": dest, "subfolder": "Music", "codec": "copy",
-            "quality": "", "structure": "artist_album"}
+            "quality": "", "structure": exporter.DEFAULT_STRUCTURE}
     body.update(exporter.EXPORT_DEFAULTS)
     body.update(over)
     return body
@@ -152,7 +157,7 @@ try:
     assert res["exported"] == 1 and res["verified"] == 1, res
     written = listing(DEST)
     audio = [p for p in written if os.path.splitext(p)[1].lower() in exporter.EXPORT_AUDIO_EXTS]
-    assert audio == [f"{DEST}/Music/Artist One/Album A/01 - Track 1.flac".replace("\\", "/")], written
+    assert audio == [f"{DEST}/Music/Artist One/Album A/1-01 Track 1.flac".replace("\\", "/")], written
     # …and no archive anywhere: a single-track export is the track, unpackaged.
     assert not [p for p in written if p.lower().endswith((".zip", ".7z", ".rar", ".tar"))], written
     # The defaults also carry the album's sidecars (cover + lyrics) next to it.
@@ -167,8 +172,8 @@ try:
     assert (res["exported"], res["skipped"]) == (2, 1), res
     assert res["playlists"] == 3, res           # Album A, Album B, all.m3u8
     written = listing(DEST)
-    assert f"{DEST}/Music/Artist Two/Album B/01 - Track 1.flac".replace("\\", "/") in written
-    assert f"{DEST}/Music/Artist One/Album A/02 - Track 2.flac".replace("\\", "/") in written
+    assert f"{DEST}/Music/Artist Two/Album B/1-01 Track 1.flac".replace("\\", "/") in written
+    assert f"{DEST}/Music/Artist One/Album A/1-02 Track 2.flac".replace("\\", "/") in written
     assert f"{DEST}/Music/Artist One/Album A/Album A.m3u8".replace("\\", "/") in written
     assert f"{DEST}/Music/Artist Two/Album B/Album B.m3u8".replace("\\", "/") in written
     assert [p for p in written if p.lower().endswith("all.m3u8")], written
@@ -186,7 +191,7 @@ try:
     assert res["exported"] == 1, res
     only = [p for p in listing(solo_dest)
             if os.path.splitext(p)[1].lower() in exporter.EXPORT_AUDIO_EXTS]
-    assert only == [f"{solo_dest}/Music/Artist One/Album A/02 - Track 2.flac".replace("\\", "/")], only
+    assert only == [f"{solo_dest}/Music/Artist One/Album A/1-02 Track 2.flac".replace("\\", "/")], only
 
     # --------------------------------------------- the dialog's format options
     # mp3 V2 out of the same shared surface: one file per track, still one file
@@ -204,15 +209,65 @@ try:
     res = post(dialog_body([one], mp3_one, codec="mp3", quality="320"))
     assert res["exported"] == 1, res
     assert [p for p in listing(mp3_one) if p.endswith(".mp3")] == \
-        [f"{mp3_one}/Music/Artist One/Album A/01 - Track 1.mp3".replace("\\", "/")]
+        [f"{mp3_one}/Music/Artist One/Album A/1-01 Track 1.mp3".replace("\\", "/")]
 
     # ------------------------------------- sidecars and playlists can be turned off
     bare = os.path.join(ROOT, "Device5")
     os.makedirs(bare)
     res = post(dialog_body([one], bare, playlists=False, sidecars=False, embed_covers=False))
     assert (res["playlists"], res["sidecars"]) == (0, 0), res
-    assert listing(bare) == [f"{bare}/Music/Artist One/Album A/01 - Track 1.flac".replace("\\", "/")], \
+    assert listing(bare) == [f"{bare}/Music/Artist One/Album A/1-01 Track 1.flac".replace("\\", "/")], \
         listing(bare)
+
+    # ------------------------------- the structure menu, and a custom one used
+    # The page renders the exporter's OWN menu (keys, labels) and the grammar a
+    # custom script is written in, so the dropdown cannot offer a structure the
+    # run would refuse.
+    menu = client.get("/api/export/structures").json()
+    assert [s["v"] for s in menu["structures"]] == list(exporter.STRUCTURES), menu
+    assert all(s["label"] for s in menu["structures"]), menu
+    assert "discnumber" in menu["fields"] and "num" in menu["functions"], menu
+
+    # A structure the user typed is previewed on the sample track through the
+    # same evaluator the run uses, and the run then writes what the script
+    # names for the REAL tracks.
+    script = "$upper(%albumartist%)/%album%/%discnumber%-%tracknumber% %title%"
+    pv = client.post("/api/export/structure/preview",
+                     json={"script": script, "ext": ".flac"}).json()
+    assert pv["ok"] and pv["path"] == "SYSTEM OF A DOWN/Toxicity/1-4 Psycho.flac", pv
+    custom_dest = os.path.join(ROOT, "DeviceCustom")
+    os.makedirs(custom_dest)
+    res = post(dialog_body([one, two, solo], custom_dest, structure="custom",
+                           structure_script=script, embed_covers=False,
+                           playlists=False, sidecars=False))
+    assert res["exported"] == 3, res
+    custom_written = listing(custom_dest)
+    assert f"{custom_dest}/Music/ARTIST ONE/Album A/1-1 Track 1.flac".replace("\\", "/") \
+        in custom_written, custom_written
+    assert f"{custom_dest}/Music/ARTIST TWO/Album B/1-1 Track 1.flac".replace("\\", "/") \
+        in custom_written, custom_written
+
+    # A field the app does not know is refused with a sentence — in the preview
+    # the page shows while it is typed, and at the start of a run (400, with
+    # nothing written, rather than a silently shortened tree).
+    bad = client.post("/api/export/structure/preview",
+                      json={"script": "%nope%/%title%"}).json()
+    assert not bad["ok"] and "%nope%" in bad["error"], bad
+    empty = client.post("/api/export/structure/preview", json={"script": ""}).json()
+    assert not empty["ok"] and "needs a script" in empty["error"], empty
+    empty_dest = os.path.join(ROOT, "DeviceBad")
+    os.makedirs(empty_dest)
+    try:
+        r = client.post("/api/export", json=dialog_body(
+            [one], empty_dest, structure="custom", structure_script="%nope%/%title%"))
+        assert r.status_code == 400 and "%nope%" in r.json()["detail"], r.text[:300]
+        # …and a structure the app does not have at all, including the key this
+        # release replaced, is refused rather than silently re-laid
+        r = client.post("/api/export", json=dialog_body([one], empty_dest,
+                                                        structure="artist_album"))
+        assert r.status_code == 400 and "folder structure" in r.json()["detail"], r.text[:300]
+    finally:
+        assert listing(empty_dest) == [], listing(empty_dest)
 
     # ------------------------------------------- an unusable target is refused
     r = client.post("/api/export", json=dialog_body([one], MUSIC))
@@ -224,4 +279,5 @@ finally:
 
 print("ok  export dialog: shared option set == the API's run options, the default "
       "request exports end to end, 1 track stays 1 file, album + transcode runs "
-      "produce one file per track, sidecars/playlists toggle off, bad targets 400")
+      "produce one file per track, sidecars/playlists toggle off, the structure "
+      "menu + custom structure preview/run agree, bad structures and targets 400")

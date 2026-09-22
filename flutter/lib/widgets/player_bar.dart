@@ -294,7 +294,10 @@ class PlayerBar extends StatelessWidget {
                       tooltip: 'Next',
                     ),
                     Tooltip(
-                      message: _gainTooltip(playback),
+                      message: _gainTooltip(
+                        playback,
+                        state.configValue<String>('replaygain_mode', 'track'),
+                      ),
                       child: Text(
                         playback.gainDb == 0
                             ? 'RG 0.0 dB'
@@ -356,13 +359,19 @@ class PlayerBar extends StatelessWidget {
     );
   }
 
-  static String _gainTooltip(PlaybackController playback) {
+  static String _gainTooltip(PlaybackController playback, String mode) {
     if (playback.gainSource == null) {
       return 'Unity — no ReplayGain for this file';
     }
     final origin = playback.gainAnalyzed
         ? 'measured on demand (no ReplayGain tags in the file)'
         : 'from the file\'s ReplayGain tags';
-    return 'ReplayGain ${playback.gainDb.toStringAsFixed(2)} dB — $origin (${playback.gainSource})';
+    // Album mode and NOT the album gain: this album carries no
+    // REPLAYGAIN_ALBUM_GAIN, so each of its tracks is normalised on its own —
+    // say which value was used instead of implying album normalisation.
+    final album = mode == 'album' && !playback.gainAlbum
+        ? '; this album has no album gain, so its track value was used'
+        : '';
+    return 'ReplayGain ${playback.gainDb.toStringAsFixed(2)} dB — $origin ($playback.gainSource)$album';
   }
 }

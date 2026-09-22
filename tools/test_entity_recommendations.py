@@ -13,9 +13,14 @@ their transport:
   that provider states (`reason`), plus the provider's OWN number in `score`
   (null when it states none);
 * per-source outcomes keep the registry's vocabulary: `skipped: no <key>` for a
-  source without its credential, `skipped: <its own limit>` for a source that
-  cannot speak about an entity, `failed: <the provider's own words>` for a call
-  that raised;
+  source without its credential, `skipped: <its own limit>` for an answer a
+  source that COULD speak about the entity did not have, `failed: <the
+  provider's own words>` for a call that raised;
+* a source whose entity feed belongs to another kind of page (Last.fm's
+  similar-artists/tracks feeds on an album) is not a failure at all: it is not
+  asked, and it is reported once, compactly, in `not_applicable` — a short
+  marker plus the provider's own sentence — so a capability is never rendered
+  as an error and no pill is cut off mid-sentence;
 * two sources naming the same identity are ONE row, with the preferred
   source's reason kept and the other listed in `also_from`;
 * an entity shelf is "what this page is LIKE", so a row the library owns is
@@ -611,12 +616,15 @@ ok("Kalabi" not in {row["artist"] for row in album["items"]},
    "Apple's term search is filtered to the artist Apple NAMED, so a same-named act is out")
 ok(album["basis"] == "album: Slowdive — Souvlaki (%s)" % RG_SOUVLAKI,
    f"an album basis names artist and title ({album['basis']})")
-ok(album["notes"]["lastfm"] == "skipped: no lastfm_api_key"
-   and album["notes"]["listenbrainz"].startswith("skipped: ListenBrainz's Labs feed")
-   and album["notes"]["discogs"].startswith("skipped: Discogs browses by style")
-   and album["notes"]["spotify"].startswith("skipped: no spotify_client_id")
-   and "musicbrainz" not in album["notes"],
-   f"every source that cannot answer says why ({sorted(album['notes'])})")
+ok(album["notes"]["spotify"].startswith("skipped: no spotify_client_id")
+   and not [sid for sid in ("musicbrainz", "deezer", "itunes") if sid in album["notes"]],
+   f"every source that WAS asked and could not answer says why ({sorted(album['notes'])})")
+ok([one["id"] for one in album["not_applicable"]]
+   == ["lastfm", "listenbrainz", "discogs"]
+   and not [one for one in album["not_applicable"] if one["id"] in album["notes"]],
+   f"…while the artist-level feeds are NOT failures on an album: there is no "
+   f"similar-ALBUM feed to ask them about "
+   f"({[o['id'] for o in album['not_applicable']]})")
 fan_out = [c for c in CALLS if c[1].endswith("/albums")]
 ok(len(fan_out) == discover.RELATED_FANOUT + 1,
    f"the related-artist bridge fans out over {discover.RELATED_FANOUT} artists "
@@ -625,6 +633,91 @@ bounded = seed_rows(seed_kind="album", seed_mbid=RG_SOUVLAKI, seed_name="Souvlak
                     seed_artist="Slowdive", kind="albums", limit=3)
 ok(len(bounded["items"]) == 3,
    "the shelf is the size it was asked for")
+
+# --------------------------------------------------------------------------- #
+# 4b) What a page's own LEVEL can be answered: a source whose feed belongs to
+#     another kind of page is INFORMATION, not a failure — and a source that
+#     really failed on the same shelf is still reported as one
+# --------------------------------------------------------------------------- #
+print("== what this page's level can be answered ==")
+fresh()
+noted = seed_rows(seed_kind="album", seed_mbid=RG_SOUVLAKI, seed_name="Souvlaki",
+                  seed_artist="Slowdive", kind="albums")
+cannot = {one["id"]: one for one in noted["not_applicable"]}
+ok(set(cannot) == {"lastfm", "listenbrainz", "discogs"}
+   and all(set(one) == {"id", "label", "short", "why"} for one in cannot.values()),
+   f"an album page names the artist-level feeds once each, compactly "
+   f"({sorted(cannot)})")
+ok(not [sid for sid in cannot if sid in noted["notes"]]
+   and not [sid for sid in cannot if sid in noted["sources_asked"]],
+   "…they are not asked at all, so they are neither a `skipped:` note nor in "
+   "`sources_asked`")
+ok(cannot["lastfm"]["short"] == "artist & track pages only"
+   and cannot["lastfm"]["why"] == ("Last.fm's entity feeds are similar ARTISTS "
+                                   "and similar TRACKS — it has no "
+                                   "similar-ALBUMS feed"),
+   f"the marker says which pages the feed answers; the full sentence — the "
+   f"provider's own limit — is the tooltip ({cannot['lastfm']})")
+ok(cannot["listenbrainz"]["short"] == "artist pages only"
+   and cannot["discogs"]["short"] == "no similar-entity feed"
+   and cannot["discogs"]["why"].startswith("Discogs browses by style"),
+   f"ListenBrainz publishes the artists feed only, Discogs states no "
+   f"similarity at all ({[one['short'] for one in cannot.values()]})")
+ok(discover.BY_ID["lastfm"]["entity_kinds"] == ("artists", "tracks")
+   and discover.BY_ID["listenbrainz"]["entity_kinds"] == ("artists",)
+   and discover.BY_ID["discogs"]["entity_kinds"] == (),
+   "…and the registry says so: `entity_kinds` is the ROW kinds a feed really "
+   "produces, not the genre `rec_kinds` it was defaulted from")
+# The seed KIND is the rule's other half: a similar-tracks feed answers a track
+# page, and a chart narrowed by an artist answers an artist page.
+ok(discover.entity_limit(discover.BY_ID["lastfm"], "album", "tracks")[0]
+   == "track pages only"
+   and discover.entity_limit(discover.BY_ID["rym"], "album", "tracks")[1]
+   == ("RateYourMusic charts filter by GENRE and by ARTIST — it states no "
+       "similar-tracks feed")
+   and discover.entity_limit(discover.BY_ID["lastfm"], "album", "albums")[0]
+   == "artist & track pages only",
+   "a feed that does exist but is seeded by another page says which page that "
+   "is (Last.fm's similar-tracks feed, RYM's artist chart)")
+# `not_applicable` is the entity shelf's own field: the genre and library
+# seeds keep the payload they always had.
+fresh()
+genre_seed = api_discover.recommended_list(seed="shoegaze", kind="albums", limit=5)
+ok("not_applicable" not in genre_seed,
+   "a genre seed is not a page, so it carries no capability line")
+
+# An artist page — the level every similar-artist feed answers — says nothing.
+fresh()
+ok(seed_rows(seed_kind="artist", seed_mbid=ARTIST_SLOWDIVE, seed_name="Slowdive",
+             kind="artists")["not_applicable"] == [],
+   "an artist page reports no capability line at all")
+
+# A TRACK page: the artist-only feeds are information, and the sources that CAN
+# answer it still do.
+fresh()
+track_page = seed_rows(seed_kind="track", seed_mbid=TRACK_ALISON,
+                       seed_name="Alison", seed_artist="Slowdive", kind="tracks")
+ok([one["id"] for one in track_page["not_applicable"]] == ["listenbrainz", "rym"]
+   and not [one for one in track_page["not_applicable"]
+            if one["id"] in track_page["notes"]]
+   and track_page["items"],
+   f"a track page reports the artist-only feeds as information and still "
+   f"answers ({[o['id'] for o in track_page['not_applicable']]})")
+
+# The same album shelf, with a provider that really failed: `failed:` stays a
+# note in the provider's own words, named in `sources_asked`, and never folded
+# into the capability line.
+fresh()
+discovery.deezer_related_artists = lambda *a, **k: (_ for _ in ()).throw(
+    RuntimeError('Deezer refused: 403 "Quota exceeded"'))
+failed_album = seed_rows(seed_kind="album", seed_mbid=RG_SOUVLAKI,
+                         seed_name="Souvlaki", seed_artist="Slowdive",
+                         kind="albums")
+ok(failed_album["notes"]["deezer"] == 'failed: Deezer refused: 403 "Quota exceeded"'
+   and "deezer" in failed_album["sources_asked"]
+   and "deezer" not in [one["id"] for one in failed_album["not_applicable"]],
+   f"a source that really failed keeps its own note on the very same shelf "
+   f"({failed_album['notes']['deezer']})")
 
 # --------------------------------------------------------------------------- #
 # 5) A TRACK page: similar tracks when the key is there, the artist's own top
@@ -653,9 +746,10 @@ ok(tracks["Soon"]["reason"] == "genre: dream pop (MusicBrainz)",
    f"the recording's OWN genre drives the tag search, not its artist's "
    f"({tracks['Soon']['reason']})")
 ok(unkeyed["notes"]["lastfm"] == "skipped: no lastfm_api_key"
-   and unkeyed["notes"]["listenbrainz"].startswith("skipped: ListenBrainz's Labs feed")
-   and "musicbrainz" not in unkeyed["notes"],
-   "the keyed source and the artist-only feed both say why they abstained")
+   and "musicbrainz" not in unkeyed["notes"]
+   and [one["id"] for one in unkeyed["not_applicable"]] == ["listenbrainz", "rym"],
+   "a keyed source without its key is still skipped by name, while the "
+   "artist-only feeds are information")
 
 # A recording that states no genres of its own falls back to its artist's — the
 # page still gets its genre rows rather than a blanket skip.
@@ -842,10 +936,12 @@ album_tracks = seed_rows(seed_kind="album", seed_mbid=RG_SOUVLAKI,
                          seed_name="Souvlaki", seed_artist="Slowdive",
                          kind="tracks")
 ok(rym_calls() == []
-   and album_tracks["notes"]["rym"].startswith(
-       "skipped: RateYourMusic charts filter by GENRE and by ARTIST"),
-   f"an album page's track shelf states RYM's own limit "
-   f"({album_tracks['notes'].get('rym')})")
+   and [one for one in album_tracks["not_applicable"] if one["id"] == "rym"]
+   and album_tracks["not_applicable"][-1]["why"].startswith(
+       "RateYourMusic charts filter by GENRE and by ARTIST")
+   and "rym" not in album_tracks["notes"],
+   f"an album page's track shelf states RYM's own limit as information "
+   f"({album_tracks['not_applicable'][-1]['why']})")
 CFG.pop("rym_archive_fallback", None)
 
 # --------------------------------------------------------------------------- #

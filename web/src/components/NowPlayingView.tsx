@@ -102,8 +102,10 @@ interface Props {
   rg: {
     mode: RgMode;
     preamp: number;
-    /** What the bar is applying to this track — null at unity. */
-    applied: { gain: number; source: string | null; analyzed: boolean } | null;
+    /** What the bar is applying to this track — null at unity. `album` is
+     *  false while the mode is "album" when the album tag was missing, so the
+     *  line can name the per-track fallback instead of implying album gain. */
+    applied: { gain: number; source: string | null; analyzed: boolean; album: boolean } | null;
     onMode: (m: RgMode) => void;
     onPreamp: (db: number) => void;
   };
@@ -344,11 +346,9 @@ export default function NowPlayingView(p: Props) {
   // or track change, not on every unrelated store write.
   const queue = useStore((s) => s.queue);
   const index = useStore((s) => s.index);
-  const setIndex = useStore((s) => s.setIndex);
   const setQueue = useStore((s) => s.setQueue);
   const queueRemoveAt = useStore((s) => s.queueRemoveAt);
   const queueMove = useStore((s) => s.queueMove);
-  const setPlaying = useStore((s) => s.setPlaying);
   const queueListRef = useRef<HTMLDivElement>(null);
   const queueTriggerRef = useRef<HTMLButtonElement>(null);
   const queueCloseRef = useRef<HTMLButtonElement>(null);
@@ -878,32 +878,58 @@ export default function NowPlayingView(p: Props) {
             p.rg.applied.analyzed
               ? "measured on demand: this file has no ReplayGain tags"
               : "from ReplayGain tags"
+          }${
+            p.rg.mode === "album" && !p.rg.applied.album
+              ? "; this album has no album gain, so its track value was used"
+              : ""
           }${p.rg.applied.source?.endsWith("+clamp") ? "; reduced to stop clipping" : ""}`
         : "Unity — no ReplayGain for this file.";
 
   // Shared control blocks — the audio layout shows them under the cover;
   // the fullscreen-video layout overlays them at the bottom of the picture.
+  //
+  // Every tier of the metadata block reads its colour from the SAME polarity
+  // decision the lyric pane uses instead of the fixed white/zinc steps it
+  // carried before. On a mid-grey cover (the case the pane's own rule is built
+  // around, where both inks are equally far from the field) the title's white
+  // read fine while "16/44.1" and the album/artist lines — zinc-500 and
+  // zinc-400 on that same field — sat barely above 2:1. `ink.active` is the
+  // pane's full-strength ink, `ink.dim` its faded step: brighter than the ink
+  // on a dark field, darker on a light one, so the tier is still a step down
+  // and still legible on both. `ink.shade` is the pane's glyph shadow, which
+  // only the dark polarity has — a light halo on a light field is an outline
+  // around every glyph, not legibility.
+  // ... and the pane's own SCRIM, for the reason the pane has one: the polarity
+  // is decided from the COVER's colour, but the field this block actually sits
+  // on is the ambience — the page's near-black under a 34 % cover wash. A light
+  // cover therefore picks the light ink while the measured field beside the
+  // text is rgb(99,99,101): near-black on a dark field, 2.5:1, the same
+  // grey-on-grey failure the pane fixed by veiling its own reading surface. The
+  // veil moves the FIELD instead of the ink, so every tier keeps the step the
+  // table gave it (tools/check_np_metadata_contrast.cjs measures the pixels:
+  // mid-grey fields went from 2.7:1 to 7.2:1 on the secondary lines, and the
+  // light-polarity case from 2.5:1 to 5.4:1).
   const textBlock = (
     /* Every text row keeps a fixed height and is ALWAYS rendered —
        blanking a row while the next track's tags load is what made
        the block (and the title itself) shake on next/previous. */
-    <div className="text-center w-[26rem] max-w-full min-w-0">
+    <div className={`text-center w-[26rem] max-w-full min-w-0 rounded-2xl ${ink.shade} ${ink.scrim}`}>
       <div className="h-8 flex items-center justify-center gap-2" title={title}>
-        <div className="text-2xl font-bold text-white truncate">{title}</div>
+        <div className={`text-2xl font-bold truncate ${ink.active}`}>{title}</div>
         <AdvisoryMark value={freshTags?.ITUNESADVISORY ?? p.current.advisory} />
         {/* bit depth/sample rate rides beside the title, same as the
             player bar; tooltip carries the full codec/bitrate detail */}
         {techStr && (
-          <span className="text-[11px] font-mono text-zinc-500 shrink-0" title={techTip || undefined}>
+          <span className={`text-[11px] font-mono shrink-0 ${ink.dim}`} title={techTip || undefined}>
             {techStr}
           </span>
         )}
       </div>
       <div className="h-5 mt-1 flex items-center justify-center" title={albumLine}>
-        <div className="text-sm text-zinc-400 truncate">{albumLine}</div>
+        <div className={`text-sm truncate ${ink.dim}`}>{albumLine}</div>
       </div>
       <div className="h-5 mt-0.5 flex items-center justify-center" title={artistLine}>
-        <div className="text-sm text-zinc-400 truncate">{artistLine}</div>
+        <div className={`text-sm truncate ${ink.dim}`}>{artistLine}</div>
       </div>
     </div>
   );
@@ -1570,12 +1596,11 @@ export default function NowPlayingView(p: Props) {
                   <button
                     className="min-w-0 flex-1 flex items-center gap-3 text-left"
                     onClick={() => {
-                      // Same as the player bar's queue popover: the track
-                      // change starts playback, but the store's `playing`
-                      // would stay stale — wrong icon, and the first
-                      // play/pause click would be a no-op.
-                      setIndex(i);
-                      setPlaying(t.path);
+                      // A queue row press is a PLAY press: the same action the
+                      // play buttons use, so the track changes, `playing` stays
+                      // in step, and pressing the row that is already playing
+                      // restarts it instead of doing nothing.
+                      useStore.getState().playNow(queue, i);
                     }}
                     title="Play this track now"
                   >

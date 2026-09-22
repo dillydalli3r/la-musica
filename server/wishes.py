@@ -768,10 +768,23 @@ def owned_mbids(cfg=None):
     owned = {}
     for artist in lib.get("artists", []):
         for alb in artist.get("albums", []):
-            if alb.get("pending"):
-                # A framework album carries the release id but holds NO audio:
-                # counting it as owned would refuse the very download that is
-                # meant to fill it ("already in your library").
+            count = alb.get("track_count")
+            if alb.get("pending") or (count is not None and not count):
+                # A framework album is a REQUEST on disk, not the album: the
+                # folder "Add to library" creates before any audio exists,
+                # carrying the release's MBIDs in its marker — which is exactly
+                # what makes counting it as "owned" so easy and so wrong. The
+                # pipeline then refuses to download the very album that is meant
+                # to fill it ("already in your library"), and the add ends
+                # terminal with nothing behind it. `pending` says so in the
+                # library's own words (server.library's framework rows), and a
+                # row that STATES zero tracks says the same thing off its own
+                # files — it covers a payload whose rows predate that flag. A
+                # row that states nothing is left alone: guessing there would
+                # refuse a real album its own download.
+                #
+                # Counting it as owned would refuse the very download that is
+                # meant to fill it.
                 continue
             meta = alb.get("meta") or {}
             for key in ("MUSICBRAINZ_ALBUMID", "MUSICBRAINZ_RELEASEGROUPID"):
@@ -781,6 +794,21 @@ def owned_mbids(cfg=None):
     return owned
 
 
+def owned_path(owned, *mbids):
+    """The library folder that holds one of *mbids*, or "".
+
+    The question every caller of `owned_mbids` ends up asking — "is this
+    release here, and where?" — answered once, so an id list and the map are
+    the only things a caller needs. Empty ids are skipped (a wish that names no
+    release has no folder to find) and the first id the library knows wins.
+    """
+    for mbid in mbids:
+        key = str(mbid or "").strip().lower()
+        if key and key in (owned or {}):
+            return str(owned[key] or "")
+    return ""
+
+
 def reconcile_with_library(cfg=None):
     """Mark open wishes whose MusicBrainz release is already in the library as
     imported. Returns the count of freshly resolved wishes.
@@ -788,14 +816,26 @@ def reconcile_with_library(cfg=None):
     Matches the release ID against the library's ``MUSICBRAINZ_ALBUMID`` tags
     (or its release-group id) so a wish saved from a release-group page still
     resolves. Cheap enough to run at the end of every worker cycle.
+
+    A folder with NO AUDIO is not the album, and this is the check that keeps
+    the difference: a framework album (the "Add to library" folder — a marker,
+    a placeholder cover, no tracks) carries its release's MBIDs in its marker,
+    and marking the wish imported on that evidence is what turned an add into a
+    terminal wish with an empty folder standing behind it: the worker never
+    searched it again, and the library showed an album that was never there.
+    The audio is the test (`server.pending_albums.is_placeholder` — one listing
+    per candidate wish, never one per album in the library), and a folder that
+    fails it leaves its wish open for the search that will fill it.
     """
+    from server import pending_albums
+
     owned = owned_mbids(cfg)
     resolved = 0
     for w in list_wishes():
         if w["status"] in ("imported",):
             continue
         mbid = str(w["release_mbid"]).strip().lower()
-        if mbid and mbid in owned:
+        if mbid and mbid in owned and not pending_albums.is_placeholder(owned[mbid]):
             mark_imported(w["id"], owned[mbid] or "")
             resolved += 1
             # A wish the user filled by hand lands here, so this path notifies

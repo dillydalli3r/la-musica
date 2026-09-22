@@ -219,13 +219,21 @@ class PlaybackController extends ChangeNotifier {
   int index = -1;
 
   double _gainDb = 0;
+  /// The linear factor actually handed to the player — the model's own
+  /// [ReplayGain.linear], unity until the first answer arrives.
+  double _gainLinear = 1;
   String? _gainSource;
   bool _gainAnalyzed = false;
+  /// True only when the number came from the album gain; false in album mode
+  /// means this album has none and the track value was used (the readout says
+  /// so instead of implying the album was matched as an album).
+  bool _gainAlbum = false;
   double _volume = 1;
 
   double get gainDb => _gainDb;
   String? get gainSource => _gainSource;
   bool get gainAnalyzed => _gainAnalyzed;
+  bool get gainAlbum => _gainAlbum;
   double get volume => _volume;
   bool get hasTrack => index >= 0 && index < queue.length;
   Map<String, dynamic>? get current => hasTrack ? queue[index] : null;
@@ -305,29 +313,74 @@ class PlaybackController extends ChangeNotifier {
 
   Future<void> setVolume(double value) async {
     _volume = value.clamp(0.0, 1.0);
-    await player.setVolume(_volume * _gainLinear());
+    await player.setVolume(_volume * _gainLinear);
     notifyListeners();
   }
 
   /// Re-fetch the gain for the current track (a mode or preamp change) and
-  /// apply it to the RUNNING element — used when the user edits the setting
-  /// mid-song, where a small step is preferable to a re-load.
+  /// apply it to the RUNNING element — the settings page calls this after it
+  /// saves the ReplayGain section, so a mode/preamp edit lands on the song that
+  /// is already playing instead of only on the next one, where a small step is
+  /// preferable to a re-load.
   Future<void> refreshGain() async {
     if (!hasTrack) return;
     await _applyGain();
     notifyListeners();
   }
 
-  double _gainLinear() {
-    // dB → linear amplitude without dart:math: 10^(db/20).
-    var result = 1.0;
-    var term = 1.0;
-    final x = (_gainDb / 20) * 2.302585092994046;
-    for (var i = 1; i <= 12; i++) {
-      term *= x / i;
-      result += term;
+  /// How long to wait between re-asks for a gain the server is still measuring
+  /// on the fly, in ms. Growing, because a whole-file EBU R128 decode lands in
+  /// seconds on a warm disk and only a long file on a cold one is slow; the
+  /// list's LENGTH is the number of attempts, and its sum (~48 s) is where this
+  /// client gives up — by then the server has the value cached, so the next
+  /// play reads it in one request.
+  static const List<int> _rgRetryMs = [1500, 3000, 5000, 8000, 12000, 18000];
+  Timer? _rgTimer;
+  String? _rgWatchPath;
+  int _rgTries = 0;
+
+  /// Keep asking for [path]'s gain while the server reports its on-demand
+  /// measurement as still running, and apply the value to the track that is
+  /// ALREADY PLAYING when it lands.
+  ///
+  /// The request is bounded server-side (`PLAYBACK_WAIT_S`) because playback
+  /// must not wait on a full decode, so an untagged track starts at unity — but
+  /// that answer is not final: the decode keeps going and caches its result.
+  /// Without this the phone played the whole track at unity and nothing but a
+  /// settings change ever fetched the gain again. just_audio sets its volume as
+  /// a step (there is no ramp to schedule on the platform player), so this one
+  /// lands as a step — the same edit [refreshGain] makes mid-song.
+  void _watchGain(String path, bool pending) {
+    _rgTimer?.cancel();
+    _rgTimer = null;
+    final playing = current?['path']?.toString() ?? '';
+    if (!pending || path == '' || path != playing) {
+      _rgWatchPath = null;
+      _rgTries = 0;
+      return;
     }
-    return result;
+    if (_rgWatchPath != path) {
+      _rgWatchPath = path;
+      _rgTries = 0;
+    }
+    if (_rgTries >= _rgRetryMs.length) {
+      // A decode that has not finished in ~48 s is not worth more requests: its
+      // value is cached for the next play either way.
+      _rgWatchPath = null;
+      return;
+    }
+    final wait = _rgRetryMs[_rgTries];
+    _rgTries += 1;
+    _rgTimer = Timer(Duration(milliseconds: wait), () async {
+      _rgTimer = null;
+      if (_rgWatchPath != path || (current?['path']?.toString() ?? '') != path) {
+        _rgWatchPath = null;
+        _rgTries = 0;
+        return;
+      }
+      await _applyGain(); // re-arms itself while the answer is still pending
+      notifyListeners();
+    });
   }
 
   Future<void> _applyGain() async {
@@ -337,24 +390,37 @@ class PlaybackController extends ChangeNotifier {
     final path = track['path']?.toString() ?? '';
     if (path.isEmpty) return;
     final mode = state.configValue<String>('replaygain_mode', 'track');
+    var pending = false;
     try {
       if (mode == 'off') {
         _gainDb = 0;
+        _gainLinear = 1;
         _gainSource = null;
         _gainAnalyzed = false;
+        _gainAlbum = false;
       } else {
         final rg = await client.replaygain(path, mode: mode);
         _gainDb = rg.gain ?? 0;
+        // The model's own maths (10^(dB/20), clamped to the same ±24 dB window
+        // as the web player) instead of a second copy of it in here — the
+        // hand-rolled Taylor series computed the same value, and two
+        // implementations of one gain is exactly how the clients drift.
+        _gainLinear = rg.linear;
         _gainSource = rg.source;
         _gainAnalyzed = rg.analyzed;
+        _gainAlbum = rg.album;
+        pending = rg.pending;
       }
     } on ApiException {
       // A gain we could not read is unity, never a guess.
       _gainDb = 0;
+      _gainLinear = 1;
       _gainSource = null;
       _gainAnalyzed = false;
+      _gainAlbum = false;
     }
-    await player.setVolume(_volume * _gainLinear());
+    await player.setVolume(_volume * _gainLinear);
+    _watchGain(path, pending);
   }
 
   Future<void> _load() async {
@@ -406,6 +472,9 @@ class PlaybackController extends ChangeNotifier {
 
   @override
   void dispose() {
+    // A pending re-ask must not outlive the player (it would set the volume of
+    // a disposed platform player).
+    _rgTimer?.cancel();
     player.dispose();
     super.dispose();
   }

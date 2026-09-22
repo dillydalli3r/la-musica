@@ -159,7 +159,8 @@ try:
 
     off = loudness.replaygain_for_path(cfg, "t.flac", mode="off")
     assert off == {"gain": None, "peak": None, "mode": "off",
-                   "source": None, "analyzed": False}, off
+                   "source": None, "analyzed": False,
+                   "pending": False, "album": False}, off
 
     track = loudness.replaygain_for_path(cfg, "t.flac", clip_protection=False)
     assert track["gain"] == -3.21 and track["mode"] == "track", track
@@ -169,17 +170,21 @@ try:
                                          clip_protection=False)
     assert album["gain"] == -2.50, album       # album gain wins in album mode
     assert album["peak"] == 1.002, album
+    assert album["album"] is True, album       # ...and it IS the album gain
 
     pre = loudness.replaygain_for_path(cfg, "t.flac", preamp_db=3.0,
                                        clip_protection=False)
     assert abs(pre["gain"] - (-0.21)) < 1e-9, pre
 
-    # Album mode falls back to the track value when the album tags are gone.
+    # Album mode falls back to the track value when the album tags are gone —
+    # and says so, so the player can report per-track normalisation instead of
+    # implying the album was matched as an album.
     _FakeAudioFile.tags = {"REPLAYGAIN_TRACK_GAIN": "-3.21 dB",
                            "REPLAYGAIN_TRACK_PEAK": "0.5"}
     fallback = loudness.replaygain_for_path(cfg, "t.flac", mode="album",
                                             clip_protection=False)
     assert fallback["gain"] == -3.21 and fallback["peak"] == 0.5, fallback
+    assert fallback["album"] is False, fallback
 
     # Clip protection clamps to the ceiling for the peak: 0 dBFS is the
     # loudest a peak of 0.5 can be scaled to, i.e. -20*log10(0.5) = +6.02 dB
@@ -288,7 +293,8 @@ try:
                                              mode="track", preamp_db=0.0,
                                              clip_protection=False)
         assert first == {"gain": 4.0, "peak": 0.5, "mode": "track",
-                         "source": "ffmpeg", "analyzed": True}, first
+                         "source": "ffmpeg", "analyzed": True,
+                         "pending": False, "album": False}, first
         second = loudness.replaygain_for_path(cfg2, track2,
                                               mode="track", preamp_db=0.0,
                                               clip_protection=False)
@@ -340,6 +346,9 @@ try:
             wait_s=loudness.PLAYBACK_WAIT_S)
         waited = time.monotonic() - t0
         assert first["gain"] is None and first["analyzed"] is False, first
+        # ...and it says the decode is still running, which is what makes the
+        # player ask again instead of keeping this unity for the whole track.
+        assert first["pending"] is True, first
         assert waited < 2.0, waited
         assert started.wait(10), "the measurement never started"
         assert loudness.cached_analysis(cfg, slow) is None
@@ -349,7 +358,7 @@ try:
         second = loudness.replaygain_for_path(
             cfg, slow, mode="track", preamp_db=0.0, clip_protection=False,
             wait_s=0.0)
-        assert second["gain"] is None, second
+        assert second["gain"] is None and second["pending"] is True, second
         assert calls == [slow], calls
 
         # Once it lands, playback is answered from the cache — one decode.
@@ -362,7 +371,8 @@ try:
             cfg, slow, mode="track", preamp_db=0.0, clip_protection=False,
             wait_s=loudness.PLAYBACK_WAIT_S)
         assert settled == {"gain": -5.0, "peak": 0.8, "mode": "track",
-                           "source": "ffmpeg", "analyzed": True}, settled
+                           "source": "ffmpeg", "analyzed": True,
+                           "pending": False, "album": False}, settled
         assert calls == [slow], calls
 
         # wait_s=None — the batch callers — still waits for the decode.

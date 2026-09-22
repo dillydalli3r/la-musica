@@ -32,6 +32,7 @@ Local tools only: ffmpeg and the CUETools ARCUE binary, both from
 Run:  python tools/test_accurip_roundtrip.py
 """
 import contextlib
+import hashlib
 import io
 import os
 import shutil
@@ -364,6 +365,69 @@ notes = discs_mod.rename_accurip_for_discs(
     log_fn=lambda _m: None)
 ok(notes == [] and os.path.isfile(os.path.join(AMB, "App.accurip")),
    f"a legacy name that matches both discs is not renamed ({notes})")
+
+print("== a scoped run verifies ONE album and the rest stays byte for byte ==")
+# What the import chain does the moment an album lands: script 9 with that
+# album as its target. The whole point of the scoped run is that a library of
+# hundreds of albums costs ONE album's verification — the other albums must
+# come out of it exactly as they went in.
+SCOPE_A = os.path.join(TMP, "Artists", "Scoped", "Album A (2024)")
+SCOPE_B = os.path.join(TMP, "Artists", "Scoped", "Album B (2024)")
+for _dir, _freq in ((SCOPE_A, 300), (SCOPE_B, 1000)):
+    os.makedirs(_dir, exist_ok=True)
+    for _n in (1, 2):
+        writetrack(os.path.join(_dir, f"{_n:02d} Track {_n}.wav"), _freq + _n)
+    write_cue(os.path.join(_dir, "CD-1.cue"),
+              ["01 Track 1.wav", "02 Track 2.wav"])
+
+
+def snapshot(root):
+    """{music-folder-relative path: sha256} — the bytes of everything below."""
+    out = {}
+    for base, _dirs, files in os.walk(root):
+        for f in files:
+            p = os.path.join(base, f)
+            with open(p, "rb") as fh:
+                out[os.path.relpath(p, root).replace("\\", "/")] = \
+                    hashlib.sha256(fh.read()).hexdigest()
+    return out
+
+
+TARGET_PREFIX = os.path.relpath(SCOPE_A, TMP).replace("\\", "/") + "/"
+both = snapshot(TMP)
+outside = {p: h for p, h in both.items()
+           if not p.startswith(TARGET_PREFIX) and not p.startswith(".mlo/")}
+
+stats, out = run(cfg(music_folder=TMP, targets=[SCOPE_A]))
+after = snapshot(TMP)
+outside_after = {p: h for p, h in after.items()
+                 if not p.startswith(TARGET_PREFIX) and not p.startswith(".mlo/")}
+
+ok(stats["modified_count"] == 1 and stats["error_count"] == 0,
+   f"the target album is the one that was verified ({stats['modified_count']}, "
+   f"{stats['error_count']}: {stats['errors']})")
+ok(os.path.isfile(os.path.join(SCOPE_A, "CD-1.accurip")),
+   "…and its CD-1.accurip is on disk")
+ok(outside == outside_after,
+   "no file outside the target album changed: the run's writes are inside the "
+   f"album it was given ({sorted(set(outside_after) ^ set(outside))[:5]})")
+
+b_folder = os.path.relpath(SCOPE_B, TMP).replace("\\", "/") + "/"
+ok({p[len(b_folder):]: h for p, h in both.items() if p.startswith(b_folder)}
+   == {p[len(b_folder):]: h for p, h in after.items() if p.startswith(b_folder)},
+   "the neighbouring album is byte for byte identical (hash of every file, "
+   "before vs after)")
+
+# …and the untargeted run is still the whole library: the album the scoped run
+# left alone is verified by it (the scoped run is a narrowing, never a change
+# of what a Run All covers).
+stats, out = run(cfg(music_folder=TMP, force_accurip=False))
+ok(os.path.isfile(os.path.join(SCOPE_B, "CD-1.accurip")),
+   "an untargeted run is the whole library again — it verified the album the "
+   "scoped run never looked at")
+ok(stats["modified_count"] >= 1 and stats["error_count"] == 0,
+   f"…and it reports the work it did ({stats['modified_count']} written, "
+   f"{stats['skipped_count']} already current, {stats['errors']})")
 
 print("== a missing tool is named, with where to install it ==")
 import mlo.accurip as accurip_mod  # noqa: E402

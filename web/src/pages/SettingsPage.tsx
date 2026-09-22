@@ -1278,6 +1278,10 @@ export default function SettingsPage() {
           options: [["links", "Links"], ["cover", "Cover art"], ["genres", "Genres"], ["lyrics", "Lyrics"], ["advisory", "Advisory"]],
           help: "Families an import must never decide for you, whatever the mode above. A cover kept here has its candidates staged instead of writing the first hit; the links and advisory fetches are skipped; lyrics drop out of the chain. The rest of the import stays automatic, and the album's prompt names that family as waiting for you rather than as unsourced.",
         },
+        {
+          k: "import_keep_synced_lyrics", label: "Keep a synced lyric an import arrives with", type: "bool",
+          help: "An import replaces the families it decides for itself with what it found: the album's lyrics, genres, advisories and cover art win over whatever the download came with. A family you kept above (or one whose own switch is off) is never touched. This is the lyric family's one exception — ON, a track whose lyric already carries timestamps (a synced one) keeps it and the fetch skips that track; OFF, the shipped default, the peer's lyric is replaced like everything else. A PLAIN (untimed) lyric is always replaced: the providers answer with that form anyway.",
+        },
         { k: "import_auto_scripts", label: "Run the script chain after import", type: "bool" },
         {
           k: "import_scripts", label: "Import script ids (e.g. 1, 3, 5, 7 — blank = built-in chain)", type: "text",

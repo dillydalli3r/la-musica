@@ -24,6 +24,7 @@ with targets touches only the target's subtree.
 Run:  python tools/test_layout_case.py
 """
 import atexit
+import hashlib
 import json
 import os
 import shutil
@@ -189,6 +190,22 @@ def listing():
         for n in dirs + names:
             out.add(os.path.relpath(os.path.join(root, n), MF).replace("\\", "/"))
     return out
+
+def hashes(root):
+    """{music-folder-relative path: sha256} for every file under *root*.
+
+    `listing()` answers "does this path exist"; this answers "are these still
+    the same bytes" — which is what a scoped run has to leave behind for
+    everything it was not pointed at."""
+    out = {}
+    for base, _dirs, files in os.walk(root):
+        for f in files:
+            p = os.path.join(base, f)
+            with open(p, "rb") as fh:
+                out[os.path.relpath(p, root).replace("\\", "/")] = \
+                    hashlib.sha256(fh.read()).hexdigest()
+    return out
+
 
 def stored(parent, name):
     """Whether *parent* holds an entry spelled EXACTLY *name*.
@@ -430,10 +447,40 @@ ok(not stats.get("layout_fixed") and stats.get("layout_total", 0) >= 2,
 
 print("== targets confine the run ==")
 # What the import chain does: script 20 per album folder. Only that subtree may
-# be scanned AND fixed — the other artist's spelling is not this run's business.
+# be scanned AND fixed — the other artist's spelling is not this run's business,
+# and nothing outside the target may change a single byte. Hash every file
+# outside the target before and after: spelling alone would not catch a run
+# that rewrote somebody else's music, and this is the check the "an import only
+# costs one album" promise stands on. `.mlo` is the app's own state (the
+# library-wide report, the Trash), not library content.
 target = os.path.join(MF, "Artists", "Quiet", "case album")
+# The target album folder IS the run's subject — its own rename (case album ->
+# Case Album) is the fix being asserted below — so both spellings of it are
+# dropped from the comparison. Everything else, the target's artist folder
+# included, has to hash the same: the scoped run visits the artist folder and
+# this one album, and nothing else.
+TARGET_PARENT = os.path.relpath(os.path.dirname(target), MF).replace("\\", "/") + "/"
+TARGET_NAME = os.path.basename(target).casefold()
+
+
+def outside_hashes():
+    def is_target(path):
+        if not path.startswith(TARGET_PARENT):
+            return False
+        return path[len(TARGET_PARENT):].split("/")[0].casefold() == TARGET_NAME
+
+    return {p: h for p, h in hashes(MF).items()
+            if not is_target(p) and not p.startswith(".mlo/")}
+
+
+before_outside = outside_hashes()
 stats = layoutmod.run_scan_layout({"music_folder": MF, "naming_script": SCRIPT,
                                    "layout_apply": True, "targets": [target]})
+after_outside = outside_hashes()
+ok(after_outside == before_outside,
+   "every file outside the target album is byte for byte identical after the "
+   f"scoped run ({len(before_outside)} files; "
+   f"{sorted(set(after_outside) ^ set(before_outside))[:5]} differ)")
 ok(stored(os.path.join(MF, "Artists", "Quiet"), "Case Album")
    and not stored(os.path.join(MF, "Artists", "Quiet"), "case album"),
    "the targeted album folder is fixed")

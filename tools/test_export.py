@@ -3,8 +3,10 @@
 
 The Export page is the one place the app writes OUTSIDE the library, so the
 rules it must never break are pinned here: a selection exports into the
-configured layout (multi-disc albums included, whose file names carry the
-disc prefix or two discs collide on "01 - Intro"), the compatibility options
+configured layout (the shipped one is the library's own tree — ALBUMARTIST /
+Album / "1-01 Title", disc number included so a two-disc album cannot collide
+on one name — and a structure the user typed is a naming script evaluated by
+the same grammar), the compatibility options
 actually reach the files (ID3v2.3, embedded art at the requested quality and
 resolution cap, ReplayGain tags), a re-run is idempotent for transcodes as
 well as copies, sync mode prunes, and exporting back into the music folder is
@@ -80,24 +82,86 @@ class _Tags:
     def get_tag(self, name):
         return self._tags.get(name)
 
+    def all_tags(self):
+        return dict(self._tags)
 
-def _rel(structure, tags, music_folder=None, ext=".mp3", disc=""):
+
+def _rel(structure, tags, music_folder=None, ext=".mp3", disc="", script=""):
     src = os.path.join(LIB, "Artist One", "Album A", "03 - Song.flac")
-    return exporter._target_relpath(src, _Tags(tags), structure, music_folder or "", ext, disc)
+    return exporter._target_relpath(src, _Tags(tags), structure, music_folder or "",
+                                    ext, disc, script)
 
 
-# The layout each structure promises, and the disc prefix that keeps a
-# multi-disc album's two "03 - Song" files apart.
+def listing(root):
+    """Every file under *root*, with "/" separators, sorted."""
+    return sorted(os.path.join(base, f).replace("\\", "/")
+                  for base, _dirs, files in os.walk(root) for f in files)
+
+
+# The layout each structure promises. The shipped one is a naming script, so it
+# writes the LIBRARY's own file name — disc number first, "1-03 Song", the way
+# mlo.naming's default does — and takes ALBUMARTIST (never the track's own
+# ARTIST). The hand-built ones keep the " - " spelling a saved export_structure
+# pins, and take the disc prefix only for a multi-disc album.
 TAGGED = {"TITLE": "Song", "ARTIST": "Artist One", "ALBUMARTIST": "Artist One",
           "ALBUM": "Album A", "TRACKNUMBER": "3"}
-assert _rel("artist_album", TAGGED) == os.path.join("Artist One", "Album A", "03 - Song.mp3")
+assert _rel(exporter.DEFAULT_STRUCTURE, TAGGED) == \
+    os.path.join("Artist One", "Album A", "1-03 Song.mp3")
 assert _rel("album", TAGGED) == os.path.join("Album A", "03 - Song.mp3")
 assert _rel("flat", TAGGED) == "Artist One - 03 - Song.mp3"
 assert _rel("mirror", TAGGED, LIB) == os.path.join("Artist One", "Album A", "03 - Song.mp3")
-assert _rel("artist_album", TAGGED, None, ".mp3", "2-") == \
-    os.path.join("Artist One", "Album A", "2-03 - Song.mp3")
-# An untagged file still lands in a sensible place instead of the export root.
-assert _rel("artist_album", {}) == os.path.join("Artist One", "Album A", "00 - 03 - Song.mp3")
+assert _rel("album", TAGGED, None, ".mp3", "2-") == \
+    os.path.join("Album A", "2-03 - Song.mp3")
+# ALBUMARTIST, not ARTIST: a compilation is ONE folder, not one per track.
+COMPILATION = dict(TAGGED, ARTIST="Guest Singer", ALBUMARTIST="Various Artists")
+assert _rel(exporter.DEFAULT_STRUCTURE, COMPILATION).split(os.sep)[0] == "Various Artists"
+# A file with no ALBUMARTIST falls back to ARTIST, exactly as track_variables
+# does for the library's own script.
+assert _rel(exporter.DEFAULT_STRUCTURE, {k: v for k, v in TAGGED.items()
+                                         if k != "ALBUMARTIST"}).split(os.sep)[0] == "Artist One"
+# The disc number is written for a SINGLE-disc album too ("1-"), and a two-disc
+# album's files can never collide on one name.
+assert _rel(exporter.DEFAULT_STRUCTURE, dict(TAGGED, DISCNUMBER="2")) == \
+    os.path.join("Artist One", "Album A", "2-03 Song.mp3")
+# A custom structure is the same grammar: whatever the user typed, exactly.
+assert _rel("custom", TAGGED, None, ".mp3", "", "%album%/%artist% - %title%") == \
+    os.path.join("Album A", "Artist One - Song.mp3")
+assert _rel("custom", TAGGED, None, ".mp3", "", "%albumartist%/$left(%title%,2)%tracknumber%") == \
+    os.path.join("Artist One", "So3.mp3")
+# An untagged file still lands in a sensible place instead of the export root:
+# the folders it already sits in and its own file name stand in for the tags.
+assert _rel(exporter.DEFAULT_STRUCTURE, {}) == \
+    os.path.join("Artist One", "Album A", "1-00 03 - Song.mp3")
+
+# What the page offers and what a run accepts are the same table, and the menu
+# carries the vocabulary a custom script is written in.
+_menu = exporter.structure_menu()
+assert [s["v"] for s in _menu["structures"]] == list(exporter.STRUCTURES)
+assert all(s["label"] for s in _menu["structures"])
+assert "albumartist" in _menu["fields"] and "discnumber" in _menu["fields"]
+assert "num" in _menu["functions"]
+# A structure that cannot name a path is refused with a sentence — a bad field,
+# a bad function, an empty script and an unknown key all fail BEFORE any run.
+for bad in ("%nope%/%title%", "$iff(%title%,%title%,x)/%title%", "", "   "):
+    why = exporter.structure_error("custom", bad)
+    assert why and "custom folder structure" in why, (bad, why)
+assert "unknown folder structure" in exporter.structure_error("artist_album", "")
+assert exporter.structure_error(exporter.DEFAULT_STRUCTURE, "") == ""
+assert exporter.structure_error("mirror", "") == ""
+# …and starting a run with one is a ValueError, never a half-written tree.
+for structure, script in (("custom", "%nope%"), ("artist_album", "")):
+    try:
+        exporter.export_tracks({}, [], DEST, structure=structure, structure_script=script)
+    except ValueError as e:
+        assert "folder structure" in str(e), str(e)
+    else:
+        raise AssertionError(f"{structure!r} must be refused")
+# The preview shows the sample track's path through the same evaluator the run
+# uses (and the codec's extension), or the refusal sentence.
+_pv = exporter.preview_structure("$upper(%albumartist%)/%album%/%title%", ".flac")
+assert _pv["ok"] and _pv["path"] == "SYSTEM OF A DOWN/Toxicity/Psycho.flac", _pv
+assert exporter.preview_structure("%nope%")["ok"] is False
+assert exporter.preview_structure("")["ok"] is False
 
 
 def make(path, seconds=1.0, freq=440, tags=None, codec=None):
@@ -163,13 +227,16 @@ try:
     assert stats["warnings"] and "m4a" in stats["warnings"][0], stats["warnings"]
 
     album_dir = os.path.join(DEST, "Music", "Artist One", "Album A")
+    # The shipped structure is the library's own: the disc number comes first
+    # even on a single-disc album ("1-01 Track 1"), and the " - " the old
+    # preset used is gone (that is the library's spelling, not a choice here).
     assert sorted(os.listdir(album_dir)) == [
-        "01 - One.lrc", "01 - Track 1.mp3", "02 - Track 2.mp3", "Album A.m3u8",
+        "01 - One.lrc", "1-01 Track 1.mp3", "1-02 Track 2.mp3", "Album A.m3u8",
         "cover.jpg", "description.txt"], os.listdir(album_dir)
     assert sorted(os.listdir(os.path.join(DEST, "Music", "Artist One", "Album B"))) == [
-        "1-01 - Track 1.mp3", "2-01 - Track 1.mp3", "Album B.m3u8"]
+        "1-01 Track 1.mp3", "2-01 Track 1.mp3", "Album B.m3u8"]
 
-    exported = os.path.join(album_dir, "01 - Track 1.mp3")
+    exported = os.path.join(album_dir, "1-01 Track 1.mp3")
     af = AudioFile(exported)
     assert af.get_tag("TITLE") == "Track 1" and af.get_tag("ALBUM") == "Album A"
     # ReplayGain: track and album gain, both written from the same measurement.
@@ -184,7 +251,7 @@ try:
     assert head[:3] == b"ID3" and head[3] == 3, head
     # Playlists: relative paths, EXTINF with the duration, both levels present.
     playlist = open(os.path.join(DEST, "Music", "all.m3u8"), encoding="utf-8").read()
-    assert playlist.startswith("#EXTM3U\n#EXTINF:") and "Artist One/Album A/01 - Track 1.mp3" in playlist
+    assert playlist.startswith("#EXTM3U\n#EXTINF:") and "Artist One/Album A/1-01 Track 1.mp3" in playlist
     assert os.path.isfile(os.path.join(DEST, "Music", "Artist One", "Album A", "Album A.m3u8"))
 
     # ------------------------------------------------------------ idempotent
@@ -205,12 +272,44 @@ try:
                                     embed_covers=True, playlists=False, verify=True,
                                     workers=2)
     assert copied["failed"] == 0, copied["errors"]
-    copy_of_one = os.path.join(DEST2, "Music", "Artist One", "Album A", "01 - Track 1.flac")
+    copy_of_one = os.path.join(DEST2, "Music", "Artist One", "Album A", "1-01 Track 1.flac")
     copy_af = AudioFile(copy_of_one)
     assert copy_af.get_tag("TITLE") == "Track 1"
     assert copy_af.embedded_pictures(), "the copied FLAC must carry the album cover"
 
-    # ------------------------------------------------------------ sync mode
+    # ------------------------------------------------------- custom structure
+    # A custom structure is a naming script too, so the tree it writes is
+    # exactly what it says — and the page's own preview runs the same
+    # evaluator (exporter.preview_structure) the run does.
+    custom_dest = os.path.join(ROOT, "DestCustom")
+    os.makedirs(custom_dest)
+    custom_script = "$upper(%albumartist%)/%album%/%discnumber%-%tracknumber% %title%"
+    custom = exporter.export_tracks(CFG, [one, two, d1, d2], custom_dest,
+                                    structure="custom", structure_script=custom_script,
+                                    embed_covers=False, playlists=False, verify=True,
+                                    sidecars=False)
+    assert custom["failed"] == 0, custom["errors"]
+    root_slash = custom_dest.replace("\\", "/")
+    assert listing(custom_dest) == [
+        f"{root_slash}/Music/ARTIST ONE/Album A/1-1 Track 1.flac",
+        f"{root_slash}/Music/ARTIST ONE/Album A/1-2 Track 2.flac",
+        # the two discs keep their own numbers: nothing collides on one name
+        f"{root_slash}/Music/ARTIST ONE/Album B/1-1 Track 1.flac",
+        f"{root_slash}/Music/ARTIST ONE/Album B/2-1 Track 1.flac",
+    ], listing(custom_dest)
+
+    # A script that names nothing at all for a REAL track is refused before
+    # anything is written, even though the sample the preview uses has the tag
+    # (an empty %field% drops its own segment, so only a path with nothing left
+    # in it is refused).
+    try:
+        exporter.export_tracks(CFG, [one], custom_dest, structure="custom",
+                               structure_script="%genre%")
+    except ValueError as e:
+        assert "produced no path" in str(e), str(e)
+    else:
+        raise AssertionError("a structure naming no path must be refused")
+
     stale = os.path.join(DEST2, "Music", "Artist One", "Album A", "99 - Stale.flac")
     shutil.copy2(two, stale)
     pruned = exporter.export_tracks(CFG, [one], DEST2, codec="copy", embed_covers=False,
@@ -228,5 +327,6 @@ try:
 finally:
     shutil.rmtree(ROOT, ignore_errors=True)
 
-print("ok  export: layout + disc prefixes, ID3v2.3, embedded art, ReplayGain, "
-      "playlists, idempotent re-run, copy-with-art, prune, library-destination refusal")
+print("ok  export: shipped/custom structures + disc numbers, ID3v2.3, embedded "
+      "art, ReplayGain, playlists, idempotent re-run, copy-with-art, prune, "
+      "library-destination refusal")

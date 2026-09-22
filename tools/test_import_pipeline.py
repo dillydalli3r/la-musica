@@ -732,6 +732,268 @@ finally:
     _intg.resolve_advisory_route = _real_resolve_advisory
 
 # --------------------------------------------------------------------------- #
+# What an import does NOT keep: the peer's lyric, genre, advisory and art
+# --------------------------------------------------------------------------- #
+# `finish_album`'s first pass over an album that just landed is
+# `imports.drop_arrived_values`: the four families an import decides for itself
+# are the IMPORT's, and every writer for them FILLS an empty slot rather than
+# replacing a full one (a user's own write needs that — see the last case
+# here), so the values a download arrived with have to go before those writers
+# run. Real (if tiny) FLAC files are tagged here rather than a stand-in
+# AudioFile, because what this pins is what the app's own tag layer does to a
+# file: mutagen, `mlo.audio`, and the writers of all four families.
+import struct
+
+from mlo import format_all as _format_all
+from mlo import lyrics_fetch as _lyrics_fetch
+
+ARRIVED_ROOT = tempfile.mkdtemp(prefix="mlo_import_arrived_")
+
+
+def png_rgb(rgb):
+    """A real 1×1 PNG in that colour. Pillow opens these, so the cover pass'
+    preparation is genuinely exercised instead of skipped as unreadable."""
+    import zlib
+
+    def chunk(tag, data):
+        body = tag + data
+        return (struct.pack(">I", len(data)) + body
+                + struct.pack(">I", zlib.crc32(body) & 0xFFFFFFFF))
+
+    ihdr = struct.pack(">IIBBBBB", 1, 1, 8, 2, 0, 0, 0)
+    idat = zlib.compress(b"\x00" + bytes(rgb))
+    return (b"\x89PNG\r\n\x1a\n" + chunk(b"IHDR", ihdr) + chunk(b"IDAT", idat)
+            + chunk(b"IEND", b""))
+
+
+PEER_ART = png_rgb((255, 0, 0))
+ALBUM_ART = png_rgb((0, 0, 255))
+
+
+def peer_flac(folder, lyric=None, advisory="0"):
+    """One track carrying what a peer's download carries: its own GENRE,
+    ITUNESADVISORY, LYRICS and embedded art.
+
+    The container is the FLAC marker plus a STREAMINFO block and no frames —
+    mutagen tags it and `mlo.audio` reads it exactly like any other FLAC, and
+    nothing in this suite decodes audio (the same reason `make_wav` above
+    writes a WAV nobody listens to).
+    """
+    os.makedirs(folder, exist_ok=True)
+    path = os.path.join(folder, "01 - Track.flac")
+    streaminfo = struct.pack(">HH", 4096, 4096) + b"\x00\x00\x00" + b"\x00\x00\x00"
+    streaminfo += ((44100 << 44) | (1 << 41) | (15 << 36) | 0).to_bytes(8, "big")
+    streaminfo += b"\x00" * 16
+    with open(path, "wb") as fh:
+        fh.write(b"fLaC" + bytes([0x80]) + len(streaminfo).to_bytes(3, "big")
+                 + streaminfo)
+
+    from mutagen.flac import FLAC, Picture
+
+    f = FLAC(path)
+    f["TITLE"] = "Track One"
+    f["ARTIST"] = "Test Artist"
+    f["ALBUMARTIST"] = "Test Artist"
+    f["ALBUM"] = "Peer Album"
+    f["TRACKNUMBER"] = "1"
+    f["GENRE"] = "Peer Genre"
+    f["ITUNESADVISORY"] = advisory
+    if lyric is not None:
+        f["LYRICS"] = lyric
+    pic = Picture()
+    pic.type = 3
+    pic.mime = "image/png"
+    pic.data = PEER_ART
+    f.add_picture(pic)
+    f.save()
+    return path
+
+
+def arrived(path):
+    """The file through the app's own tag layer — every assertion below is
+    about what a reader of the finished album sees."""
+    from mlo.audio import AudioFile
+
+    af = AudioFile(path)
+    assert af.audio is not None, f"unreadable fixture {path}"
+    return af
+
+
+ARRIVED_CFG = {"music_folder": ARRIVED_ROOT, "advisory_auto_fetch": True,
+               "cover_auto_fetch": True, "genre_autofill": True}
+APP_NOTES = {"id": "rel-1", "release_group_id": "rg-1", "title": "Peer Album",
+             "artists": [{"name": "Test Artist", "mbid": "art-1"}],
+             "media": [{"disc": 1, "position": 1, "title": "Track One",
+                        "recording_mbid": "rec-1"}]}
+IMPORTED_LYRIC = "[00:04.00]the lyric the import fetched"
+
+_real_genre_chain, _real_advisory_route = _intg.genre_chain, _intg.resolve_advisory_route
+_real_fetch_lyrics = _lyrics_fetch.fetch_lyrics
+# The three remote seams of the import's own writers, answered locally: the
+# release's genre chain, the advisory providers, and the lyrics service.
+_intg.genre_chain = lambda **kw: {"per_track": {(1, 1): ["Shoegaze"]},
+                                  "sources": {}, "levels": {}}
+# 1 states explicit — and the fixtures arrive rated 0, so a value that was NOT
+# replaced shows up as a 0 rather than as a coincidence.
+_intg.resolve_advisory_route = lambda **kw: {"value": 1, "source": "deezer-isrc",
+                                             "checked": ["deezer-isrc"]}
+_lyrics_fetch.fetch_lyrics = lambda *a, **kw: {
+    "provider": "lrclib", "provider_label": "LRCLIB",
+    "synced": IMPORTED_LYRIC, "plain": "the lyric the import fetched"}
+
+try:
+    # ---- defaults: all four arrived values go, the import's four land -------
+    album = os.path.join(ARRIVED_ROOT, "Peer Album")
+    track = peer_flac(album, lyric="peer lyric, plain")
+    sidecar = os.path.join(album, "01 - Track.lrc")
+    with open(sidecar, "w", encoding="utf-8") as fh:
+        fh.write("peer lyric, from the sidecar it arrived with")
+    af = arrived(track)
+    assert af.has_tag("GENRE") and af.get_tag("ITUNESADVISORY") == "0", af.all_tags()
+    assert af.get_lyrics() and af.embedded_pictures(), af.all_tags()
+
+    dropped = imports.drop_arrived_values(album, ARRIVED_CFG, [13])
+    assert dropped == {"checked": 1, "failed": 0, "lyrics": 1, "genre": 1,
+                       "advisory": 1, "cover": 1}, dropped
+    af = arrived(track)
+    assert not af.has_tag("GENRE"), af.all_tags()
+    assert not af.has_tag("ITUNESADVISORY"), af.all_tags()
+    assert not (af.get_lyrics() or "").strip(), af.get_lyrics()
+    assert af.embedded_pictures() == [], af.embedded_pictures()
+    assert not os.path.exists(sidecar), "the .lrc it arrived with is gone too"
+
+    # The import's own writers, in `finish_album`'s own order: the lyrics step
+    # (script 13's per-track core, which the batch runner and the API share),
+    # the release's genres, then the advisory pipeline.
+    fetched = _lyrics_fetch.fetch_one(track, ARRIVED_CFG)
+    assert fetched["status"] == "ok", fetched
+    written, failed = imports._stamp_release(album, APP_NOTES, ARRIVED_CFG)
+    assert (written, failed) == (1, 0), (written, failed)
+    adv = imports.fetch_advisories([album], ARRIVED_CFG)
+    assert adv["updated"] == 1, adv
+    af = arrived(track)
+    assert "the lyric the import fetched" in (af.get_lyrics() or ""), af.get_lyrics()
+    # A READER sees the repeated GENRE fields joined ("; "), whatever the writer
+    # handed over — the release's genres, and not the peer's.
+    assert af.get_tag("GENRE") == "Rock; Shoegaze", af.get_tag("GENRE")
+    assert af.get_tag("ITUNESADVISORY") == "1", af.get_tag("ITUNESADVISORY")
+
+    # …and the album's own cover is what the files carry afterwards: script 10's
+    # pass is the import's embedder, `embed_covers` ON replacing whatever art is
+    # there with the cover the album owns (the shipped OFF is that same pass
+    # leaving audio with no art at all, which is what the drop above already
+    # left behind).
+    cover = os.path.join(album, "cover.png")
+    with open(cover, "wb") as fh:
+        fh.write(ALBUM_ART)
+    prepped = _format_all._prepare_embedded_cover(album, ARRIVED_CFG)
+    assert prepped, "the album's own cover is what the pass embeds"
+    assert _format_all._format_embedded_covers(
+        track, {**ARRIVED_CFG, "embed_covers": True}, {})[1] is True
+    pics = arrived(track).embedded_pictures()
+    assert len(pics) == 1 and pics[0][1] == prepped[0], [len(b) for _m, b in pics]
+    assert pics[0][1] != PEER_ART, "the peer's art never comes back"
+
+    # ---- import_keep_synced_lyrics ON: a SYNCED lyric survives … -----------
+    synced = "[00:12.30]peer lyric, synced"
+    kept = os.path.join(ARRIVED_ROOT, "Synced Album")
+    kept_track = peer_flac(kept, lyric=synced)
+    kept_sidecar = os.path.join(kept, "01 - Track.lrc")
+    with open(kept_sidecar, "w", encoding="utf-8") as fh:
+        fh.write(synced)
+    keep_cfg = dict(ARRIVED_CFG, import_keep_synced_lyrics=True)
+    dropped = imports.drop_arrived_values(kept, keep_cfg, [13])
+    assert dropped["lyrics"] == 0 and dropped["genre"] == 1, dropped
+    af = arrived(kept_track)
+    assert af.get_lyrics() == synced, af.get_lyrics()
+    assert os.path.isfile(kept_sidecar), "the synced sidecar stays too"
+    # …and the fetch skips that file for exactly that reason …
+    fetched = _lyrics_fetch.fetch_one(kept_track, keep_cfg)
+    assert (fetched["status"], fetched["reason"]) == ("skipped", "lyrics already present"), fetched
+    # …while the other three families are replaced whatever the switch says.
+    assert not af.has_tag("GENRE") and not af.has_tag("ITUNESADVISORY"), af.all_tags()
+    assert af.embedded_pictures() == [], af.embedded_pictures()
+    # A PLAIN lyric is not work nobody could reproduce — it is what every
+    # provider answers with, so the same switch does not keep it.
+    plain = os.path.join(ARRIVED_ROOT, "Plain Album")
+    plain_track = peer_flac(plain, lyric="peer lyric, plain")
+    dropped = imports.drop_arrived_values(plain, keep_cfg, [13])
+    assert dropped["lyrics"] == 1, dropped
+    assert not (arrived(plain_track).get_lyrics() or "").strip()
+
+    # ---- the wiring: `finish_album` itself drops before its own steps ------
+    # The one call every import path makes, with the chain switched off so
+    # nothing here depends on a script running. What it proves is WHERE the
+    # drop sits: the peer's genre is gone and the release's has already landed
+    # from the genres step below it, the art that came with the download is
+    # gone, and the two families this chain-less run does not decide (lyrics,
+    # advisory) still hold what the album arrived with.
+    wired = os.path.join(ARRIVED_ROOT, "Wired Album")
+    wired_track = peer_flac(wired, lyric="peer lyric, plain")
+    wired_cfg = {"music_folder": ARRIVED_ROOT, "import_auto_scripts": False,
+                 "import_scripts": [], "rym_links_auto": False,
+                 "metadata_auto_fetch": False, "instrumental_auto_fetch": False,
+                 "genre_autofill": True, "cover_auto_fetch": True,
+                 "advisory_auto_fetch": True}
+    _real_candidates = imports.cover_candidates
+    imports.cover_candidates = lambda *a, **kw: None      # no cover search here
+    try:
+        res = imports.finish_album(wired, wired_cfg, release=APP_NOTES)
+    finally:
+        imports.cover_candidates = _real_candidates
+    af = arrived(wired_track)
+    assert res["dropped"] == {"checked": 1, "failed": 0, "lyrics": 0, "genre": 1,
+                              "advisory": 0, "cover": 1}, res["dropped"]
+    assert af.get_tag("GENRE") == "Rock; Shoegaze", af.get_tag("GENRE")
+    assert af.embedded_pictures() == [], af.embedded_pictures()
+    assert "peer lyric" in (af.get_lyrics() or ""), af.get_lyrics()
+    assert af.get_tag("ITUNESADVISORY") == "0", af.get_tag("ITUNESADVISORY")
+
+    # ---- no drop, no replacement: the writers are still fill-only ----------
+    # The half of the contract the import must NOT change: the wizard's own
+    # steps and every /run write into empty slots, and a value already there —
+    # the user's own, or a peer's on an album nobody imported — is theirs.
+    manual = os.path.join(ARRIVED_ROOT, "Manual Album")
+    manual_track = peer_flac(manual, lyric="peer lyric, plain")
+    imports._stamp_release(manual, APP_NOTES, ARRIVED_CFG)
+    echoes = imports.fetch_advisories([manual], ARRIVED_CFG)
+    af = arrived(manual_track)
+    assert af.get_tag("GENRE") == "Peer Genre", af.get_tag("GENRE")
+    assert echoes["updated"] == 0 and af.get_tag("ITUNESADVISORY") == "0", echoes
+    assert set(echoes["sources"].values()) == {"existing-tag"}, echoes["sources"]
+    assert "peer lyric" in (af.get_lyrics() or ""), af.get_lyrics()
+    assert len(af.embedded_pictures()) == 1, af.embedded_pictures()
+
+    # ---- what the import is NOT going to decide, it does not empty ---------
+    # A family the user kept, and a chain with no lyrics step (script 13 is the
+    # fetcher — nothing would replace what the drop removed). Both are read off
+    # the same switches the steps themselves are gated on.
+    held = os.path.join(ARRIVED_ROOT, "Held Album")
+    held_track = peer_flac(held, lyric="peer lyric, plain")
+    dropped = imports.drop_arrived_values(
+        held, dict(ARRIVED_CFG, import_review_families=["genres", "lyrics"]), [13])
+    af = arrived(held_track)
+    assert dropped["lyrics"] == 0 and dropped["genre"] == 0, dropped
+    assert af.has_tag("GENRE") and (af.get_lyrics() or "").strip(), af.all_tags()
+    assert dropped["cover"] == 1 and dropped["advisory"] == 1, dropped
+
+    noch = os.path.join(ARRIVED_ROOT, "No Chain Album")
+    noch_track = peer_flac(noch, lyric="peer lyric, plain")
+    dropped = imports.drop_arrived_values(noch, ARRIVED_CFG, [])
+    af = arrived(noch_track)
+    # The chain decides the lyrics, so a chain without it keeps them — while the
+    # genre and the cover still go (their steps run on every path) and the
+    # advisory does NOT (its step only runs when a chain will read it).
+    assert dropped["lyrics"] == 0 and dropped["advisory"] == 0, dropped
+    assert dropped["genre"] == 1 and dropped["cover"] == 1, dropped
+    assert (af.get_lyrics() or "").strip() and af.embedded_pictures() == [], af.all_tags()
+finally:
+    _intg.genre_chain = _real_genre_chain
+    _intg.resolve_advisory_route = _real_advisory_route
+    _lyrics_fetch.fetch_lyrics = _real_fetch_lyrics
+    shutil.rmtree(ARRIVED_ROOT, ignore_errors=True)
+
+# --------------------------------------------------------------------------- #
 # soulseek.import_completed(finish=...): the chain is opt-in per album
 # --------------------------------------------------------------------------- #
 from server import soulseek as _slsk

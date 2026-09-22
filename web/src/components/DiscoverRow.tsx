@@ -2,7 +2,7 @@ import { useState } from "react";
 import { useQueryClient } from "@tanstack/react-query";
 import { Link } from "react-router-dom";
 import { Disc3, ExternalLink, Loader2, Plus } from "lucide-react";
-import { api, getToken, serverUrl, type DiscoverItem, type DiscoverNotes } from "../api";
+import { api, getToken, serverUrl, type DiscoverItem, type DiscoverNotes, type DiscoverNotApplicable } from "../api";
 import { toast } from "../store";
 
 /** What a disabled add button says when the server has no add route at all —
@@ -47,14 +47,82 @@ export function sourceLabel(id: string, reported?: string | null): string {
  *  their own sentences, without a provider name in front of them. */
 const PLAIN_NOTES: Record<string, true> = { recommended: true, charts: true };
 
-/** The sources that said nothing, one chip each, carrying the server's own
- *  reason ("skipped: no lastfm_api_key"). A silence the server explained is
- *  shown; one it did not explain is not invented. `sources` is the asked list,
- *  printed quietly so a short answer is never mistaken for a whole one. */
-export function NotesChips({ notes, sources }: { notes?: DiscoverNotes | null; sources?: string[] }) {
+/** How long a chip's label may be before the outcome word stands in for it.
+ *  A label is NEVER clipped to fit: it is the note's lead clause when that is
+ *  short enough to read as one, and otherwise the outcome word alone (`failed`
+ *  — the provider's own words are a hover away), so no pill ever ends
+ *  mid-sentence or mid-word. */
+const MAX_LABEL = 48;
+
+/** The SHORT label for one source note — the chip's entire visible text, with
+ *  the server's own sentence in its `title`.
+ *
+ *  A pill holds a few words, and a sentence cut off where the pill ended reads
+ *  as a bug in the app rather than as a fact about a provider, so the label is
+ *  the note's own FIRST CLAUSE — up to its first ` — `, ` (` or full stop, which
+ *  is a complete phrase by construction — or, when even that is too long to be
+ *  a label, the outcome word (`failed`, `skipped`). A reason that is one clause
+ *  long is the label whole (`no lastfm_api_key`, `unknown source`). */
+function shortNote(note: string): string {
+  const text = note.trim();
+  const head = /^([a-z]+):\s*/i.exec(text);
+  const word = (head?.[1] ?? "").toLowerCase();
+  const rest = text.slice(head?.[0].length ?? 0).trim();
+  const lead = rest.split(/\s+—\s+|\s+\(|\.\s+/)[0].replace(/[.;,]\s*$/, "").trim();
+  const label = lead && lead.length <= MAX_LABEL ? lead : word || lead;
+  return word === "partial" && label !== "partial" ? `partial: ${label}` : label || text;
+}
+
+/** The sources an ENTITY shelf cannot use at all, on ONE quiet line: who they
+ *  are, the short marker saying what they CAN answer, and the provider's own
+ *  full sentence in the tooltip. Never amber — this is a fact about the
+ *  provider, not a request that failed, and a page that has three such sources
+ *  must not look like a page with three errors. */
+function CapabilityLine({ notApplicable }: { notApplicable: DiscoverNotApplicable[] }) {
+  if (!notApplicable.length) return null;
+  return (
+    <span
+      className="text-[10px] text-zinc-600"
+      title={notApplicable.map((one) => `${one.label} — ${one.why}`).join("\n")}
+    >
+      cannot answer for this page:{" "}
+      {notApplicable.map((one) => `${one.label} (${one.short})`).join(" · ")}
+    </span>
+  );
+}
+
+/** What each source said, and who was asked.
+ *
+ *  THE RENDERING RULE — which silence is information and which is an error:
+ *
+ *  * amber, and only amber, is a source the request actually lost something to:
+ *    `failed: …` (the provider refused, timed out or answered with an error),
+ *    and `skipped: …` — an answer it did not have (an empty result from a feed
+ *    that should have had one) or a missing credential, which keeps its chip
+ *    exactly as documented because it is the ONE silence the reader can end, by
+ *    adding that key in Settings → Discovery;
+ *  * quiet grey is information: `partial: …` (a source that answered with part
+ *    of a long list), the `nothing to search for` chip on a row that names
+ *    neither an artist nor a title (see `AddButton` — a row with no name is not
+ *    a failure of anything), and `CapabilityLine` above for a source whose feed
+ *    does not exist for this KIND of page at all (Last.fm's similar-tracks feed
+ *    cannot be asked about an album);
+ *  * `sources` is the asked list, printed quietly beside them, so a short
+ *    answer is never mistaken for a whole one. A silence the server explained
+ *    is shown; one it did not explain is not invented. */
+export function NotesChips({
+  notes,
+  sources,
+  notApplicable,
+}: {
+  notes?: DiscoverNotes | null;
+  sources?: string[];
+  notApplicable?: DiscoverNotApplicable[] | null;
+}) {
   const rows = Object.entries(notes ?? {});
   const asked = sources ?? [];
-  if (!rows.length && !asked.length) return null;
+  const cannot = notApplicable ?? [];
+  if (!rows.length && !asked.length && !cannot.length) return null;
   return (
     <div className="flex flex-wrap items-center gap-1.5">
       {asked.length > 0 && (
@@ -62,22 +130,24 @@ export function NotesChips({ notes, sources }: { notes?: DiscoverNotes | null; s
           asked: {asked.join(", ")}
         </span>
       )}
+      <CapabilityLine notApplicable={cannot} />
       {rows.map(([id, note]) => {
         // "partial: N of 2202 genres …" is a source answering with part of a
         // long list — information, not a failure, so it is not coloured like
-        // one. Anything else on a source id is the reason it said nothing.
+        // one. Anything else on a source id is a real outcome: the reason it
+        // said nothing, in the provider's own words when it refused.
         const partial = /^partial:/i.test(note);
         return (
           <span
             key={id}
-            className={`chip max-w-[24rem] truncate ${
+            className={`chip ${
               partial
                 ? "bg-raise border border-border text-zinc-400"
                 : "bg-amber-950/30 border border-amber-900/60 text-amber-300/90"
             }`}
             title={note}
           >
-            {PLAIN_NOTES[id] ? note : `${sourceLabel(id)} — ${note}`}
+            {PLAIN_NOTES[id] ? note : `${sourceLabel(id)} — ${shortNote(note)}`}
           </span>
         );
       })}
@@ -90,7 +160,18 @@ export function NotesChips({ notes, sources }: { notes?: DiscoverNotes | null; s
  *  one failure the row must keep out of the retry loop. */
 type AddOutcome =
   | { state: "unavailable" }
-  | { state: "answered"; already: boolean; background: boolean; added: number; note: string; why: string }
+  | {
+      state: "answered";
+      already: boolean;
+      background: boolean;
+      added: number;
+      /** The request was made BY NAME (the row carries no id). */
+      nameOnly: boolean;
+      /** …and the server found a MusicBrainz match for it. */
+      matched: boolean;
+      note: string;
+      why: string;
+    }
   | { state: "error"; message: string };
 
 /** The `POST /api/library/add` reply (server/api_add.py). */
@@ -99,6 +180,16 @@ type AddReply = {
   /** An artist's albums arrive one by one (`album_pending` per album), so the
    *  call returns while the work goes on. */
   background?: boolean;
+  /** A name-only add that MATCHED: the framework album exists now and
+   *  MusicBrainz is being asked the rest of the way on a thread. Id-given
+   *  replies never state either flag. */
+  matched?: boolean;
+  resolving?: boolean;
+  /** A name-only add that matched NOTHING: the wish the search was queued
+   *  under (nothing is on disk yet, and the row must not read as "added"). */
+  by_name?: boolean;
+  wish_id?: number;
+  queued?: number;
   /** The server's own summary of what it just queued. */
   note?: string;
   albums?: { already_in_library?: boolean }[];
@@ -107,6 +198,42 @@ type AddReply = {
   detail?: string;
 };
 
+/** The row's add request: the body the server wants, and whether that body is
+ *  a NAME (the row states no MusicBrainz id at all).
+ *
+ *  A row WITH an id is added by id — its release group when it has one (that
+ *  skips the server's own resolution), else the id itself with `kind: "auto"`,
+ *  which means "look up what this id names". A row WITHOUT one is still
+ *  addable: it is sent by name, and the server searches MusicBrainz for
+ *  artist+title, adopts the id it finds, and — finding none — records a
+ *  name-keyed wish so the auto-import's own search can run. `kind: "auto"` is
+ *  NEVER sent for a name-only row: with no id there is nothing to look up, and
+ *  the row's own kind is what the search and the wish are made of.
+ *
+ *  `null` when the row names neither a title nor an artist: there is nothing
+ *  for the server to search, which is the one case it answers 400 to. */
+function addRequest(item: DiscoverItem): { body: Record<string, unknown>; nameOnly: boolean } | null {
+  const rg = (item.release_group_mbid || "").trim();
+  const mbid = (rg || item.mbid || "").trim();
+  if (mbid) return { body: rg ? { mbid, kind: "release_group" } : { mbid, kind: "auto" }, nameOnly: false };
+  const title = (item.title || "").trim();
+  const artist = (item.artist || "").trim();
+  if (!title && !artist) return null;
+  return {
+    nameOnly: true,
+    body: {
+      kind: item.kind,
+      title,
+      artist,
+      // A soft preference for the search, never a filter, and the provider's
+      // own page for the row — the wish's note keeps it as the source link.
+      year: item.year,
+      source: item.source_label || item.source || "",
+      page_url: item.page_url || "",
+    },
+  };
+}
+
 /** Ask the server to add one row.
  *
  *  Sent here rather than through `api.libraryAdd` because the row has to tell
@@ -114,12 +241,7 @@ type AddReply = {
  *  `api.ts`'s `json()` folds every failure into one message, and only the
  *  status carries that difference. Same credentials and token as any `api.ts`
  *  call. */
-async function requestAdd(item: DiscoverItem): Promise<AddOutcome> {
-  // The row's release group IS the thing to add, and saying so skips the
-  // server's own id resolution; a row with only its own id (a recording, an
-  // artist) hands that over and lets the server decide what it names.
-  const rg = (item.release_group_mbid || "").trim();
-  const mbid = (rg || item.mbid || "").trim();
+async function requestAdd(req: { body: Record<string, unknown>; nameOnly: boolean }): Promise<AddOutcome> {
   const token = getToken();
   let r: Response;
   try {
@@ -130,7 +252,7 @@ async function requestAdd(item: DiscoverItem): Promise<AddOutcome> {
         "Content-Type": "application/json",
         ...(token ? { Authorization: `Bearer ${token}` } : {}),
       },
-      body: JSON.stringify(rg ? { mbid, kind: "release_group" } : { mbid, kind: "auto" }),
+      body: JSON.stringify(req.body),
     });
   } catch (e) {
     return { state: "error", message: e instanceof Error ? e.message : String(e) };
@@ -149,6 +271,10 @@ async function requestAdd(item: DiscoverItem): Promise<AddOutcome> {
     already: albums.length > 0 && albums.every((a) => a?.already_in_library),
     background: !!body.background,
     added: albums.filter((a) => a && !a.already_in_library).length,
+    // `matched` is stated by the server for a name-only add; an id-given reply
+    // has resolved its id already, so it counts as matched by construction.
+    nameOnly: req.nameOnly,
+    matched: !req.nameOnly || !!body.matched,
     note: String(body.note || ""),
     why: [...(body.skipped ?? []), ...(body.errors ?? [])].map((s) => String(s?.reason || "")).find(Boolean) ?? "",
   };
@@ -158,35 +284,43 @@ async function requestAdd(item: DiscoverItem): Promise<AddOutcome> {
  *  point: an added release is a download job, so "Add to library" becomes
  *  "queued, pending" IN THE ROW and stays there — a toast would be gone while
  *  the album is still on its way. */
-type AddPhase = "idle" | "busy" | "unavailable" | "queued" | "adding" | "already" | "nothing";
+type AddPhase = "idle" | "busy" | "unavailable" | "queued" | "adding" | "byname" | "already" | "nothing";
 
-/** The unowned row's action. Disabled — with the reason in its tooltip — when
- *  the row carries no MusicBrainz id, and permanently disabled once the server
- *  has answered 404: a route this build does not have will not appear by
- *  pressing the button again. */
+/** The unowned row's action.
+ *
+ *  A row the server CAN add offers the button however little the row knows: an
+ *  id when it has one, else artist+title, which the server searches
+ *  MusicBrainz for and — finding nothing — turns into a name-keyed wish. The
+ *  one row that gets no button is the one with no name to search AT ALL (not
+ *  even an artist), because there the add could only ever fail; that chip is
+ *  informational grey, not an error. Permanently disabled once the server has
+ *  answered 404: a route this build does not have will not appear by pressing
+ *  the button again. */
 function AddButton({ item }: { item: DiscoverItem }) {
   const qc = useQueryClient();
   const [phase, setPhase] = useState<AddPhase>("idle");
   const [detail, setDetail] = useState("");
-  const mbid = (item.release_group_mbid || item.mbid || "").trim();
+  const req = addRequest(item);
 
-  if (!mbid) {
+  if (!req) {
     return (
       <span
         className="chip bg-raise border border-border text-zinc-600 shrink-0"
-        title="This row states no MusicBrainz id, so there is nothing to ask the server to add"
+        title="This row names neither an artist nor a title, so there is nothing for the server to search for"
       >
-        no MBID
+        nothing to search for
       </span>
     );
   }
 
-  const tip = `Add ${item.title || "this"} to the library — the server resolves it on MusicBrainz and queues the download`;
+  const tip = req.nameOnly
+    ? `Add ${item.title || "this"} to the library — the server searches MusicBrainz for it by artist and title, and queues a name search when it finds no match`
+    : `Add ${item.title || "this"} to the library — the server resolves it on MusicBrainz and queues the download`;
 
   const run = async () => {
     setPhase("busy");
     try {
-      const out = await requestAdd(item);
+      const out = await requestAdd(req);
       if (out.state === "unavailable") {
         setPhase("unavailable");
         setDetail(ADD_UNAVAILABLE);
@@ -207,6 +341,12 @@ function AddButton({ item }: { item: DiscoverItem }) {
         // resolves each release group, so "background" outranks "nothing".
         setPhase("adding");
         toast.success(`Adding ${item.title || "it"} — the albums arrive as MusicBrainz resolves them`);
+      } else if (out.nameOnly && !out.matched) {
+        // The server found no MusicBrainz match and queued a name-keyed wish:
+        // nothing is on disk, but a search IS running, so this is neither
+        // "nothing to add" nor a plain queue — the server's own note says it.
+        setPhase("byname");
+        toast.success(out.note || `Added ${item.title || "it"} — no MusicBrainz match, searching by name`);
       } else if (!out.added) {
         setPhase("nothing");
         toast(`Nothing to add for ${item.title || "this row"}${out.why ? ` — ${out.why}` : ""}`);
@@ -238,11 +378,15 @@ function AddButton({ item }: { item: DiscoverItem }) {
       </span>
     );
   }
-  if (phase === "queued" || phase === "adding") {
-    const label = phase === "queued" ? "Queued — pending" : "Adding — pending";
-    const why = phase === "queued"
-      ? "Queued into the library: the download is running, and the album appears there when it lands"
-      : "Queued into the library: MusicBrainz is being read one release group at a time, and each album appears as it resolves";
+  if (phase === "queued" || phase === "adding" || phase === "byname") {
+    const label =
+      phase === "queued" ? "Queued — pending" : phase === "adding" ? "Adding — pending" : "Queued — searching by name";
+    const why =
+      phase === "queued"
+        ? "Queued into the library: the download is running, and the album appears there when it lands"
+        : phase === "adding"
+          ? "Queued into the library: MusicBrainz is being read one release group at a time, and each album appears as it resolves"
+          : "Queued into the library by NAME: MusicBrainz had no match for this row, so a name-keyed wish is searching for it by artist and title";
     return (
       <span className="chip bg-sky-950/40 border border-sky-900/60 text-sky-300 shrink-0" title={detail ? `${why} — ${detail}` : why}>
         {label}

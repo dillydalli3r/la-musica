@@ -32,7 +32,11 @@ clearable, once the prompt is answered.
 The stage each row carries is the vocabulary in server.soulseek_auto.STAGES —
 `queued`, `searching`, `downloading`, `verifying`, `importing`, `completed`,
 `failed`, `needs_attention` — so a wish from the MusicBrainz queue and a job
-started from the Soulseek search bar are described in the same words.
+started from the Soulseek search bar are described in the same words. ONE stage
+is not in that list (`pending_albums.STAGE_RESOLVING`): an "Add to library" that
+answered before MusicBrainz did is waiting for THE SERVER, not for the network,
+and calling it `queued` would say a download was on its way when nothing has
+been searched for yet.
 """
 import os
 import time
@@ -41,7 +45,7 @@ from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 
 from mlo.config import load_config
-from server import soulseek_auto, wishes
+from server import pending_albums, soulseek_auto, wishes
 
 router = APIRouter()
 
@@ -81,8 +85,13 @@ SECTIONS = ("queued", "in_progress", "needs_attention", "completed", "failed")
 
 
 def _section_of(stage):
-    """Which section a row's STAGES name belongs in."""
-    if stage in ("queued", "searching"):
+    """Which section a row's STAGES name belongs in.
+
+    `pending_albums.STAGE_RESOLVING` belongs with the waiting rows for the same
+    reason `searching` does: work is running for it right now, and it is not
+    yet doing anything the network would see.
+    """
+    if stage in ("queued", "searching", pending_albums.STAGE_RESOLVING):
         return "queued"
     if stage in ("downloading", "verifying", "importing"):
         return "in_progress"
@@ -106,6 +115,14 @@ def _wish_source(wish):
         key = "musicbrainz" if wish.get("release_mbid") else "soulseek"
     return key, {"musicbrainz": "MusicBrainz", "soulseek": "Soulseek",
                  "auto": "Auto-import"}[key]
+
+
+def _resolving(wish):
+    """Whether this wish's framework album is still having its MusicBrainz
+    identity resolved (`pending_albums.is_resolving`: the marker says so, and
+    it is fresh enough to believe)."""
+    path = str(wish.get("album_path") or "")
+    return bool(path) and pending_albums.is_resolving(path)
 
 
 def _progress_from_search(search):
@@ -311,6 +328,18 @@ def _wish_rows(wishes_list, jobs_by_wish, cfg=None):
         # this wish again on its own is what decides every action the row has
         # (see server/wishes' retry policy).
         terminal = bool(wishes.is_terminal(w, cfg or {}))
+        if not live and not terminal and stage in ("queued", "searching") \
+                and _resolving(w):
+            # The add answered before MusicBrainz did
+            # (`pending_albums.create_from_request`): the row says what the
+            # SERVER is doing, instead of "queued" — which reads as waiting for
+            # a download nothing has searched for. A wish the store has ENDED
+            # keeps its own state, and so does one a job is already working on:
+            # a resolution that never landed must not make the row claim work
+            # for ever (the marker's own age bound is in `pending_albums`).
+            stage = pending_albums.STAGE_RESOLVING
+            note = "Asking MusicBrainz what this release is — the search " \
+                   "starts as it answers"
         if stage == "failed" and not terminal:
             # A failed ATTEMPT is not a given-up wish — with attempts left in
             # its budget the worker searches it again by itself — and the row
@@ -367,7 +396,7 @@ def _wish_rows(wishes_list, jobs_by_wish, cfg=None):
             # with no action at all until the attempts cap gave up for good.
             "cancelable": stage in ("queued", "searching", "downloading",
                                     "verifying", "importing", "needs_attention",
-                                    "failed"),
+                                    "failed", pending_albums.STAGE_RESOLVING),
             # A TERMINAL wish (imported, nothing found, or failed for good —
             # `wishes.is_terminal`) is one the user may take off the list
             # entirely; one that is still wanted or being searched is not

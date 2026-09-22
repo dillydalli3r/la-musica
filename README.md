@@ -273,7 +273,11 @@ narrow or heavily zoomed one, where the lyrics pane keeps a real minimum height
 instead of being squeezed under the fold. The lyrics pane carries its own scrim
 (and every line a tight text shadow) because the backdrop is a light additive
 color field: over a white cover the old 2 px blur at 60 % made the text
-unreadable, which is what the dim is tuned for now. Both lyric surfaces — this
+unreadable, which is what the dim is tuned for now. The title, the format line
+and the album/artist lines under the cover take that same ink decision and the
+same veil: the ambience is dark even under a light cover (measured, in
+`tools/check_np_metadata_contrast.cjs`), so a block with fixed white/grey steps
+put its secondary lines at ~2.5:1 on both polarities. Both lyric surfaces — this
 pane and the right-docked sidebar viewer — carry the same size control: `−`, a
 percentage you can type into, `+`, 5 % a press (85-160 %), remembered per
 surface because a 380 px sidebar and a full-screen pane want different numbers.
@@ -281,7 +285,16 @@ ReplayGain is applied through the WebAudio gain stage in
 **track**, **album** or **off** mode (`replaygain_mode`) with a preamp
 (`replaygain_preamp_db`, ±24 dB); a file without ReplayGain tags is measured on
 the fly with ffmpeg's EBU R128 meter when `replaygain_analyze_missing` is on
-(default), cached in `.mlo/data/replaygain.json`, with clip protection. Music
+(default), cached in `.mlo/data/replaygain.json`, with clip protection. The gain
+is on the element before the first sample, and the on-demand measurement is
+bounded to one second so the click is never held behind a decode: a track whose
+measurement only finishes after that has it ramped in the moment it lands,
+instead of playing the whole song at unity. Music videos carry the same gain,
+and album mode on an album with no `REPLAYGAIN_ALBUM_GAIN` says in the readout
+that each track fell back to its own gain rather than implying album
+normalisation. Pressing play on what is already playing starts it over (the
+album card, the album header, an artist's play all, a row and a queue row),
+while the transport's play after a pause resumes where it stopped. Music
 videos play at the correct aspect ratio, incompatible codecs are transcoded to
 fragmented MP4 (`GET /api/videos/stream?transcode=1`), and the keyboard shortcuts
 (`F`, `/`, `?`, Space, ← →, `[` `]`, `0`) live in
@@ -305,8 +318,18 @@ the whole `run_all_order` over that album. The **import script chain** then runs
 (default `import_scripts`, i.e. `DEFAULT_CHAIN`, which *is* `run_all_order` —
 one list, in `mlo/config.py`, so a script added to Run All can never be missing
 from an import); `import_auto_scripts` turns it off, `import_scripts` replaces it
-outright, and the chain only ever *fills* a tag, so what you typed in the wizard
-survives. **Bulk import** queues several
+outright. An import decides four families for itself and **replaces** what the
+download arrived carrying — the lyric the fetch found, the release's genres, the
+advisory pipeline's rating, and the album's own cover art (the art a peer baked
+into the files goes with it) — in `server/imports.py::drop_arrived_values`, the
+import's first tag-writing pass. It has to be the first one: every writer for
+those four *fills* an empty slot rather than replacing a full one, which is what
+keeps a user's own edit, and an import empties the slots before those writers
+run. Everything else an import touches still only ever **fills**, so what you
+typed in the wizard survives; a family you kept in `import_review_families` (and
+one in review mode) is left exactly as it arrived, and
+`import_keep_synced_lyrics` is the lyric family's one exception — on, a track
+whose lyric already carries timestamps keeps it. **Bulk import** queues several
 albums with `import_bulk_concurrency` (2 by default, 1–8).
 
 The **Genres** step asks the whole configured chain with **one button**: every
@@ -609,8 +632,13 @@ runbook — is
 
 **Export** writes a playlist, albums, artists, tracks or the whole library as MP3
 (VBR/CBR or custom), AAC, Opus, Vorbis, WAV, AIFF, ALAC, WavPack, WMA or a
-bit-exact `copy`, in `artist_album`, `album`, `flat` or `mirror` layout
-(`export_codec`, `export_structure`, `export_subfolder`). **Where it goes is a
+bit-exact `copy`, in the shipped `albumartist_album_disc` layout —
+ALBUMARTIST / Album / `1-01 Title`, the disc number included, so a two-disc
+album keeps its discs apart and a compilation stays one folder — or `album`,
+`flat`, `mirror`, or `custom`, a structure you type in the same Picard-style
+tag grammar the library's own naming script uses (`export_codec`,
+`export_structure`, `export_structure_script`, `export_subfolder`; the Export
+page previews a custom one and refuses a field the app does not know). **Where it goes is a
 choice**: `export_target` is `zip` — the client downloads one archive (the only
 mode a browser can honour, and the default) — or `server`, a folder the machine
 running the app can see, picked with the drive list and the free-space readout

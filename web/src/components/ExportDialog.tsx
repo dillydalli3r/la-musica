@@ -1,9 +1,9 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import type { ReactNode } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { AlertTriangle, Download, FileOutput, HardDrive, HardDriveDownload, RotateCcw, Save } from "lucide-react";
 import { api, IN_TAURI } from "../api";
-import type { ExportCodecSpec, ExportEq, ExportForm } from "../api";
+import type { ExportCodecSpec, ExportEq, ExportForm, ExportStructurePreview, ExportStructures } from "../api";
 import { toast } from "../store";
 import { fmtBytes, fmtDuration } from "../lib/fmt";
 import Segmented from "./Segmented";
@@ -14,12 +14,9 @@ import Modal from "./Modal";
  * so nothing but the form needs to know the word. */
 export const CUSTOM = "custom";
 
-export const STRUCTURES = [
-  { v: "artist_album", label: "Artist / Album / 01 - Title" },
-  { v: "album", label: "Album / 01 - Title" },
-  { v: "flat", label: "Flat — one folder" },
-  { v: "mirror", label: "Mirror library layout" },
-];
+/** The dropdown value that means "the structure the user typed" in
+ *  `structure_script` (server.exporter.CUSTOM_STRUCTURE). */
+export const CUSTOM_STRUCTURE = "custom";
 
 /** The two places an export can go. A browser cannot write to the server's
  *  filesystem, so "download a .zip" is the mode that works everywhere; a server
@@ -49,7 +46,8 @@ export const BLANK_FORM: ExportForm = {
   subfolder: "Music",
   codec: "copy",
   quality: "",
-  structure: "artist_album",
+  structure: "albumartist_album_disc",
+  structure_script: "",
   embed_covers: true,
   embed_cover_jpeg_quality: 90,
   embed_cover_resolution: 1200,
@@ -164,6 +162,9 @@ export interface ExportOptions {
   busy: boolean;
   specs: ExportCodecs | undefined;
   spec: ExportCodecSpec | undefined;
+  /** The folder-structure menu and the grammar a custom structure is written
+   *  in, as the server publishes them (server/exporter.structure_menu). */
+  structures: ExportStructures | undefined;
   /** Effective kbps of the chosen codec+quality, or null when unpredictable. */
   kbps: number | null;
   /** Predicted output size, or null when `seconds` is 0 or kbps unknown. */
@@ -197,6 +198,7 @@ export function useExportOptions(paths: string[], seconds = 0): ExportOptions {
   const { data: drivesData } = useQuery({ queryKey: ["exportDrives"], queryFn: api.exportDrives });
   const { data: specs } = useQuery({ queryKey: ["exportCodecs"], queryFn: api.exportCodecs });
   const { data: savedDefaults } = useQuery({ queryKey: ["exportDefaults"], queryFn: api.exportDefaults });
+  const { data: structures } = useQuery({ queryKey: ["exportStructures"], queryFn: api.exportStructures });
   const { data: eq } = useQuery({ queryKey: ["exportEq"], queryFn: api.exportEq });
 
   const [form, setForm] = useState<ExportForm | null>(null);
@@ -305,8 +307,8 @@ export function useExportOptions(paths: string[], seconds = 0): ExportOptions {
 
   return {
     f, set, setMany, customValue, setCustomValue, busy, spec, kbps, estBytes,
-    specs, drives, selectedDrive, overCapacity, target, eq, paths, seconds,
-    run, saveDefaults, resetDefaults,
+    specs, structures, drives, selectedDrive, overCapacity, target, eq, paths,
+    seconds, run, saveDefaults, resetDefaults,
     refreshDrives: () => void queryClient.invalidateQueries({ queryKey: ["exportDrives"] }),
   };
 }
@@ -330,6 +332,24 @@ export function ExportOptionsPanel({ e, hint }: {
   const { f, set, setMany, spec, kbps, estBytes, seconds, paths, busy, target, eq } = e;
   const zip = target === "zip";
   const eqSelected = [...(eq?.presets ?? []), ...(eq?.profiles ?? [])].find((p) => p.id === f.eq_profile);
+  /* The user's own structure is checked by the SERVER while it is typed — the
+   * same validator a run refuses with, so the sentence under the box is the
+   * one an export would give. Debounced: one request per pause instead of one
+   * per keystroke. */
+  const custom = f.structure === CUSTOM_STRUCTURE;
+  const script = f.structure_script;
+  const ext = spec?.ext ?? "";
+  const [customPreview, setCustomPreview] = useState<ExportStructurePreview | null>(null);
+  useEffect(() => {
+    if (!custom) return;
+    let live = true;
+    const timer = setTimeout(() => {
+      api.exportStructurePreview(script, ext)
+        .then((r) => { if (live) setCustomPreview(r); })
+        .catch((err) => { if (live) setCustomPreview({ ok: false, path: "", error: String(err) }); });
+    }, 350);
+    return () => { live = false; clearTimeout(timer); };
+  }, [custom, script, ext]);
   return (
     <div className="min-w-0">
       {hint && <div className="text-[11px] text-zinc-500 mb-3">{hint}</div>}
@@ -465,15 +485,57 @@ export function ExportOptionsPanel({ e, hint }: {
           value={f.structure}
           onChange={(ev) => set("structure", ev.target.value)}
         >
-          {STRUCTURES.map((st) => (
+          {/* The server's own menu (exporter.structure_menu), NOT a list of
+              this page's own: a structure a run would refuse must not be on
+              offer, and its labels are where the shipped file name is spelled
+              out. Until it lands the form's own value stays selected. */}
+          {!e.structures && <option value={f.structure}>{f.structure || "Loading…"}</option>}
+          {(e.structures?.structures ?? []).map((st) => (
             <option key={st.v} value={st.v}>{st.label}</option>
           ))}
         </select>
       </label>
-      <div className="text-[10px] text-zinc-600 mt-1">
-        A multi-disc album gets a &quot;1-01 - Title&quot; file name, so the two discs
-        cannot collide.
-      </div>
+      {f.structure === CUSTOM_STRUCTURE ? (
+        <>
+          <label className="text-[10px] text-zinc-500 flex flex-col gap-1 mt-2">
+            Custom structure
+            <input
+              className="input font-mono !py-1 text-xs min-w-0 tap"
+              value={f.structure_script}
+              spellCheck={false}
+              placeholder="%albumartist%/%album%/%discnumber%-$num(%tracknumber%,2) %title%"
+              onChange={(ev) => set("structure_script", ev.target.value)}
+            />
+          </label>
+          {/* The server validates it — one grammar, one validator, so what the
+              page shows here is what a run would say. */}
+          <div className="text-[10px] mt-1 break-all">
+            {customPreview === null ? (
+              <span className="text-zinc-600">Checking…</span>
+            ) : customPreview.ok ? (
+              <span className="text-zinc-600">
+                A sample track goes to <code className="text-zinc-400">{customPreview.path}</code>
+              </span>
+            ) : (
+              <span className="text-amber-300">{customPreview.error}</span>
+            )}
+          </div>
+          <div className="text-[10px] text-zinc-600 mt-1 leading-relaxed">
+            Fields: <code>{(e.structures?.fields ?? []).map((x) => `%${x}%`).join(" ")}</code>
+            <br />
+            Functions: <code>{(e.structures?.functions ?? []).map((x) => `$${x}()`).join(" ")}</code>
+            {" "}· <code>/</code> creates folders, <code>$if(%field%,then,else)</code> drops a level
+            a tag cannot fill.
+          </div>
+        </>
+      ) : (
+        <div className="text-[10px] text-zinc-600 mt-1">
+          The shipped structure writes the library&apos;s own file name —{" "}
+          <code>1-01 Title</code>, the disc number included, so a two-disc album
+          cannot collide — under the album artist and the album. &quot;Custom&quot;
+          takes your own tag fields instead.
+        </div>
+      )}
 
       {/* ---- artwork, tags, extras -------------------------------- */}
       <div className="text-xs font-bold text-zinc-300 mt-4 mb-2">Artwork &amp; tags</div>

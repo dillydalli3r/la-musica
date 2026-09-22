@@ -532,6 +532,17 @@ class DiscoverItem {
     _ => releaseGroupMbid == null ? 'auto' : 'release_group',
   };
 
+  /// Whether the row can be asked for at all.
+  ///
+  /// An id is not required: the server adds a row BY NAME when it has none,
+  /// searching MusicBrainz for the artist and title and queueing a name-keyed
+  /// wish when nothing matches. Only a row that names NEITHER — no artist and
+  /// no title to search with — has nothing to ask for, so that is the one case
+  /// the add action is withheld: a button that could only be answered with a
+  /// 400 is worse than no button.
+  bool get addable =>
+      addMbid != null || title.isNotEmpty || (artist?.isNotEmpty ?? false);
+
   factory DiscoverItem.fromJson(Map<String, dynamic> json) => DiscoverItem(
     kind: json['kind']?.toString() ?? 'album',
     title: _str(json['title']) ?? _str(json['name']) ?? '',
@@ -621,6 +632,35 @@ class DiscoverGenreResult {
       );
 }
 
+/// One source an ENTITY shelf cannot use at all, with the provider's own
+/// reason (`GET /api/discover/recommended?seed_kind=…`): a similar-ARTISTS
+/// feed cannot be asked about an album, and a limit the provider publishes is
+/// not a failed request. [short] is the compact marker to print beside the
+/// source's name ("artist pages only", "no similar-entity feed") and [why] the
+/// full sentence for the tooltip — the label is short BY DESIGN, never a
+/// sentence cut off by the chip it sits in.
+class DiscoverNotApplicable {
+  DiscoverNotApplicable({
+    required this.id,
+    required this.label,
+    required this.short,
+    required this.why,
+  });
+
+  final String id;
+  final String label;
+  final String short;
+  final String why;
+
+  factory DiscoverNotApplicable.fromJson(Map<String, dynamic> json) =>
+      DiscoverNotApplicable(
+        id: _str(json['id']) ?? '',
+        label: _str(json['label']) ?? '',
+        short: _str(json['short']) ?? '',
+        why: _str(json['why']) ?? '',
+      );
+}
+
 /// `GET /api/discover/recommended`. [basis] is the server's own sentence about
 /// why these rows were picked — shown as it stands, never re-worded here.
 class DiscoverRecommendedResult {
@@ -628,21 +668,37 @@ class DiscoverRecommendedResult {
     this.items = const [],
     this.sourcesAsked = const [],
     this.notes = const {},
+    this.notApplicable = const [],
     this.basis,
   });
 
   final List<DiscoverItem> items;
   final List<String> sourcesAsked;
   final Map<String, String> notes;
+
+  /// The sources whose feed does not exist for this page's level — reported
+  /// as information, never as a skip (see `DiscoverNotes`).
+  final List<DiscoverNotApplicable> notApplicable;
   final String? basis;
 
-  factory DiscoverRecommendedResult.fromJson(Map<String, dynamic> json) =>
-      DiscoverRecommendedResult(
-        items: _discoverItems(json['items']),
-        sourcesAsked: _strings(json['sources_asked']),
-        notes: _stringMap(json['notes']),
-        basis: _str(json['basis']),
-      );
+  factory DiscoverRecommendedResult.fromJson(Map<String, dynamic> json) {
+    final cannot = json['not_applicable'];
+    return DiscoverRecommendedResult(
+      items: _discoverItems(json['items']),
+      sourcesAsked: _strings(json['sources_asked']),
+      notes: _stringMap(json['notes']),
+      notApplicable: cannot is List
+          ? [
+              for (final one in cannot)
+                if (one is Map)
+                  DiscoverNotApplicable.fromJson(
+                    Map<String, dynamic>.from(one),
+                  ),
+            ]
+          : const [],
+      basis: _str(json['basis']),
+    );
+  }
 }
 
 List<DiscoverItem> _discoverItems(dynamic raw) => raw is List

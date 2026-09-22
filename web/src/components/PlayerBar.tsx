@@ -27,7 +27,11 @@ import { ASPECT_FIT, readAspect, writeAspect, type VideoAspect } from "../lib/vi
 
 /** Mirrors the `/api/replaygain` payload (see `api.replaygain`): `gain` is the
  * dB the player applies (null = unity), `analyzed` says the backend had to
- * measure the file on the fly because its tags carried no ReplayGain. */
+ * measure the file on the fly because its tags carried no ReplayGain,
+ * `pending` says that measurement is STILL RUNNING (so the unity is
+ * temporary), and `album` says the number really is the album gain — false
+ * while the mode is "album" means this album has none and the track value was
+ * used instead. */
 interface RgResult {
   path: string;
   gain: number | null;
@@ -35,6 +39,8 @@ interface RgResult {
   mode: string;
   source: string | null;
   analyzed: boolean;
+  pending: boolean;
+  album: boolean;
 }
 type RgMode = "track" | "album" | "off";
 
@@ -105,6 +111,16 @@ function ScrollingText({ text, className }: {
  *  turn every pause/play into another play. See PlayerBar's `countPlay`. */
 const PLAY_START_SECONDS = 1;
 
+/** How long the player waits between re-asks for a gain the backend is still
+ *  measuring on the fly, in ms. Growing, because a whole-file EBU R128 decode
+ *  lands in seconds on a warm disk and only a long file on a cold one is slow;
+ *  the array's LENGTH is also the number of attempts, and its sum (~48 s) is
+ *  where the player gives up — by then the decode's value is in the server
+ *  cache for the next play anyway, and a rejected value (no decoder at all)
+ *  must not be asked for forever. Each retry costs one tag read once the
+ *  decode has finished. */
+const RG_RETRY_MS = [1500, 3000, 5000, 8000, 12000, 18000];
+
 
 export default function PlayerBar() {
   const queue = useStore((s) => s.queue);
@@ -121,6 +137,9 @@ export default function PlayerBar() {
   const playing = useStore((s) => s.playing);
   const setPlaying = useStore((s) => s.setPlaying);
   const queueId = useStore((s) => s.queueId);
+  // The play press this queue came from: a reload is due when EITHER the queue
+  // identity or the press changed (see the load effect's guard).
+  const playToken = useStore((s) => s.playToken);
   const vol = useStore((s) => s.vol);
   const setVol = useStore((s) => s.setVol);
   const { t } = useI18n();
@@ -138,6 +157,10 @@ export default function PlayerBar() {
   // for every sync type.
   const pathOnA = useRef<string | null>(null);
   const pathOnB = useRef<string | null>(null);
+  // The same idea for the music-video popout: a video is decoded by that ONE
+  // <video> element, so "which track does the video hold" is a path of its
+  // own (the audio pair's paths are cleared while a video plays).
+  const pathOnVideo = useRef<string | null>(null);
   const setElPath = (el: HTMLAudioElement | null, path: string | null) => {
     if (el === aRef.current) pathOnA.current = path;
     else if (el === bRef.current) pathOnB.current = path;
@@ -157,6 +180,11 @@ export default function PlayerBar() {
   const preloaded = useRef(-1); // queue index preloaded into the idle element
   const preloadedPath = useRef<string | null>(null); // what that preload holds
   const loadedPath = useRef<string | null>(null); // track the active element plays
+  // The play press `loadedPath` was loaded for: a press that resolves to the
+  // track already loaded must still restart it, a queue edit must not (see the
+  // load effect). Starts at the mount's token so the first press of the session
+  // behaves like any other.
+  const loadedToken = useRef(playToken);
   const [time, setTime] = useState(0);
   const [duration, setDuration] = useState(0);
   const [shuffle, setShuffle] = useState(false);
@@ -422,23 +450,90 @@ export default function PlayerBar() {
   };
   /** Install a path's gain on whichever element holds that path — never on the
    *  other one: it may be holding the preloaded next track, and writing this
-   *  track's gain there is the wrong-loudness handover. */
+   *  track's gain there is the wrong-loudness handover. The music-video popout
+   *  is one of those decoders (same WebAudio chain), on the same rule: only the
+   *  path its <video> actually holds. */
   const applyGainForPath = (path: string, gain: number | null) => {
     if (pathOnA.current === path && aRef.current) applyReplayGain(aRef.current, gain);
     if (pathOnB.current === path && bRef.current) applyReplayGain(bRef.current, gain);
+    if (pathOnVideo.current === path && videoRef.current) applyReplayGain(videoRef.current, gain);
   };
   /** Re-assert the gain that belongs to the track an element holds, read from
    *  the cache; unity when that path has no settled gain. Never another
    *  track's value — that is the loud start this stage exists to avoid.
-   *  `immediate` is for the gapless handover, which calls this on the element
-   *  it is about to start. */
-  const applyElGain = (el: HTMLAudioElement, immediate = false) => {
-    const path = el === aRef.current ? pathOnA.current : pathOnB.current;
+   *  `immediate` is for the starts that know the element is not sounding yet:
+   *  the gapless handover, and the video popout's own metadata event. */
+  const applyElGain = (el: HTMLMediaElement, immediate = false) => {
+    const path =
+      el === videoRef.current ? pathOnVideo.current
+        : el === aRef.current ? pathOnA.current : pathOnB.current;
     const hit = path ? rgCache.current.get(path) : undefined;
     applyReplayGain(el, hit?.gain ?? null, immediate);
   };
   // The result behind that gain — drives the readout beside the volume bar.
   const [rgRes, setRgRes] = useState<RgResult | null>(null);
+
+  // ---- a gain that arrives LATE ------------------------------------------
+  // /api/replaygain bounds its on-demand measurement to PLAYBACK_WAIT_S (one
+  // second) BECAUSE the player installs the gain before the track starts and
+  // must not hold the click behind a whole-file EBU R128 decode. So a track
+  // with no ReplayGain tags starts at unity — but that answer is not final:
+  // the decode keeps running server-side and stores its value. The request is
+  // therefore repeated while the backend reports it as still measuring, and the
+  // value is put on the element that is ALREADY SOUNDING — a ramp, because the
+  // audio is live and a step would click. Before this, nothing re-applied a
+  // late value at all: an untagged track played its whole length at unity and
+  // only a track change or a mode/preamp edit ever fetched the gain again.
+  //
+  // Timers rather than a socket or a long-poll: a pending gain is worth a few
+  // tag reads, not a second protocol, and the player already polls for job
+  // locks. See RG_RETRY_MS for the schedule and the give-up rule.
+  const rgWatch = useRef<Map<string, { timer: number; tries: number }>>(new Map());
+  const stopRgWatch = (path: string) => {
+    const w = rgWatch.current.get(path);
+    if (w) clearTimeout(w.timer);
+    rgWatch.current.delete(path);
+  };
+  const stopRgWatches = () => {
+    for (const path of [...rgWatch.current.keys()]) stopRgWatch(path);
+  };
+  /** One re-ask, `tries` steps into the schedule. */
+  const rgAskAgain = (path: string, tries: number) => {
+    stopRgWatch(path); // one schedule per path, however many callers armed one
+    const gen = rgGen.current;
+    const timer = window.setTimeout(() => {
+      rgWatch.current.delete(path);
+      // A late value only has somewhere to land while a decoder still holds the
+      // path; for anything else there is nothing to do, and nothing is lost —
+      // the decode caches its result server-side, so the next play of that path
+      // reads it in one request. And after a mode/preamp edit the newer answer
+      // owns the gain stage (a settings change re-asks by itself).
+      if (rgGen.current !== gen) return;
+      if (path !== pathOnA.current && path !== pathOnB.current && path !== pathOnVideo.current) return;
+      void rgFor(path).then((r) => {
+        if (rgGen.current !== gen) return;
+        if (r && r.gain !== null) {
+          // LANDED. Cache it, so every later start of this path — a resume, the
+          // gapless handover, a return to the track — installs it from the
+          // client cache with a step and no round trip at all.
+          rgCache.current.set(path, r);
+          applyGainForPath(path, r.gain);
+          if (queue[index]?.path === path) setRgRes(r);
+          return;
+        }
+        if (r?.pending && tries + 1 < RG_RETRY_MS.length) rgAskAgain(path, tries + 1);
+        else stopRgWatch(path);
+      });
+    }, RG_RETRY_MS[Math.min(tries, RG_RETRY_MS.length - 1)]);
+    rgWatch.current.set(path, { timer, tries });
+  };
+  /** Start (or leave running) the re-ask schedule for a path whose answer said
+   *  a measurement is still in flight. Idempotent per path: the load and the
+   *  readout ask for the same track, and the second ask must not restart the
+   *  schedule the first one started. */
+  const watchRgPending = (path: string) => {
+    if (!rgWatch.current.has(path)) rgAskAgain(path, 0);
+  };
 
   // Reload + play whenever the queue identity or index changes (keyed on
   // queueId so a fresh queue at the same index still reloads). Skipped when
@@ -448,9 +543,14 @@ export default function PlayerBar() {
   useEffect(() => {
     const track = queue[index];
     if (!track) return;
-    // A pure reorder (queueMove / remove around the playing row) resolves
-    // to the SAME track — reloading it would restart the song from zero.
-    if (track.path === loadedPath.current) return;
+    // A pure reorder (queueMove / remove around the playing row) resolves to
+    // the SAME track — reloading it would restart the song from zero, and a
+    // trim of the queue is the same case. A DELIBERATE press that resolves to
+    // the same track is the other case and needs the opposite: pressing play
+    // on the album that is already playing must start it over instead of doing
+    // nothing. `playToken` (bumped by every play press, never by a queue edit)
+    // is what tells them apart.
+    if (track.path === loadedPath.current && playToken === loadedToken.current) return;
     // Switching tracks must FEEL immediate: silence the outgoing audio the
     // moment the selection changes, before the new source is fetched and
     // decoded. Without this the old track kept playing until the new one was
@@ -470,6 +570,15 @@ export default function PlayerBar() {
       return;
     }
     loadedPath.current = track.path;
+    loadedToken.current = playToken;
+    // Pre-warm this track's gain. The request is what STARTS a missing
+    // server-side measurement, so asking here — before src resolution, before
+    // the video popout's own load — gives that decode the longest head start,
+    // and the video branch below never reaches the audible load's lookup at
+    // all. When the value is ready in time (from tags, or from a measurement
+    // this session already made) the load installs it before play() and nothing
+    // lands late: that cache hit is the case this exists to make common.
+    void rgFor(track.path);
     // Nothing has been counted for this track yet — the play is recorded by
     // the element's own `play` event (countPlay), so loading must not count
     // anything, only forget the previous track's count.
@@ -497,12 +606,29 @@ export default function PlayerBar() {
       // probe-driven direct/transcode choice and remounts on path change) —
       // here we only re-apply rate/volume and nudge playback past any
       // autoplay-policy hesitation.
+      //
+      // This is also the music video's ReplayGain path: that <video> is its
+      // decoder AND it carries the same WebAudio gain chain as the <audio>
+      // pair, so the gain belongs on it. Videos used to get no value at all
+      // while the bar printed "RG -x dB" for them. The element is keyed on
+      // path/live and attaches its graph only once it has a real src, so the
+      // value is installed from two sides: here (cache hit, stepped in) and
+      // again from the element's own play/metadata events, which is where a
+      // pending value lands.
+      pathOnVideo.current = track.path;
       const v = videoRef.current;
       if (v) {
         v.playbackRate = speed;
         v.volume = vol;
+        applyElGain(v, true);
         v.play().catch(() => {});
       }
+      const gen = rgGen.current;
+      void rgFor(track.path).then((r) => {
+        if (rgGen.current !== gen || pathOnVideo.current !== track.path) return;
+        applyGainForPath(track.path, r?.gain ?? null);
+        if (r?.pending) watchRgPending(track.path);
+      });
       return;
     }
     if (swapped.current) {
@@ -522,6 +648,9 @@ export default function PlayerBar() {
     }
     preloaded.current = -1;
     preloadedPath.current = null;
+    // An audio track owns the decoders now, so the popout's path (and with it
+    // any late value headed for the video) is no longer this player's business.
+    pathOnVideo.current = null;
     const el = audio();
     if (!el) return;
     // Exactly one decoder: the element we are NOT loading into stops here.
@@ -568,10 +697,15 @@ export default function PlayerBar() {
       // unity is the honest value — the readout effect installs the new
       // setting on the spot.
       applyReplayGain(el, rgGen.current === gen ? r?.gain ?? null : null, true);
+      // The backend could not settle this gain inside PLAYBACK_WAIT_S (an
+      // untagged file whose decode is still running), so the unity just
+      // installed is temporary: keep asking, and land the value on this
+      // element while it plays rather than leaving the track unnormalised.
+      if (rgGen.current === gen && r?.pending) watchRgPending(track.path);
       el.play().catch(() => {});
     })();
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [index, queueId]);
+  }, [index, queueId, playToken]);
 
   // Preload the next sequential track into the idle element as the current
   // one approaches its end — this is what makes the handover gapless.
@@ -622,6 +756,10 @@ export default function PlayerBar() {
         // A mode/preamp edit while this was in flight owns the gain stage now.
         if (rgGen.current !== gen) return;
         applyGainForPath(nextPath, r?.gain ?? null);
+        // Untagged next track: the handover has no load step, so unity would
+        // otherwise stay on the element the swap starts. The re-ask lands the
+        // real value on whichever element holds this path by then.
+        if (r?.pending) watchRgPending(nextPath);
       });
       idle.load();
     });
@@ -665,7 +803,13 @@ export default function PlayerBar() {
     rgGen.current += 1;
     rgCache.current.clear();
     rgPending.current.clear();
+    // Answers already in flight are dead too — including the re-ask schedule,
+    // which would otherwise report the old settings' value seconds later.
+    stopRgWatches();
   }, [rgMode, rgPreamp]);
+  // The schedule dies with the player (the bar unmounts on sign-out): a timer
+  // kept past that would go on asking for a track nothing can hold.
+  useEffect(() => () => stopRgWatches(), []);
   // The gain readout for the current track — and the path a mode/preamp edit
   // takes to reach the element that is playing right now. The gain itself was
   // already installed before play by the load above; this never moves the
@@ -691,6 +835,9 @@ export default function PlayerBar() {
       if (dead || rgGen.current !== gen || queue[index]?.path !== path) return;
       applyGainForPath(path, r?.gain ?? null);
       setRgRes(r);
+      // Still measuring: the gain is unity for now, not for the track's whole
+      // length — keep asking so the value lands on the playing element.
+      if (r?.pending) watchRgPending(path);
     });
     return () => {
       dead = true;
@@ -713,6 +860,12 @@ export default function PlayerBar() {
   // loudness was matched when nothing was.
   const rgGain = rgRes?.gain ?? null;
   const fmtDb = (db: number) => `${db >= 0 ? "+" : ""}${db.toFixed(1)} dB`;
+  // The readout must not imply an album normalisation the album cannot have:
+  // in album mode, a missing REPLAYGAIN_ALBUM_GAIN (an album nobody ran the
+  // ReplayGain script over, or one measured on the fly, which has no album
+  // pass to give) means each of its tracks is normalised on its own — so the
+  // readout says which value it actually used instead of degrading silently.
+  const rgAlbumFallback = rgMode === "album" && !!rgRes && !rgRes.album;
   const rgTip =
     rgGain === null
       ? ""
@@ -720,6 +873,8 @@ export default function PlayerBar() {
           rgRes?.analyzed
             ? "measured on demand: this file has no ReplayGain tags"
             : "from ReplayGain tags"
+        }${
+          rgAlbumFallback ? "; this album has no album gain, so its track value was used" : ""
         }${rgRes?.source?.endsWith("+clamp") ? "; reduced to stop clipping" : ""}`;
 
   // The fullscreen viewer opens from the player's own button AND from the
@@ -1274,8 +1429,12 @@ export default function PlayerBar() {
                                   toast(held.held.why);
                                   return;
                                 }
-                                setIndex(i);
-                                setPlaying(t.path);
+                                // A press on a queue row is a play press, so it
+                                // goes through the same action every play button
+                                // uses: pressing the row that is ALREADY playing
+                                // restarts it instead of doing nothing (the
+                                // playToken), and `playing` stays in step.
+                                useStore.getState().playNow(queue, i);
                                 setQueueOpen(false);
                               }}
                               title="Play this track now"
@@ -1554,10 +1713,22 @@ export default function PlayerBar() {
                 e.currentTarget.volume = vol;
                 e.currentTarget.playbackRate = speed;
                 attachAnalyser(e.currentTarget);
+                // ... and install this video's ReplayGain before its first
+                // sample, exactly like the audio load: stepped in (the element
+                // is at its start), from the cache, which is where the pre-warm
+                // and the late re-ask both put the value.
+                applyElGain(e.currentTarget, true);
                 onVideoMeta(e);
               }}
               onEnded={handleEnded}
-              onPlay={(e) => countPlay(e.currentTarget)}
+              onPlay={(e) => {
+                // Same rule as the audio pair's play handler: the element
+                // re-asserts its own track's gain, so a resume after the value
+                // landed, or a remount, is never left at unity.
+                attachAnalyser(e.currentTarget);
+                applyElGain(e.currentTarget);
+                countPlay(e.currentTarget);
+              }}
             />
           </div>,
           document.body
@@ -1608,7 +1779,7 @@ export default function PlayerBar() {
                 applied:
                   rgGain === null
                     ? null
-                    : { gain: rgGain, source: rgRes?.source ?? null, analyzed: !!rgRes?.analyzed },
+                    : { gain: rgGain, source: rgRes?.source ?? null, analyzed: !!rgRes?.analyzed, album: !!rgRes?.album },
                 onMode: (m) => saveRg({ replaygain_mode: m }),
                 onPreamp: (db) => saveRg({ replaygain_preamp_db: db }),
               }}
@@ -1732,6 +1903,12 @@ function VideoPopout({
       key={`${path}|${live ? "x" : "direct"}`}
       ref={videoRef}
       src={src}
+      // Same CORS-handshake as the <audio> pair (and the shared SubtitledVideo):
+      // without it a cross-origin API — the Tauri desktop shell, a Flutter-web
+      // build, a LAN server — leaves this element out of the WebAudio graph
+      // (attachAnalyser refuses a tainted stream), so it would get neither the
+      // meter NOR the ReplayGain the bar reports for it.
+      crossOrigin="anonymous"
       controls={!fill}
       autoPlay
       playsInline

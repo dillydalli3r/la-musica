@@ -507,6 +507,26 @@ export interface ExportCodecSpec {
   default: string;
 }
 
+/** `GET /api/export/structures` — the folder-structure menu the Export page
+ *  renders (keys and labels, straight from server.exporter.STRUCTURES) and the
+ *  vocabulary a custom structure script is written in. */
+export interface ExportStructures {
+  structures: { v: string; label: string }[];
+  /** The %fields% a custom script may use (the naming grammar's variables). */
+  fields: string[];
+  /** The $functions it may call. */
+  functions: string[];
+}
+
+/** `POST /api/export/structure/preview` — what a user-typed structure writes
+ *  for the server's sample track, or the sentence that refuses it (an unknown
+ *  %field%, an empty result). Same validation the run itself applies. */
+export interface ExportStructurePreview {
+  ok: boolean;
+  path: string;
+  error: string;
+}
+
 /** The Export page's form — the request body, and (key for key, under
  * `export_<field>`) the saved defaults it loads on open. */
 export interface ExportForm {
@@ -518,7 +538,13 @@ export interface ExportForm {
   subfolder: string;
   codec: string;
   quality: string;
+  /** "albumartist_album_disc" (the shipped tree, the library's own shape),
+   *  "album", "flat", "mirror", or "custom" for `structure_script`. */
   structure: string;
+  /** The user's own structure, a naming script (mlo.naming's grammar: %field%
+   *  substitution, $if(), "/" for folders). Read when `structure` is
+   *  "custom". */
+  structure_script: string;
   embed_covers: boolean;
   embed_cover_jpeg_quality: number;
   embed_cover_resolution: number;
@@ -1385,13 +1411,29 @@ export interface DiscoverItem {
 }
 
 /** Why a source said nothing: source id → the server's own words ("skipped:
- *  no lastfm_api_key"). A source absent from this map answered.
+ *  no lastfm_api_key"). A source absent from this map answered — or was never
+ *  asked because no feed of its kind exists for the request (see
+ *  `DiscoverNotApplicable`, which is information, not a silence).
  *
- *  Two keys are not failures: `recommended` is the recommendation shelf's own
+ *  Three keys are not failures: `recommended` is the recommendation shelf's own
  *  verdict on the seed (the one non-source key), and a note beginning
  *  "partial:" is a source answering with part of a long list. A source the
  *  server does not know is keyed by what was asked for, with "unknown source". */
 export type DiscoverNotes = Record<string, string>;
+
+/** A source an ENTITY shelf cannot use at all, with the provider's own reason
+ *  (`GET /api/discover/recommended?seed_kind=…`): a similar-ARTISTS feed
+ *  cannot be asked about an album, and a limit the provider publishes is not a
+ *  failed request. `short` is the compact marker to print beside the source's
+ *  name ("artist pages only", "no similar-entity feed") and `why` the full
+ *  sentence for the tooltip — the label is short BY DESIGN, never a sentence
+ *  cut off by the pill it sits in. */
+export interface DiscoverNotApplicable {
+  id: string;
+  label: string;
+  short: string;
+  why: string;
+}
 
 /** `GET /api/discover/genres` — the genre list of the requested scope, with
  *  the counts each side can state (library counts are tracks, albums and
@@ -1423,12 +1465,15 @@ export interface DiscoverItems {
 
 /** `GET /api/discover/recommended` — an online shelf seeded by the whole
  *  library (`seed=library`) or by one genre. `basis` says what the rows were
- *  built from. */
+ *  built from. The entity seed (`seed_kind`) also returns `not_applicable`:
+ *  the sources whose feed cannot answer a page of this kind, reported as
+ *  information rather than as a skip. */
 export interface DiscoverRecommended {
   items: DiscoverItem[];
   sources_asked: string[];
   notes: DiscoverNotes;
   basis: string;
+  not_applicable?: DiscoverNotApplicable[];
 }
 
 /** The four closed windows every chart can be asked for — the same vocabulary
@@ -1866,8 +1911,12 @@ export const api = {
   // ReplayGain for playback loudness matching. `mode` overrides the saved
   // replaygain_mode for one call (track/album/off); `analyzed` is true when
   // the gain had to be measured on the fly because the tags were missing.
+  // `pending` is true while that on-demand measurement is still decoding, so
+  // a null `gain` is temporary and asking again is worth it; `album` is true
+  // only when the number really is the album gain (false in album mode =
+  // this album has none, per-track values were used).
   replaygain: (path: string, mode?: "track" | "album" | "off") =>
-    json<{ path: string; gain: number | null; peak: number | null; mode: string; source: string | null; analyzed: boolean }>(
+    json<{ path: string; gain: number | null; peak: number | null; mode: string; source: string | null; analyzed: boolean; pending: boolean; album: boolean }>(
       `${API}/replaygain?path=${encodeURIComponent(path)}${mode ? `&mode=${mode}` : ""}`
     ),
   lyricsEmbed: (path: string, lyrics: string, staged = false) =>
@@ -2679,6 +2728,19 @@ export const api = {
    * table the backend owns. */
   exportCodecs: () => json<{ codecs: Record<string, ExportCodecSpec> }>(`${API}/export/codecs`),
   exportDefaults: () => json<ExportForm>(`${API}/export/defaults`),
+  /** The folder-structure menu (keys + labels) and the %fields% / $functions a
+   *  custom structure script may use — the exporter's own tables, so the
+   *  dropdown cannot offer a structure a run would refuse. */
+  exportStructures: () => json<ExportStructures>(`${API}/export/structures`),
+  /** The path a user-typed structure writes for one sample track, or the
+   *  server's sentence refusing it (an unknown %field%, an empty result).
+   *  Same grammar and same validation the run applies. */
+  exportStructurePreview: (script: string, ext: string) =>
+    json<ExportStructurePreview>(`${API}/export/structure/preview`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ script, ext }),
+    }),
   /** The equaliser profiles an export can bake in, and the server's own line
    *  about what applying one does. */
   exportEq: () => json<ExportEq>(`${API}/export/eq`),

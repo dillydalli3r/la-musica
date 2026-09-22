@@ -7,10 +7,10 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 
 from .audio import AudioFile
 from .config import should_write_audio_tag
-from .paths import AUDIO_EXTS, DEFAULT_DIGITAL_SOURCE, fsync_dir
+from .paths import AUDIO_EXTS, DEFAULT_DIGITAL_SOURCE, LIB_AUDIO_EXTS, fsync_dir
 from .stats import (
     new_stats, _make_pbar, _pbar_skip, _pbar_update, _diff_bytes,
-    _walk_files, is_audio_file, _find_albums, _clean_set, _summarize_values,
+    _walk_files, is_audio_file, _clean_set, _summarize_values,
     _collect_targets, worker_count,
 )
 from .tagtext import canonical_text
@@ -474,11 +474,22 @@ def _format_for_storage(text, cfg, optimize=True, is_for_lrc=False):
     )
 
 
-def _process_lyrics_for_audio(audio_path, cfg):
+def _process_lyrics_for_audio(audio_path, cfg, media_source=None):
     af = AudioFile(audio_path)
 
     if af.audio is None:
         return ("fail", 0, 0, f"load: {af.error}")
+
+    # What the album-level MEDIA/SOURCE pass needs (see
+    # _normalize_album_media_source), read here WHILE THE CONTAINER IS OPEN:
+    # that pass used to open every file a second time to ask these two
+    # questions. Read before anything is written — the tags below are lyrics,
+    # INSTRUMENTAL and the .lrc sidecar, and none of them touches MEDIA or
+    # SOURCE — and keyed the way the album pass looks it up. The dict is filled
+    # by the pool's threads, one key per file from the worker that opened it.
+    if media_source is not None:
+        media_source[os.path.normcase(os.path.normpath(audio_path))] = (
+            af.get_tag("MEDIA"), af.get_tag("SOURCE"))
 
     modified = False
     original_size = os.path.getsize(audio_path)
@@ -680,11 +691,37 @@ def _process_lyrics_for_audio(audio_path, cfg):
 
 def _normalize_album_media_source(args):
     # args is (album_dir, default_source) or (album_dir, default_source, config)
-    if len(args) == 3:
+    # or (album_dir, default_source, config, media_source) — the last being
+    # what the per-file lyrics pass already read off each file it opened.
+    media_source = None
+    if len(args) == 4:
+        album_dir, default_source, cfg, media_source = args
+    elif len(args) == 3:
         album_dir, default_source, cfg = args
     else:
         album_dir, default_source = args
         cfg = None
+
+    def _known(path):
+        """(MEDIA, SOURCE) the lyrics pass read for *path*, else None."""
+        if not media_source:
+            return None
+        return media_source.get(os.path.normcase(os.path.normpath(path)))
+
+    def _handle(path, af):
+        """(handle, error) for a file this pass has to WRITE.
+
+        The read half of the album did not open the files the lyrics pass had
+        already opened — but a write needs a container of its own, and one that
+        cannot be opened is reported exactly as the read pass reports it (the
+        album's verdict, not a crash).
+        """
+        if af is not None:
+            return af, ""
+        fresh = AudioFile(path)
+        if fresh.audio is None:
+            return None, f"cannot read {os.path.basename(path)}: {fresh.error}"
+        return fresh, ""
 
     try:
         files = sorted(f for f in os.listdir(album_dir) if is_audio_file(f))
@@ -698,19 +735,26 @@ def _normalize_album_media_source(args):
 
         for fn in files:
             path = os.path.join(album_dir, fn)
-            af = AudioFile(path)
+            known = _known(path)
+            if known is None:
+                af = AudioFile(path)
 
-            if af.audio is None:
-                return (
-                    album_dir,
-                    "failed",
-                    0,
-                    0,
-                    f"cannot read {fn}: {af.error}",
-                )
-
-            media_val = af.get_tag("MEDIA")
-            source_val = af.get_tag("SOURCE")
+                if af.audio is None:
+                    return (
+                        album_dir,
+                        "failed",
+                        0,
+                        0,
+                        f"cannot read {fn}: {af.error}",
+                    )
+                media_val = af.get_tag("MEDIA")
+                source_val = af.get_tag("SOURCE")
+            else:
+                # Read a moment ago, with the same tags on disk: nothing
+                # between the two passes writes MEDIA or SOURCE (the lyrics
+                # pass writes lyrics, and the .lrc sidecar it may remove).
+                af = None
+                media_val, source_val = known
 
             media_clean = str(media_val).strip() if media_val is not None else ""
             source_clean = str(source_val).strip() if source_val is not None else ""
@@ -757,6 +801,11 @@ def _normalize_album_media_source(args):
                         # Respect per-filetype MEDIA_SOURCE toggle
                         if cfg is not None and not should_write_audio_tag(cfg, "SOURCE", filepath=path):
                             continue
+                        # A write needs a container of its own: a file the
+                        # lyrics pass opened was not opened here (see _handle).
+                        af, err = _handle(path, af)
+                        if err:
+                            return (album_dir, "failed", 0, 0, err)
                         original_size = os.path.getsize(path)
 
                         if not af.set_tag("SOURCE", fill_source):
@@ -781,6 +830,9 @@ def _normalize_album_media_source(args):
                 if source_clean:
                     if not should_write_audio_tag(cfg, "SOURCE", filepath=path):
                         continue
+                    af, err = _handle(path, af)
+                    if err:
+                        return (album_dir, "failed", 0, 0, err)
                     original_size = os.path.getsize(path)
                     if not af.delete_tag("SOURCE"):
                         return (
@@ -805,6 +857,9 @@ def _normalize_album_media_source(args):
                 if source_clean:
                     if cfg is not None and not should_write_audio_tag(cfg, "SOURCE", filepath=path):
                         continue
+                    af, err = _handle(path, af)
+                    if err:
+                        return (album_dir, "failed", 0, 0, err)
                     original_size = os.path.getsize(path)
 
                     if not af.delete_tag("SOURCE"):
@@ -838,11 +893,18 @@ def _normalize_album_media_source(args):
         return (album_dir, "failed", 0, 0, str(e))
 
 
-def _normalize_media_source_library(config, stats):
+def _normalize_media_source_library(config, stats, albums, media_source=None):
     """
     Album-level MEDIA/SOURCE enforcement:
     - Digital Media albums must have SOURCE populated.
     - Non-Digital Media albums must not have SOURCE.
+
+    *albums* is the album list the per-file pass's own walk already produced
+    (see `run_format_lyrics`); *media_source* is the {path: (MEDIA, SOURCE)}
+    that pass read off every file it opened, which is what lets a file this
+    pass does not have to WRITE go unopened here — an album's tracks are opened
+    once per run of script 1, not twice for two questions about the same
+    container. A caller with neither walks for itself.
     """
     if not config.get("normalize_media_source", True):
         return stats
@@ -853,13 +915,11 @@ def _normalize_media_source_library(config, stats):
     if not os.path.isdir(folder):
         return stats
 
-    # Targets first: a scoped run (one album, an import) must not walk the
-    # whole library to throw the answer away.
-    if config.get("targets") is not None:
-        target_files = _collect_targets(config["targets"], AUDIO_EXTS)
-        albums = sorted({os.path.dirname(f) for f in target_files})
-    else:
-        albums = _find_albums(folder)
+    if albums is None:
+        albums = sorted({os.path.normpath(os.path.dirname(f)) for f in
+                         (_collect_targets(config["targets"], LIB_AUDIO_EXTS)
+                          if config.get("targets") is not None
+                          else _walk_files(folder, LIB_AUDIO_EXTS))})
 
     if not albums:
         return stats
@@ -869,7 +929,8 @@ def _normalize_media_source_library(config, stats):
 
     with ThreadPoolExecutor(max_workers=workers) as ex:
         futures = {
-            ex.submit(_normalize_album_media_source, (a, default_source, config)): a
+            ex.submit(_normalize_album_media_source,
+                      (a, default_source, config, media_source)): a
             for a in albums
         }
 
@@ -930,9 +991,19 @@ def run_format_lyrics(config):
         return stats
 
     targets = config.get("targets")
-    files = _collect_targets(targets, AUDIO_EXTS)
-    if targets is None:
-        files = sorted(_walk_files(folder, AUDIO_EXTS))
+    # ONE walk for both halves of this script. The per-file lyrics pass needs
+    # AUDIO_EXTS; MEDIA/SOURCE is enforced per ALBUM over everything the
+    # library counts as a track (LIB_AUDIO_EXTS — a music video is a track,
+    # and a disc of them is still an album), and that half used to find its
+    # albums with a SECOND walk of the same library (a scoped run asked
+    # _collect_targets twice over the same targets). Walking the wider set once
+    # and splitting it here leaves the lyrics pass exactly the files it had and
+    # the album half exactly the albums _find_albums would have returned.
+    all_files = _collect_targets(targets, LIB_AUDIO_EXTS) if targets is not None \
+        else sorted(_walk_files(folder, LIB_AUDIO_EXTS))
+    albums = sorted({os.path.normpath(os.path.dirname(f)) for f in all_files})
+    files = [f for f in all_files
+             if os.path.splitext(f)[1].lower() in AUDIO_EXTS]
     # Deduplicate in case targets contained both album and its tracks (e.g. Select All)
     # _collect_targets already uses a set, but be extra safe for case-insensitive FS
     if len(files) != len(set(os.path.normcase(p) for p in files)):
@@ -940,6 +1011,12 @@ def run_format_lyrics(config):
         for p in files:
             seen[os.path.normcase(p)] = p
         files = sorted(seen.values())
+
+    # {path: (MEDIA, SOURCE)} as read by the per-file pool below and handed to
+    # the album pass: see _process_lyrics_for_audio. Empty when nothing was
+    # opened (no audio files), which is just an album pass with nothing to
+    # reuse.
+    media_source = {}
 
     if files:
         threads = worker_count(
@@ -949,7 +1026,8 @@ def run_format_lyrics(config):
         counts = {"ok": 0, "skip": 0, "fail": 0}
 
         with ThreadPoolExecutor(max_workers=threads) as ex:
-            futures = {ex.submit(_process_lyrics_for_audio, p, config): p for p in files}
+            futures = {ex.submit(_process_lyrics_for_audio, p, config, media_source): p
+                       for p in files}
             pbar = _make_pbar(len(futures), "Lyrics")
 
             for fut in as_completed(futures):
@@ -986,8 +1064,9 @@ def run_format_lyrics(config):
     else:
         log("No audio files found for lyrics processing.")
 
-    # Album-level MEDIA/SOURCE enforcement.
-    _normalize_media_source_library(config, stats)
+    # Album-level MEDIA/SOURCE enforcement, over the albums this run's own walk
+    # already found and with the per-file pass's own MEDIA/SOURCE reads.
+    _normalize_media_source_library(config, stats, albums, media_source)
 
     return stats
 

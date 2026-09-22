@@ -991,6 +991,33 @@ user asked for, in the order they asked for it. `server/exporter.py` owns both.
   covers `.cue`, `.log`, `.accurip` and the `.lrc`/cover/description/artist-image
   set, and `export_manifest` (ON) writes `checksums.sha256` listing every written
   file with its hash, so a copied library can be proven intact at the other end.
+- **R96 — the folder structure is the library's own shape, and a custom one is
+  the same grammar.** `export_structure` is `albumartist_album_disc` (shipped),
+  `album`, `flat`, `mirror`, or `custom`; a custom one evaluates the user's own
+  script from `export_structure_script`. Both the shipped layout and the custom
+  one ARE naming scripts (`mlo/naming`: `%field%` substitution, `$if()`, `/` for
+  folders), so presets and custom share one evaluator, one vocabulary and one
+  validator — a `%field%` or `$function` the grammar does not implement is
+  refused, never silently evaluated to "". `GET /api/export/structures` serves
+  the menu's keys and labels and that vocabulary (the page renders THIS, so the
+  dropdown cannot offer what a run would refuse), and
+  `POST /api/export/structure/preview` evaluates a typed script against a sample
+  track and returns the same sentence the run refuses with. The shipped
+  structure writes ALBUMARTIST, never the track's own ARTIST (a compilation is
+  ONE folder, not one per track), and the library's own file name —
+  `%discnumber%-$num(%tracknumber%,2) %title%`, i.e. `1-01 Title`, the disc
+  number written for a SINGLE-disc album too, because that is what
+  `mlo.naming`'s default script produces and an export must read like the
+  library it was copied from. A structure that names no path — empty, unknown,
+  or a selection whose tags it cannot use — is refused with a sentence BEFORE
+  anything is written (the endpoint answers 400); a script that names nothing
+  for one file fails that file with its own message rather than dropping it into
+  the export root. The layout this replaced (`artist_album`, whose label
+  promised "Artist / Album / 01 - Title") is MIGRATED in `mlo/config.py` rather
+  than kept selectable: the key means "the tree this app ships", so a saved
+  value moves to the new layout and the key can never name a tree the app does
+  not write. (`artist_album_disc`, advertised by Settings for years without ever
+  being implemented, migrates there too.)
 
 ### 7.10 YouTube, cookies and the Soulseek port
 
@@ -1167,6 +1194,59 @@ user asked for, in the order they asked for it. `server/exporter.py` owns both.
   pages and the credits panel show it (`宇多田ヒカル (Hikaru Utada)`), while the
   SAME setting is what translates non-Latin names for the Soulseek searches and
   the beets import.
+- **R95 — "Add to library" records the request, and a request is not the
+  album.** Four things follow, and the library, the queue and the wish store
+  have to agree about all of them (`server/api_add.py`, `server/pending_albums.py`,
+  `server/api_queue.py`, `server/wishes.py`, `server/interrupt_recovery.py`):
+
+  * **The button answers before MusicBrainz does.** A request that already
+    carries the title and the artist has given everything a framework album and
+    a wish need, so the folder, the marker and the wish are written from the
+    request (`pending_albums.create_from_request`), the reply says
+    `"background": true` + `"resolving": true`, and the release lookup
+    (`integrations.auto_import_targets` + the rest of the add) runs on a daemon
+    thread (`api_add._prepare_add`). A caller that gave only an id (a bare MBID
+    or URL) keeps the synchronous resolution — there is nothing to name a folder
+    with until MusicBrainz answers — and its reply says `"resolving": true` for
+    the same reason: the server, not the caller, named the release. The one
+    difference the user sees is the queue row: while the identity is being
+    resolved it carries `pending_albums.STAGE_RESOLVING`
+    (`searching_musicbrainz`), which the queue view draws as *Searching
+    MusicBrainz…* — a wish in that state is waiting for the SERVER, and calling
+    it `queued` would read as a download nothing has searched for. The flag is
+    cleared when the lookup lands, and a marker whose lookup never landed is
+    believed only for `pending_albums.RESOLVING_MAX_AGE`, after which the row
+    falls back to the wish's own state.
+  * **A framework album is never the album.** A folder holding a
+    `.mlo_pending.json` marker and NO audio is a REQUEST on disk: its marker
+    carries the release's MBIDs, so `wishes.owned_mbids` and
+    `wishes.reconcile_with_library` refuse it (`pending_albums.is_placeholder`)
+    — counting it as "already in your library" is what left a wish terminal,
+    nothing searching it and an empty album standing in the library for ever —
+    and `POST /api/wishes/{id}/import` refuses to aim an import at it (409, the
+    same sentence as any un-downloaded wish). Only a folder with audio satisfies
+    "already in your library".
+  * **A fresh add is a fresh request.** Re-adding a release whose wish has ENDED
+    (`not_found`, a spent `failed`, or `imported` with no audio anywhere) re-arms
+    it (`wishes.rearm`: counters and backoff cleared, due now) before the reply
+    claims the search has started; a wish whose album really IS here answers
+    "It is already in your library." instead, with no framework album created
+    for it. An add that names its release instead of identifying it (no MBID,
+    `title` + `artist`, from a streaming recommendation) searches MusicBrainz
+    once: a hit continues as an ordinary add (`matched: true`), and no hit
+    records a NAME-keyed wish (`name:<artist> — <album>`, `matched: false`,
+    `by_name: true`) the queue's own name search fills — never an id, and never
+    a framework album nothing could tie an import back to.
+  * **One release is one album folder, and an import ends the placeholder.** An
+    import that lands somewhere else (its own name disagreed with the naming
+    script, or it was aimed at a folder by hand) is tied back to the placeholder
+    by release identity — `pending_albums.adopt_root` asks the release's own
+    wish after its own folder scan, and `pending_albums.clear_if_filled` takes
+    the placeholder down when the album really arrived elsewhere
+    (`_drop_other_placeholder`, matched by `imports._album_mbids`, never by
+    name) — and the startup sweep (`server.interrupt_recovery`) re-arms a
+    framework album whose wish has STOPPED while its release is nowhere in the
+    library, and removes the placeholder whose album IS there.
 
 ### 7.13 Disc rips: a DVD or Blu-ray structure is one title, not a pile of parts
 
@@ -1261,6 +1341,25 @@ user asked for, in the order they asked for it. `server/exporter.py` owns both.
     for every script, so nothing in an import ever walks the library (`mlo/cli`'s
     own Run All is the explicit, user-started library-wide path and is not what
     an import runs).
+
+- **R94 — an album-scoped action never waits on an unrelated album.** A script
+  run claims the paths it is about to work on, in the same registry a delete, a
+  move or a tag write claims against (`server.job_locks`), so two chains over
+  DIFFERENT albums run at the same time — two imports of two releases, an
+  import and a user-started run — while two over the SAME album refuse or queue
+  exactly as one process-wide run lock used to make them. What a refusal says
+  is the claim's own sentence ("`<album>` is in use by Import Album (job-4) —
+  wait for it to finish, then retry"), so the user is told which album is busy
+  and who has it, not that "a script run is already in progress". A queueing
+  caller (an import, which must not skip its chain) waits for that album's
+  claim instead of the whole process. A library-wide Run All is the one run
+  that touches everything: it claims the library root (`<music folder>/Artists`,
+  or the music folder itself while that does not exist yet), so it blocks every
+  scoped run and is blocked by any — the honest reading of "this run rewrites
+  whatever it finds". The UI's header bar still follows ONE run at a time (the
+  one in flight longest, so the line never interleaves two albums' numbers);
+  every run's own row in MAINTAIN → In progress shows its own progress
+  regardless of who holds the bar.
 
 ### 7.15 Notifications and the player's own immediacy
 

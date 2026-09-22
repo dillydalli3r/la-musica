@@ -8,6 +8,14 @@ has already renamed away, or move a folder out from under a script still
 writing into it. This registry is where a job claims the paths it is about to
 touch, so every entry point can refuse with 409 (``PathLocked``) instead.
 
+That claim is also what serializes the script runs themselves:
+``server.script_runners.run_chain`` holds its targets here for the length of
+the chain, and the claim IS its gate — two chains over DISJOINT albums run at
+the same time (nothing in album B's scripts needs album A finished), while two
+chains over one album, or a library-wide Run All (which holds the root),
+refuse or queue exactly as the process-wide lock they replaced made them. A
+second run lock would only be one more thing to keep in step with this one.
+
 Two paths conflict when they are the same path, or one holds the other (an
 album folder vs. a track inside it), so album-scoped work and a single-track
 edit block each other in both directions. Paths are compared under the same

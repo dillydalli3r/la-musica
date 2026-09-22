@@ -1,7 +1,11 @@
 import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
-import type { ReactNode } from "react";
+import type { ReactNode, RefObject } from "react";
 import type { LucideIcon } from "lucide-react";
+
+/** The app's edge gutter: a fixed panel keeps this much air between itself and
+ *  the viewport on every side. */
+const GUTTER = 8;
 
 /** The one dropdown idiom: mount it inside a `relative` parent next to the
  *  trigger, pass `open`, and it renders the click shield (a full-viewport
@@ -18,6 +22,7 @@ export default function Popover({
   shield = true,
   fixed = false,
   rightGap,
+  anchorRef,
 }: {
   open: boolean;
   onClose: () => void;
@@ -46,6 +51,12 @@ export default function Popover({
    *  tray) floated a bar-padding away from the screen edge on a wide window
    *  while every other edge-anchored surface sat at the app's 8 px gutter. */
   rightGap?: number;
+  /** Fixed mode only: the caller's own trigger, measured instead of the
+   *  zero-size marker below. The marker is a block box, so it sits at the
+   *  trigger's LEFT edge — a `"right"`-aligned panel positioned from it lines
+   *  its right edge up with that edge and lands a button-width further left
+   *  than the panel the caller sees today. */
+  anchorRef?: RefObject<HTMLElement | null>;
 }) {
   useEffect(() => {
     if (!open) return;
@@ -56,12 +67,15 @@ export default function Popover({
     return () => window.removeEventListener("keydown", onKey);
   }, [open, onClose]);
 
-  const anchorRef = useRef<HTMLSpanElement>(null);
-  const [at, setAt] = useState<{ top: number; bottom: number; right: number; left: number; center: number } | null>(null);
+  const markerRef = useRef<HTMLSpanElement>(null);
+  const panelRef = useRef<HTMLDivElement>(null);
+  const [at, setAt] = useState<
+    { top: number; bottom: number; right: number; left: number; center: number; vw: number } | null
+  >(null);
   useLayoutEffect(() => {
     if (!open || !fixed) return;
     const place = () => {
-      const box = anchorRef.current?.getBoundingClientRect();
+      const box = (anchorRef?.current ?? markerRef.current)?.getBoundingClientRect();
       if (!box) return;
       setAt({
         top: box.bottom + 4,
@@ -70,10 +84,11 @@ export default function Popover({
         // the trigger across a resize or a scroll, and every value is clamped
         // so the panel stays inside the viewport on a narrow window.
         right: rightGap != null
-          ? Math.max(8, rightGap)
-          : Math.max(8, window.innerWidth - box.right),
-        left: Math.min(Math.max(8, box.left), window.innerWidth - 8),
-        center: Math.min(Math.max(box.width, box.left + box.width / 2), window.innerWidth - 8),
+          ? Math.max(GUTTER, rightGap)
+          : Math.max(GUTTER, window.innerWidth - box.right),
+        left: Math.min(Math.max(GUTTER, box.left), window.innerWidth - GUTTER),
+        center: Math.min(Math.max(box.width, box.left + box.width / 2), window.innerWidth - GUTTER),
+        vw: window.innerWidth,
       });
     };
     place();
@@ -83,12 +98,39 @@ export default function Popover({
       window.removeEventListener("resize", place);
       window.removeEventListener("scroll", place, true);
     };
-  }, [open, fixed, rightGap]);
+  }, [open, fixed, rightGap, anchorRef]);
+
+  // The panel's own width, read once it is on screen: it is what decides
+  // whether a right-aligned panel has room on the left at all. Measured (and
+  // re-measured when the menu's contents change) instead of hardcoded, since
+  // the panel class is the caller's.
+  const [panelWidth, setPanelWidth] = useState(0);
+  useLayoutEffect(() => {
+    if (!open || !fixed) return;
+    const w = panelRef.current?.getBoundingClientRect().width ?? 0;
+    if (w && Math.abs(w - panelWidth) > 0.5) setPanelWidth(w);
+  });
+
+  // A right-aligned panel keeps its right edge on the trigger and grows
+  // LEFTWARDS, so the room it has is what the trigger leaves on its left: the
+  // panel's left edge lands at `vw - at.right - width`, and once that crosses
+  // the gutter the panel would leave the window — or slide under the rail, as
+  // the album cover menu did, its trigger sitting at the content pane's left
+  // edge with the menu wider than the space in front of it. Flip to the
+  // trigger's LEFT edge and open rightwards instead; a flip that still would
+  // not fit is clamped to the gutter, so a panel wider than the window stops
+  // at the edge rather than overflowing it.
+  const flipped =
+    align === "right" && !!at && panelWidth > 0 && at.right + panelWidth > at.vw - GUTTER;
+  const flipLeft = at
+    ? Math.min(at.left, Math.max(GUTTER, at.vw - GUTTER - panelWidth))
+    : GUTTER;
 
   if (!open) return null;
   const portaled = fixed && at;
   const panel = (
     <div
+      ref={panelRef}
       role="menu"
       style={
         portaled
@@ -97,7 +139,9 @@ export default function Popover({
               ...(placement === "top" ? { bottom: at!.bottom } : { top: at!.top }),
               maxWidth: "calc(100vw - 1rem)",
               ...(align === "right"
-                ? { right: at!.right }
+                ? flipped
+                  ? { left: flipLeft }
+                  : { right: at!.right }
                 : align === "left"
                   ? { left: at!.left }
                   : { left: at!.center, transform: "translateX(-50%)" }),
@@ -131,8 +175,11 @@ export default function Popover({
               grew the notification bell's 36 px wrapper to 60 px the moment the
               tray opened — the bar centers that wrapper, so the whole button
               (and its icon) jumped 12 px up under the cursor. A block box
-              contributes its own height, which is zero. */}
-          <span ref={anchorRef} className="block w-0 h-0" aria-hidden="true" />
+              contributes its own height, which is zero. A caller that hands in
+              its own trigger (`anchorRef`) needs none of this: the trigger
+              itself is measured, which is also what keeps a right-aligned panel
+              on the trigger's RIGHT edge. */}
+          {!anchorRef && <span ref={markerRef} className="block w-0 h-0" aria-hidden="true" />}
           {portaled && createPortal(panel, document.body)}
         </>
       ) : (

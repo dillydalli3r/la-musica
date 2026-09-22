@@ -1718,6 +1718,12 @@ const QUEUE_KEY = ["soulseekQueue"];
 const QUEUE_STAGE: Record<string, { label: string; cls: string; icon: typeof Star }> = {
   queued: { label: "Queued", cls: "bg-zinc-800/70 text-zinc-300 border-zinc-700", icon: CircleDashed },
   searching: { label: "Searching", cls: "bg-sky-900/40 text-sky-300 border-sky-800", icon: Search },
+  // The one stage that is not a server.soulseek_auto.STAGES name: an "Add to
+  // library" that came back before MusicBrainz did
+  // (server/pending_albums.STAGE_RESOLVING). Nothing is being searched for yet
+  // — the server is working out WHAT the release is — so it says so instead of
+  // wearing the download queue's own word.
+  searching_musicbrainz: { label: "Searching MusicBrainz…", cls: "bg-sky-900/40 text-sky-300 border-sky-800", icon: Search },
   downloading: { label: "Downloading", cls: "bg-sky-900/40 text-sky-300 border-sky-800", icon: ArrowDownToLine },
   verifying: { label: "Verifying", cls: "bg-cyan-900/40 text-cyan-300 border-cyan-800", icon: FileCheck2 },
   importing: { label: "Importing", cls: "bg-sky-900/40 text-sky-300 border-sky-800", icon: FolderInput },

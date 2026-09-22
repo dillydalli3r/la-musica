@@ -943,6 +943,20 @@ DEFAULT_CONFIG = {
     # everything any configured source can answer, which is the point of
     # automatic mode.
     "import_review_families": [],
+    # What an import does with the lyrics an album ARRIVED carrying. An import
+    # replaces the four families it decides for itself — its lyrics, genres,
+    # advisories and cover art — with what it found; that is
+    # `server.imports.drop_arrived_values`, and it is the one place an import
+    # is allowed to overrule a tag rather than fill it (a user's own write, the
+    # wizard's steps and every /run keep the fill-only behaviour). This is the
+    # lyric family's exception, because a SYNCED lyric (real timestamps) is
+    # work no source can reproduce: ON, a file whose own lyric already carries
+    # timestamps keeps it, exactly as it is, and the fetch skips that file as
+    # it always has. OFF (the shipped default) the peer's lyric is replaced like
+    # the rest of the four families. A PLAIN (untimed) lyric is always
+    # replaced: untimed text is what the providers answer with, so there is
+    # nothing in it a fetch could not supply.
+    "import_keep_synced_lyrics": False,
 
     # The two switches over the whole acquisition surface. Both default on,
     # which is how the app has always behaved. `auto_acquisition_enabled` is
@@ -1361,7 +1375,19 @@ DEFAULT_CONFIG = {
     "export_subfolder": "Music",
     "export_codec": "copy",
     "export_quality": "",
-    "export_structure": "artist_album",
+    # The folder the export writes a track into: a key of
+    # server.exporter.STRUCTURES — "albumartist_album_disc" (the shipped one:
+    # ALBUMARTIST / Album / "1-01 Title", the shape the library's own naming
+    # script produces), "album", "flat", "mirror", or "custom" for the script
+    # below. Kept as a plain string here: a custom one is a naming script, not
+    # an enum, so the exporter validates it (and refuses a bad field with a
+    # sentence) rather than this table.
+    "export_structure": "albumartist_album_disc",
+    # The structure the user typed, used when `export_structure` is "custom":
+    # the same %field% / $if() grammar the library's naming script uses
+    # (mlo.naming), e.g. "%albumartist%/%album%/%discnumber%-$num(%tracknumber%,2)
+    # %title%".
+    "export_structure_script": "",
     # Embed the album cover into every exported file. Separate keys from the
     # library's embed_covers / embed_cover_* on purpose: exporting to a player
     # must never decide what the library's own files keep. Quality applies to
@@ -1669,6 +1695,21 @@ def normalize_config(user=None) -> dict:
         cfg["export_replaygain_mode"] = (
             "tags" if _as_bool(saved.get("export_replaygain"), False) else "off")
     cfg.pop("export_replaygain", None)
+
+    # The export's shipped folder structure used to be "artist_album": the same
+    # three levels, but its file name spelled the disc number only for a
+    # MULTI-disc album ("1-01 - Intro"), its label said "Artist / Album" while
+    # the code already preferred ALBUMARTIST, and its file name separator was
+    # not the library's. The shipped layout is the library's own now
+    # (ALBUMARTIST / Album / "1-01 Title", disc number included for every
+    # album), and the key still means "the tree this app ships", so a saved
+    # value is MIGRATED to it rather than left on a spelling no dropdown offers
+    # any more — the app must never write a tree its own key does not name.
+    # "artist_album_disc" was advertised by Settings for years without ever
+    # being implemented (it behaved as `artist_album`), so it lands here too
+    # and finally gets the disc numbers its label promised.
+    if str(cfg.get("export_structure") or "").strip() in ("artist_album", "artist_album_disc"):
+        cfg["export_structure"] = "albumartist_album_disc"
 
     for key in _BOOL_KEYS:
         cfg[key] = _as_bool(cfg.get(key), DEFAULT_CONFIG.get(key, False))

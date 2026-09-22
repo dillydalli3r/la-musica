@@ -265,10 +265,15 @@ def _wav_transport_timeout(src):
     return timeout
 
 
-def _convert_to_wavs(ffmpeg_exe, track_paths, tmp_dir, config):
+def _convert_to_wavs(ffmpeg_exe, track_paths, tmp_dir, config, transport=None):
     """Decode each track to WAV in tmp_dir, keeping its own channel layout,
     sample rate and bit depth (no upmix/resample/truncation — the WAV must be
     the source audio).
+
+    *transport* is how many of these decodes may run at once. None means the
+    whole worker budget is this disc's (the caller runs one disc at a time);
+    the album lanes of :func:`run_generate_accurip` pass the share left to one
+    disc, so N albums verified at once do not each start N ffmpeg processes.
 
     Returns {original basename lower -> wav basename} on success.
     Parallelised; on any failure raises.
@@ -289,7 +294,9 @@ def _convert_to_wavs(ffmpeg_exe, track_paths, tmp_dir, config):
         tasks.append((src, os.path.join(tmp_dir, wav_base)))
         name_map[base.lower()] = wav_base
 
-    workers = worker_count(config, default=4, maximum=8, items=len(tasks))
+    workers = (worker_count(config, default=4, maximum=8, items=len(tasks))
+               if transport is None
+               else max(1, min(int(transport), len(tasks))))
     errors = []
 
     def _one(pair):
@@ -378,16 +385,20 @@ def _cue_unresolved_refs(cue_text, folder):
     return unresolved
 
 
-def _generate_via_cuetools(ffmpeg_exe, arcue_exe, album_dir, disc_num, track_paths, cue_path, config):
+def _generate_via_cuetools(ffmpeg_exe, arcue_exe, album_dir, disc_num, track_paths, cue_path, config,
+                           transport=None):
     """Generate the CUETools verification log for one disc via ArCueDotNet.
 
     Uses a temp dir with WAVs + patched cue, invokes ArCueDotNet -v, captures
     the verbose log.  Returns the raw log text (as CUETools emitted it).
+    *transport* is the WAV-decoding width this disc gets (see
+    :func:`_convert_to_wavs`).
     """
     tmp_dir = tempfile.mkdtemp(prefix="mlo_accurip_")
     try:
         # Decode to WAVs
-        name_map = _convert_to_wavs(ffmpeg_exe, track_paths, tmp_dir, config)
+        name_map = _convert_to_wavs(ffmpeg_exe, track_paths, tmp_dir, config,
+                                    transport)
 
         # The cue drives the TOC, so the order it is built from must be the
         # disc's track order, not the caller's listdir order.
@@ -848,12 +859,32 @@ def run_generate_accurip(config):
     log(f"found {len(cd_albums)} CD album(s) for AccurateRip (CUETools)")
 
     pattern = _disc_pattern_for(config)
-    # One tick per album: the CUETools pass is this script's slow part and the
-    # UI header follows this bar — without one the header sat frozen on the
-    # previous script's numbers for the whole run.
-    counts = {"ok": 0, "skip": 0, "fail": 0}
-    pbar = _make_pbar(len(cd_albums), "AccurateRip", unit="album")
-    for album_dir in cd_albums:
+
+    def album_pass(album_dir, transport=None):
+        """One album's AccurateRip pass, off the runner thread.
+
+        Returns ONE row dict, because everything this pass touches is already
+        the album's own: its folder, its cue, its CD-{n} files, and the temp
+        WAVs it decodes into (one ``mkdtemp`` per disc, see
+        :func:`_generate_via_cuetools`). Two albums share no path, which is
+        what makes them lanes rather than steps — and the work being
+        overlapped is this script's slow half: every track is decoded through
+        ffmpeg and then re-verified by CUETools, one process per track, album
+        after album before there was a pool.
+
+        The counts and the log lines are RETURNED instead of written here: the
+        run's numbers, its progress bar and the identity cache belong to the
+        runner thread, and `book` below is where a lane's answer lands. Same
+        for messages — a lane that printed as it went would scramble the run's
+        output into completion order.
+        """
+        row = {"no_audio": False, "skipped": 0, "modified": 0, "scanned": 0,
+               "errors": [], "notes": [], "identities": {}}
+
+        def note(level, text):
+            """A line for the run's log: ``info``, ``warn`` or ``error``."""
+            row["notes"].append((level, text))
+
         discs = album_discs(album_dir)
         if not discs:
             # Single-disc fallback: an album whose tracks carry no D-TT prefix
@@ -866,19 +897,19 @@ def run_generate_accurip(config):
                 if aud:
                     discs = {1: aud}
                 else:
-                    stats["skipped_count"] += 1
-                    _pbar_skip(pbar, counts)
-                    continue
+                    row["skipped"] += 1
+                    row["no_audio"] = True
+                    return row
             except OSError:
-                stats["skipped_count"] += 1
-                _pbar_skip(pbar, counts)
-                continue
+                row["skipped"] += 1
+                row["no_audio"] = True
+                return row
 
         # Automatic rename for .accurip to CD-{n}.accurip (per user: CD-$(n) scheme applies)
         # This runs before generation so legacy names like App.accurip become CD-1.accurip
         try:
             from .discs import rename_accurip_for_discs
-            rename_accurip_for_discs(album_dir, discs, log_fn=lambda m: log(f"  {m}"), config=config)
+            rename_accurip_for_discs(album_dir, discs, log_fn=lambda m: note("info", f"  {m}"), config=config)
         except Exception:
             pass
 
@@ -940,7 +971,7 @@ def run_generate_accurip(config):
                             except OSError:
                                 pass
                         if not needs_regen:
-                            stats["skipped_count"] += 1
+                            row["skipped"] += 1
                             continue
                 except OSError:
                     pass
@@ -948,7 +979,7 @@ def run_generate_accurip(config):
                 # trust: regenerate it through CUETools.
 
             if not write_files:
-                stats["skipped_count"] += 1
+                row["skipped"] += 1
                 continue
 
             cue_path = _find_cue_for_disc(album_dir, disc_num, discs, pattern)
@@ -958,12 +989,13 @@ def run_generate_accurip(config):
                 # No cue found – synthesize a minimal cue from the track order so CUETools can still verify.
                 # This is required for automatic .accurip generation on albums where the cue is missing
                 # but MEDIA=CD; the synthetic cue will list the WAV transports in track-number order.
-                log(c(f"  {os.path.basename(album_dir)} disc {disc_num}: no cue found – synthesizing minimal cue for CUETools", Color.YELLOW))
+                note("warn", f"  {os.path.basename(album_dir)} disc {disc_num}: no cue found – synthesizing minimal cue for CUETools")
 
             # The disc's track order is applied inside _generate_via_cuetools,
             # where the cue that carries it is built.
             try:
-                content = _generate_via_cuetools(ffmpeg_exe, arcue_exe, album_dir, disc_num, track_paths, cue_path, config)
+                content = _generate_via_cuetools(ffmpeg_exe, arcue_exe, album_dir, disc_num, track_paths, cue_path, config,
+                                                 transport)
                 # Format directly after generation per user spec: trim each line, trim outer blanks only
                 # No extra blank line at bottom — like .cue's rstrip(), final newline only if append_final_newline
                 # Respects keep_empty_accurip_lines (like keep_empty_cue_lines)
@@ -973,9 +1005,8 @@ def run_generate_accurip(config):
                     append_final_newline=config.get("append_final_newline", False),
                 )
             except Exception as e:
-                stats["error_count"] += 1
-                stats["errors"].append((accurip_path, str(e)[:300]))
-                log(c(f"  failed {os.path.basename(album_dir)} CD-{disc_num}: {e}", Color.RED))
+                row["errors"].append((accurip_path, str(e)[:300]))
+                note("error", f"  failed {os.path.basename(album_dir)} CD-{disc_num}: {e}")
                 continue
 
             # Atomic write with fsync to avoid corruption on crash/power loss
@@ -994,23 +1025,77 @@ def run_generate_accurip(config):
                 if disc_ids and all(disc_ids.values()):
                     # What this file was verified against, for the next run's
                     # freshness test — the audio, not the container's mtime.
-                    _IDENTITIES[disc_key] = dict(disc_ids)
-                stats["modified_count"] += 1
-                stats["total_scanned"] += 1
+                    # Carried back to the runner with the rest of the row: the
+                    # run's cache is folded once, when the lanes are done, so
+                    # two lanes never write the same dict at once.
+                    row["identities"][disc_key] = dict(disc_ids)
+                row["modified"] += 1
+                row["scanned"] += 1
                 # Log short summary – parse status for nice output
                 st, _ = parse_accurip_status(content)
                 col = Color.GREEN if st == "REAL" else (Color.RED if st == "FAKE" else Color.YELLOW)
-                log(f"  {os.path.basename(album_dir)}: {os.path.basename(accurip_path)} ({len(track_paths)} tracks) → {c(st, col)}")
+                note("info", f"  {os.path.basename(album_dir)}: {os.path.basename(accurip_path)} ({len(track_paths)} tracks) → {c(st, col)}")
             except Exception as e:
-                stats["error_count"] += 1
-                stats["errors"].append((accurip_path, str(e)))
-                log(c(f"  failed write {os.path.basename(accurip_path)}: {e}", Color.RED))
+                row["errors"].append((accurip_path, str(e)))
+                note("error", f"  failed write {os.path.basename(accurip_path)}: {e}")
                 try:
                     if os.path.exists(tmp):
                         os.remove(tmp)
                 except OSError:
                     pass
-        _pbar_update(pbar, counts)
+        return row
+
+    # ONE ALBUM PER LANE. An album's AccurateRip pass is its own folder, its
+    # own cue and its own CD-{n} files, and the slow part — decoding every
+    # track through ffmpeg and re-verifying it with CUETools — is exactly what
+    # does not need the album before it to be finished. The transport width
+    # one disc gets is the SAME budget divided among the lanes (never one
+    # width per lane): a Run All on a CD library used to run one album at a
+    # time with N ffmpeg processes, and it must not turn into lanes x N.
+    workers = worker_count(config, default=min(4, os.cpu_count() or 1),
+                           maximum=8, items=len(cd_albums))
+    transport_width = worker_count(config, default=4, maximum=8)
+    per_disc = max(1, transport_width // max(1, workers))
+
+    counts = {"ok": 0, "skip": 0, "fail": 0}
+    # One tick per album: the CUETools pass is this script's slow part and the
+    # UI header follows this bar — without one the header sat frozen on the
+    # previous script's numbers for the whole run. The tick stays on THIS
+    # thread (in `book`), because the bar is the run's, not a lane's.
+    pbar = _make_pbar(len(cd_albums), "AccurateRip", unit="album")
+
+    def book(row):
+        """One lane's answer, on the runner thread — the ONLY writer of the
+        run's numbers, its bar, its log and the identity cache. A lane's log
+        lines print here, in the run's own album order."""
+        stats["skipped_count"] += row["skipped"]
+        stats["modified_count"] += row["modified"]
+        stats["total_scanned"] += row["scanned"]
+        stats["error_count"] += len(row["errors"])
+        stats["errors"].extend(row["errors"])
+        _IDENTITIES.update(row["identities"])
+        for level, text in row["notes"]:
+            if level == "info":
+                log(text)
+            else:
+                log(c(text, Color.RED if level == "error" else Color.YELLOW))
+        if row["no_audio"]:
+            # An album with no audio at all is a skip, not a verified album —
+            # the bar counts the file it could not find, as it always has.
+            _pbar_skip(pbar, counts)
+        else:
+            _pbar_update(pbar, counts)
+
+    if workers > 1 and len(cd_albums) > 1:
+        with ThreadPoolExecutor(max_workers=workers) as ex:
+            # map, not as_completed: the rows are booked in album order, so the
+            # run's log and its numbers read exactly as the serial pass wrote
+            # them even though the work finishes in whatever order it does.
+            for row in ex.map(lambda a: album_pass(a, per_disc), cd_albums):
+                book(row)
+    else:
+        for album_dir in cd_albums:
+            book(album_pass(album_dir, per_disc))
 
     try:
         pbar.close()

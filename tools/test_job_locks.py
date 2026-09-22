@@ -455,6 +455,305 @@ check("an unscoped run holds the library root",
 check("a scoped run holds its own targets",
       script_runners.held_paths({"music_folder": music}, [run_album]) == [run_album])
 
+print("== two chains over DIFFERENT albums run at the same time ==")
+
+# Two albums that share nothing but the library. A chain scoped to one of them
+# used to serialize against a chain scoped to the other (one process-wide lock,
+# process-wide because nothing knew what a chain was about to touch), so two
+# unrelated imports queued up behind each other. The gate is the run's own
+# claim now, so only the same album — or a library-wide run, which holds the
+# root — can make a chain wait.
+album_a = os.path.join(music, "Artists", "Other", "Album A")
+album_b = os.path.join(music, "Artists", "Other", "Album B")
+for _d in (album_a, album_b):
+    os.makedirs(_d, exist_ok=True)
+    with open(os.path.join(_d, "01 - Track.flac"), "w", encoding="utf-8") as fh:
+        fh.write("not really audio")
+
+live = {"now": 0, "max": 0}
+live_lock = threading.Lock()
+# Both scripts must be inside the runner at once: a Barrier, not an Event —
+# an Event the first one sets is already satisfied when IT waits on it.
+twin = threading.Barrier(2)
+
+
+def overlapping_runner(cfg):
+    """A script that only finishes once its twin has started: two chains that
+    really overlap have both of them inside the runner at the same time."""
+    with live_lock:
+        live["now"] += 1
+        live["max"] = max(live["max"], live["now"])
+    try:
+        # Breaks (and both raisers carry on) if the twin never arrives, which
+        # is what a still-serialized chain looks like: max stays 1.
+        twin.wait(timeout=3)
+    except threading.BrokenBarrierError:
+        pass
+    finally:
+        with live_lock:
+            live["now"] -= 1
+    return {"modified_count": 0}
+
+
+def run_on(target, out, ids=(3,), **kwargs):
+    """A chain in its own thread, so two of them can be in flight at once."""
+    out.append(script_runners.run_chain({"music_folder": music}, list(ids),
+                                        targets=[target], **kwargs))
+
+
+script_runners.RUNNERS[3] = ("Optimize FLACs", overlapping_runner)
+try:
+    out_a, out_b = [], []
+    threads = [threading.Thread(target=run_on, args=(target, out))
+               for target, out in ((album_a, out_a), (album_b, out_b))]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join(20)
+finally:
+    script_runners.RUNNERS.clear()
+    script_runners.RUNNERS.update(real_runners)
+
+check("both chains ran to the end", [len(out_a), len(out_b)] == [1, 1],
+      f"{out_a} {out_b}")
+check("and both were inside their script at the same time",
+      live["max"] == 2, str(live))
+check("neither run is left holding anything", jl.jobs() == [], str(jl.jobs()))
+
+print("== two chains over the SAME album still serialize ==")
+
+gate = threading.Event()
+started = threading.Event()
+
+
+def gated_runner(cfg):
+    target = (cfg.get("targets") or [""])[0]
+    if os.path.normcase(target) == os.path.normcase(album_a):
+        started.set()
+        gate.wait(10)
+    return {"modified_count": 0}
+
+
+script_runners.RUNNERS[3] = ("Optimize FLACs", gated_runner)
+holder, queued = [], []
+try:
+    first = threading.Thread(target=run_on, args=(album_a, holder))
+    first.start()
+    started.wait(5)
+
+    refused = ""
+    try:
+        script_runners.run_chain({"music_folder": music}, [3], targets=[album_a])
+    except script_runners.RunBusy as e:
+        refused = str(e)
+    check("a second chain over the same album is refused, not queued",
+          bool(refused), refused)
+    check("and the refusal names the album in use, not just 'a run is going'",
+          os.path.basename(album_a) in refused and "Optimize FLACs" in refused,
+          refused)
+
+    free = script_runners.run_chain({"music_folder": music}, [3], targets=[album_b])
+    check("another album's chain is NOT refused while that one is held",
+          [r.get("id") for r in free] == [3], str(free))
+
+    waiting = threading.Thread(target=run_on, args=(album_a, queued),
+                               kwargs={"wait": True, "timeout": 10})
+    waiting.start()
+    time.sleep(0.3)
+    check("a waiting chain over the same album does not start while it is held",
+          queued == [], str(queued))
+    gate.set()
+    waiting.join(15)
+    first.join(15)
+finally:
+    gate.set()
+    script_runners.RUNNERS.clear()
+    script_runners.RUNNERS.update(real_runners)
+
+check("the waiting chain gets the album as soon as the holder finishes",
+      len(queued) == 1 and [r.get("id") for r in queued[0]] == [3], str(queued))
+check("nothing is left claimed afterwards", jl.jobs() == [], str(jl.jobs()))
+
+print("== a chain follows the folder the script SAID it moved to ==")
+
+album_from = os.path.join(music, "Artists", "Other", "Moved From")
+album_to = os.path.join(music, "Artists", "Other", "Moved To")
+
+
+def moved_album_case(move_reports, walk_says):
+    """Run one chain whose script moves the album; returns (final targets,
+    the folders a library walk was asked for).
+
+    *move_reports* is what the moving script claims about its destination (the
+    beets step reports `moved_targets`), *walk_says* what a library walk would
+    have found.
+    """
+    for d in (album_from, album_to):
+        shutil.rmtree(d, ignore_errors=True)
+    os.makedirs(album_from, exist_ok=True)
+    with open(os.path.join(album_from, "01 - Track.flac"), "w", encoding="utf-8") as fh:
+        fh.write("not really audio")
+
+    def moving_runner(cfg):
+        shutil.move(album_from, album_to)
+        out = {"modified_count": 0}
+        if move_reports:
+            out["moved_targets"] = [album_to]
+        return out
+
+    walks = []
+    real_find = script_runners._find_moved_album
+    final = []
+    script_runners.RUNNERS[3] = ("Optimize FLACs", moving_runner)
+    script_runners._find_moved_album = \
+        lambda names, folder: (walks.append(folder), walk_says)[1]
+    try:
+        script_runners.run_chain({"music_folder": music}, [3],
+                                 targets=[album_from], final=final)
+    finally:
+        script_runners.RUNNERS.clear()
+        script_runners.RUNNERS.update(real_runners)
+        script_runners._find_moved_album = real_find
+    return final, walks
+
+
+final, walks = moved_album_case(move_reports=True, walk_says="")
+check("a chain follows the folder the script reported",
+      [os.path.normcase(p) for p in final] == [os.path.normcase(album_to)],
+      str(final))
+check("and never walks the library to find it (an import is scoped)",
+      walks == [], str(walks))
+
+final, walks = moved_album_case(move_reports=False, walk_says=album_to)
+check("a mover that reports nothing is still followed, by the library walk",
+      [os.path.normcase(p) for p in final] == [os.path.normcase(album_to)],
+      str(final))
+check("which is asked once, for that one vanished target",
+      len(walks) == 1, str(walks))
+
+print("== two chains never mix their numbers in one bar ==")
+
+# The header bar is ONE process-wide hook (`mlo.stats.progress_hook`) and a
+# script points it at itself for the length of its run — which only ever worked
+# because two chains could not be in flight. They can now, so a frame is routed
+# to the run whose THREAD it arrives on and only the run that has been in
+# flight longest paints the bar: one line showing two albums' counts is a lie
+# about both, while the other run's own in-progress ROW (keyed by job) still
+# moves. The hook must also come back to the relay when the last run ends.
+from mlo import stats as _stats                  # noqa: E402
+from mlo.stats import _HookPbar                  # noqa: E402
+
+TICKS = 3
+
+real_hook = getattr(_stats, "progress_hook", None)
+bar_frames = []
+
+
+def recorder(done, total, desc):
+    """Stands in for the WebSocket relay the header bar is drawn from."""
+    bar_frames.append((desc, live["now"]))
+
+
+_stats.progress_hook = recorder
+
+rows = {}
+bar_gate = threading.Event()
+both_inside = threading.Barrier(2)
+
+
+def ticking_runner(cfg):
+    """A script that drives its own bar (the header's source) and records what
+    the live in-progress rows say while both runs are going."""
+    pbar = _HookPbar(TICKS, "Step")
+    with live_lock:
+        live["now"] += 1
+    try:
+        both_inside.wait(timeout=3)
+    except threading.BrokenBarrierError:
+        pass
+    for _ in range(TICKS):
+        pbar.update(1)
+        for row in jl.jobs():
+            rows.setdefault(row["label"], set()).add(
+                (row.get("progress") or {}).get("text"))
+        time.sleep(0.05)
+    bar_gate.wait(5)
+    with live_lock:
+        live["now"] -= 1
+    return {"modified_count": 0}
+
+
+script_runners.RUNNERS[3] = ("Optimize FLACs", ticking_runner)
+script_runners.RUNNERS[5] = ("Process images", ticking_runner)
+hook_after = None
+try:
+    out_3, out_5 = [], []
+    threads = [
+        threading.Thread(target=run_on, args=(album_a, out_3), kwargs={"ids": (3,)}),
+        threading.Thread(target=run_on, args=(album_b, out_5), kwargs={"ids": (5,)}),
+    ]
+    for t in threads:
+        t.start()
+    time.sleep(0.5)          # both are ticking inside their runner by now
+    bar_gate.set()
+    for t in threads:
+        t.join(20)
+    hook_after = getattr(_stats, "progress_hook", None)
+finally:
+    bar_gate.set()
+    script_runners.RUNNERS.clear()
+    script_runners.RUNNERS.update(real_runners)
+
+check("both chains ran", [len(out_3), len(out_5)] == [1, 1], f"{out_3} {out_5}")
+
+# Frames recorded while BOTH runs were inside their script: the one run that
+# owns the bar ticked TICKS times and the other run's ticks stayed off it — the
+# count is what catches a shared wrapper, which would have delivered both.
+overlap = [desc for desc, now in bar_frames if now >= 2]
+check("only the run that owns the bar ticks it, never both",
+      len(overlap) == TICKS and len(set(overlap)) == 1,
+      f"{len(overlap)} frame(s) while both ran: {overlap}")
+check("and the bar never carried the other run's name",
+      len([name for name in ("Optimize FLACs", "Process images")
+           if any(name in desc for desc, _ in bar_frames)]) == 1,
+      f"{sorted({desc for desc, _ in bar_frames})}")
+check("each run's own in-progress row carries its own script",
+      sorted(rows) == ["Optimize FLACs", "Process images"]
+      and all(texts == {label} for label, texts in rows.items()),
+      str({k: sorted(v) for k, v in rows.items()}))
+check("the dispatcher is off the hook and the bar is empty once the runs end",
+      hook_after is recorder and _stats.progress_hook is recorder
+      and script_runners._bars == {},
+      f"{hook_after} {script_runners._bars}")
+
+
+def short_runner(cfg):
+    """Two ticks, no waiting: what one chain on its own looks like."""
+    pbar = _HookPbar(2, "Step")
+    pbar.update(1)
+    pbar.update(1)
+    return {"modified_count": 0}
+
+
+bar_frames.clear()
+script_runners.RUNNERS[3] = ("Optimize FLACs", short_runner)
+lone_after = None
+try:
+    script_runners.run_chain({"music_folder": music}, [3], targets=[album_a])
+    lone_after = getattr(_stats, "progress_hook", None)
+finally:
+    _stats.progress_hook = real_hook          # the relay is who came in here
+    script_runners.RUNNERS.clear()
+    script_runners.RUNNERS.update(real_runners)
+
+check("a chain on its own still drives the header bar it is handed",
+      len({desc for desc, _ in bar_frames}) >= 1
+      and all(desc == "Optimize FLACs" or desc.endswith("Optimize FLACs")
+              for desc, _ in bar_frames),
+      str(bar_frames))
+check("and hands the hook back when it ends", lone_after is recorder,
+      f"{lone_after}")
+
 print("== the payload MAINTAIN → In progress reads ==")
 
 from server import api_jobs  # noqa: E402

@@ -111,6 +111,11 @@ export function SubtitledVideo({
       key={`${path}|${live ? "x" : "direct"}`}
       ref={videoRef}
       src={src}
+      // The player's <audio> pair carries this for the WebAudio graph and the
+      // ReplayGain stage on it; a music video is decoded by a <video> element
+      // and needs the same handshake, or against a cross-origin API (desktop
+      // shell, LAN server) it is dropped from that graph entirely.
+      crossOrigin="anonymous"
       controls={controls}
       autoPlay
       muted={muted}

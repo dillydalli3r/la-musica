@@ -58,6 +58,14 @@ interface Store {
   setIndex: (i: number) => void;
   queueId: number; // bumped on every queue replacement — player reloads even
   // when the new queue starts at the same index
+  /** Bumped by every DELIBERATE play press: `playNow` (so every play button in
+   *  the app), plus the queue popovers' own "play this row". The player
+   *  restarts the current track when this changes even though the path did not
+   *  — which is what pressing an album's play button a second time means. A
+   *  reorder, a rolling queue edit or a trim must NOT bump it: those resolve to
+   *  the same track too, and restarting the song for them would be the bug this
+   *  token exists to separate from the press. */
+  playToken: number;
   playNow: (q: QueueTrack[], i?: number) => void;
   query: string;
   setQuery: (q: string) => void;
@@ -144,6 +152,7 @@ export const useStore = create<Store>((set) => ({
   index: 0,
   setIndex: (index) => set({ index }),
   queueId: 0,
+  playToken: 0,
   playNow: (queue, index = 0) => {
     // A file a job is rewriting RIGHT NOW does not play: the server refuses the
     // stream (409) and the element would just sit there silent. Say what the
@@ -156,7 +165,7 @@ export const useStore = create<Store>((set) => ({
       toast(held.held.why);
       return;
     }
-    set((st) => ({ queue, index, queueId: st.queueId + 1, playing: queue[index]?.path ?? null }));
+    set((st) => ({ queue, index, queueId: st.queueId + 1, playToken: st.playToken + 1, playing: queue[index]?.path ?? null }));
   },
   query: "",
   setQuery: (query) => set({ query }),

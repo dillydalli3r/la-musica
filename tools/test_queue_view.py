@@ -612,6 +612,25 @@ FIXTURE_JOBS = [
      "source": "soulseek", "label": "Broken — Release",
      "started_at": 6.0, "ended_at": 7.0},
 ]
+# Framework albums for the deferred-add rows below: the marker is what the
+# queue reads (`pending_albums.is_resolving`), so the rows need real ones.
+RESOLVING_FOLDER = os.path.join(REDIRECT, "Artists", "Name [id]", "[Album] Deferred")
+STALE_FOLDER = os.path.join(REDIRECT, "Artists", "Old [id]", "[Album] Stale")
+ENDED_FOLDER = os.path.join(REDIRECT, "Artists", "Done [id]", "[Album] Ended")
+for _folder in (RESOLVING_FOLDER, STALE_FOLDER, ENDED_FOLDER):
+    os.makedirs(_folder, exist_ok=True)
+pathmod.save_pending(RESOLVING_FOLDER,
+                     {"pending": True, "resolving": True,
+                      "resolving_at": real_time.time(), "wish_id": 6})
+pathmod.save_pending(STALE_FOLDER,
+                     # Older than `pending_albums.RESOLVING_MAX_AGE`: the
+                     # process that wrote it died before the lookup landed.
+                     {"pending": True, "resolving": True, "wish_id": 7,
+                      "resolving_at": real_time.time() - 4000})
+pathmod.save_pending(ENDED_FOLDER,
+                     {"pending": True, "resolving": True, "wish_id": 8,
+                      "resolving_at": real_time.time()})
+
 FIXTURE_WISHES = [
     {"id": 1, "release_mbid": "11111111", "title": "Waiting", "artist": "Wish",
      "year": "2004", "status": "wanted", "note": "", "target_dir": "",
@@ -638,6 +657,29 @@ FIXTURE_WISHES = [
                  "media": ["CD"], "track_count": 3,
                  "disambiguation": "promo", "catalog_number": "PRO-CD-1",
                  "label": "Void Recordings"}},
+    # The deferred add's own row. An "Add to library" that answered before
+    # MusicBrainz did carries a framework album whose marker says `resolving`
+    # (server/pending_albums.create_from_request), and the queue then says what
+    # the SERVER is doing — "queued" would read as waiting for a download
+    # nothing has searched for. Two ways that flag must NOT be believed: a
+    # marker whose resolution never landed (the process died between the two),
+    # and a wish the store has ENDED (nothing searches it again, so the row
+    # would claim work for ever).
+    {"id": 6, "release_mbid": "66666666", "title": "Deferred", "artist": "Fresh",
+     "year": "2020", "status": "wanted", "note": "", "target_dir": "",
+     "queries": [], "attempts": 0, "added_at": 16.0, "updated_at": 16.5,
+     "last_search": 0.0, "last_error": "", "album_path": RESOLVING_FOLDER,
+     "source": "musicbrainz", "pending": True},
+    {"id": 7, "release_mbid": "77777777", "title": "Stale", "artist": "Abandoned",
+     "year": "2021", "status": "wanted", "note": "", "target_dir": "",
+     "queries": [], "attempts": 0, "added_at": 17.0, "updated_at": 17.5,
+     "last_search": 0.0, "last_error": "", "album_path": STALE_FOLDER,
+     "source": "musicbrainz", "pending": True},
+    {"id": 8, "release_mbid": "88888888", "title": "Ended", "artist": "Imported",
+     "year": "2022", "status": "imported", "note": "", "target_dir": "",
+     "queries": [], "attempts": 0, "added_at": 18.0, "updated_at": 18.5,
+     "last_search": 0.0, "last_error": "", "album_path": ENDED_FOLDER,
+     "source": "musicbrainz", "pending": True},
 ]
 FIXTURE_READY = os.path.join(REDIRECT, "downloads", "peer", "Some Album")
 os.makedirs(FIXTURE_READY, exist_ok=True)
@@ -703,7 +745,28 @@ with Patch(auto, jobs=lambda: [dict(j) for j in FIXTURE_JOBS],
     # not among them — clearing never touches a row that is still going.
     clearable = sorted(r["id"] for rows in fixture["sections"].values() for r in rows
                        if r["clearable"])
-    assert clearable == ["job:10", "job:11", "wish:5"], clearable
+    assert clearable == ["job:10", "job:11", "wish:5", "wish:8"], clearable
+
+    # The deferred add's rows, in the three states that decide whether the
+    # resolving flag may be believed (see the fixture's own comment).
+    def wish_row(wish_id):
+        for rows in fixture["sections"].values():
+            for r in rows:
+                if r.get("wish_id") == wish_id:
+                    return r
+        return None
+
+    fresh = wish_row(6)
+    assert fresh and fresh["stage"] == "searching_musicbrainz", fresh
+    assert "MusicBrainz" in fresh["note"], fresh
+    assert fresh["cancelable"] and not fresh["clearable"], fresh
+    assert fixture["sections"]["queued"], fixture["sections"]["queued"]
+    stale = wish_row(7)
+    assert stale and stale["stage"] == "queued", stale
+    assert "MusicBrainz" not in stale["note"], stale
+    ended = wish_row(8)
+    assert ended and ended["stage"] == "completed", ended
+    assert "Imported into the library" in ended["note"], ended
 
     # the payload the page is rendered with
     payload_path = os.path.join(REDIRECT, "queue-payload.json")
@@ -733,5 +796,7 @@ print("ok  a completed download reports whether it was imported, and a failed jo
 print("ok  two items for the same library folder never run together (claim waited, then released)")
 print("ok  per-item cancel goes through the wish list / the job / the bulk queue")
 print("ok  one payload carries every stage, in its own section, with its outcome")
+print("ok  a deferred add's row says MusicBrainz is being asked, and a row whose "
+      "step has stopped never claims it is still running")
 
 shutil.rmtree(REDIRECT, ignore_errors=True)

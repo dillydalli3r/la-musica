@@ -88,10 +88,14 @@ try {
     ["a waiting row says where in the line it is", "Waiting · #1"],
     ["the waiting group says why it waits", "starts by itself when one of them finishes"],
     ["clear all for the waiting queue", "Clear all (1)"],
-    ["queued section with its count", "Queued / searching · 2"],
+    // The counts include the deferred-add fixture rows: an add whose
+    // MusicBrainz identity is still being resolved, one whose resolution never
+    // landed, and one the store has ENDED (tools/test_queue_view.py).
+    ["queued section with its count", "Queued / searching · 4"],
+    ["the deferred add's own stage label", "Searching MusicBrainz…"],
     ["in-progress section with its count", "In progress · 2"],
     ["needs-attention section", "Needs you · 2"],
-    ["completed section with its count", "Completed · 2"],
+    ["completed section with its count", "Completed · 3"],
     ["failed section with its count", "Failed · 2"],
     ["pipeline header counts", "3/3 running"],
     ["the per-release candidate ceiling named", "3 candidate(s) each"],

@@ -136,7 +136,10 @@ class _DiscoverRowState extends State<DiscoverRow> {
                     crossAxisAlignment: WrapCrossAlignment.center,
                     children: [
                       if (item.sourceName.isNotEmpty)
-                        SourceChip(label: item.sourceName, url: item.pageUrl),
+                        SourceChip(
+                          label: item.sourceName,
+                          tooltip: item.pageUrl,
+                        ),
                       for (final extra in item.alsoFrom)
                         SourceChip(label: discoverSourceLabel(extra)),
                     ],
@@ -262,7 +265,11 @@ class _DiscoverRowState extends State<DiscoverRow> {
       );
     }
     final onAdd = widget.onAdd;
-    if (onAdd == null || item.addMbid == null) return const SizedBox.shrink();
+    // A row with no MusicBrainz id is added BY NAME, so it still gets the
+    // button; only a row that names nothing at all — no artist and no title to
+    // search with — is left without one, because that add could only be
+    // answered with a 400.
+    if (onAdd == null || !item.addable) return const SizedBox.shrink();
     return OutlinedButton.icon(
       onPressed: _busy ? null : () => _add(onAdd),
       icon: _busy
@@ -278,15 +285,18 @@ class _DiscoverRowState extends State<DiscoverRow> {
 
   /// A successful add leaves a framework album on disk searching for its
   /// audio: the row says so, and offers the undo the server supports, instead
-  /// of looking untouched the moment the button is pressed.
+  /// of looking untouched the moment the button is pressed. A NAME-keyed add
+  /// that matched nothing leaves no folder at all — only a wish searching by
+  /// artist and title — and says exactly that rather than "nothing added".
   Widget _queuedAction(BuildContext context, LibraryAddResult result) {
     final muted = Theme.of(
       context,
     ).colorScheme.onSurface.withValues(alpha: 0.55);
     // The pending album the undo applies to: the path it was created at, and
-    // the wish searching for its audio.
+    // the wish searching for its audio — which a no-match reply names on the
+    // result itself, its `albums` being empty.
     String? albumPath;
-    int? wishId;
+    int? wishId = result.wishId;
     for (final album in result.albums) {
       if (albumPath == null && album.created && album.albumPath.isNotEmpty) {
         albumPath = album.albumPath;
@@ -301,6 +311,8 @@ class _DiscoverRowState extends State<DiscoverRow> {
           child: Text(
             result.background
                 ? 'Discography queued'
+                : result.byName && !result.matched
+                ? 'Queued — searching by name'
                 : (result.added > 0
                       ? 'Queued — searching for its audio'
                       : 'Nothing added'),
@@ -388,15 +400,16 @@ class DiscoverKindSwitch extends StatelessWidget {
   );
 }
 
-/// A small chip naming a provider. [url] is the row's own page on that provider
-/// — offered as a tooltip, since the client carries no browser to open it with.
-/// [accent] is the colour of a chip that is reporting a failure rather than a
-/// name.
+/// A small chip naming a provider. [tooltip] is the sentence behind the chip —
+/// the row's own page on that provider, or the provider's whole note when the
+/// chip is reporting one — offered as a tooltip, since the client carries no
+/// browser to open it with. [accent] is the colour of a chip that is reporting
+/// a failure rather than a name.
 class SourceChip extends StatelessWidget {
-  const SourceChip({super.key, required this.label, this.url, this.accent});
+  const SourceChip({super.key, required this.label, this.tooltip, this.accent});
 
   final String label;
-  final String? url;
+  final String? tooltip;
   final Color? accent;
 
   @override
@@ -418,41 +431,118 @@ class SourceChip extends StatelessWidget {
         ),
       ),
     );
-    final tooltip = url;
-    return tooltip == null || tooltip.isEmpty
+    final tooltipText = tooltip;
+    return tooltipText == null || tooltipText.isEmpty
         ? chip
-        : Tooltip(message: tooltip, child: chip);
+        : Tooltip(message: tooltipText, child: chip);
   }
 }
 
 const Color _warn = Color(0xFFFBBF24);
 const Color _fail = Color(0xFFF87171);
 
-/// The provider status strip: one chip per source the server asked, carrying
-/// its own note — "skipped: no lastfm_api_key" is shown, never swallowed, so a
-/// short list of results stays explainable.
+/// How long a chip's label may be before the outcome word stands in for it.
+/// A label is NEVER clipped to fit: it is the note's lead clause when that is
+/// short enough to read as one, and otherwise the outcome word alone (`failed`
+/// — the provider's own words are one tooltip away), so no chip ever ends
+/// mid-sentence or mid-word.
+const int _noteLabelMax = 48;
+
+/// The SHORT label one provider note is shown AS, with the server's own
+/// sentence in the chip's tooltip.
+///
+/// Same rule as the React client's (its `shortNote`, so the two front ends
+/// cannot disagree): the label is the note's own FIRST CLAUSE — up to its first
+/// ` — `, ` (` or full stop, which is a complete phrase by construction — or,
+/// when even that is too long to be a label, the outcome word (`failed`,
+/// `skipped`). A reason that is one clause long is the label whole
+/// (`no lastfm_api_key`, `unknown source`).
+String discoverNoteLabel(String note) {
+  final text = note.trim();
+  final head = RegExp(r'^([a-z]+):\s*').firstMatch(text);
+  final word = head?.group(1)?.toLowerCase() ?? '';
+  final rest = head == null ? text : text.substring(head.end).trim();
+  final lead = rest
+      .split(RegExp(r'\s+—\s+|\s+\(|\.\s+'))
+      .first
+      .replaceFirst(RegExp(r'[.;,]\s*$'), '')
+      .trim();
+  final label = lead.isNotEmpty && lead.length <= _noteLabelMax
+      ? lead
+      : (word.isNotEmpty ? word : lead);
+  if (label.isEmpty) return text;
+  return word == 'partial' && label != 'partial' ? 'partial: $label' : label;
+}
+
+/// The provider status strip: one chip per source the server reported, and one
+/// quiet line for the sources this PAGE's level cannot be answered by.
+///
+/// THE RENDERING RULE — which silence is information and which is an error
+/// (the same split the React client states in its `NotesChips`):
+///
+/// * a coloured chip is a source the request actually lost something to: the
+///   provider refused (`failed: …`, red) or had no answer to give
+///   (`skipped: …`, amber — including a missing credential, which keeps its
+///   chip as documented because it is the ONE silence the reader can end, by
+///   adding that key in Settings → Discovery);
+/// * nothing is coloured for INFORMATION: `partial: …` (a source that answered
+///   with part of a long list) is left neutral, and [notApplicable] — the
+///   sources whose feed does not exist for this kind of page at all — is the
+///   plain line under the chips. A capability a provider publishes is not a
+///   failed request, and three of them must not read as three errors;
+/// * every chip carries the server's WHOLE sentence as its tooltip, so the
+///   label can stay short without ever losing what the provider said.
 class DiscoverNotes extends StatelessWidget {
-  const DiscoverNotes({super.key, required this.notes});
+  const DiscoverNotes({
+    super.key,
+    required this.notes,
+    this.notApplicable = const [],
+  });
 
   /// source id -> the server's line: "" answered, else "skipped: …" or
   /// "failed: …".
   final Map<String, String> notes;
 
+  /// The sources an entity shelf cannot use at all, each with the short marker
+  /// and the provider's own sentence (see `DiscoverNotApplicable`).
+  final List<DiscoverNotApplicable> notApplicable;
+
   @override
   Widget build(BuildContext context) {
-    if (notes.isEmpty) return const SizedBox.shrink();
+    if (notes.isEmpty && notApplicable.isEmpty) {
+      return const SizedBox.shrink();
+    }
+    final muted = Theme.of(
+      context,
+    ).colorScheme.onSurface.withValues(alpha: 0.5);
     return Padding(
       padding: const EdgeInsets.only(bottom: 6),
       child: Wrap(
         spacing: 6,
         runSpacing: 6,
+        crossAxisAlignment: WrapCrossAlignment.center,
         children: [
+          if (notApplicable.isNotEmpty)
+            Tooltip(
+              message: [
+                for (final one in notApplicable) '${one.label} — ${one.why}',
+              ].join('\n'),
+              child: Text(
+                'cannot answer for this page: '
+                '${[for (final one in notApplicable) '${one.label} (${one.short})'].join(' · ')}',
+                style: TextStyle(fontSize: 10, color: muted),
+              ),
+            ),
           for (final entry in notes.entries)
             SourceChip(
               label: entry.value.isEmpty
                   ? discoverSourceLabel(entry.key)
-                  : '${discoverSourceLabel(entry.key)} — ${entry.value}',
+                  : '${discoverSourceLabel(entry.key)} — '
+                        '${discoverNoteLabel(entry.value)}',
+              tooltip: entry.value.isEmpty ? null : entry.value,
               accent: entry.value.isEmpty
+                  ? null
+                  : entry.value.startsWith('partial')
                   ? null
                   : (entry.value.startsWith('failed') ? _fail : _warn),
             ),
@@ -466,6 +556,11 @@ class DiscoverNotes extends StatelessWidget {
 /// comes back so the row can show the album as pending; null means the add
 /// failed and the reason has already been shown.
 ///
+/// A row with no MusicBrainz id is added BY NAME — artist, title, year, and the
+/// provider's label and page — and the server searches MusicBrainz for it,
+/// queueing a name-keyed wish when it finds no match. Only a row that names
+/// nothing at all is refused here, before any request.
+///
 /// A 404 is the one failure worth spelling out: no add route on this server
 /// means the button cannot work here at all, which is stated plainly instead of
 /// reporting a wish that was never filed.
@@ -477,19 +572,28 @@ Future<LibraryAddResult?> addDiscoverItem(
   final messenger = ScaffoldMessenger.of(context);
   if (client == null) return null;
   final mbid = item.addMbid;
-  if (mbid == null) {
+  final nameOnly = mbid == null;
+  if (nameOnly && !item.addable) {
     messenger.showSnackBar(
-      const SnackBar(content: Text('This row has no MusicBrainz id to add.')),
+      const SnackBar(
+        content: Text('This row names no artist and no title to search for.'),
+      ),
     );
     return null;
   }
   try {
     final result = await client.addToLibrary(
       mbid: mbid,
-      kind: item.wishKind,
+      // A name-keyed search needs the row's OWN kind: `wishKind`'s
+      // `release_group`/`recording` name an entity by type, which a row with
+      // no id has nothing to name that way.
+      kind: nameOnly ? item.kind : item.wishKind,
+      releaseGroupMbid: item.releaseGroupMbid,
       title: item.title,
       artist: item.artist,
       year: item.year,
+      source: item.sourceName,
+      pageUrl: item.pageUrl,
     );
     messenger.showSnackBar(SnackBar(content: Text(result.message)));
     return result;

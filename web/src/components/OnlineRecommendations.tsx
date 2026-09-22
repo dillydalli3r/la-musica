@@ -70,6 +70,10 @@ export default function OnlineRecommendations({
   const rows = data?.items ?? [];
   const notes = data?.notes ?? {};
   const asked = data?.sources_asked ?? [];
+  // The sources this page's KIND has no feed for at all (Last.fm cannot be
+  // asked about an album): information, not a silence — they are not in
+  // `sources_asked` either, and the chips say so on their own quiet line.
+  const cannot = data?.not_applicable ?? [];
   // The shelf's own verdict ("no recommendation source had anything to suggest
   // for this album") is the one-line WHY when nothing came back, so it is
   // printed as that line rather than as a chip repeating it.
@@ -119,7 +123,7 @@ export default function OnlineRecommendations({
                 ? "No online provider had anything for this page."
                 : "This page states nothing to seed an online shelf from.")}
           </p>
-          <NotesChips notes={sourceNotes} sources={asked} />
+          <NotesChips notes={sourceNotes} sources={asked} notApplicable={cannot} />
         </div>
       ) : (
         <>
@@ -135,7 +139,7 @@ export default function OnlineRecommendations({
               silent is the footnote to an answer, and the four lines it took
               above the list are four more suggestions the reader never saw. */}
           <div className="mt-2">
-            <NotesChips notes={sourceNotes} sources={asked} />
+            <NotesChips notes={sourceNotes} sources={asked} notApplicable={cannot} />
           </div>
         </>
       )}

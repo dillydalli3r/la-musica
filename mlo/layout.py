@@ -170,6 +170,21 @@ def _counts(issues):
     return counts
 
 
+def _new_sink():
+    """The counters ONE walker keeps while it works.
+
+    A sink carries the four keys the run's stats are built from, so a lane's
+    answer folds back with plain addition, plus the two the report itself
+    carries (``albums``, ``audio_files``). The runner thread's sink IS the
+    run's own ``stats`` dict — same key names, which is why the walk's
+    accounting helpers can take either — and a lane gets a fresh one of these,
+    so several artist folders can be visited at once without one lane touching
+    another's numbers (see :func:`scan_library`'s merge, the only writer).
+    """
+    return {"total_scanned": 0, "skipped_count": 0, "unchanged_count": 0,
+            "error_count": 0, "errors": [], "albums": 0, "audio_files": 0}
+
+
 def _has_audio(d):
     """Whether any audio sits directly in *d* or one/two levels down (the only
     nesting the layout uses: disc folders inside an album)."""
@@ -460,6 +475,14 @@ def scan_library(cfg=None, stats=None):
     cover art, and inside an artist folder its artist.jpg / artist.png and
     description.txt (only audio with no album folder is reported there).
 
+    The artist folders are visited on a pool (`worker_count`, so the Worker
+    threads setting sizes it): they share nothing but the music folder they
+    sit in, and the expensive part of a whole-library scan is the one
+    container read per album the `wrong_case` check needs to know what the
+    naming script would have spelled. Lanes return their rows and their
+    counters and the runner merges them in the walk's own order — see the
+    plan/merge pair below.
+
     *stats*, when given, is the runner's stats dict, because the payload below
     is the API's shape and must not grow a bookkeeping key. It accounts the
     entries the scan examined (`total_scanned`), then closes each one as
@@ -486,39 +509,43 @@ def scan_library(cfg=None, stats=None):
     if not folder or not os.path.isdir(folder):
         return out
 
-    def entries(d):
+    def entries(d, sink):
         """One folder's entries, with a failed listing accounted as the error
         it is: an unreadable artist or album folder would otherwise look
         exactly like an empty one, and the report would say the library holds
-        nothing there."""
+        nothing there.
+
+        *sink* is the counter dict of the walker asking — the run's ``stats``
+        for the runner thread, a lane's own :func:`_new_sink` for an artist
+        folder the pool is visiting. Each walker counts only what IT looked
+        at, so lanes never share a counter; the merge in :func:`scan_library`
+        is what folds them back into the run.
+        """
         names, err = _list(d)
-        if err and stats is not None:
-            stats["error_count"] += 1
-            stats["errors"].append((d, f"cannot list: {err}"))
+        if err and sink is not None:
+            sink["error_count"] += 1
+            sink["errors"].append((d, f"cannot list: {err}"))
         return names
 
-    def opened():
+    def opened(sink):
         """One entry the scan looked at."""
-        if stats is not None:
-            stats["total_scanned"] += 1
+        if sink is not None:
+            sink["total_scanned"] += 1
 
-    def closed(reported=False, skipped=False):
+    def closed(sink, reported=False, skipped=False):
         """Close out one entry opened above: skipped when the layout does not
         judge it at all, otherwise unchanged unless it produced a row."""
-        if stats is None:
+        if sink is None:
             return
         if skipped:
-            stats["skipped_count"] += 1
+            sink["skipped_count"] += 1
         elif not reported:
-            stats["unchanged_count"] += 1
+            sink["unchanged_count"] += 1
 
     lib = library_root(folder)
     out["exists"] = True
     out["artists_dir"] = (lib or "").replace("\\", "/")
     issues = []
-    # Paths already reported as wrong_case — one artist folder serves all of
-    # its albums, and the user does not need that row ten times.
-    case_seen = set()
     # What this run looks at: None = the whole library, else the artist
     # folders a target named (see _scope). A scoped run skips the two
     # library-wide steps below — a foreign folder in the root and a stray
@@ -530,15 +557,15 @@ def scan_library(cfg=None, stats=None):
     # Only Artists/ and the app's own .mlo state dirs belong here. A loose
     # audio file at the root is the classic "dropped it in the wrong place",
     # and a foreign folder is either a manual rip dump or a stray copy.
-    for name in (entries(folder) if scope is None else []):
+    for name in (entries(folder, stats) if scope is None else []):
         p = os.path.join(folder, name)
         if os.path.isdir(p):
-            opened()
+            opened(stats)
             if name in _ROOT_ALLOWED or name.startswith(".mlo"):
-                closed(skipped=True)
+                closed(stats, skipped=True)
                 continue
             if lib and os.path.normcase(os.path.abspath(p)) == os.path.normcase(os.path.abspath(lib)):
-                closed(skipped=True)
+                closed(stats, skipped=True)
                 continue
             holds = _has_audio(p)
             issues.append(_issue(
@@ -546,27 +573,27 @@ def scan_library(cfg=None, stats=None):
                 "folder in the music folder root%s" % (" holding audio" if holds else ""),
                 "the library lives in Artists/ — move anything real into "
                 "Artists/<Artist>/<Album>/"))
-            closed(reported=True)
+            closed(stats, reported=True)
         elif _is_audio(name):
-            opened()
+            opened(stats)
             issues.append(_issue(
                 "audio_at_root", p, folder, "audio file in the music folder root",
                 "move it into Artists/<Artist>/<Album>/ (or import it) so "
                 "grading and the organizer can see it",
                 fix=_loose_fix(p, folder, naming_script)))
-            closed(reported=True)
+            closed(stats, reported=True)
         elif name.startswith(".mlo_"):
-            opened()
+            opened(stats)
             issues.append(_issue(
                 "legacy_state_file", p, folder,
                 "leftover from the old .mlo_data layout",
                 "safe to delete once the migration has been confirmed"))
-            closed(reported=True)
+            closed(stats, reported=True)
         else:
             # Any other loose file at the root is not the layout's business:
             # the root also carries the user's own notes and scripts.
-            opened()
-            closed(skipped=True)
+            opened(stats)
+            closed(stats, skipped=True)
 
     if not lib or not os.path.isdir(lib):
         out.update(issues=issues, counts=_counts(issues), total=len(issues))
@@ -579,41 +606,55 @@ def scan_library(cfg=None, stats=None):
         *albums* restricts the visit to those album folder NAMES — what a
         scoped run passes, so an import scans the album it wrote and no other
         album of the same artist. None means every album folder there is.
+
+        ``(rows, sink)`` comes back instead of the rows going straight into
+        the report: this is the unit :func:`scan_library` runs one lane per
+        artist folder, so the rows it found and the entries it counted are its
+        own. Nothing under an artist folder can be reported from another
+        artist's walk, which is what makes that safe — and the only writer of
+        the report is the merge that consumes these.
         """
+        rows = []
+        sink = _new_sink()
+        # Paths already reported as wrong_case, for THIS artist: one artist
+        # folder serves all of its albums and the user does not need that row
+        # ten times. Only paths inside this folder can ever reach the set, so
+        # one set per artist is the same dedupe a whole-library set did.
+        case_seen = set()
         # ---- 3. <music>/Artists/<Artist> ----------------------------------
-        for an in entries(p):
+        for an in entries(p, sink):
             ap = os.path.join(p, an)
             if not os.path.isdir(ap):
-                opened()
+                opened(sink)
                 if _is_audio(an):
-                    issues.append(_issue(
+                    rows.append(_issue(
                         "audio_in_artist", ap, folder,
                         "audio file directly in the artist folder \u201c%s\u201d "
                         "(no album folder)" % name,
                         "give it an album folder: Artists/<Artist>/<Album>/",
                         fix=_loose_fix(ap, folder, naming_script)))
-                    closed(reported=True)
+                    closed(sink, reported=True)
                 # Any other file in an artist folder is the artist's own
                 # content (artist.jpg / artist.png / description.txt written
                 # by mlo.artistdata) — expected, so nothing to report.
                 else:
-                    closed(skipped=True)
+                    closed(sink, skipped=True)
                 continue
             if albums is not None and an not in albums:
                 # A neighbouring album of a scoped run: listed, not looked at.
-                opened()
-                closed(skipped=True)
+                opened(sink)
+                closed(sink, skipped=True)
                 continue
             # An album folder is one entry, opened when it is seen and closed
             # with whatever its contents produced: unchanged only when nothing
             # below answered for it. Counted by the rows themselves rather than
             # by a flag each branch has to remember to set — an album whose
             # stray file was reported is not an unchanged folder.
-            opened()
-            out["albums"] += 1
-            rows_before = len(issues)
+            opened(sink)
+            sink["albums"] += 1
+            rows_before = len(rows)
             if not _has_audio(ap):
-                issues.append(_issue(
+                rows.append(_issue(
                     "empty_album", ap, folder,
                     "album folder \u201c%s / %s\u201d holds no audio" % (name, an),
                     "remove it, or fill it \u2014 an empty album grades as an error"))
@@ -622,49 +663,49 @@ def scan_library(cfg=None, stats=None):
             # not the way the naming script spells it. Reported next to the
             # shape problems because from here it is the same kind of answer:
             # "this is not the canonical library yet".
-            issues.extend(_case_issues(name, an, ap, folder, naming_script, case_seen))
+            rows.extend(_case_issues(name, an, ap, folder, naming_script, case_seen))
 
             # ---- 4. inside an album: strays and unexpected subfolders ------
-            for f in entries(ap):
+            for f in entries(ap, sink):
                 fp = os.path.join(ap, f)
-                opened()
+                opened(sink)
                 if os.path.isdir(fp):
                     if _DISC_RE.match(f) or _is_disc_structure(fp):
                         # A disc folder (CD1, Disc 2 …) and a disc STRUCTURE
                         # (VIDEO_TS/BDMV, the shape a DVD/Blu-ray rip comes in)
                         # are both the layout working as intended: the remux
                         # turns the structure into one MKV (mlo.videodisc).
-                        closed(skipped=True)
+                        closed(sink, skipped=True)
                     else:
-                        issues.append(_issue(
+                        rows.append(_issue(
                             "unexpected_subfolder", fp, folder,
                             "folder \u201c%s\u201d inside album \u201c%s / %s\u201d"
                             % (f, name, an),
                             "only disc folders (CD1, Disc 2, \u2026) belong "
                             "inside an album"))
-                        closed(reported=True)
+                        closed(sink, reported=True)
                     continue
                 ext = os.path.splitext(f)[1].lower()
                 if _is_audio(f):
-                    out["audio_files"] += 1
-                    closed()
+                    sink["audio_files"] += 1
+                    closed(sink)
                 elif ext and ext in _ALBUM_SIDECARS:
-                    closed(skipped=True)      # .lrc/.cue/.log/.accurip
+                    closed(sink, skipped=True)      # .lrc/.cue/.log/.accurip
                 elif ext in IMAGE_EXTS:
-                    closed(skipped=True)      # cover art
+                    closed(sink, skipped=True)      # cover art
                 elif f.lower() in ALBUM_SIDECAR_NAMES:
-                    closed(skipped=True)      # album description.txt
+                    closed(sink, skipped=True)      # album description.txt
                 elif f.startswith("."):
-                    closed(skipped=True)      # the app's own manifests
+                    closed(sink, skipped=True)      # the app's own manifests
                 else:
-                    issues.append(_issue(
+                    rows.append(_issue(
                         "stray_file", fp, folder,
                         "file \u201c%s\u201d is not audio, artwork or a known "
                         "sidecar" % f,
                         "delete it if it is junk (nfo/db/txt) — it is dead "
                         "weight in the library"))
-                    closed(reported=True)
-            closed(reported=len(issues) > rows_before)
+                    closed(sink, reported=True)
+            closed(sink, reported=len(rows) > rows_before)
 
         # ---- 5. the artist folder itself -----------------------------------
         # An artist folder holding NO album folder at all is a dead artist:
@@ -676,43 +717,58 @@ def scan_library(cfg=None, stats=None):
         # empty_artist() decides, the same question the grade and the removal
         # route ask.
         if empty_artist(p):
-            opened()
-            issues.append(_issue(
+            opened(sink)
+            rows.append(_issue(
                 "empty_artist", p, folder,
                 "artist folder \u201c%s\u201d holds no album folder" % name,
                 "remove it to the Trash (Optimize → Library layout → remove), "
                 "or put one of the artist's albums inside it",
                 fix={"action": "trash"}))
-            closed(reported=True)
+            closed(sink, reported=True)
+        return rows, sink
 
+    # ---- 2. <music>/Artists, and every folder under it --------------------
+    # The walk is PLANNED first and merged after: an artist folder is its own
+    # subject (nothing under one can be reported from another's walk) and its
+    # rows are the rows a serial walk produced for it, so the pool below can
+    # visit several at once without the report being able to tell. What it
+    # overlaps is what this scan actually spends its time on: one container
+    # read per album, to compare the stored spelling against the naming
+    # script, plus the directory listings. `plan` holds the walk's own order
+    # and `merge` is the ONE writer of `issues`/`stats`, so the rows, the
+    # counters and the order between them are what they always were — the
+    # apply rebases later fixes through the report's order (parent before
+    # child, see apply_fixes), which a pool must not reshuffle.
+    plan = []
     if scope is None:
         # ---- 2. <music>/Artists -------------------------------------------
-        artist_names = entries(lib)
+        artist_names = entries(lib, stats)
         for name in artist_names:
             p = os.path.join(lib, name)
             if not os.path.isdir(p):
-                opened()
+                opened(stats)
                 if _is_audio(name):
-                    issues.append(_issue(
+                    rows = [_issue(
                         "audio_in_artists", p, folder,
                         "audio file directly in Artists/ (no artist or album folder)",
                         "move it into Artists/<Artist>/<Album>/",
-                        fix=_loose_fix(p, folder, naming_script)))
+                        fix=_loose_fix(p, folder, naming_script))]
                 else:
-                    issues.append(_issue(
+                    rows = [_issue(
                         "stray_in_artists", p, folder,
                         "non-audio file directly in Artists/",
-                        "delete it, or move it into the album it belongs to"))
-                closed(reported=True)
+                        "delete it, or move it into the album it belongs to")]
+                closed(stats, reported=True)
+                plan.append(("rows", rows))
                 continue
             if name.startswith("."):
-                opened()
-                issues.append(_issue(
+                opened(stats)
+                plan.append(("rows", [_issue(
                     "hidden_folder", p, folder, "hidden folder inside Artists/",
-                    "hidden folders are not library content — move or delete it"))
-                closed(reported=True)
+                    "hidden folders are not library content — move or delete it")]))
+                closed(stats, reported=True)
                 continue
-            artist(name, p)
+            plan.append(("artist", (name, p, None)))
         out["artists"] = sum(1 for n in artist_names
                              if os.path.isdir(os.path.join(lib, n))
                              and not n.startswith("."))
@@ -720,9 +776,43 @@ def scan_library(cfg=None, stats=None):
         # A scoped run: exactly the artist folders a target named. Nothing
         # above them is judged — an album that is being fixed cannot be the
         # reason to report the root it happens to sit under.
-        for p in sorted(scope):
-            artist(os.path.basename(p), p, scope[p])
+        plan = [("artist", (os.path.basename(p), p, scope[p]))
+                for p in sorted(scope)]
         out["artists"] = len(scope)
+
+    def merge(rows, sink):
+        """Fold one lane's answer into the report — the only writer."""
+        issues.extend(rows)
+        if stats is not None:
+            for key in ("total_scanned", "skipped_count", "unchanged_count",
+                        "error_count"):
+                stats[key] += sink[key]
+            stats["errors"].extend(sink["errors"])
+        out["albums"] += sink["albums"]
+        out["audio_files"] += sink["audio_files"]
+
+    # Sized by the shared worker setting; one lane (a scoped run's single
+    # album, or worker_limit=1) visits in-line, which is also the order every
+    # report was written in before there was a pool.
+    lanes = mlo_stats.worker_count(cfg, default=min(8, os.cpu_count() or 1),
+                                   maximum=16, items=len(plan))
+    if lanes > 1 and len(plan) > 1:
+        from concurrent.futures import ThreadPoolExecutor
+
+        with ThreadPoolExecutor(max_workers=lanes) as ex:
+            futures = [None if kind == "rows" else ex.submit(artist, *args)
+                       for kind, args in plan]
+            for (kind, args), fut in zip(plan, futures):
+                if fut is None:
+                    issues.extend(args)
+                else:
+                    merge(*fut.result())
+    else:
+        for kind, args in plan:
+            if kind == "rows":
+                issues.extend(args)
+            else:
+                merge(*artist(*args))
 
     out.update(issues=issues, counts=_counts(issues), total=len(issues))
     return out

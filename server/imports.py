@@ -150,7 +150,8 @@ def finish_album(album_dir, cfg=None, progress=None, force=None, release=None):
     import queue, the bulk queue, the Soulseek auto-importer and the wish /
     artist-watch pipeline behind it, so what an album ends up as cannot depend
     on which button was pressed. Returns ``{"path", "chain", "scripts",
-    "errors", "chained", "chain_off", "note", "autonomy"}``: ``scripts`` is one
+    "errors", "chained", "chain_off", "note", "autonomy", "dropped"}``:
+    ``scripts`` is one
     result per chain id (``server.script_runners`` shape), ``errors`` a flat
     list for a caller that only wants to know what went wrong, and ``path`` the
     folder the album actually ended at: the chain reports where it ended up
@@ -189,6 +190,20 @@ def finish_album(album_dir, cfg=None, progress=None, force=None, release=None):
     scripts off must not silently take the cover art with it) — while
     ``advisory_auto_fetch`` / ``instrumental_auto_fetch`` only run when a chain
     is configured to read what they write.
+
+    WHAT THE ALBUM ARRIVED WITH is dropped for the four families this import
+    decides itself — lyrics, genre, advisory, embedded cover art — by
+    :func:`drop_arrived_values`, and it happens HERE, before every writer
+    below and before the chain. Those writers fill an EMPTY value rather than
+    replacing a full one (a user's own edit must survive their /run), so
+    emptying the slots is what makes an import land what the import found:
+    the peer's genre, rating, lyrics and artwork are the download's, not the
+    album's. It runs after the review stop, because a stopped import hands the
+    album over exactly as it arrived, and it leaves every family the user kept
+    for themselves alone. ``dropped`` is its result: the files it walked, the
+    files whose tags it could not touch (they keep what they arrived with),
+    and how many files lost an arrived value per family. ``import_keep_synced_lyrics``
+    is the lyric family's one exception — see the key.
 
     WHAT IS LEFT is always reported, in both modes, by
     ``_report_gaps``: the album's ``autonomy`` block carries what it is still
@@ -249,6 +264,14 @@ def finish_album(album_dir, cfg=None, progress=None, force=None, release=None):
         out["note"] = (f"stopped for review at {policy['stop']} — the script "
                        "chain has not run")
         return _report_gaps(out, cfg, policy, path)
+    # WHAT IT ARRIVED WITH goes now, before every writer below and before the
+    # chain: the four families this import decides are the import's, and each
+    # of their writers fills an empty slot rather than replacing a full one
+    # (see `drop_arrived_values`, which is where the reasoning lives). After
+    # the review stop on purpose — a stopped import hands the album over as it
+    # arrived — and over `run_cfg`, so a family the user kept for themselves is
+    # left exactly as it is in every mode.
+    out["dropped"] = drop_arrived_values(path, run_cfg, chain)
     # The album's identity, read while it is still where the caller put it:
     # the chain's beets/organize step renames the folder to its canonical
     # layout, and after that the old path is the only handle this function has
@@ -1926,6 +1949,181 @@ def release_group_mismatch(match_row, release_group_id):
 
 
 # --------------------------------------------------------------------------- #
+# What an import does NOT keep
+# --------------------------------------------------------------------------- #
+# An import decides four families for itself: the album's lyrics (script 13),
+# its GENRE (the release's own chain, `_stamp_release`), its ITUNESADVISORY
+# (`fetch_advisories`) and its cover art (`run_cover_step`). A download arrives
+# carrying the PEER's values for all four, and every one of those writers is
+# FILL-ONLY: `_stamp_release` writes a genre only into an empty one,
+# `fetch_advisories` echoes a stored 0/1/2 instead of asking anybody, script 13
+# skips a track that already carries lyrics, and art inside the file is art no
+# source this app asked for produced. Without this pass the album therefore
+# ends the import holding what the peer put there rather than what the import
+# found.
+#
+# So `drop_arrived_values` is the import's FIRST tag-writing pass, and
+# `finish_album` runs it before anything else touches the folder. Emptying the
+# four slots is what lets those writers — which a user's OWN write still needs
+# to fill-only (the wizard's genre pick, the tag editors, a manual `/run`) —
+# land the import's values. That is the whole difference between an import and
+# `/run`: the scripts themselves are unchanged, an import just does not hand
+# them the peer's head start.
+#
+# `import_keep_synced_lyrics` is the one exception, and it is the lyric
+# family's alone: a SYNCED lyric is work no source can reproduce, so with the
+# switch on a file whose own lyric already carries timestamps keeps it (and
+# script 13 skips that file, as it always did). Off — the shipped default — it
+# is replaced like everything else.
+def _arrived_lyric_is_synced(af, lrc_path):
+    """Whether the lyric a file ARRIVED with carries real timestamps.
+
+    Both places a lyric lives count: the embedded tag and the ``.lrc`` sidecar
+    next to the file. "Synced" is `mlo.lyrics`'s own answer (`sync_level_of`:
+    everything but a plain text is timed), and a stub with no words in it — a
+    metadata-only or timestamp-only sidecar — is not a lyric at all
+    (`has_lyrics_text`), so it can never be the thing the switch keeps.
+    """
+    from mlo.lyrics import has_lyrics_text, sync_level_of
+
+    texts = [af.get_lyrics() or ""]
+    try:
+        with open(lrc_path, "r", encoding="utf-8", errors="replace") as fh:
+            texts.append(fh.read())
+    except OSError:
+        pass
+    return any(sync_level_of(t) != "plain" and has_lyrics_text(t) for t in texts)
+
+
+def drop_arrived_values(album_dir, cfg=None, chain=None):
+    """Drop what a downloaded album arrived carrying, for the four families an
+    import decides itself: the LYRICS (embedded and the ``.lrc`` sidecar, plus
+    the transliteration / translation half derived from them), GENRE,
+    ITUNESADVISORY and the embedded cover art. See the note above for why the
+    import's own writers need this and a user's write does not.
+
+    Called on the album as it arrived, BEFORE any family step or chain script.
+    Only the families THIS import is going to decide are cleared — a family the
+    user kept is not the pipeline's to empty, which is what handing the album
+    over means, so `import_review_families`, a review-mode run and the
+    families' own switches are all read here exactly as the steps read them.
+    The lyrics are the one family whose clearing also needs the CHAIN: script
+    13 is the fetcher, so a chain that will not run it has nothing to put in
+    place of the lyric it would remove. ``chain`` is the chain this import will
+    run (`chain_for(cfg)` when the caller has not computed one).
+
+    The lyric guard for a file with a described USLT frame is `mlo.audio`'s own
+    (`delete_lyrics`): a named translation another tagger wrote is theirs and
+    stays, like every other described frame in this app.
+
+    Returns the counts: ``checked`` files walked, ``failed`` files whose tags
+    could not be read or written (counted, never swallowed — such a file keeps
+    what it arrived with, and a caller has to be able to say so), and one count
+    per family of the FILES that lost an arrived value.
+    """
+    from mlo import import_policy
+    from mlo.audio import AudioFile
+    from mlo.config import should_write_audio_tag
+    from mlo.lyrics import _lrc_for
+
+    cfg = cfg or load_config()
+    chain = chain_for(cfg) if chain is None else list(chain)
+    # The families the user kept. `review_families` is the same answer the
+    # steps themselves are gated on: the configured list, `cover_review`, and
+    # every family in review mode.
+    kept = set(import_policy.review_families(cfg))
+    drop = {
+        # 13 is the fetcher: no 13 in the chain, nothing to replace a lyric.
+        "lyrics": 13 in chain and "lyrics" not in kept,
+        "genre": "genres" not in kept,
+        # Mirroring `finish_album`'s own gate: the advisory step only runs when
+        # a chain is configured to read what it writes.
+        "advisory": bool(chain) and bool(cfg.get("advisory_auto_fetch", True))
+                    and "advisory" not in kept,
+        # The cover step runs on every path (its switch is its own), and art
+        # inside a file is nobody's but the downloader's until an import
+        # decides the family.
+        "cover": bool(cfg.get("cover_auto_fetch", True)) and "cover" not in kept,
+    }
+    if not any(drop.values()):
+        return {"checked": len(_audio_files(album_dir)), "failed": 0,
+                "lyrics": 0, "genre": 0, "advisory": 0, "cover": 0}
+    keep_synced = bool(cfg.get("import_keep_synced_lyrics", False))
+
+    def _one(path):
+        """One file: which families lost an arrived value, or "failed"."""
+        try:
+            af = AudioFile(path)
+            if af.audio is None:
+                return "failed"
+            # A stand-in AudioFile (a test double) may carry only get_tag /
+            # set_tag: there is nothing in it to inspect or drop, exactly as
+            # `_stamp_release` treats a double as one that cannot defer.
+            if not all(hasattr(af, m) for m in ("has_tag", "delete_tag",
+                                                "delete_lyrics",
+                                                "embedded_pictures")):
+                return ()
+            gone = []
+            if drop["lyrics"] and should_write_audio_tag(cfg, "LYRICS",
+                                                         filepath=path):
+                lrc = _lrc_for(path)
+                if not (keep_synced and _arrived_lyric_is_synced(af, lrc)):
+                    if str(af.get_lyrics() or "").strip():
+                        af.delete_lyrics()
+                        gone.append("lyrics")
+                    if os.path.isfile(lrc):
+                        os.remove(lrc)
+                        gone.append("lyrics")
+                    # A transliteration / translation is a transform OF the
+                    # lyric: once the import replaces that lyric the stored
+                    # ones describe words that are no longer in the file, and
+                    # the grader would fail the pair (XLIT_UNNEEDED) rather
+                    # than credit them. Dropped with their source, by the same
+                    # helper that drops them when the lyric no longer needs
+                    # them at all.
+                    try:
+                        from mlo import lyrics_xlit
+                        for kind in ("TRANSLITERATION", "TRANSLATION"):
+                            if lyrics_xlit._drop_stored_transforms(af, path, kind):
+                                gone.append("lyrics")
+                    except Exception:
+                        traceback.print_exc()
+            if drop["genre"] and af.has_tag("GENRE") \
+                    and should_write_audio_tag(cfg, "GENRE", filepath=path):
+                af.delete_tag("GENRE")
+                gone.append("genre")
+            if drop["advisory"] and af.has_tag("ITUNESADVISORY") \
+                    and should_write_audio_tag(cfg, "ITUNESADVISORY", filepath=path):
+                af.delete_tag("ITUNESADVISORY")
+                gone.append("advisory")
+            if drop["cover"] and af.embedded_pictures():
+                if af.remove_embedded_pictures():
+                    gone.append("cover")
+            return gone
+        except Exception:
+            traceback.print_exc()
+            return "failed"
+
+    files = _audio_files(album_dir)
+    out = {"checked": len(files), "failed": 0, "lyrics": 0, "genre": 0,
+           "advisory": 0, "cover": 0}
+    # Distinct FILES share nothing: every write above is one container rewrite
+    # of its own file (mlo.audio, one flush per file), so an album's tracks go
+    # side by side instead of one after another — the same fan-out
+    # `_stamp_release` and the chain's own passes use.
+    workers = worker_count(cfg, default=8, maximum=8, items=len(files))
+    with ThreadPoolExecutor(max_workers=workers) as ex:
+        outcomes = list(ex.map(_one, files))
+    for row in outcomes:
+        if row == "failed":
+            out["failed"] += 1
+            continue
+        for family in set(row or ()):
+            out[family] += 1
+    return out
+
+
+# --------------------------------------------------------------------------- #
 # Identity tags for a release-driven import
 # --------------------------------------------------------------------------- #
 def _release_for_stamping(release):
@@ -1961,6 +2159,12 @@ def _stamp_release(album_dir, release, cfg):
     ``finish_album`` resolves it from the ISRCs (``fetch_advisories``) before
     the chain runs, which is the only path that can state a real rating
     instead of echoing one.
+
+    GENRE is written only into a track that carries none, which is what keeps
+    a genre the user typed (the wizard's step, the tag editor) — and it is also
+    why an IMPORT clears the arrived genre first (``drop_arrived_values``): for
+    an import the release's genres are the album's, and they land here because
+    the slot was emptied before this ran, not because this writer replaced it.
     """
     from mlo.audio import AudioFile
     from mlo.autotag import genre_count, trim_genres
@@ -2337,7 +2541,14 @@ def _bulk_one(item, cfg):
             stamp_error = f"release stamping failed: {e}"
 
     try:
-        finished = finish_album(album, cfg)
+        # The release this row carries goes on to `finish_album` too. Its
+        # genres step is the one that stamps GENRE, and the import's own pass
+        # has just cleared whatever the album arrived with (see
+        # `drop_arrived_values`), so that step has to stamp from the release in
+        # hand: re-resolving it from the album's own MBID would be a second
+        # lookup — with its own fresh choice of edition — and one that cannot
+        # answer would leave the album with no genre at all.
+        finished = finish_album(album, cfg, release=release)
     except Exception as e:                      # finish_album promises not to raise
         traceback.print_exc()
         finished = {"path": album, "scripts": [], "chain": [], "errors": [str(e)]}

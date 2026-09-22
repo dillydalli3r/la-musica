@@ -117,6 +117,15 @@ def _split_args(argtext):
     return args
 
 
+# The $functions below implement, in the order the help lists them. Declared
+# as data because a caller that accepts a script TYPED BY THE USER (the
+# export's custom folder structure) has to name a typo: an unknown function
+# evaluates to "" exactly like an empty tag, so "$iff(...)" silently shortened
+# the path instead of reporting itself. Keep this tuple and _func in step.
+FUNCTIONS = ("if", "eq", "ne", "not", "and", "or", "left", "right", "num",
+             "lower", "upper", "replace")
+
+
 def _func(name, args, variables):
     a = [_run(tokens, variables) for tokens in args]
     if name == "if":
@@ -220,6 +229,31 @@ def _compile(script):
             i += 1
     flush()
     return tokens
+
+
+def script_vocabulary(script):
+    """(fields, functions) that *script* uses, each in the order it appears.
+
+    ``fields`` are the %variable% names, ``functions`` the $function names —
+    what a caller accepting a user-typed script compares against the
+    vocabulary it can actually supply (``track_variables``' keys and
+    ``FUNCTIONS``). Both are evaluated to "" when unknown, which is the right
+    behaviour for a stored script and exactly what a validator has to catch
+    before it is stored.
+    """
+    fields, calls = [], []
+
+    def walk(tokens):
+        for token in tokens:
+            if token[0] == "var":
+                fields.append(token[1])
+            elif token[0] == "func":
+                calls.append(token[1])
+                for body in token[2]:
+                    walk(body)
+
+    walk(_compile(str(script or "")))
+    return fields, calls
 
 
 def _run(tokens, variables):

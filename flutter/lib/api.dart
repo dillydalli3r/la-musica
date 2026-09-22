@@ -28,6 +28,8 @@ class ReplayGain {
     this.mode = 'track',
     this.source,
     this.analyzed = false,
+    this.pending = false,
+    this.album = false,
   });
 
   final double? gain;
@@ -36,13 +38,25 @@ class ReplayGain {
   final String? source;
   final bool analyzed;
 
+  /// True while the server is still measuring this file on the fly, so a null
+  /// [gain] (unity) is temporary — asking again is worth it, and the value that
+  /// comes back belongs on the track that is already playing.
+  final bool pending;
+
+  /// True only when [gain] really is the album gain. False while [mode] is
+  /// "album" means the album carries no album gain, so the per-track value was
+  /// used — the caller reports that instead of implying album normalisation.
+  final bool album;
+
   /// Linear amplitude for a dB gain — what a player's volume control takes.
   /// Unity when the server sent nothing (an untagged file at `off`).
-  double get linear {
-    final db = gain ?? 0;
-    final value = _pow10(db / 20);
-    return value.clamp(0.0, 4.0);
-  }
+  ///
+  /// The ±24 dB window is the one the web player clamps to (analyser.ts): a
+  /// quiet master legitimately asks for more than +12 dB, and clamping the
+  /// LINEAR value at 4.0 used to under-apply every gain above it, so the two
+  /// clients played the same track at different levels.
+  double get linear =>
+      _pow10((gain ?? 0).clamp(-24.0, 24.0) / 20);
 
   static double _pow10(double exponent) {
     // 10^x without dart:math's pow double-dispatch: exp(x * ln 10).
@@ -62,6 +76,8 @@ class ReplayGain {
     mode: json['mode']?.toString() ?? 'track',
     source: json['source']?.toString(),
     analyzed: json['analyzed'] == true,
+    pending: json['pending'] == true,
+    album: json['album'] == true,
   );
 }
 
@@ -171,6 +187,9 @@ class LibraryAddResult {
   LibraryAddResult({
     this.ok = false,
     this.background = false,
+    this.matched = false,
+    this.byName = false,
+    this.wishId,
     this.note,
     this.albums = const [],
     this.skipped = const [],
@@ -179,6 +198,19 @@ class LibraryAddResult {
 
   final bool ok;
   final bool background;
+
+  /// A name-keyed add that FOUND a MusicBrainz match: the framework album
+  /// exists now and MusicBrainz is asked the rest of the way on a thread.
+  /// Id-given replies never state either flag.
+  final bool matched;
+
+  /// A name-keyed add that matched NOTHING: nothing is on disk, and a
+  /// name-keyed wish is searching for it. The row must not read as "added".
+  final bool byName;
+
+  /// The wish that add queued, when the server states one outside `albums` —
+  /// the no-match reply names it there, and the row's undo applies to it.
+  final int? wishId;
   final String? note;
   final List<LibraryAddAlbum> albums;
 
@@ -197,6 +229,11 @@ class LibraryAddResult {
     if (background) {
       return note ??
           'Preparing the discography — the albums appear as they are added';
+    }
+    if (byName && !matched) {
+      // No MusicBrainz match: nothing is on disk, but a search IS running, so
+      // this is neither "added" nor "nothing" — the server's own note says it.
+      return note ?? 'Added — no MusicBrainz match, searching by name';
     }
     final tail = StringBuffer();
     if (alreadyInLibrary > 0) {
@@ -217,6 +254,9 @@ class LibraryAddResult {
       LibraryAddResult(
         ok: json['ok'] == true,
         background: json['background'] == true,
+        matched: json['matched'] == true,
+        byName: json['by_name'] == true,
+        wishId: (json['wish_id'] as num?)?.toInt(),
         note: _text(json['note']),
         albums: json['albums'] is List
             ? [
@@ -575,6 +615,13 @@ class ApiClient {
   /// row's own ids when it has them — a release group wins, because the app
   /// wishes for groups and lets the server pick the edition. [kind] is one of
   /// the server's entity kinds (`DiscoverItem.wishKind` derives it).
+  ///
+  /// A row with NO id is added BY NAME: what it knows — its own kind, artist,
+  /// title, year, and the provider's label and page — is sent instead, and the
+  /// server searches MusicBrainz for that artist+title, adopting the id it
+  /// finds and queueing a name-keyed wish when it finds no match. The id
+  /// vocabulary is NOT used there: `release_group`/`recording` name an entity
+  /// by type, and a row with no id has nothing to name that way.
   Future<LibraryAddResult> addToLibrary({
     String? releaseGroupMbid,
     String? releaseMbid,
@@ -583,23 +630,36 @@ class ApiClient {
     String? title,
     String? artist,
     String? year,
+    String? source,
+    String? pageUrl,
   }) async {
     final id = _firstId([releaseGroupMbid, mbid, releaseMbid]);
-    if (id == null) {
+    final named =
+        (title != null && title.isNotEmpty) ||
+        (artist != null && artist.isNotEmpty);
+    if (id == null && !named) {
       // Nothing to add is a client-side mistake: said here rather than sent as
       // a request the server can only answer with a 400.
-      throw ApiException(0, 'this row has no MusicBrainz id to add');
+      throw ApiException(
+        0,
+        'this row has no MusicBrainz id and no name to add',
+      );
     }
     final reply = await postJson(
       '/api/library/add',
       body: {
-        'mbid': id,
+        if (id != null) 'mbid': id,
         'kind': kind,
-        if (releaseMbid != null && releaseMbid.isNotEmpty)
+        if (id != null && releaseMbid != null && releaseMbid.isNotEmpty)
           'release_mbid': releaseMbid,
         if (title != null && title.isNotEmpty) 'title': title,
         if (artist != null && artist.isNotEmpty) 'artist': artist,
         if (year != null && year.isNotEmpty) 'year': year,
+        // The provider's own label and page: they ride into the wish's note as
+        // the source link, which is all a name-keyed add has to go on.
+        if (id == null && source != null && source.isNotEmpty) 'source': source,
+        if (id == null && pageUrl != null && pageUrl.isNotEmpty)
+          'page_url': pageUrl,
       },
       // A release group's editions and an artist's discography are several
       // MusicBrainz round trips; the default 30 s is not enough for either.

@@ -770,12 +770,14 @@ def _analyze_bounded(cfg, path, wait_s):
 def replaygain_for_path(cfg, path, mode=None, preamp_db=None,
                         clip_protection=None, wait_s=None):
     """Playback gain for one track: ``{"gain", "peak", "mode", "source",
-    "analyzed"}``.
+    "analyzed", "pending", "album"}``.
 
     ``gain`` is dB to add in the player's gain stage, or None for unity
     (mode "off", or nothing to go on). ``mode`` "album" prefers
-    REPLAYGAIN_ALBUM_GAIN and falls back to the track value. Missing tags are
-    measured on demand (ffmpeg, via the cache) when
+    REPLAYGAIN_ALBUM_GAIN and falls back to the track value — ``album`` is
+    True only when that album value is what was returned, so a caller can
+    report the fallback instead of implying album normalisation. Missing tags
+    are measured on demand (ffmpeg, via the cache) when
     ``replaygain_analyze_missing`` is on. ``preamp_db`` is added before clip
     protection, which clamps the gain so the resulting peak stays at or below
     0 dBFS and says so in ``source`` ("tags+clamp"). Defaults come from *cfg*
@@ -785,9 +787,11 @@ def replaygain_for_path(cfg, path, mode=None, preamp_db=None,
     ``wait_s`` bounds that on-demand measurement: None (batch callers, and
     the command line) waits for the decode, a number returns unity once it
     runs out — the decode finishes in the background and the value is cached,
-    so asking again costs one cache read. Playback passes
-    ``PLAYBACK_WAIT_S``: the gain has to be known before the track starts, so
-    a request must not sit on a multi-second decode to get it.
+    so asking again costs one cache read. That timeout also sets ``pending``,
+    which is what tells a caller the unity it just got is not the answer yet.
+    Playback passes ``PLAYBACK_WAIT_S``: the gain has to be known before the
+    track starts, so a request must not sit on a multi-second decode to get
+    it.
     """
     cfg = cfg or {}
     if mode is None:
@@ -798,12 +802,19 @@ def replaygain_for_path(cfg, path, mode=None, preamp_db=None,
         clip_protection = cfg.get("replaygain_clip_protection", False)
 
     result = {"gain": None, "peak": None, "mode": mode, "source": None,
-              "analyzed": False}
+              "analyzed": False, "pending": False, "album": False}
     if mode == "off":
         return result
 
     tags = _rg_tags(path)
-    if mode == "album" and tags["album_gain_db"] is not None:
+    # `album` says the number really came from REPLAYGAIN_ALBUM_GAIN. False with
+    # mode "album" is the degradation the player has to be able to SEE: the tags
+    # carry no album gain (and a measurement never produces one — it is a
+    # single-file pass), so every track gets its own track gain and the album
+    # comes out normalised track by track, not as an album.
+    album = mode == "album" and tags["album_gain_db"] is not None
+    result["album"] = bool(album)
+    if album:
         gain, peak = tags["album_gain_db"], tags["album_peak_db"]
     else:
         gain, peak = tags["gain_db"], tags["peak"]
@@ -820,6 +831,13 @@ def replaygain_for_path(cfg, path, mode=None, preamp_db=None,
                     store_analysis(cfg, path, data)
             else:
                 data = _analyze_bounded(cfg, path, wait_s)
+                if data is None:
+                    # The wait ran out with the decode still running, so this
+                    # unity is TEMPORARY, not a verdict: the run finishes and
+                    # stores its value (see _analyze_bounded), so a caller that
+                    # can ask again — the player, seconds later, while the track
+                    # is already sounding — gets the real gain from the cache.
+                    result["pending"] = True
         if data:
             gain = data.get("gain_db")
             peak = data.get("peak")

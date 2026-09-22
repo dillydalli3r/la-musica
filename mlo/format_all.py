@@ -19,6 +19,7 @@ already in canonical form, and it never regenerates .accurip via CUETools
 import os
 import io
 import tempfile
+import threading
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 from .accurip import _canonical_accurip_text
@@ -160,6 +161,18 @@ def _prepare_embedded_cover(album_dir, cfg):
     return prepare_cover_bytes(data, cover_mime(os.path.splitext(cover_path)[1]), cfg)
 
 
+# One album cover is prepared once per run and reused by every track of that
+# album (`cover_cache`, built per run in run_format_all). An album's tracks are
+# formatted by DIFFERENT pool threads, so without a lock several of them read
+# and prepare the same cover before any of them publishes the entry — the read
+# and the Pillow work paid up to `worker_count` times per album — and the cache
+# is a plain dict mutated from all of them. One lock for the whole cache, not
+# one per album: the critical section is a MISS, every track after the first
+# only takes it to read, and holding it across the prepare is what makes a miss
+# single-flight.
+_cover_cache_lock = threading.Lock()
+
+
 def _format_embedded_covers(path, cfg, cover_cache, af=None):
     """Embedded-art pass driven by the embed_covers setting.
 
@@ -185,9 +198,13 @@ def _format_embedded_covers(path, cfg, cover_cache, af=None):
             return (path, True, None)
 
         album_dir = os.path.dirname(path)
-        if album_dir not in cover_cache:
-            cover_cache[album_dir] = _prepare_embedded_cover(album_dir, cfg)
-        prep = cover_cache[album_dir]
+        # Single-flight per album (see _cover_cache_lock): the other tracks of
+        # this album are being formatted right now, and each of them asked for
+        # this same cover before any of them had it.
+        with _cover_cache_lock:
+            if album_dir not in cover_cache:
+                cover_cache[album_dir] = _prepare_embedded_cover(album_dir, cfg)
+            prep = cover_cache[album_dir]
         if not prep:
             return (path, False, None)  # no on-disk cover — leave audio untouched
         data, mime = prep

@@ -157,7 +157,7 @@ def _staging_report(cfg=None, log=None) -> list:
 def _pending_report(cfg=None, log=None) -> list:
     """Framework albums left in an impossible state by a kill.
 
-    Two cases, both read through the modules that own the state:
+    Cases, all read through the modules that own the state:
 
     * a marker whose folder HOLDS AUDIO — the download landed and the process
       died before the marker was cleared, so the library would list a
@@ -165,17 +165,28 @@ def _pending_report(cfg=None, log=None) -> list:
       own :func:`server.pending_albums.clear_if_filled` (placeholder cover
       and all); the log says the script chain did not run, because that is
       the one thing the sweep cannot know and the user may still want;
+    * a marker whose WISH has ENDED (imported / nothing found / a spent failure)
+      while the folder holds NO audio — nothing searches a terminal wish again
+      by itself, so the framework album would stand in the library for good as
+      an album nobody has. The wish is RE-ARMED (`wishes.rearm`: counters and
+      backoff cleared, due now) and the folder stays as its placeholder: the
+      request the user made is real, and the search is what was missing. A
+      terminal wish whose release IS in the library (audio, ``owned_mbids``) is
+      the other end of the same state: the placeholder is then torn down
+      (`remove_folder`, marker and folder both), because the real album is what
+      the library should show;
     * a marker whose WISH is gone — nothing will ever fill that folder, so it
       is logged as an orphan for the user to cancel. It is NOT deleted: this
       app does not remove an album folder from the library at startup on its
       own.
     """
-    from server import pending_albums
+    from server import pending_albums, wishes
 
     out = []
     root = library_root(_music_folder(cfg))
     if not root:
         return out
+    owned = None                     # the library's own answer, read once
     for folder in pending_albums._scan_pending(root):
         info = load_pending(folder) or {}
         name = os.path.basename(folder)
@@ -199,24 +210,66 @@ def _pending_report(cfg=None, log=None) -> list:
         wid = info.get("wish_id")
         if wid is None:
             continue
-        if _wish_exists(wid):
+        wish = _wish_of(wid)
+        if not wish:
+            out.append({"kind": "orphan_pending", "folder": folder,
+                        "wish_id": wid})
+            _say(log, f"framework album {name!r} waits on wish {wid}, which is"
+                      " gone — nothing is searching for it; cancel it from the"
+                      " queue to remove the folder")
             continue
-        out.append({"kind": "orphan_pending", "folder": folder, "wish_id": wid})
-        _say(log, f"framework album {name!r} waits on wish {wid}, which is"
-                  " gone — nothing is searching for it; cancel it from the"
-                  " queue to remove the folder")
+        if not wishes.is_terminal(wish, cfg or {}):
+            continue                  # a live request owns this folder
+        if owned is None:
+            try:
+                owned = wishes.owned_mbids(cfg)
+            except Exception:
+                owned = {}
+        # The release ids the wish and its marker carry, matched against the
+        # albums the library has on disk with their own MBID tags
+        # (`wishes.owned_mbids`, which never counts a folder with no audio — the
+        # framework folder this very marker belongs to can never answer for
+        # itself).
+        where = wishes.owned_path(owned, wish.get("release_mbid"),
+                                  info.get("release_id"),
+                                  info.get("release_group_id"))
+        if where:
+            removed = False
+            try:
+                removed = bool(pending_albums.remove_folder(folder))
+            except Exception:
+                traceback.print_exc()
+            if removed:
+                out.append({"kind": "pending_duplicate", "folder": folder,
+                            "album": where})
+                _say(log, f"framework album {name!r} duplicates the album the"
+                          f" library already has ({where}): placeholder"
+                          " removed")
+            try:
+                wishes.update_wish(wid, {"album_path": where})
+            except Exception:
+                traceback.print_exc()
+            continue
+        try:
+            wishes.rearm(wid)
+        except Exception:
+            traceback.print_exc()
+            continue
+        out.append({"kind": "pending_rearmed", "folder": folder, "wish_id": wid})
+        _say(log, f"framework album {name!r} had a wish that had STOPPED"
+                  " (nothing found, failed, or imported with no audio on disk):"
+                  " it is back in the queue and searched again")
     return out
 
 
-def _wish_exists(wish_id) -> bool:
+def _wish_of(wish_id):
+    """The wish row *wish_id* names, or None."""
     from server import wishes
 
     try:
-        return bool(wishes.get_wish(int(wish_id)))
+        return wishes.get_wish(int(wish_id))
     except Exception:
-        # An unreadable wishes.db must not turn every framework album into an
-        # orphan: report nothing rather than something wrong.
-        return True
+        return None
 
 
 def _read_journal(cfg=None, log=None) -> list:

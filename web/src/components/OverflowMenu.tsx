@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useRef, useState } from "react";
 import { Ellipsis } from "lucide-react";
 import type { LucideIcon } from "lucide-react";
 import Popover, { MenuItem } from "./Popover";
@@ -28,6 +28,7 @@ export default function OverflowMenu({
   align = "right",
   icon: Icon = Ellipsis,
   label,
+  fixed = false,
 }: {
   sections: OverflowMenuSection[];
   buttonTitle?: string;
@@ -40,8 +41,15 @@ export default function OverflowMenu({
   /** Optional text next to the glyph — what makes a specialist menu read as a
    *  labelled action instead of a generic overflow. */
   label?: string;
+  /** Portal the panel to the viewport and position it from this button — for
+   *  a trigger inside an `overflow` container that would clip the flyout, or
+   *  under the sidebar's z-index (the album cover menu: the panel used to be
+   *  cut off on its left edge). Fixed panels also get the primitive's gutter
+   *  flip on a narrow window. */
+  fixed?: boolean;
 }) {
   const [open, setOpen] = useState(false);
+  const btnRef = useRef<HTMLButtonElement>(null);
 
   const visible = sections
     .map((s) => ({ ...s, items: s.items.filter((i) => !i.hidden) }))
@@ -50,6 +58,7 @@ export default function OverflowMenu({
   return (
     <div className="relative">
       <button
+        ref={btnRef}
         className={buttonClass}
         onClick={() => setOpen(!open)}
         title={buttonTitle}
@@ -64,6 +73,8 @@ export default function OverflowMenu({
         open={open}
         onClose={() => setOpen(false)}
         align={align}
+        fixed={fixed}
+        anchorRef={btnRef}
         panelClass="w-64 max-h-[70vh] overflow-y-auto p-1.5"
       >
         {visible.map((s, si) => (

@@ -1733,7 +1733,10 @@ def get_replaygain(path: str = Query(...), mode: str = Query("")):
     the gain before the track starts, so this request must never sit on a
     multi-second decode — a file that is not measured in time answers unity,
     the decode finishes in the background and its value is cached for the
-    next request.
+    next request. That answer is not a verdict, so it also carries `pending`
+    (true while the decode is still running: ask again and the gain is there)
+    and `album` (false in album mode means the album carries no album gain and
+    the track value was used).
     """
     from mlo import loudness
 
@@ -1752,6 +1755,17 @@ def get_replaygain(path: str = Query(...), mode: str = Query("")):
         "mode": res.get("mode"),
         "source": res.get("source"),
         "analyzed": bool(res.get("analyzed")),
+        # `pending`: the on-demand measurement this request started (or joined)
+        # is still decoding, so the unity above is TEMPORARY. The player asks
+        # again while this is true and, when the value lands, ramps it onto the
+        # element that is already playing — an untagged track used to keep that
+        # unity for its whole length.
+        "pending": bool(res.get("pending")),
+        # `album`: the number came from REPLAYGAIN_ALBUM_GAIN. False while
+        # `mode` is "album" says the album has no album gain, so per-track
+        # values were used — the player reports that instead of implying the
+        # album was normalised as an album.
+        "album": bool(res.get("album")),
     }
 
 
@@ -3004,7 +3018,14 @@ class ExportRequest(BaseModel):
     subfolder: str = "Music"           # created under the drive root
     codec: str = "copy"                # any key of exporter.CODECS
     quality: str = ""                  # a preset key (V0/320/256/q8/…) or a number
-    structure: str = "artist_album"    # artist_album | album | flat | mirror
+    # Which tree an exported track lands in: a key of exporter.STRUCTURES
+    # ("" = the shipped one), "custom" for the script below. The exporter is
+    # the authority — an unknown key, a bad %field% or a script that names no
+    # path comes back as a 400 sentence.
+    structure: str = ""
+    # The naming script a "custom" structure evaluates (the same %field% /
+    # $if() grammar the library's own naming script uses, mlo.naming).
+    structure_script: Optional[str] = None
     # Compatibility options. None = use the saved `export_*` config value, so a
     # client that omits a field keeps the user's defaults instead of forcing
     # the built-in one (server.exporter.EXPORT_DEFAULTS holds both).
@@ -3034,9 +3055,15 @@ class EqImportRequest(BaseModel):
     text: str = ""
 
 
+class StructurePreviewRequest(BaseModel):
+    script: str = ""
+    ext: str = ""      # the codec's produced extension, for the example path
+
+
 # Fields of ExportRequest that are not run options (they are positional parts
 # of the call, not keys of exporter.EXPORT_DEFAULTS).
-_EXPORT_FORM_FIELDS = ("paths", "dest", "subfolder", "codec", "quality", "structure")
+_EXPORT_FORM_FIELDS = ("paths", "dest", "subfolder", "codec", "quality",
+                       "structure", "structure_script")
 
 
 @app.get("/api/export/defaults")
@@ -3045,11 +3072,31 @@ def export_defaults():
     and what its "Save as default" writes back."""
     cfg = load_config()
     out = {}
-    for name in ("dest", "subfolder", "codec", "quality", "structure"):
+    for name in ("dest", "subfolder", "codec", "quality", "structure",
+                 "structure_script"):
         out[name] = cfg.get("export_" + name, DEFAULT_CONFIG.get("export_" + name, ""))
     for name, default in exporter.EXPORT_DEFAULTS.items():
         out[name] = cfg.get("export_" + name, default)
     return out
+
+
+@app.get("/api/export/structures")
+def export_structures():
+    """The folder-structure menu (keys and labels) and the %fields% /
+    $functions a custom structure script may use — the Exporter's own tables,
+    so the dropdown cannot offer a structure the run would refuse."""
+    return exporter.structure_menu()
+
+
+@app.post("/api/export/structure/preview")
+def export_structure_preview(req: StructurePreviewRequest):
+    """What a user-typed folder structure would write, for one sample track.
+
+    The Export page calls this while the custom structure is being typed: the
+    same grammar and the same validation the run itself applies, so a field the
+    app does not know is refused there with the server's own sentence instead
+    of being discovered at the end of a run."""
+    return exporter.preview_structure(req.script, req.ext)
 
 
 @app.get("/api/export/drives")
@@ -3159,7 +3206,8 @@ def export_run(req: ExportRequest):
         res = exporter.export_tracks(
             cfg, [os.path.normpath(p) for p in req.paths], dest_root,
             subfolder=req.subfolder, codec=req.codec, quality=req.quality,
-            structure=req.structure, **opts,
+            structure=req.structure, structure_script=req.structure_script or "",
+            **opts,
         )
     except ValueError as e:      # an unusable destination (inside the library…)
         raise HTTPException(400, str(e))
@@ -5620,7 +5668,15 @@ def wishes_import(wid: int):
     candidates = []
     album_path = str(wish.get("album_path") or "").strip()
     if album_path and os.path.isdir(album_path):
-        candidates.append(album_path)
+        from server import pending_albums
+        # A framework album is not an album to import: the folder "Add to
+        # library" created holds a marker, a placeholder cover and NO audio, so
+        # an import aimed at it would run the chain over nothing and then mark
+        # this wish imported — the empty folder would stand in the library as
+        # the album that wish was waiting for. Nothing has arrived yet, which is
+        # what the 409 below says.
+        if not pending_albums.is_placeholder(album_path):
+            candidates.append(album_path)
     # Anything in the download dir that names this wish's release: the artist
     # and the title, in either order, is what a peer's folder is called.
     from server import soulseek

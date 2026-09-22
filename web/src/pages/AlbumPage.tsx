@@ -663,9 +663,12 @@ export default function AlbumPage() {
               {/* small square menu over the cover: upload / find online / info.
                   Same box as the action row below (`.btn-icon`), with an
                   opaque backdrop instead of the panel tint so it stays
-                  readable on any cover. */}
+                  readable on any cover. `fixed` because the cover sits at the
+                  left edge of the scrolled pane: an in-place panel was clipped
+                  by `main` and slid under the sidebar. */}
               <div className="absolute top-1.5 right-1.5 opacity-0 group-hover/cover:opacity-100 [@media(hover:none)]:opacity-100 transition-opacity">
                 <OverflowMenu
+                  fixed
                   buttonClass="btn-icon bg-black/80 border-white/20 text-zinc-100 hover:bg-black hover:text-white"
                   buttonTitle="Cover art actions"
                   sections={[

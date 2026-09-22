@@ -17,6 +17,8 @@ import os
 import shutil
 import sys
 import tempfile
+import threading
+import time as real_time
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, ROOT)
@@ -464,6 +466,87 @@ ok(bool(pathmod.load_pending(folder6)),
    "the marker is still there until the chain finishes the album")
 eq(res_row.get("errors") or [], [], "the organizer reported no error")
 
+# ...and when the import's own tags name a folder that is NOT even beside the
+# framework album (a different artist credit, a naming script edited in
+# between), the placeholder is STILL the destination: the release's own wish
+# knows where its album is, so `adopt_root` asks it. Otherwise the album lands
+# beside a placeholder that then stands empty in the library for ever — one
+# release, two albums on the shelf.
+far = release_variant(9, "Far Adopt")
+row9 = pending_albums.create(far, cfg)
+folder9 = row9["album_path"].replace("/", os.sep)
+ok(os.path.isdir(folder9), "the far-away case has its framework album")
+far_staging = os.path.join(MF, ".mlo", "downloads", "a-peer",
+                           "Other Artist Nine - Far Adopt")
+write_tagged_wav(os.path.join(far_staging, "1-01 One.wav"), {
+    "ALBUM": far["title"],
+    # A DIFFERENT artist name: organize names another artist folder entirely,
+    # so the placeholder is not in the folder it is about to write into.
+    "ALBUMARTIST": "Other Artist Nine",
+    "ARTIST": "Other Artist Nine",
+    "MUSICBRAINZ_ALBUMARTISTID": far["artists"][0]["mbid"],
+    "MUSICBRAINZ_ARTISTID": far["artists"][0]["mbid"],
+    "MUSICBRAINZ_ALBUMID": far["id"],
+    "MUSICBRAINZ_RELEASEGROUPID": far["release_group_id"],
+    "RELEASETYPE": "Album",
+    "DATE": far["date"],
+    "ORIGINALDATE": far["originaldate"],
+    "MEDIA": "CD",
+    "RELEASECOUNTRY": far["country"],
+    "CATALOGNUMBER": far["catalog_number"],
+    "LABEL": far["label"],
+    "DISCNUMBER": "1",
+    "TRACKNUMBER": "1",
+    "TITLE": "One",
+})
+org2 = mlo_main.organize(mlo_main.OrganizeRequest(paths=[far_staging], dry_run=False))
+res2 = (org2.get("results") or [{}])[0]
+landed2 = os.path.normcase(os.path.normpath(str(res2.get("album_root") or "")))
+eq(landed2, os.path.normcase(os.path.normpath(folder9)),
+   "an import whose tags name another artist folder still lands IN the placeholder")
+ok(any(f.lower().endswith(".wav") for f in os.listdir(folder9)),
+   "and its track is in there", os.listdir(folder9))
+eq(res2.get("errors") or [], [], "with no error reported")
+
+# An import that was never adopted (aimed at a folder of its own — the wizard,
+# the Downloads panel) and COMPLETES somewhere else still ends the placeholder:
+# the import's own end matches the release identity, not the folder name, so
+# the empty album cannot survive beside the album it was created for.
+stray = release_variant(8, "Stray Add")
+rowS = pending_albums.create(stray, cfg)
+folderS = rowS["album_path"].replace("/", os.sep)
+ok(os.path.isdir(folderS), "the stray case has its framework album")
+arrived = os.path.join(MF, "Artists", "Test Artist 8", "Stray Add (imported)")
+write_tagged_wav(os.path.join(arrived, "1-01 One.wav"), {
+    "ALBUM": stray["title"],
+    "ALBUMARTIST": "Test Artist 8",
+    "ARTIST": "Test Artist 8",
+    "MUSICBRAINZ_ALBUMARTISTID": stray["artists"][0]["mbid"],
+    "MUSICBRAINZ_ARTISTID": stray["artists"][0]["mbid"],
+    "MUSICBRAINZ_ALBUMID": stray["id"],
+    "MUSICBRAINZ_RELEASEGROUPID": stray["release_group_id"],
+    "RELEASETYPE": "Album",
+    "DATE": stray["date"],
+    "ORIGINALDATE": stray["originaldate"],
+    "MEDIA": "CD",
+    "RELEASECOUNTRY": stray["country"],
+    "CATALOGNUMBER": stray["catalog_number"],
+    "LABEL": stray["label"],
+    "DISCNUMBER": "1",
+    "TRACKNUMBER": "1",
+    "TITLE": "One",
+})
+eq(pending_albums.clear_if_filled(arrived, cfg, chained=True), False,
+   "the folder the import landed in is not a framework album itself")
+ok(not os.path.isdir(folderS),
+   "yet the placeholder standing for ITS release is gone", folderS)
+eq([d for d in pending_albums._scan_pending(MF)
+    if int((pathmod.load_pending(d) or {}).get("wish_id") or 0) == int(rowS["wish_id"])],
+   [], "and no framework folder is left for that release anywhere")
+eq(os.path.normcase(str((wishes.get_wish(rowS["wish_id"]) or {}).get("album_path") or "")),
+   os.path.normcase(arrived),
+   "the wish now names the album that really arrived")
+
 # --------------------------------------------------------------------------- #
 # 7. the HTTP route, end to end, with MusicBrainz stubbed
 # --------------------------------------------------------------------------- #
@@ -476,6 +559,10 @@ except Exception as e:                                            # pragma: no c
 else:
     from server import api_add, integrations as intg, wishes_worker
 
+    # The real policy, captured BEFORE the stubs below replace it: this section
+    # ends by putting it back, and a "real" captured after the first stub would
+    # restore a stub (the later cases here exercise the policy itself).
+    real_targets = intg.auto_import_targets
     # Its own release: the albums above are in the library by now, and the
     # route is supposed to CREATE a framework album, not report one it found.
     route_release = release_variant(7, "Route Add")
@@ -597,7 +684,6 @@ else:
     seventh = release_variant(4, "Chosen Edition")
     intg.resolve_release = lambda mbid: (seventh, seventh["id"])
     policy_calls = []
-    real_targets = intg.auto_import_targets
     intg.auto_import_targets = lambda mbid, kind=None, mode="best", limit=None: (
         policy_calls.append(mbid) or real_targets(mbid, kind, mode, limit=limit))
     pick = client.post("/api/library/add", json={
@@ -671,6 +757,357 @@ try:
     ok(False, "an unknown folder still 404s")
 except Exception as e:
     ok("404" in str(e), "an unknown folder still 404s", e)
+
+# --------------------------------------------------------------------------- #
+# 9. the deferred add, the re-add of a wish that had ENDED, a release the
+#    library already has, and the add that only NAMES its release
+# --------------------------------------------------------------------------- #
+print("\nthe deferred add, the re-add, and the add by name")
+try:
+    from fastapi import FastAPI
+    from fastapi.testclient import TestClient
+except Exception as e:                                            # pragma: no cover
+    print(f"  SKIP  TestClient unavailable: {e}")
+else:
+    from server import api_add, api_queue
+    from server import integrations as intg
+    from server import wishes_worker
+
+    add_app = FastAPI()
+    add_app.include_router(api_add.router)
+    add_client = TestClient(add_app)
+    queue_app = FastAPI()
+    queue_app.include_router(api_queue.router)
+    queue_client = TestClient(queue_app)
+
+    def rows_for(wish_id, section="queued"):
+        payload = queue_client.get("/api/queue").json()
+        return [r for r in payload["sections"][section]
+                if r.get("wish_id") == wish_id]
+
+    def until(pred, timeout=30.0):
+        end = real_time.monotonic() + timeout
+        while real_time.monotonic() < end:
+            if pred():
+                return True
+            real_time.sleep(0.05)
+        return pred()
+
+    real_targets = intg.auto_import_targets
+    real_resolve = intg.resolve_release
+    real_trigger = wishes_worker.trigger
+    real_owned = wishes.owned_mbids
+    real_search = intg.search_mb
+
+    def unique_release(tag, title, artist):
+        """A test release whose ids are REAL UUIDs — `release_variant`'s own
+        ids grow past eight characters for n > 9, and the route PARSES what it
+        is given (`integrations._mbid`), so a longer first segment is not an id
+        at all (the policy's "already in the library" check then misses, which
+        is exactly what this case is about)."""
+        rel = release_variant(1, title)
+        rel["id"] = f"{tag}-1111-1111-1111-111111111111"
+        rel["release_group_id"] = f"{tag}-2222-2222-2222-222222222222"
+        rel["artists"] = [{"name": artist,
+                           "mbid": f"{tag}-3333-3333-3333-333333333333"}]
+        return rel
+
+    # ---- the reply does not wait for MusicBrainz -------------------------- #
+    slow = unique_release("0a0a0a0a", "Deferred Add", "Test Artist 11")
+    lookup_started = threading.Event()
+    lookup_may_finish = threading.Event()
+    kicks = []
+
+    def slow_targets(mbid, kind=None, mode="best", types=None, limit=None):
+        """MusicBrainz takes as long as it takes: the reply must not be
+        waiting on it, which is the whole point of the deferred add."""
+        lookup_started.set()
+        lookup_may_finish.wait(30)
+        return [{"mbid": slow["id"], "title": slow["title"]}], []
+
+    intg.auto_import_targets = slow_targets
+    intg.resolve_release = lambda mbid: (slow, slow["id"])
+    wishes_worker.trigger = lambda wid=None: kicks.append(wid) or {"ok": True}
+
+    began = real_time.monotonic()
+    replied = add_client.post("/api/library/add", json={
+        "mbid": slow["release_group_id"], "kind": "release_group",
+        "title": slow["title"], "artist": "Test Artist 11", "year": "1997"})
+    took = real_time.monotonic() - began
+    eq(replied.status_code, 200, "a deferred add answers 200")
+    body = replied.json()
+    ok(took < 1.0, "in well under a second, whatever MusicBrainz is doing",
+       f"{took:.2f}s")
+    eq(body.get("background"), True, "the reply says the work goes on without it")
+    eq(body.get("resolving"), True, "and that the release is still being resolved")
+    eq(body.get("note"), ("Added to your library — MusicBrainz is still being "
+                          "asked what this release is, and the search starts as "
+                          "it answers."),
+       "in the server's own words about that state")
+    albums = body.get("albums") or []
+    eq(len(albums), 1, "the framework album is in the reply")
+    eq(albums[0].get("resolving"), True, "carrying the live flag")
+    eq(albums[0].get("created"), True, "and the fact that it created it")
+    d_wish = albums[0]["wish_id"]
+    d_folder = str(albums[0]["album_path"]).replace("/", os.sep)
+    ok(os.path.isdir(d_folder), "the folder is on disk when the reply is written",
+       d_folder)
+    ok(bool(pathmod.load_pending(d_folder)), "marked pending")
+    eq(kicks, [], "nothing is searching yet: MusicBrainz has not named the release")
+    ok(lookup_started.wait(10), "the lookup runs on its own thread")
+    open_rows = rows_for(d_wish)
+    eq(len(open_rows), 1, "the deferred add has one row on the queue")
+    eq(open_rows[0]["stage"], "searching_musicbrainz",
+       "saying MusicBrainz is being asked, not that a download is coming")
+    eq(open_rows[0]["pending"], True, "as a framework album")
+    ok(open_rows[0]["cancelable"], "that can still be taken back off the queue",
+       open_rows[0])
+
+    # ---- the resolution lands: ONE album, and the search starts ----------- #
+    lookup_may_finish.set()
+    ok(until(lambda: not pending_albums.is_resolving(d_folder)),
+       "the resolving flag is cleared when the resolution lands")
+    ok(until(lambda: bool(kicks)), "and the search for what it recorded is started")
+    wish_row = wishes.get_wish(d_wish)
+    landed = str((wish_row or {}).get("album_path") or "").replace("/", os.sep)
+    ok(os.path.isdir(landed), "the wish points at the album it recorded", landed)
+    eq([t["title"] for t in (pathmod.load_expected_tracks(landed) or {}).get("tracks", [])],
+       ["One", "Two"], "the release's own tracklist is on the album now")
+    marked = [d for d in pending_albums._scan_pending(MF)
+              if int((pathmod.load_pending(d) or {}).get("wish_id") or 0) == int(d_wish)]
+    ok(len(marked) == 1, "exactly one framework folder stands for the add", marked)
+    eq(os.path.normcase(marked[0]) if marked else "", os.path.normcase(landed),
+       "and it is the one its wish names")
+    settled = rows_for(d_wish)
+    eq(len(settled), 1, "still one queue row for it")
+    ok(settled and settled[0]["stage"] in ("queued", "searching"),
+       "now the ordinary wish row", settled[0]["stage"] if settled else None)
+
+    # ---- a wish that ENDED, re-added, is searched again -------------------- #
+    again = unique_release("0b0b0b0b", "Readded Album", "Test Artist 12")
+    intg.auto_import_targets = lambda mbid, kind=None, mode="best", types=None, limit=None: (
+        [{"mbid": again["id"], "title": again["title"]}], [])
+    intg.resolve_release = lambda mbid: (again, again["id"])
+    first = add_client.post("/api/library/add",
+                            json={"mbid": again["release_group_id"],
+                                  "kind": "release_group"})
+    a_wish = (first.json().get("albums") or [{}])[0].get("wish_id")
+    ok(bool(a_wish), "the re-add case recorded its wish", first.json())
+    wishes.mark_not_found(a_wish, "nothing usable found on the network")
+    ended = wishes.get_wish(a_wish)
+    eq(ended["status"], "not_found", "the wish ENDED (nothing was found)")
+    eq(wishes.due_at(ended, load_config()), float("inf"),
+       "and no pass will ever search it again — that is what terminal means")
+    kicks.clear()
+    second = add_client.post("/api/library/add",
+                             json={"mbid": again["release_group_id"],
+                                   "kind": "release_group"})
+    eq(second.status_code, 200, "re-adding it answers 200")
+    live = wishes.get_wish(a_wish)
+    eq(live["status"], "wanted", "the terminal verdict is cleared")
+    eq(live["not_found"], 0, "its empty-search counter is reset")
+    ok(wishes.due_at(live, load_config()) <= real_time.time() + 1,
+       "…and it is due NOW, so the worker's next pass searches it")
+    eq(second.json().get("note"), "Soulseek is searching for them now.",
+       "and the promise the reply makes is one the queue will keep")
+    eq([w["id"] for w in wishes.list_wishes()
+        if w["release_mbid"] == again["id"]], [a_wish], "one wish, not two")
+    eq(kicks, [None], "and the pass that searches it is started")
+
+    # ---- a release the library already has -------------------------------- #
+    owned_rel = unique_release("0d0d0d0d", "Owned Add", "Test Artist 14")
+    owned_folder = os.path.join(MF, "Artists", "Test Artist 14", "Owned Add")
+    os.makedirs(owned_folder, exist_ok=True)
+    add_audio(owned_folder)                    # a real album, audio on disk
+    wishes.owned_mbids = lambda cfg=None: {
+        owned_rel["release_group_id"].lower(): owned_folder}
+    intg.auto_import_targets = real_targets    # the policy's own owned check
+    intg.resolve_release = lambda mbid: (owned_rel, owned_rel["id"])
+    kicks.clear()
+    owned_post = add_client.post("/api/library/add",
+                                 json={"mbid": owned_rel["release_group_id"],
+                                       "kind": "release_group"})
+    eq(owned_post.status_code, 200, "adding a release the library has answers 200")
+    owned_body = owned_post.json()
+    eq(owned_body.get("albums"), [], "and creates no framework album")
+    eq(owned_body.get("note"), "It is already in your library.",
+       "saying exactly that, instead of promising a search")
+    eq([s.get("reason") for s in owned_body.get("skipped") or []],
+       ["already in the library"], "with the policy's own reason")
+    eq(kicks, [], "and nothing is queued for an album that is already here")
+    eq([d for d in pending_albums._scan_pending(MF)
+        if str((pathmod.load_pending(d) or {}).get("release_group_id") or "").lower()
+        == owned_rel["release_group_id"].lower()], [],
+       "no framework folder was left behind for it")
+    wishes.owned_mbids = real_owned
+
+    # ---- a lookup that FAILS lands somewhere, and says why ---------------- #
+    broke = unique_release("0c0c0c0c", "Broken Lookup", "Test Artist 13")
+
+    def broken_targets(mbid, kind=None, mode="best", types=None, limit=None):
+        raise RuntimeError("MusicBrainz did not answer")
+
+    intg.auto_import_targets = broken_targets
+    intg.resolve_release = lambda mbid: (broke, broke["id"])
+    bad_post = add_client.post("/api/library/add", json={
+        "mbid": broke["release_group_id"], "kind": "release_group",
+        "title": broke["title"], "artist": "Test Artist 13", "year": "1997"})
+    eq(bad_post.status_code, 200, "an add whose lookup fails still answers")
+    bad_album = (bad_post.json().get("albums") or [{}])[0]
+    bad_folder = str(bad_album.get("album_path") or "").replace("/", os.sep)
+    bad_wish = bad_album.get("wish_id")
+    ok(os.path.isdir(bad_folder),
+       "its framework album is there while the lookup runs")
+    ok(until(lambda: not os.path.isdir(bad_folder)),
+       "and is taken down when the lookup fails (nothing would ever fill it)")
+    failed_wish = wishes.get_wish(bad_wish)
+    eq(failed_wish["status"], "wanted",
+       "the request itself stays on the queue, so the search can still be run")
+    ok("MusicBrainz" in str(failed_wish.get("last_error") or ""),
+       "with the reason recorded on it", failed_wish.get("last_error"))
+    bad_rows = rows_for(bad_wish)
+    eq(len(bad_rows), 1, "the queue still has its row")
+    ok("MusicBrainz" in str(bad_rows[0].get("reason") or ""),
+       "saying what went wrong", bad_rows[0].get("reason"))
+    intg.auto_import_targets = real_targets
+    intg.resolve_release = real_resolve
+
+    # ---- an add that only NAMES its release -------------------------------- #
+    named = unique_release("0e0e0e0e", "Named Album", "Test Artist 15")
+    intg.search_mb = lambda entity, query, **kw: (
+        {"rows": [{"id": named["release_group_id"], "score": 100, "title": query,
+                   "first_release_date": "1997"}], "total": 1, "offset": 0,
+         "next": None, "query": query} if entity == "release-group" else
+        {"rows": [], "total": 0, "offset": 0, "next": None, "query": query})
+    intg.auto_import_targets = lambda mbid, kind=None, mode="best", types=None, limit=None: (
+        [{"mbid": named["id"], "title": named["title"]}], [])
+    intg.resolve_release = lambda mbid: (named, named["id"])
+    hit = add_client.post("/api/library/add", json={
+        "mbid": "", "kind": "album", "title": named["title"],
+        "artist": "Test Artist 15", "year": "1997", "source": "Deezer",
+        "page_url": "https://example.invalid/album/15"})
+    eq(hit.status_code, 200, "an add that names its release answers 200")
+    hit_body = hit.json()
+    eq(hit_body.get("matched"), True, "and says MusicBrainz matched it")
+    hit_albums = hit_body.get("albums") or []
+    eq(len(hit_albums), 1, "the add went through as an ordinary one")
+    eq(hit_albums[0].get("release_group_id"), named["release_group_id"],
+       "for the entity MusicBrainz answered with")
+
+    # …and with nothing to match, the NAME is what is recorded: no id is
+    # invented, and nothing claims MusicBrainz matched it.
+    intg.search_mb = lambda entity, query, **kw: {
+        "rows": [], "total": 0, "offset": 0, "next": None, "query": query}
+    kicks.clear()
+    gap = add_client.post("/api/library/add", json={
+        "mbid": "", "kind": "album", "title": "No Such Album 16",
+        "artist": "No Such Artist 16", "source": "Deezer",
+        "page_url": "https://example.invalid/album/16"})
+    eq(gap.status_code, 200, "an add MusicBrainz cannot match answers 200")
+    gap_body = gap.json()
+    eq(gap_body.get("matched"), False, "saying it was not matched")
+    eq(gap_body.get("by_name"), True, "that it is keyed by name instead")
+    ok(bool(gap_body.get("wish_id")), "on a wish the queue can search", gap_body)
+    eq(gap_body.get("albums"), [],
+       "with no framework album (there is no id that could ever tie one to it)")
+    gap_wish = wishes.get_wish(gap_body["wish_id"])
+    ok(str(gap_wish["release_mbid"]).startswith("name:"),
+       "the wish is keyed by the NAME", gap_wish["release_mbid"])
+    eq(gap_wish["source"], "soulseek",
+       "recorded as a by-name request, never as a MusicBrainz match")
+    eq(gap_wish["artist"], "No Such Artist 16", "with the artist the row gave")
+    eq(gap_wish["title"], "No Such Album 16", "and its album")
+    ok("Deezer" in str(gap_wish["note"]), "and where the row came from",
+       gap_wish["note"])
+    eq(kicks, [None], "and the search for it is started")
+    gap_rows = rows_for(gap_body["wish_id"])
+    eq(len(gap_rows), 1, "the by-name wish has a row on the queue")
+    eq(gap_rows[0]["source"], "Soulseek", "labelled as the by-name request it is")
+    eq(gap_rows[0]["pending"], False, "with no framework album claiming otherwise")
+    eq(gap_rows[0]["stage"], "queued", "and no MusicBrainz step it never had")
+    eq(gap_body.get("note"), "MusicBrainz has no match for it — it is on the "
+                             "queue to be searched by name.",
+       "the reply says which of the two happened")
+
+    # …and nothing to search BY is refused rather than recorded as an empty wish
+    empty = add_client.post("/api/library/add", json={"mbid": "", "kind": "album"})
+    eq(empty.status_code, 400, "an add with neither artist nor title is refused")
+
+    intg.search_mb = real_search
+    intg.auto_import_targets = real_targets
+    intg.resolve_release = real_resolve
+    wishes_worker.trigger = real_trigger
+
+# --------------------------------------------------------------------------- #
+# 10. the state that leaves an empty album behind, and the sweep that heals it
+# --------------------------------------------------------------------------- #
+print("\nframework albums nothing would ever fill")
+from server import interrupt_recovery  # noqa: E402
+
+# A wish whose release the library "has" — where the folder proving it is an
+# AUDIO-LESS framework album (the library listed the placeholder the add itself
+# created). Marking the wish imported on that evidence is what left a request
+# terminal with an empty folder standing behind it for ever.
+ph = dict(release_variant(1, "Reconcile Add"))
+ph["id"] = "0f1f1f1f-1111-1111-1111-111111111111"
+ph["release_group_id"] = "0f1f1f1f-2222-2222-2222-222222222222"
+ph["artists"] = [{"name": "Test Artist Ph", "mbid": "0f1f1f1f-3333-3333-3333-333333333333"}]
+ph_row = pending_albums.create(ph, cfg)
+ph_folder = ph_row["album_path"].replace("/", os.sep)
+real_owned = wishes.owned_mbids
+wishes.owned_mbids = lambda cfg=None: {ph["id"].lower(): ph_folder}
+eq(wishes.reconcile_with_library(cfg), 0,
+   "reconciliation refuses a folder that holds no audio")
+ok(wishes.get_wish(ph_row["wish_id"])["status"] != "imported",
+   "so the wish stays open for the search that will fill it")
+add_audio(ph_folder)                              # the audio arrives
+eq(wishes.reconcile_with_library(cfg), 1, "…and resolves it once the audio is there")
+eq(wishes.get_wish(ph_row["wish_id"])["status"], "imported", "…as imported")
+
+# An ENDED wish whose framework album is still empty: nothing searches a
+# terminal wish again by itself, so the album would stand there for good. The
+# startup sweep re-arms the request instead — the search is what was missing.
+dead = dict(release_variant(1, "Ended Add"))
+dead["id"] = "0f2f2f2f-1111-1111-1111-111111111111"
+dead["release_group_id"] = "0f2f2f2f-2222-2222-2222-222222222222"
+dead["artists"] = [{"name": "Test Artist Dead", "mbid": "0f2f2f2f-3333-3333-3333-333333333333"}]
+dead_row = pending_albums.create(dead, cfg)
+dead_folder = dead_row["album_path"].replace("/", os.sep)
+wishes.mark_not_found(dead_row["wish_id"], "nothing usable found")
+ok(wishes.is_terminal(wishes.get_wish(dead_row["wish_id"]), cfg),
+   "the ended wish is terminal, so no pass would search it again")
+sweep = interrupt_recovery.startup_recovery(cfg, log=lambda _t: None)
+rearmed = [r for r in sweep.get("pending") or [] if r.get("kind") == "pending_rearmed"
+           and os.path.normcase(r.get("folder") or "") == os.path.normcase(dead_folder)]
+ok(len(rearmed) == 1, "the sweep re-arms the wish whose album is still empty",
+   sweep.get("pending"))
+eq(wishes.get_wish(dead_row["wish_id"])["status"], "wanted",
+   "so the search for it runs again")
+ok(os.path.isdir(dead_folder), "and its framework album stays as its placeholder")
+
+# …and the other end of the same state: a placeholder whose album IS in the
+# library (real audio, elsewhere) is taken down, so the library cannot show an
+# empty album beside the one it is for.
+dup = dict(release_variant(1, "Dup Add"))
+dup["id"] = "0f3f3f3f-1111-1111-1111-111111111111"
+dup["release_group_id"] = "0f3f3f3f-2222-2222-2222-222222222222"
+dup["artists"] = [{"name": "Test Artist Dup", "mbid": "0f3f3f3f-3333-3333-3333-333333333333"}]
+dup_row = pending_albums.create(dup, cfg)
+dup_folder = dup_row["album_path"].replace("/", os.sep)
+dup_real = os.path.join(MF, "Artists", "Test Artist Dup", "Dup Add (real)")
+os.makedirs(dup_real, exist_ok=True)
+add_audio(dup_real)
+wishes.mark_not_found(dup_row["wish_id"], "nothing usable found")
+wishes.owned_mbids = lambda cfg=None: {dup["id"].lower(): dup_real}
+sweep2 = interrupt_recovery.startup_recovery(cfg, log=lambda _t: None)
+removed = [r for r in sweep2.get("pending") or [] if r.get("kind") == "pending_duplicate"
+           and os.path.normcase(r.get("folder") or "") == os.path.normcase(dup_folder)]
+ok(len(removed) == 1, "the sweep removes the placeholder whose album is really here",
+   sweep2.get("pending"))
+ok(not os.path.isdir(dup_folder), "the empty album is gone from the library")
+eq(os.path.normcase(str((wishes.get_wish(dup_row["wish_id"]) or {}).get("album_path") or "")),
+   os.path.normcase(dup_real), "and its wish names the album that really arrived")
+wishes.owned_mbids = real_owned
 
 print()
 if FAILED:

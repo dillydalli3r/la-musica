@@ -17,10 +17,16 @@ inversion keeps this module importable from the routes without importing
 `server.main` (which imports these).
 
 `honey: one job at a time, process-wide. Two concurrent "import all" runs
-would race over the same folders; the second call answers "already running"
-with the live status instead. Revisit only if per-album parallelism is ever
-wanted — the chain scripts hold a process-wide lock anyway
-(server.script_runners.RUN_LOCK), so parallel albums would only queue up.
+would race over the same folders — one clearing a pending marker the other is
+still working on — and the second call answers "already running" with the live
+status instead. That is a decision about SEQUENCING, not about the machine:
+this runner takes each album all the way through before it starts the next, so
+a failure in album 3 leaves 4..N untouched and reported. It costs nobody else
+anything: a script run serializes on its own TARGET paths
+(server.job_locks; see R94 in docs/OPTIMIZATION-GRADING-SPEC.md), so an
+import-all job neither blocks nor is blocked by someone working on a different
+album — it holds the album it is on while it works on it, which is the claim a
+delete, a move or a tag write is refused against.
 
 The run also registers itself in :mod:`server.job_locks`: one job for the whole
 run, holding the album it is on while it works on it, so a delete, a move or a

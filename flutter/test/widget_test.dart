@@ -11,12 +11,19 @@
 //
 // Run:  flutter test
 
+import 'dart:convert';
+
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:http/http.dart' as http;
+import 'package:http/testing.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 
 import 'package:la_musica/api.dart';
 import 'package:la_musica/models.dart';
+import 'package:la_musica/pages/settings.dart';
 import 'package:la_musica/state.dart';
+import 'package:la_musica/widgets/discover_row.dart';
 import 'package:la_musica/widgets/player_bar.dart';
 import 'package:la_musica/widgets/shelves.dart';
 
@@ -28,6 +35,23 @@ Widget harness(Widget child) => AppScope(
   playback: PlaybackController(state: AppState()),
   child: MaterialApp(home: Scaffold(body: child)),
 );
+
+/// A controller that records the one thing the settings page has to reach: the
+/// gain stage of the track that is ALREADY playing. `refreshGain` is that
+/// re-apply — it had no caller at all before the settings page called it, so a
+/// mode/preamp edit only ever reached the next track. Overridden because the
+/// real one talks to just_audio, which has no platform implementation under
+/// `flutter test`.
+class _SpyPlayback extends PlaybackController {
+  _SpyPlayback({required super.state});
+
+  int refreshes = 0;
+
+  @override
+  Future<void> refreshGain() async {
+    refreshes++;
+  }
+}
 
 void main() {
   group('AdvisoryMark', () {
@@ -167,8 +191,96 @@ void main() {
       expect(ReplayGain().linear, 1.0);
     });
 
-    test('clamps a hot gain instead of letting it run away', () {
-      expect(ReplayGain(gain: 40).linear, lessThanOrEqualTo(4.0));
+    test('clamps dB to the same window the web player uses', () {
+      // A quiet master legitimately asks for more than +12 dB, and clamping the
+      // LINEAR value at 4.0 silently under-applied every gain above it — the
+      // phone then played the same track at a different level than the desktop.
+      // The window is the player's own: ±24 dB (web/src/lib/analyser.ts), which
+      // is what the preamp is clamped to server-side too.
+      expect(ReplayGain(gain: 18).linear, closeTo(7.943, 0.01));
+      expect(ReplayGain(gain: 40).linear, closeTo(15.849, 0.01));
+      expect(ReplayGain(gain: -60).linear, closeTo(0.063, 0.001));
+    });
+
+    test('reads pending and album out of the payload', () {
+      // `pending` says the unity is temporary — the server is still measuring
+      // the file — and `album` says the number really is the album gain. Both
+      // change what the controller does, so both have to survive the parse.
+      final pending = ReplayGain.fromJson({
+        'gain': null,
+        'mode': 'album',
+        'pending': true,
+      });
+      expect(pending.linear, 1.0);
+      expect(pending.pending, isTrue);
+      expect(pending.album, isFalse);
+      final album = ReplayGain.fromJson({
+        'gain': -7.2,
+        'album': true,
+        'analyzed': true,
+      });
+      expect(album.album, isTrue);
+      expect(album.pending, isFalse);
+    });
+  });
+
+  group('ReplayGain settings reach the running player', () {
+    testWidgets('saving the section re-applies the gain to the playing track', (
+      tester,
+    ) async {
+      SharedPreferences.setMockInitialValues({});
+      final calls = <String>[];
+      final state = AppState(
+        clientFactory: () => MockClient((request) async {
+          calls.add('${request.method} ${request.url.path}');
+          if (request.url.path.endsWith('/health')) {
+            return http.Response(
+              jsonEncode({'status': 'ok', 'version': 'test'}),
+              200,
+            );
+          }
+          if (request.url.path.endsWith('/config')) {
+            return http.Response(
+              jsonEncode({'replaygain_mode': 'album', 'replaygain_preamp_db': 0}),
+              200,
+            );
+          }
+          return http.Response('{}', 200);
+        }),
+      );
+      state.config = {'replaygain_mode': 'track', 'replaygain_preamp_db': 0};
+      await state.connect('http://fixture.invalid');
+      final playback = _SpyPlayback(state: state);
+
+      await tester.pumpWidget(
+        AppScope(
+          state: state,
+          playback: playback,
+          child: const MaterialApp(home: Scaffold(body: SettingsPage())),
+        ),
+      );
+      await tester.pump();
+
+      // The ReplayGain section's own Save: the sheet's first section, and the
+      // button sits in that section's label row.
+      final save = find.descendant(
+        of: find
+            .ancestor(of: find.text('REPLAYGAIN'), matching: find.byType(Row))
+            .first,
+        matching: find.byType(TextButton),
+      );
+      expect(save, findsOneWidget);
+      await tester.tap(save);
+      await tester.pump();
+      await tester.pump(const Duration(milliseconds: 100));
+
+      expect(calls, contains('POST /api/config'));
+      expect(
+        playback.refreshes,
+        1,
+        reason: 'the track that is already playing must get the new value',
+      );
+      playback.dispose();
     });
   });
 
@@ -184,6 +296,179 @@ void main() {
       await tester.pumpWidget(harness(TrackRow(track: track)));
       expect(find.text('Song'), findsOneWidget);
       expect(find.text('E'), findsOneWidget);
+    });
+  });
+
+  group('Discover notes and the add affordance', () {
+    // The server's own lines, as `server/discover.py` writes them: a real
+    // failure in the provider's words, the one actionable silence, a long
+    // reason, and the artist level an album page cannot be answered at. What
+    // the client must get right is that the LABEL never ends mid-sentence
+    // (the whole sentence stays in the tooltip) and that a capability the
+    // provider publishes is never drawn as a failure.
+    test('labels a note with its own first clause, never a cut sentence', () {
+      expect(
+        discoverNoteLabel('skipped: no lastfm_api_key'),
+        'no lastfm_api_key',
+      );
+      expect(
+        discoverNoteLabel('failed: Deezer refused: 403 "Quota exceeded"'),
+        'Deezer refused: 403 "Quota exceeded"',
+      );
+      expect(
+        discoverNoteLabel(
+          'skipped: RateYourMusic knows no artist called "Blur" — its own '
+          'chart filter matched no chart',
+        ),
+        'RateYourMusic knows no artist called "Blur"',
+      );
+      expect(
+        discoverNoteLabel(
+          'partial: 500 of 2202 genres — the list is cut at the source\'s '
+          'page size',
+        ),
+        'partial: 500 of 2202 genres',
+      );
+      // One clause, longer than a label may be: the outcome word stands in
+      // rather than the clause being clipped to fit.
+      expect(
+        discoverNoteLabel(
+          'skipped: could not resolve "Nobody At All" on MusicBrainz, and this '
+          'feed is MBID-native',
+        ),
+        'skipped',
+      );
+    });
+
+    testWidgets('shows a capability as information and a failure as an error', (
+      tester,
+    ) async {
+      await tester.pumpWidget(
+        harness(
+          DiscoverNotes(
+            notes: {'deezer': 'failed: Deezer refused: 403 "Quota exceeded"'},
+            notApplicable: [
+              DiscoverNotApplicable(
+                id: 'lastfm',
+                label: 'Last.fm',
+                short: 'artist & track pages only',
+                why:
+                    'Last.fm\'s entity feeds are similar ARTISTS and similar '
+                    'TRACKS — it has no similar-ALBUMS feed',
+              ),
+            ],
+          ),
+        ),
+      );
+      expect(
+        find.text('Deezer — Deezer refused: 403 "Quota exceeded"'),
+        findsOneWidget,
+      );
+      expect(
+        find.text(
+          'cannot answer for this page: Last.fm (artist & track pages only)',
+        ),
+        findsOneWidget,
+      );
+      // Neither sentence is lost: each is the chip's (or the line's) tooltip.
+      expect(
+        find.byTooltip('failed: Deezer refused: 403 "Quota exceeded"'),
+        findsOneWidget,
+      );
+      expect(
+        find.byTooltip(
+          'Last.fm — Last.fm\'s entity feeds are similar ARTISTS and similar '
+          'TRACKS — it has no similar-ALBUMS feed',
+        ),
+        findsOneWidget,
+      );
+    });
+
+    testWidgets('offers the add for a row with no MusicBrainz id', (
+      tester,
+    ) async {
+      final deezer = DiscoverItem.fromJson({
+        'kind': 'album',
+        'title': 'The Magic Whip',
+        'artist': 'Blur',
+        'year': '2015',
+        'source': 'deezer',
+        'source_label': 'Deezer',
+      });
+      await tester.pumpWidget(
+        harness(DiscoverRow(item: deezer, onAdd: (item) async => null)),
+      );
+      expect(find.text('Add to library'), findsOneWidget);
+
+      // A row that names NOTHING has nothing to search for: the action that
+      // could only be answered with a 400 is not offered at all.
+      await tester.pumpWidget(
+        harness(
+          DiscoverRow(
+            item: DiscoverItem.fromJson({'kind': 'album', 'title': ''}),
+            onAdd: (item) async => null,
+          ),
+        ),
+      );
+      expect(find.text('Add to library'), findsNothing);
+    });
+
+    testWidgets('reports a name-keyed add for what it was, not as nothing', (
+      tester,
+    ) async {
+      final noMatch = LibraryAddResult.fromJson({
+        'ok': true,
+        'matched': false,
+        'by_name': true,
+        'wish_id': 9,
+        'queued': 0,
+      });
+      expect(
+        noMatch.message,
+        'Added — no MusicBrainz match, searching by name',
+      );
+      final deezer = DiscoverItem.fromJson({
+        'kind': 'album',
+        'title': 'The Magic Whip',
+        'artist': 'Blur',
+        'source': 'deezer',
+        'source_label': 'Deezer',
+      });
+      await tester.pumpWidget(
+        harness(DiscoverRow(item: deezer, onAdd: (item) async => noMatch)),
+      );
+      await tester.tap(find.text('Add to library'));
+      await tester.pumpAndSettle();
+      // A wish is searching, and the server named it: the row says so and the
+      // undo applies to that wish rather than to no album at all.
+      expect(find.text('Queued — searching by name'), findsOneWidget);
+      expect(find.text('Undo'), findsOneWidget);
+    });
+
+    test('parses the capability line an entity shelf carries', () {
+      final shelf = DiscoverRecommendedResult.fromJson({
+        'items': [],
+        'sources_asked': ['musicbrainz', 'deezer'],
+        'notes': {'spotify': 'skipped: no spotify_client_id'},
+        'basis': 'album: Blur — The Magic Whip (by name)',
+        'not_applicable': [
+          {
+            'id': 'lastfm',
+            'label': 'Last.fm',
+            'short': 'artist & track pages only',
+            'why':
+                'Last.fm\'s entity feeds are similar ARTISTS and similar '
+                'TRACKS — it has no similar-ALBUMS feed',
+          },
+        ],
+      });
+      expect(shelf.notApplicable.single.id, 'lastfm');
+      expect(shelf.notApplicable.single.short, 'artist & track pages only');
+      // The library and genre seeds send none, and that is not an error.
+      expect(
+        DiscoverRecommendedResult.fromJson({'items': []}).notApplicable,
+        isEmpty,
+      );
     });
   });
 }
