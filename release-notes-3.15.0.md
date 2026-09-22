@@ -82,8 +82,7 @@ The audit found more than one release could fix at once. These are real, are
 adopted when the import lands in a sibling folder whose name matches the
 tag-derived path (and adoption can redirect the album root while leaving sidecars
 in a ghost folder); a re-add reuses a **terminal** wish, so the "searching now"
-promise is false and nothing searches it; the "already in your library" terminal
-path skips the framework-album teardown the other paths do; a wish import
+promise is false and nothing searches it; a wish import
 accepts an audio-less framework folder and reports success; the placeholder
 cover occupies `cover.jpg`, which can leave an imported album without its own
 cover; and a pending album whose wish went terminal renders a spinner that never
