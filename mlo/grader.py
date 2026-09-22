@@ -3209,7 +3209,7 @@ def _grade_album(album_dir, lyrics_format, cfg=None):
                         _cd_leg_reason(n, tr) for n in failed)
                 elif legs and not missing:
                     tr["audit"] = "REAL"
-                    tr["audit_verified"] = ("all three legs: "
+                    tr["audit_verified"] = ("all three sources: "
                                             + ", ".join(sorted(legs)))
                 elif not stored_tag and (tr.get("checksum_status") == "REAL"
                                          or tr.get("accuraterip_status") == "REAL"):
@@ -3281,7 +3281,7 @@ def _grade_album(album_dir, lyrics_format, cfg=None):
                 _legs = tr.get("audit_legs") or _cd_legs(tr)
                 _short = ", ".join(sorted(
                     n for n, state in _legs.items() if state in ("fail", "missing")
-                )) or "no leg could verify it"
+                )) or "verifiable evidence (no check could be evaluated)"
                 if not stored_tag:
                     add_issue(f"Missing AUDIT tag (run Audit Library) — the CD "
                               f"verdict needs: {_short}", basename)

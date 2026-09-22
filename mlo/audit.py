@@ -1764,7 +1764,7 @@ def run_audit_library(config):
         # of one line of its own evidence, and the run log has to say which —
         # "the disc is not in the AccurateRip database" and "the .log CRC does
         # not match the audio" are different problems for the user.
-        log(c("CD verdict FAKE — the leg(s) that failed:", Color.RED))
+        log(c("CD verdict FAKE — the evidence that failed:", Color.RED))
         for name in sorted(cd_verdict_failed):
             why, count = cd_verdict_failed[name]
             log(c(f"  {name} ({count} track(s)): {why}", Color.RED))
@@ -1777,7 +1777,7 @@ def run_audit_library(config):
                     by_leg.setdefault(name, (why, []))[1].append(fp)
         log(c(f"CD evidence incomplete: {len(cd_verdict_unresolved)} CD "
               f"track(s) keep no AUDIT verdict — a verdict needs evidence, and "
-              f"these legs could not be evaluated here:", Color.YELLOW))
+              f"none of it could be evaluated here:", Color.YELLOW))
         for name in sorted(by_leg):
             why, paths = by_leg[name]
             log(c(f"  missing '{name}' evidence ({len(paths)} track(s)): {why}",

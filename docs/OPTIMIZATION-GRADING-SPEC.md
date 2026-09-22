@@ -59,7 +59,7 @@ Grade script (4) over an album and reading the report.
   an album whose audio is gone cannot hide from the counts.
 - **R7 — artist folders have their own grade.** `grade_artist()` evaluates
   `grade_check_artist_image` and `grade_check_artist_description`, and fails an
-  artist folder that holds NO album folder at all (`EMPTY_ARTIST`): a folder
+  artist folder that holds NO album folder at all (`ARTIST_EMPTY`): a folder
   carrying only the artist's own image and description is not an artist in this
   library — nothing of theirs is here — so it cannot pass as one. With both
   checks switched off an artist that DOES hold an album reports 100 % and
@@ -102,7 +102,7 @@ An issue is `{code, label, where, reason}` for album-level and artist problems
 | `LOG_CHECKSUM` | the rip log's EAC SHA256 does not verify |
 | `AUDIT` | the audit tag is missing or not REAL (with `grade_check_audit` on) |
 | `EMPTY_FOLDER`, `EXPECTED_TRACKS_MISSING` | folder/release-level failures |
-| `ARTIST_IMAGE_MISSING`, `ARTIST_IMAGE_CORRUPT`, `ARTIST_IMAGE_FORMAT`, `ARTIST_IMAGE_OVERSIZED`, `ARTIST_IMAGE_ASPECT`, `ARTIST_IMAGE_UPSCALED`, `ARTIST_DESCRIPTION_MISSING`, `ARTIST_FOLDER_MISSING`, `EMPTY_ARTIST` | artist-folder failures (script 19 clears the image ones). `EMPTY_ARTIST` is an artist folder holding NO album folder — only the artist's own image/description: the artist is not in the library, so the folder is not a graded artist. Script 20 reports it and the Optimization page can remove it to the Trash |
+| `ARTIST_IMAGE_MISSING`, `ARTIST_IMAGE_CORRUPT`, `ARTIST_IMAGE_FORMAT`, `ARTIST_IMAGE_OVERSIZED`, `ARTIST_IMAGE_ASPECT`, `ARTIST_IMAGE_UPSCALED`, `ARTIST_DESCRIPTION_MISSING`, `ARTIST_FOLDER_MISSING`, `ARTIST_EMPTY` | artist-folder failures (script 19 clears the image ones). `ARTIST_EMPTY` is an artist folder holding NO album folder — only the artist's own image/description: the artist is not in the library, so the folder is not a graded artist. Script 20 reports it and the Optimization page can remove it to the Trash |
 | `ARTIST_IMAGE_UNDERSIZED` | informational note on an artist image below `artist_image_target_size` — reported, never failing |
 
 ---
@@ -319,7 +319,7 @@ group still renders (section *Other checks*).
 | `grade_check_cover_crop` | Cover aspect ratio (squareness) | ON | `|w/h − 1| ≤ cover_crop_threshold` (an aspect test, not crop detection) |
 | `grade_check_sidecar_cover` | Per-track sidecar covers | ON | per-track covers meet the same rules |
 | `grade_check_tag_spaces` | Tags — no padding | ON | no leading/trailing space or tab, and no run of 2+ internal spaces, in a single-line tag value (a value carrying a newline is never judged — its whitespace is text) |
-| `grade_check_tag_case` | Tag value capitalisation | ON | `MEDIA`, `SOURCE`, `RELEASETYPE`, `RELEASESTATUS`, `AUDIT`, `RELEASECOUNTRY`, `SCRIPT` and `MOOD` hold the canonical spelling `mlo/tagtext.py` writes (`TAG_CASE`), and every name in `GENRE` holds the form every genre writer ends on — `mlo/genres.py::display_name` of the name's canonical spelling (`GENRE_CASE`, e.g. `metal` → `Metal`). GENRE is deliberately NOT in `CANONICAL_CASE`: it is an open, multi-value tag whose canonical form is per name, not a closed vocabulary. Free text — `TITLE`, `ALBUM`, `ARTIST`, `LABEL`, lyrics — is never touched |
+| `grade_check_tag_case` | Tags — canonical value case | ON | `MEDIA`, `SOURCE`, `RELEASETYPE`, `RELEASESTATUS`, `AUDIT`, `RELEASECOUNTRY`, `SCRIPT` and `MOOD` hold the canonical spelling `mlo/tagtext.py` writes (`TAG_CASE`), and every name in `GENRE` holds the form every genre writer ends on — `mlo/genres.py::display_name` of the name's canonical spelling (`GENRE_CASE`, e.g. `metal` → `Metal`). GENRE is deliberately NOT in `CANONICAL_CASE`: it is an open, multi-value tag whose canonical form is per name, not a closed vocabulary. Free text — `TITLE`, `ALBUM`, `ARTIST`, `LABEL`, lyrics — is never touched |
 | `grade_check_tag_blank_lines` | Tags — no blank lines | ON | no blank line inside a tag value (`LYRICS` exempt) |
 | `grade_check_lyrics_spaces` | Lyrics — no padding | ON | no leading/trailing space on a lyric line |
 | `grade_check_lyrics_blank_lines` | Lyrics — blank line rules | ON | blank lines match the formatter's canonical output |
@@ -612,6 +612,25 @@ Even a forced re-rate rewrites only with evidence: the invented
   table folds the spellings sources emit (`rnb` → `r&b`, `synthpop` →
   `synth-pop`). A name MusicBrainz does not publish is still stored (dropping
   what a source said is worse) and is what `GENRE_VOCAB` reports.
+- **R39a — the source list ships complete, and the ask stops when a track is
+  full.** `genre_sources` is a PRIORITY list: `GENRE_SOURCES`
+  (`server/integrations.py`) is the shipped order — RateYourMusic, MusicBrainz,
+  ListenBrainz, iTunes, Last.fm, TheAudioDB, Wikidata, Bandcamp, Discogs,
+  Deezer, Spotify — and `mlo.config.DEFAULT_CONFIG["genre_sources"]` IS that
+  list (`tools/test_genres.py` asserts the two are equal), and `normalize_config`
+  treats every order this app ever shipped as "never customized" — the four
+  older chains and the 11-source order that preceded the two-source one
+  (`LEGACY_DEFAULT_GENRE_SOURCES`, `LEGACY_GENRE_SOURCES`) — so an untouched
+  install follows the current default while a list the user edited is kept
+  exactly as saved. The sources are asked in that order until every track holds
+  what the writer would write (`_genre_complete` — the early stop): at
+  `mb_genre_count = 2` one specific genre plus its derived family IS the track's
+  answer, so the sources below the one that supplied it are never asked; a
+  source that would only repeat the answer must not be paid a request for it,
+  and the ones below are fallbacks rather than a second opinion. The surfaces
+  offer ONE `Import genres` action with the source tray beside it: the tray
+  lists every source the app knows, ticks the enabled ones, says what each one
+  provides, and carries the reset back to the shipped default.
 - **R40** — the family is *derived* from a curated 28-family table plus keyword
   rules, never asked of a model; a genre with no known family gets **no** family
   slot rather than a wrong one.
@@ -691,6 +710,14 @@ Even a forced re-rate rewrites only with evidence: the invented
 - **R52** — credits are not lyrics: the contributor block some providers return
   as the first line is dropped (becoming a blank line), and an instrumental is
   never given lyrics.
+- **R52a — both lyric surfaces carry the same size control.** `−`, a typeable
+  percentage and `+`, in 5 % steps between **85 %** and **160 %** (100 % is the
+  surface's own base size) — one shared control (`web/src/components/LyricZoom.tsx`)
+  so the sidebar and the fullscreen player cannot drift. A typed value is
+  clamped to the bounds and rounded to a whole percent, never snapped to a step,
+  and each surface keeps its OWN value (`mlo.lyrzoom.sidebar.v1` for the
+  sidebar, `mlo.np.lyrzoom.v2` for the player): resizing one must not
+  re-lay-out the other.
 
 ### 7.5 Covers
 
@@ -780,6 +807,18 @@ and records which stage answered (`source`), plus the words it saw (`hits`).
   words, is recorded in the reply's per-source map either way, and `3` (or an
   unparseable reply) falls through the ladder. Provenance ids: `ai-lyrics` (the
   words were read) and `ai` (they were not).
+- **R62a — the reasoning effort is the user's, and `Max` degrades instead of
+  failing.** `ai_effort` (default **high**) is what every AI call sends as
+  `reasoning_effort` — R62's advisory judge, script 17's transforms, the
+  connection check — and the genre ranking has its own `ai_genre_effort` (same
+  default), which the same client reads in its place before the call
+  (`server/genre_ai.py`). Both take `minimal`, `low`, `medium`, `high` or
+  `max`: `minimal` sends NO effort field at all (no thinking, the fastest
+  answer), any other value sends itself and then retries without the field, and
+  `max` is a LADDER — `max`, then `high`, then no field — because not every
+  OpenAI-compatible endpoint knows the word: dropping a rung reaches "the
+  highest this provider accepts" rather than the provider's own default
+  (`server/ai.py::ai_chat`). A value outside the five reads as `high`.
 - **R63 — the word scan is the last resort, and its mild tier decides nothing.**
   With the AI off or silent, `mlo/advisory_words.py` scans the lyrics: only a hit
   from the lexicon's STRONG set makes a track `1`. The MILD tier (`ass`,
@@ -815,12 +854,16 @@ source of truth for all of them (`GET /api/dependencies`), so the page, the CLI
 table and the auto-update worker cannot disagree.
 
 - **R66 — a row that is behind says so, whoever installs it.** `state` is `ok`,
-  `update`, `missing` or `error`; `update` means the upstream release the check
-  found is NEWER than what is installed (`update_available`), and a tool the
-  distro provides is still behind when its package is. It is never forced back
-  to `ok` because this app cannot fetch it, and the header's *N update(s)
-  available* counts exactly the rows whose chip is amber — one predicate, so the
-  count and the table cannot disagree.
+  `update` or `missing`; `update` means the upstream release the check found is
+  NEWER than what is installed (`update_available`), and a tool the distro
+  provides is still behind when its package is. A failed upstream check never
+  becomes a state of its own: the rate-limited lookup leaves the row on the
+  status its pinned target gives it and the note carries the failure
+  (`upstream check failed: …`) — a wall of red for a transient 403 would be
+  worse than no check at all. `state` is never forced back to `ok` because this
+  app cannot fetch the tool, and the header's *N update(s) available* counts
+  exactly the rows whose chip is amber — one predicate, so the count and the
+  table cannot disagree.
 - **R67 — what can be done is a separate fact.** `install_kind` is `deps` (the
   installer fetches a pinned Windows build, a native Linux build, a `.deb` or a
   pip package into the tools folder), `system` (the OS package manager owns the
@@ -975,6 +1018,23 @@ user asked for, in the order they asked for it. `server/exporter.py` owns both.
   and the payload says so. Nothing runs on its own: the probe is fired by the
   page's *Test port* action.
 
+### 7.11 MusicBrainz browsing and the watch dialog
+
+- **R83 — the release-type picker is chips, and it holds every type
+  MusicBrainz can state.** The watch dialog
+  (`web/src/components/WatchDialog.tsx`, feeding `server/artist_watch.py`)
+  draws the five primary types — `album`, `ep`, `single`, `broadcast`, `other`
+  — and the eleven secondary ones — `compilation`, `soundtrack`, `spokenword`,
+  `interview`, `audiobook`, `live`, `remix`, `dj-mix`, `mixtape/street`, `demo`,
+  `field recording` — each a toggle carrying its own `aria-pressed` state and
+  MusicBrainz's own capitalization. Nothing is paged through: there is no "load
+  more" and no hidden tail. What the dialog ticks is what the watch stores, as a
+  CLOSED vocabulary compared case-insensitively — a name MusicBrainz does not
+  publish is dropped rather than kept as a filter that could never match
+  anything. The artist pages themselves keep loading their release lists as the
+  reader scrolls, and the fallback button stays for the two cases where the
+  observer cannot run (no `IntersectionObserver`, or a stalled fetch).
+
 ## 8. Recommended runbook
 
 Nothing here is a substitute for the app's own Dependencies page: run it first
@@ -1000,8 +1060,9 @@ and install what the platform supports.
    designed to be the whole job: 11 moves video containers first, 3 re-encodes
    lossless sources, 14 tags and organizes, 15 writes the tracklist manifest,
    2/1 canonicalize sidecars, 13/18 fetch and publish lyrics, 17 adds
-   transforms, 8 writes mood/energy/genre/advisory, 5 normalizes images, 6
-   audits, 7 measures DR/ReplayGain, 9 writes `.accurip`, 12 writes key/BPM, 16
+   transforms, 8 writes mood/energy/genre/advisory, 5 normalizes images, 19
+   re-fits the artist image, 6 audits, 7 measures DR/ReplayGain, 9 writes
+   `.accurip`, 12 writes key/BPM, 16
    is the standalone mood pass, 10 is the final canonical pass, 20 puts the
    library's shape right, 21 completes any half-written AcoustID pair and 4
    grades.
@@ -1022,7 +1083,8 @@ and install what the platform supports.
 
 Safe to re-run at any time: **4** (read-only) and **20** (idempotent — a library
 already in the canonical shape has nothing left to fix), 2, 1, 5, 6, 7, 8,
-9, 10, 12, 13, 15, 16, 17, 21 (it acts only on a file holding half a pair).
+9, 10, 12, 13, 15, 16, 17, 19 (it never upscales and leaves a conforming image
+byte for byte alone), 21 (it acts only on a file holding half a pair).
 Re-running 3/11 only replaces files whose conversion/remux has not happened yet,
 unless their force flags are set. **Needs a human decision**:
 
@@ -1040,10 +1102,11 @@ unless their force flags are set. **Needs a human decision**:
 - **Script 18 publishes to LRCLIB**, a public database: it refuses when the
   database already answers for the recording, and `force_publish` overrides that
   refusal. Treat a `force_publish` run as an upload, not a local operation.
-- `grade_check_audit` (off) and `audit_cd_require_both` / `audit_verify_*` decide
-  how much audit machinery runs; on a Docker or Linux server, AccurateRip
-  generation and the AudioAuditor/Logchecker path are unavailable by platform,
-  and `GET /api/capabilities` says so.
+- `grade_check_audit` (ON — `STRICT_DEFAULT_KEYS`) and `audit_cd_require_both` /
+  `audit_verify_*` decide how much audit machinery runs; on a Docker or Linux
+  server the AccurateRip, audit and logchecker paths run through the image's own
+  runtimes (`mono-runtime` for CUETools, `php-cli` for the Logchecker phar), and
+  `GET /api/capabilities` names what a given host cannot do.
 
 ---
 
@@ -1072,8 +1135,9 @@ checks see or how they judge it.
 | `encoder_tags` | per-format map | which `ENCODER_*` markers `grade_check_encoder` requires (`ENCODER_QUALITY` / `ENCODER_VERSION` on, `ENCODER_PROGRAM` off, per format) |
 | `strip_unknown_tags` | ON | whether `grade_check_excess_tags` reports junk tags |
 | `mb_genre_count` | 2 (max 3) | `grade_check_genre_count` ceiling, and what script 8/10 trim to |
-| `genre_autofill` / `genre_sources` | ON / `[rateyourmusic, musicbrainz, listenbrainz, itunes, lastfm, theaudiodb, wikidata, bandcamp, discogs, deezer, spotify]` | which writers can satisfy the genre checks. The list is a PRIORITY list, asked in order and stopped as soon as a track's list is complete, and the shipped default is every source the app knows (R30a) |
+| `genre_autofill` / `genre_sources` | ON / `[rateyourmusic, musicbrainz, listenbrainz, itunes, lastfm, theaudiodb, wikidata, bandcamp, discogs, deezer, spotify]` | which writers can satisfy the genre checks. The list is a PRIORITY list, asked in order and stopped as soon as a track's list is complete, and the shipped default is every source the app knows (R39a) |
 | `mood_enabled` / `mood_source` | ON / `hybrid` | whether script 8/16 writes `MOOD`/`ENERGY` at all |
+| `ai_effort` / `ai_genre_effort` | `high` / `high` | the reasoning budget every AI call sends, and the genre ranking's own: `minimal` (no thinking field), `low`, `medium`, `high`, `max` — `max` reaches a provider's ceiling by ladder (`max` → `high` → no field, R62a) |
 | `naming_script` | the shipped pattern | what `grade_check_naming` / `grade_check_filename_case` compare against |
 | `short_folder_names` | off | 8-char ids (both spellings are accepted) |
 | `music_folder` | — | the root the paths are compared against |
@@ -1108,9 +1172,11 @@ checks see or how they judge it.
 | `lrclib_auto_publish` / `force_publish` | ON / off | whether script 18 publishes, and whether it overrides LRCLIB's refusal |
 | `run_all_order` / `import_scripts` / `import_auto_scripts` | see R8 / R9 | what runs, and in which order |
 
-Two keys in that table deliberately do **not** change a verdict on their own:
-`grade_check_accuraterip` (AUDIT-only, R5) and `show_sidecar_files` (whether
-the viewer computes per-file sidecar grades; it adds no check).
+Two keys deliberately do **not** change a verdict on their own:
+`grade_check_accuraterip` (AUDIT-only, R5) and `show_sidecar_files` —
+deliberately NOT in the table above: it only makes the viewer list a file's
+sidecar siblings (`cue`/`log`/`lrc`/`.accurip`) and compute their grades, and it
+adds no check.
 
 ---
 
