@@ -644,8 +644,14 @@ function AutoProgress({ p }: { p: SlskAutoProgress }) {
   );
 }
 
-/** Live view of the auto-import job (search → log test → download → audit → import). */
-function AutoPanel({ initialMbid }: { initialMbid?: string }) {
+/** The live view of a job started from a peer's share (Browse → auto-import).
+ *
+ *  The Auto tab's own way in is the queue — paste a release, `Add to queue` —
+ *  and that path never asks a question (see ReleaseQueueBar). This card exists
+ *  for the one remaining interactive start, where a human is looking at a
+ *  peer's folder and said yes: its prompts still have somewhere to be answered,
+ *  and the same pipeline runs behind them. */
+function AutoJob() {
   const { data: job, refetch } = useQuery({
     queryKey: ["soulseekAuto"],
     queryFn: api.soulseekAutoStatus,
@@ -655,21 +661,18 @@ function AutoPanel({ initialMbid }: { initialMbid?: string }) {
   });
   const running = job?.state === "running" || job?.state === "confirm";
   const navigate = useNavigate();
-  const [mbid, setMbid] = useState(initialMbid ?? "");
-  const [queries, setQueries] = useState("");
   const [answering, setAnswering] = useState(false);
 
-  const start = async () => {
-    const id = releaseMbid(mbid);
+  /** Run the job's own release again — no form to read the value from: the job
+   *  that just ended carries the release it was about. */
+  const startAgain = async () => {
+    const id = job?.release?.id || "";
     if (!id) {
-      toast("Paste a MusicBrainz release URL or MBID");
+      toast("That job carried no release id — start it from the release's page");
       return;
     }
     try {
-      const r = await api.soulseekAutoStart({
-        release_mbid: id,
-        queries: queries.split(";").map((s) => s.trim()).filter(Boolean) || undefined,
-      });
+      const r = await api.soulseekAutoStart({ release_mbid: id });
       // Over the ceiling it does not fail — it takes its place and starts by
       // itself when a running release finishes (see the queue's Waiting group).
       toast(r.waiting
@@ -760,16 +763,16 @@ function AutoPanel({ initialMbid }: { initialMbid?: string }) {
   const waited = job?.confirm?.waited ?? 0;
   const searched = (job?.confirm?.queries ?? []).length > 0;
   const waitedTxt = waited >= 90 ? `${Math.round(waited / 60)} min` : waited >= 1 ? `${Math.round(waited)}s` : "under a second";
-
   const r = job?.release;
   // The wizard needs the folder it should tag; staging_path is the fallback an
   // unorganized job leaves in the result.
   const tagPath = job?.result?.album_path ?? job?.result?.staging_path ?? "";
+
   return (
     <div className="panel">
       <div className="flex items-center justify-between mb-2">
         <div className="text-xs font-semibold uppercase tracking-wider text-zinc-500 flex items-center gap-1.5">
-          <Zap className="h-3.5 w-3.5" /> Auto-import a MusicBrainz release
+          <Zap className="h-3.5 w-3.5" /> Live job — started from a peer's share
         </div>
         {running && (
           <button className="btn-ghost !py-1 text-xs text-red-300 tap" onClick={cancel}>
@@ -778,32 +781,10 @@ function AutoPanel({ initialMbid }: { initialMbid?: string }) {
         )}
       </div>
       <div className="text-[11px] text-zinc-500 mb-2.5">
-        Finds the release on the network by its identifiable traits (catalog number for CDs,
-        title + year for digital media — customizable in Settings), tests the rip logs before
-        committing, downloads, audits against the logs, and imports it fully tagged.
-        Lossless folders are preferred — if only lossy copies exist you are asked before
-        anything is downloaded.
+        A folder you handed over from Browse runs the same chain the queue runs — search,
+        rip-log test, download, audit, import — and stops here for the answers a queue row
+        decides by policy. Releases go on the queue instead: paste one above.
       </div>
-      {!running && (
-        <div className="flex gap-2 flex-wrap">
-          <input
-            className="input flex-1 min-w-[240px] tap"
-            placeholder="MusicBrainz release URL or MBID (e.g. https://musicbrainz.org/release/…)"
-            value={mbid}
-            onChange={(e) => setMbid(e.target.value)}
-          />
-          <input
-            className="input w-full sm:w-56 tap"
-            placeholder="Custom queries (; separated, optional)"
-            value={queries}
-            onChange={(e) => setQueries(e.target.value)}
-            title="Override the search terms for this run. Fields: artist album year country catalognumber barcode label"
-          />
-          <button className="btn-primary tap" onClick={start}>
-            <Zap className="h-4 w-4" /> Auto-import
-          </button>
-        </div>
-      )}
       {job?.state !== "idle" && (
         <div className="mt-3 rounded-lg border border-border bg-panel/50 p-3">
           {r?.title && (
@@ -828,8 +809,8 @@ function AutoPanel({ initialMbid }: { initialMbid?: string }) {
               </div>
               <button
                 className="btn-ghost !py-1 text-xs mt-2 text-red-300 tap"
-                disabled={!releaseMbid(mbid)}
-                onClick={start}
+                disabled={!job?.release?.id}
+                onClick={startAgain}
                 title="Run the same release again with the values in the form above"
               >
                 <RotateCw className="h-3.5 w-3.5" /> Retry
@@ -844,8 +825,8 @@ function AutoPanel({ initialMbid }: { initialMbid?: string }) {
               </div>
               <button
                 className="btn-ghost !py-1 text-xs mt-2 tap"
-                disabled={!releaseMbid(mbid)}
-                onClick={start}
+                disabled={!job?.release?.id}
+                onClick={startAgain}
                 title="Run the same release again with the values in the form above"
               >
                 <RotateCw className="h-3.5 w-3.5" /> Start again
@@ -993,6 +974,104 @@ function AutoPanel({ initialMbid }: { initialMbid?: string }) {
             </div>
           ))}
         </div>
+      )}
+    </div>
+  );
+}
+
+/** The Auto tab: the queue IS the auto-importer.
+ *
+ *  A release goes on by pasting its MusicBrainz ID or URL, and from there the
+ *  app does the whole job by itself — search on the worker's interval, test the
+ *  rip logs, download, audit, import into the library. Nothing on that path
+ *  asks a question: the cases an interactive job parked on (only lossy copies,
+ *  no rip log, nothing found yet) are decided by the search policy, and a
+ *  release that cannot be found simply stays on the queue and is looked for
+ *  again on the next pass — the interval, the backoff and the attempt ceiling
+ *  are the user's own, in Settings → Soulseek.
+ *
+ *  So this tab shows what is being LOOKED FOR, plus the one job that can still
+ *  prompt: a peer's folder handed over from Browse (`AutoJob`). Everything else
+ *  the pipeline is doing — downloading, verifying, needs-you, finished — is the
+ *  Queue tab, one press away. */
+function AutoPanel({ initialMbid, running, onShowQueue }: {
+  initialMbid?: string;
+  running: boolean;
+  onShowQueue?: () => void;
+}) {
+  const [busyId, setBusyId] = useState<string | null>(null);
+  const { data, refetch } = useQuery({
+    queryKey: QUEUE_KEY,
+    queryFn: api.queue,
+    refetchInterval: running ? 3000 : 10000,
+  });
+  const { cancel, retry, dismiss, doImport, clear } = useQueueActions(refetch, setBusyId);
+  const sections = data?.sections;
+  // The releases WAITING for a free slot, in the order they will start, and the
+  // rest of the "queued" section (a wish waiting for the network is being
+  // searched, which is a different thing from waiting its turn).
+  const waitingRows = (sections?.queued ?? []).filter((r) => r.waiting);
+  const lookingRows = (sections?.queued ?? []).filter((r) => !r.waiting);
+  const elsewhere = (sections?.in_progress.length ?? 0)
+    + (sections?.needs_attention.length ?? 0)
+    + (sections?.completed.length ?? 0)
+    + (sections?.failed.length ?? 0);
+
+  return (
+    <div className="space-y-4">
+      <div className="panel">
+        <div className="text-xs font-semibold uppercase tracking-wider text-zinc-500 flex items-center gap-1.5 mb-2">
+          <Zap className="h-3.5 w-3.5" /> Auto-import a release
+        </div>
+        <div className="text-[11px] text-zinc-500 mb-2.5">
+          Paste a MusicBrainz release ID or URL and the app finds it by its own identifiable
+          traits (catalog number for CDs, title + year for digital media — the queries are yours
+          in Settings → Soulseek), tests the rip logs before committing, downloads, audits
+          against the logs and imports it fully tagged. It keeps looking on its own schedule
+          until it lands: only lossy copies or a release with no rip log is decided by the search
+          policy rather than by this app guessing, and a release nothing can be found for stays
+          here and is searched again.
+        </div>
+        <ReleaseQueueBar initialMbid={initialMbid} onAdded={refetch} />
+      </div>
+
+      <AutoJob />
+
+      {!sections ? (
+        <PageLoading />
+      ) : (
+        <>
+          {waitingRows.length > 0 && (
+            <QueueSection
+              title="Waiting"
+              hint={`queued behind the ${data?.running ?? 0} release(s) running now — each starts by itself when one of them finishes`}
+              rows={waitingRows} tone="border-amber-800 text-amber-300"
+              empty=""
+              busyId={busyId}
+              onCancel={cancel} onRetry={retry} onImport={doImport} onDismiss={dismiss}
+              onClear={(item) => clear({ id: item.id }, item)}
+            />
+          )}
+          <QueueSection
+            title="Looking for"
+            hint="searched on the worker's own schedule — imported the moment a verified copy appears"
+            rows={lookingRows} tone="border-amber-800 text-amber-300"
+            empty="nothing is being looked for — paste a release above"
+            busyId={busyId}
+            onCancel={cancel} onRetry={retry} onImport={doImport} onDismiss={dismiss}
+            onClear={(item) => clear({ id: item.id }, item)}
+          />
+          {elsewhere > 0 && (
+            <div className="text-[11px] text-zinc-500">
+              {elsewhere} row(s) downloading, parked or finished —{" "}
+              <button className="underline hover:text-zinc-300 tap" onClick={onShowQueue}>
+                open the Queue tab
+              </button>{" "}
+              for those. Nothing here needs a press: every release above starts, verifies and
+              imports on its own.
+            </div>
+          )}
+        </>
       )}
     </div>
   );
@@ -1983,86 +2062,15 @@ function QueueSection({ title, hint, rows, tone, empty, busyId, selected, onSele
  *  underneath (server.wishes) is the durable request, and the queue is where
  *  it is read, waited on and acted on.
  */
-function QueuePanel({ running }: { running: boolean }) {
+/** The five things that can be done to ONE queue row.
+ *
+ *  Extracted because two surfaces list the same rows — the Queue tab, and the
+ *  Auto tab's "looking for" list — and a retry or a cancel has to mean the
+ *  same thing, hit the same endpoint and say the same words wherever it is
+ *  pressed. The caller owns `busyId` (each panel renders its own spinner) and
+ *  passes the refetch its own queue query exposes. */
+function useQueueActions(refetch: () => void, setBusyId: (id: string | null) => void) {
   const qc = useQueryClient();
-  // The queue follows the server's payload on this interval: fast while
-  // something is moving (progress bars, stage changes, a prompt being answered
-  // elsewhere), slow while the queue is only sitting there. Every mutation
-  // below refetches at once, so an action never waits for the next tick.
-  const { data, refetch, isFetching, dataUpdatedAt } = useQuery({
-    queryKey: QUEUE_KEY,
-    queryFn: api.queue,
-    refetchInterval: running ? 3000 : 10000,
-  });
-  const [busyId, setBusyId] = useState<string | null>(null);
-  // SELECT MODE: the ticks are keyed by the row's own id — the STABLE one the
-  // server names it by ("job:3", "pipeline:<key>", …). The list is polled every
-  // few seconds and rows start, settle and drop out of it as it goes, so an
-  // index-keyed selection would move under the user's finger; an id that has
-  // left the list simply stops counting (see `selectedRows`).
-  const [selectMode, setSelectMode] = useState(false);
-  const [selected, setSelected] = useState<Set<string>>(new Set());
-  const [bulkBusy, setBulkBusy] = useState(false);
-  const sections = data?.sections;
-  // What the header says: the rows it is actually rendering, added up. The
-  // server's own `counts` come off the same rows, so the two can never
-  // disagree — and if a payload ever arrived without them, the list is still
-  // the thing the numbers describe.
-  const rows = Object.values(sections ?? {}).flat();
-  const total = rows.length;
-
-  // The store's own worker state and log (GET /api/wishes): WHEN the app looks
-  // for a release on its own, and what the last pass did. Read here rather
-  // than kept as its own panel — it is the schedule behind these rows.
-  const { data: store } = useQuery({
-    queryKey: ["wishes"],
-    queryFn: api.wishes,
-    refetchInterval: 15000,
-  });
-  const worker = store?.worker;
-  const [wanted, setWanted] = useState("");
-  const [wantBusy, setWantBusy] = useState(false);
-
-  /** Want a release the network does not have yet: the row this creates is the
-   *  standing request, with no album folder behind it (the album appears when
-   *  something is found). The interval and the backoff decide when it is
-   *  searched — this only records what to look for. */
-  const addWanted = async () => {
-    const id = (wanted.match(MBID_RE)?.[0] ?? "").toLowerCase();
-    if (!id) {
-      toast("Paste a MusicBrainz release ID or URL");
-      return;
-    }
-    setWantBusy(true);
-    try {
-      const r = await api.wishAdd({ release_mbid: id });
-      setWanted("");
-      toast.success(
-        `${r.wish?.artist ? `${r.wish.artist} — ` : ""}${r.wish?.title || "it"} is queued — it is searched for automatically`
-      );
-      refetch();
-    } catch (e) {
-      toast.error(String(e));
-    } finally {
-      setWantBusy(false);
-    }
-  };
-
-  /** Search everything that is DUE, now, instead of at the next pass. A row
-   *  waiting out its retry backoff keeps that wait: what is due is the store's
-   *  own answer (`wishes.due_at`), never this button's. */
-  const searchDue = async () => {
-    setWantBusy(true);
-    try {
-      const r = await api.wishesSearchAll();
-      toast(r.ok ? "Searching for everything due…" : r.error || "Already searching");
-      refetch();
-    } catch (e) {
-      toast.error(String(e));
-    } finally {
-      setWantBusy(false);
-    }
-  };
 
   const cancel = async (item: SlskQueueItem) => {
     setBusyId(item.id);
@@ -2155,6 +2163,166 @@ function QueuePanel({ running }: { running: boolean }) {
       setBusyId(null);
     }
   };
+
+  return { cancel, retry, dismiss, doImport, clear };
+}
+
+/** "Look for this" — the one question the queue exists to answer.
+ *
+ *  Paste a MusicBrainz release ID or URL and the release becomes a row the
+ *  wishes worker searches on its own schedule, through the SAME pipeline an
+ *  auto-import job runs (search → log test → download → audit → import). The
+ *  search happens on the interval below, and `Search due now` runs the pass
+ *  that is due immediately — a row still waiting out its retry backoff keeps
+ *  that wait, because what is due is the store's answer, not this button's.
+ *
+ *  Nothing on this path asks a question: a lossy-only or log-less candidate is
+ *  decided by the search policy, and a release nothing can be found for stays
+ *  on the queue and is tried again — which is what "keep looking" meant when it
+ *  still had to be answered by hand.
+ *
+ *  `initialMbid` prefills the field (the MusicBrainz pages link here with
+ *  `?release=<id>`), and only ever fills an EMPTY field: a late route change
+ *  must not overwrite what someone is typing. */
+function ReleaseQueueBar({ initialMbid, onAdded, className }: {
+  initialMbid?: string;
+  /** Called after a release was added, so the list under the bar can refetch. */
+  onAdded?: () => void;
+  className?: string;
+}) {
+  // The store's own worker state and log (GET /api/wishes): WHEN the app looks
+  // for a release on its own, and what the last pass did — the schedule behind
+  // these rows, read here rather than in a panel of its own.
+  const { data: store } = useQuery({ queryKey: ["wishes"], queryFn: api.wishes, refetchInterval: 15000 });
+  const worker = store?.worker;
+  const [wanted, setWanted] = useState(initialMbid ?? "");
+  const [wantBusy, setWantBusy] = useState(false);
+  useEffect(() => {
+    if (initialMbid) setWanted((cur) => cur || initialMbid);
+  }, [initialMbid]);
+
+  /** Want a release the network does not have yet: the row this creates is the
+   *  standing request, with no album folder behind it (the album appears when
+   *  something is found). The interval and the backoff decide when it is
+   *  searched — this only records what to look for. */
+  const addWanted = async () => {
+    const id = releaseMbid(wanted).toLowerCase();
+    if (!id) {
+      toast("Paste a MusicBrainz release ID or URL");
+      return;
+    }
+    setWantBusy(true);
+    try {
+      const r = await api.wishAdd({ release_mbid: id });
+      setWanted("");
+      toast.success(
+        `${r.wish?.artist ? `${r.wish.artist} — ` : ""}${r.wish?.title || "it"} is queued — it is searched for automatically`
+      );
+      onAdded?.();
+    } catch (e) {
+      toast.error(String(e));
+    } finally {
+      setWantBusy(false);
+    }
+  };
+
+  /** Search everything that is DUE, now, instead of at the next pass. */
+  const searchDue = async () => {
+    setWantBusy(true);
+    try {
+      const r = await api.wishesSearchAll();
+      toast(r.ok ? "Searching for everything due…" : r.error || "Already searching");
+      onAdded?.();
+    } catch (e) {
+      toast.error(String(e));
+    } finally {
+      setWantBusy(false);
+    }
+  };
+
+  return (
+    <div className={`rounded-md border border-border bg-panel/60 p-2.5 space-y-2 text-xs ${className ?? ""}`}>
+      <div className="flex flex-wrap gap-2">
+        <Link2 className="h-4 w-4 text-zinc-600 self-center shrink-0" />
+        <input
+          className="input flex-1 min-w-[220px] tap"
+          placeholder="Paste a MusicBrainz release ID or URL — the queue keeps looking for it"
+          value={wanted}
+          onChange={(e) => setWanted(e.target.value)}
+          onKeyDown={(e) => e.key === "Enter" && !wantBusy && addWanted()}
+        />
+        <button
+          className="btn-primary tap"
+          onClick={addWanted}
+          disabled={wantBusy || !wanted.trim()}
+          title="Put it on the queue — Soulseek is searched for it on the interval below, and it is imported the moment a verified copy appears"
+        >
+          <Plus className="h-4 w-4" /> Add to queue
+        </button>
+        <button
+          className="btn-ghost tap"
+          onClick={searchDue}
+          disabled={wantBusy}
+          title="Search Soulseek for every row that is due right now, rather than at the next pass. A row still waiting out its retry backoff keeps that wait."
+        >
+          <Search className="h-3.5 w-3.5" /> Search due now
+        </button>
+      </div>
+      <div className="flex flex-wrap items-center gap-2 text-[10px] text-zinc-600">
+        <span className={worker?.enabled ? "text-emerald-400" : "text-amber-400"}>
+          {worker?.enabled ? "looking for these on its own" : "automatic search off"}
+        </span>
+        <span>· every {worker?.interval_hours ?? 6}h</span>
+        <span>· next {worker?.next_run ? timeAgo(worker.next_run).replace("ago", "from now") : "—"}</span>
+        {worker?.running && worker.current && (
+          <span className="text-sky-300">· searching {worker.current}</span>
+        )}
+        {worker && !worker.running && worker.last_result && <span>· last: {worker.last_result}</span>}
+      </div>
+    </div>
+  );
+}
+
+function QueuePanel({ running }: { running: boolean }) {
+  const qc = useQueryClient();
+  // The queue follows the server's payload on this interval: fast while
+  // something is moving (progress bars, stage changes, a prompt being answered
+  // elsewhere), slow while the queue is only sitting there. Every mutation
+  // below refetches at once, so an action never waits for the next tick.
+  const { data, refetch, isFetching, dataUpdatedAt } = useQuery({
+    queryKey: QUEUE_KEY,
+    queryFn: api.queue,
+    refetchInterval: running ? 3000 : 10000,
+  });
+  const [busyId, setBusyId] = useState<string | null>(null);
+  // SELECT MODE: the ticks are keyed by the row's own id — the STABLE one the
+  // server names it by ("job:3", "pipeline:<key>", …). The list is polled every
+  // few seconds and rows start, settle and drop out of it as it goes, so an
+  // index-keyed selection would move under the user's finger; an id that has
+  // left the list simply stops counting (see `selectedRows`).
+  const [selectMode, setSelectMode] = useState(false);
+  const [selected, setSelected] = useState<Set<string>>(new Set());
+  const [bulkBusy, setBulkBusy] = useState(false);
+  const sections = data?.sections;
+  // What the header says: the rows it is actually rendering, added up. The
+  // server's own `counts` come off the same rows, so the two can never
+  // disagree — and if a payload ever arrived without them, the list is still
+  // the thing the numbers describe.
+  const rows = Object.values(sections ?? {}).flat();
+  const total = rows.length;
+
+  // The bar (paste → Add to queue), the wishes worker behind it and the five
+  // row actions are shared with the Auto tab: one hook and one component, so
+  // the two surfaces cannot drift.
+  const { cancel, retry, dismiss, doImport, clear } = useQueueActions(refetch, setBusyId);
+  // The store's own worker log (GET /api/wishes): what the last passes did. The
+  // bar polls the same key for its schedule line, so this shares that cache.
+  const { data: store } = useQuery({
+    queryKey: ["wishes"],
+    queryFn: api.wishes,
+    refetchInterval: 15000,
+  });
+
   // Rows whose work is over — the count the header's "Clear finished" reports,
   // and the only rows that button will touch.
   const finished = rows.filter((r) => r.clearable).length;
@@ -2347,49 +2515,9 @@ function QueuePanel({ running }: { running: boolean }) {
         </div>
       )}
 
-      {/* What the app is looking FOR, and the two controls the whole queue
-          shares. A release that is not on the network yet belongs here rather
-          than in a list of its own: the durable request is the row, and this
-          panel is where rows are read and acted on. */}
-      <div className="rounded-md border border-border bg-panel/60 p-2.5 space-y-2 text-xs">
-        <div className="flex flex-wrap gap-2">
-          <Link2 className="h-4 w-4 text-zinc-600 self-center shrink-0" />
-          <input
-            className="input flex-1 min-w-[220px] tap"
-            placeholder="Paste a MusicBrainz release ID or URL — the queue keeps looking for it"
-            value={wanted}
-            onChange={(e) => setWanted(e.target.value)}
-            onKeyDown={(e) => e.key === "Enter" && !wantBusy && addWanted()}
-          />
-          <button
-            className="btn-primary tap"
-            onClick={addWanted}
-            disabled={wantBusy || !wanted.trim()}
-            title="Put it on the queue — Soulseek is searched for it on the interval below, and it is imported the moment a verified copy appears"
-          >
-            <Plus className="h-4 w-4" /> Add to queue
-          </button>
-          <button
-            className="btn-ghost tap"
-            onClick={searchDue}
-            disabled={wantBusy}
-            title="Search Soulseek for every row that is due right now, rather than at the next pass. A row still waiting out its retry backoff keeps that wait."
-          >
-            <Search className="h-3.5 w-3.5" /> Search due now
-          </button>
-        </div>
-        <div className="flex flex-wrap items-center gap-2 text-[10px] text-zinc-600">
-          <span className={worker?.enabled ? "text-emerald-400" : "text-amber-400"}>
-            {worker?.enabled ? "looking for these on its own" : "automatic search off"}
-          </span>
-          <span>· every {worker?.interval_hours ?? 6}h</span>
-          <span>· next {worker?.next_run ? timeAgo(worker.next_run).replace("ago", "from now") : "—"}</span>
-          {worker?.running && worker.current && (
-            <span className="text-sky-300">· searching {worker.current}</span>
-          )}
-          {worker && !worker.running && worker.last_result && <span>· last: {worker.last_result}</span>}
-        </div>
-      </div>
+      {/* The same bar the Auto tab renders: one component, two places —
+          a release added on either tab is added the same way. */}
+      <ReleaseQueueBar onAdded={refetch} />
 
       {!sections ? (
         <PageLoading />
@@ -3001,8 +3129,6 @@ function SharingCard({ running }: { running: boolean }) {
   );
 }
 
-const MBID_RE = /[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/i;
-
 /** Hard stop for the search poll loop, in seconds. slskd ends a search 15s
  *  after the last peer response by default, which lands well inside this. */
 const SEARCH_POLL_LIMIT_S = 180;
@@ -3548,7 +3674,9 @@ export default function SoulseekPage() {
         )
       )}
 
-      {tab === "auto" && <AutoPanel initialMbid={releaseParam} />}
+      {tab === "auto" && (
+        <AutoPanel initialMbid={releaseParam} running={running} onShowQueue={() => setTab("queue")} />
+      )}
 
       {tab === "queue" && <QueuePanel running={running} />}
 
