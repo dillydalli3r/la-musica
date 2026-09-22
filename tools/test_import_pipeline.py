@@ -489,7 +489,14 @@ gate = threading.Event()
 _real_finish = imports.finish_album
 
 
-def _slow_finish(album_dir, cfg=None, progress=None, force=None):
+def _slow_finish(album_dir, cfg=None, progress=None, force=None, **kwargs):
+    # The seam takes whatever the importer passes (`release` today, whatever it
+    # is tomorrow): a fake that fixed the signature would turn a NEW keyword
+    # into a TypeError inside the bulk thread — which surfaces as the row never
+    # reaching "imported", not as a missing argument — and only when the thread
+    # happens to call it while this stub is installed. The other seam stubs
+    # (`test_job_locks`, `test_chain_after_acquire`) take `**kwargs` for the
+    # same reason.
     gate.wait(10)
     return {"path": os.path.normpath(album_dir), "scripts": [], "chain": [], "errors": []}
 
