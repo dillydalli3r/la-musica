@@ -365,12 +365,17 @@ jobs:
           PLIST="$APP/Info.plist"
           test -f "$PLIST" || { echo "::error::no Info.plist inside $APP"; exit 1; }
           fail=0
-          audio="$(plutil -extract UIBackgroundModes raw -o - "$PLIST" 2>/dev/null || true)"
-          echo "UIBackgroundModes: $audio"
-          case "$audio" in
-            *audio*) ;;
-            *) echo "::error::UIBackgroundModes does not carry 'audio' — playback would stop as soon as the app leaves the foreground"; fail=1 ;;
-          esac
+          # `plutil -extract <array> raw` prints the array's COUNT, not its
+          # contents: the first version of this check read "1" off a perfectly
+          # good plist and failed the build. PlistBuddy prints the array itself,
+          # one indented element per line, so the check does not depend on the
+          # order the modes are declared in.
+          modes="$(/usr/libexec/PlistBuddy -c "Print :UIBackgroundModes" "$PLIST" 2>/dev/null || true)"
+          printf 'UIBackgroundModes:\n%s\n' "$modes"
+          if ! printf '%s\n' "$modes" | grep -qE '(^|[[:space:]])audio[[:space:]]*$'; then
+            echo "::error::UIBackgroundModes does not carry 'audio' — playback would stop as soon as the app leaves the foreground"
+            fail=1
+          fi
           ats="$(plutil -extract NSAppTransportSecurity.NSAllowsArbitraryLoadsInWebContent raw -o - "$PLIST" 2>/dev/null || true)"
           echo "NSAllowsArbitraryLoadsInWebContent: $ats"
           if [ "$ats" != "true" ]; then
