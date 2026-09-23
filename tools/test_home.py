@@ -121,4 +121,73 @@ store.map_for = lambda **kw: 1 / 0
 assert r._rated(albums, user="", limit=5) == []
 assert r._rated([], user="", limit=5) == []
 
+# --------------------------------------------------------------------------- #
+# The grading strip (server.recommendations.grade_warning — the object
+# `GET /api/grades/summary` answers with and the Home payload carries as
+# `grade_warning`, drawn by web/src/components/GradeWarning on both pages): the
+# owner's shape for a finding, the two albums that are never one, the totals
+# printed beside it, and the cap that keeps a strip from becoming a page.
+# --------------------------------------------------------------------------- #
+def _tr(path, **issues):
+    return {"path": path, "file": path.rsplit("/", 1)[-1],
+            "tags": {"TITLE": path.rsplit("/", 1)[-1]}, "issues": issues}
+
+
+gw_lib = {"artists": [{"path": "C:/M/A", "name": "Alpha", "albums": [
+    # ONE failing track: the finding is the TRACK, and the album is its frame.
+    {"path": "C:/M/A/One", "pass": False, "pass_count": 9, "total_checks": 10,
+     "grade_pct": 90.0, "meta": {"ALBUM": "One"},
+     "tracks": [_tr("C:/M/A/One/1.flac", COVER="track")]},
+    # TWO failing tracks: the finding is the ALBUM, with the count and the
+    # union of their codes — a dozen rows of one album say less than its name.
+    {"path": "C:/M/A/Two", "pass": False, "pass_count": 4, "total_checks": 10,
+     "grade_pct": 40.0, "meta": {"ALBUM": "Two"},
+     "tracks": [_tr("C:/M/A/Two/1.flac", COVER="track"),
+                _tr("C:/M/A/Two/2.flac", AUDIT="track")]},
+    # A failure recorded against the album itself names no file, so it is an
+    # album row carrying the grader's own sentence.
+    {"path": "C:/M/A/Three", "pass": False, "pass_count": 3, "total_checks": 4,
+     "grade_pct": 75.0, "meta": {"ALBUM": "Three"}, "tracks": [],
+     "issues": {"Missing MEDIA": ["album-wide"]}},
+    # NOT findings: a passing album, a PENDING framework album (nothing was
+    # graded because its audio has not arrived — listing it would report a wish
+    # as a broken album) and an album with no checks (0 == 0 passes).
+    {"path": "C:/M/A/Fine", "pass": True, "pass_count": 10, "total_checks": 10,
+     "grade_pct": 100.0, "meta": {"ALBUM": "Fine"}, "tracks": []},
+    {"path": "C:/M/A/Wait", "pass": False, "pending": True, "pass_count": 0,
+     "total_checks": 1, "grade_pct": 0.0, "meta": {"ALBUM": "Wait"}, "tracks": []},
+    {"path": "C:/M/A/Off", "pass": False, "pass_count": 0, "total_checks": 0,
+     "grade_pct": None, "meta": {"ALBUM": "Off"}, "tracks": []},
+]}]}
+gw = r.grade_warning(gw_lib)
+assert gw["ok"] is False and gw["albums_failing"] == 3, gw
+assert gw["tracks_failing"] == 3, gw
+# The totals are the SAME sums the Home header prints, so the strip and the
+# percentage beside it cannot disagree: 26 of 35 checks.
+assert (gw["pass_count"], gw["total_checks"], gw["grade_pct"]) == (26, 35, 74.3), gw
+assert [(i["kind"], i["album"]) for i in gw["items"]] == \
+    [("album", "Two"), ("album", "Three"), ("track", "One")], gw["items"]
+two = gw["items"][0]
+assert two["failing_tracks"] == 2 and two["codes"] == ["AUDIT", "COVER"], two
+three = gw["items"][1]
+assert three["reason"] == "Missing MEDIA" and three["failing_tracks"] == 0, three
+one = gw["items"][2]
+assert one["track_path"] == "C:/M/A/One/1.flac" and one["title"] == "1.flac", one
+assert one["codes"] == ["COVER"] and "failing_tracks" not in one, one
+# Worst first, by the same key for both kinds.
+assert [i["grade_pct"] for i in gw["items"]] == [40.0, 75.0, 90.0], gw["items"]
+# A library that passes says so, with nothing to list.
+assert r.grade_warning({"artists": []})["ok"] is True
+# The cap: 12 rows listed, the rest COUNTED — the Library's Failing filter is
+# where a reader goes past a screenful.
+many = {"artists": [{"path": "C:/M/A", "albums": [
+    {"path": f"C:/M/A/A{n}", "pass": False, "pass_count": 0, "total_checks": 1,
+     "grade_pct": float(n), "meta": {"ALBUM": f"A{n}"}, "tracks": [],
+     "issues": {"album folder holds no audio": ["folder"]}} for n in range(20)]}]}
+cap = r.grade_warning(many)
+assert len(cap["items"]) == 12 and cap["more"] == 8, (len(cap["items"]), cap["more"])
+assert cap["albums_failing"] == 20, cap["albums_failing"]
+# …and the Home payload carries THAT object, not a second count of the library.
+assert _home["grade_warning"] == r.grade_warning({"artists": []}), _home["grade_warning"]
+
 print("ok")
