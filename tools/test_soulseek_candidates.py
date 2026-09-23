@@ -1080,11 +1080,15 @@ JOB_RELEASE_2D = dict(JOB_RELEASE, media=[
     {"disc": 2, "position": 2, "title": "Delta", "length": 230000}])
 
 
-def score_logs(*, low=(), invalid=()):
-    """A _score_logs stand-in: 'low'/'invalid' name the logs to grade badly."""
+def score_logs(*, low=(), invalid=(), why="gap handling"):
+    """A _score_logs stand-in: 'low'/'invalid' name the logs to grade badly.
+
+    Five-tuples, the shape the real scorer returns: the fifth is Logchecker's
+    own note about the log, which the rejection reason quotes."""
     def fake(paths, cfg):
         return [(p, 50 if os.path.basename(p) in low else 100,
-                 "invalid" if os.path.basename(p) in invalid else "ok", None)
+                 "invalid" if os.path.basename(p) in invalid else "ok", None,
+                 why if os.path.basename(p) in low else "")
                 for p in sorted(paths)]
     return fake
 

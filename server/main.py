@@ -957,6 +957,60 @@ def library(refresh: int = Query(0)):
     return lib_mod.build_library(cfg)
 
 
+@app.get("/api/log/report")
+def log_report_route(path: str = Query(...), disc: Optional[int] = Query(None),
+                     timeout: int = Query(30, ge=5, le=120)):
+    """One rip log in full: Logchecker's own report, this app's checksum
+    verdict, and the log's text.
+
+    `path` is the `.log` itself or the album folder that holds it — an album
+    with several logs is asked disc by disc (`disc=2` → `CD-2.log`, the pattern
+    `grade_album_logs` renames them to), and one with a single log answers
+    without a disc. This is the answer to "why did this score 60": the number
+    alone never said, and Logchecker's own `Details:` lines are exactly where a
+    deduction explains itself (`-10 gap handling` and the like).
+
+    Read-only end to end: nothing is scored into the tags, renamed or stored,
+    and the phar runs for this answer alone. The path must live inside the
+    music folder, like every other path-taking route.
+    """
+    from mlo.discs import _disc_expected_name, _disc_pattern_for, log_report
+
+    p = str(path or "").strip()
+    root = str(load_config().get("music_folder") or "")
+    if not p or not root:
+        raise HTTPException(400, "a path inside the music folder is required")
+    siblings: List[str] = []
+    if os.path.isdir(p):
+        # An album folder: pick its log. Several logs are a disc set, and the
+        # caller names the one it means — the LIST travels back either way, so
+        # the reader can switch discs without asking again.
+        try:
+            siblings = sorted(f for f in os.listdir(p) if f.lower().endswith(".log"))
+        except OSError:
+            siblings = []
+        if not siblings:
+            raise HTTPException(404, "this album holds no .log")
+        if disc is not None:
+            p = os.path.join(p, _disc_expected_name(_disc_pattern_for(load_config()),
+                                                    int(disc), ".log"))
+        elif len(siblings) == 1:
+            p = os.path.join(p, siblings[0])
+        else:
+            # Several discs and no disc named: answer with the first, not an
+            # error — the payload carries the list, and a viewer that had to
+            # guess again would make the reader pick twice.
+            p = os.path.join(p, siblings[0])
+    if not p.lower().endswith(".log"):
+        raise HTTPException(400, "path is not a .log")
+    if not os.path.isfile(p):
+        raise HTTPException(404, f"no such log: {os.path.basename(p)}")
+    if not _in_music_folder(p, root):
+        raise HTTPException(400, "log path is outside the music folder")
+    out = log_report(p, timeout=int(timeout))
+    out["siblings"] = siblings
+    return out
+
 @app.get("/api/home")
 def home(request: Request, refresh: int = Query(0)):
     """Home page: stats, recent additions, top grades, favorites, a random
@@ -8448,6 +8502,21 @@ def library_layout_report():
     warning drawn from a scan that did not happen is the one thing this must
     never produce."""
     return mlo_layout.load_report(load_config())
+
+
+@app.get("/api/grades/summary")
+def grades_summary():
+    """Whether the library passes its grading checks, and — when it does not —
+    what fails, with a link target for every row.
+
+    Read-only: nothing is graded, re-graded or written. It reads the library
+    payload the Library page already fetches and says which of its albums and
+    tracks came out below their checks (server.recommendations.grade_warning,
+    the same object `/api/home` carries as `grade_warning`). The Library page
+    has no Home payload, so without this route the two pages would each have
+    to count the library themselves and could disagree."""
+    from server import recommendations
+    return recommendations.grade_warning(lib_mod.build_library(load_config()))
 
 
 @app.post("/api/library/layout/remove-empty-artist")

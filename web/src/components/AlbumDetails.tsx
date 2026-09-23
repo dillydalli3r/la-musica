@@ -1,8 +1,10 @@
 import { useQuery } from "@tanstack/react-query";
-import { Disc3, Gauge, Info, Loader2 } from "lucide-react";
+import { Disc3, FileText, Gauge, Info, Loader2 } from "lucide-react";
+import { useState } from "react";
 import { api } from "../api";
 import type { Album } from "../types";
 import Modal from "./Modal";
+import LogReport from "./LogReport";
 import DownloadButton from "./DownloadButton";
 import { ExportButton } from "./ExportDialog";
 import TrackDetails, { DetailRows, DetailSection, type DetailItem } from "./TrackDetails";
@@ -33,6 +35,9 @@ const yesNo = (v: boolean | null | undefined) => (v ? "yes" : "no");
  *  (TrackDetails) is the same readout one level down: both render through the
  *  same DetailRows/DetailSection, so a row looks the same in either. */
 export function AlbumDetails({ album, onClose }: { album: Album; onClose: () => void }) {
+  // The rip log panel, opened on demand: most albums are fine, and the log
+  // itself is only ever wanted when the grading has something to answer for.
+  const [logOpen, setLogOpen] = useState(false);
   const reg = useTagRegistry();
   const { t } = useI18n();
   const meta = (album.meta ?? {}) as Record<string, string | null | undefined>;
@@ -126,6 +131,26 @@ export function AlbumDetails({ album, onClose }: { album: Album; onClose: () => 
       <DetailSection icon={Gauge} title="Grading & audit">
         <DetailRows rows={gradeRows} />
       </DetailSection>
+
+      {/* The rip log the grading above was read off. Scoring a log and never
+          letting anyone read it is what made "score 60 is below the required
+          100" a dead end for the owner; the panel opens on demand so an album
+          that is fine costs nothing to look at. */}
+      {album.has_log && (
+        <DetailSection icon={FileText} title="Rip log">
+          {logOpen ? (
+            <LogReport albumPath={album.path} onClose={() => setLogOpen(false)} />
+          ) : (
+            <button
+              className="btn-ghost !py-1.5 text-xs tap"
+              onClick={() => setLogOpen(true)}
+              title="Read the log's own text and what Logchecker made of it (score, checksum, its own notes)"
+            >
+              <FileText className="h-3.5 w-3.5" /> View the log
+            </button>
+          )}
+        </DetailSection>
+      )}
 
       <DetailSection icon={Disc3} title="Stored tags">
         <DetailRows

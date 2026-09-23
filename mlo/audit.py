@@ -1521,6 +1521,16 @@ def run_audit_library(config):
                           f"checksum' line (EAC writes one from 1.0) — not "
                           f"required, so the disc is judged on its CRCs",
                           Color.YELLOW))
+                elif state == "unverified":
+                    # It carries one, and nothing could check it: Logchecker
+                    # prints `checksum_ok` whether or not it found its pypi EAC
+                    # helper, so a modified log reads identical to a clean one
+                    # there. Named, never charged — the CRCs below decide the
+                    # leg, and installing eac-logchecker closes the gap.
+                    log(c(f"WARNING: {os.path.basename(lp)} carries a log "
+                          f"checksum that was NOT verified ({detail}) — the "
+                          f"disc is judged on its CRCs; install the EAC log "
+                          f"checker to verify the log itself", Color.YELLOW))
                 # 'ok' establishes the leg. 'unsupported' / 'missing' / None
                 # leave it to the per-track CRCs.
                 #

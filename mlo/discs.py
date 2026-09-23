@@ -1344,6 +1344,138 @@ def logchecker_available():
         return False
 
 
+def _logchecker_env():
+    """The environment the phar runs with: this process's, plus every place an
+    `eac-logchecker` console script may live.
+
+    Logchecker does not compute an EAC log's SHA256 itself — it shells out to
+    the pypi package's script, and prints `Checksum: checksum_ok` either way.
+    The app vendors pip packages and a second Python on the box often holds the
+    shim, so both are put on PATH before asking."""
+    env = dict(os.environ)
+    try:
+        import sys as _sys
+        import glob as _glob
+        candidates = [os.path.join(os.path.dirname(_sys.executable), "Scripts")]
+        for pattern in (
+            os.path.expandvars(r"%LocalAppData%\Python\*\Scripts"),
+            os.path.expandvars(r"%LocalAppData%\Programs\Python\Python*\Scripts"),
+            os.path.expandvars(r"%LocalAppData%\Programs\Python\*\Scripts"),
+        ):
+            candidates.extend(_glob.glob(pattern))
+        for p in candidates:
+            if os.path.isdir(p) and p not in env.get("PATH", ""):
+                env["PATH"] = p + os.pathsep + env.get("PATH", "")
+        py_dir = os.path.dirname(_sys.executable)
+        if py_dir not in env.get("PATH", ""):
+            env["PATH"] = py_dir + os.pathsep + env.get("PATH", "")
+    except Exception:
+        pass
+    return env
+
+
+def _logchecker_paths():
+    """(php_exe, phar) for the installed Logchecker, or (None, None)."""
+    from .tools import detect_all_tools
+    tools = detect_all_tools()
+    lc_info = tools.get("logchecker") or {}
+    php_info = tools.get("php") or {}
+    phar = lc_info.get("phar_path")
+    php_exe = lc_info.get("php_exe") or (php_info.get("php_exe") if php_info else None)
+    if not phar or not php_exe or not os.path.isfile(phar) or not os.path.isfile(php_exe):
+        php_exe = shutil.which("php") or php_exe
+    if not phar or not php_exe or not os.path.isfile(phar) or not os.path.isfile(php_exe):
+        return None, None
+    return php_exe, phar
+
+
+def run_logchecker(log_path, timeout=30):
+    """`php logchecker.phar analyze --no_text <log>` -> its output, or None.
+
+    The ONE runner: the score, the report the UI shows and the checksum
+    fallback all read this output, so they cannot disagree about what
+    Logchecker said — or about whether it ran at all."""
+    if not log_path or not os.path.isfile(log_path):
+        return None
+    try:
+        php_exe, phar = _logchecker_paths()
+    except Exception:
+        return None
+    if not php_exe or not phar:
+        return None
+    try:
+        proc = run_tool([php_exe, phar, "analyze", "--no_text", log_path],
+                        stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                        text=True, encoding="utf-8", errors="replace",
+                        timeout=timeout, env=_logchecker_env())
+    except Exception:
+        return None
+    if proc.returncode != 0:
+        return None
+    return (proc.stdout or "") + "\n" + (proc.stderr or "")
+
+
+def parse_logchecker(out):
+    """Logchecker's `--no_text` output as data.
+
+    The header keys it always writes (Ripper/Version/Language/Score/Checksum),
+    the `Details :` lines under them — its own per-check notices, which is where
+    a deduction explains itself — and `raw`, so a version that adds a field
+    later is still visible to whoever opens the log."""
+    rep = {"ripper": "", "version": "", "language": "", "score": None,
+           "checksum": "", "details": [], "raw": (out or "")[:20000]}
+    if not out:
+        return rep
+    for key, field in (("Ripper", "ripper"), ("Version", "version"),
+                       ("Language", "language"), ("Checksum", "checksum")):
+        m = re.search(rf"^{key}\s*:\s*(.*)$", out, re.MULTILINE | re.IGNORECASE)
+        if m:
+            rep[field] = m.group(1).strip()
+    m = re.search(r"^Score\s*:\s*(-?\d+)\s*$", out, re.MULTILINE | re.IGNORECASE)
+    if m:
+        rep["score"] = int(m.group(1))
+    m = re.search(r"^Details\s*:\s*$(.*)", out,
+                  re.MULTILINE | re.IGNORECASE | re.DOTALL)
+    if m:
+        for line in m.group(1).splitlines():
+            line = line.strip()
+            if line:
+                rep["details"].append(line)
+    return rep
+
+
+def log_report(log_path, timeout=30, max_text=200_000):
+    """Everything this app knows about ONE rip log: Logchecker's own report,
+    this app's checksum verdict, and the log's text.
+
+    Read-only, and the answer the owner asked for ("I don't even know a way to
+    view logs"): the score alone never said WHY a log scored 60, and the text is
+    what a person reads to see it. `available` is false when no scorer is
+    installed — an empty report is never dressed up as a scored one."""
+    log_path = str(log_path or "")
+    report = {"path": log_path, "name": os.path.basename(log_path),
+              "exists": bool(log_path) and os.path.isfile(log_path),
+              "available": False, "report": parse_logchecker(None),
+              "checksum": {"state": None, "detail": None},
+              "text": "", "truncated": False, "bytes": 0}
+    if not report["exists"]:
+        return report
+    try:
+        report["bytes"] = os.path.getsize(log_path)
+    except OSError:
+        report["bytes"] = 0
+    out = run_logchecker(log_path, timeout=timeout)
+    report["available"] = out is not None
+    if out:
+        report["report"] = parse_logchecker(out)
+    state, detail = check_log_checksum(log_path)
+    report["checksum"] = {"state": state, "detail": detail}
+    text = read_log_text(log_path)
+    report["truncated"] = len(text) > max_text
+    report["text"] = text[:max_text]
+    return report
+
+
 def score_disc_log(cli_exe, log_path=None, disc_files=None, timeout=30):
     """Score one disc's log with OPSnet Logchecker via PHP. Returns 0-100 or None.
 
@@ -1430,6 +1562,22 @@ def score_disc_log(cli_exe, log_path=None, disc_files=None, timeout=30):
 # ----------------------------------------------------------------------
 # Log checksum + AccurateRip verification (for audit)
 # ----------------------------------------------------------------------
+def _eac_helper_on_path(path=None):
+    """Whether the phar's own checksum helper is runnable with this PATH.
+
+    Logchecker does not validate a log itself: it shells out to the pypi
+    package's `eac-logchecker` script and prints `Checksum: checksum_ok` either
+    way — including for a log with one byte changed. Asking PATH is asking the
+    same question the phar asks itself, and it is the only signal that holds for
+    every log: a log the phar cannot even parse prints no "not validated" notice
+    at all, while a helper it cannot find is missing for all of them."""
+    try:
+        return bool(shutil.which("eac-logchecker",
+                                 path=path or os.environ.get("PATH")))
+    except Exception:
+        return False
+
+
 def check_log_checksum(log_path):
     """Verify the EAC SHA256 log checksum (==== Log checksum ... ====).
 
@@ -1499,14 +1647,51 @@ def check_log_checksum(log_path):
                     phar = lc.get("phar_path")
                     php_exe = lc.get("php_exe") or php.get("php_exe")
                     if os.path.isfile(phar) and php_exe and os.path.isfile(php_exe):
+                        # The same environment score_disc_log runs with, so the
+                        # phar finds its helper wherever it was installed and
+                        # the PATH probe below asks about THAT PATH.
+                        env = _logchecker_env()
                         proc = run_tool([php_exe, phar, "analyze", "--no_text", log_path],
                                         stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-                                        text=True, encoding="utf-8", errors="replace", timeout=15)
+                                        text=True, encoding="utf-8", errors="replace",
+                                        timeout=15, env=env)
                         out = (proc.stdout or "") + "\n" + (proc.stderr or "")
                         m = re.search(r"Checksum\s*:\s*(\w+)", out, re.IGNORECASE)
                         if m:
                             state = m.group(1).lower()
+                            # `checksum_ok` is evidence only when the phar says
+                            # it actually checked. Without its own EAC helper it
+                            # prints the same word and a Notice — "Could not find
+                            # EAC logchecker, checksum not validated" — so the
+                            # answer there is 'unverified': the log CLAIMS a
+                            # checksum and nothing checked it. Measured, on a
+                            # real EAC 1.3 log with one digit of "Peak level"
+                            # changed: Score 100, Checksum: checksum_ok — the
+                            # edit goes through untouched, which is what made
+                            # this branch claim 'ok' for a doctored log.
                             if state == "checksum_ok":
+                                m_rip = re.search(r"Ripper\s*:\s*(\S+)", out,
+                                                  re.IGNORECASE)
+                                if (m_rip and m_rip.group(1).strip().lower()
+                                        == "unknown"):
+                                    # It carries a checksum line nothing can be
+                                    # checked against (the phar could not tell
+                                    # which ripper wrote it): the same
+                                    # "claimed, never checked" reading as a
+                                    # missing helper, not 'unsupported' — that
+                                    # one belongs to a log with no checksum
+                                    # concept at all.
+                                    return ("unverified",
+                                            "Logchecker could not identify the "
+                                            "ripper, so the log's checksum was "
+                                            "left unchecked")
+                                if (re.search(r"checksum not validated", out,
+                                              re.IGNORECASE)
+                                        or not _eac_helper_on_path(env.get("PATH"))):
+                                    return ("unverified",
+                                            "Logchecker found no EAC log checker "
+                                            "to validate the log's checksum, so "
+                                            "its 'checksum_ok' is untested")
                                 return ("ok", None)
                             if state in ("checksum_invalid", "checksum_error"):
                                 return ("invalid", state)

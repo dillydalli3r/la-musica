@@ -1,6 +1,6 @@
 import { Fragment, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
-import { Link, useNavigate } from "react-router-dom";
+import { Link, useNavigate, useSearchParams } from "react-router-dom";
 import {
   ArrowDownUp, BarChart3, ChevronDown, ChevronRight, CloudDownload,
   FileVideo, FolderSync, FolderTree, Info as InfoIcon, Layers, Library, ListChecks,
@@ -29,6 +29,7 @@ import LockedChip from "../components/LockedChip";
 import { forceDict, loadForceSel } from "../lib/force";
 import Segmented from "../components/Segmented";
 import PageHeader from "../components/PageHeader";
+import GradeWarning from "../components/GradeWarning";
 import StarRating from "../components/StarRating";
 import { ratingOf, useRatings, useSetRating, FOLDER_RATING_NOTE } from "../lib/ratings";
 import CoverImg, { TrackCover } from "../components/CoverImg";
@@ -242,7 +243,22 @@ export default function LibraryPage() {
   const [view, setView] = useLibraryView();
   // checkboxes (and the batch toolbar they feed) only exist in select mode
   const { selectMode, toggleSelectMode } = useSelectMode();
+  const [searchParams, setSearchParams] = useSearchParams();
   const [preset, setPreset] = useState<Preset>("all");
+  // A link can NAME the filter: `/library?filter=failing` is where the grade
+  // warning's "+N more" sends a reader who wants the whole list. The preset is
+  // applied on arrival, and the parameter is then dropped, because the quick
+  // filter's own menu owns the filter from that point on — an address bar still
+  // claiming a filter the reader has since cleared would be the URL lying about
+  // the rows. An unknown value is ignored, never trusted into the state.
+  useEffect(() => {
+    const wanted = searchParams.get("filter");
+    if (!wanted) return;
+    if (PRESETS.some((p) => p.id === wanted)) setPreset(wanted as Preset);
+    const next = new URLSearchParams(searchParams);
+    next.delete("filter");
+    setSearchParams(next, { replace: true });
+  }, [searchParams, setSearchParams]);
   // The two facets beside the presets: the user's OWN star ratings ("what have
   // I not rated yet") and the advisory ladder. Both are facets rather than
   // presets because each has more than one answer worth picking — the preset
@@ -805,6 +821,13 @@ export default function LibraryPage() {
     <div className="p-6 space-y-5 mx-auto max-w-6xl">
       {/* toolbar rides in the header: controls left, stats/select/counts right */}
       <PageHeader icon={Library} title="Library">
+      {/* The library's own grading verdict, first thing on the page: whether
+          every album passed its checks and, when one did not, which albums and
+          tracks failed — each row linking to the thing it names. It is the
+          same strip Home draws at its top, off the same server object
+          (`/api/grades/summary`, components/GradeWarning), so the two pages
+          can never count the library differently. */}
+      <GradeWarning />
       {/* The layout finding is the one condition that is about the whole
           library rather than an album: it says part of the music folder is
           not a graded album at all, which no per-album badge can show. The

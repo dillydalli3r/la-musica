@@ -15,6 +15,7 @@ import type {
   DiscoveryImageRow,
   DownloadEntry,
   DownloadsPayload,
+  GradeWarning,
   HomeData,
   ImportAutonomy,
   ImportBulkJob,
@@ -29,6 +30,7 @@ import type {
   LyricsProviders,
   LyricsPublishBatchResult,
   LyricsXlitResult,
+  LogReportPayload,
   MBArtistBrowse,
   MBRecordingBrowse,
   MBReleaseChoicePayload,
@@ -2487,6 +2489,24 @@ export const api = {
   /** The report the LAST layout scan stored (script 20, or the panel's Scan) —
    *  walk-free, which is why the Library page can afford to ask on load. */
   libraryLayoutReport: () => json<LayoutSnapshot>(`${API}/library/layout/report`),
+
+  /** Whether the library passes its grading checks, and — when it does not —
+   *  what fails, with a link target per row. The SAME object `/api/home`
+   *  carries as `grade_warning`: the Library page fetches no Home payload, so
+   *  this is how both pages read one answer rather than counting the library
+   *  twice. `ok` and `grade_pct` come from one sum, so the strip can never
+   *  contradict the header's percentage. */
+  gradesSummary: () => json<GradeWarning>(`${API}/grades/summary`),
+
+  /** One rip log in full: Logchecker's own report, this app's checksum
+   *  verdict, and the log's text — the answer to "why did this score 60".
+   *  `path` is the `.log` itself or the album folder holding it; an album with
+   *  several logs is asked disc by disc (`disc`). Read-only, and `available`
+   *  false means no scorer is installed — a missing report, never a zero. */
+  logReport: (path: string, disc?: number) =>
+    json<LogReportPayload>(
+      `${API}/log/report?path=${encodeURIComponent(path)}${disc ? `&disc=${disc}` : ""}`
+    ),
 
   /** Scan the library AND settle what the folder itself proves (script 20's
    *  apply phase): wrong-case names, audio outside any album folder, and what

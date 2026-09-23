@@ -27,3 +27,10 @@ threadpoolctl==3.6.0
 # that has not re-run pip yet reports "push unavailable" on /api/push/status
 # rather than failing to start or losing the live event channel.
 cryptography==50.0.1
+# The EAC rip-log checksum verifier (the pypi package mlo.discs imports, and
+# the console script Logchecker's PHP shells out to for `Checksum:`).
+# WITHOUT IT the phar prints `Checksum: checksum_ok` for a log it never
+# validated — measured on a real EAC 1.3 log with one digit changed: Score 100,
+# checksum_ok — so the container could not tell a doctored log from a clean one,
+# and a log that changed after EAC signed it passed every check the app makes.
+eac-logchecker==0.8.1

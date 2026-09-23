@@ -1,4 +1,5 @@
 import { useEffect, useState } from "react";
+import { Link } from "react-router-dom";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { ExternalLink, RotateCcw } from "lucide-react";
 import { api } from "../api";
@@ -25,8 +26,15 @@ const KIND_LABEL: Record<SourceKind, string> = {
 };
 
 /** What each config key a source may need is called and where it is issued.
- *  The KEYS come from the endpoint's `needs`; this is only their wording. */
-const KEY_INFO: Record<string, { label: string; hint: string; url?: string; link?: string; secret?: boolean }> = {
+ *  The KEYS come from the endpoint's `needs`; this is only their wording.
+ *
+ *  `tab`/`tabLink` are for a key that can also arrive as a FILE: they name the
+ *  Settings tab that holds the import box, and the copy that links to it. The
+ *  link is only drawn where Settings is a page this render can reach — the
+ *  wizard's Keys step is behind App's first-run gate, which opens /setup and
+ *  nothing else, so there the hint names the box instead of linking to a page
+ *  that would bounce straight back to the step. */
+const KEY_INFO: Record<string, { label: string; hint: string; url?: string; link?: string; secret?: boolean; tab?: string; tabLink?: string }> = {
   spotify_client_id: {
     label: "Spotify client ID",
     hint: "Create an app, then copy its Client ID from the dashboard.",
@@ -56,13 +64,17 @@ const KEY_INFO: Record<string, { label: string; hint: string; url?: string; link
   rym_cookie: {
     label: "RateYourMusic cookie",
     hint:
-      "How to get it: sign in to rateyourmusic.com in your browser → F12 (dev tools) → Network → reload the page → click any request to rateyourmusic.com → Headers → Request Headers → copy everything after \"Cookie:\". " +
-      "Paste the WHOLE header value — every name=value pair it shows, not just one token like cf_clearance: RYM checks the session cookies together, and the app normalises the paste for you (newlines, a stray \"Cookie:\" label). " +
-      "It is a session credential: keep it to yourself, and paste a fresh one when RYM starts refusing — signing out or clearing cookies invalidates it, and Test asks RYM again even after a refusal. " +
+      "Two ways in: a cookies.txt in Netscape format — what a browser-extension exporter like \"Get cookies.txt\" writes — is imported by the box on Settings' Discovery tab (paste it or drop the file; only its rateyourmusic.com cookies are kept), " +
+      "or sign in to rateyourmusic.com in your browser → F12 (dev tools) → Network → reload the page → click any request to rateyourmusic.com → Headers → Request Headers → copy everything after \"Cookie:\" and paste it in the field above. " +
+      "Either way take the WHOLE value — every name=value pair it shows, not just one token like cf_clearance: RYM checks the session cookies together, and the app normalises the paste for you (newlines, a stray \"Cookie:\" label). " +
+      "Its `session` cookie is HttpOnly, so a browser extension's export is the only way to hand that one over at all. " +
+      "It is a session credential: keep it to yourself, and set a fresh one when RYM starts refusing — signing out or clearing cookies invalidates it, and Test asks RYM again even after a refusal. " +
       "MusicBrainz already states the RYM page for many releases, so this is only needed for the rest.",
     url: "https://rateyourmusic.com",
     link: "rateyourmusic.com",
     secret: true,
+    tab: "discovery",
+    tabLink: "Import from cookies.txt — Settings → Discovery",
   },
   // The AcoustID pair belongs HERE, in the wizard's Keys step: the application
   // key is what makes fingerprint matching work at all, and the user key is
@@ -118,6 +130,28 @@ const KEY_HOME: Record<string, string> = {
   ai_model: "Settings → AI",
   ai_api_key: "Settings → AI",
   auth_password_hash: "first-run setup, or Sign-in & security",
+};
+
+/** What to say about a `needs` entry that is an installed PROGRAM rather than
+ *  a config key. There is one today — yt-dlp, the only name in
+ *  `server/sources_health.py`'s `_TOOLS`, which checks for it in the app's
+ *  dependencies folder and on PATH — and it has no field to type, so it is a
+ *  note wherever the ROW that needs it is drawn (Settings → Sources) and once
+ *  in the panel's own copy wherever it is not (the wizard's Keys step draws
+ *  only the rows that ask for a key). Both halves of the YouTube cookie story
+ *  are in the note: yt-dlp is what searches, fetches and captions, and its
+ *  cookies are a Netscape-format cookies.txt like RYM's — `tab`/`tabLink` jump
+ *  to the box that imports them, where Settings is a page this render can
+ *  reach (see KEY_INFO). */
+const TOOL_INFO: Record<string, { label: string; hint: string; tab?: string; tabLink?: string }> = {
+  "yt-dlp": {
+    label: "yt-dlp",
+    hint:
+      "The downloader behind every YouTube path: it searches, fetches the missing music videos (script 11) and reads YouTube captions for lyrics (script 18). Installed from the Tools step (or Settings → Dependencies). " +
+      "Its cookies are a cookies.txt in Netscape format — what a browser-extension exporter like \"Get cookies.txt\" writes — imported into the app's own YouTube cookie jar on the Videos tab, which yt-dlp then reads for age-gated, members-only and throttled videos.",
+    tab: "videos",
+    tabLink: "Import its cookies — Settings → Videos",
+  },
 };
 
 /** `needs` mixes config keys with installed tools (yt-dlp): only the keys get
@@ -314,12 +348,32 @@ export default function SourcesPanel({ only, askKeys }: { only?: SourceKind | So
         )}
       </div>
 
+      {/* The one thing the Keys step names that is not a key: yt-dlp is a
+          PROGRAM, so it has no row here — its `needs yt-dlp` chips hang off
+          the YouTube rows, which are activity sources that Settings → Sources
+          unfolds — and the cookie half of it is part of what a first run
+          should know about the downloader it is about to lean on. */}
+      {askKeys && (
+        <div className="rounded-md border border-border bg-zinc-950/40 px-3 py-2 space-y-1">
+          <div className="text-[10px] uppercase tracking-widest text-zinc-500">Not a key — the programs behind the sources</div>
+          {Object.entries(TOOL_INFO).map(([id, tool]) => (
+            <div key={id} className="text-[10px] text-zinc-600 flex items-center gap-1 flex-wrap">
+              <span className="text-zinc-500">{tool.label}:</span>
+              <span>{tool.hint}</span>
+            </div>
+          ))}
+        </div>
+      )}
+
       {groups.map(([kind, list]) => (
         <div key={kind} className="space-y-1">
           {!askKeys && <div className="text-[10px] uppercase tracking-widest text-zinc-500">{KIND_LABEL[kind]}</div>}
           <div className="rounded-md border border-border divide-y divide-border/60">
             {list.map((row) => {
               const promptKeys = promptKeysOf(row);
+              // Programs this row needs (`needs yt-dlp`): no field to type, so
+              // the note under the row is where it is named and explained.
+              const toolNeeds = row.needs.filter((k) => !(k in KEY_INFO) && k in TOOL_INFO);
               // The RYM rows need exactly one key — the cookie — so the chip
               // names it: "cookie missing" is what the fix (paste a logged-in
               // Cookie header) hangs off. The live failure reason arrives in
@@ -367,7 +421,11 @@ export default function SourcesPanel({ only, askKeys }: { only?: SourceKind | So
                   {row.needs
                     .filter((k) => !(k in KEY_INFO))
                     .map((k) => (
-                      <span key={k} className="chip border border-white/15 bg-white/5 text-zinc-400">
+                      <span
+                        key={k}
+                        className="chip border border-white/15 bg-white/5 text-zinc-400"
+                        title={TOOL_INFO[k]?.hint}
+                      >
                         {KEY_HOME[k] ? `set ${k} in ${KEY_HOME[k]}` : `needs ${k}`}
                       </span>
                     ))}
@@ -434,26 +492,55 @@ export default function SourcesPanel({ only, askKeys }: { only?: SourceKind | So
               // Where the key is issued, in the panel's own words. The Keys
               // step keeps these: a hint that says where to get the value is
               // part of asking for it, and it is one line per key.
-              const hints = promptKeys.map((k) => {
-                const info = KEY_INFO[k];
-                return (
-                  <div key={k} className="text-[10px] text-zinc-600 flex items-center gap-1 flex-wrap">
-                    <span className="text-zinc-500">{info.label}:</span>
-                    <span>{info.hint}</span>
-                    {info.url && (
-                      <a
-                        className="text-accent-soft hover:underline inline-flex items-center gap-0.5"
-                        href={info.url}
-                        target="_blank"
-                        rel="noreferrer"
-                      >
-                        {info.link ?? info.url}
-                        <ExternalLink className="h-2.5 w-2.5" />
-                      </a>
-                    )}
-                  </div>
-                );
-              });
+              const hints = [
+                ...promptKeys.map((k) => {
+                  const info = KEY_INFO[k];
+                  return (
+                    <div key={k} className="text-[10px] text-zinc-600 flex items-center gap-1 flex-wrap">
+                      <span className="text-zinc-500">{info.label}:</span>
+                      <span>{info.hint}</span>
+                      {info.url && (
+                        <a
+                          className="text-accent-soft hover:underline inline-flex items-center gap-0.5"
+                          href={info.url}
+                          target="_blank"
+                          rel="noreferrer"
+                        >
+                          {info.link ?? info.url}
+                          <ExternalLink className="h-2.5 w-2.5" />
+                        </a>
+                      )}
+                      {/* The key can also arrive as a FILE, and the box that
+                          imports it is a tab of this same page. Drawn only
+                          where Settings is reachable at all: the wizard's own
+                          gate routes everything but /setup back to /setup, so
+                          there the hint names the box instead of linking to a
+                          page that would bounce. */}
+                      {info.tab && info.tabLink && !askKeys && (
+                        <Link replace className="text-accent-soft hover:underline" to={`/settings?tab=${info.tab}`}>
+                          {info.tabLink}
+                        </Link>
+                      )}
+                    </div>
+                  );
+                }),
+                // A needed program is the same shape of line, with no field
+                // above it to paste into.
+                ...toolNeeds.map((id) => {
+                  const tool = TOOL_INFO[id];
+                  return (
+                    <div key={id} className="text-[10px] text-zinc-600 flex items-center gap-1 flex-wrap">
+                      <span className="text-zinc-500">{tool.label}:</span>
+                      <span>{tool.hint}</span>
+                      {tool.tab && tool.tabLink && !askKeys && (
+                        <Link replace className="text-accent-soft hover:underline" to={`/settings?tab=${tool.tab}`}>
+                          {tool.tabLink}
+                        </Link>
+                      )}
+                    </div>
+                  );
+                }),
+              ];
 
               if (askKeys) {
                 return (
@@ -477,9 +564,9 @@ export default function SourcesPanel({ only, askKeys }: { only?: SourceKind | So
                 <div key={busyId(row)} className="px-3 py-2 space-y-1.5">
                   <div className="flex items-center gap-2 flex-wrap">{chips}</div>
                   {report}
-                  {promptKeys.length > 0 && (
+                  {(promptKeys.length > 0 || toolNeeds.length > 0) && (
                     <div className="space-y-1.5 pt-0.5">
-                      {keyFields}
+                      {promptKeys.length > 0 && keyFields}
                       <div className="space-y-1">{hints}</div>
                     </div>
                   )}

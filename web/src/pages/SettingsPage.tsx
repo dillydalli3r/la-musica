@@ -1,5 +1,5 @@
 import { useEffect, useState, type DragEvent } from "react";
-import { useNavigate } from "react-router-dom";
+import { useNavigate, useSearchParams } from "react-router-dom";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { Bell, Save, RotateCcw, LayoutGrid, Settings as SettingsIcon, Check, Eye, EyeOff, ChevronDown, ChevronUp, Wand2, X, FolderOpen, Loader2, Trash2 } from "lucide-react";
 import { api, deviceUnavailable, unavailableFeatures } from "../api";
@@ -417,7 +417,8 @@ function YoutubeCookieJar() {
       </div>
       <div className="text-[11px] text-zinc-600">
         In the browser you are signed in to YouTube with, export its cookies to a <span className="text-zinc-400">cookies.txt</span>{" "}
-        (a "Get cookies.txt" extension writes exactly this file), then paste its contents below or drop the file onto the box.
+        (a "Get cookies.txt" extension writes exactly this file, in Netscape format — the only shape this box accepts), then paste its
+        contents below or drop the file onto the box.
         yt-dlp reads the saved copy for age-gated, members-only and throttled videos — the jar belongs to this app, at{" "}
         <span className="text-zinc-400">{jar?.path ?? "<music folder>/.mlo/data/cookies.txt"}</span>.
       </div>
@@ -586,8 +587,9 @@ function RymCookieJar({ onStored }: { onStored: (value: string) => void }) {
         )}
       </div>
       <div className="text-[11px] text-zinc-600">
-        Signed in to rateyourmusic.com, export the browser's cookies to a <span className="text-zinc-400">cookies.txt</span> — the
-        Firefox extension <span className="text-zinc-400">"cookies.txt"</span> by Rob W writes exactly that file — then paste its
+        Signed in to rateyourmusic.com, export the browser's cookies to a <span className="text-zinc-400">cookies.txt</span>{" "}
+        in Netscape format — the Firefox extension <span className="text-zinc-400">"cookies.txt"</span> by Rob W writes exactly
+        that file, and it is the only shape this box accepts — then paste its
         contents below or drop the file onto the box. It replaces the manual paste above: only the{" "}
         <span className="text-zinc-400">rateyourmusic.com</span> cookies are kept (RYM's{" "}
         <span className="text-zinc-400">session</span> cookie is HttpOnly, so this export is the only way to hand it over), and they
@@ -1053,7 +1055,7 @@ export default function SettingsPage() {
         {
           k: "youtube_cookies_mode", label: "Cookies for YouTube", type: "select",
           options: [["none", "None — anonymous"], ["file", "A cookies file (saved below)"], ["browser", "Read from a browser"]],
-          help: "Your own YouTube session is the only thing that opens an age-gated or members-only video — without it YouTube answers \"Sign in to confirm your age\" — and it stops the throttling a fresh IP gets. None: nothing is sent. A cookies file: the jar saved in the box below this row, which you paste or drop there. Read from a browser: yt-dlp opens that browser's own cookie store — same machine, signed in to YouTube, and closed if its store is locked.",
+          help: "Your own YouTube session is the only thing that opens an age-gated or members-only video — without it YouTube answers \"Sign in to confirm your age\" — and it stops the throttling a fresh IP gets. None: nothing is sent. A cookies file: the jar saved in the box below this row — paste a cookies.txt into it or drop the file on it, in Netscape format, which is what a browser-extension exporter like \"Get cookies.txt\" writes. Read from a browser: yt-dlp opens that browser's own cookie store — same machine, signed in to YouTube, and closed if its store is locked.",
         },
         {
           k: "youtube_cookies_browser", label: "Browser to read cookies from", type: "select",
@@ -1288,7 +1290,7 @@ export default function SettingsPage() {
         { k: "discovery_timeout_s", label: "Request timeout (s)", type: "number", min: 3, max: 30 },
         {
           k: "rym_cookie", label: "RateYourMusic cookie", type: "password",
-          help: "Only needed when RYM answers with a challenge. Sign in to rateyourmusic.com, press F12 → Network → reload → click any request to rateyourmusic.com → Headers → Request Headers → copy everything after \"Cookie:\" and paste it here (newlines and the \"Cookie:\" label are handled for you). The import panel below is the easier way when you have it: a \"cookies.txt\" browser extension (the Firefox one is Rob W's cookies.txt) exports the cookies of a signed-in rateyourmusic.com profile, and only its rateyourmusic.com cookies land here — RYM's `session` cookie is HttpOnly, so that export is the only way to get it out of a browser at all. It is a session credential — do not share it, and paste a fresh one when RYM starts refusing, since signing out or clearing cookies invalidates it. Blank = RYM is skipped like any other unavailable source; MusicBrainz still resolves RYM links for well-known releases. Test it with the Sources panel's Test button.",
+          help: "Only needed when RYM answers with a challenge. Two ways in: the import panel below takes a cookies.txt in Netscape format — what a browser-extension exporter like \"Get cookies.txt\" writes — pasted into the box or dropped on it, and keeps only its rateyourmusic.com cookies; or open the devtools route — sign in to rateyourmusic.com, press F12 → Network → reload → click any request to rateyourmusic.com → Headers → Request Headers → copy everything after \"Cookie:\" and paste it in the field above (newlines and the \"Cookie:\" label are handled for you). RYM's `session` cookie is HttpOnly, so a browser extension's export is the only way to get it out of a browser at all. It is a session credential — do not share it, and paste a fresh one when RYM starts refusing, since signing out or clearing cookies invalidates it. Blank = RYM is skipped like any other unavailable source; MusicBrainz still resolves RYM links for well-known releases. Test it with the Sources panel's Test button.",
         },
         {
           k: "rym_links_auto", label: "Auto-find RateYourMusic links", type: "bool",
@@ -1545,6 +1547,20 @@ export default function SettingsPage() {
   const [previewing, setPreviewing] = useState(false);
   const [rawConfig, setRawConfig] = useState("{}");
   const [tab, setTab] = useState("general");
+  // A link can name the tab it wants: `/settings?tab=discovery` is how the
+  // Sources panel's RateYourMusic row reaches that tab's cookie import box.
+  // Every pick goes through here and drops the parameter again (the effect
+  // under NAV adopts whatever the URL names), so the rail and the URL cannot
+  // disagree — and the NEXT click on that link still moves, where navigating
+  // to an already-current URL would not.
+  const [params, setParams] = useSearchParams();
+  const pickTab = (id: string) => {
+    setTab(id);
+    if (!params.get("tab")) return;
+    const next = new URLSearchParams(params);
+    next.delete("tab");
+    setParams(next, { replace: true });
+  };
   // This browser's own notification permission, re-read on mount so the
   // panel shows the truth even when it was granted in another tab.
   const [notifyState, setNotifyState] = useState<NotifyState>(() => notificationState());
@@ -1661,6 +1677,16 @@ export default function SettingsPage() {
     { id: "audiometa", label: "Key & BPM", section: "Scripts" },
     { id: "importtags", label: "Import & tags", section: "Scripts" },
   ];
+
+  // The other half of `pickTab` above: adopt the tab the URL names, on mount
+  // and on every later change, so a link into a tab works however the page was
+  // reached. A name the rail does not have is dropped — an unknown tab would
+  // render an empty column — which is why this reads NAV, declared just above
+  // and usable here because the effect runs after the render that built it.
+  useEffect(() => {
+    const want = params.get("tab") ?? "";
+    if (want && NAV.some((n) => n.id === want)) setTab(want);
+  }, [params]);
 
   const runPreview = async () => {
     setPreviewing(true);
@@ -2128,7 +2154,7 @@ export default function SettingsPage() {
                   key={i}
                   className="w-full text-left px-2.5 py-1.5 rounded-md hover:bg-white/10 tap"
                   onClick={() => {
-                    if (h.tab) setTab(h.tab);
+                    if (h.tab) pickTab(h.tab);
                     setQ("");
                   }}
                 >
@@ -2152,7 +2178,7 @@ export default function SettingsPage() {
                 <div className="hidden md:block px-3 pt-3 pb-1 text-[10px] uppercase tracking-wider text-zinc-600 first:pt-0">{n.section}</div>
               )}
               <button
-                onClick={() => setTab(n.id)}
+                onClick={() => pickTab(n.id)}
                 className={`w-full whitespace-nowrap text-left px-3 py-2 rounded-md text-xs transition-colors md:py-1.5 ${
                   tab === n.id ? "bg-accent on-accent font-medium" : "text-zinc-400 hover:text-white hover:bg-panel border border-transparent"
                 } tap`}

@@ -506,7 +506,79 @@ else:
        f"REAL, and the readout names the missing legs "
        f"({tr.get('audit')}, {tr.get('audit_legs')})")
 
+print("== the phar's checksum word is only evidence when it validated ==")
+# Logchecker does not compute the log's SHA256 itself: it shells out to the
+# pypi `eac-logchecker` script and prints `Checksum: checksum_ok` either way.
+# On the owner's container the helper was missing, so a real EAC 1.3 log with
+# one digit of "Peak level" changed came back `Score 100` / `checksum_ok` and
+# the app recorded it as verified. The fallback reads the phar's own notice and
+# the helper on PATH now — the second is what holds for a log the phar cannot
+# even parse, which prints no notice at all.
+with open(os.path.join(ALBUM, "CD-1.log"), "w", encoding="utf-8") as fh:
+    fh.write("Exact Audio Copy V1.3 from 2. September 2016\n\n"
+             "Track |  Start  |  Length  | Start sector | End sector\n"
+             "---------------------------------------------------------\n"
+             "  1  | 00:00.00 | 00:00.10 | 0 | 8\n\n"
+             "Track  1\n     Copy CRC 00000000\n\n"
+             "==== Log checksum "
+             + "0" * 64 + " ====\n")
+CHECKSUM_LOG = os.path.join(ALBUM, "CD-1.log")
+
+_saved_csum = (discs_mod.HAS_EAC_CHECKER, discs_mod.eac_logchecker,
+               discs_mod.run_tool, discs_mod._eac_helper_on_path)
+try:
+    # No verifier in-process, so the phar fallback is the path under test.
+    discs_mod.HAS_EAC_CHECKER = False
+    discs_mod.eac_logchecker = None
+
+    def _phar(text):
+        def fake(argv, **kw):
+            class P:
+                returncode = 0
+                stdout = text
+                stderr = ""
+            return P()
+        return fake
+
+    NOTICE = ("Ripper  : EAC\nVersion : 1.3\nLanguage: en\nScore   : 100\n"
+              "Checksum: checksum_ok\nDetails :\n"
+              "    [Notice] Could not find EAC logchecker, checksum not validated.\n")
+
+    discs_mod.run_tool = _phar(NOTICE)
+    discs_mod._eac_helper_on_path = lambda path=None: False
+    state, detail = discs_mod.check_log_checksum(CHECKSUM_LOG)
+    ok(state == "unverified",
+       f"a 'checksum_ok' the phar could not validate reads 'unverified', never "
+       f"'ok' ({state}: {detail})")
+
+    discs_mod._eac_helper_on_path = lambda path=None: True
+    # …and with the helper present AND the phar not saying it failed to
+    # validate, its word stands: `ok`. (The notice above is decisive on its
+    # own — the phar saying it did not validate is not overruled by PATH.)
+    discs_mod.run_tool = _phar(
+        "Ripper  : EAC\nVersion : 1.3\nLanguage: en\nScore   : 100\n"
+        "Checksum: checksum_ok\nDetails :\n"
+        "    [Notice] Log checksum verified.\n")
+    state, _detail = discs_mod.check_log_checksum(CHECKSUM_LOG)
+    ok(state == "ok",
+       f"the same word WITH the helper on PATH is a pass ({state})")
+
+    discs_mod.run_tool = _phar(NOTICE.replace("checksum_ok", "checksum_invalid"))
+    state, _detail = discs_mod.check_log_checksum(CHECKSUM_LOG)
+    ok(state == "invalid", f"a checksum the phar refuses is 'invalid' ({state})")
+
+    discs_mod.run_tool = _phar("Ripper  : unknown\nVersion : \nScore   : 0\n"
+                               "Checksum: checksum_ok\nDetails :\n"
+                               "    Unknown log file, could not determine ripper.\n")
+    state, _detail = discs_mod.check_log_checksum(CHECKSUM_LOG)
+    ok(state == "unverified",
+       f"a log the phar cannot parse is 'unverified', not 'ok' ({state})")
+finally:
+    (discs_mod.HAS_EAC_CHECKER, discs_mod.eac_logchecker, discs_mod.run_tool,
+     discs_mod._eac_helper_on_path) = _saved_csum
+
 shutil.rmtree(TMP, ignore_errors=True)
+
 print()
 if FAILS:
     print("FAILED: %d check(s)" % len(FAILS))

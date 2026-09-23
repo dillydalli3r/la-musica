@@ -1,6 +1,6 @@
 # la musica
 
-**v3.23.1** — a self-hosted app that *manages, optimizes, audits, grades and plays* your music library, from a browser, a desktop window or a phone.
+**v3.23.2** — a self-hosted app that *manages, optimizes, audits, grades and plays* your music library, from a browser, a desktop window or a phone.
 
 **la musica** (formerly Music Library Optimizer) is a FastAPI backend plus a React UI over the `mlo` engine: music and music videos (karaoke-synced lyrics), manual and smart playlists, likes and favourites, artist artwork and biographies, a multi-source lyrics chain, offline caching, device export, and a managed Soulseek client whose auto-importer verifies what it downloaded.
 All state — config, playlists, favourites, the beets library, Soulseek config, measured loudness, caches, runtime-installed tools — lives in one hidden `.mlo` folder in your music directory.

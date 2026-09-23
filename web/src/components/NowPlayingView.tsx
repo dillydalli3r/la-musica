@@ -373,6 +373,30 @@ function VolumeControl() {
   );
 }
 
+/** Tailwind's own `md`, written as a query in the SAME unit (48rem), so this
+ *  line and the `md:` classes the layout switches on cannot drift apart. */
+const MD_UP = "(min-width: 48rem)";
+
+/** True at `md` and up, live. The compact phone header (see `compact`) is the
+ *  one piece of this player that asks JavaScript for the width instead of
+ *  letting a breakpoint class do the switching: what the lyrics button DOES
+ *  changes with it — expand the block, or only toggle the pane — and no `md:`
+ *  utility can pick a click handler. Read on mount so the first paint already
+ *  knows, and on `change` so a rotation or a dragged window re-decides instead
+ *  of leaving the phone's mode on a desktop-width screen. */
+function useMdUp() {
+  const [up, setUp] = useState(() => window.matchMedia?.(MD_UP).matches ?? true);
+  useEffect(() => {
+    const mq = window.matchMedia?.(MD_UP);
+    if (!mq) return;
+    const on = (e: MediaQueryListEvent) => setUp(e.matches);
+    setUp(mq.matches); // the width can move between render and this effect
+    mq.addEventListener("change", on);
+    return () => mq.removeEventListener("change", on);
+  }, []);
+  return up;
+}
+
 export default function NowPlayingView(p: Props) {
   // Subscribed field by field, never as a selector-less `useStore()`: this is
   // the fullscreen pane, and the store is written many times a second while
@@ -411,6 +435,18 @@ export default function NowPlayingView(p: Props) {
   // Lyrics pane, default on; the toggle sits beside the visualizer's in the
   // top bar (LYRICS_KEY carries the why).
   const [showLyrics, setShowLyrics] = useState(() => localStorage.getItem(LYRICS_KEY) !== "0");
+  // ---- the phone's compact mode -------------------------------------------
+  // Reported on a phone: the cover art, the title + format readout, the
+  // album · artist row and the star row together took the whole screen before
+  // the first control, so below `md` this overlay opens COMPACT — ONE header
+  // row (thumbnail, title, artist · album) with the transport and the seek bar
+  // under it, and the lyrics pane away. The lyrics button in the top bar is the
+  // expand/collapse control there (see its handler): one press opens the full
+  // block AND the pane the button is named for, the next puts both back. At
+  // `md` and up nothing reads this state — the block, the pane and the button
+  // are exactly what they were.
+  const mdUp = useMdUp();
+  const [compact, setCompact] = useState(true);
   // ReplayGain preamp: the slider drags locally and commits to the config on a
   // short debounce, so one drag is one config write (and one re-fetch of the
   // track's gain), not one per 0.5 dB step. The commit goes through a ref —
@@ -748,11 +784,17 @@ export default function NowPlayingView(p: Props) {
   // Layout (cover sizing, pane presence) follows the on-screen lyrics even
   // while stale so next/previous never reflows the whole view.
   const layoutHasLyrics = hasLyricsText(lyricsText) && !instrumental;
+  // The compact header is a PHONE mode: at `md` and up this is false whatever
+  // the state says, so a window dragged wide (or a mode left over from a
+  // phone-width open) cannot leave the desktop layout without its block.
+  const compactMode = compact && !mdUp;
   // Whether the pane is actually on screen: the track has lyrics AND the
-  // reader has not dismissed them. The track's lyrics still decide the
-  // toggle's presence (below) — a button that cannot do anything is hidden,
-  // not rendered inert.
-  const paneOpen = layoutHasLyrics && showLyrics;
+  // reader has not dismissed them — and, below `md`, the overlay is not in its
+  // compact header, where the pane is the expanded HALF of the mode and the
+  // one button that opens it is the same lyrics button. The track's lyrics
+  // still decide the toggle's presence (below) — a button that cannot do
+  // anything is hidden, not rendered inert.
+  const paneOpen = layoutHasLyrics && (mdUp ? showLyrics : !compactMode);
   const hasLyrics = layoutHasLyrics && !staleLyrics;
   const plainLines = useMemo(() => {
     if (!hasLyrics) return [];
@@ -1273,6 +1315,20 @@ export default function NowPlayingView(p: Props) {
     </div>
   );
 
+  // The lyrics button's own wording, per width: above `md` it toggles the pane
+  // and nothing else; below `md` it is the compact header's expand / collapse
+  // control (its handler carries the why).
+  const lyricsTitle = mdUp
+    ? "Toggle the lyrics pane"
+    : compact
+      ? "Expand the player"
+      : "Collapse the player";
+  // What that button lights on: the reader's pane pick above `md` (exactly as
+  // it always has), the expanded block below it. Not `paneOpen`, which is false
+  // for a track with no lyrics even when the phone has expanded it — the
+  // control owns the mode there, and the mode exists for every track.
+  const lyricsOn = mdUp ? showLyrics : !compactMode;
+
   return (
     /* No polarity tint on the root anymore: the whole player draws its text on
        the ambience through the wash below, and the only surfaces that still
@@ -1463,21 +1519,42 @@ export default function NowPlayingView(p: Props) {
                 lyrics button (Mic2 on the bar toggles the docked pane).
                 Hidden when the track has no lyrics rather than shown inert —
                 the same rule the visualizer follows over a music video: a
-                control that cannot do anything is not drawn. It used to be
-                nothing at all: the pane appeared whenever lyrics existed and
-                could not be put away, which is what made it feel like an
-                accident of the layout instead of something you own. */}
-            {!videoPath && layoutHasLyrics && (
+                control that cannot do anything is not drawn (below `md` the
+                compact header is the exception; see the last paragraph). It
+                used to be nothing at all: the pane appeared whenever lyrics
+                existed and could not be put away, which is what made it feel
+                like an accident of the layout instead of something you own.
+
+                Below `md` it is ALSO the compact header's one control (one
+                button, not one per width): the expanded view it opens is the
+                pane the button is named for plus the block the phone report
+                asked to collapse, so one press brings both back. It lights on
+                `lyricsOn` rather than on `paneOpen` for the same reason the
+                compact mode reads it — below `md` the MODE owns the pane, and
+                at `md` and up the two flags are equal. A phone press never
+                writes LYRICS_KEY: the compact mode is a mode, not the reader's
+                pane pick, and it should not follow them to the desktop.
+
+                Which is also why the button is drawn for EVERY track below
+                `md`, lyrics or not: there it is the only way out of the
+                compact header, and an instrumental stuck in it would have no
+                art and no rating at all. Above `md` the old rule stands — no
+                lyrics, no button. */}
+            {!videoPath && (layoutHasLyrics || !mdUp) && (
               <button
-                className={`p-2 rounded-lg transition-colors hover:bg-white/10 ${showLyrics ? "text-accent" : "text-current hover:text-white"}`}
+                className={`p-2 rounded-lg transition-colors hover:bg-white/10 ${lyricsOn ? "text-accent" : "text-current hover:text-white"}`}
                 onClick={() => {
+                  if (!mdUp) {
+                    setCompact(!compact);
+                    return;
+                  }
                   const v = !showLyrics;
                   setShowLyrics(v);
                   persist(LYRICS_KEY, v ? "1" : "0");
                 }}
-                title="Toggle the lyrics pane"
-                aria-label="Toggle the lyrics pane"
-                aria-pressed={showLyrics}
+                title={lyricsTitle}
+                aria-label={lyricsTitle}
+                aria-pressed={lyricsOn}
               >
                 <Mic2 className="h-5 w-5" />
               </button>
@@ -1721,7 +1798,44 @@ export default function NowPlayingView(p: Props) {
                 : "max-h-full min-h-0 overflow-x-clip overflow-y-auto"
             }`}
           >
-            <div className="relative">
+            {/* the phone's compact header — the whole top block as ONE row
+                (the note on `compact` above carries the report). `md:hidden`
+                as well as the state: this must never render at md and up
+                whatever the state says, and the block below must never show
+                below md while it does. Fixed row heights like the block's own
+                rows, so a track change cannot make the header jump. */}
+            {compactMode && (
+              <div className="md:hidden w-[26rem] max-w-full min-w-0 flex items-center gap-3 px-1">
+                <CoverImg
+                  albumPath={p.current.albumPath}
+                  coverFile={coverFile}
+                  wrapperClass="shrink-0 w-12 h-12 rounded-lg shadow-lg bg-raise overflow-hidden"
+                />
+                {/* min-w-0 + truncate down the whole chain, and the readout is
+                    the ONE box allowed to keep its width: at 390px a long
+                    title has to give way, but a clipped format readout is the
+                    report this surface already has a history of. */}
+                <div className="flex-1 min-w-0">
+                  <div className={`h-6 flex items-center gap-2 min-w-0 ${ink.shade}`} title={title}>
+                    <span className={`truncate text-base font-bold ${ink.active}`}>{title}</span>
+                    {techStr && (
+                      <span className={`shrink-0 text-[11px] font-mono ${ink.dim}`} title={techTip || undefined}>
+                        {techStr}
+                      </span>
+                    )}
+                  </div>
+                  <div
+                    className={`h-5 flex items-center min-w-0 ${ink.shade}`}
+                    title={[albumLine, artistLine].filter(Boolean).join(" · ")}
+                  >
+                    <span className={`truncate text-xs ${ink.dim}`}>
+                      {[albumLine, artistLine].filter(Boolean).join(" · ")}
+                    </span>
+                  </div>
+                </div>
+              </div>
+            )}
+            <div className={`relative ${compactMode ? "hidden md:block" : ""}`}>
               {orbs && (
                 <div
                   className="artwork-glow absolute -inset-6 rounded-[2rem] blur-2xl"
@@ -1734,15 +1848,19 @@ export default function NowPlayingView(p: Props) {
                 // One size per breakpoint per LAYOUT: the art never jumps when a
                 // track's lyrics load or finish, and above lg the pane sits
                 // beside it so the size is the same either way. On a phone the
-                // pane's toggle is the one moment it changes — that IS the
-                // request: the cover, title and controls collapse to a header
-                // and the lyrics take the rest of the screen.
+                // compact header replaces the art outright, so the small size
+                // is what the expanded view wears there — the cover, title and
+                // controls collapse to the header and the lyrics take the rest
+                // of the screen.
                 wrapperClass={`relative rounded-2xl shadow-2xl bg-raise overflow-hidden lg:w-[min(28rem,48vh)] lg:h-[min(28rem,48vh)] ${
                   paneOpen ? "w-32 h-32" : "w-72 h-72"
                 }`}
               />
             </div>
-            {textBlock}
+            {/* the block the compact header stands in for; `hidden md:block`
+                keeps the desktop copy on screen even if the width state is a
+                beat behind a resize */}
+            {compactMode ? <div className="hidden md:block">{textBlock}</div> : textBlock}
             {transportRow}
             {/* seek + volume — a single line under the transport */}
             {seekRow}

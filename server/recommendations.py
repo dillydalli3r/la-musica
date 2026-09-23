@@ -274,6 +274,110 @@ def _needs_attention(albums, limit):
     return [_owned_row(a, reason="Needs attention") for a in bad[:limit]]
 
 
+# The most findings the banner names; everything past it is the `more` count a
+# reader clicks through to the Library's own Failing filter.
+_GRADE_WARNING_MAX = 12
+# The grader records an album-wide failure against one of these INSTEAD of a
+# file name (mlo.grader's add_issue): "album" for a check that belongs to the
+# folder (its cover, its .log), "album-wide" for one that spans every track in
+# it (MEDIA, the album tags).
+_ALBUM_WHERE = ("album", "album-wide")
+
+
+def grade_warning(lib):
+    """Whether the library passes its grading checks, and — when it does not —
+    what fails, specifically: the object both pages' warning strip is drawn
+    from (`GET /api/grades/summary`, and `grade_warning` in the Home payload).
+
+    Read off the library payload the pages already hold, and totalled the way
+    the Home header totals it: every album's `pass_count` over its
+    `total_checks`. `ok` is therefore the grader's own per-album rule (failed
+    checks == 0, server.library.build_album) applied to the whole library, so
+    the strip can never contradict the percentage printed beside it.
+
+    Two albums are not a finding, and both would be the loudest row on the
+    page:
+    - a PENDING framework album (the release the user added whose audio has
+      not arrived): nothing was graded, because there was nothing to grade,
+      and its row's failed check is the empty-folder placeholder — listing it
+      would report a wish as a broken album;
+    - an album with NO checks (`total_checks` 0): it PASSES by the rule above
+      (0 == 0), which is how an album whose checks are all switched off stops
+      disagreeing with the Grade script.
+
+    The owner's rule for what a finding is: ONE failing track in an album is
+    shown AS THAT TRACK — the album is only the frame around it, and the file
+    is the thing to open — while two or more are shown AS THE ALBUM, which
+    carries how many tracks fail and the union of their codes, because a dozen
+    rows of one album say less than its name. A failure the grader recorded
+    against the album itself (no file to name) always makes an album row and
+    carries the grader's own sentence as `reason`.
+    """
+    albums = [alb for ar in (lib.get("artists") or [])
+              for alb in (ar.get("albums") or [])]
+    pass_count = sum(int(a.get("pass_count") or 0) for a in albums)
+    total_checks = sum(int(a.get("total_checks") or 0) for a in albums)
+    items = []
+    tracks_failing = 0
+    for alb in albums:
+        # See the docstring: neither of these was graded, so neither is wrong.
+        if alb.get("pending") or not (alb.get("total_checks") or 0) or alb.get("pass"):
+            continue
+        bad = [tr for tr in (alb.get("tracks") or []) if tr.get("issues")]
+        issues = alb.get("issues") or {}
+        sentences = [s for s, where in issues.items()
+                     if any(w in _ALBUM_WHERE for w in (where or ()))]
+        if not bad and not sentences:
+            # A folder failure with no file against it and no album-wide
+            # sentence either: the grader keys those by the folder itself (an
+            # album folder that holds no audio), and its sentence is the only
+            # thing there is to say.
+            sentences = list(issues)
+        tracks_failing += len(bad)
+        meta = alb.get("meta") or {}
+        album_path = str(alb.get("path") or "").replace("\\", "/")
+        row = {
+            "album_path": album_path,
+            "artist": _artist_of(alb),
+            "album": (str(meta.get("ALBUM") or "").strip()
+                      or album_path.rsplit("/", 1)[-1]),
+            "grade_pct": alb.get("grade_pct"),
+        }
+        if len(bad) == 1 and not sentences:
+            tr = bad[0]
+            items.append(dict(row,
+                              kind="track",
+                              track_path=str(tr.get("path") or ""),
+                              # The tag the player shows, the file name standing
+                              # in when it is empty — a row named "" is a track
+                              # the reader cannot match to the album's table.
+                              title=(str((tr.get("tags") or {}).get("TITLE") or "").strip()
+                                     or str(tr.get("file") or "")),
+                              codes=sorted(set(tr.get("issues") or ()))))
+            continue
+        items.append(dict(row,
+                          kind="album",
+                          failing_tracks=len(bad),
+                          codes=sorted({c for tr in bad
+                                        for c in (tr.get("issues") or ())}),
+                          **({"reason": sentences[0]} if sentences else {})))
+    # Worst first: the lowest grade, then the album with the most failing
+    # tracks (a single-track row counts as the one track it is).
+    items.sort(key=lambda it: (it["grade_pct"] if it["grade_pct"] is not None else 0.0,
+                               -(it.get("failing_tracks") or 1)))
+    more = max(0, len(items) - _GRADE_WARNING_MAX)
+    return {
+        "ok": not items,
+        "pass_count": pass_count,
+        "total_checks": total_checks,
+        "grade_pct": round(100.0 * pass_count / total_checks, 1) if total_checks else None,
+        "albums_failing": len(items),
+        "tracks_failing": tracks_failing,
+        "items": items[:_GRADE_WARNING_MAX],
+        "more": more,
+    }
+
+
 def build_home(cfg, user=""):
     """Full Home payload for the given config and user (TTL-cached).
 
@@ -306,9 +410,10 @@ def build_home(cfg, user=""):
         stats["playlists"] = len(pl.list_playlists(user) or [])
     except Exception:
         stats["playlists"] = 0
-    passes = sum((a.get("pass_count") or 0) for a in albums)
-    checks = sum((a.get("total_checks") or 0) for a in albums)
-    stats["grade_pct"] = round(100.0 * passes / checks, 1) if checks else None
+    # The grading summary is built once and read twice: the header's percentage
+    # and the warning strip's totals are the same sums, counted in one place.
+    grade = grade_warning(lib)
+    stats["grade_pct"] = grade["grade_pct"]
 
     recent = _recent(albums, recent_count)
     top = _top_rated(albums, max(4, recent_count // 2))
@@ -341,6 +446,11 @@ def build_home(cfg, user=""):
         "wanted": _wanted(8, {os.path.normcase(os.path.normpath(a.get("path") or ""))
                               for a in albums if a.get("pending")}),
         "needs_attention": _needs_attention(albums, max(4, recent_count // 2)),
+        # Whether the library passes its own checks, and what fails — the SAME
+        # object `GET /api/grades/summary` answers with, so Home's strip and
+        # the Library page's can never say different things (the Library page
+        # has no Home payload to read it from).
+        "grade_warning": grade,
     }
     with _lock:
         _cache.update({"t": now, "key": cache_key, "data": data})

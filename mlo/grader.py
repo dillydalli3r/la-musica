@@ -2899,6 +2899,7 @@ def _grade_album(album_dir, lyrics_format, cfg=None):
                 _discs_for_csum = {}
             has_csum = False
             has_invalid = False
+            has_unverified = False
             for lp in sorted(csum_logs_v):
                 state, _det = _check_csum_v(lp)
                 # Determine disc for this log file
@@ -2933,6 +2934,14 @@ def _grade_album(album_dir, lyrics_format, cfg=None):
                 if disc_for_log is not None:
                     if state == "ok":
                         per_disc_checksum_map[disc_for_log] = "REAL"
+                    elif state == "unverified":
+                        # The log carries a checksum that NOTHING could check
+                        # (no EAC log checker, so Logchecker's own 'checksum_ok'
+                        # is untested — see mlo.discs.check_log_checksum). Not a
+                        # pass and not a failure: the column says UNVERIFIED, so
+                        # a doctored log can never read REAL, and an honest
+                        # install without the helper is not accused of anything.
+                        per_disc_checksum_map[disc_for_log] = "UNVERIFIED"
                     elif state == "invalid":
                         per_disc_checksum_map[disc_for_log] = "FAKE"
                     elif state == "missing":
@@ -2951,11 +2960,18 @@ def _grade_album(album_dir, lyrics_format, cfg=None):
                 # not (spec R27), so it leaves the aggregate at NONE.
                 if state == "ok":
                     has_csum = True
+                elif state == "unverified":
+                    has_unverified = True
                 elif state == "invalid":
                     has_invalid = True
                     has_csum = True
             if has_invalid:
                 checksum_status = "FAKE"
+            elif has_unverified:
+                # A claimed checksum nothing verified outranks a plain NONE:
+                # the log is not evidence either way, and saying REAL here is
+                # exactly the claim that let a modified log through.
+                checksum_status = "UNVERIFIED"
             elif has_csum:
                 checksum_status = "REAL"
             else:
@@ -3160,10 +3176,19 @@ def _grade_album(album_dir, lyrics_format, cfg=None):
                     # not a missing leg to charge the album for. Reading it as
                     # missing is what failed a 2008 rip whose log was written by
                     # a version that had no checksum to write.
-                    log_state = {"REAL": "ok", "FAKE": "fail"}.get(
-                        str(tr.get("checksum_status") or ""))
+                    csum_state = str(tr.get("checksum_status") or "")
+                    log_state = {"REAL": "ok", "FAKE": "fail"}.get(csum_state)
                     if log_state:
                         states.append(log_state)
+                    elif csum_state == "UNVERIFIED":
+                        # The log claims a checksum that NOTHING could verify
+                        # (no EAC log checker — mlo.discs.check_log_checksum).
+                        # Neither evidence for the rip nor against it, so the
+                        # leg reads 'missing' (the docstring's "we could not
+                        # check"): an honest install is never charged for a
+                        # helper it has not installed, and the CRCs below still
+                        # decide the leg when they can.
+                        states.append("missing")
                 if cfg.get("grade_check_crc", True):
                     codes = set(tr.get("issues") or ())
                     states.append("fail" if "CRC_MISMATCH" in codes

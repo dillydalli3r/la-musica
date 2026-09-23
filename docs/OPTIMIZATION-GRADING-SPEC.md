@@ -3742,6 +3742,93 @@ screen; above `lg` the pane sits beside the artwork.
   pixel box clipped at every one of them. The bar's volume line uses the same
   component, so both surfaces are fixed once.
 
+### 7.36 A rip log that carries a checksum has to be checked, and shown
+
+- **R229 — Logchecker's `checksum_ok` is only evidence when something actually
+  checked.** The phar does not compute an EAC log's SHA256 itself: it shells
+  out to the pypi `eac-logchecker` script and prints **`Checksum: checksum_ok`
+  either way** — measured on a real EAC 1.3 log with one digit of "Peak level"
+  changed: `Score 100`, `Checksum: checksum_ok`, and the fixture's own verifier
+  computed a different SHA256. The verifier was in neither the image nor the
+  Dependencies page, so `mlo.discs.check_log_checksum` fell back to that word
+  and returned `ok` for a doctored log, and the app's "a log that carries a
+  checksum must verify" rule was unenforced on every install. Now:
+  `eac-logchecker==0.8.1` is in `server/requirements.txt` (the image) and in
+  `mlo.fetchdeps.PIP_PACKAGES` (the Dependencies page, so a bare-metal install
+  can add it), the phar's word is read only alongside a real answer — the
+  "checksum not validated" notice or `mlo.discs._eac_helper_on_path`, which
+  asks the same question the phar asks itself and holds for a log the phar
+  cannot even parse — and a claimed-but-unchecked checksum reads
+  **`unverified`**, never `ok`. `mlo.grader` maps it to `UNVERIFIED` (per disc
+  and as the album aggregate, ordered FAKE > UNVERIFIED > REAL > NONE) and
+  `mlo.audit` names it as an unevaluable leg, so the file keeps the verdict its
+  CRCs earn instead of being blamed for a helper nobody installed. Verified
+  against three copies of a real log (untouched / one digit changed /
+  structurally edited): without the verifier `ok`·`unverified`·`unverified`,
+  with it `ok`·`invalid`·`invalid`.
+- **R230 — the log itself is readable in the app.** `GET /api/log/report`
+  (album folder or `.log`, `disc=N` for a disc set; read-only) returns
+  Logchecker's own report — ripper, version, language, score, checksum word,
+  its `Details:` lines and the raw output — plus this app's checksum verdict
+  and the log's decoded text, capped. It is the answer to the owner's report
+  ("I don't even know a way to view logs") because a score alone never said
+  why: an album whose copies are one scene rip fails on every candidate with
+  Logchecker's own arithmetic (`−30` an EAC older than 0.99, `−10` gap
+  handling), and those lines are where a deduction explains itself. The panel
+  (`web/src/components/LogReport.tsx`) opens from the album readout's **Rip
+  log** section and from a track's readout, shows `available: false` as "no
+  scorer installed" rather than a score of zero, and carries a disc switcher
+  when the folder holds several logs.
+- **R231 — a rejected candidate names Logchecker's own note.** The auto-import's
+  reason was `score 60 is below the required 100`, seventeen times over, with
+  nothing about the deduction and no way to look at the log: `_score_logs` now
+  carries the phar's `Details:` lines (minus the "could not find EAC
+  logchecker" notice, which is about this machine and already said by the
+  checksum state), and `_log_fail_reason` writes
+  `<name> — Logchecker <score>/100, required <min_score> (<its own note>)`, or
+  the checksum verdict when that is the cause. The bar stays what it was —
+  `grade_log_score_threshold`, **100 by default** (the owner's rule) — and the
+  reason names it so the way out (lower it, or pick another release) is one
+  screen away.
+
+### 7.37 The library page says what is failing, and the tools install themselves
+
+- **R232 — Home and the Library open with the grading verdict, and it names
+  things.** `GET /api/grades/summary` (and the same object as `grade_warning`
+  in the Home payload, so Home needs no second request) returns whether the
+  library passes, the totals the Home header prints (`pass_count` over
+  `total_checks`, one sum, so the strip can never contradict the percentage
+  beside it), and — when it does not — the findings themselves. The owner's
+  rule decides the shape of a finding: **one failing track in an album is shown
+  as the track, two or more as the album** (carrying `failing_tracks` and the
+  union of their codes), and a failure the grader recorded against the folder
+  itself always makes an album row carrying the grader's own sentence. Two
+  albums are never findings: a PENDING framework album (nothing was graded
+  because its audio has not arrived) and an album with `total_checks` 0 (which
+  passes by the grader's own rule, `0 == 0`). Each row links to the album
+  (`albumRef`) or the track (`trackRef`), the list is capped at 12 with the
+  rest as a `+N` link into the Library's existing Failing filter, and
+  `["gradesSummary"]` is in `invalidateLibrary`'s list — a run that graded,
+  tagged or imported just changed the very checks the strip reports.
+- **R233 — the tools install themselves, and the cookie imports are named
+  where the keys are.** `dependencies_auto_update` is **ON by default**: the
+  app's checks are worth what the tools behind them are, and a user who never
+  opens the Dependencies page would otherwise run a library whose log scoring,
+  DR measurement or AccurateRip evidence silently did nothing. Installs stay in
+  the dependencies folder (never system-wide) and the pass is capped at one
+  every six hours; unticking it stops the next pass immediately, which is what
+  `mlo.fetchdeps.auto_update_enabled` promises (its own fallback matches
+  `mlo.config`'s default, so a config written before the key existed does not
+  read as "off" while the page shows it ticked). And the Keys surfaces name the
+  programs behind the sources: **yt-dlp** with what it does for the app and that
+  its cookies are a **Netscape-format `cookies.txt`** (a browser extension's
+  export, imported into the app's own jar on Settings → Videos), and
+  RateYourMusic's row points at the same kind of import for `rym_cookie`
+  (Settings → Discovery), whose help text names the Netscape file as well as the
+  devtools header. One limitation, stated: while the first-run wizard is up,
+  `/settings` is not routable (App.tsx's first-run gate), so the wizard's Keys
+  step NAMES both imports and the clickable jump appears once setup is finished.
+
 ## 8. Recommended runbook
 
 Nothing here is a substitute for the app's own Dependencies page: run it first

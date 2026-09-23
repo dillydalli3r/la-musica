@@ -1,6 +1,6 @@
 import { useState, type ReactNode } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
-import { ShieldCheck, CircleAlert, Info, ExternalLink, Loader2, RefreshCw, ChevronDown, ChevronRight, Users } from "lucide-react";
+import { ShieldCheck, CircleAlert, Info, ExternalLink, Loader2, RefreshCw, ChevronDown, ChevronRight, Users, FileText } from "lucide-react";
 import type { LucideIcon } from "lucide-react";
 import { Link } from "react-router-dom";
 import { api, answerSources, checkTrackValues, replyFor } from "../api";
@@ -12,6 +12,7 @@ import { trackRef } from "../lib/refs";
 import { AuditBadge, GradeBadge, advisoryLine, advisoryOutcome, instrumentalLine } from "./Badges";
 import TrackDownloadExport from "./TrackDownloadExport";
 import Modal from "./Modal";
+import LogReport from "./LogReport";
 import { tagLabel, tagTooltip, useTagRegistry } from "../lib/tags";
 
 /** The tags this modal gives their own row elsewhere (advisory, instrumental,
@@ -108,6 +109,10 @@ export default function TrackDetails({
   // Credits are looked up only once the section is opened — the panel below
   // mounts on open, so the modal never waits on MusicBrainz.
   const [creditsOpen, setCreditsOpen] = useState(false);
+  // The rip log behind this track's grading, opened on demand and for THIS
+  // track's disc (`track.discnumber`) — the panel fetches on open, so an
+  // unopened modal never runs the phar.
+  const [logOpen, setLogOpen] = useState(false);
 
   // Provenance exists only in the check endpoints' reply (they report which
   // provider stated each value); it is not readable off the file afterwards,
@@ -218,6 +223,19 @@ export default function TrackDetails({
 
       <div className="flex flex-wrap items-center gap-2">
         <TrackDownloadExport path={track.path} title={track.tags?.TITLE ?? track.file} />
+        {/* The log this track's grading was read off — the same panel the album
+            readout opens, at this track's own disc, so "score 60 is below the
+            required 100" is one click from the file that says why. */}
+        {albumPath && (
+          <button
+            className="btn-ghost !py-1.5 text-xs tap"
+            onClick={() => setLogOpen((v) => !v)}
+            aria-expanded={logOpen}
+            title="Read this disc's rip log and what Logchecker made of it"
+          >
+            <FileText className="h-3.5 w-3.5" /> {logOpen ? "Hide the log" : "View the log"}
+          </button>
+        )}
         {/* jump to the track's own page for full tag editing */}
         <Link
           to={trackRef({ path: track.path, tags: { MUSICBRAINZ_TRACKID: track.tags?.MUSICBRAINZ_TRACKID } })}
@@ -227,6 +245,12 @@ export default function TrackDetails({
           <ExternalLink className="h-3.5 w-3.5" /> Track page
         </Link>
       </div>
+
+      {logOpen && albumPath && (
+        <div className="rounded border border-border bg-raise/30 px-3 py-2">
+          <LogReport albumPath={albumPath} disc={track.discnumber ?? undefined} />
+        </div>
+      )}
 
       {issues.length > 0 && (
         <div>

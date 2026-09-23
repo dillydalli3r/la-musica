@@ -2697,17 +2697,29 @@ def _local_wanted_files(ddir, username, wanted):
     return out
 
 
-def _log_fail_reason(name, score, state, min_score):
-    """Why one rip log did not clear the bar.
+def _log_fail_reason(name, score, state, min_score, why=""):
+    """Why one rip log did not clear the bar, with Logchecker's own words.
 
-    The reason names the required score, so the bar this run is judging by
-    (Settings → Auto-import) is discoverable from the attempt itself instead of
-    a bare number the user has to guess at."""
+    The bar is `grade_log_score_threshold` (Settings → Auto-import), 100 by
+    default, and Logchecker marks a log down for reasons of its own (-30 for an
+    EAC older than 0.99, -10 for gap handling). A release whose copies are all
+    the same scene rip therefore fails on every candidate — the owner's case,
+    seventeen deep — and a bare "score 60 is below the required 100" said
+    nothing about the deduction or what to do. `why` is Logchecker's own note
+    about the log; the bar and the setting are named so the way out is one
+    screen away.
+    """
     if score is None:
-        return f"{name} — unscorable"
-    if state == "invalid":
-        return f"{name} — checksum invalid"
-    return f"{name} — score {score} is below the required {min_score}"
+        base = f"{name} — Logchecker could not score it"
+    elif state == "invalid":
+        base = (f"{name} — log checksum does not verify (the file changed after "
+                f"EAC signed it)")
+    elif state == "unverified":
+        base = (f"{name} — Logchecker {score}/100, required {min_score}, and the "
+                f"checksum was NOT verified (no EAC log checker installed)")
+    else:
+        base = f"{name} — Logchecker {score}/100, required {min_score}"
+    return f"{base} ({why})" if why else base
 
 
 def _wait_for_files(slsk, ddir, username, wanted, timeout_s, cancel_check=None,
@@ -2900,8 +2912,15 @@ def _log_passes(score, state, min_score):
 
 
 def _score_logs(local_logs, cfg):
-    """Grade rip logs. Returns [(path, score_or_None, checksum_state, detail)]."""
-    from mlo.discs import score_disc_log, check_log_checksum, read_log_text
+    """Grade rip logs. Returns [(path, score_or_None, checksum_state, detail, why)].
+
+    `why` is Logchecker's own note about the log (its `Details:` lines, joined)
+    — the difference between "score 60" and "score 60 because …", which is the
+    whole diagnosis of a release whose every candidate fails on its log. The
+    "could not find EAC logchecker" notice is dropped: the checksum state
+    already says that, and it is about this machine, not about the rip."""
+    from mlo.discs import (score_disc_log, check_log_checksum, read_log_text,
+                           run_logchecker, parse_logchecker)
 
     out = []
     for p in sorted(local_logs):
@@ -2912,7 +2931,15 @@ def _score_logs(local_logs, cfg):
         state, detail = check_log_checksum(p)
         if state is None and not re.search(r"====\s*Log checksum", read_log_text(p) or "", re.IGNORECASE):
             state = "unsupported"
-        out.append((p, score, state, detail))
+        why = ""
+        try:
+            rep = parse_logchecker(run_logchecker(p))
+            why = " · ".join(
+                d for d in rep.get("details", [])
+                if "could not find eac logchecker" not in d.lower())[:120]
+        except Exception:
+            why = ""
+        out.append((p, score, state, detail, why))
     return out
 
 
@@ -3492,13 +3519,14 @@ def _try_batch(slsk, ddir, batch, release, cfg, is_cd, min_score):
         _log("Grading rip log(s) with Logchecker…")
         scores = _score_logs(list(got_logs.values()), cfg)
         good, bad = [], []
-        for p, score, state, detail in scores:
+        for p, score, state, detail, why in scores:
             _log(f"  {os.path.basename(p)}: score "
-                 f"{score if score is not None else '?'}, checksum {state or '?'}")
+                 f"{score if score is not None else '?'}, checksum {state or '?'}"
+                 + (f" — {why}" if why else ""))
             if _log_passes(score, state, min_score):
                 good.append(os.path.basename(p))
             else:
-                bad.append((os.path.basename(p), score, state))
+                bad.append((os.path.basename(p), score, state, why))
         # A folder can hold a second, junk log for the same disc (and a
         # manual/browse pick can hold several): the album rides on the log that
         # grades well, the rest are reported and ignored. A checksum MISMATCH
@@ -3507,14 +3535,14 @@ def _try_batch(slsk, ddir, batch, release, cfg, is_cd, min_score):
         if not good:
             _reject(a["username"], a["dir"],
                     "log rejected: " + "; ".join(
-                        _log_fail_reason(n, s, st, min_score)
-                        for n, s, st in bad)
+                        _log_fail_reason(n, s, st, min_score, why)
+                        for n, s, st, why in bad)
                     + " (Settings → Auto-import); trying the next candidate")
             _drop_candidate(slsk, ddir, a["username"], a["wanted"])
             a["state"] = "dropped"
             continue
-        for n, s, st in bad:
-            _log(f"  ignoring {_log_fail_reason(n, s, st, min_score)}")
+        for n, s, st, why in bad:
+            _log(f"  ignoring {_log_fail_reason(n, s, st, min_score, why)}")
         _log(f"{len(good)} log(s) pass — downloading the full album…")
         # The log cleared the bar, so the album has earned its bytes: it is
         # requested NOW, in a second call, and only its own files — the logs are

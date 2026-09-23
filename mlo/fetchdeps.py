@@ -323,6 +323,12 @@ PIP_PACKAGES = {
     "librosa": "librosa",
     "beets": "beets",
     "yt-dlp": "yt-dlp",
+    # The EAC rip-log checksum verifier. Logchecker's PHP shells out to its
+    # console script for `Checksum:`, and mlo.discs imports the package itself:
+    # without it a log whose bytes changed after EAC signed it reads as valid
+    # (the phar prints checksum_ok regardless), so this is what makes the
+    # "a log that carries a checksum must verify" rule enforceable at all.
+    "eac-logchecker": "eac-logchecker",
 }
 
 # Pip packages whose releases GitHub does not carry, so their newest version
@@ -2355,10 +2361,14 @@ _auto_stop = threading.Event()
 
 def auto_update_enabled():
     """The `dependencies_auto_update` switch, read fresh on every pass so
-    turning it off stops the next one instead of a cached answer."""
+    turning it off stops the next one instead of a cached answer.
+
+    The fallback matches mlo.config's default (ON): a config written before the
+    key existed — or a hand-edited one that dropped it — must not read as
+    "off" here while the Dependencies page shows it ticked."""
     try:
         from .config import load_config
-        return bool(load_config().get("dependencies_auto_update", False))
+        return bool(load_config().get("dependencies_auto_update", True))
     except Exception:
         return False
 

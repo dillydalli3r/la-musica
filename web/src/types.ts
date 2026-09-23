@@ -333,6 +333,96 @@ export interface LayoutSnapshot {
   report: LayoutReport | null;
 }
 
+/** `/api/grades/summary` — whether the library passes its grading checks, and
+ *  what fails (server.recommendations.grade_warning). The Home payload carries
+ *  the SAME object as `grade_warning`, so the strip on Home and the one on the
+ *  Library page are one answer rather than two counts of one library.
+ *
+ *  `ok` is the grader's own per-album rule (failed checks == 0) read over the
+ *  whole library, so it agrees with `grade_pct` by construction; that
+ *  percentage is null when no check ran at all. A pending framework album and
+ *  an album with zero checks are never findings — nothing was graded either
+ *  way — so `albums_failing` counts the albums that really failed, one entry
+ *  of `items` each. */
+export interface GradeWarning {
+  ok: boolean;
+  pass_count: number;
+  total_checks: number;
+  grade_pct: number | null;
+  albums_failing: number;
+  tracks_failing: number;
+  /** Worst first (lowest grade, then the most failing tracks), capped at 12;
+   *  whatever did not fit is `more`. */
+  items: GradeWarningItem[];
+  /** Findings past that cap — the strip links this to the Library's own
+   *  Failing filter rather than printing a hundred rows. */
+  more: number;
+}
+
+/** One failing album, or one failing track inside an album that otherwise
+ *  passes. The owner's rule for which: ONE failing track in an album is shown
+ *  AS THAT TRACK (the album is only the frame around it), two or more as THE
+ *  ALBUM — the row then carries `failing_tracks` and the union of their codes
+ *  instead of a dozen rows of the same album. */
+export interface GradeWarningItem {
+  kind: "track" | "album";
+  album_path: string;
+  /** The failing file — present exactly on a `track` item. */
+  track_path?: string;
+  artist: string;
+  album: string;
+  /** The track's own name (its TITLE tag, the file name failing that) —
+   *  present with `track_path`. */
+  title?: string;
+  /** How many of the album's tracks fail — present on an `album` item, and 0
+   *  when the album failed a check of its own rather than its files'. */
+  failing_tracks?: number;
+  /** The grader's BARE codes — GENRE_MISSING, COVER, CRC_MISMATCH and the
+   *  like; the union of the failing tracks' own, on an album item. */
+  codes: string[];
+  /** The grader's own sentence for an album-level failure ("Missing cover
+   *  image", "Missing .log file", …); absent when a file failed instead. */
+  reason?: string;
+  /** The album's grade (what the worst-first order sorts on). */
+  grade_pct: number | null;
+}
+
+/** `GET /api/log/report` — one rip log read in full: Logchecker's report, this
+ *  app's verdict on its checksum, and the log's own text (mlo.discs
+ *  .log_report). Read-only: nothing is scored into the tags or renamed.
+ *
+ *  `available` is false when no Logchecker is installed — `report` is then
+ *  empty and MUST NOT be read as a score of zero (a missing scorer is not a
+ *  bad rip); `text` still holds the log, which is what a reader falls back to.
+ *  `checksum.state` is this app's verdict on the log's checksum line — "ok",
+ *  "invalid", "missing", "unsupported", "unverified", or null when the log
+ *  states none — with `detail` saying which line or helper decided it. `text`
+ *  is the log's decoded bytes, capped at `report`'s own limit; `truncated`
+ *  says the file was longer. */
+export interface LogReportPayload {
+  path: string;
+  name: string;
+  exists: boolean;
+  available: boolean;
+  bytes: number;
+  truncated: boolean;
+  report: {
+    ripper: string;
+    version: string;
+    language: string;
+    score: number | null;
+    checksum: string;
+    details: string[];
+    raw: string;
+  };
+  checksum: { state: string | null; detail: string | null };
+  text: string;
+  /** The `.log` files in the folder that was asked for, when the caller named
+   *  a FOLDER — empty for a path that was already one log. The route reports
+   *  the list either way, so a viewer can switch discs without asking again. */
+  siblings: string[];
+}
+
 /** One cover-art provider the musichoarders meta-search can query. */
 export interface CoverSource {
   id: string;
@@ -954,6 +1044,10 @@ export interface HomeData {
   /** Every album added but not downloaded yet, newest first — the one shelf a
    *  user can read to see everything still waiting. */
   pending?: HomeAlbum[];
+  /** Whether the library passes its grading checks, and what fails — the SAME
+   *  object `/api/grades/summary` serves, so the strip on Home and the one on
+   *  the Library page cannot disagree about the library's own verdict. */
+  grade_warning?: GradeWarning;
 }
 
 export interface HomeArtist {

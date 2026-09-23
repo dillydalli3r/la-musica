@@ -1632,11 +1632,14 @@ DEFAULT_CONFIG = {
     # First run / updates
     "first_run_done": False,
     # Install tools that are missing or behind their upstream release without
-    # waiting for the Dependencies page. OFF by default: it downloads binaries
-    # on its own schedule, which is a decision the user makes, not one the app
-    # makes for them. The worker reads this every pass, so switching it off
-    # stops the next pass immediately.
-    "dependencies_auto_update": False,
+    # waiting for the Dependencies page. ON by default: the app's whole tool
+    # chain (php + Logchecker, ffmpeg, rsgain, the audited downloaders) is what
+    # its checks are worth, and a user who never opens that page would otherwise
+    # run a library whose log grading, DR measurement or AccurateRip evidence
+    # silently did nothing. Installs stay inside the dependencies folder —
+    # nothing system-wide — and the pass is capped at one every six hours. The
+    # worker reads this every pass, so switching it off stops the next one.
+    "dependencies_auto_update": True,
     # Sidecar files (cue/log/lrc/accurip) shown as extra rows in library views
     "show_sidecar_files": False,
 }

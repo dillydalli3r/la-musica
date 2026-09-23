@@ -5,6 +5,7 @@ import { AlertTriangle, ArrowDownUp, BarChart3, Clock, Disc3, Heart, ListChecks,
 import { api } from "../api";
 import { EmptyState, PageLoading } from "../components/Badges";
 import StorageCard from "../components/StorageCard";
+import GradeWarning from "../components/GradeWarning";
 import PageHeader from "../components/PageHeader";
 import AlbumCard from "../components/AlbumCard";
 import Segmented from "../components/Segmented";
@@ -335,6 +336,14 @@ export default function HomePage() {
           />
         </div>
       </div>
+
+      {/* The library's own grading verdict, above the shelves: whether every
+          album passed its checks, and — when one did not — the tracks and
+          albums that failed, each linking to the thing it names. It paints
+          from Home's own copy of the summary (the payload's `grade_warning`,
+          the same object `/api/grades/summary` serves), so the strip costs no
+          second walk of the library. */}
+      <GradeWarning initial={data.grade_warning} />
 
       {/* Home ticks the same albums the Library's batch toolbar acts on (the
           selection is global), but the actions themselves — play, playlist,

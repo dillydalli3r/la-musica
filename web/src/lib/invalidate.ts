@@ -16,6 +16,11 @@ export function invalidateLibrary(qc: QueryClient): void {
     // a 5-minute staleTime; without this a tag write leaves the playing track
     // showing its old TITLE/tech for minutes.
     ["tags"],
+    // The grade strip on Home and the Library page (GET /api/grades/summary):
+    // a run that graded, tagged or imported just changed the very checks it
+    // reports, and its own staleTime would otherwise leave the strip saying
+    // "3 failing" over a library that now passes.
+    ["gradesSummary"],
   ]) {
     qc.invalidateQueries({ queryKey });
   }
