@@ -29,7 +29,7 @@ export default function VolumePct({ value, onChange, className }: {
   return (
     <span className={`relative inline-flex items-center shrink-0 ${className ?? ""}`}>
       <input
-        className="w-10 bg-transparent border border-transparent hover:border-border focus:border-accent rounded px-1 pr-3.5 text-right text-[10px] font-mono tabular-nums text-zinc-500 hover:text-zinc-300 focus:text-zinc-200 outline-none"
+        className="w-10 bg-transparent border border-transparent hover:border-border focus:border-accent rounded px-1 pr-3.5 text-right text-[10px] font-mono tabular-nums text-current opacity-70 hover:opacity-100 focus:opacity-100 outline-none"
         inputMode="numeric"
         value={text}
         title="Volume — type a percentage"
@@ -44,7 +44,7 @@ export default function VolumePct({ value, onChange, className }: {
           }
         }}
       />
-      <span className="absolute right-1 text-[9px] text-zinc-600 pointer-events-none">%</span>
+      <span className="absolute right-1 text-[9px] text-current opacity-60 pointer-events-none">%</span>
     </span>
   );
 }

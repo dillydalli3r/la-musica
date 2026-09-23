@@ -208,15 +208,15 @@ interface LyricInk {
 
 const INK_ON_DARK: LyricInk = {
   active: "text-white",
-  dim: "text-zinc-300",
+  dim: "text-zinc-200",
   plain: "text-zinc-100",
   shade: "np-shade",
   wordNow: "text-accent scale-110 [text-shadow:0_0_16px_rgba(255,255,255,0.4)]",
   wordSung: "text-white",
   wordNext: "text-white/75",
   chromeStrong: "text-white",
-  chromeButton: "text-zinc-400 hover:text-white hover:bg-white/10",
-  chromeText: "text-zinc-400",
+  chromeButton: "text-zinc-300 hover:text-white hover:bg-white/10",
+  chromeText: "text-zinc-300",
   scrim: "",
 };
 
@@ -229,8 +229,8 @@ const INK_ON_LIGHT: LyricInk = {
   wordSung: "text-zinc-950",
   wordNext: "text-zinc-950/75",
   chromeStrong: "text-zinc-950",
-  chromeButton: "text-zinc-950/60 hover:text-zinc-950 hover:bg-black/5",
-  chromeText: "text-zinc-950/60",
+  chromeButton: "text-zinc-950/75 hover:text-zinc-950 hover:bg-black/5",
+  chromeText: "text-zinc-950/75",
   scrim: "",
 };
 
@@ -250,6 +250,12 @@ export function npLuminance(rgb: [number, number, number]): number {
  *  drawn behind it), and a brighter one pushes the bloom cores past it. */
 export const NP_INK_FLIP = 0.42;
 
+/** The luminance at or below which the field needs NO wash at all: white ink on
+ *  a flat field clears AA on its own down here (1.05 / (L + 0.05) >= 4.5 is
+ *  L <= 0.18), and every cover below it measured holding AA on every patch the
+ *  text covers. */
+export const NP_FIELD_AS_IS = 0.20;
+
 /** The ink and the field lift ONE cover asks for.
  *
  *  `scrim` is empty for a dark cover — the ask is that nothing at all sits
@@ -259,7 +265,31 @@ export const NP_INK_FLIP = 0.42;
  *  leaving the bright cores untouched. */
 export function npInk(rgb: [number, number, number]): LyricInk & { scrim: string } {
   const lum = npLuminance(rgb);
-  if (lum <= NP_INK_FLIP) return INK_ON_DARK;
+  if (lum <= NP_INK_FLIP) {
+    if (lum <= NP_FIELD_AS_IS) return INK_ON_DARK;
+    // The white table, and a field drop under it. A cover in this band has a
+    // dark AVERAGE while the ambience painted from it is not: the orbs and the
+    // bloom are screen-blended, so they ADD light on top of that average, and
+    // the patch the lyrics and the metadata block sit on measured roughly
+    // twice the cover's own luminance. The Bends cover (rgb 168 126 104, L
+    // 0.24) put the field at ~0.45 — white ink read about 2:1 there, which is
+    // the "text mixes into the background" report — while a cover just under
+    // the ink flip measured the same failure at 3.6:1 on a flat field.
+    //
+    // So the field is dropped instead of the ink being flipped: a wash built
+    // from the cover's OWN colour mixed toward near-black (never a grey),
+    // full-bleed, no edge, rounding or blur — a scrim, not a panel. The
+    // strength is one number because the band is narrow and the composition
+    // that lifts the field is the same on every cover; it is measured, per
+    // cover, in tools/check_np_metadata_contrast.cjs.
+    const dark = rgb.map((v) => Math.round(v * 0.30));
+    const strength = 0.62;
+    return {
+      ...INK_ON_DARK,
+      scrim: `linear-gradient(to bottom, rgb(${dark.join(" ")} / ${strength.toFixed(3)}), `
+        + `rgb(${dark.join(" ")} / ${strength.toFixed(3)}))`,
+    };
+  }
   // The strength has a FLOOR, and the floor is the point: what the dark table
   // has to clear is the DIMMEST patch the text covers — the metadata block at
   // the bottom, where the vignette bites — and that patch is dark no matter how
@@ -305,7 +335,7 @@ const INACTIVE_SCALE = { sm: 0.88, md: 0.84, lg: 0.8 } as const;
  * styled — only synced lines get the active/inactive treatment. The dim is
  * deliberately mild (80 %, 1px): over the light additive ambience a 2px blur
  * at 60 % made the line genuinely unreadable on a white cover. */
-const LINE_BLUR = "np-line-blur blur-[1px] opacity-80 hover:blur-none hover:opacity-100 focus-within:blur-none focus-within:opacity-100 transition-[opacity,filter] duration-motion-base ease-motion";
+const LINE_BLUR = "np-line-blur blur-[1px] opacity-90 hover:blur-none hover:opacity-100 focus-within:blur-none focus-within:opacity-100 transition-[opacity,filter] duration-motion-base ease-motion";
 
 /** The volume cluster is its own component because dragging the slider writes
  *  `vol` once per pointer step. Subscribed here, where the value is actually
@@ -317,7 +347,7 @@ function VolumeControl() {
   const setVol = useStore((s) => s.setVol);
   const VolIcon = vol <= 0 ? VolumeX : vol < 0.5 ? Volume1 : Volume2;
   return (
-    <div className="hidden md:flex items-center gap-1.5 text-zinc-500 shrink-0" title={`Volume — ${Math.round(vol * 100)}%`}>
+    <div className="hidden md:flex items-center gap-1.5 shrink-0" title={`Volume — ${Math.round(vol * 100)}%`}>
       <VolIcon className="h-4 w-4" />
       <input
         type="range"
@@ -1026,7 +1056,7 @@ export default function NowPlayingView(p: Props) {
     </div>
   );
   const transportRow = (
-    <div className="flex items-center justify-center gap-2.5 flex-wrap">
+    <div className={`flex items-center justify-center gap-2.5 flex-wrap ${ink.shade}`}>
       <button aria-label="Shuffle" aria-pressed={p.shuffle} className={`p-2 rounded-lg transition-colors ${p.shuffle ? "text-accent" : ink.chromeButton}`} onClick={p.onToggleShuffle} title="Shuffle">
         <Shuffle className="h-4 w-4" />
       </button>
@@ -1115,7 +1145,7 @@ export default function NowPlayingView(p: Props) {
     </div>
   );
   const seekRow = (
-    <div className={`flex items-center gap-2 text-xs w-[26rem] max-w-full px-2 ${ink.chromeText}`}>
+    <div className={`flex items-center gap-2 text-xs w-[26rem] max-w-full px-2 ${ink.shade} ${ink.chromeText}`}>
       <span className="w-10 text-right font-mono tabular-nums">{fmtDuration(dispTime)}</span>
       <ScrubSeek
         videoPath={videoPath}
@@ -1311,10 +1341,10 @@ export default function NowPlayingView(p: Props) {
         <div
           className={`safe-np-top flex items-center justify-between transition-[opacity,transform] duration-300 ease-out ${
             videoPath ? (chromeVisible ? "pointer-events-auto" : "pointer-events-none opacity-0 -translate-y-3") : ""
-          }`}
+          } ${videoPath ? "text-zinc-300" : `${ink.shade} ${ink.chromeText}`}`}
         >
           <button
-            className="p-2 rounded-lg transition-colors hover:bg-white/10 text-zinc-400 hover:text-white"
+            className="p-2 rounded-lg transition-colors hover:bg-white/10 text-current hover:text-white"
             onClick={p.onClose}
             title="Exit fullscreen (Esc)"
             aria-label="Exit fullscreen"
@@ -1323,7 +1353,7 @@ export default function NowPlayingView(p: Props) {
           </button>
           <div className="flex items-center gap-1 min-w-0">
             {p.queuePos && (
-              <span className="text-[10px] font-mono text-zinc-500 mr-1 tabular-nums" title="Queue position">
+              <span className="text-[10px] font-mono text-current opacity-80 mr-1 tabular-nums" title="Queue position">
                 {p.queuePos}
               </span>
             )}
@@ -1332,18 +1362,18 @@ export default function NowPlayingView(p: Props) {
             <button
               className={`max-w-[15rem] min-w-0 items-center gap-1.5 px-1.5 py-1 rounded-md text-[10px] font-mono hidden sm:flex ${
                 upNextLabel
-                  ? "text-zinc-500 hover:text-white hover:bg-white/10 transition-colors"
-                  : "text-zinc-600 opacity-40 pointer-events-none"
+                  ? "text-current hover:text-white hover:bg-white/10 transition-colors"
+                  : "text-current opacity-60 pointer-events-none"
               }`}
               onClick={() => setQueueOpen(true)}
               title={upNextLabel ? `Up next — ${upNextLabel} · click to view the queue` : "Up next — nothing queued"}
             >
-              <span className="uppercase tracking-widest text-zinc-600 shrink-0">Up next</span>
+              <span className="uppercase tracking-widest opacity-70 shrink-0">Up next</span>
               <span className="truncate">{upNextLabel || "—"}</span>
             </button>
             <button
               ref={queueTriggerRef}
-              className={`p-2 rounded-lg transition-colors hover:bg-white/10 ${queueOpen ? "text-white bg-white/10" : "text-zinc-400 hover:text-white"}`}
+              className={`p-2 rounded-lg transition-colors hover:bg-white/10 ${queueOpen ? "text-white bg-white/10" : "text-current hover:text-white"}`}
               onClick={() => setQueueOpen(!queueOpen)}
               title="Up next (queue)"
               aria-label="Up next queue"
@@ -1355,7 +1385,7 @@ export default function NowPlayingView(p: Props) {
                 audio layout, so the toggle is hidden rather than a no-op */}
             {!videoPath && (
               <button
-                className={`p-2 rounded-lg transition-colors hover:bg-white/10 ${viz ? "text-accent" : "text-zinc-400 hover:text-white"}`}
+                className={`p-2 rounded-lg transition-colors hover:bg-white/10 ${viz ? "text-accent" : "text-current hover:text-white"}`}
                 onClick={() => {
                   const v = !viz;
                   setViz(v);
@@ -1380,7 +1410,7 @@ export default function NowPlayingView(p: Props) {
                 accident of the layout instead of something you own. */}
             {!videoPath && layoutHasLyrics && (
               <button
-                className={`p-2 rounded-lg transition-colors hover:bg-white/10 ${showLyrics ? "text-accent" : "text-zinc-400 hover:text-white"}`}
+                className={`p-2 rounded-lg transition-colors hover:bg-white/10 ${showLyrics ? "text-accent" : "text-current hover:text-white"}`}
                 onClick={() => {
                   const v = !showLyrics;
                   setShowLyrics(v);
@@ -1395,7 +1425,7 @@ export default function NowPlayingView(p: Props) {
             )}
             <div className="relative">
               <button
-                className={`p-2 rounded-lg transition-colors hover:bg-white/10 ${options ? "text-white bg-white/10" : "text-zinc-400 hover:text-white"}`}
+                className={`p-2 rounded-lg transition-colors hover:bg-white/10 ${options ? "text-white bg-white/10" : "text-current hover:text-white"}`}
                 onClick={() => setOptions(!options)}
                 title="Lyrics & display options"
                 aria-label="Lyrics and display options"

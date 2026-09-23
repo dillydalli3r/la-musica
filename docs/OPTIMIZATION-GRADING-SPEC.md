@@ -857,12 +857,34 @@ rating.
     time readouts. A single ink cannot be AA on a field that spans rgb(96) to
     rgb(255) within one screen (a white cover's bloom core), which is why the
     polarity is decided at all; the glyph shadow flips with it;
-  * **nothing behind a dark cover, a cover-tinted lift behind a bright one**:
-    at or below the flip the ambience is dark enough for the white table on
+  * **nothing behind a dark cover, a cover-tinted wash in the band above it, a
+    cover-tinted lift above the flip**: at or below `NP_FIELD_AS_IS` (0.20
+    relative luminance) the ambience is dark enough for the white table on
     every patch the text covers, so **no scrim is drawn at all** — the
-    background is the artwork's own ambience. Above it the field is lifted by a
-    full-bleed gradient built from the cover's own colour mixed toward white
-    (never a grey), with no edge, rounding or blur — a scrim, not a panel.
+    background is the artwork's own ambience. Above the flip the field is
+    lifted by a full-bleed gradient built from the cover's own colour mixed
+    toward white (never a grey), with no edge, rounding or blur — a scrim, not
+    a panel. The band BETWEEN the two keeps the white table and DROPS the field
+    instead: the same full-bleed mechanism, the cover's colour mixed toward
+    near-black at 0.62. That band is the case the owner reported twice — a
+    cover is a mixture (The Bends is a bright face on a dark frame), and the
+    average the flip judges it by sits well below the field its ambience
+    paints, because the orbs and the bloom are screen-blended and ADD light on
+    top of it (0.24 average, 0.45 field, measured). White ink read 2.55–3.49:1
+    there with four tiers under 3:1 — "the text mixes into the background" —
+    and 6.98–15.02:1 on the same cover after the wash, across all 17 tiers the
+    player draws (the top bar's queue line and `Up next` label, the title, the
+    format line, the album and artist lines, the transport glyphs, the time
+    readouts, the volume box and the lyric lines).
+  * **the chrome follows the chosen table, never a fixed grey**: the top bar's
+    icons and queue line, the transport glyphs, the seek readouts and
+    `VolumePct` take their colour from the ink (`text-current` inside an
+    `ink.chromeText` surface), so they move with the polarity. `VolumePct` draws
+    on two surfaces — the fullscreen chrome and the player bar — and the fixed
+    `zinc-500`/`zinc-600` it used to pin suited only the dark one (the volume
+    box read 1.64:1 on a mid cover: invisible). Over a music video the top bar
+    keeps light greys, because the picture is the field there and the ink's
+    polarity says nothing about it.
   The floating MENUS are the deliberate exception and keep their frosted veil
   (`np-veil` + `np-veil-dark` + `np-veil-panel`: the options popover, the queue
   drawer) — a menu is a menu, and its panel is how it reads as one. R56c's
