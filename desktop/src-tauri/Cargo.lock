@@ -2107,7 +2107,7 @@ dependencies = [
 
 [[package]]
 name = "mlo-desktop"
-version = "3.21.2"
+version = "3.22.0"
 dependencies = [
  "parking_lot",
  "tauri",

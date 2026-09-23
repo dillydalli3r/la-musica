@@ -16,6 +16,7 @@ Run:  python tools/check_versions.py           (exit 0 = all agree, 1 = drift)
 import json
 import os
 import re
+import subprocess
 import sys
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -32,6 +33,19 @@ def find(pattern, text, path, label):
     if not m:
         sys.exit(f"check_versions: no {label} found in {path} (pattern {pattern!r})")
     return m.group(1)
+
+
+def lock_pins(text):
+    """Every package in a Cargo.lock as `name -> (version, checksum)`."""
+    pins = {}
+    for block in text.split("[[package]]")[1:]:
+        name = re.search(r'^name = "([^"]+)"', block, re.M)
+        ver = re.search(r'^version = "([^"]+)"', block, re.M)
+        if not name or not ver:
+            continue
+        sum_ = re.search(r'^checksum = "([^"]+)"', block, re.M)
+        pins[name.group(1)] = (ver.group(1), sum_.group(1) if sum_ else "")
+    return pins
 
 
 def main():
@@ -57,14 +71,33 @@ def main():
     # released as 3.20.3 today, and a blanket text replace of the version in
     # the lock turned its entry into "3.20.4" with 3.20.3's checksum under it —
     # a lockfile cargo cannot resolve, discovered only by the desktop build.
-    lock_names = re.findall(r'^name = "([^"]+)"\nversion = "([^"]+)"',
-                            read("desktop/src-tauri/Cargo.lock"), re.M)
-    strays = [name for name, ver in lock_names if ver == source]
+    lock = read("desktop/src-tauri/Cargo.lock")
+    strays = [name for name, (ver, _) in lock_pins(lock).items() if ver == source]
     if strays != ["mlo-desktop"]:
-        print(f"\ncheck_versions: the lock carries {source} in "
-              f"{strays or 'no package'} — expected exactly ['mlo-desktop']; "
-              f"a dependency's own version is not ours to bump")
-        return 1
+        # A dependency whose release number HAPPENS to equal ours is not ours
+        # and not a bug: `bumpalo` shipped as 3.20.3, `serde_with` as 3.22.0,
+        # and a rule that looks for our number alone flags them every time we
+        # land on one. The bug this check exists for is a BLANKET text replace,
+        # which rewrites a dependency's version and leaves its OLD checksum
+        # under it — a lockfile cargo refuses. So compare with HEAD: whatever
+        # MOVED must be mlo-desktop, and nothing moving (a committed tree, as
+        # in CI) means there is nothing here to police.
+        head = subprocess.run(["git", "show", "HEAD:desktop/src-tauri/Cargo.lock"],
+                              cwd=ROOT, capture_output=True, text=True)
+        head_pins = lock_pins(head.stdout) if head.returncode == 0 else None
+        moved = ([name for name, pin in lock_pins(lock).items()
+                  if head_pins is not None and head_pins.get(name) != pin]
+                 if head_pins is not None else None)
+        if head_pins is None or not moved:
+            print(f"  note  the lock carries {source} in {strays} — other "
+                  f"packages' own release numbers, and nothing moved since HEAD")
+        else:
+            wrong = [name for name in moved if name != "mlo-desktop"]
+            if wrong:
+                print(f"\ncheck_versions: {wrong} changed in the lock — a "
+                      f"dependency's own version is not ours to bump")
+                return 1
+            print(f"  ok    only mlo-desktop moved in the lock ({source})")
 
     # The iOS build number ships in the same plist as the marketing version;
     # two numbers that can disagree is the exact drift this script exists for.

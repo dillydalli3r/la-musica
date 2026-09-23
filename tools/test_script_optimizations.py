@@ -13,6 +13,7 @@ The fixtures are synthetic FLAC/PNG/JPEG/MP4 files in a temp folder; the
 user's library is never touched.
 """
 import io
+import math
 import os
 import shutil
 import subprocess
@@ -1159,6 +1160,148 @@ def check_format_all_cover_prepared_once(tmp):
        f"measured {len(prepared)}: {prepared})")
 
 
+def _tone_flac(path, seconds=3, freq=220.0):
+    """A real, non-silent FLAC: the audit's detectors decide on audio, and a
+    silent fixture gets no verdict to skip on."""
+    import struct
+    wav = path + ".wav"
+    rate = 44100
+    frames = bytearray()
+    for i in range(int(rate * seconds)):
+        v = 0.4 * math.sin(2 * math.pi * freq * i / rate)
+        v += 0.2 * math.sin(2 * math.pi * freq * 3 * i / rate + 0.5)
+        s = int(max(-1.0, min(1.0, v)) * 32767)
+        frames += struct.pack("<hh", s, s)
+    with wave.open(wav, "w") as w:
+        w.setnchannels(2)
+        w.setsampwidth(2)
+        w.setframerate(rate)
+        w.writeframes(bytes(frames))
+    if FLAC_EXE:
+        subprocess.run([FLAC_EXE, "-s", "-f", "-8", "-o", path, wav],
+                       check=True, capture_output=True)
+    else:
+        subprocess.run([FFMPEG_EXE, "-v", "error", "-i", wav, "-c:a", "flac",
+                        "-y", path], check=True, capture_output=True)
+    os.remove(wav)
+    from mutagen.flac import FLAC as _FLAC
+    f = _FLAC(path)
+    f["TITLE"] = ["Track"]
+    f["ARTIST"] = ["A"]
+    f["ALBUM"] = ["B"]
+    f["TRACKNUMBER"] = ["1"]
+    f.save()
+    return path
+
+
+# --------------------------------------------------------------------------- #
+# Script 6 — a re-audit of unchanged files decodes nothing.
+# --------------------------------------------------------------------------- #
+def check_audit_rerun_decodes_nothing(tmp):
+    """The integrity test decodes only the files this run will audit."""
+    from mlo import audit as mlo_audit
+    from mlo.audio import AudioFile
+    if not _dep_exe("audioauditor", "AudioAuditorCLI.exe"):
+        skip("no .dependencies AudioAuditor: the audit cannot write a verdict")
+        return
+    if not (FLAC_EXE or FFMPEG_EXE):
+        skip("no flac/ffmpeg: the integrity test has nothing to decode with")
+        return
+
+    album = os.path.join(tmp, "audit_rerun")
+    os.makedirs(album)
+    tracks = [_tone_flac(os.path.join(album, f"0{n} - Track.flac"), 3,
+                         freq=220.0 + 40 * n) for n in (1, 2)]
+    run_cfg = cfg(music_folder=album, targets=[album], worker_limit=1)
+
+    verified, restore_v = count_calls(mlo_audit, "verify_integrity")
+    batches, restore_b = count_calls(mlo_audit, "_audit_batch")
+    try:
+        mlo_audit.run_audit_library(dict(run_cfg))
+        first_verified, first_batches = len(verified), len(batches)
+        verdicts = [str(AudioFile(p).get_tag("AUDIT") or "") for p in tracks]
+        verified.clear()
+        batches.clear()
+        mlo_audit.run_audit_library(dict(run_cfg))
+        second_verified, second_batches = len(verified), len(batches)
+        verdicts_again = [str(AudioFile(p).get_tag("AUDIT") or "")
+                          for p in tracks]
+        # A TAG write moves every file's stamp and none of its audio — which
+        # is what the rest of a script chain does to every file it touches.
+        for p in tracks:
+            af = AudioFile(p)
+            af.defer_save(True)
+            af.set_tag("COMMENT", "written after the audit")
+            af.defer_save(False)
+        verified.clear()
+        batches.clear()
+        mlo_audit.run_audit_library(dict(run_cfg))
+        third_verified, third_batches = len(verified), len(batches)
+        # Re-encoded audio is NOT the audio the verdict was written for.
+        _tone_flac(tracks[0], 3, freq=500.0)
+        verified.clear()
+        mlo_audit.run_audit_library(dict(run_cfg))
+        fourth_verified = len(verified)
+    finally:
+        restore_v()
+        restore_b()
+
+    if not any(verdicts):
+        skip("AudioAuditor gave the fixture no verdict: nothing to skip on")
+        return
+    ok(first_verified == 2 and first_batches == 1,
+       f"script 6: the first run verifies and audits both tracks "
+       f"({first_verified} integrity decodes, {first_batches} spectral batch)")
+    ok(second_verified == 0 and second_batches == 0,
+       f"script 6: a second run over the same bytes decodes NOTHING — the "
+       f"verdict and the integrity answer are already recorded for them (was "
+       f"2 integrity decodes + 1 spectral batch per run, measured "
+       f"{second_verified} + {second_batches})")
+    ok(verdicts_again == verdicts,
+       f"script 6: and the AUDIT verdicts are unchanged ({verdicts} vs "
+       f"{verdicts_again})")
+    ok(third_verified == 0 and third_batches == 0,
+       f"script 6: a TAG write does not invalidate that — the verdict is about "
+       f"the audio, and the record keeps its identity (measured "
+       f"{third_verified} decodes, {third_batches} batches)")
+    ok(fourth_verified == 1,
+       f"script 6: re-encoded audio is audited again, and only it (measured "
+       f"{fourth_verified})")
+
+
+def check_audit_one_tag_read_per_file(tmp):
+    """Script 6 asks both of its questions of one container parse."""
+    from mlo import audit as mlo_audit
+    import server.tagcache as tagcache
+    if not (FLAC_EXE or FFMPEG_EXE):
+        skip("no flac/ffmpeg: the audit cannot run")
+        return
+
+    album = os.path.join(tmp, "audit_reads")
+    os.makedirs(album)
+    for n in (1, 2):
+        _tone_flac(os.path.join(album, f"0{n} - Track.flac"), 2)
+    tagcache.invalidate_all()
+
+    reads, restore_r = count_calls(tagcache, "read_track")
+    opens, restore_o = count_calls(mlo_audit, "AudioFile")
+    try:
+        mlo_audit.run_audit_library(
+            cfg(music_folder=album, targets=[album], worker_limit=1))
+    finally:
+        restore_r()
+        restore_o()
+    tagcache.invalidate_all()
+
+    ok(len(reads) == 2,
+       f"script 6: ONE tag read per file answers both MEDIA and AUDIT (was "
+       f"two separate container parses per file plus the write, measured "
+       f"{len(reads)} reads for 2 files)")
+    ok(len(opens) <= 2,
+       f"script 6: and the audit itself opens a container only to WRITE "
+       f"(measured {len(opens)} opens for 2 files)")
+
+
 def main():
     print("Script optimization audit (measurements, not claims)")
     tmp = tempfile.mkdtemp(prefix="mlo_script_opt_")
@@ -1169,6 +1312,8 @@ def main():
         ("script 8  Auto tagging (release tags)", check_autotag_release_write_batch),
         ("script 8  Auto tagging (no re-open)", check_autotag_no_reopen_after_fix),
         ("script 12 Key & BPM", check_audiometa_batch_write),
+        ("script 6  Audit (re-run decodes nothing)", check_audit_rerun_decodes_nothing),
+        ("script 6  Audit (one read per file)", check_audit_one_tag_read_per_file),
         ("script 10 Format all (art)", check_format_all_art_single_write),
         ("script 10 Format all (.cue reads)", check_format_all_cue_single_read),
         ("script 10 Format all (cue repair)", check_format_all_cue_repair_once_per_album),

@@ -453,6 +453,9 @@ export const CONFIG_GROUPS: CfgGroup[] = [
         { k: "wishes_retry_backoff_minutes", label: "Extra wait before retrying after a transient failure (minutes, doubles per attempt, 0 = none)", type: "number", min: 0, max: 1440, help: "A refused slskd, a MusicBrainz outage or a failed verification is not the album being unavailable — the wish waits this long before the next try, doubling each attempt up to 24 hours." },
         { k: "wishes_auto_import", label: "Auto-import when a verified match is found", type: "bool" },
         { k: "soulseek_auto_wish_prompt", label: "Keep searching wishes automatically while the app runs", type: "bool" },
+        { k: "soulseek_auto_lossy_policy", label: "When only lossy copies exist (a wish, a watched artist)", type: "select",
+          options: [["never", "Never take one — keep searching (default)"], ["best", "Take the best one, and say so"]],
+          help: "An unattended download (a wish, an artist watch) that finds only MP3/AAC folders. Never is the shipped behaviour: the release stays on the wish list and keeps being searched, never quietly turning up as lossy audio. Best takes the top-ranked lossy folder the ranking already offers — the fastest, most complete copy of the album — and names the format in the job's log, its queue row and the notification it ends with. The Soulseek page always ASKS you either way, so this can never overrule an answer you gave by hand." },
       ],
     },
     {

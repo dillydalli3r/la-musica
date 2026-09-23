@@ -506,6 +506,37 @@ with Patch(auto, load_config=lambda: dict(CFG),
     assert "no match for" in fail["reason"], fail
     assert fail["release_mbid"] == bad["id"], fail
 
+    # ...and the two ways a COMPLETED import is not the plain success the row
+    # used to report. A move the naming script could not finish kept only the
+    # script's name, which reads as "the album is fine, a script grumbled"
+    # while the album's remaining files sat in the staging folder the user has
+    # to import again; and an album taken as a lossy copy under
+    # `soulseek_auto_lossy_policy` is not the lossless import every other row
+    # is. Both facts ride the row now, and the payload carries them as data so
+    # a client can act on the note it renders.
+    PIPE.imports["Partial"] = {
+        "imported": True, "organized": False, "partial": True,
+        "organize_error": "1 file(s) could not be moved into the library — "
+                          "they are still in the download folder"}
+    PIPE.imports["Lossy"] = {"imported": True, "organized": True, "lossy": "MP3"}
+    for mbid, artist, title in (("88888888-0000-0000-0000-000000000001", "Partial", "Move"),
+                                ("88888888-0000-0000-0000-000000000002", "Lossy", "Copy")):
+        auto.start_job(release=_release(mbid, artist, title), source="soulseek")
+    got = _wait_for(lambda: [r for r in _queue(client)["sections"]["completed"]
+                             if r["title"] in ("Move", "Copy")], 20,
+                    "the partial and lossy rows") or []
+    partial_row = [r for r in got if r["title"] == "Move"][0]
+    assert partial_row["stage"] == "completed", partial_row
+    assert partial_row["note"].startswith("Imported into the library"), partial_row
+    assert "naming script could not move every file" in partial_row["note"], partial_row
+    assert "still in the download folder" in partial_row["note"], partial_row
+    assert partial_row["partial"] is True, partial_row
+    assert partial_row["organize_error"].startswith("1 file(s)"), partial_row
+    lossy_row = [r for r in got if r["title"] == "Copy"][0]
+    assert lossy_row["note"] == "Imported into the library — a lossy copy (MP3)", lossy_row
+    assert lossy_row["lossy"] == "MP3", lossy_row
+    assert lossy_row["partial"] is False, lossy_row
+
     # ------------------------------------------------------------------- #
     # 5. cancelling rows goes through the primitive that owns them
     # ------------------------------------------------------------------- #

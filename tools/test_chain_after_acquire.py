@@ -6,8 +6,11 @@ What this pins, path by path:
   * the Soulseek auto-importer — a download the pipeline fetched by itself
   * the bulk queue and the sequential "import everything downloaded" queue
     (the one-click import route and the per-row Import button both end there)
-  * an "Add to library" framework album the download lands in (organize adopts
-    the folder the naming script created before the audio existed)
+  * an "Add to library" framework album the download lands in — the album lands
+    IN that folder and the folder then takes the name the naming script gives
+    the tags (the add-time name comes from the MusicBrainz payload, so it must
+    not outlive them: the grade compares every file against the script's own
+    answer)
   * a watch-queued release (the watch's wish fills that same framework album)
   * a manual drag-and-drop import (the wizard's finish)
 
@@ -368,6 +371,70 @@ def check_auto_download():
 check_auto_download()
 
 # --------------------------------------------------------------------------- #
+# (a2) an organize that cannot place every file still finishes the import
+# --------------------------------------------------------------------------- #
+print("\n(a2) a namer that failed does not cost the album its cover or its chain")
+
+
+def check_partial_organize():
+    """The namer failing must not abort the import.
+
+    `_import` used to RAISE on organize's per-file errors, i.e. before
+    `_start_import_chain`: an album whose naming script could not move one
+    locked track got no artwork and no script chain at all, and the job died as
+    an error — the "Missing cover image" half of the owner's report. It is
+    reported now (`organized` False, `organize_error`, `partial`), the chain
+    still runs, and `partial` is what keeps the download folder intact: the
+    files that never moved are still there to retry (clearing it is how an
+    import loses audio).
+    """
+    src = os.path.join(DD, "Partial Organize")
+    make_wav(os.path.join(src, "01 - one.wav"))
+    rel = release(11, "Partial Organize")
+    saves = {name: getattr(soulseek_auto, name) for name in
+             ("_stamp_mb_tags", "_stamp_media", "_verify_acoustid",
+              "_account_metadata")}
+    real_convert = flac_mod.convert_album_lossless
+    real_organize = mlo_main.organize
+
+    def organize(req):
+        # ok:True with the file-level failure the organizer reports for a track
+        # another process holds open
+        return {"results": [{"album_root": req.paths[0], "path": req.paths[0],
+                             "errors": ["01 - one.wav: a file inside is still "
+                                        "in use — stop playback and retry"]}]}
+
+    soulseek_auto._stamp_mb_tags = lambda album_dir, release: 0
+    soulseek_auto._stamp_media = lambda album_dir, media, cfg: (0, [])
+    soulseek_auto._verify_acoustid = lambda album_dir, release, cfg: None
+    soulseek_auto._account_metadata = lambda album_dir, cfg: {}
+    flac_mod.convert_album_lossless = lambda album_dir, cfg: {"modified_count": 0}
+    mlo_main.organize = organize
+    mark, rmark, smark = len(CHAIN_CALLS), len(FINISH_RESULTS), len(STAGING_CALLS)
+    try:
+        res = soulseek_auto._import(src, rel, CFG, "CD")
+    finally:
+        for name, fn in saves.items():
+            setattr(soulseek_auto, name, fn)
+        flac_mod.convert_album_lossless = real_convert
+        mlo_main.organize = real_organize
+    join_chain_threads()
+
+    eq(res.get("imported"), True, "the import still reports the album imported")
+    eq(res.get("organized"), False, "with the namer's failure on the record")
+    ok("could not be moved" in str(res.get("organize_error") or ""),
+       "naming what could not be placed", res.get("organize_error"))
+    eq(res.get("partial"), True,
+       "and flagging the download as unsafe to clear (the files are still there)")
+    eq(len(calls_since(mark)), 1, "the configured chain still ran")
+    eq(len(results_since(rmark)), 1, "over the album, through finish_album")
+    ok(len(STAGING_CALLS) > smark,
+       "and the cover/metadata step still ran for it", STAGING_CALLS[smark:])
+
+
+check_partial_organize()
+
+# --------------------------------------------------------------------------- #
 # (b) the queue: bulk, the one-click route and the sequential runner
 # --------------------------------------------------------------------------- #
 print("\n(b) the bulk queue and the import queue")
@@ -492,31 +559,46 @@ def check_framework_adoption():
         "RELEASETYPE": "Album", "DATE": adopt["date"],
         "ORIGINALDATE": adopt["originaldate"],
         # a DIFFERENT medium from MusicBrainz's own "CD": the naming script then
-        # names another folder than the framework album's — the case adoption
-        # exists for
+        # names another folder than the framework album's own name — which is
+        # the whole point of the case below
         "MEDIA": "Vinyl", "RELEASECOUNTRY": adopt["country"],
         "CATALOGNUMBER": adopt["catalog_number"], "LABEL": adopt["label"],
         "DISCNUMBER": "1", "TRACKNUMBER": "1", "TITLE": "One",
     })
     org = mlo_main.organize(mlo_main.OrganizeRequest(paths=[staging], dry_run=False))
     landed = norm((org.get("results") or [{}])[0].get("album_root") or "")
-    eq(landed, folder, "the organizer landed the album IN the framework folder")
-    ok(bool(pathmod.load_pending(folder)),
-       "the marker is still there while the chain has not run")
+    # The name those TAGS give the album — the same naming script the ADD
+    # evaluated from its MusicBrainz payload, on the payload's own "Vinyl"
+    # spelling of the medium.
+    expected = norm(pending_albums.folder_for_release(dict(adopt, medium="Vinyl"),
+                                                      CFG) or "")
+    eq(landed, expected, "the organizer landed the album in the folder the "
+                         "naming script names (not the add-time one)")
+    ok(not os.path.isdir(folder),
+       "so the name the ADD gave the folder is gone — it cannot survive the tags")
+    ok(bool(pathmod.load_pending(landed)),
+       "the marker travelled with the folder, so the album is still the framework "
+       "album while the chain has not run")
+    ok(not pathmod.load_pending(folder),
+       "and nothing was left pending under the add-time name")
+    wish = wishes.get_wish(row["wish_id"]) or {}
+    eq(norm(str(wish.get("album_path") or "")), landed,
+       "and the wish that created it follows the folder")
 
-    # the auto-importer's post-download seam, on the adopted folder
+    # the auto-importer's post-download seam, on the folder organize reported —
+    # exactly what server.soulseek_auto._import does with `res["album_root"]`
     mark, rmark = len(CHAIN_CALLS), len(FINISH_RESULTS)
-    soulseek_auto._start_import_chain(folder, CFG)
+    soulseek_auto._start_import_chain(landed, CFG)
     join_chain_threads()
     calls = calls_since(mark)
     eq(len(calls), 1, "the chain ran exactly once on the adopted folder")
     if calls:
-        eq(calls[0]["target"], folder, "on the framework album's own folder")
+        eq(calls[0]["target"], landed, "on the folder the naming script named")
     done = results_since(rmark)
     eq(len(done), 1, "finish_album was called once, with (folder, cfg) and nothing else")
     if done:
         ok(done[0]["chained"] is True, "its result says the chain ran", done[0])
-    ok(not pathmod.load_pending(folder),
+    ok(not pathmod.load_pending(landed),
        "and only THEN is the framework album no longer pending")
 
 
@@ -775,6 +857,75 @@ def check_partial_album():
 check_partial_album()
 
 # --------------------------------------------------------------------------- #
+# (g2) the import-complete notice is the LAST thing the pipeline does
+# --------------------------------------------------------------------------- #
+print("\n(g2) the moment import_done is emitted")
+
+
+def check_done_notice_moment():
+    """`import_done` must not arrive before the pipeline has decided anything.
+
+    The notice is the app's "your album is ready" (it reaches the desktop, the
+    mobile shell and every open client), and it used to be the FIRST statement
+    of `_report_gaps` — i.e. emitted before the gaps, the grade and the prompt
+    that phase decides. The order is asserted by watching the three seams the
+    one function passes, in sequence: the gaps, the prompt they raise, and the
+    notice.
+    """
+    from mlo import import_policy
+
+    folder = album_of("Moment Album")
+    import_autonomy.clear(folder, CFG)
+    seq = []
+    seen_prompt_at_notice = []
+    real_gaps = import_policy.gaps
+    real_prompt = import_autonomy.raise_prompt
+    real_emit = events.emit
+
+    def spy_gaps(*a, **kw):
+        # Only up to the notice: the stub below asks `import_autonomy.prompts`
+        # for the listed rows, which derives the gaps again — that second pass
+        # is this check's own reading, not the pipeline's order.
+        if "import_done" not in seq:
+            seq.append("gaps")
+        return real_gaps(*a, **kw)
+
+    def spy_prompt(*a, **kw):
+        if "import_done" not in seq:
+            seq.append("prompt")
+        return real_prompt(*a, **kw)
+
+    def spy_emit(kind, title, body="", data=None, **kw):
+        if kind in ("import_started", "import_done"):
+            seq.append(str(kind))
+            if kind == "import_done":
+                # What the user is told the album needs must already be on
+                # record when "Imported" goes out, or the notice speaks for a
+                # report that does not exist yet.
+                seen_prompt_at_notice.append(
+                    any(p["album"] == fwd(folder)
+                        for p in import_autonomy.prompts(CFG)))
+
+    import_policy.gaps = spy_gaps
+    import_autonomy.raise_prompt = spy_prompt
+    events.emit = spy_emit
+    try:
+        res = imports.finish_album(folder, CFG)
+    finally:
+        import_policy.gaps = real_gaps
+        import_autonomy.raise_prompt = real_prompt
+        events.emit = real_emit
+    ok(bool(res["autonomy"]["missing"]), "the album has gaps to report")
+    eq(seq, ["import_started", "gaps", "prompt", "import_done"],
+       "the notice goes out AFTER the gaps and the prompt they raise")
+    eq(seen_prompt_at_notice, [True],
+       "and the prompt it raises is already listed when it does")
+    import_autonomy.clear(folder, CFG)
+
+
+check_done_notice_moment()
+
+# --------------------------------------------------------------------------- #
 # (h) the marker rules when the chain did not run
 # --------------------------------------------------------------------------- #
 print("\n(h) a chain that could not run")
@@ -931,6 +1082,173 @@ def check_chain_final_target():
 
 
 check_chain_final_target()
+
+# --------------------------------------------------------------------------- #
+# (e) a download queued from the Soulseek PAGE imports itself
+#
+# The owner's ask: pressing Download on the Soulseek page must be the ONLY
+# press an album needs. Every import path in this suite starts from something
+# the app decided; this one starts from the three routes the page's own
+# Download button calls, and asserts the whole chain — the import, the
+# configured scripts and the completion the notification sequence ends on —
+# runs with nothing else pressed.
+# --------------------------------------------------------------------------- #
+print("\n(e) a download queued from the Soulseek page imports itself")
+
+PAGE_USER = "pagepeer"
+PAGE_BATCH = "20202"
+PAGE_ALBUM = os.path.join(DD, PAGE_USER, PAGE_BATCH, "Music", "Page Album")
+PAGE_FINAL = os.path.join(LIB, "Page Artist", "Page Album (2001)")
+
+
+def page_download_fixture():
+    """The slskd layout a page download lands in, with real audio in it."""
+    for name in ("01 - one.wav", "02 - two.wav"):
+        make_wav(os.path.join(PAGE_ALBUM, name))
+    return [{"filename": f"Music/Page Album/{name}",
+             "size": os.path.getsize(os.path.join(PAGE_ALBUM, name))}
+            for name in ("01 - one.wav", "02 - two.wav")]
+
+
+def page_transfer_tree(files):
+    """slskd's transfer tree for those files, every one of them finished."""
+    return [{"username": PAGE_USER, "directories": [{
+        "directory": "Music/Page Album",
+        "files": [{"id": f"t{i}", "filename": f["filename"],
+                   "state": "Completed, Succeeded", "bytesTransferred": f["size"],
+                   "size": f["size"], "percentComplete": 100.0}
+                  for i, f in enumerate(files)]}]}]
+
+
+def check_page_download_auto_import():
+    from fastapi.testclient import TestClient
+
+    files = page_download_fixture()
+    real_organize = mlo_main.organize
+    real_tag = mlo_main._tag_media_for_albums
+    real_ident = mlo_main._stamp_import_identity
+    real_convert = flac_mod.convert_album_lossless
+    real_ready = soulseek.ready_albums
+    real_state = soulseek.downloads_state
+    real_running = soulseek.is_running
+    real_web = soulseek.web_up
+    real_enqueue = soulseek.enqueue_download
+    real_emit = events.emit
+    real_load = mlo_main.load_config
+    prev_importer = import_queue._importer
+    # `_page_download_pass` reads the live config, which this suite has already
+    # redirected once — and `load_config` follows the music folder into
+    # `<music>/.mlo/data/config.json` as soon as one exists, so the module
+    # attribute is what an install's settings ARE here.
+    mlo_main.load_config = lambda: {"music_folder": MF,
+                                    "import_autonomy": "automatic",
+                                    "manual_import_enabled": True}
+
+    def organize(req):
+        os.makedirs(os.path.dirname(PAGE_FINAL), exist_ok=True)
+        shutil.move(req.paths[0], PAGE_FINAL)
+        return {"results": [{"album_root": PAGE_FINAL, "path": PAGE_FINAL}]}
+
+    emitted = []
+    soulseek.is_running = lambda *a, **k: True
+    soulseek.web_up = lambda *a, **k: True
+    soulseek.enqueue_download = lambda username, wanted, cfg=None: True
+    soulseek.downloads_state = lambda *a, **k: page_transfer_tree(files)
+    soulseek.ready_albums = lambda *a, **k: [PAGE_ALBUM] if os.path.isdir(PAGE_ALBUM) else []
+    mlo_main.organize = organize
+    mlo_main._tag_media_for_albums = lambda albums: 0
+    mlo_main._stamp_import_identity = lambda albums: 0
+    flac_mod.convert_album_lossless = lambda album_dir, cfg: {"modified_count": 0}
+    events.emit = lambda kind, title, body, data=None, **kw: emitted.append(
+        (kind, title, body, data))
+    import_queue.set_importer(
+        lambda path: mlo_main._import_one_album(path, CFG, chain_async=False))
+    mlo_main._drop_page_intents()
+    mark = len(CHAIN_CALLS)
+    try:
+        # ---- a press slskd REFUSES is not remembered ----------------------- #
+        # Only what slskd really queued becomes a download the app imports by
+        # itself: a refused enqueue must not leave an intent behind to fire on
+        # somebody else's files later.
+        soulseek.is_running = lambda *a, **k: False
+        soulseek.web_up = lambda *a, **k: False
+        client = TestClient(mlo_main.app)
+        refused = client.post("/api/soulseek/download",
+                              json={"username": PAGE_USER, "files": files})
+        ok(refused.status_code == 400, "a refused press answers 400", refused.text)
+        eq(mlo_main._page_intents(), [], "and is not remembered as a download")
+        soulseek.is_running = lambda *a, **k: True
+        soulseek.web_up = lambda *a, **k: True
+
+        # ---- the page's OWN route: a download press, nothing else --------- #
+        res = client.post("/api/soulseek/download",
+                          json={"username": PAGE_USER, "files": files})
+        ok(res.status_code == 200, "the page's Download route answers 200", res.text)
+        eq(res.json().get("queued"), 2, "and queued both files")
+        ok(bool(mlo_main._page_intents()),
+           "the press is remembered as a download to import when it lands")
+
+        # ---- the transfer finishes; the app notices by itself -------------- #
+        ok(mlo_main._page_download_pass() is True,
+           "the pass starts the import with nothing else pressed")
+        deadline = time.time() + 60
+        while import_queue.running() and time.time() < deadline:
+            time.sleep(0.05)
+        ok(not import_queue.running(), "the import run finished")
+    finally:
+        mlo_main.organize = real_organize
+        mlo_main._tag_media_for_albums = real_tag
+        mlo_main._stamp_import_identity = real_ident
+        flac_mod.convert_album_lossless = real_convert
+        soulseek.ready_albums = real_ready
+        soulseek.downloads_state = real_state
+        soulseek.is_running = real_running
+        soulseek.web_up = real_web
+        soulseek.enqueue_download = real_enqueue
+        events.emit = real_emit
+        import_queue.set_importer(prev_importer)
+
+    calls = calls_since(mark)
+    eq(len(calls), 1, "the configured chain ran exactly once for the page download")
+    if calls:
+        eq(calls[0]["target"], norm(PAGE_FINAL),
+           "on the folder the import put the album in")
+        eq(calls[0]["ids"], imports.chain_for(CFG), "with the configured ids")
+    ok(os.path.isdir(PAGE_FINAL), "the album really is in the library")
+    ok(not os.path.isdir(PAGE_ALBUM), "and no longer in the download folder")
+    eq([e[0] for e in emitted if e[0] in ("import_started", "import_done", "download_done")],
+       ["import_started", "import_done", "download_done"],
+       "the notification sequence is the pipeline's own, ending on its completion")
+    ok("Page Album" in emitted[-1][2] or "Imported" in emitted[-1][1],
+       "whose last frame is the pipeline's own report", emitted[-1])
+    eq(mlo_main._page_intents(), [], "and the intent is spent")
+
+    # ---- an install that wants to REVIEW still reviews ------------------- #
+    # `import_autonomy` = review (the pipeline's own stop-at-each-step mode) and
+    # `manual_import_enabled` off are the two ways this install says "a person
+    # imports here": either one leaves the download in the folder with its
+    # "ready to import" row, and says so once instead of importing behind the
+    # user's back.
+    for patch, label in (({"import_autonomy": "review"}, "import_autonomy = review"),
+                         ({"manual_import_enabled": False}, "manual_import_enabled off")):
+        for name in ("01 - one.wav", "02 - two.wav"):
+            make_wav(os.path.join(PAGE_ALBUM, name))
+        mlo_main.load_config = lambda patch=patch: {"music_folder": MF, **patch}
+        mlo_main._remember_page_download(PAGE_USER, files)
+        mark = len(CHAIN_CALLS)
+        ok(mlo_main._page_download_pass() is False,
+           f"nothing imports itself with {label}")
+        eq(len(calls_since(mark)), 0, f"and no chain ran for it ({label})")
+        ok(os.path.isdir(PAGE_ALBUM), f"the download is left where it is ({label})")
+        eq(mlo_main._page_intents(), [],
+           f"the intent is dropped, not retried forever ({label})")
+        shutil.rmtree(PAGE_ALBUM, ignore_errors=True)
+
+    mlo_main.load_config = real_load
+    import_queue.set_importer(lambda p: {})
+
+
+check_page_download_auto_import()
 
 # --------------------------------------------------------------------------- #
 print()

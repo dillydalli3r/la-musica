@@ -6,6 +6,7 @@ import ConfirmButton from "./ConfirmButton";
 import ServerVersionNotice from "./ServerVersionNotice";
 import { useI18n } from "../lib/i18n";
 import { isClientShell, probeServer, resetClientSetup, type ProbeResult } from "../lib/clientSetup";
+import { dropPush } from "../lib/notify";
 import { toast } from "../store";
 
 /** Settings → Security: the password, this client's session, and the facts a
@@ -103,6 +104,7 @@ export default function SecurityPanel() {
   const signOut = async (everywhere: boolean) => {
     setBusy(true);
     try {
+      await dropPush(); // this device must stop being woken once nobody is signed in
       if (everywhere) await api.authRevokeAll();
       else await api.authLogout();
       setToken(null);

@@ -14,11 +14,21 @@ sites that belong to this task:
 * a newer release (`server/version.py`) — announced once per version, not once
   per check.
 
+It also covers the SECOND transport the same frames ride (#48): Web Push, so a
+device that is CLOSED still hears that an import finished. That half is pinned
+against the specification rather than against itself — RFC 8291's own Appendix A
+vector, replayed through the encryption this server sends — plus the fan-out,
+the per-device kind filter, the 404/410 pruning RFC 8030 requires, and the one
+rule that matters most: nothing in it may ever fail an event.
+
 The client's own contract (payload shape, click targets, the badge, clear all)
 lives in tools/test_notifications.cjs; this file is only about what the server
 publishes.
 """
+import base64
+import json
 import os
+import struct
 import sys
 import tempfile
 import time
@@ -246,6 +256,350 @@ check("a second check does not repeat the news", len(frames("update_available"))
 version_mod._fetch_latest = lambda: {"latest": "100.0.0", "release_url": ""}
 version_mod.check(force=True)
 check("a NEWER release is announced again", len(frames("update_available")) == 2)
+
+# ── Web Push (issue #48) ────────────────────────────────────────────────────
+#
+# The transport that wakes a device whose app is closed. Everything here runs
+# offline: the ONE network call the server makes (events._push_post) is
+# replaced, and the frame it would have carried is opened exactly the way a
+# browser's PushManager opens it (RFC 8291 §3.4) — which is the only way to
+# prove the record is real without a push service to talk to.
+print("== web push: waking a device that is closed ==")
+try:
+    from cryptography.hazmat.primitives import hashes as _hashes
+    from cryptography.hazmat.primitives import serialization as _ser
+    from cryptography.hazmat.primitives.asymmetric import ec as _ec
+    from cryptography.hazmat.primitives.asymmetric import utils as _asym
+    from cryptography.hazmat.primitives.asymmetric.ec import EllipticCurvePublicKey as _PubKey
+    from cryptography.hazmat.primitives.ciphers.aead import AESGCM as _AESGCM
+    from cryptography.hazmat.primitives.kdf.hkdf import HKDF as _HKDF
+    crypto = True
+except Exception as exc:  # pragma: no cover — a missing extra is a SKIP
+    print(f"  SKIP  cryptography is not installed: {exc}")
+    crypto = False
+
+if crypto:
+    from mlo import paths as mlo_paths  # noqa: E402
+    from server import auth as auth_mod  # noqa: E402
+
+    # Everything this section writes goes to its own directory: the key file and
+    # the subscription rows must never land in the library's own .mlo (the same
+    # reason the rest of this suite patches app_data_dir).
+    push_dir = tempfile.mkdtemp(prefix="mlo-push-")
+    mlo_paths.app_data_dir = lambda *a, **k: push_dir
+    auth_mod.db_path = lambda: os.path.join(push_dir, "auth.db")
+    auth_mod._initialized = False
+    # Both caches are per process, and app_data_dir has already been moved by
+    # an earlier section of this file — reset them so the pair is made HERE.
+    events_mod._keys = None
+    events_mod._signing_key_cache = None
+
+    def b64u(raw):
+        return base64.urlsafe_b64encode(raw).rstrip(b"=").decode()
+
+    def unb64u(text):
+        return base64.urlsafe_b64decode(str(text) + "=" * (-len(str(text)) % 4))
+
+    class Device:
+        """One browser: its own P-256 key pair and 16-byte authentication
+        secret, subscribed through the real store, and the decryption a real
+        PushManager performs on what arrives."""
+
+        def __init__(self, kinds=None, endpoint="https://push.example.invalid/send/one",
+                     username=""):
+            self.key = _ec.generate_private_key(_ec.SECP256R1())
+            self.public = self.key.public_key().public_bytes(
+                _ser.Encoding.X962, _ser.PublicFormat.UncompressedPoint)
+            self.secret = os.urandom(16)
+            self.endpoint = endpoint
+            auth_mod.push_subscribe(username, endpoint, b64u(self.public),
+                                    b64u(self.secret), kinds or [])
+
+        def open(self, body):
+            """The record as a browser sees it: ECDH against the sender's
+            public key, the same HKDF chain in reverse, AES-GCM."""
+            salt, idlen = body[:16], body[20]
+            as_public, ciphertext = body[21:21 + idlen], body[21 + idlen:]
+            shared = self.key.exchange(
+                _ec.ECDH(), _PubKey.from_encoded_point(_ec.SECP256R1(), as_public))
+            ikm = _HKDF(_hashes.SHA256(), 32, salt=self.secret,
+                        info=b"WebPush: info\x00" + self.public + as_public).derive(shared)
+            cek = _HKDF(_hashes.SHA256(), 16, salt=salt,
+                        info=b"Content-Encoding: aes128gcm\x00").derive(ikm)
+            nonce = _HKDF(_hashes.SHA256(), 12, salt=salt,
+                          info=b"Content-Encoding: nonce\x00").derive(ikm)
+            plain = _AESGCM(cek).decrypt(nonce, ciphertext, None)
+            assert plain[-1] == 2, "the padding delimiter (RFC 8291 §4)"
+            return json.loads(plain[:-1])
+
+    posts = []
+
+    def stub_push_service(status=201):
+        """Stand in for the push service. The only network call in this half of
+        the feature, replaced — never a real service."""
+        def post(url, body, headers, timeout=10):
+            posts.append({"url": url, "body": body, "headers": headers})
+            return status, b""
+        events_mod._push_post = post
+
+    def settle():
+        """Wait for the sender thread to finish what emit queued."""
+        events_mod._push_queue.join()
+
+    stub_push_service()
+    mine = Device(kinds=["import_done", "wish_found"])
+    posts.clear()
+    # An import whose summary grew an error list is the realistic way a frame
+    # gets big: the record declares `rs` 4096, and a payload past it is a frame
+    # a push service may refuse outright (RFC 8030 §7.2).
+    events_mod.emit("import_done", "Imported An Album", "x" * 20000,
+                    {"link": "/album/An%20Album"})
+    settle()
+    huge = mine.open(posts[0]["body"]) if posts else {}
+    check("an oversized frame is trimmed under the record's own size",
+          len(posts) == 1 and len(posts[0]["body"]) < events_mod._PUSH_RECORD_SIZE
+          and len(huge.get("body", "")) > 0 and huge["body"].endswith("…"),
+          str(len(posts[0]["body"]) if posts else 0))
+    check("...keeping the title and the click target the user acts on",
+          huge.get("title") == "Imported An Album"
+          and (huge.get("data") or {}).get("link") == "/album/An%20Album", str(huge.get("title")))
+    pub = events_mod.push_public_key()
+    check("a VAPID key pair is generated on first use",
+          len(unb64u(pub)) == 65 and unb64u(pub)[0] == 4, pub[:12])
+    check("...once, not per send", events_mod.push_public_key() == pub)
+    check("...kept beside the app's own state, not in the config",
+          os.path.isfile(os.path.join(push_dir, "webpush.json")))
+
+    # The encryption is checked against the SPEC, not against itself: if it ever
+    # drifts, a push service refuses every record and the feature dies silently.
+    kat_sender = _ec.derive_private_key(
+        int.from_bytes(unb64u("yfWPiYE-n46HLnH0KqZOF1fJJU3MYrct3AELtAQ-oRw"), "big"),
+        _ec.SECP256R1())
+    kat = b64u(events_mod._encrypt(
+        b"When I grow up, I want to be a watermelon",
+        unb64u("BCVxsr7N_eNgVRqvHtD0zTZsEc6-VV-JvLexhqUzORcxaOzi6-AYWXvTBHm4bjyPjs7Vd8pZGH6SRpkNtoIAiw4"),
+        unb64u("BTBZMqHH6r4Tts7J_aSIgg"), kat_sender, unb64u("DGv6ra1nlYgDCS1FRnbzlw")))
+    check("RFC 8291 Appendix A: the record is byte for byte the spec's",
+          kat == ("DGv6ra1nlYgDCS1FRnbzlwAAEABBBP4z9KsN6nGRTbVYI_c7VJSPQTBtkgcy27mlmlMoZIIg"
+                  "Dll6e3vCYLocInmYWAmS6TlzAC8wEqKK6PBru3jl7A_yl95bQpu6cVPTpK4Mqgkf1CXztLVBSt"
+                  "2Ks3oZwbuwXPXLWyouBWLVWGNWQexSgSxsj_Qulcy4a-fN"))
+
+    drain()
+    posts.clear()
+    events_mod.emit("import_done", "Imported Kind of Blue", "21 scripts ran",
+                    {"album_path": "F:\\Music\\Miles - Kind of Blue"})
+    settle()
+    check("an import finishing -> one POST, to the subscribed device", len(posts) == 1)
+    sent = posts[0] if posts else {"url": "", "body": b"", "headers": {}}
+    check("...at the device's own endpoint", sent["url"] == mine.endpoint, sent["url"])
+    check("...as an aes128gcm record with a TTL",
+          sent["headers"].get("Content-Encoding") == "aes128gcm"
+          and bool(sent["headers"].get("TTL")), str(sent["headers"]))
+    frame = mine.open(sent["body"]) if sent["body"] else {}
+    check("...carrying the frame the socket carries",
+          frame.get("event") == "import_done" and frame.get("title") == "Imported Kind of Blue"
+          and frame.get("body") == "21 scripts ran", str(frame))
+    check("...with the album as the click target",
+          (frame.get("data") or {}).get("album_path") == "F:\\Music\\Miles - Kind of Blue")
+
+    auth_header = str(sent["headers"].get("Authorization") or "")
+    jwt = auth_header.split("t=")[1].split(",")[0] if auth_header.startswith("vapid t=") else ""
+    parts = jwt.split(".")
+    claims, signed = {}, False
+    if len(parts) == 3:
+        claims = json.loads(unb64u(parts[1]))
+        sig = unb64u(parts[2])
+        try:
+            _PubKey.from_encoded_point(_ec.SECP256R1(), unb64u(pub)).verify(
+                _asym.encode_dss_signature(int.from_bytes(sig[:32], "big"),
+                                           int.from_bytes(sig[32:], "big")),
+                f"{parts[0]}.{parts[1]}".encode("ascii"), _ec.ECDSA(_hashes.SHA256()))
+            signed = True
+        except Exception:
+            signed = False
+    check("the POST is signed with the install's own VAPID key",
+          auth_header.startswith("vapid t=") and auth_header.endswith("k=" + pub))
+    check("...ES256, and it verifies against the published half", signed)
+    check("...naming the push service it is for as its audience",
+          claims.get("aud") == "https://push.example.invalid", str(claims))
+
+    posts.clear()
+    events_mod.emit("script_done", "Scripts finished", "3 ran")
+    settle()
+    check("a kind this device did not ask for does not wake it", posts == [], str(posts))
+    events_mod.emit("wish_found", "Wish found: Kind of Blue", "", {})
+    settle()
+    check("...one it did ask for does", len(posts) == 1)
+    everything = Device(endpoint="https://push.example.invalid/send/two")
+    posts.clear()
+    events_mod.emit("script_done", "Scripts finished", "3 ran")
+    settle()
+    check("a device that asked for everything gets everything",
+          [p["url"] for p in posts] == [everything.endpoint], str(posts))
+    posts.clear()
+    events_mod.emit("download_started", "Download started", "", {},
+                    config={"notify_soulseek_download_start": False})
+    settle()
+    check("a kind switched off in the config is published to nobody", posts == [], str(posts))
+
+    posts.clear()
+    test_result = events_mod.send_test("")
+    check("the test button reaches this user's own devices",
+          test_result["sent"] == 2 and test_result["subscriptions"] == 2
+          and test_result["available"] is True, str(test_result))
+    check("...including one that asked for other kinds only (a test must be "
+          "deliverable where it was pressed)",
+          {p["url"] for p in posts} == {mine.endpoint, everything.endpoint})
+    opened = mine.open(posts[0]["body"]) if posts else {}
+    check("...with its own wording and a click target",
+          opened.get("event") == "test" and (opened.get("data") or {}).get("link") == "/settings")
+    theirs = Device(kinds=["import_done"], endpoint="https://push.example.invalid/send/three",
+                    username="ann")
+    posts.clear()
+    events_mod.send_test("ann")
+    check("...and only to the caller's, never another user's",
+          [p["url"] for p in posts] == [theirs.endpoint], str(posts))
+    posts.clear()
+    events_mod.emit("import_done", "Imported One", "", {})
+    settle()
+    check("an outcome still reaches every user's subscribed devices", len(posts) == 3)
+
+    stub_push_service(410)
+    events_mod.emit("import_done", "Imported Two", "", {})
+    settle()
+    check("a 410 drops the device (RFC 8030: it is gone)",
+          auth_mod.push_subscription_count() == 0, str(auth_mod.push_subscription_count()))
+    stub_push_service(404)
+    Device(kinds=["import_done"], endpoint="https://push.example.invalid/send/four")
+    events_mod.emit("import_done", "Imported Three", "", {})
+    settle()
+    check("...and so does a 404", auth_mod.push_subscription_count() == 0)
+    stub_push_service(500)
+    Device(kinds=["import_done"], endpoint="https://push.example.invalid/send/five")
+    events_mod.emit("import_done", "Imported Four", "", {})
+    settle()
+    check("a push service having a bad day keeps the device",
+          auth_mod.push_subscription_count() == 1)
+    events_mod._push_post = lambda *a, **k: (0, b"")
+    events_mod.emit("import_done", "Imported Five", "", {})
+    settle()
+    check("an unreachable push service keeps it too", auth_mod.push_subscription_count() == 1)
+
+    def exploding_send(row, body):
+        raise RuntimeError("push exploded")
+
+    def exploding_store(*a, **k):
+        raise RuntimeError("the store is gone")
+
+    drain()
+    real_send = events_mod._send_one
+    events_mod._send_one = exploding_send
+    published = events_mod.emit("import_done", "Imported Six", "summary", {"album_path": "X"})
+    settle()
+    check("a send that explodes still leaves the event published",
+          published.get("event") == "import_done" and len(frames("import_done")) == 1)
+    events_mod._send_one = real_send
+    real_subscriptions = auth_mod.push_subscriptions
+    auth_mod.push_subscriptions = exploding_store
+    check("a subscription store that cannot be read is not an error either",
+          events_mod.fanout({"event": "import_done"})
+          == {"sent": 0, "gone": 0, "failed": 0, "subscriptions": 0})
+    auth_mod.push_subscriptions = real_subscriptions
+
+    kept = Device(kinds=["import_done"], endpoint="https://push.example.invalid/send/six")
+    Device(kinds=["import_done"], endpoint="https://push.example.invalid/send/six",
+           username="ann")
+    check("re-subscribing one endpoint updates its row instead of adding one",
+          auth_mod.push_subscription_count() == 2
+          and [r["username"] for r in auth_mod.push_subscriptions()
+               if r["endpoint"] == kept.endpoint] == ["ann"])
+    check("a client may only drop its own device",
+          auth_mod.push_unsubscribe(kept.endpoint, "bob") == 0
+          and auth_mod.push_subscription_count() == 2)
+    check("...its own goes through", auth_mod.push_unsubscribe(kept.endpoint, "ann") == 1)
+    check("the server's own pruning is not scoped to a user",
+          auth_mod.push_unsubscribe("https://push.example.invalid/send/five") == 1)
+    Device(kinds=["import_done"], endpoint="https://push.example.invalid/send/seven",
+           username="ann")
+    auth_mod.revoke_all()
+    check("signing out everywhere takes the devices with it (nothing is pushed to a "
+          "signed-out phone)", auth_mod.push_subscription_count() == 0)
+
+    auth_mod.push_subscribe("", "https://push.example.invalid/send/broken",
+                            "not-a-key", "not-a-secret", [])
+    posts.clear()
+    stub_push_service()
+    events_mod.emit("import_done", "Imported Seven", "", {})
+    settle()
+    check("a row whose keys cannot be used is pruned, not retried forever",
+          posts == [] and auth_mod.push_subscription_count() == 0)
+
+    print("== web push over HTTP: the routes the client calls ==")
+    try:
+        from fastapi.testclient import TestClient
+    except Exception as exc:  # pragma: no cover
+        print(f"  SKIP  TestClient unavailable: {exc}")
+    else:
+        # Gate OFF: this is about the push routes, not about who may call them
+        # (tools/test_auth.py owns the gate). Both entry points are patched —
+        # the middleware consults the cache first.
+        gate_off = {"required": False, "mode": "auto", "has_password": False, "username": "",
+                    "host": "127.0.0.1", "public_url": "", "session_days": 30}
+        auth_mod.cached_state = lambda: dict(gate_off)
+        auth_mod.current_state = lambda refresh=False: dict(gate_off)
+        client = TestClient(main_mod.app)  # no `with`: no lifespan, no workers
+
+        via_http = Device(kinds=["import_done"], endpoint="https://push.example.invalid/send/late")
+        status_body = client.get("/api/push/status").json()
+        check("the status route offers the key to subscribe with",
+              status_body.get("available") is True and status_body.get("public_key") == pub
+              and status_body.get("subscriptions") == 1, str(status_body))
+        body = {"endpoint": "https://push.example.invalid/send/http",
+                "keys": {"p256dh": b64u(via_http.public), "auth": b64u(via_http.secret)},
+                "kinds": ["import_done"]}
+        res = client.post("/api/push/subscribe", json=body)
+        check("a subscription is accepted through the route",
+              res.status_code == 200 and res.json().get("subscriptions") == 2, res.text)
+        check("...with the kinds that device asked for",
+              [r["kinds"] for r in auth_mod.push_subscriptions()
+               if r["endpoint"] == body["endpoint"]] == ["import_done"])
+        check("an endpoint that is not https is refused",
+              client.post("/api/push/subscribe",
+                          json=dict(body, endpoint="http://push.example.invalid/send/x")
+                          ).status_code == 400)
+        check("keys that are not a browser key pair are refused",
+              client.post("/api/push/subscribe",
+                          json=dict(body, keys={"p256dh": "AAAA", "auth": "AAAA"})
+                          ).status_code == 400)
+        posts.clear()
+        res = client.post("/api/push/test", json={})
+        check("the test route reports what it really did",
+              res.status_code == 200 and res.json().get("sent") == 2, res.text)
+        res = client.post("/api/push/unsubscribe", json={"endpoint": body["endpoint"]})
+        check("the unsubscribe route forgets the device",
+              res.status_code == 200 and res.json().get("removed") == 1
+              and auth_mod.push_subscription_count() == 1, res.text)
+
+        # The state every install is in for one release: requirements.txt names
+        # `cryptography`, but a machine that has not re-run pip does not have it.
+        # Push must be reported as unavailable rather than failing the API, the
+        # event channel or the boot.
+        live_keys = events_mod._keys
+        events_mod._keys = {}
+        try:
+            check("without the crypto library the status route says so",
+                  client.get("/api/push/status").json().get("available") is False)
+            check("...a subscription is refused with 503, not a broken row",
+                  client.post("/api/push/subscribe", json=body).status_code == 503)
+            check("...and the test button says the same",
+                  client.post("/api/push/test", json={}).status_code == 503)
+            posts.clear()
+            published = events_mod.emit("import_done", "Imported Anyway", "", {})
+            settle()
+            check("...while events keep being published, with no push attempted",
+                  posts == [] and published.get("event") == "import_done")
+        finally:
+            events_mod._keys = live_keys
 
 print(f"\n{len(FAILED)} failure(s)")
 sys.exit(1 if FAILED else 0)

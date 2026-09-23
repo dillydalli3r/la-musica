@@ -36,7 +36,10 @@ pipeline asks the same question in the same place: ``auto_acquisition_enabled``
 is the master switch for what the app does ON ITS OWN (the wishes worker
 searching, an artist watch queueing, an add-to-library request downloading) and
 ``manual_import_enabled`` is the switch over the user's own import path (the
-wizard and the ``POST /api/import/*`` routes). Both default on.
+wizard and the ``POST /api/import/*`` routes). Both default on, and
+``page_download_auto_import`` reads the two together: a download the user
+queued from the Soulseek page imports itself only while an automatic import is
+what this install wants at all.
 """
 
 MODES = ("automatic", "review")
@@ -348,6 +351,34 @@ def manual_import_enabled(cfg):
     work; off, they refuse with `MANUAL_OFF_NOTE` rather than importing.
     """
     return bool((cfg or {}).get("manual_import_enabled", True))
+
+
+def page_download_auto_import(cfg):
+    """May a download the user queued from the Soulseek page import itself?
+
+    The page's own Download button queues transfers and used to leave the
+    album sitting in the download folder until somebody pressed Import —
+    a second decision for an act the user had already taken. It is imported by
+    the app now, and this is the one question that decides whether it is: the
+    two switches that say "a person decides this import" answer it, and BOTH
+    must be open.
+
+    * `import_autonomy` "review" is exactly "do not decide an import for me":
+      the pipeline stops at the first family it cannot fill and hands the album
+      over, so a download queued while it is on is left where it is with its
+      row, waiting for the press that IS the review.
+    * `manual_import_enabled` off means an import the user asked for by hand
+      must not run at all (see the key's own contract: those routes refuse with
+      `MANUAL_OFF_NOTE`), and an automatic import behind that refusal is the
+      very thing the switch exists to stop — "nothing importing behind their
+      back".
+
+    Neither switch is about ACQUISITION, which is why `auto_acquisition_enabled`
+    is not asked here: the download itself was the user's own action (the same
+    reason a wish's "Search now" ignores that switch), and this call only
+    decides what happens to the bytes they asked for.
+    """
+    return manual_import_enabled(cfg) and mode(cfg) == "automatic"
 
 
 def configured_families(cfg):

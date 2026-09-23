@@ -64,8 +64,14 @@ a full toolchain and one on a NAS report different lists. The Dependencies page
 and the setup wizards read that report and say a feature is unavailable with
 the reason, instead of offering an Install button that cannot succeed.
 
-- **Notifications work the same**, so a phone can be told that a wish was found
-  or an import is ready.
+- **Notifications work the same** while the app is open — and the socket is why
+  the desktop tray exists at all: a hidden window keeps its connection alive, so
+  it is still told when a wish lands or an import finishes. What the shells do
+  **not** have is remote push: a Tauri webview registers no service worker, so a
+  CLOSED shell cannot be woken. Push belongs to the browser and to the installed
+  PWA — on iPhone and iPad that means la musica on the Home Screen, iOS 16.4 or
+  newer — and Settings → Notifications says exactly that per client instead of
+  offering a switch that could not work (`spec R204`).
 - **Capabilities** are split by platform: `capabilities/default.json` is
   desktop-only (folder picker + notifications), `capabilities/mobile.json`
   gives Android/iOS the core commands and notifications but no dialog
@@ -81,7 +87,7 @@ the reason, instead of offering an Install button that cannot succeed.
 
 ## Bundle config
 
-`bundle.iOS.minimumSystemVersion` 14.0, `bundle.iOS.bundleVersion` 3.21.2,
+`bundle.iOS.minimumSystemVersion` 14.0, `bundle.iOS.bundleVersion` 3.22.0,
 `bundle.iOS.infoPlist` and `bundle.android.minSdkVersion` 24 in
 `tauri.conf.json`. The Android package name and the iOS bundle id both come from
 the top-level `identifier` (`com.musiclibraryoptimizer.lamusica` — the old

@@ -1,6 +1,6 @@
 # la musica
 
-**v3.21.2** — a self-hosted app that *manages, optimizes, audits, grades and
+**v3.22.0** — a self-hosted app that *manages, optimizes, audits, grades and
 plays* your music library, from the browser, a desktop window or a phone.
 
 **la musica** (formerly Music Library Optimizer) is a FastAPI backend plus a
@@ -446,6 +446,28 @@ overwritten — you are told which one stayed (`spec R165`). In practice an
 automatic import lands a graded album **with its cover art**, instead of handing
 you a release to finish by hand over artwork the app had just fetched.
 
+**The album's name is what its tags say when the chain is done.** *Auto tagging*
+(script 8) is the last writer of the tags the naming script reads — it sharpens
+the dates and widens the release country — so it now re-applies the naming script
+to exactly the albums whose release tags it filled (`spec R199`), and a framework
+folder named from the MusicBrainz payload at add time is moved onto the name its
+tags produce (`spec R200`). Without that, the name the tags implied and the name
+on disk could disagree for the rest of the chain, and Grade — the last script —
+reported every file of a perfectly tagged album as `PATH: expected '…' (run
+organize)`.
+
+**The cover a framework album carries is a stand-in, not a cover.** The
+release-group front fetched when you add a release is treated as "no cover yet":
+the artist's real one is fetched over it, and the stand-in is dropped only once
+that real cover has been written. If nothing clears the cover minimum the
+stand-in STAYS and the step's own note says the album is keeping it — an album is
+never left with no cover file at all (`spec R201`). And an import that cannot
+place every file is **reported, not aborted**: the album is in the library, so
+its cover, its chain and the rest of the pipeline still run, the files that
+stayed in the download folder are named in the job's own line, and "Imported" is
+said only once the pipeline is really finished — the notice comes after the gap
+phase and its prompt, never one step early (`spec R202`).
+
 **When the edition the app picked is not on the network, it does not give the
 album up.** *Add to library* on a release group tries that group's ranked
 editions IN ORDER — the best pressing first, then the next, **three by default**
@@ -467,6 +489,19 @@ none of them is there, the release is **not dropped and its album is not
 removed**: it moves to the queue's own **Background** list — one row per release,
 however many editions it is trying — and keeps being searched on the worker's
 schedule until one lands.
+
+**A wish or a followed artist takes a copy only while one exists in a lossless
+format.** `soulseek_auto_lossy_policy` ships as **`never`** — an unattended
+acquisition that finds only MP3 leaves the release waiting, and the row says "a
+lossless copy is preferred, so nothing was downloaded" — and `best` lets it take
+the best-ranked lossy copy instead, which is then named as lossy in the job's
+log, its queue row and the notification, because a lossy album that arrives
+silently is the bug this key exists to avoid (`spec R210`). The Soulseek page
+**always asks**, whatever this holds: a person who pressed download is there to
+answer. And a download queued from that page now imports itself, runs the chain
+and notifies exactly as a wish does (`spec R209`) — through the same
+`import_autonomy` / `manual_import_enabled` gate every unattended import passes,
+so an install that wants to review still reviews.
 
 The **Genres** step asks the whole configured chain with **one button**: every
 source the app knows, asked in the order `genre_sources` lists them —
@@ -827,6 +862,19 @@ has its own off switch are skipped rather than run as no-ops:
 `lyrics_xlit_enabled` / `lyrics_translate_enabled` (17), `lrclib_auto_publish`
 (18), `acoustid_enabled` (21).
 
+**A re-run proves what it can and decodes what it must.** Script 6 keeps an
+evidence record per file — size, mtime and, where the container states one, the
+audio identity a tag write cannot move (FLAC's STREAMINFO MD5) — so a second run
+over an unchanged album re-audits **nothing** instead of re-decoding every file:
+measured on a 20-track fixture, that pass went from 20 `flac -t` decodes and
+1.32 s to none and 0.03 s, with the AUDIT tags and the grade output identical
+(`spec R206`–`R207`). A re-encoded track is audited again; a tag write is not.
+The decoder is deliberately **not** shared between scripts: each decodes for its
+own question (rsgain's EBU R128, the DR meter's per-channel PCM, librosa's mono
+22.05 kHz), no two want the same artefact, and the decodes scripts 12 and 16 pay
+are 1–3% of their own analysis — while holding one album's samples to pass them
+along would cost 636 MB of RAM (`spec R208`).
+
 By default the optimizer does **not** embed cover art — it removes it, and
 covers live on disk as `cover.*` plus per-track sidecars; Settings → *Embedded
 covers* (`embed_covers`, `embed_cover_jpeg_quality`, `embed_cover_resolution`)
@@ -979,7 +1027,22 @@ with an in-app toast when permission is refused. The tray keeps every kind;
 `notify_wish_found`, `notify_download_done`, `notify_import_ready`,
 `notify_soulseek_download_start` and `notify_soulseek_upload_start` decide which
 kinds are published, and `?since=` replays the 100-event ring so a client that
-reconnects does not miss one. This is **not** remote push. The UI ships in six
+reconnects does not miss one.
+
+**And it is remote push too** — a client that is not open gets woken. The server
+signs with VAPID and encrypts each message (RFC 8291 `aes128gcm`), keeps one row
+per subscribed device beside the sessions and users, and prunes a device the push
+service reports gone (404/410; anything else leaves it alone). `import_done` is
+among the kinds push carries, which is what closes the loop on an unattended
+import: the phone in the other room is told when the *pipeline* — not the
+download — finishes (`spec R202`). The signing key lives in `webpush.json`
+beside the state and deliberately **not** in the config, because `GET
+/api/config` hands the whole config to every signed-in client. Settings →
+Notifications shows a switch per device with a **Send a test notification**
+button, and says what the platform can do instead of offering a switch it cannot
+honour: the desktop shell notifies only while it runs, iPhone and iPad need la
+musica on the Home Screen (iOS 16.4+), and a plain-http page has no push at all
+(`spec R203`–`R205`). The UI ships in six
 languages — English, Español,
 Français, Deutsch, 日本語, Português (Brasil) — picked as this browser's own choice
 (`localStorage: mlo.locale`), then the server's `ui_locale`, then

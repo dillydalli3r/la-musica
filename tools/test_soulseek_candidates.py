@@ -3324,4 +3324,112 @@ assert "trying the next candidate" not in _detail, _detail
 assert soulseek_auto._rejection_detail([]) == "", "no attempts must not invent a reason"
 print("  ok a rejection report names the peers and the reasons, and counts the rest")
 
+# --------------------------------------------------------------------------- #
+# 8. A lossy-ONLY album on the BACKGROUND path: `soulseek_auto_lossy_policy`.
+#    The wishes worker and the artist watch run with confirm_lossy=False, so
+#    before this key the branch below them ended in a flat refusal and a release
+#    that exists only as MP3 could never be filled by either. The default stays
+#    exactly that refusal (a background acquisition never takes lossy audio
+#    behind the user's back); "best" takes the top-ranked lossy folder and SAYS
+#    it did, in the job's own log, in the result the row and the notification
+#    read, and in the notification itself.
+# --------------------------------------------------------------------------- #
+print("== a lossy-only album: the policy decides, out loud ==")
+
+
+def lossy_rows(user, folder, *, slot, queue, speed):
+    """A complete 2-track MP3 folder with its rip log and cue — a candidate for
+    a CD release, and a LOSSY one (rows carry no size: run_job plants the files)."""
+    out = [lrow(user, f"Music/{folder}/01 - Alpha.mp3", 200.0),
+           lrow(user, f"Music/{folder}/02 - Beta.mp3", 210.0),
+           lrow(user, f"Music/{folder}/rip.log"),
+           lrow(user, f"Music/{folder}/Album.cue")]
+    for r in out:
+        r["slot"], r["queue"], r["speed"] = slot, queue, speed
+    return out
+
+
+# Two lossy peers, so "the best one" is a real choice: the free slot and the
+# faster peer win on `_rank`, and the slower, queued one must not be taken.
+BEST_LOSSY = lossy_rows("mp3peer", "Mp3rip", slot=True, queue=0, speed=9_000_000)
+WORSE_LOSSY = lossy_rows("slowmp3", "Slowrip", slot=False, queue=500, speed=200_000)
+LOSSY_ONLY = BEST_LOSSY + WORSE_LOSSY
+
+from server import events as events_mod   # noqa: E402
+
+# (a) THE DEFAULT — no key at all, which is what every config written before it
+#     existed reads as: the refusal, word for word, with nothing downloaded and
+#     the reason on the row a user reads (the job's failure notification and the
+#     wish store's `last_error` both carry this sentence).
+_refused = []
+_real_emit = events_mod.emit
+events_mod.emit = lambda kind, title, body, data=None, **kw: _refused.append(
+    (kind, title, body, data))
+try:
+    run = run_job(JOB_RELEASE, LOSSY_ONLY)
+finally:
+    events_mod.emit = _real_emit
+assert run.job["state"] == "error", run.job
+assert run.job["result"]["error"] == (
+    "Only lossy copies found (MP3) — a lossless copy is preferred, so nothing "
+    "was downloaded."), run.job["result"]
+assert (run.enqueued, run.imported, run.calls) == ([], [], []), \
+    (run.enqueued, run.imported, run.calls)
+assert not run.job["result"].get("lossy"), run.job["result"]
+_failed = [e for e in _refused if e[0] == "download_failed"]
+assert _failed and _failed[-1][2] == run.job["result"]["error"], _refused
+assert not [e for e in _refused if e[0] == "download_done"], _refused
+
+# ...and "never" spelled out is the same answer as the missing key.
+run = run_job(JOB_RELEASE, LOSSY_ONLY,
+              cfg=dict(JOB_CFG, soulseek_auto_lossy_policy="never"))
+assert run.job["state"] == "error", run.job
+assert (run.enqueued, run.imported) == ([], []), (run.enqueued, run.imported)
+
+# (b) "best": the best of the two lossy folders is downloaded and imported, and
+#     the fact that it is a lossy copy travels with the job's result — that is
+#     what the queue row and the notification are made of.
+_said = []
+events_mod.emit = lambda kind, title, body, data=None, **kw: _said.append(
+    (kind, title, body, data))
+try:
+    run = run_job(JOB_RELEASE, LOSSY_ONLY,
+                  cfg=dict(JOB_CFG, soulseek_auto_lossy_policy="best"))
+finally:
+    events_mod.emit = _real_emit
+assert run.job["state"] == "done" and run.imported, run.job
+assert run.job["result"]["lossy"] == "MP3", run.job["result"]
+# the peers are asked in the RANKING's order, so the best lossy folder is the
+# first one tried and the one that becomes the import (the batch width is 3 —
+# `soulseek_candidate_slots` — so the second lossy peer is asked alongside it,
+# which is how every candidate is attempted; what the policy decides is that a
+# lossy copy may be taken at all)
+assert [f.split("/")[1] for f in run.enqueued[0]] == ["Mp3rip"], run.enqueued[0]
+assert [f.split("/")[1] for f in run.enqueued[1]] == ["Slowrip"], run.enqueued[1]
+assert all(f.startswith("Music/Mp3rip/") for f in run.enqueued[2]), run.enqueued[2]
+assert all(f.startswith("Music/Slowrip/") for f in run.enqueued[3]), run.enqueued[3]
+assert os.path.basename(run.imported[-1]) == "Mp3rip", run.imported
+_log = [e["msg"] for e in run.job["log"]]
+assert any("lossy copy" in m and "soulseek_auto_lossy_policy" in m for m in _log), _log
+assert not any(m == ("Only lossy copies found (MP3) — a lossless copy is "
+                     "preferred, so nothing was downloaded.") for m in _log), _log
+_done = [e for e in _said if e[0] == "download_done"]
+assert _done, [e[0] for e in _said]
+assert "lossy copy (MP3)" in _done[-1][2], _done[-1]
+assert "soulseek_auto_lossy_policy" in _done[-1][2], _done[-1]
+# ...and the INTERACTIVE path still asks, whatever the key says: a person who
+# asked for the release by hand is offered the lossy copy, never handed it.
+_said.clear()
+events_mod.emit = lambda kind, title, body, data=None, **kw: _said.append(
+    (kind, title, body, data))
+try:
+    ask = run_job(JOB_RELEASE, LOSSY_ONLY, confirm_lossy=True, answer=False,
+                  cfg=dict(JOB_CFG, soulseek_auto_lossy_policy="best"))
+finally:
+    events_mod.emit = _real_emit
+assert ask.prompt and ask.prompt["reason"] == "lossy_only", ask.prompt
+assert ask.job["state"] == "error", ask.job
+assert (ask.enqueued, ask.imported) == ([], []), (ask.enqueued, ask.imported)
+
 print("ok")
+

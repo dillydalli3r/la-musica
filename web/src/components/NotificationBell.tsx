@@ -1,11 +1,20 @@
 import { useEffect, useState } from "react";
 import { useNavigate } from "react-router-dom";
-import { Bell, BellOff, BellRing, X } from "lucide-react";
+import { Bell, BellOff, BellRing, Send, X } from "lucide-react";
 import {
+  disablePush,
+  enablePush,
   notificationState,
+  pushEnabled,
+  pushStatus,
+  pushSupport,
+  refreshPush,
   requestNotifications,
+  sendTestPush,
   startEventStream,
   type NotifyState,
+  type PushStatus,
+  type PushSupport,
 } from "../lib/notify";
 import {
   clearAll,
@@ -49,6 +58,13 @@ export default function NotificationBell() {
   const [state, setState] = useState<NotifyState>(() => notificationState());
   const [open, setOpen] = useState(false);
   const { items, unread } = useNotifications();
+  // Remote push (see lib/notify.ts): what this client can do is fixed for the
+  // session, what the SERVER can do needs one call, and whether this device is
+  // subscribed is storage.
+  const [pushCap] = useState<PushSupport>(() => pushSupport());
+  const [push, setPush] = useState<PushStatus | null>(null);
+  const [pushOn, setPushOn] = useState(() => pushEnabled());
+  const [pushBusy, setPushBusy] = useState(false);
 
   useEffect(() => {
     const stop = startEventStream();
@@ -57,11 +73,71 @@ export default function NotificationBell() {
 
   useEffect(() => registerNavigator((to) => navigate(to)), [navigate]);
 
+  // Kept fresh on every load: a browser rotates its push endpoint and key
+  // material on its own schedule, and a row the server kept would then encrypt
+  // to a key nobody holds (lib/notify.ts refreshPush).
+  useEffect(() => {
+    if (pushCap !== "ok") return;
+    let live = true;
+    void refreshPush();
+    void pushStatus().then((s) => {
+      if (live) setPush(s);
+    });
+    return () => {
+      live = false;
+    };
+  }, [pushCap]);
+
   const enable = async () => {
     const next = await requestNotifications();
     setState(next);
     if (next === "granted") toast.success(t("notify.enabled"));
     else if (next === "denied") toast(t("notify.blocked_help"));
+  };
+
+  const togglePush = async () => {
+    if (pushBusy) return;
+    setPushBusy(true);
+    try {
+      if (pushOn) {
+        await disablePush();
+        setPushOn(false);
+        toast(t("notify.push_off"));
+      } else {
+        const res = await enablePush();
+        if (res.ok) {
+          setPushOn(true);
+          setPush((s) => (s ? { ...s, subscriptions: s.subscriptions + 1 } : s));
+          toast.success(t("notify.push_on"));
+        } else if (res.reason === "blocked") {
+          toast(t("notify.blocked_help"));
+        } else if (res.reason === "server") {
+          toast(t("notify.push_unavailable"));
+        } else {
+          toast(t("notify.push_hint_unsupported"));
+        }
+      }
+    } finally {
+      setPushBusy(false);
+    }
+  };
+
+  const testPush = async () => {
+    if (pushBusy) return;
+    setPushBusy(true);
+    try {
+      const res = await sendTestPush();
+      // The server's own count, not a hopeful "sent": a test that reached
+      // nothing must say so, which is the only way a user learns their phone
+      // dropped the subscription.
+      if (res.subscriptions === 0) toast(t("notify.push_test_none"));
+      else if (res.sent > 0) toast.success(t("notify.push_test_sent", { count: res.sent }));
+      else toast.error(t("notify.push_test_failed"));
+    } catch (e) {
+      toast.error(String(e));
+    } finally {
+      setPushBusy(false);
+    }
   };
 
   const toggle = () => {
@@ -149,6 +225,14 @@ export default function NotificationBell() {
             </button>
           )}
         </div>
+        <PushRow
+          support={pushCap}
+          status={push}
+          on={pushOn}
+          busy={pushBusy}
+          onToggle={() => void togglePush()}
+          onTest={() => void testPush()}
+        />
         {state !== "granted" && state !== "unsupported" && (
           <button
             className="w-full text-left text-xs px-2.5 py-1.5 rounded-lg flex items-center gap-2.5 text-zinc-400 hover:bg-white/10 hover:text-zinc-200 transition-colors tap"
@@ -207,4 +291,87 @@ function aged(ms: number): string {
   const hours = Math.floor(mins / 60);
   if (hours < 24) return `${hours}h`;
   return new Date(ms).toLocaleDateString();
+}
+
+/** The remote-push controls: whether THIS device can be woken with the app
+ *  closed, and the button that proves it.
+ *
+ *  Prop-driven on purpose — the whole point of this row is what it does NOT
+ *  draw. `pushSupport()` (lib/notify.ts) is the honest answer to "can this
+ *  client be pushed to at all": the desktop shell has no service worker, an
+ *  iOS tab cannot subscribe, a plain-http LAN page has no secure context. In
+ *  each of those cases the switch is NOT rendered (a switch we cannot honour
+ *  teaches the user that the feature is broken) and one sentence says what the
+ *  situation really is. tools/check_push.mjs renders every one of those cases.
+ */
+export function PushRow({
+  support,
+  status,
+  on,
+  busy,
+  onToggle,
+  onTest,
+}: {
+  support: PushSupport;
+  status: PushStatus | null;
+  on: boolean;
+  busy: boolean;
+  onToggle: () => void;
+  onTest: () => void;
+}) {
+  const { t } = useI18n();
+  const unavailable =
+    support === "desktop"
+      ? t("notify.push_hint_desktop")
+      : support === "ios_install"
+      ? t("notify.push_hint_ios")
+      : support === "ok"
+      ? t("notify.push_unavailable")
+      : t("notify.push_hint_unsupported");
+  if (support !== "ok" || !status?.available) {
+    return (
+      <div className="px-2.5 pb-1.5 pt-0.5 text-[10px] leading-snug text-zinc-500">
+        {unavailable}
+      </div>
+    );
+  }
+  return (
+    <div className="px-2.5 pb-1.5">
+      <div className="flex items-center justify-between gap-2">
+        <span className="text-[10px] uppercase tracking-wider text-zinc-500">
+          {t("notify.push_title")}
+        </span>
+        <span className="flex items-center gap-2">
+          <span className="text-[11px] text-zinc-400">{t("notify.push_this_device")}</span>
+          <button
+            role="switch"
+            aria-checked={on}
+            aria-label={t("notify.push_this_device")}
+            disabled={busy}
+            title={on ? t("notify.push_off") : t("notify.push_on")}
+            onClick={onToggle}
+            className={`relative h-5 w-9 shrink-0 rounded-full transition-colors ${
+              on ? "bg-accent" : "bg-white/15"
+            } ${busy ? "opacity-60" : ""}`}
+          >
+            <span
+              className={`absolute top-0.5 h-4 w-4 rounded-full bg-white transition-[left] ${
+                on ? "left-[18px]" : "left-0.5"
+              }`}
+            />
+          </button>
+        </span>
+      </div>
+      {on && (
+        <button
+          className="mt-1 w-full text-left text-[11px] px-2 py-1 rounded-md text-accent-soft hover:text-accent hover:bg-white/10 transition-colors tap"
+          disabled={busy}
+          onClick={onTest}
+        >
+          <Send className="inline h-3 w-3 mr-1.5 align-[-2px]" />
+          {t("notify.push_test")}
+        </button>
+      )}
+    </div>
+  );
 }

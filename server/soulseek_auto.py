@@ -929,6 +929,23 @@ def _notify_finish(state, result, release):
                     "pipeline is still finishing it (artwork, metadata, then "
                     "the configured scripts). One more notice follows when it "
                     "is done.")
+            # A move the naming script could not place every file of: the album
+            # IS in the library and its chain runs (see `_import`), but what
+            # stayed behind is still in the download folder, and the user is the
+            # only one who can clear the lock that held it. Saying so here is
+            # the difference between "done" and "done except".
+            if result.get("partial"):
+                body += (" Some files could not be moved into the library and are "
+                         "still in the download folder — import that folder again "
+                         "to finish the album.")
+            # A LOSSLESS rule was overruled to get this album at all
+            # (`soulseek_auto_lossy_policy` "best"): the notification is the one
+            # surface a user who is not looking at the page cannot miss, so the
+            # format is named here rather than left to the grade.
+            if result.get("lossy"):
+                body += (f" This is a lossy copy ({result['lossy']}) — nothing "
+                         f"lossless was found and soulseek_auto_lossy_policy "
+                         f"allowed it.")
             # An album that is missing tracks must not read as a whole one.
             # Only the YouTube branch ever sets `error_count` (its per-track
             # failures), so this adds a sentence for it and changes nothing for
@@ -4339,6 +4356,25 @@ def _run_youtube(release, cfg, confirm_lossy):
     _finish("done", result)
 
 
+def _lossy_allowed(cfg):
+    """May this UNATTENDED job put a lossy copy in the library?
+
+    `soulseek_auto_lossy_policy` — "best" says yes, and the caller then says so
+    out loud: in the job's log, in the completed job's row and in the
+    notification the job ends with. Anything else (including the shipped
+    default "never", and a config written before this key existed) is the
+    behaviour the refusal sentence has always described: a background
+    acquisition never takes lossy audio, so the release stays where it is and
+    keeps being searched.
+
+    Only the background path asks this. A job a person started
+    (`confirm_lossy`) is offered the lossy copy and decides for itself, which
+    is why the key can never overrule a user's answer.
+    """
+    value = str((cfg or {}).get("soulseek_auto_lossy_policy") or "").strip().lower()
+    return value == "best"
+
+
 def _run(release_mbid=None, release=None, queries=None, username=None,
          target_dir=None, confirm_lossy=False, kind=None, mode=None, job_id=0,
          search_seconds=None):
@@ -4512,6 +4548,11 @@ def _run(release_mbid=None, release=None, queries=None, username=None,
         # spent (the configured one and, on a digital release, the broader
         # second pass) — the number both wish offers publish as `waited`.
         queries_built, search_wait, searched_s = [], 0, 0.0
+        # What the lossy branch below decided, when it decided anything: the
+        # format(s) an unattended job took under `soulseek_auto_lossy_policy`.
+        # It is set on BOTH candidate paths (the browsed-folder grab is a
+        # manual entry, so it is never lossy-gated) and read after the import.
+        lossy = None
         if username and target_dir:
             _stage("searching", f"Browsing {username}…")
             _log(f"Manual entry: {username} · {target_dir}")
@@ -4760,47 +4801,63 @@ def _run(release_mbid=None, release=None, queries=None, username=None,
             # ---- lossless preference ----------------------------------------
             # `_rank` already puts lossless folders first, so a lossless match
             # wins whenever one exists. When every candidate is lossy the
-            # download changes what lands in the library — that decision is
-            # the user's (interactive jobs ask; background wishes decline).
+            # download changes what lands in the library, and WHO decides that
+            # depends on who asked: an interactive job parks the question for
+            # the user (confirm_lossy), while a background one — a wish, an
+            # artist watch — has nobody to ask and reads
+            # `soulseek_auto_lossy_policy` instead. "never" (the shipped
+            # default, and what every config written before the key existed
+            # means) refuses with the sentence this branch always ended on;
+            # "best" takes the top-ranked lossy folder — `candidates` is
+            # `_rank`-sorted, so it is the fastest, most complete copy of the
+            # album the network offered — and says so HERE and in the result,
+            # because a lossy album that arrives silently is the surprise the
+            # key exists to prevent.
             if not any(c["lossless"] for c in candidates):
                 formats = sorted({os.path.splitext(f["file"])[1].lstrip(".").upper()
                                   for c in candidates for f in c["audio"]})
                 shown = ", ".join(f for f in formats if f)[:60] or "lossy"
-                if not confirm_lossy:
+                if confirm_lossy:
+                    _log(f"Only lossy copies found ({shown}) — waiting for your go-ahead.")
+                    with _lock:
+                        _job["state"] = "confirm"
+                        _job["stage"] = "Waiting: only lossy copies found"
+                        _job["stage_key"] = "needs_attention"
+                        _job["confirm"] = {
+                            "reason": "lossy_only",
+                            "formats": formats,
+                            "candidates": [{
+                                "username": c["username"],
+                                "dir": c["dir"],
+                                "format": os.path.splitext(c["audio"][0]["file"])[1].lstrip(".").upper()
+                                          if c["audio"] else "",
+                                "matched": c["matched"],
+                                "expected": c["expected"],
+                                "size": c["total_size"],
+                                "score": c["score"],
+                            } for c in candidates[:5]],
+                        }
+                    _job["_event"].wait()  # released by confirm(job_id) or cancel(job_id)
+                    _job["_event"].clear()
+                    with _lock:
+                        _job["confirm"] = None
+                        _job["state"] = "running"
+                        accepted = _job["_answer"]["accept"]
+                    if _cancelled():
+                        return _finish("cancelled")
+                    if not accepted:
+                        raise RuntimeError("Lossy-only download declined — nothing "
+                                           "was downloaded.")
+                    _log("Lossy download approved — continuing with the lossy copy.")
+                elif not _lossy_allowed(cfg):
                     raise RuntimeError(
                         f"Only lossy copies found ({shown}) — a lossless copy is "
                         f"preferred, so nothing was downloaded.")
-                _log(f"Only lossy copies found ({shown}) — waiting for your go-ahead.")
-                with _lock:
-                    _job["state"] = "confirm"
-                    _job["stage"] = "Waiting: only lossy copies found"
-                    _job["stage_key"] = "needs_attention"
-                    _job["confirm"] = {
-                        "reason": "lossy_only",
-                        "formats": formats,
-                        "candidates": [{
-                            "username": c["username"],
-                            "dir": c["dir"],
-                            "format": os.path.splitext(c["audio"][0]["file"])[1].lstrip(".").upper()
-                                      if c["audio"] else "",
-                            "matched": c["matched"],
-                            "expected": c["expected"],
-                            "size": c["total_size"],
-                            "score": c["score"],
-                        } for c in candidates[:5]],
-                    }
-                _job["_event"].wait()  # released by confirm(job_id) or cancel(job_id)
-                _job["_event"].clear()
-                with _lock:
-                    _job["confirm"] = None
-                    _job["state"] = "running"
-                    accepted = _job["_answer"]["accept"]
-                if _cancelled():
-                    return _finish("cancelled")
-                if not accepted:
-                    raise RuntimeError("Lossy-only download declined — nothing "
-                                       "was downloaded.")
-                _log("Lossy download approved — continuing with the lossy copy.")
+                else:
+                    lossy = shown
+                    _log(f"Only lossy copies found ({shown}) — the best one is "
+                         f"being downloaded as a lossy copy "
+                         f"(soulseek_auto_lossy_policy is “best”).")
 
         # ---- try candidates in batches ---------------------------------------
         # Up to `_batch_width` candidates of THIS release are attempted at once
@@ -4831,12 +4888,21 @@ def _run(release_mbid=None, release=None, queries=None, username=None,
 
             # --- stage 4: import -------------------------------------------------
             result = _import(found["root"], release, cfg, is_cd)
+            if lossy:
+                # WHAT this album is rides with the result, because every
+                # surface that reports the job reads it: the queue row says "a
+                # lossy copy" and the notification names the format. An album
+                # that arrives lossy says so wherever it is announced.
+                result = dict(result, lossy=lossy)
             # The library holds the album now, so the download dir is only
             # staging: `soulseek_clear_downloads` decides whether what THIS job
             # downloaded there goes with it (see _clear_downloads). Only for an
             # import that really landed — a failed one keeps its files, and they
-            # are what its retry downloads from.
-            if result.get("imported"):
+            # are what its retry downloads from — and only for a COMPLETE one:
+            # a partial move (`partial`) leaves audio where a later organize
+            # still has to pick it up, so clearing the folder under it is how an
+            # import loses files the network may not have again.
+            if result.get("imported") and not result.get("partial"):
                 result.update(_clear_downloads(slsk, ddir, found, cfg))
             _finish("done", result)
             return
@@ -5462,7 +5528,14 @@ def _import(local_root, release, cfg, media, source=""):
     stamped from it instead of re-detecting the medium of the whole folder.
     `source` is where the album came from, for the one caller whose origin the
     rest of the app cannot infer (the YouTube branch): it is written as SOURCE
-    where the file does not already say something."""
+    where the file does not already say something.
+
+    The result says three separate things, because they are: `imported` (the
+    album is in the library and its chain was started), `organized` (the naming
+    script placed every file) and `partial` (it did not — audio is still in the
+    download folder, which is therefore NOT cleared). A namer that fails is
+    reported, never fatal: the album is in the library either way and the chain
+    still runs over it."""
     from mlo.paths import move_path
     from server import main as srv
     from server.main import OrganizeRequest
@@ -5537,22 +5610,30 @@ def _import(local_root, release, cfg, media, source=""):
         # organize reports ok:True with its per-file failures in `errors` — a
         # locked track's file stays behind while the rest move in, and the
         # staging folder left holding audio is a SECOND album by the app's own
-        # definition ("an album is the directory that holds audio"). Reporting
-        # that as a successful import also let the download dir be cleared, i.e.
-        # the unmoved files deleted. Treat any failure as the import's own: the
-        # download is left intact, the panel offers it again, and the file-level
-        # organizer completes it.
+        # definition ("an album is the directory that holds audio"). It is
+        # reported as the import's own failure (`partial` below keeps the
+        # download directory intact, so the files that never moved are still
+        # there to retry — reporting this as a clean import also let the
+        # download dir be cleared, i.e. the unmoved files deleted), but it no
+        # longer ABORTS the import: the album is in the library, and a namer
+        # that failed used to take the cover step and the script chain down with
+        # it, leaving an album with no artwork and no chain ever run — the
+        # "Missing cover image" half of the owner's report. What could not be
+        # organised is said out loud (the log, `organize_error` in the job
+        # result, and the queue row's own line for it).
         _move_errors = [str(e) for e in (res.get("errors") or [])]
         if _move_errors:
             for line in _move_errors[:5]:
                 _log("  ! organize: " + line)
             if len(_move_errors) > 5:
                 _log(f"  ! organize: +{len(_move_errors) - 5} more")
-            raise RuntimeError(
+            organize_error = (
                 f"{len(_move_errors)} file(s) could not be moved into the "
-                f"library — the download is left intact so nothing is lost; "
-                f"import it again from the queue")
-        if isinstance(res, dict) and res.get("error"):
+                f"library — they are still in the download folder, and the "
+                f"file-level organizer completes them")
+            _log("  ! the album is in the library and the import chain still "
+                 "runs over it — the namer can be re-run from the album page")
+        elif isinstance(res, dict) and res.get("error"):
             organize_error = res["error"]
         else:
             organized = True
@@ -5566,4 +5647,9 @@ def _import(local_root, release, cfg, media, source=""):
     _start_import_chain(album_path, cfg, release, download_dir=local_root)
     return {"album_path": album_path, "imported": True,
             "staging_path": dest, "organized": organized,
-            "organize_error": organize_error}
+            "organize_error": organize_error,
+            # The download directory belongs to a job whose album was placed
+            # COMPLETELY: a partial move leaves audio behind, and clearing the
+            # folder it is in is how an import loses files the user cannot get
+            # back (see the caller).
+            "partial": bool(organize_error and not organized)}

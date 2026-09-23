@@ -1036,6 +1036,78 @@ def _fill_release_tags(info, config, album_dir):
 # ----------------------------------------------------------------------
 # Script 8 runner
 # ----------------------------------------------------------------------
+def _rename_to_script(albums, config, stats):
+    """Re-apply the naming script to the albums this pass re-tagged.
+
+    Returns the folders the albums are in NOW — the runner's own
+    ``moved_targets`` report, which is how the rest of the chain learns the
+    album is somewhere else (``server.script_runners._claimed_targets``).
+
+    WHY the namer runs again here: script 8 is the LAST writer of the tags the
+    naming script reads, and the chain names every folder BEFORE it. The only
+    full rename in the chain is script 14 — beets' ``organize()``, which runs
+    third — so a folder is named from the tags as they stood then, while this
+    pass afterwards fills LABEL / CATALOGNUMBER / MEDIA / RELEASETYPE / both
+    DATEs and widens RELEASECOUNTRY from the same MusicBrainz release
+    (`_fill_release_tags`; on an import the importer's own stamper wrote only
+    what its search payload carried, so the slots MusicBrainz still owed this
+    album are filled here). The folder then spells the STALE tags' answer and
+    script 4 — Grade, last in every shipped order — reports every file of an
+    impeccably tagged album as ``PATH: expected '<the name this pass implies>'``.
+
+    It is the same move script 14 makes after beets, for the same reason, and
+    it is idempotent: an album whose folder already spells the answer is
+    rewritten 0 bytes, so only the albums whose release tags really changed are
+    handed over. Nothing here is fatal — a namer that cannot run (a folder
+    someone holds) is reported in the run's own stats and the chain carries on
+    with the folder it has.
+    """
+    from server.beetscfg import _organized_roots
+    from server.main import OrganizeRequest, organize
+
+    music = str((config or {}).get("music_folder") or "")
+    paths = sorted({os.path.normpath(str(a)) for a in albums
+                    if str(a or "") and _in_library(str(a), music)})
+    if not paths:
+        return []
+    try:
+        res = organize(OrganizeRequest(paths=list(paths), dry_run=False))
+    except Exception as e:
+        stats["error_count"] += 1
+        stats["errors"].append(f"the naming script could not be re-applied: {e}")
+        log(c(f"  ! the naming script could not be re-applied: {e}", Color.YELLOW))
+        return []
+    for row in (res or {}).get("results") or []:
+        errs = [str(x) for x in (row.get("errors") or [])]
+        if errs:
+            stats["error_count"] += 1
+            stats["errors"].append(
+                f"{os.path.basename(str(row.get('path') or ''))}: "
+                f"the naming script could not be re-applied ({errs[0]})")
+            log(c(f"  ! {os.path.basename(str(row.get('path') or ''))}: {errs[0]}",
+                  Color.YELLOW))
+    roots = _organized_roots(paths, res)
+    log(f"  naming script re-applied to {len(roots)} album(s) whose "
+        f"release tags this pass filled")
+    return roots
+
+
+def _in_library(path, music):
+    """Whether *path* is an album the naming script owns — inside the music
+    folder, which is the one scope `server.main.organize` works in. A target
+    outside it (audio sitting loose in the music folder root, a folder the run
+    was pointed at) would only earn the organizer's "outside music folder"
+    error, which is not this import's business to report."""
+    if not music:
+        return False
+    try:
+        return (os.path.commonpath([os.path.abspath(path),
+                                    os.path.abspath(music)])
+                == os.path.abspath(music))
+    except ValueError:
+        return False
+
+
 def run_auto_tagging(config):
     folder = config["music_folder"]
     stats = new_stats()
@@ -1107,6 +1179,11 @@ def run_auto_tagging(config):
     # run on a thread pool, so the count is collected per album here rather
     # than incremented into shared state.
     release_written = []
+    # The albums those writes landed on. The rename at the end of this runner
+    # is scoped by this set and not by `stats["modified_count"]` (mood, energy
+    # and the genre cap are writes that no naming script reads), so it follows
+    # exactly the albums whose folder name the stage above may have changed.
+    release_touched = set()
 
     def process_album(album):
         files = _album_files(album)
@@ -1199,6 +1276,8 @@ def run_auto_tagging(config):
         release_modified, release_note = _fill_release_tags(info, config, album)
         release_written.append(release_modified)
         modified += release_modified
+        if release_modified:
+            release_touched.add(album)
         if release_note:
             notes.append(release_note)
 
@@ -1409,6 +1488,13 @@ def run_auto_tagging(config):
 
     if pbar:
         pbar.close()
+    # The namer gets the last word (see _rename_to_script): the folder is
+    # renamed from the tags THIS pass settled, before the chain's later scripts
+    # and its final Grade read it. Reported as `moved_targets` so the rest of
+    # the chain follows an album that moved.
+    if release_touched:
+        stats["moved_targets"] = _rename_to_script(sorted(release_touched),
+                                                  config, stats)
     # The runner's own summary: how many release-identity tags this pass
     # filled, or that there was nothing to fill.
     release_total = sum(release_written)

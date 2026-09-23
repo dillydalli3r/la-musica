@@ -3,6 +3,7 @@ import { useQuery } from "@tanstack/react-query";
 import { Check, Loader2, LogIn, LogOut, RefreshCw, Server, User } from "lucide-react";
 import { api, setToken } from "../api";
 import { useI18n } from "../lib/i18n";
+import { dropPush } from "../lib/notify";
 import Popover, { MenuItem } from "./Popover";
 import { toast } from "../store";
 
@@ -135,6 +136,7 @@ export default function AccountMenu() {
     if (busy) return;
     setBusy(true);
     try {
+      await dropPush(); // this device must stop being woken for whoever is signed out
       await api.authLogout();
       setToken(null);
       toast.success(t("auth.sign_out"));

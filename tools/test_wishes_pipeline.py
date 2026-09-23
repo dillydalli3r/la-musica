@@ -549,6 +549,52 @@ with pipeline_patches(cfg=SHIPPED), SLSK, \
           row3.get("cancelable") is True, json.dumps(row3 or {}))
 
 # --------------------------------------------------------------------------- #
+# 3c. a settle that is NOT a failure must not inherit the last failure's
+#     backoff — the wish goes back on its INTERVAL
+# --------------------------------------------------------------------------- #
+print("\n== a spent backoff is not an every-tick retry ==")
+
+# `retry_at` is the TRANSIENT-failure backoff, and `due_at` reads its mere
+# PRESENCE as "the last attempt failed". An empty search settles through
+# `mark_wanted` with no backoff to give, which used to SKIP the column — so the
+# stamp a previous failure left behind (in the past by then) survived, `due_at`
+# returned it as "due now", and the wish was re-searched on every worker tick
+# (~2 minutes) instead of every `wishes_interval_hours`. The same hole was in
+# `mark_background`, i.e. the spent walk (spec R153).
+STALE_ID = "66666666-2222-2222-2222-222222222222"
+EMPTY_ERR = "No candidate folder contained every track"
+stale = wishes.add_wish(STALE_ID, title="Stale Backoff", artist="An Artist",
+                        source="soulseek")
+wishes.mark_searching(stale["id"])
+wishes.mark_wanted(stale["id"], error="peer went offline mid-transfer",
+                   attempts=1, retry_at=time.time() - 5)   # a failure that is over
+worker._settle_attempt(wishes.get_wish(stale["id"]), dict(SHIPPED), EMPTY_ERR)
+after = wishes.get_wish(stale["id"])
+check("an empty search clears the spent backoff",
+      after["status"] == "wanted" and float(after["retry_at"]) == 0.0,
+      json.dumps({"status": after["status"], "retry_at": after["retry_at"]}))
+_due = wishes.due_at(after, dict(SHIPPED))
+check("...so it is due on its interval, not on the stamp of a failure that is over",
+      _due > time.time() + 5 * 3600, json.dumps({"due_at": _due, "now": time.time()}))
+
+# ...and a spent WALK that moves to the background is the same kind of settle:
+# nothing about an empty walk is a failure, so it is re-walked at the interval.
+wishes.set_candidates(stale["id"], [{"mbid": STALE_ID, "title": "Stale Backoff",
+                                     "score": 1, "catalog_numbers": ["CAT-1"]}])
+wishes.mark_searching(stale["id"])
+wishes.mark_wanted(stale["id"], error="peer went offline mid-transfer",
+                   attempts=1, retry_at=time.time() - 5)
+BG_CFG = dict(SHIPPED, wishes_not_found_attempts=1)
+worker._settle_attempt(wishes.get_wish(stale["id"]), BG_CFG, EMPTY_ERR)
+bg = wishes.get_wish(stale["id"])
+check("a spent walk moves to the background with its backoff cleared",
+      bg["status"] == "background" and float(bg["retry_at"]) == 0.0,
+      json.dumps({"status": bg["status"], "retry_at": bg["retry_at"]}))
+_bg_due = wishes.due_at(bg, BG_CFG)
+check("...and it is re-walked at the interval, not on every tick",
+      _bg_due > time.time() + 5 * 3600, json.dumps({"due_at": _bg_due}))
+
+# --------------------------------------------------------------------------- #
 # 4. a wish whose release cannot be resolved still renders
 # --------------------------------------------------------------------------- #
 print("\n== a wish nobody could look up ==")

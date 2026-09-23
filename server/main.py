@@ -138,6 +138,10 @@ async def _lifespan(app: FastAPI):
     # slskd's byte counts move (see _soulseek_transfers_watch) — the page used
     # to draw those bars from a 3 s poll of its own.
     threading.Thread(target=_soulseek_transfers_watch, daemon=True).start()
+    # Downloads the user started from the Soulseek page: the album imports
+    # itself (and runs its chain) once it lands, so asking for a download is
+    # the only press it needs (see _soulseek_page_downloads_watch).
+    threading.Thread(target=_soulseek_page_downloads_watch, daemon=True).start()
     # Size caps: prunes the download/staging/trash caches down to their
     # configured ceilings (see server/cache_caps).
     try:
@@ -5046,15 +5050,216 @@ def _queue_downloads(soulseek, username, files):
         raise HTTPException(502, f"slskd did not queue the download: {e}")
 
 
+# --------------------------------------------------------------------------- #
+# A download queued from the Soulseek page imports itself
+# --------------------------------------------------------------------------- #
+# The page's Download button used to be the end of the app's involvement: the
+# bytes landed in the download folder and the album waited for somebody to
+# press Import, a SECOND decision for an act the user had already taken. The
+# page's three download routes now record what was asked for, and the pass
+# below imports the album it produced — `_import_one_album` through
+# `import_queue`, i.e. exactly what the Import button runs, so the chain, the
+# claims and the notifications are the same ones and there is no second import
+# pipeline to keep in step.
+#
+# Only those three routes record an intent: the auto-importer's own downloads
+# go through `server.soulseek_auto` and import themselves under their own job,
+# so recording there would import the same album twice.
+#
+# Nothing here decides when a download is done — the pass asks
+# `soulseek.ready_albums`, the ONE readiness rule the Import button itself
+# works from, so an album whose transfers are still running is simply not ready
+# yet and an album a player still holds open is reported by the import exactly
+# as a press would report it.
+_PAGE_LOCK = threading.Lock()
+_PAGE_DOWNLOADS: list = []
+# How long a recorded intent is worth honouring. An intent is only ever matched
+# against the very files it queued (see `_page_download_albums`), so this is a
+# bound on a list that must not grow for ever, not a staleness rule — a
+# download can sit queued behind a peer overnight.
+_PAGE_INTENT_TTL_S = 24 * 3600
+_PAGE_IMPORT_INTERVAL_S = 5.0
+
+
+def _remember_page_download(username, files):
+    """Record what the page just queued, so its album imports itself.
+
+    Only the INTENT is kept: which of this peer's files the user asked for.
+    Which folder they became is decided later, from where those files really
+    landed (`_local_download_candidates`/`_index_download_tree`, the mapping
+    the auto-importer itself uses), so nothing here has to know slskd's
+    staging layout."""
+    rows = [{"filename": str((f or {}).get("filename") or ""),
+             "size": int((f or {}).get("size") or 0)}
+            for f in (files or [])]
+    rows = [r for r in rows if r["filename"]]
+    if not rows or not str(username or "").strip():
+        return
+    with _PAGE_LOCK:
+        _PAGE_DOWNLOADS.append({"username": str(username), "files": rows,
+                                "at": time.time()})
+
+
+def _page_intents():
+    """The live intent records, oldest first, with anything expired dropped.
+
+    The records themselves are handed back, not copies: the pass marks the
+    files an import has taken over ON them and prunes what is left empty."""
+    cutoff = time.time() - _PAGE_INTENT_TTL_S
+    with _PAGE_LOCK:
+        _PAGE_DOWNLOADS[:] = [i for i in _PAGE_DOWNLOADS if i["at"] >= cutoff]
+        return list(_PAGE_DOWNLOADS)
+
+
+def _page_intent_files(intent, ddir):
+    """`[(this intent's file, where it is on disk)]` — present files only.
+
+    The lookup is the auto-importer's own, in the same two steps: one index of
+    this peer's tree for the leaves this intent queued
+    (`_index_download_tree`), then the candidate locations per file
+    (`_local_download_candidates`). That is what makes a batch-dir download, an
+    older leaf-shaped one and a slskd-sanitised share name all resolve the way
+    the pipeline resolves them, instead of this module growing a second idea of
+    where a transfer lands."""
+    from server import soulseek_auto
+    leaves = sorted({os.path.basename(str(f["filename"]).replace("\\", "/"))
+                     for f in intent["files"]})
+    index = soulseek_auto._index_download_tree(ddir, intent["username"], leaves)
+    out = []
+    for f in intent["files"]:
+        for p in soulseek_auto._local_download_candidates(
+                ddir, intent["username"], f["filename"], f["size"], index=index):
+            if os.path.isfile(p):
+                out.append((f, os.path.abspath(p)))
+                break
+    return out
+
+
+def _page_download_albums(cfg, ddir):
+    """`[(ready folder, [(intent, its files inside it)])]`.
+
+    Only folders that hold a file the user queued from the page are returned:
+    an album somebody else is downloading (a wish's job, a bulk run) is not
+    this pass's business — those import themselves under their own job, and a
+    second import of the same folder is the duplicate this scoping prevents."""
+    from server import soulseek, soulseek_auto
+    intents = _page_intents()
+    if not intents:
+        return []
+    try:
+        ready = soulseek.ready_albums(cfg)
+    except Exception:
+        # slskd unreachable or no download dir: nothing can be ready, and the
+        # intents stay for the tick that answers.
+        return []
+    if not ready:
+        return []
+    where = [(intent, _page_intent_files(intent, ddir)) for intent in intents]
+    out = []
+    for root in ready:
+        held = [(intent, [fp for fp in files if soulseek_auto._under(fp[1], root)])
+                for intent, files in where]
+        held = [(intent, files) for intent, files in held if files]
+        if held:
+            out.append((root, held))
+    return out
+
+
+def _consume_page_intents(held):
+    """Take the files an import just took over out of their own intent.
+
+    An intent that queued a whole share loses only the album that just started
+    importing; its other albums stay and import when their own folder is
+    ready."""
+    with _PAGE_LOCK:
+        taken = {id(f) for _intent, files in held for f, _local in files}
+        for intent, _files in held:
+            intent["files"] = [f for f in intent["files"] if id(f) not in taken]
+        _PAGE_DOWNLOADS[:] = [i for i in _PAGE_DOWNLOADS if i["files"]]
+
+
+def _drop_page_intents(note=""):
+    """Forget every recorded page download, saying why ONCE.
+
+    Used when the install does not want imports to run by themselves (see
+    `mlo.import_policy.page_download_auto_import`): the album keeps its row in
+    the download folder — "ready to import" — and the press that imports it is
+    the review those settings asked for."""
+    with _PAGE_LOCK:
+        count = len(_PAGE_DOWNLOADS)
+        _PAGE_DOWNLOADS.clear()
+    if count and note:
+        print(f"[mlo] {count} download(s) queued from the Soulseek page: {note}")
+
+
+def _page_download_pass():
+    """One pass: import the albums the user's own page downloads finished.
+
+    Returns True when an import was started. One album per pass on purpose —
+    `import_queue` takes each album all the way through before the next one, so
+    the rest are simply taken by the following ticks."""
+    from mlo import import_policy
+    from server import import_queue, soulseek
+
+    if not _page_intents():
+        return False
+    cfg = load_config()
+    if not import_policy.page_download_auto_import(cfg):
+        _drop_page_intents(
+            "left in the download folder for you to import — automatic import "
+            "is off (import_autonomy = review, or manual_import_enabled off)")
+        return False
+    if import_queue.running():
+        return False      # one import at a time: the next tick takes it
+    ddir = soulseek.download_dir(cfg)
+    if not ddir or not os.path.isdir(ddir):
+        return False
+    for root, held in _page_download_albums(cfg, ddir):
+        res = import_queue.start(paths=[root])
+        if not res.get("ok"):
+            # An import run started between the two checks (or the importer is
+            # not wired up yet): the album stays where it is and the next tick
+            # tries again, with its intent intact.
+            continue
+        _consume_page_intents(held)
+        print(f"[mlo] {os.path.basename(root)}: the download queued from the "
+              f"Soulseek page finished — importing it and running its chain")
+        return True
+    return False
+
+
+def _soulseek_page_downloads_watch():
+    """Import the albums the user's own page downloads produced.
+
+    Its own thread, not a step of the transfer watcher: that one pushes the
+    page's live bars and deliberately does nothing while no client is watching
+    (`_live_transfers_check`), while a download somebody asked for has to
+    finish by itself whether or not a page is open. This loop costs nothing
+    while nothing was queued from the page — the first thing a pass does is
+    look at an (almost always empty) list."""
+    while True:
+        try:
+            _page_download_pass()
+        except Exception:
+            traceback.print_exc()
+        time.sleep(_PAGE_IMPORT_INTERVAL_S)
+
+
 @app.post("/api/soulseek/download")
 def soulseek_download(req: SoulseekDownloadRequest):
-    """Queue files from a user for download into the download dir."""
+    """Queue files from a user for download into the download dir.
+
+    A download queued HERE is imported by itself once it lands (see the
+    page-download section above): the user has already said the album belongs
+    in the library by asking for it, and a second press for the same act was
+    the queue's own "and now import it"."""
     from server import soulseek
     if not (soulseek.is_running() or soulseek.web_up()):
         raise HTTPException(400, "slskd is not running — start it first")
     if not req.username or not req.files:
         raise HTTPException(400, "username and files required")
     _queue_downloads(soulseek, req.username, req.files)
+    _remember_page_download(req.username, req.files)
     return {"ok": True, "queued": len(req.files)}
 
 
@@ -5096,6 +5301,7 @@ def soulseek_download_bulk(req: SoulseekBulkDownloadRequest):
     if not str(req.username or "").strip() or not files:
         raise HTTPException(400, "username and a non-empty files list are required")
     _queue_downloads(soulseek, req.username, files)
+    _remember_page_download(req.username, files)
     return {"queued": len(files)}
 
 
@@ -5151,6 +5357,11 @@ def soulseek_download_user(req: SoulseekUserDownloadRequest):
     queue = [f for f in wanted if f["filename"] not in active]
     if queue:
         _queue_downloads(soulseek, username, queue)
+        # Only what was really queued: the files skipped because a transfer for
+        # them is already running were not asked for by THIS press, and their
+        # album is already on the way (with its own intent from the press that
+        # did queue them).
+        _remember_page_download(username, queue)
     return {"queued": len(queue), "scanned": scanned,
             "skipped": len(wanted) - len(queue)}
 
@@ -7336,6 +7547,15 @@ def organize(req: OrganizeRequest):
         # a name that differs by one segment (the MEDIA spelling the importer
         # detected vs MusicBrainz's) would drop the album beside the
         # placeholder and leave the placeholder pending forever.
+        #
+        # `script_root` is the name the script gives the album, and the folder
+        # is RENAMED onto it below (see the end of this loop): the placeholder's
+        # own name comes from the MusicBrainz payload, so keeping it would mean
+        # an add-time name outliving the tags — the album sitting in a folder
+        # no tag can produce, which grading then reports file by file
+        # ("PATH: expected '…'"). The identity, not the name, is what makes the
+        # folder the album's: the marker is inside it and travels with it.
+        script_root = new_root
         try:
             from server import pending_albums
             adopted = pending_albums.adopt_root(new_root, meta_tags)
@@ -7483,11 +7703,33 @@ def organize(req: OrganizeRequest):
             except OSError:
                 break
 
+        # The framework album's folder takes the script's name — the album was
+        # moved into it above, so this is one rename of a folder that already
+        # holds the whole album (marker, manifest, art, audio), not a second
+        # move: nothing is left behind and no placeholder is orphaned. Only a
+        # folder still carrying its marker is ever renamed
+        # (`pending_albums.rename_placeholder`), and only onto a name nothing
+        # else occupies: a real album standing there is never touched, and the
+        # album then keeps the folder it landed in rather than being merged
+        # into someone else's.
+        notes = []
+        if os.path.normcase(os.path.normpath(new_root)) != \
+                os.path.normcase(os.path.normpath(script_root)):
+            renamed = ""
+            try:
+                from server import pending_albums
+                renamed = pending_albums.rename_placeholder(new_root, script_root)
+            except Exception:
+                traceback.print_exc()
+            if renamed:
+                notes.append("the folder the add created was renamed to the "
+                             "name the naming script gives the album")
+                new_root = renamed
+
         # Post-organize cue maintenance: renaming audio underneath cue
         # sheets leaves stale FILE references, and album-named cues moved
         # by the leftovers pass keep names the CD-N grader rejects. Re-run
         # the same evidence-based engine the cue script uses.
-        notes = []
         try:
             from mlo.discs import fix_cue_filenames, rename_cues_for_discs
             for old, new in rename_cues_for_discs(new_root, config=cfg):
@@ -8260,6 +8502,98 @@ def library_layout_apply(request: Request = None):
     mbresolve.invalidate()
     _refresh_slskd_shares_soon()
     return report
+
+
+# --------------------------------------------------------------------------- #
+# Web Push (the transport behind server/events.py)
+# --------------------------------------------------------------------------- #
+# The device half of the event channel: a browser subscribes here and is then
+# woken with the same frames /ws/events carries, with the app closed. The
+# routes are thin on purpose — the key material, the encryption and the fan-out
+# all live in server/events.py, and the subscription rows in server/auth.py's
+# database — so there is exactly one place that knows how a push is sent.
+class PushSubscription(BaseModel):
+    endpoint: str
+    keys: dict
+    # What this device asked to be woken for; empty/absent means "everything
+    # the server publishes".
+    kinds: Optional[List[str]] = None
+
+
+class PushEndpoint(BaseModel):
+    endpoint: str
+
+
+@app.get("/api/push/status")
+def push_status(request: Request):
+    """Whether push can be offered here, the key to subscribe with, and how
+    many devices this user already has registered.
+
+    A client asks BEFORE it shows the switch: an install whose `cryptography`
+    is missing, or a deployment that has no key material, must not be offered a
+    button that cannot work (see lib/notify.ts).
+    """
+    user = auth_mod.current_user(request)
+    return {
+        "available": bool(events_mod.push_public_key()),
+        "public_key": events_mod.push_public_key(),
+        "subscriptions": auth_mod.push_subscription_count(user),
+    }
+
+
+@app.post("/api/push/subscribe")
+def push_subscribe(body: PushSubscription, request: Request):
+    """Register (or refresh) this device.
+
+    The endpoint and the two keys come from the browser's own PushManager; the
+    row is scoped to the caller's user, so the news lands on the devices of the
+    person who set them up. Re-posting the same endpoint updates it in place —
+    that is what the client does on every load (a browser rotates its key
+    material, and a stale row would encrypt to a key nobody holds any more).
+    """
+    endpoint = (body.endpoint or "").strip()
+    keys = body.keys or {}
+    p256dh = str(keys.get("p256dh") or "").strip()
+    auth_key = str(keys.get("auth") or "").strip()
+    # A push endpoint is always https (RFC 8030 §5: the push service is reached
+    # over TLS), and the keys are a P-256 point and a 16-byte secret. Rejecting
+    # the rest here keeps an unusable row out of the database — `_send_one`
+    # would only discover it after the next import finished.
+    if not endpoint.startswith("https://") or len(endpoint) > 2048:
+        raise HTTPException(400, "not a push endpoint")
+    if not events_mod.key_size_ok(p256dh, 65) or not events_mod.key_size_ok(auth_key, 16):
+        raise HTTPException(400, "not a browser key pair")
+    if not events_mod.push_public_key():
+        raise HTTPException(503, "push is unavailable on this server")
+    user = auth_mod.current_user(request)
+    auth_mod.push_subscribe(user, endpoint, p256dh, auth_key, body.kinds)
+    return {"ok": True, "subscriptions": auth_mod.push_subscription_count(user)}
+
+
+@app.post("/api/push/unsubscribe")
+def push_unsubscribe(body: PushEndpoint, request: Request):
+    """Forget this device (the switch turned off, or a sign-out).
+
+    Scoped to the caller: one user cannot unregister another's device.
+    """
+    removed = auth_mod.push_unsubscribe(
+        (body.endpoint or "").strip(), auth_mod.current_user(request))
+    return {"ok": True, "removed": removed}
+
+
+@app.post("/api/push/test")
+def push_test(request: Request):
+    """Send one test frame to THIS user's devices.
+
+    The button that lets somebody prove it on their own phone instead of
+    believing a settings page. It answers what really happened — how many
+    devices took it, how many were dead and how many failed — because "sent"
+    with a silent zero is exactly the feedback this feature must not give.
+    """
+    result = events_mod.send_test(auth_mod.current_user(request))
+    if not result.get("available"):
+        raise HTTPException(503, "push is unavailable on this server")
+    return result
 
 
 # --------------------------------------------------------------------------- #

@@ -408,4 +408,87 @@ if beets_dir and os.path.isdir(beets_dir):
 else:
     print("  skipped: beets mediafile check (no vendored beets here)")
 
+# --------------------------------------------------------------------------- #
+# 5) The pass leaves the FOLDER named from the tags it just settled
+# --------------------------------------------------------------------------- #
+# Script 8 writes the LAST of the naming script's own inputs — the chain's only
+# namer (script 14's organize, then script 14 ends with another organize) runs
+# BEFORE it, so a year-only date that is sharpened here leaves the folder
+# spelling the stale tags' answer and script 4 (Grade, last) reports every file
+# as `PATH: expected '<what these tags imply>'` (issue #48). The runner
+# therefore re-applies the naming script to exactly the albums whose release
+# tags it filled (`mlo.autotag._rename_to_script`) and reports where they are
+# now as `moved_targets`, which is what the rest of the chain follows.
+from server import main as srv_main  # noqa: E402
+
+run_album = os.path.join(TMP, "runner")
+os.makedirs(run_album, exist_ok=True)
+run_files = []
+for _i, _title in enumerate(("Mysterons", "Sour Times"), 1):
+    _p = make_mp3(os.path.join(run_album, f"1-0{_i} {_title}.mp3"))
+    run_files.append(_p)
+    _af = AudioFile(_p)
+    for _k, _v in dict(COARSE, MUSICBRAINZ_TRACKID=f"recording-{_i}").items():
+        _af.set_tag(_k, _v)
+
+# The album whose dates are already full: this pass writes NOTHING to it, so the
+# namer must not be run over it (the rename is scoped to what changed).
+done_album = os.path.join(TMP, "runner_done")
+os.makedirs(done_album, exist_ok=True)
+done_file = make_mp3(os.path.join(done_album, "1-01 Track.mp3"))
+_done_af = AudioFile(done_file)
+for _k, _v in FULL.items():
+    _done_af.set_tag(_k, _v)
+
+renamed_to = os.path.join(os.path.dirname(run_album), "renamed by the script")
+organize_calls = []
+_real_organize = srv_main.organize
+import shutil  # noqa: E402
+
+
+def _recording_organize(req):
+    # The real organize MOVES the album to the name the script gives it, and
+    # only a folder that holds audio is believed (see beetscfg._organized_roots)
+    # — so the stub moves it too.
+    organize_calls.append([os.path.normpath(p) for p in req.paths])
+    os.makedirs(os.path.dirname(renamed_to), exist_ok=True)
+    shutil.move(req.paths[0], renamed_to)
+    return {"results": [{"path": req.paths[0], "album_root": renamed_to}]}
+
+
+srv_main.organize = _recording_organize
+CALLS.clear()
+sys.modules["server.integrations"] = _mb_stub()
+try:
+    run_stats = autotag.run_auto_tagging(dict(
+        cfg, music_folder=TMP, targets=run_files + [done_file],
+        # only the release-identity stage is the subject: no audio decoding
+        mood_enabled=False, auto_instrumental=False,
+        instrumental_auto_fetch=False, auto_advisory=False,
+        auto_zero_advisory_for_instrumental=False, genre_autofill=False))
+finally:
+    srv_main.organize = _real_organize
+    if saved is None:
+        del sys.modules["server.integrations"]
+    else:
+        sys.modules["server.integrations"] = saved
+
+ok(run_stats["release_tags_written"] == 4,
+   "the pass sharpened both coarse dates on both tracks "
+   f"({run_stats['release_tags_written']} tags)")
+eq_ok = organize_calls == [[os.path.normpath(run_album)]]
+ok(eq_ok, "the namer was re-applied to the album it re-tagged, and NOT to the "
+          f"album it wrote nothing to ({organize_calls})")
+ok([os.path.normpath(p) for p in run_stats.get("moved_targets") or []]
+   == [os.path.normpath(renamed_to)],
+   "and the folder it now occupies is reported as moved_targets, so the rest of "
+   f"the chain follows the album ({run_stats.get('moved_targets')})")
+# The tags really moved: the folder the naming script derives from them is a
+# different one than the tags as they arrived produced.
+_arrived = eval_script(DEFAULT_NAMING_SCRIPT, track_variables(dict(COARSE)))
+_now = eval_script(DEFAULT_NAMING_SCRIPT, track_variables(dict(COARSE, DATE="1997-03-25")))
+ok(_arrived != _now,
+   f"and those tags name another folder ({_arrived.split('/')[1]!r} -> "
+   f"{_now.split('/')[1]!r})")
+
 print(f"\n{passed} checks passed")

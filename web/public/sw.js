@@ -31,24 +31,29 @@ self.addEventListener("install", () => {
 
 /** Web Push.
  *
- *  The app's own notifications (a found wish, a finished download) are raised
- *  by the page over the /ws/events socket — see web/src/lib/notify.ts — because
- *  this server is self-hosted and has no VAPID key pair to sign a real push
- *  with. These two handlers exist so that a push subscription, if a deployment
- *  ever adds one, needs no client change: the frame is the same shape the
- *  socket carries, so the same wording reaches the user, with the app closed.
+ *  The app's own notifications are raised by the page over the /ws/events
+ *  socket (see web/src/lib/notify.ts) — but a page that is CLOSED cannot raise
+ *  anything, and that is the case this handler exists for: the server sends
+ *  the same frame through a push service (server/events.py, Web Push) and the
+ *  worker raises the notification, so "the import finished" reaches a phone in
+ *  a pocket. The frame is the shape the socket carries, so both transports
+ *  produce the same wording.
  */
 self.addEventListener("push", (event) => {
   let frame = { title: "la musica", body: "", url: "/" };
   try {
     const data = event.data ? event.data.json() : null;
     if (data) {
+      const inner = data.data || {};
       frame = {
         title: data.title || frame.title,
         body: data.body || "",
-        // Same click-through as the page's own notifications: the frame names
-        // the route it is about (server/events.py sets `link`).
-        url: data.link || data.url || (data.data || {}).link || "/",
+        // The frame names the route it is about (`link`, set by the emitter:
+        // server/events.py). `url` is the same field for a page that raised
+        // its own notification, and a top-level `link` is what an older
+        // deployment's frame carried — read all three rather than dropping a
+        // click-through.
+        url: inner.link || data.link || data.url || "/",
       };
     }
   } catch {
@@ -65,28 +70,97 @@ self.addEventListener("push", (event) => {
   );
 });
 
+/** The push service rotated this device's subscription.
+ *
+ *  Chrome does not fire this (it just stops delivering, and the server sees a
+ *  410 on the next send and prunes the row — see server/events.py); Firefox
+ *  and Safari do, and without this the device would go quiet until its next
+ *  page load. The kinds list is deliberately NOT sent from here: the worker
+ *  has no access to the app's own preference, and a row with no kinds gets
+ *  everything the server publishes — which the next page load narrows back to
+ *  exactly what this device asked for (lib/notify.ts refreshPush). Reaching a
+ *  device with one kind too many for a moment beats not reaching it at all.
+ */
+self.addEventListener("pushsubscriptionchange", (event) => {
+  event.waitUntil(
+    (async () => {
+      try {
+        const status = await fetch("/api/push/status", { credentials: "include" });
+        if (!status.ok) return;
+        const info = await status.json();
+        if (!info?.public_key) return;
+        const pad = "=".repeat((4 - (info.public_key.length % 4)) % 4);
+        const raw = atob((info.public_key + pad).replace(/-/g, "+").replace(/_/g, "/"));
+        const key = new Uint8Array(raw.length);
+        for (let i = 0; i < raw.length; i++) key[i] = raw.charCodeAt(i);
+        const sub =
+          event.newSubscription ||
+          (await self.registration.pushManager.subscribe({
+            userVisibleOnly: true,
+            applicationServerKey: key,
+          }));
+        const keys = sub.toJSON().keys || {};
+        await fetch("/api/push/subscribe", {
+          method: "POST",
+          credentials: "include",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ endpoint: sub.endpoint, keys }),
+        });
+      } catch {
+        /* No session (the page is closed and the cookie is gone), or the
+           server is unreachable: the row is pruned on the next send, and the
+           next page load re-subscribes. */
+      }
+    })()
+  );
+});
+
 /** Clicking a notification focuses the app and follows the route the frame
  *  named — the album or the page the outcome is about (the page passes it as
  *  `data.url` in showNotification options) — or opens the app when none is
  *  running. */
 self.addEventListener("notificationclick", (event) => {
   event.notification.close();
-  const target = (event.notification.data || {}).url || "/";
+  // Resolved against this worker's origin rather than handed to navigate() as
+  // it arrived: the frame carries an app route ("/album/…"), and a relative URL
+  // is otherwise resolved against whatever page the client happens to be on.
+  const raw = String((event.notification.data || {}).url || "/");
+  let target = "/";
+  try {
+    target = new URL(raw, self.location.origin).href;
+  } catch {
+    target = new URL("/", self.location.origin).href;
+  }
   event.waitUntil(
     (async () => {
       const all = await self.clients.matchAll({ type: "window", includeUncontrolled: true });
       for (const client of all) {
+        if (!("navigate" in client)) continue;
         // A client that can navigate is sent to the subject even when it is
         // already showing the app: the user clicked a notification about THAT
         // album, so focusing the last page they left would be the wrong answer.
-        if ("navigate" in client) {
+        let moved = null;
+        try {
+          // navigate() answers null when it refused to move the client (it was
+          // closing, or the URL was rejected) — that is a client to skip, not a
+          // click to swallow, and the loop then tries the next window.
+          moved = await client.navigate(target);
+        } catch {
+          continue;
+        }
+        if (!moved) continue;
+        // Focusing can be refused (a headless or minimised window). That is not
+        // a reason for the click to do nothing: the navigation above already
+        // happened, so the answer is "this window", never a SECOND one — which
+        // is what falling through to openWindow would give.
+        if ("focus" in moved) {
           try {
-            await client.navigate(target);
+            return await moved.focus();
           } catch {
-            /* a client mid-teardown: focusing it is still the right thing */
+            return undefined;
           }
         }
-        if ("focus" in client) return client.focus();
+        return undefined;
       }
       if (self.clients.openWindow) return self.clients.openWindow(target);
       return undefined;

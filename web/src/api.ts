@@ -1004,6 +1004,16 @@ export interface SlskQueueItem {
   /** Partial bytes of rejected candidates that could not be removed — still in
    *  the download folder, reported rather than left for someone to find. */
   leftovers?: string[];
+  /** True when the import moved the album but the naming script could not
+   *  place EVERY file: the album is in the library and the files that stayed
+   *  behind are still in the download folder (import that folder again to
+   *  finish it). `organize_error` is the import's own sentence about them. */
+  partial?: boolean;
+  organize_error?: string;
+  /** The format a completed album arrived in when it was taken as a LOSSY copy
+   *  under `soulseek_auto_lossy_policy` ("MP3", …; "" otherwise) — the row must
+   *  not read as the lossless import every other row is. */
+  lossy?: string;
   /** What this row's manual action is ("manual" = enter it by hand in the
    *  wizard, "answer" = a question parked on the auto-import tab), and where
    *  it happens. "" when the row has no such action. */

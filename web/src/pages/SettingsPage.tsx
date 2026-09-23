@@ -1207,6 +1207,14 @@ export default function SettingsPage() {
         },
         { k: "wishes_auto_import", label: "Auto-import when a verified match is found", type: "bool" },
         { k: "soulseek_auto_wish_prompt", label: "Keep searching wishes automatically while the app runs", type: "bool" },
+        {
+          k: "soulseek_auto_lossy_policy", label: "When only lossy copies exist (a wish, a watched artist)", type: "select",
+          options: [
+            ["never", "Never take one — keep searching (default)"],
+            ["best", "Take the best one, and say so"],
+          ],
+          help: "An unattended download (a wish, an artist watch) that finds only MP3/AAC folders. Never is the shipped behaviour: the release stays on the wish list and keeps being searched, never quietly turning up as lossy audio. Best takes the top-ranked lossy folder the ranking already offers — the fastest, most complete copy of the album — and names the format in the job's log, its queue row and the notification it ends with. The Soulseek page always ASKS you either way, so this can never overrule an answer you gave by hand.",
+        },
       ],
     },
     {

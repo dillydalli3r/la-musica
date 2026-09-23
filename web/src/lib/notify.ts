@@ -1,8 +1,9 @@
-import { IN_TAURI, getToken, serverUrl } from "../api";
+import { IN_TAURI, getToken, onAuthLost, serverUrl } from "../api";
 import { t, type MessageKey } from "./i18n";
 import { toast } from "../store";
 import {
   OS_KINDS,
+  PUSH_KINDS,
   ingest,
   openNotification,
   type NotificationRecord,
@@ -48,6 +49,7 @@ export type EventKind =
   /** A peer started downloading from us: our files are being shared. */
   | "upload_started"
   | "import_ready"
+  | "import_done"
   | "import_needs_data"
   | "script_done"
   | "script_failed"
@@ -115,6 +117,322 @@ export async function requestNotifications(): Promise<NotifyState> {
   } catch {
     return "denied";
   }
+}
+
+/** ── Web Push ─────────────────────────────────────────────────────────────
+ *
+ *  Remote push: the way a device that is CLOSED hears that an import finished
+ *  (#48). A live page is already told everything over /ws/events — and that is
+ *  why this is a SEPARATE switch, per device, rather than another kind of
+ *  notification: it is about *where* the news can reach, not which news.
+ *
+ *  What works where, because a switch we cannot honour must not be offered:
+ *
+ *  * Browser over https (or localhost): Web Push, app open or closed. This is
+ *    the full story and the only client that gets the switch by default.
+ *  * Android: the same Web Push, but the subscription lives in an installed
+ *    PWA — Chrome will not deliver push to a plain tab forever, and the
+ *    installed app is what the user actually wants on a phone.
+ *  * iOS/iPadOS: push needs the app ADDED TO THE HOME SCREEN (Web Push landed
+ *    in Safari 16.4, for installed web apps only). A tab in Safari can raise a
+ *    foreground notification and nothing else, so `pushSupport()` answers
+ *    "ios_install" there and the panel explains that instead of offering a
+ *    subscription that would silently never fire.
+ *  * The desktop shell (Tauri): no service worker, therefore no Web Push. It
+ *    raises its OWN notification while it is running (showNotification, via
+ *    the Tauri plugin), which is what it can honestly promise.
+ *
+ *  The subscription is kept fresh on every load (`refreshPush`) because a
+ *  browser rotates its endpoint and key material — and it is dropped on
+ *  sign-out (`dropPush`) because a device that has been signed out must not
+ *  keep receiving this server's news.
+ */
+
+const PUSH_KEY = "mlo.push.endpoint";
+
+/** Why this device can or cannot be pushed to, as the panel renders it. */
+export type PushSupport =
+  | "ok" // this browser can subscribe
+  | "desktop" // the Tauri shell: no service worker there
+  | "ios_install" // iOS/iPadOS outside an installed app
+  | "insecure" // plain-http LAN: no service worker, so no push
+  | "unsupported"; // browser without the Push API
+
+function storedPush(): string {
+  try {
+    return localStorage.getItem(PUSH_KEY) || "";
+  } catch {
+    return "";
+  }
+}
+
+function rememberPushEndpoint(endpoint: string | null) {
+  try {
+    if (endpoint) localStorage.setItem(PUSH_KEY, endpoint);
+    else localStorage.removeItem(PUSH_KEY);
+  } catch {
+    /* storage disabled: the subscription still works, it just cannot be
+       refreshed or dropped by endpoint on the next load */
+  }
+}
+
+/** Whether this client can be offered the push switch at all — and when it
+ *  cannot, the reason the panel shows in its place (see the block above). */
+export function pushSupport(): PushSupport {
+  if (IN_TAURI) return "desktop";
+  if (typeof navigator === "undefined" || !("serviceWorker" in navigator)) return "unsupported";
+  if (!("PushManager" in window)) return "unsupported";
+  // A service worker needs a secure context, and so does push: on a plain-http
+  // LAN address the browser registers neither (see main.tsx's own check).
+  if (!window.isSecureContext) return "insecure";
+  // iPadOS 13+ reports itself as a Mac; the touch points give it away, and the
+  // home-screen rule below is Safari's alone.
+  const ua = navigator.userAgent || "";
+  const ios =
+    /iPad|iPhone|iPod/.test(ua) || (/Macintosh/.test(ua) && navigator.maxTouchPoints > 1);
+  // An installed app is the only place iOS delivers a push: in a tab, Safari
+  // 16.4's Web Push raises nothing once the page is gone. `display-mode` is
+  // the standard answer; `standalone` is WebKit's older spelling of it.
+  let installed = false;
+  try {
+    installed = window.matchMedia?.("(display-mode: standalone)").matches === true;
+  } catch {
+    /* no matchMedia: the standalone flag below is the only answer left */
+  }
+  if (!installed && "standalone" in navigator && navigator.standalone === true) installed = true;
+  if (ios && !installed) return "ios_install";
+  return "ok";
+}
+
+/** Whether this device asked for push, for the switch's own state. Read from
+ *  storage rather than the browser's PushManager because the two can disagree:
+ *  the row the SERVER holds is what decides whether a frame is sent. */
+export function pushEnabled(): boolean {
+  return !!storedPush();
+}
+
+export interface PushStatus {
+  /** The server can sign a push (it has key material and the crypto library). */
+  available: boolean;
+  /** The VAPID public key to subscribe with, base64url. */
+  public_key: string;
+  /** How many devices this user already registered. */
+  subscriptions: number;
+}
+
+/** What the test button reports: `sent` is devices that took the frame, `gone`
+ *  ones the push service called dead, `failed` the rest. */
+export interface PushTestResult {
+  sent: number;
+  gone: number;
+  failed: number;
+  subscriptions: number;
+}
+
+/** Ask the server what it can do. Never throws: a server that cannot be
+ *  reached reports "unavailable", which hides the switch rather than offering
+ *  a button that fails. */
+export async function pushStatus(): Promise<PushStatus> {
+  try {
+    const res = await pushFetch<Partial<PushStatus>>("/api/push/status");
+    return {
+      available: !!res.available,
+      public_key: String(res.public_key || ""),
+      subscriptions: Number(res.subscriptions || 0),
+    };
+  } catch {
+    return { available: false, public_key: "", subscriptions: 0 };
+  }
+}
+
+/** The API's own call shape (see api.ts's `json`): the session travels as the
+ *  `mlo_session` cookie for the web app, or as a Bearer token for a client
+ *  pointed at another server. */
+async function pushFetch<T>(path: string, body?: unknown): Promise<T> {
+  const token = getToken();
+  const res = await fetch(`${serverUrl()}${path}`, {
+    method: body === undefined ? "GET" : "POST",
+    credentials: "same-origin",
+    headers: {
+      ...(body === undefined ? {} : { "Content-Type": "application/json" }),
+      ...(token ? { Authorization: `Bearer ${token}` } : {}),
+    },
+    body: body === undefined ? undefined : JSON.stringify(body),
+  });
+  if (!res.ok) throw new Error(`push: ${res.status}`);
+  return (await res.json()) as T;
+}
+
+/** The worker's registration, registered here if the page has not done it yet
+ *  (main.tsx registers it on load; a client that turns push on immediately
+ *  after signing in must not race that). */
+async function pushRegistration(): Promise<ServiceWorkerRegistration | null> {
+  try {
+    if (!("serviceWorker" in navigator)) return null;
+    const existing = await navigator.serviceWorker.getRegistration();
+    if (!existing) await navigator.serviceWorker.register("/sw.js", { scope: "/" });
+    const reg = await navigator.serviceWorker.ready;
+    return reg ?? null;
+  } catch {
+    return null;
+  }
+}
+
+/** VAPID keys are base64url; `applicationServerKey` wants the raw bytes. The
+ *  explicit `ArrayBuffer` is what `BufferSource` accepts — a `Uint8Array` over
+ *  a possibly-shared buffer does not type-check. */
+function keyBytes(base64url: string): Uint8Array<ArrayBuffer> {
+  const pad = "=".repeat((4 - (base64url.length % 4)) % 4);
+  const raw = atob((base64url + pad).replace(/-/g, "+").replace(/_/g, "/"));
+  const out = new Uint8Array(raw.length);
+  for (let i = 0; i < raw.length; i++) out[i] = raw.charCodeAt(i);
+  return out;
+}
+
+/** The subscription this device currently holds, creating one if needed. */
+async function subscribe(
+  reg: ServiceWorkerRegistration,
+  publicKey: string,
+): Promise<{ endpoint: string; keys: { p256dh: string; auth: string } } | null> {
+  const manager = reg.pushManager;
+  if (!manager) return null;
+  const existing = await manager.getSubscription();
+  const sub =
+    existing ??
+    (await manager.subscribe({
+      // Required by Chrome: every push MUST raise a visible notification, which
+      // is exactly what sw.js's push handler does.
+      userVisibleOnly: true,
+      applicationServerKey: keyBytes(publicKey),
+    }));
+  if (!sub) return null;
+  const keys = sub.toJSON().keys;
+  if (!keys?.p256dh || !keys.auth) return null;
+  return { endpoint: sub.endpoint, keys: { p256dh: keys.p256dh, auth: keys.auth } };
+}
+
+/** Tell the server about this device. */
+async function registerSubscription(
+  sub: { endpoint: string; keys: { p256dh: string; auth: string } },
+): Promise<void> {
+  await pushFetch<{ subscriptions?: number }>("/api/push/subscribe", {
+    endpoint: sub.endpoint,
+    keys: sub.keys,
+    // What this device asked to be woken for (lib/notifications.ts). The
+    // server honours it per subscription, so a device that asked for less is
+    // not woken for the rest.
+    kinds: Object.keys(PUSH_KINDS),
+  });
+  rememberPushEndpoint(sub.endpoint);
+}
+
+/** Turn push on for this device. MUST be called from a user gesture: the OS
+ *  permission dialog can only be raised from one (see requestNotifications),
+ *  and Safari refuses the subscription otherwise. Returns the reason when it
+ *  cannot, so the panel can say what to do instead of nothing happening. */
+export async function enablePush(): Promise<{ ok: boolean; reason?: string }> {
+  const support = pushSupport();
+  if (support !== "ok") return { ok: false, reason: support };
+  const permission = await requestNotifications();
+  if (permission !== "granted") return { ok: false, reason: "blocked" };
+  const reg = await pushRegistration();
+  if (!reg) return { ok: false, reason: "unsupported" };
+  const status = await pushStatus();
+  if (!status.available || !status.public_key) return { ok: false, reason: "server" };
+  try {
+    const sub = await subscribe(reg, status.public_key);
+    if (!sub) return { ok: false, reason: "unsupported" };
+    await registerSubscription(sub);
+    return { ok: true };
+  } catch {
+    // A refused subscription (a browser that will not reach its push service,
+    // a key the browser rejects) must leave the switch off rather than claim
+    // it is on.
+    return { ok: false, reason: "failed" };
+  }
+}
+
+/** Turn push off for this device: drop the browser's subscription AND the
+ *  server's row, so neither side keeps the other's state. */
+export async function disablePush(): Promise<void> {
+  const reg = await pushRegistration();
+  let endpoint = storedPush();
+  try {
+    const sub = reg ? await reg.pushManager.getSubscription() : null;
+    if (sub) {
+      endpoint = sub.endpoint || endpoint;
+      await sub.unsubscribe();
+    }
+  } catch {
+    /* the browser's own unsubscribe failed: the server row still goes */
+  }
+  if (endpoint) {
+    try {
+      await pushFetch<{ removed?: number }>("/api/push/unsubscribe", { endpoint });
+    } catch {
+      /* Signed out, or the server is unreachable. Nothing is lost: the push
+         service itself answers 410 for an unsubscribed endpoint, and the
+         server prunes the row on the next send (server/events.py). */
+    }
+  }
+  rememberPushEndpoint(null);
+}
+
+/** Drop this device's subscription because the user signed out. Never throws:
+ *  a sign-out must not fail on this. */
+export async function dropPush(): Promise<void> {
+  try {
+    if (!storedPush()) return; // this device was never subscribed
+    await disablePush();
+  } catch {
+    /* the sign-out carries on regardless */
+  }
+}
+
+// A session that died under us (it expired, it was revoked, "log out
+// everywhere") is a sign-out too: this device must stop being woken for the
+// person who is no longer signed in. The two explicit sign-out buttons call
+// dropPush themselves (AccountMenu, SecurityPanel) — this covers the path
+// where nobody pressed anything.
+onAuthLost(() => {
+  void dropPush();
+});
+
+/** Re-register this device's subscription with the server.
+ *
+ *  Called on every load of the signed-in app, because a browser rotates a
+ *  subscription's endpoint and its key material on its own schedule — a row
+ *  the server kept would then encrypt to a key nobody holds, which is the
+ *  silent failure mode of every push implementation. It also restores a row
+ *  the server dropped (a password change revokes them: see auth.revoke_all).
+ */
+export async function refreshPush(): Promise<void> {
+  if (pushSupport() !== "ok") return;
+  if (!storedPush()) return; // this device never asked to be pushed to
+  if (typeof Notification === "undefined" || Notification.permission !== "granted") return;
+  try {
+    const reg = await pushRegistration();
+    if (!reg) return;
+    const status = await pushStatus();
+    if (!status.available || !status.public_key) return;
+    const sub = await subscribe(reg, status.public_key);
+    if (sub) await registerSubscription(sub);
+  } catch {
+    /* the next load tries again; the subscription the browser holds is still
+       valid, so nothing is lost by a refresh that could not be sent */
+  }
+}
+
+/** Send a test frame to this user's devices and report what really happened —
+ *  the button that lets somebody prove push on their own phone. */
+export async function sendTestPush(): Promise<PushTestResult> {
+  const res = await pushFetch<Partial<PushTestResult>>("/api/push/test", {});
+  return {
+    sent: Number(res.sent || 0),
+    gone: Number(res.gone || 0),
+    failed: Number(res.failed || 0),
+    subscriptions: Number(res.subscriptions || 0),
+  };
 }
 
 /** Fallback wording for a frame the server sent without a title. Every emitter

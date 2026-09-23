@@ -33,7 +33,7 @@ from .stats import (
     _diff_bytes, worker_count,
 )
 from .subproc import run_tool
-from .tagtext import canonical_text
+from .tagtext import canonical_text, canonical_value
 from .tools import detect_all_tools
 from .ui import print_header, log, c, Color
 
@@ -290,24 +290,64 @@ def _audit_tag_value(severity, cli_status):
     return None
 
 
-def _read_and_normalize_audit(path, write_tags=True, config=None):
-    """Read the AUDIT verdict and fix legacy mixed-case values (Real -> REAL)
-    in a single file open. Returns (verdict, changed)."""
+def _read_audit_tags(path, write_tags=True, config=None):
+    """(media_is_cd, verdict, changed) for one file, from ONE container read.
+
+    The MEDIA=CD pass at the top of the run and the verdict pass below ask the
+    same file two different questions, and each used to open — and parse — the
+    container for itself, on top of the open the AUDIT write pays: three parses
+    of every file, every run. server.tagcache is the stat-keyed read cache the
+    API serves tracks through, so the second question is answered from the
+    first parse. Its key carries the file's mtime, so the one write made here
+    (normalizing a legacy mixed-case verdict, Real -> REAL) makes the next read
+    read again rather than serve what the write just replaced.
+
+    Imported lazily: mlo must not import server at module level (the CLI runs
+    the scripts without a server), and a build that has no server simply reads
+    the file directly.
+    """
+    raw_media = raw_audit = ""
+    got = None
+    try:
+        from server import tagcache
+        got = tagcache.read_track(path, ["MEDIA", "AUDIT"])[0]
+    except Exception:
+        got = None
+    if got is None:
+        try:
+            af = AudioFile(path)
+            if af.audio is None:
+                return False, None, False
+            raw_media = str(af.get_tag("MEDIA") or "")
+            raw_audit = str(af.get_tag("AUDIT") or "").strip()
+        except Exception:
+            return False, None, False
+    else:
+        raw_media = str(got.get("MEDIA") or "")
+        raw_audit = str(got.get("AUDIT") or "").strip()
+
+    # Through the canonical spelling (mlo.tagtext), so a "cd" a different
+    # tagger wrote is the same MEDIA this audit expects.
+    is_cd = canonical_text("MEDIA", raw_media) == "CD"
+    # mlo.tagtext owns the spelling rule; an unknown value (a word that is
+    # neither verdict) comes back unchanged and is reported as no verdict,
+    # exactly as the old .upper() did.
+    v = str(canonical_value("AUDIT", raw_audit))
+    changed = False
+    if write_tags and raw_audit and v in ("REAL", "FAKE") and raw_audit != v:
+        # Respect per-filetype AUDIT toggle
+        if config is None or should_write_audio_tag(config, "AUDIT", filepath=path):
+            changed = _write_audit_value(path, v)
+    return is_cd, (v if v in ("REAL", "FAKE") else None), changed
+
+
+def _write_audit_value(path, value):
+    """Write one normalized AUDIT value; True when the file changed."""
     try:
         af = AudioFile(path)
-        raw = str(af.get_tag("AUDIT") or "").strip()
-        # mlo.tagtext owns the spelling rule; an unknown value (a word that is
-        # neither verdict) comes back unchanged and is reported as no verdict,
-        # exactly as the old .upper() did.
-        v = str(canonical_value("AUDIT", raw))
-        changed = False
-        if write_tags and raw and v in ("REAL", "FAKE") and raw != v:
-            # Respect per-filetype AUDIT toggle
-            if config is None or should_write_audio_tag(config, "AUDIT", filepath=path):
-                changed = bool(af.set_tag("AUDIT", v))
-        return (v if v in ("REAL", "FAKE") else None), changed
+        return bool(af.set_tag("AUDIT", value))
     except Exception:
-        return None, False
+        return False
 
 
 # ----------------------------------------------------------------------
@@ -315,15 +355,28 @@ def _read_and_normalize_audit(path, write_tags=True, config=None):
 # ----------------------------------------------------------------------
 # "REAL" is a statement about the BYTES AudioAuditor read. Replace or
 # re-encode the file and the tag still says REAL about audio nothing audited —
-# and the next run SKIPS it on that stale verdict. The size and mtime each
-# verdict was written for live in <music>/.mlo/data/audit_evidence.json (the
-# same place and shape as the on-demand ReplayGain cache, mlo.loudness) and a
-# file whose bytes no longer match is audited again instead of skipped.
+# and the next run SKIPS it on that stale verdict. What each verdict was
+# written for lives in <music>/.mlo/data/audit_evidence.json (the same place
+# and shape as the on-demand ReplayGain cache, mlo.loudness), and a file the
+# record no longer describes is audited again instead of skipped.
+#
+# A record is [size, mtime_ns, verified, identity]: the size and mtime it was
+# written for, the integrity test's own answer for that audio (True/False, or
+# None when the run never tested it), and the audio identity a tag write
+# cannot move. All four are read through _evidence_state, which is the only
+# thing that decides whether a stored verdict is trusted — see there for why
+# the identity has to be part of it.
 #
 # ponytail: one JSON file rewritten once per run, entries dropped only when
 # their file is gone; move it to sqlite if a huge library ever makes that hurt.
 EVIDENCE_NAME = "audit_evidence.json"
 _EVIDENCE = {}
+# Which files THIS run verified as intact (canonical path -> bool). It rides
+# in the evidence record's third element (see _record_evidence).
+_INTEGRITY_PASSED = {}
+# "the caller did not say": distinguishes "keep what the record has" from a
+# remembered None.
+_UNSET = object()
 
 
 def _ev_key(path):
@@ -343,6 +396,103 @@ def _file_stamp(path):
         return None
 
 
+def _record_evidence(path, verified=_UNSET, identity=None):
+    """Store the evidence record for *path*: [size, mtime_ns, verified, identity].
+
+    *verified* is the integrity test's own answer for these bytes (True/False)
+    when this run ran it over the file, and None when it did not — the config
+    had the test off, or the file was skipped before it could run. None is not
+    a failure and not a pass: it means "nothing established this", and a later
+    run verifies a file whose record does not say True rather than trusting a
+    verdict nobody ever decoded (which is also how a record written by a
+    version that had no third element behaves).
+
+    The fourth element is the AUDIO identity (see :func:`_audio_identity`):
+    the half of the record that a tag write cannot move. A caller that has
+    just read it passes it in rather than paying for the same header twice.
+    """
+    stamp = _file_stamp(path)
+    if stamp is None:
+        return
+    key = _ev_key(path)
+    if verified is _UNSET:
+        verified = _INTEGRITY_PASSED.get(key)
+        if verified is None:
+            rec = _EVIDENCE.get(key)
+            if (isinstance(rec, (list, tuple)) and len(rec) >= 3
+                    and _record_stamp(rec) == stamp):
+                # This run did not run the test over the file (it was settled
+                # already), and the file has not moved since: the answer the
+                # record carries is still the answer for these bytes, so a
+                # later write does not have to forget it.
+                verified = rec[2]
+    if identity is None:
+        identity = _audio_identity(path)
+    _EVIDENCE[key] = [stamp[0], stamp[1], verified, identity]
+
+
+def _record_stamp(rec):
+    """The [size, mtime_ns] a stored record was written for, or None."""
+    try:
+        return [int(rec[0]), int(rec[1])]
+    except (TypeError, ValueError, IndexError):
+        return None
+
+
+def _audio_identity(path):
+    """*path*'s audio identity, or "" when its container cannot state one.
+
+    The FLAC STREAMINFO MD5 that mlo.discs' CRC memo and mlo.accurip already
+    key their own audio evidence on: a tag write leaves it, a re-encode or a
+    different file changes it. Imported lazily (mlo.accurip imports this
+    module back) and only asked of a .flac, the one container that states a
+    stream identity here — a file of any other kind would pay an open (an
+    ffprobe, for a video) to be told nothing.
+    """
+    if os.path.splitext(str(path))[1].lower() != ".flac":
+        return ""
+    try:
+        from .accurip import _audio_identity as identity_of
+        return identity_of(path) or ""
+    except Exception:
+        return ""
+
+
+def _evidence_state(path):
+    """(current, verified) for one file's stored evidence.
+
+    *current* — the record describes THIS file's audio: either the size/mtime
+    stamp matches, or the record's audio identity does. The stamp is the cheap
+    half; the identity is the half that survives a tag write, which is what a
+    re-audit after a script chain actually needs — the chain writes tags to
+    every file it touches, so by the next run every stamp has moved while the
+    audio has not, and a stamp-only test re-decodes the whole library to learn
+    what the last run already knew (mlo.discs and mlo.accurip key their own
+    audio evidence on the identity for exactly this reason).
+
+    *verified* — the record also carries the integrity test's answer for those
+    bytes, and it was True. A container that states no identity (an mp3's tags
+    move its stamp and nothing else) is trusted on its stamp alone, which is
+    what it was before this element existed.
+    """
+    key = _ev_key(path)
+    rec = _EVIDENCE.get(key)
+    stamp = _file_stamp(path)
+    if stamp is None or not isinstance(rec, (list, tuple)) or len(rec) < 2:
+        return False, False
+    verified = bool(len(rec) >= 3 and rec[2])
+    if _record_stamp(rec) == stamp:
+        return True, verified
+    identity = str(rec[3]) if len(rec) >= 4 else ""
+    if identity and identity == _audio_identity(path):
+        # The same audio under a new stamp: the tags were rewritten, the
+        # samples were not. Re-filed under the current stamp so the rest of
+        # this run asks the cheap question.
+        _record_evidence(path, verified, identity)
+        return True, verified
+    return False, False
+
+
 def _evidence_path(config):
     """<music>/.mlo/data/audit_evidence.json, or "" when there is no folder."""
     try:
@@ -353,7 +503,8 @@ def _evidence_path(config):
 
 
 def _load_evidence(config):
-    """The stored {path: [size, mtime_ns]} map; unreadable reads as empty.
+    """The stored {path: [size, mtime_ns, verified, identity]} map; unreadable
+    reads as empty.
 
     Entries whose file is gone are dropped here: the map is per library, and a
     deleted album must not leave its stamps behind forever."""
@@ -417,7 +568,7 @@ def _write_audit_tag(path, value):
             # The file already carries this verdict and this run just re-read
             # it against these bytes: renew the evidence so the next run may
             # skip it (a stale stamp was the reason this file was audited).
-            _EVIDENCE[_ev_key(path)] = _file_stamp(path)
+            _record_evidence(path)
             return False, 0, 0, None
 
         if not af.set_tag("AUDIT", value):
@@ -425,7 +576,7 @@ def _write_audit_tag(path, value):
 
         after = os.path.getsize(path)
         b_rem, b_add = _diff_bytes(before, after)
-        _EVIDENCE[_ev_key(path)] = _file_stamp(path)
+        _record_evidence(path)
         return True, b_rem, b_add, None
     except Exception as e:
         return False, 0, 0, str(e)
@@ -481,6 +632,7 @@ def run_audit_library(config):
     # verdict (the CD phases below write some) and saved once at the end.
     _EVIDENCE.clear()
     _EVIDENCE.update(_load_evidence(config))
+    _INTEGRITY_PASSED.clear()
 
     # ------------------------------------------------------------------
     # One MEDIA=CD pass for the whole run. Four separate phases (CD checksum
@@ -501,22 +653,28 @@ def run_audit_library(config):
     # .accurip lookup into the album-wide one it replaced.
     canon_files = {_ev_key(p): p for p in files}
 
+    # ONE tag read per file, answering BOTH questions this run asks of the
+    # same container: whether the track is MEDIA=CD (below) and whether it
+    # already carries an AUDIT verdict (the pass further down, which also
+    # normalizes a legacy mixed-case value). Keyed by path:
+    # {path: (is_cd, verdict, changed)}.
+    read_workers = worker_count(config, default=8, maximum=16, items=len(files))
+    with ThreadPoolExecutor(max_workers=read_workers) as pool:
+        file_reads = dict(zip(files, pool.map(
+            lambda p: _read_audit_tags(p, config.get("write_audit_tag", True),
+                                       config),
+            files)))
+
     cd_album_map = {}
     cd_files_flagged = set()
     for album_dir, paths in by_album_files.items():
         is_cd = False
         for pp in paths:
-            try:
-                af_tmp = AudioFile(pp)
-                if af_tmp.audio is None:
-                    continue
-                # Through the canonical spelling (mlo.tagtext), so a "cd" a
-                # different tagger wrote is the same MEDIA this audit expects.
-                if canonical_text("MEDIA", af_tmp.get_tag("MEDIA")) == "CD":
-                    cd_files_flagged.add(pp)
-                    is_cd = True
-            except Exception:
-                continue
+            # Through the canonical spelling (mlo.tagtext), so a "cd" a
+            # different tagger wrote is the same MEDIA this audit expects.
+            if file_reads.get(pp, (False, None, False))[0]:
+                cd_files_flagged.add(pp)
+                is_cd = True
         cd_album_map[album_dir] = is_cd
 
     # ------------------------------------------------------------------
@@ -719,78 +877,30 @@ def run_audit_library(config):
                         log(f"  {c('–', Color.GREY)} {os.path.basename(p)} "
                             f"{c(unverified_cd[p], Color.GREY)}")
 
-    # ------------------------------------------------------------------
-    # Integrity check (foobar2000 Verify Integrity style) — optional but on
-    # by default. Uses `flac -t` for FLAC and `ffmpeg -v error` for all
-    # types to catch truncated files, frame CRC mismatches, and sync errors.
-    # Failures here make the final AUDIT FAKE, just like a fake lossless
-    # detection, and are all configurable via Settings → Audit.
-    # ------------------------------------------------------------------
-    integrity_failed = {}
-    if config.get("audit_integrity", True):
-        ffmpeg_exe = (tools.get("ffmpeg") or {}).get("ffmpeg_exe")
-        flac_exe = (tools.get("flac") or {}).get("flac_exe")
-        if not flac_exe and not ffmpeg_exe:
-            # Without a decoder this pass could only re-parse each file's tags
-            # and then report "all files passed verification" — a claim about
-            # audio nothing tested. Nothing is checked, and the log says so.
-            log(c(f"Integrity: no flac/ffmpeg available - {len(files)} file(s) "
-                  f"NOT verified (no decoder to test them with)", Color.YELLOW))
-            stats["errors"].append(("Integrity", "no flac/ffmpeg to verify with"))
-        else:
-            # Only verify files that would be audited anyway (respect force/skip later)
-            # But run it now so we can fail fast and avoid an expensive AudioAuditor run
-            # on a file that is already corrupt.
-            def _check_one(p):
-                ok, err = verify_integrity(p, ffmpeg_exe, flac_exe)
-                return p, ok, err
-
-            cw = worker_count(config, default=8, maximum=16, items=len(files))
-            with ThreadPoolExecutor(max_workers=cw) as ex:
-                futs = {ex.submit(_check_one, p): p for p in files}
-                from concurrent.futures import as_completed as _as_comp
-                for fut in _as_comp(futs):
-                    p, ok, err = fut.result()
-                    if not ok:
-                        integrity_failed[p] = err or "integrity check failed"
-
-            if integrity_failed:
-                n_fail = len(integrity_failed)
-                log(c(f"Integrity: {n_fail} file(s) failed verification (foobar2000 style) — will be AUDIT=FAKE", Color.RED))
-                for p in sorted(integrity_failed)[:10]:
-                    try:
-                        rel = os.path.relpath(p, folder)
-                    except ValueError:
-                        rel = os.path.basename(p)
-                    log(f"  {c('✕', Color.RED)} {rel} {c(integrity_failed[p][:80], Color.RED)}")
-                if n_fail > 10:
-                    log(f"  … and {n_fail - 10} more")
-            else:
-                log("Integrity: all files passed verification")
-
-    # A CD rip's verdict comes from its OWN verification, never from the
-    # spectrogram detectors: the .log CRC (written above, as soon as it is
-    # known) or a REAL .accurip. `audit_cd_require_both` only decides whether
-    # AudioAuditor is ALSO run over MEDIA=CD — its verdict can add warning
-    # flags, and decides only for a disc neither source could verify.
-
-    # Skip files that already carry a REAL/FAKE verdict (normalizing
-    # legacy mixed-case values) unless the audit is forced.
+    # Skip files that already carry a REAL/FAKE verdict (a legacy mixed-case
+    # value was normalized by the read above) unless the audit is forced.
     # When require_both, CD files are NOT skipped — they need the second source.
+    #
+    # This runs BEFORE the integrity pass on purpose. That pass decodes every
+    # file it is handed, and a file whose stored verdict was written for
+    # exactly these bytes (the evidence stamp below) has nothing left for it
+    # to find: re-decoding it on every run is what made a re-audit of an
+    # unchanged library cost one full decode per file and report nothing. What
+    # the pass IS for is the files this run is about to audit — fail fast on a
+    # corrupt one before the spectral run, and write FAKE for a failure a
+    # stored verdict missed — and those are exactly `todo`.
     todo = files
     skipped = 0
     stale = 0
     if not force:
-        workers = worker_count(config, default=8, maximum=8, items=len(files))
-        with ThreadPoolExecutor(max_workers=workers) as pool:
-            results = list(pool.map(
-                lambda path: _read_and_normalize_audit(
-                    path, config.get("write_audit_tag", True), config
-                ),
-                files,
-            ))
+        # Whether this run is even supposed to decode the audio (see the
+        # integrity pass below): with the test off, nothing about a file's
+        # bytes can be established, so a stored verdict is trusted on its
+        # stamp alone — exactly what it was before, and nothing is claimed.
+        integrity_on = bool(config.get("audit_integrity", True))
         todo = []
-        for path, (verdict, changed) in zip(files, results):
+        for path in files:
+            _, verdict, changed = file_reads.get(path, (False, None, False))
             if verdict is not None:
                 # CD files are re-checked even when a tag exists: they carry
                 # the log/AccurateRip verdict, which outranks the stored one —
@@ -798,13 +908,21 @@ def run_audit_library(config):
                 if path in cd_files and (require_both or cd_verify_ran):
                     todo.append(path)
                     continue
-                # A verdict is only trusted for the bytes it was written for.
-                # A re-encoded or replaced file keeps the old tag, and this
-                # stamp check is what stops that stale REAL from being skipped
-                # forever; a file with no recorded stamp (audited before the
-                # evidence existed) is audited once more and then has one.
-                stamp = _file_stamp(path)
-                if stamp is not None and _EVIDENCE.get(_ev_key(path)) == stamp:
+                # A verdict is only trusted for the audio it was written for:
+                # the record's stamp (replaced or re-encoded files move it) or
+                # — since a script chain writes tags to every file it touches,
+                # which moves the stamp and nothing else — its audio identity.
+                # A file with no matching record (audited before the evidence
+                # existed, or changed since) is audited once more and then has
+                # one.
+                #
+                # With the integrity test on, those samples must ALSO have
+                # been decoded and passed once: a verdict recorded by a run
+                # that never ran that test (the setting was off, or the
+                # version that wrote it had no such element) is re-established
+                # here, once, and settles from then on.
+                current, verified = _evidence_state(path)
+                if current and (not integrity_on or verified):
                     skipped += 1
                     if changed:
                         stats["modified_count"] += 1
@@ -824,6 +942,87 @@ def run_audit_library(config):
                   f"evidence (replaced, re-encoded, or audited before the "
                   f"evidence was recorded) - auditing them again",
                   Color.YELLOW))
+
+    # ------------------------------------------------------------------
+    # Integrity check (foobar2000 Verify Integrity style) — optional but on
+    # by default. Uses `flac -t` for FLAC and `ffmpeg -v error` for all
+    # types to catch truncated files, frame CRC mismatches, and sync errors.
+    # Failures here make the final AUDIT FAKE, just like a fake lossless
+    # detection, and are all configurable via Settings → Audit.
+    # ------------------------------------------------------------------
+    integrity_failed = {}
+    if config.get("audit_integrity", True):
+        ffmpeg_exe = (tools.get("ffmpeg") or {}).get("ffmpeg_exe")
+        flac_exe = (tools.get("flac") or {}).get("flac_exe")
+        if not flac_exe and not ffmpeg_exe:
+            # Without a decoder this pass could only re-parse each file's tags
+            # and then report "all files passed verification" — a claim about
+            # audio nothing tested. Nothing is checked, and the log says so.
+            log(c(f"Integrity: no flac/ffmpeg available - {len(todo)} file(s) "
+                  f"NOT verified (no decoder to test them with)", Color.YELLOW))
+            stats["errors"].append(("Integrity", "no flac/ffmpeg to verify with"))
+        elif todo:
+            # Only the files this run is actually about to audit: fail fast
+            # and avoid an expensive AudioAuditor run on a file that is
+            # already corrupt. A file the verdict/stamp pass above left out of
+            # `todo` was verified for exactly these bytes already (that is
+            # what `todo` means here), and `flac -t`/`ffmpeg -f null` decode
+            # the whole file — re-decoding it proved nothing and cost a full
+            # decode per file on every re-audit of an unchanged library.
+            to_verify = []
+            for p in todo:
+                current, verified = _evidence_state(p)
+                if not (current and verified):
+                    to_verify.append(p)
+            untouched = len(todo) - len(to_verify)
+            if untouched:
+                log(f"Integrity: {untouched} file(s) already verified intact "
+                    f"for their audio - not decoded again")
+
+            def _check_one(p):
+                ok, err = verify_integrity(p, ffmpeg_exe, flac_exe)
+                return p, ok, err
+
+            cw = worker_count(config, default=8, maximum=16,
+                              items=len(to_verify))
+            with ThreadPoolExecutor(max_workers=cw) as ex:
+                futs = {ex.submit(_check_one, p): p for p in to_verify}
+                from concurrent.futures import as_completed as _as_comp
+                for fut in _as_comp(futs):
+                    p, ok, err = fut.result()
+                    # The answer belongs to these bytes: recorded so the next
+                    # run over them does not decode the file again, and
+                    # recorded either way — a FAIL must be re-established, not
+                    # remembered as a pass.
+                    _INTEGRITY_PASSED[_ev_key(p)] = bool(ok)
+                    _record_evidence(p)
+                    if not ok:
+                        integrity_failed[p] = err or "integrity check failed"
+
+            if integrity_failed:
+                n_fail = len(integrity_failed)
+                log(c(f"Integrity: {n_fail} file(s) failed verification (foobar2000 style) — will be AUDIT=FAKE", Color.RED))
+                for p in sorted(integrity_failed)[:10]:
+                    try:
+                        rel = os.path.relpath(p, folder)
+                    except ValueError:
+                        rel = os.path.basename(p)
+                    log(f"  {c('✕', Color.RED)} {rel} {c(integrity_failed[p][:80], Color.RED)}")
+                if n_fail > 10:
+                    log(f"  … and {n_fail - 10} more")
+            elif todo:
+                # The count is the pass's own list, which is now only the
+                # files this run audits — a file skipped on its evidence is
+                # not "verified" by this pass and must not be counted as if it
+                # were.
+                log(f"Integrity: all {len(todo)} file(s) to be audited passed "
+                    f"verification")
+
+    # A CD rip's verdict comes from its OWN verification, never from the
+    # spectrogram detectors: the .log CRC (written above, as soon as it is
+    # known) or a REAL .accurip. `audit_cd_require_both` only decides whether
+    # AudioAuditor is ALSO run over MEDIA=CD — its verdict can add warning
+    # flags, and decides only for a disc neither source could verify.
 
     if not require_both:
         # Only skip CD files that were successfully verified via log CRC.

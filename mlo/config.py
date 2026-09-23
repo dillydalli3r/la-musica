@@ -125,6 +125,27 @@ LEGACY_DEFAULT_DIGITAL_QUERIES = (
 # earlier would describe names the run itself was about to change — and 21
 # belongs there for the same reason, since a pair it completes is one of the
 # things 4 grades.
+#
+# 8 stays after 14 and after 13, and NEITHER may move:
+#   * after 13 (fetch lyrics), because its INSTRUMENTAL stage reads the lyrics
+#     the fetch step stored — a track that gained its .lrc an album earlier must
+#     not be called instrumental;
+#   * after 14 (beets), because `_fill_release_tags` fills an album's own
+#     release identity from its MUSICBRAINZ_ALBUMID, and on a library-wide run
+#     beets is what MATCHES and stamps that id — running 8 first skipped every
+#     album beets had not identified yet.
+# The price of that placement is that 8 rewrites the very tags this order has
+# already used to name the folder (its DATE/ORIGINALDATE sharpening, the wider
+# RELEASECOUNTRY, the label/catalog/medium/type slots it fills), and 14's
+# organize() is the only full rename in the list. So the namer gets the last
+# word from inside the writer rather than from the order: script 8 re-applies
+# the naming script to exactly the albums whose release tags it filled
+# (`mlo.autotag._rename_to_script`) and reports them as `moved_targets`, so the
+# tail of the chain follows the album. Without it the folder spells the stale
+# tags' answer and 4 — Grade, last — reports every file as "PATH: expected '…'"
+# on an album that was named correctly a minute earlier (issue #48). The rename
+# is idempotent, and it is the same move `beets_organize_after` already makes
+# for 14.
 # Keep in step with web/src/lib/scripts.ts (tests/test_script_menus).
 DEFAULT_RUN_ALL_ORDER = [11, 3, 14, 15, 2, 1, 13, 18, 17, 8, 5, 19, 6, 7, 9, 12, 16, 10, 20, 21, 4]
 
@@ -1152,6 +1173,21 @@ DEFAULT_CONFIG = {
     # worker keeps searching with the queries the job already used. The
     # background path itself never asks (a wish must not be turned into a wish).
     "soulseek_auto_wish_prompt": True,
+    # What an UNATTENDED acquisition (a wish, an artist watch) does when the
+    # only complete folders the network offers are lossy — MP3/AAC, which
+    # `_rank` already puts behind every lossless copy and which the download
+    # would put in the library for good. "never" (the default) is the
+    # behaviour this key documents: a background download is never allowed to
+    # take lossy audio, so the release stays in the wish list and keeps being
+    # searched, with that sentence as its reason. "best" takes the best lossy
+    # candidate the ranking ALREADY offers (the list `_rank` sorted, so the
+    # fastest complete copy of the album) and says so out loud — in the job's
+    # own log, in its queue row and in the notification it ends with, because a
+    # lossy album that arrives silently is exactly the surprise this key exists
+    # to prevent. The INTERACTIVE path (the Soulseek page, the search box) asks
+    # the user whichever value this holds: a person who asked for a release by
+    # hand is offered the lossy copy, never handed it.
+    "soulseek_auto_lossy_policy": "never",
     # Release-choice policy (mlo.release_choice — the ONE policy every
     # acquisition path ranks editions with: "Add to library", the bulk
     # auto-import, the wish worker and the artist watch). It prefers
@@ -1563,7 +1599,10 @@ DEFAULT_CONFIG = {
     # import — plus the two "it began" halves of a Soulseek transfer, a
     # download whose first bytes moved and a peer taking files from us. Each
     # client asks for its own OS permission; these switches are the
-    # server-side half (what gets published at all).
+    # server-side half (what gets published at all). That half now covers both
+    # transports: the live /ws/events socket and Web Push for a device that is
+    # closed (see server/events.py) — switching a kind off here silences it on
+    # every device, which is what "do not tell me about this" has to mean.
     "notify_wish_found": True,
     "notify_download_done": True,
     "notify_import_ready": True,
@@ -1677,6 +1716,10 @@ _CHOICES = {
     # Import autonomy: the whole chain, or the wizard's stop-at-each-step
     # behaviour applied to the pipeline (see DEFAULT_CONFIG).
     "import_autonomy": {"automatic", "review"},
+    # Whether an unattended acquisition may take a lossy copy at all (see the
+    # key's own comment): "never" is the shipped behaviour, "best" the one that
+    # says out loud that it did.
+    "soulseek_auto_lossy_policy": {"never", "best"},
     "auth_mode": {"auto", "required", "off"},
     "advisory_fallback": {"0", "2", "none"},
     "ai_genre_effort": {"minimal", "low", "medium", "high", "max"},

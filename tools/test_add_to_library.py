@@ -324,12 +324,15 @@ tagcache_mod = __import__("server.tagcache", fromlist=["tagcache"])
 tagcache_mod.invalidate_all()
 
 # The chain's own two calls, first, because they are the ordering guarantee: the
-# placeholder MUST go before the cover step (that step counts any cover as the
-# album's own) and the marker must NOT go while the chain still owes the album
+# placeholder cover must NOT go before the cover step (that step treats our
+# placeholder as no cover of the album's own and fetches over it — deleting it
+# first is how an album whose every candidate the floor refuses ended up with no
+# cover at all), and the marker must NOT go while the chain still owes the album
 # work.
-ok(pending_albums.drop_placeholder_cover(folder),
-   "the chain's pre-cover-step call drops the placeholder")
-ok(not os.path.exists(os.path.join(folder, cover_name)), "and the file is gone from disk")
+ok(not pending_albums.drop_placeholder_cover(folder),
+   "the placeholder cover is NOT dropped on its own — it is the folder's last cover")
+ok(os.path.exists(os.path.join(folder, cover_name)),
+   "so the album still HAS a cover at that point", cover_name)
 eq(pending_albums.clear_if_filled(folder, CHAIN_CFG, chained=False), False,
    "a configured chain that has NOT run leaves the album pending")
 ok(bool(pathmod.load_pending(folder)), "so the library still reports it pending")
@@ -338,8 +341,8 @@ out = finish(folder, CHAIN_CFG)
 eq(out["errors"], [], "the stubbed import finished without errors")
 ok(not os.path.exists(os.path.join(folder, pathmod.PENDING_FILE)),
    "the marker is gone once the import has finished the album")
-ok(all(saw is False for saw in cover_step_saw),
-   "the chain's cover step never saw a cover (the placeholder went first)",
+ok(all(saw is True for saw in cover_step_saw),
+   "the chain reached its cover step with the placeholder still in the folder",
    cover_step_saw)
 cover_bytes = read_bytes(os.path.join(folder, "cover.jpg"))
 ok(cover_bytes != COVER_PLACEHOLDER,
@@ -400,7 +403,8 @@ pending_left = [a for ar in payload["artists"] for a in ar["albums"] if a.get("p
 eq(pending_left, [], "no pending album is left behind")
 
 # --------------------------------------------------------------------------- #
-# 6. the import that lands on a DIFFERENT name still fills the framework folder
+# 6. the import that lands on a DIFFERENT name fills the framework folder AND
+#    the folder takes the name the naming script gives the TAGS
 # --------------------------------------------------------------------------- #
 print("\norganize adopts the framework album")
 import struct  # noqa: E402  (a real WAV the organizer can tag and read)
@@ -454,16 +458,30 @@ write_tagged_wav(os.path.join(staging, "1-01 One.wav"), {
 org = mlo_main.organize(mlo_main.OrganizeRequest(paths=[staging], dry_run=False))
 res_row = (org.get("results") or [{}])[0]
 landed = os.path.normcase(os.path.normpath(str(res_row.get("album_root") or "")))
-eq(landed, os.path.normcase(os.path.normpath(folder6)),
-   "the organizer landed the album IN the framework folder")
-ok(any(f.lower().endswith(".wav") for f in os.listdir(folder6)),
-   "the downloaded track is in the framework folder now",
-   os.listdir(folder6))
+# The name those TAGS give the album — the add named its folder from the
+# MusicBrainz payload, whose medium is "CD" while the download is a Vinyl rip,
+# so the two disagree by construction. The tags win: a folder named from the
+# payload is a folder NO tag can produce, and grading checks every file against
+# the script's own answer (issue #48's "PATH: expected '<…>'").
+expected = os.path.normcase(os.path.normpath(
+    pending_albums.folder_for_release(dict(adopt, medium="Vinyl"), cfg) or ""))
+eq(landed, expected, "the album landed in the folder the naming script names")
+ok(not os.path.isdir(folder6) or
+   os.path.normcase(os.path.normpath(folder6)) == landed,
+   "so the name the ADD gave the folder is gone", folder6)
+ok(any(f.lower().endswith(".wav") for f in os.listdir(landed)),
+   "the downloaded track is in that folder now", os.listdir(landed))
 ok(not any(f.lower().endswith(".wav") for f in os.listdir(staging))
    if os.path.isdir(staging) else True,
    "and left the staging folder")
-ok(bool(pathmod.load_pending(folder6)),
-   "the marker is still there until the chain finishes the album")
+ok(bool(pathmod.load_pending(landed)),
+   "the marker travelled with the folder: still the framework album, now at "
+   "the name the tags give it")
+ok(not pathmod.load_pending(folder6),
+   "and nothing is left pending under the add-time name")
+eq(os.path.normcase(str((wishes.get_wish(row6["wish_id"]) or {}).get("album_path")
+                        or "")),
+   landed, "the wish that created it follows the folder")
 eq(res_row.get("errors") or [], [], "the organizer reported no error")
 
 # ...and when the import's own tags name a folder that is NOT even beside the
@@ -502,10 +520,21 @@ write_tagged_wav(os.path.join(far_staging, "1-01 One.wav"), {
 org2 = mlo_main.organize(mlo_main.OrganizeRequest(paths=[far_staging], dry_run=False))
 res2 = (org2.get("results") or [{}])[0]
 landed2 = os.path.normcase(os.path.normpath(str(res2.get("album_root") or "")))
-eq(landed2, os.path.normcase(os.path.normpath(folder9)),
-   "an import whose tags name another artist folder still lands IN the placeholder")
-ok(any(f.lower().endswith(".wav") for f in os.listdir(folder9)),
-   "and its track is in there", os.listdir(folder9))
+# …and it lands there under the name the SCRIPT gives those tags: the tags
+# credit "Other Artist Nine", so that is the artist folder it belongs in — the
+# placeholder's own (payload-named) folder is renamed onto it, marker and all.
+far_tags = dict(far, medium="CD",
+                artists=[{"name": "Other Artist Nine",
+                          "mbid": far["artists"][0]["mbid"]}])
+expected2 = os.path.normcase(os.path.normpath(
+    pending_albums.folder_for_release(far_tags, cfg) or ""))
+eq(landed2, expected2,
+   "an import whose tags name another artist folder lands at the script's own name")
+ok(not os.path.isdir(folder9),
+   "so the placeholder's payload-named folder is gone", folder9)
+ok(any(f.lower().endswith(".wav") for f in os.listdir(landed2)),
+   "and its track is in there", os.listdir(landed2))
+ok(bool(pathmod.load_pending(landed2)), "with the marker")
 eq(res2.get("errors") or [], [], "with no error reported")
 
 # An import that was never adopted (aimed at a folder of its own — the wizard,

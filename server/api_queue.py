@@ -236,9 +236,23 @@ def _job_row(job, wish_id=None):
         # The import outcome, in the row: "in the download folder" is a
         # different thing from "in your library" and the queue says which.
         if result.get("imported"):
-            note = ("Imported into the library"
-                    + ("" if result.get("organized") is not False
-                       else " (the naming script failed — see the job log)"))
+            note = "Imported into the library"
+            # A LOSSLESS copy was preferred and not found — the album is in the
+            # library as the lossy format the policy allowed, and the row must
+            # not read as the lossless import the rest of the pipeline aims
+            # for.
+            if result.get("lossy"):
+                note += f" — a lossy copy ({result['lossy']})"
+            # A PARTIAL move: the naming script placed what it could and the
+            # album's remaining files are STILL in the download folder. The old
+            # line named only the script, so the row read as "the album is fine,
+            # a script grumbled" while the tracks that never moved sat in the
+            # staging folder the user has to import again — the sentence the
+            # notification has always carried (see `_notify_finish`) and the row
+            # did not.
+            if result.get("organized") is False:
+                note += (" — the naming script could not move every file, and what "
+                         "stayed behind is still in the download folder")
         elif result.get("wished"):
             note = "Nothing was found — it is on the queue to keep looking"
         else:
@@ -289,6 +303,16 @@ def _job_row(job, wish_id=None):
         # What a row needs to be ACTIONABLE (see server/api_queue's docstring):
         # what went wrong, what the manual action is, and where it happens.
         "outcome": str(result.get("outcome") or ""),
+        # A move the naming script could not complete: `partial` is the import's
+        # own verdict and `organize_error` its sentence, so a client renders the
+        # row's line (and the "import that folder again" step) without inventing
+        # either — `note` says it in one line, these two say it in a form a
+        # client can act on.
+        "partial": bool(result.get("partial")),
+        "organize_error": str(result.get("organize_error") or ""),
+        # The album imported under `soulseek_auto_lossy_policy`: the format it
+        # arrived in, so a badge or a filter can say what the sentence says.
+        "lossy": str(result.get("lossy") or ""),
         "leftovers": leftovers,
         "action": action,
         "action_link": action_link,

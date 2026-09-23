@@ -465,9 +465,10 @@ evidence matters.
 - **R22 — a verdict needs evidence, and is bound to its file.** Script 6 writes
   a verdict only where something verified it; a missing tool, a timeout or an
   `info`-only answer leaves the tag untouched and reports the file as
-  *not verified*. The verdict is stamped with the file's size and mtime in
-  `<music>/.mlo/data/audit_evidence.json`, and a file whose stamp no longer
-  matches is re-audited.
+  *not verified*. The verdict is stamped with the file's size, mtime and
+  **audio identity** in `<music>/.mlo/data/audit_evidence.json`, and a file the
+  record no longer describes — neither its stamp nor its identity — is
+  re-audited (R206).
 - **R23 — `.accurip` files are per disc** (`CD-1.accurip`, `CD-2.accurip`) and
   are regenerated when the disc's **audio** changed, so a re-ripped disc cannot
   inherit its neighbour's verdict — and a tag write cannot make it look like a
@@ -3151,6 +3152,201 @@ screen; above `lg` the pane sits beside the artwork.
   and the queue row keeps the long form. The row's stage already stays
   "importing" until the chain settles; the sentence now agrees with it.
 
+### 7.28 The import arrives complete: the name, the cover, and when the notice may speak
+
+- **R199 — the album folder is named from the FINAL tags, so the last tag writer
+  is followed by the namer.** Script 8 (Auto tagging) is the last writer of the
+  tags the naming script reads (`mlo.autotag._fill_release_tags`: both DATEs
+  sharpened, RELEASECOUNTRY widened, LABEL/CATALOGNUMBER/MEDIA/RELEASETYPE
+  filled), while the chain's only full rename is script 14's `organize()`. The
+  ORDER is not the fix and must not move: 8 stays after 13 (its INSTRUMENTAL
+  stage reads the lyrics 13 stored) and after 14 (on a library-wide run beets is
+  what MATCHES and stamps the `MUSICBRAINZ_ALBUMID` that `_fill_release_tags`
+  keys on). Script 8 therefore ends by re-applying the naming script to exactly
+  the albums whose release tags it filled (`mlo.autotag._rename_to_script`) and
+  reports where they are now as `stats["moved_targets"]`, so the rest of the
+  chain follows the album (`script_runners._follow_moved_targets`). The rename
+  is idempotent, scoped to albums inside the music folder, and never fatal.
+  Without it the folder spells the stale tags' answer and script 4 — Grade, last
+  — reports every file of an impeccably tagged album as `PATH: expected '<what
+  these tags imply> (run organize)'`.
+- **R200 — an add-time folder name never outlives the tags.** A framework
+  album's name comes from the MusicBrainz PAYLOAD (`pending_albums.create`, the
+  provisional guess of `create_from_request`), while every namer in the pipeline
+  names the album from the TAGS. `server.main.organize` keeps `adopt_root`'s
+  identity-first destination — so the album lands IN the framework folder
+  created for its release rather than beside it — and then moves that folder
+  onto the path the naming script gives the tags
+  (`pending_albums.rename_placeholder`), which is what it does with every album
+  it lands (`_adopt_deferred` is the same move at add time). The marker is
+  inside the folder and travels with it, so it stays the same framework album,
+  and the wish that created it is re-pointed (`album_path`/`target_dir`) because
+  that path is what the queue links to and what `_revive` reads. Only a folder
+  still carrying its marker is ever renamed, and never onto a name a real album
+  already occupies: the album then keeps the folder it landed in rather than
+  being merged into someone else's. Chosen over "make the grade tell the user to
+  rename": the app owns the naming script, so a name no tag can produce is the
+  app's defect, not a task for the user.
+- **R201 — an album is never left coverless, and the placeholder cover is not
+  one of its own.** The framework album's placeholder (Cover Art Archive's
+  release-group front, at the library's own minimum) is a stand-in, not "the
+  album already has a cover": the cover step treats it as no cover and fetches
+  the release's own artwork over it (`pending_albums.placeholder_cover_present`),
+  it is never DELETED on the way in, and it goes only once a real cover has been
+  written — under its own name or another extension, so the album never keeps
+  two cover files. When nothing clears the cover floor, or the step cannot run
+  at all, the placeholder STAYS: `_drop_placeholder_cover` refuses to take the
+  folder's LAST cover away, and the step's note says the album keeps the
+  framework album's own release-group artwork. The bug this settles: the
+  placeholder was deleted before the cover step could say whether it had
+  anything better, so an album whose every candidate `mlo.cover_choice`'s
+  minimum refused ended with no cover file at all and graded "Missing cover
+  image" while an image of that very release sat on disk.
+- **R202 — an import that cannot place every file is reported, not aborted, and
+  "Imported" means the pipeline really finished.** A naming-script failure no
+  longer raises out of the auto-importer's `_import`: the album is in the
+  library, so its cover step, its chain and the rest of the pipeline still run
+  and the download is kept (`partial`), with the files that stayed in the
+  download folder named in the job's own line — a partial landing is a fact
+  about the album, not a reason to lose it. And `import_done` is emitted where
+  the pipeline is actually finished, after the gap phase and its prompt
+  (`['import_started', 'gaps', 'prompt', 'import_done']` — the order the
+  notification seam is asserted to observe), because the notice is what a user
+  reads as "done": it may not speak one step early.
+
+### 7.29 Push reaches a client that is not open
+
+- **R203 — push is a real transport, and it may never take the event bus down
+  with it.** The server signs with VAPID (RFC 8292, ES256) and encrypts each
+  message with RFC 8291 `aes128gcm`; the key pair is generated once and kept in a
+  file beside the state (`webpush.json`), **never in the config** — `GET
+  /api/config` hands the whole config to every signed-in session, so a private
+  key stored there is a credential any client could read. Subscriptions live
+  beside `sessions`/`users`, keyed by their endpoint (re-subscribing updates the
+  row instead of double-sending), and carry the kinds that device asked for. A
+  404 or 410 from the push service deletes the row; anything else leaves it. The
+  emit path only QUEUES — no database, no socket, no blocking — and the sender
+  never raises: an exploding device leaves the event published, because a
+  notification must not fail the import that earned it. Measured: the RFC's own
+  Appendix A vector reproduces byte for byte, and the fan-out is asserted to POST
+  a payload that decrypts with the device's private key.
+- **R204 — a client is told the truth about its own platform.** The switch is
+  rendered only where push can actually work (secure context, `PushManager`, a
+  registered service worker); everywhere else the panel shows the sentence for
+  that platform instead of a control that would fail — the desktop shell
+  notifies only while it runs (no service worker there), iPhone and iPad need
+  la musica on the Home Screen (iOS 16.4+), and a plain-http page has no push at
+  all. A server that cannot sign (no `cryptography`) says so and answers the
+  subscribe with 503 rather than half-working.
+- **R205 — a subscription belongs to the identity that made it.** Subscribing
+  carries the signed-in user, and the row follows whichever user last signed in
+  on that browser; signing out or replacing a device's session drops it
+  (`revoke_all`, `delete_user`, and the client's own `onAuthLost`), a client can
+  only unsubscribe its own endpoint, and the server prunes by itself. A device
+  must not keep being woken for an account that left it.
+
+### 7.30 The script chain's wall clock: what is shared, and what is measured
+
+- **R206 — a stored audit verdict is trusted for the AUDIO it was written for,
+  not for the file's mtime.** Script 6 re-decides nothing it can already prove: a
+  file whose evidence record describes what is on disk — its size and mtime, or
+  the audio identity a tag write cannot move (the FLAC STREAMINFO MD5 that R23
+  and `mlo.discs`' CRC memo already key audio evidence on) — and whose bytes the
+  integrity test (`flac -t`, `ffmpeg -f null`) already passed is skipped, verdict
+  and all, and the integrity test runs only over the files this run is actually
+  going to audit. A record written by a version that had no integrity element, or
+  by a run with `audit_integrity` off, settles nothing: that file is verified
+  once more and then settles. A container that states no identity (an mp3, a WAV)
+  is trusted on its stamp alone, as before, and a record that matches neither
+  re-audits rather than guesses. Measured on a 20-track fixture: the second run
+  of script 6 drops from 20 `flac -t` decodes + 1 AudioAuditor batch (1.32 s) to
+  none at all (0.03 s), with the AUDIT tags and the grade output identical; a
+  re-encoded track is audited again, a tag write is not.
+- **R207 — one container parse answers both of the audit's questions, through
+  the shared tag cache.** MEDIA (is this track a CD?) and AUDIT (does it already
+  carry a verdict?) come out of ONE `server.tagcache.read_track(path, ["MEDIA",
+  "AUDIT"])` per file — the stat-keyed cache the API serves tracks through, whose
+  key carries the mtime, so a tag write re-reads rather than serving what the
+  write replaced — and the audit opens a container itself only to WRITE. The
+  import is lazy, the `mlo.layout` precedent: `mlo` must not import `server` at
+  module level. Measured: 3 container parses per file (MEDIA pass, verdict pass,
+  write) become 1 read + 1 write; 60 opens for a 20-track run become 40 on a
+  re-run.
+- **R208 — a chain's decodes are not shareable, and that is measured, not
+  assumed.** Each script that decodes a track decodes it for its own question —
+  `flac -t`'s frame CRCs and stream MD5 (3, 6), AudioAuditor's spectral pass (6),
+  rsgain's EBU R128 (7), the DR meter's 44.1 kHz per-channel `pcm_f32le` (7),
+  librosa's 22.05 kHz mono (12, 16), the decoded-PCM CRC (4, 9) — and no two of
+  them want the same artefact, so handing one script another's decode would move
+  a number another rule quotes. Measured on one real 5-minute 23 MB FLAC: the
+  decodes scripts 12 and 16 pay are 0.306 s and 0.125 s, against 13.5 s (mood
+  features) and 11.3 s (BPM + key) of analysis over the same signal — 1-3% —
+  while holding one album's samples to hand them from 12 to 16 costs 12 × 5 min
+  × 44100 × 4 B ≈ 636 MB of RAM. The decode that WAS repeated for nothing is
+  script 6's (R206); the shared-decode cache itself is measured and kept out of
+  the tree (`local://issue48-decode-cache.py`).
+
+### 7.31 The unattended acquisition: what may be taken, and when it is asked for
+
+- **R209 — a download queued from the Soulseek page imports itself.** The page's
+  three Download routes (`POST /api/soulseek/download`, `-bulk`, `-user`) record
+  what they queued (`server.main._remember_page_download`: the peer and the
+  remote files, nothing else — a refused enqueue records nothing), and the pass
+  that watches them (`_page_download_pass`, its own thread
+  `_soulseek_page_downloads_watch`, 5 s) imports the folder those files became
+  through `import_queue` — i.e. `_import_one_album` → `imports.finish_album` →
+  the configured chain, the very call the Import button makes, so there is no
+  second import pipeline to keep in step. Readiness is `soulseek.ready_albums`,
+  the ONE rule the Import button works from, so nothing here re-decides what
+  "downloaded" means; the remote-file-to-folder mapping is the pipeline's own
+  (`_index_download_tree`/`_local_download_candidates`), so slskd's batch layout
+  and the older shapes resolve the same way. Only folders holding a file THAT
+  press queued are taken, so the auto-importer's own downloads (which import
+  under their own job) are untouched. Two switches decide whether it runs at all
+  (`mlo.import_policy.page_download_auto_import`): `import_autonomy` "review" and
+  `manual_import_enabled` off each leave the album in the download folder with
+  its "ready to import" row and say so once — an install that wants to review
+  still reviews, and the press that imports it is the manual route, which keeps
+  working. `auto_acquisition_enabled` is deliberately not asked: the download was
+  the user's own action. The notification sequence is the pipeline's own —
+  `import_started`, `import_done`, then `import_queue`'s `download_done`.
+- **R210 — a background acquisition and a lossy-only album: the policy decides,
+  and either answer is said out loud.** `soulseek_auto_lossy_policy` ("never" —
+  the shipped default, and what every config written before the key existed
+  reads as; "best") is read only by the UNATTENDED path (`_run` with
+  `confirm_lossy` False: the wishes worker, the artist watch), which used to end
+  in a flat refusal — with it, a release that exists only as MP3 could never be
+  filled by either. "never" leaves that sentence untouched ("a lossless copy is
+  preferred, so nothing was downloaded", the line the wish row carries); "best"
+  takes the top-ranked candidate the ranking ALREADY offers (`candidates` is
+  `_rank`-sorted), and the departure is reported everywhere the job is: the log,
+  `result["lossy"]`, the completed queue row ("Imported into the library — a
+  lossy copy (MP3)") and `_notify_finish`'s body, which names the format and the
+  key. The INTERACTIVE path is unmoved: a person who asked for the release by
+  hand parks on the same question whatever the key says, so the key can never
+  overrule an answer given by hand. The same rule covers the other departure: a
+  completed job whose naming script could not move every file says where the
+  files are ("the naming script could not move every file, and what stayed
+  behind is still in the download folder"), with `partial`/`organize_error` on
+  the row — the old line named only the script and read as "the album is fine, a
+  script grumbled".
+- **R211 — a settle that is not a failure is scheduled by the interval, not by a
+  spent backoff.** `retry_at` is the transient-failure backoff and nothing else:
+  `wishes.due_at` reads its mere PRESENCE as "the last attempt failed" and
+  returns it in preference to `wishes_interval_hours`. The two settles that have
+  no backoff to give — an empty search and a spent walk
+  (`wishes_worker._settle_attempt`'s not-found branch and `mark_background`) —
+  pass none, and `wishes.mark_wanted` USED to skip the column when the argument
+  was None, so a stamp an earlier failure left behind (in the past by then)
+  survived: `due_at` returned it as "due now" on every tick and the wish was
+  re-searched every ~2 minutes instead of on its interval — the opposite of what
+  the function documents and of what `advance_candidate`/`rearm` do.
+  `mark_wanted` now always writes the column (its default 0 is "as soon as the
+  interval allows", exactly as documented) and `mark_background` writes it too,
+  so an empty search and a background pass both go back on the interval.
+  `tools/test_wishes_pipeline.py` asserts both, and fails (due_at in the past)
+  with the old guard.
+
 ## 8. Recommended runbook
 
 Nothing here is a substitute for the app's own Dependencies page: run it first
@@ -3327,6 +3523,18 @@ which file a verdict is later computed on, never the verdict itself:
   playing with the screen off" is not a promise Android makes here — what the
   app controls on every platform is that its own state is honest about what the
   element is doing (R188), and that is enforced in the client.
+- **Push is Web Push, and only Web Push.** The server signs with VAPID and
+  encrypts per RFC 8291 (R203), and the browser, the installed PWA and the
+  desktop shell's own window all receive it — but nothing here speaks APNs or
+  FCM, so the **Tauri iOS and Android apps cannot be woken while they are
+  closed**: on those, push requires la musica added to the Home Screen as a PWA
+  (iOS 16.4+), and the panel says exactly that rather than offering a switch
+  (R204). A native bridge is a separate piece of work, not a setting. Delivery
+  through a real push service is what *Send a test notification* is for: the
+  suites stub the service's HTTP layer (the payload is decrypted with the
+  device's own private key, and RFC 8291's Appendix A vector is reproduced byte
+  for byte), which is everything short of dialling Mozilla's or Apple's endpoint
+  from a test run.
 - **The storage walk counts DIRENT NAMES, not blocks.** A hard link made by
   hand inside the library is a second real file to `os.scandir`, so the card
   counts it twice; a symlink or junction is not followed at all, and is

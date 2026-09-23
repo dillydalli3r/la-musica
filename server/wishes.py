@@ -697,8 +697,17 @@ def mark_wanted(wid, error="", attempts=None, retry_at=None, not_found=None,
     fields = {"status": "wanted", "last_error": str(error or "")[:400]}
     if attempts is not None:
         fields["attempts"] = attempts
-    if retry_at is not None:
-        fields["retry_at"] = float(retry_at or 0)
+    # ALWAYS written, with the default 0 — and that is the fix for a live stall:
+    # `retry_at` is the TRANSIENT-failure backoff and nothing else (`due_at`
+    # reads its presence as "the last attempt failed"), so a settle that has no
+    # backoff to give must not leave a previous failure's stamp behind. It did,
+    # because the column was skipped when the argument was None — and the two
+    # settles that pass none (`_settle_attempt`'s empty-search branch and
+    # `mark_background`, which also writes it now) run AFTER a failure often
+    # enough. The stale stamp is in the past by then, `due_at` returns it as
+    # "due", and the wish is re-searched on every tick (~2 min) instead of on
+    # its interval — the opposite of what the paragraph above promises.
+    fields["retry_at"] = float(retry_at or 0)
     if not_found is not None:
         fields["not_found"] = int(not_found)
     if candidate is not None:
@@ -918,7 +927,14 @@ def mark_background(wid, error="", attempts=None, not_found=None):
     `not_found` = empty searches) so the retry/backoff policy still paces the
     background passes exactly as it paces everything else.
     """
-    fields = {"status": "background", "last_error": str(error or "")[:400]}
+    fields = {"status": "background", "last_error": str(error or "")[:400],
+              # The spent backoff goes with it, for the same reason
+              # `mark_wanted` always writes one: a background pass is paced by
+              # the INTERVAL, and inheriting a failure's `retry_at` (in the past
+              # by now) made `due_at` say "due" on every tick, so a spent walk
+              # was re-walked every ~2 minutes instead of every
+              # `wishes_interval_hours`.
+              "retry_at": 0}
     if attempts is not None:
         fields["attempts"] = int(attempts)
     if not_found is not None:

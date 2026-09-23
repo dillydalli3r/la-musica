@@ -20,8 +20,9 @@ Lifecycle, in one place:
 * :func:`create`     — folder + manifest + cover + marker + wish
 * :func:`create_from_request` — the same, from what an add ALREADY holds, so
   the reply does not wait for MusicBrainz (:func:`finish_deferred` ends it)
-* :func:`drop_placeholder_cover` — the chain calls this before its own cover
-  step, so the step fetches the release's real artwork instead of accepting ours
+* :func:`drop_placeholder_cover` — the import calls this once a REAL cover has
+  been written (and `clear_if_filled` at the end of an import), so our
+  temporary image goes only when something stands in its place
 * :func:`clear_if_filled` — the marker goes once the import has finished the
   folder (the configured chain ran, or none is configured); a chain that has
   NOT run yet leaves the album pending, because it is not finished
@@ -29,6 +30,8 @@ Lifecycle, in one place:
   folder with it
 * :func:`adopt_root` — an import landing on a framework album's path writes
   INTO it instead of beside it
+* :func:`rename_placeholder` — and the folder then takes the name the naming
+  script gives it, so an add-time name never outlives the tags
 """
 import hashlib
 import os
@@ -293,10 +296,48 @@ def write_placeholder_cover(folder, release, cfg=None):
             "bytes": len(data), "source": source or "coverartarchive"}
 
 
+def _placeholder_cover_name(folder):
+    """The file name of the placeholder cover *folder* still holds, or "".
+
+    "Still holds" means the file is byte-for-byte the one this module wrote
+    (the marker's own sha1) — a cover the import or the user put there is a
+    cover of the album's own, not ours. This is the ONE reader of that fact:
+    :func:`_drop_placeholder_cover` (ours to delete?) and the import's cover
+    step (is the cover standing there only our temporary image?) both ask here,
+    so they can never disagree about what the folder holds.
+    """
+    info = pathmod.load_pending(folder) or {}
+    cover = info.get("cover") or {}
+    name = str(cover.get("file") or "")
+    if not name or os.path.basename(name) != name:
+        return ""
+    try:
+        with open(os.path.join(folder, name), "rb") as fh:
+            data = fh.read()
+    except OSError:
+        return ""
+    if hashlib.sha1(data).hexdigest() != str(cover.get("sha1") or ""):
+        return ""
+    return name
+
+
+def placeholder_cover_present(folder):
+    """Whether the folder's cover art is still only our placeholder."""
+    return bool(_placeholder_cover_name(folder))
+
+
 def _drop_placeholder_cover(folder, info):
     """Delete the placeholder cover — only while it is still the exact file we
-    wrote. A cover the import or the user put there (a different size, or a
-    name we do not own) is never touched."""
+    wrote, and never as the folder's LAST cover.
+
+    A cover the import or the user put there (a different size, or a name we do
+    not own) is never touched. A placeholder that is the only cover left STAYS
+    as well: it is a real image of the release's own release group (CAA's front
+    at the library's own 1200 px), and taking it away is how an import whose
+    every candidate was refused by `mlo.cover_choice`'s floor — or whose cover
+    step could not run at all — ended up graded "Missing cover image" with an
+    image of the album sitting right there. It is only ours to take away while
+    another cover stands in its place."""
     cover = info.get("cover") or {}
     name = str(cover.get("file") or "")
     if not name or os.path.basename(name) != name:
@@ -309,11 +350,25 @@ def _drop_placeholder_cover(folder, info):
         return False
     if hashlib.sha1(data).hexdigest() != str(cover.get("sha1") or ""):
         return False
+    if not _other_cover(folder, name):
+        return False
     try:
         os.remove(path)
         return True
     except OSError:
         return False
+
+
+def _other_cover(folder, name):
+    """Whether the folder holds a cover that is NOT *name* (`mlo.grader`'s own
+    set, so this asks exactly what grading asks by "has a cover")."""
+    from mlo.grader import COVER_NAMES
+
+    try:
+        names = {n.lower() for n in os.listdir(folder)}
+    except OSError:
+        return False
+    return bool((names & COVER_NAMES) - {name.lower()})
 
 
 def prefetch_content(folder, cfg=None, *, background=False):
@@ -722,15 +777,20 @@ def finish_deferred(deferred, albums, cfg=None):
 
 
 def drop_placeholder_cover(folder):
-    """Delete the framework album's placeholder cover — if it is still ours.
+    """Delete the framework album's placeholder cover — if it is still ours,
+    and only while a cover of the album's own stands beside it.
 
-    The import chain calls this BEFORE its own cover step, so that step sees a
-    folder with NO cover and fetches the release's real artwork; a placeholder
-    left in place counts as "the album already has a cover" and the album would
-    be left with only our temporary image. Only the file THIS module wrote is
+    Called AFTER the cover step wrote the release's own artwork — that step
+    treats our placeholder as no cover at all (:func:`placeholder_cover_present`),
+    so it fetches the release's real artwork instead of accepting ours — and at
+    the end of an import (`clear_if_filled`). Only the file THIS module wrote is
     ever deleted: the marker records its name and sha1, and a cover the import
     or the user put there (different bytes, or a name we do not own) is left
-    exactly as it is. Returns True when a file was removed.
+    exactly as it is. And never the LAST one: an album whose every candidate the
+    cover floor refused keeps our release-group artwork, which is a real image
+    of the release, instead of being left with no cover at all — "Missing cover
+    image" for an album with a picture of itself on disk was half the owner's
+    report. Returns True when a file was removed.
     """
     return _drop_placeholder_cover(folder, pathmod.load_pending(folder) or {})
 
@@ -770,8 +830,10 @@ def clear_if_filled(folder, cfg=None, *, chained=True, chain_off=False):
     complete album.
 
     The placeholder cover goes here too (idempotent with
-    :func:`drop_placeholder_cover`), so a caller that never reached its cover
-    step cannot leave our temporary image behind. A folder with no audio is
+    :func:`drop_placeholder_cover`) — but only while a cover of the album's own
+    stands beside it: our temporary image IS the release's own release-group
+    artwork, and an album whose every candidate the cover floor refused must
+    keep it rather than be left with no cover at all. A folder with no audio is
     left pending either way: nothing has arrived yet.
 
     A framework folder for the SAME release standing somewhere else goes as
@@ -1032,6 +1094,77 @@ def adopt_root(new_root, meta_tags):
         if want & have:
             return cand
     return _wished_placeholder(want, new_root)
+
+
+def rename_placeholder(old, new):
+    """Move a framework album onto the folder the naming script names.
+
+    The other half of :func:`adopt_root`, and the rule that makes an add-time
+    name unable to survive an import: "Add to library" names its folder from
+    the MusicBrainz PAYLOAD, and every later namer names the album from the
+    TAGS the pipeline actually wrote (the importer's own stamper, then beets,
+    then script 8). The two disagree whenever the payload was missing what the
+    release has (a catalogue number, the medium the download really is, a date
+    MusicBrainz only spells in full on the release) — and while `adopt_root`
+    kept the placeholder's name so the album would land IN it rather than
+    beside it, that name is exactly the stale one the grader then flags file by
+    file: ``PATH: expected '<what the tags say>'`` for an album sitting in the
+    folder the ADD created.
+
+    So the folder MOVES onto the name the script gives it, which is what the
+    pipeline does with every album it lands (`_adopt_deferred` is the same move
+    at add time). The marker is inside the folder and travels with it, so the
+    framework album stays the same framework album — one release, one folder —
+    and the wish that created it is re-pointed, because its ``album_path`` is
+    what the queue links to and what "is this release already in my library"
+    reads (`_revive`: a wish whose folder was renamed out from under it looked
+    like an album that never arrived, and the worker went hunting again).
+
+    Returns the folder it now occupies, or "" when it could not be moved: not a
+    framework album, gone, a folder already standing at the new name (a real
+    album's folder is never touched), or a failed move. The caller keeps the
+    adoption it had in that case — the album still lands somewhere real.
+    """
+    old = os.path.normpath(str(old or ""))
+    new = os.path.normpath(str(new or ""))
+    if not old or not new:
+        return ""
+    if os.path.normcase(old) == os.path.normcase(new):
+        return new
+    info = pathmod.load_pending(old)
+    if not info:
+        return ""
+    if os.path.exists(new):
+        return ""
+    try:
+        os.makedirs(os.path.dirname(new), exist_ok=True)
+        os.replace(old, new)
+    except OSError:
+        traceback.print_exc()
+        return ""
+    _prune_empty_parent(os.path.dirname(old))
+    _point_wish_at(info, old, new)
+    return new
+
+
+def _point_wish_at(info, old, new):
+    """Carry a framework album's wish onto the folder it now occupies."""
+    try:
+        from server import wishes
+
+        wid = info.get("wish_id")
+        if not wid:
+            return
+        row = wishes.get_wish(int(wid)) or {}
+        fields = {}
+        for key in ("album_path", "target_dir"):
+            have = os.path.normpath(str(row.get(key) or ""))
+            if have and os.path.normcase(have) == os.path.normcase(old):
+                fields[key] = new.replace("\\", "/")
+        if fields:
+            wishes.update_wish(int(wid), fields)
+    except Exception:
+        traceback.print_exc()
 
 
 def _wished_placeholder(want, new_root):

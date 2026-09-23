@@ -21,3 +21,9 @@ numpy==2.5.2
 # exists by then. mlo.stats.bound_numeric_threads applies it; a build without
 # it keeps the environment answer.
 threadpoolctl==3.6.0
+# Web Push, so a device that is CLOSED still hears that an import finished
+# (server/events.py): P-256 ECDH and ECDSA plus AES-GCM, none of which the
+# standard library has. Imported lazily inside the push code, and an install
+# that has not re-run pip yet reports "push unavailable" on /api/push/status
+# rather than failing to start or losing the live event channel.
+cryptography==50.0.1

@@ -38,6 +38,12 @@ What this pins, with every HTTP seam stubbed (no network at all):
     tags support, and the other keys of a pre-existing staged entry survive;
     `cover_auto_fetch` OFF fetches, stages and writes nothing; an album that
     already has art is the same no-op in all three modes;
+  * a framework album's PLACEHOLDER cover (the release group's own front, which
+    "Add to library" fetched) is not "the album's cover": the step fetches over
+    it, and the album keeps it — rather than being left with no cover file at
+    all — when every candidate is refused by the floor. It is dropped once a
+    cover of the album's own has been written, and never as the folder's last
+    cover;
   * the lyrics built-in chain is the documented ranking, `available_sources()`
     carries a stable 1-based `rank` (and states each provider's caveats), and
     a saved `lyrics_sources` list still wins.
@@ -46,6 +52,7 @@ Run:  python tools/test_covers.py
 """
 import contextlib
 import copy
+import hashlib
 import json
 import os
 import shutil
@@ -1134,6 +1141,96 @@ assert "no cover" in out["note"], out
 assert len(calls) == 1 and jcalls, (calls, jcalls)   # the fallbacks found none either
 assert imp.staged_metadata(empty_album, REVIEW_ON) == {}
 
+
+# --------------------------------------------------------------------------- #
+# 8b) a framework album's PLACEHOLDER cover is never the cover that is lost
+# --------------------------------------------------------------------------- #
+# "Add to library" fetches the release GROUP's front into the folder it created,
+# so the album has real art before the audio exists. During the import that
+# image is a stand-in: the release's own front is preferred, so the cover step
+# must NOT read it as "this album already has a cover" — and it must never be
+# DELETED on the way to fetching one either, because an album whose every
+# candidate `mlo.cover_choice`'s floor refuses (or whose cover step cannot run
+# at all) was then left with no cover file, which the grade reports as
+# "Missing cover image" while an image of the release sits on disk.
+PLACEHOLDER_BYTES = png(1200, 1200)
+
+from mlo import paths as _mlo_paths            # noqa: E402
+from server import pending_albums as _pend     # noqa: E402
+
+
+def framework_album(name, artist, title, placeholder="cover.jpg"):
+    """A framework album exactly as `pending_albums.create` leaves one: the
+    folder, the marker recording what it wrote, and that placeholder cover."""
+    path = album(name, artist=artist, title=title)
+    with open(os.path.join(path, placeholder), "wb") as fh:
+        fh.write(PLACEHOLDER_BYTES)
+    _mlo_paths.save_pending(path, {
+        "pending": True, "release_id": "rel-placeholder",
+        "release_group_id": "rg-placeholder", "title": title, "artist": artist,
+        "wish_id": 0, "source": "musicbrainz",
+        "cover": {"file": placeholder,
+                  "sha1": hashlib.sha1(PLACEHOLDER_BYTES).hexdigest(),
+                  "bytes": len(PLACEHOLDER_BYTES),
+                  "source": "coverartarchive"}})
+    return path
+
+
+kept_album = framework_album("Portishead/Dummy", "Portishead", "Dummy")
+assert _pend.placeholder_cover_present(kept_album)
+# 1. every candidate below the floor: nothing is written, and the album KEEPS a
+# cover — ours, which is the release group's own artwork
+clear_caches()
+stub_cov(cover_lines(3, width=800, height=800,
+                     release=release_of("Portishead", "Dummy")))
+stub_json({})
+fetched.clear()
+written.clear()
+out = imp.run_cover_step(kept_album, {"music_folder": MUSIC, "cover_review": False})
+assert (out["fetched"], out["applied"]) == (False, {}), out
+assert "below the minimum 1200×1200" in out["note"], out["note"]
+assert "keeps the framework album's own release-group artwork" in out["note"], out["note"]
+assert os.path.isfile(os.path.join(kept_album, "cover.jpg")), os.listdir(kept_album)
+assert written == [] and fetched == [], (written, fetched)
+# 2. …and the end of an import cannot take it either: it is the folder's LAST
+# cover, so `drop_placeholder_cover` refuses it (the marker still goes)
+assert _pend.drop_placeholder_cover(kept_album) is False
+assert _pend.clear_if_filled(kept_album, {"music_folder": MUSIC}, chained=True) is True
+assert not os.path.exists(os.path.join(kept_album, _mlo_paths.PENDING_FILE))
+assert os.path.isfile(os.path.join(kept_album, "cover.jpg")), os.listdir(kept_album)
+assert _pend.placeholder_cover_present(kept_album) is False, \
+    "with the marker gone the file is the album's own cover, not a placeholder"
+
+# 3. a cover that DOES land takes the placeholder with it — even when the writer
+# stores it under another extension, which would otherwise leave the album with
+# two cover files (the picker, the grader and the tag writer each read one).
+wrote_album = framework_album("Massive Attack/Mezzanine", "Massive Attack",
+                              "Mezzanine")
+assert _pend.placeholder_cover_present(wrote_album)
+_saved_write = srv_main._write_cover_bytes
+
+
+def writing_cover_bytes(alb, stem, ext, data):
+    with open(os.path.join(alb, stem + ext), "wb") as fh:
+        fh.write(data)
+    return {"path": os.path.join(alb, stem + ext)}
+
+
+srv_main._write_cover_bytes = writing_cover_bytes
+try:
+    clear_caches()
+    stub_cov(cover_lines(3, width=1400, height=1400,
+                         release=release_of("Massive Attack", "Mezzanine")))
+    stub_json({})
+    out = imp.run_cover_step(wrote_album, {"music_folder": MUSIC,
+                                           "cover_review": False})
+finally:
+    srv_main._write_cover_bytes = _saved_write
+assert out["fetched"] is True, out
+assert not _pend.placeholder_cover_present(wrote_album), out
+assert sorted(f for f in os.listdir(wrote_album) if f.lower().startswith("cover")) \
+    == ["cover.png"], os.listdir(wrote_album)
+assert open(os.path.join(wrote_album, "cover.png"), "rb").read() == png(600, 600)
 
 # --------------------------------------------------------------------------- #
 # 9) The lyrics ranking

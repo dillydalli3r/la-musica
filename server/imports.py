@@ -411,20 +411,22 @@ def _finish_album(path, cfg, progress=None, force=None, release=None,
     out["skipped_families"] = _skipped_families(chain, run_cfg, policy["review"])
     for _reason in out["skipped_families"]:
         print(f"[mlo] import: {_reason} — {os.path.basename(path)}")
-    # A FRAMEWORK album (`server.pending_albums`) loses OUR placeholder cover
-    # here, BEFORE the cover step below — that step then sees a folder with no
-    # cover and fetches the release's real artwork instead of accepting the
-    # placeholder. Only the file the framework album wrote is ever deleted, and
-    # only the placeholder: the album's PENDING MARKER stays until the
-    # configured chain has run (see the ends of this function), so a folder
-    # whose import never got there keeps being reported as pending rather than
-    # being dressed up as a finished album. Runs before the review stop too:
-    # dropping the placeholder is not one of the decisions a review is about.
-    try:
-        from server import pending_albums
-        pending_albums.drop_placeholder_cover(path)
-    except Exception:
-        traceback.print_exc()
+    # A FRAMEWORK album's placeholder cover is NOT dropped here any more. It
+    # used to be, before the cover step below could say whether it had anything
+    # better: the step then fetched the release's own artwork — and an import
+    # whose every candidate `mlo.cover_choice` refuses (its floor is the
+    # library's minimum, and a release whose CAA front is smaller than it has
+    # nothing that clears) was left with NO cover file at all, which is the
+    # grade's "Missing cover image" on an album the ADD had already given a real
+    # release-group image. The placeholder is OUR temporary image only in the
+    # sense that the release's own front is preferred — so the cover step is
+    # what knows: it treats ours as no cover (so it still fetches) and drops it
+    # once it has written a real one (`pending_albums.placeholder_cover_present`,
+    # `drop_placeholder_cover`), and the end of an import drops it too — never
+    # as the folder's last cover. The album's PENDING MARKER is untouched here,
+    # as before: it stays until the configured chain has run (see the ends of
+    # this function), so a folder whose import never got there keeps being
+    # reported as pending rather than being dressed up as a finished album.
     if policy["stop"]:
         # Review: the album is handed over before the first step that needs a
         # decision, so nothing tag-writing runs past it. It keeps what it
@@ -825,10 +827,12 @@ def _announce_import(kind, path, out=None, cfg=None):
 
     `import_started` when `finish_album` picks an album up, `import_done` with
     the chain's own one-line summary when it has been over it. Emitted from the
-    ONE entry point and the ONE exit every path passes (`_report_gaps`), so the
-    wizard, the bulk queue, the panel's import and the auto-import's chain all
-    announce the same way — and a config that switched them off says so through
-    `events._notify_configured`, like every other kind.
+    ONE entry point and the ONE exit every path passes (`_report_gaps`, which
+    emits the notice LAST — after the gaps and the prompt it raises — so "done"
+    never arrives while the pipeline is still deciding what to ask the user) —
+    so the wizard, the bulk queue, the panel's import and the auto-import's
+    chain all announce the same way, and a config that switched them off says so
+    through `events._notify_configured`, like every other kind.
     """
     try:
         from server import events
@@ -874,8 +878,15 @@ def _report_gaps(out, cfg, policy, path, grade=None):
     and is only present when there was something to report at all: an import
     that ran no chain decided nothing, so it reports nothing (the same early
     return the function always had for `import_auto_scripts` off).
+
+    The ``import_done`` notice goes out at the very END of this function, after
+    the gaps and the prompt are decided, and not before them: "Imported <album>"
+    means the pipeline is over, and the gaps are the LAST thing it does — the
+    phase that grades the album and raises the prompt that sends the user to the
+    one family it could not supply. Emitted first (as it was) the notice arrived
+    while that phase was still running, so the one surface that says "your album
+    is ready" spoke before the album's own report existed.
     """
-    _announce_import("import_done", path, out, cfg=cfg)
     gaps = import_policy.gaps(path, import_policy.effective_config(cfg),
                               steps={"advisory": out.get("advisory"),
                                      "cover": out.get("cover")},
@@ -888,6 +899,7 @@ def _report_gaps(out, cfg, policy, path, grade=None):
             path, cfg, gaps, mode=policy["mode"],
             reason="stopped" if policy["stop"] else "missing"),
     }
+    _announce_import("import_done", path, out, cfg=cfg)
     return out
 
 
@@ -1816,6 +1828,15 @@ def run_cover_step(album_dir, cfg=None):
     that exact image, and the picker lists below-floor rows for exactly that
     reason (`server.main._cover_metrics` reports the shortfall as a warning).
 
+    A framework album's PLACEHOLDER cover does not count as "has a cover": it is
+    the release group's own artwork, kept as a stand-in until this step finds
+    the release's, and treating it as the album's cover would mean never
+    fetching the real one. It is not deleted on the way in either (the folder
+    must never be left without a cover between the two), only once a real image
+    has been written over or beside it. When nothing clears the floor the
+    placeholder STAYS — a below-floor candidate is a worse cover than the one
+    already there — and the note says which of the two it kept.
+
     Never fatal, and never silent about a cover it could not get: the result is
     ``{"fetched", "applied", "source", "note", "staged", "candidates",
     "choice", "notes"}`` — the same shape `run_metadata_step` hands back to
@@ -1827,10 +1848,24 @@ def run_cover_step(album_dir, cfg=None):
     cfg = cfg or load_config()
     out = {"fetched": False, "applied": {}, "source": None, "note": "",
            "staged": False, "candidates": 0, "choice": None, "notes": []}
+    # Whether the album's cover art is still only the framework album's own
+    # placeholder (see the docstring). Declared out here because every way out
+    # of this function reports it.
+    placeholder = False
     if not cfg.get("cover_auto_fetch", True):
         return out
     try:
-        if _album_cover_present(album_dir):
+        # Our own placeholder is not a cover for this purpose (see the
+        # docstring): it is what the ADD left standing in for the artwork this
+        # step is here to fetch.
+        from server import pending_albums
+
+        placeholder = pending_albums.placeholder_cover_present(album_dir)
+        if placeholder:
+            out["notes"].append(
+                "the framework album's placeholder cover does not count as the "
+                "album's cover — the release's own artwork is fetched over it")
+        if _album_cover_present(album_dir) and not placeholder:
             return out
         # The candidates are ALWAYS ranked fresh here, and that is deliberate
         # (spec R154): the staged review record the add leaves behind is a
@@ -1843,11 +1878,12 @@ def run_cover_step(album_dir, cfg=None):
         payload = cover_candidates(album_dir, cfg)
         if payload is None:
             out["note"] = "no artist/album tags to search by"
-            return out
+            return _kept_placeholder(out, placeholder)
         if bool(cfg.get("cover_review", False)):
-            return stage_cover_candidates(album_dir, payload, cfg)
+            return _kept_placeholder(
+                stage_cover_candidates(album_dir, payload, cfg), placeholder)
         chosen = payload.get("chosen")
-        out["notes"] = list(payload.get("notes") or [])
+        out["notes"] = list(payload.get("notes") or []) + list(out["notes"])
         out["candidates"] = int(payload.get("candidate_count") or 0)
         out["source"] = payload.get("provider")
         out["choice"] = chosen
@@ -1855,7 +1891,7 @@ def run_cover_step(album_dir, cfg=None):
             out["note"] = ("no cover found" if not payload.get("candidates") else
                            "no candidate could be used — "
                            + ((payload.get("notes") or [""])[-1]))
-            return out
+            return _kept_placeholder(out, placeholder)
         # The WRITE gate (see the docstring): the floor is the same number the
         # pick was ranked with — `policy_config` is where `cover_minimum` is
         # derived, so this reads it from its one definition rather than from
@@ -1868,7 +1904,7 @@ def run_cover_step(album_dir, cfg=None):
                         if side is not None else "size never measured")
             out["note"] = (f"the chosen cover ({measured}) is below the minimum "
                            f"{floor}×{floor} — nothing was written")
-            return out
+            return _kept_placeholder(out, placeholder)
         url = str(chosen.get("big") or "")
         artist = payload.get("artist") or ""
         album = payload.get("album") or ""
@@ -1888,12 +1924,24 @@ def run_cover_step(album_dir, cfg=None):
             # failure of the step: the note says what happened and why nothing
             # was written, and the next run (or the user's own pick) tries again.
             out["note"] = str(e)
-            return out
+            return _kept_placeholder(out, placeholder)
         if not data:
             out["note"] = ("the chosen cover's own image came back empty — "
                            "nothing was written in its place")
-            return out
+            return _kept_placeholder(out, placeholder)
         res = _write_cover_bytes(album_dir, "cover", _sniff_image_ext(data, ctype), data)
+        # A real cover of the release's own is on disk now, so the framework
+        # album's placeholder goes — and this is the ONLY moment it may: the
+        # write above may have landed under another extension ("cover.png" over
+        # our "cover.jpg"), which would otherwise leave the album with two
+        # covers, and `pending_albums` refuses to take the folder's last cover
+        # anyway. Never fatal: a placeholder left behind is a cover, not a
+        # failure of the import.
+        if placeholder:
+            try:
+                pending_albums.drop_placeholder_cover(album_dir)
+            except Exception:
+                traceback.print_exc()
         out["applied"] = {"cover": res.get("path")}
         out["fetched"] = True
         out["note"] = (f"cover fetched from {chosen['source'] or 'the image url'} "
@@ -1902,6 +1950,23 @@ def run_cover_step(album_dir, cfg=None):
     except Exception as e:
         traceback.print_exc()
         out["note"] = f"cover step failed: {e}"
+    return _kept_placeholder(out, placeholder)
+
+
+def _kept_placeholder(out, placeholder):
+    """*out* with the line that says the album keeps the placeholder cover.
+
+    Nothing of the album's own was written (the caller only reaches here with
+    ``applied`` empty), so the folder still holds the release-group artwork the
+    ADD fetched. That is the difference between "no cover found" and "no cover
+    at all", and the owner's report was the second one — the note names which
+    image is standing in the folder, so a user reading it knows the album has
+    art and where it came from."""
+    if not placeholder or out.get("applied"):
+        return out
+    note = str(out.get("note") or "").strip()
+    kept = "the album keeps the framework album's own release-group artwork"
+    out["note"] = f"{note} — {kept}" if note else kept
     return out
 
 

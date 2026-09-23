@@ -77,6 +77,19 @@ export const OS_KINDS: Record<string, true> = {
   import_needs_data: true,
 };
 
+/** The kinds this device asks the SERVER to push to it (lib/notify.ts sends
+ *  this list when it subscribes).
+ *
+ *  The same set as the OS popups, plus the one outcome the issue that added
+ *  push named first: an import that FINISHED while the app was closed (#48) —
+ *  which is the whole reason a device needs waking, since a live page already
+ *  hears it on /ws/events. A kind missing here still reaches an open app; it
+ *  just cannot wake a closed one. */
+export const PUSH_KINDS: Record<string, true> = {
+  ...OS_KINDS,
+  import_done: true,
+};
+
 /** How many entries the log keeps. Long enough to cover a working session,
  *  short enough that the panel stays a list and storage stays tiny. */
 const MAX_ITEMS = 50;
