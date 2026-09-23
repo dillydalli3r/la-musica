@@ -737,6 +737,18 @@ def _running_ids():
     return {j["id"] for j in auto.jobs() if j["state"] == "running"}
 
 
+def _pipeline_free():
+    """No job holds the pipeline right now.
+
+    A slot is a RUNNING or CONFIRM job (`soulseek_auto._active_locked`), not
+    just a running one: a job left sitting at a confirmation prompt by an
+    earlier block still counts, so the three releases below would — correctly —
+    queue instead of starting. That is how this suite failed on a slower CI box
+    (ok, no job) while passing here.
+    """
+    return not [j for j in auto.jobs() if j["state"] in ("running", "confirm")]
+
+
 def _settled():
     return all(j["state"] in ("done", "error", "cancelled") for j in auto.jobs())
 
@@ -748,6 +760,18 @@ PIPE.found = True
 
 with pipeline_patches(_wait_for_files=_gated_wait,
                       find_candidates=_per_peer_candidates), SLSK:
+    # Slots are RUNNING and CONFIRM jobs (`soulseek_auto._active_locked`), so a
+    # job an earlier block left parked on a question still holds the pipeline —
+    # and it never clears by itself, because a prompt waits for a user. The
+    # three releases below would (correctly) queue instead of starting, which is
+    # how this suite failed on CI while passing here. Take the prompt-sitters
+    # off the list the way a user would, then wait for the pipeline to be free:
+    # a RUNNING leftover is left alone — it settles on its own, and the wait
+    # covers it.
+    for _job in auto.jobs():
+        if _job["state"] == "confirm":
+            auto.cancel(_job["id"])
+    wait_until(_pipeline_free, what="the earlier blocks' jobs to release the pipeline")
     first_three = [auto.start_job(release=dict(r), release_mbid=r["id"],
                                   source="soulseek")
                    for r in (WAIT_A, WAIT_B, WAIT_C)]
@@ -755,8 +779,12 @@ with pipeline_patches(_wait_for_files=_gated_wait,
           all(r.get("ok") and (r.get("job") or {}).get("id") for r in first_three),
           json.dumps([r.get("error") for r in first_three if not r.get("ok")]))
     live = _running_ids()
+    # Guarded: the check above is the one that reports "ok but no job" in words;
+    # an unguarded r["job"] here would crash the suite with a KeyError instead
+    # of letting both failures print.
     check("...and they are exactly the registered jobs",
-          live == {r["job"]["id"] for r in first_three}, json.dumps(sorted(live)))
+          live == {r["job"]["id"] for r in first_three if r.get("job")},
+          json.dumps(sorted(live)))
 
     # The 4th release. The behaviour this replaces: ok=False, transient=True,
     # "3 releases are already running (soulseek_search_concurrency)".
