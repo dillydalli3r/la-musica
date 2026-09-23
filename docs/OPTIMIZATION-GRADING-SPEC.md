@@ -2948,6 +2948,30 @@ the work (`POST /api/library/layout/apply`, or script 20's own run).
   pass and the stored report; a scoped run stores nothing, so the report never
   describes half a library.
 
+### 7.21 The storage card: what it measures, and what it warns about
+
+The card answers "how much disk is behind this install" from one walk per
+folder (`server.api_storage.scan`): the library, the app's state, the bin, the
+transfers, the app's own tools — with `app_total` the sum of those four app
+folders, and the library deliberately not part of it (the music is the user's,
+not the app's). Every figure is a number or `null`: a volume the OS will not
+measure is never reported as 0, because "0 GB free" and "could not ask" are
+different answers.
+
+- **R186 — a link not followed is not a gap, and only a real gap warns.** The
+  walk never follows a link (a file reached through one is counted once, where
+  it really lives), so a linked file or directory is skipped ON PURPOSE: the
+  figures lose nothing, and the card says so quietly — "N links not followed —
+  a linked file or folder is counted once, where it really lives". An
+  UNREADABLE directory is the other kind, a figure nobody could take, and that
+  is the one the card warns about in amber, with the paths in its tooltip. The
+  reply carries the split (`skipped_count`, `skipped_links`,
+  `skipped_unreadable`, and `kind` on every skipped row), because the
+  `reason` strings are the walk's own words and a client must not have to parse
+  them to know which kind it is looking at. A healthy install has both, in the
+  bundled tools: a `libjpeg.so` version symlink is a link; a toolchain unpacked
+  onto a network mount that went away is unreadable.
+
 ## 8. Recommended runbook
 
 Nothing here is a substitute for the app's own Dependencies page: run it first
@@ -3114,6 +3138,12 @@ which file a verdict is later computed on, never the verdict itself:
   argv. When it cannot bridge, the tool sees a path it cannot open and reports
   *it* — so a step that "found nothing" or "could not decode" on a long-path
   library is a bridge failure, not an empty library.
+- **The storage walk counts DIRENT NAMES, not blocks.** A hard link made by
+  hand inside the library is a second real file to `os.scandir`, so the card
+  counts it twice; a symlink or junction is not followed at all, and is
+  reported as a link rather than a gap (R186). Nothing in the app creates a
+  hard link — the only links a healthy install has are the bundled tools' own
+  version symlinks.
 - Detection is heuristic where the evidence is: AudioAuditor's spectral
   detectors can disagree with a provably intact rip, which is why a verified CD
   rip outranks them (R21) and why `AUDIOAUDITOR_OVERRIDE` exists (R25).

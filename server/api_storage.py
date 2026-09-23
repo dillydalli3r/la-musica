@@ -160,12 +160,28 @@ def scan(root, ext_buckets: Optional[Dict[str, str]] = None) -> Optional[Dict[st
     if not _isdir(root):
         return None
     out: Dict[str, Any] = {"bytes": 0, "files": 0, "buckets": {}, "skipped": [],
-                           "skipped_count": 0}
+                           "skipped_count": 0, "skipped_links": 0,
+                           "skipped_unreadable": 0}
 
-    def skip(path, reason):
+    def skip(path, reason, kind="unreadable"):
+        """One entry the walk stepped over — and WHICH KIND of thing it was.
+
+        The two kinds are not the same answer and must not be counted as one:
+        an UNREADABLE directory is a gap in the figures (nobody knows what is
+        in it), while a LINK is a deliberate skip that costs the figures
+        nothing at all — a file reached through a link is counted once, at the
+        real file, so not following it is the correct arithmetic rather than a
+        missing number. The bundled tools carry both (a `libjpeg.so` version
+        symlink is a link; a toolchain unpacked onto a network mount is
+        unreadable), and the card says which is which.
+        """
         out["skipped_count"] += 1
+        if kind == "link":
+            out["skipped_links"] += 1
+        else:
+            out["skipped_unreadable"] += 1
         if len(out["skipped"]) < MAX_SKIPPED:
-            out["skipped"].append({"path": path, "reason": reason})
+            out["skipped"].append({"path": path, "reason": reason, "kind": kind})
 
     stack = [root]
     while stack:
@@ -182,12 +198,14 @@ def scan(root, ext_buckets: Optional[Dict[str, str]] = None) -> Optional[Dict[st
                         if entry.name.lower() in _SKIP_LOWER:
                             continue
                         if _is_link(entry):
-                            skip(entry.path, "linked directory — not followed")
+                            skip(entry.path, "linked directory — not followed",
+                                 kind="link")
                             continue
                         stack.append(entry.path)
                         continue
                     if _is_link(entry):
-                        skip(entry.path, "symbolic link — not followed")
+                        skip(entry.path, "symbolic link — not followed",
+                             kind="link")
                         continue
                     if not entry.is_file(follow_symlinks=False):
                         continue  # a device, socket or other special entry
@@ -210,17 +228,23 @@ def scan(root, ext_buckets: Optional[Dict[str, str]] = None) -> Optional[Dict[st
 
 
 class _Skips:
-    """The walks' unreadable and linked directories, for the answer's single
-    ``skipped`` list."""
+    """The walks' skipped entries, for the answer's single ``skipped`` list —
+    and the two KINDS counted apart, because only one of them is a gap: a link
+    is not followed on purpose (its target is counted once, where it lives),
+    while an unreadable directory is a figure nobody could take."""
 
     def __init__(self) -> None:
         self.rows: List[Dict[str, str]] = []
         self.count = 0
+        self.links = 0
+        self.unreadable = 0
 
     def add(self, result: Optional[Dict[str, Any]]) -> None:
         if not result:
             return
         self.count += result["skipped_count"]
+        self.links += result["skipped_links"]
+        self.unreadable += result["skipped_unreadable"]
         for row in result["skipped"]:
             if len(self.rows) < MAX_SKIPPED:
                 self.rows.append(row)
@@ -371,6 +395,10 @@ def storage_snapshot(cfg, folder: Optional[str]) -> Dict[str, Any]:
                                deps_row]),
         "skipped": skips.rows,
         "skipped_count": skips.count,
+        # The split the card speaks in: an unreadable folder is a gap in the
+        # figures and warns; a link not followed is the walk being right.
+        "skipped_links": skips.links,
+        "skipped_unreadable": skips.unreadable,
         "scanned_at": int(time.time()),
         "took_ms": int((time.monotonic() - started) * 1000),
     }

@@ -42,8 +42,14 @@ interface StoragePayload {
     staging_files: number;
     roots: StorageRow[];
   } | null;
-  skipped: { path: string; reason: string }[];
+  /** Every entry the walk stepped over, with the OS's own words. `kind` is
+   *  the split that matters on screen: "link" was skipped ON PURPOSE (a file
+   *  reached through a link is counted once, at the real file, so nothing is
+   *  missing from the figures), "unreadable" is a figure nobody could take. */
+  skipped: { path: string; reason: string; kind: "link" | "unreadable" }[];
   skipped_count: number;
+  skipped_links: number;
+  skipped_unreadable: number;
   scanned_at: number;
   took_ms: number;
 }
@@ -228,13 +234,33 @@ export default function StorageCard() {
         )}
       </div>
 
-      {data.skipped_count > 0 && (
+      {data.skipped_unreadable > 0 && (
         <div
           className="text-[10px] text-amber-400/90 leading-relaxed"
-          title={data.skipped.map((s) => `${s.path} — ${s.reason}`).join("\n")}
+          title={data.skipped
+            .filter((s) => s.kind !== "link")
+            .map((s) => `${s.path} — ${s.reason}`)
+            .join("\n")}
         >
-          {data.skipped_count} folder{data.skipped_count === 1 ? "" : "s"} could not be read — the
-          figures above exclude {data.skipped_count === 1 ? "it" : "them"}.
+          {data.skipped_unreadable} folder{data.skipped_unreadable === 1 ? "" : "s"} could not be
+          read — the figures above exclude {data.skipped_unreadable === 1 ? "it" : "them"}.
+        </div>
+      )}
+      {/* Not a warning: a link the walk did not follow has cost the figures
+          NOTHING — its target is counted once, at the real file — so this is
+          the arithmetic being right, said quietly. (The bundled tools carry a
+          few version symlinks; a toolchain unpacked on a network mount is the
+          unreadable case above.) */}
+      {data.skipped_links > 0 && (
+        <div
+          className="text-[10px] text-zinc-500 leading-relaxed"
+          title={data.skipped
+            .filter((s) => s.kind === "link")
+            .map((s) => `${s.path} — ${s.reason}`)
+            .join("\n")}
+        >
+          {data.skipped_links} link{data.skipped_links === 1 ? "" : "s"} not followed — a linked
+          file or folder is counted once, where it really lives.
         </div>
       )}
     </div>

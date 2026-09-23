@@ -188,6 +188,55 @@ assert snap["skipped_count"] == 1, snap["skipped_count"]
 assert lib["audio_bytes"] == AUDIO
 
 # --------------------------------------------------------------------------- #
+# 2b) A LINK is not an unreadable folder: the walk steps over it on purpose and
+#     the figures lose nothing — what a link points at is counted once, at the
+#     real file. The bundled tools carry exactly this (the `libjpeg.so` version
+#     symlinks), and the card must not warn about them.
+# --------------------------------------------------------------------------- #
+# The classification is what this suite owns, so it is proven by the WALK's own
+# question: `_is_link` is what decides, and whether a real symlink/junction is
+# detected is mlo.stats' answer, tested there. Two entries the walk counts
+# nothing for anyway (an empty folder, an uncounted extension), so the only
+# difference the links can make is in the skip list — which is the point.
+LINK_DIR = os.path.join(ALBUM_A, "linked-tree")
+LINK_FILE = os.path.join(ALBUM_A, "tool.bin")
+os.makedirs(LINK_DIR, exist_ok=True)
+make(LINK_FILE, 4096)
+base = api_storage.storage_snapshot(CFG, MUSIC)
+
+_REAL_LINK = api_storage._is_link
+_FAKE_LINKS = {os.path.normcase(LINK_DIR), os.path.normcase(LINK_FILE)}
+api_storage._is_link = lambda entry: os.path.normcase(entry.path) in _FAKE_LINKS
+try:
+    after = api_storage.storage_snapshot(CFG, MUSIC)
+finally:
+    api_storage._is_link = _REAL_LINK
+
+assert after["skipped_links"] == 2, after["skipped"]
+assert after["skipped_unreadable"] == 0, \
+    [r for r in after["skipped"] if r["kind"] != "link"]
+assert after["skipped_count"] == 2, after["skipped_count"]
+assert {r["kind"] for r in after["skipped"]} == {"link"}, after["skipped"]
+assert all("not followed" in r["reason"] for r in after["skipped"]), after["skipped"]
+# Same bytes, same file count: nothing double counted through a link and
+# nothing lost by not following one.
+assert after["library"]["bytes"] == base["library"]["bytes"], \
+    (after["library"]["bytes"], base["library"]["bytes"])
+assert after["library"]["files"] == base["library"]["files"], after["library"]
+
+# …and where the OS lets a test make a real one, that the walk SEES it is
+# confirmed too (Windows needs a privilege for this, CI does not).
+try:
+    REAL_LINK = os.path.join(ALBUM_A, "01 - Song (link).flac")
+    os.symlink(os.path.join(ALBUM_A, "01 - Song.flac"), REAL_LINK)
+except (OSError, NotImplementedError, AttributeError) as e:
+    print(f"note: no real symlink here ({e}) — the walk's own link test is mlo.stats' case")
+else:
+    real = api_storage.storage_snapshot(CFG, MUSIC)
+    assert real["skipped_links"] == 1 and real["skipped_unreadable"] == 0, real["skipped"]
+    assert real["library"]["bytes"] == base["library"]["bytes"], real["library"]
+
+# --------------------------------------------------------------------------- #
 # 3) The volume: used = total - free, and the percentage agrees
 # --------------------------------------------------------------------------- #
 assert snap["total_bytes"] == 1000 and snap["free_bytes"] == 400, snap
@@ -267,7 +316,8 @@ body = r.json()
 assert set(body) == {"mount", "label", "type", "total_bytes", "free_bytes",
                      "used_bytes", "percent_used", "library", "app_data",
                      "trash", "downloads", "dependencies", "app_total",
-                     "skipped", "skipped_count",
+                     "skipped", "skipped_count", "skipped_links",
+                     "skipped_unreadable",
                      "scanned_at", "took_ms"}, sorted(body)
 assert body["library"]["bytes"] == AUDIO + SIDECAR, body["library"]
 assert body["free_bytes"] == 400, body

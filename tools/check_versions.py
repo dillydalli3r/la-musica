@@ -52,6 +52,20 @@ def main():
         read("desktop/src-tauri/Cargo.lock"), "desktop/src-tauri/Cargo.lock",
         "mlo-desktop lock version")
 
+    # …and nothing ELSE in that lock may carry our version. A dependency whose
+    # release number happens to equal ours is not ours to rename: `bumpalo` is
+    # released as 3.20.3 today, and a blanket text replace of the version in
+    # the lock turned its entry into "3.20.4" with 3.20.3's checksum under it —
+    # a lockfile cargo cannot resolve, discovered only by the desktop build.
+    lock_names = re.findall(r'^name = "([^"]+)"\nversion = "([^"]+)"',
+                            read("desktop/src-tauri/Cargo.lock"), re.M)
+    strays = [name for name, ver in lock_names if ver == source]
+    if strays != ["mlo-desktop"]:
+        print(f"\ncheck_versions: the lock carries {source} in "
+              f"{strays or 'no package'} — expected exactly ['mlo-desktop']; "
+              f"a dependency's own version is not ours to bump")
+        return 1
+
     # The iOS build number ships in the same plist as the marketing version;
     # two numbers that can disagree is the exact drift this script exists for.
     found["desktop/src-tauri/tauri.conf.json (iOS bundleVersion)"] = str(
