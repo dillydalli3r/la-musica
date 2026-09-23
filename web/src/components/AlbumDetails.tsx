@@ -3,6 +3,8 @@ import { Disc3, Gauge, Info, Loader2 } from "lucide-react";
 import { api } from "../api";
 import type { Album } from "../types";
 import Modal from "./Modal";
+import DownloadButton from "./DownloadButton";
+import { ExportButton } from "./ExportDialog";
 import TrackDetails, { DetailRows, DetailSection, type DetailItem } from "./TrackDetails";
 import { albumTech, fmtDuration, fmtTech } from "../lib/fmt";
 import { tagLabel, tagTooltip, useTagRegistry } from "../lib/tags";
@@ -46,6 +48,12 @@ export function AlbumDetails({ album, onClose }: { album: Album; onClose: () => 
   // not this rip's fault (mlo.grader, the CD-leg block).
   const notes = album.notes ?? [];
   const missing = album.expected_tracks?.filter((t) => t.missing).length ?? 0;
+  // The album page's own pair (AlbumPage's header row): an album readout opened
+  // from a track row's menu has the same two actions, with the same props, so
+  // "download / export this album" never means leaving the modal for a page the
+  // reader may not have been on.
+  const paths = album.tracks.map((t) => t.path);
+  const seconds = album.tracks.reduce((s, t) => s + (t.tech?.length ?? 0), 0);
 
   const infoRows: DetailItem[] = [
     // A framework album is added but its audio has not arrived: that is the
@@ -97,6 +105,23 @@ export function AlbumDetails({ album, onClose }: { album: Album; onClose: () => 
       <DetailSection icon={Info} title="Release">
         <DetailRows rows={infoRows} />
       </DetailSection>
+
+      {album.tracks.length > 0 && (
+        <div className="flex flex-wrap items-center gap-2">
+          <DownloadButton
+            paths={paths}
+            label="Download for offline playback"
+            emptyReason="Nothing to download — this album has no tracks"
+          />
+          <ExportButton
+            paths={paths}
+            seconds={seconds}
+            title="Export this album to a drive"
+            emptyReason="Nothing to export — this album has no tracks"
+            dialogSubtitle={`${title} · ${album.tracks.length} track${album.tracks.length === 1 ? "" : "s"}`}
+          />
+        </div>
+      )}
 
       <DetailSection icon={Gauge} title="Grading & audit">
         <DetailRows rows={gradeRows} />

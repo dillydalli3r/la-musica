@@ -847,6 +847,36 @@ def _finish(state, result=None):
     _start_next()
 
 
+def _wish_keeps_looking():
+    """Is this job one step of a search the store will run again?
+
+    True when the job fills a wish that is not terminal: the walk has more
+    ranked editions to ask, or the release has settled into its background
+    request, or its retry policy has not spent its attempts. Such a job's
+    failure is a spent CANDIDATE, not an outcome — the wish layer announces the
+    ends that are real (`wish_failed`, `wish_not_found`), and R153's background
+    phase is deliberately silent.
+
+    A job with no wish behind it — the interactive search, a bulk add — keeps
+    its own `download_failed`: nothing else will ever say it gave up.
+
+    Never raises; a wish store that cannot be read leaves the announcement ON,
+    because a missing word is worse than a repeated one.
+    """
+    wid = _job.get("wish_id")
+    if not wid:
+        return False
+    try:
+        from mlo.config import load_config
+        from server import wishes
+
+        wish = wishes.get_wish(int(wid))
+        return bool(wish) and not wishes.is_terminal(wish, load_config())
+    except Exception:
+        traceback.print_exc()
+        return False
+
+
 def _notify_finish(state, result, release):
     """Announce a settled auto-import job (see server/events.py).
 
@@ -864,7 +894,9 @@ def _notify_finish(state, result, release):
 
     A CANCELLED job says nothing: the user just cancelled it themselves, and a
     frame about their own button press is noise. A job that is merely retried
-    (or re-queued behind another) has not settled and says nothing either.
+    (or re-queued behind another) has not settled and says nothing either — and
+    neither does a job that failed ONE candidate of a wish's own walk, which is
+    the same rule one level down (`_wish_keeps_looking`).
 
     The BEGINNING is announced separately and much earlier: `download_started`
     goes out from _wait_for_files the moment a candidate's first bytes move.
@@ -888,10 +920,25 @@ def _notify_finish(state, result, release):
         staging = str(result.get("staging_path") or "")
 
         if state == "error":
+            err = str(result.get("error") or "the download did not finish")
+            # ONE STEP OF A WALK IS NOT AN OUTCOME. A job filling a wish is one
+            # candidate of that wish's own search, and a candidate that came
+            # back empty or refused is spent while the wish keeps going (the
+            # walk moves to the next ranked edition, or the release rests in
+            # the background — R151/R153). Announcing it here pushed a "Download
+            # failed" per abandoned candidate for a release the app had not
+            # given up on at all, which is exactly the noise the walk's own
+            # silence rules exist to avoid. The end that IS an outcome is
+            # announced by the layer that owns it: `wish_failed` /
+            # `wish_not_found` when the store stops searching, or this frame
+            # when nothing else will (an interactive job, a bulk add).
+            if _wish_keeps_looking():
+                _log(f"Nothing landed for this edition — the wish keeps walking "
+                     f"the release: {err}")
+                return
             # Nothing else on the bus says "your download gave up": without
             # this frame a refused slskd, a dead peer or a verification that
             # failed all looked identical to a job that was still running.
-            err = str(result.get("error") or "the download did not finish")
             leftover = [str(p) for p in (result.get("leftovers") or [])]
             body = err
             if leftover:
@@ -2009,12 +2056,26 @@ def _search_queries(slsk, queries, wait_s, usable=None, response_limit=0):
             except Exception:
                 pass
         pending = [e for e in watch if not slsk.is_search_done(e[2] or {})]
+        merged = [f for e in watch for f in ((e[2] or {}).get("responses") or [])]
+        # ONE PEER IS ONE PEER, however many templates saw it. The templates of
+        # one album overlap by design (the catalog number, the barcode and the
+        # title all name the same release), and slskd serves one response list
+        # PER search, so SUMMING their counters counted the same peer once per
+        # template — a row reporting 15 responses for 3 peers. Distinct
+        # usernames, and distinct user+file, are what "peers" and "files" mean;
+        # with nothing served yet the per-search counters are the fallback,
+        # still summed because each is genuinely about a different search.
+        if merged:
+            responses = len({f.get("username") or "" for f in merged} - {""})
+            files = len({(f.get("username") or "", f.get("file") or "") for f in merged})
+        else:
+            responses = sum(int((e[2] or {}).get("responseCount") or 0) for e in watch)
+            files = sum(int((e[2] or {}).get("fileCount") or 0) for e in watch)
         _job_search_progress(display, {
             "state": "InProgress" if pending else "Completed",
-            "responseCount": sum(int((e[2] or {}).get("responseCount") or 0) for e in watch),
-            "fileCount": sum(int((e[2] or {}).get("fileCount") or 0) for e in watch),
+            "responseCount": responses,
+            "fileCount": files,
         })
-        merged = [f for e in watch for f in ((e[2] or {}).get("responses") or [])]
         if usable is not None and merged and usable(merged):
             early = True
             break

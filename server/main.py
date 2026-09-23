@@ -3255,6 +3255,15 @@ class EqImportRequest(BaseModel):
     name: str = ""
     text: str = ""
 
+class EqAutoEqRequest(BaseModel):
+    # The results-relative directory the search returned
+    # (`<source>/<rig>/<model>`), not a URL: the server builds the raw GitHub
+    # URL itself and refuses anything that is not a plain relative path.
+    id: str = ""
+    # Which AutoEq form to fetch first — "parametric" (its own parametric
+    # output), "graphic" (the band list it is derived from) or "fixed".
+    form: str = "parametric"
+
 
 class ExportConfigRequest(BaseModel):
     name: str = ""
@@ -3427,6 +3436,39 @@ def export_eq_delete(profile_id: str):
     if not removed:
         raise HTTPException(404, f"no such profile: {profile_id}")
     return {"ok": True, "id": profile_id}
+
+
+@app.get("/api/eq/autoeq/search")
+def eq_autoeq_search(q: str = Query(""), limit: int = Query(40),
+                     refresh: bool = Query(False)):
+    """Search AutoEq's measured headphones by name.
+
+    The catalogue itself is the project's INDEX.md, cached beside the profiles
+    for a month (mlo.eq.autoeq_index): fetching a megabyte per keystroke is not
+    a search box. `refresh=1` re-fetches it — the button the page offers when a
+    headphone the user owns is missing — and a failed refresh still answers with
+    the cached rows, with the reason in `error`."""
+    index = eq_mod.autoeq_index(_music_folder(), refresh=bool(refresh))
+    rows = eq_mod.autoeq_search(q, index["rows"], limit=max(1, min(200, int(limit or 40))))
+    return {"rows": rows, "models": len(index["rows"]),
+            "fetched_at": index["fetched_at"], "error": index["error"]}
+
+
+@app.post("/api/eq/autoeq/import")
+def eq_autoeq_import(req: EqAutoEqRequest):
+    """Fetch one AutoEq correction and store it as a profile.
+
+    The row that comes back is the stored profile — the same shape every other
+    profile has, so the caller can select it immediately. An id that is not a
+    results-relative directory, a fetch that fails, or a file this parser will
+    not accept is a 400/502 with the reason; the profile is never stored half
+    read."""
+    try:
+        return eq_mod.autoeq_import(_music_folder(), req.id, req.form)
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+    except Exception as e:
+        raise HTTPException(502, f"AutoEq fetch failed: {e}")
 
 
 @app.get("/api/export/zip/{zip_id}")

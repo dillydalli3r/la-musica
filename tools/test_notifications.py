@@ -54,9 +54,17 @@ from server import main as main_mod  # noqa: E402
 
 
 def drain():
-    """Forget every frame so far, so a count is about THIS outcome."""
+    """Forget every frame so far, so a count is about THIS outcome.
+
+    BOTH stores go: `recent()` answers from the memory ring AND the durable log
+    (see server/events.py — that is what a client closed overnight catches up
+    from), so clearing one would leave the other's frames in the next count."""
     with events_mod._lock:
         events_mod._events.clear()
+    try:
+        os.remove(events_mod._event_log_path())
+    except OSError:
+        pass
 
 
 def frames(kind=None):
@@ -600,6 +608,135 @@ if crypto:
                   posts == [] and published.get("event") == "import_done")
         finally:
             events_mod._keys = live_keys
+
+# ── One spent candidate is not a dead end, and the log outlives the process
+#    (issue #49) ─────────────────────────────────────────────────────────────
+#
+# A job filling a wish is ONE step of that wish's own search: the walk has more
+# ranked editions to ask, or the release rests in the background. The layer that
+# owns the outcome announces the ends that are real (`wish_failed`,
+# `wish_not_found`); a `download_failed` per abandoned candidate is exactly the
+# noise that rule exists to avoid. A job with NO wish behind it — the
+# interactive search, a bulk add — keeps its own frame, because nothing else
+# will ever speak for it.
+print("== a failed candidate of a walk says nothing ==")
+from mlo import config as mlo_config  # noqa: E402
+from mlo import paths as mlo_paths  # noqa: E402
+from server import soulseek_auto as auto_mod  # noqa: E402
+
+# Everything this section writes goes to its own directory: the durable log
+# must never land in the library's own .mlo (the same reason the rest of this
+# suite patches app_data_dir).
+events_dir = tempfile.mkdtemp(prefix="mlo-events-")
+mlo_paths.app_data_dir = lambda *a, **k: events_dir
+walk_dir = tempfile.mkdtemp(prefix="mlo-walk-")
+wishes.db_path = lambda: os.path.join(walk_dir, "wishes.db")
+wishes._initialized = False
+
+WALKING_ID = "2b2b2b2b-0000-0000-0000-000000000049"
+walking = wishes.add_wish(WALKING_ID, title="Still Walking", artist="An Artist",
+                          source="soulseek")
+wishes.set_candidates(walking["id"], [
+    {"mbid": WALKING_ID, "title": "Still Walking"},
+    {"mbid": "2b2b2b2b-0000-0000-0000-000000000050", "title": "Still Walking (Japan)"}])
+WALK_RELEASE = {"id": WALKING_ID, "title": "Still Walking",
+                "artists": [{"name": "An Artist"}]}
+
+_real_load_config = mlo_config.load_config
+_real_notify_devices = events_mod.notify_devices
+_saved_job_wish = auto_mod._job.get("wish_id")
+# The retry policy reads the config for its attempt cap: pinned here, so the
+# checks below do not depend on the developer's own settings. Push is not what
+# is under test, and there is no push service to talk to.
+mlo_config.load_config = lambda: {"wishes_max_attempts": 3}
+events_mod.notify_devices = lambda payload: None
+try:
+    store = wishes.get_wish(walking["id"])
+    check("the wish under the job really is still being walked",
+          not wishes.is_terminal(store, {"wishes_max_attempts": 3})
+          and wishes.walk_length(store) == 2, json.dumps(store))
+
+    drain()
+    auto_mod._job["wish_id"] = walking["id"]
+    auto_mod._notify_finish("error", {"error": "slskd refused the queue"}, WALK_RELEASE)
+    check("a failed candidate of a wish's walk announces nothing",
+          frames("download_failed") == [], json.dumps(frames()))
+
+    # The same failure with no wish behind it: nothing else will ever say it
+    # gave up, so the frame stays.
+    drain()
+    auto_mod._job.pop("wish_id", None)
+    auto_mod._notify_finish("error", {"error": "slskd refused the queue"}, WALK_RELEASE)
+    failed = frames("download_failed")
+    check("...while the same failure with no wish behind it is announced once",
+          len(failed) == 1, json.dumps(frames()))
+    check("...with the payload shape the tray needs",
+          shape_ok(failed[0], "download_failed") if failed else False)
+    check("...and it is the only thing said", len(frames()) == 1, json.dumps(frames()))
+
+    # A wish whose search is OVER is announced by its own layer, so the job's
+    # frame comes back for it: the rule is the WISH's state, never the id.
+    drain()
+    wishes.mark_failed(walking["id"], "no verified match after 3 searches", 3)
+    auto_mod._job["wish_id"] = walking["id"]
+    auto_mod._notify_finish("error", {"error": "slskd refused the queue"}, WALK_RELEASE)
+    check("a job whose wish has given up announces again",
+          len(frames("download_failed")) == 1,
+          json.dumps([e.get("event") for e in frames()]))
+finally:
+    mlo_config.load_config = _real_load_config
+    events_mod.notify_devices = _real_notify_devices
+    if _saved_job_wish is None:
+        auto_mod._job.pop("wish_id", None)
+    else:
+        auto_mod._job["wish_id"] = _saved_job_wish
+
+# ── The durable replay log ──────────────────────────────────────────────────
+#
+# The ring above is MEMORY. A client that was closed — a desktop or mobile shell
+# no push service can reach — catches up with `?since=`, and that answer has to
+# survive the process: the frames are on disk beside the push keys, and
+# `recent()` reads both. The log is a catch-up window, not a ledger, so it keeps
+# a bounded tail — the NEWEST frames, because a reconnect wants the afternoon,
+# not the morning.
+print("== the durable log: a frame outlives the memory ring ==")
+log_dir = tempfile.mkdtemp(prefix="mlo-eventslog-")
+mlo_paths.app_data_dir = lambda *a, **k: log_dir
+_log_notify_devices = events_mod.notify_devices
+events_mod.notify_devices = lambda payload: None
+try:
+    drain()
+    frame = events_mod.emit("download_done", "Durable", "It survives the restart",
+                            {"link": "/library"})
+    with events_mod._lock:
+        events_mod._events.clear()          # a restart: the ring is empty again
+    replayed = frames("download_done")
+    check("a frame survives the memory ring dying",
+          len(replayed) == 1 and replayed[0]["seq"] == frame["seq"],
+          json.dumps(replayed))
+    check("...and it is the frame itself, payload included",
+          shape_ok(replayed[0], "download_done") if replayed else False)
+    check("...while a client that already saw it does not get it again",
+          events_mod.recent(frame["at"], limit=10 ** 6) == [],
+          json.dumps(events_mod.recent(frame["at"], limit=10 ** 6)))
+
+    # The compaction keeps the newest `_LOG_KEEP` lines: the oldest frames are
+    # what a bounded catch-up window drops.
+    drain()
+    seqs = [events_mod.emit("download_done", f"Durable {i}", "", {"link": "/library"})["seq"]
+            for i in range(events_mod._LOG_KEEP + 5)]
+    events_mod._log_compact(events_mod._event_log_path())
+    with open(events_mod._event_log_path(), encoding="utf-8") as fh:
+        kept = [json.loads(line) for line in fh if line.strip()]
+    check("_log_compact keeps the newest _LOG_KEEP lines",
+          [k["seq"] for k in kept] == seqs[-events_mod._LOG_KEEP:],
+          json.dumps({"kept": len(kept), "keep": events_mod._LOG_KEEP}))
+    check("...so the oldest frames are the ones that go",
+          seqs[0] not in [k["seq"] for k in kept]
+          and seqs[-1] in [k["seq"] for k in kept],
+          json.dumps({"first": seqs[0], "last": seqs[-1], "kept": len(kept)}))
+finally:
+    events_mod.notify_devices = _log_notify_devices
 
 print(f"\n{len(FAILED)} failure(s)")
 sys.exit(1 if FAILED else 0)

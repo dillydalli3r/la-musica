@@ -996,6 +996,156 @@ check("a catalog number's identity is its digits and letters, not its spelling",
       == release_choice.catalog_key("G.E.D-24425"),
       release_choice.catalog_key("G.E.D-24425"))
 
+# --------------------------------------------------------------------------- #
+# A refusal is SPENT, not fatal: the walk moves on, and a spent walk rests in
+# the background (issue #49)
+# --------------------------------------------------------------------------- #
+# The search that FOUND copies and had every one of them refused says so in one
+# sentence (`server.soulseek_auto`, the rejected-candidate dead end), and that
+# sentence is all the retry policy sees. "The network has nothing" and "the
+# network had copies this pipeline would not take" are different facts: a
+# refusal is not a transient failure (the same folder, graded the same way,
+# refuses again), so the walk asks the next ranked edition instead of settling
+# the wish — and a walk that has asked everything it may rests in the
+# BACKGROUND rather than reading as a search that gave up.
+print("\n== a refused candidate is spent, not fatal ==")
+
+REFUSAL = "Every candidate was rejected (1 attempt(s) — see the log)."
+check("a refusal is its own outcome, not a miss",
+      wishes.outcome_of(REFUSAL) == "rejected", wishes.outcome_of(REFUSAL))
+check("...while a sentence about the network having nothing is still a miss",
+      wishes.outcome_of("No candidate folder contained every track") == "not_found")
+check("...and a dead peer is still a transient failure",
+      wishes.outcome_of("peer went offline mid-transfer") == "transient")
+
+# Two groups of three ranked editions, each group one album: the first is
+# refused by every edition, the second is refused once and then lands.
+def walk_ids(tag):
+    return [f"9a9a9a9a-0000-0000-0000-0000000000{tag}{n}" for n in (1, 2, 3)]
+
+
+REFUSE_IDS, MOVE_IDS = walk_ids("1"), walk_ids("2")
+
+
+def walk_rel(mbid):
+    n = mbid[-2:]
+    return dict(REL, id=mbid, release_group_id=mbid, title=f"Walked Album {n}",
+                catalog_number=f"WALK-{n}", catalog_numbers=[f"WALK-{n}"])
+
+
+WALK_RELS = {m: walk_rel(m) for m in REFUSE_IDS + MOVE_IDS}
+
+
+def walk_resolve(mbid):
+    """integrations.resolve_release, canned: every ranked edition resolves."""
+    rel = WALK_RELS.get(str(mbid or "").strip().lower())
+    return (dict(rel), rel["id"]) if rel else (None, "")
+
+
+def walked_wish(rows, title):
+    """A wish walking `rows` (its ranked editions) with a framework album on disk."""
+    w = wishes.add_wish(rows[0], title=title, artist="An Artist", source="soulseek")
+    wishes.set_candidates(w["id"], [
+        {"mbid": m, "title": WALK_RELS[m]["title"],
+         "catalog_numbers": WALK_RELS[m]["catalog_numbers"]} for m in rows])
+    folder = os.path.join(MUSIC, "Artists", f"An Artist - {title}")
+    os.makedirs(folder, exist_ok=True)
+    pathmod.save_pending(folder, {"release_id": rows[0], "release_group_id": rows[0],
+                                  "wish_id": w["id"]})
+    wishes.update_wish(w["id"], {"album_path": folder})
+    return w["id"], folder
+
+
+# (a) EVERY ranked edition refused. The slskd boundary is stubbed where the rest
+#     of this suite stubs it — one settled job per candidate, carrying the
+#     refusal sentence — so the walk loop and the settle policy under it run for
+#     real, and the wish's own row is what the assertions read.
+REFUSE_ID, REFUSE_FOLDER = walked_wish(REFUSE_IDS, "Refused Album")
+_asked, _states = [], {}
+
+
+def refusing_start_job(**kw):
+    _asked.append(kw)
+    jid = 490000 + len(_asked)
+    _states[jid] = {"state": "error", "stage": "",
+                    "result": {"error": REFUSAL, "errors": [REFUSAL]}}
+    return {"ok": True, "job": {"id": jid}}
+
+
+def refusing_job_state(job_id=None):
+    return dict(_states.get(job_id) or {"state": "error", "result": {"error": REFUSAL}})
+
+
+with SLSK, Patch(intg, resolve_release=walk_resolve), \
+     Patch(auto, start_job=refusing_start_job, job_state=refusing_job_state):
+    outcome = worker._run_one(wishes.get_wish(REFUSE_ID), dict(CFG))
+
+refused = wishes.get_wish(REFUSE_ID)
+check("one attempt asks EVERY ranked edition, in the ranking's order",
+      [c["release_mbid"] for c in _asked] == REFUSE_IDS,
+      json.dumps([c["release_mbid"] for c in _asked]))
+check("...and every refusal moves the walk on rather than ending it",
+      outcome == "background" and refused["status"] == "background",
+      json.dumps({"outcome": outcome, "status": refused["status"]}))
+check("...so the wish is NOT terminal: the release is still being walked",
+      not wishes.is_terminal(refused, CFG), json.dumps({"status": refused["status"]}))
+check("...with its walk left on the LAST edition it asked",
+      (wishes.candidate_state(refused, CFG) or {}).get("index") == 2
+      and [t["mbid"] for t in wishes.candidate_state(refused, CFG)["tried"]] == REFUSE_IDS[:2],
+      json.dumps(wishes.candidate_state(refused, CFG)))
+check("...the framework album stays (something IS still searching for it)",
+      os.path.isdir(REFUSE_FOLDER) and pathmod.load_pending(REFUSE_FOLDER) is not None
+      and bool(refused["album_path"]),
+      json.dumps({"folder": REFUSE_FOLDER, "album_path": refused["album_path"]}))
+check("...and the refusal spends no not-found attempt: it is not a miss",
+      refused["not_found"] == 0, json.dumps({"not_found": refused["not_found"]}))
+check("...the row's own report keeps the answer the search gave",
+      "Every candidate was rejected" in refused["last_error"]
+      and "ranked edition(s)" in refused["last_error"], refused["last_error"])
+
+# (b) ONE refused edition is a spent candidate, not a settled wish: the walk
+#     moves to the NEXT ranked edition and asks it — the second one lands.
+MOVE_ID, _ = walked_wish(MOVE_IDS[:2], "Moved Album")
+_asked2, _states2, _seen = [], {}, []
+
+
+def moving_start_job(**kw):
+    _asked2.append(kw)
+    jid = 490100 + len(_asked2)
+    if len(_asked2) == 1:
+        _states2[jid] = {"state": "error", "stage": "", "result": {"error": REFUSAL}}
+    else:
+        _states2[jid] = {"state": "done", "stage": "",
+                         "result": {"imported": True, "errors": [],
+                                    "album_path": os.path.join(MUSIC, "Artists", "Moved Album")}}
+    return {"ok": True, "job": {"id": jid}}
+
+
+def moving_job_state(job_id=None):
+    # The wish store as the walk leaves it BETWEEN candidates: a refusal that
+    # settled the wish would show up here as not_found/failed/background.
+    _seen.append(((wishes.get_wish(MOVE_ID) or {}).get("status"),
+                  (wishes.get_wish(MOVE_ID) or {}).get("candidate")))
+    return dict(_states2.get(job_id) or {"state": "error", "result": {"error": REFUSAL}})
+
+
+with SLSK, Patch(intg, resolve_release=walk_resolve), \
+     Patch(auto, start_job=moving_start_job, job_state=moving_job_state):
+    moved_outcome = worker._run_one(wishes.get_wish(MOVE_ID), dict(CFG))
+
+moved = wishes.get_wish(MOVE_ID)
+check("a refused candidate leaves the wish WANTED, mid-walk",
+      ("wanted", 1) in _seen, json.dumps(_seen))
+check("...so the next ranked edition is the one asked",
+      moved_outcome == "imported" and len(_asked2) == 2
+      and _asked2[1]["release_mbid"] == MOVE_IDS[1],
+      json.dumps({"outcome": moved_outcome,
+                  "asked": [c["release_mbid"] for c in _asked2]}))
+check("...and the walk's own record says which edition it is on",
+      (wishes.candidate_state(moved, CFG) or {}).get("index") == 1
+      and [t["mbid"] for t in wishes.candidate_state(moved, CFG)["tried"]] == MOVE_IDS[:1],
+      json.dumps(wishes.candidate_state(moved, CFG)))
+
 shutil.rmtree(REDIRECT, ignore_errors=True)
 print(f"\n{len(FAILED)} failure(s)")
 sys.exit(1 if FAILED else 0)

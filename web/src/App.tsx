@@ -4,7 +4,7 @@ import { Link, Navigate, NavLink, Route, Routes, useLocation, useNavigate } from
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import {
   Activity, ArrowDownUp, ArrowUpRight, BarChart3, ChevronLeft, ChevronRight, ClipboardCheck, Compass, Disc3, Download, Eye, Gauge, HardDriveDownload, Heart, HeartHandshake, Home, Import,
-  Keyboard, Library, ListChecks, ListMusic, Menu, Music2, Music4, PanelLeftClose, Search, SlidersHorizontal, Sparkles, Tags, Trash2, User, WifiOff, X,
+  Keyboard, Library, ListChecks, ListMusic, Menu, Music2, Music4, PanelLeftClose, Search, Sliders, SlidersHorizontal, Sparkles, Tags, Trash2, User, WifiOff, X,
   Settings as SettingsIcon, Wrench,
 } from "lucide-react";
 import { api, AuthError, getToken, IN_TAURI, onAuthLost, serverUrl } from "./api";
@@ -39,6 +39,7 @@ const SoulseekPage = lazy(() => import("./pages/SoulseekPage"));
 const ExportPage = lazy(() => import("./pages/ExportPage"));
 const GradingPage = lazy(() => import("./pages/GradingPage"));
 const OptimizationPage = lazy(() => import("./pages/OptimizationPage"));
+const EqualizerPage = lazy(() => import("./pages/EqualizerPage"));
 const DependenciesPage = lazy(() => import("./pages/DependenciesPage"));
 const GenrePage = lazy(() => import("./pages/GenrePage"));
 const DownloadsPage = lazy(() => import("./pages/DownloadsPage"));
@@ -133,6 +134,11 @@ const NAV_GROUPS: { labelKey: MessageKey; items: { to: string; labelKey: Message
       { to: "/in-progress", labelKey: "nav.inProgress", icon: Activity, end: false },
       { to: "/checks", labelKey: "nav.checks", icon: ListChecks, end: false },
       { to: "/dependencies", labelKey: "nav.dependencies", icon: Wrench, end: false },
+      // The equalizer shapes what the player SOUNDS like, so it sits with the
+      // app's other configuration — one page away from Settings, in the sidebar
+      // the issue asked for, and one key (`playback_eq_profile`) shared by every
+      // client of the server.
+      { to: "/equalizer", labelKey: "nav.equalizer", icon: Sliders, end: false },
       { to: "/settings", labelKey: "nav.settings", icon: SettingsIcon, end: false },
       // The donation page sits with the app's own pages rather than in a
       // footer: it is a page like any other, and a user who wants to support
@@ -1240,6 +1246,7 @@ export default function App() {
             <Route path="/soulseek" element={<SoulseekPage />} />
             <Route path="/export" element={<ExportPage />} />
             <Route path="/optimize" element={<OptimizationPage />} />
+            <Route path="/equalizer" element={<EqualizerPage />} />
             <Route path="/grading" element={<GradingPage />} />
             <Route path="/in-progress" element={<InProgressPage />} />
             <Route path="/browse" element={<BrowsePage />} />

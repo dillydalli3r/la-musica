@@ -1,8 +1,8 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import {
-  AudioLines, Captions, ChevronDown, Heart, Info, ListMusic, ListPlus, Mic2, Pause, Play, Repeat, Settings2, Shuffle,
-  SkipBack, SkipForward, Volume1, Volume2, VolumeX, X,
+  AudioLines, Captions, ChevronDown, Heart, Info, ListMusic, ListPlus, Maximize2, Mic2, Minimize2, Pause, Play,
+  Repeat, Settings2, Shuffle, SkipBack, SkipForward, Volume1, Volume2, VolumeX, X,
 } from "lucide-react";
 import { api } from "../api";
 import VolumePct from "./VolumePct";
@@ -13,6 +13,7 @@ import { toast, useStore } from "../store";
 import { fmtTech, fmtPair, isVideoFile } from "../lib/fmt";
 import { AdvisoryMark } from "./Badges";
 import StarRating from "./StarRating";
+import ScrollingText from "./ScrollingText";
 import { ratingOf, useRatings, useSetRating } from "../lib/ratings";
 import CoverImg from "./CoverImg";
 import Popover, { MenuItem } from "./Popover";
@@ -200,6 +201,11 @@ interface LyricInk {
   chromeStrong: string;
   chromeButton: string;
   chromeText: string;
+  /** The frequency strip's ink, when the visualizer is shown over the artwork.
+   *  Same rule as the chrome above, and the same table: a canvas cannot wear a
+   *  Tailwind class, so it takes the polarity itself and picks its own
+   *  near-white / near-black tones (see Visualizer's `ink`). */
+  viz: "light" | "dark";
   /** The full-bleed field lift this table needs, or "" for none. Built from
    *  the cover's own colour (`rgb`) rather than a grey, and drawn with no
    *  edge, rounding or blur: a scrim, never a panel. */
@@ -217,6 +223,7 @@ const INK_ON_DARK: LyricInk = {
   chromeStrong: "text-white",
   chromeButton: "text-zinc-300 hover:text-white hover:bg-white/10",
   chromeText: "text-zinc-300",
+  viz: "light",
   scrim: "",
 };
 
@@ -231,6 +238,7 @@ const INK_ON_LIGHT: LyricInk = {
   chromeStrong: "text-zinc-950",
   chromeButton: "text-zinc-950/75 hover:text-zinc-950 hover:bg-black/5",
   chromeText: "text-zinc-950/75",
+  viz: "dark",
   scrim: "",
 };
 
@@ -802,6 +810,10 @@ export default function NowPlayingView(p: Props) {
   // fullscreenchange listener below reads it through a ref to stay correct.
   const closeRef = useRef(p.onClose);
   closeRef.current = p.onClose;
+  // Native (browser-window) fullscreen: off unless the top-bar button asks for
+  // it, and `fsOwn` marks the transitions this pane caused itself.
+  const [nativeFs, setNativeFs] = useState(() => !!document.fullscreenElement);
+  const fsOwn = useRef(false);
 
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
@@ -826,13 +838,28 @@ export default function NowPlayingView(p: Props) {
   // never sees a keydown, only the resulting fullscreenchange. Treating that
   // transition as "the user is done" is what makes a single Esc enough
   // everywhere. The listener only exists while the viewer is mounted.
+  //
+  // Native fullscreen is now the viewer's own OPT-IN (the button in the top
+  // bar), so a transition this pane asked for must not close it: `fsOwn` says
+  // "we pressed it", and a windowed pane is what that button wanted.
   useEffect(() => {
     const onFs = () => {
-      if (!document.fullscreenElement) closeRef.current();
+      setNativeFs(!!document.fullscreenElement);
+      if (!document.fullscreenElement && !fsOwn.current) closeRef.current();
+      fsOwn.current = false;
     };
     document.addEventListener("fullscreenchange", onFs);
     return () => document.removeEventListener("fullscreenchange", onFs);
   }, []);
+
+  const toggleNativeFs = () => {
+    fsOwn.current = true;
+    if (document.fullscreenElement) {
+      document.exitFullscreen().catch(() => { /* gone */ });
+      return;
+    }
+    document.documentElement.requestFullscreen?.().catch(() => { fsOwn.current = false; });
+  };
 
   const toggleOpt = (which: "xlit" | "trans") => {
     if (which === "xlit") {
@@ -921,7 +948,6 @@ export default function NowPlayingView(p: Props) {
               }
             : undefined
         }
-        title={seekable ? "Click to seek" : undefined}
       >
         {/* One layout for every state: the line block is laid out at the
             active size and scaled down when inactive — a compositor-only
@@ -1023,8 +1049,12 @@ export default function NowPlayingView(p: Props) {
        blanking a row while the next track's tags load is what made
        the block (and the title itself) shake on next/previous. */
     <div className={`text-center w-[26rem] max-w-full min-w-0 ${ink.shade}`}>
-      <div className="h-8 flex items-center justify-center gap-2" title={title}>
-        <div className={`text-2xl font-bold truncate ${ink.active}`}>{title}</div>
+      <div className="h-8 flex items-center justify-center gap-2 min-w-0" title={title}>
+        {/* The title DRIFTS when it does not fit — the same marquee the player
+            bar's own title uses (components/ScrollingText), so a long track
+            name is READ here instead of cut at "…" (reported). A short one
+            never moves: the shift is measured, not guessed. */}
+        <ScrollingText text={title} className={`text-2xl font-bold ${ink.active}`} />
         <AdvisoryMark value={freshTags?.ITUNESADVISORY ?? p.current.advisory} />
         {/* bit depth/sample rate rides beside the title, same as the
             player bar; tooltip carries the full codec/bitrate detail */}
@@ -1034,23 +1064,38 @@ export default function NowPlayingView(p: Props) {
           </span>
         )}
       </div>
-      <div className="h-5 mt-1 flex items-center justify-center" title={albumLine}>
-        <div className={`text-sm truncate ${ink.dim}`}>{albumLine}</div>
-      </div>
-      <div className="h-5 mt-0.5 flex items-center justify-center" title={artistLine}>
-        <div className={`text-sm truncate ${ink.dim}`}>{artistLine}</div>
+      {/* Album and artist on ONE row — "Hail to the Thief · Radiohead" is one
+          fact pair, and the two stacked rows read as two unrelated lines
+          (reported). It marquees for the same reason the title does, and keeps
+          a fixed height so the block still never jumps on next/previous. */}
+      <div
+        className="h-5 mt-1 flex items-center justify-center gap-2 min-w-0"
+        title={[albumLine, artistLine].filter(Boolean).join(" · ")}
+      >
+        <ScrollingText
+          text={[albumLine, artistLine].filter(Boolean).join(" · ")}
+          className={`text-sm ${ink.dim}`}
+        />
       </div>
       {/* Fixed height and always rendered, like the rows above, so the block
           never jumps on next/previous. The control's own tooltip carries the
           rest: half stars on a star's left half, the value already set clears
           it, and the keyboard works (← / →, Delete). */}
-      <div className="h-7 mt-1 flex items-center justify-center">
+      <div className={`h-7 mt-1 flex items-center justify-center ${ink.chromeText}`}>
         <StarRating
           size="md"
           label="Track rating"
           value={ratingOf(ratingsData?.ratings, p.current.path)}
           onChange={(v) => setRating(p.current.path, v)}
           pending={pending(p.current.path)}
+          /* The two colours are the INK's, not the control's defaults: this row
+             sits straight on the artwork, where a zinc-600 outline and a white
+             accent fill both blend into a bright cover. The outline keeps a
+             little air (the scale should not shout) while the filled half takes
+             the ink at full strength — the same polarity rule the lyrics, the
+             chrome and the frequency strip follow (R52c). */
+          emptyClass="text-current opacity-45"
+          fillClass="fill-current"
         />
       </div>
     </div>
@@ -1439,6 +1484,17 @@ export default function NowPlayingView(p: Props) {
             )}
             <div className="relative">
               <button
+                className={`p-2 rounded-lg transition-colors hover:bg-white/10 ${nativeFs ? "text-accent" : "text-current hover:text-white"}`}
+                onClick={toggleNativeFs}
+                title={nativeFs ? "Leave browser fullscreen (Esc)" : "Browser fullscreen — hide the browser's own chrome"}
+                aria-label={nativeFs ? "Leave browser fullscreen" : "Enter browser fullscreen"}
+                aria-pressed={nativeFs}
+              >
+                {nativeFs ? <Minimize2 className="h-5 w-5" /> : <Maximize2 className="h-5 w-5" />}
+              </button>
+            </div>
+            <div className="relative">
+              <button
                 className={`p-2 rounded-lg transition-colors hover:bg-white/10 ${options ? "text-white bg-white/10" : "text-current hover:text-white"}`}
                 onClick={() => setOptions(!options)}
                 title="Lyrics & display options"
@@ -1697,7 +1753,7 @@ export default function NowPlayingView(p: Props) {
                 nothing (bars rendered, box clipped away). */}
             {viz && (
               <div className="sticky bottom-0 z-10 shrink-0 min-h-12 w-[26rem] max-w-full px-2">
-                <Visualizer playing={p.playing} className="block h-12 w-full" />
+                <Visualizer playing={p.playing} className="block h-12 w-full" ink={ink.viz} />
               </div>
             )}
           </div>
@@ -1759,7 +1815,7 @@ export default function NowPlayingView(p: Props) {
                    slab in the owner's screenshot, and the blurred tint that
                    replaced it still read as a box over the artwork; both are
                    gone. */
-                className={`relative flex-1 min-h-0 overflow-y-auto overscroll-contain px-6 py-5 no-scrollbar ${ink.shade} transition-opacity duration-300 ${
+                className={`relative flex-1 min-h-0 overflow-y-auto overscroll-contain px-6 py-5 no-scrollbar lyr-fade ${ink.shade} transition-opacity duration-300 ${
                   staleLyrics ? "opacity-50" : "opacity-100"
                 }`}
                 style={{ zoom: lyricZoom }}
@@ -1783,6 +1839,37 @@ export default function NowPlayingView(p: Props) {
                   </div>
                 )}
               </div>
+              {/* The two lyric controls, ON the lyrics and SUBTLE. Both used
+                  to live only in the options popover, so nudging the sync or
+                  fitting the size to the room meant leaving the words to go
+                  and find them — and neither is a thing a listener should have
+                  to hunt for while the song plays. Chrome, not a panel: no
+                  background, no border, the ink's own tone at reduced opacity
+                  (it brightens on hover, and it fades with the pane's own
+                  stale state because it rides the same surface), so it reads
+                  as part of the words rather than a control strip pasted over
+                  the artwork (R52c). Rendered only while the pane is OPEN:
+                  collapsed, there is nothing on screen to size or to shift. */}
+              {paneOpen && (
+                <div className={`shrink-0 flex items-center justify-end gap-4 px-6 pb-2 pt-1 text-[11px] transition-opacity duration-300 ${ink.shade} ${ink.chromeText} ${
+                  staleLyrics ? "opacity-40" : "opacity-60"
+                } hover:opacity-100 focus-within:opacity-100`}>
+                  <LyricZoom
+                    pct={Math.round((lyricZoom / LYRIC_ZOOM_BASE) * 100)}
+                    onChange={(p) => {
+                      const next = (p / 100) * LYRIC_ZOOM_BASE;
+                      setLyricZoom(next);
+                      persist(ZOOM_KEY, String(next));
+                    }}
+                  />
+                  <LyricOffset
+                    path={p.current.path}
+                    ms={offsetMs}
+                    onChange={setOffsetMs}
+                    onSaved={(lrc) => setLyricsText(lrc)}
+                  />
+                </div>
+              )}
             </div>
           )}
         </div>

@@ -35,6 +35,7 @@ export default {
   "nav.watched": "Watched artists",
   "nav.grading": "Grading",
   "nav.dependencies": "Dependencies",
+  "nav.equalizer": "Equalizer",
   "nav.settings": "Settings",
   "nav.donations": "Donations",
 

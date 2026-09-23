@@ -7,10 +7,10 @@ import {
   CACHED_SIZES_KEY,
   cachedFlags,
   cancelDownloads,
-  downloadTracks,
   uncacheTrack,
   type DownloadProgress,
 } from "../lib/mediaCache";
+import { downloadForOffline } from "../lib/offline";
 import { toast } from "../store";
 
 /** How many of `paths` are already in the offline cache. */
@@ -126,45 +126,15 @@ export default function DownloadButton({
     setDone(0);
     setProg(null);
     try {
-      const hits = await cachedFlags(paths);
-      const todo = paths.filter((_, i) => !hits[i]);
-      if (!todo.length) {
-        toast("Already downloaded");
-        return;
-      }
-      // One bounded, cancellable run: N tracks at a time (server config
-      // `download_concurrency`), with a bulk request per chunk when the
-      // server offers one. Nothing here fires a promise per track.
-      const report = await downloadTracks(todo, {
+      // The run itself (and what it says about the outcome) belongs to
+      // lib/offline: the track/album menu offers the same action, and the two
+      // must not disagree about what "downloaded" means.
+      await downloadForOffline(paths, {
         onProgress: (p) => {
           setProg(p);
           setDone(p.done);
         },
       });
-      if (report.failures.length) {
-        // One dead file must not abandon the rest — but a bare count ("2 of
-        // 2 could not be downloaded") leaves nothing to act on, so the
-        // reason travels out with the file it belongs to.
-        const rows = report.failures.map((f) => {
-          const name = f.path ? f.path.split(/[\\/]/).pop() || f.path : "";
-          return name ? `${name} — ${f.message}` : f.message;
-        });
-        const head = rows.slice(0, 2).join(" · ");
-        toast.error(
-          `${report.failures.length} of ${todo.length} track(s) could not be downloaded: ${head}` +
-            (rows.length > 2 ? ` · +${rows.length - 2} more` : "")
-        );
-      } else if (report.cancelled) {
-        toast(`Download stopped — ${report.done} of ${todo.length} track(s) are cached`);
-      } else {
-        toast.success(
-          `Downloaded ${report.done} track${report.done === 1 ? "" : "s"} for offline playback`
-        );
-      }
-    } catch (e) {
-      // downloadTracks reports per-track failures itself; this is the run
-      // failing outright (no Cache Storage, or no answer from the server).
-      toast.error(`Download failed: ${e instanceof Error ? e.message : String(e)}`);
     } finally {
       setBusy(false);
       setProg(null);

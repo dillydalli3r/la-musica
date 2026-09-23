@@ -69,16 +69,19 @@ const hexRgb = (h) => {
  *  in, together with the album and artist rows. */
 const readTiers = (page) => page.evaluate(() => {
   const overlay = document.querySelector("div.fixed.inset-0.z-50");
-  // Structural anchor: the title is the only text-2xl inside the overlay.
-  const titleEl = overlay && overlay.querySelector("div.text-2xl");
-  const titleRow = titleEl && titleEl.parentElement;
+  // Structural anchor: the title is the only text-2xl inside the overlay. It
+  // is a SPAN since the marquee (`ScrollingText` wraps the text to measure and
+  // drift it), and the album + artist are ONE row ("Album · Artist"), so the
+  // pair is read as a single tier — the thing the checked floor is about is
+  // the text, not how many rows it is laid out in.
+  const titleEl = overlay && overlay.querySelector(".text-2xl");
+  const titleRow = titleEl && titleEl.closest("div.h-8");
   const block = titleRow && titleRow.parentElement;
   if (!block || block.children.length < 3) return null;
   const rows = [...block.children];
-  const title = rows[0]?.querySelector("div");
+  const title = rows[0]?.querySelector(".text-2xl");
   const tech = rows[0]?.querySelector("span.font-mono");
-  const album = rows[1]?.firstElementChild;
-  const artist = rows[2]?.firstElementChild;
+  const albumArtist = rows[1]?.firstElementChild;
   const box = block.getBoundingClientRect();
   const cs = getComputedStyle(block);
   const read = (el) => {
@@ -101,7 +104,7 @@ const readTiers = (page) => page.evaluate(() => {
       backdrop: cs.backdropFilter,
       shadow: cs.boxShadow,
     },
-    title: read(title), tech: read(tech), album: read(album), artist: read(artist),
+    title: read(title), tech: read(tech), albumArtist: read(albumArtist),
   };
 });
 
@@ -159,7 +162,7 @@ async function measure(page, hex, label, pick) {
     // Open the fullscreen player the way a user does (the app-wide shortcut is
     // layout-independent: the bar's own button is a phone-only control).
     await page.keyboard.press("f");
-    await page.waitForSelector("div.fixed.inset-0.z-50 div.text-2xl", { timeout: 15000 });
+    await page.waitForSelector("div.fixed.inset-0.z-50 .text-2xl", { timeout: 15000 });
     // The fixture's tracks are a couple of seconds long, so the queue has
     // already run past the lyric track by the time the player is up. Pause and
     // step BACK to it: the pane (and its toggle) only exists while the current
@@ -203,9 +206,9 @@ async function measure(page, hex, label, pick) {
   }
 
   const tiers = await readTiers(page);
-  check(`${label}: the metadata block renders all four tiers`,
-    !!tiers && !!tiers.title && !!tiers.tech && !!tiers.album && !!tiers.artist,
-    JSON.stringify(tiers && { t: tiers.title?.text, tech: tiers.tech?.text, a: tiers.album?.text }));
+  check(`${label}: the metadata block renders the title, its readout and the album·artist pair`,
+    !!tiers && !!tiers.title && !!tiers.tech && !!tiers.albumArtist,
+    JSON.stringify(tiers && { t: tiers.title?.text, tech: tiers.tech?.text, a: tiers.albumArtist?.text }));
   if (!tiers) {
     await page.screenshot({ path: path.join(SHOTS, `${label}-NO-BLOCK.png`) }).catch(() => {});
     return null;
@@ -226,8 +229,7 @@ async function measure(page, hex, label, pick) {
   const rows = [
     ["title", tiers.title, AA_LARGE],
     ["the format line", tiers.tech, AA_SMALL],
-    ["the album line", tiers.album, AA_SMALL],
-    ["the artist line", tiers.artist, AA_SMALL],
+    ["the album·artist line", tiers.albumArtist, AA_SMALL],
   ];
   const report = [];
   for (const [name, tier, need] of rows) {

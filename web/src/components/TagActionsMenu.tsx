@@ -1,18 +1,22 @@
 import { useState } from "react";
 import { useNavigate } from "react-router-dom";
+import { useQueryClient } from "@tanstack/react-query";
 import {
-  Activity, BadgeInfo, Disc3, Ellipsis, Flame, Gauge, ImagePlus, Info, Languages, ListMusic, Music2,
-  RefreshCw, ShieldCheck, Sparkles, Tags, UploadCloud, Users,
+  Activity, ArrowDownToLine, BadgeInfo, Disc3, Ellipsis, FileOutput, Flame, Gauge, ImagePlus, Info, Languages,
+  ListMusic, Music2, RefreshCw, ShieldCheck, Sparkles, Tags, UploadCloud, Users,
 } from "lucide-react";
 import type { LucideIcon } from "lucide-react";
 import { api } from "../api";
 import BulkTagsDialog from "./BulkTagsDialog";
+import ExportDialog from "./ExportDialog";
 import OverflowMenu from "./OverflowMenu";
 import MetadataReviewModal from "./MetadataReviewModal";
 import Modal from "./Modal";
 import { CreditsPanel } from "./TrackDetails";
 import { DetailsDialog } from "./AlbumDetails";
 import { advisoryOutcome } from "./Badges";
+import { CACHED_PATHS_KEY, CACHED_SIZES_KEY } from "../lib/mediaCache";
+import { downloadForOffline } from "../lib/offline";
 import { toast } from "../store";
 import type { LyricsPublishBatchResult, LyricsXlitResult, ScriptRunResult } from "../types";
 
@@ -54,6 +58,8 @@ export default function TagActionsMenu({
 }) {
   const [review, setReview] = useState<null | "artist" | "album">(null);
   const [tagsOpen, setTagsOpen] = useState(false);
+  const [exportOpen, setExportOpen] = useState(false);
+  const qc = useQueryClient();
   // Credits / Details of the CURRENT selection. Per release, so they need an
   // album folder (the whole release) or exactly one file (that recording);
   // a multi-track selection without an album has nothing to show.
@@ -161,6 +167,39 @@ export default function TagActionsMenu({
                 hidden: !viewable,
                 title: "The stored tags, technical readout and grading for the selection",
                 onClick: () => setView("details"),
+              },
+            ],
+          },
+          {
+            // What the selection is FOR, next to what it IS: the same two
+            // actions the album and track pages keep in their header row. The
+            // row menu had neither, so "download this track" and "export this
+            // album" both meant opening another page first (issue #50). Both
+            // entries run the SHARED implementations — lib/offline for the
+            // cache, the pages' own ExportDialog for the drive.
+            title: "Files",
+            items: [
+              {
+                label: "Download for offline playback",
+                icon: ArrowDownToLine,
+                disabled: !paths.length,
+                title: "Cache the selection in this client for offline playback",
+                onClick: () => {
+                  void downloadForOffline(paths).then(() => {
+                    // Every "downloaded" mark and the downloads page's own byte
+                    // total read these two; both are stale the moment the cache
+                    // changes (see DownloadButton.rescan).
+                    qc.invalidateQueries({ queryKey: CACHED_PATHS_KEY });
+                    qc.invalidateQueries({ queryKey: CACHED_SIZES_KEY });
+                  });
+                },
+              },
+              {
+                label: "Export…",
+                icon: FileOutput,
+                disabled: !paths.length,
+                title: "Transcode and save the selection to a drive",
+                onClick: () => setExportOpen(true),
               },
             ],
           },
@@ -382,6 +421,13 @@ export default function TagActionsMenu({
             setTagsOpen(false);
             onDone?.();
           }}
+        />
+      )}
+      {exportOpen && (
+        <ExportDialog
+          paths={paths}
+          onClose={() => setExportOpen(false)}
+          subtitle={albumPath ? "the selection" : "this track"}
         />
       )}
     </>

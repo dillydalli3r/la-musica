@@ -425,8 +425,9 @@ def _try_candidate(wish, cfg, cand, window, pos, total):
     * ``("imported", album_path)`` — this candidate landed; the acquisition is
       over and the caller marks the wish imported;
     * ``("empty", err)`` — the search answered and there is nothing usable for
-      THIS edition, which is what makes the walk move on (the ordinary
-      not-found classification, `wishes.outcome_of`);
+      THIS edition (nothing found, or copies found and refused), which is what
+      makes the walk move on (the ordinary not-found/rejected classification,
+      `wishes.outcome_of`);
     * ``("pending", err)`` / ``("skipped", err)`` — a transient failure or
       pipeline contention: already settled by the retry policy (a backoff, or
       nothing at all), and never a reason to ask the next candidate;
@@ -522,9 +523,13 @@ def _try_candidate(wish, cfg, cand, window, pos, total):
         _LAST_RESULT.result = result
         return ("imported", result.get("album_path") or "")
     err = (result.get("error") or st.get("stage") or "no verified match yet")
-    if wishes.outcome_of(err) == "not_found":
+    if wishes.outcome_of(err) in ("not_found", "rejected"):
         # The search answered, and there is nothing usable for THIS edition —
-        # the walk may move on (the caller decides, with the list in hand).
+        # nothing found, or copies found and refused — which is what makes the
+        # walk move on (the caller decides, with the list in hand). A refusal is
+        # spent for the SAME reason a miss is: the folder was graded and would
+        # be graded the same way again, so the next ranked edition is the only
+        # thing left to ask (R151).
         return ("empty", err)
     return (_settle_attempt(wish, cfg, err), err)
 
@@ -543,6 +548,10 @@ def _settle_attempt(wish, cfg, err):
       ticks until one of the candidates lands (spec R153). Only a wish with no
       ranked list at all — nothing to keep asking — ends `not_found`, which is
       the terminal outcome it always was.
+    * a walk whose every edition was REFUSED (`"rejected"`) rests in the
+      BACKGROUND too, without spending a not-found attempt: one attempt asked
+      the whole ranking, and re-asking the same folders would be refused the
+      same way (spec R153).
     * a TRANSIENT failure (a refused slskd, an outage, a failed verification)
       is retried after its backoff until the attempts cap is spent.
 
@@ -558,7 +567,29 @@ def _settle_attempt(wish, cfg, err):
     """
     wid = wish["id"]
     attempts = int(wish.get("attempts") or 0) + 1
-    if wishes.outcome_of(err) == "not_found":
+    kind = wishes.outcome_of(err)
+    if kind == "rejected":
+        # Every ranked edition answered with copies and every copy was refused
+        # (grading below the configured score, a missing `.log`, a verification
+        # that did not pass). One attempt has now asked the whole ranking, so
+        # the release rests exactly where a spent empty walk rests — the
+        # BACKGROUND (R153): non-terminal, silent, framework album kept, and
+        # re-walked from the best edition on the worker's ticks, because a
+        # refusal is a fact about the copies that were up at that moment, not
+        # about the release. The not-found budget is deliberately NOT spent:
+        # "the network does not have it" is a different fact, and that budget
+        # counts the searches that came back empty.
+        if wishes.walk_length(wish, cfg) >= 1:
+            wishes.mark_background(wid, wishes.walk_report(wish, err, cfg),
+                                   attempts=attempts)
+            return "background"
+        # No ranked list to walk and nothing to ask again: keep looking at the
+        # interval, like any other open wish (a name-keyed wish has no copies to
+        # refuse in the first place, so this is only reachable through a hand
+        # edit of the candidate list).
+        wishes.mark_wanted(wid, error=str(err)[:300], attempts=attempts, candidate=0)
+        return "pending"
+    if kind == "not_found":
         empty = int(wish.get("not_found") or 0) + 1
         cap = wishes.not_found_attempts(cfg)
         if cap and empty >= cap:

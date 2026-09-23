@@ -1512,6 +1512,16 @@ DEFAULT_CONFIG = {
     # preamp and filters are rendered into the same ffmpeg filter chain as the
     # ReplayGain gain above.
     "export_eq_profile": "",
+    # The Equalizer APO / Peace profile the PLAYER applies while it plays — a
+    # built-in preset id or an imported profile's, "" = no EQ. One key for
+    # every client, not a per-device preference: the curve is part of what the
+    # library sounds like, the same reason `replaygain_mode` is one key. The
+    # profile's own Preamp travels with it (the player puts the gain in front
+    # of its biquad chain, which is what keeps a boosted curve from clipping).
+    # The EQUALIZER page is where it is picked and edited (and the only place a
+    # curve is heard before it is saved); the Settings page carries the raw id
+    # as text, the same way the export's profile key has always been editable.
+    "playback_eq_profile": "",
     # Where an export goes: "server" (a drive/folder this machine can see, the
     # drive picker on the Export page) or "zip" (staged in the app's data dir
     # and handed back as one archive — the only destination a browser can offer

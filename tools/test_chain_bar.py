@@ -20,7 +20,7 @@ This is the contract that keeps them from disagreeing:
 The first half runs a real chain on a scratch album and records every frame the
 relay would have received, in order. The second half hands those frames to
 tools/check_chain_bar.mjs, which serves the REAL page on a scratch port (8011+,
-never the owner's 8000), presses "Run ticked scripts", pushes the frames into
+never the owner's 8000), presses "Run all", pushes the frames into
 the store the app draws from and asserts the label, readout and bar a user
 would see after each one.
 

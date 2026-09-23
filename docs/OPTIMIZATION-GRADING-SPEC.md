@@ -785,6 +785,56 @@ rating.
   typically rendered `DR<n>`); they are graded through the required-tag sweep and
   the album-tag check, never on video files.
 
+- **R219 — the equalizer applies to PLAYBACK, and it is the same profile
+  store an export uses.** `playback_eq_profile` (one config key, "" = off — the
+  curve is what the library sounds like, the same reason `replaygain_mode` is
+  one key) names a built-in preset or an imported profile from
+  `mlo.eq`/`<music>/.mlo/data/eq`, and the player installs it on its own
+  WebAudio graph: `lib/eqNodes.buildEqChain` renders the profile's preamp as one
+  GainNode followed by one BiquadFilterNode per active band, spliced between the
+  ReplayGain gain and the analyser (`lib/analyser.applyEq`), so the meters and
+  the ambience read the equalized signal and an element attached later (the
+  gapless pair's other half, a video popout) inherits the same curve. The
+  mapping is APO's own — PK → peaking, LS/HS/LSC/HSC → shelves, LP/HP/BP/NO →
+  the matching pass/notch — so a band's frequency, gain and order are identical
+  in the app and in an export; a SHELF's width is the one honest difference
+  (APO's custom slope reaches ffmpeg as a Q, while a WebAudio shelf is
+  fixed-slope), and it is stated in the page rather than hidden. The editor
+  (`pages/EqualizerPage.tsx`, sidebar → MAINTAIN) lists the presets and the
+  stored profiles, imports APO/Peace text or a dropped file, draws the response
+  from the browser's own `getFrequencyResponse` (never a second implementation
+  of the filter maths), gives every band a DRAGGABLE handle plus typeable Fc /
+  Gain / Q boxes (clamped, committed on Enter or blur, the VolumePct pattern;
+  Escape puts the stored value back and the blur it fires is not a commit)
+  and a per-band on/off, and previews edits LIVE through the player's own chain
+  — nothing is stored until Save, which writes the profile back as APO text
+  through the one import endpoint (`POST /api/export/eq/import`), replacing a
+  profile of the same name. A profile that cannot be built leaves plain
+  playback alone even mid-install: `installEq`'s tear-down is undone when the
+  build throws, because the element's audio reaches the speakers through that
+  graph alone and a gain node left connected to nothing is silence. `tools/test_export_audio.py` keeps covering the
+  parser, the store and the export chain the page shares.
+
+- **R220 — AutoEq is a SEARCH, and an import is the profile store's own
+  file.** `GET /api/eq/autoeq/search?q=` answers from the AutoEq project's own
+  index (`results/INDEX.md`, ~6 300 measurements, cached beside the profiles for
+  a month — a search box that downloads a megabyte per keystroke is unusable),
+  ranking an exact model name, then a name the query starts, then where the
+  first word lands, with EVERY word required. `POST /api/eq/autoeq/import`
+  fetches ONE file by name — `<model> ParametricEQ.txt`, falling back to the
+  `GraphicEQ` form for a model that has only that — so no GitHub API call (and
+  no rate limit) is in the path, and the fetched text goes through the SAME
+  parser and store as a pasted profile (`mlo.eq.autoeq_import` →
+  `import_profile`), which is what makes an imported correction editable,
+  exportable and applicable to playback like any other. An id that is not a
+  plain results-relative path is refused with a 400 (`_autoeq_dir`), and a
+  failed refresh still answers from the cache with the reason in `error` instead
+  of emptying the list. The import hands the page the row the server stored
+  and the page opens THAT row: a profile's id is its name's slug, so
+  re-importing an existing name REPLACES that profile, and a look-up in the
+  page's own catalogue would open the bands from before the import — and Save
+  would then write those back over it.
+
 ### 7.4 Lyrics format and sync
 
 - **R45** — the storage target is `lyrics_format`: `EMBEDDED` (default), `LRC`
@@ -857,7 +907,15 @@ rating.
     the metadata tiers, the karaoke syllables, the transport glyphs and the
     time readouts. A single ink cannot be AA on a field that spans rgb(96) to
     rgb(255) within one screen (a white cover's bloom core), which is why the
-    polarity is decided at all; the glyph shadow flips with it;
+    polarity is decided at all; the glyph shadow flips with it, and that shadow
+    is ALL halo — four low-alpha stops, the tightest 0.42 — never a tight
+    near-opaque core: the 0.92/3px core of the first fix merged between
+    glyphs into a slab of uniform dark pixels under the line on a BRIGHT
+    field (a red cover reads bright to the eye while its average luminance
+    sits under the flip, so the light table was picked), which is what was
+    reported. Legibility is carried by the ink's own contrast and by the
+    field's treatment above; the shadow only has to stop a glyph dissolving
+    into a busy mid-tone;
   * **nothing behind a dark cover, a cover-tinted wash in the band above it, a
     cover-tinted lift above the flip**: at or below `NP_FIELD_AS_IS` (0.20
     relative luminance) the ambience is dark enough for the white table on
@@ -886,6 +944,13 @@ rating.
     box read 1.64:1 on a mid cover: invisible). Over a music video the top bar
     keeps light greys, because the picture is the field there and the ink's
     polarity says nothing about it.
+  * **the frequency strip takes the same table**: `<Visualizer>`'s
+    `ink` prop is the ink polarity (`ink.viz`), and it draws its bars in
+    the table's own tones — near-black over a bright cover, near-white
+    over a dark one — because a strip drawn with the app's accent
+    (white) is a white strip on a white field: the same "text that blends
+    into the background" the lyrics had. Left unset (the docked lyrics
+    sidebar, whose surface IS the app's dark panel) the accent is right.
   The floating MENUS are the deliberate exception and keep their frosted veil
   (`np-veil` + `np-veil-dark` + `np-veil-panel`: the options popover, the queue
   drawer) — a menu is a menu, and its panel is how it reads as one. R56c's
@@ -959,6 +1024,83 @@ rating.
   lyrics found by any provider): N track(s)", and the run's stats carry
   `instrumental_count`) so "skipped: 12" cannot read as "twelve tracks nobody
   looked at".
+
+- **R52e — the fullscreen player opens IN THE WINDOW, and the browser's own
+  fullscreen is a separate, opt-in button.** Clicking the album art in the
+  now-playing bar (and the bar's own fullscreen glyph, and the app-wide `F`)
+  mounts the viewer, which is `fixed inset-0` and covers the app by itself — it
+  does NOT call `requestFullscreen`. Taking the whole screen is a distinct
+  control, rendered in the viewer's top bar (`Maximize2`/`Minimize2`, beside the
+  visualizer and lyrics toggles) and remembered in its own state; the
+  `fullscreenchange` listener still treats a browser-driven exit (Esc being
+  swallowed by the browser is the common case) as "the user is done", but a
+  transition this pane asked for — `fsOwn` — leaves the viewer up. What this
+  fixes: entering the player seized the whole screen, which is not what "open
+  the player" means, and an embedded host can refuse the request anyway.
+
+- **R52f — the meters follow the SOUND, not the last attach.** Every media
+  element carries its own WebAudio graph (`lib/analyser`), and the gapless
+  `<audio>` pair means two of them exist with only one playing: the analyser the
+  visualizer and the ambience read is therefore chosen from a registry of
+  attached elements by "which one is actually playing" (falling back to the last
+  attach), because reading the idle half returns an all-zero spectrum and both
+  meters fell back to their synthetic animation while real audio played. The
+  same read resumes a context the browser suspended or WebKit "interrupted"
+  (tab backgrounded, a phone call) before it returns — a suspended context reads
+  as zeros too — and a WebAudio failure is retried after a cooldown instead of
+  latching the meters off for the session. An element that has left the document
+  is skipped, so a video popout unmounted mid-track cannot answer for the app.
+
+- **R52g — the lyric pane reads as a live surface: a nudge parks the follow for
+  a little over a second, its edges dissolve, and its own controls ride on the
+  words.** Five behaviours, one shared pane (`web/src/lib/lyrScroll.ts`,
+  `LyricsSidebar.tsx`, `NowPlayingView.tsx` — the sidebar, the fullscreen
+  player and the editor preview take their scrolling from the same module, so
+  they cannot drift apart):
+  * **The hold is `HOLD_MS` = 1 200 ms, not 6 000.** A wheel or a touch calls
+    `takeOver()`, which stops the glider and parks the follow until
+    `Date.now() + HOLD_MS`; a timer `HOLD_MS + 50` later re-kicks the pane while
+    the element is playing, so the sung line is picked back up in place rather
+    than waiting for the next line change — the hold suppresses the line-change
+    step too. The 6 s this started as made the pane look BROKEN: a reader who
+    nudged the wheel and then waited watched the song's line change three times
+    while the pane sat still. A wheel's momentum is a few hundred milliseconds
+    and a finger drag re-arms the hold on every event, so a second and a bit
+    never fights a gesture in progress and the pane is alive the moment the
+    reader stops.
+  * **The pane's top and bottom edges dissolve (`.lyr-fade`, `index.css`).**
+    Both scrollers carry it: a mask (`mask-image` and `-webkit-mask-image`)
+    that is transparent at 0, opaque at 26 px, opaque at `calc(100% - 26px)`
+    and transparent at 100 % — a line the pane's own box cuts through its
+    middle is the one place a reading surface looks broken rather than alive.
+    A MASK and not an overlay: nothing is painted, so R52c still holds and the
+    reading surface has no panel, tint or gradient of its own. The first and
+    last lines are never affected, because `LYRICS_PAD_TOP` / `LYRICS_PAD_BOTTOM`
+    hold them a third of the pane away from either edge.
+  * **The two lyric controls sit ON the words, quietly.** The fullscreen pane's
+    footer row carries `LyricZoom` and `LyricOffset` themselves, not only the
+    options popover's copies — nudging the sync or fitting the size to the room
+    used to mean leaving the words to go and find them. The row is rendered
+    only while the pane is OPEN (`paneOpen &&`: collapsed, there is nothing on
+    screen to size or to shift), in the ink's own tone (`ink.chromeText`) at
+    `opacity-60` (`40` while the lyrics are stale, `100` on hover /
+    `focus-within`), with no background and no border of its own (R52c). Both
+    controls take `text-current` plus an opacity instead of a hardcoded grey —
+    `text-zinc-500` / `text-white` are gone from them — because ONE control is
+    rendered on three surfaces: the sidebar's header, the options popover, and
+    the artwork itself, where a fixed zinc glyph is R52c's grey-on-grey failure.
+  * **A lyric line is not a tooltip.** `title="Click to seek"` is gone from
+    both surfaces; the line still seeks on click (`renderLine`'s `onClick` →
+    `p.onSeek(l.time)` and `centerLine(i)`), so the only thing lost is a hover
+    bubble drawn over the words.
+  * **The star row takes the ink too.** `StarRating`'s two colours are
+    parameters now (`emptyClass`, `fillClass`; the app's own defaults are
+    unchanged, `text-zinc-600` and `fill-current text-accent`), and the
+    fullscreen row passes `text-current opacity-45` / `fill-current`: this row
+    sits straight on the artwork, where a zinc-600 outline and an accent fill
+    both blend into a bright cover. The outline keeps a little air, the filled
+    halves take the ink at full strength — the polarity of R52c applied to a
+    control.
 
 ### 7.5 Covers
 
@@ -2340,7 +2482,7 @@ user asked for, in the order they asked for it. `server/exporter.py` owns both.
   list: no error, no empty slot, and nothing waiting for a candidate that does
   not exist. A candidate that answers with nothing usable ends ITS search and the
   walk moves on; a candidate that fails for a TRANSIENT reason (a refused slskd,
-  a MusicBrainz outage, a failed verification) stops the walk and goes through
+  a MusicBrainz outage) stops the walk and goes through
   the store's retry/backoff policy unchanged — one policy, asked per candidate,
   and the walk invents no schedule of its own. The walk only ever moves FORWARD
   inside an attempt, and the next attempt starts at the BEST candidate again
@@ -2385,6 +2527,28 @@ user asked for, in the order they asked for it. `server/exporter.py` owns both.
   units — empty searches — now counted per WALK: the number of empty walks the
   release may have before it settles into the background.
 
+- **R214 — a candidate whose copies were REFUSED is spent, not fatal, and the
+  walk moves on.** "Every candidate was rejected (…)" — a batch every peer of
+  which the pipeline refused on grading, on the `.log` a CD folder must carry,
+  or on a verification that did not pass — is its own classification
+  (`wishes.outcome_of` answers `"rejected"` beside `"not_found"` and
+  `"transient"`), because the network HAVING copies this app will not take is a
+  different fact from a network that has none, and only one of them is worth
+  retrying unchanged. `wishes_worker._try_candidate` returns `empty` for it, so
+  the walk advances to the next ranked edition exactly as it does after a miss,
+  and `_settle_attempt` sends a walk whose every edition was refused to the
+  BACKGROUND (R153) WITHOUT spending a not-found attempt — the refusal was not
+  a miss. What this fixes: the sentence classified as `transient`, the one
+  classification that STOPS a walk, so the wish was re-marked `wanted` with the
+  backoff, `wishes.restart_walk` put it back on edition 1, and a release group
+  whose best edition scores below `soulseek_auto_log_min_score` (or whose
+  rip logs never reach it) looped on that edition for ever — the reported "won't
+  move on to the next best release", with a "Retrying in 28m 55s" that never
+  named another edition. `tools/test_wishes_pipeline.py` now drives a
+  three-edition wish through `_run_one` and asserts every edition is asked in
+  ranking order, that the walk's own record moves with it, and that the end is
+  `background` with the not-found counter still zero.
+
 - **R178 — a failure retries on ITS OWN clock, and a walk that keeps failing
   stays quiet.** Two halves of one report ("Retrying after a failure at 12:10",
   five hours after the download started; a fallback release landing in the
@@ -2413,6 +2577,21 @@ user asked for, in the order they asked for it. `server/exporter.py` owns both.
     was asked to find by name. A wish with NO ranked list (a name-keyed
     wishlist row) keeps the terminal `failed` outcome it always had, because
     nothing is left to re-ask.
+
+- **R215 — one spent candidate of a walk is not an outcome and announces
+  nothing.** A settled auto-import job that fills a wish is ONE step of that
+  wish's search: its failure means another ranked edition is about to be asked,
+  or the release is resting in the background (R153) — not that the request
+  gave up. `soulseek_auto._wish_keeps_looking()` reads the job's `wish_id` and
+  the store's own verdict (`wishes.is_terminal`), and `_notify_finish` returns
+  BEFORE the `download_failed` frame when the store will search again; the ends
+  that ARE outcomes are announced by the layer that owns them (`wish_failed`,
+  `wish_not_found` from `server/wishes`), and R153's background phase stays
+  silent. A job with no wish behind it — the interactive search, a bulk add —
+  keeps its own `download_failed`, because nothing else will ever say it gave
+  up, and so does a wish-keyed job whose wish HAS given up. Before this, a
+  release the app had not given up on announced "Download failed" once per
+  abandoned candidate.
 
 - **R179 — ONE RELEASE IS ONE TILE, even mid-import.** A framework album is a
   row of its own (a folder with a marker and no audio) and the album the audio
@@ -2735,6 +2914,58 @@ user asked for, in the order they asked for it. `server/exporter.py` owns both.
   rather than through it: the Modal layer is `z-[60]` against the player's
   `z-50`, which is what lets a dialog sit over the fullscreen view.
 
+- **R221 — a title that does not fit DRIFTS, on both surfaces.** The player
+  bar's marquee is its own component now — `web/src/components/ScrollingText.tsx`,
+  out of the inline copy that used to live in `PlayerBar.tsx` — so the bar and
+  the fullscreen player share ONE mechanism, and with it the `title-marquee`
+  keyframe and its `--title-shift` variable in `index.css`. It MEASURES rather
+  than guesses: a `ResizeObserver` watches the wrapper AND the text, so a
+  web-font swap, a badge appearing beside the title and a window resize all
+  re-measure, and `shift` stays `0` for anything that fits — a short title must
+  not wobble. The drift distance is the overflow plus 6 px of visible padding,
+  the period is `Math.max(5, Math.min(24, shift / 12))` seconds, and
+  `prefers-reduced-motion` still kills the animation. Both of the fullscreen
+  player's long lines use it: its TITLE (which used to `truncate`, cutting a
+  track name mid-word — the reported case) and its album·artist row.
+- **R222 — the fullscreen block names one fact pair per row.** The text block
+  in `NowPlayingView.tsx` draws the title row (h-8, title plus the advisory
+  mark and the codec readout), then `Album · Artist` on ONE h-5 row, then the
+  star row (h-7) — where the album and the artist used to stack as two rows
+  that read as two unrelated lines (reported). The pair is joined with " · "
+  and the whole pair rides the row's own `title`. Every row keeps its fixed
+  height and is always rendered, so the block still cannot jump on
+  next / previous.
+- **R223 — the player bar's grid may not let a flank overlap its centre.** The
+  desktop grid in `PlayerBar.tsx` is
+  `grid-cols-[minmax(0,1fr)_auto_minmax(0,1fr)]`, not `1fr_auto_1fr`: a bare
+  `1fr` track still carries an `auto` MINIMUM, so neither flank could shrink
+  below its own content and, at high browser zoom or a narrow window, the left
+  cluster ran over the centred seek row — the reported overlapping "up next" /
+  duration readouts. `minmax(0,1fr)` lets a flank truncate instead, which is
+  what the title's own marquee (R221) and the flank's `min-w-0` already assume.
+- **R224 — the frequency strip's resize check is its BACKING STORE.**
+  `Visualizer.tsx` sizes the canvas from its box and
+  `dpr = Math.min(2, window.devicePixelRatio || 1)`, and compares
+  `Math.round(w × dpr)` / `Math.round(h × dpr)` against `canvas.width` /
+  `canvas.height`. The old test compared the CSS width alone (`lastW`), so a
+  HEIGHT change (the strip's own box, a zoomed pane) or a devicePixelRatio
+  change (the window dragged to another monitor, a browser zoom step) left the
+  previous bitmap in place and the browser stretched it into the new box — the
+  reported "two offset rows of bars". Comparing what the canvas actually holds
+  catches all three, and a resized frame is repainted rather than skipped as an
+  idle frame.
+- **R225 — a slider's dot and its ring are one shape, so neither animates
+  into place.** `index.css`'s `input[type="range"]::-webkit-slider-thumb` draws
+  the outer ring as a `box-shadow` ON the thumb and no longer transitions
+  `transform`: the ring is drawn from the thumb's own transform, while the
+  thumb's POSITION follows the pointer natively and never animates, so a
+  `transition: transform .1s` under a hover `scale(1.25)` (`.seek-fat`:
+  `1.15`) showed the dot jumping per pixel and the ring scaling after it — the
+  reported "the dot and the outer ring move at different times", worst during a
+  drag, where hover flickers and the scale is mid-transition for most of the
+  gesture. Hover changes instantly now, in the same rule, and
+  `::-moz-range-thumb` carries the same ring.
+
 ### 7.16 The library page: the five views, the columns and the filters
 
 - **R103 — the library offers five views, and each one draws rows.** Grid
@@ -2767,9 +2998,12 @@ user asked for, in the order they asked for it. `server/exporter.py` owns both.
   the rows it would leave:
   * **Star rating** — Any / Rated / Unrated, over the user's own stars and
     nothing else. A track counts as rated when its own file has a rating; an
-    album when its folder rating is set OR any track in it is rated; an artist
-    when any of its albums is. Nothing here is an average, and the rule is
-    printed in the menu itself (`RATED_NOTE`) rather than left to a tooltip.
+    album only when the verdict on the ALBUM itself is in (its folder rating)
+    AND every track in it carries one of its own — a half-rated album is not
+    finished, and the "Unrated" list is where it belongs (the reported "only
+    one track counted"); an artist when any of its albums is. Nothing here is
+    an average, and the rule is printed in the menu itself (`RATED_NOTE`)
+    rather than left to a tooltip.
   * **Advisory** — Any / Explicit / Clean. Explicit means `ITUNESADVISORY` 1 (the
     badge the tables draw); Clean means everything that does not flag explicit:
     2 (the clean EDITION) and 0/absent (nothing marked it explicit). An album
@@ -2798,6 +3032,25 @@ user asked for, in the order they asked for it. `server/exporter.py` owns both.
   representative album cover and then to the placeholder. Home also carries the
   **Your ratings** shelf: the user's rated releases, highest first, in
   half-stars — the same unit the API and `lib/ratings.ts` speak.
+
+- **R218 — a details menu fits the window, and every action it lists is
+  reachable.** The "…" menus are capped to the room their OWN trigger leaves, in
+  the viewport, by `Popover`'s fixed mode (`maxHeight` from the measured rect,
+  `100dvh` so a phone's URL bar is not counted twice) — and to the room on the
+  side the panel OPENS, so a top-placed panel is bounded by the space above
+  its trigger (the trigger's own `top`), never by the space below it; `OverflowMenu` therefore
+  defaults to `fixed` and drops its old `max-h-[70vh]`. The cap is what makes
+  the panel scroll INSIDE the window: the app shell is `h-dvh overflow-hidden`,
+  so a panel running past the fold was unreachable, not merely clipped — the
+  reported "the menu is cut off", whose fix cannot be another `overflow-y-auto`
+  (the panel already had one). The long menus keep the app's own thin scrollbar
+  (`index.css`, no `scrollbar-hide` anywhere) and `overscroll-contain`, so the
+  tracklist behind them does not move with the wheel. A ROW's menu and an
+  album's readout both carry the two file actions the pages' headers have —
+  **Download for offline playback** (the ONE implementation, `lib/offline.ts`,
+  shared with `DownloadButton`) and **Export…** (the pages' own `ExportDialog`)
+  — because "download / export this" must not mean opening another page first.
+  `tools/check_menus.cjs` walks the sidebar and the cover menu's geometry.
 
 ### 7.17 The first-run setup wizard asks only what is required
 
@@ -3152,6 +3405,24 @@ screen; above `lg` the pane sits beside the artwork.
   and the queue row keeps the long form. The row's stage already stays
   "importing" until the chain settles; the sentence now agrees with it.
 
+- **R217 — the counters describe the list beside them, and count a peer
+  ONCE.** Two surfaces showed numbers that did not belong to the rows under
+  them. `soulseek.search_results` derived `responseCount`/`fileCount` from
+  slskd's SEARCH STATE, which only settles once a search has ended: a page
+  rendering those beside a file list served by `/responses` read "0 peer(s), 0
+  file(s)" over a list of hits, and a search ended early by `response_limit`
+  never settles at all. They are computed from the response list itself now —
+  `len({username})`, `len(responses)` — with the state's own counters only as
+  the fallback for the window where slskd has counted responses it will not
+  serve yet. `soulseek_auto._search_queries` SUMMED each template's counters
+  while asking every template at once: the templates of one album overlap by
+  design (catalog number, barcode, title all name the same release), so one peer
+  was counted once per template (15 "responses" for three peers) — it counts
+  DISTINCT usernames and distinct user+file across the responses in hand.
+  `tools/test_soulseek_candidates.py` pins both: two templates returning the
+  same peer's same two files read 1 peer / 2 files, and the counters travel with
+  the list they describe.
+
 ### 7.28 The import arrives complete: the name, the cover, and when the notice may speak
 
 - **R199 — the album folder is named from the FINAL tags, so the last tag writer
@@ -3251,6 +3522,26 @@ screen; above `lg` the pane sits beside the artwork.
   must not keep being woken for an account that left it.
 
 ### 7.30 The script chain's wall clock: what is shared, and what is measured
+
+- **R216 — the notification a client missed is STILL THERE when it comes
+  back, and a kind's reach is the same on every client.** `?since=` replays from
+  two stores: the in-memory ring (`_MAX_EVENTS` 100, R90's channel) and a
+  durable log beside the app state (`server/events.py::_log_append`, newest
+  `_LOG_KEEP` = 400 frames, atomically rewritten past `_LOG_MAX_BYTES`),
+  because a client that is closed for a day — and a desktop or mobile shell in
+  particular, which no push service can reach at all (R204's own "notifies only
+  while it runs") — otherwise hears nothing about the import that finished
+  overnight. `recent()` merges both, dedupes on `seq` and returns the newest
+  `limit`; a client that has never seen an event still asks "from now"
+  (`eventsUrl` sends `Date.now()/1000`), so a fresh install is not greeted with
+  a hundred notices for things that happened before it existed. In the same
+  change `OS_KINDS` and `PUSH_KINDS` (`web/src/lib/notifications.ts`) became ONE
+  set: an outcome worth interrupting an open app for is worth waking a closed
+  one for, and the kinds that were asymmetric are the ones that proved it —
+  `import_done` (pushed, never popped), `watch.new_release` and
+  `storage_pruned` (neither). `tools/test_notifications.py` asserts the frame
+  survives the memory ring, that a client which already saw it is not sent it
+  twice, and that the log keeps exactly the newest `_LOG_KEEP` frames. The append and the compaction it may trigger share the module lock: the rewrite is a read-modify-write of the whole file, so a frame appended between its read and its `os.replace` would be rewritten away — silently, and only under concurrent emitters.
 
 - **R206 — a stored audit verdict is trusted for the AUDIO it was written for,
   not for the file's mtime.** Script 6 re-decides nothing it can already prove: a
@@ -3579,8 +3870,9 @@ which file a verdict is later computed on, never the verdict itself:
   detectors can disagree with a provably intact rip, which is why a verified CD
   rip outranks them (R21) and why `AUDIOAUDITOR_OVERRIDE` exists (R25).
 - **A ranked walk is bounded, and a spent one WAITS rather than giving up**
-  (R150/R155): after `soulseek_fallback_candidates` editions have been asked and
-  none answered, the release keeps its place in Background and is searched again
+  (R150/R153/R214): after `soulseek_fallback_candidates` editions have been asked
+  and none answered — or after every edition answered with copies the pipeline
+  REFUSED — the release keeps its place in Background and is searched again
   on the worker's ticks. A release nobody on the network shares therefore stays
   there until the user removes it — the app does not stop trying on its own, and
   it does not pretend the album arrived.
@@ -3596,6 +3888,20 @@ which file a verdict is later computed on, never the verdict itself:
   what asks again. Nothing re-checks a dismissed gap on its own, so an album
   short of a cover stays short of it until you import it again or fill the
   family in; the grading line it earns stays visible on the album page.
+- **The player's equalizer is the BROWSER's biquads, not Equalizer APO's own
+  engine** (R219): a peaking band, a pass and a notch are rendered the way an
+  export's ffmpeg chain renders them, so the frequencies, the gains and the band
+  order agree between the app and an exported copy — but a SHELF's width does
+  not (APO's custom slope reaches ffmpeg as a Q, and a WebAudio shelf is
+  fixed-slope), and any line the parser reports as unsupported (`Include:`,
+  `Convolution:`, an unknown construct) is reported and NOT applied, in playback
+  exactly as in an export.
+- **A notification a client missed survives a restart, but not for ever**
+  (R216): the durable log keeps the newest 400 frames, so a device that was
+  away longer than that (or that is reopened after a long absence) sees the most
+  recent notices and not the whole history — the tray keeps its own newest 50
+  anyway, and push (R203) is the transport for waking a device while it is
+  closed.
 - **A stored language is sticky until someone edits it** (R167). The `LANGUAGE`
   tag is what the transforms are decided from, so a wrong value there (the
   model's answer for one track of a mixed album, MusicBrainz's own

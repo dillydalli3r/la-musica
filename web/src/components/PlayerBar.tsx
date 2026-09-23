@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState, type CSSProperties, type SyntheticEvent } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, type SyntheticEvent } from "react";
 import { createPortal } from "react-dom";
 import { Link } from "react-router-dom";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
@@ -16,8 +16,9 @@ import { AdvisoryMark } from "./Badges";
 import StarRating from "./StarRating";
 import { ratingOf, useRatings, useSetRating } from "../lib/ratings";
 import VolumePct from "./VolumePct";
-import { applyReplayGain, attachAnalyser, resumeAnalyser } from "../lib/analyser";
+import { applyEq, applyReplayGain, attachAnalyser, resumeAnalyser } from "../lib/analyser";
 import NowPlayingView from "./NowPlayingView";
+import ScrollingText from "./ScrollingText";
 import LyricsSidebar from "./LyricsSidebar";
 import TrackDownloadExport from "./TrackDownloadExport";
 import { DetailsDialog } from "./AlbumDetails";
@@ -44,67 +45,6 @@ interface RgResult {
   album: boolean;
 }
 type RgMode = "track" | "album" | "off";
-
-/** One line of text (the song name) that auto-scrolls back and forth ONLY
- * when it genuinely overflows the space it's given. Everything else — the
- * advisory badge, the codec readout — sits outside this window and never
- * moves. */
-function ScrollingText({ text, className }: {
-  text: string;
-  className?: string;
-}) {
-  const wrapRef = useRef<HTMLSpanElement>(null);
-  const textRef = useRef<HTMLSpanElement>(null);
-  const [shift, setShift] = useState(0);
-
-  useEffect(() => {
-    const wrap = wrapRef.current;
-    const el = textRef.current;
-    if (!wrap || !el) return;
-    let raf = 0;
-    const measure = () => {
-      // sub-pixel rounding on scaled displays can report a 1-2px phantom
-      // overflow — only scroll for a real shortfall (2px+)
-      const over = Math.ceil(el.scrollWidth - wrap.clientWidth);
-      setShift(over > 2 ? over + 6 : 0); // +6 = visible padding at the end
-    };
-    const schedule = () => {
-      cancelAnimationFrame(raf);
-      raf = requestAnimationFrame(measure);
-    };
-    measure();
-    // re-measure whenever the available space changes AND when the text's
-    // own width changes (web-font swap, async badge rendering)
-    const ro = new ResizeObserver(schedule);
-    ro.observe(wrap);
-    ro.observe(el);
-    document.fonts?.ready.then(schedule).catch(() => {});
-    return () => {
-      cancelAnimationFrame(raf);
-      ro.disconnect();
-    };
-  }, [text]);
-
-  const dur = Math.max(5, Math.min(24, shift / 12));
-  return (
-    <span ref={wrapRef} className={`block overflow-hidden min-w-0 ${className ?? ""}`}>
-      <span
-        ref={textRef}
-        className={`block whitespace-nowrap ${shift > 0 ? "title-marquee will-change-transform" : ""}`}
-        style={
-          shift > 0
-            ? ({
-                "--title-shift": `-${shift}px`,
-                animation: `title-marquee ${dur}s ease-in-out infinite`,
-              } as CSSProperties)
-            : undefined
-        }
-      >
-        {text}
-      </span>
-    </span>
-  );
-}
 
 /** How close to the start of its own track a `play` event must be to count as
  *  the track STARTING rather than the user resuming or seeking: anything past
@@ -192,13 +132,13 @@ export default function PlayerBar() {
   const [loop, setLoop] = useState(false);
   const [speed, setSpeed] = useState(1);
   const [fullscreen, setFullscreen] = useState(false);
-  // Native browser fullscreen for the fullscreen player: entering the viewer
-  // also fullscreens the browser window (best effort — some embeds deny it);
-  // leaving the viewer restores it.
-  const openFullscreen = () => {
-    setFullscreen(true);
-    document.documentElement.requestFullscreen?.().catch(() => { /* denied */ });
-  };
+  // Opening the viewer NEVER takes the browser's own fullscreen: the pane is
+  // `fixed inset-0` and covers the app by itself, which is what clicking the
+  // album art should mean (the owner's report: it seized the whole screen,
+  // and an embedded host can refuse the request anyway). Real fullscreen is a
+  // separate, explicit toggle inside the viewer's top bar; leaving the viewer
+  // still gives the browser its window back.
+  const openFullscreen = () => setFullscreen(true);
   const closeFullscreen = () => {
     setFullscreen(false);
     if (document.fullscreenElement) document.exitFullscreen().catch(() => { /* gone */ });
@@ -509,6 +449,19 @@ export default function PlayerBar() {
   const rgModeRaw = cfg?.replaygain_mode;
   const rgMode: RgMode = rgModeRaw === "album" || rgModeRaw === "off" ? rgModeRaw : "track";
   const rgPreamp = typeof cfg?.replaygain_preamp_db === "number" ? cfg.replaygain_preamp_db : 0;
+  // The equalizer the config names (`playback_eq_profile`, owned by the
+  // Equalizer page): its bands go onto the SAME WebAudio graph as the gain —
+  // installed once per profile change, and inherited by any element attached
+  // later (lib/analyser.applyEq). The catalogue is the one the Equalizer page
+  // reads and writes, so the curve heard here is the curve edited there, and
+  // an import or an AutoEq fetch lands in both at once.
+  const eqProfileId = String(cfg?.playback_eq_profile ?? "");
+  const { data: eqCatalog } = useQuery({ queryKey: ["exportEq"], queryFn: api.exportEq });
+  useEffect(() => {
+    const rows = [...(eqCatalog?.presets ?? []), ...(eqCatalog?.profiles ?? [])];
+    const row = eqProfileId ? rows.find((p) => p.id === eqProfileId) : undefined;
+    applyEq(row?.filters ?? [], row?.preamp_db ?? 0);
+  }, [eqProfileId, eqCatalog]);
   const rgCache = useRef<Map<string, RgResult>>(new Map());
   // One in-flight request per path: the load (which needs the gain before it
   // plays) and the readout effect below share it, so awaiting a track's gain
@@ -1246,7 +1199,7 @@ export default function PlayerBar() {
         {/* full layout from tablet width up: cover+title / centered seek /
             actions+volume, balanced 1fr-auto-1fr so the seek bar sits dead
             center */}
-        <div className="hidden md:grid h-full grid-cols-[1fr_auto_1fr] items-center gap-3 [container-type:inline-size]">
+        <div className="hidden md:grid h-full grid-cols-[minmax(0,1fr)_auto_minmax(0,1fr)] items-center gap-3 [container-type:inline-size]">
         {/* left flank of the grid: cover + title block — its 1fr track
             balances the right cluster so the seek bar sits dead center.
             The cover is absolutely positioned so its image's INTRINSIC
@@ -1668,7 +1621,7 @@ export default function PlayerBar() {
                 className="flex-1 min-w-0 seek-fat"
                 title="Volume — shared by the whole app"
               />
-              <VolumePct value={vol} onChange={setVol} />
+              <VolumePct value={vol} onChange={setVol} className="text-[10px]" />
               {/* the applied ReplayGain, right where the level is set — the
                   number is the dB the player is adding, the tooltip says where
                   it came from. Absent entirely at unity. */}

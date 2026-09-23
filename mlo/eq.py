@@ -57,6 +57,8 @@ import math
 import os
 import re
 import time
+import urllib.request
+from urllib.parse import quote, unquote
 
 from mlo.paths import app_data_dir, safe_segment, slug_name
 
@@ -798,3 +800,191 @@ def catalog(music_folder):
                  "cannot be read is refused with its line number, never "
                  "imported into a different curve."),
     }
+
+
+# --------------------------------------------------------------------------- #
+# AutoEq — the headphone corrections from github.com/jaakkopasanen/AutoEq
+# --------------------------------------------------------------------------- #
+# AutoEq publishes one directory per measured headphone under `results/`, and
+# each directory holds the SAME correction in the formats this module already
+# reads (`<model> ParametricEQ.txt`, `<model> GraphicEQ.txt`, a `.csv`, a
+# `.png`) — so "search for my headphones" needs two things and no new format:
+#
+#   * an INDEX of what has been measured. That is the project's own
+#     `results/INDEX.md`, one line per measurement
+#     (`- [Sennheiser HD 600](./oratory1990/over-ear/Sennheiser%20HD%20600) by oratory1990`).
+#     It is ~850 KiB, so it is fetched ONCE, kept beside the profiles, and
+#     re-fetched on a long TTL: the measurement set changes by the week, and a
+#     search box that downloads a megabyte per keystroke is unusable.
+#   * ONE profile file, fetched by name. `<model> ParametricEQ.txt` is the
+#     shape AutoEq's own `ParametricEQ` output has, and the parametric form is
+#     what this parser reads natively (a `GraphicEQ` file is the fallback for a
+#     model that has only that). No directory listing is needed for it, which
+#     keeps the GitHub API — and its rate limit — out of the path entirely.
+AUTOEQ_REPO = "jaakkopasanen/AutoEq"
+AUTOEQ_BRANCH = "master"
+AUTOEQ_RAW = (f"https://raw.githubusercontent.com/{AUTOEQ_REPO}/"
+              f"{AUTOEQ_BRANCH}")
+AUTOEQ_INDEX_NAME = "autoeq-index.md"
+AUTOEQ_INDEX_URL = f"{AUTOEQ_RAW}/results/INDEX.md"
+# A month: the index is a file LIST, and the profile itself is always fetched
+# fresh, so a stale copy still names the right directories.
+AUTOEQ_INDEX_TTL_S = 30 * 24 * 3600
+AUTOEQ_INDEX_MAX_BYTES = 4 * 1024 * 1024
+# The forms AutoEq writes, best first. `parametric` is the one APO ships and
+# the one whose filters survive the round trip through this parser unchanged;
+# `graphic` is the band list it is derived FROM, and the fixed-band form is the
+# lowest-resolution one — a perfectly good fallback, never a first choice.
+AUTOEQ_FORMS = (("parametric", "ParametricEQ"), ("graphic", "GraphicEQ"),
+                ("fixed", "FixedBandEQ"))
+_AUTOEQ_LINE_RE = re.compile(
+    r"^\s*-\s*\[(?P<model>.+?)\]\((?P<path>\./[^)]+)\)\s+by\s+(?P<rest>.+?)\s*$")
+
+
+def _http_get(url, timeout=30.0, max_bytes=0):
+    """One GET as this app. GitHub answers 403 to urllib's default agent."""
+    req = urllib.request.Request(url, headers={"User-Agent": "la-musica"})
+    with urllib.request.urlopen(req, timeout=timeout) as resp:
+        return resp.read(max_bytes) if max_bytes else resp.read()
+
+
+def autoeq_index_path(music_folder=None):
+    return os.path.join(app_data_dir(music_folder), AUTOEQ_INDEX_NAME)
+
+
+def autoeq_index(music_folder=None, refresh=False):
+    """AutoEq's index of measured headphones, cached on disk.
+
+    Returns ``{"rows", "fetched_at", "error"}``. A refresh that FAILS falls
+    back to the cached copy: a search box that stops working because GitHub
+    hiccuped is worse than a list a month old, and ``error`` says what
+    happened without hiding that the rows are still usable.
+    """
+    path = autoeq_index_path(music_folder)
+    text, fetched_at = "", 0.0
+    try:
+        with open(path, "rb") as f:
+            text = decode_profile(f.read(AUTOEQ_INDEX_MAX_BYTES))
+        fetched_at = os.path.getmtime(path)
+    except OSError:
+        pass
+    fresh = bool(text) and (time.time() - fetched_at) < AUTOEQ_INDEX_TTL_S
+    error = ""
+    if refresh or not fresh:
+        try:
+            fetched = decode_profile(_http_get(AUTOEQ_INDEX_URL, timeout=60.0,
+                                               max_bytes=AUTOEQ_INDEX_MAX_BYTES))
+            if fetched.strip():
+                text, fetched_at = fetched, time.time()
+                try:
+                    os.makedirs(os.path.dirname(path), exist_ok=True)
+                    with open(path, "w", encoding="utf-8", newline="\n") as f:
+                        f.write(fetched)
+                except OSError:
+                    # A cache that cannot be written is a slower search, not a
+                    # failed one: the rows in hand are already parsed below.
+                    pass
+        except Exception as e:
+            error = f"could not fetch the AutoEq index ({e})"
+    return {"rows": parse_autoeq_index(text), "fetched_at": fetched_at,
+            "error": error}
+
+
+def parse_autoeq_index(text):
+    """INDEX.md as rows: ``{id, model, source, rig}``.
+
+    ``id`` is the results-relative directory (``<source>/<rig>/<model>``), which
+    is what a profile fetch is built from. Lines that do not carry a model and
+    a link are skipped: the file's own prose headings are not measurements."""
+    rows = []
+    for line in str(text or "").splitlines():
+        m = _AUTOEQ_LINE_RE.match(line)
+        if not m:
+            continue
+        model = m.group("model").strip()
+        rel = unquote(m.group("path").strip()).lstrip("./").strip("/")
+        if not model or not rel:
+            continue
+        # "by oratory1990" (no rig stated) and "by crinacle on 711 in-ear".
+        source, _, rig = m.group("rest").strip().partition(" on ")
+        rows.append({"id": rel, "model": model, "source": source.strip(),
+                     "rig": rig.strip()})
+    return rows
+
+
+def autoeq_search(query, rows, limit=40):
+    """The measurements whose model name matches *query*, best first.
+
+    Every word of the query must appear in the model name — "hd 600" is an AND,
+    not an OR — and the ranking is exact name, then name starting with the
+    query, then where the first word lands. That order is what makes typing
+    "hd 600" offer the HD 600 before the twenty models that merely contain
+    those characters later on.
+    """
+    words = [w for w in re.split(r"[^0-9a-z+]+", str(query or "").lower()) if w]
+    if not words:
+        return []
+    joined = " ".join(words)
+    scored = []
+    for row in rows:
+        low = re.sub(r"\s+", " ", row["model"].lower()).strip()
+        if not all(w in low for w in words):
+            continue
+        at = low.find(words[0])
+        if low == joined:
+            rank = 0
+        elif low.startswith(joined):
+            rank = 1
+        elif at <= 3:
+            rank = 2
+        else:
+            rank = 3
+        scored.append(((rank, at, len(low), low), row))
+    scored.sort(key=lambda pair: pair[0])
+    return [dict(row) for _, row in scored[:max(1, int(limit or 40))]]
+
+
+def _autoeq_dir(eq_id):
+    """The results-relative directory an id names, or (\"\", why not)."""
+    raw = unquote(str(eq_id or "").strip()).strip("/")
+    parts = raw.split("/")
+    if (not raw or "://" in raw or ".." in parts
+            or not 2 <= len(parts) <= 4 or not all(p.strip() for p in parts)):
+        return "", f"invalid AutoEq id: {eq_id!r}"
+    return raw, ""
+
+
+def autoeq_import(music_folder, eq_id, form="parametric"):
+    """Fetch ONE AutoEq correction and store it as a profile; returns its row.
+
+    The requested form is tried first and the others follow, so a model that
+    only has a `GraphicEQ` file still imports (the parser converts that band
+    list to peaking filters exactly as AutoEq's own parametric output does).
+    The stored name is the model's, so re-importing a model the user already
+    has REPLACES it — which is what asking for it again means.
+    """
+    rel, error = _autoeq_dir(eq_id)
+    if error:
+        raise ValueError(error)
+    model = unquote(rel.split("/")[-1])
+    order = [f for f in AUTOEQ_FORMS if f[0] == str(form or "").strip().lower()]
+    order += [f for f in AUTOEQ_FORMS if f not in order]
+    tried = []
+    for _, suffix in order:
+        name = f"{model} {suffix}.txt"
+        url = f"{AUTOEQ_RAW}/results/{quote(f'{rel}/{name}', safe='/')}"
+        try:
+            text = decode_profile(_http_get(
+                url, timeout=30.0, max_bytes=MAX_PROFILE_BYTES * 2))
+        except Exception as e:
+            tried.append(f"{name}: {e}")
+            continue
+        if not text.strip():
+            tried.append(f"{name}: empty")
+            continue
+        try:
+            return import_profile(music_folder, model, text)
+        except ValueError as e:
+            raise ValueError(f"{model}: {e}")
+    raise ValueError(f"no AutoEq profile could be fetched for {model} "
+                     f"({'; '.join(tried[:3])})")

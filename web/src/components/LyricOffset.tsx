@@ -86,7 +86,13 @@ export default function LyricOffset({ path, ms, onChange, onSaved, className }: 
     }
   };
 
-  const btn = "p-0.5 rounded-md text-zinc-500 hover:text-white hover:bg-raise disabled:opacity-30 disabled:hover:bg-transparent transition-colors";
+  // The ink is the SURFACE's, not a fixed grey: this control is rendered on
+  // three of them — the sidebar header (a dark panel), the fullscreen
+  // player's options popover, and the fullscreen player ITSELF, straight over
+  // the artwork, where a zinc-500 glyph is the grey-on-grey failure of R52c.
+  // `text-current` inside the caller's own ink class is what makes one control
+  // read right on all three.
+  const btn = "p-0.5 rounded-md text-current opacity-70 hover:opacity-100 hover:bg-white/10 disabled:opacity-30 disabled:hover:bg-transparent transition-colors";
   const dirty = ms !== 0;
 
   return (
@@ -101,7 +107,7 @@ export default function LyricOffset({ path, ms, onChange, onSaved, className }: 
         <Minus className="h-3 w-3" />
       </button>
       <span
-        className={`w-10 text-right text-[10px] font-mono tabular-nums ${dirty ? "text-accent" : "text-zinc-500"}`}
+        className={`w-10 text-right text-[10px] font-mono tabular-nums ${dirty ? "text-accent" : "text-current opacity-80"}`}
         title={
           error
             ? `Could not save the offset: ${error}`

@@ -1008,12 +1008,25 @@ _NOT_FOUND_HINTS = (
     "no candidate folder", "nothing found", "nothing usable", "no usable",
     "nothing was found", "no verified match", "not on soulseek", "no results",
 )
+# A search that FOUND copies and had every one of them refused. The distinction
+# matters because the two are different facts with different ends: "not found"
+# is the network having nothing (the not-found budget's own case, and the one a
+# background walk keeps asking about), while "rejected" is the network having
+# copies this pipeline would not accept — every candidate in the batch was
+# refused on grading, on the `.log` a CD folder must carry, or on verification.
+# It is NOT a transient failure: retrying the same folder with the same settings
+# refuses it again, so classifying it as transient is what left a release-group
+# walk re-asking edition 1 for ever instead of moving on to the next ranked
+# edition (see `_settle_attempt`, and R151/R153).
+_REJECTED_HINTS = ("every candidate was rejected",)
 
 
 def outcome_of(error):
-    """Classify why an acquisition did not land: ``"not_found"`` or
-    ``"transient"`` (see the policy above)."""
+    """Classify why an acquisition did not land: ``"not_found"``,
+    ``"rejected"`` or ``"transient"`` (see the policy above)."""
     low = str(error or "").lower()
+    if any(h in low for h in _REJECTED_HINTS):
+        return "rejected"
     return "not_found" if any(h in low for h in _NOT_FOUND_HINTS) else "transient"
 
 

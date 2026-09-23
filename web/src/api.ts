@@ -602,6 +602,20 @@ export interface ExportZip {
   url: string;
 }
 
+/** One biquad band of an equalizer profile — the shape mlo.eq's parser emits
+ *  (`type`/`fc`/`gain`/`q`/`on`) and the one the player's WebAudio chain and
+ *  the editor both build. `type` is an Equalizer APO type (PK, LS, HS, LSC,
+ *  HSC, LP, HP, BP, NO); `fc` is Hz, `gain` dB, `q` the filter's width. */
+export interface EqBand {
+  type: string;
+  fc: number;
+  gain: number;
+  q: number;
+  /** An OFF band stays in the list — it is what the file said — and is simply
+   *  not applied. */
+  on: boolean;
+}
+
 /** One equalizer profile the server can bake into an export
  *  (`GET /api/export/eq`): the built-in presets, and the profiles the user
  *  imported from Equalizer APO / Peace text. `unsupported` names lines the
@@ -614,12 +628,34 @@ export interface ExportEqProfile {
   id: string;
   label: string;
   preamp_db: number;
-  filters: Record<string, unknown>[];
+  filters: EqBand[];
   imported_at?: string;
   unsupported?: string[];
   errors?: string[];
   empty?: boolean;
   notes?: string[];
+}
+
+/** One AutoEq measurement (`GET /api/eq/autoeq/search`): a headphone the
+ *  AutoEq project has equalized, from one measurement source. */
+export interface EqAutoEqRow {
+  /** The results-relative directory (`<source>/<rig>/<model>`) — pass it back
+   *  to eqAutoEqImport() verbatim; it is not a URL. */
+  id: string;
+  model: string;
+  /** Who measured it (oratory1990, crinacle, Rtings…) and on what rig. */
+  source: string;
+  rig: string;
+}
+
+export interface EqAutoEqSearch {
+  rows: EqAutoEqRow[];
+  /** How many measurements the cached index holds (0 = nothing fetched yet). */
+  models: number;
+  /** Unix seconds the cached index was written (0 = never). */
+  fetched_at: number;
+  /** Why the index could not be refreshed, or "" — the rows are still usable. */
+  error: string;
 }
 
 export interface ExportEq {
@@ -2928,6 +2964,20 @@ export const api = {
   exportEqDelete: (id: string) =>
     json<{ ok: boolean; id: string }>(`${API}/export/eq/${encodeURIComponent(id)}`, {
       method: "DELETE",
+    }),
+  /** Search AutoEq's measured headphones by name (`GET /api/eq/autoeq/search`).
+   *  The server keeps the project's own index cached for a month; `refresh`
+   *  re-fetches it — the button for a headphone the list does not have yet. */
+  eqAutoEqSearch: (q: string, refresh = false) =>
+    json<EqAutoEqSearch>(
+      `${API}/eq/autoeq/search?q=${encodeURIComponent(q)}${refresh ? "&refresh=1" : ""}`),
+  /** Fetch one AutoEq correction and store it as a profile, returning the
+   *  stored row. `id` is a search row's own id. */
+  eqAutoEqImport: (id: string, form = "parametric") =>
+    json<ExportEqProfile>(`${API}/eq/autoeq/import`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ id, form }),
     }),
   /** The saved export configurations, newest first. Each row carries the state
    *  of the equalizer profile it names, so a config whose profile has been

@@ -275,6 +275,20 @@ def main():
 
     from mlo import layout, paths, remux, videodisc
     from server import events as events_mod
+
+def drain_events():
+    """Forget every frame so far, so a count is about THIS outcome.
+
+    BOTH stores go: `events.recent()` answers from the memory ring AND the
+    durable log beside the app state (spec R216) — the log outlives the
+    process, so clearing only the ring would count a previous run's frames (and
+    an earlier section of this one)."""
+    with events_mod._lock:
+        events_mod._events.clear()
+    try:
+        os.remove(events_mod._event_log_path())
+    except OSError:
+        pass
     from server import import_autonomy
 
     # ================= 1. DVD-Video: the 3-part title wins =================
@@ -367,7 +381,7 @@ def main():
               "within 5%" in reason_a, reason_a)
         check("...naming BOTH durations",
               "5:00" in reason_a and "4:54" in reason_a, reason_a)
-        events_mod._events.clear()
+        drain_events()
         stats_a, lines_a = captured_logs(remux.run_remux_videos, cfg_for(amb))
 
     check("nothing was converted", stats_a["converted"] == 0, stats_a)
@@ -406,7 +420,7 @@ def main():
           and row.get("wizard_link") == mine[0]["link"], row.get("action_link"))
 
     with Patched(fake, exe, probe):
-        events_mod._events.clear()
+        drain_events()
         remux.run_remux_videos(cfg_for(amb))
     check("re-running the same refusal does not repeat the notification",
           not [e for e in events_mod.recent(0, limit=10 ** 6)
@@ -532,7 +546,7 @@ def main():
     check("the pick refuses it for the reason that matters",
           ititle is None and "mount" in ireason and ".iso" in ireason, ireason)
     with Patched(fake, exe, probe):
-        events_mod._events.clear()
+        drain_events()
         stats_i, lines_i = captured_logs(remux.run_remux_videos, cfg_for(iso_dir))
     check("the .iso is not remuxed and not touched",
           stats_i["converted"] == 0 and os.path.isfile(iso), stats_i)
@@ -576,7 +590,7 @@ def main():
     fake.declare(avi, 700, video="mpeg4", audio=("mp3",))
     with Patched(fake, exe, probe):
         fake.reset()
-        events_mod._events.clear()
+        drain_events()
         stats_d, lines_d = captured_logs(remux.run_remux_videos, cfg_for(rip))
     check("the disc's own streams are the feature, not the rip beside them",
           stats_d["converted"] == 1 and os.path.isfile(os.path.join(rip, "A Film.mkv")),
@@ -660,7 +674,7 @@ def main():
     ats2 = os.path.join(ask_dir, "VIDEO_TS")
     dvd_set(ats2, 1, 1, 10)
     cfg_ask = cfg_for(ask_dir)
-    events_mod._events.clear()
+    drain_events()
     entry = import_autonomy.raise_video_prompt(
         ask_dir, cfg_ask, candidates=["VTS_01 (1 part, 10s)"], reason="the app will not choose")
     check("the question is stored under the album",

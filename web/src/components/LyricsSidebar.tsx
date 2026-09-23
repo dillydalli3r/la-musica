@@ -235,7 +235,7 @@ export default function LyricsSidebar({
       </div>
       <div
         ref={scrollRef}
-        className="relative flex-1 min-h-0 overflow-y-auto overscroll-contain px-5 py-4 no-scrollbar"
+        className="relative flex-1 min-h-0 overflow-y-auto overscroll-contain px-5 py-4 no-scrollbar lyr-fade"
         // CSS zoom on the pane, exactly like the fullscreen player's: the
         // shared scroller measures with offsetTop/offsetHeight (see
         // lib/lyrScroll), which are layout units and therefore blind to it, so
@@ -276,7 +276,6 @@ export default function LyricsSidebar({
                       }
                     : undefined
                 }
-                title={seekable ? "Click to seek" : undefined}
               >
                 <div
                   ref={(el) => {

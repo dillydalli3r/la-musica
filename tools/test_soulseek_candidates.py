@@ -396,6 +396,94 @@ finally:
 
 
 # --------------------------------------------------------------------------- #
+# _search_queries: the progress counts DISTINCT peers/files, one peer is one
+# peer however many templates saw it
+# --------------------------------------------------------------------------- #
+# The templates of one album overlap by design (the catalog number, the barcode
+# and the title all name the same release) and slskd serves ONE response list
+# PER search, so SUMMING their counters counted the same peer once per template
+# — a row reporting 15 responses for 3 peers. What "peers" and "files" mean is
+# distinct usernames, and distinct user+file, across everything merged.
+print("== one peer seen by two templates is still one peer ==")
+SHARED_FILES = [{"username": "twin", "file": "Music/Album/01 - T.flac"},
+                {"username": "twin", "file": "Music/Album/02 - T.flac"}]
+# Each search's own counters say 1 peer / 2 files: summed they would say 2/4.
+TWIN_DONE = {"state": "Completed", "isComplete": True, "responses": SHARED_FILES,
+             "responseCount": 1, "fileCount": 2}
+_twin_clock = FakeClock()
+_real_time_module = soulseek_auto.time
+soulseek_auto.time = _twin_clock
+_twin_search = soulseek_auto._job["search"]
+try:
+    twin = MultiSearchSlsk({"catalognumber": [TWIN_DONE], "barcode": [TWIN_DONE]})
+    results, errors, skipped = soulseek_auto._search_queries(
+        twin, ["catalognumber", "barcode"], wait_s=5)
+    assert [q for q, _r in results] == ["catalognumber", "barcode"], results
+    assert errors == [] and skipped == 0, (errors, skipped)
+    progress = soulseek_auto._job["search"]
+    assert progress["responses"] == 1, progress   # ONE peer, seen twice
+    assert progress["files"] == 2, progress       # its TWO files, not four
+    assert progress["state"] == "Completed", progress
+finally:
+    soulseek_auto._job["search"] = _twin_search
+    soulseek_auto.time = _real_time_module
+print("  ok two templates, one peer: one peer and its two files")
+
+
+# --------------------------------------------------------------------------- #
+# soulseek.search_results: the counters describe the list they travel with
+# --------------------------------------------------------------------------- #
+# slskd's own `responseCount`/`fileCount` only settle once a search has ENDED,
+# so a page that draws them beside a file list served from `/responses` shows
+# "0 files from 0 peers" over a list of hits — and a search stopped early by a
+# response limit never settles at all. The numbers the UI is about to draw come
+# from the response list itself: one response row is one peer, one entry in
+# `responses` is one file.
+print("== the counters describe the responses they travel with ==")
+_UNSETTLED = {"state": "InProgress", "isComplete": False,
+              "responseCount": 0, "fileCount": 0}   # the state has not settled
+_SERVED = [{"username": "peerA", "hasFreeUploadSlot": True, "uploadSpeed": 1_000_000,
+            "queueLength": 0,
+            "files": [{"filename": "Music/A/01 - T.flac", "size": 10, "length": 200,
+                       "extension": "flac"},
+                      {"filename": "Music/A/02 - T.flac", "size": 20, "length": 210,
+                       "extension": "flac"}]},
+           {"username": "peerB", "hasFreeUploadSlot": False, "uploadSpeed": 0,
+            "queueLength": 3,
+            "files": [{"filename": "Music/A/01 - T.flac", "size": 10, "length": 200,
+                       "extension": "flac"}]}]
+_real_request = soulseek._request
+
+
+def _served_request(method, path, **kw):
+    return _SERVED if str(path).endswith("/responses") else dict(_UNSETTLED)
+
+
+try:
+    soulseek._request = _served_request
+    got = soulseek.search_results("sid-x")
+    assert [f["file"] for f in got["responses"]] == \
+        ["Music/A/01 - T.flac", "Music/A/02 - T.flac", "Music/A/01 - T.flac"], got
+    assert got["responseCount"] == 2, got     # two PEERS, not one per response row
+    assert got["fileCount"] == 3, got         # three entries in the list served
+    assert got["state"] == "InProgress" and got["isComplete"] is False, got
+    # ...and with nothing served yet the state's own counters are the fallback:
+    # the window where slskd has counted responses it will not hand over.
+    def _unserved_request(method, path, **kw):
+        if str(path).endswith("/responses"):
+            return []
+        return {"state": "InProgress", "isComplete": False,
+                "responseCount": 4, "fileCount": 7}
+    soulseek._request = _unserved_request
+    not_yet = soulseek.search_results("sid-x")
+    assert not_yet["responses"] == [], not_yet
+    assert (not_yet["responseCount"], not_yet["fileCount"]) == (4, 7), not_yet
+finally:
+    soulseek._request = _real_request
+print("  ok 2 peers / 3 files for the list they describe")
+
+
+# --------------------------------------------------------------------------- #
 # _normalize_browse: slskd 0.26's object shape -> full remote paths
 # --------------------------------------------------------------------------- #
 BROWSE_PAYLOAD = {"directories": [

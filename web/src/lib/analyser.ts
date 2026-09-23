@@ -1,4 +1,4 @@
-/** Shared WebAudio graph for playback: ReplayGain loudness + the visualizer.
+/** Shared WebAudio graph for playback: ReplayGain loudness + the equalizer + the visualizer.
  *
  * A single AudioContext holds one MediaElementSource per media element
  * (<audio> AND the music-video <video> — a media element can only ever be
@@ -12,9 +12,34 @@
  * instead of ever risking playback itself.
  */
 
+import { buildEqChain, type EqChain } from "./eqNodes";
+import type { EqBand } from "../api";
+
 let ctx: AudioContext | null = null;
 let current: AnalyserNode | null = null;
-let broken = false;
+// A WebAudio failure is retried rather than latched for ever: a browser that
+// refuses to build a context for a moment (too many contexts across tabs, a
+// policy hiccup on a page that is not focused yet) used to cost the meters and
+// the equalizer for the whole session. The cool-down is what keeps a retry
+// from becoming one attempt per animation frame.
+let brokenUntil = 0;
+const BROKEN_RETRY_MS = 5000;
+
+/** Every element carrying a graph, oldest attach first. The `<audio>` pair and
+ *  the video popout each own one, and only one of them is making sound at a
+ *  time — but `current` is the LAST attach, which is not always the one
+ *  PLAYING (a gapless handover attaches the next element early, a popout
+ *  attaches the <video> the <audio> never stops feeding). Reading the wrong
+ *  element returns an all-zero spectrum, so both meters sat on their synthetic
+ *  fallback until something re-attached. The registry is what lets the read
+ *  follow the sound instead of the attach order. */
+const graphs = new Set<HTMLMediaElement>();
+
+/** The equalizer profile the player is applying (see lib/eqNodes.ts), or null
+ *  while none is installed. Module state on purpose: it is what an element
+ *  attached later has to inherit, so a gapless handover does not drop the
+ *  curve mid-album. */
+let eqProfile: { filters: EqBand[]; preampDb: number } | null = null;
 
 /** Decibel window of every analyser we build, in dBFS. getByteFrequencyData
  *  squeezes THIS window into 0..255, so the mapping that turns bytes back
@@ -28,7 +53,7 @@ let broken = false;
 export const MIN_DB = -90;
 export const MAX_DB = -10;
 
-type Chain = { analyser: AnalyserNode; gain: GainNode };
+type Chain = { analyser: AnalyserNode; gain: GainNode; eq?: EqChain | null };
 
 /** The graph is stored ON the element. A media element can be attached to
  *  exactly one MediaElementSourceNode ever, so keeping the reference here
@@ -44,18 +69,18 @@ type Attached = HTMLMediaElement & {
 
 function ensureCtx(): AudioContext | null {
   if (ctx) return ctx;
-  if (broken) return null;
+  if (Date.now() < brokenUntil) return null;
   try {
     const AC =
       window.AudioContext ||
       (window as unknown as { webkitAudioContext?: typeof AudioContext }).webkitAudioContext;
     if (!AC) {
-      broken = true;
+      brokenUntil = Date.now() + BROKEN_RETRY_MS;
       return null;
     }
     ctx = new AC();
   } catch {
-    broken = true;
+    brokenUntil = Date.now() + BROKEN_RETRY_MS;
     ctx = null;
   }
   return ctx;
@@ -69,6 +94,7 @@ function ensureCtx(): AudioContext | null {
 export function attachAnalyser(el: HTMLMediaElement): AnalyserNode | null {
   // Widening cast to the element tag: optional property, we are its only writer.
   const tagged: Attached = el;
+  graphs.add(el);
   const have = tagged.__mloAnalyser;
   if (have) {
     // Already attached — by this module, by a hot reload, or by the other
@@ -106,7 +132,12 @@ export function attachAnalyser(el: HTMLMediaElement): AnalyserNode | null {
     source.connect(gain);
     gain.connect(analyser);
     analyser.connect(c.destination);
-    tagged.__mloAnalyser = { ctx: c, chain: { analyser, gain } };
+    const chain: Chain = { analyser, gain, eq: null };
+    tagged.__mloAnalyser = { ctx: c, chain };
+    // An element attached AFTER a profile was installed (the gapless pair's
+    // other half, a video popout) must start with the same curve the playing
+    // element has, or a handover would drop the equalizer mid-album.
+    if (eqProfile) installEq(chain, eqProfile);
   } catch {
     // This element can't be metered (already attached by a graph we can't
     // see, or unplayable media). Keep whatever analyser is active and keep
@@ -156,12 +187,86 @@ export function applyReplayGain(el: HTMLMediaElement, db?: number | null,
 
 /** Resume the shared context. Safe to call from anywhere (a suspended
  * context routes audio into silence); a no-op before the context exists —
- * attachAnalyser() resumes the one it creates. */
+ * attachAnalyser() resumes the one it creates.
+ *
+ * WebKit parks a context as "interrupted" rather than "suspended" (a phone
+ * call, another app taking the audio session) and only `resume()` brings it
+ * back, so both states are asked about. */
 export function resumeAnalyser() {
-  if (ctx && ctx.state === "suspended") ctx.resume().catch(() => {});
+  if (ctx && (ctx.state === "suspended" || (ctx.state as string) === "interrupted")) {
+    ctx.resume().catch(() => {});
+  }
 }
 
-/** The analyser to read now, or null when WebAudio isn't available. */
+/** Re-route one chain as gain → [preamp, bands…] → analyser, tearing the
+ *  previous equalizer out first. The analyser stays LAST so the meters and the
+ *  ambience read the equalized signal — the curve is part of what is playing.
+ *  Never throws: an EQ that cannot be built leaves plain playback alone. */
+function installEq(chain: Chain, profile: { filters: EqBand[]; preampDb: number }) {
+  try {
+    chain.gain.disconnect();
+    for (const node of chain.eq?.nodes ?? []) node.disconnect();
+    chain.eq = null;
+    const built = buildEqChain(chain.analyser.context, profile.filters, profile.preampDb);
+    if (!built) {
+      chain.gain.connect(chain.analyser);
+      return;
+    }
+    chain.gain.connect(built.head);
+    built.tail.connect(chain.analyser);
+    chain.eq = built;
+  } catch {
+    /* A profile that cannot be built must never stop the music — and the
+       tear-down above already unplugged the gain, while the element's audio
+       reaches the speakers through this graph only, so put the direct edge
+       back instead of leaving silence. Guarded in turn: the context itself may
+       be what failed. */
+    try { chain.gain.connect(chain.analyser); } catch { /* nothing left to connect */ }
+  }
+}
+
+/** Install the playback equalizer on every attached element, and on the ones
+ *  attached later. Called with the profile the app's config names — an empty
+ *  band list (or a 0 dB preamp) is "no equalizer" and leaves the graph as it
+ *  was. */
+export function applyEq(filters: EqBand[], preampDb = 0) {
+  eqProfile = { filters: filters ?? [], preampDb: Number(preampDb) || 0 };
+  for (const el of graphs) {
+    const tag = el as Attached;
+    if (!tag.__mloAnalyser) continue;
+    installEq(tag.__mloAnalyser.chain, eqProfile);
+  }
+}
+
+/** The profile currently installed, for a UI that wants to show it. */
+export function activeEq(): { filters: EqBand[]; preampDb: number } | null {
+  return eqProfile;
+}
+
+/** The analyser to read now, or null when WebAudio isn't available.
+ *
+ *  Whichever element is PLAYING answers, not whichever attached last: with a
+ *  graph per element, the last attach is regularly the idle half of the
+ *  gapless pair, and its spectrum is zeros — the strip and the ambience would
+ *  both fall back to their synthetic animation while real audio was playing.
+ *  No element playing (paused, idle) keeps the last attach, which is the one
+ *  the user just heard and the one a resume re-attaches anyway. */
 export function activeAnalyser(): AnalyserNode | null {
+  // A context the browser suspended on its own (tab in the background, iOS
+  // inactivity, a phone call) routes audio into silence AND reads as zeros,
+  // which is the other way a working meter looks dead — and asking has to
+  // happen BEFORE the early return below, because the element that is still
+  // playing is exactly the case that needs it. The resume is a no-op unless
+  // the context really is suspended; a browser that wants a gesture refuses.
+  resumeAnalyser();
+  for (const el of graphs) {
+    const tag = el as Attached;
+    // `isConnected` keeps a removed element (a video popout that was unmounted
+    // mid-track) out of the scan: its `paused` flag can stay false after it
+    // leaves the document, and it would then answer for the app for ever.
+    if (tag.__mloAnalyser && el.isConnected && !el.paused && !el.ended) {
+      return tag.__mloAnalyser.chain.analyser;
+    }
+  }
   return current;
 }

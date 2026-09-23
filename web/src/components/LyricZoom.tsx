@@ -48,7 +48,13 @@ export default function LyricZoom({ pct, onChange, className }: {
     if (next !== Math.round(pct)) onChange(next);
   };
 
-  const btn = "p-0.5 rounded-md text-zinc-500 hover:text-white hover:bg-raise disabled:opacity-30 disabled:hover:bg-transparent transition-colors";
+  // The ink is the SURFACE's, not a fixed grey: this control is rendered on
+  // three of them — the sidebar header (a dark panel), the fullscreen
+  // player's options popover, and the fullscreen player ITSELF, straight over
+  // the artwork, where a zinc-500 glyph is the grey-on-grey failure of R52c.
+  // `text-current` inside the caller's own ink class is what makes one control
+  // read right on all three.
+  const btn = "p-0.5 rounded-md text-current opacity-70 hover:opacity-100 hover:bg-white/10 disabled:opacity-30 disabled:hover:bg-transparent transition-colors";
 
   return (
     <span className={`inline-flex items-center gap-0.5 shrink-0 ${className ?? ""}`}>
@@ -66,7 +72,7 @@ export default function LyricZoom({ pct, onChange, className }: {
       </button>
       <span className="relative inline-flex items-center shrink-0">
         <input
-          className="w-10 bg-transparent border border-transparent hover:border-border focus:border-accent rounded px-1 pr-3.5 text-right text-[10px] font-mono tabular-nums text-zinc-500 hover:text-zinc-300 focus:text-zinc-200 outline-none"
+          className="w-10 bg-transparent border border-transparent hover:border-border focus:border-accent rounded px-1 pr-3.5 text-right text-[10px] font-mono tabular-nums text-current opacity-80 hover:opacity-100 focus:opacity-100 outline-none"
           inputMode="numeric"
           value={text}
           title={`Lyrics size — type a percentage (${LYRIC_ZOOM_MIN}–${LYRIC_ZOOM_MAX})`}
@@ -82,7 +88,7 @@ export default function LyricZoom({ pct, onChange, className }: {
             }
           }}
         />
-        <span className="absolute right-1 text-[9px] text-zinc-600 pointer-events-none">%</span>
+        <span className="absolute right-1 text-[9px] text-current opacity-60 pointer-events-none">%</span>
       </span>
       <button
         className={btn}

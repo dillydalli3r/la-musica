@@ -51,8 +51,15 @@ input[type="range"]::-webkit-slider-thumb {
   border-radius: 9999px;
   background: rgb(var(--accent));
   border: none;
+  /* The outer ring is a box-shadow ON the thumb, so it is drawn from the
+     thumb's own transform. `transition: transform .1s` therefore animated the
+     RING against a native position that never animates: while the pointer
+     moved per pixel the dot jumped and the ring scaled after it, which is the
+     reported "the dot and the outer ring move at different times" (worst on a
+     drag, where hover flickers and the scale is mid-transition for most of the
+     gesture). A thumb's geometry follows the pointer and nothing else, so its
+     hover state changes instantly too — dot and ring are one shape. */
   box-shadow: 0 0 0 3px rgb(var(--accent) / 0.15);
-  transition: transform 0.1s ease;
 }
 input[type="range"]::-webkit-slider-thumb:hover {
   transform: scale(1.25);
@@ -627,22 +634,29 @@ table td {
    across the lyrics and one under the title). Two things carry the legibility
    instead. The field itself is darkened for every cover by the player's
    full-bleed wash (NowPlayingView), and the ink — always the light table now —
-   carries its own shadow: a TIGHT near-opaque core that outlines the glyph
-   against whatever it crosses, plus a WIDE soft halo that lifts the whole line
-   out of the busier mid-tones of the colour field. Core-only was the old
-   0.55/0.35 pair and it lost faded lines in the drift; halo-only smears the
-   glyph. Both stops are near-opaque on purpose: this shadow is the only local
-   contrast the text has left. */
-/* The same two stops, mirrored for the DARK ink a bright cover asks for
+   carries its own shadow.
+   The shadow is ALL halo, no core: a stack of wide, low-opacity offsets that
+   sink the line into the field. The old shape paired a tight 3px blur at 0.92
+   with the halo, and on a bright field (a red cover reads bright to the eye,
+   though WCAG luminance calls it dark, so the light ink table is picked) that
+   near-opaque ring merged between glyphs into a slab of uniform dark pixels
+   under the line — the owner's "block … beneath it". Each layer here is at
+   most 0.42 and none of them is tight, so what crosses a bright cover is
+   depth, not a plate. Legibility comes from the wash and from the ink's own
+   contrast; the shadow only has to stop a glyph from dissolving into a busy
+   mid-tone. */
+/* The same stack mirrored for the DARK ink a bright cover asks for
    (the polarity is decided once, in `npInk`): a light halo is what separates a
    near-black glyph from a bright field, exactly as the dark one does for white
-   glyphs. Both stops are the ink's opposite, so a cover that flips the table
+   glyphs. Both stacks are the ink's opposite, so a cover that flips the table
    flips its shadow with it. */
 .np-shade-light {
-  text-shadow: 0 1px 3px rgb(255 255 255 / 0.75), 0 2px 14px rgb(255 255 255 / 0.45);
+  text-shadow: 0 1px 2px rgb(255 255 255 / 0.35), 0 2px 6px rgb(255 255 255 / 0.32),
+    0 4px 16px rgb(255 255 255 / 0.3), 0 8px 30px rgb(255 255 255 / 0.22);
 }
 .np-shade {
-  text-shadow: 0 1px 3px rgb(0 0 0 / 0.92), 0 2px 14px rgb(0 0 0 / 0.62);
+  text-shadow: 0 1px 2px rgb(0 0 0 / 0.42), 0 2px 6px rgb(0 0 0 / 0.4),
+    0 4px 16px rgb(0 0 0 / 0.38), 0 8px 30px rgb(0 0 0 / 0.3);
 }
 /* ------------------------------------------------------------------ */
 /* The player's frosted menus                                          */
@@ -704,6 +718,22 @@ table td {
 }
 .no-scrollbar::-webkit-scrollbar {
   display: none;
+}
+
+/* A lyrics scroller fades into its own edges. A line sliced through its middle
+   by the pane's edge is the one place a reading surface looks BROKEN rather
+   than alive — the row above the anchor is meant to be readable, and the pane's
+   top (under the header) and bottom (where the visualizer strip starts) cut
+   whatever sits there in half. A MASK, not an overlay: nothing is painted, so
+   the reading surface still has no panel, tint or gradient of its own (R52c) —
+   the text simply dissolves over the last 26 px. The first and last lines are
+   never affected: the scroller's own pads (LYRICS_PAD_TOP/BOTTOM) hold them a
+   third of the pane away from either edge. */
+.lyr-fade {
+  -webkit-mask-image: linear-gradient(to bottom, transparent 0, #000 26px,
+    #000 calc(100% - 26px), transparent 100%);
+  mask-image: linear-gradient(to bottom, transparent 0, #000 26px,
+    #000 calc(100% - 26px), transparent 100%);
 }
 
 /* ------------------------------------------------------------------ */

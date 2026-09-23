@@ -387,14 +387,20 @@ export default function LibraryPage() {
   //
   // A folder's stars and a file's stars are different facts (the store keeps
   // its own scope per path), so a row of either kind answers for what it IS:
-  // a track is rated when its own file has stars, an album when its folder
-  // rating is set OR anything inside it is rated, and an artist when any of
-  // its albums is. That is the sentence `RATED_NOTE` prints in the menu, and
-  // it is defined once here so the three tables cannot each mean something
-  // else by the same word.
+  // a track is rated when its own file has stars, and an ALBUM only when the
+  // user's verdict on the album is in (its folder rating) AND every track in
+  // it carries one of its own — an album is finished, or it is not. One
+  // starred track out of twelve used to mark the whole album done, which is
+  // the reported "detecting … not just one": the facet's question is "what
+  // have I not rated yet", and a half-rated album is exactly that. An artist
+  // counts as rated when any of its albums does. That is the sentence
+  // `RATED_NOTE` prints in the menu, and it is defined once here so the three
+  // tables cannot each mean something else by the same word.
   const ratedTrack = (t: { path: string }) => ratingOf(ratings, t.path) > 0;
-  const ratedAlbum = (al: Album) =>
-    ratingOf(albumRatings, al.path) > 0 || (al.tracks ?? []).some((t) => ratedTrack(t));
+  const ratedAlbum = (al: Album) => {
+    const tracks = al.tracks ?? [];
+    return ratingOf(albumRatings, al.path) > 0 && tracks.every((t) => ratedTrack(t));
+  };
   const ratingOK = (rated: boolean) =>
     ratingFilter === "any" ? true : ratingFilter === "rated" ? rated : !rated;
 

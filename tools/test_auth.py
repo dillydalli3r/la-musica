@@ -151,7 +151,12 @@ check("header wins over cookie", auth_mod.token_from_request(
 check("no token at all", auth_mod.token_from_request(_Req()) == "")
 
 print("== events ==")
-events_mod._events.clear()
+with events_mod._lock:
+    events_mod._events.clear()
+try:  # the durable log too: recent() reads both (spec R216)
+    os.remove(events_mod._event_log_path())
+except OSError:
+    pass
 payload = events_mod.emit("wish_found", "Wish found: X", "body", {"wish_id": 1},
                           config={"notify_wish_found": True})
 check("emit returns the frame", payload.get("event") == "wish_found" and payload.get("seq"))
@@ -162,7 +167,12 @@ check("a switched-off kind is not published",
       sum(1 for e in events_mod.recent(0) if e.get("title") == "Off") == 0)
 for i in range(events_mod._MAX_EVENTS + 20):
     events_mod.emit("download_done", f"n{i}", config={"notify_download_done": True})
-check("the ring stays bounded", len(events_mod.recent(0, limit=10 ** 6)) <= events_mod._MAX_EVENTS)
+# The RING is what has to stay bounded in memory; `recent()` answers from the
+# ring AND the durable log (spec R216), so its own bound is asserted below on
+# the log's own cap rather than by reading the union.
+check("the ring stays bounded", len(events_mod._events) <= events_mod._MAX_EVENTS)
+check("...and the durable log keeps its own bound",
+      len(events_mod._log_frames(0)) <= events_mod._LOG_KEEP)
 check("a bad config never silences the event",
       events_mod.emit("download_done", "boom", config=None).get("event") == "download_done")
 

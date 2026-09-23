@@ -1413,11 +1413,21 @@ def search_results(search_id, cfg=None):
                 "queue": queue,
             })
     st_dict = state if isinstance(state, dict) else {}
+    # The counters describe the list ABOVE them, and they are computed from it
+    # rather than read off the search's state: slskd's own `responseCount` /
+    # `fileCount` only settle once a search has ENDED, so a page that renders
+    # them beside a file list which comes from `/responses` shows "found 0 files
+    # from 0 peers" over a list of hits (the reported metrics bug), and a search
+    # stopped early by a response limit never settles at all. One response is
+    # one peer, one entry in `responses` is one file — the same two numbers the
+    # UI is about to draw. The state's counters are the fallback for the window
+    # where slskd has counted responses it will not serve yet.
+    peers = {r["username"] for r in responses if r["username"]}
     return {
         "state": st_dict.get("state"),
         "isComplete": bool(st_dict.get("isComplete")),
-        "responseCount": int(st_dict.get("responseCount") or 0),
-        "fileCount": int(st_dict.get("fileCount") or 0),
+        "responseCount": len(peers) if responses else int(st_dict.get("responseCount") or 0),
+        "fileCount": len(responses) if responses else int(st_dict.get("fileCount") or 0),
         "responses": responses,
     }
 

@@ -79,7 +79,7 @@ export default function Popover({
   const markerRef = useRef<HTMLSpanElement>(null);
   const panelRef = useRef<HTMLDivElement>(null);
   const [at, setAt] = useState<
-    { top: number; bottom: number; right: number; left: number; center: number; vw: number } | null
+    { top: number; bottom: number; above: number; right: number; left: number; center: number; vw: number } | null
   >(null);
   useLayoutEffect(() => {
     if (!open || !fixed) return;
@@ -89,6 +89,10 @@ export default function Popover({
       setAt({
         top: box.bottom + 4,
         bottom: window.innerHeight - box.top + 4,
+        // The room ABOVE the trigger, which is what caps a top-placed panel:
+        // `bottom` measures the room below its top edge and is the wrong bound
+        // for a panel that opens upwards.
+        above: box.top,
         // Distances/offsets, not one anchor: the panel keeps its alignment to
         // the trigger across a resize or a scroll, and every value is clamped
         // so the panel stays inside the viewport on a narrow window.
@@ -147,6 +151,17 @@ export default function Popover({
               position: "fixed",
               ...(placement === "top" ? { bottom: at!.bottom } : { top: at!.top }),
               maxWidth: "calc(100vw - 1rem)",
+              // A panel taller than the room the trigger leaves below (or above)
+              // it was the one thing that could not be reached: the app shell is
+              // `h-dvh overflow-hidden`, so a flyout running past the fold is
+              // clipped by the window with no way to scroll to it. The cap is
+              // measured from the same trigger rect the position is, so it
+              // follows the row on scroll and resize, and `dvh` keeps a phone's
+              // URL bar out of the arithmetic. Panels that carry
+              // `overflow-y-auto` scroll inside it; the rest simply stop.
+              maxHeight: placement === "top"
+                ? `calc(${at!.above}px - ${GUTTER}px)`
+                : `calc(100dvh - ${at!.top}px - ${GUTTER}px)`,
               ...(align === "right"
                 ? flipped
                   ? { left: flipLeft }

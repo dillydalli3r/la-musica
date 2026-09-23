@@ -25,6 +25,7 @@ export default {
   "nav.watched": "Beobachtete Künstler",
   "nav.grading": "Bewertung",
   "nav.dependencies": "Abhängigkeiten",
+  "nav.equalizer": "Equalizer",
   "nav.settings": "Einstellungen",
   "nav.donations": "Spenden",
 

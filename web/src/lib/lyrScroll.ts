@@ -129,9 +129,18 @@ export function createLyricsGlider(c: HTMLElement, anchor: number = LYRICS_ANCHO
 }
 
 /** How long an explicit wheel / touch keeps the pane in the reader's hands
- * before following picks back up (native players do the same — being yanked
- * back mid-read is what reads as "auto-scroll is broken"). */
-const HOLD_MS = 6000;
+ * before following picks back up.
+ *
+ * Short on purpose. The 6 s this started as made the pane look BROKEN: a
+ * reader who nudged the wheel and then waited watched the song's line change
+ * three times while the pane sat still (the hold also suppressed the
+ * line-change step, so nothing moved at all). A wheel's own momentum is a few
+ * hundred milliseconds and a finger drag re-arms this on every event, so a
+ * little over a second is enough to never fight a gesture in progress — and
+ * short enough that the pane feels alive again the moment the reader stops.
+ * The line-change step and the resume-after-pause kick both go through the same
+ * clock, so a long line still picks itself up without waiting for the next one. */
+const HOLD_MS = 1200;
 /** A clock jump this large between frames can only be a seek. */
 const SEEK_JUMP = 1.2;
 /** Window around a seek in which a move SNAPS instead of gliding (scrubbing

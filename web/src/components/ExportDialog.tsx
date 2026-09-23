@@ -894,8 +894,8 @@ export function ExportOptionsPanel({ e, hint }: {
       {importing && (
         <EqProfileModal
           onClose={() => setImporting(false)}
-          onImported={(id) => {
-            set("eq_profile", id);
+          onImported={(row) => {
+            set("eq_profile", row.id);
             void queryClient.invalidateQueries({ queryKey: ["exportConfigs"] });
           }}
         />

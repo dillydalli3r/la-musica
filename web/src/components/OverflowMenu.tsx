@@ -28,7 +28,7 @@ export default function OverflowMenu({
   align = "right",
   icon: Icon = Ellipsis,
   label,
-  fixed = false,
+  fixed = true,
 }: {
   sections: OverflowMenuSection[];
   buttonTitle?: string;
@@ -45,7 +45,12 @@ export default function OverflowMenu({
    *  a trigger inside an `overflow` container that would clip the flyout, or
    *  under the sidebar's z-index (the album cover menu: the panel used to be
    *  cut off on its left edge). Fixed panels also get the primitive's gutter
-   *  flip on a narrow window. */
+   *  flip on a narrow window and its cap to the room the trigger actually
+   *  leaves, which is what makes a long menu (the track menu) scroll INSIDE
+   *  the window instead of running past the fold. On by default: every caller
+   *  of this component is a menu that can outgrow the row it hangs from, and
+   *  an in-place panel is the exception a caller opts into with
+   *  `fixed={false}`. */
   fixed?: boolean;
 }) {
   const [open, setOpen] = useState(false);
@@ -75,7 +80,7 @@ export default function OverflowMenu({
         align={align}
         fixed={fixed}
         anchorRef={btnRef}
-        panelClass="w-64 max-h-[70vh] overflow-y-auto p-1.5"
+        panelClass="w-64 overflow-y-auto overscroll-contain p-1.5"
       >
         {visible.map((s, si) => (
           <div key={si} className={si > 0 ? "mt-1 pt-1 border-t border-white/10" : ""}>

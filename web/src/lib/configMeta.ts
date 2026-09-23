@@ -213,6 +213,12 @@ export const CONFIG_GROUPS: CfgGroup[] = [
         { k: "replaygain_analyze_missing", label: "Measure tracks without ReplayGain tags instead of playing them at unity", type: "bool" },
         { k: "replaygain_clip_protection", label: "Clip protection", type: "bool" },
         { k: "replaygain_skip_existing", label: "Skip files that already have RG tags", type: "bool" },
+        // The player's equalizer, as the raw id — the EQ page (MAINTAIN →
+        // Equalizer) is where it is picked, edited and heard, and it writes
+        // this same key; this field is the escape hatch that shows what is
+        // stored (and clears it), the way the export's profile id has always
+        // been editable as text.
+        { k: "playback_eq_profile", label: "Player equalizer (preset or imported profile id, blank = off)", type: "text" },
       ],
     },
     {

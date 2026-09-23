@@ -43,6 +43,10 @@ def drain():
     """Forget every frame so far, so a count is about THIS outcome."""
     with events_mod._lock:
         events_mod._events.clear()
+    try:  # the durable log as well: recent() reads both (spec R216)
+        os.remove(events_mod._event_log_path())
+    except OSError:
+        pass
 
 
 def frames(kind=None):

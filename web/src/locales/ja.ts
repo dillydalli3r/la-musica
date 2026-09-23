@@ -25,6 +25,7 @@ export default {
   "nav.watched": "ウォッチ中のアーティスト",
   "nav.grading": "評価",
   "nav.dependencies": "依存関係",
+  "nav.equalizer": "イコライザー",
   "nav.settings": "設定",
   "nav.donations": "寄付",
 

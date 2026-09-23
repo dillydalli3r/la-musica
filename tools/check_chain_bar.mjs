@@ -12,7 +12,7 @@
  * after it, each carrying the whole-step pair `steps`.
  *
  * This check serves the real page (Vite, on a scratch port — 8011 and up,
- * never the owner's 8000), presses "Run ticked scripts" with that stage
+ * never the owner's 8000), presses "Run all" with that stage
  * frame on screen, then pushes each recorded frame into the store the app
  * draws from and asserts what a user sees:
  *
@@ -136,7 +136,7 @@ try {
   await page.goto(`http://127.0.0.1:${port}/import?album=${encodeURIComponent(ALBUM)}&step=Finish`);
   // The preview has landed once the step names the chain it will run.
   await page.waitForSelector("text=Runs automatically after import:", { timeout: 20000 });
-  await page.waitForSelector("text=Run ticked scripts", { timeout: 20000 });
+  await page.waitForSelector("button:has-text(\"Run all\")", { timeout: 20000 });
 
   /** One relay frame, exactly as the websocket delivers it — into the same
    *  store the app's own pages read. */
@@ -149,7 +149,7 @@ try {
   await pushFrame(stage);
   await page.waitForTimeout(50);
 
-  await page.getByRole("button", { name: "Run ticked scripts" }).click();
+  await page.getByRole("button", { name: "Run all" }).click();
   await page.waitForTimeout(200);
 
   const bars = [];

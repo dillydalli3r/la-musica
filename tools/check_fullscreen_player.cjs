@@ -164,7 +164,10 @@ const surface = (page) => page.evaluate(() => {
       border: ["Top", "Right", "Bottom", "Left"].map((s) => cs["border" + s + "Width"]).join("/"),
     };
   };
-  const titleLine = root.querySelector("div.text-2xl");
+  // The title rides the marquee (components/ScrollingText), so the
+  // `text-2xl` marker is on a span inside it, any tag; the row keeps its
+  // fixed `h-8` height, so the metadata block is that row's parent.
+  const titleLine = root.querySelector(".text-2xl");
 
   // The selectors the cutover deleted, read from the BUILT stylesheet (a dead
   // rule would still ship even with no reader in the markup). Matched with a
@@ -225,7 +228,7 @@ const surface = (page) => page.evaluate(() => {
     viewport: { w: window.innerWidth, h: window.innerHeight },
     overArt,
     paintedOverArt,
-    meta: bare(titleLine ? titleLine.parentElement.parentElement : null),
+    meta: bare(titleLine ? (titleLine.closest("div.h-8")?.parentElement ?? null) : null),
     paneBare: bare(scroller),
     deadRules,
   };
@@ -290,6 +293,11 @@ const paneState = (page) => page.evaluate(() => {
  *  before that settles measures the animation, not the design. */
 const clickToggle = async (page) => {
   await page.locator('button[aria-label="Toggle the lyrics pane"]').first().click();
+  // The box animates width/opacity for 300 ms (max-height snaps, the other
+  // two interpolate), and the poll below can see two equal samples at the
+  // tail of the curve while the box is still moving. Let the transition run
+  // out first, then look for the settled state.
+  await sleep(450);
   let last = null;
   let stable = 0;
   for (let i = 0; i < 25; i++) {

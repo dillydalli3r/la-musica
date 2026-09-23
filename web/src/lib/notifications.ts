@@ -62,9 +62,17 @@ export interface NotificationRecord {
 /** Kinds that deserve an operating-system notification — the ones about
  *  something happening while the user was looking elsewhere (a wish landing
  *  hours later, a download starting or finishing, a peer taking files from
- *  you, an import waiting for a decision).
+ *  you, an import waiting for a decision, a finished import, a watched artist
+ *  releasing something, a store the server pruned on its own).
  *  A script run or a grade is the user's own foreground job: the tray and a
- *  toast say so, and an OS popup for it would be noise. */
+ *  toast say so, and an OS popup for it would be noise. So are the two
+ *  "your add is on its way" kinds (`library_add`, `album_pending`) — an
+ *  acknowledgement of a press, made while the user is still looking at the
+ *  button.
+ *  A kind listed here pops on EVERY client, open or closed. A kind missing
+ *  here reaches the tray of an OPEN client and nothing else — which is a
+ *  decision about the kind, not about the client, so it holds for the web,
+ *  the desktop shell and the phone alike. */
 export const OS_KINDS: Record<string, true> = {
   wish_found: true,
   wish_failed: true,
@@ -74,21 +82,20 @@ export const OS_KINDS: Record<string, true> = {
   download_failed: true,
   upload_started: true,
   import_ready: true,
+  import_done: true,
   import_needs_data: true,
+  "watch.new_release": true,
+  storage_pruned: true,
 };
 
 /** The kinds this device asks the SERVER to push to it (lib/notify.ts sends
  *  this list when it subscribes).
  *
- *  The same set as the OS popups, plus the one outcome the issue that added
- *  push named first: an import that FINISHED while the app was closed (#48) —
- *  which is the whole reason a device needs waking, since a live page already
- *  hears it on /ws/events. A kind missing here still reaches an open app; it
- *  just cannot wake a closed one. */
-export const PUSH_KINDS: Record<string, true> = {
-  ...OS_KINDS,
-  import_done: true,
-};
+ *  The same set as the OS popups: an outcome worth interrupting an open app
+ *  for is an outcome worth waking a closed one for, and keeping the two lists
+ *  equal is what stops a kind from reaching a phone but not a desktop. A kind
+ *  missing here still reaches an open app; it just cannot wake a closed one. */
+export const PUSH_KINDS: Record<string, true> = { ...OS_KINDS };
 
 /** How many entries the log keeps. Long enough to cover a working session,
  *  short enough that the panel stays a list and storage stays tiny. */

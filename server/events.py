@@ -8,8 +8,10 @@ already runs somewhere deep in a worker thread; what was missing is a place to
 
 `emit()` is that place. It:
 
-* appends to a small in-memory ring, so a client that connects a moment later
-  (or reconnects after a dropped socket) still sees what just happened,
+* appends to a small in-memory ring AND to a durable log beside the app state,
+  so a client that connects a moment later (or reconnects after a dropped
+  socket, a restart, or a night with the app closed) still sees what just
+  happened,
 * pushes the frame to every live `/ws/events` subscriber,
 * hands the same frame to Web Push for every device that subscribed (see the
   "Web Push" section below), and
@@ -98,6 +100,80 @@ _events = []
 # "strictly newer" rule true across restarts, and doubles as the timestamp the
 # replay window (`?since=`) is expressed in.
 _seq = int(time.time() * 1000)
+
+# ── Durable replay ──────────────────────────────────────────────────────────
+#
+# The ring above is MEMORY: it dies with the process, and a client away for
+# more than `_MAX_EVENTS` frames hears nothing about what it missed. Web Push
+# covers a closed browser, but a desktop or mobile shell cannot be woken by it
+# at all (a Tauri webview has no service worker — see web/src/lib/notify.ts),
+# so for those clients the replay on reconnect is the ONLY way a notification
+# survives the app being closed. The frames are therefore kept on disk as well,
+# beside the push keys, and `recent()` answers from both.
+_EVENT_LOG = "events.jsonl"
+# Frames kept when the file is rewritten, and the size that triggers it. The
+# log is a catch-up window, not a ledger: 400 frames is days of a busy install,
+# and the rewrite keeps the file (and the read a reconnect pays for) small.
+_LOG_KEEP = 400
+_LOG_MAX_BYTES = 512 * 1024
+
+
+def _event_log_path() -> str:
+    from mlo.paths import app_data_dir
+    return os.path.join(app_data_dir(), _EVENT_LOG)
+
+
+def _log_append(payload: dict) -> None:
+    """Append one frame to the durable log. Never raises (see emit).
+
+    The append and the compaction it may trigger share `_lock`: the compaction
+    is a read-modify-write of the whole file, so a frame appended between its
+    read and its `os.replace` would be rewritten away — silently, and only
+    under concurrent emitters. `emit` calls this after releasing the lock and
+    holds nothing itself, so what the lock covers here is file I/O alone."""
+    try:
+        path = _event_log_path()
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with _lock:
+            with open(path, "a", encoding="utf-8") as fh:
+                fh.write(json.dumps(payload, separators=(",", ":")) + "\n")
+            if os.path.getsize(path) > _LOG_MAX_BYTES:
+                _log_compact(path)
+    except Exception:
+        pass
+
+
+def _log_compact(path: str) -> None:
+    """Rewrite the log with just its newest frames, atomically.
+
+    A half-written log read by a client mid-rewrite would lose frames it has
+    not seen yet, so the tail is written beside the log and moved over it."""
+    with open(path, encoding="utf-8") as fh:
+        lines = fh.readlines()
+    tmp = path + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as fh:
+        fh.writelines(lines[-_LOG_KEEP:])
+    os.replace(tmp, path)
+
+
+def _log_frames(since: float) -> list:
+    """Frames in the durable log newer than `since`, oldest first."""
+    try:
+        with open(_event_log_path(), encoding="utf-8") as fh:
+            lines = fh.readlines()
+    except OSError:
+        return []
+    out = []
+    for line in lines:
+        try:
+            frame = json.loads(line)
+        except ValueError:
+            # A torn last line (a crash mid-write) is one lost frame, not a
+            # reason to answer the client with nothing.
+            continue
+        if float(frame.get("at") or 0) > float(since or 0):
+            out.append(frame)
+    return out
 
 
 def _notify_configured(kind: str, cfg: dict) -> bool:
@@ -542,6 +618,11 @@ def emit(kind: str, title: str, body: str = "", data: dict = None, config: dict 
         _events.append(payload)
         del _events[:-_MAX_EVENTS]
         subs = list(_subscribers)
+    # On disk as well as in memory, so a client that was closed (and a desktop
+    # or mobile shell that no push service can reach) still finds the frame
+    # waiting when its `?since=` asks. Outside the lock: this is file I/O, and
+    # the ring above is already the answer for everyone watching right now.
+    _log_append(payload)
     for sub_queue, loop in subs:
         try:
             loop.call_soon_threadsafe(_put_nowait, sub_queue, payload)
@@ -579,9 +660,21 @@ def subscribe(queue, loop):
 
 
 def recent(since: float = 0.0, limit: int = _MAX_EVENTS):
-    """Events newer than `since` (unix seconds), oldest first."""
+    """Events newer than `since` (unix seconds), oldest first.
+
+    Answered from the memory ring AND the durable log: the ring is everything a
+    client might have missed within this process's life, the log is what
+    survives a restart or an app that was closed for days. Frames are deduped on
+    `seq` (both can hold the same one) and the newest `limit` are returned —
+    a client always wants the tail, never the whole history."""
     with _lock:
         out = [e for e in _events if float(e.get("at") or 0) > float(since or 0)]
+    if len(out) < limit:
+        seen = {int(e.get("seq") or 0) for e in out}
+        extra = [f for f in _log_frames(since) if int(f.get("seq") or 0) not in seen]
+        if extra:
+            out = sorted(out + extra,
+                         key=lambda e: (float(e.get("at") or 0), int(e.get("seq") or 0)))
     return out[-limit:]
 
 

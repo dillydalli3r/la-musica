@@ -38,8 +38,12 @@ async function profileText(file: File): Promise<string> {
  *  way out. */
 export default function EqProfileModal({ onClose, onImported }: {
   onClose: () => void;
-  /** Called with the id to select once the profile is stored. */
-  onImported: (id: string) => void;
+  /** Called with the row the server stored. The PAGE opens this row rather
+   *  than looking the id up in its own list: re-importing a name REPLACES that
+   *  profile, so the list it holds carries the previous bands and opening
+   *  those would put the old curve back in the editor (and let Save write it
+   *  over the import). */
+  onImported: (row: ExportEqProfile) => void;
 }) {
   const qc = useQueryClient();
   const [name, setName] = useState("");
@@ -81,7 +85,7 @@ export default function EqProfileModal({ onClose, onImported }: {
     try {
       const row = await api.exportEqImport(name.trim(), text);
       setSaved(row);
-      onImported(row.id);
+      onImported(row);
       qc.invalidateQueries({ queryKey: ["exportEq"] });
       toast.success(`Imported the equalizer profile “${row.label}”`);
     } catch (e) {

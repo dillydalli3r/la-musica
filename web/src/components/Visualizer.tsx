@@ -98,7 +98,20 @@ function atRest(levels: Float32Array, n: number): boolean {
  * The ramp is anchored to the strip rather than to each bar (quiet colour at
  * the baseline, bright at the top), so a taller bar carries more of it and
  * level reads as brightness as well as height. */
-export default function Visualizer({ playing, className = "" }: { playing: boolean; className?: string }) {
+export default function Visualizer({ playing, className = "", ink }: {
+  playing: boolean;
+  className?: string;
+  /** The ink to draw the bars with, when the strip sits ON something whose
+   *  brightness is not the app's own dark surface.
+   *
+   *  The fullscreen player paints its text straight onto the artwork and picks
+   *  its ink per cover (`npInk`) — white over a dark field, near-black over a
+   *  bright one — and the bars follow the SAME table. They used to draw with
+   *  the app's accent (white), which is exactly "text that blends into the
+   *  background" on a white cover: a white strip on a white field. Left out
+   *  (the docked sidebar, whose surface IS the app's), the accent is right. */
+  ink?: "light" | "dark";
+}) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const levels = useRef<Float32Array>(new Float32Array(BARS));
   const playingRef = useRef(playing);
@@ -112,12 +125,17 @@ export default function Visualizer({ playing, className = "" }: { playing: boole
     const ctx = canvas.getContext("2d");
     if (!ctx) return;
 
-    const accent = getComputedStyle(document.documentElement)
+    const accentRoot = getComputedStyle(document.documentElement)
       .getPropertyValue("--accent")
       .trim() || "255 255 255";
-    const accentSoft = getComputedStyle(document.documentElement)
+    const accentSoftRoot = getComputedStyle(document.documentElement)
       .getPropertyValue("--accent-soft")
       .trim() || "212 212 216";
+    // The strip's own palette: the app's accent, or — when the caller says the
+    // bars are drawn over ARTWORK — the same two tones the lyrics use, so a
+    // bright cover gets dark bars and a dark one gets white (see `ink`).
+    const accent = ink === "dark" ? "9 9 11" : ink === "light" ? "255 255 255" : accentRoot;
+    const accentSoft = ink === "dark" ? "63 63 70" : ink === "light" ? "244 244 245" : accentSoftRoot;
     // Read once: a matchMedia change mid-session is not worth a listener for a
     // halo this small (the ambient background re-reads its own on every open).
     const motion = !window.matchMedia("(prefers-reduced-motion: reduce)").matches;
@@ -125,7 +143,6 @@ export default function Visualizer({ playing, className = "" }: { playing: boole
     let handle = 0;
     let onTimer = false;
     let freq: Uint8Array | null = null;
-    let lastW = 0;
     let lastIdle = 0;
 
     const tick = () => {
@@ -163,12 +180,19 @@ export default function Visualizer({ playing, className = "" }: { playing: boole
       if (!w || !h) return;
 
       // A canvas resize blanks the backing store by itself, so a resized
-      // frame is always repainted (see the idle skip below).
-      const resized = w !== lastW;
+      // frame is always repainted (see the idle skip below). The check is on
+      // the BACKING STORE, not on the CSS width: a height change (the strip's
+      // box, a zoomed pane) or a devicePixelRatio change (the window dragged
+      // to another monitor, a browser zoom step) used to leave the old bitmap
+      // in place, and the browser then stretched it into the new box — two
+      // offset rows of bars, the reported "messed up" strip. Comparing what
+      // the canvas actually holds catches all three; width alone missed two.
+      const backW = Math.round(w * dpr);
+      const backH = Math.round(h * dpr);
+      const resized = backW !== canvas.width || backH !== canvas.height;
       if (resized) {
-        canvas.width = Math.round(w * dpr);
-        canvas.height = Math.round(h * dpr);
-        lastW = w;
+        canvas.width = backW;
+        canvas.height = backH;
       }
 
       // Idle: nothing to animate, so the strip eases onto its baseline and
@@ -257,7 +281,11 @@ export default function Visualizer({ playing, className = "" }: { playing: boole
       if (onTimer) window.clearTimeout(handle);
       else cancelAnimationFrame(handle);
     };
-  }, []);
+    // `ink` is a dependency and not a mount-time constant: the polarity is
+    // decided per COVER, so a track change can turn a dark strip into a light
+    // one — the loop restarts with the new palette (the levels it eases stay
+    // in their ref, so the strip does not jump back to the baseline).
+  }, [ink]);
 
   return <canvas ref={canvasRef} className={className} aria-hidden />;
 }

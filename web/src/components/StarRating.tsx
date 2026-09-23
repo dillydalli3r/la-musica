@@ -53,7 +53,15 @@ const half = (v: number) => (Number.isInteger(v) ? String(v) : v.toFixed(1));
  *  CALLER knows something the control does not — an album or artist rating is
  *  the user's verdict on that entity (never the average of its tracks) and
  *  lives in the app's store alone, because a folder has no file to tag. The
- *  widget itself stays scope-blind: it draws stars and reports a number. */
+ *  widget itself stays scope-blind: it draws stars and reports a number.
+ *
+ *  `emptyClass` / `fillClass` are the two colours, and they exist for the one
+ *  surface whose background is not the app's: the fullscreen player draws its
+ *  star row straight onto the artwork, where the fixed `zinc-600` outline and
+ *  the white accent FILL both blend into a bright cover (reported). The caller
+ *  there hands in the player's own ink (`text-current` + the surface's tone),
+ *  the same rule the lyrics, the chrome and the frequency strip follow — so
+ *  the stars read as part of the block instead of vanishing into the picture. */
 export default function StarRating({
   value: rawValue,
   onChange,
@@ -65,6 +73,8 @@ export default function StarRating({
   hint,
   showValue = false,
   className = "",
+  emptyClass = "text-zinc-600",
+  fillClass = "fill-current text-accent",
 }: {
   /** The rating in UI units: 0-5, step 0.5. */
   value: number;
@@ -83,6 +93,10 @@ export default function StarRating({
   /** Print the numeric value beside the stars (page headers). */
   showValue?: boolean;
   className?: string;
+  /** The empty outline's colour and the filled halves' — overrides for the one
+   *  surface drawn on artwork (see the doc above). */
+  emptyClass?: string;
+  fillClass?: string;
 }) {
   const [hover, setHover] = useState<number | null>(null);
   const readOnlyFinal = readOnly ?? !onChange;
@@ -143,7 +157,7 @@ export default function StarRating({
         const fill = Math.max(0, Math.min(1, shown - (star - 1)));
         return (
           <span key={star} className="relative inline-flex shrink-0">
-            <Star className={`${ICON[size]} text-zinc-600`} strokeWidth={2} aria-hidden="true" />
+            <Star className={`${ICON[size]} ${emptyClass}`} strokeWidth={2} aria-hidden="true" />
             {fill > 0 && (
               // Half a star is a clipped full star, so both ends of the
               // clip line up with the outline underneath.
@@ -151,7 +165,7 @@ export default function StarRating({
                 className="absolute inset-y-0 left-0 overflow-hidden pointer-events-none"
                 style={{ width: `${fill * 100}%` }}
               >
-                <Star className={`${ICON[size]} fill-current text-accent`} strokeWidth={2} aria-hidden="true" />
+                <Star className={`${ICON[size]} ${fillClass}`} strokeWidth={2} aria-hidden="true" />
               </span>
             )}
             {!readOnlyFinal && (

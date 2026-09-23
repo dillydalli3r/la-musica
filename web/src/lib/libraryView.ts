@@ -76,9 +76,12 @@ export const RATING_FILTERS: { id: RatingFilter; label: string; hint: string }[]
 /** What "rated" means for a row that has no rating of its own. An album's
  *  stars are the FOLDER rating (its own verdict, stored in the DB); a track's
  *  are its file's. Read as one sentence everywhere the facet is applied, so
- *  the albums, artists and tracks tables cannot describe it differently. */
+ *  the albums, artists and tracks tables cannot describe it differently — and
+ *  an album is only RATED once the verdict on the album itself is in AND every
+ *  track of it carries one of its own: a half-rated album is not finished, and
+ *  naming it in the "Unrated" list is exactly what that list is for. */
 export const RATED_NOTE =
-  "An album counts as rated when its own folder rating is set or any track in it is rated; an artist when any of its albums is. Nothing here is an average.";
+  "An album counts as rated when its own folder rating is set AND every track in it is rated; an artist when any of its albums is. Nothing here is an average.";
 
 /** Advisory facet — the app's own three-state ladder, in the two questions a
  *  listener actually asks: "show me the explicit ones" and "keep them away
