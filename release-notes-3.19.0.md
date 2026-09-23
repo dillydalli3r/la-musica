@@ -2,7 +2,7 @@
 
 Everything below came from reports on the running app, and every one is fixed where the
 cause was rather than where the symptom showed. Evidence is named per section; the house
-rules are in `docs/OPTIMIZATION-GRADING-SPEC.md` (135 rules, `R166`–`R170` new here).
+rules are in `docs/OPTIMIZATION-GRADING-SPEC.md` (136 rules, `R166`–`R170` new here).
 
 ## An import never waits for a person, and a warning is not a lock
 
@@ -114,7 +114,7 @@ configured fallback. A stated 0 is final; nothing second-guesses a source (`R62`
 ## The setup wizard is six steps, and the library page's views work
 
 - **Setup**: 13 steps → **6**, with the strictest checks as the shipped defaults and one
-  screen for credentials (keys step 4 779 px → 1 468 px). Verified with six screenshots and
+  screen for credentials (that step's page: 4 779 px → 1 468 px tall). Verified with six screenshots and
   a reachability test that every key still has an editor.
 - **Library**: *Albums / Artists / Tracks* rendered empty 200 px rows — the title cell held
   name, marks and stars in 220 px, so the name collapsed to zero width. Fixed with a wrap
@@ -150,7 +150,7 @@ configured fallback. A stated 0 is final; nothing second-guesses a source (`R62`
 
 ## The contract, the tests, and how to run it
 
-`docs/OPTIMIZATION-GRADING-SPEC.md` is the contract (135 rules, `R166`–`R170` new, `R9`,
+`docs/OPTIMIZATION-GRADING-SPEC.md` is the contract (136 rules, `R166`–`R170` new, `R9`,
 `R52c` and `R161` rewritten); `README.md` and the repository description follow it.
 
 **All 113 Python suites pass** (`python tools/test_*.py`, one per area, each exiting
