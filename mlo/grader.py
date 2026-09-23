@@ -4367,6 +4367,9 @@ def _empty_folder_result(folder, folder_root):
         "sidecars": [],
         "album_values": {t: "" for t in ALBUM_TAGS},
         "issues": {EMPTY_FOLDER: [rel]},
+        # Same shape as a graded album: a reader of `notes` never has to
+        # treat "absent" as a case of its own.
+        "notes": [],
     }
 
 
