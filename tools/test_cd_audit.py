@@ -526,10 +526,23 @@ CHECKSUM_LOG = os.path.join(ALBUM, "CD-1.log")
 
 _saved_csum = (discs_mod.HAS_EAC_CHECKER, discs_mod.eac_logchecker,
                discs_mod.run_tool, discs_mod._eac_helper_on_path)
+from mlo import tools as tools_mod
+_saved_detect = tools_mod.detect_all_tools
 try:
     # No verifier in-process, so the phar fallback is the path under test.
     discs_mod.HAS_EAC_CHECKER = False
     discs_mod.eac_logchecker = None
+    # …and the phar path is only TAKEN when the tool table says where Logchecker
+    # and its PHP are, so that table is faked on paths that exist. Without this
+    # the suite reads the machine it runs on: with the app's own installer
+    # behind it (the maintainer's box) the four checks below pass, and on a
+    # bare CI runner the table is empty, the branch is never entered, and all
+    # four fail reporting `(None: eac-logchecker not installed)` — the LOGIC
+    # under test is the same either way, so the machine must not decide.
+    tools_mod.detect_all_tools = lambda *a, **k: {
+        "logchecker": {"phar_path": __file__, "php_exe": __file__},
+        "php": {"php_exe": __file__},
+    }
 
     def _phar(text):
         def fake(argv, **kw):
@@ -576,6 +589,7 @@ try:
 finally:
     (discs_mod.HAS_EAC_CHECKER, discs_mod.eac_logchecker, discs_mod.run_tool,
      discs_mod._eac_helper_on_path) = _saved_csum
+    tools_mod.detect_all_tools = _saved_detect
 
 shutil.rmtree(TMP, ignore_errors=True)
 
