@@ -28,6 +28,7 @@ import QueryBuilder, {
   NO_VALUE_OPS, fieldIndex, filterSpec, runnableConditions, useDebounced, useLibraryFields,
 } from "../components/QueryBuilder";
 import FacetRail from "../components/FacetRail";
+import { ratingOf, useRatings } from "../lib/ratings";
 import Segmented from "../components/Segmented";
 import Modal from "../components/Modal";
 import { AdvisoryMark, CachedMark, EmptyState, GradeBadge, MediaChip, PageLoading, PendingMark, pendingSummary } from "../components/Badges";
@@ -141,7 +142,10 @@ function trackMetaOf(lib: Library | undefined): Map<string, TrackMeta> {
     for (const al of a.albums) {
       for (const t of al.tracks) {
         map.set(key(t.path), {
-          artist: al.album_artist || a.name,
+          // R106: the display name, exactly as the library page and the artist
+          // page name it — a folder is "Radiohead [<mbid>]", and the raw
+          // basename was what this sheet printed.
+          artist: al.album_artist || a.display_name || a.name,
           album: al.meta?.ALBUM || al.path.split("/").pop() || "",
           albumPath: al.path,
           albumCover: al.cover_file,
@@ -185,6 +189,14 @@ export default function BrowsePage() {
   const { playNow } = useStore();
   const { data: catalogue } = useLibraryFields();
   const { data: lib } = useQuery({ queryKey: ["library"], queryFn: () => api.library() });
+  // The app's OWN ratings (UI 0-5) — the same store every other row in the app
+  // draws. The sheet used to read `tr.rating`, a key the query engine never
+  // stamps, and then fell through to the file's Picard RATING tag, which is
+  // 0-100: a rated file printed "100" in a column headed 0-5, and a rating
+  // given in the app printed "—". `server.api_query.rating_source` is where
+  // the two live apart; display is the store's, as everywhere else.
+  const { data: ratingsData } = useRatings();
+  const ratings = ratingsData?.ratings;
 
   const [conditions, setConditions] = useState<LibraryCondition[]>([]);
   const [match, setMatch] = useState<"all" | "any">("all");
@@ -221,16 +233,23 @@ export default function BrowsePage() {
   const meta = useMemo(() => trackMetaOf(lib), [lib]);
 
   const spec = useMemo(() => filterSpec(conditions, match), [conditions, match]);
+  /** The sort the engine is really given. A native <select> whose value is not
+   *  among its options paints the FIRST option instead, so a key the catalogue
+   *  cannot vouch for yet is asked as that first option (the "Artist" grouping
+   *  key) — never as `library.path`, which was what this fell back to while
+   *  `/api/library/fields` was still in flight: the sheet's first page came
+   *  back in file order under a header that read "Artist". */
+  const sortKey = sortable.has(sort.key) ? sort.key : GROUPS[0].id;
   const request = useMemo(
     () => ({
       ...spec,
       target,
-      sort: { key: sortable.has(sort.key) ? sort.key : "library.path", dir: sort.dir },
+      sort: { key: sortKey, dir: sort.dir },
       group: group || null,
       limit: PAGE,
       offset: page * PAGE,
     }),
-    [spec, target, sort, group, page, sortable]
+    [spec, target, sortKey, sort.dir, group, page]
   );
   // Typing in a value box must not fire a query per keystroke; the same
   // debounce the count uses, on the whole request.
@@ -382,8 +401,14 @@ export default function BrowsePage() {
 
   const renderTrackRow = (tr: Track) => {
     const m = meta.get(tr.path.replace(/\\/g, "/"));
-    const artist = (tr as Track & { artist?: string }).artist ?? m?.artist ?? "";
-    const albumName = (tr as Track & { album?: string }).album ?? m?.album ?? "";
+    // The library payload's own names first: the engine stamps each row with
+    // the artist and album FOLDER basenames (mlo.query), and those folders are
+    // named for the disk ("Radiohead [<mbid>]", "[Album] 1994-11-29 … {GB - CD
+    // …} [<label>] [<mbid>]"), which is what this sheet used to print in two
+    // columns that every other page fills from the payload (R106). The stamps
+    // stay as the fallback for a row the payload does not carry.
+    const artist = m?.artist ?? (tr as Track & { artist?: string }).artist ?? "";
+    const albumName = m?.album ?? (tr as Track & { album?: string }).album ?? "";
     return (
       <tr key={tr.path} className="table-row group cursor-pointer" title="Click to play" onClick={() => play(tr.path)}>
         <td className={`td cell-nowrap text-zinc-600${PHONE_HIDE}`}>{tr.tracknumber ?? tr.tags.TRACKNUMBER ?? "—"}</td>
@@ -423,8 +448,8 @@ export default function BrowsePage() {
         <td className={`td text-zinc-500 break-words${PHONE_HIDE}`}>{tr.tags.GENRE ?? "—"}</td>
         <td className={`td text-zinc-500${PHONE_HIDE}`}>{fmtDuration(tr.tech?.length)}</td>
         <td className={`td text-zinc-500${PHONE_HIDE}`}>{fmtTech(tr.tech) || "—"}</td>
-        <td className="td text-zinc-400 tabular-nums" title="Rating (0-5, half stars)">
-          {ratingText((tr as Track & { rating?: number }).rating ?? (tr.tags as Record<string, unknown>).RATING)}
+        <td className="td text-zinc-400 tabular-nums" title="Rating (0-5, half stars) — your own rating, stored by the app">
+          {ratingText(ratingOf(ratings, tr.path))}
         </td>
         <td className="td">
           <GradeBadge pass={!!tr.grade_pass} score={null} size="sm" />

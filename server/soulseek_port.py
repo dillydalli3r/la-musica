@@ -50,6 +50,19 @@ NOTE = ("A definite answer about the internet needs a probe from OUTSIDE this "
         "machine: a listener that accepts, a mapping the router itself lists, "
         "and the addresses both depend on.")
 
+# A container cannot forward its own port, and no row above can say so: the
+# gateway the probe reaches is Docker's bridge (172.18.x.1), so the automatic
+# opening the setting asks for never leaves the container — a UPnP search from
+# in here is answered by nothing, and the answer reads like a router that does
+# not do UPnP. The router can only forward to the HOST, so the port has to be
+# published by compose AND forwarded there by hand.
+CONTAINER_NOTE = ("This app runs in a container: the gateway a probe can see "
+                  "from here is Docker's bridge, not the home router, so "
+                  "automatic opening cannot reach it. Publish the port "
+                  "(docker-compose.yml: ports: \"{port}:{port}\") and forward "
+                  "TCP {port} on the ROUTER to the HOST's LAN address — a router "
+                  "cannot forward to a container address.")
+
 # What each gateway verdict means for the port, whichever side reported it (the
 # live read, or `soulseek.portmap_state`, which uses `mlo.portmap`'s own state
 # names). A mapping a gateway lists for this machine is the one definite pass; the
@@ -415,7 +428,18 @@ def port_check(cfg=None):
         _self_connect_check(port, wan),
         _network_check(running, cfg),
     ]
+    try:
+        from server.auth import in_container
+        container = bool(in_container())
+    except Exception:
+        container = False
+    if container:
+        # On the row whose silence is otherwise read as "my router has no UPnP":
+        # in a container that verdict is about Docker's bridge, not the router.
+        for row in checks:
+            if row["id"] == "mapping":
+                row["detail"] = _joined([row["detail"], CONTAINER_NOTE.format(port=port)])
     verdict = _verdict(checks)
     return {"ok": verdict == "ok", "port": port, "checks": checks,
-            "verdict": verdict, "note": NOTE,
+            "verdict": verdict, "note": NOTE, "container": container,
             "checked_at": datetime.now(timezone.utc).isoformat(timespec="seconds")}

@@ -3131,7 +3131,18 @@ const AUDIT_TONE: Record<string, string> = {
   ok: "bg-emerald-900/40 text-emerald-300 border-emerald-800",
   scanning: "bg-sky-900/40 text-sky-300 border-sky-800",
   misconfigured: "bg-amber-900/40 text-amber-300 border-amber-800",
+  // The share is served and searchable, but no forward was confirmed for the
+  // listen port a peer connects BACK to: amber, because nothing here can prove
+  // it is closed (a forward made by hand is not readable), and the summary says
+  // exactly what is and is not known.
+  listen_unconfirmed: "bg-amber-900/40 text-amber-300 border-amber-800",
   disabled: "bg-raise border-border text-zinc-400",
+};
+
+/** Statuses whose own words are a caution, not a failure: their summary is
+ *  drawn in amber, everything else that is not `ok` in red. */
+const AUDIT_AMBER: Record<string, true> = {
+  scanning: true, misconfigured: true, listen_unconfirmed: true,
 };
 
 /** Share configuration (la musica settings are the source of truth — the
@@ -3265,7 +3276,9 @@ function SharingCard({ running }: { running: boolean }) {
         <span className="text-[10px] uppercase tracking-widest text-zinc-500">Sharing</span>
         {audit && (
           <span className={`chip text-[9px] border ${AUDIT_TONE[audit.status] ?? "bg-red-900/40 text-red-300 border-red-800"}`}>
-            {audit.status === "ok" ? "shared" : audit.status.replace(/_/g, " ")}
+            {audit.status === "ok" ? "shared"
+              : audit.status === "listen_unconfirmed" ? "port unconfirmed"
+              : audit.status.replace(/_/g, " ")}
           </span>
         )}
         {audit?.scan.ready && audit.scan.files > 0 && (
@@ -3288,7 +3301,7 @@ function SharingCard({ running }: { running: boolean }) {
             className="btn-ghost !py-1 text-xs tap"
             onClick={verifyBrowsable}
             disabled={probing || !running}
-            title="Read slskd's own share index and look for a file that is on disk — what a browse by another user returns"
+            title="Read slskd's own share index and look for a file that is on disk — the list a peer WOULD get once its connection to the listen port is accepted"
           >
             {probing ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Eye className="h-3.5 w-3.5" />} Verify browse
           </button>
@@ -3300,7 +3313,7 @@ function SharingCard({ running }: { running: boolean }) {
 
       {audit && (
         <div className="space-y-1.5">
-          <div className={`${audit.ok ? "text-zinc-400" : audit.status === "scanning" || audit.status === "misconfigured" ? "text-amber-300" : "text-red-300"}`}>
+          <div className={`${audit.ok ? "text-zinc-400" : AUDIT_AMBER[audit.status] ? "text-amber-300" : "text-red-300"}`}>
             {audit.summary}
           </div>
           {audit.problems.length > 0 && (

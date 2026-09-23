@@ -108,6 +108,10 @@ class FakeSlskd:
         }
         self.contents = self._contents_for(TRACK, TRACK_SIZE)
         self.logged_in = True
+        # slskd's upload tree (what others downloaded from us) — empty until a
+        # test seeds a transfer, which is also the app's only proof that peers
+        # reached the listen port from outside.
+        self.uploads = []
 
     @staticmethod
     def _contents_for(path, size):
@@ -127,6 +131,8 @@ class FakeSlskd:
             return self.contents
         if path == "/server":
             return {"isLoggedIn": self.logged_in}
+        if path == "/transfers/uploads":
+            return self.uploads
         return None
 
     def request(self, method, path, json=None, headers=None, timeout=None):
@@ -320,6 +326,65 @@ assert audit["browse"]["ok"] is True, audit["browse"]
 assert "01 - A Track.flac" in audit["browse"]["detail"], audit["browse"]
 assert "Starting shared file scan" in audit["scan"]["log"][0], audit["scan"]["log"]
 
+# ...and the mapping the app ASKED for and did not get: the share is served and
+# searchable, but a peer reaches it by connecting BACK to the listen port, so a
+# green "other users can browse and download" here is the one lie the card must
+# not tell (the owner's report: the card said shared, their client could not
+# browse). A router that granted a mapping keeps it green — that is the state
+# below this one.
+ready()
+saved_map = soulseek._PORTMAP.get("result")
+soulseek._PORTMAP["result"] = {
+    "state": "no_gateway",
+    "detail": "UPnP: no device answered the UPnP search on 239.255.255.250:1900.",
+}
+audit = soulseek.share_audit(CFG, probe=True)
+assert audit["status"] == "listen_unconfirmed", (audit["status"], audit["problems"])
+assert audit["ok"] is False
+codes = [p["code"] for p in audit["problems"]]
+assert "listen_unreachable" in codes, codes
+lic = next(p for p in audit["problems"] if p["code"] == "listen_unreachable")
+assert "50000" in lic["message"], lic
+assert "Forward TCP 50000" in lic["hint"], lic
+assert "can find and search them" in audit["summary"], audit["summary"]
+assert "no forward was confirmed" in audit["summary"], audit["summary"]
+assert audit["browse"]["ok"] is True, "the index is still served, and is still probed"
+
+# in a container the remedy has to be about the HOST: the gateway a container
+# can see is Docker's bridge, so the forward the app asks for by itself can
+# never be made, and the router cannot forward to a container address
+import server.auth as srv_auth
+real_in_container = srv_auth.in_container
+srv_auth.in_container = lambda: True
+audit = soulseek.share_audit(CFG)
+srv_auth.in_container = real_in_container
+hint = next(p for p in audit["problems"] if p["code"] == "listen_unreachable")["hint"]
+assert "Running in a container" in hint and "HOST's LAN address" in hint, hint
+assert "50000:50000" in hint, hint
+
+# ...and the state CLEARS once peers have actually reached the port: a served
+# upload is a connection THEY opened, which is stronger evidence than a missing
+# mapping (the by-hand forward a container can never read back)
+ready()
+fake.uploads = [{"username": "someone", "directories": [
+    {"files": [{"filename": "01 - A Track.flac", "state": "Completed, Succeeded"}]}]}]
+audit = soulseek.share_audit(CFG)
+assert audit["status"] == "ok", (audit["status"], audit["problems"])
+assert audit["ok"] is True
+assert any("1 transfer(s) have been served" in n for n in audit["notes"]), audit["notes"]
+fake.uploads = []
+
+# a mapping the router confirmed keeps the audit green: this state is about the
+# app's own request not being answered, not about every install without UPnP
+ready()
+soulseek._PORTMAP["result"] = {"state": "mapped", "verified": True,
+                               "internal_ip": "192.168.1.20",
+                               "detail": "UPnP: the router lists the mapping."}
+audit = soulseek.share_audit(CFG)
+assert audit["status"] == "ok", (audit["status"], audit["problems"])
+assert audit["ok"] is True
+soulseek._PORTMAP["result"] = saved_map
+
 # never scanned: the index is empty and the daemon is not scanning it either
 ready(ready=False, files=0, directories=0, scanProgress=0.0)
 audit = soulseek.share_audit(CFG)
@@ -495,8 +560,8 @@ assert codes == {"share_dropped", "filter_invalid"}, codes
 assert audit["filters"]["invalid"][0]["pattern"] == "[unclosed"
 
 print("ok  the share audit tells no-scan-yet, scan-running, scan-failed, "
-      "empty-index, unbrowsable, missing-folder, stale-config, logged-out, "
-      "daemon-down, sharing-off and misconfigured apart")
+      "empty-index, unbrowsable, unconfirmed-listen-port, missing-folder, "
+      "stale-config, logged-out, daemon-down, sharing-off and misconfigured apart")
 
 
 # --------------------------------------------------------------------------- #

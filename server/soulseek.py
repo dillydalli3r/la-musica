@@ -1624,11 +1624,11 @@ def cancel_downloads(username, transfer_ids, cfg=None, failed=None):
     return True
 
 
-def uploads_state(cfg=None):
+def uploads_state(cfg=None, timeout=30.0):
     """Full upload transfer tree (what others have downloaded = shared
     history), grouped per user. Same shape as downloads_state()."""
     try:
-        return _request("GET", "/transfers/uploads") or []
+        return _request("GET", "/transfers/uploads", timeout=timeout) or []
     except httpx.HTTPStatusError as e:
         if e.response is not None and e.response.status_code == 404:
             return []
@@ -1945,7 +1945,8 @@ def rescan_shares(cfg=None):
 _AUDIT_STATUS_RANK = (
     "not_running", "not_logged_in", "unconfigured", "path_unreadable",
     "config_mismatch", "scan_failed", "not_scanned", "scanning",
-    "empty_share", "unbrowsable", "misconfigured", "ok", "disabled",
+    "empty_share", "unbrowsable", "listen_unconfirmed", "misconfigured", "ok",
+    "disabled",
 )
 _AUDIT_RANK = {name: i for i, name in enumerate(_AUDIT_STATUS_RANK)}
 
@@ -2179,13 +2180,58 @@ def _share_contents(cfg=None, limit_bytes=_PROBE_MAX_BYTES):
     return _normalize_browse(payload), False, ""
 
 
+def _served_uploads(cfg=None):
+    """How many upload transfers slskd has handled, 0 when it cannot be read.
+
+    A peer downloads from this share over a connection IT opens to the listen
+    port, so any transfer in slskd's upload tree is proof that peers DO reach
+    this port — the positive half of what a probe from inside the network can
+    only describe. It is what keeps `listen_unconfirmed` from being permanent
+    on an install whose forward was made by hand (a container can never see its
+    router, and nothing else here can read the mapping)."""
+    try:
+        total = 0
+        for entry in uploads_state(cfg, timeout=5.0) or []:
+            if not isinstance(entry, dict):
+                continue
+            for d in entry.get("directories") or []:
+                for f in (d or {}).get("files") or []:
+                    if isinstance(f, dict) and f.get("state"):
+                        total += 1
+        return total
+    except Exception:
+        return 0
+
+
+def _listen_hint(port_state):
+    """What to do about an unconfirmed listen port, in THIS install's terms.
+
+    A container cannot forward its own port: the gateway this process can see is
+    Docker's bridge (172.18.x.1), so the automatic opening the switch asks for
+    never reaches the home router, and the router can only forward to the
+    HOST's address on the LAN. Saying "forward the port" without that is the
+    advice that was already on screen while the share stayed unreachable."""
+    port = int(port_state.get("listen_port") or 0)
+    if port_state.get("container"):
+        return (f"Running in a container: publish the port in docker-compose.yml "
+                f"(ports: \"{port}:{port}\") and forward TCP {port} on the ROUTER "
+                f"to the HOST's LAN address — a router cannot forward to a "
+                f"container address, and automatic opening cannot reach the "
+                f"router from in here (the gateway this process sees is Docker's "
+                f"bridge). Then press Test port on this page.")
+    return (f"Forward TCP {port} on the router to this machine's LAN address, or "
+            f"turn on automatic port opening if the router speaks UPnP. Test "
+            f"port on this page says what can be seen from here.")
+
+
 def share_audit(cfg=None, probe=False):
     """What other Soulseek users can find, browse and download right now.
 
     `status` names one failure mode per distinct cause (no share configured, a
     folder slskd cannot read, a config the running daemon never loaded, a scan
     that failed, a scan that never finished, an index with no files, an index
-    that does not hold a file that is on disk) so the UI can say what is
+    that does not hold a file that is on disk, a listen port no gateway
+    confirmed a forward for) so the UI can say what is
     actually wrong instead of "not sharing". `probe=True` additionally pulls
     slskd's own share index and looks for a file that is on the disk.
 
@@ -2306,6 +2352,12 @@ def share_audit(cfg=None, probe=False):
         elif status == "unbrowsable":
             summary = ("slskd's share index did not answer for a file that is on "
                        "disk — a browse of this share comes up short.")
+        elif status == "listen_unconfirmed":
+            summary = (f"slskd is sharing {scan['files']} files in "
+                       f"{scan['directories']} folders — other users can find and "
+                       f"search them, but no forward was confirmed for the "
+                       f"listen port, so a browse or a download FROM this "
+                       f"client can fail until it is reachable.")
         elif status == "misconfigured":
             summary = ("slskd is sharing, but part of the share configuration was "
                        "left out of the generated config.")
@@ -2405,12 +2457,37 @@ def share_audit(cfg=None, probe=False):
         note(f"Nothing is accepting connections on the Soulseek listen port "
              f"{port_state['listen_port']}.")
     mapping = port_state["mapping"]
+    # A gateway verdict that is not a mapping is the one case where a green
+    # share lies: search, login and the index all work, so the audit used to say
+    # "other users can search, browse and download them" — while a peer reaches
+    # this library by connecting BACK to the listen port, and the app had just
+    # been told no mapping is in place. That contradiction is the owner's report
+    # (the card said shared, their client could not browse), so the mapping the
+    # app ASKED for and did not get is its own status, with the remedy for the
+    # install that is running (a container forwards through the host, see
+    # _listen_hint). `refused`/`error` are the gateway's own refusals, which are
+    # the same "no forward was confirmed" for the peer waiting to connect.
     if mapping["enabled"] and mapping["state"] in ("refused", "no_gateway",
                                                    "unsupported", "error"):
         note(f"Peers cannot connect back to this client: {mapping['detail']} "
              f"Forward the listen port on the router (or check it on the "
              f"Soulseek page) — an unforwarded listener cannot be reached from "
              f"outside.")
+        # ...unless peers have ALREADY reached it: an upload is a connection
+        # they opened to this port, so a served transfer outranks the missing
+        # mapping, which for a by-hand forward is only "this machine cannot see
+        # the router" (a container never can).
+        served = _served_uploads(cfg)
+        if served:
+            note(f"{served} transfer(s) have been served to other users, which "
+                 f"is a connection they opened to the listen port: peers do "
+                 f"reach this client, and the mapping this app asks for is not "
+                 f"what is carrying them.")
+        else:
+            add("listen_unconfirmed", "listen_unreachable",
+                f"Nothing confirmed a forward for the listen port "
+                f"{mapping['listen_port']}: {mapping['detail']}",
+                _listen_hint(port_state))
     elif mapping["enabled"] and mapping["state"] == "mapped":
         note(mapping["detail"] + f" (automatic port opening, port "
                                  f"{mapping['listen_port']}).")

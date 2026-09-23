@@ -3672,6 +3672,76 @@ screen; above `lg` the pane sits beside the artwork.
   `portmap.read_port` wholesale, which is how a broken read shipped in the first
   place.
 
+### 7.33 What a share that is served still cannot promise
+
+- **R226 — the sharing card never calls a share browsable while the forward it
+  asked for is missing.** Search, login and slskd's own index all work with the
+  listen port closed, so the card's sentence ("slskd is sharing N files in M
+  folders — other users can search, browse and download them") was exactly what
+  a peer's **Browse** request contradicts: a browse IS a connection BACK to the
+  listen port. `server.soulseek.share_audit` reports `listen_unconfirmed` (its
+  own status, ranked under `unbrowsable`) when automatic port opening is ON and
+  the gateway answered `no_gateway`/`unsupported`/`refused`/`error` — the app
+  asked for a mapping and did not get one. The row carries the port, the
+  gateway's own words, and a hint written for the install that is running:
+  a container is told the forward goes to the **HOST's** LAN address and that
+  automatic opening cannot reach the router from in there (the gateway this
+  process sees is Docker's bridge — the same sentence `soulseek_port.port_check`
+  now adds to its `mapping` row), while a bare-metal install is told to forward
+  TCP `<port>` on the router. A mapping the router CONFIRMED leaves the audit
+  `ok`, and automatic opening turned OFF stays a note: this state is about the
+  app's own request going unanswered, not about every install without UPnP.
+  It also CLEARS on evidence: a transfer in slskd's upload tree is a connection
+  a peer opened TO this port, so once one exists the audit is `ok` again and a
+  note carries the count (`_served_uploads`) — without it, a by-hand forward
+  would leave a container install amber forever, since nothing inside a
+  container can read the router's mapping.
+  The live failure it was written from: the owner's container served 104 files
+  in 7 folders (slskd's own `/shares`, `uploads: []`, and no inbound connection
+  line in `slskd.log`) while the card read green and the summary promised
+  browsing. Pinned by `tools/test_soulseek_sharing.py`: the state and its
+  severity, the hint in both installs, and both boundaries above.
+
+### 7.34 The Browse sheet reads the payload's names and the store's ratings
+
+- **R227 — the sheet's columns are the app's own facts, never the disk's
+  spellings, and its first request sorts by what the toolbar shows.**
+  `mlo.query` stamps every returned row with the artist and album **folder**
+  basenames, and the Browse sheet printed those stamps in two columns every
+  other page fills from the payload: `Radiohead [a74b1b7f-…]` and
+  `[Album] 1994-11-29 … {GB - CD …} [Parlophone] [<mbid>]` where the rest of the
+  app shows *Radiohead* and *The Bends* (R106). The payload's
+  `album_artist || display_name` and its `ALBUM` tag now lead, with the stamps
+  kept as the fallback for a row the payload does not carry. The Rating column
+  read `tr.rating` — a key the engine never stamps — and fell through to the
+  file's Picard `RATING` tag, which is 0-100: a file rated 5 stars in the app
+  printed `100` in a column headed 0-5, and an app-only rating printed `—`. It
+  now reads `GET /api/ratings` through `lib/ratings.ratingOf`, the same store
+  and helper every other row uses. The sort had the same shape of bug: the
+  request fell back to `library.path` while `/api/library/fields` was still in
+  flight, so the first page came back in file order under a header that read
+  *Artist*; the fallback is now the option the `<select>` actually paints
+  (`GROUPS[0].id`, the "Artist" grouping key). Verified in the browser against
+  a decorated-folder fixture: the cells read `Radiohead` / `Amnesiac` / `4.5`,
+  and the captured `POST /api/library/query` bodies show
+  `{"sort":{"key":"artist"}}` before the catalogue lands and
+  `{"sort":{"key":"artist.name"}}` after it — never `library.path`.
+
+### 7.35 The volume readout is sized in characters, not pixels
+
+- **R228 — the percentage box fits its own digits at any font, DPI or text-size
+  setting.** `VolumePct` sized its input `w-7` (28 px) with `px-1`; three digits
+  in the shipped mono font are 27 px of content in a 26 px content box, so
+  "100" was clipped by the input's own edge — the owner's screenshot, and worse
+  wherever the system mono is wider or the browser's default text size is
+  larger. The box is `calc(3ch + 0.5rem + 2px)`: 3ch IS the three digits the
+  value is capped at (0-100), `0.5rem` is `px-1`'s own padding (rem, not a fixed
+  pixel count — padding scales with the root font and a fixed allowance did
+  not), and 2px is the border. Measured in the fullscreen player at a 16/20/24
+  px root: `scrollWidth == clientWidth` (no clipping) at all three, where the
+  pixel box clipped at every one of them. The bar's volume line uses the same
+  component, so both surfaces are fixed once.
+
 ## 8. Recommended runbook
 
 Nothing here is a substitute for the app's own Dependencies page: run it first

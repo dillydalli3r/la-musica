@@ -37,8 +37,16 @@ export default function VolumePct({ value, onChange, className }: {
 
   return (
     <span className={`inline-flex items-center shrink-0 font-mono tabular-nums text-current ${className ?? ""}`}>
+      {/* The box is sized in `ch`, not pixels: the value is capped at three
+          digits, and 3ch IS three digits of the mono font it renders in, so no
+          font, DPI or browser text-size setting can push a glyph out of it.
+          A pixel width ("w-7") was 1px short of "100" in the shipped font
+          already — the trailing 0 clipped by the input's own content box, the
+          chopped readout the owner reported — and worse wherever the system
+          mono is wider. The rest is px-1's own 0.5rem (which scales with the
+          root font, hence rem here, not a fixed 10px) plus the 2px border. */}
       <input
-        className="w-7 bg-transparent border border-transparent hover:border-border focus:border-accent rounded px-1 text-right text-current outline-none"
+        className="w-[calc(3ch+0.5rem+2px)] bg-transparent border border-transparent hover:border-border focus:border-accent rounded px-1 text-right text-current outline-none"
         inputMode="numeric"
         value={text}
         title="Volume — type a percentage"
