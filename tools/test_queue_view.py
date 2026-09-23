@@ -522,9 +522,18 @@ with Patch(auto, load_config=lambda: dict(CFG),
     for mbid, artist, title in (("88888888-0000-0000-0000-000000000001", "Partial", "Move"),
                                 ("88888888-0000-0000-0000-000000000002", "Lossy", "Copy")):
         auto.start_job(release=_release(mbid, artist, title), source="soulseek")
-    got = _wait_for(lambda: [r for r in _queue(client)["sections"]["completed"]
-                             if r["title"] in ("Move", "Copy")], 20,
-                    "the partial and lossy rows") or []
+
+    # BOTH rows, not the first one: `_wait_for` returns the moment its lambda is
+    # satisfied, so waiting for "Move or Copy" let the slower of the two land
+    # after the wait — and on a loaded CI runner it did, which is how this suite
+    # failed there while passing here (IndexError on the row that was not there
+    # yet). Wait for the set, then assert each row.
+    def _both_rows():
+        rows = [r for r in _queue(client)["sections"]["completed"]
+                if r["title"] in ("Move", "Copy")]
+        return rows if {r["title"] for r in rows} == {"Move", "Copy"} else None
+
+    got = _wait_for(_both_rows, 20, "the partial and lossy rows") or []
     partial_row = [r for r in got if r["title"] == "Move"][0]
     assert partial_row["stage"] == "completed", partial_row
     assert partial_row["note"].startswith("Imported into the library"), partial_row
