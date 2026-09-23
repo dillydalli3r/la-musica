@@ -184,6 +184,33 @@ def _phase(text):
         traceback.print_exc()
 
 
+# The claim kinds that mean an album is being IMPORTED or FINISHED right now:
+# the download's own chain (`auto-import`), the import queue and every
+# single-album import (`import`), and a script run over the album (`scripts`).
+# The same three `server.api_queue` reads to keep such a release in the queue's
+# In progress section, so both surfaces agree about what "being imported" is.
+IMPORT_CLAIM_KINDS = ("auto-import", "import", "scripts")
+
+
+def _importing_now(album_dir):
+    """The claim an in-flight import holds *album_dir* under, or None.
+
+    A claim on the album whose kind is one of `IMPORT_CLAIM_KINDS` means the
+    pipeline is on it: `server.job_locks` is the one registry that knows, and
+    ``holder`` answers the claim itself (`{job, kind, label, ...}`).
+    """
+    try:
+        from server import job_locks
+        claim = job_locks.holder(album_dir)
+    except Exception:
+        return None
+    if not isinstance(claim, dict):
+        return None
+    if str(claim.get("kind") or "") not in IMPORT_CLAIM_KINDS:
+        return None
+    return claim
+
+
 def finish_album(album_dir, cfg=None, progress=None, force=None, release=None,
                  wait=True):
     """Run the configured chain over ONE album folder.
@@ -307,6 +334,33 @@ def finish_album(album_dir, cfg=None, progress=None, force=None, release=None,
     chain = chain_for(cfg)
     label = (script_runners.run_label(chain) if chain
              else "Import " + (os.path.basename(path.rstrip("\\/")) or path))
+    if wait:
+        # ONE IMPORT PER ALBUM. A second autonomous caller used to QUEUE behind
+        # the claim and then run the whole pipeline again — the six pre-chain
+        # lookups and all 21 scripts, over an album the first caller had just
+        # finished ("it's doing the scripts again", with nothing about the
+        # second run wanted). The album is already being imported, so this call
+        # answers that instead of duplicating the work; the user's own press
+        # (``wait=False``) keeps its 409, whose sentence names the holder.
+        # A job importing its OWN claim is not a duplicate — the download job
+        # holds the album from its first byte and then runs this very import
+        # under that same claim — so the guard only fires for a FOREIGN job.
+        try:
+            running = _importing_now(path)
+            mine = script_runners.job_locks.current()
+        except Exception:
+            running, mine = None, None
+        # Only an IDENTIFIED job that is not the holder is a duplicate. A caller
+        # with no job of its own (an unmanaged background thread) keeps the old
+        # wait-then-run behaviour: skipping there could leave an album the
+        # download's own chain is holding unimported, which is far worse than
+        # the repeat this guard removes.
+        if running is not None and mine is not None and running.get("job") != mine:
+            holder = str(running.get("label") or "An import")
+            return {"path": path, "scripts": [], "chain": [], "errors": [],
+                    "chained": False, "chain_off": False,
+                    "note": f"{holder} is already importing this album",
+                    "skipped_families": [], "already_importing": True}
     with script_runners.claim_paths([path], kind="import", label=label,
                                    wait=wait):
         # Announced only once the album is really this import's: a press that

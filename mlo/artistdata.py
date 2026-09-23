@@ -69,7 +69,7 @@ try:
 except ImportError:
     ImageOps = None
 
-from .paths import MLO_DATA_DIR_NAME, MLO_DIR_NAME, app_data_dir, library_root
+from .paths import album_sidecar_copy, MLO_DATA_DIR_NAME, MLO_DIR_NAME, app_data_dir, library_root
 
 # Stems an artist image may use ("artist.jpg", "Artist.PNG", ...).
 ARTIST_IMAGE_STEMS = ("artist",)
@@ -847,15 +847,30 @@ def run_optimize_artist_images(config):
 # descriptions
 # --------------------------------------------------------------------------- #
 def description_path(folder) -> str:
-    """Path of *folder*'s ``description.txt`` (the on-disk name when present)."""
+    """Path of *folder*'s ``description.txt`` (the on-disk name when present).
+
+    A NUMBERED copy counts as the on-disk name — "description (2).txt" is what
+    a file manager leaves when it copies one into a folder that already holds
+    it, and the app never writes one itself (``write_description`` replaces the
+    file). Reading it keeps an album's description from being invisible beside
+    a name the app does not recognise; the layout scan offers to rename it to
+    the canonical name (`mlo.layout`, the sidecar-copy finding). The canonical
+    name wins when both are there, and copies are then taken in number order.
+    """
     try:
-        for name in os.listdir(folder):
-            if name.lower() == DESCRIPTION_NAME:
-                path = os.path.join(folder, name)
-                if os.path.isfile(path):
-                    return path
+        names = os.listdir(folder)
     except OSError:
-        pass
+        return os.path.join(folder, DESCRIPTION_NAME)
+    canonical = [n for n in names if n.lower() == DESCRIPTION_NAME]
+    copies = []
+    for name in names:
+        n = album_sidecar_copy(name)
+        if n is not None:
+            copies.append((n, name))
+    for name in canonical + [n for _, n in sorted(copies)]:
+        path = os.path.join(folder, name)
+        if os.path.isfile(path):
+            return path
     return os.path.join(folder, DESCRIPTION_NAME)
 
 

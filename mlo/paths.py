@@ -538,6 +538,53 @@ SIDECAR_COVER_EXTS = IMAGE_EXTS
 # mlo.artistdata); artwork.json is app state and lives under .mlo/data.
 ALBUM_SIDECAR_NAMES = ("description.txt",)
 
+# The same names as a file manager leaves them when it copies one into a folder
+# that already holds it: "description (2).txt". A numbered copy is the app's OWN
+# family, not a stray — the description reader reads it, and the layout scan
+# renames it to the canonical name where nothing else occupies that name.
+_SIDECAR_COPY_RE = re.compile(r"^(?P<stem>.*?) \((?P<n>\d+)\)$")
+
+
+def album_sidecar_copy(name):
+    """The number in a numbered copy of an album sidecar, or None.
+
+    "description (2).txt" → 2, "description.txt" → None, and anything that is
+    not an album-sidecar copy → None. Callers order copies by it.
+    """
+    stem, ext = os.path.splitext(str(name or ""))
+    if ext.lower() != ".txt":
+        return None
+    m = _SIDECAR_COPY_RE.match(str(stem))
+    if not m or (m.group("stem") + ext).lower() not in ALBUM_SIDECAR_NAMES:
+        return None
+    return int(m.group("n"))
+
+
+def album_sidecar_of(name):
+    """The canonical album sidecar *name* is, or "" — copies included.
+
+    "description.txt" → "description.txt"; "description (2).TXT" →
+    "description.txt"; "notes.txt" → "". The app itself never writes a
+    numbered copy (`mlo.artistdata.write_description` replaces the file
+    atomically), so one arrives from outside: a file manager, a sync client or
+    an older build. It is still the album's description, and reading it is
+    what keeps it from being invisible beside a name the app does not know.
+    """
+    stem, ext = os.path.splitext(str(name or ""))
+    if ext.lower() != ".txt":
+        return ""
+    stem = str(stem)
+    while True:
+        m = _SIDECAR_COPY_RE.match(stem)
+        if not m:
+            break
+        stem = m.group("stem")
+    cand = (stem + ext).lower()
+    for known in ALBUM_SIDECAR_NAMES:
+        if cand == known:
+            return known
+    return ""
+
 
 def get_sidecar_cover_path(album_dir, track_filename):
     """Return the sidecar cover path for a track if it exists, else None.

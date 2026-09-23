@@ -494,7 +494,7 @@ def scan_library(cfg=None, stats=None):
     modifying half is :func:`apply_fixes`, which counts what it changed.
     """
     from .naming import DEFAULT_NAMING_SCRIPT
-    from .paths import ALBUM_SIDECAR_NAMES, IMAGE_EXTS
+    from .paths import ALBUM_SIDECAR_NAMES, album_sidecar_of, IMAGE_EXTS
 
     cfg = cfg or {}
     folder = str(cfg.get("music_folder") or "")
@@ -693,8 +693,35 @@ def scan_library(cfg=None, stats=None):
                     closed(sink, skipped=True)      # .lrc/.cue/.log/.accurip
                 elif ext in IMAGE_EXTS:
                     closed(sink, skipped=True)      # cover art
-                elif f.lower() in ALBUM_SIDECAR_NAMES:
-                    closed(sink, skipped=True)      # album description.txt
+                elif album_sidecar_of(f):
+                    # The album's description.txt — or a NUMBERED COPY of it
+                    # ("description (2).txt"), which a file manager, a sync
+                    # client or an older build leaves behind: the app's own
+                    # writer replaces the file, so it never makes one itself.
+                    # The canonical name is what it should be called, so a copy
+                    # with no canonical file beside it is offered the rename;
+                    # one that has the canonical next to it is a real stray
+                    # (two descriptions — the reader must not guess which).
+                    canonical = album_sidecar_of(f)
+                    canonical_on_disk = False
+                    try:
+                        canonical_on_disk = any(
+                            other.lower() == canonical for other in os.listdir(ap))
+                    except OSError:
+                        pass
+                    if f.lower() == canonical or canonical_on_disk:
+                        closed(sink, skipped=True)  # the app's own description
+                    else:
+                        rows.append(_issue(
+                            "sidecar_copy", fp, folder,
+                            "album \u201c%s / %s\u201d stores its description as "
+                            "\u201c%s\u201d" % (name, an, f),
+                            "rename it to \u201c%s\u201d — the app reads either "
+                            "name, and Apply fixes renames without touching the "
+                            "text" % canonical,
+                            fix={"action": "rename",
+                                 "to": os.path.join(ap, canonical)}))
+                        closed(sink, reported=True)
                 elif f.startswith("."):
                     closed(sink, skipped=True)      # the app's own manifests
                 else:

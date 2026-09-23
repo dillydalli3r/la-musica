@@ -917,7 +917,18 @@ def _notify_finish(state, result, release):
             return
 
         if result.get("imported"):
-            body = "Downloaded and imported into your library."
+            # The album IS in the library, but the import pipeline that
+            # finishes it — links, metadata, cover art, then the configured
+            # script chain — runs on a thread of its own and announces itself
+            # when it is really over (`imports._announce_import` →
+            # "Imported <album>", with the chain's own summary). Saying
+            # "imported" HERE read as "finished", so a user watching 21 scripts
+            # run for another four minutes had already been told the album was
+            # done. This notice is the DOWNLOAD's, and it says so.
+            body = ("Downloaded and moved into your library — the import "
+                    "pipeline is still finishing it (artwork, metadata, then "
+                    "the configured scripts). One more notice follows when it "
+                    "is done.")
             # An album that is missing tracks must not read as a whole one.
             # Only the YouTube branch ever sets `error_count` (its per-track
             # failures), so this adds a sentence for it and changes nothing for

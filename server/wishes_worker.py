@@ -586,11 +586,28 @@ def _settle_attempt(wish, cfg, err):
         return "pending"
     cap = wishes.max_attempts(cfg)
     if cap and attempts >= cap:
+        if wishes.walk_length(wish, cfg) >= 1:
+            # A WALK does not end because the network had a bad day: every
+            # ranked edition is still an edition, and the release was asked for
+            # by name ("Add to library" is what records the walk — spec R175).
+            # It goes to the BACKGROUND, which is what "silent" means here: the
+            # row stays where it already was, keeps its framework album, and is
+            # re-walked from the best edition on the worker's own ticks
+            # (R153). Reported as a FAILED row it landed in the section reserved
+            # for things a person has to deal with — for a search the app is
+            # still perfectly able to run.
+            wishes.mark_background(wid, wishes.walk_report(wish, err, cfg),
+                                   attempts=attempts)
+            return "background"
         wishes.mark_failed(wid, err, attempts)
         _drop_framework_album(wish, cfg)
         return "failed"
+    delay = wishes.retry_delay(cfg, attempts)
+    # No backoff configured (0) is not "retry immediately, forever": the row
+    # then falls back to the interval, which is what `due_at` reads off an
+    # absent `retry_at` (a stamp of `now` would have made every tick a retry).
     wishes.mark_wanted(wid, error=str(err)[:300], attempts=attempts,
-                       retry_at=time.time() + wishes.retry_delay(cfg, attempts))
+                       retry_at=(time.time() + delay) if delay else 0)
     return "pending"
 
 

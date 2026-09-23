@@ -874,6 +874,29 @@ with Patch(auto, jobs=lambda: [dict(j) for j in FIXTURE_JOBS],
     assert ended and ended["stage"] == "completed", ended
     assert "Imported into the library" in ended["note"], ended
 
+    # ...and a release whose album an IMPORT is holding right now is IN
+    # PROGRESS, whatever the settling stage says: the download is done, the
+    # release is not, and the row used to flicker through Completed for the
+    # seconds between "the album landed" and "the chain said it started", then
+    # jump back. The claim is the one thing that knows (the same registry
+    # MAINTAIN → In progress draws), so the payload must read it.
+    with job_locks.holding([ENDED_FOLDER], kind="auto-import",
+                           label="Import Album"):
+        held = _queue(client)
+        held_row = next(r for rows in held["sections"].values() for r in rows
+                        if r.get("wish_id") == 8)
+        assert held_row["stage"] == "importing", held_row
+        assert "Import Album" in held_row["note"], held_row
+        assert any(r.get("wish_id") == 8 for r in held["sections"]["in_progress"]), \
+            [r["id"] for r in held["sections"]["in_progress"]]
+        assert not any(r.get("wish_id") == 8 for r in held["sections"]["completed"]), \
+            [r["id"] for r in held["sections"]["completed"]]
+    # released: the row is back where its own registry put it.
+    back = _queue(client)
+    back_row = next(r for rows in back["sections"].values() for r in rows
+                    if r.get("wish_id") == 8)
+    assert back_row["stage"] == "completed", back_row
+
     # the payload the page is rendered with
     payload_path = os.path.join(REDIRECT, "queue-payload.json")
     with open(payload_path, "w", encoding="utf-8") as f:

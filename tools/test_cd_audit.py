@@ -185,15 +185,22 @@ try:
        f"({tr.get('audit')} / {tr.get('issues')})")
     ok(tr.get("audit_verified") == "log-checksum",
        f"the verdict says WHAT verified it ({tr.get('audit_verified')})")
-    # …and the album is still one check short, because a REQUIRED leg has
-    # nothing behind it: the readout names the AccurateRip leg as a problem to
-    # fix, and an album cannot be a pass beside a problem it lists (the case
-    # below, where every leg is established, is the pass).
+    # …and the album is one check short on the LEG THE APP CAN FIX: this rip
+    # carries no LOG_GRADE, so the score leg has nothing behind it and charges
+    # (script 6 scores the log). The AccurateRip leg no longer does — a
+    # pressing the database has never seen reads exactly like a disc with no
+    # .accurip and nothing can tell the two apart — so it is said as NOT
+    # CHECKED in `notes` and charged to nobody: the same missing evidence,
+    # reported for what it is, one leg apart.
     ok(res["pass_count"] == res["total_checks"] - 1
-       and any("'accuraterip' evidence" in i for i in res["issues"]),
-       f"a rip verified by its log is REAL, and the album is one check short "
-       f"while the AccurateRip evidence is unestablished "
-       f"({res['pass_count']}/{res['total_checks']}, {res['issues']})")
+       and any("'log-score' evidence" in i for i in res["issues"])
+       and any("'accuraterip'" in n and "not checked" in n
+               for n in res.get("notes") or [])
+       and not any("'accuraterip' evidence" in i for i in res["issues"]),
+       f"a rip verified by its log is REAL and the album passes, with the "
+       f"unverifiable AccurateRip leg said as not checked "
+       f"({res['pass_count']}/{res['total_checks']}, "
+       f"issues={list(res['issues'])[:2]}, notes={len(res.get('notes') or [])})")
 finally:
     _dm.check_log_checksum = _real_check
 

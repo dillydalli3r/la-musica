@@ -919,9 +919,36 @@ def _skip_names():
     return {d.lower() for d in SKIP_DIRS}
 
 
+def _refresh_library_caches():
+    """Make the next library/home build re-walk the music folder.
+
+    Both payloads are CACHED — the library tree in `tagcache`'s own entry
+    (`get_library`, TTL), Home's for 15 minutes — and Home is built FROM the
+    library, so a Refresh that only re-asked answered with the same rows for
+    minutes, which reads exactly like a dead button (the reason `/api/home`
+    grew its own `?refresh=1`). This is the one place that drops them, shared
+    by the Library's and Home's Refresh buttons so the two cannot drift:
+    `invalidate_all` clears the tag cache (every album's grade and tech read
+    comes from it), the cover cache and the library payload in one go, and the
+    identity and recommendation caches go with them.
+    """
+    tagcache.invalidate_all()
+    mbresolve.invalidate()
+    from server import recommendations
+    recommendations.invalidate()
+
+
 @app.get("/api/library")
-def library():
-    """Tag-rich library tree: artists -> albums -> tracks (grade/audit + tags)."""
+def library(refresh: int = Query(0)):
+    """Tag-rich library tree: artists -> albums -> tracks (grade/audit + tags).
+
+    `?refresh=1` is the Library page's Refresh button: it drops the caches the
+    payload is built from (`_refresh_library_caches`), so the next build
+    re-walks the music folder instead of answering from its TTL entry — what a
+    user pressing Refresh after a file was added or a script was run expects.
+    """
+    if refresh:
+        _refresh_library_caches()
     cfg = load_config()
     return lib_mod.build_library(cfg)
 
@@ -935,20 +962,15 @@ def home(request: Request, refresh: int = Query(0)):
     Scoped by the session's user: the shelves carry that person's favourites
     and playlist count, and the cache is keyed on the user for the same reason.
 
-    `?refresh=1` is the "Your library" card's Refresh button, and it has to do
-    more than re-ask: the payload is cached for 15 minutes and is BUILT from
-    the library payload, which is cached again under its own key. Refetching
-    the route therefore returned the same rows for a quarter of an hour, which
-    reads exactly like a dead button. Refresh drops the library, tag,
-    identity and recommendation caches the way a settings save does, so the
-    next build re-walks the music folder — the point of pressing it after a
-    file was added or a script was run.
+    `?refresh=1` is Home's Refresh button (`_refresh_library_caches`): the
+    payload is cached for 15 minutes and is BUILT from the library payload,
+    which is cached again under its own key, so refetching the route alone
+    returned the same rows for a quarter of an hour — which reads exactly like
+    a dead button. One shared drop, the same one `/api/library?refresh=1`
+    performs, so the two buttons can never do different things.
     """
     if refresh:
-        tagcache.invalidate_all()
-        mbresolve.invalidate()
-        from server import recommendations
-        recommendations.invalidate()
+        _refresh_library_caches()
     from server import recommendations
     try:
         return recommendations.build_home(load_config(), auth_mod.current_user(request))

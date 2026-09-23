@@ -272,6 +272,38 @@ def _no_release():
     return wishes.release_identity({})
 
 
+# The claim kinds that mean an album is being IMPORTED or FINISHED right now:
+# the download's own chain (`auto-import`), the import queue and every
+# single-album import (`import`), and a script run over the album (`scripts` —
+# the chain runs under this one, and so does a Run All). An export, a tag write
+# or a cover write claims the album too, and none of those make a finished
+# download unfinished, so those rows keep their own stage.
+_IMPORT_KINDS = ("auto-import", "import", "scripts")
+
+
+def _album_claims():
+    """{album key: the claiming job's label} for the albums being finished now.
+
+    ONE registry (`server.job_locks` — the same one MAINTAIN → In progress
+    reads) and ONE matcher (`_album_key`), so a queue row and the page that
+    lists the work cannot disagree about which album is busy.
+    """
+    out = {}
+    try:
+        from server import job_locks
+        for job in job_locks.jobs():
+            if str(job.get("kind") or "") not in _IMPORT_KINDS:
+                continue
+            label = str(job.get("label") or "") or "An import"
+            for held in job.get("paths") or []:
+                key = _album_key(held)
+                if key:
+                    out.setdefault(key, label)
+    except Exception:
+        return {}      # an unreadable registry must not blank the queue
+    return out
+
+
 def _album_key(path):
     """One album's identity inside the payload, for the rows that name a
     folder: the same normalization the prompt table keys its entries by, so a
@@ -756,6 +788,23 @@ def build_queue(cfg=None):
         # still answers with what the registries know.
         pass
 
+    # A release whose album an IMPORT is holding right now belongs in In
+    # progress, whatever its own registry's stage says. The claim is the one
+    # thing that knows the album is being written this second, and without it a
+    # finished download flickered through Completed for the seconds between
+    # "the album landed" and "the chain said it started", then jumped back to
+    # In progress: the download was done, the RELEASE was not. One row per
+    # release stays one row — the claim only says which section it is in.
+    claims = _album_claims()
+    if claims:
+        for row in rows:
+            if row.get("stage") != "completed":
+                continue
+            holder = claims.get(_album_key(row.get("album_path")))
+            if not holder:
+                continue
+            row["stage"] = "importing"
+            row["note"] = f"{holder} is still running over this album"
     sections = {name: [] for name in SECTIONS}
     for row in rows:
         sections[_section_of(row["stage"])].append(row)

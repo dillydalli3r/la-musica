@@ -1791,7 +1791,7 @@ user asked for, in the order they asked for it. `server/exporter.py` owns both.
   which edition "this album" is. The only other ranking in the acquisition path
   ranks a different thing: `soulseek_auto._rank` over `find_candidates` ranks the
   PEER FOLDERS of one already-chosen edition (which peer has the complete,
-  lossless, log-verified copy), so a walk of three editions contains up to three
+  lossless, log-verified copy), so a walk of five editions contains up to five
   of those — a downloads ranking inside a candidate, never a second opinion about
   which edition the album is.
 
@@ -2253,10 +2253,10 @@ user asked for, in the order they asked for it. `server/exporter.py` owns both.
 
 - **R151 — each candidate's search is BOUNDED, and the walk stops at the end of
   its own list.** A walk asks at most `soulseek_fallback_candidates` editions
-  (shipped **3**, clamped to 1–10; **1** is the pre-walk behaviour — the best
+  (shipped **5**, clamped to 1–10; **1** is the pre-walk behaviour — the best
   edition and nothing behind it), and each candidate's search is given
   `soulseek_search_timeout_seconds` of quiet (shipped **60**) before it counts as
-  not found and the walk moves on — **per candidate**, so a walk of three may
+  not found and the walk moves on — **per candidate**, so a walk of five may
   wait up to three of those, while a usable folder still ends a candidate's
   search in seconds. That window is the app's EXISTING one, not a second timer:
   it is the quiet time `soulseek_auto_search_wait` means, plus the response grace
@@ -2312,6 +2312,87 @@ user asked for, in the order they asked for it. `server/exporter.py` owns both.
   `wishes_not_found_attempts` (shipped 3, 0 = never) keeps its meaning and its
   units — empty searches — now counted per WALK: the number of empty walks the
   release may have before it settles into the background.
+
+- **R178 — a failure retries on ITS OWN clock, and a walk that keeps failing
+  stays quiet.** Two halves of one report ("Retrying after a failure at 12:10",
+  five hours after the download started; a fallback release landing in the
+  queue's *Failed* section):
+
+  - **the cadence.** `wishes.due_at` was `max(last_search + interval, retry_at)`,
+    so a transient failure's backoff (`wishes_retry_backoff_minutes`, shipped 30,
+    doubling to a day) was swallowed whole by the periodic interval
+    (`wishes_interval_hours`, shipped 6): a peer that was simply down was
+    re-asked six hours later, and the time the row showed had nothing to do
+    with the failure it followed. Now the two clocks are separate and each
+    governs its own case — a wish whose last attempt FAILED is due at
+    `retry_at` (the backoff), and a wish that merely found nothing is due at the
+    interval. `retry_at` is only ever stamped by that failure path, so its
+    presence IS "the last attempt failed"; with the backoff turned off (0
+    minutes) nothing stamps it and the interval remains the floor, which is what
+    keeps a disabled backoff from turning every tick into a retry.
+  - **the silence.** A wish that carries a ranked walk never ends `failed`
+    (`wishes_worker._settle_attempt`): spending `wishes_max_attempts` on a
+    release EVERY edition of which the network refused sends it to the
+    BACKGROUND instead — `mark_background` with the walk's own report, the same
+    non-terminal state R153 defines — so the row stays where it was, keeps its
+    framework album, and is re-walked from the best edition on the worker's
+    ticks. *Failed* is the section for things a person has to deal with, and
+    "the network did not have it yet" is not one of them for a release the app
+    was asked to find by name. A wish with NO ranked list (a name-keyed
+    wishlist row) keeps the terminal `failed` outcome it always had, because
+    nothing is left to re-ask.
+
+- **R179 — ONE RELEASE IS ONE TILE, even mid-import.** A framework album is a
+  row of its own (a folder with a marker and no audio) and the album the audio
+  landed in is another, so a release that exists as TWO folders was listed
+  twice for as long as the placeholder survived — the chain's own end clears it
+  (`imports._finish_album` → `pending_albums.clear_if_filled`), which is
+  minutes of a duplicate tile, and a placeholder whose chain never ends (a
+  review stop, a crash) stayed a duplicate for good. `server.library`'s payload
+  now answers the question the folders cannot: `_drop_filled_placeholders` runs
+  over the finished tree and the placeholder YIELDS to the album, matched on the
+  release id (`MUSICBRAINZ_ALBUMID`, the release GROUP id as the fallback) —
+  never on the folder name, because the whole point is that the two folders are
+  named differently. A placeholder whose release is NOT in the payload keeps its
+  row (that is the album the user asked for and nothing has filled yet), and an
+  artist row left with no albums goes with it.
+
+- **R180 — ONE IMPORT PER ALBUM.** A second autonomous import of an album
+  another job is already importing used to QUEUE behind that job's claim and
+  then run the whole pipeline again — the six pre-chain lookups and every
+  script, over an album the first caller had just finished. `imports.finish_album`
+  answers `already_importing` instead (`_importing_now` reads the ONE registry,
+  `server.job_locks`, and takes only a claim whose kind is `auto-import`,
+  `import` or `scripts` — the same three `server.api_queue` reads for its In
+  progress section). A job importing its OWN claim is never a duplicate: the
+  download job holds the album from its first byte and then runs this very
+  import under that claim, and a caller with no job of its own keeps the old
+  wait-then-run behaviour, because skipping there could leave an album
+  unimported. The user's own press (`wait=False`) keeps its 409, whose sentence
+  names the holder.
+
+- **R181 — a disc that could not be checked is not a failed check.**
+  `mlo.grader`'s CD verdict charges a missing leg once — every leg the app's own
+  artefacts decide (a LOG_GRADE the scorer writes, the log's CRCs) — with ONE
+  exception: the AccurateRip leg. A pressing the database has never seen reads
+  exactly like a disc with no `.accurip` at all and no code path can tell the
+  two apart, so failing the album for it failed the rip for what the network
+  does not know. It is reported in the grade's `notes` channel (the same one the
+  artist image checks use: inform without failing) and rendered as "Not
+  checked", never under "Failed checks" — the state is stated, the album is
+  judged on what could be measured, and the stored verdict is still never
+  guessed.
+
+- **R182 — the app's own sidecars are a FAMILY, and a numbered copy is one of
+  them.** `mlo.artistdata.write_description` replaces `description.txt`
+  atomically, so the app never writes "description (2).txt" — a copy arrives
+  from outside (a file manager, a sync client, an older build). It is still the
+  album's description: `paths.album_sidecar_of` recognises the family,
+  `artistdata.description_path` reads a copy (the canonical name wins when both
+  are there), and the layout scan reports `sidecar_copy` with a rename fix to
+  the canonical name instead of calling the app's own file dead weight. Two
+  descriptions side by side stay the reader's to sort out — the app does not
+  guess which text is the right one.
 
 - **R169 — the walk asks DISTINCT PRESSINGS: two editions that state the same
   catalog number are ONE search.** Separate MusicBrainz releases really do share

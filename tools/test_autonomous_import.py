@@ -579,4 +579,49 @@ for _name, _fn in _real.items():
 integrations.resolve_release = _real_resolve
 script_runners.run_chain = _real_chain
 shutil.rmtree(TMP, ignore_errors=True)
+# --------------------------------------------------------------------------- #
+# ONE IMPORT PER ALBUM: a FOREIGN claim means the work is already being done.
+# --------------------------------------------------------------------------- #
+# A second autonomous caller used to QUEUE behind the claim and then run the
+# whole pipeline again — the six pre-chain lookups and all 21 scripts, over an
+# album the first caller had just finished ("it's doing the scripts again").
+# It now answers "already importing" and runs nothing. A caller inside its OWN
+# claim — the download job, which holds the album from its first byte and then
+# imports it — is not a duplicate and still runs.
+from server import job_locks  # noqa: E402
+import threading as _threading  # noqa: E402
+
+held = os.path.join(TMP, "held-album")
+os.makedirs(held, exist_ok=True)
+_foreign = {}
+_release = _threading.Event()
+_acquired = _threading.Event()
+
+
+def _hold_in_another_job():
+    # A claim lives in the CONTEXT that made it (`job_locks.current`), so the
+    # other import has to be a context of its own — exactly what a second
+    # background job is.
+    with job_locks.holding([held], kind="import", label="Import Held"):
+        _foreign["job"] = job_locks.current()
+        _acquired.set()
+        _release.wait(30)
+
+
+_holder = _threading.Thread(target=_hold_in_another_job, daemon=True)
+_holder.start()
+_acquired.wait(30)
+try:
+    _mine = job_locks.new_job()
+    with job_locks.holding([os.path.join(TMP, "other-album")], kind="import",
+                           label="Import Other", job=_mine):
+        out = imports.finish_album(held, dict(CFG), wait=True)
+finally:
+    _release.set()
+    _holder.join(30)
+ok(out.get("already_importing") is True and not out.get("scripts"),
+   "an album a FOREIGN import holds is not imported a second time")
+ok("Import Held" in str(out.get("note") or ""),
+   "…and the answer names the holder")
+
 print(f"autonomous import: all {passed} assertions passed")

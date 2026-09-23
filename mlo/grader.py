@@ -1472,6 +1472,10 @@ def _grade_album(album_dir, lyrics_format, cfg=None):
 
     tracks = []
     issues = {}
+    # Informational lines for this album: they say what was NOT checked,
+    # never that something failed. The artist grade has carried the same
+    # channel since the image checks (_artist_image_issues).
+    notes = []
 
     album_tag_values = {}
     media_values = []
@@ -3231,7 +3235,15 @@ def _grade_album(album_dir, lyrics_format, cfg=None):
             # drawing a green dot beside a problem it had just named. An issue
             # the verdict does not charge is a verdict that lies, so the
             # readout below is a check of its own: every CD leg has evidence.
-            if cd_legs_missing:
+            # The AccurateRip leg is the ONE exception, and it is not for its
+            # own sake: a pressing the database has never seen reads exactly
+            # like a disc with no .accurip at all, and no code path can tell
+            # the two apart. A missing FILE is the app's to fix (script 9
+            # writes it); a missing DATABASE ENTRY is not, and failing an
+            # album for it failed the rip for what the network does not know.
+            # It is reported in `notes` instead — said plainly as NOT CHECKED,
+            # which is what it is — so nothing is hidden and nothing is claimed.
+            if [n for n in cd_legs_missing if n != "accuraterip"]:
                 total_checks += 1
                 failed_checks += 1
             # The missing legs are named ONCE for the album, per leg, so the
@@ -3247,13 +3259,21 @@ def _grade_album(album_dir, lyrics_format, cfg=None):
                                 ".accurip"),
             }
             for name in sorted(cd_legs_missing):
-                add_issue(
-                    f"AUDIT readout: nothing established the CD verdict's "
-                    f"'{name}' evidence for "
-                    f"{len(cd_legs_missing[name])} track(s): "
-                    f"{_missing_wording.get(name, 'no evidence')} — the stored "
-                    f"verdict is shown as it is, not guessed (we could not "
-                    f"check, which is not the same as a bad rip)", "album")
+                subject = (f"the CD verdict's '{name}' evidence for "
+                           f"{len(cd_legs_missing[name])} track(s)")
+                reason = _missing_wording.get(name, "no evidence")
+                if name == "accuraterip":
+                    notes.append(
+                        f"AUDIT not checked: nothing established {subject}: "
+                        f"{reason} — the database simply may not know this "
+                        f"pressing, and a disc that could not be checked is "
+                        f"not a bad rip")
+                else:
+                    add_issue(
+                        f"AUDIT readout: nothing established {subject}: "
+                        f"{reason} — the stored verdict is shown as it is, "
+                        f"not guessed (we could not check, which is not the "
+                        f"same as a bad rip)", "album")
             # ---- CD verification resolves the deferred AUDIT requirement --
             # A rip whose .log CRC verifies, or whose .accurip verifies, is
             # REAL on that evidence alone: the stored tag (AudioAuditor's
@@ -3893,6 +3913,7 @@ def _grade_album(album_dir, lyrics_format, cfg=None):
             for t in ALBUM_TAGS
         },
         "issues": {k: sorted(v, key=str.lower) for k, v in issues.items()},
+        "notes": sorted(set(notes), key=str.lower),
     }
 
 

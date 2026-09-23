@@ -749,14 +749,14 @@ def candidate_state(wish, cfg=None):
     """Which candidate this wish is being searched for, as ONE block or None.
 
     None when the walk has nothing to say: no list at all, or a single entry.
-    "release 1 of 1" is noise, and a caller that shows nothing is right about a
+    "Release 1 of 1" is noise, and a caller that shows nothing is right about a
     wish whose list has one step. With a real walk every key is present:
 
         {index, total, label, mbid, title, tried: [{mbid, title}, ...]}
 
     *total* is how many candidates the walk may ask (`walk_length`: the ranked
     list capped by `soulseek_fallback_candidates`), *label* is the sentence the
-    surfaces show ("release 2 of 5") — one wording, built here so the queue row,
+    surfaces show ("Release 2 of 5") — one wording, built here so the queue row,
     the album's page and the notifications cannot disagree about where the
     search is — and *tried* is what already came back empty in THIS attempt, so
     an end-of-walk report names the whole walk rather than only its last step.
@@ -929,8 +929,8 @@ def mark_background(wid, error="", attempts=None, not_found=None):
 
 
 def candidate_label(index, total):
-    """"release 2 of 5" — the ONE wording for a position in the walk."""
-    return f"release {int(index) + 1} of {int(total)}"
+    """"Release 2 of 5" — the ONE wording for a position in the walk."""
+    return f"Release {int(index) + 1} of {int(total)}"
 
 
 def walk_report(wish, err, cfg=None):
@@ -1035,14 +1035,28 @@ def retry_delay(cfg, attempts):
 def due_at(wish, cfg):
     """When this wish may be searched again ON ITS OWN.
 
-    The interval's own end, or a pending transient backoff, whichever is
-    later — so a failure waits its backoff even on a tick that lands right
-    after it."""
-    interval = max(1, _int(cfg, "wishes_interval_hours", 6)) * 3600.0
+    A FAILED attempt keeps its own schedule — `retry_at`, the doubling backoff
+    from `wishes_retry_backoff_minutes` — because that is what the backoff is
+    for: a peer that is down, or a MusicBrainz that is rate-limiting, is
+    retried when it has had a moment, not when the next periodic look is due.
+    The interval (`wishes_interval_hours`) is the OTHER case, and the common
+    one: a wish whose search simply found nothing yet, which is re-asked on that
+    cadence so the network is polled at a sane rate.
+
+    Both used to be `max(interval, retry_at)`, which read as "retrying at 12:10"
+    five hours after a download started: a 30-minute backoff was swallowed whole
+    by the 6-hour interval, so a failure waited the interval anyway and the
+    number the row showed had nothing to do with the failure it followed.
+    `retry_at` is only ever set by that failure path, so its presence IS "the
+    last attempt failed" — and with the backoff turned off (0 minutes) nothing
+    sets it, which is what keeps the interval as the floor in that case."""
     if is_terminal(wish, cfg):
         return float("inf")
-    return max(float(wish.get("last_search") or 0) + interval,
-               float(wish.get("retry_at") or 0))
+    retry = float(wish.get("retry_at") or 0)
+    if retry:
+        return retry
+    interval = max(1, _int(cfg, "wishes_interval_hours", 6)) * 3600.0
+    return float(wish.get("last_search") or 0) + interval
 
 
 def is_terminal(wish, cfg):

@@ -351,7 +351,7 @@ def _wish_state_of(w, cfg):
         "source": str(w.get("source") or ""),
         "queries": list(w.get("queries") or []),
         # WHICH ranked candidate the search is on (spec R150-R154): the album a
-        # pending row links to says where its acquisition is ("release 2 of 3")
+        # pending row links to says where its acquisition is ("Release 2 of 3")
         # from the SAME block the queue row reads, so the tile and the queue row
         # can never disagree about it. None for a wish with one candidate.
         "walk": walk,
@@ -652,6 +652,62 @@ def library_cache_key(cfg):
     )
 
 
+def _release_identity(row):
+    """The MusicBrainz release a row is ABOUT, or "" when it states none.
+
+    The ONE identity a framework row and the album it becomes have in common:
+    both carry the release id in their album-level tags (a placeholder from its
+    marker, a real album from its files). The release GROUP is the fallback,
+    for a wish keyed by the group and an album whose tracks state only that.
+    """
+    meta = row.get("meta") or {}
+    for key in ("MUSICBRAINZ_ALBUMID", "MUSICBRAINZ_RELEASEGROUPID"):
+        value = str(meta.get(key) or "").strip().lower()
+        if value:
+            return value
+    return ""
+
+
+def _drop_filled_placeholders(result):
+    """ONE RELEASE IS ONE TILE — even mid-import.
+
+    A framework album is a row of its own (a folder with a marker and no
+    audio) and the album the audio landed in is another, so a release that
+    exists as TWO folders was listed twice, for as long as the placeholder
+    survived: the chain's own end clears it (`imports._finish_album` →
+    `pending_albums.clear_if_filled`), which is minutes of a duplicate tile the
+    user watches — and a placeholder whose chain never ends (a review stop, a
+    crash) stayed a duplicate for good. Only the same folder was ever compared
+    before, and nothing compared the two rows.
+
+    The placeholder YIELDS to the album: a release already represented by a row
+    with audio is not also a pending one. Rows are matched on the release id
+    (the group id as a fallback), never on the folder name — the whole point is
+    that the two folders are named differently. A placeholder whose release is
+    NOT in the payload keeps its row: that is the album the user asked for and
+    nothing has filled yet.
+    """
+    real = set()
+    for ar in result:
+        for row in ar["albums"]:
+            if row.get("pending"):
+                continue
+            ident = _release_identity(row)
+            if ident:
+                real.add(ident)
+    if not real:
+        return
+    for ar in result:
+        kept = []
+        for row in ar["albums"]:
+            if row.get("pending") and _release_identity(row) in real:
+                continue        # the album itself is here: not a second one
+            kept.append(row)
+        if len(kept) != len(ar["albums"]):
+            ar["albums"] = kept
+            ar["aggregate"] = _aggregate_albums(kept)
+
+
 def build_library(cfg, progress=None):
     """Full library tree with artist/album/track aggregates (TTL-cached)."""
     folder = cfg.get("music_folder") or ""
@@ -715,6 +771,8 @@ def build_library(cfg, progress=None):
                 "albums": albums_data,
                 "aggregate": agg,
             })
-        return {"folder": folder.replace("\\", "/"), "artists": result}
+        _drop_filled_placeholders(result)
+        return {"folder": folder.replace("\\", "/"),
+                "artists": [ar for ar in result if ar["albums"]]}
 
     return tagcache.get_library(cfg_key, _build)

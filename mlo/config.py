@@ -1110,7 +1110,11 @@ DEFAULT_CONFIG = {
     # exactly the behaviour before the walk existed (the best edition, nothing
     # behind it); a group with fewer eligible editions than this simply ends the
     # walk at the end of its own list. Clamped to the list by the walk itself.
-    "soulseek_fallback_candidates": 3,
+    # Five, not three: a rank is a guess about WHICH PRESSING is best, and the
+    # walk exists because the network disagrees with it often enough — each
+    # candidate costs one quiet window and nothing else, and the walk stops the
+    # moment a usable folder appears.
+    "soulseek_fallback_candidates": 5,
     # How long ONE candidate's search is given before it counts as not found and
     # the walk moves on. The same QUIET window `soulseek_auto_search_wait` is
     # (slskd ends a search when the network stops answering, with the app's own

@@ -18,6 +18,7 @@ ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, ROOT)
 
 import mlo.artistdata as ad  # noqa: E402
+import mlo.paths as paths  # noqa: E402
 
 if not ad.HAS_PIL:
     print("SKIP: Pillow not installed")
@@ -186,6 +187,35 @@ try:
           ad.read_provenance(ALBUM, cfg=CFG) == {}, raw)
 finally:
     shutil.rmtree(TMP, ignore_errors=True)
+
+print("\n== a numbered copy is the album's description ==")
+# "description (2).txt" is what a file manager leaves when it copies a file
+# into a folder that already holds one; the app's own writer REPLACES the file
+# atomically, so a copy always arrives from outside. It is still the album's
+# description — invisible to a reader that only knows the exact name — and the
+# layout scan offers the rename instead of calling the album's own file dead
+# weight (mlo.paths.album_sidecar_of, mlo.layout's sidecar_copy finding).
+COPY_DIR = os.path.join(TMP, "copy-album")
+os.makedirs(COPY_DIR, exist_ok=True)
+with io.open(os.path.join(COPY_DIR, "description (2).txt"), "w",
+             encoding="utf-8", newline="\n") as fh:
+    fh.write("A description a file manager copied.\n")
+check("a numbered copy is READ",
+      ad.read_description(COPY_DIR).strip() == "A description a file manager copied.",
+      ad.description_path(COPY_DIR))
+check("…and it is the on-disk name the app resolves to",
+      os.path.basename(ad.description_path(COPY_DIR)) == "description (2).txt")
+check("…and the family matcher knows the name and its number",
+      paths.album_sidecar_of("description (2).TXT") == "description.txt"
+      and paths.album_sidecar_copy("description (3).txt") == 3)
+# With the canonical file beside it, the canonical one wins — two texts are the
+# reader's to sort out, and it must not guess.
+with io.open(os.path.join(COPY_DIR, "description.txt"), "w",
+             encoding="utf-8", newline="\n") as fh:
+    fh.write("The canonical one.\n")
+check("the canonical name wins over a copy",
+      ad.read_description(COPY_DIR).strip() == "The canonical one.",
+      ad.read_description(COPY_DIR))
 
 print(f"\n{'FAILURES: ' + ', '.join(FAILS) if FAILS else 'all checks passed'}")
 raise SystemExit(1 if FAILS else 0)
