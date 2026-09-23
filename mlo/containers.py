@@ -651,8 +651,12 @@ def _inject_png_text(png_path, tags_dict):
 #             ignore the setting (the FLAC re-encode in mlo.flac also uses
 #             it, as flac.exe's own -0..-8 level).
 #   rate      the lossy rate: (flag, shipped default, low, high, unit).
-#             mp3/aac/opus take kbps; ogg takes libvorbis' own 0-10 quality
-#             scale (-q:a 6 is roughly 192 kbps VBR).
+#             mp3/aac/opus take kbps and the flag is written as `<n>k` —
+#             ffmpeg's own suffix, and the ONLY one it accepts: "320kbps" is
+#             rejected outright ("Invalid chars 'bps' at the end of expression"),
+#             so the unit here is the argv suffix, not a caption. ogg takes
+#             libvorbis' own 0-10 quality scale (-q:a 6 is roughly 192 kbps VBR)
+#             and appends no suffix at all.
 CODECS = {
     "flac": {
         "ext": ".flac", "codec": "flac", "lossless": True,
@@ -674,12 +678,12 @@ CODECS = {
     "mp3": {
         "ext": ".mp3", "codec": "mp3", "lossless": False,
         "args": ["-c:a", "libmp3lame", "-f", "mp3"],
-        "rate": ("-b:a", 320, 8, 320, "kbps"),
+        "rate": ("-b:a", 320, 8, 320, "k"),
     },
     "aac": {
         "ext": ".m4a", "codec": "aac", "lossless": False,
         "args": ["-c:a", "aac", "-f", "ipod"],
-        "rate": ("-b:a", 256, 8, 512, "kbps"),
+        "rate": ("-b:a", 256, 8, 512, "k"),
     },
     "ogg": {
         "ext": ".ogg", "codec": "vorbis", "lossless": False,
@@ -689,7 +693,7 @@ CODECS = {
     "opus": {
         "ext": ".opus", "codec": "opus", "lossless": False,
         "args": ["-c:a", "libopus", "-f", "opus"],
-        "rate": ("-b:a", 128, 6, 512, "kbps"),
+        "rate": ("-b:a", 128, 6, 512, "k"),
     },
 }
 
@@ -775,6 +779,41 @@ def codec_extra_args(cfg):
     return str((cfg or {}).get("library_codec_args") or "").split()
 
 
+def codec_args(codec, level=None, bitrate=0, extra=()):
+    """The encoder arguments one target codec gets, from a triple.
+
+    Quality/level first (None = the encoder's own), then the lossy rate
+    (clamped to the codec's own range; 0 = the codec's shipped default), then
+    *extra* — an argv fragment already split (`codec_extra_args`), appended
+    verbatim: ffmpeg lets the LAST flag win, so a user's own "-b:a 128k"
+    overrides the rate.
+
+    The ONE place a (codec, level, rate) triple becomes argv: the library pass
+    reads its triple from `library_codec_*` (`encoder_args` below) and the
+    offline download's re-encode from `download_*` (server/api_media), so one
+    target encodes the same way whichever asked for it.
+    """
+    spec = CODECS.get(codec)
+    if not spec:
+        return []
+    args = list(spec["args"])
+    if spec.get("level") and level is not None:
+        args += [spec["level"], str(max(0, min(8, int(level))))]
+    rate = spec.get("rate")
+    if rate:
+        flag, default, low, high, unit = rate
+        try:
+            value = int(bitrate or 0)
+        except (TypeError, ValueError):
+            value = 0
+        # 0 (the shipped default) means "the codec's own rate", which is why
+        # it is resolved BEFORE the clamp: clamping the sentinel would turn it
+        # into the codec's minimum, not its default.
+        value = max(low, min(high, value)) if value else default
+        args += [flag, f"{value}{unit}"]
+    return args + [str(a) for a in (extra or ())]
+
+
 def encoder_args(codec, cfg):
     """The encoder arguments that convert *cfg*'s target *codec* gets.
 
@@ -784,24 +823,12 @@ def encoder_args(codec, cfg):
     `library_codec_args` verbatim. ffmpeg lets the LAST flag win, so a user
     who writes their own "-b:a 128k" overrides the bitrate above.
     """
-    spec = CODECS.get(codec)
-    if not spec:
-        return []
-    args = list(spec["args"])
-    if spec.get("level"):
-        args += [spec["level"],
-                 str(clamped_int(cfg, "library_codec_quality", 0, 8))]
-    rate = spec.get("rate")
-    if rate:
-        flag, default, low, high, unit = rate
-        try:
-            # 0 (the shipped default) means "the codec's own rate", which is
-            # why it is resolved BEFORE the clamp: clamping the sentinel would
-            # turn it into the codec's minimum, not its default.
-            value = int((cfg or {}).get("library_codec_bitrate") or 0)
-        except (TypeError, ValueError):
-            value = 0
-        value = max(low, min(high, value)) if value else default
-        args += [flag, f"{value}{unit}"]
-    return args + codec_extra_args(cfg)
+    try:
+        bitrate = int((cfg or {}).get("library_codec_bitrate") or 0)
+    except (TypeError, ValueError):
+        bitrate = 0
+    return codec_args(codec,
+                      clamped_int(cfg, "library_codec_quality", 0, 8),
+                      bitrate,
+                      codec_extra_args(cfg))
 

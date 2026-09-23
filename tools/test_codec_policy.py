@@ -172,8 +172,8 @@ for codec, spec in CODECS.items():
 
 # The configured rate/quality replaces the codec's own default, clamped to the
 # range that codec accepts (mp3 stops at 320 kbps, libvorbis at 10).
-assert encoder_args("mp3", _cfg("C:/music", library_codec_bitrate=192))[-1] == "192kbps"
-assert encoder_args("opus", _cfg("C:/music", library_codec_bitrate=9999))[-1] == "512kbps"
+assert encoder_args("mp3", _cfg("C:/music", library_codec_bitrate=192))[-1] == "192k"
+assert encoder_args("opus", _cfg("C:/music", library_codec_bitrate=9999))[-1] == "512k"
 assert encoder_args("ogg", _cfg("C:/music", library_codec_bitrate=8))[-1] == "8"
 assert encoder_args("ogg", _cfg("C:/music", library_codec_bitrate=8))[-2] == "-q:a"
 assert encoder_args("flac", _cfg("C:/music", library_codec_quality=8))[-2:] == \
@@ -186,12 +186,12 @@ assert encoder_args("alac", _cfg("C:/music", library_codec_quality=8)) == \
 # library_codec_args are appended verbatim, last, so a user's own flag wins.
 extra = _cfg("C:/music", library_codec="mp3", library_codec_bitrate=192,
              library_codec_args="-b:a 128k -joint_stereo 1")
-assert encoder_args("mp3", extra)[4:] == ["-b:a", "192kbps", "-b:a", "128k",
+assert encoder_args("mp3", extra)[4:] == ["-b:a", "192k", "-b:a", "128k",
                                           "-joint_stereo", "1"]
 cmd = flac_mod.convert_command(FFMPEG, "in.wav", "out.mp3", extra)
 assert cmd == [FFMPEG, "-y", "-v", "error", "-nostdin", "-i", "in.wav",
                "-map", "0:a:0", "-c:a", "libmp3lame", "-f", "mp3",
-               "-b:a", "192kbps", "-b:a", "128k", "-joint_stereo", "1",
+               "-b:a", "192k", "-b:a", "128k", "-joint_stereo", "1",
                "out.mp3"], cmd
 
 # The codec an extension cannot answer is probed from the file, and an
@@ -251,7 +251,7 @@ try:
     # The one command line carries the target's args and the input/output.
     assert calls[0] == [FFMPEG, "-y", "-v", "error", "-nostdin", "-i",
                         src.replace("\\", "/"), "-map", "0:a:0",
-                        "-c:a", "libmp3lame", "-f", "mp3", "-b:a", "320kbps",
+                        "-c:a", "libmp3lame", "-f", "mp3", "-b:a", "320k",
                         calls[0][-1]], calls[0]
     assert calls[0][-1].endswith(".mp3") and ".conv_" in calls[0][-1], calls[0]
     names = _names(album)

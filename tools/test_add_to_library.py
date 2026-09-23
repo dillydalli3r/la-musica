@@ -1042,6 +1042,56 @@ else:
     empty = add_client.post("/api/library/add", json={"mbid": "", "kind": "album"})
     eq(empty.status_code, 400, "an add with neither artist nor title is refused")
 
+    # ---- an add records the group's ranked editions (spec R150/R169) ------- #
+    # The walk is what makes a scarce release findable: without the list the
+    # search stops at the one edition the add resolved, and a pressing whose
+    # folders hold nothing usable ENDS the release instead of moving on to the
+    # next — which is what the artist watch's path always did and this route
+    # never did. So the add has to hand the wish the list
+    # `integrations.group_targets` resolved: best first, catalog numbers
+    # included (that is what R169 dedupes by, and what the queue row's badge
+    # reports the position of).
+    walked = unique_release("0f0f0f0f", "Walked Album", "Test Artist 17")
+    group_rows = [
+        {"mbid": walked["id"], "title": walked["title"], "score": 900,
+         "catalog_numbers": ["WALK-1"]},
+        {"mbid": walked["release_group_id"], "title": "Walked Album (JP)",
+         "score": 800, "catalog_numbers": ["WALK-1J"]},
+    ]
+    intg.auto_import_targets = lambda mbid, kind=None, mode="best", types=None, limit=None: (
+        [{"mbid": walked["id"], "title": walked["title"],
+          "release_group_id": walked["release_group_id"],
+          "candidates": group_rows}], [])
+    intg.resolve_release = lambda mbid: (walked, walked["id"])
+    walk_run = add_client.post("/api/library/add", json={
+        "mbid": walked["id"], "kind": "release_group", "title": walked["title"],
+        "artist": "Test Artist 17", "year": "1999"})
+    eq(walk_run.status_code, 200, "a release-group add answers 200")
+    walk_wish_id = (walk_run.json().get("albums") or [{}])[0].get("wish_id")
+    ok(bool(walk_wish_id) and until(lambda: bool(wishes.get_wish(walk_wish_id))),
+       "and its wish is on the queue", walk_wish_id)
+    # The wish exists from the REQUEST (create_from_request names it from the
+    # title it was given); the ranked list arrives with the resolution, which
+    # runs on a daemon thread — so wait for the walk itself, not the row.
+    ok(until(lambda: wishes.walk_length(wishes.get_wish(walk_wish_id), cfg) == 2),
+       "the add records the group's ranked editions on the wish",
+       (wishes.get_wish(walk_wish_id) or {}).get("candidates"))
+    stored = (wishes.get_wish(walk_wish_id) or {}).get("candidates") or []
+    eq([r.get("mbid") for r in stored],
+       [walked["id"], walked["release_group_id"]],
+       "best first, exactly as the policy ranked them")
+    eq([r.get("catalog_numbers") for r in stored], [["WALK-1"], ["WALK-1J"]],
+       "with the catalog numbers the walk dedupes by")
+    walk_row = rows_for(walk_wish_id)
+    eq(len(walk_row), 1, "the walk is still ONE row of the queue", walk_row)
+    eq((walk_row[0].get("walk") or {}).get("total"), 2,
+       "and the row says how many editions it may ask",
+       walk_row[0].get("walk"))
+    eq((walk_row[0].get("walk") or {}).get("label"), "release 1 of 2",
+       "with the wording every surface shares", walk_row[0].get("walk"))
+    intg.auto_import_targets = real_targets
+    intg.resolve_release = real_resolve
+
     intg.search_mb = real_search
     intg.auto_import_targets = real_targets
     intg.resolve_release = real_resolve

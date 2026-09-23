@@ -272,6 +272,17 @@ def _create_all(targets, cfg, *, queries=None, title="", artist="", year="",
                 release, cfg, queries=queries,
                 title=t.get("title") or title, artist=artist, year=year,
                 prefetch=False,
+                # The ranked fallback list (spec R150) the target already
+                # carries from `integrations.group_targets`: the release
+                # group's eligible editions, best first, deduped by catalog
+                # number (R169). Recording it is what makes the wish's search
+                # walk PAST a pressing that has nothing usable instead of
+                # ending at the one edition this add resolved — the walk, its
+                # per-candidate window and the background phase are the
+                # worker's (R151-R153); this call only has to hand it the
+                # list. A target with none (an add that named ONE release)
+                # keeps the single-candidate behavior it always had.
+                candidates=t.get("candidates") or None,
                 # The FIRST album this resolution creates takes over the
                 # framework album the add already put on disk (`deferred`);
                 # every later one (mode="all") gets its own folder, exactly as

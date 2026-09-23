@@ -412,6 +412,58 @@ except HTTPException as e:
 check("the framing the browser reads is versioned and stable",
       media.BULK_VERSION == 1 and media.BULK_MIME == "application/x-mlo-bulk", media.BULK_MIME)
 
+# --------------------------------------------------------------------------- #
+print("\nthe download rendition: what a downloaded copy holds")
+# --------------------------------------------------------------------------- #
+# The shipped default is `copy`: the cached bytes are the file's own, so a
+# track is never downloaded in a codec it is not already in — and the bulk
+# route can still carry a whole queue.
+check("a downloaded copy is the file's own codec by default",
+      DEFAULT_CONFIG["download_codec"] == "copy" and DEFAULT_CONFIG["download_bitrate"] == 0)
+check("the download rate spans what the library's does (0 = the codec's own)",
+      _INT_RANGES["download_bitrate"] == (0, 512))
+check("and the player streams rather than playing the copy by default",
+      DEFAULT_CONFIG["playback_source"] == "stream")
+
+from mlo.containers import codec_args  # noqa: E402
+
+check("a re-encode carries the codec's own arguments and the configured rate",
+      codec_args("mp3", None, 192) == ["-c:a", "libmp3lame", "-f", "mp3", "-b:a", "192k"],
+      str(codec_args("mp3", None, 192)))
+check("ogg takes libvorbis' own 0-10 scale, not kbps",
+      codec_args("ogg", None, 8)[-2:] == ["-q:a", "8"], str(codec_args("ogg", None, 8)))
+check("0 means the codec's own default, not its minimum",
+      codec_args("mp3", None, 0)[-1] == "320k", str(codec_args("mp3", None, 0)))
+check("a lossless target takes no rate at all",
+      codec_args("flac", None, 320) == ["-c:a", "flac", "-f", "flac"],
+      str(codec_args("flac", None, 320)))
+check("and no compression level: the encoder's own is what ships",
+      "-compression_level" not in codec_args("flac", None, 0))
+
+try:
+    media.download_rendition("/music/x.flac", "nonsense")
+    check("an unknown download codec is refused, not guessed", False, "accepted")
+except HTTPException as e:
+    check("an unknown download codec is refused, not guessed",
+          e.status_code == 400, f"{e.status_code} {e.detail}")
+
+# The bulk route frames each file's SIZE up front, so it cannot carry a
+# re-encode (no size until it is done) — it must say so rather than hand back
+# the library's own bytes to a client told it is getting a smaller rendition.
+real_load_config = media.load_config
+try:
+    media.load_config = lambda: {"download_codec": "opus", "download_bitrate": 128,
+                                 "download_concurrency": 3}
+    try:
+        media.media_bulk(media.BulkRequest(paths=["/music/x.flac"]))
+        check("the bulk route refuses while downloads are re-encoded", False, "accepted")
+    except HTTPException as e:
+        check("the bulk route refuses while downloads are re-encoded",
+              e.status_code == 409 and "download_codec" in str(e.detail),
+              f"{e.status_code} {e.detail}")
+finally:
+    media.load_config = real_load_config
+
 print()
 if FAILED:
     print(f"{len(FAILED)} check(s) FAILED: {', '.join(FAILED)}")

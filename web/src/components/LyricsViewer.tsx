@@ -3,7 +3,7 @@ import { useQuery } from "@tanstack/react-query";
 import { CloudDownload, PenLine, Play, Square, Plus, Trash2, Undo2, Keyboard, Upload } from "lucide-react";
 import { api, isOffline } from "../api";
 import { toast, useStore } from "../store";
-import { offlineMediaUrl } from "../lib/mediaCache";
+import { playbackSource } from "../lib/mediaCache";
 import LrclibPublishPanel from "./LrclibPublish";
 import Popover from "./Popover";
 import { nextSpeed, fmtSpeed } from "../lib/playback";
@@ -483,18 +483,19 @@ export default function LyricsViewer({
       setPlaying(false);
     } else {
       const p = path;
-      // Cache first, exactly like the player bar: a downloaded track previews
-      // in a shell with no server, and only an uncached one has to reach for
-      // the network. The lookup is async, so the guard below keeps a slow one
-      // from pointing the element at the track we have since left.
+      // The same resolution the player bar uses (lib/mediaCache): a downloaded
+      // track previews in a shell with no server, and `playback_source`
+      // decides which copy plays while both are available. The lookup is
+      // async, so the guard below keeps a slow one from pointing the element
+      // at the track we have since left.
       previewPath.current = p;
       void (async () => {
-        const cached = await offlineMediaUrl(p);
+        const source = await playbackSource(p);
         if (previewPath.current !== p) return;
-        if (!cached && isOffline()) {
+        if (!source.cached && isOffline()) {
           toast.error(`“${track || p}” isn’t downloaded — it needs the server to play.`);
         }
-        audio.src = cached ?? api.streamUrl(p);
+        audio.src = source.src;
         audio.playbackRate = speed;
         audio.volume = vol;
         audio.play().catch(() => toast("Playback failed — audio format unsupported in browser"));

@@ -27,14 +27,24 @@ Two answers live here:
   bound).
 
 Both are read-only, both stay inside the music folder through the same guard
-the stream endpoint uses, and both serve the file's own bytes — the download
-path never transcodes.
+the stream endpoint uses.
+
+What the bytes ARE depends on `download_codec`: `copy` (the shipped default)
+serves the file's own, and a codec name re-encodes the track for the cache
+only (`download_rendition` below) — the library file is never touched, and a
+browser-decodable target is what makes a smaller cache worth having. The bulk
+route frames each file's own bytes, so it cannot carry a rendition: it refuses
+while one is configured, and the client's queue then fetches track by track
+through `/api/stream?download=1`.
 """
 from __future__ import annotations
 
 import json
 import os
 import queue
+import shutil
+import subprocess
+import tempfile
 import threading
 import time
 from typing import Callable, Iterator, Sequence
@@ -361,6 +371,86 @@ def full_body_response(path: str, media_type: str) -> FileResponse:
                      headers={"Accept-Ranges": "none", **_NO_TRANSFORM})
 
 
+def encoded_response(src: str, args: Sequence[str], ext: str, media_type: str,
+                     *, attachment: bool = False) -> FileResponse:
+    """Encode `src` with ffmpeg and serve the result as ONE 200 body.
+
+    The temp folder and its file are the response's own to remove: Starlette
+    runs the BackgroundTask when the body has been sent, so a cancelled
+    download cleans up too. `attachment` sets Content-Disposition with the
+    encoded file's name (what the Export page wants — a browser save dialog);
+    the offline download leaves it off, since its bytes go to Cache Storage
+    rather than to a folder.
+
+    One home for "ffmpeg produced a file, now serve it": the export popover
+    (`/api/track/export`) and the download rendition below differ only in
+    which codec table and which media type they pass.
+    """
+    from starlette.background import BackgroundTask
+
+    from mlo.subproc import run_tool
+    from mlo.tools import detect_all_tools
+
+    ffmpeg = (detect_all_tools().get("ffmpeg") or {}).get("ffmpeg_exe")
+    if not ffmpeg:
+        raise HTTPException(500, "ffmpeg is not installed")
+
+    tmpdir = tempfile.mkdtemp(prefix="mlo_encode_")
+    out = os.path.join(tmpdir, os.path.splitext(os.path.basename(src))[0] + ext)
+    try:
+        proc = run_tool([ffmpeg, "-y", "-v", "error", "-i", src] + list(args) +
+                        ["-map_metadata", "0", out],
+                        stdout=subprocess.DEVNULL, stderr=subprocess.PIPE,
+                        text=True, errors="replace", timeout=1800)
+        if proc.returncode != 0 or not os.path.isfile(out) or os.path.getsize(out) == 0:
+            raise HTTPException(500, f"transcode failed: {(proc.stderr or '')[:200]}")
+    except HTTPException:
+        shutil.rmtree(tmpdir, ignore_errors=True)
+        raise
+    except Exception as e:
+        shutil.rmtree(tmpdir, ignore_errors=True)
+        raise HTTPException(500, f"transcode failed: {e}")
+
+    def _cleanup():
+        try:
+            os.remove(out)
+            os.rmdir(tmpdir)
+        except OSError:
+            pass
+
+    return FileResponse(
+        out, media_type=media_type,
+        filename=os.path.basename(out) if attachment else None,
+        background=BackgroundTask(_cleanup),
+    )
+
+
+def download_rendition(src: str, codec: str, bitrate: int = 0) -> FileResponse:
+    """`src` re-encoded to *codec* for the offline cache, as one 200 body.
+
+    The download's own quality knob (`download_codec` / `download_bitrate`):
+    `copy` never reaches here — the caller serves the file's own bytes — so
+    this is the "the device has no room for the library's format" case. The
+    argv comes from `mlo.containers.codec_args` with no compression level
+    (ffmpeg's own default, which is the level the library pass ships) and the
+    configured rate, so a target encodes here exactly as it does in the
+    library.
+
+    The media type is the ENCODED container's, not octet-stream: in a shell
+    the cached body is handed to an `<audio>` element as a blob: URL, and the
+    element reads the type off the blob.
+    """
+    from mlo.containers import CODECS, codec_args
+
+    key = str(codec or "").strip().lower()
+    spec = CODECS.get(key)
+    if not spec:
+        raise HTTPException(400, f"unsupported download codec: {codec}")
+    ext = spec["ext"]
+    return encoded_response(src, codec_args(key, None, bitrate), ext,
+                            _mime_for("x" + ext))
+
+
 def _resolve_and_guard(path: str) -> tuple[str, str | None]:
     """The readable path for `path`, or the reason it may not be read.
 
@@ -417,8 +507,22 @@ def media_bulk(req: BulkRequest):
     if len(req.paths) > MAX_BULK:
         raise HTTPException(413, f"at most {MAX_BULK} files per request "
                                  f"({len(req.paths)} given) — send the queue in chunks")
+    cfg = load_config()
+    codec = str(cfg.get("download_codec") or "copy").strip().lower()
+    if codec not in ("", "copy"):
+        # This framing promises each file's SIZE up front and then its bytes,
+        # so it can only carry a file that already exists — a re-encode has no
+        # size until it is done. Saying so beats handing back the library's own
+        # bytes to a client that asked for (and is told it is getting) a
+        # smaller rendition: a silent 4x cache is worse than one slow request
+        # per track, which is what /api/stream?download=1 does.
+        raise HTTPException(
+            409,
+            f"downloads are encoded as {codec} on this server "
+            f"(download_codec) — fetch them one track at a time "
+            f"through /api/stream?download=1")
     entries = plan_downloads(req.paths, check=_download_guard)
-    window = clamp_window(load_config().get("download_concurrency"))
+    window = clamp_window(cfg.get("download_concurrency"))
     return StreamingResponse(
         iter_bulk_body(entries, window=window),
         media_type=BULK_MIME,

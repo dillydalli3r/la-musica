@@ -687,6 +687,29 @@ again. *Import all completed*
 imports every finished download **sequentially**, with cancel finishing the album
 in flight (`GET /api/soulseek/import-all/status`).
 
+**The search asks more than one pressing.** Every add records the release
+group's ranked editions on its wish — best first, deduped by folded catalog
+number, so two releases printed with `GED 24425` and `GED24425` are ONE search
+and not two spent windows (`spec R150`, `R169`, `R175`) — and the search walks
+them one at a time inside the one wish: each candidate gets
+`soulseek_search_timeout_seconds` of quiet (60 by default, 5–300) before the walk
+moves on, up to `soulseek_fallback_candidates` editions (3 by default, 1 = the
+best one and nothing behind it). A group with fewer eligible editions simply ends
+at the end of its own list — no error, no empty slot — and a walk that is spent
+is not a give-up: the release moves to the queue's **Background** section, keeps
+its framework album and its place in the pipeline, and is re-walked from the best
+edition on the worker's own ticks until something lands or the user cancels it
+(`spec R151`–`R153`). A release is still **ONE row** whatever the walk does, and
+that row says which edition it is asking with its own badge — `release 2 of 3`,
+the server's wording, with the edition and what already came back empty in its
+tooltip (`spec R176`). **What counts as a good rip log is 100, everywhere it is
+asked**: the acquisition gate (`soulseek_auto_log_min_score` — a CD candidate's
+`.log` must score 100 in Logchecker and its checksum must verify before its audio
+is even queued), the grading check (`grade_log_score_threshold`) and the audit
+verdict (`audit_log_score_threshold`) all ship that way, and a CD candidate that
+carries no log at all is offered through an explicit confirm instead of being
+accepted quietly (`spec R174`).
+
 The download dir is also capped: **two independent size caps**, both 5 GB by
 default and both editable in Settings → Storage (`soulseek_cache_cap_gb`,
 `trash_cap_gb` — 0 turns one off; one store filling up never eats the other's
@@ -907,6 +930,24 @@ worker runs, a smaller JSON cache (GETs only, 512 KiB per entry, 3 MiB total) an
 `blob:` playback cover the same case, and an **Offline** pill says when a stored
 answer is being shown. Writes, Soulseek, imports and exports still need the
 server.
+
+**What a downloaded copy HOLDS, and which copy PLAYS** are two settings
+(*Settings → Downloads & playback*, R171–R173): `download_codec` ships as
+**`copy`** — the cached bytes are the library file's own, so a track is never
+downloaded in a codec it is not already in — and a codec target instead
+re-encodes the track for that device's cache only (`download_bitrate` is that
+target's rate: kbps for MP3/AAC/Opus, Vorbis' 0-10 scale for Ogg, 0 for the
+codec's own default; the library file is never touched, and the bulk transfer
+route stands aside with a 409 while a rendition is configured, because it frames
+each file's size up front). `playback_source` ships as **`stream`**: the player
+asks the server for the library file even when a copy is downloaded, or plays the
+downloaded copy instead (`downloaded`) — one resolver decides it for every
+surface, the copy is played whenever the server cannot be reached (a preference
+never strands the player), and a stream that a copy exists for carries
+`nocache=1` so a cache-first service worker cannot answer it with the very bytes
+the setting asked to avoid. The cache key holds no session token, so a download
+survives a re-login — which is what makes `blob:` playback work in the shells,
+where every media URL carries one.
 
 ### Notifications and languages
 

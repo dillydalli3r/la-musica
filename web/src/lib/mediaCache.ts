@@ -1,13 +1,14 @@
 import { useMemo } from "react";
 import { useQuery } from "@tanstack/react-query";
-import { api, getToken, serverUrl } from "../api";
+import { api, getToken, isOffline, serverUrl } from "../api";
 import { isVideoFile } from "./fmt";
 import type { Library, Track } from "../types";
 
 /**
  * Offline media cache: "Download" in the app caches a track's audio into
  * the browser's Cache Storage so playback keeps working without the
- * server (a registered service worker serves cached streams). Saving a
+ * server (a registered service worker serves cached streams; a shell, which
+ * has none, gets the bytes as a `blob:` URL — see `playbackSource`). Saving a
  * file to disk is Export's job, not Download's.
  *
  * The cache key is the exact URL the player element requests, so the
@@ -16,6 +17,12 @@ import type { Library, Track } from "../types";
  * — a moved file leaves its download at a key nothing asks for any more.
  * Beside the bytes lives an identity index (below): MusicBrainz recording id
  * → where its bytes actually sit, so a rename cannot orphan a download.
+ *
+ * Which bytes: the library's own, unless `download_codec` names a target —
+ * then `/api/stream?download=1` re-encodes the track for the cache (the
+ * library file is untouched), and the queue drops the bulk route, which can
+ * only frame files that already exist. `playback_source` decides which of
+ * the two the PLAYER takes while both are available.
  */
 const CACHE_NAME = "mlo-media-v2";
 
@@ -86,11 +93,29 @@ function apiAbsolute(path: string): string {
   return new URL(path, serverUrl() || window.location.href).toString();
 }
 
+/** `url` without the session token, as a CACHE KEY.
+ *
+ *  In a shell every media URL carries `?token=…` (a webview is not the origin
+ *  that holds the session cookie, and a media element cannot set a header),
+ *  and a token is re-issued at every sign-in. A key that carries one stops
+ *  naming the bytes it stored the moment the user signs in again: a downloaded
+ *  album reads as undownloaded with all of its bytes still in the cache. The
+ *  token is authorization, never identity, so it is dropped from the key and a
+ *  download outlives the session that made it.
+ *
+ *  Textual rather than re-serialized through `URL`/`URLSearchParams`, which
+ *  would rewrite a space as `+` where `streamUrl` wrote `%20` — and the key
+ *  would then miss the very request the service worker matches (the element's
+ *  own URL). */
+function cacheKey(url: string): string {
+  return url.replace(/([?&])token=[^&]*/i, "$1").replace(/[?&]$/, "");
+}
+
 /** The URL the PLAYER asks for — and with it the key a track's bytes are
  *  cached under: the service worker matches the element's own request, so the
  *  download is what makes offline playback work. */
 function playbackUrl(path: string): string {
-  return absolute(isVideoFile(path) ? api.videoStreamUrl(path) : api.streamUrl(path));
+  return cacheKey(absolute(isVideoFile(path) ? api.videoStreamUrl(path) : api.streamUrl(path)));
 }
 
 /** Headers every download request carries: the session, as the app's own
@@ -109,7 +134,10 @@ function authHeaders(extra?: HeadersInit): Headers {
  * "Downloaded" survives a server that is down. */
 function cacheUrls(path: string): string[] {
   if (!isVideoFile(path)) return [playbackUrl(path)];
-  return [absolute(api.videoStreamUrl(path)), absolute(api.videoStreamUrl(path, true))];
+  return [
+    cacheKey(absolute(api.videoStreamUrl(path))),
+    cacheKey(absolute(api.videoStreamUrl(path, true))),
+  ];
 }
 
 /** The folder holding `path` — the album directory of a track file, and (one
@@ -125,7 +153,10 @@ function parentDir(path: string): string {
  *  service worker serves them from this same cache. */
 function artworkUrls(trackPath: string): string[] {
   const album = parentDir(trackPath);
-  return [absolute(api.coverUrl(album)), absolute(api.artistImageUrl(parentDir(album)))];
+  return [
+    cacheKey(absolute(api.coverUrl(album))),
+    cacheKey(absolute(api.artistImageUrl(parentDir(album)))),
+  ];
 }
 
 /** The JSON a downloaded track needs offline: its album payload (description,
@@ -655,6 +686,46 @@ export async function offlineMediaUrl(target: CacheTarget): Promise<string | nul
   }
 }
 
+/** The source a player element should load for one track, and whether that is
+ *  the downloaded copy.
+ *
+ *  Every player surface goes through here — the audio elements, their gapless
+ *  preload, the lyric previews and the video popout — so one rule decides
+ *  which bytes play, and `playback_source` (stream | downloaded, shipped
+ *  `stream`) cannot be honored in one place and ignored in another.
+ *
+ *  The downloaded copy is taken when the setting says so, and ALWAYS when the
+ *  server cannot be reached (`isOffline()`): with the API answering from its
+ *  own cache the copy is the only thing that plays, so a preference must never
+ *  strand the player. `opts.transcode` (the video popout's live transcode) is
+ *  a different rendition of the track, so a copy — the DIRECT stream's bytes —
+ *  only stands in for it offline.
+ *
+ *  A stream URL that a downloaded copy exists for carries `nocache=1`: the
+ *  service worker's media branch is cache-first and matches the element's own
+ *  URL, so without it "prefer streaming" would play the very bytes it is
+ *  asking to avoid. The server ignores the parameter, and nothing is stored
+ *  under that URL, so it costs one miss and nothing else. */
+export async function playbackSource(
+  target: CacheTarget,
+  opts: { video?: boolean; transcode?: boolean } = {}
+): Promise<{ src: string; cached: boolean }> {
+  const { path } = targetOf(target);
+  const cached = await offlineMediaUrl(target);
+  const offline = isOffline();
+  if (cached && (offline || (!opts.transcode && (await prefersDownloaded())))) {
+    return { src: cached, cached: true };
+  }
+  const url = opts.video ? api.videoStreamUrl(path, !!opts.transcode) : api.streamUrl(path);
+  return { src: cached ? streamingNoCache(url) : url, cached: false };
+}
+
+/** `url` marked so a cache-first service worker must go to the network for it.
+ *  Absolute, because the marker is compared against the warmed keys. */
+function streamingNoCache(url: string): string {
+  return absolute(`${url}${url.includes("?") ? "&" : "?"}nocache=1`);
+}
+
 /** A `blob:` URL for an image already in the offline cache, or null when its
  *  bytes were never downloaded.
  *
@@ -671,7 +742,7 @@ export async function offlineMediaUrl(target: CacheTarget): Promise<string | nul
  *  with the other blob URLs. */
 export async function offlineArtworkUrl(url: string): Promise<string | null> {
   try {
-    const key = absolute(url);
+    const key = cacheKey(absolute(url));
     // A URL carrying a cover version (`&v=`) names a SPECIFIC image, and the
     // warmed entry is whatever the download stored — possibly an earlier
     // version of the same file. It is therefore only consulted as itself: no
@@ -847,6 +918,33 @@ async function queueWidth(explicit?: number): Promise<number> {
     return n > 0 ? Math.min(MAX_CONCURRENCY, Math.max(1, Math.trunc(n))) : DEFAULT_CONCURRENCY;
   } catch {
     return DEFAULT_CONCURRENCY; // server unreachable: the default is still a queue
+  }
+}
+
+/** Whether this server re-encodes downloads (`download_codec` other than
+ *  `copy`). The rendition is produced by `/api/stream?download=1` itself, so
+ *  the only thing the client has to know is that the bulk route cannot carry
+ *  one: it frames each file's size up front, and a re-encode has none until it
+ *  is done. Read the same way `queueWidth` reads its key — an ordinary GET the
+ *  query cache already holds. */
+async function encodesDownloads(): Promise<boolean> {
+  try {
+    const codec = String((await api.config())?.download_codec ?? "copy").trim().toLowerCase();
+    return !!codec && codec !== "copy";
+  } catch {
+    return false; // server unreachable: the download itself will say why
+  }
+}
+
+/** `playback_source` from the server config: true when this app plays a
+ *  downloaded copy in preference to streaming the library file. `stream` — the
+ *  shipped default — asks the server even for a track that IS downloaded. */
+async function prefersDownloaded(): Promise<boolean> {
+  try {
+    const want = String((await api.config())?.playback_source ?? "stream").trim().toLowerCase();
+    return want === "downloaded";
+  } catch {
+    return false; // server unreachable: streaming is the default anyway
   }
 }
 
@@ -1110,8 +1208,8 @@ export async function cachedFlags(paths: string[]): Promise<boolean[]> {
  *  The work happens in two shapes, both bounded by `download_concurrency`:
  *  chunks of the queue through the bulk endpoint (one response, the server's
  *  own pool reading them N at a time), and — for whatever the bulk route
- *  cannot carry, on a server without it, or after a stream dies mid-batch —
- *  the per-track pool, N requests at a time.
+ *  cannot carry (a configured download rendition, a server without it, or a
+ *  stream that dies mid-batch) — the per-track pool, N requests at a time.
  *
  *  Never throws for a track that failed: every failure comes back in the
  *  report with its reason, because one dead file must not abandon the rest of
@@ -1141,13 +1239,21 @@ export async function downloadTracks(
   const pending = [...paths];
   try {
     const width = await queueWidth(opts.concurrency);
-    while (pending.length && !ctrl.signal.aborted) {
-      const chunk = pending.splice(0, BULK_CHUNK);
-      progress(null);
-      const missed = await bulkChunk(chunk, ctrl.signal, report, progress);
-      if (missed === null || missed.length) {
-        // Not (all) carried: the rest of the queue goes one request per track.
-        await runPool([...(missed ?? chunk), ...pending.splice(0)], width, ctrl.signal, report, progress);
+    if (await encodesDownloads()) {
+      // A download rendition: the bulk route frames each file's SIZE up front
+      // and so can only carry bytes that already exist — and it refuses while
+      // one is configured. Every track goes one request at a time, where
+      // /api/stream?download=1 does the encoding.
+      await runPool(pending.splice(0), width, ctrl.signal, report, progress);
+    } else {
+      while (pending.length && !ctrl.signal.aborted) {
+        const chunk = pending.splice(0, BULK_CHUNK);
+        progress(null);
+        const missed = await bulkChunk(chunk, ctrl.signal, report, progress);
+        if (missed === null || missed.length) {
+          // Not (all) carried: the rest of the queue goes one request per track.
+          await runPool([...(missed ?? chunk), ...pending.splice(0)], width, ctrl.signal, report, progress);
+        }
       }
     }
   } catch (e) {

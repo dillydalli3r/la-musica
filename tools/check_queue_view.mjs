@@ -99,6 +99,14 @@ try {
     ["failed section with its count", "Failed · 2"],
     ["pipeline header counts", "3/3 running"],
     ["the per-release candidate ceiling named", "3 candidate(s) each"],
+    // The walk (spec R150-R153): one wish working through the group's ranked
+    // editions says so with its own badge, using the server's wording — and
+    // the row it rides is still ONE row, whatever the walk does.
+    ["the walk badge names the position being asked", "> release 2 of 2<"],
+    ["the walk badge explains what it is doing",
+     "Also searching this release group&#x27;s other pressings, release 2 of 2"],
+    ["the walk badge names the edition being asked", "Asking: Isles (Japan)"],
+    ["and what already came back empty", "Came back empty: Isles"],
     ["slskd transfer ceiling named", "9 slskd transfer slot(s)"],
     ["the downloading row's release", "Isles"],
     ["its artist", "Bicep"],

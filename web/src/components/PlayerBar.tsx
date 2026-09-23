@@ -8,7 +8,7 @@ import { toast, useStore } from "../store";
 import { fmtDuration } from "../lib/fmt";
 import { fmtPair, fmtTech, isVideoFile } from "../lib/fmt";
 import { nextSpeed, fmtSpeed } from "../lib/playback";
-import { offlineMediaUrl } from "../lib/mediaCache";
+import { playbackSource } from "../lib/mediaCache";
 import { heldBy, useJobLocks, useLockLabel, useLockWhy } from "../lib/locks";
 import { useI18n } from "../lib/i18n";
 import LockedChip from "./LockedChip";
@@ -673,25 +673,25 @@ export default function PlayerBar() {
     // rather than leaving the paused one of the pair as the meter source.
     attachAnalyser(el);
     try { videoRef.current?.pause(); } catch { /* ignore */ }
-    // Cache first: a downloaded track plays from Cache Storage as a blob:,
-    // which needs no server, no token and no cookie — in a shell (no service
-    // worker) nothing else can hand those bytes to an element. An uncached
-    // path gets the stream URL exactly as before; the network case only pays
-    // for one Cache Storage lookup.
+    // Which bytes play is `playbackSource`'s decision: the downloaded copy
+    // when `playback_source` says so — and always when the server is away,
+    // because in a shell (no service worker) nothing else can hand those bytes
+    // to an element — the stream otherwise. The lookup is one Cache Storage
+    // read either way.
     void (async () => {
       const gen = rgGen.current;
       // Both lookups run together, and the gain is INSTALLED BEFORE play():
       // see the ReplayGain block above for why an element must never start
       // on the previous track's gain and be corrected afterwards.
-      const [cached, r] = await Promise.all([offlineMediaUrl(track.path), rgFor(track.path)]);
+      const [source, r] = await Promise.all([playbackSource(track.path), rgFor(track.path)]);
       // A quick next/previous while the lookups were in flight means a newer
       // load owns this element's src by now — that one wins.
       if (loadedPath.current !== track.path) return;
-      if (!cached && isOffline()) {
+      if (!source.cached && isOffline()) {
         // Doomed either way, so say so instead of leaving a silent element.
         toast.error(`“${displayTitle}” isn’t downloaded — it needs the server to play.`);
       }
-      el.src = cached ?? api.streamUrl(track.path);
+      el.src = source.src;
       setElPath(el, track.path);
       el.playbackRate = speed; // fresh <src> resets the rate
       // The element is reused from the previous track, so its `paused` is not
@@ -732,23 +732,22 @@ export default function PlayerBar() {
     if (heldBy(nextPath)) return;
     preloaded.current = next;
     preloadedPath.current = nextPath;
-    // Same cache-first resolution as the audible load, or a downloaded next
-    // track would hand over to a dead network instead of to its local bytes.
-    // A miss lands on the stream URL, so the preload element is never pointed
-    // at a blob: for a track that has no cached copy.
-    void offlineMediaUrl(nextPath).then((cached) => {
+    // The same resolution as the audible load, or a downloaded next track
+    // would hand over to a dead network instead of to its local bytes — and,
+    // with streaming preferred, to a copy the audible load is not using.
+    void playbackSource(nextPath).then((source) => {
       // A newer preload (or a reorder that changed what "next" is), the
       // audible load, or a quick skip past this track owns the idle element
       // by now.
       if (preloadedPath.current !== nextPath) return;
-      if (!cached && isOffline()) {
+      if (!source.cached && isOffline()) {
         // Said here rather than at the handover: the swap into this element
         // is where the silence would start, and nothing else knows about it
         // before then.
         const t = queue[next];
         toast.error(`“${t.title || t.file.replace(/\.[^.]+$/, "")}” isn’t downloaded — it needs the server to play.`);
       }
-      idle.src = cached ?? api.streamUrl(nextPath);
+      idle.src = source.src;
       setElPath(idle, nextPath);
       // The handover swaps this element in with no further load step, so the
       // next track's gain is fetched NOW — seconds of slack before it plays —
@@ -1879,25 +1878,28 @@ function VideoPopout({
   const trackKey = tracks.map((t) => t.key).join("|");
   const [failed, setFailed] = useState(false);
   const [errorFallback, setErrorFallback] = useState(false);
-  // The cached copy of this video: a blob: URL once the lookup has run and the
-  // download is there, null when it is not, `undefined` while the lookup is
-  // still in flight — then the element gets no src at all, because starting it
-  // on the network URL would fire a request that fails offline and trip
-  // onError into `failed` a tick before the blob arrives.
-  const [cached, setCached] = useState<string | null>();
+  // The source the resolver picked: a blob: URL for a downloaded copy, the
+  // stream URL otherwise, and `undefined` while the lookup is still in flight
+  // — then the element gets no src at all, because starting it on the network
+  // URL would fire a request that fails offline and trip onError into `failed`
+  // a tick before the blob arrives.
+  const [src, setSrc] = useState<string | undefined>();
+  // The probe decision and the onError fallback both force the live stream;
+  // derived, so a late-arriving probe result needs no state syncing.
+  const live = errorFallback || preferTranscode;
   useEffect(() => {
     let on = true;
-    setCached(undefined);
-    void offlineMediaUrl(path).then((url) => {
+    setSrc(undefined);
+    void playbackSource(path, { video: true, transcode: live }).then((source) => {
       if (!on) return;
-      if (!url && isOffline()) {
+      if (!source.cached && isOffline()) {
         // Doomed either way, so say so instead of leaving a black rectangle.
         toast.error(`“${path.split(/[\\/]/).pop() ?? path}” isn’t downloaded — it needs the server to play.`);
       }
-      setCached(url);
+      setSrc(source.src);
     });
     return () => { on = false; };
-  }, [path]);
+  }, [path, live]);
   useEffect(() => {
     setFailed(false);
     setErrorFallback(false);
@@ -1915,17 +1917,6 @@ function VideoPopout({
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [captions, trackKey, path, errorFallback, preferTranscode]);
-  // The probe decision and the onError fallback both force the live stream;
-  // derived, so a late-arriving probe result needs no state syncing.
-  const live = errorFallback || preferTranscode;
-  // A cached copy holds the DIRECT stream's bytes, so the transcode decision
-  // normally wins over it — but with the server away the cached copy is the
-  // only thing that can play, so offline it wins instead. A blob: URL goes in
-  // as-is: the query params the callers below assume (`?transcode=1`, the
-  // token) describe a network request, and appending one to a blob would be a
-  // URL for a different resource than the bytes we already have.
-  const cachedSrc = cached && (!live || isOffline()) ? cached : null;
-  const src = cachedSrc ?? (cached === undefined && !live ? undefined : api.videoStreamUrl(path, live));
   if (failed) {
     return (
       <div className="flex items-center justify-center p-6 text-center text-[11px] text-zinc-400">

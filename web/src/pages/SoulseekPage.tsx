@@ -5,7 +5,7 @@ import {
   ArrowDownUp, ArrowDown, ArrowDownToLine, Disc3, Eye, EyeOff, FolderInput, FolderOpen, Loader2, Play, Power, RefreshCw, Search,
   User, Zap, Square, FileCheck2, FileVideo, Music2, Save, Tag, Trash2, PackageOpen,
   Star, Plus, CheckCircle2, CircleDashed, Clock, CheckSquare, AlertTriangle, ExternalLink, RotateCw, ChevronDown, ChevronRight, Link2,
-  MessageSquare, X, Wand2, CheckCheck, MessageCircleQuestion,
+  MessageSquare, X, Wand2, CheckCheck, MessageCircleQuestion, Layers,
 } from "lucide-react";
 import { api } from "../api";
 import type { ImportRunStatus, ReadyAlbum, SlskAutoFile, SlskAutoJob, SlskStatus, SlskAutoProgress, SlskConversation, SlskDownloads, SlskMessage, SlskPortCheck, SlskQueueItem, SlskQueuePayload, SlskQueueScope, SlskSearchProgress, SlskTransfer, StagingEntry, StagingRoot, StagingRootId } from "../api";
@@ -1942,6 +1942,30 @@ function QueueRow({ item, busy, selected, onSelect, onCancel, onRetry, onImport,
                     : "Started from a Soulseek search or browse"
             }>{item.source}</span>
             {item.attempts ? <span className="text-[10px] text-zinc-600">{item.attempts} attempt(s)</span> : null}
+            {/* A ranked-edition WALK (spec R150-R153): this ONE row is working
+                through the release group's editions, best first — one search
+                window each — because the pressing it started on had nothing
+                usable. The label is the server's own sentence
+                (`wishes.candidate_state`), so the row, the album page and the
+                notification cannot disagree about where the search is; the
+                tooltip says which edition is being asked and what has already
+                come back empty. Absent when there is nothing to walk (one
+                candidate, or none). */}
+            {item.walk && (
+              <span
+                className="chip text-[9px] border border-violet-800 bg-violet-900/30 text-violet-300"
+                title={
+                  `Also searching this release group's other pressings, ${item.walk.label}, one at a time — `
+                  + `each gets its own search window, and an edition sharing a catalog number with one already asked is skipped. `
+                  + (item.walk.title ? `Asking: ${item.walk.title}. ` : "")
+                  + (item.walk.tried.length
+                    ? `Came back empty: ${item.walk.tried.map((t) => t.title || t.mbid).join(", ")}.`
+                    : "")
+                }
+              >
+                <Layers className="h-3 w-3" /> {item.walk.label}
+              </span>
+            )}
             {item.progress?.percent != null && item.stage === "downloading" && (
               <span className="text-[10px] text-zinc-500">{fmtPercent(item.progress.percent)}</span>
             )}

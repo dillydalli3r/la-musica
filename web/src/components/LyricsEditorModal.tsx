@@ -6,7 +6,7 @@ import {
 } from "lucide-react";
 import { api, isOffline } from "../api";
 import { toast, useStore } from "../store";
-import { offlineMediaUrl } from "../lib/mediaCache";
+import { playbackSource } from "../lib/mediaCache";
 import {
   parseLrc, serializeLrc, KaraokeWords, type LrcLine, type LrcWord,
 } from "./LyricsViewer";
@@ -185,12 +185,12 @@ export default function LyricsEditorModal({
         // track change while it is in flight must win over the late result.
         previewPath.current = p;
         void (async () => {
-          const cached = await offlineMediaUrl(p);
+          const source = await playbackSource(p);
           if (previewPath.current !== p) return;
-          if (!cached && isOffline()) {
+          if (!source.cached && isOffline()) {
             toast.error(`“${track || p}” isn’t downloaded — it needs the server to play.`);
           }
-          a.src = cached ?? api.streamUrl(p);
+          a.src = source.src;
           start();
         })();
       }

@@ -310,13 +310,29 @@ with Patch(auto, load_config=lambda: dict(CFG),
      Patch(intg, resolve_release=_resolve), \
      Patch(worker, time=_fast_clock()):
     # A wish per wish: three MusicBrainz releases the worker will fill.
+    walking = None
     for i, (artist, title) in enumerate((("Alan Braxe", "Intro"),
                                          ("Bicep", "Isles"),
                                          ("Crimson", "Nova"))):
         rel = _release(f"11111111-0000-0000-0000-00000000000{i}", artist, title)
         RESOLVED[rel["id"]] = rel
         RESOLVED[rel["release_group_id"]] = rel
-        wishes.add_wish(rel["id"], title=title, artist=artist)
+        wish = wishes.add_wish(rel["id"], title=title, artist=artist)
+        if title == "Isles":
+            walking = wish
+
+    # ONE of them is a WALK (spec R150-R153): the release group's ranked
+    # editions, best first, asked one at a time inside the one wish — so the
+    # row shows the walk's position as its own badge (the mjs asserts the
+    # wording), and stays ONE row however many editions it tries.
+    assert walking is not None
+    wishes.set_candidates(walking["id"], [
+        {"mbid": "11111111-0000-0000-0000-000000000001", "title": "Isles",
+         "score": 900, "catalog_numbers": ["ZEN-124"]},
+        {"mbid": "11111111-0000-0000-0000-000000000019",
+         "title": "Isles (Japan)", "score": 800, "catalog_numbers": ["ZEN-124J"]},
+    ])
+    wishes.advance_candidate(walking["id"], CFG)      # on to the second pressing
 
     # --- a wish that is waiting: queued, sourced, cancelable --------------- #
     payload = _queue(client)
@@ -693,6 +709,30 @@ pathmod.save_pending(ENDED_FOLDER,
                       "resolving_at": real_time.time()})
 
 FIXTURE_WISHES = [
+    # A wish that is WALKING its release group's ranked editions (spec
+    # R150-R153): two pressings, on the second one, the best already tried and
+    # empty. It is also the wish a live job belongs to (`wish_id: 2`), so this
+    # is the row that proves both things at once — ONE row for the release and
+    # a badge saying which edition is being asked.
+    {"id": 2, "release_mbid": "bbbbbbbb", "title": "Isles", "artist": "Bicep",
+     "year": "2018", "status": "wanted", "note": "", "target_dir": "",
+     "queries": [], "attempts": 1, "added_at": 10.5, "updated_at": 11.5,
+     "last_search": 11.0, "last_error": "",
+     "candidates": [
+         {"mbid": "bbbbbbbb", "title": "Isles", "score": 900,
+          "catalog_numbers": ["ZEN-124"]},
+         {"mbid": "bbbbbbb9", "title": "Isles (Japan)", "score": 800,
+          "catalog_numbers": ["ZEN-124J"]},
+     ],
+     "candidate": 1,
+     "album_path": "", "source": "musicbrainz", "pending": True,
+     # The identity the store keeps for the release (server/wishes
+     # .RELEASE_KEYS), the same pressing its running job reports.
+     "release": {"id": "bbbbbbbb", "artist": "Bicep", "title": "Isles",
+                 "date": "2018-04-20", "country": "GB", "countries": ["GB"],
+                 "catalog_number": "ZEN-124", "media": ["CD"],
+                 "track_count": 12, "status": "Official",
+                 "disambiguation": "Deluxe Edition", "label": "Ninja Tune"}},
     {"id": 1, "release_mbid": "11111111", "title": "Waiting", "artist": "Wish",
      "year": "2004", "status": "wanted", "note": "", "target_dir": "",
      "queries": [], "attempts": 0, "added_at": 10.0, "updated_at": 10.0,
@@ -777,8 +817,13 @@ with Patch(auto, jobs=lambda: [dict(j) for j in FIXTURE_JOBS],
     assert park[0]["stage"] == "needs_attention", park[0]
     live = [r for r in fixture["sections"]["in_progress"] if r["title"] == "Isles"][0]
     assert live["progress"]["percent"] == 50.0, live
-    # its release is also a wish in this fixture, so ONE row carries both
-    assert live["wish_id"] == 2 and live["kind"] == "job", live
+    # its release is also a wish in this fixture, so ONE row carries both: the
+    # wish is the row (it is the thing being searched, and the one that walks
+    # the ranked editions) and the running job rides on it — never a second row
+    # for the same release.
+    assert live["wish_id"] == 2 and live["job_id"] == 7, live
+    assert len([r for rs in fixture["sections"].values() for r in rs
+                if r.get("wish_id") == 2]) == 1, "one row per release"
     # EVERY row carries the release identity block, with the documented keys,
     # built from what the row knows (a job's own release summary, a wish's
     # stored identity, the payload a queued release was queued with) — and the

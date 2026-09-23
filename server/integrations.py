@@ -22,6 +22,10 @@ import httpx
 
 from mlo import cover_choice as _cover_choice
 from mlo import release_choice
+# The app's own capitalization of a genre name (mlo.genres.display_name): one
+# home for it, shared with the writers, the grader and server.discover, so a
+# page can never render a genre the way a tag would not hold it.
+from mlo.genres import display_name as _genre_display
 
 MB_BASE = "https://musicbrainz.org/ws/2"
 LRCLIB_BASE = "https://lrclib.net/api"
@@ -3811,12 +3815,26 @@ def _genre_track_key(disc, position):
 
 
 def _genre_names(names):
-    """Trimmed, case-insensitively deduped names, original spelling kept."""
+    """Trimmed, case-insensitively deduped names, in the app's own spelling.
+
+    MusicBrainz publishes its genre names lowercase ("shoegaze", "art pop") and
+    that is a database convention, not a caption: every name a page draws goes
+    through `mlo.genres.display_name`, the one capitalization the writers, the
+    grader and the Discover lists already share — so the artist page's chips
+    read "Art Pop" without a second casing rule existing anywhere, and the
+    string a user copies off that page is the string a tag holds.
+
+    Capitalization is display, never identity (`mlo.genres`): the dedupe below
+    folds case, and so does every comparison downstream.
+    """
     out = []
+    seen = set()
     for name in names or []:
         text = str(name or "").strip()
-        if text and text.lower() not in {g.lower() for g in out}:
-            out.append(text)
+        folded = text.casefold()
+        if text and folded not in seen:
+            seen.add(folded)
+            out.append(_genre_display(text) or text)
     return out
 
 
@@ -5609,7 +5627,10 @@ def artist_identity(mbid):
             (data.get("life-span") or {}).get("end") or "",
         ],
         "genres": _genre_names(_genres(data)),
-        "tags": [t.get("name") for t in (data.get("tags") or [])[:8]],
+        # Tags ride the same chip row as the genres, so they are capitalized
+        # the same way — a row reading "Art Pop · britpop" is the bug this
+        # fixes, and a tag is no more a sentence than a genre is.
+        "tags": _genre_names([t.get("name") for t in (data.get("tags") or [])[:8]]),
     }
 
 

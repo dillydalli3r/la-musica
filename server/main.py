@@ -1574,6 +1574,13 @@ def stream(path: str = Query(...), download: int = Query(0)):
     status 206". See server/api_media.py. Without it, a player gets exactly
     what it wants: byte ranges and a 206.
 
+    `download_codec` decides WHAT those downloaded bytes are: `copy` (the
+    default) is the file's own codec, any other value re-encodes the track
+    into the cache at `download_bitrate` — the library file is never touched,
+    and the rendition is served from here rather than from the bulk route
+    (see server/api_media.download_rendition). A player is unaffected either
+    way: `download` is the only flag that re-encodes.
+
     A path a job holds right now is refused 409 (both modes) instead of
     streaming a file that is being rewritten; the PLAYER does not change
     otherwise — an unlocked file answers ranges exactly as before, and a stream
@@ -1588,8 +1595,13 @@ def stream(path: str = Query(...), download: int = Query(0)):
         raise HTTPException(400, "file outside music folder")
     ctype = _CTYPES.get(os.path.splitext(p)[1].lower(), "application/octet-stream")
     if download:
-        from server.api_media import full_body_response
-        return full_body_response(p, ctype)
+        from server import api_media
+        cfg = load_config()
+        codec = str(cfg.get("download_codec") or "copy").strip().lower()
+        if codec not in ("", "copy"):
+            return api_media.download_rendition(p, codec,
+                                                cfg.get("download_bitrate") or 0)
+        return api_media.full_body_response(p, ctype)
     # ponytail: unknown extensions stream as octet-stream; add explicit
     # mapping above when a supported player format is missing.
     return FileResponse(p, media_type=ctype, headers={"Accept-Ranges": "bytes"})
@@ -6578,50 +6590,15 @@ def track_export(path: str = Query(...), codec: str = Query("flac"),
         raise HTTPException(404, "file not found")
     if not _in_music_folder(p, _music_folder()):
         raise HTTPException(400, "path is outside the music folder")
-    # Local import like every other ffmpeg call site in this module: the
-    # module-level `from mlo.tools import …` was missing here, so the whole
-    # export endpoint answered 500 (NameError) instead of a file.
-    from mlo.tools import detect_all_tools
-    ffmpeg = (detect_all_tools().get("ffmpeg") or {}).get("ffmpeg_exe")
-    if not ffmpeg:
-        raise HTTPException(500, "ffmpeg is not installed")
-
     bitrate = max(64, min(500, int(bitrate)))
     level = max(0, min(8, int(level)))
     args = [a.format(bitrate=bitrate, level=level) for a in args_tpl]
-
-    tmpdir = tempfile.mkdtemp(prefix="mlo_export_")
-    out = os.path.join(tmpdir, os.path.splitext(os.path.basename(p))[0] + ext)
-    from mlo.subproc import run_tool
-    import subprocess
-    try:
-        proc = run_tool([ffmpeg, "-y", "-v", "error", "-i", p] + args +
-                        ["-map_metadata", "0", out],
-                        stdout=subprocess.DEVNULL, stderr=subprocess.PIPE,
-                        text=True, errors="replace", timeout=1800)
-        if proc.returncode != 0 or not os.path.isfile(out) or os.path.getsize(out) == 0:
-            raise HTTPException(500, f"transcode failed: {(proc.stderr or '')[:200]}")
-    except HTTPException:
-        import shutil
-        shutil.rmtree(tmpdir, ignore_errors=True)
-        raise
-    except Exception as e:
-        import shutil
-        shutil.rmtree(tmpdir, ignore_errors=True)
-        raise HTTPException(500, f"transcode failed: {e}")
-
-    from starlette.background import BackgroundTask
-
-    def _cleanup():
-        try:
-            os.remove(out)
-            os.rmdir(tmpdir)
-        except OSError:
-            pass
-
-    return FileResponse(out, media_type="application/octet-stream",
-                        filename=os.path.basename(out),
-                        background=BackgroundTask(_cleanup))
+    # The encode-and-serve step is server.api_media's (it is what the offline
+    # download's own rendition uses); this route only owns its codec table and
+    # the save-dialog naming.
+    from server import api_media
+    return api_media.encoded_response(p, args, ext, "application/octet-stream",
+                                      attachment=True)
 
 
 class GenreImportRequest(BaseModel):

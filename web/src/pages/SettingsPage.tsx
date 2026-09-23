@@ -1222,6 +1222,31 @@ export default function SettingsPage() {
       ],
     },
     {
+      title: "Downloads & playback",
+      blurb:
+        "What a downloaded (offline) copy holds, and which copy plays. Downloading caches a track on this device so it plays with the server away — see the Downloads page. Quality here is about the CACHE: the library's own audio is never touched, and streaming always serves the library file.",
+      fields: [
+        {
+          k: "download_codec", label: "Downloaded copies are", type: "select",
+          options: [["copy", "Copy (the file's own codec) — default"], ...CODEC_CHOICES.filter(([v]) => v !== "keep")],
+          help: "Copy stores exactly what the library holds — nothing is re-encoded, so a track is downloaded in the codec it is already in. "
+                + "Any other target re-encodes the track for this device's cache only (smaller downloads for a phone; the library file keeps its own format). "
+                + "There is no \"keep\" here: copy IS never re-encode.",
+        },
+        {
+          k: "download_bitrate", label: "Download bitrate (kbps) / Vorbis quality", type: "number", min: 0, max: 512,
+          help: "The re-encode's rate: kbps for MP3/AAC/Opus, Vorbis' own 0-10 quality scale for Ogg. 0 uses the codec's own "
+                + "default (MP3 320, AAC 256, Ogg 6, Opus 128). Ignored while the codec above is Copy, and by a lossless target.",
+        },
+        {
+          k: "playback_source", label: "Play tracks from", type: "select",
+          options: [["stream", "Streaming from the server — default"], ["downloaded", "The downloaded copy"]],
+          help: "Streaming asks the server for the library file even when a copy is downloaded; the downloaded copy plays what is cached, "
+                + "saving bandwidth and working with the server away. Either way a copy plays when the server cannot be reached.",
+        },
+      ],
+    },
+    {
       title: "Server & remote access",
       blurb: "Where this server listens and the address clients should dial. A change to the port or host is picked up at the next start; the address is what a phone or desktop client is told to use.",
       fields: [
@@ -1598,6 +1623,7 @@ export default function SettingsPage() {
     { id: "security", label: t("settings.security") },
     { id: "notifications", label: t("settings.notifications") },
     { id: "remote", label: "Remote access" },
+    { id: "downloads", label: "Downloads & playback" },
     { id: "home", label: "Home" },
     { id: "naming", label: "Naming" },
     { id: "storage", label: "Storage" },
@@ -1793,7 +1819,9 @@ export default function SettingsPage() {
       ["audiometa", "Key & BPM"], ["beets", "Beets tagging"],
       ["storage", "Storage & cleanup"],
       ["soulseek", "Soulseek (managed slskd)"], ["autoimport", "Auto-import"],
-      ["wishes", "Wishes"], ["artistwatch", "Artist watch"], ["remote", "Server & remote access"], ["home", "Home"], ["deps", "Dependencies"],
+      ["wishes", "Wishes"], ["artistwatch", "Artist watch"], ["remote", "Server & remote access"],
+      ["downloads", "Downloads & playback"],
+      ["home", "Home"], ["deps", "Dependencies"],
       ["discovery", "Discovery"], ["artistimages", "Artist images"], ["ai", "AI lyric transforms"], ["import", "Import pipeline"],
       ["importtags", "Import & tag cleanup"],
     ].map(([tab, prefix]) => [

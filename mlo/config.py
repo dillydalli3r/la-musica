@@ -1392,6 +1392,33 @@ DEFAULT_CONFIG = {
     # describes the whole path. A local server can stream several FLACs in
     # parallel; more than a handful mostly thrashes the disk and the network.
     "download_concurrency": 3,
+    # What a downloaded (offline) copy is encoded as — the Downloads page and
+    # the Download button cache a track on the device, and this is the audio
+    # those bytes hold. `copy` is the shipped default and always names the
+    # file's OWN codec: the cache gets exactly the library's bytes, nothing is
+    # re-encoded, and a track is never downloaded in a codec it is not already
+    # in. A codec name (the same list library_codec takes, from
+    # mlo.containers.CODECS) re-encodes the track ON THE WAY OUT instead, for
+    # a device that has no room for the library's format; the library file is
+    # never touched. Playback of a transcoded copy is offline-only (see
+    # playback_source) — streaming always serves the library's own bytes.
+    "download_codec": "copy",
+    # The rate that re-encode uses: kbps for the CBR targets (mp3/aac/opus),
+    # libvorbis' own 0-10 quality scale for ogg. 0 = the codec's own shipped
+    # default, exactly like library_codec_bitrate. Ignored while the codec is
+    # `copy` (nothing is being encoded) and by a lossless target.
+    "download_bitrate": 0,
+    # Which bytes the PLAYER takes for a track this device has downloaded:
+    #   stream (default) — the server's stream endpoint, i.e. the library file
+    #     itself, at full quality, whether or not a copy sits in the cache;
+    #   downloaded — the cached copy, so playback costs no bandwidth and works
+    #     with the server away.
+    # The default is `stream` because a streamed track is always the library's
+    # own file while a downloaded one may be a smaller rendition
+    # (download_codec). A server that cannot be reached is not a preference:
+    # with the API answering from its cache the downloaded copy plays whatever
+    # this says, because it is the only thing that can.
+    "playback_source": "stream",
     "run_all_order": list(DEFAULT_RUN_ALL_ORDER),
 
     # Export to device (Export page). Each key is the SAVED DEFAULT behind one
@@ -1621,6 +1648,10 @@ _INT_RANGES = {
     # means "the codec's own shipped default".
     "library_codec_bitrate": (0, 512),
     "library_codec_quality": (0, 8),
+    # The offline download's own rate, clamped per codec when it is used
+    # (mlo.containers.codec_args) like the library one above; 0 = the codec's
+    # own shipped default and `download_codec` = "copy" ignores it entirely.
+    "download_bitrate": (0, 512),
 }
 _CHOICES = {
     "lyrics_format": {"EMBEDDED", "LRC", "BOTH"},
@@ -1652,6 +1683,14 @@ _CHOICES = {
     "library_codec": {"flac", "alac", "wav", "aiff", "mp3", "aac", "ogg",
                       "opus", "keep"},
     "library_codec_optimize": {"all", "lossless_to_lossy", "keep"},
+    # What a downloaded copy is encoded as: the file's own codec (`copy`), or
+    # one of mlo.containers.CODECS' targets. A stored typo falls back to the
+    # shipped default rather than reaching ffmpeg as an unknown codec.
+    "download_codec": {"copy", "flac", "alac", "wav", "aiff", "mp3", "aac",
+                       "ogg", "opus"},
+    # Which copy the player takes when a track is downloaded: the server's
+    # stream (the default) or the cached one.
+    "playback_source": {"stream", "downloaded"},
     # How yt-dlp gets the user's cookies, and which browser's store it reads
     # in browser mode. The browser list is yt-dlp's own (server/youtube.py
     # holds the same tuple as COOKIES_BROWSERS, so the validator, the settings

@@ -2339,6 +2339,45 @@ user asked for, in the order they asked for it. `server/exporter.py` owns both.
   is now refused with the list of what it does take, rather than having its UUID
   read as a release.
 
+- **R175 — every add RECORDS the walk it will take, or the walk is one edition
+  and a spent search ends the release.** The ranked list R150 walks is only ever
+  as good as who writes it: `server.api_add._create_all` resolves its targets
+  through `integrations.auto_import_targets` (whose rows already carry
+  `candidates`, best first, deduped by catalog number per R169) and had dropped
+  that field on the floor, so every ordinary add — the MusicBrainz pages' *Add
+  to library*, the queue bar (R170), a deferred add's background resolution, an
+  artist's prepared rows — recorded a wish with NO list. With no list the wish
+  is a single-candidate acquisition: a pressing whose peer folders hold nothing
+  usable ends `not_found` (terminal, framework album taken down) instead of
+  moving on to the next edition, and `wishes.candidate_state` has nothing to
+  report, so no surface can say where the search is. The list is passed straight
+  through to `pending_albums.create(candidates=…)`, which is the ONE writer of
+  `wishes.set_candidates`: it fills an EMPTY list only (a wish already walking
+  keeps its order; `rearm` starts a fresh walk), it accepts a ONE-entry list as
+  readily as three — that single entry is what tells the store this wish carries
+  the ranked editions of an album request, and therefore keeps a spent walk in
+  the BACKGROUND (R153) instead of ending it — and it keeps each entry's catalog
+  numbers, which is what the walk dedupes by. Every other writer of that list
+  (the artist watch's `queue_release`) already did this; the add path is the one
+  that did not.
+
+- **R176 — a walk is ONE row, and that row says which edition it is asking.**
+  The candidates are asked one at a time INSIDE the one wish
+  (`wishes_worker._run_one`), so a release is one queue entry however many
+  editions it tries — never a row (or a job) per edition — and the row carries
+  the position as its own badge: `SlskQueueItem.walk`
+  (`{index, total, label, mbid, title, tried}`, built by
+  `wishes.candidate_state`) renders beside the stage and source chips, labelled
+  with the server's own wording (`release 2 of 3`) so the row, the album page
+  and the notification cannot disagree, with a tooltip naming the edition being
+  asked and the ones that already came back empty. `walk` is null — and the
+  badge is absent — when there is nothing to walk: no list, or one entry, where
+  "release 1 of 1" would be noise. The row's `note` keeps the sentence
+  (`release 2 of 3: <title>` while a job is asking it, `next: …` between
+  attempts, `tried N of M · no usable copy yet · searched again automatically
+  around HH:MM` in the background phase); the badge is the at-a-glance form of
+  the same fact, and it is the ONLY new UI a walk needs.
+
 - **R154 — an import USES what the add already fetched, where the add's record
   is an IDENTITY.** The add path resolves the album's page content before the
   audio exists (`imports.prefetch_album`, R140) and the import then asked the
@@ -2622,6 +2661,78 @@ user asked for, in the order they asked for it. `server/exporter.py` owns both.
   held "2021 - Vinyl Rip {CD} — needs extra data" (R166's wording: the album
   had already landed), and *Enter manually* landed on
   `/import?album=…&step=Links&missing=links,cover,genres,lyrics`.
+
+### 7.19 Downloads: what a copy holds, and which copy plays
+
+- **R171 — a downloaded copy is the file's OWN codec unless the user says
+  otherwise.** Downloading caches a track on the device (the Downloads page, the
+  Download button, the player bar's own control) so it plays with the server
+  away. `download_codec` ships as **`copy`**: the cached bytes ARE the library
+  file's — same codec, same bits, nothing re-encoded — so a track is never
+  downloaded in a format it is not already in, and the setting exists only for
+  the device that has no room for the library's own format. Any other value is a
+  target from `mlo.containers.CODECS` (the same list `library_codec` takes,
+  minus `keep`, because `copy` IS "never re-encode" — offering both would be two
+  names for one state), and `download_bitrate` is that target's rate exactly as
+  `library_codec_bitrate` is the library pass's: kbps for the CBR targets
+  (mp3/aac/opus — the flag is ffmpeg's own `<n>k`), libvorbis' 0-10 quality
+  scale for ogg, **0 = the codec's own shipped default**, clamped per codec by
+  `mlo.containers.codec_args` and never reaching a lossless target. The
+  rendition is the DOWNLOAD's: `/api/stream?download=1` serves it
+  (`server/api_media.download_rendition`), the library file is never touched,
+  streaming an un-downloaded or un-preferred track always serves the library's
+  own bytes, and `POST /api/media/bulk` — which frames each file's size up front
+  and so cannot carry a re-encode — refuses with **409** and says which key is
+  responsible; the client's queue then drops to one request per track
+  (`lib/mediaCache.downloadTracks`).
+- **R172 — which copy PLAYS is `playback_source`, and it ships as streaming.**
+  `stream` (the shipped default) asks the server for the library file even when
+  a copy is downloaded; `downloaded` plays what is cached. ONE resolver decides
+  it (`web/src/lib/mediaCache.playbackSource`) and every player surface goes
+  through it — the audible `<audio>`, its gapless preload, both lyric previews
+  and the video popout — so the setting cannot be honored in one place and
+  ignored in another. Two things outrank it: the server being unreachable
+  (`isOffline()`, the API answering from its own cache) makes the copy the only
+  thing that can play, so it is played whatever the setting says; and a video's
+  live transcode (`?transcode=1`) is a DIFFERENT rendition, so a copy — which
+  holds the direct stream's bytes — stands in for it only offline. A stream URL
+  a copy exists for carries `nocache=1`: the service worker's media branch is
+  cache-first on the element's own URL, so without that marker "prefer
+  streaming" would play the very bytes it is asking to avoid (the server ignores
+  the parameter, and nothing is ever stored under it).
+- **R173 — cached playback works in every client, and the cache is keyed by the
+  TRACK, not by the session.** The download is stored under the URL the player
+  asks for (`playbackUrl`), which is what makes the service worker's
+  `cache.match` hit on ordinary playback in a browser; a shell has no service
+  worker at all (Tauri skips the registration), and there the same lookup hands
+  the bytes back as a `blob:` URL — the ONE way a downloaded track plays with
+  the server away, and the reason `playbackSource` exists rather than each
+  element building its own URL. That key holds NO session token
+  (`mediaCache.cacheKey`): a shell's media URLs carry `?token=…` because a
+  webview cannot send the cookie, and the token is re-issued at every sign-in,
+  so a token-bearing key would stop naming its own bytes the moment the user
+  signs in again — a downloaded album reading as undownloaded with every byte
+  still in the cache. Stripping is textual, never a URL re-serialization:
+  `URLSearchParams` would rewrite a space as `+` where `streamUrl` wrote `%20`,
+  and the key would then miss the very request the service worker matches. The
+  artwork warmed beside the audio is keyed the same way.
+- **R174 — the rip-log bar is 100, and it is the same number in all three
+  places it is asked.** `soulseek_auto_log_min_score` (the acquisition gate: a
+  CD candidate's `.log` must be scorable, score **>= 100** and not
+  checksum-invalid before its audio is even queued), `grade_log_score_threshold`
+  (the LOG_GRADE check) and `audit_log_score_threshold` (the AUDIT verdict's
+  log-score leg) all ship **100** — a Logchecker-perfect log, by default, and
+  `mlo/discs.score_disc_log` is what scores it (Logchecker's own
+  `Checksum: checksum_invalid` is a hard refusal, never a low score). The bar
+  applies to every candidate the app finds BY ITSELF. The three paths that do
+  not gate are the user's own hands, and each says so where it happens: a
+  MANUAL entry (a peer folder picked in the browse/manual flow) runs the gate
+  only for the logs it selected, so choosing a folder with no log is a choice
+  the user made; a CD candidate with no log at all on the searched path is
+  re-scored as Digital Media and offered through the `no_logs` confirm prompt
+  rather than silently refused; and a folder already on disk (the staging
+  imports) is graded after the fact, never refused. Lowering any of the three is
+  a settings change, never a default.
 
 ## 8. Recommended runbook
 
