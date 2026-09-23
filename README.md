@@ -1,6 +1,6 @@
 # la musica
 
-**v3.20.0** — a self-hosted app that *manages, optimizes, audits, grades and
+**v3.20.1** — a self-hosted app that *manages, optimizes, audits, grades and
 plays* your music library, from the browser, a desktop window or a phone.
 
 **la musica** (formerly Music Library Optimizer) is a FastAPI backend plus a
@@ -693,7 +693,7 @@ number, so two releases printed with `GED 24425` and `GED24425` are ONE search
 and not two spent windows (`spec R150`, `R169`, `R175`) — and the search walks
 them one at a time inside the one wish: each candidate gets
 `soulseek_search_timeout_seconds` of quiet (60 by default, 5–300) before the walk
-moves on, up to `soulseek_fallback_candidates` editions (3 by default, 1 = the
+moves on, up to `soulseek_fallback_candidates` editions (5 by default, 1 = the
 best one and nothing behind it). A group with fewer eligible editions simply ends
 at the end of its own list — no error, no empty slot — and a walk that is spent
 is not a give-up: the release moves to the queue's **Background** section, keeps

@@ -87,7 +87,7 @@ the next pressing (`spec R175`). `server.api_add._create_all` now hands the list
 
 - the search walks the group's editions best first, **one 60-second window each**
   (`soulseek_search_timeout_seconds`, 5–300), up to
-  `soulseek_fallback_candidates` editions (3 by default, 1 = best edition only);
+  `soulseek_fallback_candidates` editions (5 by default, 1 = best edition only);
 - two editions stating the same catalog number are **one** search (`R169`);
 - a group with **fewer** eligible editions than the cap ends at the end of its own
   list — no error, no empty slot;
