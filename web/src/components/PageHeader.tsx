@@ -49,9 +49,15 @@ export default function PageHeader({
           one sibling allowed to give any (the title column is `min-w-0`, for
           its own truncation) — the page title measured 0 px wide on
           /favorites/tracks and on /playlists, the title of the page with no
-          room at all. Sized from the leftover, that same box wraps its own
-          buttons onto another line and the title keeps the width its text
-          needs. */}
+          room at all.
+          `md:basis-auto` is the other half of that, and the half a long
+          subtitle needs: `flex-1` alone is `flex: 1 1 0%`, so a page whose
+          title column asks for MORE than the row (Checks & scripts' four-line
+          blurb, at 1244 px) left the actions box at its 0 % basis — measured
+          0 px wide, with its buttons overflowing to the LEFT over the very
+          text (Save drawn across "…and the scripts the grader already read").
+          Sized from its content it shrinks with the row instead of vanishing,
+          and still grows into leftover room when there is any. */}
       <div className="flex flex-col md:flex-row md:items-start md:justify-between gap-3 md:gap-4">
         <div className="min-w-0">
           {overline && <div className="text-[10px] uppercase tracking-widest text-zinc-500">{overline}</div>}
@@ -76,7 +82,7 @@ export default function PageHeader({
           )}
         </div>
         {actions && (
-          <div className="flex items-center justify-end flex-wrap gap-1.5 md:flex-1 min-w-0">{actions}</div>
+          <div className="flex items-center justify-end flex-wrap gap-1.5 md:flex-1 md:basis-auto min-w-0">{actions}</div>
         )}
       </div>
       {children}

@@ -293,7 +293,11 @@ export default function CheckStackPage() {
   return (
     <div className="p-6 space-y-5 mx-auto max-w-6xl">
       <PageHeader
-        sticky
+        // NOT sticky, unlike most pages: this header carries the whole stack
+        // description, the counts, the Discard/Save pair AND the filter row —
+        // 160 px of it pinned over a list of a hundred-odd rows, which is most
+        // of a laptop viewport and reads as rows scrolling under a bar. The
+        // filter box scrolls with the list it filters.
         icon={Layers}
         title="Checks & scripts"
         subtitle="The whole optimization, grading and auditing stack — the Run All chain, every graded check with its group and preset, and the audit pass. Everything here is described by the server from the code that owns it (server/api_stack.py), and saves to the same settings the scripts and the grader already read."

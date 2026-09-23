@@ -232,7 +232,7 @@ function PickTable({ cols, rows, emptyNote }: {
  * with the library's own track table, because a selection you cannot read as a
  * table is a selection you cannot check. */
 export default function ExportPage() {
-  const { data: lib } = useQuery({ queryKey: ["library"], queryFn: api.library });
+  const { data: lib } = useQuery({ queryKey: ["library"], queryFn: () => api.library() });
   const { data: playlists } = useQuery({ queryKey: ["playlists"], queryFn: api.playlists });
 
   const [sourceKind, setSourceKind] = useState<SourceKind>("playlist");

@@ -1,10 +1,10 @@
-import { Fragment, useEffect, useMemo, useState, type ReactNode } from "react";
+import { Fragment, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { Link, useNavigate } from "react-router-dom";
 import {
   ArrowDownUp, BarChart3, ChevronDown, ChevronRight, CloudDownload,
   FileVideo, FolderSync, FolderTree, Info as InfoIcon, Layers, Library, ListChecks,
-  ListFilter, ListPlus, Play, Search, Tag, Trash2, Wand2, X,
+  ListFilter, ListPlus, Play, RefreshCw, Search, Tag, Trash2, Wand2, X,
 } from "lucide-react";
 import { api } from "../api";
 import { SCRIPTS, DEFAULT_RUN_ALL, isScriptId } from "../lib/scripts";
@@ -185,7 +185,27 @@ function parseQueryTerms(raw: string): QueryTerms {
 }
 
 export default function LibraryPage() {
-  const { data: lib, isLoading, error } = useQuery({ queryKey: ["library"], queryFn: api.library });
+  // Refresh means "look at the music folder AGAIN", not "ask again": the
+  // server caches this payload (tagcache's library entry) and every album's
+  // tech/grade reads under it, so a plain refetch redrew the same tree — the
+  // same trap `/api/home?refresh=1` was written for, which is why both buttons
+  // now go through one server-side drop (`main._refresh_library_caches`). The
+  // flag is one-shot and a ref rather than a query key, so an ordinary
+  // background refetch (a remount, a save's invalidation) keeps using the
+  // cache instead of forcing a re-walk every time.
+  const forceRefresh = useRef(false);
+  const { data: lib, isLoading, error, isFetching, refetch } = useQuery({
+    queryKey: ["library"],
+    queryFn: () => {
+      const force = forceRefresh.current;
+      forceRefresh.current = false;
+      return api.library(force);
+    },
+  });
+  const refresh = () => {
+    forceRefresh.current = true;
+    void refetch();
+  };
   const { data: config } = useQuery({ queryKey: ["config"], queryFn: api.config });
   // The layout report the last scan stored (script 20, or the Optimization
   // panel's Scan). Read, never walked: this is what lets the page state a
@@ -1009,6 +1029,18 @@ export default function LibraryPage() {
             title="Select mode — show checkboxes for batch actions"
           >
             <ListChecks className="h-3.5 w-3.5" /> Select
+          </button>
+
+          {/* Refresh: re-walk the music folder. Home carries the same control
+              in the same order (Stats, Select, Refresh), so the two pages that
+              draw the library cannot offer different ways to update it. */}
+          <button
+            className="btn-ghost !py-1.5 text-xs tap"
+            onClick={refresh}
+            disabled={isFetching}
+            title="Look at the music folder again — drops the server's cached tree (and the tag reads under it) and re-walks it, then repaints this page"
+          >
+            <RefreshCw className={`h-3.5 w-3.5 ${isFetching ? "animate-spin" : ""}`} /> Refresh
           </button>
 
           <span className="text-xs text-zinc-500 whitespace-nowrap">

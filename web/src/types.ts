@@ -159,7 +159,11 @@ export interface Album {
   source_summary: string | null;
   /** Grouped grading issues: full issue text → affected files ("album" for
    * album-level checks). Powers the condensed FAIL details on the album page. */
-  issues?: Record<string, string[]>;
+    /** Informational lines from the same grading pass: what could NOT be
+   *  checked (an AccurateRip verdict the database has no entry for). They
+   *  never fail the album — `issues` is the failing half. */
+  notes?: string[];
+issues?: Record<string, string[]>;
   tracks: Track[];
   /** The release's own tracklist, recorded at import time. Present only for
    *  albums the import wizard matched to a MusicBrainz release; `missing`

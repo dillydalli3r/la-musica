@@ -233,7 +233,7 @@ export default function MoreLikeThis({
   // a library the page already loaded is reused instead of fetched again.
   const { data: lib } = useQuery({
     queryKey: ["library"],
-    queryFn: api.library,
+    queryFn: () => api.library(),
     enabled: albums.length > 0,
     staleTime: 60_000,
   });

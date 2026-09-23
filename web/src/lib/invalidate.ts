@@ -21,6 +21,31 @@ export function invalidateLibrary(qc: QueryClient): void {
   }
 }
 
+/** The outcome kinds that do NOT touch the library.
+ *
+ *  A QUIET list rather than a loud one, deliberately: the frames that leave
+ *  the library exactly as it is are these three — a newer release exists, and
+ *  the two "a transfer began" halves (a Soulseek transfer moving bytes is not
+ *  an album that landed) — while every other outcome in use either added an
+ *  album, wrote tags, moved files or settled a wish the shelves report. A kind
+ *  added later is far more likely to be about something that landed than about
+ *  nothing at all, and being wrong here costs one refetch of a payload the
+ *  server caches: a loud list would instead have to be maintained forever, and
+ *  a forgotten kind would leave a page quietly stale.
+ *
+ *  `affectsLibrary` is what the App's event subscription asks (see
+ *  `web/src/App.tsx`): an outcome that passes it drops the library-derived
+ *  queries, which is what makes the Library and Home pages live. */
+const QUIET_KINDS: Record<string, true> = {
+  update_available: true,
+  download_started: true,
+  upload_started: true,
+};
+
+export function affectsLibrary(kind: string): boolean {
+  return !(kind in QUIET_KINDS);
+}
+
 /** The cover a client most recently WROTE, per album + file name.
  *
  *  A cover's URL is its folder and file name, and replacing the image does not

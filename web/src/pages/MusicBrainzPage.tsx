@@ -116,7 +116,7 @@ function useOwnedAlbum(ids: (string | null | undefined)[]) {
   const want = ids.filter(Boolean).map((x) => String(x).toLowerCase()).join(",");
   const { data: lib } = useQuery<LibraryData>({
     queryKey: ["library"],
-    queryFn: api.library,
+    queryFn: () => api.library(),
     staleTime: 30000,
   });
   return useMemo(() => {

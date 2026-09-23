@@ -41,6 +41,10 @@ export function AlbumDetails({ album, onClose }: { album: Album; onClose: () => 
   const title = meta.ALBUM || album.path.split("/").pop() || "album";
   const pending = pendingSummary(album, t);
   const issues = Object.entries(album.issues ?? {});
+  // The grader's informational half: said, never failed. An album can
+  // pass with both lists filled — a disc AccurateRip has no entry for is
+  // not this rip's fault (mlo.grader, the CD-leg block).
+  const notes = album.notes ?? [];
   const missing = album.expected_tracks?.filter((t) => t.missing).length ?? 0;
 
   const infoRows: DetailItem[] = [
@@ -118,6 +122,21 @@ export function AlbumDetails({ album, onClose }: { album: Album; onClose: () => 
               >
                 {text}
                 {files?.length ? <span className="text-red-400/70"> — {files.join(", ")}</span> : null}
+              </li>
+            ))}
+          </ul>
+        </DetailSection>
+      )}
+
+      {notes.length > 0 && (
+        <DetailSection icon={Info} title={`Not checked (${notes.length})`}>
+          <ul className="space-y-1">
+            {notes.map((text) => (
+              <li
+                key={text}
+                className="text-xs text-zinc-300/90 bg-zinc-800/40 border border-zinc-700/50 rounded px-2 py-1 break-all"
+              >
+                {text}
               </li>
             ))}
           </ul>

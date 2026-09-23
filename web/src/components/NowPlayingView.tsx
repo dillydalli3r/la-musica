@@ -12,6 +12,8 @@ import { DetailsDialog } from "./AlbumDetails";
 import { toast, useStore } from "../store";
 import { fmtTech, fmtPair, isVideoFile } from "../lib/fmt";
 import { AdvisoryMark } from "./Badges";
+import StarRating from "./StarRating";
+import { ratingOf, useRatings, useSetRating } from "../lib/ratings";
 import CoverImg from "./CoverImg";
 import Popover, { MenuItem } from "./Popover";
 import ScrubSeek from "./ScrubSeek";
@@ -981,6 +983,11 @@ export default function NowPlayingView(p: Props) {
   // just inside the block's edges — the widest rows' own field: the title
   // and the secondary tiers clear AA on the mid-grey and the white cover with
   // no panel under them, only the wash and the glyph shadow.
+  // The track's own rating, editable here exactly as in the bar: one map and
+  // one optimistic setter (`lib/ratings`), so a star clicked in the fullscreen
+  // player lights up in the row behind it — and vice versa.
+  const { data: ratingsData } = useRatings();
+  const { setRating, pending } = useSetRating();
   const textBlock = (
     /* Every text row keeps a fixed height and is ALWAYS rendered —
        blanking a row while the next track's tags load is what made
@@ -1002,6 +1009,19 @@ export default function NowPlayingView(p: Props) {
       </div>
       <div className="h-5 mt-0.5 flex items-center justify-center" title={artistLine}>
         <div className={`text-sm truncate ${ink.dim}`}>{artistLine}</div>
+      </div>
+      {/* Fixed height and always rendered, like the rows above, so the block
+          never jumps on next/previous. The control's own tooltip carries the
+          rest: half stars on a star's left half, the value already set clears
+          it, and the keyboard works (← / →, Delete). */}
+      <div className="h-7 mt-1 flex items-center justify-center">
+        <StarRating
+          size="md"
+          label="Track rating"
+          value={ratingOf(ratingsData?.ratings, p.current.path)}
+          onChange={(v) => setRating(p.current.path, v)}
+          pending={pending(p.current.path)}
+        />
       </div>
     </div>
   );

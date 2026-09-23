@@ -11,6 +11,8 @@ import { PendingMark, pendingSummary } from "./Badges";
 import { useI18n } from "../lib/i18n";
 import { albumRef } from "../lib/refs";
 import { originalYear } from "../lib/fmt";
+import { ratingOf, useRatings } from "../lib/ratings";
+import StarRating from "./StarRating";
 import type { ReactNode } from "react";
 import type { Album } from "../types";
 
@@ -49,6 +51,13 @@ export default function AlbumCard({ al, artistName, selectable, selected, onSele
   const media = al.media || al.meta?.MEDIA;
   const countries = releaseCountries(al.meta?.RELEASECOUNTRY);
   const { t } = useI18n();
+  // The album's OWN rating (the user's verdict on the album, never the average
+  // of its tracks — lib/ratings owns that distinction), read here rather than
+  // passed in: this card draws the same album on six pages, and one of them
+  // enriching its own rows would leave the other five without stars. ONE
+  // request per page and scope, shared by every card through the query cache.
+  const { data: albumRatings } = useRatings("album");
+  const rating = ratingOf(albumRatings?.ratings, al.path);
   // The pending mark's own sentence (null for a complete album), used both for
   // the dot and for the reason the play button is off.
   const pending = pendingSummary(al, t);
@@ -217,6 +226,19 @@ export default function AlbumCard({ al, artistName, selectable, selected, onSele
             ) : null;
           })()}
         </div>
+        {/* The album's rating, UNDER the artist/year caption: the grid showed
+            covers and captions while the same albums' ratings were only visible
+            in the table view's own column, so a shelf of grid cards said
+            nothing about how the user had judged them. Read-only here — the
+            table row and the album page are where a rating is EDITED — and
+            drawn for library albums only, like the status dot above it: a row
+            the library does not hold (`owned: false`, a wish) has no album to
+            have a verdict about. */}
+        {inLibrary && (
+          <div className="mt-0.5">
+            <StarRating size="sm" readOnly label="Album rating" value={rating} />
+          </div>
+        )}
         {/* The caller's own bits sit on a line of their OWN: sharing this one
             with the artist and the year cost a 6-column shelf its artist
             ("Syst…" beside a reason chip), and the chip is the shelf's own

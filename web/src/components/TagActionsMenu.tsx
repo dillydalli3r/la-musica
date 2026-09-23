@@ -270,12 +270,21 @@ export default function TagActionsMenu({
             ],
           },
           {
-            // Library scripts that rewrite files the selection already
-            // carries (an AUDIT tag, a .accurip, a DR value): the FORCE flag
-            // is what makes them redo the work instead of skipping it, which
-            // is the only way to fix a wrong verdict/sidecar from here.
+            // Library scripts that write an artefact the selection already
+            // carries (an AUDIT tag, a .accurip, a DR value). The PLAIN run
+            // fills what is missing and leaves a matching file alone — that is
+            // the entry a library missing its .accurip files wants — and the
+            // FORCE flag beside it redoes the work instead of skipping it,
+            // which is the only way to fix a wrong verdict/sidecar from here.
             title: "Re-run & overwrite",
             items: [
+              {
+                label: "Generate AccurateRip (.accurip)",
+                icon: Disc3,
+                disabled: !paths.length,
+                title: "Script 9 over the selection: each disc's .accurip is written where it is missing (CUETools), and a file that already matches is left alone — the Force entry below rewrites it whatever it says",
+                onClick: () => run(() => api.run([9], paths), ran),
+              },
               {
                 label: "Force re-audit (rewrite AUDIT tags)",
                 icon: ShieldCheck,

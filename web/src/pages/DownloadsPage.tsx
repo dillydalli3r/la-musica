@@ -368,7 +368,7 @@ export default function DownloadsPage() {
   const [trackCols, toggleTrackCol] = useColumnPrefs("cached-tracks", TRACK_COLS);
   const [trackW, setTrackW, resetTrackW] = useColumnWidths("cached-tracks");
 
-  const { data: lib } = useQuery({ queryKey: ["library"], queryFn: api.library });
+  const { data: lib } = useQuery({ queryKey: ["library"], queryFn: () => api.library() });
   const { data: tracks, isFetching, refetch } = useQuery({ queryKey: CACHED_PATHS_KEY, queryFn: cachedTracks });
   const { data: sizes } = useQuery({ queryKey: CACHED_SIZES_KEY, queryFn: cachedEntrySizes });
 

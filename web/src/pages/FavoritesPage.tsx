@@ -120,7 +120,7 @@ export default function FavoritesPage() {
 
 /** Flat library lookups shared by every tab. */
 function useLibraryMaps() {
-  const { data: lib } = useQuery({ queryKey: ["library"], queryFn: api.library });
+  const { data: lib } = useQuery({ queryKey: ["library"], queryFn: () => api.library() });
   return useMemo(() => {
     const tracks = new Map<string, { track: Track; album: Album; artist: Artist }>();
     const albums = new Map<string, { album: Album; artist: Artist }>();

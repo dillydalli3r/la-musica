@@ -839,7 +839,7 @@ export function useCachedPaths(): Set<string> {
   const { data: tracks } = useQuery({ queryKey: CACHED_PATHS_KEY, queryFn: cachedTracks });
   const { data: lib } = useQuery<Library>({
     queryKey: ["library"],
-    queryFn: api.library,
+    queryFn: () => api.library(),
     enabled: false,
   });
   return useMemo(() => {

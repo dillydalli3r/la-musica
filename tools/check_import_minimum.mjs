@@ -270,16 +270,20 @@ check("the chain's ids head the grid, in the chain's own order",
 // Run All order would have put there.
 check("a script the chain does not name keeps its box, unticked",
       grid.some((b) => b.label === "Remux videos (MKV)" && !b.checked));
-lacks(finish.open, ["Run all scripts"], "the Finish step offers no Run All of its own");
-has(finish.open, ["Run ticked scripts"],
-    "the Finish step runs the ticked boxes — the album's own scripts");
+// The bulk press says "Run all": it runs every ticked box, and the boxes
+// directly above it are the list of which those are — the import chain until
+// the user changes them.
+has(finish.open, ["Run all"],
+    "the Finish step's bulk press is Run all — over its own ticked boxes");
+lacks(finish.open, ["Run ticked scripts"],
+      "…worded as the one press it is, not as a narrowed variant");
 // …and it offers NO re-run of the import chain: that press went back through
 // `finish_album`, whose own steps (drop_arrived_values included) emptied the
 // four families an import decides and re-fetched them, undoing the work just
 // done by hand in these steps. The button is gone; the ticked boxes are what
 // Finish runs, and the album page can re-run any script on its own.
-lacks(finish.open, ["Run the import chain", "Run all scripts"],
-      "the Finish step offers no chain re-run and no library-wide Run All");
+lacks(finish.open, ["Run the import chain"],
+      "the Finish step offers no chain re-run");
 
 // --------------------------------------------------------------------------- #
 // 5. the affordance, clicked — and the order the user reads

@@ -18,7 +18,7 @@ export default function PlaylistsPage() {
   const navigate = useNavigate();
   const { playNow } = useStore();
   const { data: playlists, isLoading } = useQuery({ queryKey: ["playlists"], queryFn: api.playlists });
-  const { data: lib } = useQuery({ queryKey: ["library"], queryFn: api.library });
+  const { data: lib } = useQuery({ queryKey: ["library"], queryFn: () => api.library() });
   const gridSize = (localStorage.getItem("mlo.gridSize") as "s" | "m" | "l" | null) ?? "m";
   const [newName, setNewName] = useState("");
   const fileRef = useRef<HTMLInputElement>(null);

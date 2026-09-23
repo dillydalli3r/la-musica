@@ -184,7 +184,7 @@ export default function BrowsePage() {
   const navigate = useNavigate();
   const { playNow } = useStore();
   const { data: catalogue } = useLibraryFields();
-  const { data: lib } = useQuery({ queryKey: ["library"], queryFn: api.library });
+  const { data: lib } = useQuery({ queryKey: ["library"], queryFn: () => api.library() });
 
   const [conditions, setConditions] = useState<LibraryCondition[]>([]);
   const [match, setMatch] = useState<"all" | "any">("all");

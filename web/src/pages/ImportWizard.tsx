@@ -563,7 +563,7 @@ export default function ImportWizard() {
     return () => clearInterval(timer);
   }, [bulkJob?.status, qc]);
 
-  const { data: lib } = useQuery({ queryKey: ["library"], queryFn: api.library });
+  const { data: lib } = useQuery({ queryKey: ["library"], queryFn: () => api.library() });
 
   // Metadata review is off unless the config explicitly turns it on.
   const { data: cfg } = useQuery({ queryKey: ["config"], queryFn: api.config });
@@ -4510,10 +4510,11 @@ const finish = async () => {
                 title="Run exactly the ticked scripts above — the import chain until you change them — on this album, now"
               >
                 <Wand2 className={`h-3.5 w-3.5 ${runningTicked ? "animate-spin" : ""}`} />
-                {runningTicked ? "Running…" : "Run ticked scripts"}
+                {runningTicked ? "Running…" : "Run all"}
               </button>
               <span className="text-[10px] text-zinc-500">
-                Finish runs the ticked scripts. There is no "re-run the import chain" button here any more: the chain
+                Run all runs every ticked script — the import chain until you change them. There is no separate
+                "re-run the import chain" button here any more: the chain
                 re-runs the import's own steps (it re-fetches links, genres, cover art and the advisory, and empties
                 the arrived values of the four families the import decides), which undid exactly the work done by
                 hand in these steps — an album you just finished by hand is finished. The scripts alone can always be

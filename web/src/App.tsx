@@ -66,6 +66,10 @@ import ClientSetup from "./pages/ClientSetup";
 import { isClientSetupDone, isClientShell } from "./lib/clientSetup";
 import { isOffline, onOfflineFallback } from "./api";
 import type { OfflineInfo } from "./api";
+// The app event stream's own outcome kinds, and the ONE invalidation a write
+// to the library implies (see the subscription below).
+import { onAppEvent } from "./lib/notify";
+import { affectsLibrary, invalidateLibrary } from "./lib/invalidate";
 
 import PlayerBar from "./components/PlayerBar";
 import { ProgressInline } from "./components/ProgressBar";
@@ -75,6 +79,11 @@ import { EmptyState, PendingMark } from "./components/Badges";
 // rail groups them by what the user is doing (browse / acquire / maintain)
 // and renders a label above each group. Collapsed, the labels give way to a
 // hairline divider so the rail stays a clean icon column.
+/** How long a burst of app events is allowed to gather before the library is
+ *  re-read: long enough that an import chain's several outcomes cost one
+ *  refetch, short enough that the page is live to the eye. */
+const LIVE_LIBRARY_MS = 1500;
+
 const NAV_GROUPS: { labelKey: MessageKey; items: { to: string; labelKey: MessageKey; icon: LucideIcon; end: boolean }[] }[] = [
   {
     labelKey: "nav.group.library",
@@ -323,6 +332,34 @@ export default function App() {
   const query = useStore((s) => s.query);
   const setQuery = useStore((s) => s.setQuery);
   const qc = useQueryClient();
+
+  // LIVE LIBRARY UPDATES. The server announces every settled outcome on
+  // /ws/events (lib/notify.ts owns that socket); an outcome nearly always means
+  // the library changed under whichever page is open — an import landed, a
+  // script wrote tags, a wish was filled, an album was added as pending — so
+  // the queries derived from it are dropped NOW, and the Library and Home pages
+  // repaint themselves instead of waiting for a visit or a manual Refresh.
+  //
+  // Coalesced by a short timer: one import chain emits several outcomes in a
+  // burst, and the library payload is the biggest one the client asks for, so
+  // a burst must cost ONE refetch. The kinds that cannot have changed anything
+  // are named in lib/invalidate's QUIET_KINDS.
+  const liveTimer = useRef<number | undefined>(undefined);
+  useEffect(() => {
+    const stop = onAppEvent((kind) => {
+      if (!affectsLibrary(kind)) return;
+      if (liveTimer.current !== undefined) window.clearTimeout(liveTimer.current);
+      liveTimer.current = window.setTimeout(() => {
+        liveTimer.current = undefined;
+        invalidateLibrary(qc);
+      }, LIVE_LIBRARY_MS);
+    });
+    return () => {
+      stop();
+      if (liveTimer.current !== undefined) window.clearTimeout(liveTimer.current);
+      liveTimer.current = undefined;
+    };
+  }, [qc]);
   const { t } = useI18n();
   const progressClear = useRef<Timer | undefined>(undefined);
   // The shortcut sheet: opened by "?" or the keyboard button in the top bar.
@@ -549,7 +586,7 @@ export default function App() {
   const q = query.trim().toLowerCase();
   const { data: lib } = useQuery<LibraryData>({
     queryKey: ["library"],
-    queryFn: api.library,
+    queryFn: () => api.library(),
     enabled: searchOpen && q.length >= 2,
     staleTime: 30000,
     refetchIntervalInBackground: false,

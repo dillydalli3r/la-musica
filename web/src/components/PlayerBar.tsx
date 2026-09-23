@@ -286,7 +286,7 @@ export default function PlayerBar() {
   // library payload (covers playlists/.m3u8 queues whose entries lack them).
   const { data: libForCover } = useQuery({
     queryKey: ["library"],
-    queryFn: api.library,
+    queryFn: () => api.library(),
     staleTime: 5 * 60 * 1000,
   });
   // One Map per payload; track changes are O(1) lookups.

@@ -57,7 +57,7 @@ export default function PlaylistDetailPage() {
     select: (rows: Playlist[]) => rows.find((p) => p.id === pid),
   });
   const { data: detail, error: detailError } = useQuery({ queryKey: ["playlist", pid], queryFn: () => api.playlist(pid) });
-  const { data: lib } = useQuery({ queryKey: ["library"], queryFn: api.library });
+  const { data: lib } = useQuery({ queryKey: ["library"], queryFn: () => api.library() });
   const { data: catalogue } = useLibraryFields();
   const fields = useMemo(() => fieldIndex(catalogue), [catalogue]);
 

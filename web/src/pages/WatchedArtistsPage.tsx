@@ -222,7 +222,7 @@ function AddArtistPanel({ watched, onPick }: {
 }) {
   const [text, setText] = useState("");
   const [error, setError] = useState("");
-  const lib = useQuery({ queryKey: ["library"], queryFn: api.library });
+  const lib = useQuery({ queryKey: ["library"], queryFn: () => api.library() });
 
   // The library's own artists, deduplicated by MusicBrainz id: two folders of
   // the same artist are one artist to watch.

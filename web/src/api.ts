@@ -1003,7 +1003,7 @@ export interface SlskWalk {
   /** How many ranked editions the walk may ask (`soulseek_fallback_candidates`,
    *  clamped to the list the release group actually has). */
   total: number;
-  /** "release 2 of 3" — the ONE wording for the position. */
+  /** "Release 2 of 3" — the ONE wording for the position. */
   label: string;
   mbid: string;
   title: string;
@@ -1892,7 +1892,11 @@ export const api = {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(body),
     }, 60000),
-  library: () => json<import("./types").Library>(`${API}/library`),
+  /** The library tree. `refresh` makes the server drop the caches the payload
+   *  is built from and re-walk the music folder — what the page's Refresh
+   *  button asks for; an ordinary call may answer from its TTL entry. */
+  library: (refresh = false) =>
+    json<import("./types").Library>(`${API}/library${refresh ? "?refresh=1" : ""}`),
   /** The ONE field catalogue every filter UI renders (the Browse builder, the
    *  facet rail, the smart-playlist rule editor). Cached hard: it only changes
    *  when the server's own field list does. */

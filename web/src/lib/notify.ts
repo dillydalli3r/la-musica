@@ -191,6 +191,10 @@ let socket: WebSocket | null = null;
 let stopped = false;
 let attempt = 0;
 let timer: number | undefined;
+/** Subscribers to the OUTCOME kinds (`onAppEvent`): screens that draw what an
+ *  outcome changed, rather than the tray that lists it. Plain callbacks, never
+ *  React state — the listener decides what to do with a kind. */
+const eventListeners = new Set<(kind: string) => void>();
 // Bumped by every start()/stop(): handlers captured by an older socket compare
 // their own generation against this and bail out. Without it, the sign-in /
 // sign-out flip (and StrictMode's double mount in dev) left the previous
@@ -218,6 +222,21 @@ function eventsUrl(): string {
   return `${ws}/ws/events?${q}`;
 }
 
+/** Call `fn` with the `event` string of every app event this client has not
+ *  seen yet — the server's own OUTCOME channel (see the module docstring), not
+ *  the byte-level progress frames on `/ws/progress`.
+ *
+ *  A screen that draws what those outcomes CHANGE — the library tree, the home
+ *  shelves — can refresh itself the moment one lands instead of waiting for
+ *  its next stale window. Listeners never see a replayed ring frame, and one
+ *  that throws cannot break the stream. Returns a stop function. */
+export function onAppEvent(fn: (kind: string) => void): () => void {
+  eventListeners.add(fn);
+  return () => {
+    eventListeners.delete(fn);
+  };
+}
+
 function handle(raw: string) {
   let frame: AppEvent;
   try {
@@ -237,6 +256,13 @@ function handle(raw: string) {
   if (!frame.title) frame.title = t(FALLBACK_TITLE[frame.event as EventKind] ?? "notify.event");
   const rec = ingest(frame);
   if (!rec) return;
+  for (const fn of eventListeners) {
+    try {
+      fn(frame.event);
+    } catch {
+      /* a listener's own problem: the tray and the socket carry on */
+    }
+  }
   void showNotification(frame, rec);
 }
 
