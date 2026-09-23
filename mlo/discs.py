@@ -225,6 +225,15 @@ _CRC_CHUNK = 1 << 16
 # re-ripped or edited file is never served a stale verdict. Bounded: a long
 # session over a churning library drops the map rather than growing forever.
 _CRC_MEMO = {}
+# The same verdict keyed by the AUDIO's own identity instead of the file's
+# stat, which is what a tag write changes and the audio is not. FLAC states one
+# (STREAMINFO's MD5, the same identity `mlo.accurip` keys its .accurip evidence
+# on: a tag rewrite leaves it, a re-rip or re-encode changes it), and a
+# container that cannot state one simply never hits this map. Without it every
+# script that wrote a tag — an import writes dozens — moved the mtime and made
+# the next reader decode the whole track again with ffmpeg, which is the most
+# expensive thing this module does.
+_CRC_AUDIO_MEMO = {}
 _CRC_MEMO_LOCK = threading.Lock()
 _CRC_MEMO_MAX = 20000
 
@@ -239,12 +248,27 @@ def _audio_crc32(ffmpeg_exe, path):
     import zlib
 
     key = None
+    identity = ""
     try:
         st = os.stat(path)
-        key = (os.path.normcase(os.path.abspath(path)), st.st_size, st.st_mtime_ns)
+        norm = os.path.normcase(os.path.abspath(path))
+        key = (norm, st.st_size, st.st_mtime_ns)
         with _CRC_MEMO_LOCK:
             if key in _CRC_MEMO:
                 return _CRC_MEMO[key]
+        # The stat key missed: the file changed in SOME way. Ask what it says
+        # about its own audio before paying for a decode — a tag write is the
+        # common case by far, and re-decoding a 40 MB track to learn what a
+        # rewrite could not have touched is what made a graded import slow.
+        from mlo.accurip import _audio_identity
+        identity = _audio_identity(path)
+        if identity:
+            with _CRC_MEMO_LOCK:
+                hit = _CRC_AUDIO_MEMO.get((norm, identity))
+            if hit is not None:
+                with _CRC_MEMO_LOCK:
+                    _CRC_MEMO[key] = hit
+                return hit
     except OSError:
         key = None
 
@@ -285,6 +309,10 @@ def _audio_crc32(ffmpeg_exe, path):
             if len(_CRC_MEMO) >= _CRC_MEMO_MAX:
                 _CRC_MEMO.clear()
             _CRC_MEMO[key] = got
+            if identity:
+                if len(_CRC_AUDIO_MEMO) >= _CRC_MEMO_MAX:
+                    _CRC_AUDIO_MEMO.clear()
+                _CRC_AUDIO_MEMO[(key[0], identity)] = got
     return got
 
 

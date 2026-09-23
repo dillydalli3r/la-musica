@@ -434,8 +434,15 @@ assert all(r[3]["status"] == "imported" for r in progress_rows), progress_rows
 # the order the import works in. A row COUNT is satisfied by any producer that
 # happens to publish as many frames (and broken by one that publishes one
 # more), which is not what this line is here to say.
-PHASES = ["Looking up links…", "Fetching genres…", "Fetching advisories…",
-          "Checking instrumentals…", "Fetching metadata…", "Finding cover art…"]
+# The metadata and cover steps announce themselves together now: they write
+# FILES (the review record, the art) while the four tag steps write TAGS, so
+# the pair runs beside them — started after the genre step (which settles the
+# identity its lookup reads) and joined before the chain. One frame for the
+# pair, because that is what it is: two steps on one worker, in their own
+# order (`imports._files_step`).
+PHASES = ["Looking up links…", "Fetching genres…",
+          "Fetching metadata and cover art…", "Fetching advisories…",
+          "Checking instrumentals…"]
 labels = [row[2] for row in hook_rows]
 assert all(labels.count(p) == 2 for p in PHASES), labels
 firsts = [labels.index(p) for p in PHASES]

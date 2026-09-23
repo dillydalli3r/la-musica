@@ -1033,13 +1033,21 @@ def _apple_json(path, params, timeout=None):
                     return json.load(fh)
         except (OSError, ValueError):
             pass
+    # The spacing is the lock's whole job, and it is taken for the spacing
+    # ONLY: the request happens outside it. Held across the call — the shape
+    # this had — one slow answer stalled every other Apple caller behind it,
+    # and the interval became a ceiling for the whole client instead of a gap
+    # between requests (`discovery._throttle` has always stamped the time, let
+    # go and only then asked). Measured on one album's advisory pass with
+    # several callers waiting: 38 s of it was spent asleep inside this lock,
+    # against 5 s for the same work with the lock held for the spacing only.
     with _apple_lock:
         wait = _APPLE_MIN_INTERVAL - (time.time() - _apple_last)
         if wait > 0:
             time.sleep(wait)
         _apple_last = time.time()
-        data = _advisory_json(f"{_ITUNES_LOOKUP}{path}", dict(params or {}),
-                              timeout=timeout, host="itunes.apple.com")
+    data = _advisory_json(f"{_ITUNES_LOOKUP}{path}", dict(params or {}),
+                          timeout=timeout, host="itunes.apple.com")
     if data is None or not fp:
         return data
     try:

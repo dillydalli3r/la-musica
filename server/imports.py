@@ -502,6 +502,44 @@ def _finish_album(path, cfg, progress=None, force=None, release=None,
             except Exception:
                 traceback.print_exc()
 
+    # ---- the FILE-writing pair, beside the TAG-writing steps ---------------
+    # Metadata (artist image, artist/album description) and cover art write
+    # FILES — the review record they share, and the art the album folder keeps
+    # — while links, genres, advisory and instrumentals write TAGS on the audio
+    # files. Different files, so they go side by side: started here (the
+    # album's identity is settled by the genre step above, which is what the
+    # metadata lookup reads — `album_identity`) and joined before the chain,
+    # which is the first thing that needs them on disk (script 5 processes the
+    # images, the grade wants the cover). ONE worker for BOTH steps in their
+    # own order, because they stage into ONE review record and must not
+    # clobber each other (`stage_metadata` / the `covers` entry of the same
+    # file).
+    #
+    # Both run on EVERY path, chain or no chain: `metadata_auto_fetch` /
+    # `cover_auto_fetch` are their own switches, and the unattended import has
+    # fetched them since it existed — the chain's own switch is about the
+    # scripts, and turning it off must not silently take the cover art away
+    # with it. Cover art: an album that arrived without one gets it now, found
+    # by the identity the import just stamped and stored by the cover page's
+    # own writer. With `*_review` on, the candidates are staged for the user
+    # instead.
+    _phase("Fetching metadata and cover art…")
+
+    def _files_step():
+        got = {}
+        try:
+            got["metadata"] = run_metadata_step(path, run_cfg)
+        except Exception:
+            traceback.print_exc()
+        try:
+            got["cover"] = run_cover_step(path, run_cfg)
+        except Exception:
+            traceback.print_exc()
+        return got
+
+    _files_pool = ThreadPoolExecutor(max_workers=1)
+    _files = _files_pool.submit(_files_step)
+
     # Advisory BEFORE the chain: script 8 derives ALBUMITUNESADVISORY from the
     # per-track values, so writing ITUNESADVISORY afterwards would leave the
     # album tag stale. Gated by advisory_auto_fetch; never fatal. Only fetched
@@ -532,29 +570,18 @@ def _finish_album(path, cfg, progress=None, force=None, release=None,
     # the record is looked up by the album's own identity (see
     # `staged_metadata`), so it survives the chain moving the album to its
     # canonical folder — which it does, via beets/organize. Never fatal.
-    _phase("Fetching metadata…")
+    # The two file steps had the whole advisory/instrumental pass to run in;
+    # this is where their work is collected, before the chain (which reads what
+    # they wrote) and before the no-chain return (whose result reports them).
     try:
-        out["metadata"] = run_metadata_step(path, run_cfg)
+        _files_got = _files.result()
+        for _key in ("metadata", "cover"):
+            if _files_got.get(_key) is not None:
+                out[_key] = _files_got[_key]
     except Exception:
         traceback.print_exc()
-
-    # Cover art: an album that arrived without one gets it now, found by the
-    # identity the import just stamped and stored by the cover page's own
-    # writer. With cover_review on the candidates are staged instead (as
-    # ``covers`` on the album's entry in the same review file the metadata step
-    # writes, so the two steps share one record and neither clobbers the
-    # other). Gated by cover_auto_fetch; never fatal.
-    #
-    # Both steps run on EVERY path, chain or no chain: `metadata_auto_fetch` /
-    # `cover_auto_fetch` are their own switches, and the unattended import has
-    # fetched them since it existed — the chain's own switch is about the
-    # scripts, and turning it off must not silently take the cover art away
-    # with it.
-    _phase("Finding cover art…")
-    try:
-        out["cover"] = run_cover_step(path, run_cfg)
-    except Exception:
-        traceback.print_exc()
+    finally:
+        _files_pool.shutdown(wait=True)
 
     if not chain:
         # `import_auto_scripts` off / every id held for review: deliberately
@@ -1034,6 +1061,17 @@ def fetch_advisories(paths, cfg=None, force=False):
         folder = os.path.dirname(path)
         per_folder[folder] = per_folder.get(folder, 0) + 1
 
+    # ONE TRACK AT A TIME, deliberately. The pass was fanned out per file (the
+    # shape `drop_arrived_values` and `_stamp_release` use for their own
+    # per-file writes) and MEASURED slower on this album: Apple's interval is
+    # global, and the sources are asked in a fixed order whose album-level
+    # answers the first track warms for the rest. Eight lanes arriving at
+    # `_apple_json` together turned a spacing that the serial pass never even
+    # reached — it was already three seconds between calls — into 38 s of
+    # sleep for the same twelve tracks, and the pass went 24 s to 41 s. The
+    # concurrency that pays is one level up: the metadata/cover pair runs
+    # beside this pass (`_files_step`), and instrumentals fan out per file
+    # because LRCLIB's interval is 0.4 s, where overlap does win.
     updated = 0
     gated = 0
     values = {}
@@ -1214,31 +1252,52 @@ def fetch_instrumentals(paths, cfg=None):
         elif os.path.isfile(p):
             targets.append(p)
 
-    found = inst.detect_instrumental(targets, cfg)
     updated = 0
     values = {}
     evidence = {}
-    for path, hit in found.items():
+
+    # The same fan-out the advisory pass above uses, for the same reason: one
+    # file per worker (its own container rewrite), while the sources behind
+    # `detect_instrumental` — LRCLIB's own flag, Spotify's audio features when
+    # it is configured — answer per track and overlap each other's spacing
+    # instead of queueing up behind each other's latency. The per-source
+    # answers are memoized (`integrations._advisory_cached`), so a source asked
+    # twice in a run still costs one request.
+    def _one(path):
+        """(path, row) for one file; the fold below is the only mutator."""
+        row = {"updated": 0, "value": None, "answers": None}
         try:
+            hits = inst.detect_instrumental([path], cfg)
+            hit = next(iter(hits.values()), None) or {}
+            row["answers"] = hit.get("answers") or None
             value = hit.get("value")
-            if hit.get("answers"):
-                evidence[path] = hit["answers"]
             if value is None:
-                continue
+                return path, row
             af = AudioFile(path)
             if af.audio is None:
-                continue
+                return path, row
             current = str(af.get_tag("INSTRUMENTAL") or "").strip()
             if current in ("0", "1"):
-                values[path] = int(current)
-                continue
+                row["value"] = int(current)
+                return path, row
             if not should_write_audio_tag(cfg, "INSTRUMENTAL", filepath=path):
-                continue
+                return path, row
             if str(value) != current and af.set_tag("INSTRUMENTAL", str(value)):
-                updated += 1
-            values[path] = value
+                row["updated"] = 1
+            row["value"] = value
         except Exception:
-            continue
+            return path, row
+        return path, row
+
+    workers = worker_count(cfg, default=8, maximum=8, items=len(targets))
+    with ThreadPoolExecutor(max_workers=workers) as ex:
+        rows = list(ex.map(_one, targets))
+    for path, row in rows:
+        updated += row["updated"]
+        if row["answers"]:
+            evidence[path] = row["answers"]
+        if row["value"] is not None:
+            values[path] = row["value"]
     if updated:
         _invalidate_caches(*[os.path.dirname(p) for p in values])
     return {"updated": updated, "values": values, "evidence": evidence}

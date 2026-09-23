@@ -1138,6 +1138,20 @@ def run_auto_tagging(config):
         if not info:
             return album, 0, None, None, []
 
+        # ONE container rewrite per file for the WHOLE album pass. Six stages
+        # below fill tags (the whitespace fix, the release identity,
+        # INSTRUMENTAL, the derived album advisory, the instrumental zero and
+        # its re-derivation) and every set_tag used to save the whole
+        # container for itself — six whole-file copies of a 30 MB track for
+        # six tags, on a library whose script 3 writes `--padding=0` so there
+        # is no padding to absorb them. The flush at the bottom is where all
+        # of them land at once, exactly as `_fill_release_tags` already does
+        # for its own dozen; a handle that only implements get/set (a caller's
+        # stub) cannot defer and keeps writing per tag, like before.
+        deferred = [d["af"] for d in info if hasattr(d["af"], "defer_save")]
+        for af in deferred:
+            af.defer_save(True)
+
         modified = 0
         notes = []
         advisory_value = None
@@ -1268,6 +1282,17 @@ def run_auto_tagging(config):
                                 notes[i] = f"advisory={new_val}"
                                 break
 
+        # The album's ONE write per file (see the deferral at the top). A
+        # failed flush wrote nothing at all — every tag above was applied in
+        # memory only — so it is reported by name instead of being counted as
+        # modified, and the next pass over the album fills it again.
+        failed = [os.path.basename(af.path) for af in deferred
+                  if af.defer_save(False) is not True]
+        if failed:
+            notes.append("the container write failed: "
+                         + ", ".join(failed[:3])
+                         + (f" (+{len(failed) - 3} more)"
+                            if len(failed) > 3 else ""))
         return album, modified, notes, advisory_value, info
 
     def mood_genre_for_track(item):

@@ -2416,6 +2416,59 @@ user asked for, in the order they asked for it. `server/exporter.py` owns both.
   descriptions side by side stay the reader's to sort out — the app does not
   guess which text is the right one.
 
+- **R183 — the import pipeline runs the steps that CAN overlap side by side,
+  and one track at a time where the provider's interval is the wall.** The six
+  steps between the press and the first script are not one kind of work: links,
+  genres, advisory and instrumentals write TAGS on the audio files, while
+  metadata (artist image, descriptions) and cover art write FILES — the review
+  record they share, and the art the album folder keeps. The file pair is
+  therefore started on one worker right after the genre step (which settles the
+  identity its lookup reads, `album_identity`) and joined before the chain,
+  which is the first thing that needs it on disk (script 5 processes the
+  images, the grade wants the cover). One worker for both, in their own order,
+  because they stage into ONE review record. The pair announces itself with ONE
+  phase line ("Fetching metadata and cover art…"), and the phase list
+  `tools/test_import_pipeline.py` checks is that list.
+  **The per-track passes are NOT all fanned out, and that is measured.** They
+  were, on the shape the per-file writers use (`drop_arrived_values`,
+  `_stamp_release`): one worker per file, distinct files sharing nothing. For
+  the ADVISORY pass that made the album slower — 24 s to 41 s, with 38 s of the
+  pass asleep inside `_apple_json` where the serial pass spent 5 — because
+  Apple's interval is GLOBAL and the serial pass never reached it: three
+  seconds already separate its per-track calls, and the first track warms the
+  album-level answers the rest reuse. Eight lanes arriving together turn that
+  headroom into queueing. The pass is serial again, with the measurement in a
+  comment so nobody re-fans it by pattern-matching. Instrumentals DO fan out per
+  file, and pay, because LRCLIB's interval is 0.4 s. The rule is the interval,
+  not the pattern: fan out when the provider's spacing is shorter than the work
+  between calls, never when it is the wall.
+  `_apple_json` keeps the spacing under its lock and takes the REQUEST outside
+  it (the shape `discovery._throttle` always had): held across the call, one
+  slow answer stalled every other Apple caller behind it, and the interval
+  became a ceiling for the client instead of a gap between requests.
+- **R184 — an import writes each file ONCE per pass, and a tag write never
+  costs a decode.** Auto tagging (script 8) fills tags in six stages — the
+  whitespace fix, the release identity, INSTRUMENTAL, the derived album
+  advisory, the instrumental zero and its re-derivation — and each `set_tag`
+  used to save the whole container for itself: six whole-file copies of a 30 MB
+  track, on a library whose script 3 writes `--padding=0`, so there is no
+  padding to absorb them. The album pass now defers (`mlo.audio.defer_save`,
+  the idiom `_fill_release_tags` already used for its own dozen) and flushes
+  once per file at the end, so a file costs ONE write however many of the six
+  stages fire, reporting by name any file whose single write could not land — a
+  failed flush wrote NOTHING, so it is never counted as written. (Measured on a
+  fixture where one stage fires, the count is 1 per file either way: the bound
+  is what the change buys, and it pays on the albums where the advisory,
+  instrumental and derived tags all land at once.)
+  And the CRC memo (`mlo.discs._audio_crc32`, the decoded-PCM CRC every CD log
+  check and the audit share) is keyed on the container's OWN audio identity —
+  FLAC's STREAMINFO MD5, the identity `mlo.accurip` already keys its evidence
+  on, which a tag rewrite leaves and a re-rip or re-encode changes — as well as
+  on size+mtime. Before it, every script that wrote a tag moved the mtime and
+  made the next reader decode the whole track again with ffmpeg; the import
+  writes tags on every track, so the second grade of an album paid for twelve
+  decodes it had already done.
+
 - **R169 — the walk asks DISTINCT PRESSINGS: two editions that state the same
   catalog number are ONE search.** Separate MusicBrainz releases really do share
   one — the same CD issued under two labels (DGC's `GED 24425` beside Geffen's
