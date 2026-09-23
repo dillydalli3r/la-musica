@@ -100,6 +100,8 @@ def _type_sentence(key, want):
         return f"{key} must be true or false"
     if want is int:
         return f"{key} must be a whole number"
+    if want is list:
+        return f"{key} must be a list of file family names"
     return f"{key} must be text"
 
 
@@ -110,8 +112,9 @@ def clean_config(config):
     Refused: a key the form does not have (a config file is not a place to
     smuggle anything into a run), a value of the wrong type, and an enumerated
     value the run itself would refuse — an unknown codec, folder structure,
-    target or ReplayGain mode, and an equalizer profile id that could name a
-    file outside the profile folder.
+    target, ReplayGain mode or file family (an EMPTY file selection included),
+    and an equalizer profile id that could name a file outside the profile
+    folder.
     """
     if not isinstance(config, dict):
         raise ValueError("a config must be an object of the export form's fields")
@@ -145,6 +148,14 @@ def clean_config(config):
         # The run's own validator and its own sentence: a structure a run would
         # refuse must not be saveable in the first place.
         problem = exporter.structure_error(structure, out.get("structure_script", ""))
+        if problem:
+            raise ValueError(problem)
+    files = out.get("copy_files")
+    if files is not None:
+        # The run's own validator and its own sentence, exactly like the
+        # structure above: a config the page saves must not be a way to store a
+        # selection an export would refuse (an unknown family, or none at all).
+        problem = exporter.copy_files_error(files)
         if problem:
             raise ValueError(problem)
     eq_id = out.get("eq_profile")

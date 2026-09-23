@@ -254,29 +254,48 @@ function PlaylistGridCard({ playlist, trackMeta, onPlay }: {
               </div>
             ))}
           </div>
-          <span className="absolute bottom-1.5 left-1.5 bg-black/65 text-zinc-300 text-[9px] font-mono tracking-wide rounded px-1 py-0.5 border border-white/10">
-            {playlist.track_count} track{playlist.track_count === 1 ? "" : "s"}
-          </span>
-          {totalDur > 0 && (
-            <span className="absolute bottom-1.5 right-1.5 bg-black/65 text-zinc-200 text-[9px] font-mono tracking-wide rounded px-1 py-0.5 border border-white/10">
-              {fmtDuration(totalDur)}
-            </span>
-          )}
         </div>
         </Link>
         <div className="absolute top-1.5 right-1.5">
           <FavHeart kind="playlist" id={String(playlist.id)} className="!p-1.5 bg-black/60 tap-hit" iconClass="h-4 w-4" revealOnHover />
         </div>
-        <button
-          className="btn-primary absolute left-2 top-9 !rounded-lg !p-3 row-hover transition-opacity shadow-2xl tap-hit"
-          title="Play playlist"
-          onClick={(e) => {
-            e.stopPropagation();
-            onPlay(tracks);
-          }}
-        >
-          <Play className="h-4 w-4 fill-current" />
-        </button>
+        {/* ONE flow column, the shape the library's album card uses: the play
+            button owns the top band, the chips the bottom edge. The button was
+            `absolute left-2 top-9` beside independently anchored corner chips —
+            and `.tap-hit { position: relative }` (the phone/coarse-pointer rule
+            that grows a 44px hit area) OVERRODE that `absolute`, so on a phone
+            the button fell out of the overlay and into the flow below the
+            cover, on top of the caption. In flow it needs no position of its
+            own, and no chip can be drawn over it. The `h-5` spacer stands in
+            for the album card's ADR chip row, so the two grids' play buttons
+            sit on the same line. */}
+        <div className="pointer-events-none absolute inset-x-1.5 top-1.5 bottom-1.5 flex flex-col items-start min-h-0">
+          <div className="h-5 shrink-0" />
+          <div className="ml-0.5 mt-2.5 shrink-0 pointer-events-auto">
+            <button
+              className="btn-primary tap-hit !rounded-lg !p-3 row-hover transition-opacity shadow-2xl"
+              title="Play playlist"
+              onClick={(e) => {
+                e.stopPropagation();
+                onPlay(tracks);
+              }}
+            >
+              <Play className="h-4 w-4 fill-current" />
+            </button>
+          </div>
+          {/* The chips stay over the cover's own link: the column lets clicks
+              through, so tapping "12 tracks" still opens the playlist. */}
+          <div className="mt-auto w-full min-h-0 overflow-hidden flex items-center justify-between gap-2">
+            <span className="min-w-0 truncate bg-black/65 text-zinc-300 text-[9px] font-mono tracking-wide rounded px-1 py-0.5 border border-white/10">
+              {playlist.track_count} track{playlist.track_count === 1 ? "" : "s"}
+            </span>
+            {totalDur > 0 && (
+              <span className="shrink-0 whitespace-nowrap bg-black/65 text-zinc-200 text-[9px] font-mono tracking-wide rounded px-1 py-0.5 border border-white/10">
+                {fmtDuration(totalDur)}
+              </span>
+            )}
+          </div>
+        </div>
       </div>
       <div className="mt-2 px-0.5">
         <div className="text-sm font-medium truncate block" title={playlist.name}>

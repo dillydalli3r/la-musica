@@ -73,13 +73,15 @@ the reason, instead of offering an Install button that cannot succeed.
   command of its own on mobile, so there is nothing else to permit.
 - **Background audio** stays declared (`UIBackgroundModes: [audio]` in
   `Info.plist`): music playing with the screen locked is what a music client is
-  for. It used to carry a second job — keeping an embedded backend alive with a
-  silent session — and that job, with its sideload-only caveat, went away with
-  the backend.
+  for. `mobile.yml` now reads that key — and the ATS exemption below — back out
+  of the built `.app`, so a build that lost either one fails instead of shipping
+  an app that goes quiet when backgrounded. It used to carry a second job —
+  keeping an embedded backend alive with a silent session — and that job, with
+  its sideload-only caveat, went away with the backend.
 
 ## Bundle config
 
-`bundle.iOS.minimumSystemVersion` 14.0, `bundle.iOS.bundleVersion` 3.20.4,
+`bundle.iOS.minimumSystemVersion` 14.0, `bundle.iOS.bundleVersion` 3.21.0,
 `bundle.iOS.infoPlist` and `bundle.android.minSdkVersion` 24 in
 `tauri.conf.json`. The Android package name and the iOS bundle id both come from
 the top-level `identifier` (`com.musiclibraryoptimizer.lamusica` — the old

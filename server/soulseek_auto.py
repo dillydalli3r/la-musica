@@ -3805,6 +3805,46 @@ def _release_from_folder(username, target_dir, slsk):
 def _reject(username, folder, reason):
     with _lock:
         _job["attempts"].append({"username": username, "dir": folder, "reason": str(reason)[:200]})
+    # …and to the LOG the failure tells the user to look at. The list above is
+    # the job's own: in memory, gone the moment the row is cleared. The sentence
+    # a failed acquisition hands over ends with "see the log", and it said that
+    # while writing nothing anywhere that outlived the job — so the one pointer
+    # a stuck release gave pointed at a place the reason had never been.
+    line = f"candidate rejected — {username} ({folder}): {str(reason)[:200]}"
+    try:
+        _log("  " + line)
+    except Exception:
+        pass
+    try:
+        from server import wishes
+        wishes.log("info", line)
+    except Exception:
+        pass
+
+
+def _rejection_detail(attempts, limit=3):
+    """The first few rejection reasons, as one line for the failure message.
+
+    WHICH peer and WHY is the whole of the diagnosis of a failed acquisition,
+    and it used to live only in the job's in-memory `attempts` list: the
+    sentence the user was handed said "see the log", the log carried nothing
+    (see `_reject`), and the list itself died the moment the row was cleared.
+    So the reasons travel WITH the message now — the wish store persists it
+    (`mark_wanted`'s `error`) and the queue row shows it, which is what makes a
+    stuck release explain itself instead of reading as a search that hangs."""
+    rows = list(attempts or [])
+    parts = []
+    for a in rows[:limit]:
+        who = str(a.get("username") or "?")
+        why = str(a.get("reason") or "")
+        for tail in (" — trying the next candidate", "; trying the next"):
+            why = why.split(tail)[0]
+        parts.append(f"{who}: {why.strip().rstrip('.')}"[:120])
+    text = "; ".join(p for p in parts if p.strip())
+    extra = len(rows) - len(parts)
+    if extra > 0:
+        text += f" (+{extra} more in the log)"
+    return text
 
 
 def _record_wish_attempt(wid, error, cfg):
@@ -4808,8 +4848,15 @@ def _run(release_mbid=None, release=None, queries=None, username=None,
         # the wish list — with the queries this job already searched with — and
         # the background worker keeps looking for it. The offer carries the
         # seconds the searches REALLY took, like the other dead end.
-        rejected_msg = ("Every candidate was rejected "
-                        f"({len(_job['attempts'])} attempt(s) — see the log).")
+        reasons = _rejection_detail(_job["attempts"])
+        # With no reasons recorded the sentence is byte-for-byte what it always
+        # was: a caller (and a test) that knows this failure must not be reading
+        # a different message because the diagnostics grew a field.
+        rejected_msg = (
+            f"Every candidate was rejected ({len(_job['attempts'])} attempt(s) — see the log)."
+            if not reasons else
+            f"Every candidate was rejected ({len(_job['attempts'])} attempt(s)): {reasons}."
+        )
         wished = _ask_to_wish(release, queries_built, searched_s, cfg, confirm_lossy,
                               error=rejected_msg)
         if _cancelled():

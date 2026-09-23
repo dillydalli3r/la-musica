@@ -309,9 +309,12 @@ function CachedAlbumCard({ row, onPlay, onRemove }: {
       /* The card's own play button queues the WHOLE album, and the tracks this
          browser did not download are exactly the ones that need the server —
          so the button here queues the cached ones. */
+      /* The card places the button in its own band (`AlbumCard`'s overlay is
+         one flow column now), so it carries no `absolute left-2 top-9` of its
+         own — an offset here would put it back in the chips' way. */
       actions={
         <button
-          className="tap-hit btn-primary absolute left-2 top-9 !rounded-lg !p-3 row-hover transition-opacity shadow-2xl"
+          className="tap-hit btn-primary !rounded-lg !p-3 row-hover transition-opacity shadow-2xl"
           title={`Play the ${row.cachedCount} cached track${row.cachedCount === 1 ? "" : "s"} of this album`}
           aria-label="Play the cached tracks"
           onClick={(e) => {

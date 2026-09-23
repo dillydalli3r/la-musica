@@ -34,7 +34,9 @@ export default function AlbumCard({ al, artistName, selectable, selected, onSele
   /** Album page target; pass `null` to render the card without links
    * (e.g. entries that have no album page, like trashed folders). */
   href?: string | null;
-  /** Overrides the play button (top-left overlay); defaults to today's button. */
+  /** Overrides the play button. The CARD places it — the button's own band
+   * (top-left, under the ADR chip) is part of the overlay's one column — so
+   * pass the button itself, without a position of its own. */
   actions?: ReactNode;
   /** The caller's own bits for the row, drawn on their own line under the
    *  caption — for pages that state more than the shared grid does (Home
@@ -50,6 +52,11 @@ export default function AlbumCard({ al, artistName, selectable, selected, onSele
   const artist = artistName ?? al.artist ?? al.album_artist ?? al.path.split(/[\\/]/).slice(0, -1).pop() ?? "";
   const media = al.media || al.meta?.MEDIA;
   const countries = releaseCountries(al.meta?.RELEASECOUNTRY);
+  // The two cover facts that are not the release country: the release's own ADR
+  // and the codec/bitrate summary. Read once here because the overlay draws the
+  // ADR chip, the button and the chips as ONE column, in that order.
+  const dr = al.meta?.["ALBUM DYNAMIC RANGE"] ?? null;
+  const tech = albumTech(al.tracks, true);
   const { t } = useI18n();
   // The album's OWN rating (the user's verdict on the album, never the average
   // of its tracks — lib/ratings owns that distinction), read here rather than
@@ -95,92 +102,110 @@ export default function AlbumCard({ al, artistName, selectable, selected, onSele
             <input type="checkbox" checked={!!selected} onChange={() => onSelect?.(al.path)} title="Select album" />
           </div>
         )}
-        {(() => {
-          const tech = albumTech(al.tracks, true);
-          const dr = al.meta?.["ALBUM DYNAMIC RANGE"] ?? null;
-          return (
-            <>
-              {/* One LEFT-aligned column of the three facts a reader scans a
-                  shelf for: which pressing it is, where it came from, what is
-                  inside. They used to be two corner chips with the release
-                  countries fused onto the medium and pushed to the right edge,
-                  so the same album's format chip moved with the length of its
-                  country list (#38). Bitrate sits at the BOTTOM, the line a
-                  reader's eye lands on first in a grid.
-
-                  The play button lives top-left below the DR chip, so this
-                  column can never cover it, and each row is its own badge so
-                  one long country list wraps inside its own line instead of
-                  stretching its neighbours. */}
-              {(media || countries.length > 0 || tech) && (
-                <div className="absolute bottom-1.5 left-1.5 max-w-[calc(100%-0.75rem)] flex flex-col items-start gap-1 pointer-events-none">
-                  {media && (
-                    <span
-                      className="pointer-events-auto max-w-full break-words text-[9px] font-semibold tracking-wide leading-snug rounded px-1 py-0.5 border border-white/10 bg-black/65 text-zinc-200"
-                      title={`Media: ${media}`}
-                    >
-                      {mediaShort(media)}
-                    </span>
-                  )}
-                  {countries.length > 0 && (
-                    <span
-                      className="pointer-events-auto max-w-full break-words text-[9px] tracking-wide leading-snug rounded px-1 py-0.5 border border-white/10 bg-black/65 text-zinc-300"
-                      title={`Released in ${countries.join(", ")}`}
-                    >
-                      {countries.join(", ")}
-                    </span>
-                  )}
-                  {tech && (
-                    <span
-                      className="pointer-events-auto max-w-full break-words bg-black/65 text-zinc-300 text-[9px] font-mono tracking-wide rounded px-1 py-0.5 border border-white/10"
-                      title={`Formats: ${albumTech(al.tracks)}`}
-                    >
-                      {tech}
-                    </span>
-                  )}
-                </div>
-              )}
-              {dr ? (
-                <span
-                  className="absolute top-1.5 left-1.5 bg-black/65 text-zinc-200 text-[9px] font-mono tracking-wide rounded px-1 py-0.5 border border-white/10"
-                  title="Album dynamic range (DR meter)"
-                >
-                  DR{dr}
-                </span>
-              ) : null}
-            </>
-          );
-        })()}
         {inLibrary && (
           <div className="absolute top-1.5 right-1.5">
             <FavHeart kind="album" id={al.path} mbid={al.meta?.MUSICBRAINZ_ALBUMID} className="!p-1.5 bg-black/60" iconClass="h-4 w-4" revealOnHover />
           </div>
         )}
-        {inLibrary && (actions ?? (
-          /* A framework album has no audio to play, so the button is OFF
-             rather than a control that starts nothing: the wrapper carries the
-             sentence (a disabled button does not get its own tooltips). */
-          <span title={pending ? pending.full : undefined}>
-            <button
-              className={`tap-hit btn-primary absolute left-2 top-9 !rounded-lg !p-3 row-hover transition-opacity shadow-2xl${pending ? " opacity-60 cursor-not-allowed" : ""}`}
-              title={pending ? pending.full : "Play album"}
-              aria-label={pending ? pending.full : "Play album"}
-              disabled={!!pending}
-              onClick={(e) => {
-                e.stopPropagation();
-                useStore.getState().playNow(
-                  (al.tracks ?? []).map((t) => ({
-                    path: t.path, file: t.file, albumPath: al.path,
-                    artist, album: al.meta?.ALBUM ?? undefined, title: t.tags.TITLE || undefined,
-                    advisory: t.tags.ITUNESADVISORY ?? null,
-                  }))
-                );
-              }}
+        {/* The cover's chrome is ONE flow column, not three overlays that each
+            guess where the others end. It used to be a `top-9` play button plus
+            a `bottom-1.5` chip column that grew UPWARD, so a card too small for
+            both (a phone at cover size S, or an album carrying a long release
+            country list) drew a country chip straight over the play circle. In
+            one column nothing can land on anything else whatever the card's
+            size: the chips take the room left under the button, and a card with
+            less room than that clips its own last chip rather than covering the
+            control (`min-h-0` + `overflow-hidden` below).
+
+            The ADR chip's row is reserved whether or not this release has one,
+            so the button below it sits at the same offset on every card and a
+            shelf's buttons stay on one line — that is what `top-9` used to pin,
+            except it only pinned it until the chip column grew into it. */}
+        <div className="pointer-events-none absolute inset-x-1.5 top-1.5 bottom-1.5 flex flex-col items-start min-h-0">
+          <div className="h-5 shrink-0 flex items-center">
+            {dr ? (
+              <span
+                className="pointer-events-auto bg-black/65 text-zinc-200 text-[9px] font-mono tracking-wide rounded px-1 py-0.5 border border-white/10"
+                title="Album dynamic range (ADR): the release's own DR, one value for every track on it"
+              >
+                ADR{dr}
+              </span>
+            ) : null}
+          </div>
+          {inLibrary && (
+            /* The button's band, placed by the card: the caller's `actions`
+               button lands here too, so it carries no offset of its own. A
+               framework album has no audio to play, so the default button is
+               OFF rather than a control that starts nothing — the band carries
+               the sentence (a disabled button does not get its own tooltips).
+               `pointer-events-auto`: the column itself must let the cover's
+               own link and the heart through. */
+            <div
+              className="ml-0.5 mt-2.5 shrink-0 pointer-events-auto"
+              title={actions || !pending ? undefined : pending.full}
             >
-              <Play className="h-4 w-4 fill-current" />
-            </button>
-          </span>
-        ))}
+              {actions ?? (
+                <button
+                  className={`tap-hit btn-primary !rounded-lg !p-3 row-hover transition-opacity shadow-2xl${pending ? " opacity-60 cursor-not-allowed" : ""}`}
+                  title={pending ? pending.full : "Play album"}
+                  aria-label={pending ? pending.full : "Play album"}
+                  disabled={!!pending}
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    useStore.getState().playNow(
+                      (al.tracks ?? []).map((t) => ({
+                        path: t.path, file: t.file, albumPath: al.path,
+                        artist, album: al.meta?.ALBUM ?? undefined, title: t.tags.TITLE || undefined,
+                        advisory: t.tags.ITUNESADVISORY ?? null,
+                      }))
+                    );
+                  }}
+                >
+                  <Play className="h-4 w-4 fill-current" />
+                </button>
+              )}
+            </div>
+          )}
+          {/* One LEFT-aligned column of the three facts a reader scans a shelf
+              for: which pressing it is, where it came from, what is inside.
+              They used to be two corner chips with the release countries fused
+              onto the medium and pushed to the right edge, so the same album's
+              format chip moved with the length of its country list (#38).
+              Bitrate sits at the BOTTOM, the line a reader's eye lands on first
+              in a grid, and each row is its own badge so one long country list
+              wraps inside its own line instead of stretching its neighbours.
+              `mt-auto` keeps the column on the cover's bottom edge while there
+              is room; with none, it shrinks and clips instead of riding up into
+              the button. */}
+          {(media || countries.length > 0 || tech) && (
+            <div className="mt-auto min-h-0 max-w-full overflow-hidden flex flex-col items-start justify-end gap-1 pointer-events-none">
+              {media && (
+                <span
+                  className="pointer-events-auto max-w-full break-words text-[9px] font-semibold tracking-wide leading-snug rounded px-1 py-0.5 border border-white/10 bg-black/65 text-zinc-200"
+                  title={`Media: ${media}`}
+                >
+                  {mediaShort(media)}
+                </span>
+              )}
+              {countries.length > 0 && (
+                <span
+                  className="pointer-events-auto max-w-full break-words text-[9px] tracking-wide leading-snug rounded px-1 py-0.5 border border-white/10 bg-black/65 text-zinc-300"
+                  title={`Released in ${countries.join(", ")}`}
+                >
+                  {countries.join(", ")}
+                </span>
+              )}
+              {tech && (
+                <span
+                  className="pointer-events-auto max-w-full break-words bg-black/65 text-zinc-300 text-[9px] font-mono tracking-wide rounded px-1 py-0.5 border border-white/10"
+                  title={`Formats: ${albumTech(al.tracks)}`}
+                >
+                  {tech}
+                </span>
+              )}
+            </div>
+          )}
+        </div>
       </div>
       <div className="mt-2 px-0.5">
         <div className="flex items-center gap-1.5 min-w-0">

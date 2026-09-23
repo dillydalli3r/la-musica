@@ -1,6 +1,6 @@
 # la musica
 
-**v3.20.4** — a self-hosted app that *manages, optimizes, audits, grades and
+**v3.21.0** — a self-hosted app that *manages, optimizes, audits, grades and
 plays* your music library, from the browser, a desktop window or a phone.
 
 **la musica** (formerly Music Library Optimizer) is a FastAPI backend plus a
@@ -184,7 +184,7 @@ album header's film button (or a track's "…" menu) searches YouTube through
 yt-dlp, drops the file into the album folder and tags it as that track's music
 video, so the matching panel is only needed for videos it did not download.
 An album's cover carries its own badges — the
-measured dynamic range (top-left) and, down the bottom-left corner as three
+measured album dynamic range (`ADR`, top-left) and, down the bottom-left corner as three
 left-aligned rows, the medium, every country it was released in and the release's
 format/bitrate (`CD` / `US, CA` / `FLAC 16/44.1`) — and every track row offers the
 same "…" menu wherever it is listed: tagging (the tag editor, genre and advisory
@@ -311,9 +311,15 @@ scheduled yet). Watches inherit the whole acquisition chain below.
 A persistent player bar (queue, drag-reorder, shuffle, repeat-one, speed, sleep
 timer, ReplayGain, visualizer, app-wide volume) plus a fullscreen player with
 animated karaoke lyrics. The fullscreen view is a two-column layout on a wide
-window (cover + controls, lyrics beside it) and a scrolling single column on a
-narrow or heavily zoomed one, where the lyrics pane keeps a real minimum height
-instead of being squeezed under the fold. Nothing floats over the art as a
+window (cover + controls, lyrics beside it) and, on a phone, a compact header —
+cover, title, transport, seek — with the lyrics pane taking the rest of the
+screen as the ONE scrolling surface (nothing nested, nothing clipped). Play state
+comes from the media element's own events, so a pause the OS makes — a
+backgrounded iPhone, an interruption, a headset button — is what the bar shows
+rather than what the last click asked for. The favourite sits at the player's
+bottom-left on a phone (where Apple Music keeps its own) and in the transport row
+above `lg`; it is the app's own heart, because a *star* here means a rating.
+Nothing floats over the art as a
 panel: the lyrics pane, the metadata block, the transport and the top bar draw
 **no** background, border or blur of their own, and what keeps their text
 readable is the ink itself — its colour is **derived from the cover** (the
@@ -900,10 +906,21 @@ page previews a custom one and refuses a field the app does not know). **Where i
 choice**: `export_target` is `zip` — the client downloads one archive (the only
 mode a browser can honour, and the default) — or `server`, a folder the machine
 running the app can see, picked with the drive list and the free-space readout
-(`export_dest`). Covers, ID3v2.3 plus optional ID3v1, `.m3u8` playlists, `.lrc`,
-`.cue`, `.log`, `.accurip`, descriptions and the artist image travel with the
-files, `export_manifest` writes a `checksums.sha256` beside them, and every
-written file is re-opened and verified. Sync mode (`export_prune`) removes audio
+(`export_dest`). **WHAT gets copied is a selection** (`export_copy_files`) —
+ticked one by one on the Export page, and the family the run's own `excluded`
+report names each file by: the tracks themselves (always the default, and the
+family an export exists for), the covers/artwork, the `.lrc` lyrics, the `.cue`
+sheets, the rip's `.log`/`.accurip`, the album's own `description.txt`, its
+checksum lists (`.md5`/`.sfv`/`.ffp`/`.torrent`), its notes and scans
+(`.txt`/`.nfo`/`.url`/`.pdf`), the playlists the album carries and anything else
+it holds that the app cannot classify (subfolders are reported, never walked). A
+run nobody asked anything of writes the tracks alone — the cover travels
+EMBEDDED — and an empty selection is refused rather than writing an empty
+folder; `export_sidecars` (the switch this replaced) still resolves to the
+classic set it always copied, and `export_playlists` writes a fresh `.m3u8` per
+album plus `all.m3u8`. ID3v2.3 plus optional ID3v1, `export_manifest` writes a
+`checksums.sha256` beside them, and every written file is re-opened and
+verified. Sync mode (`export_prune`) removes audio
 the run did not write; exporting *into* the music folder is refused.
 
 **ReplayGain** is a mode, not a checkbox: `export_replaygain_mode` is `off`,
@@ -1013,7 +1030,14 @@ and the GHCR image.
   is a debug build (the SDK debug keystore), the IPA is built `--no-sign`, and a
   plain-http server needs the platform's exemption
   (`desktop/src-tauri/Info.plist` sets `NSAllowsArbitraryLoadsInWebContent`;
-  `mobile.yml` flips `usesCleartextTraffic` for Android).
+  `mobile.yml` flips `usesCleartextTraffic` for Android). The iOS plist also
+  declares `UIBackgroundModes: audio` — the reason playback survives the app
+  leaving the foreground — and `mobile.yml` reads both that key and the ATS
+  exemption back out of the built `.app`, so a merge that drops either one fails
+  the build instead of shipping an app that goes quiet when backgrounded.
+  Android's WebView has no equivalent switch: playback continues while the
+  process lives, and the OS may reclaim a backgrounded app — the app declares no
+  foreground playback service, so it does not promise otherwise.
   `tools/make_sidestore_source.py` writes the `source.json` the release
   publishes, so a sideloading tool gets the name, version, bundle id, icon and
   download URL from the IPA itself.
@@ -1036,7 +1060,12 @@ of reporting a clean "0 processed" run.
 
 Everything the API can do — read the library, rewrite tags, move and delete files,
 start downloads — is one password away from anyone who can reach the port. That is
-what the gate covers; it is not a UI lock. The keys it reads:
+what the gate covers; it is not a UI lock. The top bar's rightmost control is the
+account itself: it names the user this client is signed in as, switches between
+the server's users (the login screen's own sign-in, then a reload — every cached
+answer, the player and the event socket are keyed on being signed in), and signs
+out. A server with no users says so and points here, rather than showing an empty
+list. The keys it reads:
 
 | Key | Default | What it does |
 | --- | --- | --- |
@@ -1142,7 +1171,7 @@ Where the app stores what it fetches (all under `<music>/.mlo/`):
 | `GET /api/storage` | one disk snapshot for the Home card: the volume, the library, the **app's own footprint** (`app_total` = state + bin + transfers + tools, with `dependencies` measured where it lives), the bin and the transfer folders — every figure the OS refused is `null`, never 0 |
 | `GET /api/album` `GET /api/artist` `GET /api/artist/artwork`, `GET /api/stream` `GET /api/videos/stream` `GET /api/videos/meta` `GET /api/videos/thumb` | entity details, stored artist image/description + provenance and the artist's own grade; audio/video streaming (Range; `?transcode=1`), codec probe, scrub frames |
 | `GET /api/tags` `POST /api/tags/bulk` `…/videos/tag`, `POST /api/run`, `POST /api/organize` | per-track tag read view; bulk tag surgery; video tag writes; run scripts 1–21; apply the naming script (dry-run supported) |
-| `POST /api/export`, `GET /api/export/codecs` `…/drives` `…/defaults` | multi-format export plus its codec table, drives and saved defaults |
+| `POST /api/export`, `GET /api/export/codecs` `…/drives` `…/defaults` `…/files` | multi-format export plus its codec table, drives, saved defaults and the file families the run's `copy_files` selection names |
 | `GET/POST/PATCH/DELETE /api/wishes…`, `POST /api/wishes/{id}/search` `…/search-all` `…/reconcile` `…/import` | the wishlist and its worker |
 | `GET /api/sources/health` `…/{id}`, `GET /api/capabilities`, `GET /api/dependencies` | every external source with its `needs`/`configured` state (`?probe=1`); what this server can run; the tool table with installed/pinned/upstream versions |
 | `GET/POST/DELETE /api/youtube/cookies` | the yt-dlp cookie jar: which mode is on and what the file holds, save a pasted/dropped `cookies.txt` (validated as a Netscape cookie file first), delete it |

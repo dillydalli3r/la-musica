@@ -1489,14 +1489,29 @@ DEFAULT_CONFIG = {
     # export carries audio, and a playlist (server.playlists.export_m3u8) is
     # what writes a playlist file.
     "export_playlists": False,
-    # Mirror cover.*/description.txt/artist image/.lrc/.cue/.log next to the
-    # exported audio. OFF by default: the cover travels EMBEDDED in each file
+    # The switch `export_copy_files` below replaced: mirror cover.*/
+    # description.txt/artist image/.lrc/.cue/.log next to the exported audio.
+    # OFF by default: the cover travels EMBEDDED in each file
     # (export_embed_covers) and the rip's evidence (.cue/.log/.accurip) stays
-    # in the library, where the audit and the grading read it. On, the run
-    # copies them exactly as before. A `.lrc` is the exception either way: it
-    # follows `export_lyrics` below, which says whether lyrics travel in the
-    # file, as a sidecar, or both.
+    # in the library, where the audit and the grading read it. Still honoured —
+    # per run and as a saved default — for a caller or a config that predates
+    # the file selection, and it means the set it always meant
+    # (server.exporter.LEGACY_SIDECAR_FAMILIES). A `.lrc` is the exception
+    # either way: it follows `export_lyrics` below, which says whether lyrics
+    # travel in the file, as a sidecar, or both.
     "export_sidecars": False,
+    # WHICH files an export writes, as the family keys of
+    # server.exporter.FILE_FAMILIES (the tracks themselves, the covers, the
+    # lyrics, the cue sheets, the rip log, the album's description, the
+    # checksum lists, the text/notes/scans, the playlists the album carries,
+    # and anything else it holds). EMPTY means "nobody has chosen": the
+    # `export_sidecars` switch above still decides then, and an install that
+    # touched neither exports the tracks alone — the behaviour it always had.
+    # Written by the Export page's form ("Save as default", or a saved
+    # config); a family key is checked where a config is SAVED
+    # (server.exportconfigs), because this file is hand-editable and mlo cannot
+    # import the exporter's own table to check it here.
+    "export_copy_files": [],
     # How an export writes lyrics: "embedded" (the LYRICS tag), "lrc" (a .lrc
     # beside the exported file) or "both". "" follows the LIBRARY's own
     # `lyrics_format` — an export defaults to what the app keeps in the library

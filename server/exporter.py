@@ -56,11 +56,19 @@ overridable per run — see ``EXPORT_DEFAULTS``):
   the exported albums plus one for the whole export. OFF by default: the
   album playlists are an album-export artifact, while a real playlist export
   is written by ``server.playlists.export_m3u8``.
-* ``sidecars`` — mirror cover.*/description.txt/artist image/.lrc/.cue/.log.
-  OFF by default: an export carries audio, the cover travels embedded, and
-  the rip's evidence stays in the library. On, it restores the old behaviour.
+* ``copy_files`` — WHICH files the run writes, as the family keys of
+  ``FILE_FAMILIES``: the tracks themselves, the covers and artwork, the lyrics,
+  the cue sheets, the rip log, the album's own description, the checksum lists,
+  the text/notes/scans, the playlists the album carries, and anything else it
+  holds that this app does not classify. The shipped default is the tracks
+  alone; an empty selection is REFUSED (a run that copies nothing would write
+  an empty folder). ``sidecars`` is the switch this replaced and still resolves
+  to the set it always copied (``LEGACY_SIDECAR_FAMILIES``), so a caller of the
+  old API and a config written by it behave exactly as they did.
 * Every non-audio file left behind is reported in ``excluded`` (name, album,
-  classification and the reason it did not travel — see ``extra_files``).
+  family and the reason it did not travel — see ``extra_files``). A file the
+  run WAS asked for is copied and not reported: the audit's filter and the copy
+  pass are the same predicate (``export_tracks._travels``).
 * ``manifest`` — write ``checksums.sha256`` at the export root: one
   "<sha256>  <relative path>" line per exported file, the format
   ``sha256sum -c`` reads back.
@@ -102,8 +110,8 @@ from mlo import lyrics as lyrics_mod
 from mlo import naming
 from mlo.audio import AudioFile
 from mlo.naming import sanitize_path, sanitize_segment
-from mlo.paths import app_data_dir
-from mlo.stats import worker_count
+from mlo.paths import album_sidecar_of, app_data_dir
+from mlo.stats import is_audio_file, worker_count
 from mlo.subproc import tool_path
 from mlo.tools import detect_all_tools
 from server import job_locks
@@ -278,6 +286,76 @@ _LOSSLESS_FACTORS = {"flac": 0.62, "alac": 0.70, "wavpack": 0.60}
 # Assumed decoded rate when a source does not report its own sample format.
 _PCM_KBPS_FALLBACK = 1411.0
 
+# What an export writes, as ONE table: the file families this exporter can see
+# beside a selection's tracks, in the order the Export page offers them.
+# ``audio`` is the tracks themselves — the family an export exists for — and
+# every other key is a family of NON-audio siblings. Which family a concrete
+# file belongs to is decided by ONE classifier (``_extra_kind``, over the
+# extension table ``_EXTRA_REASONS``, plus the cover names and the artist image
+# it knows by NAME), and this table is what the menu, the run's copy pass and
+# the run's own report all read: what the page offers, what a run copies and
+# what a run says it left behind can never disagree. The label and the hint are
+# served to the page (``file_families``), so the menu cannot offer a family a
+# run would refuse either.
+FILE_FAMILIES = {
+    "audio": {
+        "label": "The tracks themselves",
+        "hint": "The audio files, as the codec and the quality above write them.",
+    },
+    "cover": {
+        "label": "Covers and artwork",
+        "hint": "The album's cover.* and the artist image, copied as files. They "
+                "travel EMBEDDED in each exported file anyway (see above).",
+    },
+    "lyrics": {
+        "label": "Lyrics (.lrc)",
+        "hint": "The exported tracks' own .lrc files. The Lyrics option above is "
+                "what writes lyrics FOR the exported files.",
+    },
+    "cue": {
+        "label": "Cue sheets (.cue)",
+        "hint": "The rip's track layout. Copied as it is; the run repoints its "
+                "FILE lines at the files it wrote.",
+    },
+    "log": {
+        "label": "Rip log and accuracy report (.log, .accurip)",
+        "hint": "The rip's own verification evidence — the log the audit "
+                "checksums and the AccurateRip report.",
+    },
+    "description": {
+        "label": "Album description (description.txt)",
+        "hint": "The album's own description, the file this app writes and "
+                "reads — numbered copies of it included.",
+    },
+    "checksum": {
+        "label": "Checksum lists (.md5, .sfv, .ffp, .torrent)",
+        "hint": "The checksum and fingerprint lists a rip ships with, and its "
+                "torrent file.",
+    },
+    "text": {
+        "label": "Notes, links and scans (.txt, .nfo, .url, .pdf)",
+        "hint": "The ripper's release notes, a link file, a booklet or a scan.",
+    },
+    "playlist": {
+        "label": "Playlists the album carries (.m3u, .m3u8, .pls, .wpl)",
+        "hint": "Copied as they are — they name the LIBRARY's own files. “Write "
+                ".m3u8 playlists” below writes new ones for the export instead.",
+    },
+    "other": {
+        "label": "Anything else (a file this app does not recognise)",
+        "hint": "Thumbs.db, a .bak, an image that is not the cover. A stray "
+                "SUBFOLDER is reported in the run's leftovers but never walked "
+                "or copied.",
+    },
+}
+
+# The family set the ``sidecars`` switch stood for: the exporter mirrored
+# cover.*/description.txt/artist image/.lrc/.cue/.log beside the exported audio,
+# and nothing else. A caller that still sends that boolean — or a config that
+# still holds ``export_sidecars`` — gets exactly this set, so the switch the
+# file selection replaced keeps meaning what it always meant.
+LEGACY_SIDECAR_FAMILIES = ("audio", "cover", "lyrics", "cue", "log", "description")
+
 # Run options and their defaults. ``export_<name>`` in the config holds the
 # saved default for each; a per-run value (the Export page's form) wins.
 EXPORT_DEFAULTS = {
@@ -298,6 +376,13 @@ EXPORT_DEFAULTS = {
     # run leaves behind is reported in ``excluded`` (see extra_files).
     "playlists": False,
     "sidecars": False,
+    # WHICH files a run writes, as the keys of FILE_FAMILIES above.
+    # `copy_files` is the one option that does NOT resolve through ``option``:
+    # ``copy_files()`` below reads it, and a selection nobody made falls back to
+    # the `sidecars` switch it replaced BEFORE it falls back to this value —
+    # which is what a caller that sends nothing new gets, i.e. today's
+    # behaviour: the tracks alone.
+    "copy_files": ["audio"],
     "manifest": False,
     "verify": True,
     "prune": False,
@@ -445,6 +530,71 @@ def lyrics_mode(cfg, opts):
         return value
     library = str((cfg or {}).get("lyrics_format") or "").strip().lower()
     return library if library in LYRICS_MODES else "embedded"
+
+
+def _family_keys(value):
+    """The family keys a caller's value names, in the order it named them.
+
+    A value is a list/tuple of keys, or a comma/semicolon-separated string: the
+    form posts the list, and config.json is hand-editable, so both shapes reach
+    here. Unknown keys are KEPT (``copy_files_error`` is what refuses them, with
+    a sentence the caller shows) and duplicates dropped."""
+    if isinstance(value, str):
+        value = value.replace(";", ",").split(",")
+    if not isinstance(value, (list, tuple, set)):
+        return []
+    out = []
+    for item in value:
+        key = str(item or "").strip().lower()
+        if key and key not in out:
+            out.append(key)
+    return out
+
+
+def copy_files(cfg, opts):
+    """THE file selection this run writes: a tuple of ``FILE_FAMILIES`` keys, in
+    the table's own order.
+
+    The per-run selection wins, then the saved ``export_copy_files``, then the
+    ``sidecars`` switch this replaced — per-run OR saved (``option`` reads
+    both), so a caller that still sends the boolean gets the set it asked for
+    even though the exporter no longer has a switch of its own. A run nobody
+    asked anything of writes the tracks alone, which is the behaviour an export
+    has always had.
+
+    A selection that is merely absent is NOT an empty one: ``[]`` is a caller
+    that selected no files at all, and that is refused (``copy_files_error``)
+    before anything is written. Unknown keys survive to that same refusal — this
+    resolver answers "what WOULD this run write", and the answer for a family
+    the exporter does not have is "nothing", which is not what the caller meant
+    and must not be answered silently."""
+    chosen = _family_keys((opts or {}).get("copy_files")) \
+        or _family_keys((cfg or {}).get("export_copy_files"))
+    if chosen:
+        return tuple(key for key in FILE_FAMILIES if key in set(chosen))
+    if option(cfg, opts, "sidecars"):
+        return LEGACY_SIDECAR_FAMILIES
+    return ("audio",)
+
+
+def copy_files_error(value):
+    """The sentence that refuses a file selection, or "" when it is usable.
+
+    ``value`` is what a caller SENT (the run option, or a saved config's field).
+    Refused: a key that is not one of ``FILE_FAMILIES`` — the page's menu is
+    served from that table, so this is a hand-made request or a config from
+    another build — and an EMPTY selection, which would create the destination
+    and write an empty tree while reporting success. Both are refused BEFORE
+    the destination is touched, so a refused run leaves nothing behind."""
+    keys = _family_keys(value)
+    unknown = [key for key in keys if key not in FILE_FAMILIES]
+    if unknown:
+        return ("unknown file family(ies): " + ", ".join(unknown)
+                + " — the families are " + ", ".join(FILE_FAMILIES))
+    if not keys:
+        return ("no files selected — a run that copies nothing would write an "
+                "empty folder; pick at least one of %s" % ", ".join(FILE_FAMILIES))
+    return ""
 
 
 def option_int(cfg, opts, name, low=0, high=None):
@@ -649,6 +799,19 @@ def structure_menu():
         "fields": sorted(STRUCTURE_FIELDS),
         "functions": list(naming.FUNCTIONS),
     }
+
+
+def file_families():
+    """The file-family menu the Export page renders: every key a run accepts,
+    with the label and the one-line explanation to show it under.
+
+    Served rather than hard-coded in the page — the same reason
+    ``structure_menu`` is — so the checkboxes, the sentence a refused selection
+    comes back with and the run's own copy pass cannot drift apart: a family
+    the menu offered but the exporter did not know is exactly what this table
+    prevents."""
+    return {"families": [{"v": key, "label": spec["label"], "hint": spec["hint"]}
+                         for key, spec in FILE_FAMILIES.items()]}
 
 
 def script_for_structure(structure, typed=""):
@@ -874,61 +1037,48 @@ def _copy_once(src, dst, seen):
         return False
 
 
-# Text sidecars that belong to a track and travel with it.
-_TRACK_SIDECAR_EXTS = (".lrc", ".cue", ".log")
+def _copy_siblings(cfg, src_track, dst_track, seen, selected):
+    """Copy the album files this run was asked for beside the exported track.
 
-# Sidecars an album folder holds as a whole, whatever they are named after:
-# the rip's .cue/.log, and the .accurip accuracy report every track of that rip
-# was checked against.
-_ALBUM_SIDECAR_EXTS = (".cue", ".log", ".accurip")
+    ``selected(folder, name, family, is_dir)`` is the RUN's own rule for "this
+    run writes this sibling" — the very predicate the audit is filtered by (see
+    ``export_tracks._travels``), so a file the run copies is never reported as
+    left behind and a file it leaves is never copied. Which family a sibling
+    belongs to comes from the ONE classifier the audit uses (``_extra_kind``),
+    so the menu's promise and the run's behaviour are the same vocabulary.
 
-
-def _mirror_sidecars(cfg, src_track, dst_track, seen):
-    """Mirror an exported track's sidecars into the exported album folder.
-
-    An exported copy is meant to carry what grading expects: the album cover
-    (cover.*), the album description (description.txt) and the track's own
-    .lrc/.cue/.log go next to the exported tracks, and the artist image
-    (artist.jpg, which lives one level ABOVE the album folder in the library)
-    is mirrored one level above the exported album folder. Embedded artwork
-    already travels inside the audio file on the transcode path; this covers
-    the `copy` path too, where the bytes are untouched.
-
-    Returns the number of files copied."""
+    A directory is never walked (the same promise ``extra_files`` makes).
+    Audio is what the run writes itself, never a sibling. Returns the number of
+    files copied."""
     from mlo.grader import COVER_NAMES
-    from mlo.paths import ALBUM_SIDECAR_NAMES, library_root
+    from mlo.artistdata import ARTIST_IMAGE_EXTS
+    from mlo.paths import library_root
 
     src_dir = os.path.dirname(src_track)
     dst_dir = os.path.dirname(dst_track)
-    stem = os.path.splitext(os.path.basename(src_track))[0]
+    covers = {n.lower() for n in COVER_NAMES}
+    image_exts = tuple(e.lower() for e in ARTIST_IMAGE_EXTS)
     copied = 0
 
     try:
-        lowered = {e.lower(): e for e in os.listdir(src_dir)}
+        entries = sorted(os.listdir(src_dir))
     except OSError:
-        lowered = {}
-
-    # Track-level sidecar ("01 - Song.lrc"), then the album-level artifacts:
-    # the rip's .cue/.log/.accurip are normally named after the ALBUM, not the
-    # track, and grading wants them next to the exported tracks either way.
-    for ext in _TRACK_SIDECAR_EXTS:
-        name = stem + ext
-        if _copy_once(os.path.join(src_dir, name), os.path.join(dst_dir, name), seen):
-            copied += 1
-    for real in sorted(lowered.values()):
-        if os.path.splitext(real)[1].lower() in _ALBUM_SIDECAR_EXTS:
-            if _copy_once(os.path.join(src_dir, real),
-                          os.path.join(dst_dir, real), seen):
-                copied += 1
-
-    for name in tuple(COVER_NAMES) + tuple(ALBUM_SIDECAR_NAMES):
-        real = lowered.get(name)
-        if real and _copy_once(os.path.join(src_dir, real),
-                               os.path.join(dst_dir, real), seen):
+        entries = []
+    for name in entries:
+        source = os.path.join(src_dir, name)
+        if is_audio_file(name):
+            continue
+        family, _why = _extra_kind(name, covers, image_exts)
+        if not selected(src_dir, name, family, os.path.isdir(source)):
+            continue
+        if _copy_once(source, os.path.join(dst_dir, name), seen):
             copied += 1
 
-    # Artist image, one level above the album. Skipped when the album sits
-    # directly in the library root (no artist folder to mirror).
+    # The artist image is the one file that belongs to the album's PARENT (the
+    # library keeps it one level above the album folder), so it is mirrored one
+    # level above the exported album folder instead — and only when the run was
+    # asked for the artwork. Skipped when the album sits directly in the library
+    # root: there is no artist folder to mirror.
     parent = os.path.dirname(os.path.abspath(src_dir))
     root = library_root(cfg.get("music_folder"))
     if root and os.path.normcase(parent) != os.path.normcase(os.path.abspath(root)):
@@ -938,10 +1088,15 @@ def _mirror_sidecars(cfg, src_track, dst_track, seen):
         except Exception:
             image = None
         if image:
-            if _copy_once(image,
-                          os.path.join(os.path.dirname(dst_dir), os.path.basename(image)),
-                          seen):
-                copied += 1
+            # The predicate is asked about the FILE that would be copied, never
+            # about a family on its own: one rule decides what travels, for
+            # every file a run can reach.
+            name = os.path.basename(image)
+            if selected(parent, name, "cover", False):
+                if _copy_once(image,
+                              os.path.join(os.path.dirname(dst_dir), name),
+                              seen):
+                    copied += 1
     return copied
 
 
@@ -1350,24 +1505,30 @@ def _verify(dst, src_seconds):
 # ------------------------------------------------- what an export leaves behind
 # An album folder holds more than audio: a rip's verification evidence
 # (.log/.accurip/.md5), the ripper's own sidecars (.cue/.txt/.nfo), the app's
-# album playlists and the cover image. An export carries the AUDIO — the cover
-# travels EMBEDDED in each file (embed_covers) — so every other file stays in
-# the library where the audit, the grading and the rip's own checksum read it.
-# What an export must NEVER do is drop one of them silently: the run reports
-# every non-audio file it found, by album, with the reason it did not travel.
+# album playlists and the cover image. An export carries what the user asked it
+# to carry (``copy_files`` / FILE_FAMILIES above) and nothing else, so every
+# file it did not write stays in the library where the audit, the grading and
+# the rip's own checksum read it. What an export must NEVER do is drop one of
+# them silently: the run reports every non-audio file it found, by album, with
+# the family it belongs to and the reason it did not travel.
+#
+# ONE table: extension -> (family, why it stays). The families it names are the
+# keys of FILE_FAMILIES above — the menu, the copy pass and this report are one
+# vocabulary, so a run cannot copy a family it does not offer and cannot report
+# as "left behind" a file it just wrote.
 _EXTRA_REASONS = {
-    ".log": ("evidence", "the rip log — the audit verifies its checksum"),
-    ".accurip": ("evidence", "the AccurateRip report the audit verifies"),
-    ".md5": ("evidence", "a checksum list for the rip"),
-    ".sfv": ("evidence", "a checksum list for the rip"),
-    ".ffp": ("evidence", "a FLAC fingerprint list for the rip"),
-    ".torrent": ("evidence", "a torrent file describing the release"),
-    ".cue": ("sidecar", "the rip's track layout, which stays with the audio it describes"),
-    ".txt": ("sidecar", "a text sidecar (an album description) written beside the audio"),
-    ".nfo": ("sidecar", "the ripper's release notes"),
+    ".log": ("log", "the rip log — the audit verifies its checksum"),
+    ".accurip": ("log", "the AccurateRip report the audit verifies"),
+    ".cue": ("cue", "the rip's track layout, which stays with the audio it describes"),
+    ".md5": ("checksum", "a checksum list for the rip"),
+    ".sfv": ("checksum", "a checksum list for the rip"),
+    ".ffp": ("checksum", "a FLAC fingerprint list for the rip"),
+    ".torrent": ("checksum", "a torrent file describing the release"),
+    ".txt": ("text", "a text sidecar (an album description) written beside the audio"),
+    ".nfo": ("text", "the ripper's release notes"),
+    ".url": ("text", "a link file written beside the audio"),
+    ".pdf": ("text", "a booklet/scan written beside the audio"),
     ".lrc": ("lyrics", "lyrics written beside the track"),
-    ".url": ("sidecar", "a link file written beside the audio"),
-    ".pdf": ("sidecar", "a booklet/scan written beside the audio"),
     ".m3u": ("playlist", "playlists come from a playlist export, not from an album export"),
     ".m3u8": ("playlist", "playlists come from a playlist export, not from an album export"),
     ".pls": ("playlist", "playlists come from a playlist export, not from an album export"),
@@ -1376,22 +1537,30 @@ _EXTRA_REASONS = {
 
 
 def _extra_kind(name, covers, image_exts):
-    """(kind, why) for one non-audio sibling: "cover" | "playlist" |
-    "evidence" | "unknown". Nothing is guessed from a file's contents — only
-    its name decides, so the same file always lands in the same bucket."""
+    """(family, why) for ONE non-audio sibling. The family is a key of
+    FILE_FAMILIES ("other" for a file this app does not classify at all), and
+    nothing is guessed from a file's CONTENTS — only its name decides, so the
+    same file always lands in the same family and the run's copy pass, the menu
+    and this audit can never disagree about it."""
     low = name.lower()
     ext = os.path.splitext(low)[1]
-    if ext in image_exts:
-        if low in covers:
-            return ("cover",
-                    "the album cover — it travels INSIDE the file (embed_covers)")
-        if os.path.splitext(low)[0] == "artist":
-            return ("cover",
-                    "the artist image — it belongs to the artist folder, not the album")
+    if low in covers:
+        # A cover is a NAME (cover.jpg/.jpeg/.png/.jxl), not an extension: the
+        # app reads it as the album's artwork whatever else sits beside it.
+        return ("cover",
+                "the album cover — it travels INSIDE the file (embed_covers)")
+    if ext in image_exts and os.path.splitext(low)[0] == "artist":
+        return ("cover",
+                "the artist image — it belongs to the artist folder, not the album")
+    if album_sidecar_of(low):
+        # The app's OWN album note — and a numbered copy ("description (2).txt")
+        # is that same file, not a stray (mlo.paths.album_sidecar_of).
+        return ("description",
+                "the album's description — the file this app writes and reads")
     known = _EXTRA_REASONS.get(ext)
     if known:
         return known
-    return "unknown", "not audio and not a file this app writes"
+    return "other", "not audio and not a file this app writes"
 
 
 def extra_files(cfg, paths, skip=None):
@@ -1399,15 +1568,18 @@ def extra_files(cfg, paths, skip=None):
     the reason it is not part of the export.
 
     Returns ``{"files": [{album, name, kind, reason, dir}], "counts": {kind: n},
-    "total": n, "albums": {album: n}}``. Directories are reported too — a stray
-    subfolder is exactly the kind of thing a library carries that nobody
-    anticipated — named with a trailing "/" and never walked.
+    "total": n, "albums": {album: n}}``, where a row's ``kind`` is the file
+    FAMILY it belongs to (a key of ``FILE_FAMILIES``) and ``reason`` is why it
+    did not travel. Directories are reported too — a stray subfolder is exactly
+    the kind of thing a library carries that nobody anticipated — named with a
+    trailing "/" and never walked.
 
-    ``skip(folder, name, kind)`` says a sibling is NOT an extra for the run that
-    asked: a `.lrc` whose track is in the selection, when the run writes lyrics
-    as a file, travels as that exported track's own `.lrc` — output, not
-    something left behind. The `.lrc` of a track OUTSIDE the selection stays in
-    the library and is still reported.
+    ``skip(folder, name, family, is_dir)`` says a sibling is NOT an extra for
+    the run that asked, because that run WROTE it: a file it was asked to copy
+    (the run's own predicate, ``export_tracks._travels``, is passed here), and a
+    `.lrc` whose track is in the selection when the run writes lyrics as a file
+    — output, not something left behind. The `.lrc` of a track OUTSIDE the
+    selection stays in the library and is still reported.
     """
     from mlo.grader import COVER_NAMES
     from mlo.artistdata import ARTIST_IMAGE_EXTS
@@ -1429,13 +1601,13 @@ def extra_files(cfg, paths, skip=None):
         for name in entries:
             if is_audio_file(name):
                 continue                       # audio is what travels
-            kind, reason = _extra_kind(name, covers, image_exts)
-            if skip and skip(folder, name, kind):
-                continue
+            family, reason = _extra_kind(name, covers, image_exts)
             is_dir = os.path.isdir(os.path.join(folder, name))
+            if skip and skip(folder, name, family, is_dir):
+                continue
             rows.append({"album": album, "name": name + ("/" if is_dir else ""),
-                         "kind": kind, "reason": reason, "dir": is_dir})
-            counts[kind] = counts.get(kind, 0) + 1
+                         "kind": family, "reason": reason, "dir": is_dir})
+            counts[family] = counts.get(family, 0) + 1
             albums[album] += 1
     return {"files": rows, "counts": counts, "total": len(rows), "albums": albums}
 
@@ -1691,12 +1863,29 @@ def export_tracks(cfg, paths, dest, subfolder="Music", codec="copy",
            "processed": 0, "eq_applied": 0, "zip": None,
            "lyrics_mode": "", "lyrics_files": 0,
            # Every non-audio file beside the selection, and why it did not
-           # travel: an export is a copy service for AUDIO, and a file it
-           # leaves behind is reported rather than dropped in silence.
+           # travel: an export writes what it was asked for (see FILE_FAMILIES)
+           # and a file it leaves behind is reported rather than dropped in
+           # silence.
            "excluded": [], "excluded_counts": {}, "excluded_total": 0,
            "excluded_note": ""}
     if not paths:
         return out
+
+    # WHICH files this run writes (see FILE_FAMILIES). Resolved first, and
+    # refused here, because the audit below, the copy pass and every write
+    # depend on it — and a selection that names no files must fail BEFORE the
+    # destination is touched, not leave an empty tree behind.
+    families = copy_files(cfg, opts)
+    given = (opts or {}).get("copy_files")
+    if given is not None:
+        problem = copy_files_error(given)
+        if problem:
+            raise ValueError(problem)
+    # What this run was asked to write, as the response carries it — the same
+    # shape the lyrics mode is reported in, so a client can see the selection
+    # the run RESOLVED (a saved default and the switch it replaced included)
+    # rather than the one it hoped it sent.
+    out["copy_files"] = list(families)
 
     # Read BEFORE the audit below, which asks what this run writes itself.
     lyrics = lyrics_mode(cfg, opts)
@@ -1714,13 +1903,35 @@ def export_tracks(cfg, paths, dest, subfolder="Music", codec="copy",
         travelling.setdefault(os.path.normcase(os.path.dirname(_p)), set()).add(
             os.path.splitext(os.path.basename(_p))[0].lower())
 
-    def _lyrics_written(folder, name, kind):
-        if kind != "lyrics" or not lyrics_lrc:
+    def _lyrics_written(folder, name, family):
+        if family != "lyrics" or not lyrics_lrc:
             return False
         return (os.path.splitext(name)[0].lower()
                 in travelling.get(os.path.normcase(folder), ()))
 
-    extra = extra_files(cfg, paths, skip=_lyrics_written)
+    def _travels(folder, name, family, is_dir=False):
+        """Whether THIS run writes this sibling.
+
+        The ONE rule the file selection is enforced by, for every caller: the
+        audit's filter below asks it (a file the run writes is not "left
+        behind"), the copy pass asks it before it copies anything
+        (``_copy_siblings``), and nothing else decides. A directory is never
+        written (a stray subfolder is reported, never walked), audio is what
+        the run writes itself rather than a sibling, and a `.lrc` belongs to
+        ONE track — it travels with that track (the same per-track rule the
+        audit uses), never with a track outside the selection."""
+        if is_dir or is_audio_file(name) or family not in families:
+            return False
+        if family == "lyrics":
+            return (os.path.splitext(name)[0].lower()
+                    in travelling.get(os.path.normcase(folder), ()))
+        return True
+
+    extra = extra_files(
+        cfg, paths,
+        skip=lambda folder, name, family, is_dir: (
+            _travels(folder, name, family, is_dir)
+            or _lyrics_written(folder, name, family)))
     out["excluded"] = extra["files"]
     out["excluded_counts"] = extra["counts"]
     out["excluded_total"] = extra["total"]
@@ -1758,7 +1969,9 @@ def export_tracks(cfg, paths, dest, subfolder="Music", codec="copy",
     eq_id = str(option(cfg, opts, "eq_profile") or "").strip()
     clean_tags = bool(option(cfg, opts, "clean_tags"))
     want_playlists = bool(option(cfg, opts, "playlists"))
-    mirror_sidecars = bool(option(cfg, opts, "sidecars"))
+    # Whether any NON-audio family was asked for at all: a run that copies
+    # the tracks alone never lists the album folder beside them.
+    want_siblings = any(key != "audio" for key in families)
     want_manifest = bool(option(cfg, opts, "manifest"))
     verify = bool(option(cfg, opts, "verify"))
     prune = bool(option(cfg, opts, "prune")) and not zip_target
@@ -1790,6 +2003,15 @@ def export_tracks(cfg, paths, dest, subfolder="Music", codec="copy",
     processing = _processing_signature(rg_mode, eq_id)
     filtered_run = rg_apply or bool(eq_filters)
 
+    if prune and "audio" not in families:
+        # Sync mode makes the destination match the tracks a run writes, so a
+        # selection that writes no tracks would DELETE the destination's audio
+        # instead of mirroring anything. A contradictory request is refused
+        # with the reason rather than obeyed.
+        raise ValueError(
+            "sync mode mirrors the tracks an export writes, but this file "
+            "selection copies no tracks — include \"The tracks themselves\", "
+            "or turn sync off")
     if codec == "copy" and filtered_run:
         # A copied file IS the source's bytes: there is no decode to filter.
         # Refused before anything is written, so the run fails with one message
@@ -1982,19 +2204,29 @@ def export_tracks(cfg, paths, dest, subfolder="Music", codec="copy",
                 except Exception:
                     pass
 
-            # Sidecars BEFORE the skip check: re-exporting an album whose
-            # tracks are already there must still complete its cover / lyrics
-            # / cue / log / description / artist image.
-            if mirror_sidecars:
+            # The files the run was ASKED for go in BEFORE the skip check:
+            # re-exporting an album whose tracks are already there must still
+            # complete its cover / lyrics / cue / log / description / artist
+            # image. `_travels` is the run's own selection rule, asked per file,
+            # so a family nobody ticked cannot be written by this path.
+            if want_siblings:
                 try:
                     with state["lock"]:
                         # serialized: the shared `seen` set is what stops two
-                        # threads from copying the same sidecar into the same
+                        # threads from copying the same file into the same
                         # destination at once
-                        copied = _mirror_sidecars(cfg, path, dst, state["sidecars_seen"])
+                        copied = _copy_siblings(cfg, path, dst,
+                                                state["sidecars_seen"], _travels)
                         out["sidecars"] += copied
                 except Exception:
-                    pass  # sidecars are not worth failing an export for
+                    pass  # a sidecar is not worth failing an export for
+
+            if "audio" not in families:
+                # The selection asked for the files BESIDE the tracks, not for
+                # the tracks: the path this track would have landed at is
+                # already known, and its own travelling siblings are in place.
+                # Everything below writes an audio file.
+                return
 
             rewritten = False
             if os.path.exists(dst):

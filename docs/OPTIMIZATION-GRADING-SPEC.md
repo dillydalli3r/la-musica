@@ -1332,13 +1332,15 @@ user asked for, in the order they asked for it. `server/exporter.py` owns both.
   An album export writes no `.accurip`, `.log`, `.cue`, `.txt`, `.jpg` or
   `.m3u8` file: the cover travels EMBEDDED in each exported file
   (`embed_covers`, ON) and the rip's evidence stays in the library where the
-  audit, the grading and the log's own checksum read it. Two switches keep the
-  old behaviour available and both are OFF by default — `export_sidecars`
-  (mirror `cover.*`/`description.txt`/artist image/`.lrc`/`.cue`/`.log`) and
+  audit, the grading and the log's own checksum read it. WHICH families do
+  travel is the user's file selection (R187); untouched, it is the tracks alone.
+  Two switches keep the old behaviour available and both are OFF by default —
+  `export_sidecars` (mirror `cover.*`/`description.txt`/artist image/`.lrc`/
+  `.cue`/`.log` — R187's `LEGACY_SIDECAR_FAMILIES`) and
   `export_playlists` (the per-album `.m3u8` plus `all.m3u8`) — and the run
   result reports what did not travel in `excluded` (one row per file: album,
-  name, `kind` ∈ cover / playlist / sidecar / evidence / unknown, and the
-  reason), with `excluded_counts`, `excluded_total` and the sentence
+  name, `kind` — the file FAMILY of R187, one of `FILE_FAMILIES`' own keys — and
+  the reason), with `excluded_counts`, `excluded_total` and the sentence
   `excluded_note` that also goes to the run log. Nothing is dropped in silence:
   an unexpected `.nfo`/`.md5`/`.sfv`/`.pdf`/`Thumbs.db`, a `.bak` nobody
   anticipated and a stray subfolder are all classified and counted. The
@@ -1519,6 +1521,53 @@ user asked for, in the order they asked for it. `server/exporter.py` owns both.
   when it is not; the `.lrc` of a track outside the selection is always
   reported. The run result carries `lyrics_mode` and the number of `.lrc`
   files it wrote.
+
+- **R187 — WHAT an export copies is a file selection, family by family.**
+  `copy_files` (per run) / `export_copy_files` (saved default) is a list of the
+  keys of `server/exporter.py`'s `FILE_FAMILIES` — `audio` (the tracks
+  themselves), `cover` (the album's `cover.*` and the artist image), `lyrics`
+  (`.lrc`), `cue` (`.cue`), `log` (`.log`/`.accurip`), `description`
+  (`description.txt`, numbered copies included — `mlo.paths.album_sidecar_of`),
+  `checksum` (`.md5`/`.sfv`/`.ffp`/`.torrent`), `text` (`.txt`/`.nfo`/`.url`/
+  `.pdf`), `playlist` (`.m3u`/`.m3u8`/`.pls`/`.wpl`) and `other` (a non-audio
+  file this app classifies as none of those) — and it is the ONE thing that
+  decides what a run writes. One classifier (`_extra_kind`, over the extension
+  table `_EXTRA_REASONS`, plus the cover names and the artist image it knows by
+  NAME) and one predicate (`export_tracks._travels`) serve the menu, the copy
+  pass (`_copy_siblings`) and the `excluded` report alike, so a file a run
+  copies is never reported as left behind and a file it leaves is never copied:
+  there is no per-surface or per-caller filter, and the families a run reports
+  in `excluded_counts` are the very keys of the selection.
+  `GET /api/export/files` serves the menu the Export page's checkboxes render
+  (keys, labels and the one-line hint under each), so a tick a run would ignore
+  cannot be drawn, exactly as the structure menu is served; the Export page's
+  checkboxes and the per-page dialog's are that group of `Opt` rows, kept in
+  table order so a saved config and a re-opened form read the way the menu does.
+  The shipped default is the tracks ALONE (`EXPORT_DEFAULTS["copy_files"]`,
+  `["audio"]`) — what an export has always written — and a run whose selection
+  writes no tracks is coherent (the families it names land where the tracks
+  would have gone) EXCEPT under `prune`: sync mode makes the destination match
+  the tracks a run writes, so a selection that writes none is REFUSED rather
+  than obeyed, because obeying it would delete the destination's audio.
+  An explicit EMPTY selection is refused with a sentence naming the families
+  (`copy_files_error`: a run that copies nothing would create the destination
+  and write an empty tree while reporting success), answered as a 400 by
+  `POST /api/export` before anything is written and refused at SAVE time by
+  `server/exportconfigs` like every other enumerated value; an unknown family
+  key is refused the same way. `/api/export/defaults` serves the RESOLVED
+  selection (`exporter.copy_files`), so the form opens showing the files the
+  next export would actually write. The per-track families follow the per-track
+  rule the audit already used — `lyrics` copies the exported tracks' OWN `.lrc`
+  files and never the `.lrc` of a track outside the selection — and a stray
+  SUBFOLDER is reported and never walked or copied, exactly as `extra_files`
+  promises. `sidecars` is the switch this replaced and is still honoured (per
+  run, and as a saved default through `mlo/config.py`'s `export_sidecars`),
+  resolving to `LEGACY_SIDECAR_FAMILIES` (audio + cover + lyrics + cue + log +
+  description) through the same code path: a caller that sends nothing new — or
+  only that boolean — gets the behaviour it had, with one honest widening,
+  since the files the audit already classifies as those families now travel
+  with them (an `Artist.jpg` sitting INSIDE an album folder, and a numbered
+  `description (2).txt`).
 
 ### 7.10 YouTube, cookies and the Soulseek port
 
@@ -2972,6 +3021,136 @@ different answers.
   bundled tools: a `libjpeg.so` version symlink is a link; a toolchain unpacked
   onto a network mount that went away is unreadable.
 
+### 7.22 The phone player: one scroller, a real play state, the favourite's home
+
+The fullscreen player is ONE component on every client, so "the phone" is a set
+of decisions inside it rather than a second player: below `lg` the cover, titles
+and controls collapse into a header and the lyrics pane takes the rest of the
+screen; above `lg` the pane sits beside the artwork.
+
+- **R188 — the element is the truth about what is playing.** `playing` is
+  written by the media element's OWN `play`/`pause` events, not only by the
+  app's buttons, and the lock screen's `playbackState` follows the same value.
+  The bug this settles (owner-reported on iOS): the OS suspends a backgrounded
+  webview, the audio stops, and the bar goes on drawing Pause — "the song is
+  still 'playing'". A pause the app did not ask for — an interruption, a
+  headset button, a decode error, the OS freezing the page — is therefore
+  reflected at once, and on the way back in from a lock screen
+  (`visibilitychange`, `pageshow`) the store is reconciled against the element
+  instead of trusted.
+- **R189 — on a phone the lyrics own the screen.** With the lyrics pane open at
+  phone widths there is exactly ONE scrolling surface, and it is the pane: the
+  cover drops to a thumbnail, the header stops scrolling, and the pane fills the
+  height that is left. Nested scrollers, a literal `100vh` cap and a scrolling
+  body behind a scrolling pane are what made the view read as broken. In a
+  viewport too short for the header (a phone in landscape) the body scrolls
+  instead, so nothing is clipped away.
+- **R190 — the favourite has exactly one home per width.** Below `lg` it is the
+  bottom-left of the player (where Apple Music keeps its own); above `lg` it is
+  the transport row's control — never both at once. It is the app's own
+  favourite, a heart: a STAR in this app means a rating, which is a different
+  store (`lib/ratings`).
+
+### 7.23 The export archive, and the offline shell that must not become it
+
+- **R191 — a download is a navigation, and the service worker must not treat it
+  as the app's shell.** `<a download href="/api/export/zip/<id>">` reaches the
+  worker with `mode: "navigate"`, and the navigation branch used to take it: it
+  fetched the archive, stored it under the SHELL's own URL, and — when that store
+  failed, which a large archive being aborted does — answered the download with
+  the cached document. The owner's report was exact: "a 2.6 KB invalid .zip",
+  which is this app's `index.html` (2,689 bytes) saved under the archive's name,
+  with the offline shell left holding a zip. Only a real app route may take that
+  branch (`destination === "document"`, and nothing under `/api/`), and the shell
+  cache is versioned so an install that was already poisoned drops it on the next
+  activation. `tools/check_export_zip.cjs` measures both halves: the bytes the
+  browser really saves, and that no cache holds an archive as a document.
+
+### 7.24 What the client calls things
+
+- **R192 — an album's dynamic range is ADR, everywhere it is an album's.** The
+  card chip and the library's album column said "DR" while the album page and
+  the stats called the same value "ADR"; per-track DR keeps its own name (the
+  track tables' `DR` column and the `DYNAMIC RANGE` tag). One value, one word:
+  the letters say which tag the number came from, which is exactly the
+  distinction a reader needs when both are on screen.
+- **R193 — the top bar says who you are, and can switch.** The account control
+  is the bar's rightmost item: it names the signed-in user (the server's own
+  default scope is named as such, never blank), lists every user the server
+  reports, and switching runs the same sign-in the login screen does — token
+  kept, then a reload, because every cached query, the player and the event
+  socket are keyed on being signed in. A server with no users says so and points
+  at Settings → Security rather than showing an empty list. Signing out is
+  available from the same panel.
+
+### 7.25 A rejected download explains itself, and the explanation outlives the job
+
+- **R194 — the failure names the peers and the reasons, and the reasons are
+  written where the failure points.** A run whose candidates were all refused
+  ends in one sentence, and that sentence is what the user keeps: the wish row
+  persists it as `last_error`, and `wish_found`/the notification carry it. It
+  now carries the attempts themselves — the first three as `peer: reason`,
+  counted past three — because the reasons used to live only in the job's own
+  in-memory list, which the row's clearing discards, while the sentence told the
+  user to go read a LOG the attempts had never been written to ("see the log" was
+  a dead pointer, and a release stuck at 0 % explained nothing). `_reject`
+  writes each attempt to the wishes log as well, so the pointer is true. With no
+  reasons recorded the sentence is **byte-for-byte** the one it always was: this
+  grew a field, it did not change a wording.
+
+### 7.26 The cover's play control, and the cascade behind it
+
+- **R195 — the play control is IN the overlay, at every width, and clear of the
+  badges.** A cover's play button shares ONE flow column with the badges: the
+  ADR row, the button band, then the chips grouped at the bottom — and the column
+  clips its own last chip rather than letting anything cover the control. The bug
+  this settles (owner's phone screenshot): `.tap-hit`'s `position: relative` was
+  an UNLAYERED rule inside the phone media query, so it beat Tailwind's
+  `absolute` on the same element — at 390px the button left the overlay entirely
+  and landed below its own cover in normal flow (measured: button top 734 against
+  a cover box ending at 698), dragging the bottom-anchored chip column down with
+  it and putting a two-line country chip over the control. Two rules follow: the
+  hit-area position declarations live in `@layer components`, so a positioning
+  UTILITY on the same element wins (the rule is about the tap target, not about
+  where the element sits), and no overlay places its control with an absolute
+  offset. A cover too small for both — the S size, 147px, with a wrapped country
+  list — keeps the button whole and clips the chip that does not fit, never the
+  other way round.
+
+### 7.27 The queue says what is true, and one press takes a row off it
+
+- **R196 — a row IS the job's own state, field by field, and it says so while it
+  waits.** The row's progress block carries what the job is really doing: the
+  query being asked and slskd's own state for it (a search is a LIST of queries
+  asked one after another, so "which one now, and is it still being asked" is
+  the difference between a search that is working and one stuck on a query
+  nothing answers), the peer and folder arriving, the phase, `files_arrived`
+  counted APART from `files_done` (what the wait has accepted on disk versus
+  what slskd calls complete — a row must not claim a file arrived that has not),
+  the job's own last log line as `stage_text` (empty once the job has SETTLED: a
+  finished job's last line describes a step nobody is running), and the rejected
+  candidates with the reason each was refused (bounded to the last eight, so one
+  row's payload cannot grow without limit). A row whose step has stopped never
+  claims it is still running.
+- **R197 — a row still in the pipeline is CANCELLED, not cleared.** One action
+  takes ONE item off the list through whichever mechanism owns it — the wish
+  list, the running job, or the bulk queue — instead of making the user find the
+  page that started it; `clear` stays for rows whose work is over. The bug this
+  settles: the client had ONE cancel call but the server branched on the wish's
+  own status, so cancelling a wish that had moved past "searching" removed the
+  folder and the wish while the download kept running — and a job whose wish is
+  gone still draws a row of its own, so it settled later as a failure and left a
+  SECOND row needing its own clear. A cancelled row reports that it was
+  cancelled rather than looking like a failure of its own.
+- **R198 — the landing notice is the download's, and it says so.** "Imported … —
+  it is in your library" is emitted when the album LANDS; the import chain starts
+  after that (`_start_import_chain`) and runs on its own thread, so the sentence
+  used to imply a finished pipeline while the scripts had not run yet. Every
+  surface that announces the landing — the app-level toast, the Auto tab's own
+  and its panel line — appends `queue.chain_running_brief` while `chain.running`,
+  and the queue row keeps the long form. The row's stage already stays
+  "importing" until the chain settles; the sentence now agrees with it.
+
 ## 8. Recommended runbook
 
 Nothing here is a substitute for the app's own Dependencies page: run it first
@@ -3138,6 +3317,16 @@ which file a verdict is later computed on, never the verdict itself:
   argv. When it cannot bridge, the tool sees a path it cannot open and reports
   *it* — so a step that "found nothing" or "could not decode" on a long-path
   library is a bridge failure, not an empty library.
+- **Background playback is a platform declaration, and only iOS's is asserted in
+  CI.** `UIBackgroundModes: audio` is what lets iOS keep playing once the app
+  leaves the foreground, and the mobile workflow now reads that key (and the ATS
+  web-content exemption) out of the built `.app`'s Info.plist, so a merge that
+  stopped happening cannot ship unnoticed. Android has no equivalent switch: a
+  WebView keeps playing while the process lives, and the OS may reclaim a
+  backgrounded app. The app declares no foreground playback service, so "keeps
+  playing with the screen off" is not a promise Android makes here — what the
+  app controls on every platform is that its own state is honest about what the
+  element is doing (R188), and that is enforced in the client.
 - **The storage walk counts DIRENT NAMES, not blocks.** A hard link made by
   hand inside the library is a second real file to `os.scandir`, so the card
   counts it twice; a symlink or junction is not followed at all, and is

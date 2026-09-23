@@ -15,6 +15,7 @@ import { albumRef, artistRef, trackRef } from "./lib/refs";
 import { toast, useStore } from "./store";
 import { withAlias } from "./lib/mbtext";
 import CreditsFooter from "./components/Credits";
+import AccountMenu from "./components/AccountMenu";
 import NotificationBell from "./components/NotificationBell";
 import ShortcutsOverlay from "./components/Shortcuts";
 import { applyConfigLocale, useI18n, type MessageKey } from "./lib/i18n";
@@ -544,17 +545,27 @@ export default function App() {
     // finished job cannot re-announce it.
     if (st !== "done" || (prev !== "running" && prev !== "confirm")) return;
     // A wish handoff also ends "done" — but nothing landed on disk to tag.
-    const job = qc.getQueryData<{ result?: { album_path?: string } | null }>(["soulseekAuto"]);
+    const job = qc.getQueryData<{
+      chain?: { running?: boolean } | null;
+      result?: { album_path?: string } | null;
+    }>(["soulseekAuto"]);
     const album = job?.result?.album_path ?? "";
     if (!album) return;
     // Say it landed, and NOTHING MORE. This used to open the import wizard on
     // whatever page the user was on — the menu, cover and lyrics steps, one
     // after another — which is exactly what a one-press `Add to library` that
-    // does the work by itself must not do. The album is in the library and the
-    // configured chain has run over it; anything a source could not supply
+    // does the work by itself must not do. Anything a source could not supply
     // arrives as a prompt (the bell, the queue's "Needs you" row, the wizard
     // linked from there), so the screen the user did not ask for is gone.
-    toast(`Imported ${album.split(/[\\/]/).filter(Boolean).pop() || album} — it is in your library`);
+    //
+    // But "done" is the DOWNLOAD's edge, not the pipeline's: `_import` starts
+    // the chain thread and returns, so the album is in the library while the
+    // scripts are still to come. One sentence used to cover both — "the
+    // configured chain has run over it", untrue at that instant. Now it says
+    // which of the two it is; the queue's row carries the rest.
+    const chainRunning = !!job?.chain?.running;
+    toast(`Imported ${album.split(/[\\/]/).filter(Boolean).pop() || album} — it is in your library`
+      + (chainRunning ? ` — ${t("queue.chain_running_brief")}` : ""));
   }, [autoStateNow, qc]);
 
   // Global search lives in the top bar and drives the library filter from
@@ -1196,6 +1207,9 @@ export default function App() {
               <Keyboard className="h-4 w-4" />
             </button>
             <NotificationBell />
+            {/* Who you are signed in as, and the switch to someone else. Last
+                in the row: the rightmost control of the bar is the account. */}
+            <AccountMenu />
           </div>
           {/* live script progress floats below the bar so the search keeps
               the full width — its own component, so a progress frame does not

@@ -652,7 +652,17 @@ export const CONFIG_GROUPS: CfgGroup[] = [
         { k: "export_verify", label: "Verify every written file", type: "bool" },
         { k: "export_prune", label: "Delete the destination leftovers first", type: "bool" },
         { k: "export_playlists", label: "Export playlists", type: "bool" },
-        { k: "export_sidecars", label: "Export sidecar files (cue/log/lrc/accurip)", type: "bool" },
+        /* The file selection the Export page saves as this device's default
+           (`export_copy_files`): the same ten families its own checkboxes draw,
+           named here for installs whose exports are always the same shape. An
+           empty selection is NOT "copy nothing" — it means nobody has chosen, so
+           the classic sidecar switch below still decides. */
+        { k: "export_copy_files", label: "What an export copies (blank = the switch below decides)", type: "multi", options: [["audio", "The tracks themselves"], ["cover", "Covers and artwork"], ["lyrics", "Lyrics (.lrc)"], ["cue", "Cue sheets (.cue)"], ["log", "Rip log and accuracy report"], ["description", "Album description"], ["checksum", "Checksum lists and .torrent"], ["text", "Notes, links and scans"], ["playlist", "Playlists the album carries"], ["other", "Anything else"]], help: "The families an export writes BESIDE the audio, as the Export page's own 'What gets copied' section offers them. A family left out stays in the library and is named in the run's report — never dropped in silence." },
+        /* The switch the Export page's file selection replaced
+           (`export_copy_files`): it still decides WHEN no selection has been
+           saved, so a device that always wants the classic set can be served
+           from here. A selection saved in the export form wins over it. */
+        { k: "export_sidecars", label: "Export the classic sidecar set (cover/description/lrc/cue/log/accurip) when no file selection is saved", type: "bool" },
         { k: "export_clean_tags", label: "Write only canonical tags", type: "bool" },
         { k: "export_id3v2", label: "ID3v2 version for MP3", type: "select", options: [["2.3", "2.3"], ["2.4", "2.4"]] },
         { k: "export_id3v1", label: "Also write ID3v1 (MP3)", type: "bool" },

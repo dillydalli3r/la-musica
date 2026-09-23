@@ -14,7 +14,11 @@
  * forced the choice between serving the old artwork forever and making every
  * downloaded track look undownloaded. */
 const CACHE_NAME = "mlo-media-v2";
-const SHELL_CACHE = "mlo-shell-v1";
+/* v2 (3.21.0): the download-navigation bug below could store an EXPORT ARCHIVE
+ * under SHELL_URL, and an install that did would keep opening its "shell" as a
+ * zip with the server down. `activate` deletes every cache this file no longer
+ * names, so the bump is what purges it on the next activation. */
+const SHELL_CACHE = "mlo-shell-v2";
 const KEPT_CACHES = new Set([CACHE_NAME, SHELL_CACHE]);
 
 /** The URL the shell is cached under: one document for every client-side
@@ -210,7 +214,18 @@ self.addEventListener("fetch", (event) => {
 
   // Navigations: network-first so a redeploy lands immediately, cached
   // document as the fallback — the shell must open with the server down.
-  if (req.mode === "navigate") {
+  //
+  // A DOWNLOAD is a navigation too, and this branch used to take it: an
+  // `<a download href="/api/export/zip/<id>">` arrives with `mode: "navigate"`,
+  // so the worker fetched the archive, tried to store it as the SHELL under
+  // SHELL_URL — and when that store failed (a 300 MB archive against the
+  // cache's quota) the `catch` below answered the *download* with the cached
+  // document. That is the owner's report exactly: "a 2.6 KB invalid .zip" —
+  // which is this app's index.html (2,689 bytes) saved under the archive's
+  // name. A real navigation's destination is `document` and a download's is
+  // empty, and no app ROUTE lives under /api/ either — both facts are checked
+  // here, so only a page the app can actually render takes this branch.
+  if (req.mode === "navigate" && req.destination === "document" && !url.pathname.startsWith("/api/")) {
     event.respondWith(
       (async () => {
         const cache = await caches.open(SHELL_CACHE);

@@ -157,6 +157,10 @@ try:
         set(d) ^ ((_FORM_FIELDS - {"paths"}) | _OPTION_FIELDS))
     assert d["subfolder"] == "Music"
     assert d["codec"] in exporter.CODECS or d["codec"] == ""
+    # The file selection is served RESOLVED (the run's own resolver), so the
+    # form opens on the files the next export would actually write: the tracks
+    # alone, until somebody saves a selection.
+    assert d["copy_files"] == ["audio"], d["copy_files"]
 
     # ------------------------------------------- one track stays exactly one file
     res = post(dialog_body([one], DEST))
@@ -228,9 +232,13 @@ try:
     # OFF is the default (asserted above); ON still writes exactly what the old
     # default did — the album's cover.jpg/.lrc beside the files and one .m3u8
     # per album plus all.m3u8 — so a device that wants them can still have them.
+    # …and a client that sends the OLD switch and no file selection (a browser
+    # on a cached bundle, or a config from before the selection existed) still
+    # gets exactly what it got: `copy_files=None` is "nothing new to say".
     opted = os.path.join(ROOT, "Device5")
     os.makedirs(opted)
-    res = post(dialog_body([one], opted, playlists=True, sidecars=True))
+    res = post(dialog_body([one], opted, playlists=True, sidecars=True,
+                           copy_files=None))
     assert (res["playlists"], res["sidecars"]) == (2, 2), res
     got = listing(opted)
     assert f"{opted}/Music/Artist One/Album A/cover.jpg".replace("\\", "/") in got, got
@@ -244,6 +252,65 @@ try:
     assert (res["playlists"], res["sidecars"]) == (0, 0), res
     assert listing(bare) == [f"{bare}/Music/Artist One/Album A/1-01 Track 1.flac".replace("\\", "/")], \
         listing(bare)
+    # The classic switch resolves to its own family set in the RESULT too, so a
+    # client can see which files a run really wrote.
+    assert res["copy_files"] == ["audio"], res["copy_files"]
+
+    # ------------------------------------- WHAT gets copied is selectable
+    # The dialog's checkbox group posts a selection of file families; only-audio
+    # is what it opens on, and every family a run is asked for travels with the
+    # same code path the audit is filtered by — a file copied is never reported
+    # as left behind, and a file left behind is never copied.
+    audio_only = os.path.join(ROOT, "Device6")
+    os.makedirs(audio_only)
+    res = post(dialog_body([one], audio_only, copy_files=["audio"]))
+    assert res["copy_files"] == ["audio"] and res["sidecars"] == 0, res
+    assert listing(audio_only) == [
+        f"{audio_only}/Music/Artist One/Album A/1-01 Track 1.flac".replace("\\", "/")], listing(audio_only)
+    assert {r["name"] for r in res["excluded"]} == {"01 - One.lrc", "cover.jpg"}, res["excluded"]
+    assert res["excluded_counts"] == {"cover": 1, "lyrics": 1}, res["excluded_counts"]
+
+    # …audio + the artwork: the cover travels BESIDE the file (and still
+    # embedded in it), the .lrc stays in the library and is reported.
+    with_art = os.path.join(ROOT, "Device7")
+    os.makedirs(with_art)
+    res = post(dialog_body([one], with_art, copy_files=["audio", "cover"]))
+    assert res["copy_files"] == ["audio", "cover"], res["copy_files"]
+    assert res["sidecars"] == 1, res
+    got = listing(with_art)
+    assert f"{with_art}/Music/Artist One/Album A/cover.jpg".replace("\\", "/") in got, got
+    assert f"{with_art}/Music/Artist One/Album A/01 - One.lrc".replace("\\", "/") not in got, got
+    assert {r["name"] for r in res["excluded"]} == {"01 - One.lrc"}, res["excluded"]
+    assert AudioFile(f"{with_art}/Music/Artist One/Album A/1-01 Track 1.flac".replace("/", os.sep)) \
+        .embedded_pictures(), "the cover must still travel embedded"
+
+    # AN EMPTY SELECTION IS REFUSED with the exporter's own sentence — a run
+    # that copies nothing must not write an empty folder and call it success —
+    # and so is a family the exporter does not have.
+    empty_dest = os.path.join(ROOT, "Device8")
+    os.makedirs(empty_dest)
+    for bad, expect in (([], "at least one"), (["audio", "covers"], "covers")):
+        r = client.post("/api/export", json=dialog_body([one], empty_dest, copy_files=bad))
+        assert r.status_code == 400 and expect in r.json()["detail"], r.text[:300]
+    assert listing(empty_dest) == [], listing(empty_dest)
+
+    # A `.lrc` belongs to ITS track: the lyrics family copies the exported
+    # track's own lyric file, and the lyric file of a track OUTSIDE the
+    # selection stays in the library (and is reported) — the same per-track rule
+    # the audit has always used.
+    lrc_dest = os.path.join(ROOT, "Device9")
+    os.makedirs(lrc_dest)
+    res = post(dialog_body([two], lrc_dest, copy_files=["audio", "lyrics"]))
+    got = listing(lrc_dest)
+    assert f"{lrc_dest}/Music/Artist One/Album A/1-02 Track 2.flac".replace("\\", "/") in got, got
+    assert not [p for p in got if p.lower().endswith(".lrc")], got
+    assert f"{lrc_dest}/Music/Artist One/Album A/01 - One.lrc".replace("\\", "/") not in got, got
+
+    # The menu the dialog renders is the exporter's own table (keys, labels and
+    # the one-line explanation), exactly like the structure menu.
+    menu = client.get("/api/export/files").json()
+    assert [f["v"] for f in menu["families"]] == list(exporter.FILE_FAMILIES), menu
+    assert all(f["label"] and f["hint"] for f in menu["families"]), menu
 
     # ------------------------------- the structure menu, and a custom one used
     # The page renders the exporter's OWN menu (keys, labels) and the grammar a
@@ -305,6 +372,7 @@ finally:
 
 print("ok  export dialog: shared option set == the API's run options, the default "
       "request exports end to end (audio only, extras reported), 1 track stays 1 "
-      "file, album + transcode runs produce one file per track, sidecars/playlists "
-      "opt-in, the structure menu + custom structure preview/run agree, bad "
-      "structures and targets 400")
+      "file, album + transcode runs produce one file per track, the file selection "
+      "(menu == the exporter's table, audio-only / audio+artwork, empty + unknown "
+      "refused), the classic sidecar switch and playlists opt-in, the structure "
+      "menu + custom structure preview/run agree, bad structures and targets 400")

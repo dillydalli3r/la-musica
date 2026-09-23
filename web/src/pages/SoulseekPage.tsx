@@ -19,6 +19,7 @@ import ConfirmButton from "../components/ConfirmButton";
 import Segmented from "../components/Segmented";
 import type { DownloadEntry, ImportBulkJob, SlskReleaseIdentity } from "../types";
 import { fmtCount, fmtCounts, fmtPercent } from "../lib/fmt";
+import { useI18n } from "../lib/i18n";
 
 interface SlskFile {
   username: string;
@@ -57,6 +58,15 @@ const fmtDur = (s: number | null) => {
   return h ? `${h}:${String(m).padStart(2, "0")}:${sec}` : `${m}:${sec}`;
 };
 const fileName = (p: string) => p.replace(/^.*[\\/]/, "");
+/** A WAIT, in the units a person reads it in: "42s" / "3m 07s" / "1h 12m" —
+ *  the shape a countdown needs, without a clock the user has to subtract from.
+ *  Units only: the sentence around it is the translated one (`queue.wait_*`). */
+const fmtWait = (s: number) => {
+  const t = Math.max(0, Math.floor(s));
+  if (t < 60) return `${t}s`;
+  if (t < 3600) return `${Math.floor(t / 60)}m ${String(t % 60).padStart(2, "0")}s`;
+  return `${Math.floor(t / 3600)}h ${String(Math.floor((t % 3600) / 60)).padStart(2, "0")}m`;
+};
 const dirName = (p: string) => p.replace(/[^\\/]*$/, "");
 const extOf = (p: string) => (p.match(/\.([a-z0-9]+)$/i)?.[1] ?? "").toUpperCase();
 
@@ -678,6 +688,7 @@ function AutoProgress({ p }: { p: SlskAutoProgress }) {
  *  peer's folder and said yes: its prompts still have somewhere to be answered,
  *  and the same pipeline runs behind them. */
 function AutoJob() {
+  const { t } = useI18n();
   const { data: job, refetch } = useQuery({
     queryKey: ["soulseekAuto"],
     queryFn: api.soulseekAutoStatus,
@@ -765,7 +776,14 @@ function AutoJob() {
         return;
       }
       const album = fileName(job?.result?.album_path ?? job?.result?.staging_path ?? "");
-      toast(album ? `Imported ${album}` : "Auto-import finished");
+      // The job reaches "done" the moment the album is IN the library, and the
+      // import chain (links, metadata, cover art, the configured scripts) runs
+      // on a thread of its own AFTER that — so "done" alone must not read as
+      // "finished". `chain.running` is the server's own field for it.
+      const chaining = !!job?.chain?.running;
+      toast(album
+        ? (chaining ? `Imported ${album} — ${t("queue.chain_running_brief")}` : `Imported ${album}`)
+        : "Auto-import finished");
       return;
     }
     if (st === "cancelled") {
@@ -995,6 +1013,7 @@ function AutoJob() {
               </button>
               <span className="text-[11px] text-emerald-400">
                 Imported {(job.result?.album_path ?? "").split(/[\\/]/).pop()}
+                {job.chain?.running ? ` — ${t("queue.chain_running_brief")}` : ""}
                 {!job.result?.organized ? " (organize failed — run it from the album page)" : ""}
               </span>
             </div>
@@ -1796,12 +1815,22 @@ function queueRows(
 }
 
 function QueueProgress({ p, stage }: { p: NonNullable<SlskQueueItem["progress"]>; stage: string }) {
+  const { t } = useI18n();
   const pct = typeof p.percent === "number" ? Math.max(0, Math.min(100, p.percent)) : null;
   return (
     <div className="mt-1 space-y-0.5">
-      <div className="flex items-center gap-2 text-[10px] text-zinc-500">
+      <div className="flex items-center gap-2 text-[10px] text-zinc-500 flex-wrap">
         {pct !== null && <span className="text-zinc-400 w-9 text-right shrink-0 tabular-nums">{fmtPercent(pct)}</span>}
+        {/* WHICH QUERY is being asked (a job asks its own list one after
+            another) and slskd's own state for it — the difference between a
+            search that is working and one stuck on a query nothing answers. */}
+        {p.query && <span className="truncate max-w-[45%]" title={`${p.query}${p.state ? ` — slskd: ${p.state}` : ""}`}>{p.query}</span>}
         {p.files_total ? <span>{p.files_done ?? 0}/{p.files_total} file(s)</span> : null}
+        {/* Files the job's own wait has ACCEPTED on disk, when that is a
+            different number from what slskd calls complete. */}
+        {!!p.files_arrived && p.files_arrived !== p.files_done && p.files_total
+          ? <span>{p.files_arrived}/{p.files_total} file(s)</span>
+          : null}
         {p.total ? <span>{fmtSize(p.done ?? 0)} / {fmtSize(p.total)}</span> : null}
         {p.speed ? <span className="text-sky-400/80">{fmtRate(p.speed)}</span> : null}
         {typeof p.eta_s === "number" && p.eta_s > 0 ? <span>ETA {fmtDur(p.eta_s)}</span> : null}
@@ -1809,6 +1838,15 @@ function QueueProgress({ p, stage }: { p: NonNullable<SlskQueueItem["progress"]>
             what the network really answered, never a fake countdown. */}
         {stage === "searching" && p.text ? <span className="truncate">{p.text}</span> : null}
       </div>
+      {/* WHICH PEER'S copy is arriving, and from which folder on it: the one
+          thing that says whose transfer this is, straight off the job's own
+          download snapshot. */}
+      {p.peer && (
+        <div className="text-[10px] text-zinc-500 truncate" title={`${p.peer} — ${p.peer_dir}`}>
+          {t("queue.peer", { user: p.peer, dir: p.peer_dir || "" })}
+          {p.phase ? ` — ${p.phase}` : ""}
+        </div>
+      )}
       {pct !== null && (
         <div className="h-1 rounded-full bg-zinc-800 overflow-hidden">
           <div className="h-full bg-sky-600" style={{ width: `${pct}%` }} />
@@ -1896,10 +1934,21 @@ function QueueRow({ item, busy, selected, onSelect, onCancel, onRetry, onImport,
   onClear: () => void;
 }) {
   const navigate = useNavigate();
+  const { t } = useI18n();
   const st = QUEUE_STAGE[item.stage] ?? QUEUE_STAGE.queued;
   const Icon = st.icon;
   const active = item.stage === "searching" || item.stage === "downloading"
     || item.stage === "verifying" || item.stage === "importing";
+  // The clock this row measures its own wait against, read ONCE per render: the
+  // countdown is the server's own deadline minus this client's clock, so it is
+  // never two different answers inside one row. `waitAt` is whichever deadline
+  // the server published — the failure's backoff (`retry_at`) or the next look
+  // the worker will take on its own (`due_at`) — and 0 when it published
+  // neither, which is the case for a row that is being worked on right now and
+  // for a terminal one nobody will look at again.
+  const nowS = Date.now() / 1000;
+  const waitAt = Math.max(Number(item.retry_at || 0), Number(item.due_at || 0));
+  const waitIn = waitAt > nowS ? waitAt - nowS : 0;
   const label = item.title || item.artist || "(unknown release)";
   // One Retry button, whichever registry owns the row: a wish is re-armed and
   // searched (terminal or not — a "search now" is always allowed), a job's
@@ -1982,6 +2031,63 @@ function QueueRow({ item, busy, selected, onSelect, onCancel, onRetry, onImport,
               nothing. */}
           <ReleaseChips r={item.release} />
           {item.note && <div className="text-[10px] text-zinc-500 truncate" title={item.note}>{item.note}</div>}
+          {/* WHAT IT IS DOING RIGHT NOW, in the job's own words (the last line
+              its log wrote): on a row with no bytes to show — a search, a wait
+              for the album folder, a verification — this is the difference
+              between a step that is working and one that is stuck. Absent on
+              rows with nothing live behind them. */}
+          {item.stage_text && (
+            <div className="text-[10px] text-zinc-400 truncate" title={item.stage_text}>
+              {t("queue.step", { text: item.stage_text })}
+            </div>
+          )}
+          {/* WHICH EDITION it is asking for, on a live walk (spec R150-R153):
+              the chip beside the stage says the POSITION ("Release 1 of 5");
+              this says which pressing that position is. */}
+          {item.walk?.title && active && (
+            <div className="text-[10px] text-violet-300/90 truncate">
+              {t("queue.asking", { label: item.walk.label, title: item.walk.title })}
+            </div>
+          )}
+          {/* UNTIL WHEN, as a countdown off the server's own clock: a row that
+              is WAITING says so instead of looking stuck. `retry_at` is the
+              failure's backoff (the WHY is the reason line below); `due_at` is
+              the next search the worker will run on its own. */}
+          {!item.stage_text && waitIn > 0 && (
+            <div className="text-[10px] text-zinc-400">
+              {item.retry_at && item.retry_at > nowS
+                ? t("queue.wait_retry", { when: fmtWait(waitIn) })
+                : t("queue.wait_next", { when: fmtWait(waitIn) })}
+            </div>
+          )}
+          {/* The album IS in the library and its chain is NOT finished: the
+              import pipeline (links, metadata, cover art, the configured
+              scripts) runs on a thread of its own after the download settles,
+              so "imported" on its own would read as "done". */}
+          {item.chain_running && (
+            <div className="text-[10px] text-sky-300/90">{t("queue.chain_running")}</div>
+          )}
+          {/* WHY nothing has landed, candidate by candidate: the peers already
+              tried, with slskd's own refusal for each. The server bounds the
+              list; `rejected_count` is how many there really were, so a long
+              search does not read as a short one. */}
+          {(item.rejected?.length ?? 0) > 0 && (
+            <details className="mt-0.5">
+              <summary className="text-[10px] text-zinc-500 cursor-pointer tap">
+                {t("queue.rejected", { count: item.rejected_count ?? item.rejected!.length })}
+              </summary>
+              <div className="mt-0.5 space-y-0.5">
+                {item.rejected!.map((a, i) => (
+                  <div key={`${a.username}-${i}`}
+                    className="flex items-baseline gap-1.5 text-[10px] text-zinc-500"
+                    title={`${a.username} — ${a.dir}\n${a.reason}`}>
+                    <span className="shrink-0 text-zinc-400">{a.username || "?"}</span>
+                    <span className="min-w-0 break-words text-zinc-400">{a.reason}</span>
+                  </div>
+                ))}
+              </div>
+            </details>
+          )}
           {/* What the album still NEEDS (an import that could not supply a
               family): a warning on a row whose release is finished — the album
               is in the library and graded, so this rides the finished row
@@ -2178,14 +2284,16 @@ function useQueueActions(refetch: () => void, setBusyId: (id: string | null) => 
   const cancel = async (item: SlskQueueItem) => {
     setBusyId(item.id);
     try {
-      // A framework album ("Add to library") owns a folder on disk, so its
-      // cancel is the one that removes the folder AND the wish; every other
-      // row goes through the queue's own dispatcher.
-      if (item.kind === "wish" && item.pending && item.wish_id != null) {
-        await api.libraryAddCancel({ wish_id: item.wish_id });
-      } else {
-        await api.queueCancel(item.id);
-      }
+      // ONE call, whatever the row is: POST /api/queue/cancel dispatches to
+      // whatever owns it, and for a wish it ends the release WHOLE on the
+      // server — the job filling it stopped (any status, not just
+      // "searching"), an acquisition still waiting for a free pipeline slot
+      // dropped, the framework album folder the add created taken down, and
+      // the wish deleted. This used to send a "framework album" wish to
+      // POST /api/library/add/cancel instead, which removed the folder and the
+      // wish but left the running download alone: it kept going, settled as a
+      // failure, and drew a SECOND row in Failed that needed its own Clear.
+      await api.queueCancel(item.id);
       toast(item.stage === "queued" ? "Removed from the queue" : "Cancelled");
       refetch();
     } catch (e) {

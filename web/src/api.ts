@@ -528,6 +528,15 @@ export interface ExportStructurePreview {
   error: string;
 }
 
+/** One family of files a run can be asked to copy (`GET /api/export/files`,
+ *  straight from server.exporter.FILE_FAMILIES): the key the request carries,
+ *  the label the checkbox shows and the one-line explanation under it. */
+export interface ExportFamily {
+  v: string;
+  label: string;
+  hint: string;
+}
+
 /** The Export page's form — the request body, and (key for key, under
  * `export_<field>`) the saved defaults it loads on open. */
 export interface ExportForm {
@@ -563,7 +572,17 @@ export interface ExportForm {
   eq_profile: string;
   clean_tags: boolean;
   playlists: boolean;
+  /** The switch `copy_files` replaced (server.exporter.LEGACY_SIDECAR_FAMILIES
+   *  when it is on). The form no longer writes it — the file selection below
+   *  is what the run reads — but a saved default or a saved config from before
+   *  the selection existed still carries it, and the run still honours it. */
   sidecars: boolean;
+  /** WHICH files the run writes: the family keys of server.exporter.
+   *  FILE_FAMILIES — "audio" (the tracks themselves), "cover", "lyrics",
+   *  "cue", "log", "description", "checksum", "text", "playlist", "other".
+   *  An EMPTY list is refused by the server with a sentence (a run that copies
+   *  nothing would write an empty folder), so the form must leave one ticked. */
+  copy_files: string[];
   /** Write `checksums.sha256` at the export root (sha256sum -c compatible). */
   manifest: boolean;
   verify: boolean;
@@ -845,6 +864,11 @@ export interface SlskAutoJob {
   } | null;
   log: { t: string; msg: string }[];
   attempts: { username: string; dir: string; reason: string }[];
+  /** The album's own import chain (links, metadata, cover art, then the
+   *  configured scripts), which runs on a thread of its own AFTER the job is
+   *  state "done". `running` is what tells a surface that the album is in the
+   *  library but NOT finished — the job's "done" alone does not say that. */
+  chain?: { running?: boolean } | null;
   result: {
     album_path?: string; staging_path?: string; imported?: boolean; organized?: boolean;
     organize_error?: string | null; error?: string;
@@ -913,17 +937,50 @@ export interface SlskQueueItem {
   release?: SlskReleaseIdentity;
   progress: {
     text?: string;
+    /** The search query slskd is answering RIGHT NOW (searching rows only):
+     *  a job asks its queries one after another, so this is which one the row
+     *  is waiting on. Set from `soulseek_auto._job_search_progress`. */
+    query?: string;
+    /** slskd's own state word for that query ("InProgress", "Completed", …),
+     *  never invented here. */
+    state?: string;
+    /** The candidate whose folder is being fetched (downloading rows only):
+     *  `peer` is the username and `peer_dir` its folder, both as the job's own
+     *  download snapshot publishes them. `phase` is what the job says it is
+     *  doing with that candidate. */
+    peer?: string;
+    peer_dir?: string;
+    phase?: string;
     done?: number;
     total?: number;
     /** byte-weighted share, null while a search has nothing to weigh */
     percent?: number | null;
     files_done?: number;
+    /** Files the job's wait has ACCEPTED on disk — deliberately not the same
+     *  number as `files_done` (what slskd calls complete). */
+    files_arrived?: number;
     files_total?: number;
     speed?: number | null;
     eta_s?: number | null;
   } | null;
-  /** Why it failed (or what the job is waiting on). */
+  /** Why it failed (or what the job is waiting on). On a wish row this is the
+   *  store's own `last_error`, which now carries the rejected candidates'
+   *  reasons (the peer and the refusal), so a row stuck on rejections explains
+   *  itself without the log. */
   reason: string;
+  /** WHAT the job is doing right now, in its own words — the last line it
+   *  wrote to its log ("Waiting for the album folder …"). Empty when nothing
+   *  live is behind the row. */
+  stage_text?: string;
+  /** WHY nothing has landed yet: the candidates already refused, newest last,
+   *  each with slskd's own reason (`rejected_count` is how many there really
+   *  were — this list is bounded). */
+  rejected?: { username: string; dir: string; reason: string }[];
+  rejected_count?: number;
+  /** True while the album's own import chain (links, metadata, cover art and
+   *  the configured scripts) is still running on its own thread: the album IS
+   *  in the library at that point, and this is what says it is not finished. */
+  chain_running?: boolean;
   /** Whether this row can be taken off the list (POST /api/queue/clear). True
    *  only for rows whose work is OVER (a settled job, an imported wish, one
    *  nothing was found for) — a row still in the pipeline is CANCELLED instead,
@@ -978,6 +1035,12 @@ export interface SlskQueueItem {
   /** When the next AUTOMATIC attempt may run, 0 when none will (a terminal
    *  row waits for the user's own retry). */
   retry_at?: number;
+  /** When the WORKER looks at this row again on its own (0 = never: the row is
+   *  terminal): the failed attempt's backoff when there is one, the search
+   *  interval otherwise (`server.wishes.due_at`). What a waiting row counts
+   *  down to — `retry_at` alone cannot answer it, because a wish with no
+   *  failure behind it still has a next search. */
+  due_at?: number;
   /** The ranked-candidate FALLBACK WALK this release is being searched with
    *  (spec R150-R154): the release-choice policy's ranked editions, best first,
    *  walked one at a time inside the one wish — so a release is ONE row however
@@ -2821,6 +2884,11 @@ export const api = {
    *  custom structure script may use — the exporter's own tables, so the
    *  dropdown cannot offer a structure a run would refuse. */
   exportStructures: () => json<ExportStructures>(`${API}/export/structures`),
+  /** The file families a run can be asked to copy (keys, labels, hints) —
+   *  the exporter's own table, so a checkbox the run would refuse cannot be
+   *  drawn, and the sentence a refused selection comes back with names the
+   *  same families. */
+  exportFileFamilies: () => json<{ families: ExportFamily[] }>(`${API}/export/files`),
   /** The path a user-typed structure writes for one sample track, or the
    *  server's sentence refusing it (an unknown %field%, an empty result).
    *  Same grammar and same validation the run applies. */
@@ -2885,8 +2953,14 @@ export const api = {
       error_count: number; errors: string[]; estimated_bytes: number | null;
       /** Present only for `target: "zip"` — what to hand the browser. */
       zip: ExportZip | null;
+      /** The file selection the run RESOLVED (server.exporter.copy_files):
+       *  the per-run selection, else the saved `export_copy_files`, else the
+       *  `sidecars` switch it replaced, else the tracks alone. `kind` below is
+       *  one of these families for every row. */
+      copy_files: string[];
       /** Every non-audio file the export left in the library, with the reason
-       *  it did not travel (server.exporter.extra_files). */
+       *  it did not travel (server.exporter.extra_files). `kind` is the file
+       *  FAMILY (`copy_files` above). */
       excluded: { album: string; name: string; kind: string; reason: string; dir: boolean }[];
       excluded_counts: Record<string, number>;
       excluded_total: number;
@@ -3017,7 +3091,14 @@ export const api = {
    *  409 = the row is not cancelable any more (it finished, or it is only a
    *  finished download whose action is the import). */
   queueCancel: (id: string) =>
-    json<{ ok: boolean; cancelled: string; removed?: boolean }>(`${API}/queue/cancel`, {
+    json<{
+      ok: boolean; cancelled: string; removed?: boolean;
+      /** Job ids the cancel STOPPED (a wish's own acquisition). Non-empty
+       *  means the download really was stopped, not just the row removed. */
+      jobs?: number[];
+      /** Queue tickets dropped: acquisitions that had not started yet. */
+      dropped?: string[];
+    }>(`${API}/queue/cancel`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ id }),
@@ -3339,13 +3420,6 @@ export const api = {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(body),
     }, 60000),
-  /** Undo an "Add to library": the wish and its framework folder both go. */
-  libraryAddCancel: (body: { album_path?: string; wish_id?: number }) =>
-    json<{ ok: boolean; removed: boolean; wish_deleted: boolean; wish_id: number | null }>(
-      `${API}/library/add/cancel`,
-      { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) },
-      20000
-    ),
   /** Queue a release / release group / whole artist into the auto-import
    *  pipeline. `mode: "best"` takes one release per release group (the
    *  preferred format), `"all"` every release. The server only RESOLVES for a

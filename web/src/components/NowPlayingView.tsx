@@ -1055,6 +1055,25 @@ export default function NowPlayingView(p: Props) {
       </div>
     </div>
   );
+  /** The like toggle, in the one shape both layouts draw.
+   *
+   *  `className` carries the size and the PLACEMENT, because the two homes are
+   *  different rooms: above lg it is one control in the transport row, and on a
+   *  phone the same control sits alone at the player's bottom-left — the spot
+   *  Apple Music keeps its favourite in, which is what the owner asked for. One
+   *  definition, so the two can never drift into two different affordances. */
+  const likeButton = (className: string) => (
+    <button
+      aria-label={p.liked ? "Unlike" : "Like this track"}
+      aria-pressed={p.liked}
+      className={`tap-hit rounded-lg transition-colors ${p.liked ? "text-accent" : ink.chromeButton} ${className}`}
+      onClick={p.onToggleLike}
+      title={p.liked ? "Unlike" : "Like this track"}
+    >
+      <Heart className={`h-[18px] w-[18px] ${p.liked ? "fill-current" : ""}`} />
+    </button>
+  );
+
   const transportRow = (
     <div className={`flex items-center justify-center gap-2.5 flex-wrap ${ink.shade}`}>
       <button aria-label="Shuffle" aria-pressed={p.shuffle} className={`p-2 rounded-lg transition-colors ${p.shuffle ? "text-accent" : ink.chromeButton}`} onClick={p.onToggleShuffle} title="Shuffle">
@@ -1089,15 +1108,10 @@ export default function NowPlayingView(p: Props) {
           self-center + a fixed height keep it on the same axis as the icons
           either side of it, whatever heights they have */}
       <span className="w-px h-6 bg-white/15 mx-1 self-center shrink-0" />
-      <button
-        aria-label={p.liked ? "Unlike" : "Like this track"}
-        aria-pressed={p.liked}
-        className={`p-2 rounded-lg transition-colors ${p.liked ? "text-accent" : ink.chromeButton}`}
-        onClick={p.onToggleLike}
-        title={p.liked ? "Unlike" : "Like this track"}
-      >
-        <Heart className={`h-[18px] w-[18px] ${p.liked ? "fill-current" : ""}`} />
-      </button>
+      {/* Desktop's home for the favourite. On a phone this control lives at the
+          player's bottom-left instead (`likeButton`'s other call site) — one
+          home per width, never two buttons for one flag. */}
+      {likeButton("p-2 hidden lg:inline-flex items-center justify-center")}
       <div className="relative">
         <button
           aria-label="Add this track to a playlist"
@@ -1620,7 +1634,12 @@ export default function NowPlayingView(p: Props) {
             row and the art sits dead centre, which is also where the
             no-lyrics layout puts it. */}
         {!videoPath && (
-        <div className={`safe-np-body flex-1 min-h-0 flex flex-col lg:flex-row items-center gap-4 sm:gap-8 overflow-y-auto lg:overflow-clip ${paneOpen ? "" : "lg:justify-start"}`}>
+        <>
+        <div className={`safe-np-body flex-1 min-h-0 flex flex-col lg:flex-row items-center gap-4 sm:gap-8 ${
+          paneOpen
+            ? "overflow-y-auto [@media(min-height:560px)]:overflow-clip"
+            : "overflow-y-auto"
+        } lg:overflow-clip ${paneOpen ? "" : "lg:justify-start"}`}>
           {/* left column: cover, track/album/artist, all playback controls —
               centered as a group inside the full column height.
               `w-full`: this is a flex item in a column whose `items-center`
@@ -1640,8 +1659,10 @@ export default function NowPlayingView(p: Props) {
               overflow unreachable on very short windows; move to a safe-center
               layout if anyone ever uses the player that small. */}
           <div
-            className={`w-full flex flex-col items-center justify-center gap-4 shrink-0 min-w-0 max-h-full min-h-0 overflow-x-clip overflow-y-auto transition-[width] duration-300 ease-out ${
-              paneOpen ? "lg:w-[42%] lg:h-full" : ""
+            className={`w-full flex flex-col items-center justify-center gap-4 shrink-0 min-w-0 transition-[width] duration-300 ease-out ${
+              paneOpen
+                ? "lg:w-[42%] lg:h-full lg:max-h-full lg:min-h-0 lg:overflow-y-auto"
+                : "max-h-full min-h-0 overflow-x-clip overflow-y-auto"
             }`}
           >
             <div className="relative">
@@ -1654,9 +1675,15 @@ export default function NowPlayingView(p: Props) {
               <CoverImg
                 albumPath={p.current.albumPath}
                 coverFile={coverFile}
-                // ONE size with or without lyrics — the art must never
-                // jump when a track's lyrics load or finish.
-                wrapperClass="relative rounded-2xl shadow-2xl bg-raise overflow-hidden w-72 h-72 lg:w-[min(28rem,48vh)] lg:h-[min(28rem,48vh)]"
+                // One size per breakpoint per LAYOUT: the art never jumps when a
+                // track's lyrics load or finish, and above lg the pane sits
+                // beside it so the size is the same either way. On a phone the
+                // pane's toggle is the one moment it changes — that IS the
+                // request: the cover, title and controls collapse to a header
+                // and the lyrics take the rest of the screen.
+                wrapperClass={`relative rounded-2xl shadow-2xl bg-raise overflow-hidden lg:w-[min(28rem,48vh)] lg:h-[min(28rem,48vh)] ${
+                  paneOpen ? "w-32 h-32" : "w-72 h-72"
+                }`}
               />
             </div>
             {textBlock}
@@ -1702,7 +1729,7 @@ export default function NowPlayingView(p: Props) {
             <div
               className={`relative flex flex-col max-w-3xl overflow-clip transition-[width,max-height,opacity,transform] duration-300 ease-out ${
                 paneOpen
-                  ? "flex-1 min-h-[45vh] w-full lg:min-h-0 lg:h-full lg:max-w-none lg:flex-none lg:w-[56%] lg:ml-auto max-h-[100vh] opacity-100 translate-x-0"
+                  ? "flex-1 min-h-[45vh] [@media(min-height:560px)]:min-h-0 w-full lg:min-h-0 lg:h-full lg:max-w-none lg:flex-none lg:w-[56%] lg:ml-auto opacity-100 translate-x-0"
                   : "flex-none min-h-0 max-h-0 w-0 max-w-0 opacity-0 translate-x-6 pointer-events-none"
               }`}
               aria-hidden={!paneOpen}
@@ -1759,6 +1786,18 @@ export default function NowPlayingView(p: Props) {
             </div>
           )}
         </div>
+
+        <div className="lg:hidden w-full shrink-0 flex items-center px-1 sm:px-2 pb-1">
+          {/* The phone's favourite: bottom-left of the player, where a thumb
+              looks for it and where Apple Music keeps its own. Outside the
+              scrolling body on purpose — a control that can scroll off a
+              phone's screen is not the control the owner asked for. The heart
+              is the app's own favourite (a STAR in this app means a rating, a
+              different store — see lib/ratings), and this row draws it only
+              below lg, where the transport row does not. */}
+          {likeButton("p-2.5 flex items-center justify-center")}
+        </div>
+        </>
         )}
       </div>
 

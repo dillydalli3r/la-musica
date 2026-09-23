@@ -90,7 +90,11 @@ const ALBUM_COLS: Col[] = [
   { id: "rating", label: "Rating", sortKey: "rating" },
   { id: "grade", label: "Grade", sortKey: "grade_pct" },
   { id: "media", label: "Media", sortKey: "media" },
-  { id: "dr", label: "DR", sortKey: "meta.ALBUM DYNAMIC RANGE" },
+  // ADR, not DR: the column sorts and shows the ALBUM's own dynamic range
+  // (the release's one value), while the track tables' `dr` columns show each
+  // track's DYNAMIC RANGE. Same letters, different tag - and the album page
+  // has called it ADR since it drew the chip.
+  { id: "dr", label: "ADR", sortKey: "meta.ALBUM DYNAMIC RANGE" },
   { id: "source", label: "Source", sortKey: "source_summary" },
   { id: "videos", label: "Videos", sortKey: "video_count" },
   { id: "inst", label: "INST", sortKey: "inst_count" },

@@ -349,6 +349,42 @@ jobs:
           echo "inspecting $APP"
           python3 ../tools/bundle_icons.py --app "$APP"
 
+      - name: Verify the declarations inside the built app's Info.plist
+        # `bundle.iOS.infoPlist` merges desktop/src-tauri/Info.plist into the
+        # generated plist, and this is the only step that proves the merge
+        # happened in the bundle the user installs. Both keys are load-bearing:
+        # without the ATS web-content exemption the app cannot reach a
+        # self-hosted http server at all, and without the audio background mode
+        # iOS suspends playback the moment the app leaves the foreground — the
+        # owner's "audio stops when I tab out". A plist that silently stopped
+        # merging would take both down with no other symptom.
+        working-directory: desktop
+        run: |
+          APP="$(find src-tauri/gen/apple/build -maxdepth 6 -name '*.app' -type d | head -1)"
+          test -n "$APP" || { echo "::error::the build produced no .app to inspect"; exit 1; }
+          PLIST="$APP/Info.plist"
+          test -f "$PLIST" || { echo "::error::no Info.plist inside $APP"; exit 1; }
+          fail=0
+          audio="$(plutil -extract UIBackgroundModes raw -o - "$PLIST" 2>/dev/null || true)"
+          echo "UIBackgroundModes: $audio"
+          case "$audio" in
+            *audio*) ;;
+            *) echo "::error::UIBackgroundModes does not carry 'audio' — playback would stop as soon as the app leaves the foreground"; fail=1 ;;
+          esac
+          ats="$(plutil -extract NSAppTransportSecurity.NSAllowsArbitraryLoadsInWebContent raw -o - "$PLIST" 2>/dev/null || true)"
+          echo "NSAllowsArbitraryLoadsInWebContent: $ats"
+          if [ "$ats" != "true" ]; then
+            echo "::error::the ATS web-content exemption is missing — the app could not reach a self-hosted http server"
+            fail=1
+          fi
+          name="$(plutil -extract CFBundleDisplayName raw -o - "$PLIST" 2>/dev/null || true)"
+          echo "CFBundleDisplayName: $name"
+          if [ "$name" != "la musica" ]; then
+            echo "::error::the home-screen name is '$name', expected 'la musica'"
+            fail=1
+          fi
+          exit $fail
+
       - name: Package the .app into an unsigned .ipa
         # An .ipa is a zip with the app bundle inside a Payload/ directory and
         # nothing else — no signing identity is involved in producing one.

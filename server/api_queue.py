@@ -136,12 +136,21 @@ def _progress_from_search(search):
     """The queued/searching row's own progress: what the network has answered.
 
     No clock: a search is a ceiling that a good candidate ends early, so a
-    percentage would be a lie. The counts are what slskd really reported."""
+    percentage would be a lie. The counts are what slskd really reported.
+
+    `query` and `state` are carried through as well: a search is a LIST of
+    queries asked one after another (`_search_queries`), so "which one is being
+    asked right now, and is slskd still asking it" is the difference between a
+    search that is working and one that is stuck on a query nothing answers —
+    neither of which the response counts alone can say. Both are slskd's own
+    words, published by `soulseek_auto._job_search_progress`."""
     if not search:
         return None
     return {
         "text": f"{int(search.get('responses') or 0)} peer(s), "
                 f"{int(search.get('files') or 0)} file(s)",
+        "query": str(search.get("query") or ""),
+        "state": str(search.get("state") or ""),
         "done": int(search.get("responses") or 0),
         "total": 0,
         "percent": None,
@@ -149,17 +158,29 @@ def _progress_from_search(search):
 
 
 def _progress_from_download(progress, stage):
-    """The in-progress row's progress block, byte-weighted like the panel's."""
+    """The in-progress row's progress block, byte-weighted like the panel's.
+
+    `peer`/`peer_dir`/`phase`/`files_arrived` ride along with the byte
+    counters: WHICH candidate's folder is arriving and what the job is doing
+    with it is the rest of "what is happening right now", and all four are
+    already in the job's own snapshot (`_progress_snapshot`). `files_arrived`
+    is deliberately a separate count from `files_done` — the first is what the
+    job's wait has accepted on disk, the second what slskd calls complete —
+    because the row must not claim a file arrived that has not."""
     if not progress:
         return None
     total = int(progress.get("size") or 0)
     done = int(progress.get("bytes") or 0)
     return {
         "text": str(progress.get("dir") or progress.get("phase") or stage),
+        "peer": str(progress.get("username") or ""),
+        "peer_dir": str(progress.get("dir") or ""),
+        "phase": str(progress.get("phase") or ""),
         "done": done,
         "total": total,
         "percent": progress.get("percent"),
         "files_done": int(progress.get("files_done") or 0),
+        "files_arrived": int(progress.get("files_arrived") or 0),
         "files_total": int(progress.get("files_total") or 0),
         "speed": progress.get("speed"),
         "eta_s": progress.get("eta_s"),
@@ -238,6 +259,33 @@ def _job_row(job, wish_id=None):
         "progress": progress,
         "reason": str(result.get("error") or (job.get("stage") if stage == "failed" else "") or ""),
         "note": note,
+        # WHAT THE JOB IS DOING, in its own words: the last line it wrote to its
+        # log is the job's own sentence for the step it is on ("Waiting for the
+        # album folder …", "Searching…", "Verifying…"). It is the ONE field
+        # that says anything at all on a row with no byte progress to show —
+        # and the difference between a step that is working and one that is
+        # quietly waiting for something. Empty once the job has SETTLED: a
+        # finished job's last log line describes a step nobody is running, and
+        # its outcome is in `reason`/`note` where it belongs.
+        "stage_text": ("" if stage in ("completed", "failed")
+                       else str(job.get("stage") or "")),
+        # WHY NOTHING HAS LANDED YET, candidate by candidate: every peer the
+        # job asked, in order, with slskd's own reason for the refusal
+        # (`soulseek_auto._reject`). The row renders them so a release stuck on
+        # rejected candidates explains itself without the user opening the log;
+        # the log keeps ALL of them, and this is bounded to the last 8 so a
+        # long search cannot make one row's payload unbounded.
+        "rejected": [{"username": str(a.get("username") or ""),
+                      "dir": str(a.get("dir") or ""),
+                      "reason": str(a.get("reason") or "")}
+                     for a in (job.get("attempts") or [])[-8:]],
+        "rejected_count": len(job.get("attempts") or []),
+        # Whether the album's own import chain (links, metadata, cover art,
+        # then the configured scripts) is STILL RUNNING on the thread that
+        # took it over. The job is state "done" by then — the album IS in the
+        # library — so this is the field that stops a surface claiming the
+        # album is finished while twenty scripts of it are still to come.
+        "chain_running": bool((job.get("chain") or {}).get("running")),
         # What a row needs to be ACTIONABLE (see server/api_queue's docstring):
         # what went wrong, what the manual action is, and where it happens.
         "outcome": str(result.get("outcome") or ""),
@@ -350,6 +398,11 @@ def _wish_rows(wishes_list, jobs_by_wish, cfg=None):
             note = job["note"]
             if job["reason"]:
                 reason = job["reason"]
+        # A SETTLED job is history (see this function's docstring), so its live
+        # detail travels with the row only while it is really working on the
+        # wish: the step it says it is on, and the candidates it already had
+        # refused. A settled job's step line describes a step nobody is running.
+        live_detail = job if live else {}
         if stage == "queued" and status == "searching":
             stage = "searching"
         if stage == "completed" and w.get("album_path"):
@@ -358,6 +411,18 @@ def _wish_rows(wishes_list, jobs_by_wish, cfg=None):
             note = ("Nothing found — not searched again unless you retry it"
                     if status == "not_found" else (reason or "Needs a manual import"))
         retry_at = float(w.get("retry_at") or 0)
+        # WHEN the worker looks again by itself (`wishes.due_at`): the failed
+        # attempt's own backoff when there is one, the interval otherwise — and
+        # NO time at all for a terminal wish, which is why `inf` (never valid
+        # JSON) is published as 0. A stash in the PAST is published as 0 too: a
+        # wish that has never been searched (`last_search` 0) answers with the
+        # bare interval, which is a stamp from 1970 — due NOW, and the worker's
+        # own `_due()` reads it exactly that way. The row renders this as a
+        # countdown and skips it at 0, so what it shows is a real wait and
+        # nothing else.
+        _due = wishes.due_at(w, cfg or {})
+        _now = time.time()
+        due_at = float(_due) if _due and _due != float("inf") and _due > _now else 0.0
         if stage == "queued" and retry_at > time.time():
             note = note or f"Retrying after a failure at {_clock(retry_at)}"
         elif stage == "queued" and not note and wishes.outcome_of(reason) == "not_found":
@@ -440,6 +505,17 @@ def _wish_rows(wishes_list, jobs_by_wish, cfg=None):
             "reason": reason,
             "note": note,
             "attempts": int(w.get("attempts") or 0),
+            # The job's own step line and the candidates it has already had
+            # refused, while it is really working on this wish ("" / [] on a
+            # row with no live job): what the row says it is doing right now,
+            # and WHY it is still here. `reason` above carries the same
+            # refusals as the one sentence the wish store persisted
+            # (`last_error`, written by soulseek_auto when it gave up), which
+            # is what a row whose job is long gone still explains itself with.
+            "stage_text": str(live_detail.get("stage_text") or ""),
+            "rejected": list(live_detail.get("rejected") or []),
+            "rejected_count": int(live_detail.get("rejected_count") or 0),
+            "chain_running": bool(live_detail.get("chain_running")),
             # WHICH pressing this wish is waiting for, resolved once and kept
             # on the wish itself (server/wishes' release identity section):
             # every key is present and a fact nobody could resolve is empty, so
@@ -452,6 +528,11 @@ def _wish_rows(wishes_list, jobs_by_wish, cfg=None):
             # (0 = it will not: the wish is terminal until the user retries).
             "not_found": int(w.get("not_found") or 0),
             "retry_at": retry_at,
+            # When the worker looks again ON ITS OWN (0 = it will not: the wish
+            # is terminal until the user retries). `retry_at` above is the
+            # failure's backoff alone; this is the answer to "when, then?" —
+            # the backoff when there is one, the search interval otherwise.
+            "due_at": due_at,
             # The ranked-candidate walk this release is being searched with
             # (spec R150-R154): `{index, total, label, mbid, title, tried}`, or
             # null for a wish with nothing to walk (one candidate, or none).
@@ -1029,14 +1110,15 @@ def _clear_refusal(row):
 def queue_cancel(req: QueueCancelRequest):
     """Cancel ONE row of the queue.
 
-    Dispatches to whichever primitive owns the row: a running job is stopped
-    (its wish goes back to the queue by itself), a waiting wish is removed from
-    the wishlist, a bulk-queue entry is dropped and an import run stops after
-    the album it is on. A row that is only a finished download is not
-    cancelable — the queue does not pretend a delete button exists for it — and
-    neither is a prompt: the album is already in the library, and its actions
-    are the wizard and the dismiss endpoint."""
-    from server import import_queue, wishes
+    Dispatches to whichever primitive owns the row: a running job is stopped,
+    a wish is ended WHOLE — every job filling it stopped, an acquisition still
+    waiting for a pipeline slot dropped, the framework album it created taken
+    down and the wish itself deleted, in one press — a bulk-queue entry is
+    dropped and an import run stops after the album it is on. A row that is
+    only a finished download is not cancelable — the queue does not pretend a
+    delete button exists for it — and neither is a prompt: the album is already
+    in the library, and its actions are the wizard and the dismiss endpoint."""
+    from server import import_queue, pending_albums, wishes
 
     item_id = str(req.id or "")
     kind, _, ref = item_id.partition(":")
@@ -1060,19 +1142,36 @@ def queue_cancel(req: QueueCancelRequest):
         wish = wishes.get_wish(wid)
         if wish is None:
             raise HTTPException(404, "wish not found")
-        if wish.get("status") == "searching":
-            # It is being searched right now: stop the job doing it, then take
-            # the wish off the list — the order matters, or the worker would be
-            # mid-download for a wish that no longer exists.
-            job_id = None
-            for j in soulseek_auto.jobs():
-                if j.get("wish_id") == wid and j.get("state") in ("running", "confirm"):
-                    job_id = j.get("id")
-                    break
-            if job_id:
-                soulseek_auto.cancel(job_id)
-        return {"ok": True,
-                "cancelled": item_id, "removed": bool(wishes.delete_wish(wid))}
+        # ONE press ends the release, whatever its acquisition is doing:
+        #
+        # * a job DOWNLOADING it is stopped (whether the wish happens to be
+        #   marked "searching" or not),
+        # * an acquisition still WAITING for a free pipeline slot is dropped
+        #   from that queue (the ticket holds the whole start_job call, so
+        #   leaving it behind would start a download for a wish that is gone),
+        # * the framework album the add created goes with it, and the wish
+        #   itself is deleted.
+        #
+        # The old code stopped the job only when the wish's status read
+        # "searching" at that instant. Under any other status it deleted the
+        # wish and left the download RUNNING — and a running job whose wish is
+        # gone keeps its own row (see build_queue), so the row the user had
+        # just cancelled came back as a settled failure in the Failed section
+        # with nothing on it but Clear: the owner's "one cancel, two rows".
+        # The failure itself is still recorded where it always was — the job's
+        # own result and log, the wish store's `last_error`.
+        stopped = []
+        for j in soulseek_auto.jobs():
+            if j.get("wish_id") != wid or j.get("state") not in ("running", "confirm"):
+                continue
+            if soulseek_auto.cancel(j.get("id")):
+                stopped.append(int(j.get("id") or 0))
+        dropped = [str(it.get("key") or "") for it in soulseek_auto.queued()
+                   if it.get("wish_id") == wid and soulseek_auto.drop_queued(it.get("key"))]
+        pending_albums.remove_for_wish(wid)
+        return {"ok": True, "cancelled": item_id,
+                "removed": bool(wishes.delete_wish(wid)),
+                "jobs": stopped, "dropped": [k for k in dropped if k]}
     if kind == "pipeline":
         if not _drop_pipeline_item(item_id):
             raise HTTPException(409, "that release already started")

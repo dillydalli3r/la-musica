@@ -825,6 +825,9 @@ try:
     assert stored["name"] == "Earbuds curve (FLAC)", stored
     assert stored["config"] == row["config"], stored
     assert stored["config"]["eq_profile"] == profile_id, stored["config"]
+    # …and the file selection, which IS part of the form (unlike `paths`): the
+    # config a user saved keeps the families that run wrote.
+    assert stored["config"]["copy_files"] == ["audio"], stored["config"]
     assert "paths" not in stored["config"], sorted(stored["config"])
 
     # Load it back — a page that had been cleared gets the whole form — and run
@@ -881,6 +884,13 @@ try:
             ({"workers": "4"}, "must be a whole number"),
             ({"embed_covers": "yes"}, "must be true or false"),
             ({"eq_profile": "../../../etc/passwd"}, "invalid equalizer profile id"),
+            # The file selection is the exporter's own enum: a family it does
+            # not have, and a selection that names no files at all, are refused
+            # here with the sentence a run would give (a saved config must not
+            # be a way to store an export the run would refuse).
+            ({"copy_files": ["audio", "covers"]}, "unknown file famil"),
+            ({"copy_files": []}, "at least one"),
+            ({"copy_files": "audio"}, "must be a list"),
             ({"paths": [loud]}, "unknown config field")):
         bad_config = client.post("/api/export/configs",
                                  json={"name": "refuse me", "config": dict(form, **patch)})

@@ -288,15 +288,23 @@ body {
   .btn-danger {
     min-height: 2.75rem;
   }
-  .tap-hit {
-    position: relative;
-  }
-  /* Every icon button is a 36px square by design; growing the HIT area is the
-     only way to reach 44px without making it taller than it is wide. */
-  .btn-icon,
-  .btn-icon-primary,
-  .btn-icon-danger {
-    position: relative;
+  /* Layered so a positioning UTILITY on the same element still wins. These two
+     rules are about the hit area (`::after` grows the tap target), not about
+     where the element sits — but unlayered they beat Tailwind's `absolute`, and
+     that is exactly how a cover's play button
+     (`btn-primary absolute left-2 top-9 tap-hit`) left its overlay at phone
+     width and landed in normal flow below the cover it belongs to. */
+  @layer components {
+    .tap-hit {
+      position: relative;
+    }
+    /* Every icon button is a 36px square by design; growing the HIT area is the
+       only way to reach 44px without making it taller than it is wide. */
+    .btn-icon,
+    .btn-icon-primary,
+    .btn-icon-danger {
+      position: relative;
+    }
   }
   .btn-icon::after,
   .btn-icon-primary::after,

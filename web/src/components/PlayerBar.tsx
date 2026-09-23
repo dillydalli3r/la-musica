@@ -225,6 +225,68 @@ export default function PlayerBar() {
   const videoRef = useRef<HTMLVideoElement>(null);
   const media = () => (isVideo ? videoRef.current : audio()) as HTMLMediaElement | null;
 
+  /** The element that holds `path` right now, or null.
+   *
+   *  Reads only refs, so it is safe from an event handler or an effect that
+   *  mounted once: `media()` above closes over the render's queue and index,
+   *  which is the wrong answer by the time a later track is playing. */
+  const elementFor = (path: string): HTMLMediaElement | null =>
+    [videoRef.current, aRef.current, bRef.current].find((el) => {
+      if (!el) return false;
+      if (el === videoRef.current) return pathOnVideo.current === path;
+      return (el === aRef.current ? pathOnA.current : pathOnB.current) === path;
+    }) ?? null;
+
+  /** The media element's OWN pause — the event the app never used to hear.
+   *
+   *  `playing` is the store's word for "sound is coming out right now", and
+   *  until this handler existed it was written ONLY by the app's own controls.
+   *  So every pause the app did not ask for left the bar drawing Pause and the
+   *  fullscreen player claiming the track was playing while the element sat
+   *  silent: iOS suspending a backgrounded webview (the owner's report — "when
+   *  tabbed out of the app, audio stops playing, but the song is still
+   *  'playing'"), an interruption (a call, another app taking the audio
+   *  session), a lock screen or headset button, a decode error. The element is
+   *  the only thing that knows, so its event is what settles it.
+   *
+   *  Guarded by identity rather than by a flag: a handover pauses the outgoing
+   *  element as the queue moves on, and a preloaded idle element pauses when
+   *  its src is replaced — neither says anything about what is playing, and
+   *  a stale event must not stop the new track. */
+  const handlePause = (e: SyntheticEvent<HTMLMediaElement>) => {
+    const p = useStore.getState().playing;
+    if (p && elementFor(p) !== e.currentTarget) return;
+    setPlaying(null);
+  };
+
+  // Coming back from a lock screen, a call, or another app: the OS may have
+  // stopped the element while the page was not running to hear it — a frozen
+  // webview receives no events of its own, so the handler above never fires and
+  // the bar returns claiming a track that is not playing (the owner's report).
+  // Re-check the truth on the way in: `playing` may only stand while the
+  // element really is.
+  useEffect(() => {
+    const reconcile = () => {
+      if (document.visibilityState !== "visible") return;
+      const p = useStore.getState().playing;
+      if (!p) return;
+      const el = elementFor(p);
+      if (!el || el.paused || el.ended) setPlaying(null);
+    };
+    document.addEventListener("visibilitychange", reconcile);
+    // Some shells restore a page from the back/forward cache without a
+    // visibility change; `pageshow` is the event that always fires on the way
+    // back in. Both are cheap, and both are the same question.
+    window.addEventListener("pageshow", reconcile);
+    return () => {
+      document.removeEventListener("visibilitychange", reconcile);
+      window.removeEventListener("pageshow", reconcile);
+    };
+    // `elementFor` reads refs only, so this listener installed once is never
+    // stale — and re-installing it per queue change would be churn.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
   /** Report ONE play to the server (`POST /api/plays`) — the app's single play
    *  seam, for both the audio pair and the music-video popout.
    *
@@ -385,11 +447,37 @@ export default function PlayerBar() {
       });
       ms.setActionHandler("previoustrack", () => stepRef.current(-1));
       ms.setActionHandler("nexttrack", () => stepRef.current(1));
+      // Scrubbing from the lock screen / Control Center / a car stereo. Without
+      // a handler the OS draws a scrubber that springs back to where the app
+      // thinks it is, which reads as "seeking is broken in the background".
+      ms.setActionHandler("seekto", (d: { seekTime?: number }) => {
+        const el = media();
+        if (!el || typeof d?.seekTime !== "number") return;
+        el.currentTime = d.seekTime;
+        setTime(d.seekTime);
+      });
     } catch {
       /* media session unsupported — ignore */
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [current, displayTitle, coverFile, coverAlbumPath]);
+
+  // The lock screen, the car stereo and the OS's own play/pause button read
+  // `playbackState`, never the app's store: a session that never sets it shows
+  // a widget that looks stopped whatever is happening, and the platform is what
+  // decides how long the audio session survives an interruption. It follows the
+  // same truth as the bar — the element's own play/pause, not the intent — so
+  // an OS-initiated pause puts the system controls in the state the app is
+  // actually in.
+  useEffect(() => {
+    const ms = navigator.mediaSession;
+    if (!ms) return;
+    try {
+      ms.playbackState = playing ? "playing" : current ? "paused" : "none";
+    } catch {
+      /* unsupported — the controls simply do not follow */
+    }
+  }, [playing, current]);
 
   const { data: likesData } = useQuery({ queryKey: ["likes"], queryFn: api.likes });
   const liked = !!current && (likesData?.paths ?? []).includes(current.path);
@@ -1150,9 +1238,9 @@ export default function PlayerBar() {
         {/* crossOrigin keeps the streams CORS-clean so the WebAudio visualizer
             can read them; attachAnalyser resumes the context it opens, so the
             very first play is not read from a suspended (all-zero) graph */}
-        <audio ref={aRef} hidden crossOrigin="anonymous" onTimeUpdate={onTime} onLoadedMetadata={onMeta} onEnded={handleEnded}
+        <audio ref={aRef} hidden crossOrigin="anonymous" onTimeUpdate={onTime} onLoadedMetadata={onMeta} onEnded={handleEnded} onPause={handlePause}
           onPlay={(e) => { attachAnalyser(e.currentTarget); applyElGain(e.currentTarget); countPlay(e.currentTarget); }} />
-        <audio ref={bRef} hidden crossOrigin="anonymous" onTimeUpdate={onTime} onLoadedMetadata={onMeta} onEnded={handleEnded}
+        <audio ref={bRef} hidden crossOrigin="anonymous" onTimeUpdate={onTime} onLoadedMetadata={onMeta} onEnded={handleEnded} onPause={handlePause}
           onPlay={(e) => { attachAnalyser(e.currentTarget); applyElGain(e.currentTarget); countPlay(e.currentTarget); }} />
 
         {/* full layout from tablet width up: cover+title / centered seek /
@@ -1743,6 +1831,7 @@ export default function PlayerBar() {
                 onVideoMeta(e);
               }}
               onEnded={handleEnded}
+              onPause={handlePause}
               onPlay={(e) => {
                 // Same rule as the audio pair's play handler: the element
                 // re-asserts its own track's gain, so a resume after the value
@@ -1855,6 +1944,7 @@ function VideoPopout({
   onMeta,
   onEnded,
   onPlay,
+  onPause,
 }: {
   path: string;
   videoRef: React.RefObject<HTMLVideoElement | null>;
@@ -1873,6 +1963,9 @@ function VideoPopout({
   onEnded: (e?: SyntheticEvent<HTMLVideoElement>) => void;
   /** One playback start, for the play history — see PlayerBar's `countPlay`. */
   onPlay: (e: SyntheticEvent<HTMLMediaElement>) => void;
+  /** The element's own pause, wherever it came from — see PlayerBar's
+   *  `handlePause`. */
+  onPause: (e: SyntheticEvent<HTMLMediaElement>) => void;
 }) {
   const tracks = useSubtitleTracks(path);
   const trackKey = tracks.map((t) => t.key).join("|");
@@ -1943,6 +2036,7 @@ function VideoPopout({
       onLoadedMetadata={onMeta}
       onEnded={onEnded}
       onPlay={onPlay}
+      onPause={onPause}
       onError={() => {
         // Direct bytes failed (MPEG-2/VC-1/etc.) — retry via live transcode.
         if (!live) setErrorFallback(true);

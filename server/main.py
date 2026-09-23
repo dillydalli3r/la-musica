@@ -3231,6 +3231,12 @@ class ExportRequest(BaseModel):
     clean_tags: Optional[bool] = None
     playlists: Optional[bool] = None
     sidecars: Optional[bool] = None
+    # WHICH files the run writes: the family keys of exporter.FILE_FAMILIES
+    # ("" / absent = the saved export_copy_files, else the `sidecars` switch
+    # above, else the tracks alone). The exporter is the authority — an unknown
+    # family and an EMPTY selection ([] would write an empty folder) both come
+    # back as a 400 sentence.
+    copy_files: Optional[List[str]] = None
     manifest: Optional[bool] = None
     verify: Optional[bool] = None
     prune: Optional[bool] = None
@@ -3277,6 +3283,11 @@ def export_defaults():
     # showing what the app keeps in the library (see exporter.lyrics_mode) and
     # the select always has a value that matches one of its options.
     out["lyrics"] = exporter.lyrics_mode(cfg, {})
+    # …and the file selection is resolved the same way (the run's own resolver,
+    # not the raw key): a config that still holds only `export_sidecars` opens
+    # the form showing the set that switch stands for, so the page always shows
+    # the files the next export would actually write.
+    out["copy_files"] = list(exporter.copy_files(cfg, {}))
     return out
 
 
@@ -3342,6 +3353,15 @@ def export_structures():
     $functions a custom structure script may use — the Exporter's own tables,
     so the dropdown cannot offer a structure the run would refuse."""
     return exporter.structure_menu()
+
+
+@app.get("/api/export/files")
+def export_files():
+    """The file families a run can be asked to copy (keys, labels, hints) — the
+    Exporter's own table, so the checkboxes cannot offer a family the run would
+    refuse, and the sentence a refused selection comes back with names the same
+    vocabulary."""
+    return exporter.file_families()
 
 
 @app.post("/api/export/structure/preview")

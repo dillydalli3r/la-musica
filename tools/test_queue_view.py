@@ -555,6 +555,56 @@ with Patch(auto, load_config=lambda: dict(CFG),
                 if r["job_id"] == job_id], after
 
     # ------------------------------------------------------------------- #
+    # 5b. ONE cancel ends a wish whose download is running — whatever the
+    #     wish's own status happens to say
+    # ------------------------------------------------------------------- #
+    # The owner's report: a row cancelled from the In progress section came
+    # BACK, a moment later, as a settled failure in Failed with nothing on it
+    # but Clear. The cause was here — the cancel stopped the job only when the
+    # wish's status read "searching" at that instant, and otherwise deleted the
+    # wish and left the download RUNNING. A running job whose wish is gone
+    # keeps its own row, so it settled on its own and drew a second one.
+    #
+    # The wish below is left `wanted` on purpose (nothing marks it searching —
+    # the status a hand-started job for a wish really leaves behind), which is
+    # the state the old code walked into.
+    hold2 = threading.Event()
+
+    def _blocking_search2(slsk_, queries, wait_s, usable=None, response_limit=0):
+        hold2.wait(10)
+        return ([("q", {"responses": []})], [], 0)
+
+    with Patch(auto, _search_queries=_blocking_search2):
+        owned = _release("88888888-0000-0000-0000-000000000001", "Owned", "Release")
+        RESOLVED[owned["id"]] = owned
+        w = wishes.add_wish(owned["id"], title="Release", artist="Owned",
+                            source="soulseek")
+        started = auto.start_job(release=owned, source="soulseek", wish_id=w["id"])
+        owned_job = started["job"]["id"]
+        _wait_for(lambda: auto.job_state(owned_job)["stage_key"] == "searching", 10,
+                  "the wish's own job to search")
+        assert wishes.get_wish(w["id"])["status"] == "wanted", \
+            "the wish is not marked searching while its job runs — the state they cancelled from"
+        row = [r for rows in _queue(client)["sections"].values() for r in rows
+               if r.get("wish_id") == w["id"]]
+        assert row and row[0]["id"] == f"wish:{w['id']}" and row[0]["cancelable"], row
+        # ONE press, ONE call: the queue's own cancel.
+        r = client.post("/api/queue/cancel", json={"id": f"wish:{w['id']}"})
+        assert r.status_code == 200, r.text
+        assert wishes.get_wish(w["id"]) is None, "the wish survived its cancel"
+        hold2.set()
+        _wait_for(lambda: auto.job_state(owned_job)["state"] == "cancelled", 15,
+                  "the wish's download to be stopped by its cancel")
+        assert owned_job in (r.json().get("jobs") or []), r.json()
+    # ...and no twin row: the album is neither still running nor a failure
+    # waiting to be cleared. Nothing about it is left in the queue at all.
+    after = _queue(client)
+    strays = [r for rows in after["sections"].values() for r in rows
+              if r.get("job_id") == owned_job or r.get("wish_id") == w["id"]]
+    assert not strays, strays
+    assert not [r for r in after["sections"]["failed"] if "Owned" in str(r.get("title"))], after
+
+    # ------------------------------------------------------------------- #
     # 6. every stage, in one payload — and the page renders it
     # ------------------------------------------------------------------- #
     from server import main as mlo_main      # heavy import, last on purpose
@@ -652,8 +702,11 @@ FIXTURE_JOBS = [
                  "label": "Ninja Tune"},
      "log": [{"t": "00:00:01", "msg": "Target: Bicep — Isles"}], "attempts": [],
      "result": None, "confirm": None, "search": None,
-     "progress": {"dir": "Music/Isles", "bytes": 41_000_000, "size": 82_000_000,
-                  "percent": 50.0, "files_done": 6, "files_total": 12,
+     "progress": {"dir": "Music/Isles", "username": "peer_one",
+                  "phase": "Downloading",
+                  "bytes": 41_000_000, "size": 82_000_000,
+                  "percent": 50.0, "files_done": 6, "files_arrived": 5,
+                  "files_total": 12,
                   "speed": 512_000, "eta_s": 80},
      "wish_id": 2, "source": "musicbrainz", "label": "Bicep — Isles",
      "started_at": 1.0, "ended_at": 0.0},
@@ -683,11 +736,26 @@ FIXTURE_JOBS = [
     {"id": 11, "state": "error", "stage": "Every candidate was rejected",
      "stage_key": "failed",
      "release": {"id": "eeeeeeee", "artist": "Broken", "title": "Release"},
-     "log": [], "attempts": [],
-     "result": {"error": "every candidate was rejected (3 attempts)"},
+     "log": [], "attempts": [
+         {"username": "peer_offline", "dir": "Music/Broken",
+          "reason": "User appears to be offline"},
+         {"username": "peer_nolog", "dir": "Music/Release",
+          "reason": "no rip log for a CD rip"}],
+     "result": {"error": "every candidate was rejected (2 attempt(s)): "
+                         "peer_offline: User appears to be offline (+1 more in "
+                         "the log)."},
      "confirm": None, "search": None, "progress": None, "wish_id": None,
      "source": "soulseek", "label": "Broken — Release",
      "started_at": 6.0, "ended_at": 7.0},
+    {"id": 12, "state": "done", "stage": "Running the import chain…",
+     "stage_key": "importing", "chain": {"running": True},
+     "release": {"id": "ffffffff", "artist": "Chained", "title": "Album"},
+     "log": [], "attempts": [],
+     "result": {"album_path": "F:/Music/Artists/Chained - Album",
+                "imported": True, "organized": True},
+     "confirm": None, "search": None, "progress": None, "wish_id": None,
+     "source": "soulseek", "label": "Chained — Album",
+     "started_at": 9.0, "ended_at": 10.0},
 ]
 # Framework albums for the deferred-add rows below: the marker is what the
 # queue reads (`pending_albums.is_resolving`), so the rows need real ones.
@@ -773,8 +841,10 @@ FIXTURE_WISHES = [
      "source": "musicbrainz", "pending": True},
     {"id": 7, "release_mbid": "77777777", "title": "Stale", "artist": "Abandoned",
      "year": "2021", "status": "wanted", "note": "", "target_dir": "",
-     "queries": [], "attempts": 0, "added_at": 17.0, "updated_at": 17.5,
-     "last_search": 0.0, "last_error": "", "album_path": STALE_FOLDER,
+     "queries": [], "attempts": 1, "added_at": 17.0, "updated_at": 17.5,
+     "last_search": real_time.time(),
+     "retry_at": real_time.time() + 900,
+     "last_error": "peer went offline mid-transfer", "album_path": STALE_FOLDER,
      "source": "musicbrainz", "pending": True},
     {"id": 8, "release_mbid": "88888888", "title": "Ended", "artist": "Imported",
      "year": "2022", "status": "imported", "note": "", "target_dir": "",
@@ -806,7 +876,7 @@ with Patch(auto, jobs=lambda: [dict(j) for j in FIXTURE_JOBS],
                          for r in rows}, (stage, fixture["sections"])
     # 'searching' and 'queued' share a section; downloading/importing live in
     # in-progress; completed rows carry their outcome; failed rows their reason
-    assert fixture["counts"]["in_progress"] == 2, fixture["counts"]
+    assert fixture["counts"]["in_progress"] == 3, fixture["counts"]
     assert fixture["sections"]["completed"], fixture["sections"]["completed"]
     assert fixture["sections"]["failed"][0]["reason"], fixture["sections"]["failed"]
     done_row = [r for r in fixture["sections"]["completed"] if r["title"] == "Homework"][0]
@@ -837,6 +907,38 @@ with Patch(auto, jobs=lambda: [dict(j) for j in FIXTURE_JOBS],
         ("ZEN-124", ["CD"], 12), facts
     assert (facts["status"], facts["disambiguation"], facts["date"],
             facts["country"]) == ("Official", "Deluxe Edition", "2018-04-20", "GB"), facts
+    # THE ROW DETAIL the owner asked for, field by field, straight off the
+    # payload: what the job is doing right now, which peer's copy is in flight,
+    # the files really on disk, the query being asked, the candidates already
+    # refused and the album whose chain is still running. Every one of them is
+    # a field the SERVER published (`soulseek_auto`'s job state), never a value
+    # the client worked out for itself.
+    assert live["stage_text"] == "Downloading 12 file(s) from peer…", live["stage_text"]
+    assert live["progress"]["peer"] == "peer_one", live["progress"]
+    assert live["progress"]["peer_dir"] == "Music/Isles", live["progress"]
+    assert live["progress"]["phase"] == "Downloading", live["progress"]
+    assert live["progress"]["files_arrived"] == 5, live["progress"]
+    assert live["progress"]["files_done"] == 6, live["progress"]
+    asking = [r for rows in fixture["sections"].values() for r in rows
+              if r.get("job_id") == 8][0]
+    assert asking["progress"]["query"] == "Crimson Nova", asking["progress"]
+    assert asking["progress"]["state"] == "InProgress", asking["progress"]
+    assert asking["stage_text"] == "Searching Soulseek…", asking["stage_text"]
+    gave_up = [r for r in fixture["sections"]["failed"] if r.get("job_id") == 11][0]
+    assert gave_up["rejected_count"] == 2 and len(gave_up["rejected"]) == 2, gave_up["rejected"]
+    assert [a["username"] for a in gave_up["rejected"]] == ["peer_offline", "peer_nolog"], \
+        gave_up["rejected"]
+    assert "offline" in gave_up["rejected"][0]["reason"], gave_up["rejected"]
+    assert gave_up["rejected"][0]["dir"] == "Music/Broken", gave_up["rejected"]
+    assert "offline" in gave_up["reason"], gave_up["reason"]
+    # ...and a row that has SETTLED claims no running step at all: its outcome
+    # is in `reason`/`note`, and a step line would be work nobody is doing.
+    assert gave_up["stage_text"] == "", gave_up["stage_text"]
+    chained = [r for rows in fixture["sections"].values() for r in rows
+               if r.get("job_id") == 12][0]
+    assert chained["chain_running"] is True, chained
+    assert chained["stage"] == "importing", chained
+    assert chained["note"] == "", chained
     absent = [r for r in fixture["sections"]["needs_attention"] if r["title"] == "Absent"][0]
     assert absent["release"]["catalog_number"] == "PRO-CD-1", absent["release"]
     assert absent["stage"] == "needs_attention", absent
@@ -870,6 +972,14 @@ with Patch(auto, jobs=lambda: [dict(j) for j in FIXTURE_JOBS],
     stale = wish_row(7)
     assert stale and stale["stage"] == "queued", stale
     assert "MusicBrainz" not in stale["note"], stale
+    # A row that is WAITING says until when: the store's own `due_at` (the
+    # worker's next look) beside the failure's `retry_at`, both the server's —
+    # which is what the row renders as a countdown. And WHY it is waiting is
+    # the failure the store recorded.
+    assert stale["retry_at"] > real_time.time(), stale
+    assert stale["due_at"] > real_time.time(), stale
+    assert stale["reason"] == "peer went offline mid-transfer", stale["reason"]
+    assert stale["stage_text"] == "", "no live job behind this row"
     ended = wish_row(8)
     assert ended and ended["stage"] == "completed", ended
     assert "Imported into the library" in ended["note"], ended

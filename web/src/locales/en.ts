@@ -86,6 +86,28 @@ export default {
   "favorites.kind.artists": "Artists",
   "favorites.kind.playlists": "Playlists",
 
+  // —— Account (who the app is signed in AS) ——————————————————————————————
+  // —— The download queue's own rows (a wish, a job) ————————————————————
+  "queue.step": "Now: {text}",
+  "queue.asking": "Asking {label}: {title}",
+  "queue.peer": "{user} · {dir}",
+  "queue.rejected": "Rejected candidates ({count})",
+  "queue.wait_next": "Next search in {when}",
+  "queue.wait_retry": "Retrying in {when}",
+  "queue.chain_running": "In the library — the import pipeline is still running",
+  "queue.chain_running_brief": "the import pipeline is still running",
+
+  "account.header": "Account",
+  "account.title": "Signed in as {user}",
+  "account.server_account": "the server's own account",
+  "account.choose": "Switch to another user",
+  "account.switch": "Switch",
+  "account.switching": "Switching…",
+  "account.failed": "Could not switch: {error}",
+  "account.no_users": "No users yet — everything here belongs to the server's own account. Create users in Settings → Security.",
+  "account.retry": "Retry",
+  "account.loading": "Reading the user list…",
+
   // —— Sign-in screen (the server's auth gate) ——————————————————————————
   "auth.sign_in": "Sign in",
   "auth.username": "Username",

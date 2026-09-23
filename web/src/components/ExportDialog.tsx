@@ -3,7 +3,7 @@ import type { ReactNode } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { AlertTriangle, Download, FileOutput, HardDrive, HardDriveDownload, RotateCcw, Save, Trash2, Upload } from "lucide-react";
 import { api, IN_TAURI } from "../api";
-import type { ExportCodecSpec, ExportEq, ExportForm, ExportStructurePreview, ExportStructures } from "../api";
+import type { ExportCodecSpec, ExportEq, ExportFamily, ExportForm, ExportStructurePreview, ExportStructures } from "../api";
 import { toast } from "../store";
 import { fmtBytes, fmtDuration } from "../lib/fmt";
 import Segmented from "./Segmented";
@@ -61,11 +61,17 @@ export const BLANK_FORM: ExportForm = {
   lyrics: "embedded",
   eq_profile: "",
   clean_tags: true,
-  /* An album export carries audio: no .m3u8, no cover.jpg, no rip evidence
-   * (server.exporter.EXPORT_DEFAULTS / mlo.config export_playlists,
-   * export_sidecars — the cover travels embedded). Both stay available as an
-   * opt-in for a device that wants them. */
   playlists: false,
+  /* WHICH files a run writes (server.exporter.FILE_FAMILIES): the tracks
+     alone, which is what an export has always written — no .m3u8, no
+     cover.jpg, no rip evidence (the cover travels EMBEDDED). The dialog's
+     checkbox group below is this list; /api/export/defaults serves the
+     resolved one, so a config that still holds only `export_sidecars` opens
+     showing the set that switch stands for. */
+  copy_files: ["audio"],
+  /* The switch `copy_files` replaced: the run still honours it when no file
+     selection is saved, and a saved config from before this field exists
+     carries it. The form itself no longer writes it. */
   sidecars: false,
   manifest: false,
   verify: true,
@@ -174,6 +180,10 @@ export interface ExportOptions {
   /** The folder-structure menu and the grammar a custom structure is written
    *  in, as the server publishes them (server/exporter.structure_menu). */
   structures: ExportStructures | undefined;
+  /** The file families a run can be asked to copy — the exporter's own table
+   *  (GET /api/export/files, server.exporter.FILE_FAMILIES), which is what the
+   *  "What gets copied" checkboxes render. */
+  fileFamilies: ExportFamily[];
   /** Effective kbps of the chosen codec+quality, or null when unpredictable. */
   kbps: number | null;
   /** Predicted output size, or null when `seconds` is 0 or kbps unknown. */
@@ -224,6 +234,7 @@ export function useExportOptions(paths: string[], seconds = 0, page?: ExportPage
   const { data: specs } = useQuery({ queryKey: ["exportCodecs"], queryFn: api.exportCodecs });
   const { data: savedDefaults } = useQuery({ queryKey: ["exportDefaults"], queryFn: api.exportDefaults });
   const { data: structures } = useQuery({ queryKey: ["exportStructures"], queryFn: api.exportStructures });
+  const { data: fileMenu } = useQuery({ queryKey: ["exportFiles"], queryFn: api.exportFileFamilies });
   const { data: eq } = useQuery({ queryKey: ["exportEq"], queryFn: api.exportEq });
 
   const [form, setForm] = useState<ExportForm | null>(null);
@@ -287,7 +298,7 @@ export function useExportOptions(paths: string[], seconds = 0, page?: ExportPage
       const extras = [
         r.skipped ? `${r.skipped} already there` : "",
         r.playlists ? `${r.playlists} playlist(s)` : "",
-        r.sidecars ? `${r.sidecars} sidecar file(s)` : "",
+        r.sidecars ? `${r.sidecars} file(s) beside the audio` : "",
         r.excluded_total ? `${r.excluded_total} file(s) left behind` : "",
         r.pruned ? `${r.pruned} removed from the device` : "",
       ].filter(Boolean).join(" · ");
@@ -333,7 +344,8 @@ export function useExportOptions(paths: string[], seconds = 0, page?: ExportPage
 
   return {
     f, set, setMany, customValue, setCustomValue, busy, spec, kbps, estBytes,
-    specs, structures, drives, selectedDrive, overCapacity, target, eq, paths,
+    specs, structures, fileFamilies: fileMenu?.families ?? [],
+    drives, selectedDrive, overCapacity, target, eq, paths,
     seconds, run, saveDefaults, resetDefaults,
     sourceKind: page?.sourceKind,
     setSourceKind: page?.setSourceKind,
@@ -343,8 +355,10 @@ export function useExportOptions(paths: string[], seconds = 0, page?: ExportPage
 
 /** The whole export option surface — where the files go, codec + quality,
  *  folder structure, artwork, tag compatibility, audio processing (ReplayGain
- *  and the equalizer), the files written beside the audio (playlists, sidecars,
- *  a checksum manifest), verification, concurrency and sync mode — plus the
+ *  and the equalizer), WHICH files a run copies (the file-family checkboxes,
+ *  server.exporter.FILE_FAMILIES), the files written beside the audio
+ *  (playlists, a checksum manifest), verification, concurrency and sync mode —
+ *  plus the
  *  run / save / reset row. The Export page and the per-page dialog both render
  *  exactly this, so the two can never drift apart.
  *
@@ -403,6 +417,17 @@ export function ExportOptionsPanel({ e, hint }: {
     }, 350);
     return () => { live = false; clearTimeout(timer); };
   }, [custom, script, ext]);
+
+  /* Tick/untick one file family, keeping the form's list in the SERVER's own
+   * table order — the order the checkboxes are drawn in — so a saved config
+   * and a re-opened form read the way the menu does. */
+  const toggleFamily = (key: string, on: boolean) => {
+    const chosen = new Set(f.copy_files);
+    if (on) chosen.add(key);
+    else chosen.delete(key);
+    set("copy_files", e.fileFamilies.map((fam) => fam.v).filter((v) => chosen.has(v)));
+  };
+
   return (
     <div className="min-w-0">
       {hint && <div className="text-[11px] text-zinc-500 mb-3">{hint}</div>}
@@ -761,6 +786,42 @@ export function ExportOptionsPanel({ e, hint }: {
           : ""}
       </div>
 
+      {/* ---- what gets copied ------------------------------------- */}
+      {/* WHICH files a run writes, ticked one by one. The list IS the server's
+          own table (server.exporter.FILE_FAMILIES, GET /api/export/files): the
+          checkboxes, the sentence a refused selection comes back with and the
+          engine's own copy pass are one vocabulary, so a tick the run would
+          ignore cannot be drawn, and what the run reports as left behind is
+          exactly what was not ticked. */}
+      <div className="text-xs font-bold text-zinc-300 mt-4 mb-2">What gets copied</div>
+      <div className="text-[11px] text-zinc-500 mb-2">
+        Everything an export writes, family by family. A family you leave
+        unticked stays in the library and is named in the run report — never
+        dropped in silence.
+      </div>
+      {!e.fileFamilies.length && (
+        <div className="text-[11px] text-zinc-600">Loading the file families…</div>
+      )}
+      {e.fileFamilies.map((fam) => (
+        <Opt
+          key={fam.v}
+          checked={f.copy_files.includes(fam.v)}
+          onChange={(on) => toggleFamily(fam.v, on)}
+          label={fam.label}
+          hint={fam.hint}
+        />
+      ))}
+      {!f.copy_files.length && (
+        <div className="flex items-start gap-2 mt-2 text-[11px] text-amber-300 border border-amber-500/30 bg-amber-500/10 rounded-md p-2">
+          <AlertTriangle className="h-3.5 w-3.5 shrink-0 mt-0.5" />
+          <span>
+            Nothing is ticked, so there would be no files to copy. An export
+            with an empty selection is refused rather than writing an empty
+            folder — tick at least one kind of file.
+          </span>
+        </div>
+      )}
+
       {/* ---- files written beside the audio ----------------------- */}
       <div className="text-xs font-bold text-zinc-300 mt-4 mb-2">Files written beside the audio</div>
       <Opt
@@ -768,12 +829,6 @@ export function ExportOptionsPanel({ e, hint }: {
         onChange={(v) => set("playlists", v)}
         label="Write .m3u8 playlists"
         hint="One per exported album, plus all.m3u8 for the whole export — UTF-8 with relative paths and durations."
-      />
-      <Opt
-        checked={f.sidecars}
-        onChange={(v) => set("sidecars", v)}
-        label="Copy covers, lyrics, cue, log, AccurateRip and descriptions"
-        hint="cover.*, description.txt, .lrc, .cue, .log, the .accurip files (the album's rip verification) and the artist image travel with the tracks."
       />
       <Opt
         checked={f.manifest}

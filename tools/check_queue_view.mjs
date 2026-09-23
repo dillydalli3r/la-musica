@@ -93,7 +93,7 @@ try {
     // landed, and one the store has ENDED (tools/test_queue_view.py).
     ["queued section with its count", "Queued / searching · 4"],
     ["the deferred add's own stage label", "Searching MusicBrainz…"],
-    ["in-progress section with its count", "In progress · 2"],
+    ["in-progress section with its count", "In progress · 3"],
     ["needs-attention section", "Needs you · 2"],
     ["completed section with its count", "Completed · 3"],
     ["failed section with its count", "Failed · 2"],
@@ -132,6 +132,20 @@ try {
     ["a finished job's own clear", "Take this finished row off the queue — nothing in your library is deleted"],
     ["the per-item cancel", "Cancel this item"],
     ["cancelling a waiting row", "Take it back off the queue"],
+    // THE ROW DETAIL: what a row is doing, whose copy is arriving, what the
+    // search is asking, why it is still here and until when — each line
+    // rendered from the server's own field (see the fixture in
+    // tools/test_queue_view.py for where every value comes from).
+    ["the live step, in the job's own words", "Now: Downloading 12 file(s) from peer"],
+    ["the query the search is asking", "Crimson Nova"],
+    ["the peer whose copy is in flight", "peer_one · Music/Isles"],
+    ["the files the job's wait accepted on disk", "5/12 file(s)"],
+    ["the candidates already refused, with their reasons", "Rejected candidates (2)"],
+    ["a refusal's own reason", "User appears to be offline"],
+    ["a refusal's own peer", ">peer_nolog<"],
+    ["the failure's own reasons in its message", "peer_offline: User appears to be offline"],
+    ["a waiting row counts down to the failure's backoff", "Retrying in "],
+    ["the album whose import chain is still running", "In the library — the import pipeline is still running"],
   ];
   const missing = want.filter(([, text]) => !flat.includes(text));
   if (missing.length) {

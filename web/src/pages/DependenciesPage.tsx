@@ -363,8 +363,13 @@ export default function DependenciesPage() {
                   {t.upstream_version
                     ? <span className={t.update_available ? "text-amber-300" : undefined}>{t.upstream_version}</span>
                     : deps?.checking
-                      ? <span className="text-zinc-600 italic">Checking…</span>
-                      : <span className="text-zinc-600 italic">Unknown</span>}
+                      /* `cell-nowrap`: the cell's own `word-break` is happy to
+                         break this status word, and at phone width the ellipsis
+                         of "Checking…" wrapped to a line of its own (the cell
+                         has room for neither the label nor the version it
+                         stands for). A one-word status is one line. */
+                      ? <span className="cell-nowrap text-zinc-600 italic">Checking…</span>
+                      : <span className="cell-nowrap text-zinc-600 italic">Unknown</span>}
                 </td>
                 <td className="td text-[11px] text-zinc-600 font-mono truncate"
                     title={t.legacy_root

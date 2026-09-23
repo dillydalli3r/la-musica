@@ -3107,7 +3107,15 @@ class QueueRefused(AutoSlsk):
         raise RuntimeError("slskd refused the queue")
 
 
-REJECTED_MSG = "Every candidate was rejected (1 attempt(s) — see the log)."
+# The rejected-candidate dead end's sentence. It names the failure class and the
+# attempt count — and it carries the first reasons too, because the reasons used
+# to live only in the job's memory while the sentence pointed at a log that never
+# had them ("see the log" was a dead pointer, and the row's own survival is what
+# a user needs: a stuck release must explain itself).
+def is_rejected(text):
+    text = str(text)
+    return (text.startswith("Every candidate was rejected (1 attempt(s))")
+            and "slskd refused the queue" in text)
 _orph_wish_dir = tempfile.mkdtemp(prefix="mlo-rejected-wish-")
 _saved_wish_init = wishes_store._initialized
 try:
@@ -3142,7 +3150,7 @@ try:
         # got a byte spends an ATTEMPT (not an empty search), and carries the
         # backoff as `retry_at` so the next pass does not re-run it at once.
         assert (_wishes[0]["attempts"], _wishes[0]["not_found"]) == (1, 0), _wishes[0]
-        assert _wishes[0]["last_error"] == REJECTED_MSG, _wishes[0]
+        assert is_rejected(_wishes[0]["last_error"]), _wishes[0]
         assert _wishes[0]["retry_at"] - run.clock.now >= \
             wishes_store.retry_delay(dict(JOB_CFG), 1) - 1, (_wishes[0], run.clock.now)
 
@@ -3153,7 +3161,7 @@ try:
                       confirm_lossy=True, answer=False)
         assert [p["reason"] for p in run.prompts] == ["no_results"], run.prompts
         assert run.job["state"] == "error", run.job["state"]
-        assert run.job["result"]["error"] == REJECTED_MSG, run.job["result"]
+        assert is_rejected(run.job["result"]["error"]), run.job["result"]
         assert len(wishes_store.list_wishes()) == _count, "a declined offer still wished"
 
         # (c) the offer switched off: no prompt at all, and the same error. The
@@ -3165,7 +3173,7 @@ try:
                       cfg=dict(JOB_CFG, soulseek_auto_wish_prompt=False))
         assert run.prompts == [], run.prompts
         assert run.job["state"] == "error", run.job["state"]
-        assert run.job["result"]["error"] == REJECTED_MSG, run.job["result"]
+        assert is_rejected(run.job["result"]["error"]), run.job["result"]
 finally:
     wishes_store._initialized = _saved_wish_init
     shutil.rmtree(_orph_wish_dir, ignore_errors=True)
@@ -3287,5 +3295,33 @@ try:
 except RuntimeError as e:
     assert "already in your library" in str(e), e
 print("  ok the same release is never imported beside itself")
+
+# --------------------------------------------------------------------------- #
+# The failure a rejected acquisition hands over must NAME the reasons.
+#
+# That sentence is all that survives the job — the wish store persists it as the
+# row's error — and it used to end "see the log" while the reasons lived only in
+# the job's in-memory list (gone when the row is cleared) and nothing wrote them
+# to the log at all. WHICH peer and WHY is the whole diagnosis, so it travels
+# with the sentence now.
+_detail = soulseek_auto._rejection_detail([
+    {"username": "peerA", "dir": "/x",
+     "reason": "log rejected: needs 90, got 62 — trying the next candidate"},
+    {"username": "peerB", "dir": "/y",
+     "reason": "download incomplete: 3 file(s) missing/timed out"},
+    {"username": "peerC", "dir": "/z",
+     "reason": "verification failed (1 problem(s)): CRC mismatch — trying the next candidate"},
+    {"username": "peerD", "dir": "/w", "reason": "no files listed for this folder"},
+])
+assert "peerA: log rejected: needs 90, got 62" in _detail, _detail
+assert "peerB: download incomplete: 3 file(s) missing/timed out" in _detail, _detail
+assert "peerC: verification failed (1 problem(s)): CRC mismatch" in _detail, _detail
+# the rest is COUNTED, never dropped in silence
+assert "(+1 more in the log)" in _detail, _detail
+assert "peerD" not in _detail, _detail
+# "trying the next candidate" is the failure's own boilerplate, not a reason
+assert "trying the next candidate" not in _detail, _detail
+assert soulseek_auto._rejection_detail([]) == "", "no attempts must not invent a reason"
+print("  ok a rejection report names the peers and the reasons, and counts the rest")
 
 print("ok")
