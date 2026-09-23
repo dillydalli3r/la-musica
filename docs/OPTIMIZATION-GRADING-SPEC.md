@@ -3347,6 +3347,35 @@ screen; above `lg` the pane sits beside the artwork.
   `tools/test_wishes_pipeline.py` asserts both, and fails (due_at in the past)
   with the old guard.
 
+### 7.32 The sharing card tracks the scan it is reporting
+
+- **R212 — a scan in progress is polled until it settles, and a settled answer
+  is re-checked at the page's own cadence.** The card's own sentence is the
+  server's audit (`slskd is indexing the shared folders (x% done)` /
+  `slskd is sharing N files in M folders`), so its truth is only as good as how
+  often it is asked for. The bug this settles (the owner's screenshot): the
+  shares query had **no refresh of any kind**, so the single fetch a rescan's
+  invalidation caused landed while slskd had indexed a fraction of the folders —
+  the card then read "…(0.0% done)" for the rest of the session while the log
+  lines printed under it went on to "Scanned 100% … Found 88 files". It now asks
+  every 1.5 s while `scan.scanning`/`scan.pending` and every 15 s otherwise (the
+  cadence the rest of that page uses), so a scan started behind the card's back
+  — a save in another tab, slskd restarting, the share watcher — is noticed too.
+  Verified against a slskd reporting a live scan: the card went from "indexing
+  … (99.7% done)" to "sharing 88 files in 6 folders" with no user action, six
+  fetches in 45 seconds.
+- **R213 — the port probe answers on a network with no UPnP device.**
+  `mlo.portmap.read_port` called `pmp_external_address(gw, …, pmp_port=…)` — a
+  keyword that function does not take — so the read raised `TypeError` and
+  `GET /api/soulseek/port-check` (the Soulseek tab's **Test port**, and the
+  endpoint `README.md` sends a user to when a peer cannot reach the share)
+  answered **500 on every install**, gateway or no gateway — precisely at the
+  moment it is the only tool for the job. The call passes the parameter the
+  function declares, and the no-device path is pinned against the REAL discovery
+  and the REAL NAT-PMP client, nothing stubbed: the suite's other cases replace
+  `portmap.read_port` wholesale, which is how a broken read shipped in the first
+  place.
+
 ## 8. Recommended runbook
 
 Nothing here is a substitute for the app's own Dependencies page: run it first

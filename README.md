@@ -1,6 +1,6 @@
 # la musica
 
-**v3.22.1** — a self-hosted app that *manages, optimizes, audits, grades and
+**v3.22.2** — a self-hosted app that *manages, optimizes, audits, grades and
 plays* your music library, from the browser, a desktop window or a phone.
 
 **la musica** (formerly Music Library Optimizer) is a FastAPI backend plus a

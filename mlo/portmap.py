@@ -844,7 +844,7 @@ def read_port(port, *, ip="", gateway="", timeout=1.5, ssdp_addr=SSDP_ADDR,
     if igd is None:
         gw = gateway or default_gateway()
         wan = pmp_external_address(gw, timeout=min(timeout, 1.0),
-                                   pmp_port=pmp_port) if gw else ""
+                                   port=pmp_port) if gw else ""
         why = _joined(errors) or (f"no device answered the UPnP search on "
                                   f"{ssdp_addr}:{ssdp_port}")
         # A gateway that answers NAT-PMP can state its WAN address but still

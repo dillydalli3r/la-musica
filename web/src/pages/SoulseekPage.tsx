@@ -3140,7 +3140,23 @@ const AUDIT_TONE: Record<string, string> = {
  * .mlo/downloads / .mlo/trash) are filtered server-side and never shared. */
 function SharingCard({ running }: { running: boolean }) {
   const qc = useQueryClient();
-  const { data } = useQuery({ queryKey: ["soulseekShares"], queryFn: () => api.soulseekShares() });
+  // Polling is the point here, not a nicety: a rescan invalidates this query
+  // ONCE, and that single answer lands while slskd has indexed a fraction of
+  // the folders — so the card read "slskd is indexing the shared folders
+  // (0.0% done)" and never moved again, while the log lines printed under it
+  // went on to "Scanned 100% … Found 88 files" (the owner's report, screenshot
+  // and all). A running scan is tracked closely; a settled one is re-checked at
+  // the same cadence the rest of this page uses, so a scan started behind the
+  // card's back (a save in another tab, slskd restarting, the share watcher)
+  // does not leave it claiming the last answer forever.
+  const { data } = useQuery({
+    queryKey: ["soulseekShares"],
+    queryFn: () => api.soulseekShares(),
+    refetchInterval: (query) => {
+      const audit = (query.state.data as { audit?: SlskShareAudit } | undefined)?.audit;
+      return audit?.scan?.scanning || audit?.scan?.pending ? 1500 : 15000;
+    },
+  });
   const [dirs, setDirs] = useState<string[] | null>(null);
   const [newDir, setNewDir] = useState("");
   const [busy, setBusy] = useState(false);

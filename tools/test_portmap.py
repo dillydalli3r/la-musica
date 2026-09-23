@@ -990,4 +990,24 @@ finally:
 
 print("ok  the mapping follows the client: made at start, replaced when the port "
       "changes, removed when the switch goes off, never blocking the start")
+
+# --------------------------------------------------------------------------- #
+# The read must SURVIVE a network with no UPnP device and a gateway that will
+# not talk NAT-PMP — the ordinary case on a router with UPnP switched off, and
+# the one the "Test port" probe exists to explain. `read_port` called
+# `pmp_external_address(gw, ..., pmp_port=...)`, a keyword that function does not
+# take, so the whole read raised `TypeError` and the probe the README points
+# users at answered 500 on EVERY install, gateway or no gateway. Nothing below
+# is stubbed: real discovery against a closed port, the real NAT-PMP client
+# against a gateway that answers nothing.
+no_gateway = portmap.read_port(
+    50000, gateway="127.0.0.1", timeout=0.3, ssdp_addr="127.0.0.1",
+    ssdp_port=closed_udp_port(), pmp_port=closed_udp_port())
+assert isinstance(no_gateway, dict), no_gateway
+assert no_gateway["listen_port"] == 50000, no_gateway
+assert no_gateway["state"] in ("no_gateway", "unsupported"), no_gateway
+assert any("no device answered" in " ".join(map(str, row.values()))
+           for row in no_gateway["attempts"]), no_gateway
+print(" ok  a read with no UPnP device answers a report instead of raising")
+
 print("ok")
