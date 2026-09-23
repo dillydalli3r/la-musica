@@ -243,8 +243,12 @@ _FORCE_KEYS = {
     13: ("force_lyrics",),
     # 15 rewrites a manifest that already exists (otherwise it is left alone).
     15: ("force_tracklist",),
-    # 16 re-analyses every track, tagged or not — the same flag script 8's
-    # mood stage answers to.
+    # 16 re-analyses every track, tagged or not. Its OWN flag: script 8's mood
+    # stage decides with `force_auto_tag` (it is one stage of the AutoTag pass,
+    # and "8 · AutoTag re-run" is what re-runs it), so ticking 16 re-times the
+    # MOOD/ENERGY of the library without also re-running the advisory and
+    # instrumental work of script 8 — and unticking it leaves that stage alone.
+    # The two flags meet in `mlo/moods.apply_mood_tags`, never in one key.
     16: ("force_mood",),
     # 17 re-transforms tracks that already carry a stored transform.
     17: ("force_xlit",),
@@ -305,8 +309,16 @@ def _apply_force(cfg, force, sid=None):
     if force is None:
         return
     if isinstance(force, bool):
-        for key in _FORCE_KEYS.get(sid, ()):
-            cfg[key] = force
+        # A bare flag means "this script, on/off" for a single run and "the
+        # whole chain" for a chain — `_run_chain_locked` applies force once with
+        # sid=None, where "this script's own flag" has no single answer. That
+        # case used to be a silent no-op (`_FORCE_KEYS.get(None, ())` is
+        # empty), so a `run_chain(..., force=True)` forced nothing at all while
+        # reporting the run as forced.
+        scopes = _FORCE_KEYS.values() if sid is None else (_FORCE_KEYS.get(sid, ()),)
+        for keys in scopes:
+            for key in keys:
+                cfg[key] = force
         return
     # Authoritative dict: clear first, then apply what was supplied.
     if sid is None:
@@ -692,27 +704,45 @@ def held_paths(cfg, targets):
     A scoped run holds its own targets — an import holds the album it is
     finishing, so a second chain over that album queues behind it while a
     chain over another album does not wait at all. An unscoped one — Run All,
-    an import chain with no target — reads and rewrites whatever it finds, so
-    it holds the library root itself: that is the claim a delete, a move or a
-    tag write is refused against while the scripts are running, and it is what
-    makes a library-wide run block every scoped one.
+    an import chain with no target — reads and rewrites whatever it finds: its
+    scripts discover their own albums from the music folder down
+    (``folder = config["music_folder"]`` in every sweep — `mlo.grader.
+    run_grade_library`, `mlo.loudness`, `mlo.autotag`, the lyric fetch), so it
+    holds the LIBRARY ROOT and every album that sweep finds OUTSIDE it.
 
-    The music folder is the fallback while the library root does not exist
-    (a fresh install, an emptied library): an unscoped run must still hold ONE
-    path, or two library-wide runs would have nothing to serialize on and
-    would both walk and rewrite the same library.
+    Those strays are the point of the second half. The library root is
+    ``<music folder>/Artists`` and the naming script files albums under it, but
+    nothing stops one living elsewhere in the music folder — filed by hand, by
+    another tool, or left behind by an import that failed halfway. A run that
+    walks the music folder rewrites those too, and holding the root alone left
+    them unlocked while a Run All was on them: a finish press, a bulk import or
+    an auto-import chain could hold the very album the sweep was grading and
+    both would write it. They are listed from the same walk the run itself
+    makes (`mlo.stats._find_albums`), so the claim and the run cannot disagree
+    about which albums are in the library. The ``.mlo`` state dirs are never
+    part of it (``SKIP_DIRS`` — the walk does not enter them), so a download or
+    a trash entry is not "in use" just because a sweep is going and the cap
+    prune keeps doing its work.
+
+    The music folder is what an unscoped run holds while the library root does
+    not exist: an unscoped run must still hold ONE path, or two library-wide
+    runs would have nothing to serialize on and would both walk and rewrite the
+    same library.
     """
     scope = targets if targets is not None else cfg.get("targets")
     paths = [os.path.normpath(str(t)) for t in (scope or []) if str(t).strip()]
     if paths:
         return paths
     folder = str(cfg.get("music_folder") or "").strip()
-    if not folder:
+    if not folder or not os.path.isdir(folder):
         return []
     root = library_root(folder)
-    if root and os.path.isdir(root):
-        return [root]
-    return [folder] if os.path.isdir(folder) else []
+    if not (root and os.path.isdir(root)):
+        return [folder]
+    key = os.path.normcase(os.path.abspath(root))
+    return [root] + [d for d in mlo_stats._find_albums(folder)
+                     if not os.path.normcase(os.path.abspath(d)).startswith(
+                         key + os.sep)]
 
 
 def run_label(ids):
@@ -777,6 +807,68 @@ def waiting_text(path, holder):
     return f"waiting for {who} — {name} is in use"
 
 
+@contextlib.contextmanager
+def claim_paths(paths, *, kind, label, wait=False, timeout=None, job=None,
+                bar=None):
+    """Hold *paths* for the block, under the run's own wait rule.
+
+    THE seam every run that rewrites an album goes through: a script chain
+    (:func:`run_chain`), an import (`server.imports.finish_album` — every path
+    of it, so the album is held from the first tag write and not only from the
+    first script), an auto-import's background chain. The claim is the gate, so
+    the run cannot start while another job holds what it is about to write:
+
+    * ``wait=True`` (imports, adds-to-library) queues, and SAYS so while it
+      waits — one frame naming the holder and the album, on the run's own row
+      and, when it has one, on the header bar — because a queued import that
+      shows nothing at all reads as a press that did nothing.
+    * ``wait=False`` (the user's own one-shot: ``/api/run``, the wizard's "Run
+      the import chain") is refused at once, with the claim's own sentence
+      naming the holder (:class:`RunBusy`; the routes answer 409) — someone is
+      at the keyboard, and queueing them behind the very job that is already
+      doing this work is what made a press look dead.
+
+    A claim that never happened leaves nothing behind: the row a waiting run
+    made for itself is forgotten with the refusal, so MAINTAIN keeps no ghost.
+    """
+    job = job or job_locks.current() or job_locks.new_job()
+    registered = False
+    if wait:
+        waiting_by = _waiting_on(paths, job)
+        if waiting_by is not None:
+            wanted, holder = waiting_by
+            if job_locks.current() != job:
+                # A job of this run's own: it needs a row to be listed in.
+                job_locks.register(job, kind=kind, label=label)
+                registered = True
+            text = waiting_text(wanted, holder)
+            if bar is not None:
+                _bar_join(bar)
+                _bar_frame(bar, 0, 0, text, job=job)
+            else:
+                job_locks.set_progress(job, 0, 0, text)
+    stack = contextlib.ExitStack()
+    try:
+        # Only the CLAIM is translated here: a PathLocked raised by the body is
+        # some other job's collision, not this run's, and stays one.
+        held = stack.enter_context(
+            job_locks.holding(paths, job=job, kind=kind, label=label,
+                              wait=wait, timeout=timeout))
+    except job_locks.PathLocked as e:
+        if registered:
+            job_locks.release(job)
+        # The claim's own sentence — "Album is in use by Import Album (job-4) —
+        # wait for it to finish, then retry" — names what to wait for, which "a
+        # script run is already in progress" could not. RunBusy is the type
+        # every caller already answers with 409 (`/api/run`,
+        # `/api/import/finish`) or "the chain could not start" (an import).
+        raise RunBusy(str(e)) from None
+    try:
+        yield held
+    finally:
+        stack.close()
+
+
 def run_chain(cfg, ids, targets=None, force=None, progress=None, wait=False,
               timeout=None, final=None):
     """Run *ids* in order against a COPY of *cfg*; report after every script.
@@ -816,14 +908,39 @@ def run_chain(cfg, ids, targets=None, force=None, progress=None, wait=False,
     auto-update (see :mod:`server.interrupt_recovery`): every script and every
     import chain funnels through here, so this one check is what stops the
     shutdown from STARTING work it would then have to kill.
+
+    And a library-wide run never SWEEPS an album parked for a person (spec
+    R163): while an import waits on an answer, the sweep is narrowed to the
+    albums that are not parked, with one log line naming what was left alone —
+    a run that names its own albums (the person's press, an import's own chain)
+    is not filtered (`server.import_autonomy.chain_scope` is the rule).
     """
     from server import interrupt_recovery
     if interrupt_recovery.is_shutting_down():
         raise RunBusy("the app is shutting down for an update — nothing can "
                       "start now; retry when it is back up")
-    # The claim (and with it the gate) is taken INSIDE the stack, so the
-    # refusal is translated here — a PathLocked raised by the body would be
-    # some other job's collision, not this run's, and stays one.
+    # A parked album is not swept (spec R163): while an import waits on a
+    # person, a library-wide run is narrowed to the albums that are not parked
+    # — the run says so — while a run that NAMES its albums (the person's press,
+    # an import finishing the album it names) runs as it always did. The scope
+    # is read the same way `held_paths` reads it below (`cfg["targets"]` is what
+    # `/api/run` sets for a scoped run).
+    from server import import_autonomy
+
+    _scope = targets if targets is not None else cfg.get("targets")
+    kept, dropped, held_note = import_autonomy.chain_scope(_scope, cfg)
+    if held_note:
+        log(held_note)
+    if dropped and not kept:
+        # Everything this sweep could touch is waiting on a person: there is no
+        # work it may do, and running the scripts over an empty scope would only
+        # report a walk that found nothing.
+        return []
+    if kept is not _scope:
+        targets = kept
+    # The claim (and with it the gate) is taken by claim_paths INSIDE the bar
+    # block below, so the refusal is translated there — a PathLocked raised by
+    # the body is some other job's collision, not this run's, and stays one.
     paths = held_paths(cfg, targets)
     label = run_label(ids)
     bar = _bar_context()
@@ -835,52 +952,27 @@ def run_chain(cfg, ids, targets=None, force=None, progress=None, wait=False,
         # The run's bar goes back with the run, however it ends — including on
         # a raise — so the header never keeps a finished run's slot.
         stack.callback(_bar_release, bar)
-        # A caller that QUEUES says so while it waits. `wait=True` is an import,
-        # and it can be minutes behind another job on the same album: with
-        # nothing published until its first script ran, the wait showed as no
-        # row of its own (MAINTAIN listed the job it was queued behind) and the
-        # header kept that job's numbers. One frame names what it waits for; the
-        # claim itself is still taken below, under the same wait/timeout rule.
-        waiting_by = _waiting_on(paths, job) if wait else None
-        registered = False
-        if waiting_by is not None:
-            path, holder = waiting_by
-            if job_locks.current() != job:
-                # A job of this run's own: it needs a row to be listed in.
-                job_locks.register(job, kind="scripts", label=label)
-                registered = True
+        # A caller that QUEUES says so while it waits (claim_paths): with
+        # nothing published until its first script ran, a waiting import showed
+        # no row of its own (MAINTAIN listed the job it was queued behind) and
+        # the header kept that job's numbers.
+        with claim_paths(paths, kind="scripts", label=label, wait=wait,
+                         timeout=timeout, job=job, bar=bar) as job:
+            # A run owns the surfaces from the moment it is really running, not
+            # from the moment its first script has built a bar: both the header
+            # bar and the run's own row are painted by the LAST frame that
+            # reached them, so a new run has to replace whatever the last
+            # producer left there (the import stages before it, a finished
+            # run's report) with ITS OWN zero state — otherwise the bar reads
+            # someone else's percentage while this run is still starting, which
+            # is what a "half-filled bar at the start of an import chain" was.
             _bar_join(bar)
-            _bar_frame(bar, 0, 0, waiting_text(path, holder), job=job)
-        try:
-            job = stack.enter_context(
-                job_locks.holding(paths, job=job, kind="scripts", label=label,
-                                  wait=wait, timeout=timeout))
-        except job_locks.PathLocked as e:
-            # A wait that timed out (or a one-shot run) never ran: the row this
-            # made for the wait is forgotten with it, so MAINTAIN keeps no ghost.
-            if registered:
-                job_locks.release(job)
-            # The claim's own sentence — "Album is in use by Import Album
-            # (job-4) — wait for it to finish, then retry" — names what to wait
-            # for, which "a script run is already in progress" could not.
-            # RunBusy is the type every caller already answers with 409
-            # (`/api/run`) or "the chain could not start" (an import).
-            raise RunBusy(str(e)) from None
-        # A run owns the surfaces from the moment it is really running, not
-        # from the moment its first script has built a bar: both the header bar
-        # and the run's own row are painted by the LAST frame that reached them,
-        # so a new run has to replace whatever the last producer left there
-        # (the import stages before it, a finished run's report) with ITS OWN
-        # zero state — otherwise the bar reads someone else's percentage while
-        # this run is still starting, which is what a "half-filled bar at the
-        # start of an import chain" was.
-        _bar_join(bar)
-        done, total, text, steps = run_start_frame(ids)
-        if text:
-            _bar_frame(bar, done, total, text, job=job, steps=steps)
-        return _run_chain_locked(cfg, ids, targets=targets, force=force,
-                                 progress=progress, final=final, job=job,
-                                 bar=bar)
+            done, total, text, steps = run_start_frame(ids)
+            if text:
+                _bar_frame(bar, done, total, text, job=job, steps=steps)
+            return _run_chain_locked(cfg, ids, targets=targets, force=force,
+                                     progress=progress, final=final, job=job,
+                                     bar=bar)
 
 
 def _prune_empty_target_dirs(cfg):
@@ -1021,7 +1113,8 @@ def _take_claimed(claimed, names, live):
     return ""
 
 
-def _follow_moved_targets(cfg, audio_names, claimed=(), misses=None):
+def _follow_moved_targets(cfg, audio_names, claimed=(), misses=None,
+                          claim_job=None):
     """Re-point the chain at an album a script moved, and never lose it silently.
 
     Script 14 (beets) rewrites the tags and applies the naming script, so an
@@ -1053,6 +1146,17 @@ def _follow_moved_targets(cfg, audio_names, claimed=(), misses=None):
     directory is gone: beets only takes the audio, so the staging folder is
     still there afterwards, holding the covers / .cue / .log it left behind —
     which is exactly the empty-of-audio folder that made the tail a no-op.
+    Those files are the album's own, so they are moved into the folder the
+    album is in NOW before the chain carries on (mlo.layout.carry_album_files)
+    — a cover fetched before the chain ran must not be left one folder behind
+    the album it was fetched for.
+
+    The run's CLAIM follows the same move (*claim_job*, see
+    :func:`job_locks.move`): the chain holds the folder the audio has left, and
+    the album it is still rewriting — tags, covers, the grade — is at its new
+    path. Both halves matter: the new folder is claimed before the next script
+    writes a byte into it, and the emptied one is let go instead of staying
+    "in use" for the rest of the run.
     """
     if cfg.get("targets") is None:
         # A LIBRARY-WIDE run has no targets to follow: every script in it
@@ -1092,6 +1196,39 @@ def _follow_moved_targets(cfg, audio_names, claimed=(), misses=None):
             moved = _find_moved_album(names, str(cfg.get("music_folder") or ""))
         if moved:
             log(f"Album moved: {t} → {moved}; the rest of the chain follows it")
+            # The CLAIM follows too (server.job_locks.move): the run was holding
+            # the folder the audio has just left, and what it is really
+            # rewriting is the album — at its new path. Without this the album
+            # was unlocked under its new name for the whole tail of the chain
+            # (a folder that has just appeared is exactly what a second import,
+            # a re-download or a fresh run would claim), while the shell it left
+            # stayed "in use" until the run ended. Taken FIRST (the album is
+            # never unclaimed in between) and waited for, never stolen: the
+            # album is mid-rewrite, so a foreign holder is queued behind.
+            if claim_job:
+                try:
+                    job_locks.move(claim_job, t, moved)
+                except job_locks.PathLocked as e:
+                    log(f"WARNING: {e} — the album's new folder could not be "
+                        f"claimed, so another job may start on it")
+            # The album's OWN files travel with it, at the album root: the
+            # cover / description / expected-tracklist the steps before and
+            # around this mover wrote into the folder the audio just left
+            # (mlo.layout.carry_album_files is the one rule, the same one the
+            # organizer applies when it renames an album). Without it the album
+            # ends up one folder away from its own cover and the grade reports
+            # COVER on an album the import had just fetched artwork for.
+            try:
+                from mlo import layout as _layout
+                carried, left = _layout.carry_album_files(
+                    t, moved, music_folder=cfg.get("music_folder"), log=log)
+            except Exception:
+                traceback.print_exc()
+                carried, left = [], []
+            if left:
+                log(f"WARNING: {len(left)} file(s) of {os.path.basename(t)} "
+                    f"could not follow the album (" + ", ".join(left[:4])
+                    + " already exist in its folder) — left where they are")
             audio_names[moved] = names
             out.append(moved)
         else:
@@ -1140,7 +1277,7 @@ def _run_chain_locked(cfg, ids, targets=None, force=None, progress=None,
         result = run_script(sid, cfg, chain=(done, total), job=job, bar=bar)
         results.append(result)
         _follow_moved_targets(cfg, audio_names, _claimed_targets(result),
-                              misses)
+                              misses, claim_job=job)
         label = RUNNERS.get(sid, (f"Script {sid}", None))[0]
         # Every step ends announced, including one that never entered its
         # runner (a switched-off feature, an unavailable module): the header

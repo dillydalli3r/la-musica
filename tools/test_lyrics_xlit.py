@@ -87,7 +87,7 @@ ok(not xl.xlit_needs("Hello there, my old friend\nI sing for you",
                      {"lyrics_translation_langs": "en"})["transliteration"],
    "Latin lyrics are never romanized")
 ok(xl.xlit_needs("", {"lyrics_translation_langs": "en"}) ==
-   {"transliteration": False, "translation": False, "langs": []},
+   {"transliteration": False, "translation": False, "langs": [], "language": ""},
    "no lyrics, no work")
 # A translation is needed only when the lyrics are NOT already the reader's
 # own language — and the answer covers every configured language at once.
@@ -122,6 +122,39 @@ class FakeAudio:
 
 ok(xl.xlit_tag_suffix({}, "Привет", FakeAudio("uk")) == "uk-latn",
    "an explicit LANGUAGE tag wins over the script guess")
+
+print("== a DECLARED language decides; the text's own script vetoes it (R167) ==")
+ok(xl.normalize_lang("jpn") == "ja" and xl.normalize_lang("ja-JP") == "ja"
+   and xl.normalize_lang("JPN; ja") == "ja",
+   "MusicBrainz's 639-3 and a tag's own spelling both read as the app's code")
+ok(xl.normalize_lang("mul") == "" and xl.normalize_lang("und") == ""
+   and xl.normalize_lang("") == "" and xl.normalize_lang("zxx") == "",
+   "a code that states nothing is not a language")
+ok(xl.declared_language("und", "", "jpn") == "ja",
+   "…so the next source that does state one is what answers")
+# The case the function words cannot answer: a Latin-script text with no
+# stopwords the app knows reads as UNDECIDED, which used to mean "not foreign"
+# — no translation — because a guess was worse than silence. A declared
+# language is not a guess.
+TURKISH = "Bir şey söyle bana\nGözlerin anlatsın"
+ok(xl.xlit_needs(TURKISH, {"lyrics_translation_langs": "en"})["translation"] is False,
+   "an undecided Latin text is still not translated on a guess")
+_turk = xl.xlit_needs(TURKISH, {"lyrics_translation_langs": "en"}, declared="tr")
+ok(_turk["translation"] is True and _turk["language"] == "tr",
+   f"…but a declared language it IS translated from ({_turk})")
+ok(xl.xlit_needs(TURKISH, {"lyrics_translation_langs": "tr"}, declared="tr")["translation"] is False,
+   "and the reader's own language needs nothing, however foreign the letters look")
+# The LYRICS outrank the tag when the two disagree about the script: a wrong
+# declared language must never romanize or skip the wrong thing.
+_ja_de = xl.xlit_needs(_JA, {"lyrics_translation_langs": "en"}, declared="de")
+ok(_ja_de["language"] == "ja" and _ja_de["transliteration"] is True,
+   f"a German tag on Japanese lyrics is denied, not obeyed ({_ja_de})")
+ok(xl.detect_language("Привет, как дела", None, "ru") == "ru",
+   "Cyrillic is several languages, so only a declared one names it")
+ok(xl.detect_language("Привет, как дела", None) == "",
+   "…and with none declared the script alone does not guess")
+ok(xl.detect_language("君の名は", None) == "ja",
+   "kana still states its own language outright")
 
 print("== translation languages ==")
 ok(xl.translation_langs({"lyrics_translation_langs": " EN, de ;"}) == ["en", "de"],
@@ -335,6 +368,67 @@ else:
     ok(stats.get("stale_removed") == 0
        and open(stale_flac, "rb").read() == stale_before,
        "a second run finds nothing to remove and rewrites nothing")
+    # ---- the language question, asked once and STORED (R167) ------------ #
+    # A Latin-script track whose language nothing in the app can state: no
+    # LANGUAGE tag, no stopwords the vote knows. The model is asked — per
+    # TRACK — and its answer is written into the LANGUAGE tag, so grading and
+    # every later run read a stored fact instead of asking again.
+    turk_flac = os.path.join(run_dir, "04 turkish.flac")
+    _make_flac(turk_flac)
+    f = FLAC(turk_flac)
+    f["LYRICS"] = ["[00:01.00] Bir şey söyle bana\n[00:03.50] Gözlerin anlatsın"]
+    f.save()
+    asked, transformed = [], []
+
+    def fake_chat_lang(config, system, user):
+        if "identify the language" in system:
+            asked.append(user)
+            return "tr"
+        transformed.append(user)
+        return "\n".join(
+            f"{ln.split('. ', 1)[0]}. {ln.split('. ', 1)[1].upper()}"
+            for ln in user.splitlines() if ". " in ln)
+
+    ai.ai_chat = fake_chat_lang
+    try:
+        stats = xl.run_lyrics_xlit({
+            "music_folder": run_dir, "targets": [turk_flac],
+            "ai_base_url": "http://x/v1", "ai_model": "m",
+            "lyrics_format": "EMBEDDED", "lyrics_translation_langs": "en",
+            "lyrics_xlit_enabled": True, "lyrics_translate_enabled": True,
+        })
+    finally:
+        ai.ai_chat = real_chat
+    ok(len(asked) == 1, f"the language is asked once for the track ({len(asked)})")
+    ok(stats.get("language_set") == 1,
+       f"and the answer is counted as a stored language ({stats.get('language_set')})")
+    f = FLAC(turk_flac)
+    ok(str(f.get("LANGUAGE", [""])[0]).lower() == "tr",
+       f"the LANGUAGE tag carries it ({f.get('LANGUAGE')})")
+    ok(bool(f.get("TRANSLATION-EN")),
+       f"the translation it implies is written ({list(f.keys())})")
+    ok(stats.get("translated") == 1, f"and counted ({stats.get('translated')})")
+    # Second run: the tag answers the question this time, so the model is asked
+    # NOTHING new — not for the language, and not for the translation it
+    # already stored.
+    asked.clear()
+    transformed.clear()
+    before2 = open(turk_flac, "rb").read()
+    ai.ai_chat = fake_chat_lang
+    try:
+        stats2 = xl.run_lyrics_xlit({
+            "music_folder": run_dir, "targets": [turk_flac],
+            "ai_base_url": "http://x/v1", "ai_model": "m",
+            "lyrics_format": "EMBEDDED", "lyrics_translation_langs": "en",
+            "lyrics_xlit_enabled": True, "lyrics_translate_enabled": True,
+        })
+    finally:
+        ai.ai_chat = real_chat
+    ok(not asked and not transformed,
+       f"a re-run asks nothing at all ({len(asked)} language, {len(transformed)} transform)")
+    ok(stats2.get("language_set") == 0 and open(turk_flac, "rb").read() == before2,
+       "…and the file is byte-identical")
+
     shutil.rmtree(run_dir, ignore_errors=True)
 
 shutil.rmtree(TMP, ignore_errors=True)

@@ -220,3 +220,88 @@ def transform_lines(config, lines, mode, lang=""):
             except OSError:
                 pass
     return out
+
+
+# --------------------------------------------------------------------------- #
+# Which language a track's lyrics are in (script 17's own question).
+# --------------------------------------------------------------------------- #
+LANGUAGE_SYSTEM = (
+    "You identify the language song lyrics are written in. Answer with ONE "
+    "ISO 639-1 code — two lower-case letters, e.g. en, de, ja, fr — and "
+    "nothing else. Answer exactly \"und\" when the text is not in one "
+    "language, is a transliteration of another language, or is too short to "
+    "tell."
+)
+
+# How much of a lyric text the question needs: a verse states the language as
+# surely as the whole song, and the ask stays cheap on a 40-line chorus.
+_LANG_LIMIT = 1200
+
+
+def _lang_code(text):
+    """A model's answer as a bare language code, "" when it did not name one.
+
+    Deliberately strict — a wrong code is written into the track's own LANGUAGE
+    tag and then read back by grading, so a guess is worse than no answer. The
+    accepted shapes are the ones a model really produces for this question:
+    a bare code (``ja``), a trailing parenthesised one (``Japanese (ja)``), and
+    a leading one followed by a separator (``ja — Japanese``). "und" and the
+    other codes that state nothing (`mlo.lyrics_xlit.normalize_lang`) are "".
+    """
+    from mlo.lyrics_xlit import _MB_LANG, normalize_lang
+
+    raw = " ".join(str(text or "").split())
+    if not raw:
+        return ""
+    m = re.fullmatch(r"[`\"']?([A-Za-z]{2,3})[`\"']?\.?", raw)
+    if m is None:
+        m = (re.search(r"\(([A-Za-z]{2,3})\)", raw)
+             or re.match(r"([A-Za-z]{2,3})\s*[-–—:,]", raw))
+    if m is None:
+        return ""
+    code = m.group(1).lower()
+    if len(code) == 3 and code not in _MB_LANG:
+        # A three-letter token that is not a known ISO 639-3 code is a word
+        # ("the", "und") rather than an answer.
+        return ""
+    return normalize_lang(code)
+
+
+def detect_language(config, text):
+    """The language one lyric text is written in, as a bare code ("" when the
+    model cannot say) — disk-cached per text, so a track is asked about once.
+
+    The question the app cannot always answer itself: script and function words
+    separate most languages, and the two they cannot (`mlo.lyrics_xlit
+    .detect_language` — two Latin-script languages with no shared stopwords) are
+    exactly what a model reads reliably. The answer's caller WRITES it into the
+    track's LANGUAGE tag, so grading reads a stored fact and never asks a model
+    anything, and the next run's question is already answered.
+    """
+    body = str(text or "").strip()
+    if not body:
+        return ""
+    base, _key, model = ai_config(config)
+    if not base or not model:
+        return ""
+    lines = [body[:_LANG_LIMIT]]
+    cache = _cache_path("language", "", lines)
+    with _CACHE_LOCK:
+        try:
+            with open(cache, "r", encoding="utf-8") as fh:
+                cached = json.load(fh)
+            if isinstance(cached, list) and cached:
+                # A remembered NON-answer ("" / "und") is served too: it cost a
+                # request, and asking the same text again is the same answer.
+                return str(cached[0] or "")
+        except (OSError, ValueError):
+            pass
+    code = _lang_code(ai_chat(config, LANGUAGE_SYSTEM, lines[0]))
+    with _CACHE_LOCK:
+        try:
+            os.makedirs(_cache_dir(), exist_ok=True)
+            with open(cache, "w", encoding="utf-8") as fh:
+                json.dump([code], fh, ensure_ascii=False)
+        except OSError:
+            pass
+    return code

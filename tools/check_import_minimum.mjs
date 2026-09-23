@@ -176,7 +176,7 @@ lacks(covers.html, ["Genres from MusicBrainz", "Save genres", "Auto-import lyric
 // Both missing families are named, and the one this step does not answer is one
 // click away.
 has(covers.open, ["Cover art is still open for this album",
-                  "This import could not finish: Cover art, Advisory still missing",
+                  "Still missing: Cover art, Advisory",
                   "Advisory"],
     "the banner keeps the whole missing list and the step says which family is open");
 
@@ -201,7 +201,7 @@ lacks(advisory.collapsed.concat(advisory.open), ["Re-rate"],
       "the advisory step offers ONE advisory action");
 lacks(advisory.collapsed, ["already carries a value keeps it", "use Re-rate"],
       "and its title does not promise the fill-only behaviour it no longer has");
-has(advisory.open, ["This import could not finish: Cover art, Advisory still missing"],
+has(advisory.open, ["Still missing: Cover art, Advisory"],
     "the banner names both families on the advisory step too");
 
 // --------------------------------------------------------------------------- #
@@ -215,7 +215,7 @@ check("a step with nothing missing hides nothing", nothing.blocks === 0,
       "a disclosure appeared on a step with nothing missing");
 has(nothing.open, ["Save lyrics & instrumental", "Auto-import lyrics", "WDPK 83.7 FM"],
     "a step with nothing missing still renders its own controls");
-has(nothing.open, ["This import could not finish: Advisory still missing"],
+has(nothing.open, ["Still missing: Advisory"],
     "the banner still names the family that IS missing");
 
 const ordinary = await render(`/import?album=${encodeURIComponent(ALBUM)}&step=Advisory`);
@@ -271,8 +271,15 @@ check("the chain's ids head the grid, in the chain's own order",
 check("a script the chain does not name keeps its box, unticked",
       grid.some((b) => b.label === "Remux videos (MKV)" && !b.checked));
 lacks(finish.open, ["Run all scripts"], "the Finish step offers no Run All of its own");
-has(finish.open, ["Run ticked scripts", "Run the import chain"],
-    "the Finish step runs the ticked boxes or the chain itself");
+has(finish.open, ["Run ticked scripts"],
+    "the Finish step runs the ticked boxes — the album's own scripts");
+// …and it offers NO re-run of the import chain: that press went back through
+// `finish_album`, whose own steps (drop_arrived_values included) emptied the
+// four families an import decides and re-fetched them, undoing the work just
+// done by hand in these steps. The button is gone; the ticked boxes are what
+// Finish runs, and the album page can re-run any script on its own.
+lacks(finish.open, ["Run the import chain", "Run all scripts"],
+      "the Finish step offers no chain re-run and no library-wide Run All");
 
 // --------------------------------------------------------------------------- #
 // 5. the affordance, clicked — and the order the user reads

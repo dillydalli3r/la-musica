@@ -16,9 +16,10 @@ Config keys this module owns:
 
     import_auto_scripts     master switch for the post-import chain
     import_scripts          explicit chain ids ([] = DEFAULT_CHAIN)
-    import_autonomy         automatic (whole chain, then one prompt for what is
-                            still missing) | review (stop before the first
-                            family that needs a decision)
+    import_autonomy         automatic (whole chain, then one WARNING for what
+                            is still missing — the album is in the library
+                            either way, spec R166) | review (stop before the
+                            first family that needs a decision)
     import_review_families  families the user decides even in automatic mode
     import_bulk_concurrency albums processed at once by bulk_import
     import_acoustid         run the AcoustID release check on an import
@@ -124,15 +125,27 @@ def _without_reviewed(ids, cfg):
     return [sid for sid in ids if sid not in dropped]
 
 
-def _invalidate_caches():
+def _invalidate_caches(*paths):
     """The album's tags just changed — the tag/name caches are stale.
 
     Same two caches ``/api/run`` invalidates after a script run; a missing
     module (a stripped backend) is not a reason to fail an import.
+
+    *paths* are the folders that were written — the album an import just
+    finished, the albums a step touched. They are passed to
+    `tagcache.invalidate_album`, which drops only THOSE folders' cached tags and
+    cover: an import is one album's work, and clearing the whole tag cache for
+    it (every track of the user's library, re-parsed on the next page) is the
+    library-wide price this used to charge. With no path the whole cache goes,
+    which is what a caller that cannot name what it touched still gets.
     """
+    folders = [p for p in paths if str(p or "")]
     try:
         from server import tagcache
-        tagcache.invalidate_all()
+        if folders:
+            tagcache.invalidate_album(*folders)
+        else:
+            tagcache.invalidate_all()
     except Exception:
         pass
     try:
@@ -151,8 +164,8 @@ def _phase(text):
     the run's row kept whatever the last producer had left on them (measured on
     a throwaway album: 5.4 s from the press to the first script, all of it
     before the chain, none of it on screen — and a real album's lookups are
-    longer). "Run the import chain" then read as a press that did nothing,
-    which is what the owner reported.
+    longer). The chain press then read as one that did nothing, which is what
+    the owner reported.
 
     Published exactly like every other frame (``job_locks.publish``), so the row
     (MAINTAIN → In progress) and the bar can never disagree — the row is this
@@ -171,32 +184,25 @@ def _phase(text):
         traceback.print_exc()
 
 
-def _refuse_if_held(album_dir, wait):
-    """A caller that will not queue asks BEFORE it starts (see *wait*).
-
-    Everything between here and the chain writes to the album — the arrived
-    values are dropped, the links, the genres, the metadata and the cover art
-    are written — so a press whose album is already being finished has to hear
-    it NOW: the steps below would otherwise run against the very files the
-    other job is rewriting (measured: two presses on one album did their
-    tag-writing steps at the same time, unclaimed) and the user would watch the
-    lookups for as long as they take before being told the chain will not
-    start. The sentence is :func:`job_locks.refusal`'s — the same one the claim
-    itself raises — so the answer cannot differ from the one the chain would
-    have given.
-    """
-    if wait:
-        return
-    from server import job_locks
-    path = os.path.normpath(str(album_dir))
-    holder = job_locks.holder(path)
-    if holder:
-        raise script_runners.RunBusy(job_locks.refusal(path, holder))
-
-
 def finish_album(album_dir, cfg=None, progress=None, force=None, release=None,
                  wait=True):
     """Run the configured chain over ONE album folder.
+
+    THE claim of the whole import — not only of its chain — is taken here, for
+    the length of the call
+    (``script_runners.claim_paths``): every step below writes to the album (the
+    arrived values are dropped, the links, the genres, the metadata, the cover
+    art), so an album another job is on must be queued behind (``wait=True``,
+    every autonomous path) or refused at once with the claim's own sentence
+    (``wait=False``, the user's own press) — and the album has to be held from
+    the FIRST tag write, not from the first script. Claiming only at the chain
+    left the network lookups before it unprotected: two presses on one album
+    could drop arrived values and write metadata into the same files at the same
+    time, and an auto-import's background chain was unlocked for its whole
+    look-up phase. A script that MOVES the album takes the claim with it
+    (:func:`_resolve_moved_album`'s folder, and the chain's own follow), so the
+    steps after the chain — the pending marker, the cache invalidation, the
+    gap report — hold the album where it is NOW.
 
     The single call every import path makes after an album is on disk — the
     wizard's finish, the downloads page's one-click import, the sequential
@@ -292,10 +298,33 @@ def finish_album(album_dir, cfg=None, progress=None, force=None, release=None,
     happens for ages" this rule removes — so it answers at once instead
     (``RunBusy``, which the route returns as 409 naming the holder).
     """
-    _refuse_if_held(album_dir, wait)
-    _announce_import("import_started", album_dir, cfg=cfg)
     cfg = cfg or load_config()
     path = os.path.normpath(str(album_dir))
+    # The claim's own name in MAINTAIN → In progress: the run this import is
+    # about to do (the same wording a chain claims itself with, so a queued
+    # import is not renamed the moment its scripts start), or the album when
+    # this library configures no chain at all.
+    chain = chain_for(cfg)
+    label = (script_runners.run_label(chain) if chain
+             else "Import " + (os.path.basename(path.rstrip("\\/")) or path))
+    with script_runners.claim_paths([path], kind="import", label=label,
+                                   wait=wait):
+        # Announced only once the album is really this import's: a press that
+        # is refused (or a queued import still waiting) has not started, and a
+        # notification about it would be a lie either way.
+        _announce_import("import_started", album_dir, cfg=cfg)
+        return _finish_album(path, cfg, progress=progress, force=force,
+                             release=release, wait=wait)
+
+
+def _finish_album(path, cfg, progress=None, force=None, release=None,
+                  wait=True):
+    """The body of :func:`finish_album`, already holding *path*.
+
+    Split out for the claim: the album is held for the WHOLE import (see the
+    entry point), and every early return below — a review stop, a missing
+    folder, no configured chain — has to release it on the way out.
+    """
     out = {"path": path, "scripts": [], "chain": [], "errors": [],
            "chained": False, "chain_off": False, "note": "",
            "skipped_families": []}
@@ -482,7 +511,7 @@ def finish_album(album_dir, cfg=None, progress=None, force=None, release=None,
         # here as well: no chain is coming to end it later, and a folder the
         # user can never clear is a trap, not a warning.
         out["note"] = _with_families(_chain_off_note(cfg), out["skipped_families"])
-        _invalidate_caches()            # the steps above wrote tags/files
+        _invalidate_caches(path)        # the steps above wrote tags/files
         _clear_pending(path, cfg, chained=False, chain_off=True)
         return out
 
@@ -492,6 +521,21 @@ def finish_album(album_dir, cfg=None, progress=None, force=None, release=None,
     # done (an import hands in its staging folder; script 14 imports the album
     # into the library and renames it).
     final = []
+    # The chain's own Grade step (script 4 — LAST in the shipped
+    # `run_all_order`) grades this album seconds before this function has to
+    # report what it is missing, and `_report_gaps` would grade the very same
+    # album again. So the chain deposits what it graded in this private sink on
+    # its own copy of the config (`run_grade_library` fills it; nothing else
+    # reads it, and it never reaches a route or a payload) and the report reuses
+    # that grade instead of paying for a second one.
+    #
+    # Only when the answer would really BE the same: with a family the user kept
+    # for review, `mlo.import_policy.gaps` grades with that family's writer
+    # switched back on (see its own comment) — a different question, to which
+    # the chain's grade is not an answer. Then the sink is left empty and the
+    # report grades as it always did.
+    grade_sink = {}
+    sink_armed = not import_policy.review_families(cfg)
     try:
         # *wait*: an import must not skip its chain just because a UI run
         # happens to hold the library lock — it queues behind it instead, and
@@ -501,9 +545,20 @@ def finish_album(album_dir, cfg=None, progress=None, force=None, release=None,
         # library and renames every file, so the folder this function was
         # handed is not the album any more (`_follow_moved_targets` follows it
         # and this is how the import hears about it).
-        out["scripts"] = script_runners.run_chain(
-            run_cfg, chain, targets=[path], force=force, progress=progress,
-            wait=wait, final=final)
+        # The sink is armed on the run config ONLY for the chain call: the steps
+        # BEFORE the chain (links, genres, advisory, instrumentals, metadata,
+        # cover) are handed `run_cfg` too, and they must see exactly the config
+        # they always saw — a step's own arguments are part of its contract (a
+        # test double dispatches on them). Only the chain's Grade step reads this
+        # key, and it is gone again before anything else can see it.
+        if sink_armed:
+            run_cfg["_grade_sink"] = grade_sink
+        try:
+            out["scripts"] = script_runners.run_chain(
+                run_cfg, chain, targets=[path], force=force, progress=progress,
+                wait=wait, final=final)
+        finally:
+            run_cfg.pop("_grade_sink", None)
     except script_runners.RunBusy as e:
         if not wait:
             # A caller that asked NOT to queue (the wizard's own "Run the
@@ -522,14 +577,38 @@ def finish_album(album_dir, cfg=None, progress=None, force=None, release=None,
                      for r in out["scripts"] if r.get("error")]
     out["path"] = _resolve_moved_album(final[0] if final else out["path"],
                                        album_mbid, album_rgid)
-    _invalidate_caches()
+    # The album MOVED (script 14 imports it into the library and renames it):
+    # this import's claim follows it, so the steps below — the pending marker,
+    # the cache invalidation, the gap report — hold the album where it is NOW
+    # instead of a folder the audio has left. The chain's own follow has almost
+    # always done this already (`_follow_moved_targets` re-points the whole job,
+    # and this is then a no-op); this is the fallback for a mover that reported
+    # no destination AND a library walk that missed it — the case the chain
+    # ends with its own WARNING about.
+    if os.path.normcase(out["path"]) != os.path.normcase(path):
+        from server import job_locks
+        try:
+            # The import's OWN wait rule: an autonomous import queues for the
+            # album (it is already in flight), the user's press is answered
+            # instead of parked behind a foreign holder of the folder the album
+            # moved into.
+            job_locks.move(job_locks.current(), path, out["path"], wait=wait)
+        except job_locks.PathLocked as e:
+            print(f"[mlo] import: {e} — the album moved to "
+                  f"{os.path.basename(out['path'])} and is not claimed there")
+    # Scoped to the album that was imported (and to the folder it started in —
+    # a script may have moved it): the tag and cover caches for anything else in
+    # the library are still valid, so they stay.
+    _invalidate_caches(path, out["path"])
     # The configured chain has run, over the folder it left the album at — only
     # now is a framework album finished (`chained=True`), and only on the FINAL
     # path: the marker lives inside the album, so clearing it on a stale one
     # would leave the real folder pending forever.
     _clear_pending(out["path"], cfg, chained=True)
     out["note"] = chain_summary(out)
-    return _report_gaps(out, cfg, policy, out["path"])
+    return _report_gaps(out, cfg, policy, out["path"],
+                        grade=grade_sink.get(_dir_key(out["path"]))
+                        or grade_sink.get(_dir_key(path)))
 
 
 # The three families an import FETCHES with its own writers — the lyrics (the
@@ -686,7 +765,12 @@ def _announce_import(kind, path, out=None, cfg=None):
         traceback.print_exc()
 
 
-def _report_gaps(out, cfg, policy, path):
+def _dir_key(path):
+    """One album folder as the key a grade sink is looked up by."""
+    return os.path.normcase(os.path.normpath(str(path or "")))
+
+
+def _report_gaps(out, cfg, policy, path, grade=None):
     """End an import: report what it could not finish, and raise ONE prompt.
 
     The single place a finished import says what it is missing, called by both
@@ -698,7 +782,11 @@ def _report_gaps(out, cfg, policy, path):
 
     The gaps themselves come from `mlo.import_policy.gaps`, i.e. from the
     grader's own checks, so a prompt here and a grading failure there are the
-    same statement. ``out["autonomy"]`` is the caller's view of it:
+    same statement. *grade* is the grade the chain's own Grade step just
+    produced for this album, when it is an answer to the same question (see
+    `finish_album`): `gaps` then derives the families from it instead of
+    grading the album a second time for the same result. ``out["autonomy"]`` is
+    the caller's view of it:
 
         {mode, stopped, missing: {family: {...}}, prompt: {...}|None}
 
@@ -709,7 +797,8 @@ def _report_gaps(out, cfg, policy, path):
     _announce_import("import_done", path, out, cfg=cfg)
     gaps = import_policy.gaps(path, import_policy.effective_config(cfg),
                               steps={"advisory": out.get("advisory"),
-                                     "cover": out.get("cover")})
+                                     "cover": out.get("cover")},
+                              grade=grade)
     out["autonomy"] = {
         "mode": policy["mode"],
         "stopped": policy["stop"],
@@ -814,15 +903,15 @@ def fetch_advisories(paths, cfg=None, force=False):
     When NO source states anything, the track is not assumed clean:
     `mlo.advisory.decide_advisory` runs the rest of the ladder — an
     instrumental track is 0, then the configured AI provider judges the lyrics
-    (when one is set up and `advisory_ai_classify` is on), then the
-    multilingual lyrics word scan, and finally `advisory_fallback` decides
-    what an unstated advisory becomes (0 by default, 2, or nothing at all).
-    The AI is a SOURCE now, not a last resort: it is asked once per track
-    whether or not a provider stated a value, and its answer is ranked with
-    theirs by the app's one rule (1 beats 0 beats 2) — see
-    `mlo.advisory.decide_advisory`. Every answer it gives is recorded in that
-    track's `answers` beside the providers', while `sources` keeps naming the
-    one source that decided the value.
+    (when one is set up and `advisory_ai_classify` is on, and only when every
+    source came up with nothing at all), and finally `advisory_fallback`
+    decides what an unstated advisory becomes (0 by default, 2, or nothing at
+    all). A source that STATED a value ends the question: it is written as it
+    stands, with that source's provenance, and the AI is never asked to
+    second-guess it — see `mlo.advisory.decide_advisory`. When the AI does
+    answer, its answer is recorded in that track's `answers` beside the
+    providers', while `sources` keeps naming the one source that decided the
+    value.
     A file that already carries a valid 0/1/2 is ECHOED, not re-asked — a
     rating the user or an earlier run settled is not overruled behind their
     back — and the echo carries its provenance: `sources[path]` reads
@@ -849,16 +938,15 @@ def fetch_advisories(paths, cfg=None, force=False):
     reports as "Missing album tag ALBUMITUNESADVISORY".
 
     Returns ``{"updated": n, "values": {path: 0|1|2}, "sources": {path:
-    provider}, "answers": {path: {source: 0|1}}, "hits": {path: [word, ...]},
-    "albums": {folder: 0|1|2}, "album_updated": n, "gated": n, "status":
+    provider}, "answers": {path: {source: 0|1}}, "albums": {folder: 0|1|2},
+    "album_updated": n, "gated": n, "status":
     {path: "written"|"unchanged"|"existing"|"gated"}}``
-    — `updated`/`values`/`sources`/`answers`/`hits` are the per-track writes
-    (`sources` is who stated each value — "instrumental", "ai-lyrics",
-    "lyrics-scan" and "fallback" included, so a value NOBODY stated is
+    — `updated`/`values`/`sources`/`answers` are the per-track writes
+    (`sources` is who stated each value — "instrumental", "ai-lyrics", "ai"
+    and "fallback" included, so a value NOBODY stated is
     distinguishable from one a provider stated: the ladder's stage is named —
     and "existing-tag" when the reported value is the file's own), `answers`
-    names every source that answered the track, the AI included, `hits` is the
-    words the scan matched, `albums`/
+    names every source that answered the track, the AI included, `albums`/
     `album_updated` are the album tag derived from them, and `gated` counts
     the files the ADVISORY write gate refused. `status` says what happened to
     each reported value THIS run — `written` (the tag now holds what this run
@@ -875,7 +963,7 @@ def fetch_advisories(paths, cfg=None, force=False):
     cfg = cfg or load_config()
     if not cfg.get("advisory_auto_fetch", True):
         return {"updated": 0, "values": {}, "sources": {}, "answers": {},
-                "hits": {}, "status": {},
+                "status": {},
                 "skipped": "advisory_auto_fetch is off"}
     targets = []
     for p in paths or []:
@@ -897,7 +985,6 @@ def fetch_advisories(paths, cfg=None, force=False):
     values = {}
     sources = {}
     answers = {}
-    hits = {}
     status = {}
     for path in targets:
         try:
@@ -934,15 +1021,13 @@ def fetch_advisories(paths, cfg=None, force=False):
             )
             # The provider route stated something, or nobody did — the ladder
             # settles the second case (an instrumental is 0, the AI judges the
-            # lyrics when one is configured, the word scan is the fallback, and
-            # `advisory_fallback` is the last resort; None means "write
-            # nothing", which is a legitimate answer). The AI is asked once
-            # either way (issue #28: it is a source now), and it is told to
-            # record its answer into the route's own map, so the reply names
+            # lyrics when one is configured, and `advisory_fallback` is the last
+            # resort; None means "write nothing", which is a legitimate answer).
+            # A source that stated a value ends the question: it is written as
+            # it stands and the AI is NOT asked about it. When the AI does
+            # answer, it records it into the route's own map, so the reply names
             # every source behind the value — the AI included — while `sources`
-            # keeps naming the one that decided it. A provider's own 0 is not
-            # final either: the ladder escalates it to 1 when the words say
-            # explicit (mlo.advisory).
+            # keeps naming the one that decided it.
             track_answers = dict(route.get("answers") or {})
             decision = advisory.decide_advisory(
                 cfg, value=route.get("value"), source=route.get("source") or "",
@@ -965,8 +1050,6 @@ def fetch_advisories(paths, cfg=None, force=False):
                 sources[path] = decision["source"]
             if track_answers:
                 answers[path] = track_answers
-            if decision.get("hits"):
-                hits[path] = decision["hits"]
             if str(value) == current:
                 status[path] = STATUS_UNCHANGED
             elif af.set_tag("ITUNESADVISORY", str(value)):
@@ -987,7 +1070,7 @@ def fetch_advisories(paths, cfg=None, force=False):
         # anything", and a caller cannot act on a lie. Nothing was looked up
         # and nothing was written, so there is no album tag to derive either.
         return {"updated": 0, "values": {}, "sources": {}, "answers": {},
-                "hits": {}, "status": status, "albums": {}, "album_updated": 0,
+                "status": status, "albums": {}, "album_updated": 0,
                 "gated": gated,
                 "skipped": (f"{gated} track(s) not rated: writing "
                             "ITUNESADVISORY is off for their file type "
@@ -1030,9 +1113,11 @@ def fetch_advisories(paths, cfg=None, force=False):
             continue
 
     if updated or album_updated:
-        _invalidate_caches()
+        # Scoped to the albums this pass wrote (spec R155): every other album's
+        # cached tags are still valid, so they stay.
+        _invalidate_caches(*albums)
     out = {"updated": updated, "values": values, "sources": sources,
-           "answers": answers, "hits": hits, "status": status, "albums": albums,
+           "answers": answers, "status": status, "albums": albums,
            "album_updated": album_updated, "gated": gated,
            "album_gated": album_gated}
     if album_gated and not album_updated:
@@ -1101,7 +1186,7 @@ def fetch_instrumentals(paths, cfg=None):
         except Exception:
             continue
     if updated:
-        _invalidate_caches()
+        _invalidate_caches(*[os.path.dirname(p) for p in values])
     return {"updated": updated, "values": values, "evidence": evidence}
 
 
@@ -1313,7 +1398,10 @@ def apply_metadata(album_dir, cfg=None):
                 "description_title": found.get("title")}, kind="album", cfg=cfg)
 
     if any(out.values()):
-        _invalidate_caches()
+        # The album it wrote, and the artist folder when it filled one: the
+        # artist image and the description are cached art like an album's, so a
+        # write there is scoped the same way (spec R155).
+        _invalidate_caches(album_dir, folder)
     return out
 
 
@@ -1330,6 +1418,13 @@ def run_metadata_step(album_dir, cfg=None):
         return {"staged": False, "applied": {}}
     if cfg.get("metadata_review", False):
         artist, album = album_identity(album_dir, cfg)
+        if _staged_metadata_held(album_dir, cfg, artist, album):
+            # The ADD ran this same candidate fetch for the SAME artist and
+            # album and staged the result for the user to pick from (spec
+            # R154): fetching it again would replace one identical record with
+            # another. The staged entry stands, and the pick screen the user
+            # already has is the answer this step would produce.
+            return {"staged": True, "applied": {}}
         try:
             candidates = discovery.metadata_candidates(artist, album, cfg=cfg)
         except Exception:
@@ -1472,6 +1567,25 @@ def cover_candidates(album_dir, cfg=None, *, limit=None):
     if not artist and not album:
         return None
     album_id, rg = _album_mbids(album_dir)
+    if not rg and album_id:
+        # `_album_mbids` reads TAGS (and a pending marker) only, on purpose: it
+        # sits on hot paths that must stay offline. An album that states its
+        # RELEASE but not its release group therefore arrived here with no group
+        # to ask the Cover Art Archive about — and the group's own front cover is
+        # the REFERENCE the cover policy is built around (`mlo.cover_choice` rule
+        # 1), so the pick could only ever be a name-searched row or one edition's
+        # sleeve. The release's own MusicBrainz record states its group, and one
+        # cached lookup here buys the reference back.
+        #
+        # Scoped to this function for exactly that reason: no hot path pays for
+        # it, and a lookup that fails (an outage, a rate limit, a release
+        # MusicBrainz does not have) leaves the identity as it was — a cover
+        # search must never fail because of this.
+        try:
+            rel = intg.release_lookup(album_id) or {}
+            rg = str(rel.get("release_group_id") or "").strip().lower() or rg
+        except Exception:
+            pass
     found = intg.cover_search(
         artist, album, limit=limit or COVER_REVIEW_LIMIT,
         timeout=COVER_FETCH_TIMEOUT, cfg=cfg,
@@ -1487,6 +1601,25 @@ def cover_candidates(album_dir, cfg=None, *, limit=None):
     payload["album_id"] = album_id
     payload["release_group"] = rg
     return payload
+
+
+def _staged_metadata_held(album_dir, cfg, artist, album):
+    """Whether the ADD's staged METADATA candidates already answer this album.
+
+    With `metadata_review` on, the add staged the artist/description candidates
+    for the user to pick from (`discovery.metadata_candidates` — the image
+    chain plus the description chain, 3.0-5.3 s measured) and the import used to
+    fetch the same thing again. The staged entry IS that answer, so the step
+    only fetches again when the entry does not describe THIS album: the artist
+    and album the candidates were fetched for must be the ones this album has.
+    """
+    entry = staged_metadata(album_dir, cfg) or {}
+    if not (entry.get("candidates") or {}):
+        return False
+    have = (str(entry.get("artist") or "").strip().lower(),
+            str(entry.get("album") or "").strip().lower())
+    want = (str(artist or "").strip().lower(), str(album or "").strip().lower())
+    return have == want and any(have)
 
 
 def stage_cover_candidates(album_dir, payload, cfg=None):
@@ -1586,6 +1719,14 @@ def run_cover_step(album_dir, cfg=None):
     try:
         if _album_cover_present(album_dir):
             return out
+        # The candidates are ALWAYS ranked fresh here, and that is deliberate
+        # (spec R154): the staged review record the add leaves behind is a
+        # PICK SCREEN (any surface may restage it, it is found by folder name or
+        # MB id as well as by path, and it carries no proof of which search, for
+        # which album, produced it), so ranking THIS import's set would mean
+        # writing an image chosen from another search's rows — the pick must be
+        # the best of what exists for the album being imported, which is the one
+        # rule both modes share.
         payload = cover_candidates(album_dir, cfg)
         if payload is None:
             out["note"] = "no artist/album tags to search by"
@@ -2457,6 +2598,47 @@ def _stamp_release(album_dir, release, cfg):
             sum(1 for o in outcomes if o == "failed"))
 
 
+def _marker_links(album_dir, cfg=None):
+    """The RateYourMusic links the ADD already resolved for this album, or {}.
+
+    `imports.prefetch_links` runs the SAME resolver at add time (same switch,
+    same MB-relation first ladder) and records what RYM confirmed in the
+    framework marker, so an import that looks the links up again pays a second
+    time for an answer the app itself wrote down.
+
+    Read only while the marker still SPEAKS FOR this album, and only while the
+    user's switch is on: the marker must carry the resolved `links` (the
+    `prefetched` echo is accepted for a marker written before this existed) and
+    the release GROUP the album's own tags state — when they state one — must
+    be the group the marker was created with, so a marker left behind by a
+    different album that landed in the same folder hands nothing over. The
+    switch is checked here because `integrations.rym_links` is where it
+    normally short-circuits: off must keep writing NO auto-resolved link, and
+    that has to hold for the marker path too.
+    """
+    cfg = cfg if cfg is not None else load_config()
+    if not cfg.get("rym_links_auto", True):
+        return {}
+    try:
+        from mlo.paths import load_pending
+        info = load_pending(album_dir) or {}
+    except Exception:
+        return {}
+    if not info:
+        return {}
+    links = dict(info.get("links") or {})
+    echo = (info.get("prefetched") or {}).get("links") or {}
+    for key in ("album", "artist"):
+        links[key] = str(links.get(key) or echo.get(key) or "").strip()
+    if not (links["album"] or links["artist"]):
+        return {}
+    _album_id, rg = _album_mbids(album_dir)
+    marker_rg = str(info.get("release_group_id") or "").strip().lower()
+    if rg and marker_rg and rg != marker_rg:
+        return {}
+    return links
+
+
 def stamp_rym_links(album_dir, cfg=None):
     """Resolve and write the album's / artist's RateYourMusic links.
 
@@ -2499,14 +2681,29 @@ def stamp_rym_links(album_dir, cfg=None):
         return out                      # nothing missing: no lookup at all
 
     artist, album = _album_identity(album_dir)
-    # With the album's MusicBrainz id the lookup is a url-relation read on
-    # MusicBrainz — no RYM scrape, no cookie, no guess — so the id is offered
-    # first and the slug/search ladder is only the fallback.
-    links = intg.rym_links(
-        artist, album, cfg=cfg,
-        mbid=(_tag(files[0], "MUSICBRAINZ_RELEASEGROUPID")
-              or _tag(files[0], "MUSICBRAINZ_ALBUMID")))
-    out["note"] = links.get("note") or ""
+    # The ADD already resolved these links and recorded them in the framework
+    # marker (`prefetch_links` — the same resolver, the same switch, the same
+    # artist/album), and this step is where an import would ask for them a
+    # SECOND time: the lookup measured 2.7 s of the add's pre-fetch, re-paid at
+    # import for an answer the app itself wrote down. The TAGS are still
+    # written below; only the lookup is skipped, and only for a link the marker
+    # really carries for THIS album.
+    links = _marker_links(album_dir, cfg)
+    if links.get("album") and links.get("artist"):
+        out["note"] = "links already resolved when the album was added"
+    else:
+        # With the album's MusicBrainz id the lookup is a url-relation read on
+        # MusicBrainz — no RYM scrape, no cookie, no guess — so the id is offered
+        # first and the slug/search ladder is only the fallback.
+        found = intg.rym_links(
+            artist, album, cfg=cfg,
+            mbid=(_tag(files[0], "MUSICBRAINZ_RELEASEGROUPID")
+                  or _tag(files[0], "MUSICBRAINZ_ALBUMID")))
+        out["note"] = found.get("note") or ""
+        # A marker holding only ONE of the two is not a reason to throw that one
+        # away: the lookup fills the other, the marker keeps what it has.
+        links = {"album": found.get("album") or links.get("album"),
+                 "artist": found.get("artist") or links.get("artist")}
     if not have_album:
         out["album"] = links.get("album")
     if not have_artist:
@@ -2557,7 +2754,7 @@ def stamp_rym_links(album_dir, cfg=None):
     with ThreadPoolExecutor(max_workers=workers) as ex:
         out["written"] = sum(1 for ok in ex.map(_write_links, files) if ok)
     if out["written"]:
-        _invalidate_caches()
+        _invalidate_caches(album_dir)
     return out
 
 

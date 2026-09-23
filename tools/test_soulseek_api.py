@@ -1237,4 +1237,104 @@ _state["running"] = True
 srv_main._SLSK_SIG = None
 assert srv_main._soulseek_check() is False, "no clients → no push"
 
+# --------------------------------------------------------------------------- #
+# The transfer push (server/main.py)
+# --------------------------------------------------------------------------- #
+# The Downloads tab's bars are drawn from these frames instead of the page's
+# own poll (spec R120), so what they must get right is: a row only when it
+# MOVED, a resync only when the list changed SHAPE, the job block verbatim,
+# silence when nothing changed, and no slskd query at all with nobody watching.
+from server import soulseek_auto  # noqa: E402
+
+
+def _row(tid, done, state="InProgress", size=1000):
+    return {"id": tid, "filename": f"Music\\Album\\{tid}.flac", "size": size,
+            "state": state, "bytesTransferred": done,
+            "percentComplete": 100.0 * done / size, "averageSpeed": 1000.0}
+
+
+_tree = [{"username": "peer", "directories": [
+    {"directory": "Music\\Album", "files": [_row("a", 0), _row("b", 500, size=500)]}]}]
+reads = []
+
+
+def _downloads(cfg=None):
+    reads.append(1)
+    return _tree
+
+
+_real_dl, _real_jobs = soulseek.downloads_state, soulseek_auto.jobs
+_real_rows = soulseek_auto.jobs
+soulseek.downloads_state = _downloads
+_jobs = []
+soulseek_auto.jobs = lambda: _jobs
+
+pushed.clear()
+srv_main._LIVE = {"sig": None, "ids": frozenset(), "rows": {}}
+srv_main.progress_clients.add("dummy-watcher-client")
+
+try:
+    assert srv_main._live_transfers_check() is True, "a running transfer keeps the fast tick"
+    assert len(pushed) == 1, pushed
+    frame = pushed[0]
+    assert frame["type"] == "transfers" and frame["resync"] is True, frame
+    assert {f["id"] for f in frame["files"]} == {"a", "b"}, frame
+    assert frame["jobs"] == [], frame
+
+    # An unchanged tree pushes nothing — a stale bar is not news.
+    assert srv_main._live_transfers_check() is True, "still in flight"
+    assert len(pushed) == 1, "an unchanged tree must not re-push"
+
+    # Bytes move: only the row that MOVED rides along, and the list did not
+    # change shape, so this is not a resync.
+    _tree[0]["directories"][0]["files"][0] = _row("a", 250)
+    assert srv_main._live_transfers_check() is True
+    assert len(pushed) == 2 and pushed[1]["resync"] is False, pushed[1]
+    assert [f["id"] for f in pushed[1]["files"]] == ["a"], pushed[1]
+    assert pushed[1]["files"][0]["bytesTransferred"] == 250, pushed[1]
+
+    # A transfer appearing changes the list's shape → the page refetches.
+    _tree[0]["directories"][0]["files"].append(_row("c", 0, state="Queued"))
+    assert srv_main._live_transfers_check() is True
+    assert pushed[2]["resync"] is True, pushed[2]
+
+    # A job's progress block is handed over VERBATIM (the same dict the
+    # /api/soulseek/auto route and the queue rows are built from).
+    progress = {"phase": "download", "bytes": 250, "size": 1000, "percent": 25.0,
+                "files_done": 0, "files_arrived": 0, "files_total": 2,
+                "speed": 1000.0, "eta_s": 1, "files": []}
+    _jobs.append({"id": 7, "state": "running", "stage": "Downloading",
+                  "stage_key": "downloading", "progress": progress})
+    assert srv_main._live_transfers_check() is True
+    assert pushed[3]["jobs"][0]["progress"] is progress, pushed[3]
+
+    # Finished (with no job running): the flip itself still goes out on the
+    # fast tick, and the NEXT pass — nothing moving, nothing changed — drops to
+    # the idle cadence, where an unchanged queue sends nothing at all.
+    _jobs.clear()
+    _tree[0]["directories"][0]["files"] = [
+        _row("a", 1000, state="Completed, Succeeded"),
+        _row("b", 500, state="Completed, Succeeded", size=500),
+        _row("c", 0, state="Completed, Succeeded")]
+    assert srv_main._live_transfers_check() is True, "the flip rides the fast tick"
+    assert {f["id"] for f in pushed[4]["files"]} == {"a", "b", "c"}, pushed[4]
+    assert srv_main._live_transfers_check() is False, "settled → idle cadence"
+    assert len(pushed) == 5, "and nothing more is sent"
+
+    # A queued-only queue has no bytes to report: idle cadence, and still no
+    # frame once its state has been told.
+    _tree[0]["directories"][0]["files"] = [_row("a", 0, state="Queued")]
+    assert srv_main._live_transfers_check() is True, "its state is news once"
+    assert srv_main._live_transfers_check() is False, "queued ≠ moving"
+
+    # Nobody watching: no frame AND no daemon query.
+    srv_main.progress_clients.clear()
+    before = len(reads)
+    assert srv_main._live_transfers_check() is False
+    assert len(reads) == before, "no clients → slskd is not read at all"
+finally:
+    soulseek.downloads_state = _real_dl
+    soulseek_auto.jobs = _real_jobs
+    srv_main._LIVE = {"sig": None, "ids": frozenset(), "rows": {}}
+
 print("ok")

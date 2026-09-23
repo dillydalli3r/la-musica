@@ -121,10 +121,12 @@ RUN_ALL_SURFACES = {
     "web/src/pages/LibraryPage.tsx": "run_all_order",
     "web/src/pages/OptimizationPage.tsx": "run_all_order",
     "web/src/pages/SettingsPage.tsx": "run_all_order",
-    # The wizard's step renders the `run_all_order` field declared in
-    # lib/configMeta.ts (its `value` arrives already loaded), so the canonical
-    # names it works with here are the shared TS list and its anchors.
-    "web/src/pages/SetupPage.tsx": "DEFAULT_RUN_ALL",
+    # The first-run setup wizard is deliberately NOT here: its cut left it with
+    # no script surface at all (it asks for the folder, the account, the tools,
+    # the keys and the Soulseek login, and the import chain's own ids live in
+    # the import wizard, declared above). A first-run knob for the Run All
+    # order was one of the 13 steps the owner asked to drop — Settings still
+    # renders it (`run_all_order`, above).
 }
 
 # The surfaces that offer ONE script at a time, and the registry each takes its
@@ -255,6 +257,116 @@ def force_keys():
     block = re.search(r"_FORCE_ALIASES = \{(.*?)\n\}", server, re.S)
     mapped = set(re.findall(r'"(\w+)":', block.group(1))) if block else set()
     return set(keys), mapped
+
+
+def force_callers(web_files):
+    """Every force dict a UI caller sends must name a key the server accepts.
+
+    The four "Force …" actions in `TagActionsMenu` shipped CONFIG-key names
+    (`{force_audit: true}`) while `_apply_force` accepts only the short UI keys
+    and script ids. An unknown key is not merely ignored: the authoritative
+    pass CLEARS every flag it does not name, so those actions ran with the very
+    force they asked for turned off — "Force re-audit" re-audited nothing.
+    A config-key spelling in a call is therefore a failure, not a style
+    question, and the short keys must actually be the ones in use.
+    """
+    mapped = force_keys()[1]
+    bad_keys, bad_spellings = [], []
+    for path in web_files:
+        src = read(path)
+        # `{ force_x: true }` in a call: the config-key spelling that was
+        # silently dropped. `force_*` inside SettingsPage's own key LISTS is
+        # legitimate (those ARE config keys, saved, not sent to /api/run).
+        for name in re.findall(r"\{\s*(force_\w+)\s*:\s*(?:true|false)", src):
+            bad_spellings.append(f"{path}: {name}")
+        for call in re.finditer(r"api\.run\(([^;]*?)\)", src, re.S):
+            for key in re.findall(r"\{\s*(\w+)\s*:\s*(?:true|false)", call.group(1)):
+                if key not in mapped:
+                    bad_keys.append(f"{path}: {key}")
+    return bad_keys, bad_spellings
+
+
+def force_bare_bool_covers_a_chain():
+    """A bare True/False must cover the WHOLE chain, not nothing.
+
+    `_run_chain_locked` applies force once with `sid=None`; the bool branch
+    used to look up `_FORCE_KEYS.get(None, ())`, which is empty, so a
+    `run_chain(..., force=True)` forced nothing while reporting the run as
+    forced."""
+    body = re.search(r"if isinstance\(force, bool\):(.*?)\n    return", read("server/script_runners.py"), re.S)
+    block = body.group(1) if body else ""
+    return bool(block) and "_FORCE_KEYS.values() if sid is None" in block
+
+
+def check_apply_force(check):
+    """The force contract, EXECUTED rather than read.
+
+    The static checks above can see the shape of `_apply_force`; these pin what
+    it does: a supplied dict is authoritative and complete (so an unchecked
+    script cannot stay forced by a saved switch), both spellings the UI may use
+    land on the same config flag, a config-key spelling does NOT (it is dropped,
+    and the clear leaves the flag off — the bug the Re-run & overwrite menu
+    shipped), a bare bool covers a whole chain, and None changes nothing."""
+    sys.path.insert(0, ROOT)
+    from server import script_runners as sr
+
+    def fresh():
+        cfg = {key: False for keys in sr._FORCE_KEYS.values() for key in keys}
+        cfg["layout_apply"] = True  # the one flag whose saved value is ON
+        return cfg
+
+    def apply(force, sid=None):
+        cfg = fresh()
+        sr._apply_force(cfg, force, sid)
+        return cfg
+
+    keys = sorted({k for v in sr._FORCE_KEYS.values() for k in v})
+    off = apply(None)
+    check("force=None leaves the saved flags alone",
+          all(off[k] is False for k in keys if k != "layout_apply") and off["layout_apply"] is True,
+          str(off))
+    empty = apply({})
+    check("an empty force dict clears every flag, layout_apply included",
+          not any(empty.values()), str(empty))
+    short = apply({"flac": True})
+    check("a short UI key sets exactly its own flag",
+          short["force_reencode_flac"] is True and sum(short.values()) == 1, str(short))
+    by_id = apply({"3": True})
+    check("a script id sets the same flag as its short name",
+          by_id == short, f"id={by_id}")
+    spelled = apply({"force_reencode_flac": True})
+    check("a config-key spelling is dropped, not honoured",
+          not any(spelled.values()), str(spelled))
+    whole = apply(True)
+    check("a bare True covers the whole chain",
+          all(whole[k] is True for k in keys), str(whole))
+    none_whole = apply(False)
+    check("a bare False clears the whole chain",
+          not any(none_whole.values()), str(none_whole))
+    scoped = apply({"audit": True}, sid=5)
+    check("a single-script application only touches that script's flags",
+          scoped["force_audit"] is False, str(scoped))
+    scoped6 = apply({"audit": True}, sid=6)
+    check("...and applies it for the script that owns it",
+          scoped6["force_audit"] is True, str(scoped6))
+
+
+def import_paths_do_not_send_an_empty_force():
+    """No import entry point may send `{}` as its force dict.
+
+    A supplied dict is authoritative and complete, so `{}` means "every force
+    flag OFF" — `layout_apply` included, which left the import chain's layout
+    pass a read-only report on the album it had just imported. The bulk queue
+    and the Soulseek import pass `force=None` (saved switches); the wizard's
+    re-run and the row menu were the two paths that disagreed, and a defaulted
+    `force = {}` parameter is how that happened."""
+    src = read("web/src/api.ts")
+    signature = re.search(r"importFinish:\s*\(([^)]*)\)", src)
+    defaulted = bool(signature) and "= {}" in signature.group(1)
+    callers = re.findall(r"importFinish\(([^)]*)\)", read("web/src/pages/ImportWizard.tsx")
+                         + read("web/src/components/TagActionsMenu.tsx"))
+    empties = [c for c in callers if re.search(r",\s*\{\s*\}", c)]
+    return defaulted, empties
 
 
 def force_defaults_are_false():
@@ -450,6 +562,18 @@ def main():
     check("one-shot force treats unselected keys as off",
           not fallbacks and not wrong,
           f"falls back to saved config: {fallbacks + wrong}")
+    bad_keys, bad_spellings = force_callers(web_run_callers())
+    check("every force a UI caller sends is a key the server accepts",
+          not bad_keys, str(bad_keys))
+    check("no caller spells a force as its config key",
+          not bad_spellings, str(bad_spellings))
+    check("a bare force covers a whole chain",
+          force_bare_bool_covers_a_chain(), "the bool branch must span sid=None")
+    defaulted, empties = import_paths_do_not_send_an_empty_force()
+    check("no import path sends an empty force dict",
+          not defaulted and not empties,
+          f"defaulted={defaulted} empty-call={empties}")
+    check_apply_force(check)
 
     print("run-all migration")
     check_run_all_migration(check)

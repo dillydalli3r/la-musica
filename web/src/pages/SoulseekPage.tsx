@@ -8,8 +8,10 @@ import {
   MessageSquare, X, Wand2, CheckCheck, MessageCircleQuestion,
 } from "lucide-react";
 import { api } from "../api";
-import type { ImportRunStatus, ReadyAlbum, SlskAutoFile, SlskStatus, SlskAutoProgress, SlskConversation, SlskDownloads, SlskMessage, SlskPortCheck, SlskQueueItem, SlskQueueScope, SlskSearchProgress, SlskTransfer, StagingEntry, StagingRoot, StagingRootId } from "../api";
+import type { ImportRunStatus, ReadyAlbum, SlskAutoFile, SlskAutoJob, SlskStatus, SlskAutoProgress, SlskConversation, SlskDownloads, SlskMessage, SlskPortCheck, SlskQueueItem, SlskQueuePayload, SlskQueueScope, SlskSearchProgress, SlskTransfer, StagingEntry, StagingRoot, StagingRootId } from "../api";
 import { toast } from "../store";
+import { useLiveTransfers, type TransfersFrame } from "../lib/notifications";
+import { SOULSEEK_QUEUE_KEY as QUEUE_KEY, STAGE_LABEL } from "../lib/acquisition";
 import { EmptyState, PageLoading } from "../components/Badges";
 import PageHeader from "../components/PageHeader";
 import Modal from "../components/Modal";
@@ -182,9 +184,33 @@ function GroupBadges({ g }: { g: SlskGroup }) {
   );
 }
 
-/** Strip a MusicBrainz URL down to the bare release MBID. */
-const releaseMbid = (s: string) =>
-  /(?:release\/)?([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})/i.exec(s.trim())?.[1] ?? "";
+/** One pasted MusicBrainz reference: the MBID and the ENTITY it names.
+ *
+ *  A URL says which entity outright (`/release-group/…`, `/artist/…`,
+ *  `/recording/…`, `/release/…`); a bare MBID is a UUID with no type in it, so
+ *  it goes out as `auto` and the SERVER detects the entity
+ *  (`server.integrations._kind_for` is what the MusicBrainz pages already rely
+ *  on), so the two paths cannot disagree about what a pasted id is. Anything
+ *  else is no reference at all — a link to a label, a work or a place is named
+ *  as unlookable rather than having its UUID read as a release, which is what
+ *  the old release-only parser did. */
+type MbKind = "release" | "release_group" | "artist" | "recording" | "auto";
+
+const MB_KIND_BY_PATH: Record<string, MbKind> = {
+  "release": "release", "release-group": "release_group",
+  "artist": "artist", "recording": "recording",
+};
+
+function mbRef(input: string): { mbid: string; kind: MbKind } | null {
+  const raw = String(input || "").trim();
+  if (!raw) return null;
+  const url = /musicbrainz\.org\/(release-group|release|artist|recording)\/([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})/i.exec(raw);
+  if (url) {
+    return { mbid: url[2].toLowerCase(), kind: MB_KIND_BY_PATH[url[1].toLowerCase()] ?? "auto" };
+  }
+  const bare = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.exec(raw);
+  return bare ? { mbid: bare[0].toLowerCase(), kind: "auto" } : null;
+}
 
 /** Last few manual searches, newest first — click to re-run. */
 const RECENT_KEY = "mlso.recentSearches";
@@ -1012,10 +1038,13 @@ function AutoPanel({ initialMbid, running, onShowQueue }: {
   // searched, which is a different thing from waiting its turn).
   const waitingRows = (sections?.queued ?? []).filter((r) => r.waiting);
   const lookingRows = (sections?.queued ?? []).filter((r) => !r.waiting);
-  const elsewhere = (sections?.in_progress.length ?? 0)
-    + (sections?.needs_attention.length ?? 0)
-    + (sections?.completed.length ?? 0)
-    + (sections?.failed.length ?? 0);
+  // Every section is read through `queueRows`: optional chaining guards
+  // `sections`, never the KEY inside it, so `sections.background.length` threw
+  // on a payload from a server that predates the background section (a stale
+  // cache, an older scratch server) and took the whole page down with it. A
+  // missing section is "no rows in that section", which is the truth.
+  const elsewhere = SECTIONS_ELSEWHERE.reduce(
+    (n, name) => n + queueRows(sections, name).length, 0);
 
   return (
     <div className="space-y-4">
@@ -1061,9 +1090,20 @@ function AutoPanel({ initialMbid, running, onShowQueue }: {
             onCancel={cancel} onRetry={retry} onImport={doImport} onDismiss={dismiss}
             onClear={(item) => clear({ id: item.id }, item)}
           />
+          {queueRows(sections, "background").length > 0 && (
+            <QueueSection
+              title="Background"
+              hint="asked every ranked edition it may, none answered — still searched on the worker's own ticks"
+              rows={queueRows(sections, "background")}
+              tone="border-violet-800 text-violet-300"
+              empty="" busyId={busyId}
+              onCancel={cancel} onRetry={retry} onImport={doImport} onDismiss={dismiss}
+              onClear={(item) => clear({ id: item.id }, item)}
+            />
+          )}
           {elsewhere > 0 && (
             <div className="text-[11px] text-zinc-500">
-              {elsewhere} row(s) downloading, parked or finished —{" "}
+              {elsewhere} row(s) downloading, parked, in the background or finished —{" "}
               <button className="underline hover:text-zinc-300 tap" onClick={onShowQueue}>
                 open the Queue tab
               </button>{" "}
@@ -1709,28 +1749,51 @@ function ImportRunCard({ run }: { run: ImportRunStatus | undefined }) {
   );
 }
 
-const QUEUE_KEY = ["soulseekQueue"];
-
 /** How each stage of the ONE queue is drawn. The labels are the shared
- *  vocabulary (server/soulseek_auto.py STAGES) — a wish from MusicBrainz and a
- *  folder grabbed from the search box read the same, because they ARE the same
- *  queue. */
+ *  vocabulary (lib/acquisition's STAGE_LABEL, i.e. server/soulseek_auto.py
+ *  STAGES) — a wish from MusicBrainz and a folder grabbed from the search box
+ *  read the same, because they ARE the same queue, and so does the Library's
+ *  badge for the same album. */
 const QUEUE_STAGE: Record<string, { label: string; cls: string; icon: typeof Star }> = {
-  queued: { label: "Queued", cls: "bg-zinc-800/70 text-zinc-300 border-zinc-700", icon: CircleDashed },
-  searching: { label: "Searching", cls: "bg-sky-900/40 text-sky-300 border-sky-800", icon: Search },
+  queued: { label: STAGE_LABEL.queued, cls: "bg-zinc-800/70 text-zinc-300 border-zinc-700", icon: CircleDashed },
+  searching: { label: STAGE_LABEL.searching, cls: "bg-sky-900/40 text-sky-300 border-sky-800", icon: Search },
   // The one stage that is not a server.soulseek_auto.STAGES name: an "Add to
   // library" that came back before MusicBrainz did
   // (server/pending_albums.STAGE_RESOLVING). Nothing is being searched for yet
   // — the server is working out WHAT the release is — so it says so instead of
   // wearing the download queue's own word.
-  searching_musicbrainz: { label: "Searching MusicBrainz…", cls: "bg-sky-900/40 text-sky-300 border-sky-800", icon: Search },
-  downloading: { label: "Downloading", cls: "bg-sky-900/40 text-sky-300 border-sky-800", icon: ArrowDownToLine },
-  verifying: { label: "Verifying", cls: "bg-cyan-900/40 text-cyan-300 border-cyan-800", icon: FileCheck2 },
-  importing: { label: "Importing", cls: "bg-sky-900/40 text-sky-300 border-sky-800", icon: FolderInput },
-  completed: { label: "Completed", cls: "bg-emerald-900/40 text-emerald-300 border-emerald-800", icon: ArrowDown },
-  failed: { label: "Failed", cls: "bg-red-950/60 text-red-300 border-red-900", icon: AlertTriangle },
-  needs_attention: { label: "Needs you", cls: "bg-amber-900/40 text-amber-300 border-amber-800", icon: AlertTriangle },
+  searching_musicbrainz: { label: STAGE_LABEL.searching_musicbrainz, cls: "bg-sky-900/40 text-sky-300 border-sky-800", icon: Search },
+  downloading: { label: STAGE_LABEL.downloading, cls: "bg-sky-900/40 text-sky-300 border-sky-800", icon: ArrowDownToLine },
+  verifying: { label: STAGE_LABEL.verifying, cls: "bg-cyan-900/40 text-cyan-300 border-cyan-800", icon: FileCheck2 },
+  importing: { label: STAGE_LABEL.importing, cls: "bg-sky-900/40 text-sky-300 border-sky-800", icon: FolderInput },
+  completed: { label: STAGE_LABEL.completed, cls: "bg-emerald-900/40 text-emerald-300 border-emerald-800", icon: ArrowDown },
+  failed: { label: STAGE_LABEL.failed, cls: "bg-red-950/60 text-red-300 border-red-900", icon: AlertTriangle },
+  needs_attention: { label: STAGE_LABEL.needs_attention, cls: "bg-amber-900/40 text-amber-300 border-amber-800", icon: AlertTriangle },
+  // The fallback walk at rest (spec R153): every ranked edition this release
+  // may ask was asked and none answered, so it keeps its place and is searched
+  // again on the worker's own ticks. Deliberately its own colour: not amber
+  // (nothing needs the user) and not sky (nothing is running right now).
+  background: { label: STAGE_LABEL.background, cls: "bg-violet-950/60 text-violet-300 border-violet-900", icon: Clock },
 };
+
+/** The sections the Auto tab summarises as "elsewhere". */
+const SECTIONS_ELSEWHERE = ["in_progress", "background", "needs_attention",
+                            "completed", "failed"] as const;
+
+/** One section of the queue payload, or an empty list.
+ *
+ *  `sections?.[name] ?? []` and never `sections?.name.length`: optional
+ *  chaining guards the OBJECT, not the key — a payload from a server that
+ *  predates a section (`background` is the newest, an older scratch server or a
+ *  stale cached response carries none) made `sections.background.length` throw
+ *  and blanked the whole Soulseek page, sidebar and all. A key the payload does
+ *  not carry means that section has no rows. */
+function queueRows(
+  sections: SlskQueuePayload["sections"] | undefined,
+  name: keyof SlskQueuePayload["sections"],
+): SlskQueueItem[] {
+  return sections?.[name] ?? [];
+}
 
 function QueueProgress({ p, stage }: { p: NonNullable<SlskQueueItem["progress"]>; stage: string }) {
   const pct = typeof p.percent === "number" ? Math.max(0, Math.min(100, p.percent)) : null;
@@ -1895,11 +1958,21 @@ function QueueRow({ item, busy, selected, onSelect, onCancel, onRetry, onImport,
               nothing. */}
           <ReleaseChips r={item.release} />
           {item.note && <div className="text-[10px] text-zinc-500 truncate" title={item.note}>{item.note}</div>}
-          {/* What the album is still missing (kind "prompt"): the wizard
-              steps that have no answer yet, in the wizard's own order. */}
+          {/* What the album still NEEDS (an import that could not supply a
+              family): a warning on a row whose release is finished — the album
+              is in the library and graded, so this rides the finished row
+              rather than holding it in a waiting section. "Enter manually"
+              beside it is the wizard at the step that decides the first of
+              them; "Mark complete" is the dismiss. A `reason` of "stopped" is
+              the one case that really is waiting: a review import that has not
+              run its chain yet. */}
           {missing.length > 0 && (
-            <div className="text-[10px] text-amber-300/90 truncate" title={missing.join(", ")}>
-              Missing: {missing.join(", ")}
+            <div className="text-[10px] text-amber-300/90 truncate"
+              title={item.needs?.detail
+                ? `${item.needs.detail}${item.needs.reason === "stopped" ? " — the import is waiting for this" : " — the album is in the library; enter it by hand or mark it complete"}`
+                : missing.join(", ")}>
+              <AlertTriangle className="inline h-3 w-3 align-[-1px]" /> Needs data:{" "}
+              {missing.join(", ")}
             </div>
           )}
           {/* Partial bytes a rejected candidate could not free: named here so
@@ -2175,7 +2248,8 @@ function useQueueActions(refetch: () => void, setBusyId: (id: string | null) => 
 
 /** "Look for this" — the one question the queue exists to answer.
  *
- *  Paste a MusicBrainz release ID or URL and the release becomes a row the
+ *  Paste a MusicBrainz release, release-group or artist ID or URL and the release
+ *  (or the group's best edition, or the artist's discography) becomes a row the
  *  wishes worker searches on its own schedule, through the SAME pipeline an
  *  auto-import job runs (search → log test → download → audit → import). The
  *  search happens on the interval below, and `Search due now` runs the pass
@@ -2212,18 +2286,34 @@ function ReleaseQueueBar({ initialMbid, onAdded, className }: {
    *  something is found). The interval and the backoff decide when it is
    *  searched — this only records what to look for. */
   const addWanted = async () => {
-    const id = releaseMbid(wanted).toLowerCase();
-    if (!id) {
-      toast("Paste a MusicBrainz release ID or URL");
+    const ref = mbRef(wanted);
+    if (!ref) {
+      toast("Paste a MusicBrainz release, release-group or artist ID or URL");
       return;
     }
     setWantBusy(true);
     try {
-      const r = await api.wishAdd({ release_mbid: id });
+      // The SAME entry point the MusicBrainz pages' own "Add to library" uses,
+      // so a pasted link and a click on the release page queue identically: a
+      // release or a release-group walks the group's ranked editions (R150),
+      // an artist queues its discography in the background, and a bare id is
+      // resolved by the server (`kind: "auto"`). Each album it creates is the
+      // framework folder the worker searches for on its own schedule.
+      const r = await api.libraryAdd({ mbid: ref.mbid, kind: ref.kind, mode: "best" });
       setWanted("");
-      toast.success(
-        `${r.wish?.artist ? `${r.wish.artist} — ` : ""}${r.wish?.title || "it"} is queued — it is searched for automatically`
-      );
+      if (r.background) {
+        toast.success(r.note || "Preparing the discography — the albums appear as they are added");
+      } else {
+        const created = (r.albums || []).filter((a) => a.created).length;
+        const have = (r.albums || []).filter((a) => a.already_in_library).length;
+        const skipped = (r.skipped || []).length + (r.errors || []).length;
+        toast.success(
+          `${created} album${created === 1 ? "" : "s"} queued`
+          + (have ? ` · ${have} already in the library` : "")
+          + (skipped ? ` · ${skipped} skipped` : "")
+          + " — searched for automatically"
+        );
+      }
       onAdded?.();
     } catch (e) {
       toast.error(String(e));
@@ -2252,7 +2342,7 @@ function ReleaseQueueBar({ initialMbid, onAdded, className }: {
         <Link2 className="h-4 w-4 text-zinc-600 self-center shrink-0" />
         <input
           className="input flex-1 min-w-[220px] tap"
-          placeholder="Paste a MusicBrainz release ID or URL — the queue keeps looking for it"
+          placeholder="Paste a MusicBrainz release, release-group or artist ID or URL — the queue keeps looking for it"
           value={wanted}
           onChange={(e) => setWanted(e.target.value)}
           onKeyDown={(e) => e.key === "Enter" && !wantBusy && addWanted()}
@@ -2558,7 +2648,7 @@ function QueuePanel({ running }: { running: boolean }) {
           />
           <QueueSection
             title="In progress" hint="downloading, verifying, moving into the library, or running the import chain"
-            rows={sections.in_progress} tone="border-sky-800 text-sky-300"
+            rows={queueRows(sections, "in_progress")} tone="border-sky-800 text-sky-300"
             empty="nothing is downloading right now"
             busyId={busyId}
             selected={selectMode ? selected : undefined}
@@ -2566,10 +2656,23 @@ function QueuePanel({ running }: { running: boolean }) {
             onCancel={cancel} onRetry={retry} onImport={doImport} onDismiss={dismiss}
             onClear={(item) => clear({ id: item.id }, item)}
           />
-          {sections.needs_attention.length > 0 && (
+          {queueRows(sections, "background").length > 0 && (
+            <QueueSection
+              title="Background"
+              hint="every ranked edition this release may ask was asked and none answered — it keeps its place and is searched again on the worker's own ticks, until one lands"
+              rows={queueRows(sections, "background")}
+              tone="border-violet-800 text-violet-300"
+              empty="" busyId={busyId}
+              selected={selectMode ? selected : undefined}
+              onSelect={selectMode ? toggleSelected : undefined}
+              onCancel={cancel} onRetry={retry} onImport={doImport} onDismiss={dismiss}
+              onClear={(item) => clear({ id: item.id }, item)}
+            />
+          )}
+          {queueRows(sections, "needs_attention").length > 0 && (
             <QueueSection
               title="Needs you" hint="parked on a question, or waiting for a manual import"
-              rows={sections.needs_attention} tone="border-amber-800 text-amber-300"
+              rows={queueRows(sections, "needs_attention")} tone="border-amber-800 text-amber-300"
               empty="" busyId={busyId}
               selected={selectMode ? selected : undefined}
               onSelect={selectMode ? toggleSelected : undefined}
@@ -2580,7 +2683,7 @@ function QueuePanel({ running }: { running: boolean }) {
           )}
           <QueueSection
             title="Completed" hint="downloaded — and whether it made it into the library"
-            rows={sections.completed} tone="border-emerald-800 text-emerald-300"
+            rows={queueRows(sections, "completed")} tone="border-emerald-800 text-emerald-300"
             empty="nothing has finished yet"
             busyId={busyId}
             selected={selectMode ? selected : undefined}
@@ -2591,7 +2694,7 @@ function QueuePanel({ running }: { running: boolean }) {
           />
           <QueueSection
             title="Failed" hint="gave up, with the reason"
-            rows={sections.failed} tone="border-red-900 text-red-300"
+            rows={queueRows(sections, "failed")} tone="border-red-900 text-red-300"
             empty="nothing failed"
             busyId={busyId}
             selected={selectMode ? selected : undefined}
@@ -3139,6 +3242,97 @@ function SharingCard({ running }: { running: boolean }) {
  *  after the last peer response by default, which lands well inside this. */
 const SEARCH_POLL_LIMIT_S = 180;
 
+/* ------------------------------------------------------------------------- *
+ * Frames into caches
+ *
+ * The transfer watcher (server/main.py) pushes the rows /api/soulseek/downloads
+ * returns, the minute they change, on the shell's progress socket. These three
+ * merges put a frame into the cache each surface already draws from, so no
+ * component learns about a second transport and no number is computed twice:
+ * every value below is the server's own, either the route's row or the job's
+ * published progress block. Each returns null when the frame restated what
+ * the cache held, which is what keeps a 2.5 Hz channel from re-rendering a
+ * panel that has nothing new to show.
+ * ------------------------------------------------------------------------- */
+
+/** This job's block from the newest frame (null when the frame does not
+ *  mention it — it belongs to another job, or to none). */
+function liveJob(frame: TransfersFrame | null, id: number | null | undefined) {
+  if (!frame || id === null || id === undefined) return null;
+  return (frame.jobs ?? []).find((j) => j.id === id) ?? null;
+}
+
+/** The Downloads tab's rows. */
+function mergeDownloads(old: SlskDownloads | undefined, frame: TransfersFrame): SlskDownloads | null {
+  if (!old) return null;
+  const byId = new Map((frame.files ?? []).map((r) => [r.id, r]));
+  if (byId.size === 0) return null;
+  let changed = false;
+  const downloads = (old.downloads ?? []).map((user) => ({
+    ...user,
+    directories: (user.directories ?? []).map((d) => ({
+      ...d,
+      files: (d.files ?? []).map((f) => {
+        const live = byId.get(f.id);
+        if (!live) return f;
+        const next = {
+          ...f,
+          bytesTransferred: live.bytesTransferred ?? f.bytesTransferred,
+          size: live.size ?? f.size,
+          percentComplete: live.percentComplete ?? f.percentComplete,
+          state: live.state ?? f.state,
+          averageSpeed: live.averageSpeed ?? f.averageSpeed,
+        };
+        if (next.bytesTransferred === f.bytesTransferred && next.size === f.size
+            && next.percentComplete === f.percentComplete && next.state === f.state
+            && next.averageSpeed === f.averageSpeed) return f;
+        changed = true;
+        return next;
+      }),
+    })),
+  }));
+  return changed ? { downloads } : null;
+}
+
+/** The queue rows' progress blocks. The route builds that block out of these
+ *  very fields (server/api_queue.py's `_progress_from_download`), so a patched
+ *  row shows the job's own numbers — the same ones its Auto-import card draws
+ *  — instead of a second measurement of them. */
+function mergeQueue(old: SlskQueuePayload | undefined, frame: TransfersFrame): SlskQueuePayload | null {
+  if (!old) return null;
+  let changed = false;
+  const patch = (row: SlskQueueItem) => {
+    const p = liveJob(frame, row.job_id)?.progress;
+    if (!p || !row.progress) return row;
+    const next = {
+      ...row.progress,
+      percent: p.percent ?? row.progress.percent,
+      files_done: p.files_done ?? row.progress.files_done,
+      files_total: p.files_total ?? row.progress.files_total,
+      speed: p.speed ?? row.progress.speed,
+      eta_s: p.eta_s ?? row.progress.eta_s,
+      done: p.bytes ?? row.progress.done,
+      total: p.size ?? row.progress.total,
+    };
+    const same = next.percent === row.progress.percent
+      && next.files_done === row.progress.files_done
+      && next.files_total === row.progress.files_total
+      && next.speed === row.progress.speed
+      && next.eta_s === row.progress.eta_s
+      && next.done === row.progress.done
+      && next.total === row.progress.total;
+    if (same) return row;
+    changed = true;
+    return { ...row, progress: next };
+  };
+  // Structurally this is the same five-key object Object.entries walks; the
+  // cast is only because fromEntries cannot know the keys.
+  const sections = Object.fromEntries(
+    Object.entries(old.sections).map(([name, rows]) => [name, rows.map(patch)]),
+  ) as SlskQueuePayload["sections"];
+  return changed ? { ...old, sections } : null;
+}
+
 function timeAgo(t: number | null | undefined): string {
   if (!t) return "never";
   const s = Math.max(0, Date.now() / 1000 - t);
@@ -3150,6 +3344,30 @@ function timeAgo(t: number | null | undefined): string {
 
 export default function SoulseekPage() {
   const [params] = useSearchParams();
+  const qc = useQueryClient();
+  const live = useLiveTransfers();
+  // Every frame the transfer watcher pushes, into the cache the surfaces
+  // below already draw from. One effect for the whole page: the frame is one
+  // message about one slskd tree, and each merge decides for itself whether
+  // its surface has anything new (they return null when it does not).
+  useEffect(() => {
+    if (!live) return;
+    // The list changed shape — a transfer appeared or slskd dropped one —
+    // which a patch cannot express: that is one real refetch.
+    if (live.resync) qc.invalidateQueries({ queryKey: ["soulseekDownloads"] });
+    qc.setQueryData<SlskDownloads>(["soulseekDownloads"], (old) => mergeDownloads(old, live) ?? old);
+    qc.setQueryData<SlskQueuePayload>(QUEUE_KEY, (old) => mergeQueue(old, live) ?? old);
+    // The Auto-import card is the job's whole payload, so a state or stage
+    // flip (searching → downloading → importing) means its log, release and
+    // result changed too: refetch once for that, and patch only the numbers.
+    const job = qc.getQueryData<SlskAutoJob>(["soulseekAuto"]);
+    const liveAuto = liveJob(live, job?.id);
+    if (job && liveAuto && (liveAuto.state !== job.state || liveAuto.stage !== job.stage)) {
+      qc.invalidateQueries({ queryKey: ["soulseekAuto"] });
+    } else if (job && liveAuto?.progress) {
+      qc.setQueryData<SlskAutoJob>(["soulseekAuto"], { ...job, progress: liveAuto.progress });
+    }
+  }, [live, qc]);
   const { data: status, refetch: refetchStatus } = useQuery({
     queryKey: ["soulseekStatus"],
     queryFn: api.soulseekStatus,
@@ -3159,7 +3377,11 @@ export default function SoulseekPage() {
     queryKey: ["soulseekDownloads"],
     queryFn: api.soulseekDownloads,
     enabled: !!status?.running,
-    refetchInterval: 3000,
+    // A SAFETY NET, not the bar's cadence: the transfers themselves arrive
+    // pushed (see the effect below), and this is what keeps the list right if
+    // that socket is down — a fallback, so it can be slow. Measured before the
+    // push existed: with 3 s the bar moved every 3.02 s.
+    refetchInterval: 30000,
   });
   // Private messages — the list lives at page level (the panel reads the same
   // query) so the Messages tab badge stays current from any tab.
@@ -3245,7 +3467,6 @@ export default function SoulseekPage() {
   // the cache until the user hides it, and a second press probes again. The button
   // is never disabled for a running transfer — the probe is read-only and takes no
   // lock, which is the point of asking it while downloads are in flight.
-  const qc = useQueryClient();
   const { data: portCheck, isFetching: portCheckBusy, refetch: probePort } = useQuery({
     queryKey: ["soulseekPortCheck"],
     queryFn: api.soulseekPortCheck,

@@ -87,7 +87,7 @@ export default function GenrePage() {
     return (
       <button
         key={name}
-        className={`chip border ${family ? "bg-panel border-dashed border-border text-zinc-400" : "bg-raise border-border text-zinc-300"} hover:text-white hover:border-accent transition-colors`}
+        className={`chip border ${family ? "bg-panel border-dashed border-border text-zinc-400" : "bg-raise border-border text-zinc-300"} hover:text-white hover:border-accent transition-colors tap`}
         onClick={() => open(name)}
         title={family
           ? `${name} is a family — the app derives it from a track's specific genre and writes it first. Open the library filtered to ${name}`
@@ -153,7 +153,7 @@ export default function GenrePage() {
                 <Link
                   key={g.name}
                   to={`/discover?genre=${encodeURIComponent(g.name)}`}
-                  className="chip bg-raise border border-border text-zinc-300 hover:text-white hover:border-accent transition-colors"
+                  className="chip bg-raise border border-border text-zinc-300 hover:text-white hover:border-accent transition-colors tap"
                   title={`Browse ${g.name} in Discover — albums, artists and tracks, from the library and every online source. Named by ${g.sources.join(", ") || "no source"}.`}
                 >
                   {g.name}

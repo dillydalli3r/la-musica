@@ -993,6 +993,15 @@ else:
     eq(len(hit_albums), 1, "the add went through as an ordinary one")
     eq(hit_albums[0].get("release_group_id"), named["release_group_id"],
        "for the entity MusicBrainz answered with")
+    # A MATCHED name-only add continues exactly as an id-given one, and with a
+    # title and an artist in hand that is the DEFERRED path: its resolution
+    # runs on a daemon thread and starts the search when it lands
+    # (`_create_all` → `wishes_worker.trigger`). Waiting for that kick here is
+    # what keeps the NEXT case's count its own — the thread's kick is not
+    # ordered against this request's reply, and the case below clears `kicks`
+    # and then asserts exactly one entry, which a straggler would break.
+    ok(until(lambda: bool(kicks)), "and its own resolution starts the search")
+    kicks.clear()
 
     # …and with nothing to match, the NAME is what is recorded: no id is
     # invented, and nothing claims MusicBrainz matched it.

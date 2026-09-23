@@ -1,15 +1,17 @@
-/** Every config setting the app has, what it is called, how it is edited, and
- *  which setup step owns it — in one module, so the first-run wizard can offer
- *  all of it without a second hand-maintained copy of the same list.
+/** Every config setting the app has, what it is called, how it is edited, and —
+ *  for the few a first run has to ask — which setup step owns it: one module,
+ *  so the wizard and the Settings page never keep two hand-maintained copies of
+ *  the same list.
  *
  *  The groups below are the settings tabs by name and field for field; the keys
  *  no tab owns (the per-filetype matrices, the export defaults, the server's
  *  own address, the login gate) are appended to the group that explains them,
  *  plus a few groups of their own. `tools/test_setup_coverage.py` holds the two
  *  sides together: every key of `mlo/config.py`'s DEFAULT_CONFIG must be covered
- *  here or named in `HIDDEN_KEYS`, and every key and group SettingsPage renders
- *  must exist here too — so a setting added on one side fails the other until
- *  it is accounted for. */
+ *  here or named in `HIDDEN_KEYS`, every key and group SettingsPage renders must
+ *  exist here too, and every group no step renders has to be rendered by some
+ *  other screen — so a setting added on one side fails the others until it is
+ *  accounted for. */
 
 import { CODEC_CHOICES } from "./codecMeta";
 
@@ -67,6 +69,19 @@ export function stepFields(step: SetupStep): CfgField[] {
   return (step.groups ?? []).flatMap((title) => cfgGroup(title).fields);
 }
 
+/** The fields a step `ask`s, in the order it names them. A name that is not a
+ *  field of one of the step's groups throws, exactly like `cfgGroup`: an ask
+ *  list that quietly rendered nothing would drop an account or a login from
+ *  the only screen that asks for it. */
+export function stepAskedFields(step: SetupStep): CfgField[] {
+  const fields = stepFields(step);
+  return (step.ask ?? []).map((k) => {
+    const field = fields.find((f) => f.k === k);
+    if (!field) throw new Error(`setup step ${step.label} asks for ${k}, which none of its groups has`);
+    return field;
+  });
+}
+
 /** One step of the first-run wizard. A step is a panel it draws (if any) plus
  *  the config groups it renders — and every step may be skipped, so nothing
  *  here is a gate on the app working afterwards. */
@@ -79,6 +94,13 @@ export interface SetupStep {
   panel?: "folder" | "dependencies" | "sources" | "slskd" | "password" | "done";
   /** CONFIG_GROUPS titles this step renders, in order. */
   groups?: string[];
+  /** Keys of THIS step's groups that are asked on the step itself, above the
+   *  group's fold, because nothing has an answer for them yet (an account, a
+   *  login). The group's other fields stay folded at their shipped default —
+   *  and all of them stay on the Settings tab. A key named here is rendered
+   *  once: the step draws the group's own field, and the group below it skips
+   *  exactly that key. */
+  ask?: string[];
 }
 
 export const CONFIG_GROUPS: CfgGroup[] = [
@@ -227,9 +249,8 @@ export const CONFIG_GROUPS: CfgGroup[] = [
       fields: [
         { k: "auto_advisory", label: "Set advisory automatically", type: "bool" },
         { k: "advisory_auto_fetch", label: "Fetch the advisory rating automatically (import + advisory fetch)", type: "bool" },
-        { k: "advisory_ai_classify", label: "Judge the lyrics with the AI provider", type: "bool", help: "The configured AI model reads the track's lyrics (embedded, else the .lrc sidecar) and rates the SONG — excessive profanity, a slur or a very strong word, or graphic sex/violence/drug use is 1; a mild word in passing is 0; 3 = it cannot tell, which falls through. It is asked whether or not a provider stated a value, and its answer is ranked with theirs (an AI 1 beats a stated 0 or 2, a stated 1 survives it). Needs an AI base URL and model in the AI section; with no AI configured the word scan below answers instead." },
-        { k: "advisory_lyrics_scan", label: "Scan the lyrics for profanity", type: "bool", help: "The multilingual word list. Only a STRONG term makes a track explicit (1); its mild tier (ass, arse, culo, arsch, reet) is reported in the reply's hits and never decides, so a song carrying one in passing is 0. Runs when the AI is not configured (or could not tell) and the track has lyrics." },
-        { k: "advisory_fallback", label: "When nothing states an advisory", type: "select", options: [["0","Store 0 — not explicit"],["2","Store 2 — clean edition"],["none","Store nothing — leave it unrated"]], help: "The last resort for a track with no provider answer, no AI answer and no lyrics evidence." },
+        { k: "advisory_ai_classify", label: "Judge the lyrics with the AI provider", type: "bool", help: "The configured AI model reads the track's lyrics (embedded, else the .lrc sidecar) and rates the SONG — excessive profanity, a slur or a very strong word, or graphic sex/violence/drug use is 1; a mild word in passing is 0; 3 = it cannot tell, which falls through. It is asked ONLY when no source stated anything at all — a value a source already stated is never second-guessed. Needs an AI base URL and model in the AI section; with no AI configured `advisory_fallback` answers instead." },
+        { k: "advisory_fallback", label: "When nothing states an advisory", type: "select", options: [["0","Store 0 — not explicit"],["2","Store 2 — clean edition"],["none","Store nothing — leave it unrated"]], help: "The last resort for a track no source stated anything about and the AI could not rate: 0 (not explicit), 2 (clean edition) or nothing at all." },
         { k: "mood_enabled", label: "Write mood tags", type: "bool" },
         { k: "genre_autofill", label: "Trim genres to the configured count", type: "bool", help: "Genres are never imported by a script: the import (MusicBrainz/RateYourMusic per track, then the configured sources) and manual edits are the only writers. Script 8 only brings a list longer than the genre count back down to it." },
         { k: "mood_source", label: "Mood source", type: "select", options: [["audio","Audio analysis"],["provider","Provider metadata"],["hybrid","Hybrid — audio, trusting the genre when the audio is ambiguous"]] },
@@ -375,6 +396,21 @@ export const CONFIG_GROUPS: CfgGroup[] = [
       ],
     },
     {
+      title: "Storage & cleanup",
+      blurb:
+        "What the app may keep on disk in the two folders it fills by itself. Both are scratch space — downloads/staging holds transfers until they are imported, the trash holds what was removed from the library — so neither may grow without end: over its cap, one is emptied OLDEST FIRST until it fits, and nothing in use is ever touched (a transfer still running, a folder an import or a script run is working on). The two caps are separate numbers; they never share a total.",
+      fields: [
+        {
+          k: "soulseek_cache_cap_gb", label: "Soulseek download cache cap (GB, 0 = no cap)", type: "number", min: 0, max: 1000, step: 0.1,
+          help: "The download folder plus the staging sibling slskd writes partials into (<music folder>/.mlo/downloads and its `incomplete`), measured together. Over this size the app deletes from them, oldest entry first, until they are back under — the copy a successful import already removes is not what this is for. An entry a transfer is still running in, or one an import / script run holds, is skipped and reported instead. 0 = no cap.",
+        },
+        {
+          k: "trash_cap_gb", label: "Trash cap (GB, 0 = no cap)", type: "number", min: 0, max: 1000, step: 0.1,
+          help: "The remove-from-library bin (<music folder>/.mlo/trash), capped on its own — filling the download cache never eats the bin's room. Over this size the app deletes the OLDEST trashed entries for good (exactly like Delete on the Trash page; what is left stays restorable) until the bin is under again, and an entry being restored is skipped. 0 = the bin keeps everything.",
+        },
+      ],
+    },
+    {
       title: "Auto-import (MusicBrainz → Soulseek)",
       blurb: "Search terms are templates of release fields (artist album year date country catalognumber barcode label). Physical pressings — CDs included — are found by their catalog number and barcode, digital media by title + year; every disc's .log must reach the score threshold before the album downloads.",
       fields: [
@@ -384,6 +420,10 @@ export const CONFIG_GROUPS: CfgGroup[] = [
         { k: "soulseek_auto_log_min_score", label: "Min .log score (0–100)", type: "number", min: 0, max: 100 },
         { k: "soulseek_auto_complete_ratio", label: "Required track completeness (0.5–1)", type: "number", min: 0.5, max: 1, step: 0.05 },
         { k: "soulseek_auto_search_wait", label: "Fallback search window (seconds of quiet on a rare album)", type: "number", min: 5, max: 300 },
+        { k: "soulseek_fallback_candidates", label: "Candidates tried per release (best first)", type: "number", min: 1, max: 10,
+          help: "How many of a release group's ranked editions one search walks: the best first, then the next. The release-choice policy ranks them (status, medium, completeness, original date), so a rare pressing no longer costs you the album — the search moves on to the next edition instead. 1 turns the walk off (the best edition only). A group with fewer eligible editions than this simply ends at the end of its own list." },
+        { k: "soulseek_search_timeout_seconds", label: "Search window per candidate (seconds)", type: "number", min: 5, max: 300,
+          help: "How long ONE candidate's search is given before it counts as not found and the walk moves on to the next edition — per candidate, so a walk of three may wait up to three of these. It is the same kind of quiet window as the fallback search window above (slskd ends a search when the network stops answering, plus the app's own response grace), and a usable folder still ends a candidate's search in seconds. A walk whose candidates all come back empty is not dropped: the release stays in the background queue and keeps being searched." },
         { k: "soulseek_auto_response_limit", label: "Responses before a search is scored (5–500)", type: "number", min: 5, max: 500, help: "slskd only hands back a search's results once it has ENDED, and a popular album never goes quiet — this ends the search early instead of waiting out the whole window. Lower = faster and fewer peers; higher = slower and more candidates." },
         { k: "auto_import_avoid_promo", label: "Never auto-import promotional / bootleg editions", type: "bool" },
         { k: "auto_import_require_country", label: "Only auto-import editions with a release country", type: "bool", help: "A MusicBrainz release without RELEASECOUNTRY is usually an unsorted import, and the CD query templates are built from that field — such editions are skipped, and a group whose only editions lack one is reported as ineligible instead." },
@@ -676,41 +716,40 @@ export const CONFIG_GROUPS: CfgGroup[] = [
     },
 ];
 
-/** The groups a first run actually asks about. Every other group is one click
- *  away inside the step that owns it (the wizard folds those): the factory
- *  defaults ARE the answer for a first run, and a wall of 50 checkboxes is how
- *  a first run gets abandoned. */
+/** The groups the wizard's steps unfold. A group this does not name renders
+ *  folded, with its shipped defaults one click away — a wall of 50 checkboxes
+ *  is how a first run gets abandoned — and a group no step renders at all is
+ *  the Settings page's, which is where the closing screen sends the reader. */
 export const OPEN_GROUPS: Record<string, true> = {
-  "AI — lyric transforms & genre ranking": true,
-  Discovery: true,
-  "Import pipeline": true,
-  "Soulseek (managed slskd)": true,
-  "Library folders & naming": true,
-  Interface: true,
-  "Script chain (Run All)": true,
-  "Server & remote access": true,
+  Dependencies: true,
   "Login gate": true,
-  Notifications: true,
 };
 
-/** The wizard, in order: the things a first run must decide come first, and
- *  every step may be skipped. Between them the steps reference EVERY group
- *  above — the coverage test fails on a group no step renders. */
+/** The wizard, in order: a first run is asked only what it cannot answer for
+ *  itself — where the library is, who may read it, the programs the scripts
+ *  need, the credentials the sources ask for, and the Soulseek account.
+ *
+ *  Every quality and check knob is deliberately absent. Grading and the audit
+ *  ship strict (mlo/config.py DEFAULT_CONFIG, held there by
+ *  tools/test_setup_coverage.py), so a step asking about them could only offer
+ *  a first run the chance to relax what it has no reason to touch — and every
+ *  one of those groups is still rendered by the Settings page, so naming them
+ *  here again would be a second screen for the same switch. */
 export const SETUP_STEPS: SetupStep[] = [
-  {
-    label: "Account",
-    title: "Your account",
-    blurb:
-      "This server's own login, asked FIRST because everything after it can be read by anyone who can reach the address. The password is required — the wizard will not move on without one. The name is optional: leave it as it is (admin) or blank it, and the install keeps an unnamed owner; either way it is editable later in Settings → Sign-in & security.",
-    panel: "password",
-    groups: ["Login gate"],
-  },
   {
     label: "Folder",
     title: "Your music library",
     blurb:
       "Everything the app grades, tags and optimizes lives under one folder (your artist/album tree). The app's own state (data, downloads, trash) lives inside it too, so it moves with the library.",
     panel: "folder",
+  },
+  {
+    label: "Account",
+    title: "Your account",
+    blurb:
+      "This server's own login. The password is required — the wizard will not move on without one, because everything after this step can be read by anyone who can reach the address. The name is optional: leave it as it is (admin) or blank it, and the install keeps an unnamed owner; either way it is editable later in Settings → Sign-in & security.",
+    panel: "password",
+    groups: ["Login gate"],
   },
   {
     label: "Tools",
@@ -724,101 +763,35 @@ export const SETUP_STEPS: SetupStep[] = [
     label: "Keys",
     title: "Sources & API keys",
     blurb:
-      "What the app asks for lyrics, genres, ratings and artwork. All of them are free, and the keyed ones work without keys too — they are simply skipped.",
+      "What the app uses for lyrics, genres, ratings and artwork. The credentials below are the only thing a first run has to paste, and every one of them is optional — a source without its key is simply skipped, saved keys are re-tested as you save them, and all of it is editable later in Settings → Sources (where the provider rows, their orders and the live status of each one live too).",
     panel: "sources",
-    groups: ["Discovery", "Import pipeline"],
-  },
-  {
-    label: "AI",
-    title: "AI model",
-    blurb:
-      "Optional, and the only model in the app: it romanizes and translates lyrics, and ranks genres during an import. With the URL or model empty both are skipped.",
-    groups: ["AI — lyric transforms & genre ranking"],
   },
   {
     label: "Soulseek",
-    title: "Soulseek sharing & auto-import",
+    title: "Soulseek login & sharing",
     blurb:
-      "Sharing your library, and letting the app fill the wishes you save by downloading from the network. Both need a free Soulseek account. The listen port is opened on your router automatically when slskd starts (UPnP first, then NAT-PMP) so peers can reach this client; turn that off below if you forward the port yourself or your router supports neither.",
+      "Your Soulseek account, and whether this client shares the library. The listen port is opened on your router automatically when slskd starts (UPnP first, then NAT-PMP) so peers can reach you — turn that off below if you forward the port yourself or your router supports neither. The transfer limits, slots and extra shared folders keep their shipped defaults in Settings → Soulseek.",
     panel: "slskd",
-    groups: ["Soulseek (managed slskd)", "Auto-import (MusicBrainz → Soulseek)", "Wishes (auto-fill)"],
-  },
-  {
-    label: "Library",
-    title: "Library & interface",
-    blurb: "How the library is laid out on disk, and what this client shows you.",
-    groups: ["Library folders & naming", "Interface", "Home"],
-  },
-  {
-    label: "Imports",
-    title: "Imports & tagging",
-    blurb:
-      "What an album goes through after it lands: the script chain's own options, genre and mood tagging, and the metadata fetched from online providers — plus the artist watch that queues new releases on its own.",
-    groups: [
-      "Import & tag cleanup",
-      "AutoTag (script 8)",
-      "Beets tagging (script 14)",
-      "Release tracklist (script 15)",
-      "Artist images & descriptions",
-      "Artist watch",
-    ],
-  },
-  {
-    label: "Scripts",
-    title: "Optimization scripts",
-    blurb:
-      "The defaults every run uses for the library's files: lossless conversion, images and covers, lyrics and CUEs, CD rip sheets, videos, and which tag families may be written at all.",
-    groups: [
-      "Library codec (script 3)",
-      "Embedded covers",
-      "Images (script 5)",
-      "Lyrics & CUEs (scripts 1, 2 & 18)",
-      "CD Rips (scripts 2/6/9/10)",
-      "Videos (script 11)",
-      "Tag writes (global switches)",
-    ],
-  },
-  {
-    label: "Quality",
-    title: "Audit, loudness & grading",
-    blurb:
-      "What the app measures and what it accepts: the audio audit, loudness and ReplayGain, AccurateRip, key and BPM detection, and every rule the grader applies.",
-    groups: [
-      "Audit (script 6)",
-      "DR / ReplayGain (script 7)",
-      "AccurateRip (script 9)",
-      "Key & BPM (script 12)",
-      "Grading (script 4)",
-      "Individual grading checks",
-    ],
-  },
-  {
-    label: "Chain",
-    title: "Script chain & export",
-    blurb: "Which scripts Run All executes, in what order, and what an export writes by default.",
-    groups: ["Script chain (Run All)", "Export defaults"],
-  },
-  {
-    label: "Access",
-    title: "Access & notifications",
-    blurb:
-      "Where this server listens, and which events it pushes to your clients. The login itself was the first step; this one is the address and the alerts.",
-    groups: ["Server & remote access", "Notifications"],
+    groups: ["Soulseek (managed slskd)"],
+    ask: ["soulseek_username", "soulseek_password", "soulseek_share_library"],
   },
   {
     label: "Done",
     title: "You're all set",
-    blurb: "Everything you skipped keeps its shipped default, and every one of these settings stays editable in Settings.",
+    blurb:
+      "Everything you skipped keeps its shipped default — and those defaults are the strict ones, so a fresh install audits and grades the library the way the app intends. Every setting is still editable in Settings.",
     panel: "done",
   },
 ];
+
 
 /** Keys the wizard writes itself rather than through a control: the folder its
  *  picker saves, and the flag its own buttons set when the run finishes. */
 export const WIZARD_MANAGED_KEYS: string[] = ["music_folder", "first_run_done"];
 
-/** Config keys the wizard deliberately does not offer. Everything else the
- *  app can configure is reachable from one of the steps above. */
+/** Config keys no screen offers: every OTHER key of the app is a field of one
+ *  of the groups above, which the Settings page renders whether or not a setup
+ *  step does. */
 export const HIDDEN_KEYS: string[] = [
   // The password hash is refused by POST /api/config (it must be: a session
   // could otherwise replace the credential with a hash of its choosing) and is

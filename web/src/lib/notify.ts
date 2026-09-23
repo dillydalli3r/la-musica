@@ -12,8 +12,9 @@ import {
 /** Desktop notifications for the events the server publishes.
  *
  *  The backend already knows when a wished-for release shows up on Soulseek, a
- *  download finishes, an album is ready to import, an import needs a decision,
- *  a script run ends, a grade lands and a newer release exists — it announces
+ *  download finishes, an album is ready to import, an import finished short of
+ *  something is left to announce, a script run ends, a grade lands and a newer
+ *  release exists — it announces
  *  each one on `/ws/events` (see server/events.py). This module is the client
  *  half: it keeps that socket open and hands every frame to the notification
  *  tray (lib/notifications.ts), which is what the bell's panel lists. The kinds

@@ -76,12 +76,17 @@ def _clock(ts):
     except Exception:
         return "later"
 
-# Sections, in the order the page shows them: what waits, what runs, what needs
-# a human, what is done, what went wrong. `needs_attention` is its own section
-# rather than a flavour of failed — an item parked on a decision (a lossy-only
-# copy, a release with no usable folder) has not failed and hiding it under
-# failures is how a queue ends up with rows nobody ever answers.
-SECTIONS = ("queued", "in_progress", "needs_attention", "completed", "failed")
+# Sections, in the order the page shows them: what waits, what runs, what is
+# still being watched for in the background, what needs a human, what is done,
+# what went wrong. `needs_attention` is its own section rather than a flavour of
+# failed — an item parked on a decision (a lossy-only copy, a release with no
+# usable folder) has not failed and hiding it under failures is how a queue ends
+# up with rows nobody ever answers. `background` is its own section for the other
+# reason: the release has asked every ranked candidate it may (spec R150-R153)
+# and is STILL being searched on the worker's own ticks, so it belongs neither
+# with the releases being walked right now nor with the ones waiting on a person.
+SECTIONS = ("queued", "in_progress", "background", "needs_attention",
+            "completed", "failed")
 
 
 def _section_of(stage):
@@ -95,6 +100,8 @@ def _section_of(stage):
         return "queued"
     if stage in ("downloading", "verifying", "importing"):
         return "in_progress"
+    if stage == "background":
+        return "background"
     if stage == "needs_attention":
         return "needs_attention"
     if stage == "failed":
@@ -296,7 +303,12 @@ def _wish_rows(wishes_list, jobs_by_wish, cfg=None):
                  # server/wishes' retry policy): it stops by itself, so it is
                  # not "failed" — it needs the user, either to retry it or to
                  # fill it by hand. needs_attention is exactly that section.
-                 "not_found": "needs_attention"}.get(status, "queued")
+                 "not_found": "needs_attention",
+                 # A spent WALK is not "needs you" at all (spec R153): the
+                 # release is still searched for on the worker's own ticks, it
+                 # just asked every ranked candidate it may, so it has its own
+                 # section instead of reading as a search that gave up.
+                 "background": "background"}.get(status, "queued")
         job = jobs_by_wish.get(w["id"])
         live = job is not None and job["stage"] not in ("completed", "failed")
         progress, note, reason = None, "", str(w.get("last_error") or "")
@@ -326,8 +338,38 @@ def _wish_rows(wishes_list, jobs_by_wish, cfg=None):
                     + _clock(wishes.due_at(w, cfg or {})))
         # The store's own verdict, read once: whether the worker will search
         # this wish again on its own is what decides every action the row has
-        # (see server/wishes' retry policy).
+        # (see server/wishes' retry policy). The WALK does not change it — a
+        # background wish is still searched — so it is read before the row is
+        # assembled and used by both the wording below and `clearable`.
         terminal = bool(wishes.is_terminal(w, cfg or {}))
+        # WHICH ranked candidate this row is asking for (spec R150-R154): the
+        # walk's own block out of the store, so the page re-derives no position
+        # and the row says where a long search is instead of looking stuck. ONE
+        # row per release whatever the walk does — the candidates are asked one
+        # at a time INSIDE this wish (`wishes_worker._run_one`), so there is
+        # never a row per candidate to merge away, and never more than one job
+        # for the wish at a time.
+        walk = wishes.candidate_state(w, cfg)
+        if walk:
+            here = walk["title"] or walk["mbid"]
+            if stage == "background":
+                # The owner's own wording for the resting phase — the position,
+                # the fact that nothing landed yet, and when the next pass looks
+                # again. The section it sits in says the rest ("Background").
+                note = " · ".join(x for x in (
+                    f"tried {walk['index'] + 1} of {walk['total']}",
+                    note or "no usable copy yet",
+                    "searched again automatically around "
+                    + _clock(wishes.due_at(w, cfg or {}))) if x)
+            else:
+                # A live job is asking for THIS candidate right now; a row
+                # between attempts is about to ask the BEST one (the walk
+                # restarts at the top every pass, spec R150), so it says which
+                # candidate the next search starts with rather than naming the
+                # one the last attempt happened to end on.
+                where = (f"{walk['label']}: {here}" if live
+                         else f"next: {walk['label']}: {here}")
+                note = f"{note} · {where}" if note else where
         if not live and not terminal and stage in ("queued", "searching") \
                 and _resolving(w):
             # The add answered before MusicBrainz did
@@ -378,7 +420,13 @@ def _wish_rows(wishes_list, jobs_by_wish, cfg=None):
             # (0 = it will not: the wish is terminal until the user retries).
             "not_found": int(w.get("not_found") or 0),
             "retry_at": retry_at,
-            "retryable": (stage in ("failed", "needs_attention")
+            # The ranked-candidate walk this release is being searched with
+            # (spec R150-R154): `{index, total, label, mbid, title, tried}`, or
+            # null for a wish with nothing to walk (one candidate, or none).
+            # The row's ONE position for the release, so a client renders it
+            # from data rather than parsing `note`.
+            "walk": walk,
+            "retryable": (stage in ("failed", "needs_attention", "background")
                           and status not in ("imported", "available", "searching")),
             # True while a framework album (the "Add to library" folder) is on
             # disk with no audio yet — cancelling such a row must remove that
@@ -396,7 +444,8 @@ def _wish_rows(wishes_list, jobs_by_wish, cfg=None):
             # with no action at all until the attempts cap gave up for good.
             "cancelable": stage in ("queued", "searching", "downloading",
                                     "verifying", "importing", "needs_attention",
-                                    "failed", pending_albums.STAGE_RESOLVING),
+                                    "failed", "background",
+                                    pending_albums.STAGE_RESOLVING),
             # A TERMINAL wish (imported, nothing found, or failed for good —
             # `wishes.is_terminal`) is one the user may take off the list
             # entirely; one that is still wanted or being searched is not
@@ -551,35 +600,45 @@ def _done_rows(ready):
     return rows
 
 
+def _prompt_warning(p):
+    """What one prompt says about its album — `import_autonomy.warning`, the
+    ONE shape every surface carries it in (the queue row, the album page's
+    banner, the wizard's own prompt banner)."""
+    from server import import_autonomy
+
+    return import_autonomy.warning(p)
+
+
 def _prompt_rows(prompts):
-    """Albums an import could not finish, as rows in the ONE queue.
+    """Albums an import could not finish, as rows of their own.
 
-    These are the STALLED rows: the album is already in the library (a wizard
-    import, a bulk run, an unattended download — every path ends in
-    ``imports.finish_album``) and something no script can invent is still
-    missing. The row carries what is missing and the two things the user can do
-    about it, which is what makes a stalled album actionable instead of a red
-    grading line somewhere else:
+    These rows exist for the album NOTHING else shows — one imported by the
+    wizard months ago, an album whose wish row was cleared, a bulk import whose
+    ticket is gone. An album whose own row is already in this payload does not
+    get a second one: `build_queue` hands this row's warning to that row
+    instead, because one album is one row (`_prompt_warning` is the payload
+    both carry).
 
-    * ``action_link`` — the wizard at this album and AT the step that decides
-      the first missing family (``mlo.import_policy.wizard_link``, the very
-      link the ``import_needs_data`` notification carries),
-    * ``dismissable`` — "the album is fine as it is", which is
-      ``POST /api/import/prompts/dismiss`` (a later import of the album
-      recomputes the gaps and raises it again if the family is still missing).
+    The row is FINISHED, not stalled, whenever the entry is a WARNING: the
+    album is in the library, so it sits where every other finished album sits
+    and says what it is short of. A separate "waiting on you" section for it is
+    exactly what made a warning read as a held import (R166). An entry that
+    really IS a wait — a review import that has not run its chain, a disc
+    structure whose feature is unpicked — keeps the waiting section, because
+    that is what it is.
     """
     from server import import_autonomy
 
     rows = []
     for p in prompts:
         album = str(p.get("album") or "")
-        families = [f for f in (p.get("families") or []) if isinstance(f, dict)]
+        warn = _prompt_warning(p)
         rows.append({
             "id": f"prompt:{p.get('id') or album}",
             "kind": "prompt",
             "job_id": None,
             "wish_id": None,
-            "stage": "needs_attention",
+            "stage": "needs_attention" if warn["waiting"] else "completed",
             "source_key": "import",
             "source": "Import",
             "title": str(p.get("album_name") or os.path.basename(album.rstrip("/")) or album),
@@ -588,22 +647,32 @@ def _prompt_rows(prompts):
             "release": _no_release(),
             "album_path": album,
             "progress": None,
-            # What is missing, in the wizard's own order: the ids the wizard's
-            # `?missing=` parameter takes and the labels a row can show.
-            "missing": [str(f.get("id") or "") for f in families],
-            "missing_labels": [str(f.get("label") or "") for f in families],
+            "needs": warn,
+            # What the row's warning line renders (`missing_labels`) and the
+            # ids the wizard's `?missing=` takes — the same two fields the rows
+            # a warning ATTACHES to get, so one payload shape reaches the UI
+            # whichever row a warning rides.
+            "missing": list(warn["families"]),
+            "missing_labels": list(warn["labels"]),
             "wizard_link": str(p.get("link") or ""),
             "action": "manual",
             "action_link": str(p.get("link") or ""),
             "dismissable": True,
-            "reason": import_autonomy.body(p),
-            "note": "Enter what is missing by hand, or dismiss it",
+            # A row that IS waiting says WHY in its own reason line (the
+            # sentence the notification body is made of); a warning on a
+            # finished album does not — its whole sentence rides `needs.detail`
+            # and the row is not a failure.
+            "reason": import_autonomy.body(p) if warn["waiting"] else "",
+            "note": ("The import is waiting for this before it can finish"
+                     if warn["waiting"]
+                     else "In the library — the missing piece is entered by hand, "
+                          "or this warning is dismissed"),
             "created_at": float(p.get("at") or 0),
             "updated_at": float(p.get("at") or 0),
-            # Nothing to cancel: the album is IN the library. The row's actions
-            # are the two above (the wizard and the dismiss — which IS how a
-            # prompt is taken off the list, so `clearable` would be a second
-            # word for the same button).
+            # Nothing to cancel: the album is IN the library and no job of ours
+            # is running over it. Its actions are the two in `needs` — the
+            # wizard and the dismiss, which IS how a warning is taken off the
+            # list, so `clearable` would be a second word for the same button.
             "cancelable": False,
             "clearable": False,
             "log_tail": [],
@@ -636,35 +705,50 @@ def build_queue(cfg=None):
     # dishonesty this view exists to remove.
     shown = {r["job_id"] for r in rows if r.get("job_id")}
     rows += [r for r in job_rows if r.get("job_id") not in shown]
-    rows += _bulk_rows(soulseek_auto.queued())
+    # A release parked in the pipeline that already has a row of its OWN is
+    # that row, not a second one. A wish from MusicBrainz is queued in the
+    # pipeline while it waits for a slot, so both builders describe it — one
+    # add read as two releases being fetched, one of them named by the wish and
+    # one by the pipeline ticket. Only a pipeline item nothing else is showing
+    # (a grab with no wish, or a wish dropped while it waited) gets its own.
+    wished = {int(r["wish_id"]) for r in rows if r.get("wish_id")}
+    rows += [r for r in _bulk_rows(soulseek_auto.queued())
+             if not (r.get("wish_id") and int(r["wish_id"]) in wished)]
     rows += _import_rows(import_queue.status())
-    # Albums an import could not finish (server/import_autonomy): the STALLED
-    # ones, in the same needs-you section as a download parked on a question —
-    # one place to see everything that is waiting on a person, whether it is
-    # waiting for a search or for a decision about an album already on disk.
-    prompt_rows = []
+    # Albums an import could not finish (server/import_autonomy): a WARNING on
+    # the row the album already has, never a hold. The album is in the library,
+    # so the row keeps its own stage (a finished release reads as finished) and
+    # gains what is still missing plus the two things to do about it — the
+    # wizard at the step that decides it, and the dismiss. A prompt whose album
+    # no other row shows keeps a row of its own, in the same finished section,
+    # so nothing is lost.
+    warned = {}
     try:
         from server import import_autonomy
-        prompt_rows = _prompt_rows(import_autonomy.prompts(cfg))
-        rows += prompt_rows
+        for pr in _prompt_rows(import_autonomy.prompts(cfg)):
+            key = _album_key(pr.get("album_path"))
+            if key:
+                warned[key] = pr
     except Exception:
         # A prompt file that cannot be read must not blank the whole queue.
-        pass
-    # ONE row per album, in its CURRENT state: a stalled album's prompt IS that
-    # state, and the settled row that reported its download or its import is
-    # the history of the same album — showing both is how one release read as
-    # "Needs you" and "Completed" at once. The prompt wins; the history is not
-    # lost (the list its kind owns still shows it, and the settled row comes
-    # back here, clearable, once the prompt is gone). Only SETTLED rows are
-    # suppressed: an album being downloaded or awaited right now is live work
-    # and stays whatever a prompt about the same folder says.
-    stalled = {_album_key(r.get("album_path")) for r in prompt_rows
-               if r.get("album_path")}
-    if stalled:
-        rows = [r for r in rows
-                if not (r.get("album_path")
-                        and r.get("stage") in ("completed", "failed")
-                        and _album_key(r.get("album_path")) in stalled)]
+        warned = {}
+    if warned:
+        attached = set()
+        for row in rows:
+            key = _album_key(row.get("album_path"))
+            pr = warned.get(key) if key else None
+            if pr is None:
+                continue
+            needs = pr["needs"]
+            row["needs"] = needs
+            row["missing"] = needs["families"]
+            row["missing_labels"] = needs["labels"]
+            row["wizard_link"] = needs["link"]
+            row["action"] = "manual"
+            row["action_link"] = needs["link"]
+            row["dismissable"] = True
+            attached.add(key)
+        rows += [pr for key, pr in warned.items() if key not in attached]
     try:
         rows += _done_rows(soulseek.ready_albums(cfg))
     except Exception:
@@ -684,6 +768,7 @@ def build_queue(cfg=None):
     counts = {
         "queued": len(sections["queued"]),
         "in_progress": len(sections["in_progress"]),
+        "background": len(sections["background"]),
         "needs_attention": len(sections["needs_attention"]),
         "completed": len(sections["completed"]),
         "failed": len(sections["failed"]),

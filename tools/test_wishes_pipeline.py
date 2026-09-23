@@ -862,6 +862,66 @@ with pipeline_patches(_wait_for_files=_gated_wait,
           and (waited[0].get("result") or {}).get("imported") is True,
           json.dumps(waited and waited[0].get("result")))
 
+# --------------------------------------------------------------------------- #
+# The walk asks DISTINCT PRESSINGS — one catalog number is one search
+# --------------------------------------------------------------------------- #
+# Separate MusicBrainz releases really do share a catalog number (one pressing
+# issued under two labels, a reissue catalogued twice, a country variant printed
+# with the number unchanged), and the number is what a CD search is keyed on: a
+# second edition carrying it can only find the folders the first one found. The
+# walk skips it — and SAYS so, because a fallback that quietly loses a ranked
+# edition is the kind of thing nobody notices until an album never lands.
+print("\n== the fallback walk skips editions that share a catalog number ==")
+from server import wishes_worker  # noqa: E402
+
+_WALK = {
+    "id": 0, "title": "Some Album", "album": "An Artist - Some Album",
+    "candidate": 0,
+    "release_mbid": "bbbbbbbb-0000-0000-0000-000000000001",
+    "candidates": [
+        {"mbid": "bbbbbbbb-0000-0000-0000-000000000001", "title": "Album (DGC)",
+         "catalog_numbers": ["GED 24425"]},
+        {"mbid": "bbbbbbbb-0000-0000-0000-000000000002", "title": "Album (Geffen)",
+         "catalog_numbers": ["GED24425"]},
+        {"mbid": "bbbbbbbb-0000-0000-0000-000000000003", "title": "Album (Japan)",
+         "catalog_numbers": ["DGC-24425"]},
+        {"mbid": "bbbbbbbb-0000-0000-0000-000000000004", "title": "Album (no number)",
+         "catalog_numbers": []},
+    ],
+}
+_walk_cfg = dict(CFG, soulseek_fallback_candidates=5)
+walk = wishes_worker._walk_candidates(_WALK, _walk_cfg)
+check("the walk asks one edition per catalog number",
+      [c["mbid"][-1] for c in walk] == ["1", "3", "4"],
+      json.dumps([(c["title"], c.get("catalog_numbers")) for c in walk]))
+check("...folding the SPELLING (DGC's \"GED 24425\" IS Geffen's \"GED24425\")",
+      [c["title"] for c in walk] == ["Album (DGC)", "Album (Japan)",
+                                     "Album (no number)"],
+      json.dumps([c["title"] for c in walk]))
+check("...and an edition stating no number is still worth asking for",
+      any(not c.get("catalog_numbers") for c in walk), json.dumps(walk))
+check("...and the skip is logged, naming the edition it dropped",
+      any("share a catalog number" in row["msg"] and "Album (Geffen)" in row["msg"]
+          for row in wishes.read_log(20)),
+      json.dumps([row["msg"][:110] for row in wishes.read_log(5)]))
+# The cap still governs: a walk of one asks one, whatever the list holds.
+check("the user's own cap still ends the walk",
+      len(wishes_worker._walk_candidates(
+          _WALK, dict(CFG, soulseek_fallback_candidates=1))) == 1,
+      json.dumps([c["title"] for c in wishes_worker._walk_candidates(
+          _WALK, dict(CFG, soulseek_fallback_candidates=1))]))
+# …and the rule is one function, so the LIST and the WALK cannot disagree.
+from mlo import release_choice  # noqa: E402
+
+_kept, _skipped = release_choice.distinct_pressings(_WALK["candidates"])
+check("the list builder drops exactly what the walk drops",
+      [c["title"] for c in _kept] == [c["title"] for c in walk]
+      and len(_skipped) == 1, json.dumps([c["title"] for c in _skipped]))
+check("a catalog number's identity is its digits and letters, not its spelling",
+      release_choice.catalog_key("ged 24425") == release_choice.catalog_key("GED24425")
+      == release_choice.catalog_key("G.E.D-24425"),
+      release_choice.catalog_key("G.E.D-24425"))
+
 shutil.rmtree(REDIRECT, ignore_errors=True)
 print(f"\n{len(FAILED)} failure(s)")
 sys.exit(1 if FAILED else 0)

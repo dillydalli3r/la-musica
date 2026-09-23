@@ -1,4 +1,4 @@
-import { Fragment, useEffect, useMemo, useState } from "react";
+import { Fragment, useEffect, useMemo, useState, type ReactNode } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { Link, useNavigate } from "react-router-dom";
 import {
@@ -17,7 +17,7 @@ import {
   customColValue, customCols, ALBUM_TRACK_COLS, ALBUM_TRACK_COL_W, ALBUM_TRACK_MIN_W, TABLE_FIT, TAG_COL_W,
   // The track table's own columns, floors and phone folds — shared with the
   // Export page's preview so the two tables cannot drift apart.
-  TRACK_COLS, TRACK_COL_W, TRACK_PHONE_CLS, PHONE_HIDE, phoneHide,
+  TRACK_COLS, TRACK_COL_W, TRACK_PHONE_CLS, TRACK_RATING_COL, PHONE_HIDE, phoneHide,
   type Col, type CustomCol,
 } from "../lib/columns";
 import { gradeSliver, statusFor, auditFails } from "../lib/status";
@@ -35,6 +35,7 @@ import CoverImg, { TrackCover } from "../components/CoverImg";
 import FavHeart from "../components/FavHeart";
 import TrackTitleCell from "../components/TrackTitleCell";
 import AlbumCard from "../components/AlbumCard";
+import { useAcquisitions, type Acquisition } from "../lib/acquisition";
 import AlbumRow, { type AlbumRowCell } from "../components/AlbumRow";
 import StatsPanel from "../components/StatsPanel";
 import TrackDetails from "../components/TrackDetails";
@@ -45,9 +46,9 @@ import type { Album, Artist, Track } from "../types";
 // The Library's browse state and option lists live in lib/libraryView.ts —
 // Home's shelves offer the same cover size and read the same settings.
 import {
-  ALBUM_SORTS, GRID_SIZES, PRESETS, VIEW_TABS,
+  ALBUM_SORTS, GRID_SIZES, PRESETS, RATING_FILTERS, ADVISORY_FILTERS, RATED_NOTE, VIEW_TABS,
   useGridSize, useLibraryView, useLocalSort, useSelectMode,
-  type Preset,
+  type Preset, type RatingFilter, type AdvisoryFilter,
 } from "../lib/libraryView";
 
 /** One floor per column, in px: the narrowest that column can be before its
@@ -61,13 +62,18 @@ const ALBUM_COL_W: Record<string, string> = {
   // beside it, and the name shares the row with the cover, the chevron and the
   // row actions — a 220 px floor there would push those off the screen.
   album: "md:w-[220px]",
-  artist: "w-[108px]",
+  artist: "w-[116px]",
   year: "w-16",
-  tracks: "w-16",
+  // 72, not 64: the header's own label ("TRACKS" at 11 px, tracked out) plus
+  // the sort arrow is 67 px wide, and a nowrap header wider than its column
+  // paints over the neighbour in a fixed-layout table.
+  tracks: "w-[72px]",
   // Five `sm` stars (14 px each) plus the hover room a click target needs.
   rating: "w-[104px]",
   grade: "w-20",
-  media: "w-[88px]",
+  // "Digital Media" is the MediumChip's own longest label: 108 px, measured —
+  // the old 88 broke the chip across two lines.
+  media: "w-[112px]",
   dr: "w-12",
   source: "w-20",
   videos: "w-20",
@@ -213,6 +219,12 @@ export default function LibraryPage() {
   // checkboxes (and the batch toolbar they feed) only exist in select mode
   const { selectMode, toggleSelectMode } = useSelectMode();
   const [preset, setPreset] = useState<Preset>("all");
+  // The two facets beside the presets: the user's OWN star ratings ("what have
+  // I not rated yet") and the advisory ladder. Both are facets rather than
+  // presets because each has more than one answer worth picking — the preset
+  // list is conditions you either want or do not.
+  const [ratingFilter, setRatingFilter] = useState<RatingFilter>("any");
+  const [advisoryFilter, setAdvisoryFilter] = useState<AdvisoryFilter>("any");
   const [filterOpen, setFilterOpen] = useState(false);
   const [sortOpen, setSortOpen] = useState(false);
   const [albumSort, setAlbumSort] = useLocalSort("albums");
@@ -245,7 +257,16 @@ export default function LibraryPage() {
   const [albumCustom, addAlbumCustomCol, removeAlbumCustomCol] = useCustomColumns("albums");
   const [trackCustom, addTrackCustomCol, removeTrackCustomCol] = useCustomColumns("tracks");
   const albumDefs: Col[] = [...ALBUM_COLS, ...customCols(albumCustom, "meta")];
-  const trackDefs: Col[] = [...TRACK_COLS, ...customCols(trackCustom, "tags")];
+  // The rating is the Library's own column and belongs beside the title (the
+  // thing being rated), so it is spliced in there rather than appended: the
+  // Columns menu and the row renderer both follow this order, and a column
+  // that appears in a different place in each is a column that drifts.
+  const trackDefs: Col[] = [
+    ...TRACK_COLS.slice(0, 3),
+    TRACK_RATING_COL,
+    ...TRACK_COLS.slice(3),
+    ...customCols(trackCustom, "tags"),
+  ];
   const [albumCols, toggleAlbumCol] = useColumnPrefs("albums", albumDefs);
   const [artistCols, toggleArtistCol] = useColumnPrefs("artists", ARTIST_COLS);
   const [trackCols, toggleTrackCol] = useColumnPrefs("tracks", trackDefs);
@@ -272,6 +293,18 @@ export default function LibraryPage() {
   const [artistW, setArtistW, resetArtistW] = useColumnWidths("artists");
   const [trackW, setTrackW, resetTrackW] = useColumnWidths("tracks");
 
+  // One GET /api/ratings per scope for the whole page (react-query dedupes it
+  // across every row, and the star controls share the cache). Declared HERE,
+  // above the filter memo, because the rating facet filters on these maps: the
+  // rows this page draws depend on them, so they are an input to the memo and
+  // not a decoration applied afterwards. The album scope is what the album rows
+  // draw — each album's OWN rating, a different fact from the ratings of the
+  // tracks inside it.
+  const { data: ratingsData } = useRatings();
+  const { data: albumRatingsData } = useRatings("album");
+  const ratings = ratingsData?.ratings;
+  const albumRatings = albumRatingsData?.ratings;
+
   // Haystacks precomputed once per payload: the filter memo then only
   // does substring checks (no join/lowercase per keystroke).
   const flat = useMemo(() => {
@@ -280,8 +313,10 @@ export default function LibraryPage() {
     for (const a of lib?.artists ?? [])
       for (const al of a.albums) {
         // Prefer the tag-derived album artist (ALBUMARTIST/ARTIST); the
-        // artist folder name is only a fallback (it carries the MBID suffix).
-        const artistName = al.album_artist || a.name;
+        // artist folder name is only a fallback, and the folder is named with
+        // its MBID disambiguator ("Radiohead [a74b1b7f-…]") — so the folder's
+        // own display name is what that fallback reads, never the raw basename.
+        const artistName = al.album_artist || a.display_name || a.name;
         const trackHays: string[] = [];
         for (const t of al.tracks ?? []) {
           const hay = [artistName, al.meta?.ALBUM ?? "", t.file, ...Object.values(t.tags ?? {}).filter(Boolean).map(String)].join(" ").toLowerCase();
@@ -307,7 +342,6 @@ export default function LibraryPage() {
       case "failing": return !t.grade_pass;
       case "cd": return (t.tags.MEDIA ?? "").toUpperCase().includes("CD");
       case "digital": return (t.tags.MEDIA ?? "").toUpperCase().includes("DIGITAL");
-      case "explicit": return t.tags.ITUNESADVISORY === "1";
       case "instrumental": return t.tags.INSTRUMENTAL === "1";
       case "videos": return !!t.is_video;
       case "missingLyrics": return !t.lyrics_present;
@@ -319,11 +353,45 @@ export default function LibraryPage() {
       case "failing": return !al.pass;
       case "cd": return (al.media ?? "").toUpperCase().includes("CD");
       case "digital": return (al.media ?? "").toUpperCase().includes("DIGITAL");
-      case "explicit":
       case "instrumental":
       case "videos":
       case "missingLyrics": return (al.tracks ?? []).some((t) => trackPresetOK(t, preset));
     }
+  };
+
+  // ---- the rating facet ("what have I not rated yet") ----
+  //
+  // A folder's stars and a file's stars are different facts (the store keeps
+  // its own scope per path), so a row of either kind answers for what it IS:
+  // a track is rated when its own file has stars, an album when its folder
+  // rating is set OR anything inside it is rated, and an artist when any of
+  // its albums is. That is the sentence `RATED_NOTE` prints in the menu, and
+  // it is defined once here so the three tables cannot each mean something
+  // else by the same word.
+  const ratedTrack = (t: { path: string }) => ratingOf(ratings, t.path) > 0;
+  const ratedAlbum = (al: Album) =>
+    ratingOf(albumRatings, al.path) > 0 || (al.tracks ?? []).some((t) => ratedTrack(t));
+  const ratingOK = (rated: boolean) =>
+    ratingFilter === "any" ? true : ratingFilter === "rated" ? rated : !rated;
+
+  // ---- the advisory facet ----
+  //
+  // The ladder is three-state (0 not explicit / 1 explicit / 2 clean edition —
+  // see `AdvisoryBadge`), read here as the two questions a listener asks of it.
+  // A track answers for itself; an album is explicit when ANY of its tracks is,
+  // and clean only when NONE is — an album with one explicit track is an
+  // explicit album, which is the direction that matters when the filter is
+  // being used to keep that material away.
+  const explicitTrack = (t: Track) => t.tags.ITUNESADVISORY === "1";
+  const trackAdvisoryOK = (t: Track) =>
+    advisoryFilter === "any" ? true
+      : advisoryFilter === "explicit" ? explicitTrack(t)
+        : !explicitTrack(t);
+  const albumAdvisoryOK = (al: Album) => {
+    if (advisoryFilter === "any") return true;
+    const tracks = al.tracks ?? [];
+    if (advisoryFilter === "explicit") return tracks.some(explicitTrack);
+    return tracks.length > 0 && tracks.every((t) => !explicitTrack(t));
   };
   const presetCounts = useMemo(() => {
     const out: Record<string, number> = {};
@@ -331,6 +399,39 @@ export default function LibraryPage() {
     return out;
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [flat]);
+
+  /** What each facet option would SHOW, counted over the view's own entity
+   *  with the search and the presets applied but the facet itself open — a
+   *  number that already had its own filter applied could never be anything
+   *  but the current selection's size, and one that ignored the presets would
+   *  promise rows the table is not going to draw.
+   *
+   *  The three tables count their own rows: an artist counts as rated /
+   *  explicit when any of its albums is, the same cascade the rows themselves
+   *  filter by (see `ratingOK` / `albumAdvisoryOK`). */
+  const facetCounts = useMemo(() => {
+    const words = parseQueryTerms(debouncedQuery).words;
+    const hayOK = (hay: string) => words.every((w) => hay.includes(w));
+    const albumFacets = (al: Album) => ({
+      rated: ratedAlbum(al),
+      explicit: (al.tracks ?? []).some(explicitTrack),
+    });
+    const rows: { rated: boolean; explicit: boolean }[] =
+      view === "tracks"
+        ? flat.tracks.filter((t) => hayOK(t.hay) && trackPresetOK(t, preset))
+          .map((t) => ({ rated: ratedTrack(t), explicit: explicitTrack(t) }))
+        : view === "artists"
+          ? (lib?.artists ?? []).map((a) => {
+            const mine = flat.albums.filter(
+              (al) => a.albums.some((x) => x.path === al.path) && hayOK(al.hay) && albumPresetOK(al, preset));
+            return { rated: mine.some(ratedAlbum), explicit: mine.some((al) => (al.tracks ?? []).some(explicitTrack)) };
+          })
+          : flat.albums.filter((al) => hayOK(al.hay) && albumPresetOK(al, preset)).map(albumFacets);
+    const rated = rows.filter((r) => r.rated).length;
+    const explicit = rows.filter((r) => r.explicit).length;
+    return { rated, unrated: rows.length - rated, explicit, clean: rows.length - explicit };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [flat, lib, view, debouncedQuery, preset, ratings, albumRatings]);
 
   // Album haystacks keyed by path (flat.albums covers every album in lib).
   const albumHay = useMemo(() => new Map(flat.albums.map((al) => [al.path, al.hay])), [flat]);
@@ -352,9 +453,12 @@ export default function LibraryPage() {
     const trackTagOK = (t: Track) =>
       terms.tags.every(({ key, value }) => tagTermOK(t.tags as Record<string, unknown>, key, value));
 
-    const trOK = (t: FlatTrack) => trackPresetOK(t, preset) && trackTagOK(t) && wordsMatch(t.hay);
+    const trOK = (t: FlatTrack) =>
+      trackPresetOK(t, preset) && trackTagOK(t) && wordsMatch(t.hay)
+      && ratingOK(ratedTrack(t)) && trackAdvisoryOK(t);
 
-    const alOK = (al: Album) => albumPresetOK(al, preset);
+    const alOK = (al: Album) =>
+      albumPresetOK(al, preset) && ratingOK(ratedAlbum(al)) && albumAdvisoryOK(al);
     const alTagOK = (al: Album) =>
       terms.tags.every(({ key, value }) =>
         tagTermOK((al.meta ?? {}) as Record<string, unknown>, key, value) ||
@@ -367,7 +471,7 @@ export default function LibraryPage() {
     const albums = flat.albums.filter((al) => alOK(al) && wordsMatch(al.hay) && alTagOK(al));
     const tracks = flat.tracks.filter(trOK);
     return { artists, albums, tracks };
-  }, [lib, debouncedQuery, preset, flat, albumHay]);
+  }, [lib, debouncedQuery, preset, ratingFilter, advisoryFilter, ratings, albumRatings, flat, albumHay]);
 
   // ---- selection helpers ----
   const selTracks = useMemo(() => {
@@ -520,15 +624,11 @@ export default function LibraryPage() {
   };
 
   // One GET /api/ratings per scope for the whole page (react-query dedupes it
-  // across every row) and the optimistic setters the star controls share. The
-  // album scope is what the album rows draw: each album's OWN rating, which is
-  // a different fact from the ratings of the tracks inside it.
-  const { data: ratingsData } = useRatings();
+  // across every row) and the optimistic setters the star controls share.
+  // The maps themselves are declared above the filter memo (the facet reads
+  // them); only the setters live here, beside the actions that call them.
   const { setRating, pending } = useSetRating();
-  const { data: albumRatingsData } = useRatings("album");
   const { setRating: setAlbumRating, pending: albumPending } = useSetRating("album");
-  const ratings = ratingsData?.ratings;
-  const albumRatings = albumRatingsData?.ratings;
 
   const playSelection = () => {
     const out: { path: string; file: string; albumPath: string; artist?: string; album?: string; title?: string; coverFile?: string | null; albumCover?: string | null; advisory?: string | null }[] = [];
@@ -538,7 +638,7 @@ export default function LibraryPage() {
     for (const a of sortedArtists)
       if (selection.artists.includes(a.path))
         for (const al of a.albums)
-          for (const t of al.tracks) out.push({ path: t.path, file: t.file, albumPath: al.path, artist: al.album_artist || a.name, album: al.meta?.ALBUM ?? undefined, title: t.tags.TITLE || undefined, coverFile: t.cover_file ?? null, albumCover: al.cover_file ?? null, advisory: t.tags.ITUNESADVISORY ?? null });
+          for (const t of al.tracks) out.push({ path: t.path, file: t.file, albumPath: al.path, artist: al.album_artist || a.display_name || a.name, album: al.meta?.ALBUM ?? undefined, title: t.tags.TITLE || undefined, coverFile: t.cover_file ?? null, albumCover: al.cover_file ?? null, advisory: t.tags.ITUNESADVISORY ?? null });
     for (const tr of sortedTracks)
       if (selection.tracks.includes(tr.path))
         out.push({ path: tr.path, file: tr.file, albumPath: tr.path.split("/").slice(0, -1).join("/"), artist: tr.artist, album: tr.album, title: tr.tags.TITLE || undefined, coverFile: tr.cover_file ?? null, albumCover: tr.albumCover ?? null, advisory: tr.tags.ITUNESADVISORY ?? null });
@@ -587,11 +687,27 @@ export default function LibraryPage() {
     [filtered.albums, albumRatings]
   );
 
+  // The tracks table's own Rating column reads the row, exactly like the
+  // albums one: `sortRows` resolves the dotted sort key against the row, so the
+  // star the column DRAWS is the value a click on its header sorts by. Shallow
+  // copies (the tags and tech records stay shared).
+  const ratedTracks = useMemo(
+    () => filtered.tracks.map((t) => ({ ...t, rating: ratingOf(ratings, t.path) })),
+    [filtered.tracks, ratings]
+  );
+
   // Sorting is memoized so typing in the search box / toggling selection
   // doesn't re-sort the whole library on every keystroke.
   const sortedAlbums = useMemo(() => sortRows(ratedAlbums, albumSort), [ratedAlbums, albumSort]);
   const sortedArtists = useMemo(() => sortRows(filtered.artists, artistSort), [filtered.artists, artistSort]);
-  const sortedTracks = useMemo(() => sortRows(filtered.tracks, trackSort), [filtered.tracks, trackSort]);
+  const sortedTracks = useMemo(() => sortRows(ratedTracks, trackSort), [ratedTracks, trackSort]);
+  // Where everything still being acquired is, from the queue's own rows and
+  // the pushed job frames (lib/acquisition) — the SAME cache entry and the
+  // same frames the Soulseek page draws, so one album cannot read as two
+  // different stages. The queue is asked only while this page has something
+  // pending; a settled library asks it nothing.
+  const pendingHere = useMemo(() => flat.albums.some((al) => al.pending), [flat]);
+  const acquisition = useAcquisitions(pendingHere);
 
   // Compact rows re-render on every selection toggle and their tracklist is
   // built inside a .map (no hook allowed there) — order each album's tracks
@@ -640,6 +756,16 @@ export default function LibraryPage() {
   }
 
   const albumColSpan = 3 + albumCols.length + (selectMode ? 1 : 0); // checkbox?, chevron+cover, cols, actions
+  // The rows the albums table actually draws: artist-headed groups when the
+  // toggle is on, a flat list otherwise. Named because the table both renders
+  // them and has to know whether there are any.
+  const albumTableRows: ({ kind: "header"; artist: string } | { kind: "album"; album: FlatAlbum })[] =
+    groupByArtist ? albumRows : sortedAlbums.map((al) => ({ kind: "album" as const, album: al }));
+  // The other two tables' widths, for the same reason the album one exists:
+  // their "nothing matches" row has to span the table it sits in.
+  const artistColSpan = 1 + artistCols.length + (selectMode ? 1 : 0);
+  const trackColSpan =
+    trackDefs.filter((c) => trackCols.includes(c.id)).length + (selectMode ? 1 : 0);
 
   const allAlbumsSelected = sortedAlbums.length > 0 && sortedAlbums.every((a) => selection.albums.includes(a.path));
   const allArtistsSelected = sortedArtists.length > 0 && sortedArtists.every((a) => selection.artists.includes(a.path));
@@ -756,36 +882,78 @@ export default function LibraryPage() {
           />
         )}
 
-        {/* quick filter lives on the same line as the view options */}
+        {/* Quick filters: the presets plus the two facets. One menu, because
+            they narrow the same table — and the count beside each row is what
+            keeps a quick filter honest (it says how many rows it would leave
+            BEFORE the click). */}
         <div className="relative">
           <button
             className={`btn-ghost !py-1.5 text-xs tap ${filterOpen ? "!text-white !bg-raise" : ""}`}
             onClick={() => setFilterOpen(!filterOpen)}
-            title="Filter the library"
+            title="Filter the library — presets, your star ratings, and explicit/clean"
           >
             <ListFilter className="h-3.5 w-3.5" />
-            {PRESETS.find((p) => p.id === preset)?.label}
-            <span className="text-zinc-600 font-mono">{presetCounts[preset] ?? ""}</span>
+            {[
+              PRESETS.find((p) => p.id === preset)?.label,
+              ratingFilter !== "any" ? RATING_FILTERS.find((f) => f.id === ratingFilter)?.label : null,
+              advisoryFilter !== "any" ? ADVISORY_FILTERS.find((f) => f.id === advisoryFilter)?.label : null,
+            ].filter(Boolean).join(" · ")}
+            {(ratingFilter !== "any" || advisoryFilter !== "any") && (
+              <span className="h-1.5 w-1.5 rounded-full bg-accent inline-block" title="Filters are active" />
+            )}
           </button>
           {filterOpen && (
             <>
               <div className="fixed inset-0 z-30" onClick={() => setFilterOpen(false)} />
-              <div className="absolute left-0 top-full mt-1 z-40 w-52 rounded-lg border border-border bg-zinc-950 shadow-2xl p-1.5">
-                {PRESETS.map((p) => (
+              <div className="absolute left-0 top-full mt-1 z-40 w-64 rounded-lg border border-border bg-zinc-950 shadow-2xl p-1.5 max-h-[70vh] overflow-y-auto">
+                <FilterGroup label="Show">
+                  {PRESETS.map((p) => (
+                    <FilterRow
+                      key={p.id}
+                      label={p.label}
+                      count={presetCounts[p.id] ?? 0}
+                      active={preset === p.id}
+                      onClick={() => setPreset(p.id)}
+                    />
+                  ))}
+                </FilterGroup>
+                <FilterGroup label="Star rating" note={RATED_NOTE}>
+                  {RATING_FILTERS.map((f) => (
+                    <FilterRow
+                      key={f.id}
+                      label={f.label}
+                      hint={f.hint}
+                      count={f.id === "any" ? facetCounts.rated + facetCounts.unrated : facetCounts[f.id]}
+                      active={ratingFilter === f.id}
+                      onClick={() => setRatingFilter(f.id)}
+                    />
+                  ))}
+                </FilterGroup>
+                <FilterGroup label="Advisory">
+                  {ADVISORY_FILTERS.map((f) => (
+                    <FilterRow
+                      key={f.id}
+                      label={f.label}
+                      hint={f.hint}
+                      count={f.id === "any" ? facetCounts.explicit + facetCounts.clean : facetCounts[f.id]}
+                      active={advisoryFilter === f.id}
+                      onClick={() => setAdvisoryFilter(f.id)}
+                    />
+                  ))}
+                </FilterGroup>
+                {(preset !== "all" || ratingFilter !== "any" || advisoryFilter !== "any") && (
                   <button
-                    key={p.id}
+                    className="w-full text-left px-2.5 py-1.5 rounded-md text-xs text-zinc-500 hover:text-white hover:bg-raise"
                     onClick={() => {
-                      setPreset(p.id);
+                      setPreset("all");
+                      setRatingFilter("any");
+                      setAdvisoryFilter("any");
                       setFilterOpen(false);
                     }}
-                    className={`w-full text-left px-2.5 py-1.5 rounded-md text-xs flex items-center justify-between gap-3 ${
-                      preset === p.id ? "bg-raise text-white" : "text-zinc-400 hover:text-white hover:bg-raise"
-                    }`}
                   >
-                    <span>{p.label}</span>
-                    <span className="text-zinc-600 font-mono">{presetCounts[p.id] ?? 0}</span>
+                    Clear all filters
                   </button>
-                ))}
+                )}
               </div>
             </>
           )}
@@ -976,6 +1144,7 @@ export default function LibraryPage() {
                       selectable={selectMode}
                       selected={sel}
                       onSelect={toggleAlbum}
+                      extraMeta={al.pending ? <AcquisitionChip acq={acquisition(al.path, al.wish_id)} /> : null}
                     />
                   );
                 })}
@@ -1041,6 +1210,7 @@ export default function LibraryPage() {
                           count. `label` — the compact list has room to say
                           it outright rather than only on hover. */}
                       <PendingMark album={al} label />
+                      <AcquisitionChip acq={al.pending ? acquisition(al.path, al.wish_id) : null} />
                       <span className="text-[11px] text-zinc-500 truncate">
                         {al.artist}
                         {al.meta?.ORIGINALDATE || al.meta?.DATE ? ` · ${originalYear(al.meta)}` : ""}
@@ -1172,7 +1342,7 @@ export default function LibraryPage() {
                       names its cover cell the same way, so the header row is
                       not two blank announcements to a screen reader. */}
                   <th className="th w-10"><span className="sr-only">Expand</span></th>
-                  <th className="th w-14"><span className="sr-only">Cover</span></th>
+                  <th className="th w-16"><span className="sr-only">Cover</span></th>
                   {albumDefs.filter((c) => albumCols.includes(c.id)).map((c) => (
                     <SortHeader key={c.id} label={c.label} sort={albumSort} sortKey={c.sortKey} onSort={setAlbumSort}
                       className={`relative ${ALBUM_COL_W[c.id] ?? (c.tag ? TAG_COL_W : "")}${phoneHide(ALBUM_PHONE_CLS, c.id)}`}
@@ -1184,7 +1354,18 @@ export default function LibraryPage() {
                 </tr>
               </thead>
               <tbody className="stagger">
-                {(groupByArtist ? albumRows : sortedAlbums.map((al) => ({ kind: "album" as const, album: al }))).map((row) =>
+                {albumTableRows.length === 0 && (
+                  /* A filtered-to-nothing table used to render as a header row
+                     over blank space, which reads as a broken view rather than
+                     as an answer — this is the answer, and it says where the
+                     filters are. */
+                  <tr>
+                    <td colSpan={albumColSpan} className="td text-zinc-500">
+                      No albums match these filters — clear them in the Filter menu.
+                    </td>
+                  </tr>
+                )}
+                {albumTableRows.map((row) =>
                   row.kind === "header" ? (
                     <tr key={`h-${row.artist}`} className="bg-panel/70">
                       <td colSpan={albumColSpan} className="px-3 py-1.5 text-xs font-bold tracking-wide text-zinc-300">
@@ -1195,6 +1376,7 @@ export default function LibraryPage() {
                     <AlbumRowGroup
                       key={row.album.path}
                       album={row.album}
+                      acq={row.album.pending ? acquisition(row.album.path, row.album.wish_id) : null}
                       expanded={expanded.has(row.album.path)}
                       onToggle={() => toggleExpand(row.album.path)}
                       visibleCols={albumCols}
@@ -1251,6 +1433,13 @@ export default function LibraryPage() {
                 </tr>
               </thead>
               <tbody className="stagger">
+                {sortedArtists.length === 0 && (
+                  <tr>
+                    <td colSpan={artistColSpan} className="td text-zinc-500">
+                      No artists match these filters — clear them in the Filter menu.
+                    </td>
+                  </tr>
+                )}
                 {sortedArtists.map((a) => {
                   const sel = selection.artists.includes(a.path);
                   return (
@@ -1271,9 +1460,12 @@ export default function LibraryPage() {
                       )}
                       <td className="td">
                         {/* the row click already opens the artist, so the link
-                            must not push the same route a second time */}
+                            must not push the same route a second time. The
+                            NAME is the folder's display name: the folder is
+                            named "Radiohead [a74b1b7f-…]", and the raw basename
+                            was what this table used to print. */}
                         <Link to={artistRef(a)} onClick={(e) => e.stopPropagation()} className="font-medium hover:text-accent-soft">
-                          {a.name}
+                          {a.display_name || a.name}
                         </Link>
                       </td>
                       {artistCols.includes("albums") && (
@@ -1329,6 +1521,13 @@ export default function LibraryPage() {
                 </tr>
               </thead>
               <tbody className="stagger">
+                {sortedTracks.length === 0 && (
+                  <tr>
+                    <td colSpan={trackColSpan} className="td text-zinc-500">
+                      No tracks match these filters — clear them in the Filter menu.
+                    </td>
+                  </tr>
+                )}
                 {sortedTracks.map((tr) => {
                   const sel = selection.tracks.includes(tr.path);
                   return (
@@ -1380,12 +1579,6 @@ export default function LibraryPage() {
                                 >
                                   <InfoIcon className="h-3.5 w-3.5" />
                                 </button>
-                                {/* the track's rating — the same fixed slot the
-                                    album page uses, so a column of ratings
-                                    reads straight down the page */}
-                                <span className="shrink-0" onClick={(e) => e.stopPropagation()}>
-                                  <StarRating size="sm" value={ratingOf(ratings, tr.path)} onChange={(v) => setRating(tr.path, v)} pending={pending(tr.path)} />
-                                </span>
                               </>
                             }
                           >
@@ -1418,6 +1611,28 @@ export default function LibraryPage() {
                               <span className="chip bg-zinc-800 text-zinc-400 border border-border text-[10px] shrink-0">INST</span>
                             )}
                           </TrackTitleCell>
+                        </td>
+                      )}
+                      {/* The rating has its own column here, and that is the
+                          fix for the collapse this view shipped: the stars used
+                          to ride in the title cell's trailing slot, which made
+                          one narrow fixed-layout column hold the name AND the
+                          marks AND the stars — 220 px against ~200 px of
+                          controls, so the title lost and rendered one character
+                          per line. A column is also what a reader wants: a
+                          straight vertical scan of the ratings (the album
+                          table has drawn it this way all along). */}
+                      {trackCols.includes("rating") && (
+                        <td
+                          className={`td${phoneHide(TRACK_PHONE_CLS, "rating")}`}
+                          onClick={(e) => e.stopPropagation()}
+                        >
+                          <StarRating
+                            size="sm"
+                            value={ratingOf(ratings, tr.path)}
+                            onChange={(v) => setRating(tr.path, v)}
+                            pending={pending(tr.path)}
+                          />
                         </td>
                       )}
                       {trackCols.includes("artist") && <td className={`td text-zinc-400 break-words${phoneHide(TRACK_PHONE_CLS, "artist")}`}>{tr.artist}</td>}
@@ -1478,8 +1693,65 @@ export default function LibraryPage() {
   );
 }
 
+/** Where an added album is in its acquisition: the queue's own word for the
+ *  stage and its own percentage while bytes are moving (lib/acquisition).
+ *
+ *  The Pending dot beside it says WHY a folder is empty; this says how far
+ *  along the thing filling it is, so a library row answers "what is happening
+ *  to this album" without opening the Soulseek page. Nothing is drawn for an
+ *  album with no acquisition on its way — a settled library looks exactly as
+ *  it did before this existed. */
+function AcquisitionChip({ acq, className = "" }: { acq: Acquisition | null; className?: string }) {
+  if (!acq) return null;
+  const pct = acq.percent === null ? "" : ` · ${Math.round(acq.percent)}%`;
+  return (
+    <span
+      className={`chip text-[9px] bg-sky-900/40 text-sky-300 border border-sky-800 shrink-0 ${className}`}
+      title={`This album's acquisition: ${acq.label}${pct}`}
+    >
+      {acq.label}{pct}
+    </span>
+  );
+}
+
+/** One labelled block of the filter menu. The note rides under the group's
+ *  label rather than in a tooltip: `RATED_NOTE` and the advisory ladder are the
+ *  definitions of what the options below them mean, and a definition nobody can
+ *  read without hovering is one the reader has to guess at. */
+function FilterGroup({ label, note, children }: { label: string; note?: string; children: ReactNode }) {
+  return (
+    <div className="border-b border-border/60 last:border-b-0 py-1">
+      <div className="px-2.5 pt-1 text-[10px] uppercase tracking-wider text-zinc-600">{label}</div>
+      {note && <div className="px-2.5 pb-1 text-[10px] text-zinc-600 leading-snug">{note}</div>}
+      {children}
+    </div>
+  );
+}
+
+/** One option: name, how many rows it would leave, and whether it is the one
+ *  in force. Clicking never closes the menu — the facets compose, and a menu
+ *  that closed on every pick would make the second one a reopen. */
+function FilterRow({ label, hint, count, active, onClick }: {
+  label: string; hint?: string; count: number; active: boolean; onClick: () => void;
+}) {
+  return (
+    <button
+      onClick={onClick}
+      title={hint}
+      aria-pressed={active}
+      className={`w-full text-left px-2.5 py-1.5 rounded-md text-xs flex items-center justify-between gap-3 ${
+        active ? "bg-raise text-white" : "text-zinc-400 hover:text-white hover:bg-raise"
+      }`}
+    >
+      <span className="truncate">{label}</span>
+      <span className={`font-mono shrink-0 ${count === 0 ? "text-zinc-700" : "text-zinc-600"}`}>{count}</span>
+    </button>
+  );
+}
+
 function AlbumRowGroup({
   album,
+  acq,
   expanded,
   onToggle,
   visibleCols,
@@ -1526,6 +1798,9 @@ function AlbumRowGroup({
   trackWidths: Record<string, number>;
   onTrackWidth: (id: string, px: number) => void;
   onResetTrackWidths: () => void;
+  /** Where this album is in its acquisition, when it is still arriving (see
+   *  `AcquisitionChip`). */
+  acq: Acquisition | null;
 }) {
   // The rows this component renders are their own tree: same hooks as the
   // page, and react-query serves them from one GET /api/ratings per scope.
@@ -1614,6 +1889,7 @@ function AlbumRowGroup({
             {/* the same marker the compact rows and the cards carry — the
                 albums table is one more album-shaped surface */}
             <PendingMark album={album} />
+            <AcquisitionChip acq={acq} />
           </>
         }
         coverPath={album.path}

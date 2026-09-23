@@ -451,13 +451,23 @@ def _codes_by_family():
     return {f["id"]: dict(f["codes"]) for f in FAMILIES}
 
 
-def gaps(album_dir, cfg, steps=None):
+def gaps(album_dir, cfg, steps=None, grade=None):
     """What this album is still missing, per family.
 
     The grader is the source: `mlo.grader._grade_album` is run exactly as the
     Grade script runs it (same config, same lyrics format), and its per-track
     issue codes are folded into the family that owns them. Nothing here forms
     an opinion of its own about what "complete" means.
+
+    *grade* is a grade the CALLER already has for this album — `server.imports
+    .finish_album` hands over what the chain's own Grade step (script 4, LAST
+    in the shipped `run_all_order`) produced seconds earlier — and it is used
+    INSTEAD of grading again when it answers the same question, i.e. when the
+    config it was taken with is the `grade_cfg` built below. That is one grade
+    per import instead of two identical ones. It is not a memo: nothing is
+    cached, and a caller with nothing in hand pays for its own grade exactly as
+    before. The caller decides whether its grade is an answer at all — see the
+    `_grade_sink` note in `finish_album` for the config under which it is not.
 
     The two exceptions are families the grader cannot report: an absent
     ITUNESADVISORY is a legitimate "unrated" and a staged cover is a file the
@@ -470,6 +480,7 @@ def gaps(album_dir, cfg, steps=None):
     pipeline left the family to the user (or was told not to decide it) and
     "unsourced" when the sources were asked and none could supply it.
     """
+
     cfg = cfg or {}
     steps = steps or {}
     out = {}
@@ -490,9 +501,19 @@ def gaps(album_dir, cfg, steps=None):
                 grade_cfg[key] = off_value
 
     try:
-        from .grader import _grade_album
-        res = _grade_album(album_dir, str(grade_cfg.get("lyrics_format", "EMBEDDED")).upper(),
-                           grade_cfg)
+        if grade is not None:
+            # One grade per import (spec R155): this is the grade the chain's
+            # own Grade step just produced for this album — the same checks on
+            # the same folder with the same switches, because the caller only
+            # offers it when the configs match (see `finish_album`). Grading
+            # again here produced the identical answer a second time, which is
+            # the whole cost this removes.
+            res = grade
+        else:
+            from .grader import _grade_album
+            res = _grade_album(
+                album_dir, str(grade_cfg.get("lyrics_format", "EMBEDDED")).upper(),
+                grade_cfg)
     except Exception:
         res = None
     codes = set()

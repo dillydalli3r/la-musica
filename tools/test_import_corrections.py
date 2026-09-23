@@ -444,7 +444,7 @@ def xlit_pair(fmt, name):
            "lyrics_xlit_sidecars": True}
     with patched(lyrics_xlit,
                  ai_ready=lambda c: True,
-                 xlit_needs=lambda t, c: {"transliteration": True, "translation": False, "langs": []},
+                 xlit_needs=lambda t, c, declared="": {"transliteration": True, "translation": False, "langs": []},
                  _apply=lambda c, t, mode, lang="": (f"[romaji] {t.splitlines()[0]}", True)):
         auto_res = lyrics_xlit.run_lyrics_xlit({**cfg, "targets": [auto_file]})
         resp = call(lambda: CLIENT.post("/api/lyrics/xlit",
@@ -537,7 +537,7 @@ ok("already has this track" in got["reason"],
 
 with patched(lyrics_xlit,
              ai_ready=lambda cfg: True,
-             xlit_needs=lambda text, cfg: {"transliteration": True, "translation": False, "langs": []},
+             xlit_needs=lambda text, cfg, declared="": {"transliteration": True, "translation": False, "langs": []},
              _apply=lambda cfg, text, mode, lang="": (_ for _ in ()).throw(RuntimeError("no AI key"))):
     resp = call(lambda: CLIENT.post("/api/lyrics/xlit",
                                     json={"paths": [make_flac("05 - xlit.flac", lyrics=LYRIC_TEXT)]})).json()

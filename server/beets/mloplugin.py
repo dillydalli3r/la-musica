@@ -45,8 +45,9 @@ if _REPO_ROOT not in sys.path:
 
 # The canonical tag-value rule (mlo.tagtext) — dependency-free and importable
 # here by design, so the release types this plugin writes are spelled exactly
-# the way the tag layer, the organizer and the grader spell them.
-from mlo.tagtext import canonical_value  # noqa: E402
+# the way the tag layer, the organizer and the grader spell them, and a
+# multi-value field is joined with the one separator that module owns.
+from mlo.tagtext import canonical_value, join_list  # noqa: E402
 
 UA = "MusicLibraryOptimizer/2.0 (beets mloplugin)"
 _MB_LOCK = threading.Lock()
@@ -262,14 +263,14 @@ def _first(value):
 def _multi(value):
     """MLO's own spelling of a multi-value field: entries joined with '; '.
 
-    mlo.naming reads ARTIST / ALBUMARTIST / RELEASETYPE as the stored
+    mlo.naming reads ARTIST / ALBUMARTIST / RELEASETYPE / GENRE as the stored
     string (the tag layer joins several comments with '; '), so taking only
-    beets' first entry would make the two sides compute DIFFERENT folder
-    names for a release with several artists or types.
+    beets' first entry would make the two sides compute DIFFERENT names for a
+    release with several artists, types or genres. The join itself is
+    mlo.tagtext.join_list — the module that owns the separator — so this side
+    can never spell a list differently from the tag layer.
     """
-    if isinstance(value, (list, tuple)):
-        return "; ".join(str(v).strip() for v in value if str(v).strip())
-    return value or ""
+    return join_list(value)
 
 
 def _multi_first(value):
@@ -303,12 +304,67 @@ def _item_track_file(item):
     return f"{disc}-{track:02d} {title}"
 
 
+# %genre% per routed item, keyed by path + mtime + size. The naming script is
+# evaluated twice per item ($mlo_file, then $mlo_dir — see _mlo_dir_func) and
+# beets re-evaluates it as it moves an album, so without this the file would be
+# opened twice per track for a value that cannot have changed in between.
+_genre_cache = {}
+
+
+def _item_genre(item):
+    """%genre% for one item: the file's own GENRE list, as the organizer reads it.
+
+    beets' item carries ONE genre — mediafile exposes `genres` (the list) but
+    beets' model has only the single-value `genre`, and that field IS
+    mediafile's `genres.single_field()`, i.e. the FIRST value. mlo.naming hands
+    the whole "; "-joined tag through (only RELEASECOUNTRY and LABEL reduce to
+    their first value — mlo.naming._first_multi, spec R33), so reading the item
+    alone made a two-genre release import to one folder and organize to
+    another. The file's own tag is the one place both sides read the SAME value
+    from: it is what the tag layer wrote (repeated fields, "; "-joined on read)
+    and what the organizer's track_variables is handed.
+
+    A file that cannot be read — or carries no GENRE, the normal case for a
+    download whose genres the chain has not filled yet — keeps the item's own
+    value, so nothing here can invent a genre beets did not state.
+    """
+    path = ""
+    key = None
+    try:
+        raw = item.path
+        path = (raw.decode("utf-8", "replace") if isinstance(raw, bytes)
+                else str(raw or ""))
+        st = os.stat(path)
+        key = (os.path.normcase(path), st.st_mtime_ns, st.st_size)
+    except Exception:  # noqa: BLE001 - no path at all, or one that cannot be stat'ed
+        key = None
+    if key is not None and key in _genre_cache:
+        return _genre_cache[key]
+    genre = ""
+    if path:
+        try:
+            from mlo.audio import AudioFile
+
+            genre = str(AudioFile(path).get_tag("GENRE") or "").strip()
+        except Exception:  # noqa: BLE001 - an unreadable file falls back below
+            genre = ""
+    if not genre:
+        genre = _multi(item.genre)
+    if key is not None:
+        if len(_genre_cache) > 256:
+            _genre_cache.clear()
+        _genre_cache[key] = genre
+    return genre
+
+
 def _item_naming_vars(item):
     """MLO naming-script variables from a beets item's (denormalized) tags.
 
     Key-for-key the map mlo.naming.track_variables builds from a file's
     tags, and with the same multi-value rules — the two are evaluated
-    against the same naming script and must agree on every variable.
+    against the same naming script and must agree on every variable. GENRE is
+    the one variable beets cannot state in full (see _item_genre), so it is
+    read off the file the item routes.
     """
     return {
         "albumartist": _multi(item.albumartist),
@@ -324,7 +380,7 @@ def _item_naming_vars(item):
         # Capitalized exactly as the plugin's own release_type_caps pass
         # writes the tag, so the name beets computes now still matches the
         # tag the next run reads (and the MLO organizer evaluates).
-        "releasetype": "; ".join(
+        "releasetype": join_list(
             _cap_releasetypes(getattr(item, "albumtypes", None)
                               or getattr(item, "releasetype", None))),
         "originaldate": _date_str(item.original_year, item.original_month, item.original_day),
@@ -341,7 +397,10 @@ def _item_naming_vars(item):
         "tracknumber": str(item.track or ""),
         "tracktotal": str(item.tracktotal or ""),
         "title": _first(item.title) or "",
-        "genre": _first(item.genre) or "",
+        # GENRE is a LIST here as it is on the tag side: see _item_genre (the
+        # item itself is the first value only, which is what made the import
+        # and the organizer disagree).
+        "genre": _item_genre(item),
     }
 
 
@@ -507,7 +566,7 @@ class MloPlugin(BeetsPlugin):
 
             # 1) Release-type capitalization
             if capped:
-                value = "; ".join(capped)
+                value = join_list(capped)
                 if value and str(af.get_tag("RELEASETYPE") or "").strip() != value:
                     af.set_tag("RELEASETYPE", value)
                     changed = True

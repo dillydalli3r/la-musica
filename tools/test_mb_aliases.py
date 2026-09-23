@@ -140,7 +140,10 @@ src = inspect.getsource(intg)
 for key, where in (('"genres+aliases"', "artist identity"),
                    ('{"artist": mbid, "inc": "aliases"}', "artist discography browse"),
                    ('"artist-credits+genres+aliases"', "release-group lookup"),
-                   ('"media+aliases"', "release-group editions browse"),
+                   # …+labels: the same request carries each edition's catalog
+                   # numbers, which the fallback walk's distinct-pressing rule
+                   # reads (spec R169)
+                   ('"media+aliases+labels"', "release-group editions browse"),
                    ("+labels+isrcs+aliases", "release lookup")):
     ok(key in src, f"{where} asks MusicBrainz for aliases ({key})")
 ok(src.count("alias_for(") >= 4, "and each of them attaches the chosen alias")

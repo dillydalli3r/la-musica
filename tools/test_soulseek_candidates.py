@@ -2250,6 +2250,39 @@ try:
 finally:
     shutil.rmtree(_stamp_dir, ignore_errors=True)
 
+# LANGUAGE is the release's TEXT REPRESENTATION (spec R167): the one statement
+# of which language the lyrics are in, written ONLY into a track that states
+# nothing — a value the user set, or the model's own answer for this track, is
+# a statement about the LYRICS and the release's language never replaces it.
+_lang_dir = tempfile.mkdtemp(prefix="mlo-stamp-lang-")
+try:
+    put_file(_lang_dir, "01 - Alpha.flac")
+    with Patch(mlo_audio, AudioFile=RecorderAudio):
+        RecorderAudio.written.clear()
+        soulseek_auto._stamp_mb_tags(_lang_dir, dict(JOB_RELEASE, language="jpn"))
+    _tags = RecorderAudio.written["01 - Alpha.flac"]
+    assert _tags.get("LANGUAGE") == "ja", _tags   # MusicBrainz's 639-3 -> the app's code
+    # "several languages" is not a language: nothing is written for it
+    with Patch(mlo_audio, AudioFile=RecorderAudio):
+        RecorderAudio.written.clear()
+        soulseek_auto._stamp_mb_tags(_lang_dir, dict(JOB_RELEASE, language="mul"))
+    assert "LANGUAGE" not in RecorderAudio.written["01 - Alpha.flac"], RecorderAudio.written
+
+    class SpokenAudio(RecorderAudio):
+        """A track that already states its language (the user's edit, or the
+        model's answer for these particular lyrics)."""
+
+        def get_tag(self, name):
+            return "tr" if str(name).upper() == "LANGUAGE" else ""
+
+    with Patch(mlo_audio, AudioFile=SpokenAudio):
+        RecorderAudio.written.clear()
+        soulseek_auto._stamp_mb_tags(_lang_dir, dict(JOB_RELEASE, language="jpn"))
+    assert "LANGUAGE" not in RecorderAudio.written["01 - Alpha.flac"], \
+        "the release's language must not overwrite the track's own"
+finally:
+    shutil.rmtree(_lang_dir, ignore_errors=True)
+
 # --------------------------------------------------------------------------- #
 # A wish stores the queries it was created with, but an EMPTY list must not pin
 # the search to nothing: the worker hands the job None, and the job derives the

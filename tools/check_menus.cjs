@@ -25,12 +25,14 @@ const want = (group) => !ONLY || ONLY === group;
 /** The app's edge gutter (see web/src/components/Popover.tsx). */
 const GUTTER = 8;
 
-// Must stay in sync with NAV in web/src/App.tsx.
-// Downloads is the browser's offline cache, a page of its own again; the
-// Soulseek *staging* list stays a tab on the Soulseek page.
+// Must stay in sync with NAV_GROUPS in web/src/App.tsx — every in-app route the
+// sidebar lists, in order, and nothing else (the footer's outbound links and
+// the credits providers are not menu entries).
 const EXPECTED_NAV = [
-  "Home", "Library", "Genres", "Trash", "Playlists", "Favorites", "Downloads",
-  "Import", "Soulseek", "Export", "Optimization", "Grading", "Dependencies", "Settings",
+  "Home", "Library", "Browse", "Genres", "Trash", "Playlists", "Favorites",
+  "Downloads", "Discover", "Recommended", "Charts", "Watched artists", "Import",
+  "Soulseek", "MusicBrainz", "Export", "Optimization", "Grading", "In progress",
+  "Checks & scripts", "Dependencies", "Settings", "Donations",
 ];
 
 /* ---- the album cover "…" menu -------------------------------------------
@@ -203,11 +205,18 @@ async function coverMenuChecks(page, check) {
   await page.goto(BASE + "/", { waitUntil: "networkidle" });
   await page.waitForTimeout(1500);
 
-  const navText = await page.locator("aside a").allInnerTexts();
-  const labels = navText.map((t) => t.trim()).filter(Boolean);
-  console.log("sidebar:", JSON.stringify(labels));
-  check("sidebar lists every NAV entry in order", JSON.stringify(labels) === JSON.stringify(EXPECTED_NAV),
-    `got ${JSON.stringify(labels)}`);
+  // Only the app's OWN routes are the menu: the sidebar's footer carries
+  // outbound links (the repo, the credits' providers) and they are not NAV
+  // entries — gathering every `aside a` made this check fail on the credits
+  // list rather than on a missing menu item.
+  const navLinks = await page.locator("aside a").evaluateAll((as) =>
+    as.filter((a) => (a.getAttribute("href") || "").startsWith("/"))
+      .map((a) => a.textContent.trim())
+      .filter(Boolean)
+  );
+  console.log("sidebar:", JSON.stringify(navLinks));
+  check("sidebar lists every NAV entry in order", JSON.stringify(navLinks) === JSON.stringify(EXPECTED_NAV),
+    `got ${JSON.stringify(navLinks)}`);
 
   for (const path of ["/library", "/mb/search?q=test"]) {
     const res = await page.goto(BASE + path, { waitUntil: "networkidle" });
@@ -219,12 +228,19 @@ async function coverMenuChecks(page, check) {
 
   // Every sidebar entry must actually lead somewhere: click it and confirm the
   // route answers and renders — the menu/routes can never drift apart silently.
+  //
+  // Only IN-APP hrefs are routes. The sidebar's footer carries outbound links
+  // (the repo, the credits) and `BASE + "https://…"` is not a URL: the walk
+  // used to try exactly that and died on `http://127.0.0.1:8000https://…`,
+  // which is how this check reported a failure that was neither the menu's nor
+  // the server's.
   await page.goto(BASE + "/", { waitUntil: "networkidle" });
   await page.waitForTimeout(800);
   const hrefs = await page.locator("aside a").evaluateAll((as) =>
     as.map((a) => ({ label: a.textContent.trim(), href: a.getAttribute("href") }))
   );
   for (const { label, href } of hrefs) {
+    if (!href || /^[a-z]+:/i.test(href)) continue; // outbound / mailto / tel
     const res = await page.goto(BASE + href, { waitUntil: "networkidle" });
     await page.waitForTimeout(600);
     const status = res && res.status();

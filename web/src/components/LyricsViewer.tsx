@@ -64,11 +64,17 @@ export function hasLyricsText(text: string | null | undefined): boolean {
 }
 
 
-export function parseLrc(lrc: string): LrcLine[] {
+export function parseLrc(lrc: string, shiftMs = 0): LrcLine[] {
   let offsetMs = 0;
   const off = lrc.match(/\[offset:\s*([+-]?\d+)\s*\]/i);
   if (off) offsetMs = parseInt(off[1], 10) || 0;
-  const shift = offsetMs / 1000;
+  // `shiftMs` is the reader's own nudge (the offset control), added to the
+  // file's `[offset:]` header: the header is the FILE's correction, the
+  // parameter the one the user is trying out before it is written back. Both
+  // are millisecond shifts of the same sync, so they add — and with the
+  // control at rest (0) this is the header alone, byte-for-byte what the
+  // parser did before the parameter existed.
+  const shift = (offsetMs + shiftMs) / 1000;
   const lines: LrcLine[] = [];
   let hasTimed = false;
   let lastTime = 0;
@@ -133,8 +139,8 @@ export function parseLrc(lrc: string): LrcLine[] {
  * synthesize one whenever the first real line arrives late. Both players'
  * lines and stored-transform seeding go through this, so their line
  * indexes always stay aligned. */
-export function parsePlayerLrc(text: string): LrcLine[] {
-  const parsed = parseLrc(text);
+export function parsePlayerLrc(text: string, shiftMs = 0): LrcLine[] {
+  const parsed = parseLrc(text, shiftMs);
   if (parsed.length && parsed[0].time > 0.35) {
     parsed.unshift({ ts: "[00:00.00]", time: 0, text: "" });
   }

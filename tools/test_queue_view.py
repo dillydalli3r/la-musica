@@ -284,8 +284,7 @@ def _wait_for(predicate, timeout=20.0, what="condition"):
 client = _app()
 empty = _queue(client)
 assert empty["counts"]["total"] == 0, empty["counts"]
-assert sorted(empty["sections"]) == ["completed", "failed", "in_progress",
-                                     "needs_attention", "queued"], sorted(empty["sections"])
+assert sorted(empty["sections"]) == sorted(api_queue.SECTIONS), sorted(empty["sections"])
 assert empty["concurrency"] == CONCURRENCY, empty["concurrency"]
 # The three numbers the queue header reports, and what makes them coherent:
 # the app enforces its own two ceilings (releases at once, candidates per
@@ -546,6 +545,68 @@ with Patch(auto, load_config=lambda: dict(CFG),
     wired = TestClient(mlo_main.app).get("/api/queue")
     assert wired.status_code == 200, (wired.status_code, wired.text)
     assert "sections" in wired.json(), wired.json()
+
+# --------------------------------------------------------------------------- #
+# 7. a WARNING rides the album's FINISHED row; only a WAIT sits in Needs you
+# --------------------------------------------------------------------------- #
+# An import that could not supply a family has FINISHED: the album is in the
+# library, so its row is a finished row carrying what it is short of (spec
+# R166), with the wizard link and the dismiss on it. Only an entry that really
+# is a wait — a review import whose chain has not run — belongs in the section
+# that reads "these are holding on you".
+from server import import_autonomy  # noqa: E402
+
+scope_cfg = cfgmod.load_config()
+scope_album = os.path.join(REDIRECT, "Artists", "Warned Album")
+os.makedirs(scope_album, exist_ok=True)
+_cover_gap = {"cover": {"id": "cover", "label": "Cover art", "step": "Covers",
+                        "state": "unsourced", "fields": ["cover art"],
+                        "codes": ["COVER"], "note": ""}}
+import_autonomy.raise_prompt(scope_album, scope_cfg, _cover_gap, reason="missing")
+warned = api_queue.build_queue(scope_cfg)
+_key = os.path.normcase(scope_album)
+show = lambda payload, section: [r for r in payload["sections"][section]
+                                 if os.path.normcase(r.get("album_path") or "") == _key]
+done_rows = show(warned, "completed")
+assert done_rows, ("a finished import's album has a finished row", warned["counts"])
+_row = done_rows[0]
+assert _row["needs"]["families"] == ["cover"], _row
+assert _row["needs"]["waiting"] is False, _row
+assert _row["stage"] == "completed" and _row["action"] == "manual" \
+    and _row["action_link"] == _row["needs"]["link"] and _row["dismissable"], _row
+assert not show(warned, "needs_attention"), \
+    "a finished import's warning must NOT sit in the section for rows holding on you"
+assert import_autonomy.parked_keys(scope_cfg) == frozenset(), \
+    "…and it must not park the album (a warning is not a lock)"
+# The AUTO-IMPORT case the same rule is for: a release the app fetched for you
+# is ONE row, in Completed, carrying the warning — not a finished row plus a
+# second "waiting on you" row for the same album.
+_rel = _release("88888888-0000-0000-0000-000000000001", "Warned", "Album")
+RESOLVED[_rel["id"]] = _rel
+with Patch(wishes, list_wishes=lambda: [dict(
+        wishes.add_wish(_rel["id"], title="Warned Album", artist="Warned"),
+        status="imported", album_path=scope_album)]):
+    merged = api_queue.build_queue(scope_cfg)
+rows = [r for r in merged["sections"]["completed"]
+        if os.path.normcase(r.get("album_path") or "") == _key]
+assert len(rows) == 1, ("one album, one row — the warning rides the finished "
+                        "release's own row", [r["id"] for r in rows])
+assert rows[0]["needs"]["families"] == ["cover"] and rows[0]["dismissable"], rows[0]
+assert not show(merged, "needs_attention"), merged["counts"]
+# The same album with a STOPPED import (review mode): that one IS a wait — its
+# chain has not run — and it keeps the waiting section with the same link.
+import_autonomy.raise_prompt(
+    scope_album, scope_cfg,
+    {"cover": {"id": "cover", "label": "Cover art", "step": "Covers",
+               "state": "decision", "fields": ["cover art"],
+               "codes": ["COVER"], "note": ""}},
+    reason="stopped")
+stopped = api_queue.build_queue(scope_cfg)
+srows = show(stopped, "needs_attention")
+assert srows and srows[0]["needs"]["waiting"] is True, (srows, stopped["counts"])
+assert str(scope_album).replace("\\", "/").lower() in import_autonomy.parked_keys(scope_cfg), \
+    "a review import that has not run its chain does park the album"
+import_autonomy.clear(scope_album, scope_cfg)
 
 # A controlled payload with one row in EVERY stage: the states a live run only
 # passes through (a download in flight, a job parked on the user, an import

@@ -59,6 +59,10 @@ from .stats import (
     new_stats, _make_pbar, _pbar_skip, _pbar_update, _collect_targets,
     _find_albums, is_audio_file, worker_count,
 )
+# the ONE multi-value separator (mlo.tagtext owns it): a writer that has to
+# know which values a file already states reads them apart with this, never
+# with a second spelling of its own
+from .tagtext import split_list
 from .ui import print_header, log, c, Color
 
 
@@ -768,15 +772,18 @@ def write_mb_tags(af, values, config=None, replace=None):
     The one writer both MusicBrainz paths use — this stage and the beets
     import plugin — so a field written by either lands the same way: an EMPTY
     value is skipped (a release that states no ISRC must not produce a blank
-    ISRC tag, which every later run would report as "written"), a tag that
-    already holds a value is KEPT (another pressing's label, or ids another
-    tagger wrote, are the album's own business), and every write honours the
-    per-tag gates. A LIST is passed through to set_tag, which stores it as
-    repeated container fields.
+    ISRC tag, which every later run would report as "written"), a SCALAR tag
+    that already holds a value is KEPT (another pressing's label, or ids
+    another tagger wrote, are the album's own business), and every write
+    honours the per-tag gates. A LIST is passed through to set_tag, which
+    stores it as repeated container fields; a list on a file that already
+    states values for that tag COMPLETES them (see _complete_list) instead of
+    being cut down to whatever one value the file happened to hold.
 
     *replace* is the pass's own rule for the tags it may change WITHOUT them
     being empty — ``(tag, have, want) -> value`` (see _fill_release_tags: the
-    two dates are sharpened and the country widened).
+    two dates are sharpened and the country widened). It is asked FIRST, so a
+    tag with its own write rule keeps it.
 
     Returns ``(written, refused)``: how many tags were written, and the
     ``(tag, reason)`` pairs the file's own writer REFUSED — a tag a container
@@ -793,10 +800,20 @@ def write_mb_tags(af, values, config=None, replace=None):
                 continue
             have = str(af.get_tag(tag) or "").strip()
             if have:
-                if replace is None:
-                    continue
-                value = _clean_value(replace(tag, have, value))
-                if value is None:
+                wanted = (_clean_value(replace(tag, have, value))
+                          if replace is not None else None)
+                if wanted is not None:
+                    value = wanted
+                elif isinstance(value, list):
+                    # The answer is a LIST (several performers, several
+                    # ISRCs) and the file already states values for this tag:
+                    # COMPLETE them rather than leaving the tag alone. The old
+                    # blanket ``continue`` cut a release's two engineers down
+                    # to whichever single credit the file happened to hold.
+                    value = _complete_list(tag, have, value)
+                    if value is None:
+                        continue
+                else:
                     continue
             if not should_write_audio_tag(config, tag, filepath=af.path):
                 continue
@@ -821,6 +838,39 @@ def _clean_value(value):
         return values or None
     text = str(value or "").strip()
     return text or None
+
+
+def _complete_list(tag, have, want):
+    """*have* plus every value of *want* it does not already state, or None.
+
+    The one rule for a LIST answer landing on a tag that already holds
+    values: the file's own values come first, in the order it states them,
+    and the answer's values it does not already state follow in
+    MusicBrainz's own order. A credit is DATA, not a single slot — a release
+    whose track has two engineers must not end up with one because the file
+    arrived carrying the other — and the file's own value may be one
+    MusicBrainz does not state at all (another pressing's credit), so it is
+    never dropped either. Comparison is case-insensitive, the way the genre
+    and country lists of this app already compare their own values.
+
+    None means the tag is COMPLETE: nothing may be written, which is what
+    keeps a re-run (and the prescan's "nothing to fill") a no-op.
+
+    RELEASECOUNTRY is answered by its own rule (``_country_upgrade``, asked
+    through *replace* before this): a country the release does not state keeps
+    the value as it is rather than being added to a list it never belonged to,
+    so this never completes it.
+    """
+    if tag == "RELEASECOUNTRY":
+        return None
+    merged = split_list(have)
+    before = len(merged)
+    seen = {value.upper() for value in merged}
+    for value in want:
+        if value.upper() not in seen:
+            seen.add(value.upper())
+            merged.append(value)
+    return merged if len(merged) > before else None
 
 
 def _mb_replace(tag, have, want):
@@ -859,17 +909,21 @@ def _fill_release_tags(info, config, album_dir):
     carries every prescan slot costs nothing, exactly as before.
 
     A tag that already holds a value is never touched — another pressing's
-    label, a credit another tagger wrote, are the album's own business — with
-    TWO exceptions. DATE and ORIGINALDATE are SHARPENED to MusicBrainz's
+    label, ids another tagger wrote, are the album's own business — with
+    THREE exceptions. DATE and ORIGINALDATE are SHARPENED to MusicBrainz's
     spelling when the tag holds a coarser form of the same date ("1980" →
     "1980-10-01", see fuller_date): those two name the album folder, so a
     year-only value would otherwise keep it a year forever. RELEASECOUNTRY is
     WIDENED to the release's whole country set when the value it holds is a
     strict subset of it ("US" → "US; CA; XE", see _country_upgrade): the tag
     holds a LIST and a file written before it could would otherwise keep the
-    release's first event forever. Returns (written, note) — the album's
-    report line, including the "nothing written" cases and every tag a file
-    REFUSED (a container that cannot hold it, a failed save), named per file.
+    release's first event forever. And a LIST answer for any other tag
+    COMPLETES what the file states instead of dropping the values it does not
+    have (see _complete_list): a track with two engineers must not end up with
+    one because the file already carried the other. Returns (written, note) —
+    the album's report line, including the "nothing written" cases and every
+    tag a file REFUSED (a container that cannot hold it, a failed save), named
+    per file.
     """
     manifest = load_expected_tracks(album_dir)
     mbid = ""

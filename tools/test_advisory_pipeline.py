@@ -363,19 +363,20 @@ try:
     assert "ALBUMITUNESADVISORY" not in FakeAudio.written[MP3], FakeAudio.written[MP3]
 
     # ----------------------------------------------------------------------- #
-    # 3b) The AI is a SOURCE in the fetch itself (issue #28): asked ONCE for
-    #     every track this run DECIDES, ranked against what the providers
-    #     stated by the app's one rule, and reported in `answers` beside them —
-    #     while `sources` keeps naming the one source that decided the value.
+    # 3b) The AI is asked ONLY where it is the answer: when every source came
+    #     up with nothing. A source that STATED a value ends the question — the
+    #     AI is not asked about it and cannot overrule it — and when the AI does
+    #     answer, its answer is reported in `answers` while `sources` keeps
+    #     naming the one source that decided the value.
     # ----------------------------------------------------------------------- #
     from server import ai as ai_mod
 
     for path in FILES:
         FakeAudio.written[path].pop("ITUNESADVISORY", None)
         FakeAudio.written[path].pop("ALBUMITUNESADVISORY", None)
-    # The escalation takes a READ of the words: the first track carries an
-    # explicit line, and the tracks without one show what an answer is worth
-    # when the model read nothing.
+    # Chic 'N' Stu carries an explicit line — and Deezer still stated 0 for it.
+    # Under the owner's rule that 0 is FINAL: no word list, no model, re-opens
+    # a value a source already stated.
     FakeAudio.written[FILES[0]]["LYRICS"] = "i dont give a fuck"
     _real_configured, _real_chat = ai_mod.ai_configured, ai_mod.ai_chat
     ai_calls = []
@@ -386,23 +387,19 @@ try:
         stub_http(deezer_routes())
         out = imports.fetch_advisories([ALBUM], dict(CFG, advisory_auto_fetch=True))
 
-        # ONE call per track this run decided — four tracks, four calls, no
-        # matter how many stages wanted the answer (the escalation of a stated
-        # 0 reuses the ladder's own call instead of paying for a second one)
-        assert len(ai_calls) == len(FILES), ai_calls
-        # Chic 'N' Stu: Deezer stated 0 and the WORD SCAN found explicit
-        # language, so the scan owns the 1 and its provenance — the AI is a
-        # backup and no longer escalates a stated value (owner's rule)
-        # Boom!: Deezer's own 1 survives the AI's 1, so the provider keeps it
+        # ONE track gets a call: Roulette, the only track no source stated
+        # anything about. The three the providers answered cost no AI call at
+        # all, whatever their lyrics say.
+        assert len(ai_calls) == 1, ai_calls
+        # Chic 'N' Stu: Deezer's stated 0 stands, explicit lyric and all
+        # Boom!: Deezer's own 1 is written as it stands
         # Roulette: nobody stated anything — the AI's answer is the ladder's
-        # Silent Streamline: no words to read, and the AI is a BACKUP — it
-        # neither overrules Deezer's 0 nor is reported as a source behind it
-        # (the reply's `answers` map names what spoke for the VALUE)
-        assert out["sources"] == {FILES[0]: "lyrics-scan (escalated)",
+        # Streamline: Deezer's stated 0 stands, no matter what the model said
+        assert out["sources"] == {FILES[0]: "deezer-isrc",
                                   FILES[1]: "deezer-isrc",
                                   FILES[2]: "ai",
                                   FILES[3]: "deezer-isrc"}, out
-        assert out["values"] == {FILES[0]: 1, FILES[1]: 1, FILES[2]: 1,
+        assert out["values"] == {FILES[0]: 0, FILES[1]: 1, FILES[2]: 1,
                                  FILES[3]: 0}, out
         assert out["answers"] == {
             FILES[0]: {"deezer-isrc": 0},

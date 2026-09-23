@@ -1,21 +1,30 @@
 #!/usr/bin/env node
 /* Fullscreen player surface: the album art carries no decorative frame, the
  * lyrics pane owns exactly ONE control and that control lives in the player's
- * own control row, and nothing is painted on top of the artwork.
+ * own control row, nothing is painted on top of the artwork, and neither the
+ * pane nor the metadata block draws a panel behind its text.
  *
- * The bug this pins (owner-reported): the lyrics had no control at all — the
+ * The bugs this pins (owner-reported): the lyrics had no control at all — the
  * pane appeared whenever the track happened to carry lyrics, so the display
- * was an accident of the tags rather than something the reader owns, and the
- * cover still carried a hairline frame after the ring removal (the art's own
- * `border-white/10`, plus the shared `border-border` on every row cover).
+ * was an accident of the tags rather than something the reader owns; the cover
+ * still carried a hairline frame after the ring removal (the art's own
+ * `border-white/10`, plus the shared `border-border` on every row cover); and
+ * the legibility tint that replaced the old `bg-white/35` slabs — the lyrics
+ * pane's `np-veil-pane` and the title's `np-veil-pill` — still read as grey
+ * boxes over the artwork. The tint is gone for good: legibility is the
+ * full-bleed wash plus the glyph shadow now, and the metadata block and the
+ * lyrics pane must compute to NO fill, blur, shadow or border of their own.
  *
  * Everything here is measured, not eyeballed: the frame from the cover
  * wrapper's COMPUTED border/outline (a `ring-*` in Tailwind is a box-shadow,
  * so a ring is told apart from the art's deliberate drop shadow by its zero
- * offset and blur), the pane's state from its own box, and "nothing floats
- * over the art" by hit-testing every control at the art's centre and corners
- * with elementFromPoint — the only way to tell what is actually painted on
- * top of a 28rem square of cover art.
+ * offset and blur), the pane's state from its own box, "nothing floats over
+ * the art" by hit-testing every control at the art's centre and corners with
+ * elementFromPoint, "no layer paints on the art" by walking every element that
+ * overlaps the art and paints (a fill, gradient, blur, shadow or border) while
+ * painting AFTER it in document order — the ambience stack and the wash come
+ * before the cover, so they are behind it — and the removed selectors from the
+ * built stylesheet itself.
  *
  * Needs a live backend serving the built app (`web/dist`):
  *   npm --prefix web run build
@@ -111,6 +120,63 @@ const surface = (page) => page.evaluate(() => {
     }
   }
 
+  // Layers that PAINT over the art. The ambience stack and the legibility wash
+  // are the only things allowed on the art's rectangle, and both sit BEHIND it:
+  // they precede the cover in document order, so the cover's own <img> paints
+  // last. Anything overlapping the art that comes AFTER it (or lifts itself
+  // with a z-index) and actually paints — a fill, a gradient, a backdrop blur,
+  // a shadow or a border — is a panel over the artwork, which is exactly the
+  // owner's report. The removed `np-veil-pane` layer would land in this list.
+  const paints = (cs) =>
+    (cs.backgroundColor !== "rgba(0, 0, 0, 0)" && cs.backgroundColor !== "transparent") ||
+    cs.backgroundImage !== "none" ||
+    cs.backdropFilter !== "none" ||
+    cs.boxShadow !== "none" ||
+    ["Top", "Right", "Bottom", "Left"].some((s) => parseFloat(cs["border" + s + "Width"]) > 0);
+  const paintedOverArt = [];
+  if (artBox) {
+    for (const el of root.querySelectorAll("*")) {
+      if (el === art || art.contains(el)) continue;
+      const r = el.getBoundingClientRect();
+      if (!r.width || !r.height) continue;
+      const ix = Math.max(0, Math.min(r.right, artBox.x + artBox.w) - Math.max(r.left, artBox.x));
+      const iy = Math.max(0, Math.min(r.bottom, artBox.y + artBox.h) - Math.max(r.top, artBox.y));
+      if (ix * iy < 0.5 * r.width * r.height) continue;
+      const after = !!(art.compareDocumentPosition(el) & Node.DOCUMENT_POSITION_FOLLOWING);
+      const z = getComputedStyle(el).zIndex;
+      if (!after && !(z !== "auto" && parseInt(z, 10) > 0)) continue;
+      if (!paints(getComputedStyle(el))) continue;
+      paintedOverArt.push(String(el.className).slice(0, 70) || el.tagName);
+    }
+  }
+
+  // What a panel WOULD look like, read off the two surfaces that must not have
+  // one: the block that carries the title and the pane that carries the lyrics.
+  const bare = (el) => {
+    if (!el) return null;
+    const cs = getComputedStyle(el);
+    return {
+      cls: String(el.className).slice(0, 80),
+      bg: cs.backgroundColor,
+      bgImage: cs.backgroundImage === "none" ? "none" : cs.backgroundImage.slice(0, 50),
+      backdrop: cs.backdropFilter,
+      shadow: cs.boxShadow,
+      border: ["Top", "Right", "Bottom", "Left"].map((s) => cs["border" + s + "Width"]).join("/"),
+    };
+  };
+  const titleLine = root.querySelector("div.text-2xl");
+
+  // The selectors the cutover deleted, read from the BUILT stylesheet (a dead
+  // rule would still ship even with no reader in the markup). Matched with a
+  // trailing non-identifier so `.np-veil-panel`, which survives, cannot satisfy
+  // a search for `.np-veil-pane`.
+  let cssText = "";
+  for (const sheet of document.styleSheets) {
+    try { for (const rule of sheet.cssRules) cssText += rule.cssText + "\n"; } catch { /* cross-origin sheet */ }
+  }
+  const deadRules = ["np-veil-pane", "np-veil-pill", "np-veil-light", "np-shade-dark"]
+    .filter((c) => new RegExp("\\." + c + "(?![\\w-])").test(cssText));
+
   return {
     art: art ? {
       box: artBox,
@@ -158,6 +224,10 @@ const surface = (page) => page.evaluate(() => {
     rowBox: row ? box(row) : null,
     viewport: { w: window.innerWidth, h: window.innerHeight },
     overArt,
+    paintedOverArt,
+    meta: bare(titleLine ? titleLine.parentElement.parentElement : null),
+    paneBare: bare(scroller),
+    deadRules,
   };
 });
 
@@ -331,6 +401,24 @@ const clickToggle = async (page) => {
 
   // ---- the artwork is clear ------------------------------------------------
   check("nothing is painted over the artwork", before.overArt.length === 0, `over the art: ${JSON.stringify(before.overArt)}`);
+  check("no layer but the ambience and the legibility wash paints on the art",
+    before.paintedOverArt.length === 0, `painted over the art: ${JSON.stringify(before.paintedOverArt)}`);
+
+  // ---- no panel behind the text --------------------------------------------
+  // The owner rejected the two grey boxes on the artwork; the lyrics pane's
+  // blurred `np-veil-pane` tint and the metadata block's `np-veil-pill` are
+  // both gone, and this is what says so from the computed style rather than
+  // from the source text.
+  check("the metadata block draws no background, blur, shadow or border of its own",
+    !!before.meta && before.meta.bg === "rgba(0, 0, 0, 0)" && before.meta.bgImage === "none" &&
+      before.meta.backdrop === "none" && before.meta.shadow === "none" && before.meta.border === "0px/0px/0px/0px",
+    JSON.stringify(before.meta));
+  check("the lyrics pane draws no background, blur or shadow of its own",
+    !!before.paneBare && before.paneBare.bg === "rgba(0, 0, 0, 0)" && before.paneBare.bgImage === "none" &&
+      before.paneBare.backdrop === "none" && before.paneBare.shadow === "none",
+    JSON.stringify(before.paneBare));
+  check("the removed veil/pill rules are gone from the built stylesheet",
+    before.deadRules.length === 0, `leftover selectors: ${JSON.stringify(before.deadRules)}`);
 
   // ---- seamless hide ------------------------------------------------------
   const hadTravel = !!before.scroller && before.scroller.scrollHeight > before.scroller.clientHeight + 8;

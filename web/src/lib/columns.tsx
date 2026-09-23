@@ -110,17 +110,37 @@ export const TRACK_COL_W: Record<string, string> = {
   cover: "w-[52px]",
   // `md:` like the album table's name column: on a phone the title is the only
   // column left beside the cover, so it takes the whole row instead.
-  title: "md:w-[220px]",
-  artist: "w-[108px]",
+  //
+  // 280 px, not the 220 it carried: the cell holds the name AND the marks that
+  // belong to it (advisory, grade, cached, video) plus the row's own trailing
+  // controls, and at 220 the title lost that fight — the link was squeezed to
+  // zero and the Library's Tracks view rendered as empty rows (see
+  // TrackTitleCell). 280 is what those parts need to sit on ONE line for an
+  // ordinary title, which is what keeps the row 40 px tall instead of three
+  // lines of marks under the name; the table's floor (TABLE_FIT's `min-w-max`)
+  // grows with it and the wrapper scrolls, the documented trade for a
+  // fixed-layout table.
+  title: "md:w-[280px]",
+  // 120, measured: "Artist Gamma" at the table's own font is 112 px wide, so
+  // the old 108 broke the name across two lines inside a column whose whole
+  // job is saying who the track is by. The floors below are sized the same way
+  // (widest value + a few px of slack), which is what keeps a row one line tall
+  // instead of three.
+  artist: "w-[120px]",
   album: "w-[112px]",
   year: "w-16",
   genre: "w-24",
-  media: "w-[88px]",
+  // The MediumChip's own longest label ("Digital Media") is 108 px wide.
+  media: "w-[112px]",
   // 80 px, the same floor the album tracklist gives its length column: an
   // hour-plus length is seven characters ("1:02:33"), which the old 64 px
   // floor could only break onto a second line.
   duration: "w-20",
-  bitrate: "w-[88px]",
+  // 184, measured: `fmtTech`'s own string ("FLAC 16/44.1 · 104 kbps") is 177 px
+  // — the app's precedent for this column is the duration one above, sized to
+  // its widest value, and a format/bitrate readout that breaks into three lines
+  // (one of them empty) is what the old 88 px floor did.
+  bitrate: "w-[184px]",
   dr: "w-12",
   source: "w-20",
   type: "w-20",
@@ -131,6 +151,10 @@ export const TRACK_COL_W: Record<string, string> = {
   // The tracklist's own id for the same length column the Tracks view calls
   // `duration` (see TRACK_PHONE_CLS).
   dur: "w-20",
+  // Five `sm` stars plus the click target around them — the same 104 px the
+  // album table gives its Rating column, so a rating reads the same width
+  // wherever it appears.
+  rating: "w-[104px]",
 };
 
 /** The track table's columns, in render order. */
@@ -157,6 +181,16 @@ export const TRACK_COLS: Col[] = [
   { id: "remixer", label: "Remixer", sortKey: "tags.REMIXER", defHidden: true },
 ];
 
+/** The Library's Tracks view own Rating column.
+ *
+ *  Here rather than in `TRACK_COLS` because the Library is the only table whose
+ *  rows carry a rating: the export preview and the offline cache draw the same
+ *  tracks without any rating data, and a column they cannot fill would be a
+ *  permanently blank 104 px on both. The value is the caller's own — the
+ *  Library injects the folder/track ratings into its rows (`ratedTracks`), and
+ *  the cell is a live star control, exactly like the album tracklist's. */
+export const TRACK_RATING_COL: Col = { id: "rating", label: "Rating", sortKey: "rating" };
+
 /** Both track tables (the Tracks view, the export preview and every album
  *  tracklist): only the cover and the title stay on a phone, every column id
  *  named here folds at `md`. The tables name the length column differently
@@ -167,6 +201,7 @@ export const TRACK_PHONE_CLS: Record<string, string> = {
   genre: PHONE_HIDE, media: PHONE_HIDE, duration: PHONE_HIDE, dur: PHONE_HIDE,
   bitrate: PHONE_HIDE, dr: PHONE_HIDE, source: PHONE_HIDE, type: PHONE_HIDE,
   inst: PHONE_HIDE, composer: PHONE_HIDE, lyricist: PHONE_HIDE, remixer: PHONE_HIDE,
+  rating: PHONE_HIDE,
 };
 
 /** Tag columns the user added fold with the built-ins they sit beside. */

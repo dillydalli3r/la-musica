@@ -30,8 +30,18 @@ import time
 # wishes call needed. Same trap server.soulseek_auto documents for its RLock.
 _lock = threading.RLock()
 
-STATUSES = ("wanted", "searching", "imported", "failed", "available", "not_found")
+STATUSES = ("wanted", "searching", "imported", "failed", "available", "not_found",
+            "background")
 
+# `background` is the FALLBACK WALK's own resting place (spec R150-R153): the
+# acquisition asked every ranked candidate it was allowed and none answered, so
+# the release is NOT dropped and its framework album is NOT taken down — the
+# wish keeps its place in the pipeline as a standing background request the
+# worker re-searches on its own ticks until one of the candidates lands. It is
+# deliberately NOT terminal (nothing about it is an answer), and it is not
+# `wanted` either: the queue shows these rows in their own section, apart from
+# the releases being actively searched and from the ones that need the user.
+#
 # Terminal statuses: the worker never searches one of these again on its own.
 # `not_found` always is — "the network does not have it" is an ANSWER, and
 # re-asking the same question on a timer is the silent stalling the retry
@@ -113,7 +123,19 @@ def _init():
                     -- in RELEASE_KEYS — resolved from the release the pipeline
                     -- looked up and kept here so the queue row can name the
                     -- edition without a MusicBrainz request of its own.
-                    release_json TEXT NOT NULL DEFAULT ''
+                    release_json TEXT NOT NULL DEFAULT '',
+                    -- The FALLBACK list: every eligible edition of the release
+                    -- group, ranked best first by the ONE release-choice policy
+                    -- (`mlo.release_choice`, spec R150) as JSON
+                    -- [{mbid,title,score}]. The album and its wish stay ONE
+                    -- (R142); what the search does with nothing found for its
+                    -- best candidate is move to the next entry instead of
+                    -- giving the album up.
+                    candidates TEXT NOT NULL DEFAULT '',
+                    -- Which entry of `candidates` is being asked for RIGHT NOW
+                    -- (0-based). Reset to 0 by rearm(): a fresh request starts a
+                    -- fresh walk. See the fallback section below.
+                    candidate INTEGER NOT NULL DEFAULT 0
                 );
                 CREATE TABLE IF NOT EXISTS wish_log (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -142,6 +164,14 @@ def _init():
             # its rows show what they know until a cycle resolves the release.
             if "release_json" not in cols:
                 c.execute("ALTER TABLE wishes ADD COLUMN release_json TEXT NOT NULL DEFAULT ''")
+            # Same rule for the fallback walk (spec R150): an older database
+            # gets an EMPTY list and index 0, i.e. exactly the single-candidate
+            # behaviour every wish had before the walk existed — its own key is
+            # the one candidate to ask the network for.
+            if "candidates" not in cols:
+                c.execute("ALTER TABLE wishes ADD COLUMN candidates TEXT NOT NULL DEFAULT ''")
+            if "candidate" not in cols:
+                c.execute("ALTER TABLE wishes ADD COLUMN candidate INTEGER NOT NULL DEFAULT 0")
 
 
 # --------------------------------------------------------------------------- #
@@ -336,6 +366,26 @@ def _row(r):
         except Exception:
             pass                        # a corrupt column is not a failed row
     d["release"] = block
+    # The fallback walk (see the section below): the ranked candidates this
+    # acquisition may ask the network for, and which of them is being asked for
+    # now. ALWAYS a list and an index — an empty list is a wish with ONE
+    # candidate (its own key), so every reader sees the documented shape and
+    # the walk is a no-op.
+    walked = []
+    stored = str(d.pop("candidates", "") or "")
+    if stored:
+        try:
+            known = json.loads(stored)
+            if isinstance(known, list):
+                walked = [c for c in known
+                          if isinstance(c, dict) and str(c.get("mbid") or "")]
+        except Exception:
+            pass                        # a corrupt column is not a failed row
+    d["candidates"] = walked
+    try:
+        d["candidate"] = max(0, int(d.get("candidate") or 0))
+    except (TypeError, ValueError):
+        d["candidate"] = 0
     # A wish whose album is a FRAMEWORK album: the folder exists (it is in the
     # library, listed as pending) but no audio has arrived yet. Derived from the
     # marker rather than stored, so the two can never disagree — the import
@@ -368,7 +418,8 @@ def list_wishes():
         rows = c.execute(
             "SELECT * FROM wishes ORDER BY "
             "CASE status WHEN 'wanted' THEN 0 WHEN 'searching' THEN 1 "
-            "WHEN 'failed' THEN 2 ELSE 3 END, added_at DESC"
+            "WHEN 'background' THEN 2 WHEN 'failed' THEN 3 ELSE 4 END, "
+            "added_at DESC"
         ).fetchall()
     from mlo.config import load_config
 
@@ -624,7 +675,8 @@ def mark_not_found(wid, error, attempts=None):
         pass
 
 
-def mark_wanted(wid, error="", attempts=None, retry_at=None, not_found=None):
+def mark_wanted(wid, error="", attempts=None, retry_at=None, not_found=None,
+                candidate=None):
     """Back in the queue for another automatic attempt.
 
     *retry_at* is when the NEXT attempt may run: the worker passes the
@@ -635,7 +687,13 @@ def mark_wanted(wid, error="", attempts=None, retry_at=None, not_found=None):
     passes it for a search that found nothing): without it the count only ever
     moved when the wish ended, so `wishes_not_found_attempts: 3` could never be
     reached — every retry read the same stored 0, decided "1 of 3" and searched
-    the network again forever instead of ending `not_found` as the policy says."""
+    the network again forever instead of ending `not_found` as the policy says.
+
+    *candidate* is where the FALLBACK WALK stands (spec R150-R153), when the
+    caller owns that position: an attempt that walked the ranked editions and
+    found nothing puts the pointer back on the BEST one, because the next
+    attempt starts there and a row left pointing at the last edition reached
+    would describe a search that is not the one about to run."""
     fields = {"status": "wanted", "last_error": str(error or "")[:400]}
     if attempts is not None:
         fields["attempts"] = attempts
@@ -643,7 +701,262 @@ def mark_wanted(wid, error="", attempts=None, retry_at=None, not_found=None):
         fields["retry_at"] = float(retry_at or 0)
     if not_found is not None:
         fields["not_found"] = int(not_found)
+    if candidate is not None:
+        fields["candidate"] = max(0, int(candidate))
     _mark(wid, **fields)
+
+
+# --------------------------------------------------------------------------- #
+# The fallback walk — WHICH ranked candidate the search asks the network for
+# --------------------------------------------------------------------------- #
+# "Add to library" on a release group resolves ONE edition per the release-choice
+# policy — and the group's OTHER eligible editions are ranked behind it by that
+# same policy. This is where that ranking lives, so an album whose best pressing
+# the network does not have is no longer given up on while four other pressings
+# of it sit in the same ranking (spec R150-R152).
+#
+# The list is computed ONCE, when the add is recorded, from the editions the
+# provider already returned (`integrations.group_targets`): the walk never spends
+# a fresh search deciding what to try next. It is walked FORWARD only, one entry
+# per exhausted candidate, so the walk terminates by construction — and its end
+# is the ordinary not-found outcome, reported with every edition it asked for.
+#
+# `release_mbid` stays the wish's KEY (the release the add was for; `UNIQUE`, and
+# what a re-add matches on), so the index — not the key — is what moves.
+def fallback_limit(cfg=None):
+    """How many ranked candidates ONE walk may ask (`soulseek_fallback_candidates`).
+
+    The user's own number (1 = the best edition and nothing behind it, exactly
+    the behaviour before the walk existed). The walk clamps it to the list it
+    was handed, so a group with fewer eligible editions than this simply ends
+    at the end of its own list — never an error and never a wait for a
+    candidate that does not exist.
+    """
+    return max(1, _int(cfg, "soulseek_fallback_candidates", 3))
+
+
+def walk_length(wish, cfg=None):
+    """How many candidates this wish's walk really has, capped by the setting.
+
+    Len < 2 is not a walk: the wish's own key is its one candidate, and the row
+    shows nothing about positions (see `candidate_state`).
+    """
+    rows = list((wish or {}).get("candidates") or [])
+    return min(len(rows), fallback_limit(cfg)) if rows else 0
+
+
+def candidate_state(wish, cfg=None):
+    """Which candidate this wish is being searched for, as ONE block or None.
+
+    None when the walk has nothing to say: no list at all, or a single entry.
+    "release 1 of 1" is noise, and a caller that shows nothing is right about a
+    wish whose list has one step. With a real walk every key is present:
+
+        {index, total, label, mbid, title, tried: [{mbid, title}, ...]}
+
+    *total* is how many candidates the walk may ask (`walk_length`: the ranked
+    list capped by `soulseek_fallback_candidates`), *label* is the sentence the
+    surfaces show ("release 2 of 5") — one wording, built here so the queue row,
+    the album's page and the notifications cannot disagree about where the
+    search is — and *tried* is what already came back empty in THIS attempt, so
+    an end-of-walk report names the whole walk rather than only its last step.
+    """
+    total = walk_length(wish, cfg)
+    if total < 2:
+        return None
+    rows = list((wish or {}).get("candidates") or [])
+    try:
+        index = max(0, int((wish or {}).get("candidate") or 0))
+    except (TypeError, ValueError):
+        index = 0
+    index = min(index, total - 1)
+    here = rows[index] or {}
+    return {
+        "index": index,
+        "total": total,
+        "label": candidate_label(index, total),
+        "mbid": str(here.get("mbid") or ""),
+        "title": str(here.get("title") or ""),
+        "tried": [{"mbid": str(r.get("mbid") or ""),
+                   "title": str(r.get("title") or "")} for r in rows[:index]],
+    }
+
+
+def candidate_of(wish):
+    """The one ranked candidate this attempt must ask for.
+
+    The wish's own key is the fallback of the fallback: a wish recorded without
+    a list — every wish saved before the walk existed, and every NAME-keyed wish
+    — is a single-candidate acquisition and answers exactly as it always did.
+    """
+    state = candidate_state(wish)
+    if state:
+        return {"mbid": state["mbid"], "title": state["title"]}
+    mbid = str((wish or {}).get("release_mbid") or "")
+    if not mbid:
+        return None
+    return {"mbid": mbid, "title": str((wish or {}).get("title") or "")}
+
+
+def set_candidates(wid, rows):
+    """Record the ranked candidate list of a wish that has none yet.
+
+    Only ever FILLS an empty list. A wish already walking its own editions keeps
+    the order it was recorded with, so a second add cannot reorder a search that
+    is in flight — `rearm` is what starts a fresh walk.
+
+    ONE entry is stored as readily as three: a list is what tells the store this
+    wish carries the ranked editions of an album request, and that is what keeps
+    a spent walk in the BACKGROUND instead of ending the wish (spec R153) —
+    including a release group whose only eligible edition is the one it was
+    added for. A wish with NO list is the other thing: a wishlist row that names
+    no edition, which still ends `not_found` when its searches run out.
+
+    Never raises: the wish exists either way, and a list that cannot be stored
+    leaves the single-candidate behaviour.
+    """
+    kept = []
+    for r in (rows or []):
+        mbid = str((r or {}).get("mbid") or "").strip()
+        if not mbid:
+            continue
+        row = {"mbid": mbid, "title": str((r or {}).get("title") or "")}
+        score = (r or {}).get("score")
+        if score is not None:
+            row["score"] = score
+        # The catalog numbers the edition states, kept so the WALK can tell two
+        # releases that are one search apart (`mlo.release_choice
+        # .distinct_pressings` — the number is what a CD search is keyed on).
+        catalogs = [str(n) for n in ((r or {}).get("catalog_numbers") or []) if str(n).strip()]
+        if catalogs:
+            row["catalog_numbers"] = catalogs
+        kept.append(row)
+    if not kept:
+        return None
+    try:
+        with _lock:
+            with _conn() as c:
+                cur = c.execute(
+                    "UPDATE wishes SET candidates=?, updated_at=? "
+                    "WHERE id=? AND candidates=''",
+                    (json.dumps(kept), time.time(), int(wid)))
+                if cur.rowcount == 0:
+                    return None
+        return get_wish(wid)
+    except Exception:
+        return None     # a list that cannot be stored is not a failed add
+
+
+def advance_candidate(wid, cfg=None):
+    """Move this wish on to the NEXT ranked candidate — or answer None.
+
+    The single step of the walk, and the whole of it: None means the walk is
+    spent (no list, one candidate, or `soulseek_fallback_candidates` already
+    asked), and the caller then settles the attempt — which is what makes the
+    walk finite rather than a loop.
+
+    The empty-search counter is deliberately NOT touched here: it counts the
+    empty WALKS of this acquisition (one per attempt, since an attempt asks
+    every candidate it may), and `_settle_attempt` is where that one empty
+    search is recorded — exactly as it always was, so a walk cannot run out of
+    the user's budget by walking. `attempts` — the transient-failure counter,
+    and the acquisition's own — is not reset either: this is the same
+    acquisition.
+
+    *retry_at* is cleared so the new candidate is asked at the interval's own
+    pace rather than inheriting the last one's backoff, and the status goes back
+    to `wanted`: the search that found nothing has ended, and the row has to say
+    so instead of sitting in `searching` while the walk moves on.
+    """
+    before = get_wish(int(wid)) or {}
+    rows = list(before.get("candidates") or [])
+    total = walk_length(before, cfg)
+    try:
+        index = max(0, int(before.get("candidate") or 0))
+    except (TypeError, ValueError):
+        index = 0
+    if len(rows) < 2 or total < 2 or index + 1 >= total:
+        return None
+    nxt = rows[index + 1] or {}
+    now, nxt_title = rows[index] or {}, (nxt.get("title") or nxt.get("mbid") or "")
+    _mark(wid, status="wanted", candidate=index + 1, retry_at=0,
+          last_error=f"no copy of {now.get('title') or now.get('mbid')} was found — "
+                     f"trying {candidate_label(index + 1, total)}: {nxt_title}")
+    log("info", f"Wish candidate {index + 1} of {total} came back empty — "
+                f"trying {candidate_label(index + 1, total)}: {nxt_title}")
+    return candidate_state(get_wish(wid), cfg)
+
+
+def restart_walk(wid, error=""):
+    """Put the walk back on its BEST candidate, keeping the status.
+
+    One attempt walks the ranked editions in order, and the next attempt starts
+    at the top again: the network that had none of them an hour ago may have the
+    first one now, and the ranking exists precisely so the best edition is the
+    one asked for first (spec R150-R153). Called where an attempt begins
+    (`wishes_worker._run_one`), so a row interrupted mid-walk does not resume
+    halfway down a list nobody is looking at any more. The empty-search counter
+    is left alone — it belongs to the acquisition, and `_settle_attempt` is what
+    advances it.
+    """
+    _mark(wid, candidate=0, last_error=str(error or "")[:400])
+
+
+def mark_background(wid, error="", attempts=None, not_found=None):
+    """The walk is spent: keep the release as a BACKGROUND request.
+
+    Nothing about an empty walk is an answer — the album is the same album and
+    the editions are the same ranked editions — so the wish is NOT ended and its
+    framework album is NOT taken down (compare `mark_not_found`, which is the
+    terminal "the network does not have it" for a wish with no walk). It moves
+    to `background`: still non-terminal, still searched on the worker's own
+    ticks, but shown in its own section instead of among the releases being
+    actively walked, so a row that has asked everything it may does not read as
+    a search that is stuck.
+
+    The counters keep their meanings (`attempts` = transient attempts burned,
+    `not_found` = empty searches) so the retry/backoff policy still paces the
+    background passes exactly as it paces everything else.
+    """
+    fields = {"status": "background", "last_error": str(error or "")[:400]}
+    if attempts is not None:
+        fields["attempts"] = int(attempts)
+    if not_found is not None:
+        fields["not_found"] = int(not_found)
+    _mark(wid, **fields)
+    log("info", f"Wish moved to the background after a spent walk: "
+                f"{error[:160] or 'every ranked candidate came back empty'}")
+
+
+def candidate_label(index, total):
+    """"release 2 of 5" — the ONE wording for a position in the walk."""
+    return f"release {int(index) + 1} of {int(total)}"
+
+
+def walk_report(wish, err, cfg=None):
+    """The report for a wish whose walk asked every candidate it may.
+
+    "Nothing found" is the same statement it always was, but a walk that asked
+    the network for three editions owes the user the fact that the walk is
+    SPENT and which editions it asked for — the row then says the release stays
+    in the background rather than reading as a search that gave up. The caller's
+    own *err* is kept inside the sentence, so what the search actually answered
+    — and its classification (`outcome_of`) — survives.
+    """
+    state = candidate_state(wish, cfg)
+    rows = list((wish or {}).get("candidates") or [])
+    total = walk_length(wish, cfg) or len(rows)
+    if state:
+        asked = state["tried"] + [{"mbid": state["mbid"], "title": state["title"]}]
+    else:
+        asked = [{"mbid": str(r.get("mbid") or ""), "title": str(r.get("title") or "")}
+                 for r in rows[:1]]
+    names = ", ".join(str(t.get("title") or t.get("mbid")) for t in asked[:6])
+    more = f" (+{len(asked) - 6} more)" if len(asked) > 6 else ""
+    if not asked:
+        return err
+    return (f"all {len(asked)} of {total} ranked edition(s) the walk may ask were "
+            f"searched and none was found: {names}{more} — {err}")
 
 
 # --------------------------------------------------------------------------- #
@@ -661,6 +974,11 @@ def mark_wanted(wid, error="", attempts=None, retry_at=None, not_found=None):
 #                 never give up) the WISH ends `not_found`: terminal, no
 #                 further automatic searches, announced once as
 #                 `wish_not_found`, re-armed only by a manual retry.
+#                 With a ranked list (the fallback walk above) that same budget
+#                 is what exhausts ONE CANDIDATE — the search then moves on to
+#                 the next ranked edition, and only the LAST candidate's spent
+#                 budget ends the wish. One policy, asked per candidate; the
+#                 walk adds no scheme of its own.
 #   * transient — retried with backoff (`wishes_retry_backoff_minutes`,
 #                 default 30, doubling per attempt, capped at a day, 0 = no
 #                 extra wait) up to `wishes_max_attempts` (0 = retry forever).
@@ -745,8 +1063,15 @@ def is_terminal(wish, cfg):
 def rearm(wid):
     """Undo a terminal outcome: the user asked for this wish to be searched
     again. Manual retry is the ONLY way back from `not_found` / a spent
-    `failed` — which is exactly what makes those states terminal."""
-    _mark(wid, status="wanted", attempts=0, not_found=0, retry_at=0, last_error="")
+    `failed` — which is exactly what makes those states terminal.
+
+    A fresh request also starts a FRESH WALK: the candidate index goes back to
+    the top of the list (`candidate=0`). Retrying an album whose every ranked
+    edition was already asked for must ask its best edition again — the network
+    that had none of them yesterday may have the first one today — not resume
+    at the last one it happened to reach (spec R150)."""
+    _mark(wid, status="wanted", attempts=0, not_found=0, retry_at=0,
+          candidate=0, last_error="")
     return get_wish(wid)
 
 

@@ -251,14 +251,26 @@ def _drop_framework_album(wish, cfg):
 
 def _run_one(wish, cfg):
     """Search + fill one wish. Returns 'imported' | 'pending' | 'skipped' |
-    'offline' | 'not_found' | 'failed'.
+    'offline' | 'not_found' | 'failed' | 'background'.
 
     'skipped' is contention (the pipeline is full of other jobs) and never
     burns an attempt; 'offline' means slskd itself is not there — every other
     wish in the pass would fail the same way, so the pass stops. 'not_found'
     and 'failed' are the two TERMINAL ends (see server/wishes' retry policy):
     the former is "the network does not have it" after its own budget of empty
-    searches, the latter "it kept failing" once the attempts cap is spent."""
+    searches, the latter "it kept failing" once the attempts cap is spent.
+    'background' is the third end and the only non-terminal one: the release
+    asked every ranked candidate the walk may ask and none answered, so it
+    stays in the pipeline as a standing background request (spec R153).
+
+    ONE ATTEMPT WALKS THE RANKED CANDIDATES (spec R150-R152): the best edition
+    first, then the next, each with its own bounded search window, stopping at
+    the first that lands. A candidate that answers with nothing usable is spent
+    for this attempt and the walk moves on; a candidate that fails for a
+    TRANSIENT reason stops the walk and is settled by the retry policy, because
+    a network that is down is not a candidate that is absent. The walk restarts
+    at the best candidate on the next attempt.
+    """
     wid = wish["id"]
     if not cfg.get("wishes_auto_import", True):
         # The user turned auto-import off: never search or download for them —
@@ -289,27 +301,159 @@ def _run_one(wish, cfg):
         wishes.log("info", f"{label} is already being searched — not started again")
         return "skipped"
 
+    walk = _walk_candidates(wish, cfg)
+    if not walk:
+        # A wish keyed by NAME has no release to look up at all: report it the
+        # way this worker always has, through the same settle policy.
+        return _settle_attempt(wish, cfg, "this wish names no MusicBrainz release")
+    # A fresh attempt starts at the BEST candidate: `candidate` is where the
+    # last attempt left the walk, and the ranking exists so that the edition
+    # the policy prefers is the one asked for first (spec R150).
+    if len(walk) > 1:
+        wishes.restart_walk(wid)
+    walk_label = label
+    if len(walk) > 1:
+        walk_label = f"{label} — {wishes.candidate_label(0, len(walk))}"
     wishes.mark_searching(wid)
-    _note(wid, label)
-    wishes.log("info", f"Wish search: {label}")
-    # A wish normally stores the release GROUP id (that is what a
-    # musicbrainz.org album link carries), and the release endpoint 404s on a
-    # group — resolve it exactly like the HTTP route does, so no wish is
-    # permanently unfillable.
+    _note(wid, walk_label)
+    wishes.log("info", f"Wish search: {label}"
+                + (f" ({len(walk)} ranked candidate(s) to try)" if len(walk) > 1 else ""))
+    # This attempt's window per candidate. A candidate's search is BOUNDED, and
+    # the walk's own count bounds how many of those windows one attempt may
+    # spend, so a wish can never search for ever in one pass (spec R151).
+    window = max(5, int(cfg.get("soulseek_search_timeout_seconds", 60) or 60))
+
+    last = ""
+    for pos, cand in enumerate(walk):
+        if pos:
+            wishes.advance_candidate(wid, cfg)
+            _note(wid, f"{label} — {wishes.candidate_label(pos, len(walk))}")
+        outcome, detail = _try_candidate(wish, cfg, cand, window, pos, len(walk))
+        if outcome == "imported":
+            wishes.mark_imported(wid, detail)
+            note = _chain_note(getattr(_LAST_RESULT, "result", None) or {})
+            if pos:
+                # The best edition was not there, so this IS another pressing:
+                # say which one landed rather than announcing a plain success
+                # the user would read as the edition they asked for.
+                note = (f"the best edition was not available, so this is "
+                        f"{wishes.candidate_label(pos, len(walk))}"
+                        + (f" — {note}" if note else ""))
+            _wish_found(wish, detail, note)
+            # the library changed — drop caches so the UI sees the new album
+            try:
+                from server import tagcache, mbresolve
+                tagcache.invalidate_all()
+                mbresolve.invalidate()
+            except Exception:
+                pass
+            return "imported"
+        if outcome != "empty":
+            # 'pending'/'skipped'/'failed' already settled the wish (a transient
+            # failure or pipeline contention) and 'not_found' ended it: none of
+            # them is a reason to ask the next candidate.
+            return outcome
+        last = detail or last
+        if pos + 1 < len(walk):
+            wishes.log("info", f"No copy of {cand['title'] or cand['mbid']} — "
+                               f"candidate {pos + 1} of {len(walk)} is spent; "
+                               f"moving on to the next ranked edition.")
+    return _settle_attempt(wish, cfg, last)
+
+
+# The result the last `_try_candidate` FINISHED with, per thread: the wish
+# passed to `_wish_found` when a candidate landed, so the announcement can carry
+# the import's own chain summary. Per thread because several wishes are in
+# flight at once (the same reason soulseek_auto keeps its state thread-local).
+_LAST_RESULT = threading.local()
+
+
+def _walk_candidates(wish, cfg):
+    """The ranked candidates THIS attempt asks, best first (spec R150-R152).
+
+    The release-choice policy's own order, capped by the user's
+    `soulseek_fallback_candidates`. A group with fewer eligible editions than
+    the cap simply ends at the end of its own list — no error, no empty slot,
+    nothing waiting for a candidate that does not exist — and a wish recorded
+    without a ranked list falls back to the single candidate its own key names,
+    exactly as every wish worked before the walk existed.
+
+    The list is then narrowed to DISTINCT PRESSINGS
+    (`mlo.release_choice.distinct_pressings`): two editions that state the same
+    catalog number are one search — the number is what a CD search is keyed on,
+    and MusicBrainz really does carry one pressing as two releases (a label
+    change, a reissue, a country variant) — so asking the second can only find
+    the folders the first already found. What was dropped is LOGGED, because a
+    fallback that silently loses a ranked edition is exactly the kind of
+    quiet shortcut this walk exists to avoid. Filtering here (and not only
+    where the list is written) also fixes a list stored before the rule
+    existed: an older wish's walk is deduplicated on its next attempt.
+    """
+    out = []
+    for row in (wish.get("candidates") or [])[:wishes.fallback_limit(cfg)]:
+        mbid = str((row or {}).get("mbid") or "").strip()
+        if mbid:
+            out.append({"mbid": mbid, "title": str((row or {}).get("title") or ""),
+                        "catalog_numbers": [str(n) for n in
+                                            ((row or {}).get("catalog_numbers") or [])]})
+    if not out:
+        here = wishes.candidate_of(wish) or {}
+        if here.get("mbid"):
+            out = [{"mbid": here["mbid"], "title": here.get("title") or "",
+                    "catalog_numbers": [str(n) for n in
+                                        (here.get("catalog_numbers") or [])]}]
+    if len(out) > 1:
+        from mlo.release_choice import distinct_pressings
+
+        kept, duplicates = distinct_pressings(out)
+        if duplicates:
+            names = ", ".join(str(d.get("title") or d.get("mbid")) for d in duplicates[:3])
+            wishes.log("info",
+                       f"{str(wish.get('album') or wish.get('title') or '').strip() or 'Wish'}: "
+                       f"{len(duplicates)} ranked edition(s) share a catalog number with "
+                       f"one already being tried ({names}) — the same search, so they "
+                       f"are skipped")
+        out = kept
+    return out
+
+
+def _try_candidate(wish, cfg, cand, window, pos, total):
+    """Ask the network for ONE ranked candidate.
+
+    Returns ``(outcome, detail)``:
+
+    * ``("imported", album_path)`` — this candidate landed; the acquisition is
+      over and the caller marks the wish imported;
+    * ``("empty", err)`` — the search answered and there is nothing usable for
+      THIS edition, which is what makes the walk move on (the ordinary
+      not-found classification, `wishes.outcome_of`);
+    * ``("pending", err)`` / ``("skipped", err)`` — a transient failure or
+      pipeline contention: already settled by the retry policy (a backoff, or
+      nothing at all), and never a reason to ask the next candidate;
+    * ``("offline", err)`` — slskd is gone, which ends the whole pass.
+
+    One candidate costs ONE MusicBrainz lookup (its own edition) and ONE
+    bounded search — never a fresh ranking, and never a second search to decide
+    what to try next (spec R150).
+    """
     from server import integrations as intg
-    release, release_mbid = intg.resolve_release(wish["release_mbid"])
+    from server import soulseek_auto
+
+    wid = wish["id"]
+    release, release_mbid = intg.resolve_release(cand["mbid"])
     if not release_mbid:
         # A release MusicBrainz will not resolve is a TRANSIENT failure like any
         # other (an outage, a rate limit, a bad id the user can fix): it goes
         # through the same settle policy instead of its own private retry, so a
         # permanently unfillable wish still ends up announced rather than being
         # re-resolved forever.
-        return _settle_attempt(wish, cfg,
-                               "MusicBrainz release could not be resolved "
-                               f"({wish['release_mbid']})")
-    # Which PRESSING this wish is about, recorded on the wish itself: the
+        return _settled(_settle_attempt(
+            wish, cfg,
+            f"MusicBrainz release could not be resolved ({cand['mbid']})"))
+    # Which PRESSING this attempt is about, recorded on the wish itself: the
     # release is in hand here, so the queue row never spends a MusicBrainz
-    # request of its own to say it (server.wishes.RELEASE_KEYS).
+    # request of its own to say it (server.wishes.RELEASE_KEYS). It follows the
+    # WALK, so the row names the edition being asked for right now.
     wishes.store_identity(wid, wishes.release_identity(release, release_mbid))
     r = soulseek_auto.start_job(
         release_mbid=release_mbid,
@@ -317,6 +461,10 @@ def _run_one(wish, cfg):
         queries=(wish.get("queries") or None),
         wish_id=wid,
         source="musicbrainz",
+        # This candidate's own bounded search window (spec R151): the walk
+        # gives each ranked edition its own, so three candidates are three
+        # windows and not one shared eternity.
+        search_seconds=window,
     )
     if not r.get("ok"):
         err = str(r.get("error") or "job refused")
@@ -325,30 +473,29 @@ def _run_one(wish, cfg):
             # of this pass): the wish keeps its place and costs no attempt.
             wishes.mark_wanted(wid, error=err,
                                attempts=int(wish.get("attempts") or 0))
-            return "skipped"
+            return ("skipped", err)
         low = err.lower()
         if "already in your library" in low:
             # honey: trust start_job's owned check; reconcile pins the path.
             resolved = wishes.reconcile_with_library(cfg)
             if not resolved:
-                wishes.mark_imported(wid, "")
                 # The library already holds this album and reconcile could not
                 # tie it to a framework folder, so the placeholder would stand
                 # for ever beside the real album (and read as a second release).
                 # Nothing searches this wish again: take it down, like every
-                # other terminal end here does.
+                # other terminal end here does. The caller marks the wish
+                # imported and announces it, in ONE place (`_run_one`).
                 _drop_framework_album(wish, cfg)
-                _wish_found(wish)
-            return "imported"
+            return ("imported", "")
         if "already queued" in low or "already running" in low or "being imported" in low:
             # Transient pipeline contention, not a failed attempt: leave the
             # wish open without burning an attempt.
             wishes.mark_wanted(wid, error=err,
                                attempts=int(wish.get("attempts") or 0))
-            return "skipped"
+            return ("skipped", err)
         wishes.mark_wanted(wid, error=err,
                            attempts=int(wish.get("attempts") or 0) + 1)
-        return "pending"
+        return ("pending", err)
     if r.get("waiting"):
         # The pipeline is full and this wish has taken its place in the waiting
         # queue (see soulseek_auto.start_job): it starts BY ITSELF the moment a
@@ -358,55 +505,56 @@ def _run_one(wish, cfg):
             wid, error=f"waiting for a free pipeline slot (position "
                        f"{r.get('position')})",
             attempts=int(wish.get("attempts") or 0))
-        return "skipped"
+        return ("skipped", "")
     job_id = (r.get("job") or {}).get("id")
-    _note(wid, label, job_id)
+    _note(wid, f"{wish.get('artist') or '?'} — {wish.get('title') or '?'}"
+               + (f" — {wishes.candidate_label(pos, total)}" if total > 1 else ""),
+          job_id)
     st = _wait_job(job_id, _stopped)
     if st.get("state") == "running":
         # Stopped by cancellation, or the job outlived every pipeline ceiling
         # (wedged) — re-mark wanted so the wish cannot rot in 'searching'.
         wishes.mark_wanted(wid, error="search interrupted — will retry",
                            attempts=int(wish.get("attempts") or 0))
-        return "pending"
+        return ("pending", "")
     result = st.get("result") or {}
     if st.get("state") == "done" and result.get("imported"):
-        wishes.mark_imported(wid, result.get("album_path") or "")
-        _wish_found(wish, result.get("album_path") or "", _chain_note(result))
-        # the library changed — drop caches so the UI sees the new album
-        try:
-            from server import tagcache, mbresolve
-            tagcache.invalidate_all()
-            mbresolve.invalidate()
-        except Exception:
-            pass
-        return "imported"
-
-    return _settle_attempt(wish, cfg,
-                           result.get("error") or st.get("stage")
-                           or "no verified match yet")
+        _LAST_RESULT.result = result
+        return ("imported", result.get("album_path") or "")
+    err = (result.get("error") or st.get("stage") or "no verified match yet")
+    if wishes.outcome_of(err) == "not_found":
+        # The search answered, and there is nothing usable for THIS edition —
+        # the walk may move on (the caller decides, with the list in hand).
+        return ("empty", err)
+    return (_settle_attempt(wish, cfg, err), err)
 
 
 def _settle_attempt(wish, cfg, err):
-    """One finished attempt: decide again-or-done, in ONE place.
+    """One finished WALK: decide again-or-done, in ONE place.
 
     The retry policy itself lives in `server.wishes` (classified outcomes,
     budgets, backoff); this is the only caller, so every way an attempt can end
     — a job that failed, a release MusicBrainz could not resolve, a search that
     found nothing — lands here and gets the same answer:
 
-    * a search that found NOTHING spends a not-found attempt and ends the wish
-      when that budget is gone (`wishes_not_found_attempts`),
+    * a walk that found NOTHING spends a not-found attempt. With a ranked list
+      behind it the release is NOT ended and its album is NOT taken down: it
+      moves to the BACKGROUND, where the worker keeps walking it on its own
+      ticks until one of the candidates lands (spec R153). Only a wish with no
+      ranked list at all — nothing to keep asking — ends `not_found`, which is
+      the terminal outcome it always was.
     * a TRANSIENT failure (a refused slskd, an outage, a failed verification)
       is retried after its backoff until the attempts cap is spent.
 
-    Both ends are terminal and both are announced ONCE by the marking call
-    itself; both come back only through the user's own retry. Returns the
-    pass-level outcome ("pending" | "not_found" | "failed").
+    Every terminal end is announced ONCE by the marking call itself; both come
+    back only through the user's own retry. Returns the pass-level outcome
+    ("pending" | "not_found" | "failed" | "background").
 
     A TERMINAL end also takes the wish's framework album down
     (`_drop_framework_album`): nothing searches that wish again by itself, so
     the album folder "Add to library" created would sit in the library for good
-    looking like an album nobody has.
+    looking like an album nobody has. The BACKGROUND end deliberately does NOT:
+    something IS still searching for it.
     """
     wid = wish["id"]
     attempts = int(wish.get("attempts") or 0) + 1
@@ -414,14 +562,27 @@ def _settle_attempt(wish, cfg, err):
         empty = int(wish.get("not_found") or 0) + 1
         cap = wishes.not_found_attempts(cfg)
         if cap and empty >= cap:
+            if wishes.walk_length(wish, cfg) >= 1:
+                # The walk is spent, and a spent walk is not an answer: every
+                # ranked candidate is still a candidate. The release keeps its
+                # place (and its framework album) as a background request the
+                # worker re-walks on its own ticks.
+                wishes.mark_background(wid, wishes.walk_report(wish, err, cfg),
+                                       attempts=attempts, not_found=empty)
+                return "background"
             wishes.mark_not_found(wid, err, attempts)
             _drop_framework_album(wish, cfg)
             return "not_found"
         # The spent empty search is RECORDED here: it is the counter the cap is
         # compared against, so a wish with a budget above one really does run
-        # out of it instead of re-reading the same zero forever.
+        # out of it instead of re-reading the same zero forever. The walk's own
+        # pointer goes back to the BEST candidate at the same time: nothing is
+        # being asked right now, and the next attempt starts at the top of the
+        # ranking (spec R150) — a row left pointing at the last edition the last
+        # attempt reached would describe a search that is not the one about to
+        # run.
         wishes.mark_wanted(wid, error=str(err)[:300], attempts=attempts,
-                           not_found=empty)
+                           not_found=empty, candidate=0)
         return "pending"
     cap = wishes.max_attempts(cfg)
     if cap and attempts >= cap:
@@ -596,6 +757,10 @@ def _cycle(wid=None):
         # announced on the bus by the marking call (see marks in server/wishes).
         empty = sum(1 for v in by_id.values() if v == "not_found")
         gave_up = sum(1 for v in by_id.values() if v == "failed")
+        # A spent walk is its own outcome and its own section: the release is
+        # still searched (see server.wishes' `background` status), so it is
+        # neither "nothing found" nor "still wanted".
+        resting = sum(1 for v in by_id.values() if v == "background")
 
         resolved = 0
         try:
@@ -608,6 +773,8 @@ def _cycle(wid=None):
 
         summary = (f"{imported} imported, {pending} still wanted, "
                    f"{resolved} resolved from library")
+        if resting:
+            summary += f", {resting} moved to the background"
         if empty:
             summary += f", {empty} not found (no further searches)"
         if gave_up:
@@ -619,7 +786,8 @@ def _cycle(wid=None):
         if open_wishes:
             wishes.log("info", "Wishes cycle done — " + summary)
         return {"ok": True, "imported": imported, "pending": pending,
-                "not_found": empty, "failed": gave_up, "resolved": resolved}
+                "not_found": empty, "failed": gave_up, "background": resting,
+                "resolved": resolved}
     finally:
         # Between passes the worker is not running — unless another pass was
         # requested while this one ran, which starts immediately (run_cycle's

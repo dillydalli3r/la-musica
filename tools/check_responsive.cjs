@@ -103,6 +103,16 @@ const MEASURE = `(() => {
    * its own longest word cannot show that word, so the text is not laid out,
    * it is crushed. Measured with a hidden span in the same font, so no magic
    * threshold is involved.
+   *
+   * The split/token regexes below use a DOUBLE backslash on purpose: this
+   * whole program is ONE template literal, and a single backslash-s inside it
+   * is the escape for the letter "s". Written with one backslash the page
+   * splits on runs of "s" and reports a whole sentence — spaces and all, e.g.
+   * 40.57 GB free of 2..., 18 characters — as the "longest word", which is how
+   * this was caught: a word has no spaces. Every wrapping paragraph then
+   * measured as its own longest word, and pages whose text wraps perfectly
+   * well were reported as crushed. Two backslashes reach the page as one,
+   * which is what the regex there needs to mean.
    */
   const squeezed = [];
   const hidden = document.createElement("span");
@@ -120,25 +130,45 @@ const MEASURE = `(() => {
     if (text.length < 8 || el.children.length) continue;
     const r = el.getBoundingClientRect();
     if (r.width > vw) continue;
-    // A single unbreakable token — a filesystem path, a URL, a UUID — that the
-    // cell truncates with an ellipsis is the INTENDED behaviour, not a crush:
-    // there is no word boundary to wrap at, so a narrow box is the design.
-    // Only multi-word text can be "crushed into a column", which is the defect
-    // this check is for.
     const cs = getComputedStyle(el);
-    if (!/\s/.test(text) && cs.textOverflow === "ellipsis") continue;
+    // A screen-reader-only box is text the page deliberately does not SHOW:
+    // its 1px width IS the clip — the only rule in the built CSS that sets
+    // clip is Tailwind's .sr-only, which sets exactly this rect — and the
+    // words it carries exist for a screen reader: an icon-only button's name
+    // (Export's "Rescan drives") or the header of a column too narrow to
+    // print a label (Export's checkbox and cover columns). Measuring it
+    // reports the design as a defect.
+    if (cs.clip !== "auto") continue;
     // A cell that collapsed to ZERO width is the same defect at its worst: the
     // text is in the DOM, has lines of height, and has no room at all. Real
     // report: a track title rendered one character per line at 0px wide while
-    // the columns beside it kept 50px each.
+    // the columns beside it kept 50px each. Tested BEFORE the exemptions
+    // below, deliberately: a page title at 0px is one word in a box that
+    // truncates with an ellipsis and carries a title, so every exemption that
+    // excuses a deliberate truncation would also excuse the one state that
+    // shows nothing at all.
     if (r.width === 0 && r.height > 0) {
       squeezed.push({ tag: el.tagName.toLowerCase(), cls: (el.className || "").toString().slice(0, 52),
-                      w: 0, need: Math.round(wordWidth(el, text.split(/\s+/)[0] || text)),
+                      w: 0, need: Math.round(wordWidth(el, text.split(/\\s+/)[0] || text)),
                       word: text.slice(0, 18) });
       continue;
     }
     if (r.width < 1) continue;
-    const words = text.split(/\s+/).filter((w) => w.length > 3);
+    // Text that cannot WRAP cannot be crushed into a column: with nowrap the
+    // text has one line by construction, there is no column to squeeze it
+    // into, and what these boxes carry is a path, a URL or an id — a token
+    // with no word boundary to wrap at. The dependency table's Location cell
+    // is 264 px of path in a 180 px cell, ellipsised with the whole path in
+    // its title: that is the intended behaviour, not this defect.
+    const nowrap = cs.whiteSpace === "nowrap" || cs.whiteSpace === "pre";
+    if (nowrap && (cs.textOverflow === "ellipsis" || el.hasAttribute("title"))) continue;
+    // A box that may break INSIDE a word can still lay that word out, so a box
+    // narrower than it is not crushed either. Measured on /settings, where the
+    // music folder is a 66-character path in a 282 px box and renders in full,
+    // wrapped onto two lines.
+    if (cs.wordBreak === "break-all" || cs.overflowWrap === "break-word" ||
+        cs.overflowWrap === "anywhere") continue;
+    const words = text.split(/\\s+/).filter((w) => w.length > 3);
     if (!words.length) continue;
     const longest = words.reduce((a, b) => (b.length > a.length ? b : a));
     const need = wordWidth(el, longest);
@@ -171,6 +201,28 @@ const MEASURE = `(() => {
 })()`;
 
 (async () => {
+  // A server that has not finished its first run measures nothing here: every
+  // route redirects to the setup wizard, which is a form with no table to
+  // squeeze and no long value to clip, so the whole run comes back "160/160
+  // passed" for pages nobody opened. Measured once, before the first
+  // navigation: the backend answers /api/config without a session until a
+  // password is claimed, and anything else (a 401 on a claimed server, no such
+  // endpoint) decides nothing and is left alone — this stops only on a config
+  // that SAYS the wizard is still up.
+  try {
+    const r = await fetch(`${BASE}/api/config`, { headers: { Accept: "application/json" } });
+    if (r.ok) {
+      const cfg = await r.json();
+      if (cfg && cfg.first_run_done === false) {
+        console.error(`[responsive] ${BASE} has not finished its first run — every route ` +
+          "redirects to the setup wizard, so the geometry measured here would be the " +
+          "wizard's, not the app's. Finish (or skip) setup on that server first, or " +
+          'POST {"first_run_done": true} to /api/config, then run this again.');
+        process.exit(2);
+      }
+    }
+  } catch { /* no reachable config endpoint: nothing to decide from */ }
+
   const browser = await chromium.launch();
   for (const vp of VIEWPORTS) {
     const page = await browser.newPage({ viewport: { width: vp.width, height: vp.height } });

@@ -3082,6 +3082,21 @@ def _stamp_mb_tags(album_dir, release):
 
         for k, v in identity.items():
             add(k, v)
+        # LANGUAGE is the release's own TEXT REPRESENTATION (`language` off
+        # MusicBrainz's release lookup: `jpn`, `eng`, … — spec R167), which is
+        # what script 17's transliteration/translation decision reads when the
+        # letters alone cannot say (two Latin-script languages is the case that
+        # matters). FILLED only, never forced: a tag the user set, or the
+        # script's own answer for this track, is a statement about the LYRICS
+        # and the release's language does not replace it — and a code that
+        # states nothing (`mul` on a compilation, `und`, `zxx`) is not written
+        # at all (`mlo.lyrics_xlit.normalize_lang` is the one place that
+        # decides what states nothing, and it also maps `jpn` -> `ja`).
+        from mlo.lyrics_xlit import normalize_lang
+
+        lang = normalize_lang(release.get("language"))
+        if lang and not normalize_lang(af.get_tag("LANGUAGE")):
+            want["LANGUAGE"] = lang
         # Album-level spelling of the chosen release (corrected when the
         # uploader's tags say something else).
         add("ALBUM", album_title)
@@ -3579,7 +3594,7 @@ def forget(job_id):
 
 def start_job(release_mbid=None, release=None, queries=None, username=None,
               target_dir=None, confirm_lossy=False, kind=None, mode=None,
-              wish_id=None, source=""):
+              wish_id=None, source="", search_seconds=None):
     """Kick off an auto-import job in a daemon thread; returns the job state.
 
     release — a full release dict (from integrations.release_lookup); when
@@ -3595,6 +3610,14 @@ def start_job(release_mbid=None, release=None, queries=None, username=None,
     wish_id — the wish this job is filling, so the queue view shows ONE row for
     the release instead of a wish and its job side by side.
     source — who asked ("musicbrainz" / "soulseek" / "auto"), for that row.
+    search_seconds — this job's SEARCH window, when the caller owns one: the
+    fallback walk gives each ranked candidate its own bounded window
+    (`soulseek_search_timeout_seconds`, spec R151), so the wish worker passes it
+    per candidate instead of the whole pipeline sharing the configured
+    `soulseek_auto_search_wait`. It bounds the SEARCH only — a candidate that
+    finds a usable folder still downloads and imports on the pipeline's own
+    ceilings (nothing here may cut a download short). None keeps the config's
+    window, which is what every other caller wants.
 
     Up to `soulseek_search_concurrency` releases run at once. A release that
     arrives while they all do TAKES ITS PLACE in the pipeline's waiting queue
@@ -3689,7 +3712,8 @@ def start_job(release_mbid=None, release=None, queries=None, username=None,
                                      queries=queries, username=username,
                                      target_dir=target_dir,
                                      confirm_lossy=confirm_lossy,
-                                     kind=kind, mode=mode, job_id=jid),
+                                     kind=kind, mode=mode, job_id=jid,
+                                     search_seconds=search_seconds),
                          daemon=True).start()
         return {"ok": True, "job": job_state(jid)}
     # The pipeline is full: WAIT, do not refuse. The release goes into the same
@@ -3701,7 +3725,8 @@ def start_job(release_mbid=None, release=None, queries=None, username=None,
     item = _queue_item(release_mbid=release_mbid, release=release, queries=queries,
                        username=username, target_dir=target_dir,
                        confirm_lossy=confirm_lossy, kind=kind, mode=mode,
-                       wish_id=wish_id, source=source)
+                       wish_id=wish_id, source=source,
+                       search_seconds=search_seconds)
     dup = _append_waiting(item)
     if dup:
         return {"ok": False, "transient": True,
@@ -4264,7 +4289,8 @@ def _run_youtube(release, cfg, confirm_lossy):
 
 
 def _run(release_mbid=None, release=None, queries=None, username=None,
-         target_dir=None, confirm_lossy=False, kind=None, mode=None, job_id=0):
+         target_dir=None, confirm_lossy=False, kind=None, mode=None, job_id=0,
+         search_seconds=None):
     from server import soulseek as slsk
     from server import integrations as intg
 
@@ -4492,7 +4518,16 @@ def _run(release_mbid=None, release=None, queries=None, username=None,
             # popular album never goes quiet, so nothing is readable until the
             # whole ceiling has elapsed. A usable candidate ends the wait even
             # sooner, so both values are ceilings, never floors.
-            search_wait = int(cfg.get("soulseek_auto_search_wait", 10) or 10)
+            #
+            # `search_seconds` is the CALLER's own window and wins over the
+            # configured one: the fallback walk gives each of a release group's
+            # ranked candidates its own bounded search (spec R151), so a walk
+            # that is on its third edition is not waiting out the fourth
+            # candidate's window as well. It bounds the search ONLY — the
+            # download, verify and import below keep the pipeline's own
+            # ceilings, because nothing may cut a transfer short.
+            search_wait = int(search_seconds
+                              or cfg.get("soulseek_auto_search_wait", 10) or 10)
             response_limit = int(cfg.get("soulseek_auto_response_limit", 15) or 15)
             # Every template goes out at once and the merged responses are
             # scored on each tick: the first complete+lossless folder ends the
@@ -5041,9 +5076,24 @@ def _clear_downloads(slsk, ddir, found, cfg):
     return out
 
 
-def _start_import_chain(album_dir, cfg, release=None):
+def _start_import_chain(album_dir, cfg, release=None, download_dir=""):
     """Finish the freshly imported album in the background: links, metadata,
     cover art — and the configured script chain.
+
+    Its claim is the JOB's, carried onto this thread
+    (``job_locks.holding``, under the id the release's album folder was
+    claimed with when the job started): the album stays locked straight through
+    the hand-off — the request that started this chain releases its own
+    reference as it returns, and the chain holds one of its own — so a user
+    press on that album (``POST /api/import/finish``) is answered 409 naming
+    this job instead of starting a second chain over the same folder, and
+    MAINTAIN keeps showing ONE row for the job while its chain runs.
+
+    The folder the download came FROM is claimed with it, for the length of the
+    chain: the album has already moved into the library, but what is left in the
+    download folder is still this release's — a second import of the same folder
+    (the downloads page's one-click import, the bulk queue) must queue behind
+    the chain that is finishing it rather than clear or re-import under it.
 
     Delegates to ``server.imports.finish_album(album_dir, cfg)``: the album was
     moved, AcoustID-checked, converted, MB/MEDIA-stamped and named by
@@ -5071,12 +5121,26 @@ def _start_import_chain(album_dir, cfg, release=None):
     metadata step was switched off or staged them for review.
     """
     from server import imports
+    from server import job_locks
 
     # The job this album belongs to, captured on ITS thread: the chain runs on
     # a thread of its own long after _run() returned, and its log lines (and
     # the metadata progress it reports) are the job's, not whichever job
     # happens to be primary by then.
     owner = int(_job.get("id") or 0)
+    # ...and its CLAIM, taken on another thread again (see _AlbumClaim): the id
+    # it holds the release's album folder under, so the chain can carry the very
+    # same claim instead of taking one of its own and queueing behind it.
+    claim = _job.get("_claim")
+    claim_job = str(getattr(claim, "job", "") or "")
+    label = str(getattr(claim, "label", "") or "") or (
+        "Import " + (os.path.basename(str(album_dir).rstrip("\\/")) or album_dir))
+    # Both folders this release owns: the library folder the album is in now,
+    # and the download folder it came from (still claiming it while the chain
+    # runs, so nothing else imports or clears it in the meantime).
+    hold_paths = [album_dir]
+    if str(download_dir or "").strip() and os.path.isdir(download_dir):
+        hold_paths.append(str(download_dir))
 
     def chain_mark(running, text=""):
         """Record the chain on the JOB (by id — `_run` has returned by now) so
@@ -5104,30 +5168,46 @@ def _start_import_chain(album_dir, cfg, release=None):
     def chain():
         _tl.jid = owner
         try:
-            result = imports.finish_album(album_dir, cfg, release=release,
-                                          progress=chain_progress)
-            for err in result.get("errors") or []:
-                _log("  ! " + err)
-            # The chain's own one-line report ("ran 12 of 14 scripts — 2
-            # failed"), then what the album is still short of. The missing
-            # families were already announced (import_needs_data, one frame)
-            # by the import that computed them; this is the job log's copy.
-            summary = imports.chain_summary(result)
-            if summary:
-                _log(summary)
-            missing = ((result.get("autonomy") or {}).get("missing") or {})
-            if missing:
-                names = ", ".join(sorted(str((v or {}).get("label") or k)
-                                         for k, v in missing.items()))
-                _log(f"Still missing after the chain: {names} — reported for a "
-                     f"decision (Soulseek queue → Needs you).")
-        except Exception:
-            traceback.print_exc()
-            _log("Import pipeline crashed: "
-                 f"{traceback.format_exc().strip().splitlines()[-1]}")
-        finally:
+            # The job's claim, carried onto THIS thread: `holding` takes a
+            # reference of its own under the same job, so the album is never
+            # unclaimed while the request that started this chain lets go of
+            # its own. A foreign holder (a user press that got in first, a bulk
+            # import of the same folder) is waited for, never stolen — the
+            # album is mid-rewrite.
+            with job_locks.holding(hold_paths, job=claim_job or None,
+                                   kind="auto-import", label=label, wait=True):
+                try:
+                    result = imports.finish_album(album_dir, cfg, release=release,
+                                                  progress=chain_progress)
+                    for err in result.get("errors") or []:
+                        _log("  ! " + err)
+                    # The chain's own one-line report ("ran 12 of 14 scripts —
+                    # 2 failed"), then what the album is still short of. The
+                    # missing families were already announced
+                    # (import_needs_data, one frame) by the import that
+                    # computed them; this is the job log's copy.
+                    summary = imports.chain_summary(result)
+                    if summary:
+                        _log(summary)
+                    missing = ((result.get("autonomy") or {}).get("missing") or {})
+                    if missing:
+                        names = ", ".join(sorted(str((v or {}).get("label") or k)
+                                                 for k, v in missing.items()))
+                        _log(f"Still missing after the chain: {names} — reported "
+                             f"for a decision (Soulseek queue → Needs you).")
+                except Exception:
+                    traceback.print_exc()
+                    _log("Import pipeline crashed: "
+                         f"{traceback.format_exc().strip().splitlines()[-1]}")
+                finally:
+                    chain_mark(False)
+                # Inside the claim: the artist image and the descriptions are
+                # written into the album that was just chained, so they are part
+                # of the work the claim is there to protect.
+                _account_metadata(album_dir, cfg)
+        except job_locks.PathLocked as e:
+            _log(f"The album could not be claimed for its chain: {e}")
             chain_mark(False)
-        _account_metadata(album_dir, cfg)
 
     _log("Running the import chain in the background (RateYourMusic links, "
          "metadata, cover art, then the configured scripts).")
@@ -5279,6 +5359,44 @@ def _import_dest(release, cfg):
     return dest
 
 
+def _adopt_into(hold, local_root):
+    """Move a finished download INTO the framework album standing for it.
+
+    `os.replace` cannot merge two directories — a rename onto a non-empty one
+    fails — and moving the album to a path of its own first is exactly what
+    left the library showing two rows for one acquisition (see
+    `pending_albums.framework_for_release`). So each ENTRY of the download is
+    moved into the placeholder: the marker, the manifest and the placeholder
+    cover stay where `create` put them, a cover the download brought replaces
+    the placeholder's (the album simply has its own art), and a folder of the
+    same name on both sides gets a `(2)` name rather than merging into a
+    folder the add did not write.
+
+    Raises the same "still locked" RuntimeError `move_path` reports, so the
+    caller's promise ("the download is left intact") still holds for whatever
+    has not moved yet.
+    """
+    from mlo.paths import move_path
+
+    for name in sorted(os.listdir(local_root)):
+        src = os.path.join(local_root, name)
+        dst = os.path.join(hold, name)
+        if os.path.isdir(src) and os.path.isdir(dst):
+            n = 2
+            while os.path.exists(dst):
+                dst = os.path.join(hold, f"{name} ({n})")
+                n += 1
+        if not move_path(src, dst, log=_log):
+            raise RuntimeError(
+                f"could not move {name} into the album the add created — a "
+                f"file is still locked (Soulseek holding it open?); what has "
+                f"not moved is left intact at {local_root}")
+    try:
+        os.rmdir(local_root)        # empty now; a stray leftover is fine
+    except OSError:
+        pass
+
+
 def _import(local_root, release, cfg, media, source=""):
     """Move the verified download into the library and run the pipeline.
 
@@ -5295,16 +5413,30 @@ def _import(local_root, release, cfg, media, source=""):
     if not folder or not os.path.isdir(folder):
         raise RuntimeError("music_folder is not configured")
 
-    dest = _import_dest(release, cfg)
+    # The album the user asked for is already a folder in the library (the
+    # framework album "Add to library" created), so the download lands IN it:
+    # one album identity, one tile, from the first byte to the grade — and
+    # organize has nothing to move afterwards. Every other import keeps the
+    # `<library root>/<Artist - Album>` destination below, which is also what
+    # the job's own folder claim is named after.
+    from server import pending_albums
 
-    if not move_path(local_root, dest, log=_log):
-        # mlo.paths.move_path never copies-then-fails: it retries a locked file
-        # (slskd still holding one) and gives up without half-moving the album.
-        raise RuntimeError(
-            f"could not move {os.path.basename(local_root)} into the library — "
-            f"a file is still locked (Soulseek holding it open?); the download "
-            f"is left intact at {local_root}")
-    _log(f"Moved into the library: {os.path.basename(dest)}")
+    dest = pending_albums.framework_for_release(release, cfg,
+                                                wish_id=_job.get("wish_id"))
+    if dest:
+        _adopt_into(dest, local_root)
+        _log(f"Moved into the album the add created: {os.path.basename(dest)}")
+    else:
+        dest = _import_dest(release, cfg)
+        if not move_path(local_root, dest, log=_log):
+            # mlo.paths.move_path never copies-then-fails: it retries a locked
+            # file (slskd still holding one) and gives up without half-moving
+            # the album.
+            raise RuntimeError(
+                f"could not move {os.path.basename(local_root)} into the library — "
+                f"a file is still locked (Soulseek holding it open?); the download "
+                f"is left intact at {local_root}")
+        _log(f"Moved into the library: {os.path.basename(dest)}")
 
     # AcoustID verification of what actually arrived, against the release this
     # job searched for: a warning in the job log, never a rejection.
@@ -5373,7 +5505,7 @@ def _import(local_root, release, cfg, media, source=""):
     except Exception as e:
         organize_error = str(e)
 
-    _start_import_chain(album_path, cfg, release)
+    _start_import_chain(album_path, cfg, release, download_dir=local_root)
     return {"album_path": album_path, "imported": True,
             "staging_path": dest, "organized": organized,
             "organize_error": organize_error}

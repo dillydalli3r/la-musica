@@ -63,6 +63,8 @@ const CFG_DEFAULTS: Record<string, unknown> = {
   soulseek_upload_limit_kib: 0,
   soulseek_download_limit_kib: 0,
   soulseek_web_https: false,
+  soulseek_cache_cap_gb: 5,
+  trash_cap_gb: 5,
   youtube_enabled: true,
   youtube_max_height: 0,
   auto_import_avoid_promo: true,
@@ -940,18 +942,13 @@ export default function SettingsPage() {
         { k: "advisory_auto_fetch", label: "Fetch the advisory rating automatically (import + advisory fetch)", type: "bool" },
         {
           k: "advisory_ai_classify", label: "Judge the lyrics with the AI provider", type: "bool",
-          help: "When no provider states an advisory, the configured AI model reads the track's lyrics "
-                + "and answers 0/1/2 (3 = it cannot tell, which falls through). Needs an AI base URL "
-                + "and model in the AI section; with no AI configured the word scan below answers instead.",
-        },
-        {
-          k: "advisory_lyrics_scan", label: "Scan the lyrics for profanity", type: "bool",
-          help: "The multilingual word list: any hit is explicit (1), no hit is clean (0). Runs when the "
-                + "AI is not configured (or could not tell) and the track has lyrics.",
+          help: "When no source states an advisory at all, the configured AI model reads the track's lyrics "
+                + "and answers 0/1/2 (3 = it cannot tell, which falls through to the fallback). Needs an AI "
+                + "base URL and model in the AI section; a value a source already stated is never second-guessed.",
         },
         {
           k: "advisory_fallback", label: "When nothing states an advisory", type: "select",
-          help: "The last resort for a track with no provider answer, no AI answer and no lyrics evidence.",
+          help: "The last resort for a track no source stated anything about and the AI could not rate.",
           options: [
             ["0", "Store 0 — not explicit"],
             ["2", "Store 2 — clean edition"],
@@ -978,6 +975,7 @@ export default function SettingsPage() {
         { k: "fix_instrumental_from_lyrics", label: "Fix INSTRUMENTAL from lyrics", type: "bool" },
         { k: "force_auto_tag", label: "Force re-tag", type: "bool" },
         { k: "force_mood", label: "Force mood & energy re-analysis (script 16)", type: "bool" },
+        { k: "instrumental_auto_fetch", label: "Look the INSTRUMENTAL verdict up when nothing states one", type: "bool" },
       ],
     },
     {
@@ -1119,6 +1117,21 @@ export default function SettingsPage() {
       ],
     },
     {
+      title: "Storage & cleanup",
+      blurb:
+        "What the app may keep on disk in the two folders it fills by itself. Both are scratch space — downloads/staging holds transfers until they are imported, the trash holds what was removed from the library — so neither may grow without end: over its cap, one is emptied OLDEST FIRST until it fits, and nothing in use is ever touched (a transfer still running, a folder an import or a script run is working on). The two caps are separate numbers; they never share a total.",
+      fields: [
+        {
+          k: "soulseek_cache_cap_gb", label: "Soulseek download cache cap (GB, 0 = no cap)", type: "number", min: 0, max: 1000, step: 0.1,
+          help: "The download folder plus the staging sibling slskd writes partials into (<music folder>/.mlo/downloads and its `incomplete`), measured together. Over this size the app deletes from them, oldest entry first, until they are back under — the copy a successful import already removes is not what this is for. An entry a transfer is still running in, or one an import / script run holds, is skipped and reported instead. 0 = no cap.",
+        },
+        {
+          k: "trash_cap_gb", label: "Trash cap (GB, 0 = no cap)", type: "number", min: 0, max: 1000, step: 0.1,
+          help: "The remove-from-library bin (<music folder>/.mlo/trash), capped on its own — filling the download cache never eats the bin's room. Over this size the app deletes the OLDEST trashed entries for good (exactly like Delete on the Trash page; what is left stays restorable) until the bin is under again, and an entry being restored is skipped. 0 = the bin keeps everything.",
+        },
+      ],
+    },
+    {
       title: "Auto-import (MusicBrainz → Soulseek)",
       blurb: "Search terms are templates of release fields (artist album year date country catalognumber barcode label). CD rips are found by catalog number, digital media by title + year; every disc's .log must reach the score threshold before the album downloads.",
       fields: [
@@ -1137,6 +1150,10 @@ export default function SettingsPage() {
         { k: "soulseek_auto_log_min_score", label: "Min .log score (0–100)", type: "number", min: 0, max: 100 },
         { k: "soulseek_auto_complete_ratio", label: "Required track completeness (0.5–1)", type: "number", min: 0.5, max: 1, step: 0.05 },
         { k: "soulseek_auto_search_wait", label: "Fallback search window (seconds of quiet on a rare album)", type: "number", min: 5, max: 300 },
+        { k: "soulseek_fallback_candidates", label: "Candidates tried per release (best first)", type: "number", min: 1, max: 10,
+          help: "How many of a release group's ranked editions one search walks: the best first, then the next. The release-choice policy ranks them (status, medium, completeness, original date), so a rare pressing no longer costs you the album — the search moves on to the next edition instead. 1 turns the walk off (the best edition only). A group with fewer eligible editions than this simply ends at the end of its own list." },
+        { k: "soulseek_search_timeout_seconds", label: "Search window per candidate (seconds)", type: "number", min: 5, max: 300,
+          help: "How long ONE candidate's search is given before it counts as not found and the walk moves on to the next edition — per candidate, so a walk of three may wait up to three of these. It is the same kind of quiet window as the fallback search window above (slskd ends a search when the network stops answering, plus the app's own response grace), and a usable folder still ends a candidate's search in seconds. A walk whose candidates all come back empty is not dropped: the release stays in the Background list and keeps being searched." },
         {
           k: "soulseek_auto_response_limit", label: "Responses before a search is scored (5–500)", type: "number", min: 5, max: 500,
           help: "slskd only hands back a search's results once it has ENDED, and a popular album never goes quiet — this ends the search early instead of waiting out the whole window. Lower = faster and fewer peers; higher = slower and more candidates.",
@@ -1189,6 +1206,29 @@ export default function SettingsPage() {
           help: "A TRANSIENT failure — slskd refused or absent, a MusicBrainz outage, a download that failed verification — waits this long before the next attempt, doubling each time (capped at 24 h). 0 retries on the next interval instead.",
         },
         { k: "wishes_auto_import", label: "Auto-import when a verified match is found", type: "bool" },
+        { k: "soulseek_auto_wish_prompt", label: "Keep searching wishes automatically while the app runs", type: "bool" },
+      ],
+    },
+    {
+      title: "Artist watch",
+      blurb:
+        "Follow an artist instead of re-checking them by hand: the worker asks MusicBrainz for releases after the watch was created and queues what matches. Nothing is queued twice, an undated release group is never 'new', and the per-cycle cap is what keeps a first check from dumping a back catalogue into the queue.",
+      fields: [
+        { k: "artist_watch_enabled", label: "Watch artists for new releases", type: "bool" },
+        { k: "artist_watch_interval_hours", label: "Check interval (hours)", type: "number", min: 1, max: 720, help: "How long between two checks of the SAME artist; the worker itself ticks far more often." },
+        { k: "artist_watch_max_per_cycle", label: "Releases queued per artist per check", type: "number", min: 1, max: 50, help: "The hard anti-dump cap. One is the shipped default: a watch that queued a hundred at once is the discography dump this feature exists to avoid." },
+        { k: "artist_watch_types", label: "Release types a watch may queue", type: "multi", options: [["album","Album"],["ep","EP"],["single","Single"],["broadcast","Broadcast"],["other","Other"],["compilation","Compilation"],["soundtrack","Soundtrack"],["spokenword","Spoken word"],["interview","Interview"],["audiobook","Audiobook"],["live","Live"],["remix","Remix"],["dj-mix","DJ mix"],["mixtape/street","Mixtape / street"],["demo","Demo"],["audio drama","Audio drama"],["field recording","Field recording"]], help: "MusicBrainz's own type names. A release group matches when its primary type is ticked or ANY secondary type is (a live album is Album + Live, so ticking Live finds it). A watch can narrow this per artist." },
+        { k: "artist_watch_auto_add", label: "Queue a matched release into the library automatically", type: "bool", help: "Off, a watch only reports what it found (the notification is the whole output) — which is what you want if you pick the edition by hand." },
+      ],
+    },
+    {
+      title: "Server & remote access",
+      blurb: "Where this server listens and the address clients should dial. A change to the port or host is picked up at the next start; the address is what a phone or desktop client is told to use.",
+      fields: [
+        { k: "download_concurrency", label: "Files read at once for one download (1–8)", type: "number", min: 1, max: 8, help: "The reader pool behind a queue or offline-cache download: higher fills a socket faster, at the cost of staging more file data in memory." },
+        { k: "server_host", label: "Listen address (0.0.0.0 = every interface)", type: "text", help: "Anything but 127.0.0.1 means other machines can reach this server — the login gate turns itself on there (see the Security tab)." },
+        { k: "server_port", label: "Port", type: "number", min: 1, max: 65535 },
+        { k: "server_public_url", label: "Public address clients should use (blank = this machine)", type: "text" },
       ],
     },
     {
@@ -1229,6 +1269,7 @@ export default function SettingsPage() {
           k: "spotify_client_secret", label: "Spotify client secret (optional)", type: "password",
           help: "Pairs with the client ID above — both are needed before the Spotify lookup runs.",
         },
+        { k: "discovery_enabled", label: "Use online discovery providers", type: "bool", help: "Off, the Home shelves and every artist/album lookup answer from the library and MusicBrainz alone: no Deezer, ListenBrainz, Last.fm or Wikipedia request leaves the machine." },
       ],
     },
     {
@@ -1250,6 +1291,7 @@ export default function SettingsPage() {
         { k: "artist_image_target_size", label: "Artist image max size (px, 0 = keep native size)", type: "number", min: 0, max: 4000 },
         { k: "artist_description_enabled", label: "Fetch artist descriptions", type: "bool" },
         { k: "album_description_enabled", label: "Fetch album descriptions", type: "bool" },
+        { k: "description_full", label: "Fetch the full description text (not just the summary)", type: "bool" },
       ],
     },
     {
@@ -1527,6 +1569,14 @@ export default function SettingsPage() {
     { k: "force_mood", label: "16 · Mood & Energy re-analysis" },
     { k: "force_xlit", label: "17 · Lyrics re-transliterate / re-translate" },
     { k: "force_publish", label: "18 · Lyrics re-publish to LRCLIB" },
+    // Script 20 is the one force key that turns work OFF rather than redoing
+    // it: the layout scan always reports, and this is what lets it rename and
+    // move. It belongs in this list all the same — it is a per-library-script
+    // switch like the others, the master toggle above must cover every one of
+    // them, and the Force menu in the header offers it by the same name
+    // (`web/src/lib/force.ts` keeps the two lists in step; it used to be
+    // missing here, which left the master toggle unable to turn the fixer off).
+    { k: "layout_apply", label: "20 · Layout fix (rename / gather)" },
   ];
 
   /** The server-side notification switches — one per event kind the backend
@@ -1547,14 +1597,17 @@ export default function SettingsPage() {
     { id: "appearance", label: "Appearance" },
     { id: "security", label: t("settings.security") },
     { id: "notifications", label: t("settings.notifications") },
+    { id: "remote", label: "Remote access" },
     { id: "home", label: "Home" },
     { id: "naming", label: "Naming" },
+    { id: "storage", label: "Storage" },
     { id: "tagwrites", label: "Tagging" },
     { id: "grading", label: "Grading" },
     { id: "beets", label: "Beets", section: "Integrations" },
     { id: "soulseek", label: "Soulseek", section: "Integrations" },
     { id: "autoimport", label: "Auto-import", section: "Integrations" },
     { id: "wishes", label: "Wishes", section: "Integrations" },
+    { id: "artistwatch", label: "Artist watch", section: "Integrations" },
     { id: "deps", label: "Dependencies", section: "Integrations" },
     { id: "discovery", label: "Discovery", section: "Providers" },
     { id: "sources", label: "Sources", section: "Providers" },
@@ -1738,8 +1791,9 @@ export default function SettingsPage() {
       ["accurip", "AccurateRip"], ["tagwrites", "Tag writes"],
       ["grading", "Grading"], ["cdrips", "CD Rips"], ["videos", "Videos"],
       ["audiometa", "Key & BPM"], ["beets", "Beets tagging"],
+      ["storage", "Storage & cleanup"],
       ["soulseek", "Soulseek (managed slskd)"], ["autoimport", "Auto-import"],
-      ["wishes", "Wishes"], ["home", "Home"], ["deps", "Dependencies"],
+      ["wishes", "Wishes"], ["artistwatch", "Artist watch"], ["remote", "Server & remote access"], ["home", "Home"], ["deps", "Dependencies"],
       ["discovery", "Discovery"], ["artistimages", "Artist images"], ["ai", "AI lyric transforms"], ["import", "Import pipeline"],
       ["importtags", "Import & tag cleanup"],
     ].map(([tab, prefix]) => [

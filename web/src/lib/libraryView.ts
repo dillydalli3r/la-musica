@@ -38,13 +38,17 @@ export const GRID_SIZES: { id: GridSize; label: string }[] = [
   { id: "l", label: "L" },
 ];
 
-/** Quick-filter presets — the album-table conditions worth one click. */
+/** Quick-filter presets — the album-table conditions worth one click.
+ *
+ *  Explicit is NOT here any more: the advisory is a three-state ladder (0 not
+ *  explicit / 1 explicit / 2 clean edition, see `AdvisoryBadge`), so it needs a
+ *  facet of its own rather than one preset that could only ever mean "1". Two
+ *  controls for one condition is how they end up disagreeing. */
 export type Preset =
   | "all"
   | "failing"
   | "cd"
   | "digital"
-  | "explicit"
   | "instrumental"
   | "missingLyrics"
   | "videos";
@@ -54,10 +58,42 @@ export const PRESETS: { id: Preset; label: string }[] = [
   { id: "failing", label: "Failing" },
   { id: "cd", label: "CD rips" },
   { id: "digital", label: "Digital" },
-  { id: "explicit", label: "Explicit" },
   { id: "instrumental", label: "Instrumental" },
   { id: "videos", label: "Music videos" },
   { id: "missingLyrics", label: "No lyrics" },
+];
+
+/** Star-rating facet — "have I rated this yet", which is a question about the
+ *  user's own verdicts and nothing else. See `RATED_NOTE`. */
+export type RatingFilter = "any" | "rated" | "unrated";
+
+export const RATING_FILTERS: { id: RatingFilter; label: string; hint: string }[] = [
+  { id: "any", label: "Any rating", hint: "Ignore the stars — show everything" },
+  { id: "rated", label: "Rated", hint: "Only rows you have given a star rating" },
+  { id: "unrated", label: "Unrated", hint: "Only rows you have not rated yet" },
+];
+
+/** What "rated" means for a row that has no rating of its own. An album's
+ *  stars are the FOLDER rating (its own verdict, stored in the DB); a track's
+ *  are its file's. Read as one sentence everywhere the facet is applied, so
+ *  the albums, artists and tracks tables cannot describe it differently. */
+export const RATED_NOTE =
+  "An album counts as rated when its own folder rating is set or any track in it is rated; an artist when any of its albums is. Nothing here is an average.";
+
+/** Advisory facet — the app's own three-state ladder, in the two questions a
+ *  listener actually asks: "show me the explicit ones" and "keep them away
+ *  from me". Clean therefore means every advisory that is not 1: 2 (the clean
+ *  EDITION the badges draw) and 0/absent (nothing marked it explicit). */
+export type AdvisoryFilter = "any" | "explicit" | "clean";
+
+export const ADVISORY_FILTERS: { id: AdvisoryFilter; label: string; hint: string }[] = [
+  { id: "any", label: "Any advisory", hint: "Ignore ITUNESADVISORY — show everything" },
+  { id: "explicit", label: "Explicit", hint: "ITUNESADVISORY 1 — a track or album that flags explicit content" },
+  {
+    id: "clean",
+    label: "Clean",
+    hint: "Nothing flags explicit: ITUNESADVISORY 0/absent (not explicit) or 2 (clean edition)",
+  },
 ];
 
 export const ALBUM_SORTS: { key: string; label: string }[] = [

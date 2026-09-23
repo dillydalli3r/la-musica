@@ -528,4 +528,80 @@ ok(os.path.getsize(TWIN_LOOSE) and os.path.getsize(TWIN_IN_ALBUM) == 4096,
 ok("Artists/Twin/1-01 Song.flac" in [i["path"] for i in report["issues"]],
    "…and the row is still reported for the user to settle")
 
+print("== a track's own files follow it, and an album's own files follow IT ==")
+# Two halves of one rule: nothing that belongs to the audio stays behind when a
+# mover takes the audio somewhere else. A loose track takes its own art/lyrics
+# into the album it is filed into (the organizer's sidecar rule — the apply used
+# to leave them in the artist folder, where they are lost to the album and
+# reported as the artist folder's sidecars on every later scan), and a folder a
+# mover emptied into ONE album takes that album's own files (cover, description,
+# expected-tracklist) with it.
+COMP_LOOSE = album("Artists/Companions", tags("Companions", "Comp Album"))
+for _name, _blob in (("1-01 Song.lrc", b"[00:01.00]a\n"),
+                     ("1-01 Song.jpg", b"x" * 64),
+                     # not the track's: a different title is a different file
+                     ("1-01 Song (live).jpg", b"y" * 64)):
+    with open(os.path.join(os.path.dirname(COMP_LOOSE), _name), "wb") as f:
+        f.write(_blob)
+
+report = layoutmod.apply_fixes({"music_folder": MF, "naming_script": SCRIPT,
+                                "layout_apply": True})
+COMP_ALBUM = os.path.join(MF, "Artists", "Companions", "Comp Album")
+ok(stored(os.path.join(MF, "Artists", "Companions"), "Comp Album"),
+   "a loose track is filed into the album folder its own tags name")
+ok(os.path.isfile(os.path.join(COMP_ALBUM, "1-01 Song.lrc"))
+   and not os.path.exists(os.path.join(MF, "Artists", "Companions", "1-01 Song.lrc")),
+   "…and the lyrics that name it travel with it")
+ok(os.path.isfile(os.path.join(COMP_ALBUM, "1-01 Song.jpg"))
+   and not os.path.exists(os.path.join(MF, "Artists", "Companions", "1-01 Song.jpg")),
+   "…so does the art that names it")
+ok(os.path.isfile(os.path.join(MF, "Artists", "Companions", "1-01 Song (live).jpg")),
+   "a file that names a DIFFERENT track is not dragged along")
+
+# the album-level half, directly: what a mover left behind when it took the
+# audio out of an album folder
+CARRY_SRC = os.path.join(MF, "Artists", "CarrySrc")
+CARRY_DST = os.path.join(MF, "Artists", "CarryDst")
+for rel, blob in (("cover.jpg", b"the album's cover"),
+                  ("description.txt", b"the album's description"),
+                  (".mlo_expected.json", b"{}"),
+                  ("Scans/notes.txt", b"inner"),
+                  ("Disc 1/1-01 Song.flac", b"fLaC" + b"\0" * 32)):
+    p = os.path.join(CARRY_SRC, rel)
+    os.makedirs(os.path.dirname(p), exist_ok=True)
+    with open(p, "wb") as f:
+        f.write(blob)
+os.makedirs(CARRY_DST, exist_ok=True)
+with open(os.path.join(CARRY_DST, "cover.jpg"), "wb") as f:
+    f.write(b"a DIFFERENT cover already in the album folder")
+
+moved, left = layoutmod.carry_album_files(CARRY_SRC, CARRY_DST, music_folder=MF)
+ok(sorted(moved) == [".mlo_expected.json", "Scans", "description.txt"],
+   f"an emptied album folder's own files travel to it ({sorted(moved)})")
+ok(left == ["cover.jpg"] and os.path.isfile(os.path.join(CARRY_SRC, "cover.jpg")),
+   f"a name the album folder already holds is left where it is, never overwritten ({left})")
+ok(os.path.isfile(os.path.join(CARRY_DST, ".mlo_expected.json"))
+   and os.path.isfile(os.path.join(CARRY_DST, "Scans", "notes.txt")),
+   "…and a subfolder the mover did not touch is carried whole")
+ok(os.path.isdir(os.path.join(CARRY_SRC, "Disc 1")),
+   "audio the mover did NOT take (a disc folder it could not import) is not "
+   "dragged into the album")
+with open(os.path.join(CARRY_DST, "cover.jpg"), "rb") as _f:
+    _cover_bytes = _f.read()
+ok(_cover_bytes == b"a DIFFERENT cover already in the album folder",
+   "the album folder's own cover is byte for byte what it was")
+
+# …and once the folder holds nothing but its own files, the last one travels
+# and the emptied folder itself is gone: an audio-less shell is what the scan
+# reports as a broken album.
+shutil.rmtree(os.path.join(CARRY_SRC, "Disc 1"))
+CARRY_DST2 = os.path.join(MF, "Artists", "CarryDst2")
+os.makedirs(CARRY_DST2, exist_ok=True)
+moved, left = layoutmod.carry_album_files(CARRY_SRC, CARRY_DST2, music_folder=MF)
+ok(moved == ["cover.jpg"] and not left, f"the last file travels too ({moved}, {left})")
+ok(not os.path.exists(CARRY_SRC),
+   "the emptied folder is pruned — not an audio-less shell the scan reports")
+shutil.rmtree(CARRY_DST, ignore_errors=True)
+shutil.rmtree(CARRY_DST2, ignore_errors=True)
+
 print(f"\nAll {passed} checks passed.")

@@ -297,10 +297,16 @@ def _gather_orphaned_artifacts(pre, post_dirs, music_folder):
     stay behind in the now audio-less source dir. Re-unite them: each
     orphan dir's remaining files move to the fresh album dir that carries
     the same MusicBrainz IDs (fallback: same audio basenames). Returns the
-    list of emptied source dirs."""
-    import shutil
+    list of emptied source dirs.
 
-    from mlo.audio import AudioFile
+    The move itself is `mlo.layout.carry_album_files` — the one rule the
+    organizer and the chain follow too (a name the album folder already holds
+    is never overwritten, the emptied source folder is pruned). What is decided
+    HERE is only WHICH fresh folder is this album's, and that is identity, not
+    name: beets renames every file it imports, so the basenames the album
+    arrived with are the fallback for a file it could not tag.
+    """
+    from mlo.layout import carry_album_files
     from mlo.stats import is_audio_file
 
     moved_from = []
@@ -309,9 +315,6 @@ def _gather_orphaned_artifacts(pre, post_dirs, music_folder):
             continue
         if any(is_audio_file(f) for f in os.listdir(old_dir)):
             continue  # audio still here — beets didn't move this album
-        leftovers = [f for f in sorted(os.listdir(old_dir)) if not is_audio_file(f)]
-        if not leftovers:
-            continue
         # find the destination: fresh dir with matching MBIDs / basenames
         dest = None
         for cand in post_dirs:
@@ -321,32 +324,52 @@ def _gather_orphaned_artifacts(pre, post_dirs, music_folder):
                 break
         if not dest or os.path.abspath(dest) == os.path.abspath(old_dir):
             continue
-        blocked = 0
-        for name in leftovers:
-            src = os.path.join(old_dir, name)
-            dst = os.path.join(dest, name)
-            if os.path.exists(dst):
-                blocked += 1
-                continue
-            try:
-                shutil.move(src, dst)
-            except Exception:
-                blocked += 1
-        if not blocked:
+        carried, left = carry_album_files(old_dir, dest,
+                                         music_folder=music_folder)
+        if carried and not left:
             moved_from.append(old_dir)
-        # prune the emptied chain up to (not including) the music folder
-        try:
-            folder_abs = os.path.abspath(music_folder or old_dir)
-            d = os.path.abspath(old_dir)
-            while d != folder_abs and d.startswith(folder_abs):
-                try:
-                    os.rmdir(d)
-                except OSError:
-                    break
-                d = os.path.dirname(d)
-        except Exception:
-            pass
     return moved_from
+
+
+def _organized_roots(paths, results):
+    """*paths* as they are NOW — each mapped through organize's own report.
+
+    organize answers per input path with the album root it left the album at
+    (``album_root``), and that is the only honest source for "where is it now":
+    the naming script it applies spells the folder differently from beets' own
+    ``%mlo_dir`` (measured on a real Creep EP import — see the caller), so the
+    path beets left is gone the moment organize has run. A row whose root does
+    not exist, or holds no audio, keeps the path it was given: the chain's own
+    claim check is what decides about it then, rather than this step guessing.
+    """
+    rows = results.get("results") if isinstance(results, dict) else results
+    by_input = {}
+    for row in rows or []:
+        try:
+            key = os.path.normcase(os.path.normpath(str(row.get("path") or "")))
+            root = str(row.get("album_root") or "").strip()
+        except Exception:
+            continue
+        if key and root:
+            by_input[key] = os.path.normpath(root.replace("/", os.sep))
+    out = []
+    for p in paths:
+        cand = by_input.get(os.path.normcase(os.path.normpath(str(p))))
+        if cand and _holds_audio(cand):
+            out.append(cand)
+        else:
+            out.append(os.path.normpath(p))
+    return out
+
+
+def _holds_audio(folder):
+    """Whether *folder* holds an audio file directly inside it."""
+    from mlo.stats import is_audio_file
+
+    try:
+        return any(is_audio_file(f) for f in os.listdir(folder))
+    except OSError:
+        return False
 
 
 def run_beets_tagging(config=None):
@@ -462,13 +485,6 @@ def run_beets_tagging(config=None):
     except Exception:
         pass
     stats["modified_count"] = len(fresh)
-    # Where the album's audio went. Beets MOVES an album into the library and
-    # names every file from the tags, so a chain pointed at the folder it came
-    # from (an import's staging folder) cannot recognise it by file name any
-    # more — `server.script_runners._follow_moved_targets` reads this to
-    # re-point the rest of the chain instead of running the whole tag-writing
-    # tail against a folder that no longer holds the album.
-    stats["moved_targets"] = list(fresh)
 
     # Re-unite sidecars / videos / covers beets left in emptied folders.
     gathered = []
@@ -501,8 +517,29 @@ def run_beets_tagging(config=None):
                 stats["error_count"] += len(errs)
             else:
                 log("organize after beets: naming script applied")
+            # …and the albums are somewhere else now. Organize evaluates MLO's
+            # naming script from the tags it just read, which spells the folder
+            # differently from beets' own %mlo_dir (measured on a real import:
+            # beets wrote
+            # "…Creep {GB - 7243 8 80234 2 9} [Parlophone] [<release id>]" and
+            # organize renamed it to "…Creep {GB - CD - 7243 8 80234 2 9}
+            # [Parlophone] [<release id>] [<group id>]"), so every path in
+            # *fresh* is gone by the time this runner returns.
+            fresh = _organized_roots(fresh, res)
         except Exception as e:
             stats["error_count"] += 1
             stats["errors"].append(f"organize after beets failed: {e}")
+
+    # Where the album's audio went, REPORTED LAST: the folder it is in when
+    # this runner returns, not the one beets left it in (see the organize step
+    # above — reporting the pre-organize path handed the chain a folder that no
+    # longer existed, `_claimed_targets` dropped it as stale, and every script
+    # after this one ran against an empty staging folder: "no audio left in …",
+    # Format all and Grade both reporting 0). Beets MOVES an album into the
+    # library and names every file from the tags, so a chain pointed at the
+    # folder it came from cannot recognise it by file name any more —
+    # `server.script_runners._follow_moved_targets` reads this to re-point the
+    # rest of the chain instead.
+    stats["moved_targets"] = list(fresh)
 
     return stats

@@ -225,8 +225,8 @@ def _matched_paths(match):
 def import_finish(req: FinishRequest):
     """Run the configured import chain over each album folder, synchronously.
 
-    This is the wizard's own "Run the import chain" press, so it does NOT
-    queue: an album another job is already finishing (the import that put it
+    This is the person's own press (the album page's tag-actions entry), so it
+    does NOT queue: an album another job is already finishing (the import that put it
     there, a script run) answers this request at once with 409 and the claim's
     own sentence naming the holder, instead of parking the press for the length
     of that run and then running the very same chain again. Every AUTONOMOUS

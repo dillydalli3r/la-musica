@@ -173,6 +173,75 @@ def release_id(rel):
     return str(rel.get("id") or rel.get("release_mbid") or "").strip()
 
 
+_CATALOG_STRIP = re.compile(r"[\s\-_.]+")
+
+
+def catalog_key(number):
+    """One catalog number folded for COMPARISON — case, spaces, dashes, dots.
+
+    What a number IS is its digits and letters; how it is spelled is whoever
+    printed it. MusicBrainz records each label's own spelling, and one pressing
+    issued by two labels really does appear twice: DGC's ``GED 24425`` beside
+    Geffen's ``GED24425`` (both catalogued releases of one CD). The search that
+    either one produces finds the same peer folders, so the two are one thing to
+    try — `distinct_pressings` is what says so.
+    """
+    return _CATALOG_STRIP.sub("", str(number or "").strip().upper())
+
+
+def catalog_numbers(rel):
+    """Every catalog number a release states, in MusicBrainz's own order.
+
+    Both payload shapes are read: the browse's per-release ``label-info`` (a
+    release can carry several numbers, one per label) and the normalized
+    ``catalog_numbers`` / ``catalog_number`` a lookup returns. Blank entries are
+    dropped and repeats are folded, because a number printed by two labels is
+    still one number.
+    """
+    out = []
+    for entry in (rel.get("label-info") or []):
+        num = str((entry or {}).get("catalog-number") or "").strip()
+        if num and catalog_key(num) not in {catalog_key(n) for n in out}:
+            out.append(num)
+    if not out:
+        for value in (list(rel.get("catalog_numbers") or [])
+                      + [rel.get("catalog_number")]):
+            num = str(value or "").strip()
+            if num and catalog_key(num) not in {catalog_key(n) for n in out}:
+                out.append(num)
+    return out
+
+
+def distinct_pressings(rows):
+    """``(kept, skipped)`` — the ranked rows that are DISTINCT SEARCHES.
+
+    The catalog number is what a CD search is keyed on, and separate
+    MusicBrainz releases really do share one — the same pressing issued under
+    two labels, a reissue catalogued twice, a country variant printed with the
+    number unchanged. Asking the network for the second of those can only find
+    the SAME folders the first one did, which is a whole search window spent for
+    nothing out of a walk that may only spend a few (R151). So an edition
+    sharing a folded catalog number with an edition already in the list is
+    skipped, and the skipped rows are RETURNED rather than swallowed: the walk
+    logs them, so a fallback that dropped a ranked edition says which.
+
+    An edition stating NO catalog number is always kept: there is nothing to
+    compare it by, and a pressing with no number may still be a different
+    upload (its search is built from the artist, title, date and label instead).
+    The first row is always kept, so a walk never comes back empty.
+    """
+    kept, skipped, seen = [], [], set()
+    for row in (rows or []):
+        nums = {catalog_key(n) for n in ((row or {}).get("catalog_numbers") or [])
+                if catalog_key(n)}
+        if nums and nums & seen:
+            skipped.append(row)
+            continue
+        seen |= nums
+        kept.append(row)
+    return kept, skipped
+
+
 def media_formats(rel):
     """MusicBrainz format names of a release's media ("CD", "Digital Media").
 
@@ -335,6 +404,10 @@ class Candidate:
     media: tuple
     track_count: int
     disambiguation: str
+    # Every catalog number MusicBrainz states for this edition, in its own
+    # order. `distinct_pressings` is what reads them: separate releases sharing
+    # one number are one SEARCH, so a walk asks only the distinct ones.
+    catalog_numbers: tuple = ()
     score: float = 0.0
     reasons: tuple = ()
     eligible: bool = True
@@ -351,6 +424,7 @@ class Candidate:
             "media": list(self.media),
             "track_count": self.track_count,
             "disambiguation": self.disambiguation,
+            "catalog_numbers": list(self.catalog_numbers),
             "score": self.score,
             "eligible": self.eligible,
             "reasons": list(self.reasons),
@@ -790,7 +864,8 @@ def _evaluate(rel, ctx, index):
     candidate = Candidate(
         release_mbid=release_id(rel), title=title, date=date, country=country,
         status=status, media=formats, track_count=count,
-        disambiguation=disambiguation, reasons=tuple(reasons), eligible=eligible,
+        disambiguation=disambiguation, catalog_numbers=tuple(catalog_numbers(rel)),
+        reasons=tuple(reasons), eligible=eligible,
         index=index, type_ok=type_ok,
     )
     return ((level_status, level_medium, level_set, level_compressed, level_tracks,

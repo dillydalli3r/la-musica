@@ -81,7 +81,44 @@ assert {"pass", "audit_summary", "grade_pct", "media"}.isdisjoint(wanted[0]), so
 _home = r.build_home({"music_folder": "C:/definitely-not-a-library"})
 assert {"recommended", "popular", "rec_source"}.isdisjoint(_home), sorted(_home)
 assert {"stats", "recent", "top_rated", "favorites", "discover", "top_artists",
-        "wanted", "needs_attention"} <= set(_home), sorted(_home)
+        "wanted", "needs_attention", "rated"} <= set(_home), sorted(_home)
 assert _home["stats"]["albums"] == 0 and _home["recent"] == [], _home["stats"]
+
+# --------------------------------------------------------------------------- #
+# The artist shelf draws the library's DISPLAY name — the naming script puts
+# the MusicBrainz id in the folder name, and that is library identity, not a
+# caption (the owner's shelf read "Radiohead [a74b1b7f-…]"). The picture flag
+# rides along with the row so the client never asks for a URL that 404s.
+# --------------------------------------------------------------------------- #
+folders = [
+    {"path": "C:/M/Radiohead [a74b1b7f-71a5-4011-9441-d0b5e4122711]",
+     "name": "Radiohead [a74b1b7f-71a5-4011-9441-d0b5e4122711]",
+     "display_name": "Radiohead",
+     "albums": [{"path": "C:/M/A/X", "cover_file": "cover.jpg"}],
+     "aggregate": {"track_count": 3}},
+]
+top = r._top_artists(folders, 6)
+assert top[0]["artist"] == "Radiohead", top
+assert top[0]["has_image"] is False, top  # a folder that is not there holds no picture
+
+# --------------------------------------------------------------------------- #
+# The rated shelf is the ratings store joined with the library's own album rows:
+# the user's verdicts, best first, each row carrying the half-star value it was
+# ranked by — so the order and the stars on the cards are one number. A value
+# the store no longer holds (a cleared rating) is not a row, and a store that
+# cannot be read loses the shelf rather than the page.
+# --------------------------------------------------------------------------- #
+from server import ratings as store
+
+store.map_for = lambda **kw: {"C:/M/A/X": 6, "C:/M/A/Y": 9, "C:/M/A/Z": 0}
+rated = r._rated(albums, user="", limit=5)
+assert [x["path"] for x in rated] == ["C:/M/A/Y", "C:/M/A/X"], rated
+assert [x["rating"] for x in rated] == [9, 6], rated
+assert all(x["owned"] is True and x["artist"] == "" for x in rated), rated
+assert r._rated(albums, user="", limit=1) == rated[:1]
+
+store.map_for = lambda **kw: 1 / 0
+assert r._rated(albums, user="", limit=5) == []
+assert r._rated([], user="", limit=5) == []
 
 print("ok")

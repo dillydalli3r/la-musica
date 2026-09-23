@@ -168,11 +168,11 @@ def stub_advisory(paths, cfg):
     _step_calls.append(("advisory", name, dict(cfg)))
     if not cfg.get("advisory_auto_fetch", True):
         return {"updated": 0, "values": {}, "sources": {}, "answers": {},
-                "hits": {}, "skipped": "advisory_auto_fetch is off"}
+                "skipped": "advisory_auto_fetch is off"}
     if not (ANSWERS.get(name) or {}).get("advisory"):
         # No provider states one, the AI cannot tell and the ladder is set to
         # write nothing: the real shape of "nothing was decided".
-        return {"updated": 0, "values": {}, "sources": {}, "answers": {}, "hits": {}}
+        return {"updated": 0, "values": {}, "sources": {}, "answers": {}}
     values = {}
     for base, _dirs, files in os.walk(str(paths[0])):
         for f in sorted(files):
@@ -180,7 +180,7 @@ def stub_advisory(paths, cfg):
                 p = os.path.join(base, f)
                 set_tags(p, {"ITUNESADVISORY": "0"})
                 values[p] = 0
-    return {"updated": len(values), "values": values, "sources": {}, "answers": {}, "hits": {}}
+    return {"updated": len(values), "values": values, "sources": {}, "answers": {}}
 
 
 def stub_instrumentals(paths, cfg):
@@ -480,6 +480,99 @@ ok(imports.DEFAULT_CHAIN == [sid for sid in DEFAULT_RUN_ALL_ORDER
    "library-wide scripts it declares")
 ok(13 not in (chain_of("Complete Album") or []),
    "reviewing lyrics takes the lyrics script out of the chain")
+
+print("== a WAITING album is not swept; a WARNING is not a hold (R161/R166) ==")
+# Three albums in one library. One is WAITING on a person — a review import
+# whose chain has not run — and a library-wide run must leave it alone. One has
+# a family no source could supply: the import ran to its END, the album is in
+# the library, and that is a WARNING, so a sweep touches it like any other
+# album. One has nothing standing at all.
+waiting = make_album("Waiting Album", links=True, cover=False, advisory=True)
+warned = make_album("Warned Album", links=True, cover=False, advisory=True)
+swept = make_album("Swept Album", links=True, cover=True, advisory=True,
+                   cover_now=True, advisory_now=True)
+import_autonomy.raise_prompt(
+    waiting, CFG,
+    {"cover": {"id": "cover", "label": "Cover art", "step": "Covers",
+               "state": "decision", "fields": ["cover art"],
+               "codes": ["COVER"], "note": ""}},
+    reason="stopped")
+import_autonomy.raise_prompt(
+    warned, CFG,
+    {"cover": {"id": "cover", "label": "Cover art", "step": "Covers",
+               "state": "unsourced", "fields": ["cover art"],
+               "codes": ["COVER"], "note": ""}})
+ok(import_autonomy.parked_entry(waiting, CFG),
+   "a review import that has not run its chain is parked")
+ok(not import_autonomy.parked_entry(warned, CFG),
+   "an album whose import FINISHED is not parked, whatever it is short of")
+ok(bool(import_autonomy.for_album(warned, CFG)),
+   "…its warning still stands for the wizard to act on")
+ok(not import_autonomy.for_album(swept, CFG), "the third one has nothing standing")
+ok("cover" in import_autonomy.warning(import_autonomy.for_album(warned, CFG))["families"],
+   "the warning names the family, in the shape every surface carries")
+ok(import_autonomy.warning(import_autonomy.for_album(warned, CFG))["waiting"] is False,
+   "…and says it is a warning, not a wait")
+ok(import_autonomy.warning(import_autonomy.for_album(waiting, CFG))["waiting"] is True,
+   "while the review import's own entry says it IS waiting")
+ok("needs extra data" in import_autonomy.title(import_autonomy.for_album(warned, CFG)),
+   "the notification for a finished import says what the album needs, not that a "
+   "decision is pending")
+ok(import_autonomy.title(import_autonomy.for_album(waiting, CFG)).startswith(
+       "Import needs a decision"),
+   "…and a stopped one keeps the wording that really is a decision")
+
+kept, dropped, note = import_autonomy.chain_scope(None, CFG)
+_dropped = {os.path.normcase(d) for d in dropped}
+ok(os.path.normcase(waiting) in _dropped,
+   f"a sweep drops the WAITING album ({dropped})")
+ok(os.path.normcase(warned) not in _dropped,
+   "…and does NOT drop the album an import finished short of a family")
+ok(os.path.normcase(swept) not in _dropped, "…nor the one with nothing standing")
+ok(os.path.normcase(warned) in {os.path.normcase(k) for k in kept}
+   and os.path.normcase(swept) in {os.path.normcase(k) for k in kept},
+   "…while still sweeping the rest of the library")
+ok("waiting on you" in note and os.path.basename(waiting) in note,
+   f"…saying so ({note})")
+ok(import_autonomy.chain_scope([waiting], CFG) == ([waiting], [], ""),
+   "a run that names its album is not filtered, whoever started it")
+ok(import_autonomy.chain_scope(
+    None, {"music_folder": tempfile.mkdtemp(prefix="mlo_nopark_")}) == (None, [], ""),
+   "and nothing is filtered while nothing is waiting")
+
+# The same rule through the REAL seam every chain passes: the run's own
+# targets are what the script is handed.
+_seen = []
+_suite_chain = script_runners.run_chain
+
+
+def _sweep_runner(cfg):
+    _seen.append([os.path.normcase(t) for t in (cfg.get("targets") or [])])
+    return {"modified_count": 0}
+
+
+script_runners.RUNNERS[98] = ("Sweep script", _sweep_runner)
+script_runners.run_chain = _real_chain
+try:
+    import contextlib
+    import io
+
+    _log = io.StringIO()
+    with contextlib.redirect_stdout(_log):
+        script_runners.run_chain(dict(CFG), [98], targets=None)
+    ok(_seen and os.path.normcase(waiting) not in _seen[-1],
+       f"a library-wide run never reaches the WAITING album ({_seen[-1:]})")
+    ok(os.path.normcase(swept) in _seen[-1], "…and does reach the album that is not")
+    ok(os.path.normcase(warned) in _seen[-1],
+       "…and the one a finished import warned about (a warning is not a lock)")
+    ok("waiting on you" in _log.getvalue(),
+       f"…with the skip said out loud ({_log.getvalue().strip()[-160:]})")
+    script_runners.run_chain(dict(CFG), [98], targets=[waiting])
+    ok(_seen[-1] == [os.path.normcase(waiting)],
+       f"the person's own press on it still runs ({_seen[-1:]})")
+finally:
+    script_runners.RUNNERS.pop(98, None)
+    script_runners.run_chain = _suite_chain
 
 for _name, _fn in _real.items():
     setattr(imports, _name, _fn)

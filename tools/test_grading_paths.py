@@ -1437,6 +1437,77 @@ ok(EXPECTED_TRACKS_MISSING not in stats_nom["issue_counts"],
 ok(stats_nom["grade_dist"] == {"PASS": 1, "FAIL": 0},
    f"and it grades PASS ({stats_nom['grade_dist']})")
 
+# ----------------------------------------------------------------------
+# %genre% is the same value on both sides of an import
+# ----------------------------------------------------------------------
+# One file, two readers: the beets import evaluates the naming script from its
+# own item (server.beets.mloplugin), the organizer evaluates it from the
+# file's tags (mlo.naming.track_variables). GENRE is a LIST on the tag side —
+# the tag layer joins repeated GENRE fields with "; " and track_variables
+# passes that through, while RELEASECOUNTRY and LABEL are the fields that
+# DELIBERATELY reduce to their first value (mlo.naming._first_multi, spec
+# R33) — so a two-genre file must yield the same %genre% and the same path on
+# both sides. It did not: beets' own `genre` field is mediafile's
+# `genres.single_field()`, the FIRST genre, and the import used it alone.
+print("== %genre% is the same value on both sides of an import ==")
+from mlo.audio import AudioFile as _AudioFile  # noqa: E402
+
+_gdir = os.path.join(tmp, "GenreAgreement")
+os.makedirs(_gdir, exist_ok=True)
+_gflac = os.path.join(_gdir, "1-01 Song.flac")
+make_flac(_gflac)
+from mutagen.flac import FLAC as _GFLAC  # noqa: E402
+
+_gf = _GFLAC(_gflac)
+_gf["GENRE"] = ["Rock", "Shoegaze"]
+_gf["TITLE"] = "Song"
+_gf.save()
+_genre_vars = track_variables(_AudioFile(_gflac).all_tags())
+ok(_genre_vars["genre"] == "Rock; Shoegaze",
+   f"the organizer's %genre% is the whole list ({_genre_vars['genre']!r})")
+
+# The import side, against the vendored/installed beets itself (CI has
+# neither: the check says so and moves on, the same way the date suite does).
+_beets_dir = next((os.path.join(_deps, d) for d in sorted(os.listdir(_deps))
+                   if d.lower().startswith("beets")), "") if os.path.isdir(_deps) else ""
+if _beets_dir:
+    sys.path.insert(0, _beets_dir)
+try:
+    from beets.library import Item as _BeetsItem
+
+    from server.beets import mloplugin as _mloplugin
+except Exception as _beets_err:  # noqa: BLE001 - no beets here: nothing to compare
+    print(f"  skipped: beets naming-variable check ({_beets_err})")
+else:
+    # beets' item for that file: its own genre field holds what mediafile's
+    # single-value `genre` gave it — the FIRST genre, which is exactly the
+    # value the import used to evaluate the script with.
+    _item = _BeetsItem(path=_gflac, title="Song", album="Amnesia",
+                       albumartist="Artist", artist="Artist", genre="Rock")
+    _item_vars = _mloplugin._item_naming_vars(_item)
+    ok(_item_vars["genre"] == _genre_vars["genre"],
+       f"the beets import computes the SAME %genre% "
+       f"({_item_vars['genre']!r} vs {_genre_vars['genre']!r})")
+    _genre_script = "%genre% - %title%"
+    ok(eval_script(_genre_script, _item_vars)
+       == eval_script(_genre_script, _genre_vars),
+       f"…and the same path from it "
+       f"({eval_script(_genre_script, _item_vars)!r} vs "
+       f"{eval_script(_genre_script, _genre_vars)!r})")
+    # The item is still the fallback: a file whose own GENRE is empty (a
+    # download the genre chain has not filled yet) keeps what beets states,
+    # and a path beets hands over that cannot be read does not crash the
+    # naming evaluation.
+    _bare_flac = os.path.join(_gdir, "1-02 Bare.flac")
+    make_flac(_bare_flac)
+    ok(_mloplugin._item_naming_vars(
+        _BeetsItem(path=_bare_flac, title="Bare", genre="Jazz"))["genre"] == "Jazz",
+       "a file with no GENRE of its own keeps beets' value")
+    ok(_mloplugin._item_naming_vars(
+        _BeetsItem(path=os.path.join(_gdir, "gone.flac"), title="Gone",
+                   genre="Jazz"))["genre"] == "Jazz",
+       "and an unreadable path falls back to it instead of failing the name")
+
 print(f"\nAll {passed} checks passed.")
 shutil.rmtree(tmp, ignore_errors=True)
 shutil.rmtree(outside, ignore_errors=True)

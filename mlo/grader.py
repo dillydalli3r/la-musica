@@ -2387,7 +2387,7 @@ def _grade_album(album_dir, lyrics_format, cfg=None):
         xlit_text = xlit_text.strip()
         if xlit_text and inst_val != "1" \
                 and should_write_audio_tag(cfg, "LYRICS", filepath=ap):
-            need = xlit_needs(xlit_text, cfg)
+            need = xlit_needs(xlit_text, cfg, af.get_tag("LANGUAGE"))
             reader = primary_translation_lang(cfg)
             srclatin = dominant_script(xlit_text) == "latin"
 
@@ -4406,6 +4406,14 @@ def run_grade_library(config):
     stats["total_scanned"] += len(empty_folders)
     counts = {"ok": 0, "skip": 0, "fail": 0}
     workers = worker_count(config, default=16, maximum=16, items=len(albums))
+    # A caller's own sink for what this run graded (spec R155). It is a PRIVATE
+    # key the caller puts on the very config it hands in — the import does, so
+    # its gap report can reuse the grade this step just paid for instead of
+    # grading the same album again — and it exists only when a caller asked:
+    # with no sink nothing here changes, and no run's own payload grows.
+    sink = config.get("_grade_sink")
+    if not isinstance(sink, dict):
+        sink = None
 
     with ThreadPoolExecutor(max_workers=workers) as ex:
         futures = {ex.submit(_grade_album, a, lyrics_format, config): a
@@ -4437,6 +4445,8 @@ def run_grade_library(config):
                 continue
             stats["total_scanned"] += 1
             results.append(result)
+            if sink is not None:
+                sink[os.path.normcase(os.path.normpath(str(album)))] = result
             _pbar_update(pbar, counts, kind="ok")
 
         if pbar:

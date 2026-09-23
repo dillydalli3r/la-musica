@@ -688,6 +688,17 @@ def release_lookup(mbid):
         "media": tracks,
         "medium_count": len(data.get("media", [])),
         "medium_formats": [m.get("format") or "" for m in data.get("media", [])],
+        # The release's TEXT REPRESENTATION — MusicBrainz's own statement of
+        # the language its lyrics are in and the script they are written in
+        # (``{"language": "jpn", "script": "Jpan"}``, ISO 639-3 + ISO 15924;
+        # it comes with the release lookup itself, so this costs no request).
+        # THIS is what an import stamps into the tracks' LANGUAGE tag, and what
+        # script 17's transliteration/translation decision reads (spec R167) —
+        # the one thing a Latin-script text cannot state about itself. `mul`
+        # ("several languages", a compilation) is passed through as it is:
+        # `mlo.lyrics_xlit.normalize_lang` is what knows it says nothing.
+        "language": str((data.get("text-representation") or {}).get("language") or ""),
+        "script": str((data.get("text-representation") or {}).get("script") or ""),
     }
 
 
@@ -4952,6 +4963,13 @@ def search_releases(query, limit=10, mode="release"):
                 "status": r.get("status"),
                 "catalog_number": label,
                 "barcode": r.get("barcode") or "",
+                # The search index states each release's text representation
+                # too (verified against the live index), so a release picked
+                # from a search carries the same language statement the full
+                # lookup does — the import's LANGUAGE stamp reads whichever
+                # dict it was handed (spec R167).
+                "language": str((r.get("text-representation") or {}).get("language") or ""),
+                "script": str((r.get("text-representation") or {}).get("script") or ""),
             })
         return out
     except Exception as e:
@@ -5816,7 +5834,7 @@ def no_edition_reason(ranked):
 
 
 def group_targets(rg_mbid, mode, *, types=None, primary_type="", secondary_type=""):
-    """([{mbid,title,score,reasons}], error) — the releases of a group to queue.
+    """([{mbid,title,score,reasons,candidates}], error) — the releases of a group to queue.
 
     Ranked by the one release-choice policy in strict mode (see
     `pick_releases`); `mode` "best" keeps only the pick, "all" every eligible
@@ -5824,7 +5842,13 @@ def group_targets(rg_mbid, mode, *, types=None, primary_type="", secondary_type=
     the pick to the release-group type the caller is after — a watch's own
     type filter — so a watch for albums can never queue a single. `error` is a
     readable reason and never an exception, so one unusable group cannot abort
-    a whole discography."""
+    a whole discography.
+
+    Every row also carries `candidates`: the eligible editions in that same
+    order as `{mbid,title,score}`, the row's own `mbid` first (spec R150). That
+    is the fallback an acquisition walks when the network does not have the
+    edition it started with — "best" therefore truncates the ROWS to one, never
+    the ranking."""
     try:
         rg = release_group_browse(rg_mbid, limit=100, offset=0)
     except Exception as e:
@@ -5842,13 +5866,38 @@ def group_targets(rg_mbid, mode, *, types=None, primary_type="", secondary_type=
     ranked = ranked_releases(rg, rg.get("releases") or [], strict=True,
                              wanted_types=types, primary_type=primary_type,
                              secondary_type=secondary_type)
-    rows = [c for c in ranked if c.eligible and c.type_ok]
-    if not rows:
+    eligible = [c for c in ranked if c.eligible and c.type_ok]
+    if not eligible:
         return [], no_edition_reason(ranked)
-    if mode != "all":
-        rows = rows[:1]
-    return [{"mbid": c.release_mbid, "title": c.title, "score": c.score,
-             "reasons": list(c.reasons)} for c in rows], None
+    # The FALLBACK list (spec R150), on every row this returns: the eligible
+    # editions in the policy's OWN order, best first, so the acquisition of the
+    # single album a row creates can move on to the next pressing when the
+    # network does not have the first. It costs no request — these are the
+    # editions the browse above already returned — and it rides on the row
+    # instead of queueing one album per edition, because one release group is
+    # one album folder (R142). Every entry names the same fields a row does
+    # (`mbid`/`title`/`score`), and the FIRST entry is always the row's own
+    # `mbid`.
+    fallback = [{"mbid": c.release_mbid, "title": c.title, "score": c.score,
+                 "catalog_numbers": list(c.catalog_numbers)} for c in eligible]
+    # …and the same number twice is the same SEARCH: the editions behind the
+    # best one are only worth asking for when they are a DIFFERENT pressing
+    # (`distinct_pressings` — the rule and its reasoning live there).
+    fallback, _duplicates = release_choice.distinct_pressings(fallback)
+    rows = eligible if mode == "all" else eligible[:1]
+    out = []
+    for c in rows:
+        row = {"mbid": c.release_mbid, "title": c.title, "score": c.score,
+               "reasons": list(c.reasons)}
+        # `mode="all"` queues every eligible edition as its OWN album — the user
+        # asked for all of them — so each of those rows is a one-candidate
+        # acquisition: there is no "next best" behind an edition that IS the
+        # target.
+        row["candidates"] = ([{"mbid": c.release_mbid, "title": c.title,
+                               "score": c.score}]
+                             if mode == "all" else fallback)
+        out.append(row)
+    return out, None
 
 
 def type_skip_reason(primary_type, secondary_types):
@@ -5899,7 +5948,7 @@ def _kind_for(mbid):
 
 def auto_import_targets(mbid, kind=None, mode="best", types=None,
                         limit=BULK_MAX_GROUPS):
-    """([{mbid,title}], [{mbid,reason}]) — what a bulk auto-import should queue.
+    """([{mbid,title,candidates}], [{mbid,reason}]) — what a bulk auto-import should queue.
 
     ONE resolution path, shared by the HTTP route's bounded quick attempt and
     by the auto-import job that redoes the whole thing when that attempt did
@@ -5907,6 +5956,13 @@ def auto_import_targets(mbid, kind=None, mode="best", types=None,
     group to its best (or every eligible) edition, an artist to one best
     release per release group it does not already own. A MusicBrainz outage
     raises MusicBrainzError — reported per item, never as "does not exist".
+
+    Every row carries `candidates`, the ranked editions it may be acquired
+    from, best first (spec R150): the release-choice policy's own order, with
+    the row's `mbid` first. A group row and an artist's per-group row carry the
+    group's whole eligible list, so the caller that records the request has the
+    fallback in hand without a second browse; a row for an explicitly named
+    RELEASE carries itself alone, because a named pressing has no next best.
 
     `types` restricts an ARTIST or release-group request to MusicBrainz's own
     release-group types, matched by `mlo.release_choice.type_matches` — the
@@ -5949,7 +6005,12 @@ def auto_import_targets(mbid, kind=None, mode="best", types=None,
         rg = str(rel.get("release_group_id") or "").strip().lower()
         if rg and rg in owned:
             return [], [{"mbid": rid, "reason": "already in the library"}]
-        return [{"mbid": rid, "title": rel.get("title") or ""}], []
+        # ONE candidate: the caller named THIS pressing, so there is no second
+        # best to fall back to — the fallback belongs to a release GROUP, whose
+        # editions the policy ranked (spec R150).
+        row = {"mbid": rid, "title": rel.get("title") or "",
+               "candidates": [{"mbid": rid, "title": rel.get("title") or ""}]}
+        return [row], []
     if kind == "release_group":
         if str(_mbid(mbid) or "").lower() in owned:
             return [], [{"mbid": mbid, "reason": "already in the library"}]
@@ -5989,6 +6050,17 @@ def auto_import_targets(mbid, kind=None, mode="best", types=None,
     return rows, skipped
 
 
+def _catalogs_of(rel):
+    """The catalog numbers a browse row states, in MusicBrainz's own order.
+
+    One call into `mlo.release_choice` — the same reader the policy fills a
+    Candidate from and the same one the walk compares by (R169) — so the page's
+    rows, the ranked candidates and the fallback list can never disagree about
+    which number an edition carries.
+    """
+    return release_choice.catalog_numbers(rel or {})
+
+
 def release_group_browse(mbid, limit=300, offset=0):
     """Release-group page: identity + its releases (editions), each with
     media so every row carries format, disc count and its '10 + 11' track
@@ -6005,8 +6077,13 @@ def release_group_browse(mbid, limit=300, offset=0):
         f"release-group/{mbid}",
         {"inc": "artist-credits+genres+aliases", "fmt": "json"},
     )
+    # `labels` rides the SAME request (MusicBrainz's browse answers it), and it
+    # is what each row's `label-info` — hence every edition's CATALOG NUMBERS —
+    # comes from. The fallback walk needs them: separate releases can share one
+    # number, and two editions that would run the same catalog-number search
+    # are one thing to try (`mlo.release_choice.distinct_pressings`).
     rel_rows, total, served = _browse_collect(
-        "release", {"release-group": mbid, "inc": "media+aliases"},
+        "release", {"release-group": mbid, "inc": "media+aliases+labels"},
         "releases", "release-count",
         limit=limit, offset=offset,
     )
@@ -6041,6 +6118,14 @@ def release_group_browse(mbid, limit=300, offset=0):
             "track_count": track_count,
             "track_breakdown": track_breakdown,
             "barcode": r.get("barcode") or "",
+            # Every catalog number this edition states (`catalog_numbers`) and
+            # the first one (`catalog_number`, the key `release_lookup` also
+            # carries) — off the browse's own `label-info`, which is why the
+            # browse asks for `labels`. The fallback walk reads them to tell two
+            # releases that are one SEARCH apart (R169), and the group page can
+            # show them beside the rest of the pressing's identity.
+            "catalog_numbers": _catalogs_of(r),
+            "catalog_number": (_catalogs_of(r) or [""])[0],
             "score": cand.score,
             "reasons": list(cand.reasons),
         })

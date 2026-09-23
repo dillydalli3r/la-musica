@@ -16,6 +16,7 @@ import TrackTitleCell from "../components/TrackTitleCell";
 import { trackRef, entityLinkClick } from "../lib/refs";
 import { invalidateLibrary } from "../lib/invalidate";
 import { auditFails } from "../lib/status";
+import { useAcquisitions } from "../lib/acquisition";
 import { isVideoFile } from "../lib/fmt";
 import { SCRIPT_LABEL } from "../lib/scripts";
 import BulkTagsDialog from "../components/BulkTagsDialog";
@@ -166,6 +167,10 @@ export default function AlbumPage() {
   // Whether the album-description check grades this folder (Settings →
   // Grading). The config is already in the app-wide cache, so this is free.
   const { data: config } = useQuery({ queryKey: ["config"], queryFn: api.config });
+  // Where this album's acquisition is, from the shared queue row and the
+  // pushed job frames (lib/acquisition) — the queue is asked only while this
+  // IS a framework album waiting for its audio.
+  const acquisition = useAcquisitions(!!data?.pending)(data?.path ?? "", data?.wish_id);
   // One GET /api/ratings per scope for the whole page (react-query dedupes it
   // across every row) and the optimistic setters the star controls share. The
   // header needs the ALBUM scope beside the track one: the user's verdict on
@@ -824,6 +829,39 @@ export default function AlbumPage() {
                     ]}
                   />
                 </div>
+                {/* WHAT AN IMPORT COULD NOT SUPPLY (server.import_autonomy):
+                    the album is IN the library either way — this is a warning,
+                    not a hold, and the one case that really is held says so
+                    outright (a review import whose chain has not run). The
+                    action is the wizard at the step that decides it, the very
+                    link the notification carries. */}
+                {data.needs && (
+                  <div className="rounded-lg border border-amber-900/60 bg-amber-950/20 px-3 py-2 space-y-1">
+                    <div className="flex items-center gap-2 flex-wrap text-xs text-amber-200">
+                      <CircleAlert className="h-3.5 w-3.5 shrink-0" />
+                      <span className="font-semibold">
+                        {data.needs.waiting ? "Waiting for an answer" : "In the library — needs data"}
+                      </span>
+                      <span className="text-amber-200/70 min-w-0">
+                        {data.needs.detail || data.needs.labels.join(", ")}
+                      </span>
+                    </div>
+                    <div className="flex items-center gap-2 flex-wrap text-[11px] text-amber-200/60">
+                      <span>
+                        {data.needs.waiting
+                          ? "The script chain has not run for this album yet: answering the step below finishes it."
+                          : "Nothing about this album is held — it is graded like any other, and this is what no source could supply."}
+                      </span>
+                      {data.needs.link && (
+                        <button className="btn-ghost !py-0.5 text-[11px] tap"
+                          onClick={() => navigate(data.needs!.link)}
+                          title="Open the import wizard at this album and at the step that decides it">
+                          <Wand2 className="h-3 w-3" /> Enter it by hand
+                        </button>
+                      )}
+                    </div>
+                  </div>
+                )}
                 {/* A FRAMEWORK album: "Add to library" created this folder
                     before its audio existed, so the page must say what is
                     happening to it rather than read as an empty album. The
@@ -842,6 +880,26 @@ export default function AlbumPage() {
                           for the dot, the panel and every row that carries it */}
                       {pendingNote && (
                         <span className="text-amber-200/70">{pendingNote.state}</span>
+                      )}
+                      {/* WHERE the acquisition is: the queue's own stage and,
+                          while bytes are moving, slskd's own share of them —
+                          pushed at 2.5 Hz, so this reads as live rather than
+                          as the last poll's snapshot. */}
+                      {acquisition && (
+                        <span className="text-amber-100 inline-flex items-center gap-1.5">
+                          <span className="font-medium">{acquisition.label}</span>
+                          {acquisition.percent !== null && (
+                            <>
+                              <span className="inline-block w-24 h-1 rounded-sm bg-amber-900/50 overflow-hidden align-middle">
+                                <span
+                                  className="block h-full bg-amber-300"
+                                  style={{ width: `${Math.max(0, Math.min(100, acquisition.percent))}%` }}
+                                />
+                              </span>
+                              <span className="tabular-nums">{Math.round(acquisition.percent)}%</span>
+                            </>
+                          )}
+                        </span>
                       )}
                       {data.wish_id != null && (
                         <Link

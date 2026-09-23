@@ -132,6 +132,39 @@ def invalidate_all():
         _lib_cache.clear()
 
 
+def _inside(path, folder):
+    """Whether *path* is *folder* or sits under it (case/hyphen folded)."""
+    p = os.path.normcase(str(path or "")).rstrip("\\/")
+    f = os.path.normcase(str(folder or "")).rstrip("\\/")
+    return bool(f) and (p == f or p.startswith(f + os.sep))
+
+
+def invalidate_album(*folders):
+    """Drop the cached tags/art of ONE album (or several) after writing it.
+
+    The scoped sibling of `invalidate_all`, and the one an import wants: an
+    import rewrites the tags of the files inside ONE album folder and writes
+    that album's own cover, and those are exactly the entries that went stale.
+    Clearing the whole tag cache instead (16384 entries covering the user's
+    entire library) made the next library page re-parse every track in it —
+    paying library-wide for one album's import.
+
+    The assembled `/api/library` payload still goes: it is keyed by the library
+    folder and the config (`library.library_cache_key`), not per album, so there
+    is no scoped way to drop it — but it is ONE entry and it really does hold
+    this album. A path that is not under any *folder* is left alone.
+    """
+    roots = [str(f or "") for f in folders if str(f or "")]
+    if not roots:
+        return
+    with _lock:
+        for key in [k for k in _tag_cache if any(_inside(k[0], r) for r in roots)]:
+            del _tag_cache[key]
+        for key in [k for k in _cover_cache if any(_inside(k[0], r) for r in roots)]:
+            del _cover_cache[key]
+        _lib_cache.clear()
+
+
 def get_library(key, builder):
     """TTL-cached library payload. key = (music_folder, relevant config)."""
     now = time.time()

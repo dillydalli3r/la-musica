@@ -1054,6 +1054,20 @@ DEFAULT_CONFIG = {
     # be retried without downloading them again.
     "soulseek_clear_downloads": True,
     "soulseek_download_dir": "",
+    # Size caps on the app's two TRANSIENT stores: the download/staging pair
+    # above (finished transfers waiting to be imported, plus slskd's in-flight
+    # partials in the sibling `incomplete`) and the remove-from-library bin
+    # (<music>/.mlo/trash). Two INDEPENDENT caps, never a shared total — one
+    # store filling up must not eat the other's room — and both ship at 5 GB
+    # because nothing else bounded them: `soulseek_clear_downloads` only
+    # removes the copy an import actually landed, so a cancelled job, a
+    # rejected candidate and a failed import all leave their bytes where they
+    # are, and a bin nothing ever empties keeps every album ever removed.
+    # 0 (or negative) = that store's cap is off; a store over its cap is
+    # pruned oldest first until it fits, never touching anything in use (see
+    # server/cache_caps.py, which owns both numbers and the pass).
+    "soulseek_cache_cap_gb": 5,
+    "trash_cap_gb": 5,
     # ON by default: the Soulseek client should be up whenever the app is.
     "soulseek_autostart": True,
     # Share the library with the network on the configured listen port.
@@ -1087,6 +1101,23 @@ DEFAULT_CONFIG = {
     # early throws away candidates that would have verified).
     # Quiet seconds before slskd ends a search with too few replies to score.
     "soulseek_auto_search_wait": 10,
+    # THE FALLBACK WALK (spec R150-R153). An acquisition of a release GROUP
+    # starts on the edition the release-choice policy ranks best; when the
+    # network does not have it, the walk asks the next ranked edition, then the
+    # next, so a rare pressing no longer sinks an album the network does have.
+    #
+    # How many of the ranked editions one walk may ask, best first. 1 is
+    # exactly the behaviour before the walk existed (the best edition, nothing
+    # behind it); a group with fewer eligible editions than this simply ends the
+    # walk at the end of its own list. Clamped to the list by the walk itself.
+    "soulseek_fallback_candidates": 3,
+    # How long ONE candidate's search is given before it counts as not found and
+    # the walk moves on. The same QUIET window `soulseek_auto_search_wait` is
+    # (slskd ends a search when the network stops answering, with the app's own
+    # response grace tail on top), but per candidate: a walk of three may
+    # therefore wait up to three of these, and a usable folder still ends a
+    # candidate's search in seconds.
+    "soulseek_search_timeout_seconds": 60,
     # Peers that must answer before the search is scored instead of waiting on
     # slskd's quiet timer: a popular album never goes quiet, and slskd only
     # hands back its responses once a search has ENDED — this is what stops a
@@ -1313,13 +1344,12 @@ DEFAULT_CONFIG = {
     "advisory_auto_fetch": True,
     # What happens when NO source states an advisory — the ladder in
     # `mlo.advisory`: an instrumental is 0 (`auto_zero_advisory_for_instrumental`),
-    # then the configured AI provider judges the lyrics when this is on,
-    # then the multilingual word scan runs when `advisory_lyrics_scan` is on,
-    # and `advisory_fallback` is the last resort: "0" (not explicit, the
-    # shipped default), "2" (clean edition) or "none" (write nothing at all,
-    # leaving the track unrated).
+    # then the configured AI provider judges the lyrics when this is on —
+    # asked ONLY when every source came up with nothing, never over a value a
+    # source stated — and `advisory_fallback` is the last resort: "0" (not
+    # explicit, the shipped default), "2" (clean edition) or "none" (write
+    # nothing at all, leaving the track unrated).
     "advisory_ai_classify": True,
-    "advisory_lyrics_scan": True,
     "advisory_fallback": "0",
     # Optional Spotify Web API credentials (client-credentials flow). Used by
     # the advisory cross-reference (the ISRC search) and by instrumental
@@ -1554,6 +1584,12 @@ _INT_RANGES = {
     "cover_jxl_target_size": (0, 4000),
     "soulseek_auto_log_min_score": (0, 100),
     "soulseek_auto_search_wait": (2, 300),
+    # The walk's own two numbers (see the DEFAULT_CONFIG block): at least one
+    # candidate, at most ten ranked editions asked before the release settles
+    # into the background, and a search window in the same range the shared
+    # search window allows.
+    "soulseek_fallback_candidates": (1, 10),
+    "soulseek_search_timeout_seconds": (5, 300),
     "soulseek_auto_response_limit": (5, 500),
     "soulseek_search_concurrency": (1, 8),
     "soulseek_candidate_slots": (1, 20),
@@ -1793,6 +1829,13 @@ def normalize_config(user=None) -> dict:
         ("grader_strict_square_threshold", 0.005, 0.0, 0.05),
         ("acoustid_min_score", 0.75, 0.0, 1.0),
         ("replaygain_preamp_db", 0.0, -24.0, 24.0),
+        # The two transient-store caps: GB, and a negative is the same OFF the
+        # Settings row documents as 0 (a floor, so a hand-edited "-1" can never
+        # become a cap of minus one byte). The ceiling is the row's own max —
+        # kept in step with it the way the genre ceiling is with mb_genre_count
+        # — because a config is a text file a person types into.
+        ("soulseek_cache_cap_gb", 5.0, 0.0, 1000.0),
+        ("trash_cap_gb", 5.0, 0.0, 1000.0),
     ):
         try:
             v = float(cfg.get(k, default))
@@ -1925,6 +1968,16 @@ def normalize_config(user=None) -> dict:
                  "discovery_search_sources", "mb_search_source",
                  "soulseek_auto_max_attempts"):
         cfg.pop(dead, None)
+
+    # The same rule for the ADVISORY family, applied by PREFIX instead of by
+    # name: the lyrics word scan and the switch that gated it were removed
+    # together, and a saved config that still carries any `advisory_*` key the
+    # shipped defaults do not know must not keep it around — a config key no
+    # code reads is a setting the Settings page would render as truth.
+    for key in [k for k in cfg
+                if isinstance(k, str) and k.startswith("advisory_")
+                and k not in DEFAULT_CONFIG]:
+        cfg.pop(key, None)
 
     # `auth_username` is a display name AND, on an install with no users row,
     # the name its claim logs in under — which makes it a path segment

@@ -14,6 +14,7 @@ from mlo import load_config
 from mlo.lyrics_fetch import fetch_one
 from mlo.lyrics_providers import SOURCES, SOURCE_LABELS, SOURCE_NOTES, available_sources, provider_order
 from server import tagcache
+from server import job_locks
 
 router = APIRouter(tags=["lyrics"])
 
@@ -183,6 +184,63 @@ def lyrics_xlit(req: LyricsPathsRequest):
         "errors": errors,
         "note": note,
     }
+
+
+class LyricsOffsetRequest(BaseModel):
+    """A lyric offset for ONE track, in milliseconds.
+
+    A DELTA, not an absolute position: the control sends the step the user
+    pressed (its buttons move a tenth of a second), and the server applies it
+    to what the file holds at that moment. A caller that instead sent "the
+    lyrics are now 300 ms late" would need to know where the file started, and
+    two surfaces open on one track (the sidebar and the fullscreen player both
+    offer the control) would each overwrite the other's arithmetic with their
+    own idea of the origin.
+    """
+    path: str
+    delta_ms: int
+    staged: bool = False  # the import wizard's not-yet-imported album
+
+
+# The app's own sanity bound on one press: a shift longer than an hour is a
+# caller bug, not an offset, and the route must refuse it BEFORE it rewrites a
+# file — a wrong 3,600,000 ms stamp is unreadable in every player.
+MAX_OFFSET_MS = 3600000
+
+
+@router.post("/api/lyrics/offset")
+@job_locks.holds(lambda req: [req.path], kind="lyrics", label="Lyric offset")
+def lyrics_offset(req: LyricsOffsetRequest):
+    """Move every timestamp in this track's lyrics by `delta_ms` and save it.
+
+    The one lyric edit the PLAYER offers (the sidebar pane's and the fullscreen
+    pane's shared offset control): the reader hears that the lines are early or
+    late and nudges them until they land, which is only useful if the correction
+    outlives the session — so the shift is written where the lyrics live
+    (`mlo.lyrics.shift_stored_lyrics`: the `.lrc` beside the track and/or its
+    `LYRICS` tag, whichever holds them) and the reply carries the text that was
+    stored, so both surfaces render the file's own copy rather than their own
+    arithmetic.
+
+    Untimed lines are left exactly as they were — an unsynced lyric has no sync
+    to move, and giving it one would invent timings nobody wrote.
+    """
+    from mlo.lyrics import shift_stored_lyrics
+
+    if abs(req.delta_ms) > MAX_OFFSET_MS:
+        raise HTTPException(
+            400, f"offset out of range (±{MAX_OFFSET_MS // 60000} minutes)")
+    cfg = load_config()
+    resolved, rejected = _batch_paths([req.path], cfg, req.staged)
+    if rejected:
+        _, error = rejected[0]
+        raise HTTPException(404 if error == "file not found" else 403, error)
+    full = resolved[0][1]
+    text, targets = shift_stored_lyrics(full, req.delta_ms, cfg)
+    if text is None:
+        raise HTTPException(404, "this track has no lyrics to shift")
+    tagcache.invalidate_path(full)
+    return {"ok": True, "lrc": text, "targets": targets}
 
 
 @router.post("/api/lyrics/publish-batch")

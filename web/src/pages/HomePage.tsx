@@ -8,13 +8,16 @@ import StorageCard from "../components/StorageCard";
 import PageHeader from "../components/PageHeader";
 import AlbumCard from "../components/AlbumCard";
 import Segmented from "../components/Segmented";
+import StarRating from "../components/StarRating";
 import StatsPanel from "../components/StatsPanel";
 import { useI18n } from "../lib/i18n";
 import CoverImg from "../components/CoverImg";
 import { GRID_SIZE_MIN } from "../lib/fmt";
 import { albumRef } from "../lib/refs";
 import { GRID_SIZES, useGridSize, useSelectMode } from "../lib/libraryView";
+import { toUi } from "../lib/ratings";
 import { useStore } from "../store";
+import type { ReactNode } from "react";
 import type { HomeAlbum, HomeArtist, Track } from "../types";
 
 /** Shelf chip: why a row is here (a wish's status, a favorite's origin). */
@@ -29,11 +32,12 @@ function Chip({ text, title }: { text: string; title?: string }) {
   );
 }
 
-function Shelf({
+function Shelf<T extends HomeAlbum>({
   title,
   icon: Icon,
   items,
   blurb,
+  extraOf,
   gridSize,
   selectable,
   selected,
@@ -41,8 +45,12 @@ function Shelf({
 }: {
   title: string;
   icon: typeof Sparkles;
-  items: HomeAlbum[];
+  items: T[];
   blurb?: string;
+  /** What each card carries under its caption. The shelf's own reason chip
+   *  ("Recently added", "Rediscover") unless the shelf draws its line — the
+   *  rated shelf shows the user's stars, which ARE its reason for a row. */
+  extraOf?: (row: T) => ReactNode;
   /** The shared cover size (lib/libraryView) — Home's shelves and the
    *  Library's grid draw their covers at the one the user picked. */
   gridSize: "s" | "m" | "l";
@@ -84,13 +92,52 @@ function Shelf({
               onSelect={onSelect}
               // The shelf's own words for why the row is here, under the
               // card's caption.
-              extraMeta={a.reason ? <Chip text={a.reason} /> : undefined}
+              extraMeta={extraOf ? extraOf(a) : a.reason ? <Chip text={a.reason} /> : undefined}
             />
           );
         })}
       </div>
     </section>
   );
+}
+
+/** The artist shelf's avatar.
+ *
+ *  The artist's own picture first: it is the artist the row names, and the
+ *  shelf used to draw a representative ALBUM cover in that circle — an album's
+ *  sleeve where a face belongs, and never the artist image the app had already
+ *  fetched for the artist page (`GET /api/artist/image`, the same endpoint the
+ *  artist page and every Discover row read).
+ *
+ *  That endpoint answers 404 for a folder holding no picture, and a URL that
+ *  404s paints the browser's broken-image glyph before anything can replace it
+ *  — so the request is only made when the payload says the folder has one
+ *  (`has_image`, no probe of our own). The URL that failed is remembered as
+ *  itself, the rule CoverImg/DiscoverRow keep, so a shelf re-rendered onto
+ *  another artist never inherits a failure; the album cover stands in next and
+ *  the placeholder is last. */
+function ArtistAvatar({ artist }: { artist: HomeArtist }) {
+  const [failed, setFailed] = useState<string[]>([]);
+  const box = "h-20 w-20 rounded-full bg-raise overflow-hidden shrink-0";
+  const picture = artist.has_image ? api.artistImageUrl(artist.path) : null;
+  if (picture && !failed.includes(picture)) {
+    return (
+      <div className={box}>
+        <img
+          src={picture}
+          alt=""
+          loading="lazy"
+          decoding="async"
+          onError={() => setFailed((seen) => (seen.includes(picture) ? seen : [...seen, picture]))}
+          className="h-full w-full object-cover"
+        />
+      </div>
+    );
+  }
+  // No picture stored, or one that would not load: the artist's representative
+  // album cover stands in, and CoverImg keeps its own placeholder for an album
+  // with no cover either.
+  return <CoverImg albumPath={artist.cover_path} coverFile={artist.cover} wrapperClass={box} />;
 }
 
 function ArtistShelf({ title, artists }: { title: string; artists?: HomeArtist[] }) {
@@ -111,11 +158,7 @@ function ArtistShelf({ title, artists }: { title: string; artists?: HomeArtist[]
             className="group rounded-xl p-2 flex flex-col items-center text-center transition-all duration-200 hover:bg-panel/70 hover:-translate-y-0.5"
             title={ar.artist}
           >
-            <CoverImg
-              albumPath={ar.cover_path}
-              coverFile={ar.cover}
-              wrapperClass="h-20 w-20 rounded-full bg-raise overflow-hidden shrink-0"
-            />
+            <ArtistAvatar artist={ar} />
             <div className="mt-2 text-sm font-medium truncate w-full">{ar.artist}</div>
             <div className="text-[11px] text-zinc-500 tabular-nums">
               {ar.album_count} album{ar.album_count === 1 ? "" : "s"}
@@ -166,7 +209,7 @@ export default function HomePage() {
     const seen = new Set<string>();
     for (const row of [
       ...(data?.recent ?? []), ...(data?.pending ?? []), ...(data?.wanted ?? []),
-      ...(data?.top_rated ?? []), ...(data?.needs_attention ?? []),
+      ...(data?.top_rated ?? []), ...(data?.rated ?? []), ...(data?.needs_attention ?? []),
       ...(data?.discover ?? []), ...(data?.favorites ?? []),
     ]) {
       const key = row.path || `mb:${row.mbid ?? ""}`;
@@ -338,6 +381,19 @@ export default function HomePage() {
         {...shelfProps}
       />
       <Shelf title={t("home.shelf.best")} icon={Star} items={data.top_rated} {...shelfProps} />
+      {/* The one shelf that is the READER's verdict rather than the library's:
+          the releases they gave stars to, best first, each card carrying the
+          stars it was ranked by. Releases with NO star are not a shelf —
+          "unrated" says nothing about why a row is here and cannot be ordered
+          (Rediscover already draws a random slice of what has not been
+          looked at). */}
+      <Shelf
+        title={t("home.shelf.rated")}
+        icon={Star}
+        items={data.rated ?? []}
+        extraOf={(row) => <StarRating readOnly size="sm" showValue value={toUi(row.rating)} />}
+        {...shelfProps}
+      />
       <Shelf
         title={t("home.shelf.attention")}
         icon={AlertTriangle}

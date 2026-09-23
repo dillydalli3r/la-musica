@@ -41,9 +41,12 @@ settled Soulseek job: in the library, or in the download folder waiting to be
 imported), download_failed (a job that gave up — an absent/refused slskd, a
 MusicBrainz outage, a verification that failed, or a search that found nothing),
 download_done for a finished import run (server/import_queue.py),
-import_needs_data (an album an import could not finish, waiting for a human
-decision), script_done / script_failed and grade_done (a run of the library
-scripts, from `/api/run`), update_available (a newer release exists).
+import_needs_data (an album an import could not supply a family for — the
+import FINISHED, the album is in the library and the gap is a warning on its own
+finished row, the bell and the album page; only a review stop's entry really is
+waiting on a person, see spec R166), script_done / script_failed and grade_done
+(a run of the library scripts, from `/api/run`), update_available (a newer
+release exists).
 download_started and upload_started are the two "it began" halves of a Soulseek
 transfer, announced the moment there is something to watch instead of only at
 the end: a download whose first bytes actually moved (the wait in

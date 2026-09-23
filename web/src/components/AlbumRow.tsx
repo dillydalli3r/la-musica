@@ -99,7 +99,10 @@ export default function AlbumRow({
             whole cell (and its extra badge) disappears with it. */}
         {title != null && (
           <td className="td">
-            <div className="flex items-center gap-1.5 min-w-0">
+            {/* `flex-wrap`, the same guard the track title cell carries: a
+                fixed-layout column cannot grow, so a name sharing its line
+                with badges had to win or vanish (see TrackTitleCell). */}
+            <div className="flex items-center gap-1.5 min-w-0 flex-wrap">
               {titleHref ? (
                 <Link
                   to={titleHref}

@@ -207,14 +207,40 @@ function MbHeaderActions({ href, query }: { href?: string; query: string }) {
   );
 }
 
+/** The words a press is acknowledged with, BEFORE the server has answered.
+
+ *  Measured (`.pi/profile_add.py`): the reply to a bare-id add used to take
+ *  10-20 s, because the route fetched the album page's provider content inside
+ *  the request — and until this existed the only thing on screen for that whole
+ *  time was the button's own spinner. It says exactly what is true at that
+ *  instant: the press was TAKEN. What the add then did — the album, its wish,
+ *  the search, the counts, the skips — is the REPLY's to report, and the reply
+ *  replaces this line when it lands (`toast.update`). */
+function addTaken(ids: string[], kind: string,
+                  extra: { title?: string; artist?: string }): string {
+  const who = [extra.artist, extra.title].filter(Boolean).join(" — ");
+  if (who) return `Adding ${who} to your library…`;
+  if (kind === "artist") return "Adding this artist's albums to your library…";
+  return ids.length > 1
+    ? `Adding ${ids.length} releases to your library…`
+    : "Adding to your library…";
+}
+
 /** "Add to library" with a busy flag: the server creates the FRAMEWORK album
  *  (the folder the naming script names, with the release's own tracklist and
  *  the release-group cover) and starts the search for its audio, so the album
  *  is in the library and visibly pending the moment the button is pressed.
  *  Reports what the server ACTUALLY added (`albums[].created`), never what was
  *  asked for; `missing` is ids that had nothing to send (already counted).
- *  A call that fails toasts the reason instead of a bare "nothing added". */
+ *  A call that fails toasts the reason instead of a bare "nothing added".
+ *
+ *  The press is acknowledged in the same tick (`addTaken`): the request it
+ *  starts cannot answer before the server has written the album and its wish,
+ *  and an add that answered nothing until then is the "shows NOTHING for ten
+ *  seconds" this exists to end. The server's own answer REPLACES that toast
+ *  (same toast, `toast.update`), so the accent stays on one line per press. */
 function useAddToLibrary() {
+  const qc = useQueryClient();
   const [busy, setBusy] = useState(false);
   const run = async (
     ids: string[],
@@ -224,6 +250,7 @@ function useAddToLibrary() {
     extra: { title?: string; artist?: string; year?: string; release_mbid?: string } = {}
   ) => {
     setBusy(true);
+    const ack = toast(addTaken(ids, kind, extra));
     let added = 0;
     let have = 0;
     let skipped = missing;
@@ -235,7 +262,8 @@ function useAddToLibrary() {
           if (res.background) {
             // An artist's discography is prepared off-request; the albums
             // appear (and start searching) as each one is created.
-            toast.success(res.note || "Preparing the discography — the albums appear as they are added");
+            toast.update(ack, res.note || "Preparing the discography — the albums appear as they are added",
+                         "success");
             return;
           }
           added += res.albums.filter((a) => a.created).length;
@@ -252,11 +280,19 @@ function useAddToLibrary() {
       }
     } finally {
       setBusy(false);
+      // The framework album exists the moment the reply lands, and the library
+      // payload is cached for a minute (`staleTime` 60 s) — so without this the
+      // album the user just asked for can be missing from the grid for up to a
+      // minute, which is what made a successful add look like it did nothing.
+      // The pending row, its stage and the wish it carries all hang off these
+      // two payloads; the search the add queued then shows up in the queue.
+      qc.invalidateQueries({ queryKey: ["library"] });
+      qc.invalidateQueries({ queryKey: ["wishes"] });
     }
     const tail = `${have ? ` · ${have} already in the library` : ""}` +
       `${skipped ? ` · ${skipped} skipped` : ""}${reason ? ` · ${reason}` : ""}`;
-    if (added) toast.success(`Added ${added} to your library${tail}`);
-    else toast.error(`Nothing added${tail || " — MusicBrainz is busy, try again"}`);
+    if (added) toast.update(ack, `Added ${added} to your library${tail}`, "success");
+    else toast.update(ack, `Nothing added${tail || " — MusicBrainz is busy, try again"}`, "error");
   };
   return { busy, run };
 }
@@ -1378,29 +1414,35 @@ interface TypeActionRow { label: string; types: string[]; count: number | null }
  *  server's own answer — what it queued, what it skipped and why, or the
  *  switch that stopped it — lands directly under the row that asked for it.
  *  The queue's own view is refetched on success, so the albums these buttons
- *  created show up there. */
-function ArtistTypeActions({ artistId, mode, groups, total, loading }: {
-  artistId: string; mode: ImportMode; groups: RGRow[]; total: number; loading: boolean;
+ *  created show up there.
+ *
+ *  One row per release-group TYPE, most-populated first — and deliberately no
+ *  "Whole artist" row: the page header's own Add to library button IS that
+ *  action (with "All" selected it hands over the whole discography), so a row
+ *  beside it would be a second control for one meaning. The per-type rows are
+ *  the part the header cannot express. */
+function ArtistTypeActions({ artistId, mode, groups }: {
+  artistId: string; mode: ImportMode; groups: RGRow[];
 }) {
   const { t } = useI18n();
   const qc = useQueryClient();
   const [busy, setBusy] = useState("");
   const [said, setSaid] = useState<Record<string, { text: string; ok: boolean }>>({});
-  // The whole-artist row first, then one per type the artist actually has,
-  // most-populated first (the type a user is most likely after on top).
-  const rows: TypeActionRow[] = useMemo(() => {
-    const whole: TypeActionRow = {
-      label: t("mb.actions_whole"), types: [], count: loading ? null : total,
-    };
-    const perType = byReleaseGroupType(groups).map(({ label, list }) => ({
-      label, types: [label.toLowerCase()], count: list.length,
-    }));
-    return [whole, ...perType.sort((a, b) => b.count - a.count
-                                    || a.label.localeCompare(b.label))];
-  }, [groups, total, loading, t]);
+  const rows: TypeActionRow[] = useMemo(
+    () => byReleaseGroupType(groups)
+      .map(({ label, list }) => ({ label, types: [label.toLowerCase()], count: list.length }))
+      .sort((a, b) => b.count - a.count || a.label.localeCompare(b.label)),
+    [groups]);
 
   const run = async (row: TypeActionRow) => {
     setBusy(row.label);
+    // The press is acknowledged before the request is even sent: the row's own
+    // line says work is under way (`mb.actions_working`, what the row renders
+    // while `mine`) and the toast names what was taken. The server's answer
+    // replaces BOTH when it lands — the row line by `said[row.label]` below,
+    // the toast by `toast.update` — so one press never leaves two answers on
+    // screen.
+    const ack = toast(`Adding this artist's ${row.label} release groups to your library…`);
     try {
       const res = await api.libraryAdd({
         mbid: artistId, kind: "artist", mode, types: row.types,
@@ -1419,12 +1461,10 @@ function ArtistTypeActions({ artistId, mode, groups, total, loading }: {
         .filter((r): r is string => !!r))]
         .slice(0, 3)
         .join(" · ");
-      setSaid((prev) => ({
-        ...prev,
-        [row.label]: { ok: res.ok,
-                       text: [counts, res.note, why].filter(Boolean).join(" — ")
-                             || t("mb.actions_nothing") },
-      }));
+      const text = [counts, res.note, why].filter(Boolean).join(" — ")
+                   || t("mb.actions_nothing");
+      setSaid((prev) => ({ ...prev, [row.label]: { ok: res.ok, text } }));
+      toast.update(ack, text, res.ok ? "success" : "error");
       // Those albums exist now, so the queue (and the library that lists a
       // pending album) is stale — that is the "refetch after a successful
       // action" the rows are judged by.
@@ -1433,7 +1473,7 @@ function ArtistTypeActions({ artistId, mode, groups, total, loading }: {
     } catch (e) {
       const text = e instanceof Error ? e.message : String(e);
       setSaid((prev) => ({ ...prev, [row.label]: { text, ok: false } }));
-      toast.error(text);
+      toast.update(ack, text, "error");
     } finally {
       setBusy("");
     }
@@ -1551,10 +1591,11 @@ export function MBArtistPage() {
                 which the server prepares off-request (one MusicBrainz browse
                 per release group — `mode` rides along for the API's shared
                 shape, and still means one release per group here); with a type
-                selected it is exactly the groups on screen. The type rows
-                below are the per-TYPE version of the same thing, and both hand
-                over the same list: every album is recorded and the search for
-                its audio starts as it is added. */}
+                selected it is exactly the groups on screen. This button is the
+                only whole-artist action on the page — the panel below offers
+                one row per TYPE, which is the part this one cannot express —
+                and both hand over the same list: every album is recorded and
+                the search for its audio starts as it is added. */}
             <Segmented
               value={mode}
               onChange={setMode}
@@ -1594,8 +1635,6 @@ export function MBArtistPage() {
             artistId={String(a.id)}
             mode={mode}
             groups={groups}
-            total={rgTotal}
-            loading={discography.isLoading}
           />
         ) : null}
         {groups.length === 0 ? (
@@ -1667,7 +1706,13 @@ export function MBArtistPage() {
                             disabled={busy}
                             onClick={(e) => {
                               e.stopPropagation();   // the row itself opens the group
-                              run([String(rg.id)], "release_group", mode);
+                              // The row knows this group's title and the artist
+                              // it belongs to, so it sends them: the add then
+                              // records the album and answers at once instead of
+                              // resolving the group's editions inside the request
+                              // (see the group page's own button).
+                              run([String(rg.id)], "release_group", mode, 0,
+                                  { title: rg.title || "", artist: a.name || "" });
                             }}
                           >
                             <Library className="h-4 w-4" />
@@ -1889,9 +1934,21 @@ export function MBReleaseGroupPage() {
                   "release_group",
                   mode,
                   0,
-                  // The override is deliberately not sent with mode "all":
-                  // the pick is one edition, and "all" means every eligible one.
-                  mode === "best" && edition ? { release_mbid: edition } : {}
+                  {
+                    // The page already KNOWS the group's own name and artist, so
+                    // it sends them: with them in hand the route writes the
+                    // framework album and answers straight away
+                    // (`pending_albums.create_from_request`), instead of
+                    // resolving the group's editions — a browse plus a lookup per
+                    // edition, at MusicBrainz's one-request-a-second budget —
+                    // before it can name a folder. Measured at 10.9 s for a group
+                    // with 8 editions; 0.2 s with these two fields.
+                    title: rg.title || "",
+                    artist: rg.artist || "",
+                    // The override is deliberately not sent with mode "all":
+                    // the pick is one edition, and "all" means every eligible one.
+                    ...(mode === "best" && edition ? { release_mbid: edition } : {}),
+                  }
                 )
               }
             >

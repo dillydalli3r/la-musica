@@ -11,7 +11,7 @@ from .stats import _decode_mp4_value
 # The ONE canonical tag-value rule (spelling + spacing). Applied here on every
 # write so an import, a wizard write, a script and a manual edit all land the
 # same, and re-applied by script 10 over an existing library.
-from .tagtext import canonical_text
+from .tagtext import canonical_text, join_list, split_list
 
 TAG_MAP = {
     # Standard sorting/display fields. These are semantic names; the
@@ -1196,11 +1196,25 @@ class AudioFile:
         container metadata key that get_lyrics() reads back (music videos are
         graded tracks and the lyrics scripts walk them too, so a video lyric
         write has to work rather than be rejected).
+
+        A LIST (two performers, two ISRCs) is stored as its "; "-joined value
+        — the one spelling a key-per-string metadata block can hold — and
+        read back the same way: get_tag returns the joined string and
+        tag_values its parts, exactly as for repeated fields elsewhere.
         """
         clean = {}
         for k, v in (mapping or {}).items():
             if v is None:
                 continue
+            if isinstance(v, (list, tuple, set)):
+                # A video container holds ONE string per key (ffmpeg's
+                # `-metadata name=value` takes a single value), so a list is
+                # stored as the "; "-joined spelling every reader of a
+                # repeated field joins to — what tag_values() splits back
+                # apart and what /api/mb/assign already writes for a video's
+                # GENRE. `str(v)` put the Python repr in the file instead: a
+                # two-engineer credit landed in the MKV as "['a', 'b']".
+                v = join_list(v)
             # Same rule as set_tag (mlo.tagtext) before the trim, so a video's
             # MEDIA/SOURCE/RELEASETYPE land canonical like an audio track's.
             v = str(canonical_text(k, str(v))).strip()
@@ -1884,6 +1898,10 @@ class AudioFile:
         custom tag, the raw key all_tags() emits ("TXXX:FOO",
         "----:com.apple.iTunes:FOO").
 
+        A video container has no repeated fields to read — its metadata block
+        holds one string per key — so its pieces are that string's
+        "; "-separated parts (the shape set_video_tags writes).
+
         Remembered per instance like all_tags(): a writer asks for the same
         tag's pieces more than once per pass. Each caller gets its own list,
         so two writers holding one track cannot corrupt each other's pieces.
@@ -1903,6 +1921,18 @@ class AudioFile:
             return []
         name = str(name)
         try:
+            if self.kind == "video":
+                # A video's metadata block holds ONE string per key, so the
+                # pieces a writer needs back are that string's "; "-separated
+                # parts: the same list get_tag() describes, read out of the
+                # one shape the container can hold. get_tag() only knows the
+                # TAG_MAP names, but all_tags() emits the container's own keys
+                # for a video, so both spellings resolve here.
+                spec = TAG_MAP.get(name.upper())
+                key = str(spec["flac"] if spec else name)
+                return split_list(
+                    self._video_tags.get(self._video_canonical(key)))
+
             if self.kind in ("flac", "ogg", "opus"):
                 spec = TAG_MAP.get(name.upper())
                 want = str(spec["flac"] if spec else name).lower()

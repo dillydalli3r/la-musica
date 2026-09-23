@@ -12,7 +12,7 @@
  * after it, each carrying the whole-step pair `steps`.
  *
  * This check serves the real page (Vite, on a scratch port — 8011 and up,
- * never the owner's 8000), presses "Run the import chain" with that stage
+ * never the owner's 8000), presses "Run ticked scripts" with that stage
  * frame on screen, then pushes each recorded frame into the store the app
  * draws from and asserts what a user sees:
  *
@@ -129,14 +129,14 @@ try {
     // The chain's own request is HELD OPEN on purpose: the wizard's strip is
     // being checked for the seconds before the chain starts and while it runs,
     // and both come from frames — never from this reply.
-    if (url.includes("/api/import/finish")) return undefined;
+    if (url.includes("/api/run")) return undefined;
     return undefined;                 // anything else: left unanswered (pending)
   });
 
   await page.goto(`http://127.0.0.1:${port}/import?album=${encodeURIComponent(ALBUM)}&step=Finish`);
   // The preview has landed once the step names the chain it will run.
   await page.waitForSelector("text=Runs automatically after import:", { timeout: 20000 });
-  await page.waitForSelector("text=Run the import chain", { timeout: 20000 });
+  await page.waitForSelector("text=Run ticked scripts", { timeout: 20000 });
 
   /** One relay frame, exactly as the websocket delivers it — into the same
    *  store the app's own pages read. */
@@ -149,13 +149,13 @@ try {
   await pushFrame(stage);
   await page.waitForTimeout(50);
 
-  await page.getByRole("button", { name: "Run the import chain" }).click();
+  await page.getByRole("button", { name: "Run ticked scripts" }).click();
   await page.waitForTimeout(200);
 
   const bars = [];
   for (const handle of await page.$$('[role="status"]')) {
     const text = await handle.evaluate((el) => el.textContent || "");
-    if (text.includes("Import chain")) bars.push(handle);
+    if (text.includes("Run scripts")) bars.push(handle);
   }
   check("the wizard shows the chain's progress strip (and the Finish step's own bar)",
         bars.length === 2, `${bars.length} bar(s)`);
@@ -168,8 +168,8 @@ try {
         pending.readout !== null && pending.readout.startsWith("…")
         && pending.width === "35%" && pending.pulsing === true,
         JSON.stringify(pending));
-  check("and it is the chain's own label that is shown, not the import stage's",
-        (pending.label || "").startsWith("Import chain —")
+  check("and it is the run's own label that is shown, not the import stage's",
+        (pending.label || "").startsWith("Run scripts —")
         && !(pending.label || "").includes("Previous album"),
         String(pending.label));
   check("the import stage's 4/8 is never drawn as the chain's readout",
@@ -188,8 +188,8 @@ try {
         staging.label === laterStage.desc, `${staging.label} vs ${laterStage.desc}`);
   check("and prints its own numbers beside that name",
         (staging.readout || "").startsWith("5/8"), String(staging.readout));
-  check("while the chain's own label is gone from the strip",
-        !(staging.label || "").includes("Import chain"), String(staging.label));
+  check("while the run's own label is gone from the strip",
+        !(staging.label || "").includes("Run scripts"), String(staging.label));
 
   // ---- 2. the run's own frames, one by one --------------------------------
   for (let i = 0; i < frames.length; i += 1) {
@@ -223,55 +223,14 @@ try {
   check("and its bar is the run's own completion, not a stage's",
         last.width === "100%", String(last.width));
 
-  // ---- 4. a chain the server REFUSES: the album is held by another job -----
-  // `/api/import/finish` answers 409 with the claim's own sentence. Nothing
-  // failed there — another job is running the same chain — so the step's line
-  // has to read it as a refusal instead of claiming a broken chain.
-  await page.route("**/api/import/finish", (route) => route.fulfill({
-    status: 409, contentType: "application/json", body: JSON.stringify({ detail: busy }) }));
-  await page.reload();
-  await page.waitForSelector("text=Run the import chain", { timeout: 20000 });
-  await page.getByRole("button", { name: "Run the import chain" }).click();
-  await page.waitForTimeout(300);
-  const said = await page.evaluate(() => {
-    const el = [...document.querySelectorAll('[role="status"]')].find(
-      (e) => (e.textContent || "").includes("Import chain"));
-    return el ? (el.textContent || "").trim() : null;
-  });
-  check("a refused chain says the album is already being finished",
-        typeof said === "string" && said.includes("already being finished"), String(said));
-  check("and never reports it as a failed chain",
-        typeof said === "string" && !said.includes("failed"), String(said));
-  check("while the engine's own sentence is kept whole",
-        typeof said === "string" && said.includes(busy), String(said));
-
-  // ---- 5. a BATCH press where one album is busy: not a script error --------
-  // The reply keeps one entry per path, so a multi-album press runs the free
-  // albums and hands the busy one back as an entry whose `errors` carry the
-  // claim's sentence. That album's line has to read as already being finished
-  // there too — never as a chain that broke.
-  // Every line the page shows about this chain — the step's own and the toast:
-  // a verdict written in one place and not the other is still a wrong verdict.
-  const albumLine = async () => page.evaluate(() => {
-    const els = [...document.querySelectorAll('[role="status"]')].filter(
-      (e) => (e.textContent || "").includes("Import chain"));
-    return els.map((e) => (e.textContent || "").trim()).join(" | ") || null;
-  });
-  await page.route("**/api/import/finish", (route) => route.fulfill({
-    status: 200, contentType: "application/json", body: JSON.stringify({
-      albums: [
-        { path: ALBUM, chain: [], scripts: [], errors: [], note: "" },
-        { path: `${ALBUM} (second)`, chain: [], scripts: [], errors: [busy], note: busy },
-      ] }) }));
-  await page.reload();
-  await page.waitForSelector("text=Run the import chain", { timeout: 20000 });
-  await page.getByRole("button", { name: "Run the import chain" }).click();
-  await page.waitForTimeout(300);
-  const batch = await albumLine();
-  check("a batch press with one album busy says it is already being finished",
-        typeof batch === "string" && batch.includes("already being finished"), String(batch));
-  check("and is never reported as a script error",
-        typeof batch === "string" && !batch.includes("script error"), String(batch));
+  // Sections 4 and 5 that used to sit here drove the wizard's own
+  // "Run the import chain" press against a 409 and a batch reply, to pin how a
+  // REFUSED chain reads. That press is gone on purpose (spec R9: it re-ran the
+  // whole import and undid the work the steps had just done by hand), so the
+  // surface it described does not exist. The refusal itself is still pinned
+  // where it lives — `tools/test_job_locks.py` covers a user press answered 409
+  // with the claim's own sentence, and the batch entry that carries it, at the
+  // API the press used.
 } finally {
   await browser.close();
   await vite.close();

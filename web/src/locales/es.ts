@@ -178,6 +178,7 @@ export default {
   "home.shelf.wanted": "Buscados en Soulseek",
   "home.shelf.wanted_blurb": "Se rastrean en segundo plano",
   "home.shelf.best": "Mejor evaluados",
+  "home.shelf.rated": "Tus valoraciones",
   "home.shelf.attention": "Necesitan atención",
   "home.shelf.attention_blurb": "Álbumes que fallan al menos una comprobación",
   "home.shelf.artists": "Artistas principales",
@@ -284,7 +285,6 @@ export default {
 
   // —— MusicBrainz artist page: add / download one release TYPE ——————————
   "mb.actions_title": "Añadir o descargar por tipo",
-  "mb.actions_whole": "Todo el artista",
   "mb.actions_groups": "{n} grupo(s) de ediciones",
   "mb.add_to_library": "Añadir a la biblioteca",
   "mb.actions_working": "Trabajando…",

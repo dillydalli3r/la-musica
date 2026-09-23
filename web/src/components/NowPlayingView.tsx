@@ -1,12 +1,14 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import {
-  AudioLines, Captions, ChevronDown, Heart, ListMusic, ListPlus, Mic2, Pause, Play, Repeat, Settings2, Shuffle,
+  AudioLines, Captions, ChevronDown, Heart, Info, ListMusic, ListPlus, Mic2, Pause, Play, Repeat, Settings2, Shuffle,
   SkipBack, SkipForward, Volume1, Volume2, VolumeX, X,
 } from "lucide-react";
 import { api } from "../api";
 import VolumePct from "./VolumePct";
 import LyricZoom from "./LyricZoom";
+import LyricOffset from "./LyricOffset";
+import { DetailsDialog } from "./AlbumDetails";
 import { toast, useStore } from "../store";
 import { fmtTech, fmtPair, isVideoFile } from "../lib/fmt";
 import { AdvisoryMark } from "./Badges";
@@ -127,26 +129,46 @@ function hexToRgbTriplet(hex?: string | null): [number, number, number] | null {
   return [(n >> 16) & 255, (n >> 8) & 255, n & 255];
 }
 
-/** WCAG relative luminance of an sRGB triplet — the "how bright is this"
- *  the pane's ink decision is taken on. The channels are linearized before
- *  being weighted: weighing the raw 0-255 values rates #ffff00 and #0000ff
- *  almost equally bright, and blue is the one saturated cover colour that
- *  would then be handed black lyrics over a near-black field. */
-function relLuminance([r, g, b]: [number, number, number]): number {
-  const lin = (v: number) => {
-    const s = v / 255;
-    return s <= 0.04045 ? s / 12.92 : ((s + 0.055) / 1.055) ** 2.4;
-  };
-  return 0.2126 * lin(r) + 0.7152 * lin(g) + 0.0722 * lin(b);
-}
-
-/** The lyric pane's ink, one table per polarity. Every lyric surface reads
- *  its colour from here, so "the lyrics are white on this cover" is decided
- *  once instead of separately for the active line, the faded ones, the
- *  karaoke syllables and the plain-text fallback. Both sides are the same
- *  zinc ladder mirrored — the palette's near-white and near-black steps, so
- *  a saturated cover still gets black-or-white lyrics and never a tint of
- *  its own colour. */
+/** The fullscreen player's ink — TWO tables, ONE choice, and the scrim that
+ *  makes the choice true.
+ *
+ *  There used to be one table (light, pinned) and a full-bleed GREY wash under
+ *  it, which is what kept white legible on a white cover. Both are gone: a grey
+ *  layer between the artwork's ambience and its text is exactly the "added
+ *  stuff behind the text" the owner reported, and pinning one ink is what made
+ *  it necessary. The ink is now derived from the cover — the ask, verbatim:
+ *  a text colour that answers to the background's own brightness.
+ *
+ *  What decides it (`npInk`), in one place:
+ *
+ *  * the cover's AVERAGE colour is what the whole ambience is built from (the
+ *    server's `tagcache.cover_color` is that average, and every layer in the
+ *    markup below paints `rgb` of it). Its relative luminance is therefore the
+ *    one number that predicts the field;
+ *  * below `NP_INK_FLIP` the ambience is a dark field: the white table is what
+ *    reads on it, and NO SCRIM IS DRAWN AT ALL — the background is the cover's
+ *    own colour, nothing added;
+ *  * above the flip the field is bright (a white cover's bloom cores go to
+ *    white), so the table flips to near-black and the field is lifted by a
+ *    LIGHT scrim built from the cover's own colour — `rgb` mixed toward white,
+ *    never grey — with a strength that grows with the cover's brightness. That
+ *    is the mirror of the old wash and it exists for the same reason: one ink
+ *    cannot be AA on a field that spans rgb(96) to rgb(255) within one screen,
+ *    so the field is bounded instead of the ink being guessed per pixel.
+ *
+ *  Every lyric surface reads its colour from the chosen table, so the polarity
+ *  is decided once instead of separately for the active line, the faded ones,
+ *  the karaoke syllables and the metadata block. The steps are the zinc
+ *  ladder's near-white and near-black rungs — a saturated cover gets white or
+ *  near-black ink, never a tint of its own colour — and the glyph SHADOW flips
+ *  with them: a dark halo under light ink, a light halo under dark ink, so the
+ *  edge of a glyph always separates from the busier mid-tones the ambience
+ *  drifts through. `dim` sits high on either ladder because an inactive line is
+ *  ALSO drawn at 80 % opacity behind a 1px blur (LINE_BLUR), which pulls it
+ *  back toward the backdrop.
+ *
+ *  The numbers — measured field patches per cover, per tier — are in
+ *  tools/check_np_metadata_contrast.cjs, which renders the real component. */
 interface LyricInk {
   /** The line being sung — full-strength ink. */
   active: string;
@@ -156,83 +178,106 @@ interface LyricInk {
   /** Unsynced lyrics have no active line to stand out against, so every
    *  line keeps full ink instead of two tones of grey. */
   plain: string;
-  /** The glyph shadow for this ink. text-shadow inherits, so the pane sets
-   *  it once for the whole reading surface. Empty for the light polarity:
-   *  near-black ink only ever lands on a field the polarity rule measured as
-   *  bright, and a white halo there is a white outline around every glyph
-   *  rather than legibility (see index.css). */
+  /** The glyph shadow. text-shadow inherits, so the pane sets it once for
+   *  the whole reading surface: a tight near-opaque core (the glyph's own
+   *  edge) plus a wide soft halo (the surround a line sits in). Its POLARITY
+   *  is the ink's: dark under light glyphs, light under dark ones. */
   shade: string;
-  /** The polarity the player's veils tint with (`--np-veil`, index.css).
-   *  A mid-grey cover is the documented hard case: both inks sit equally far
-   *  from the field, so a faded line lands grey-on-grey whatever the polarity
-   *  picks (the reported "lyrics blend into the background"). The veil moves
-   *  the FIELD instead of the ink — a light tint under dark lyrics, a dark one
-   *  under light — which keeps every ink step where the table put it. It is
-   *  stamped on the fullscreen ROOT, because `--np-veil` inherits: the pane's
-   *  layer and the metadata pill both read the same decision instead of
-   *  carrying their own copy of it. */
-  veil: string;
   /** Karaoke syllables: under the playhead, already sung, still to come. The
-   *  emphasis is the scale + glow, which works on either polarity; the
-   *  colour has to follow the ink, because the default theme's `--accent` IS
-   *  white and would put one white word back on a light cover. */
+   *  emphasis is the scale + glow; the colour follows the ink, because the
+   *  default theme's `--accent` IS white and would put one white word back
+   *  on the line it is meant to stand out from. */
   wordNow: string;
   wordSung: string;
   wordNext: string;
+  /** The transport and top-bar CHROME: the icon buttons, the time readouts and
+   *  the small labels. Their muted grey has to follow the ink's polarity too —
+   *  a zinc-500 glyph on a white cover is the same grey-on-grey failure the
+   *  lyrics had before the flip, and it is why these three live in the table
+   *  instead of being spelled out at each button. */
+  chromeStrong: string;
+  chromeButton: string;
+  chromeText: string;
+  /** The full-bleed field lift this table needs, or "" for none. Built from
+   *  the cover's own colour (`rgb`) rather than a grey, and drawn with no
+   *  edge, rounding or blur: a scrim, never a panel. */
+  scrim: string;
 }
 
 const INK_ON_DARK: LyricInk = {
   active: "text-white",
   dim: "text-zinc-300",
   plain: "text-zinc-100",
-  shade: "np-shade-dark",
-  veil: "np-veil-dark",
+  shade: "np-shade",
   wordNow: "text-accent scale-110 [text-shadow:0_0_16px_rgba(255,255,255,0.4)]",
   wordSung: "text-white",
   wordNext: "text-white/75",
+  chromeStrong: "text-white",
+  chromeButton: "text-zinc-400 hover:text-white hover:bg-white/10",
+  chromeText: "text-zinc-400",
+  scrim: "",
 };
 
 const INK_ON_LIGHT: LyricInk = {
   active: "text-zinc-950",
-  // Not the mirror of the dark side's zinc-300 (zinc-500): an inactive line is
-  // ALSO drawn at 80 % opacity behind a 1px blur (LINE_BLUR), and over a light
-  // field that wash pulls the glyphs back toward the backdrop — zinc-500 lands
-  // barely above 2:1 there, which is what made the faded lines disappear on a
-  // white cover. One step nearer the ink keeps them readable while the blur,
-  // the smaller scale and the active line's near-black still say which line is
-  // playing.
   dim: "text-zinc-800",
   plain: "text-zinc-900",
-  shade: "",
-  veil: "np-veil-light",
-  wordNow: "text-zinc-950 scale-110 [text-shadow:0_0_16px_rgba(0,0,0,0.4)]",
+  shade: "np-shade-light",
+  wordNow: "text-zinc-950 scale-110 [text-shadow:0_0_16px_rgba(0,0,0,0.35)]",
   wordSung: "text-zinc-950",
   wordNext: "text-zinc-950/75",
+  chromeStrong: "text-zinc-950",
+  chromeButton: "text-zinc-950/60 hover:text-zinc-950 hover:bg-black/5",
+  chromeText: "text-zinc-950/60",
+  scrim: "",
 };
 
-/** The two ends the decision chooses between, as the luminances it is
- *  measured against: the white and the zinc-950 (#09090b) ink tokens. */
-const INK_LUM = { light: relLuminance([255, 255, 255]), dark: relLuminance([9, 9, 11]) };
+/** Relative luminance (WCAG) of one sRGB colour. */
+export function npLuminance(rgb: [number, number, number]): number {
+  const lin = (v: number) => {
+    const s = Math.max(0, Math.min(255, v)) / 255;
+    return s <= 0.03928 ? s / 12.92 : ((s + 0.055) / 1.055) ** 2.4;
+  };
+  return 0.2126 * lin(rgb[0]) + 0.7152 * lin(rgb[1]) + 0.0722 * lin(rgb[2]);
+}
 
-/** Where the pane flips polarity, as the luminance of the DOMINANT COVER
- *  COLOUR. The rule is luminance distance — whichever ink sits farther from
- *  the field's own brightness is the readable one — so the flip belongs
- *  where the two are equally far away: the mid-point of the two ink tokens.
- *  That is also why a mid-grey cover is the hard case rather than a special
- *  one. It lands within a hair of the flip, where both inks are equally far
- *  from the field, instead of being handed grey-on-grey the way a plain
- *  "was the cover dark?" test would.
+/** Where the two tables swap: the cover's own average luminance, in relative
+ *  terms. Chosen from the measured fields (`check_np_metadata_contrast.cjs`),
+ *  not from taste — a cover at or below this leaves the ambience dark enough
+ *  that white ink clears AA on EVERY patch the text sits on (so nothing is
+ *  drawn behind it), and a brighter one pushes the bloom cores past it. */
+export const NP_INK_FLIP = 0.42;
+
+/** The ink and the field lift ONE cover asks for.
  *
- *  The cover's luminance is the right input even though the field is not the
- *  cover: the ambience paints that colour back over the near-black page (the
- *  blurred cover layer is only 34 % opaque, but the orbs, glow and bloom add
- *  the same colour back screen-blended at the cover's own hue), so the field
- *  tracks the cover's brightness. Every ambience toggle can move it, and the
- *  ink must not flip when someone turns the color drift off — the cover
- *  colour is the only stable input.
- *
- *  White is 1.0 and zinc-950 is 0.003, so this is 0.501. */
-const INK_FLIP_LUM = (INK_LUM.light + INK_LUM.dark) / 2;
+ *  `scrim` is empty for a dark cover — the ask is that nothing at all sits
+ *  behind the text there — and a cover-tinted lift above the flip, strong
+ *  enough to hold the DARK table's contrast on the dimmest patch the text
+ *  covers (the metadata block at the bottom, where the vignette bites) while
+ *  leaving the bright cores untouched. */
+export function npInk(rgb: [number, number, number]): LyricInk & { scrim: string } {
+  const lum = npLuminance(rgb);
+  if (lum <= NP_INK_FLIP) return INK_ON_DARK;
+  // The strength has a FLOOR, and the floor is the point: what the dark table
+  // has to clear is the DIMMEST patch the text covers — the metadata block at
+  // the bottom, where the vignette bites — and that patch is dark no matter how
+  // bright the cover's AVERAGE is (a #b4b4b4 cover put it at rgb(80): 2.5:1 for
+  // near-black ink, measured). A curve that starts at zero at the flip left
+  // exactly that band unreadable, so the lift starts where the ink's floor is
+  // met (0.46, which takes rgb(80) past rgb(150) — 0.38 was measured at
+  // rgb(132), where the dark table's muted zinc-800 tier sat at 4.00:1, just
+  // short of its 4.5 floor) and grows to 0.62 on a pure-white cover. Numbers
+  // from tools/check_np_metadata_contrast.cjs, which covers dark, mid-grey,
+  // bright-grey and white covers.
+  const strength = Math.min(0.62, Math.max(0.46, (lum - NP_INK_FLIP) * 1.05));
+  const lift = rgb.map((v) => Math.round(v + (255 - v) * 0.72));
+  return {
+    ...INK_ON_LIGHT,
+    scrim: `linear-gradient(to bottom, rgb(${lift.join(" ")} / ${(strength * 0.85).toFixed(3)}), `
+      + `rgb(${lift.join(" ")} / ${strength.toFixed(3)}) 52%, `
+      + `rgb(${lift.join(" ")} / ${Math.min(0.75, strength * 1.08).toFixed(3)}))`,
+  };
+}
 
 // Size steps are deliberately close together: the active line reads slightly
 // larger than the rest, and the translation/transliteration sub-lines sit
@@ -309,6 +354,16 @@ export default function NowPlayingView(p: Props) {
     () => Number(localStorage.getItem(ZOOM_KEY)) || 1.5
   );
   const [karaoke, setKaraoke] = useState(() => localStorage.getItem(KARAOKE_KEY) === "1");
+  // The lyric offset the reader is dialling in, in ms (LyricOffset): a
+  // PREVIEW — the parsed line times below move with it, and Save writes the
+  // shift into the track's own lyrics. Not persisted per device like the size
+  // and zoom beside it, because it is not a display preference: it ends up in
+  // the FILE, and a value restored on the next visit would silently re-shift
+  // lyrics that were already corrected.
+  const [offsetMs, setOffsetMs] = useState(0);
+  // Track details & credits for whatever is playing (the options menu's entry;
+  // the player bar carries the same one as an ⓘ button).
+  const [detailsOpen, setDetailsOpen] = useState(false);
   const [orbs, setOrbs] = useState(() => localStorage.getItem(ORBS_KEY) !== "0");
   const [vis, setVis] = useState(() => localStorage.getItem(VIS_KEY) !== "0");
   // Frequency-bar visualizer (fullscreen + sidebar), default on.
@@ -446,12 +501,12 @@ export default function NowPlayingView(p: Props) {
     () => hexToRgbTriplet(coverHex) ?? [113, 113, 122],
     [coverHex]
   );
-  // The lyric pane's single ink decision, taken here because this is where the
-  // cover colour lives and no CSS in this stack can compare a colour against a
-  // luminance. Both memos are keyed to the colour rather than rebuilt per
-  // render: this component re-renders on every playback tick while lyrics are
-  // on screen.
-  const ink = useMemo(() => (relLuminance(rgb) > INK_FLIP_LUM ? INK_ON_LIGHT : INK_ON_DARK), [rgb]);
+  // The ONE polarity decision for the whole player, off the cover's own average
+  // colour — the value every ambience layer below is painted from. A dark cover
+  // takes the white table and draws NOTHING behind the text; a bright one flips
+  // to near-black ink and lifts the field with a scrim built from the cover's
+  // own colour (`npInk` carries both tables and the rule).
+  const ink = useMemo(() => npInk(rgb), [rgb]);
 
   // ---- background ambience (Apple Music-style, layered) --------------------
   // One value comes from the audio — the shared WebAudio analyser's bass-
@@ -647,8 +702,8 @@ export default function NowPlayingView(p: Props) {
   const staleLyrics = lyricsFor !== p.current.path;
   const tagsStale = tagsFor !== p.current.path;
   const lines: LrcLine[] = useMemo(
-    () => (lyricsText && !instrumental ? parsePlayerLrc(lyricsText) : []),
-    [lyricsText, instrumental]
+    () => (lyricsText && !instrumental ? parsePlayerLrc(lyricsText, offsetMs) : []),
+    [lyricsText, instrumental, offsetMs]
   );
   // Layout (cover sizing, pane presence) follows the on-screen lyrics even
   // while stale so next/previous never reflows the whole view.
@@ -913,38 +968,24 @@ export default function NowPlayingView(p: Props) {
   // Shared control blocks — the audio layout shows them under the cover;
   // the fullscreen-video layout overlays them at the bottom of the picture.
   //
-  // Every tier of the metadata block reads its colour from the SAME polarity
-  // decision the lyric pane uses instead of the fixed white/zinc steps it
-  // carried before. On a mid-grey cover (the case the pane's own rule is built
-  // around, where both inks are equally far from the field) the title's white
-  // read fine while "16/44.1" and the album/artist lines — zinc-500 and
-  // zinc-400 on that same field — sat barely above 2:1. `ink.active` is the
-  // pane's full-strength ink, `ink.dim` its faded step: brighter than the ink
-  // on a dark field, darker on a light one, so the tier is still a step down
-  // and still legible on both. `ink.shade` is the pane's glyph shadow, which
-  // only the dark polarity has — a light halo on a light field is an outline
-  // around every glyph, not legibility.
-  // ... and the pane's own VEIL, for the reason the pane has one: the polarity
-  // is decided from the COVER's colour, but the field this block actually sits
-  // on is the ambience — the page's near-black under a 34 % cover wash. A light
-  // cover therefore picks the light ink while the measured field beside the
-  // text is rgb(99,99,101): near-black on a dark field, 2.5:1, the same
-  // grey-on-grey failure the pane fixed by veiling its own reading surface. The
-  // veil moves the FIELD instead of the ink, so every tier keeps the step the
-  // table gave it (tools/check_np_metadata_contrast.cjs measures the pixels:
-  // the secondary lines read 8.8:1 on the mid-grey cover and 5.9:1 on the light
-  // one, against 2.7:1 and 2.5:1 before any veil existed).
-  // The veil's FORM is `np-veil-pill` (index.css), not the `bg-white/35` box it
-  // used to be: the same tint under a backdrop blur, spread past the box as a
-  // blurred halo. A tinted rounded rectangle under the title read as a grey
-  // button pasted under the artwork — the owner's report — and a fade inside
-  // the box is not an option: the contrast above is measured against the pixels
-  // just inside its edges, which is the field the widest rows reach.
+  // Every tier of the metadata block reads its colour from the player's ONE
+  // ink table (`INK`), and the block draws NOTHING of its own: no fill, no
+  // border, no blur, no halo. It used to carry `np-veil np-veil-pill` — a
+  // tinted, blurred, rounded box spread past its edges — and the owner rejected
+  // it outright: a grey button pasted under the artwork. The tint was there to
+  // move the FIELD so a fixed ink table could stay legible on the cover's
+  // polarity, which is the wrong lever. The ink is one table now (white,
+  // zinc-100, zinc-300) and the field is what gets darkened, once, for every
+  // cover — the full-bleed wash over the ambience (see the wash below).
+  // Measured by tools/check_np_metadata_contrast.cjs, which reads the pixels
+  // just inside the block's edges — the widest rows' own field: the title
+  // and the secondary tiers clear AA on the mid-grey and the white cover with
+  // no panel under them, only the wash and the glyph shadow.
   const textBlock = (
     /* Every text row keeps a fixed height and is ALWAYS rendered —
        blanking a row while the next track's tags load is what made
        the block (and the title itself) shake on next/previous. */
-    <div className={`text-center w-[26rem] max-w-full min-w-0 rounded-2xl np-veil np-veil-pill ${ink.shade}`}>
+    <div className={`text-center w-[26rem] max-w-full min-w-0 ${ink.shade}`}>
       <div className="h-8 flex items-center justify-center gap-2" title={title}>
         <div className={`text-2xl font-bold truncate ${ink.active}`}>{title}</div>
         <AdvisoryMark value={freshTags?.ITUNESADVISORY ?? p.current.advisory} />
@@ -966,10 +1007,10 @@ export default function NowPlayingView(p: Props) {
   );
   const transportRow = (
     <div className="flex items-center justify-center gap-2.5 flex-wrap">
-      <button aria-label="Shuffle" aria-pressed={p.shuffle} className={`p-2 rounded-lg transition-colors hover:bg-white/10 ${p.shuffle ? "text-accent" : "text-zinc-500"}`} onClick={p.onToggleShuffle} title="Shuffle">
+      <button aria-label="Shuffle" aria-pressed={p.shuffle} className={`p-2 rounded-lg transition-colors ${p.shuffle ? "text-accent" : ink.chromeButton}`} onClick={p.onToggleShuffle} title="Shuffle">
         <Shuffle className="h-4 w-4" />
       </button>
-      <button aria-label="Previous track" className="p-2.5 rounded-lg transition-colors hover:bg-white/10 text-white" onClick={() => p.onStep(-1)} title="Previous track">
+      <button aria-label="Previous track" className={`p-2.5 rounded-lg transition-colors ${ink.chromeStrong} hover:bg-black/5`} onClick={() => p.onStep(-1)} title="Previous track">
         <SkipBack className="h-5 w-5" />
       </button>
       <button
@@ -981,14 +1022,14 @@ export default function NowPlayingView(p: Props) {
       >
         {p.playing ? <Pause className="h-6 w-6" /> : <Play className="h-6 w-6 ml-0.5" />}
       </button>
-      <button aria-label="Next track" className="p-2.5 rounded-lg transition-colors hover:bg-white/10 text-white" onClick={() => p.onStep(1)} title="Next track">
+      <button aria-label="Next track" className={`p-2.5 rounded-lg transition-colors ${ink.chromeStrong} hover:bg-black/5`} onClick={() => p.onStep(1)} title="Next track">
         <SkipForward className="h-5 w-5" />
       </button>
-      <button aria-label="Repeat one" aria-pressed={p.loop} className={`p-2 rounded-lg transition-colors hover:bg-white/10 ${p.loop ? "text-accent" : "text-zinc-500"}`} onClick={p.onToggleLoop} title="Repeat one">
+      <button aria-label="Repeat one" aria-pressed={p.loop} className={`p-2 rounded-lg transition-colors ${p.loop ? "text-accent" : ink.chromeButton}`} onClick={p.onToggleLoop} title="Repeat one">
         <Repeat className="h-4 w-4" />
       </button>
       <button
-        className="p-2 rounded-lg transition-colors hover:bg-white/10 text-xs font-mono text-zinc-400 min-w-[46px]"
+        className={`p-2 rounded-lg transition-colors text-xs font-mono min-w-[46px] ${ink.chromeButton}`}
         onClick={() => p.onSpeedChange(nextSpeed(p.speed, 1))}
         title="Playback speed — [ slower · ] faster · 0 reset to 1×"
       >
@@ -1001,7 +1042,7 @@ export default function NowPlayingView(p: Props) {
       <button
         aria-label={p.liked ? "Unlike" : "Like this track"}
         aria-pressed={p.liked}
-        className={`p-2 rounded-lg transition-colors hover:bg-white/10 ${p.liked ? "text-accent" : "text-zinc-500 hover:text-zinc-300"}`}
+        className={`p-2 rounded-lg transition-colors ${p.liked ? "text-accent" : ink.chromeButton}`}
         onClick={p.onToggleLike}
         title={p.liked ? "Unlike" : "Like this track"}
       >
@@ -1011,7 +1052,7 @@ export default function NowPlayingView(p: Props) {
         <button
           aria-label="Add this track to a playlist"
           aria-expanded={plOpen}
-          className={`p-2 rounded-lg transition-colors hover:bg-white/10 ${plOpen ? "text-accent bg-white/10" : "text-zinc-500 hover:text-zinc-300"}`}
+          className={`p-2 rounded-lg transition-colors ${plOpen ? "text-accent" : ink.chromeButton}`}
           onClick={() => setPlOpen(!plOpen)}
           title="Add this track to a playlist"
         >
@@ -1054,7 +1095,7 @@ export default function NowPlayingView(p: Props) {
     </div>
   );
   const seekRow = (
-    <div className="flex items-center gap-2 text-xs text-zinc-400 w-[26rem] max-w-full px-2">
+    <div className={`flex items-center gap-2 text-xs w-[26rem] max-w-full px-2 ${ink.chromeText}`}>
       <span className="w-10 text-right font-mono tabular-nums">{fmtDuration(dispTime)}</span>
       <ScrubSeek
         videoPath={videoPath}
@@ -1124,10 +1165,11 @@ export default function NowPlayingView(p: Props) {
   );
 
   return (
-    /* `ink.veil` stamps the polarity tint on the ROOT: `--np-veil` inherits,
-       so the lyrics pane's veil and the metadata pill both read the cover's
-       ink decision (see index.css) instead of carrying their own. */
-    <div className={`fixed inset-0 z-50 overflow-clip ${ink.veil} ${videoPath ? "bg-transparent" : "bg-zinc-950"} ${videoPath && !chromeVisible ? "cursor-none" : ""}`}>
+    /* No polarity tint on the root anymore: the whole player draws its text on
+       the ambience through the wash below, and the only surfaces that still
+       frost anything are the floating menus, which pin their own tint
+       (`np-veil-dark np-veil-panel`, index.css). */
+    <div className={`fixed inset-0 z-50 overflow-clip ${videoPath ? "bg-transparent" : "bg-zinc-950"} ${videoPath && !chromeVisible ? "cursor-none" : ""}`}>
       {/* overflow-clip (not hidden): a hidden box is still a scroll container,
           so wheel / scrollIntoView can silently scroll the whole overlay and
           leave the view "stuck" half-rendered. Clip can never be scrolled. */}
@@ -1194,10 +1236,14 @@ export default function NowPlayingView(p: Props) {
         <div className="amb-grain absolute inset-0" />
         <div className="amb-vignette absolute inset-0" />
       </div>
-      {/* legibility wash — deliberately light so the color field stays
-          visible; only the very top and bottom darken, for the top bar and
-          the visualizer strip */}
-      <div className="absolute inset-0 bg-gradient-to-b from-zinc-950/45 via-zinc-950/10 to-zinc-950/70" />
+      {/* The field lift the chosen ink asks for — and NOTHING when it asks for
+          none, which is every cover dark enough for the white table: the
+          background is then the artwork's own ambience with nothing added, the
+          way the owner asked for it. A bright cover gets one full-bleed scrim
+          built from ITS OWN colour (never a grey), with no edge, rounding or
+          blur — a scrim, not a panel. `npInk` computes it, and
+          tools/check_np_metadata_contrast.cjs measures the result per cover. */}
+      {ink.scrim && <div className="absolute inset-0" style={{ background: ink.scrim }} />}
       </>
       )}
 
@@ -1393,6 +1439,38 @@ export default function NowPlayingView(p: Props) {
                       }}
                     />
                   </div>
+                  {/* The lyric offset sits with the size and zoom: all three
+                      are "how the lyrics are read". Save writes the shift into
+                      the track's own lyrics (tags / .lrc) — see LyricOffset. */}
+                  <div className="flex items-center gap-2 px-2 py-1.5 text-xs text-zinc-300">
+                    <span
+                      className="flex-1"
+                      title="Move every lyric line's timestamp until it lands with the track, then Save to write it into the file's lyrics. Untimed lines are never touched."
+                    >
+                      Offset
+                    </span>
+                    <LyricOffset
+                      path={p.current.path}
+                      ms={offsetMs}
+                      onChange={setOffsetMs}
+                      onSaved={(lrc) => setLyricsText(lrc)}
+                    />
+                  </div>
+                  <div className="text-[10px] uppercase tracking-wider text-zinc-500 px-1 pt-2 pb-1">This track</div>
+                  {/* Details and credits, one click from the player itself —
+                      the same modal the library row's ⓘ opens, over the
+                      fullscreen player (Modal is z-[60] against the player's
+                      z-50, which is exactly why it can be opened from here). */}
+                  <button
+                    className="w-full text-left px-2 py-1.5 rounded-md hover:bg-white/10 text-xs text-zinc-300 flex items-center gap-2"
+                    onClick={() => {
+                      setOptions(false);
+                      setDetailsOpen(true);
+                    }}
+                  >
+                    <Info className="h-3.5 w-3.5 text-zinc-500" />
+                    Track details &amp; credits…
+                  </button>
                   <div className="text-[10px] uppercase tracking-wider text-zinc-500 px-1 pt-2 pb-1">Background</div>
                   <label className="flex items-center gap-2 px-2 py-1.5 rounded-md hover:bg-white/10 cursor-pointer text-xs text-zinc-300">
                     <input
@@ -1594,24 +1672,16 @@ export default function NowPlayingView(p: Props) {
                 else if (lyricsScrollRef.current) lyricsScrollRef.current.scrollTop = 0;
               }}
             >
-              {/* The legibility veil — a decorative layer of the pane's own
-                  BOX, not of the scroller below, so it stays put while the
-                  lyrics scroll through it. It carries the tint this cover's
-                  polarity chose plus a backdrop blur and dissolves at every
-                  edge (index.css `np-veil-pane`): the lyrics keep the contrast
-                  step the ink table gave them, and the pane draws no panel
-                  over the artwork. */}
-              <div aria-hidden className="np-veil np-veil-pane absolute inset-0" />
               <div
                 ref={lyricsScrollRef}
-                /* No panel on the reading surface itself: what separates the
-                   glyphs from the cover is the veil above — a blurred tint,
-                   not a box (a `bg-white/35` rectangle here was what read as
-                   the grey slab in the owner's screenshot). The ink still
-                   carries its own half of the job: the scroller sets the glyph
-                   shadow for this polarity once (text-shadow inherits), and
-                   every line takes its colour from the same decision, so the
-                   ink is always the near-opposite of the field behind it. */
+                /* No panel and no tint on the reading surface: what separates
+                   the glyphs from the cover is the player's full-bleed wash
+                   (deep enough for white ink on every cover) plus the glyph
+                   shadow the scroller sets once here — text-shadow inherits, so
+                   every line reads it. A `bg-white/35` rectangle was the grey
+                   slab in the owner's screenshot, and the blurred tint that
+                   replaced it still read as a box over the artwork; both are
+                   gone. */
                 className={`relative flex-1 min-h-0 overflow-y-auto overscroll-contain px-6 py-5 no-scrollbar ${ink.shade} transition-opacity duration-300 ${
                   staleLyrics ? "opacity-50" : "opacity-100"
                 }`}
@@ -1739,6 +1809,19 @@ export default function NowPlayingView(p: Props) {
             })}
           </div>
         </div>
+      )}
+
+      {/* Track details & credits, opened from the options menu. Rendered from
+          inside the fullscreen player because that is where the click is: the
+          Modal layer is z-[60] against this view's z-50, so it lands on top
+          (the same reason the credits dialog could already be opened over the
+          player from a library row). */}
+      {detailsOpen && p.current && (
+        <DetailsDialog
+          albumPath={p.current.albumPath}
+          trackPath={p.current.path}
+          onClose={() => setDetailsOpen(false)}
+        />
       )}
 
     </div>

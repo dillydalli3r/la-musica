@@ -123,6 +123,112 @@ def lang_script(lang):
     return _SCRIPT_BY_LANG.get(str(lang or "").strip().lower().split("-")[0], "latin")
 
 
+# The scripts whose letters belong to ONE language, so the text itself states
+# it (kana is Japanese, hangul is Korean). Cyrillic and Han are deliberately
+# absent: they carry several languages each, which is exactly the case a
+# DECLARED language settles and a script cannot. Arabic is HERE, though it
+# carries Persian and Urdu too, because it is what the tag suffix has always
+# read (`TRANSLITERATION-AR-LATN`) and a reader of Arabic-script lyrics is
+# served by the same answer either way.
+_SCRIPT_LANG = {
+    "japanese": "ja", "hangul": "ko", "greek": "el", "hebrew": "he",
+    "arabic": "ar", "thai": "th", "devanagari": "hi", "georgian": "ka",
+    "armenian": "hy",
+}
+
+# MusicBrainz states a release's language as an ISO 639-3 code and its script as
+# an ISO 15924 one (``{"language": "jpn", "script": "Jpan"}``), and the app's own
+# tables are keyed by the 639-1 codes a LANGUAGE tag holds — so the two meet
+# here, in ONE map. It only exists at all because a Latin-script language is
+# the one thing a text cannot state about itself: English and German look
+# identical to a script test.
+_MB_LANG = {
+    "jpn": "ja", "eng": "en", "deu": "de", "ger": "de", "fra": "fr", "fre": "fr",
+    "spa": "es", "ita": "it", "por": "pt", "nld": "nl", "dut": "nl",
+    "kor": "ko", "zho": "zh", "chi": "zh", "rus": "ru", "ukr": "uk",
+    "ell": "el", "gre": "el", "heb": "he", "ara": "ar", "hin": "hi",
+    "tha": "th", "kat": "ka", "geo": "ka", "hye": "hy", "arm": "hy",
+    "fas": "fa", "per": "fa", "urd": "ur", "ben": "bn", "srp": "sr",
+    "bul": "bg", "mkd": "mk", "bel": "be", "pol": "pl", "tur": "tr",
+    "swe": "sv", "nor": "no", "dan": "da", "fin": "fi", "isl": "is",
+    "ice": "is", "ces": "cs", "cze": "cs", "slk": "sk", "slo": "sk",
+    "slv": "sl", "hrv": "hr", "hun": "hu", "ron": "ro", "rum": "ro",
+    "lit": "lt", "lav": "lv", "est": "et", "vie": "vi", "ind": "id",
+    "glg": "gl", "cat": "ca", "eus": "eu", "baq": "eu", "cym": "cy",
+    "wel": "cy", "gle": "ga", "iri": "ga", "lat": "la",
+}
+
+# Codes that state NOTHING about the lyrics, however official they look:
+# ``mul`` (several languages at once), ``und`` (undetermined), ``zxx`` (no
+# linguistic content), the collective/uncoded ranges — and the app's own empty
+# tag. MusicBrainz really answers ``mul`` (a compilation), and every one of
+# these means "ask something else" rather than "this is the language".
+_NO_LANGUAGE = ("", "mul", "und", "zxx", "mis", "qaa", "qbb", "qlg")
+
+
+def normalize_lang(code):
+    """One language code in the app's own shape — a bare lower-case 639-1 code,
+    or "" when the code states nothing.
+
+    Accepts what MusicBrainz gives (``jpn``), what a tag holds (``ja``,
+    ``ja-JP``, ``jpn; ja``, ``Japanese``'s own code) and every spelling the app
+    writes itself, so a declared language from any source can be compared to
+    another.
+    """
+    raw = str(code or "").strip().lower()
+    if not raw:
+        return ""
+    raw = re.split(r"[-,;/]", raw)[0].strip()
+    if raw in _NO_LANGUAGE:
+        return ""
+    return _MB_LANG.get(raw, raw)
+
+
+def declared_language(*codes):
+    """The first source that actually STATES a language, normalized — the
+    tracks' ``LANGUAGE`` tag (an import stamps MusicBrainz's own answer there,
+    and a run of this script stores the model's), then anything else a caller
+    has. "" when none of them says anything."""
+    for code in codes:
+        out = normalize_lang(code)
+        if out:
+            return out
+    return ""
+
+
+def detect_language(text, cfg=None, *declared):
+    """The language one track's lyrics are in, or "" when nothing can say.
+
+    The evidence, in the order it is trusted — and the order is about how much
+    each source is about THE LYRICS themselves:
+
+    1. a DECLARED language (the track's own ``LANGUAGE`` tag) whose script
+       agrees with the text's: an import writes MusicBrainz's
+       ``text-representation`` there, and an earlier run of this rule writes
+       what a model answered. A declared language the text's own script
+       CONTRADICTS is not evidence about this text and is passed over — the
+       lyrics are what is being transformed, and a wrong tag must never
+       romanize or skip the wrong thing;
+    2. the text's own SCRIPT, for the scripts that belong to one language
+       (kana → ja, hangul → ko, … — `_SCRIPT_LANG`);
+    3. the function words of the Latin languages a reader realistically
+       configures (`_latin_lang`), which is all the evidence a text with no tag
+       has.
+
+    "" is an ANSWER: script 17 takes it to the model per track and STORES the
+    answer, so the question is paid once and grading reads what was stored
+    (spec R167).
+    """
+    src = dominant_script(text)
+    for code in declared:
+        lang = declared_language(code)
+        if lang and lang_script(lang) == src:
+            return lang
+    if src != "latin":
+        return _SCRIPT_LANG.get(src, "")
+    return _latin_lang(text)
+
+
 def dominant_script(text):
     """The script family carrying most of the text's letters."""
     counts: dict = {}
@@ -237,7 +343,7 @@ def _in_reader_language(text, lang):
     return _latin_lang(text) in ("", str(lang or "").strip().lower())
 
 
-def xlit_needs(text, cfg):
+def xlit_needs(text, cfg, declared=""):
     """What this track's own lyrics still need stored — the ONE rule.
 
     Script 17 asks this before writing anything and the grader asks it before
@@ -254,21 +360,39 @@ def xlit_needs(text, cfg):
     * TRANSLATION is language-based — one that is already in the reader's
       language (the first entry of ``lyrics_translation_langs``) needs none,
       and a needed translation is wanted for every configured language,
-      which is what ``langs`` reports.
+      which is what ``langs`` reports. The language is
+      :func:`detect_language`'s answer, *declared* included: without it, two
+      Latin-script languages were separated by a function-word vote that can
+      only ever say "one of the seven the app knows" — a German track with no
+      English stopwords in it was skipped as already-English, and a Latin
+      transliteration of a Japanese song was translated as if the romanization
+      were the lyrics' own language. With it, the release's own language (the
+      import stamps MusicBrainz's) or the model's answer for this track decides
+      for real, and the vote is what answers a text with nothing else.
 
-    Returns ``{"transliteration": bool, "translation": bool, "langs": [...]}``
-    where ``langs`` is empty unless a translation is needed.
+    Returns ``{"transliteration": bool, "translation": bool, "langs": [...],
+    "language": str}`` where ``langs`` is empty unless a translation is needed
+    and ``language`` is what the decision was made from ("" when nothing could
+    say).
     """
-    out = {"transliteration": False, "translation": False, "langs": []}
+    out = {"transliteration": False, "translation": False, "langs": [],
+           "language": ""}
     if len(_body_lines(text)) < 2:
         return out
     reader = primary_translation_lang(cfg)
     src = dominant_script(text)
+    lang = detect_language(text, cfg, declared)
+    out["language"] = lang
     if non_latin_ratio(text) >= _LATIN_THRESHOLD and src != "latin" \
             and lang_script(reader) != src:
         out["transliteration"] = True
-    if not _in_reader_language(text, reader):
-        out["translation"] = True
+    if lang:
+        # A stated language decides it outright: the reader's own needs
+        # nothing, anything else does.
+        out["translation"] = lang != normalize_lang(reader)
+    else:
+        out["translation"] = not _in_reader_language(text, reader)
+    if out["translation"]:
         out["langs"] = translation_langs(cfg)
     return out
 
@@ -299,23 +423,18 @@ def primary_translation_lang(cfg):
 def xlit_tag_suffix(cfg, text, af=None):
     """Language detail for the TRANSLITERATION tag suffix.
 
-    Source language when knowable — the explicit LANGUAGE tag first, then
-    the dominant script for scripts unique to one language (kana → JA,
-    hangul → KO, …) — always with the -LATN target-script subtag, so the
-    tag reads like BCP-47: ``TRANSLITERATION-JA-LATN``. Plain ``LATN`` when
-    the source language can't be pinned down (Cyrillic and Han each map to
-    several languages)."""
+    Source language when knowable — the explicit LANGUAGE tag first (an import
+    writes MusicBrainz's own answer there, this script writes what a model
+    answered when nothing else could), then the dominant script for scripts
+    unique to one language (kana → JA, hangul → KO, …) — always with the
+    -LATN target-script subtag, so the tag reads like BCP-47:
+    ``TRANSLITERATION-JA-LATN``. Plain ``LATN`` when the source language can't
+    be pinned down (Cyrillic and Han each map to several languages)."""
     lang = ""
     if af is not None:
-        lang = str(af.get_tag("LANGUAGE") or "").strip().lower()
-        lang = re.split("[-,;]", lang)[0] if lang else ""
-    if lang in ("", "und", "zxx"):
-        script = dominant_script(text)
-        lang = {
-            "japanese": "ja", "hangul": "ko", "greek": "el", "hebrew": "he",
-            "arabic": "ar", "thai": "th", "devanagari": "hi",
-            "georgian": "ka", "armenian": "hy",
-        }.get(script, "")
+        lang = declared_language(af.get_tag("LANGUAGE"))
+    if not lang:
+        lang = _SCRIPT_LANG.get(dominant_script(text), "")
     return f"{lang}-latn" if lang else "latn"
 
 
@@ -469,6 +588,11 @@ def run_lyrics_xlit(config):
     # _drop_stored_transforms) — the reverse of the writes, and the only way
     # a stale tag from an older, laxer rule can be cleared.
     stats["stale_removed"] = 0
+    # Tracks whose lyrics' language was ASKED of the model and stored in the
+    # LANGUAGE tag (nothing else could state it) — the one thing this script
+    # writes that is not a transform, and what keeps the question from being
+    # asked again (spec R167).
+    stats["language_set"] = 0
 
     print_header("Lyrics Transliterate & Translate (AI)")
     force = bool(config.get("force_xlit", False))
@@ -529,8 +653,8 @@ def run_lyrics_xlit(config):
         freely.
         """
         row = {"transliterated": 0, "translated": 0, "latin_skipped": 0,
-               "identity_skipped": 0, "stale_removed": 0, "changed": False,
-               "error": ""}
+               "identity_skipped": 0, "stale_removed": 0, "language_set": 0,
+               "changed": False, "error": ""}
         try:
             af = AudioFile(path)
             if af.audio is None:
@@ -554,12 +678,39 @@ def run_lyrics_xlit(config):
                 return row
 
             changed = False
-            # What this track's own lyrics still need, from the ONE rule
-            # the grader asks too (xlit_needs): a transform the rule does
-            # not ask for is never written, so a re-run leaves an
-            # already-correct track untouched and grading can never
+            # WHAT LANGUAGE THESE LYRICS ARE IN (spec R167), from the evidence
+            # the app already has: the track's own LANGUAGE tag — an import
+            # stamps MusicBrainz's release language there — and the text's own
+            # script and function words. When neither can say (two
+            # Latin-script languages with no shared stopwords is the case
+            # that matters), the model is asked ONE question about this track,
+            # and its answer is WRITTEN into the tag: grading and every later
+            # run then read the same stored answer instead of asking again, and
+            # the grader never asks a model anything at all. Filled only —
+            # a tag another source stated (the import's MusicBrainz language,
+            # the user's own edit) is never overwritten.
+            tag_lang = str(af.get_tag("LANGUAGE") or "")
+            lang = detect_language(text, config, tag_lang)
+            if not lang:
+                try:
+                    from server import ai as ai_mod
+
+                    lang = ai_mod.detect_language(config, text)
+                except Exception:
+                    lang = ""
+                if lang and not normalize_lang(tag_lang):
+                    try:
+                        if af.set_tag("LANGUAGE", lang):
+                            row["language_set"] = 1
+                            changed = True
+                    except Exception:
+                        pass
+            # What this track's own lyrics still need, from the ONE rule the
+            # grader asks too (xlit_needs, with the language just resolved): a
+            # transform the rule does not ask for is never written, so a re-run
+            # leaves an already-correct track untouched and grading can never
             # disagree with what this loop decided.
-            need = xlit_needs(text, config)
+            need = xlit_needs(text, config, declared=lang)
 
             # ---- transliteration ------------------------------------
             if do_xlit:
@@ -652,7 +803,7 @@ def run_lyrics_xlit(config):
             _pbar_update(pbar, counts, "fail")
             return
         for key in ("transliterated", "translated", "latin_skipped",
-                    "identity_skipped", "stale_removed"):
+                    "identity_skipped", "stale_removed", "language_set"):
             stats[key] += row[key]
         if row.get("skipped"):
             stats["skipped_count"] += 1
@@ -691,6 +842,7 @@ def run_lyrics_xlit(config):
         f"transliterated {stats['transliterated']}"
         f" · translated {stats['translated']}"
         f" · stale removed {stats['stale_removed']}"
+        f" · language stored {stats['language_set']}"
         f" · latin-only skipped {stats['latin_skipped']}"
         f" · identical skipped {stats['identity_skipped']}"
         f" · unchanged {stats['unchanged_count']}"

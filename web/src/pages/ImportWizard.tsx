@@ -2550,7 +2550,6 @@ export default function ImportWizard() {
   // server answers only after the first render.
   const [runAfterImport, setRunAfterImport] = useState<number[] | null>(null);
   const runAfterImportIds = runAfterImport ?? chainOrder;
-  const [scriptsRunning, setScriptsRunning] = useState(false);
   const [runningTicked, setRunningTicked] = useState(false);
 // Last action's outcome, shown in the step: a toast is gone by the time you
 // look back at a chain that took a minute to run.
@@ -2641,109 +2640,6 @@ const runTickedHere = async () => {
   }
 };
 
-/** Run every configured post-import script on the new album(s) right now,
- *  without leaving the wizard: api.importFinish is the same chain the bulk
- *  queue and the Soulseek import run, and reports per-script errors. The
- *  checkboxes stay the "on Done" shortcut for a chosen subset.
- *
- *  Targets the album the wizard was opened on too (?album=), which is exactly
- *  the album an auto-import drops you into with nothing "uploaded". */
-const runAllScripts = async () => {
-  const targets = albumTargets();
-  if (!targets.length) {
-    toast("Import the files first — the chain runs on an imported album");
-    return;
-  }
-  setScriptsRunning(true);
-  setFinishMsg("Running the import chain…");
-  setRunRows(null);
-  let stillMissing: string[] = [];
-  let notFetched: string[] = [];
-  try {
-    beginRun(`Import chain — ${scriptChain?.chain?.length ?? 0} script(s) on ${targets.length} album(s)`);
-    const res = await api.importFinish(targets, {}, staged);
-    // The chain's beets tagging / organize steps rename the album folder to
-    // its canonical layout, so the path this wizard holds can be gone by the
-    // time the reply lands. The reply carries the folder the album is in NOW
-    // (server-side re-resolution), and it is in the same order as `targets`:
-    // adopt it, or "Open album" and every later step points at a directory
-    // that no longer exists.
-    if (res.albums.length) {
-      setUploaded((prev) =>
-        prev.length === res.albums.length
-          ? prev.map((u, i) => (res.albums[i]?.path ? { ...u, path: res.albums[i].path } : u))
-          : prev
-      );
-      const mine = res.albums[Math.min(albumIndex, res.albums.length - 1)];
-      if (mine?.path) setAlbumPath(mine.path);
-      // What the chain still could not finish, from the reply's own autonomy
-      // block (the same families the notification names): the banner then
-      // points at the step that decides each one instead of leaving the album
-      // looking finished.
-      stillMissing = Object.keys(mine?.autonomy?.missing ?? {}).filter((id) => id in FAMILY_STEP);
-      setMissingFamilies(stillMissing);
-      // Families this import was CONFIGURED not to fetch (a saved chain with no
-      // script 13, `genre_autofill` / `advisory_auto_fetch` off). They are not
-      // gaps — the grader does not require a family whose own writer is off —
-      // so the reply's own note is the only place the import says it, and the
-      // step repeats it rather than letting the album read as finished
-      // without them.
-      notFetched = mine?.skipped_families ?? [];
-      qc.invalidateQueries({ queryKey: ["importPrompts"] });
-    }
-    // The chain reports one result per chain id per album; the album is kept
-    // in the label so a multi-album queue stays readable.
-    const rows = res.albums.flatMap((a) =>
-      rowsFromResults((a.scripts ?? []) as ScriptRunResult[]).map((r) => ({
-        ...r,
-        label: res.albums.length > 1 ? `${baseName(a.path) || a.path} · ${r.label}` : r.label,
-      }))
-    );
-    setRunRows(rows);
-    // An album another job is already finishing is not a script error. The
-    // reply keeps one entry per path, so that album's own claim sentence
-    // arrives in its `errors` while the free albums ran — and reporting it as
-    // an error said the chain broke on an album where nothing ran at all. The
-    // sentence names the album itself, exactly as the single-album press
-    // reads it (`startProblem`), so it needs no prefix here.
-    const busy = res.albums.flatMap((a) =>
-      a.errors.filter((e) => alreadyRunning(String(e))).map((e) => String(e))
-    );
-    const errors = res.albums.flatMap((a) =>
-      a.errors.filter((e) => !alreadyRunning(String(e)))
-        .map((e) => `${baseName(a.path) || a.path}: ${String(e)}`)
-    );
-    const failed = rows.filter((r) => !r.ok && !r.skipped).length;
-    const busyLine = `already being finished on ${busy.length} album${busy.length > 1 ? "s" : ""} — ${busy.slice(0, 3).join("; ")}`;
-    toast(
-      errors.length || failed
-        ? `Import chain finished with ${failed || errors.length} script error(s): ${errors.slice(0, 3).join("; ") || rows.find((r) => r.error)?.error}`
-        : busy.length
-          ? `Import chain: ${busyLine}`
-          : `Import chain finished on ${targets.length} album(s) — progress shows at the top of the window`
-    );
-    setFinishMsg(
-      errors.length
-        ? `Import chain: ${errors.length} script error(s) — ${errors.slice(0, 3).join("; ")}`
-        : busy.length
-          ? `Import chain: ${busyLine}`
-          : `Import chain finished on ${targets.length} album${targets.length > 1 ? "s" : ""}` +
-            (stillMissing.length
-              ? ` — still missing ${stillMissing.map((id) => FAMILY_LABEL[id]).join(", ")}`
-              : "") +
-            (notFetched.length ? ` — not fetched: ${notFetched.join("; ")}` : "")
-    );
-    qc.invalidateQueries({ queryKey: ["library"] });
-    qc.invalidateQueries({ queryKey: ["album"] });
-    qc.invalidateQueries({ queryKey: ["coverInfo", albumPath] });
-  } catch (e) {
-    setFinishMsg(startProblem("Import chain", e));
-    toast.error(String(e));
-  } finally {
-    setAct(null);
-    setScriptsRunning(false);
-  }
-};
 
 const finish = async () => {
   try {
@@ -2844,6 +2740,18 @@ const finish = async () => {
   };
 
   const missingHere = missingFamilies.find((id) => FAMILY_STEP[id] === STEPS[step]) ?? null;
+  // WHAT KIND of gap this album's entry is, read off the one prompt row that
+  // is about THIS album: a REVIEW stop (`"stopped"`) really is holding the
+  // album for an answer — its chain has not run — while a family no source
+  // could supply is a warning on an album that already landed and is graded
+  // like any other (spec R166). The banner below says which.
+  const albumPromptReason = (() => {
+    const key = (albumPath || "").replace(/\\/g, "/").toLowerCase();
+    if (!key) return "";
+    const hit = importPrompts.find(
+      (p) => (p.album || "").replace(/\\/g, "/").toLowerCase() === key);
+    return hit?.reason || "";
+  })();
   // Minimum entry: this visit came from a prompt's own link, so the steps ask
   // for what is missing and nothing else. The live list, not the URL param:
   // answering the last gap (or Dismiss) ends the mode and hands the ordinary
@@ -2959,22 +2867,31 @@ const finish = async () => {
         }
       />
 
-      {/* ---- imports waiting on a decision -------------------------------
+      {/* ---- what an import could not supply ------------------------------
           One row per album an import could not finish (server.import_prompts,
           raised by the same call that raises the notification). "Decide" opens
           the album at the step that answers it; "Dismiss" stops the asking and
-          is not a resolution — the next import of the album recomputes it. */}
+          is not a resolution — the next import of the album recomputes it.
+          The header distinguishes the two kinds of entry, because they mean
+          different things: a REVIEW stop really is holding the album for an
+          answer (its chain has not run), while a family no source could supply
+          is a warning on an album that already landed — the album is in the
+          library and nothing about it waits (spec R166). */}
       {importPrompts.length > 0 && (
         <div className="panel p-3 space-y-1.5">
           <div className="text-xs font-semibold uppercase tracking-wider text-zinc-400">
-            Imports waiting on you ({importPrompts.length})
+            {importPrompts.some((p) => p.reason === "stopped")
+              ? `Imports waiting on you (${importPrompts.length})`
+              : `Imports still needing data (${importPrompts.length})`}
           </div>
           {importPrompts.map((p) => (
             <div key={p.album} className="flex items-center gap-2 flex-wrap text-xs">
               <span className="text-zinc-200 truncate max-w-[16rem]">{p.album_name}</span>
               <span className="text-amber-300/90 truncate">
                 {p.families.map((f) => f.label || FAMILY_LABEL[f.id] || f.id).join(", ")}
-                {p.reason === "stopped" ? " — import stopped there" : ""}
+                {p.reason === "stopped"
+                  ? " — the import stopped there; its chain has not run"
+                  : " — in the library, graded like any other album"}
               </span>
               <div className="ml-auto flex items-center gap-1.5">
                 <button className="btn-primary !py-1 !px-2 text-[11px] tap" onClick={() => openPrompt(p)}>
@@ -3036,9 +2953,15 @@ const finish = async () => {
           <div className="flex items-center gap-2 flex-wrap">
             <AlertTriangle className="h-3.5 w-3.5 text-amber-300 shrink-0" />
             <span className="text-amber-200">
-              This import could not finish: {missingFamilies.map((id) => FAMILY_LABEL[id]).join(", ")} still missing
+              {albumPromptReason === "stopped"
+                ? `This import is waiting for you: ${missingFamilies.map((id) => FAMILY_LABEL[id]).join(", ")} still missing`
+                : `Still missing: ${missingFamilies.map((id) => FAMILY_LABEL[id]).join(", ")}`}
             </span>
-            <span className="text-zinc-500">Decide each one, then Finish.</span>
+            <span className="text-zinc-500">
+              {albumPromptReason === "stopped"
+                ? "Decide each one, then Finish."
+                : "The album is in the library — decide each one to fill it in, or dismiss the ask."}
+            </span>
             <div className="ml-auto flex items-center gap-1.5">
               {missingFamilies.map((id) => {
                 const i = STEPS.indexOf(FAMILY_STEP[id]);
@@ -4583,29 +4506,23 @@ const finish = async () => {
               <button
                 className="btn-primary !py-1.5 text-xs tap"
                 onClick={runTickedHere}
-                disabled={runningTicked || scriptsRunning || (!albumPath && !uploaded.length)}
+                disabled={runningTicked || (!albumPath && !uploaded.length)}
                 title="Run exactly the ticked scripts above — the import chain until you change them — on this album, now"
               >
                 <Wand2 className={`h-3.5 w-3.5 ${runningTicked ? "animate-spin" : ""}`} />
                 {runningTicked ? "Running…" : "Run ticked scripts"}
               </button>
-              <button
-                className="btn-ghost !py-1.5 text-xs tap"
-                onClick={runAllScripts}
-                disabled={scriptsRunning || runningTicked || (!albumPath && !uploaded.length)}
-                title="Run the configured import chain — the same scripts a bulk or Soulseek import runs"
-              >
-                <Wand2 className={`h-3.5 w-3.5 ${scriptsRunning ? "animate-spin" : ""}`} />
-                {scriptsRunning ? "Running…" : "Run the import chain"}
-              </button>
               <span className="text-[10px] text-zinc-500">
-                Finish runs the ticked scripts; the second button re-runs the import chain itself. Run All over the
-                library is not here — it lives on the Optimization page and in the library's own menu.
+                Finish runs the ticked scripts. There is no "re-run the import chain" button here any more: the chain
+                re-runs the import's own steps (it re-fetches links, genres, cover art and the advisory, and empties
+                the arrived values of the four families the import decides), which undid exactly the work done by
+                hand in these steps — an album you just finished by hand is finished. The scripts alone can always be
+                re-run from the album page, and Run All over the library lives on the Optimization page.
               </span>
             </div>
             {/* The bar over the chain, plus one row per chain id: a script
                 error is text in the step, not a toast that has already gone. */}
-            {(runningTicked || scriptsRunning) && (
+            {runningTicked && (
               <div className="mt-2">
                 <ActionBar
                   active

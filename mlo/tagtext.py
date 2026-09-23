@@ -51,7 +51,9 @@ __all__ = [
     "collapse_spacing",
     "has_internal_space_run",
     "is_multiline",
+    "join_list",
     "spacing_problem",
+    "split_list",
 ]
 
 # --------------------------------------------------------------------------- #
@@ -235,6 +237,37 @@ def canonical_value(tag, value):
             return _LIST_SEP.join(rule(p) for p in parts)
         return value
     return rule(text)
+
+
+def join_list(values) -> str:
+    """Several answers for one field as the ONE stored spelling: "; "-joined.
+
+    A container that holds a single string per key stores a list through this
+    — a video's metadata block is that container (see
+    mlo.audio.set_video_tags) — and it is the same spelling every reader of a
+    REPEATED container field joins to, so one list has one meaning wherever it
+    lands. ``AudioFile.set_tag`` does NOT use it for audio: there a list is
+    written as repeated fields (Vorbis comments, ID3 text frames, MP4 atoms)
+    and this string is what a reader builds from them. A value that is not a
+    list is returned as its own string, so a caller may pass either shape.
+    """
+    if isinstance(values, (list, tuple, set)):
+        return _LIST_SEP.join(str(v).strip() for v in values if str(v).strip())
+    return "" if values is None else str(values)
+
+
+def split_list(value) -> list:
+    """The values a stored string holds: its "; "-separated parts.
+
+    The read-side twin of join_list — what a writer needs when it has to know
+    WHICH values a tag already states (mlo.autotag completing a credit list)
+    rather than the one string get_tag hands back. Only the exact separator
+    splits, the rule canonical_value keeps, so a ";" inside a URL is a
+    character and not a second value. No separator means one value; an empty
+    string means none.
+    """
+    text = "" if value is None else str(value)
+    return [part.strip() for part in text.split(_LIST_SEP) if part.strip()]
 
 
 def collapse_spacing(value) -> str:

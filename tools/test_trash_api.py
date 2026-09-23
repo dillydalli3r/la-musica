@@ -4,6 +4,12 @@ POST /api/trash/restore, POST /api/album/remove).
 
 Everything runs against a throwaway music folder under the system temp dir;
 the real configured music_folder is never listed, deleted or even opened.
+
+The bin's own size cap (server/cache_caps, `trash_cap_gb`) is checked here too:
+over it the OLDEST entries are deleted until the bin fits and it stops there,
+the entries a prune kept stay restorable (their origin records are intact),
+an under-cap bin loses nothing, 0 turns the cap off, and an entry a job holds is
+skipped and reported instead of deleted.
 Run: python tools/test_trash_api.py  (exit 0 pass, 1 fail)
 """
 import atexit
@@ -13,6 +19,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -58,6 +65,7 @@ atexit.register(_cleanup_redirect)
 
 from fastapi import HTTPException  # noqa: E402
 from server import main as mlo_main  # noqa: E402  (heavy import, only for this)
+from server import cache_caps, job_locks  # noqa: E402
 
 # --------------------------------------------------------------------------- #
 # fixture: a temp music folder with a .mlo/trash/default inside it (the
@@ -659,6 +667,139 @@ def test_delete_prunes_manifest_and_stale_origin():
         shutil.rmtree(os.path.join(MF, "Artists"), ignore_errors=True)
 
 
+# --------------------------------------------------------------------------- #
+# size cap (server/cache_caps): the bin's OWN cap — the download cache's cap is
+# a separate number and is never spent here. A throwaway music folder of its
+# own, so the suite's fixture (and its manifest) is untouched by a prune.
+# --------------------------------------------------------------------------- #
+CAP_MF = tempfile.mkdtemp(prefix="mlo-trash-cap-")
+CAP_BIN = os.path.join(CAP_MF, ".mlo", "trash", "default")
+atexit.register(lambda: shutil.rmtree(CAP_MF, ignore_errors=True))
+
+# The cap is a GB figure in the config (5 shipped), so a test-sized cap is a
+# FRACTION of one: 1 MB is 1/1024 GB, the same conversion the shipped default
+# goes through, and the files stay small enough to write in a blink.
+MB = 1024 * 1024
+CAP_GB = MB / (1024 ** 3)
+
+
+def cap_cfg(gb=CAP_GB):
+    return {"music_folder": CAP_MF, "trash_cap_gb": gb}
+
+
+def cap_entry(name, size, age):
+    """One bin entry of a known size and age, with the origin record the Trash
+    page restores from — written with the app's own manifest helpers, so this
+    suite exercises the file and schema restore really reads."""
+    path = os.path.join(CAP_BIN, name)
+    os.makedirs(path, exist_ok=True)
+    with open(os.path.join(path, "track.flac"), "wb") as f:
+        f.write(b"x" * size)
+    os.utime(path, (time.time() - age, time.time() - age))
+    records = mlo_main._manifest_read(CAP_BIN)
+    records[name] = {"origin": os.path.join(CAP_MF, "Artists", name).replace("\\", "/"),
+                     "at": time.strftime("%Y-%m-%dT%H:%M:%S")}
+    mlo_main._manifest_write(CAP_BIN, records)
+    return path
+
+
+def reset_cap_bin():
+    shutil.rmtree(CAP_BIN, ignore_errors=True)
+    os.makedirs(CAP_BIN)
+
+
+def prune_trash(cfg=None):
+    """The pass, run on a thread of its own with no job of its own — so a claim
+    held by THIS thread is a foreign claim to it (a job asking about its own
+    paths is never a conflict: server.job_locks.holder)."""
+    box = {}
+    t = threading.Thread(target=lambda: box.setdefault("res", cache_caps.prune_trash(cfg or cap_cfg())))
+    t.start()
+    t.join(30)
+    assert "res" in box, "the prune thread did not finish"
+    return box["res"]
+
+
+def test_cap_prunes_oldest_first():
+    reset_cap_bin()
+    oldest = cap_entry("Oldest Album", 400 * 1024, age=400)
+    older = cap_entry("Older Album", 400 * 1024, age=300)
+    newer = cap_entry("Newer Album", 400 * 1024, age=200)
+    newest = cap_entry("Newest Album", 400 * 1024, age=100)
+    res = prune_trash()
+
+    assert res["cap_bytes"] == MB, res["cap_bytes"]
+    assert res["before_bytes"] == 4 * 400 * 1024, res["before_bytes"]
+    # 1600 kB against a 1024 kB cap: the two oldest go and the loop stops the
+    # moment the bin fits, leaving the two newest alone
+    assert [r["name"] for r in res["removed"]] == ["Oldest Album", "Older Album"], res["removed"]
+    assert res["freed_bytes"] == 800 * 1024, res["freed_bytes"]
+    assert res["after_bytes"] == 800 * 1024, res["after_bytes"]
+    assert res["kept_in_use"] == [] and res["failed"] == [], res
+    assert res["removed"][0]["age_s"] >= 390 and res["removed"][1]["age_s"] <= 310, res["removed"]
+    assert not os.path.exists(oldest) and not os.path.exists(older), "an old entry survived"
+    assert os.path.isdir(newer) and os.path.isdir(newest), "a recent entry was deleted"
+    # the records of what went went with them; the survivors' records are
+    # intact, so those entries can still be put back where they came from
+    assert set(mlo_main._manifest_read(CAP_BIN)) == {"Newer Album", "Newest Album"}, \
+        mlo_main._manifest_read(CAP_BIN)
+
+    target = os.path.join(CAP_MF, "Artists", "Newest Album").replace("\\", "/")
+
+    def body(calls):
+        r = mlo_main.trash_restore(mlo_main.TrashRestore(names=["Newest Album"]))
+        assert r == {"restored": [{"name": "Newest Album", "to": target}], "failed": []}, r
+
+    real_cfg = mlo_main.load_config
+    mlo_main.load_config = lambda: {"music_folder": CAP_MF}
+    try:
+        with_cache_spies(body)
+    finally:
+        mlo_main.load_config = real_cfg
+    assert os.path.isfile(os.path.join(CAP_MF, "Artists", "Newest Album", "track.flac")), \
+        "an entry the prune kept could not be restored"
+    assert set(mlo_main._manifest_read(CAP_BIN)) == {"Newer Album"}, mlo_main._manifest_read(CAP_BIN)
+
+
+def test_cap_under_limit_deletes_nothing():
+    reset_cap_bin()
+    kept = cap_entry("Kept Album", 400 * 1024, age=3000)
+    res = prune_trash()
+    assert res["removed"] == [] and res["freed_bytes"] == 0, res
+    assert res["before_bytes"] == res["after_bytes"] == 400 * 1024, res
+    assert os.path.isdir(kept), "an under-cap bin was pruned"
+    assert set(mlo_main._manifest_read(CAP_BIN)) == {"Kept Album"}, mlo_main._manifest_read(CAP_BIN)
+
+
+def test_cap_zero_disables():
+    res = prune_trash({"music_folder": CAP_MF, "trash_cap_gb": 0})
+    assert res["cap_bytes"] == 0, res
+    assert res["removed"] == [] and res["freed_bytes"] == 0, res
+    assert os.path.isdir(os.path.join(CAP_BIN, "Kept Album")), "0 = off deleted something"
+    assert set(mlo_main._manifest_read(CAP_BIN)) == {"Kept Album"}, mlo_main._manifest_read(CAP_BIN)
+
+
+def test_cap_keeps_in_use():
+    """Entries a job holds are never taken — even when that leaves the bin over
+    its cap, which the report says instead of working around it."""
+    reset_cap_bin()
+    held = cap_entry("Held Album", 700 * 1024, age=400)
+    held2 = cap_entry("Also Held", 700 * 1024, age=350)
+    free = cap_entry("Free Album", 700 * 1024, age=300)
+    with job_locks.holding([held, held2], kind="restore", label="Restore from Trash"):
+        res = prune_trash()
+    assert [r["name"] for r in res["kept_in_use"]] == ["Held Album", "Also Held"], res["kept_in_use"]
+    assert all("Restore from Trash" in r["reason"] for r in res["kept_in_use"]), res["kept_in_use"]
+    assert os.path.isdir(held) and os.path.isdir(held2), "an entry in use was deleted"
+    # the loop steps over what it may not take and still deletes what it may
+    assert [r["name"] for r in res["removed"]] == ["Free Album"], res["removed"]
+    assert not os.path.exists(free), "the free entry was left behind"
+    # the cap is NOT met, and the records of what was kept are still there
+    assert res["after_bytes"] == 1400 * 1024 > res["cap_bytes"], res
+    assert set(mlo_main._manifest_read(CAP_BIN)) == {"Held Album", "Also Held"}, \
+        mlo_main._manifest_read(CAP_BIN)
+
+
 _real_refresh = mlo_main._refresh_slskd_shares_soon
 
 # state-mutating checks: order matters
@@ -690,6 +831,10 @@ for label, fn in [
     ("bad dest -> 400, nothing moved", test_bad_dest_is_400_and_moves_nothing),
     ("refused delete leaves the manifest untouched", test_refused_delete_keeps_manifest),
     ("delete prunes manifest, no stale origin reused", test_delete_prunes_manifest_and_stale_origin),
+    ("cap: over-cap prunes oldest first, keeps the rest restorable", test_cap_prunes_oldest_first),
+    ("cap: an under-cap bin loses nothing", test_cap_under_limit_deletes_nothing),
+    ("cap: 0 turns the cap off", test_cap_zero_disables),
+    ("cap: an entry in use is skipped and reported", test_cap_keeps_in_use),
 ]:
     check(label, fn)
 

@@ -128,8 +128,9 @@ export function advisoryLabel(value: string | number | null | undefined): string
 }
 
 /** The advisory source ids in a reader's words. The server reports WHICH stage
- *  spoke — a provider, the lyrics scan ("lyrics-scan", "(escalated)" when it
- *  overruled a provider that said 0), the ladder's last resort ("fallback") or
+ *  spoke — a provider that stated the value, the AI when no source stated
+ *  anything ("ai-lyrics" when it read the words, "ai" when the file held
+ *  none), the instrumental rule, the ladder's last resort ("fallback") or
  *  "existing-tag" for a value echoed off the file. Those ids are the server's
  *  vocabulary, not a user's: a bare "existing-tag" said nothing about the fact
  *  that nobody was asked at all. An id this map does not know keeps the
@@ -142,12 +143,10 @@ const ADVISORY_SOURCE_WORDS: Record<string, string> = {
   "itunes-song": "iTunes (song search)",
   "discogs-parental": "Discogs (parental advisory)",
   "youtube-age": "YouTube (age gate)",
-  "lyrics-scan": "the lyrics word scan",
-  "lyrics-scan (escalated)": "the lyrics word scan, overruling a provider that stated 0",
   "ai-lyrics": "the AI's read of the lyrics",
-  "ai-lyrics (escalated)": "the AI's read of the lyrics, overruling a provider that stated 0",
+  ai: "the AI (no lyrics in the file)",
   instrumental: "the track is instrumental",
-  fallback: "the configured fallback — nothing stated a value",
+  fallback: "the configured fallback — no source stated a value",
 };
 
 /** What the reply's per-path `status` adds to a line, for the two states the

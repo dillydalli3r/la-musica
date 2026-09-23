@@ -114,10 +114,31 @@ export interface Track {
   is_video?: boolean;
 }
 
+/** What an import could not supply for an album, if anything — one shape for
+ *  every surface that carries it (the album page's banner, the queue's
+ *  finished row, the wizard's own prompt banner; `server.import_autonomy
+ *  .warning`). `waiting` is the one distinction that matters to a reader: a
+ *  `"stopped"` import (review mode) really is holding the album for an answer
+ *  and its chain has not run, while everything else is a warning on an album
+ *  that already landed — nothing about it is held. `link` opens the wizard at
+ *  the album and at the step that decides the first missing family. */
+export interface NeedsWarning {
+  families: string[];
+  labels: string[];
+  link: string;
+  detail: string;
+  reason: string;
+  mode: string;
+  waiting: boolean;
+}
+
 export interface Album {
   path: string;
   error?: string;
   meta?: AlbumMeta;
+  /** Set when an import could not supply a family for this album (see
+   *  `NeedsWarning`). The album is IN the library either way. */
+  needs?: NeedsWarning;
   album_artist?: string | null;
   album_values?: Record<string, string>;
   grade_pct: number | null;
@@ -916,6 +937,11 @@ export interface HomeData {
   };
   recent: HomeAlbum[];
   top_rated: HomeAlbum[];
+  /** The user's own rated releases, highest rating first. The row carries the
+   *  stored rating in HALF-STARS — the API's own unit (0-10), which
+   *  `lib/ratings.ts` is the one place to turn into the 0-5 a reader sees — so
+   *  the shelf's order and the stars on its cards come from one number. */
+  rated?: (HomeAlbum & { rating: number })[];
   favorites: HomeAlbum[];
   discover: HomeAlbum[];
   top_artists: HomeArtist[];
@@ -934,6 +960,13 @@ export interface HomeArtist {
   grade_pct: number | null;
   cover_path: string;
   cover: string | null;
+  /** Whether an artist picture is stored for this folder, i.e. whether
+   *  `/api/artist/image` has bytes to answer with. The shelf draws the picture
+   *  when it is true and the cover when it is not: the endpoint 404s for a
+   *  folder without one, and a request that 404s paints the browser's broken
+   *  image before the fallback can replace it. Absent means the same as false
+   *  — never assume a picture is there. */
+  has_image?: boolean;
 }
 
 /** One Home shelf row: the LIBRARY's own album row plus the shelf's reason for

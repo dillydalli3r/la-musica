@@ -134,6 +134,17 @@ async def _lifespan(app: FastAPI):
     # Soulseek UPLOADS watcher: announces a peer starting to download from us
     # (see _soulseek_uploads_watch) — nothing else in the app watches uploads.
     threading.Thread(target=_soulseek_uploads_watch, daemon=True).start()
+    # Soulseek TRANSFER watcher: pushes the Downloads tab's own rows the moment
+    # slskd's byte counts move (see _soulseek_transfers_watch) — the page used
+    # to draw those bars from a 3 s poll of its own.
+    threading.Thread(target=_soulseek_transfers_watch, daemon=True).start()
+    # Size caps: prunes the download/staging/trash caches down to their
+    # configured ceilings (see server/cache_caps).
+    try:
+        from server import cache_caps
+        cache_caps.start()
+    except Exception as e:
+        print(f"[mlo] cache caps worker failed to start: {e}")
     yield
     # Stop taking new work first (the two workers above are the app's own
     # source of new jobs), then the honest part: wait — bounded — for whatever
@@ -150,6 +161,11 @@ async def _lifespan(app: FastAPI):
     try:
         from server import artist_watch_worker
         artist_watch_worker.stop()
+    except Exception:
+        pass
+    try:
+        from server import cache_caps
+        cache_caps.stop()
     except Exception:
         pass
     try:
@@ -444,6 +460,119 @@ def _soulseek_uploads_watch():
         except Exception:
             pass
         time.sleep(_ULSK_INTERVAL_S)
+
+
+# --------------------------------------------------------------------------- #
+# Live transfer progress push
+# --------------------------------------------------------------------------- #
+# The Downloads tab's bars were drawn from the page's own 3 s poll of
+# /api/soulseek/downloads. Measured on a scratch instance with a real 2 MB/s
+# transfer (fake slskd, see the report), the bar moved every 3.02 s and what it
+# showed sat on average 1.48 s — p90 2.79 s — behind the bytes slskd had
+# already counted, because a poll only ever reports the instant it ran. Bytes
+# move continuously, so the reader watches a bar that jumps and then sits
+# still. This watcher pushes the SAME rows the route returns the moment they
+# change, and the page draws those bars from the frame instead of its timer.
+#
+# Two cadences, because only moving bytes deserve 2.5 frames a second: while a
+# transfer is InProgress (or a job is running) slskd's tree is read every 0.4 s,
+# otherwise every 5 s — a queue slskd has not started yet costs the idle one. A
+# frame goes out only when something in it changed, and a pass with no UI socket
+# open costs no request at all. Measured after this landed, with a real 2 MB/s
+# transfer: the bar moved every 0.40 s and showed a value 0.17 s old on average
+# (p90 0.31 s), against 3.02 s and 1.48 s for the poll it replaced; 2.5 frames
+# of ~370 bytes a second, and 0 frames when nothing moved.
+_LIVE_INTERVAL_S = 0.4
+_LIVE_IDLE_INTERVAL_S = 5.0
+_LIVE = {"sig": None, "ids": frozenset(), "rows": {}}
+
+
+def _live_transfer_files(tree):
+    """Every file in slskd's transfer tree — the rows a bar is drawn from."""
+    return [f
+            for entry in (tree or [])
+            for d in (entry.get("directories") or [])
+            for f in (d.get("files") or [])]
+
+
+def _live_job_rows():
+    """Every live job's own progress, as its module publishes it.
+
+    The `progress` block is handed over verbatim: it is the same one
+    /api/soulseek/auto serves and the queue rows are built from, so a pushed
+    frame can never disagree with a refresh."""
+    from server import soulseek_auto
+    return [{
+        "id": job.get("id"),
+        "state": job.get("state"),
+        "stage": job.get("stage"),
+        "stage_key": job.get("stage_key"),
+        "progress": job.get("progress"),
+    } for job in soulseek_auto.jobs()]
+
+
+def _live_signature(files, jobs):
+    """What a frame is worth sending for: each transfer's own byte count and
+    state, plus each job's state and progress numbers."""
+    sig = [(f.get("id"), f.get("bytesTransferred"), f.get("state")) for f in files]
+    for job in jobs:
+        p = job.get("progress") or {}
+        sig.append((job["id"], job["state"], job["stage"], p.get("bytes"),
+                    p.get("files_done"), p.get("files_arrived")))
+    return tuple(sig)
+
+
+def _live_transfers_check():
+    """One push pass. Returns True when the caller should tick again quickly.
+
+    Fast is for bytes that are actually moving, plus the one pass after
+    anything changed — that extra pass is what carries a FINISHED transfer's
+    state flip out at 0.4 s instead of waiting out the idle tick. A queue full
+    of transfers slskd has not started yet has no bytes to report, so it costs
+    the idle cadence; a stalled InProgress one keeps it, because it is the
+    thing the page is showing."""
+    global _LIVE
+    with _progress_lock:
+        if not progress_clients:
+            # Nobody is watching: no daemon query at all, and the memo is left
+            # alone so the next client gets a fresh comparison (the same rule
+            # _soulseek_check follows for the status dot).
+            return False
+    from server import soulseek
+    try:
+        files = _live_transfer_files(soulseek.downloads_state())
+    except Exception:
+        # A daemon that is down has no transfers to report. That is not worth
+        # a frame of its own — the status watcher already tells the page the
+        # daemon went away — and it must not make this loop loud.
+        files = []
+    jobs = _live_job_rows()
+    moving = any("InProgress" in str(f.get("state") or "") for f in files)
+    busy = any(j["state"] in ("running", "confirm") for j in jobs)
+    sig = _live_signature(files, jobs)
+    if sig == _LIVE["sig"]:
+        return moving or busy
+    ids = frozenset(f.get("id") for f in files)
+    rows = {f.get("id"): (f.get("bytesTransferred"), f.get("state")) for f in files}
+    # Only the rows that moved, plus one flag for the list changing shape: a
+    # slskd tree holds the whole history, and shipping every completed
+    # transfer 2.5 times a second would be paid for by a phone on Wi-Fi.
+    changed = [f for f in files if _LIVE["rows"].get(f.get("id")) != rows[f.get("id")]]
+    resync = ids != _LIVE["ids"]
+    _LIVE = {"sig": sig, "ids": ids, "rows": rows}
+    _broadcast({"type": "transfers", "files": changed, "jobs": jobs,
+                "resync": resync})
+    return True
+
+
+def _soulseek_transfers_watch():
+    while True:
+        live = False
+        try:
+            live = _live_transfers_check()
+        except Exception:
+            pass
+        time.sleep(_LIVE_INTERVAL_S if live else _LIVE_IDLE_INTERVAL_S)
 
 
 # --------------------------------------------------------------------------- #
@@ -1320,6 +1449,19 @@ def get_album(path: str = Query(...), staged: bool = Query(False)):
     res = lib_mod.build_album(p, load_config())
     if res is None:
         raise HTTPException(404, "no audio files")
+    # What an import could not supply for this album, if anything: the same
+    # entry the queue's own row and the bell carry (`server.import_autonomy`),
+    # in the same shape, so the page says "needs data" with the wizard link
+    # instead of leaving the reader to infer it from grading failures. Asked
+    # HERE and not inside `build_album`: the library page builds hundreds of
+    # albums through that one, and an entry asks the grader a question.
+    try:
+        from server import import_autonomy
+        entry = import_autonomy.for_album(p, load_config())
+        if entry:
+            res["needs"] = import_autonomy.warning(entry)
+    except Exception:
+        traceback.print_exc()
     return res
 
 
@@ -6784,10 +6926,12 @@ def mb_advisory_fetch(req: AdvisoryFetchRequest):
     exact-title song search), merged by `integrations.merge_advisory`: 1 when
     any source states explicit, else 0 — an unstated advisory is written as 0,
     and `answers` is what shows whether any source actually spoke. A `cleaned`
-    Apple entry states nothing and is never written. A provider that stated 0
-    is not final: when the track's own words carry explicit language, the
-    lyrics stages escalate it to 1 and the reported source names the signal
-    ("lyrics-scan (escalated)"), never the provider it overruled.
+    Apple entry states nothing and is never written. A provider that STATED a
+    value ends the question: it is written as it stands, with that provider's
+    provenance, and the AI is not asked to second-guess it — a stated 0 is
+    final. When nobody stated anything, `mlo.advisory.decide_advisory` runs the
+    ladder (an instrumental is 0, then the configured AI, then
+    `advisory_fallback`) and the reported source names the stage that answered.
 
     An existing valid 0/1/2 is echoed, not re-asked, and the echo carries its
     provenance (`sources[path] = "existing-tag"`, `status[path] = "existing"`)

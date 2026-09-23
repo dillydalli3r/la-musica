@@ -18,6 +18,7 @@ import CreditsFooter from "./components/Credits";
 import NotificationBell from "./components/NotificationBell";
 import ShortcutsOverlay from "./components/Shortcuts";
 import { applyConfigLocale, useI18n, type MessageKey } from "./lib/i18n";
+import { publishTransfers } from "./lib/notifications";
 
 // Route-level code splitting: only the landing page ships in the initial
 // bundle, every other page is fetched on first visit. Without this the whole
@@ -68,7 +69,7 @@ import type { OfflineInfo } from "./api";
 
 import PlayerBar from "./components/PlayerBar";
 import { ProgressInline } from "./components/ProgressBar";
-import { PendingMark } from "./components/Badges";
+import { EmptyState, PendingMark } from "./components/Badges";
 
 // Sidebar sections: a long flat list of 14 entries is hard to scan, so the
 // rail groups them by what the user is doing (browse / acquire / maintain)
@@ -689,6 +690,15 @@ export default function App() {
             qc.invalidateQueries({ queryKey: ["soulseekStatus"] });
             return;
           }
+          if (p?.type === "transfers") {
+            // Live transfer progress (see server/main.py's transfer watcher).
+            // Handed to the store the Soulseek page draws its bars from — NOT
+            // invalidated, because a byte count changing four times a second
+            // must not refetch anything, and never routed through the
+            // notification tray (lib/notifications.ts keeps the two apart).
+            publishTransfers(p);
+            return;
+          }
           if (typeof p?.done !== "number") return; // ping / non-progress frame
           // Through getState, not a hook value: App does not subscribe to
           // `progress` (see LiveProgress), so a frame repaints the bar alone.
@@ -1209,11 +1219,18 @@ export default function App() {
             <Route
               path="*"
               element={
-                <div className="p-10 text-center text-sm text-zinc-500">
-                  {t("page.not_found")} —{" "}
-                  <NavLink to="/library" className="text-accent-soft hover:underline">
-                    {t("nav.library")}
-                  </NavLink>
+                /* The app's own empty state, which is the affordance it was
+                   built for: a 404 is a dead end, so it gets the same glyph,
+                   the same voice and a way back to the library — the bare
+                   "Page not found — Library" line sat 40 px under the top of an
+                   otherwise empty pane, which read as a page that failed to
+                   load rather than as a route that does not exist. */
+                <div className="p-6">
+                  <EmptyState
+                    title={t("page.not_found")}
+                    hint="This address does not lead to a page in the app."
+                    action={{ label: t("nav.library"), to: "/library" }}
+                  />
                 </div>
               }
             />

@@ -30,6 +30,25 @@ names the candidates and their durations), so the same bell, the same API and
 the same queue row carry it, and :func:`prompts` re-derives it from the
 structure itself: the question is open while the app would still refuse to pick
 (`_video_still_needs`).
+
+A WAIT is not a WARNING, and the difference is what the album does while an
+entry stands. A **review stop** (`reason == "stopped"`) and a **video prompt**
+(``kind == VIDEO_KIND``) are waits: a person is answering, or a disc structure
+is about to be remuxed, and a script chain that rewrites the folder in the
+meantime half-writes the very release they are working on. :func:`chain_scope`
+is that guarantee — the library-wide chain run (`server.script_runners.run_chain`,
+the one seam all of them pass) asks it which albums it may touch, so a sweep of
+the library leaves a waiting album exactly as it is and says which ones it left
+alone, while a run that names its albums (the person's own press, an import
+finishing the album it names) is not filtered.
+
+Everything else an entry stands for — a family no source could supply
+(`reason == "missing"`) — is a WARNING, not a wait. The import ran to its end:
+the album is in the library, the release's row is FINISHED, the chain that would
+finish it has run, and the gap is announced on the one bell, shown on the
+finished queue row with the wizard link and the dismiss, and re-derived on read
+like any other entry. Nothing is held, nothing waits for the user, and no run
+skips the album because of it (R166).
 """
 
 import json
@@ -137,11 +156,21 @@ def _link(album, families):
 
 
 def title(entry):
-    """The notification's headline: which album, and that it wants a person."""
+    """The notification's headline: which album, and what it wants.
+
+    A family no source could supply is NOT a decision anyone is waiting on:
+    the import ran to its end, the album is in the library, and the gap is a
+    warning — so the headline says what the album needs instead of "needs a
+    decision", which reads as a held import (and was one, while a prompt
+    parked the album; see `parked_keys`). A review stop keeps that wording:
+    there a person really is mid-decision and the chain has not run.
+    """
     name = entry.get("album_name") or "album"
     if entry.get("kind") == VIDEO_KIND:
         return f"Which title is the main feature: {name}"
-    return f"Import needs a decision: {name}"
+    if str(entry.get("reason") or "") == "stopped":
+        return f"Import needs a decision: {name}"
+    return f"{name} — needs extra data"
 
 
 def body(entry):
@@ -149,8 +178,57 @@ def body(entry):
     return "; ".join(_line(f) for f in entry.get("families") or [])
 
 
+def warning(entry):
+    """One entry, in the shape EVERY surface carries it (the ONE vocabulary).
+
+    The queue's row (`server.api_queue`), the album page's own banner
+    (`GET /api/album`) and the wizard's prompt banner all read this, so a gap
+    can never be described one way in the list and another on the page it
+    links to. ``families``/``labels`` are the wizard's own ids and labels in
+    its own order (the ids are what its ``?missing=`` parameter takes),
+    ``link`` is the wizard opened AT this album and at the step that decides
+    the first of them, ``detail`` is the sentence the notification body is
+    made of, and ``reason``/``mode`` say which kind of entry it is: a
+    ``"stopped"`` import is WAITING for the answer (review mode), anything
+    else is a warning on an album that already landed (R166).
+    """
+    families = [f for f in (entry.get("families") or []) if isinstance(f, dict)]
+    return {
+        "families": [str(f.get("id") or "") for f in families],
+        "labels": [str(f.get("label") or "") for f in families],
+        "link": str(entry.get("link") or ""),
+        "detail": body(entry),
+        "reason": str(entry.get("reason") or ""),
+        "mode": str(entry.get("mode") or ""),
+        "waiting": _awaits_answer(entry),
+    }
+
+
+def _live(entry, cfg):
+    """Whether a STORED entry still stands — the ONE test `prompts` and
+    `for_album` share, so an entry the list would drop is an entry the album
+    page cannot find either.
+
+    An album whose folder is gone no longer stands (a link to a folder that is
+    gone is a dead end, and re-importing the album is what raises the prompt
+    again); a video prompt stands while the app would still refuse to pick; a
+    family gap stands while any of the families it named is still missing
+    (`missing_now`). A gap whose answer cannot be re-derived (the folder is
+    unreadable, the grader raised) STANDS: silence is not the same as answered.
+    """
+    if not isinstance(entry, dict):
+        return False
+    if not os.path.isdir(str(entry.get("album") or "")):
+        return False
+    if entry.get("kind") == VIDEO_KIND:
+        return _video_still_needs(str(entry.get("album") or ""), cfg)
+    named = _ids(entry)
+    now = missing_now(str(entry.get("album") or ""), cfg) if named else None
+    return not (now is not None and not (set(named) & now))
+
+
 def prompts(cfg=None):
-    """Every album waiting on the user, newest first.
+    """Every album with an OPEN entry, newest first.
 
     Two kinds of entry are dropped instead of listed, and both are the same
     statement — the condition the prompt announced no longer holds:
@@ -167,30 +245,14 @@ def prompts(cfg=None):
       may never come.
 
     A prompt whose gap cannot be re-derived (the folder is unreadable, the
-    grader raised) is KEPT: silence is not the same as answered.
+    grader raised) is KEPT: silence is not the same as answered. `_live` is
+    that whole test, shared with `for_album`.
     """
     path = _path(cfg)
     if not path or not os.path.isfile(path):
         return []
     data = _load(path)
-    live = {}
-    for k, v in data.items():
-        if not isinstance(v, dict) or not os.path.isdir(str(v.get("album") or "")):
-            continue
-        if v.get("kind") == VIDEO_KIND:
-            # A video prompt announces a disc structure the app could not pick
-            # a feature from, so THAT is its condition: still open while the
-            # structure is there and still refuses, withdrawn once the app can
-            # pick (or the structure is gone — the remux consumed its
-            # streams). Re-derived like a family gap, for the same reason.
-            if _video_still_needs(str(v.get("album") or ""), cfg):
-                live[k] = v
-            continue
-        named = _ids(v)
-        now = missing_now(str(v.get("album") or ""), cfg) if named else None
-        if now is not None and not (set(named) & now):
-            continue                    # every family it named is supplied
-        live[k] = v
+    live = {k: v for k, v in data.items() if _live(v, cfg)}
     if live != data:
         _save(path, live)
     return sorted((dict(v, id=k) for k, v in live.items()),
@@ -376,11 +438,23 @@ def missing_now(album_dir, cfg=None):
 
 
 def for_album(album_dir, cfg=None):
-    """This album's pending prompt ({} when there is none)."""
+    """This album's open entry ({} when there is none).
+
+    Reads ITS entry and asks `_live` about it — the same test the list uses, so
+    the two can never disagree — without re-deriving every other album's gap.
+    The album page asks this on every load (`GET /api/album`'s `needs`), and an
+    album page must not pay a grade for each of the library's other open gaps;
+    `prompts` still walks them all for the views that show them.
+    """
+    if not album_dir:
+        return {}
     path = _path(cfg)
     if not path or not os.path.isfile(path):
         return {}
-    return dict(_load(path).get(_key(album_dir)) or {})
+    entry = _load(path).get(_key(album_dir))
+    if not _live(entry, cfg):
+        return {}
+    return dict(entry)
 
 
 def clear(album_dir, cfg=None):
@@ -397,6 +471,120 @@ def clear(album_dir, cfg=None):
     return True
 
 
+# --------------------------------------------------------------------------- #
+# A WAIT is not a WARNING
+# --------------------------------------------------------------------------- #
+def _awaits_answer(entry):
+    """Whether this entry is a WAIT — an album a run must leave alone — rather
+    than a WARNING on an album that is already finished.
+
+    Two entries are waits. A **video prompt** (`kind == VIDEO_KIND`) stands for
+    a disc structure the app could not pick a feature from: the remux it
+    belongs to has not happened, so its files are about to change. A **review
+    stop** (`reason == "stopped"`) is a person mid-decision in the wizard, with
+    the chain not yet run — the half-answered album a sweep must not rewrite.
+
+    A family no source could supply (`reason == "missing"`) is NOT a wait: the
+    import ran to its end, the album is in the library and graded like any
+    other, and what is left is a warning the queue shows on its finished row
+    and the bell announces. Holding such an album back from a library-wide run
+    was the app treating a warning as a lock — and it did exactly that until
+    the owner hit it: an album imported with a cover missing was skipped by
+    Run All with no way to tell it apart from one still being written.
+    """
+    if not entry:
+        return False
+    return (entry.get("kind") == VIDEO_KIND
+            or str(entry.get("reason") or "") == "stopped")
+
+
+def parked_entry(album_dir, cfg=None):
+    """The prompt standing for ONE album, when it is a WAIT ({} otherwise).
+
+    `prompts()` is the ONE definition of "the gap is still open" — it drops an
+    entry whose folder is gone and one whose families have since been supplied
+    — so this asks that and forms no second opinion, then asks
+    `_awaits_answer` whether the open gap is a wait or a warning. Cheap for the
+    caller: one file read plus the re-derivation the list already memoises.
+    """
+    if not album_dir:
+        return {}
+    key = _key(album_dir)
+    for entry in prompts(cfg):
+        if str(entry.get("id") or "") == key:
+            return entry if _awaits_answer(entry) else {}
+    return {}
+
+
+def parked_keys(cfg=None):
+    """Every album a run must not touch right now, in the store's own key shape.
+
+    Only the WAITS (see `_awaits_answer`): a finished import that is short of a
+    family is a normal library album with a warning on it, and `chain_scope`
+    below is what would otherwise skip it.
+    """
+    return frozenset(str(e.get("id") or "") for e in prompts(cfg)
+                     if _awaits_answer(e))
+
+
+def chain_scope(targets, cfg=None):
+    """``(kept, dropped, note)`` — the albums a chain run may touch.
+
+    A chain over an album whose import is WAITING on a person is how a
+    half-answered release gets half-written: the person is mid-decision in the
+    wizard (a review stop), or a disc structure is about to be remuxed. So a
+    run that DISCOVERS its own albums — the library-wide sweep (`Run All`, a
+    chain with no targets: `server.script_runners.run_chain` collects the whole
+    library and every script walks it) — is narrowed to the albums that are not
+    waiting, and ``note`` says which were left alone: a skip nobody is told
+    about is the same as a silent overwrite.
+
+    What "waiting" means is `parked_keys`' own answer, and it is deliberately
+    NOT "has a prompt": an album a finished import reported a missing family
+    for is in the library, graded and ordinary — the gap is a warning on its
+    queue row and in the bell, not a lock. Skipping it made a warning read as
+    an unfinished import to anyone watching a Run All (R166).
+
+    *targets* is the run's own scope (``None``/empty = the sweep), and targets
+    come back UNCHANGED whenever nothing is waiting, so a sweep stays a sweep
+    and an album-scoped run stays scoped.
+
+    A run that NAMES its albums is deliberately not filtered, whoever started
+    it. `/api/import/finish` and the wizard's ticked scripts are the person's
+    own press — the way a park gets resolved — and an import (`finish_album`,
+    every path of it) is finishing the album it names: its own steps run first
+    and rewrite that album either way (`drop_arrived_values` empties the
+    families the import is about to decide), so filtering only its chain would
+    leave the album emptied and not refilled — the half-write this rule exists
+    to prevent. What an import never does is touch an album it was not asked
+    about: its chain is scoped to its own folder (R89), and a same-release
+    re-download is refused before any of this (R89's identity check).
+    """
+    parked = parked_keys(cfg)
+    if not parked:
+        return targets, [], ""
+    scope = [str(t) for t in (targets or []) if str(t).strip()]
+    if scope:
+        return targets, [], ""
+    # A sweep. Its scope is the library itself, so what it may not touch is
+    # every album inside it that is WAITING — the rest of the library is still
+    # swept, which is the difference between "this album is being answered" and
+    # "the run does nothing".
+    from mlo.stats import _find_albums
+
+    folder = str((cfg or {}).get("music_folder") or "").strip()
+    albums = _find_albums(folder) if folder and os.path.isdir(folder) else []
+    kept = [a for a in albums if _key(a) not in parked]
+    dropped = [a for a in albums if _key(a) in parked]
+    if not dropped:
+        return targets, [], ""
+    note = (f"{len(dropped)} album(s) are waiting on you — left untouched by "
+            f"this run: " + ", ".join(os.path.basename(os.path.normpath(d)) or d
+                                      for d in dropped[:5])
+            + (" …" if len(dropped) > 5 else ""))
+    return kept, dropped, note
+
+
 def raise_prompt(album_dir, cfg, missing, *, mode="automatic", reason="missing"):
     """Store and announce what this album is still missing.
 
@@ -404,6 +592,12 @@ def raise_prompt(album_dir, cfg, missing, *, mode="automatic", reason="missing")
     answer, so what the notification names is exactly what grading fails. An
     empty *missing* clears the album's entry — the import that resolved the
     gaps is the same call that withdraws the prompt.
+
+    What it raises is a WARNING, not a hold: the import has already finished and
+    the album is in the library, so nothing about the album waits for the user
+    (`_awaits_answer` is the line, and a family gap is on the warning side of
+    it). The gap is announced once, listed on the album's own finished queue row
+    with the wizard link, and re-derived on read until it is supplied.
 
     The SAME gap raised again is not a new outcome and does not repeat the
     notification: an album re-imported (a re-run, a script chain that still

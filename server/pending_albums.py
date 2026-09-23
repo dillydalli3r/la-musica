@@ -432,7 +432,8 @@ def _adopt_deferred(deferred, folder):
 
 
 def create(release, cfg=None, *, source=SOURCE, queries=None, title="",
-           artist="", year="", cover=True, prefetch=True, deferred=None):
+           artist="", year="", cover=True, prefetch=True, deferred=None,
+           candidates=None):
     """Create the framework album for *release* and queue its wish.
 
     Idempotent: a folder that already holds audio is left exactly as it is
@@ -458,10 +459,21 @@ def create(release, cfg=None, *, source=SOURCE, queries=None, title="",
 
     `prefetch` is the add-time page content (`prefetch_content`): on, the
     folder's description, artist artwork, links and ranked cover candidates are
-    fetched the moment the album is added, so the album's page renders real
-    content while the search runs. A batch caller (`mode="all"`, a discography)
-    passes False and runs `prefetch_content(..., background=True)` per album
-    afterwards instead — one request must not become dozens of provider calls.
+    fetched before this call returns, so the album's page renders real content
+    while the search runs. NO REQUEST passes it: those provider calls measured
+    10-20 s of an add's own latency (`server.api_add._create_all` — the cover
+    search, the RateYourMusic link lookup and the MusicBrainz metadata step)
+    for content that only an OPENED page ever reads, so the route writes the
+    record and then runs `prefetch_content(folder, cfg, background=True)`. It
+    stays a parameter for a caller that does want the content in hand before
+    its next line (the tests that assert what the marker then carries).
+
+    `candidates` is the ranked fallback list the caller resolved for this
+    release's GROUP (`integrations.group_targets`): every eligible edition best
+    first, `release`'s own id first. It is recorded on the wish, and the search
+    walks it in that order when the network does not have the edition it
+    started with (spec R150). Omitted, the wish has ONE candidate — its own key
+    — and behaves exactly as it did before the walk existed.
     """
     from server import wishes
 
@@ -510,6 +522,16 @@ def create(release, cfg=None, *, source=SOURCE, queries=None, title="",
         wish = wishes.add_wish(rid or rgid, title=title, artist=artist, year=year,
                                note="Added to the library from MusicBrainz.",
                                target_dir=folder, queries=queries, source=source)
+    if wish and candidates:
+        # The ranked fallback (spec R150) the caller resolved from the release
+        # GROUP — every eligible edition, best first. It is the same list the
+        # row the album was created from carried, so the search starts on the
+        # best edition and can move on without another MusicBrainz browse. The
+        # store only ever FILLS an empty list (`wishes.set_candidates`), so a
+        # wish already walking its own editions cannot be reordered by a
+        # re-add, and a re-add of an ENDED wish starts a fresh walk
+        # (`wishes.rearm`).
+        wishes.set_candidates(wish["id"], candidates)
     row["wish_id"] = wish["id"] if wish else None
 
     os.makedirs(folder, exist_ok=True)
@@ -873,6 +895,70 @@ def remove_for_wish(wish_id, cfg=None):
             return remove_folder(cand)
     return False
 
+
+def framework_for_release(release, cfg=None, *, wish_id=None):
+    """The framework album standing for *release* — the folder an import must
+    land in — or "".
+
+    THE identity rule for "this download IS the album the user added": the
+    wish that created the placeholder (the job's OWN `wish_id` when it fills
+    one, else the wish keyed by this release's ids — `wishes.find_for_release`)
+    names the folder, and the folder's own marker has to agree about the
+    release. A folder that holds audio is a real album and not a placeholder,
+    so it answers "" and leaves the caller's own "already in your library"
+    check to own that case.
+
+    Why an IMPORT asks: `server.soulseek_auto._import` moved a finished
+    download to `<library root>/<Artist - Album>` and left organize to
+    redirect it into the placeholder afterwards. That intermediate folder is
+    an ALBUM to the library walker — one level too shallow to sit under its
+    artist — so the grid drew it with the library root's own folder name as
+    its artist and the folder name as its title, beside the album it was about
+    to become. Landing in the placeholder is one tile from the first byte.
+    """
+    from server import wishes
+
+    rid = str((release or {}).get("id") or "").strip()
+    rgid = str((release or {}).get("release_group_id") or "").strip()
+    wish = None
+    if wish_id is not None:
+        try:
+            wish = wishes.get_wish(int(wish_id))
+        except (TypeError, ValueError):
+            wish = None
+    if not wish and (rid or rgid):
+        try:
+            wish = wishes.find_for_release(rid, rgid)
+        except Exception:
+            traceback.print_exc()
+            wish = None
+    folder = str((wish or {}).get("album_path") or "")
+    if not folder or not os.path.isdir(folder):
+        return ""
+    # ...and it has to be THIS scope's library: the wish store is the app's
+    # own, and a scope handed in through MLO_MUSIC_FOLDER (a test, a second
+    # library) can inherit a row whose folder belongs to another one. Handing
+    # that folder to an import would move an album out of the library it
+    # belongs to.
+    from mlo.paths import library_root
+
+    root = library_root((cfg or load_config()).get("music_folder"))
+    if not root:
+        return ""
+    here = os.path.normcase(os.path.abspath(folder))
+    inside = os.path.normcase(os.path.abspath(root)) + os.sep
+    if not here.startswith(inside):
+        return ""
+    info = pathmod.load_pending(folder)
+    if not info or _audio_files(folder):
+        return ""
+    want = {i.lower() for i in (rid, rgid) if i}
+    have = {str(info.get(k) or "").strip().lower()
+            for k in ("release_id", "release_group_id")}
+    have.discard("")
+    if want and have and not (want & have):
+        return ""               # a placeholder for a DIFFERENT release
+    return folder
 
 def _pending_for(folder, wid):
     """Whether *folder* is a framework album waiting on wish *wid*."""

@@ -853,6 +853,162 @@ def _rebase(path, moved):
     return p
 
 
+def _carry_entries(src_dir, dst_dir, names):
+    """``(moved, left)`` for *names* traveling from *src_dir* into *dst_dir*.
+
+    The one place the album's own files are moved with it, so every caller gets
+    the same two promises: a name *dst_dir* already holds is NEVER overwritten
+    (that file stays where it is and is reported instead — a cover search's pick
+    must not eat the album's own artwork), and the move is ``move_path``, i.e. a
+    rename whose bytes are never copied out of (``shutil.move`` degraded to a
+    silent copytree when a file was still open: the album ended up in two
+    places, see mlo.paths).
+    """
+    moved, left = [], []
+    for name in names:
+        src = os.path.join(src_dir, name)
+        dst = os.path.join(dst_dir, name)
+        if os.path.exists(dst):
+            left.append(name)
+            continue
+        try:
+            ok = move_path(src, dst)
+        except Exception:
+            ok = False
+        (moved if ok else left).append(name)
+    return moved, left
+
+
+def _prune_emptied(src_dir, music_folder):
+    """Remove *src_dir*, and the empty folders above it up to the library root.
+
+    A mover takes everything an album folder held, so the folder itself is
+    left as an audio-less shell — which the library scan reports as a broken
+    album and the user has to remove by hand. The walk up stops AT the library
+    root (never removing it) and only runs inside it: a folder outside the
+    library is not ours to remove, and an unbounded climb up an empty chain
+    could take a folder the user made.
+    """
+    lib = library_root(str(music_folder or "")) if music_folder else ""
+    stop = os.path.normcase(os.path.abspath(lib)) if lib else ""
+    d = os.path.abspath(src_dir)
+    if stop and not os.path.normcase(d).startswith(stop + os.sep):
+        return                          # outside the library: leave it alone
+    try:
+        os.rmdir(d)
+    except OSError:
+        return
+    if not stop:
+        return
+    d = os.path.dirname(d)
+    while d and os.path.normcase(d) != stop:
+        try:
+            os.rmdir(d)
+        except OSError:
+            return
+        d = os.path.dirname(d)
+
+
+def carry_album_files(src_dir, dst_dir, *, music_folder="", log=None):
+    """Move the album's own files from the folder it LEFT to the folder it is IN.
+
+    A mover takes the AUDIO and leaves everything else behind: script 14
+    imports the tracks into the library and renames them, while the cover the
+    import's cover step fetched BEFORE the chain ran, the description beside it
+    and the expected-tracklist manifest stayed in the staging folder — so the
+    album landed without artwork, the grader reported COVER, and the import was
+    parked for a person over an album it had just found artwork for. This is the
+    same rule the organizer applies when it renames an album ("move leftover
+    album files (cover art etc.) to the new album root",
+    ``server.main.organize``): the album's own files travel with it, at the
+    album root, whatever moved the audio.
+
+    Everything that is not audio goes, directories included — except a folder
+    that still holds audio beneath it, which is not an artifact of the move but
+    music the mover did not take (beets refuses a file it cannot read), and
+    dragging it in would put un-imported tracks inside the album. Collisions and
+    unreadable entries come back in ``left`` for the caller to say out loud;
+    the emptied source folder is pruned (see :func:`_prune_emptied`).
+
+    Returns ``(moved, left)`` — the names carried and the names left behind.
+    """
+    src_dir = os.path.normpath(str(src_dir or ""))
+    dst_dir = os.path.normpath(str(dst_dir or ""))
+    if not src_dir or not dst_dir or not os.path.isdir(dst_dir):
+        return [], []
+    if os.path.normcase(os.path.abspath(src_dir)) == \
+            os.path.normcase(os.path.abspath(dst_dir)):
+        return [], []
+    try:
+        names = sorted(os.listdir(src_dir))
+    except OSError:
+        return [], []
+    carrying = []
+    for name in names:
+        if _is_audio(name):
+            continue
+        path = os.path.join(src_dir, name)
+        if os.path.isdir(path) and mlo_stats._find_albums(path):
+            continue
+        carrying.append(name)
+    moved, left = _carry_entries(src_dir, dst_dir, carrying)
+    _prune_emptied(src_dir, music_folder)
+    if log is not None and moved:
+        try:
+            log("carried the album's own files with it: " + ", ".join(moved[:6]))
+        except Exception:
+            pass
+    return moved, left
+
+
+def _track_companions(folder, name):
+    """The files next to *name* that name IT — the organizer's sidecar rule.
+
+    "01 - Song.jpg", "01 - Song.cover.jpg" and "01 - Song.lrc" belong to
+    "01 - Song.flac": the exact stem, or the stem and a further qualifier. It is
+    the same convention ``server.main.organize`` moves sidecars with and the one
+    the grader's extra-artwork check accepts as tied to a track, so a file that
+    survives one and fails the other cannot exist.
+    """
+    stem = os.path.splitext(name)[0].lower()
+    out = []
+    for entry in _list(folder)[0]:
+        path = os.path.join(folder, entry)
+        if os.path.isdir(path) or _is_audio(entry):
+            continue
+        estem = os.path.splitext(entry)[0].lower()
+        if estem == stem or estem.startswith(stem + "."):
+            out.append(entry)
+    return sorted(out)
+
+
+def carry_track_files(src_file, dst_file):
+    """Move a loose track's own companions with it into the album it lands in.
+
+    The apply files a track that sat loose in an artist folder into the album
+    its tags name; its art and lyrics name the track and nothing else, so they
+    go with it (``_track_companions``) instead of being left in the artist
+    folder, where they are lost to the album and reported as that folder's
+    sidecar on every later scan.
+
+    Named by the track it carries for, and asked AFTER the track itself has
+    moved (a companion of a file that never made it must not travel), so what
+    has to exist here is the folder it is read from — the track is already in
+    the album by now.
+
+    Returns ``(moved, left)``, the same contract as :func:`carry_album_files`.
+    """
+    src_file, dst_file = os.path.normpath(str(src_file)), os.path.normpath(str(dst_file))
+    src_dir, name = os.path.dirname(src_file), os.path.basename(src_file)
+    dst_dir = os.path.dirname(dst_file)
+    if not src_dir or not dst_dir or not os.path.isdir(src_dir):
+        return [], []
+    if os.path.normcase(os.path.abspath(src_dir)) == \
+            os.path.normcase(os.path.abspath(dst_dir)):
+        return [], []
+    return _carry_entries(src_dir, dst_dir, _track_companions(src_dir, name))
+
+
 def _perform(row, intent, folder, lib, user, moved):
     """``(result, words)`` for one row's fix; the actual move is here and
     nowhere else, so the guards below are the only way a file can be touched.
@@ -905,11 +1061,17 @@ def _perform(row, intent, folder, lib, user, moved):
     if action == "rename":
         return "fixed", "renamed %s to \u201c%s\u201d" % (
             row["path"], os.path.basename(dst))
+    # A loose track is filed into its album: its own art and lyrics go with it
+    # (the organizer's own sidecar rule), so nothing that names this track is
+    # left in the artist folder it came from.
+    carried, _left = carry_track_files(src, dst)
+    with_it = (" with %d file(s) that belong to it" % len(carried)) if carried else ""
     if os.path.basename(src) != os.path.basename(dst):
-        return "fixed", "moved %s into %s as \u201c%s\u201d (letter case only)" % (
-            row["path"], _rel(os.path.dirname(dst), folder), os.path.basename(dst))
-    return "fixed", "moved %s into %s" % (
-        row["path"], _rel(os.path.dirname(dst), folder))
+        return "fixed", "moved %s into %s as \u201c%s\u201d (letter case only)%s" % (
+            row["path"], _rel(os.path.dirname(dst), folder), os.path.basename(dst),
+            with_it)
+    return "fixed", "moved %s into %s%s" % (
+        row["path"], _rel(os.path.dirname(dst), folder), with_it)
 
 
 def apply_fixes(cfg=None, report=None, stats=None, user=None):

@@ -5,8 +5,6 @@ import {
   ArrowLeft,
   ArrowRight,
   Check,
-  ChevronDown,
-  ChevronUp,
   Copy,
   Eye,
   EyeOff,
@@ -17,15 +15,11 @@ import {
   ShieldCheck,
   Sparkles,
   Users,
-  X,
 } from "lucide-react";
 import { api, deviceUnavailable, installSummary, setToken, unavailableFeatures } from "../api";
 import FolderPicker from "../components/FolderPicker";
-import SourcesPanel, { PANEL_OWNED_KEYS } from "../components/SourcesPanel";
-import AiTestButton from "../components/AiTestButton";
+import SourcesPanel from "../components/SourcesPanel";
 import { toast } from "../store";
-import { LOCALES } from "../lib/i18n";
-import { DEFAULT_RUN_ALL, SCRIPT_LABEL, isScriptId } from "../lib/scripts";
 import {
   OPEN_GROUPS,
   SETUP_STEPS,
@@ -33,6 +27,7 @@ import {
   cfgDraft,
   cfgError,
   cfgGroup,
+  stepAskedFields,
   stepFields,
   type CfgField,
 } from "../lib/configMeta";
@@ -41,20 +36,6 @@ import {
  *  save sends only the keys THAT step changed (see cfgChanges), and the closing
  *  screen can say how far from the shipped defaults the answers land. */
 const ALL_FIELDS = SETUP_STEPS.flatMap(stepFields);
-
-/** Genre sources that never answer for a single track — the chain files their
- *  answer under every track and marks it `level: "album"`/`"artist"`
- *  (server/integrations._genre_source_answers). Everything absent here is asked
- *  per track first, so "per track" is what the picker says for them. */
-const GENRE_LEVEL: Record<string, string> = {
-  rateyourmusic: "album, per track when its release page states one",
-  discogs: "album only",
-  bandcamp: "album only",
-  deezer: "album only",
-  spotify: "artist only",
-};
-
-type ProviderOption = { id: string; label: string; notes?: string; rank?: number };
 
 export default function SetupPage() {
   const navigate = useNavigate();
@@ -80,6 +61,10 @@ export default function SetupPage() {
   const [confirmPw, setConfirmPw] = useState("");
 
   const step = SETUP_STEPS[index];
+  // The values this step asks above its groups (see SetupStep.ask). Resolved
+  // once, so the group card below filters against exactly the list rendered
+  // above it and no setting can end up with two controls on one screen.
+  const asked = stepAskedFields(step);
 
   const { data: deps, refetch: refetchDeps } = useQuery({
     queryKey: ["dependencies"],
@@ -119,27 +104,9 @@ export default function SetupPage() {
   // screenshot for this was taken.
   const updates = (deps?.tools ?? []).filter((t) => t.state === "update" && t.installable !== false);
 
-  // Catalogues the pickers draw their options from. Fetched only once the
-  // steps that need them are reachable, so the folder step costs one request.
-  const live = index > 0;
-  const { data: discoveryCat } = useQuery({ queryKey: ["discoverySources"], queryFn: api.discoverySources, enabled: live });
-  const { data: lyricsCat } = useQuery({ queryKey: ["lyricsProviders"], queryFn: api.lyricsProviders, enabled: live });
-  const { data: coverCat } = useQuery({ queryKey: ["coverSources"], queryFn: api.coverSources, enabled: live });
-  // The genre rows of the health report: the same list the genre picker later
-  // offers in Settings, so a tick here cannot name a source the chain dropped.
-  const { data: health } = useQuery({
-    queryKey: ["sourcesHealth"],
-    queryFn: () => api.sourcesHealth(false),
-    enabled: live,
-    staleTime: 30000,
-  });
-  const genreOptions: [string, string][] = (health?.sources ?? [])
-    .filter((s) => s.kind === "genre")
-    .map((s) => [s.id, `${s.label} — ${GENRE_LEVEL[s.id] ?? "per track"}`]);
-
-  // Fetched on EVERY step, not only the account one: the account step is the
-  // first step now and the rail locks the steps after it until a password
-  // exists, so that gate has to be right from the first render.
+  // Fetched on EVERY step, not only the account one: the rail locks the steps
+  // after the account until a password exists, so that gate has to be right
+  // from the first render.
   const { data: auth } = useQuery({
     queryKey: ["auth", "status"],
     queryFn: api.authStatus,
@@ -206,31 +173,6 @@ export default function SetupPage() {
   const badCount = Object.keys(stepErrors).length;
 
   const setField = (k: string, value: unknown) => setDraft((d) => (d ? { ...d, [k]: value } : d));
-
-  const listCatalog: Record<string, { options: ProviderOption[]; builtin: (k: string) => string[] }> = {
-    discovery: { options: discoveryCat?.sources ?? [], builtin: (k) => discoveryCat?.defaults?.[k] ?? [] },
-    // Only time-synced providers are pickable: a plain-lyrics-only entry has no
-    // place in the chain (the `synced` flag comes from the endpoint).
-    lyrics: {
-      options: (lyricsCat?.sources ?? []).filter((s) => s.synced !== false),
-      builtin: () => lyricsCat?.default_order ?? [],
-    },
-    covers: {
-      options: (coverCat?.sources ?? []).map((s) => ({ id: s.id, label: s.name })),
-      builtin: () => coverCat?.default_sources ?? [],
-    },
-  };
-
-  /** A value-picker's options: the field's own constants, or the catalogue it
-   *  names — a value list the module cannot carry (the app's locales, the
-   *  cover regions, the genre sources). */
-  const optionsFor = (field: CfgField): [string, string][] => {
-    if (field.type === "multi") return field.optionsFrom === "genres" ? genreOptions : field.options;
-    if (field.type !== "select") return [];
-    if (field.optionsFrom === "locales") return LOCALES.map((l) => [l.code, l.label] as [string, string]);
-    if (field.optionsFrom === "coverCountries") return (coverCat?.countries ?? []).map((c) => [c, c.toUpperCase()] as [string, string]);
-    return field.options;
-  };
 
   /** `keys` undefined = everything missing or behind (the page button);
    *  `keys` = [one tool] from that row's own button. `pressed` is the row that
@@ -332,8 +274,8 @@ export default function SetupPage() {
       // the very submit that should have opened them.
       qc.invalidateQueries({ queryKey: ["auth", "status"] });
       toast.success(auth?.has_password ? "Password changed" : "Password set — every client will be asked to sign in");
-      // The account step is mandatory and is the first step: setting the
-      // password IS this step's "continue".
+      // The account step is mandatory, so setting the password IS this step's
+      // "continue": the rail unlocks the steps after it on the refetch above.
       setIndex((i) => i + 1);
     } catch (err) {
       // The server's own words: "wrong password", "at least 8 characters".
@@ -412,162 +354,11 @@ export default function SetupPage() {
       );
     }
 
-    if (field.type === "chain") {
-      const ids = (Array.isArray(value) ? value.map(Number).filter(isScriptId) : []) as number[];
-      const order = ids.length ? ids : DEFAULT_RUN_ALL;
-      // A re-ticked script goes back to its factory position instead of
-      // jumping to the end — the same rule the Settings page's Run All grid
-      // applies, so the two cannot disagree about what "the chain" is.
-      const toggle = (id: number, on: boolean) =>
-        set(
-          on
-            ? [...order.filter((x) => DEFAULT_RUN_ALL.indexOf(x) < DEFAULT_RUN_ALL.indexOf(id)), id, ...order.filter((x) => DEFAULT_RUN_ALL.indexOf(x) >= DEFAULT_RUN_ALL.indexOf(id))]
-            : order.filter((x) => x !== id),
-        );
-      return (
-        <div key={field.k} className="sm:col-span-2">
-          <span className="text-xs text-zinc-500 uppercase">{field.label}</span>
-          <div className="grid grid-cols-1 sm:grid-cols-2 gap-x-4 gap-y-1.5 mt-1">
-            {[...order, ...DEFAULT_RUN_ALL.filter((id) => !order.includes(id))].map((id) => (
-              <label key={id} className="flex items-center gap-2 text-xs text-zinc-300 cursor-pointer select-none">
-                <input type="checkbox" className="accent-[var(--accent)]" checked={order.includes(id)} onChange={(e) => toggle(id, e.target.checked)} />
-                <span className="text-zinc-600 w-4">{id}</span>
-                {SCRIPT_LABEL[id] ?? `#${id}`}
-              </label>
-            ))}
-          </div>
-          {help}
-        </div>
-      );
-    }
-
-    if (field.type === "matrix") {
-      const cells = (value ?? {}) as Record<string, Record<string, boolean>>;
-      return (
-        <div key={field.k} className="sm:col-span-2">
-          <span className="text-xs text-zinc-500 uppercase">{field.label}</span>
-          <div className="grid grid-cols-1 sm:grid-cols-2 gap-2 mt-1">
-            {field.cols.map(([col, colLabel]) => (
-              <div key={col} className="rounded-md border border-border bg-bg/60 px-3 py-2">
-                <div className="text-[10px] uppercase tracking-wider text-zinc-500">{colLabel}</div>
-                <div className="flex flex-wrap gap-x-3 gap-y-1 mt-1">
-                  {field.rows.map(([row, rowLabel]) => (
-                    <label key={row} className="flex items-center gap-1.5 text-[11px] text-zinc-300 cursor-pointer select-none">
-                      <input
-                        type="checkbox"
-                        className="accent-[var(--accent)]"
-                        checked={!!cells[col]?.[row]}
-                        onChange={(e) => set({ ...cells, [col]: { ...(cells[col] ?? {}), [row]: e.target.checked } })}
-                      />
-                      {rowLabel}
-                    </label>
-                  ))}
-                </div>
-              </div>
-            ))}
-          </div>
-          {help}
-        </div>
-      );
-    }
-
-    if (field.type === "list") {
-      const catalog = listCatalog[field.catalog];
-      const order = Array.isArray(value) ? (value as unknown[]).map(String) : [];
-      // An empty list means the built-in order, shown rather than written: the
-      // moment the user moves or drops one, the whole order becomes explicit —
-      // which is exactly what the config value then means.
-      const shown = order.length ? order : catalog.builtin(field.k).map(String);
-      const move = (i: number, delta: number) => {
-        const next = shown.slice();
-        [next[i], next[i + delta]] = [next[i + delta], next[i]];
-        set(next);
-      };
-      return (
-        <div key={field.k} className="sm:col-span-2">
-          <span className="text-xs text-zinc-500 uppercase">{field.label}</span>
-          <div className="mt-1 space-y-1.5">
-            <div className="rounded-md border border-border divide-y divide-border/60">
-              {shown.map((id, i) => {
-                const option = catalog.options.find((o) => o.id === id);
-                return (
-                  <div key={id} className="flex items-center gap-2 px-2 py-1">
-                    <span className="w-4 text-[10px] text-zinc-600">{i + 1}</span>
-                    <span className="flex-1 min-w-0 text-[12px] text-zinc-200 truncate">{option?.label ?? id}</span>
-                    <button type="button" className="p-1 text-zinc-500 hover:text-white disabled:opacity-30" title="Move up" disabled={i === 0} onClick={() => move(i, -1)}>
-                      <ChevronUp className="h-3.5 w-3.5" />
-                    </button>
-                    <button type="button" className="p-1 text-zinc-500 hover:text-white disabled:opacity-30" title="Move down" disabled={i === shown.length - 1} onClick={() => move(i, 1)}>
-                      <ChevronDown className="h-3.5 w-3.5" />
-                    </button>
-                    <button type="button" className="p-1 text-zinc-500 hover:text-red-300" title="Drop from the list (an unlisted provider is never used)" onClick={() => set(shown.filter((x) => x !== id))}>
-                      <X className="h-3.5 w-3.5" />
-                    </button>
-                  </div>
-                );
-              })}
-              {!shown.length && <div className="px-2 py-1 text-[11px] text-zinc-500">Every provider, in the built-in order.</div>}
-            </div>
-            {catalog.options.some((o) => !shown.includes(o.id)) && (
-              <div className="flex flex-wrap gap-1.5">
-                {catalog.options
-                  .filter((o) => !shown.includes(o.id))
-                  .map((o) => (
-                    <button key={o.id} type="button" className="chip border border-white/15 bg-white/5 text-[10px] text-zinc-400 hover:text-white tap" title={o.notes} onClick={() => set([...shown, o.id])}>
-                      + {o.label}
-                    </button>
-                  ))}
-              </div>
-            )}
-            {order.length > 0 && (
-              <button type="button" className="text-[10px] text-zinc-500 hover:text-white underline tap" onClick={() => set([])}>
-                Reset to the built-in order
-              </button>
-            )}
-          </div>
-          {help}
-        </div>
-      );
-    }
-
-    if (field.type === "multi") {
-      const options = optionsFor(field);
-      const on = Array.isArray(value) ? (value as unknown[]).map(String) : [];
-      // An id the catalogue does not list (the health payload has not arrived)
-      // stays visible, or a saved value would silently disappear from the list.
-      const shown: [string, string][] = [...options, ...on.filter((v) => !options.some(([o]) => o === v)).map((v): [string, string] => [v, v])];
-      return (
-        <div key={field.k} className="sm:col-span-2">
-          <span className="text-xs text-zinc-500 uppercase">{field.label}</span>
-          <div className="flex flex-wrap gap-x-4 gap-y-1 mt-1">
-            {shown.map(([v, l]) => (
-              <label key={v} className="flex items-center gap-2 text-xs text-zinc-300 cursor-pointer select-none">
-                <input type="checkbox" className="accent-[var(--accent)]" checked={on.includes(v)} onChange={(e) => set(e.target.checked ? [...on, v] : on.filter((x) => x !== v))} />
-                {l}
-              </label>
-            ))}
-          </div>
-          {help}
-        </div>
-      );
-    }
-
-    if (field.type === "csv") {
-      const parts = Array.isArray(value) ? (value as unknown[]).map(String) : [];
-      return (
-        <label key={field.k} className="block sm:col-span-2">
-          <span className="text-xs text-zinc-500 uppercase">{field.label}</span>
-          <input className="input mt-1" value={parts.join(", ")} onChange={(e) => set(e.target.value.split(",").map((s) => s.trim()))} />
-          {help}
-        </label>
-      );
-    }
-
     if (field.type === "select") {
-      // A value the option list does not carry (a catalogue that has not
-      // arrived, or a region a newer backend added) still has to be visible, or
-      // the control would look unset while the config holds a real value.
-      const options = optionsFor(field);
+      // A value the option list does not carry (a config written by an older
+      // or newer backend) still has to be visible, or the control would look
+      // unset while the config holds a real value.
+      const options = field.options;
       const current = String(value ?? "");
       const shown: [string, string][] = !current || options.some(([v]) => v === current) ? options : [[current, current], ...options];
       return (
@@ -589,27 +380,9 @@ export default function SetupPage() {
     // text / password / number share one control shape: the wizard's own
     // label-over-input, with the value the config already holds.
     const isPassword = field.type === "password";
-    // The naming script is the one field in the wizard whose shipped value is
-    // a long template nobody wants to retype: a reset puts it back without
-    // resetting anything else (the page-level "Reset to defaults" is a
-    // different, much bigger hammer).
-    const canReset = field.k === "naming_script" && !!defaults;
     return (
       <label key={field.k} className="block">
-        <span className="text-xs text-zinc-500 uppercase flex items-center gap-2">
-          {field.label}
-          {canReset && (
-            <button
-              type="button"
-              className="btn-ghost !py-0.5 !px-1.5 text-[10px] normal-case"
-              onClick={() => setField(field.k, defaults?.naming_script ?? "")}
-              disabled={String(value ?? "") === String(defaults?.naming_script ?? "")}
-              title="Put the shipped naming script back — every directory the library is organized by follows it"
-            >
-              <RotateCcw className="h-3 w-3" /> Reset to default
-            </button>
-          )}
-        </span>
+        <span className="text-xs text-zinc-500 uppercase flex items-center gap-2">{field.label}</span>
         <div className={isPassword ? "relative mt-1" : undefined}>
           <input
             className={`input${isPassword ? " !pr-9" : ""}`}
@@ -670,7 +443,7 @@ export default function SetupPage() {
           </div>
           {/* The way out that is not a step: the wizard is re-runnable from
               Settings, and a first run with no library to point at yet should
-              not have to walk twelve screens to leave. */}
+              not have to walk the whole wizard to leave. */}
           {!isLast && (
             <button className="btn-ghost !py-1 text-xs tap" disabled={busy} onClick={() => exit("/")}>
               Skip setup
@@ -678,17 +451,21 @@ export default function SetupPage() {
           )}
         </div>
 
-        {/* The rail — the same idiom as the client wizard's. Twelve labelled
-            steps wrap (six already needed it: see ClientSetup.tsx), so the
-            labels are single words and every chip jumps to its step. */}
+        {/* The rail — the same idiom as the client wizard's. Six labelled steps
+            still wrap on a phone, so the labels are single words and every chip
+            jumps to its step. */}
         <div className="flex flex-wrap items-center gap-2 text-[11px] text-zinc-500 mb-4">
           {SETUP_STEPS.map((s, i) => (
             <button
               key={s.label}
               type="button"
               className="flex items-center gap-2 tap disabled:opacity-50"
-              disabled={busy || (accountMissing && i > 0)}
-              title={accountMissing && i > 0 ? "Set the password on the first step first" : undefined}
+              // The account step is the one the wizard will not let a first
+              // run past, so it is the one the gate must leave OPEN: locking
+              // by position would lock the password step itself as soon as a
+              // step precedes it.
+              disabled={busy || (accountMissing && s.panel !== "password")}
+              title={accountMissing && s.panel !== "password" ? "Set the password on the Account step first" : undefined}
               onClick={() => setIndex(i)}
             >
               <span
@@ -883,12 +660,12 @@ export default function SetupPage() {
           )}
 
           {step.panel === "sources" && (
-            // The RYM "how to get the cookie" walkthrough that used to sit here
-            // is gone with the panel's own row hint carrying it: the cookie
-            // field is right there, and its hint names the browser steps (and
-            // now the cookies.txt extension the import accepts). One
-            // explanation, next to the control it explains.
-            <SourcesPanel />
+            // The rows that ASK for a key, and nothing else: the credentials
+            // list plus the links row the RYM cookie hangs off (the same
+            // endpoint files it under `links`, not `credentials`). The
+            // providers themselves are triaged in Settings → Sources, which
+            // draws this same panel unfolded.
+            <SourcesPanel only={["credentials", "links"]} askKeys />
           )}
 
           {step.panel === "password" && (
@@ -940,11 +717,19 @@ export default function SetupPage() {
                 </div>
               </div>
               <p className="text-[11px] text-zinc-500 leading-relaxed">
-                Sources and AI keys can be tested and changed anytime in Settings → Sources and Settings → AI; every
-                other answer here lives on the matching Settings tab. This wizard stays available from Settings →
-                General. Scripts that need missing tools will tell you when you run them.
+                Source credentials can be tested and changed anytime in Settings → Sources; every other answer here
+                lives on the matching Settings tab. This wizard stays available from Settings → General, and the
+                settings it never asked about — the scripts, the audit and every grading check — are already at the
+                strict defaults it would have offered. Scripts that need missing tools will tell you when you run them.
               </p>
             </>
+          )}
+
+          {/* The fields this step asks BY NAME, above its groups: an account
+              and a login are the values nothing has a shipped default for, and
+              a first run should not have to open a fold to find them. */}
+          {asked.length > 0 && (
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-x-6 gap-y-2.5">{asked.map(renderField)}</div>
           )}
 
           {/* The step's own settings, group by group: the same titles and the
@@ -952,24 +737,12 @@ export default function SetupPage() {
               later" has one answer. */}
           {step.groups?.map((title) => {
             const group = cfgGroup(title);
-            // The Keys step is the one step whose credentials the sources
-            // panel ABOVE already prompts for, so the card below does not ask
-            // for them a second time: the same key editable twice on one
-            // screen is what made this step read as a wall of inputs. (Every
-            // other setting the group owns still shows here, and the panel is
-            // the same control Settings → Sources renders.)
-            const fields = step.panel === "sources"
-              ? group.fields.filter((f) => !PANEL_OWNED_KEYS.includes(f.k))
-              : group.fields;
-            // A group whose fields are all hidden (Release tracklist: its only
-            // setting is a force_* re-run switch) still belongs to a step — the
-            // coverage test holds it there — but an empty card would only ask
-            // the reader what they are missing.
+            // The keys asked above are SKIPPED here: one setting, one control.
+            const fields = group.fields.filter((f) => !asked.some((x) => x.k === f.k));
+            // A group whose fields are all asked above would draw an empty
+            // card that only asks the reader what they are missing.
             if (!fields.length) return null;
-            // The Keys step ships these folded: its job is the credentials
-            // above, and the provider orders/timeouts/priorities in the cards
-            // are answers a first run does not have yet.
-            const open = !!OPEN_GROUPS[title] && step.panel !== "sources";
+            const open = !!OPEN_GROUPS[title];
             return (
               <details key={title} className="rounded-md border border-border bg-bg/40 px-3 py-2" open={open}>
                 <summary className="text-xs font-semibold text-zinc-300 cursor-pointer select-none">
@@ -978,11 +751,6 @@ export default function SetupPage() {
                 </summary>
                 {group.blurb && <p className="text-[11px] text-zinc-500 mt-1 leading-relaxed">{group.blurb}</p>}
                 <div className="grid grid-cols-1 sm:grid-cols-2 gap-x-6 gap-y-2.5 mt-2">{fields.map(renderField)}</div>
-                {/* The model is the one setting whose value cannot be checked by
-                    reading it back, so the AI step keeps its own round trip —
-                    sent from the DRAFT, so an unsaved URL/key/model can be
-                    tested before either of them is written. */}
-                {title === "AI — lyric transforms & genre ranking" && <AiTestButton value={draft} />}
               </details>
             );
           })}

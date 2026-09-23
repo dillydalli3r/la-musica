@@ -1,12 +1,19 @@
 #!/usr/bin/env python3
-"""Regression: the first-run wizard can reach every setting the app has.
+"""Regression: every setting the app has is reachable, and rendered once.
 
 The wizard renders web/src/lib/configMeta.ts, so that module — not the page —
 is the thing to hold to "covers everything": every key mlo/config.py ships must
 be either a field in one of its groups or named in one of its two explicit
 allowlists (the keys the wizard writes itself, and the ones it deliberately
 hides), and every key and group SettingsPage renders must exist there too. Add a
-setting on either side and this fails until the wizard accounts for it.
+setting on either side and this fails until the module accounts for it.
+
+A first run, though, is deliberately SHORT: the step list may render only the
+groups nothing has a default for (folder, login, tools, credentials, Soulseek),
+and every other group is the Settings page's. So the step list is not held to
+"renders every group" — it is held to "renders each group at most once, and
+every group it gave up is rendered somewhere else in the UI", which is what
+stops a group from leaving the wizard and landing nowhere.
 
 The two sides are read from source, not imported: the python side is the real
 DEFAULT_CONFIG (so a key nothing else knows about still has to be covered), the
@@ -118,15 +125,59 @@ check(
     "settings groups with no group in the wizard: " + ", ".join(sorted(missing_groups)),
 )
 
-# 4. Every group belongs to exactly one step: a group no step lists is
-#    unreachable, and one listed twice is rendered twice.
+# 4. A group is rendered by AT MOST one step — the same settings twice on one
+#    screen — and a group NO step renders must still be reachable elsewhere:
+#    the wizard is deliberately short (the shipped defaults ARE the strict
+#    ones), so a group it gave up belongs to the Settings page or to the page
+#    that owns those settings outright. A group that leaves the wizard and
+#    lands nowhere is a setting nobody can change, which is the failure this
+#    file exists to catch.
+GROUP_BLOCK = re.compile(r'\{\s*\n\s*title: "([^"]+)",(.*?)\n    \},', re.S)
+group_fields = {title: FIELD_KEY.findall(body) for title, body in GROUP_BLOCK.findall(groups_src)}
+
+# The pages a group can live on OUTSIDE the Settings and wizard screens, for a
+# group whose keys are never spelled out as config keys because the page writes
+# them itself: the Export page's form is sent back as `export_<field>` straight
+# to /api/config (web/src/api.ts, exportSaveDefaults). The value names the file
+# that has to exist for the claim to hold.
+OFF_WIZARD = {
+    "Export defaults": "web/src/api.ts",
+}
+
+# Every .tsx under web/src: a key named by one of them is a key some component
+# or page renders. configMeta.ts is deliberately NOT part of this — the whole
+# question is whether a group exists in the UI outside the wizard's registry.
+ui_text = ""
+for parent, _dirs, names in os.walk(os.path.join(ROOT, "web", "src")):
+    for name in names:
+        if name.endswith(".tsx"):
+            ui_text += open(os.path.join(parent, name), encoding="utf-8").read() + "\n"
+
 for title in sorted(group_titles):
     steps = len(re.findall(r"groups: \[[^\]]*\"%s\"" % re.escape(title), steps_src))
-    check(steps == 1, f'group "{title}" is rendered by {steps} steps, want exactly 1')
+    check(steps <= 1, f'group "{title}" is rendered by {steps} steps, want at most 1')
+    if steps:
+        continue
+    owner = OFF_WIZARD.get(title)
+    if owner is not None:
+        check(
+            os.path.isfile(os.path.join(ROOT, owner)),
+            f'OFF_WIZARD names a file that does not exist for "{title}": {owner}',
+        )
+        continue
+    lost = [k for k in group_fields[title] if not re.search(r"\b%s\b" % re.escape(k), ui_text)]
+    check(
+        not lost,
+        f'group "{title}" left the wizard with nothing in the UI rendering it: '
+        + ", ".join(lost),
+    )
 
 # 5. The named groups and the step list have to agree with the module.
 check(not (step_groups - group_titles), "steps name groups that do not exist: " + ", ".join(sorted(step_groups - group_titles)))
 check(not (open_groups - group_titles), "OPEN_GROUPS names groups that do not exist: " + ", ".join(sorted(open_groups - group_titles)))
+# An unfolded group no step renders is a fold nobody sees: the wizard only
+# opens cards it actually draws.
+check(not (open_groups - step_groups), "OPEN_GROUPS names groups no step renders: " + ", ".join(sorted(open_groups - step_groups)))
 
 # 5b. No key may appear twice inside one group: two controls for one setting
 #     render twice and disagree about nothing — and this is what catches an

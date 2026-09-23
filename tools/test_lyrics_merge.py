@@ -356,4 +356,53 @@ after_mp3 = AudioFile(mp3).all_tags()
 ok(RAW not in after_mp3, "mp3 TXXX gone after delete")
 ok(after_mp3.get("TITLE") == "New Title", "mp3 other frames untouched")
 
+# ----------------------------------------------------------------------
+# The lyric OFFSET (the player's control): only the sync moves, every
+# timestamp moves together, and the write lands where the lyrics already live.
+# ----------------------------------------------------------------------
+from mlo.lyrics import shift_lyrics_timestamps, shift_stored_lyrics  # noqa: E402
+
+ok(shift_lyrics_timestamps("plain line\n[00:10.00]sung", 500)
+   == "plain line\n[00:10.50]sung",
+   "offset: an untimed line is untouched, the timed one moves")
+ok(shift_lyrics_timestamps("[00:00.20]x", -5000) == "[00:00.00]x",
+   "offset: a stamp clamps at zero instead of going negative")
+ok(shift_lyrics_timestamps("[01:59.999]x", 1) == "[02:00.000]x",
+   "offset: its own precision is kept and the carry is right")
+ok(shift_lyrics_timestamps("[00:10.05]<00:10.50>a <00:11.00>b", 500)
+   == "[00:10.55]<00:11.00>a <00:11.50>b",
+   "offset: Enhanced word stamps move with their own line")
+ok(shift_lyrics_timestamps("[ti:Song]\n[offset:+200]\n[00:05]x", 1000)
+   == "[ti:Song]\n[offset:+200]\n[00:06]x",
+   "offset: LRC metadata headers are not timestamps")
+ok(shift_lyrics_timestamps("anything", 0) == "anything",
+   "offset: 0 is the identity, byte for byte")
+
+flac_off = os.path.join(tmp, "offset.flac")
+make_flac(flac_off)
+af_off = AudioFile(flac_off)
+af_off.set_lyrics("[00:02.00]one\nplain line\n[00:07.50]two")
+off_text, off_targets = shift_stored_lyrics(flac_off, 250)
+ok(off_targets == ["embedded"], f"offset: the tag it found is the tag it wrote {off_targets}")
+ok(AudioFile(flac_off).get_lyrics() == "[00:02.25]one\nplain line\n[00:07.75]two",
+   "offset: written to the tag, untimed line intact")
+
+# A sidecar beside the track is a place too: the shift follows the text, so a
+# track whose lyrics live in both gets both moved (and none is invented).
+sidecar_off = os.path.splitext(flac_off)[0] + ".lrc"
+with open(sidecar_off, "w", encoding="utf-8") as f:
+    f.write("[00:03.00]sidecar\n")
+off_text2, off_targets2 = shift_stored_lyrics(flac_off, -500)
+ok(sorted(off_targets2) == ["embedded", "lrc"],
+   f"offset: both stores shift when both hold lyrics {off_targets2}")
+with open(sidecar_off, encoding="utf-8") as f:
+    ok(f.read().startswith("[00:02.50]sidecar"), "offset: the sidecar moved with it")
+ok(AudioFile(flac_off).get_lyrics().startswith("[00:01.75]one"),
+   "offset: the tag moved again, from its own current value")
+
+flac_bare = os.path.join(tmp, "bare.flac")
+make_flac(flac_bare)
+ok(shift_stored_lyrics(flac_bare, 100) == (None, []),
+   "offset: a track with no lyrics is left alone, not given any")
+
 print(f"ALL {passed} MERGE TESTS PASSED")

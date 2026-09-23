@@ -276,7 +276,12 @@ import_autonomy.raise_prompt(DONE, dict(CFG),
                              {"cover": fam("cover", "Cover art"),
                               "lyrics": fam("lyrics", "Lyrics")},
                              mode="automatic", reason="missing")
-check("the stale prompt was stored", bool(import_autonomy.for_album(DONE, dict(CFG))))
+# The entry IS written — the store file holds it — and what drops it is the
+# READ: `for_album` and `prompts` both ask `_live`, so an entry whose condition
+# no longer holds is not listed (and is pruned from the store on the next walk).
+_store = json.load(open(os.path.join(DATA, "import_prompts.json"), encoding="utf-8"))
+check("the stale prompt was stored", import_autonomy._key(DONE) in _store,
+      json.dumps(sorted(_store)))
 payload = queue()
 check("...and is NOT in the payload (no Needs-you row for a finished album)",
       not any(r["kind"] == "prompt" for _, r in rows_by_id(payload).values()),
@@ -295,12 +300,21 @@ import_autonomy.raise_prompt(GAP, dict(CFG),
                               "advisory": fam("advisory", "Advisory")},
                              mode="automatic", reason="missing")
 payload = queue()
-prompts = [r for r in payload["sections"]["needs_attention"] if r["kind"] == "prompt"]
-check("the stalled album is a Needs-you row", len(prompts) == 1, json.dumps(prompts))
+prompts = [r for r in payload["sections"]["completed"] if r["kind"] == "prompt"]
+check("an album a finished import is short of is a FINISHED row (spec R166)",
+      len(prompts) == 1, json.dumps(prompts))
+check("...not a row in the section for work holding on the user",
+      not [r for r in payload["sections"]["needs_attention"]
+           if r["kind"] == "prompt"],
+      json.dumps(payload["sections"]["needs_attention"]))
 row = prompts[0] if prompts else {}
 check("...naming the families it is missing, in wizard order",
       row.get("missing") == ["cover", "advisory"]
       and row.get("missing_labels") == ["Cover art", "Advisory"], json.dumps(row))
+check("...carrying the whole warning (what, where to fix it, and that nothing waits)",
+      (row.get("needs") or {}).get("families") == ["cover", "advisory"]
+      and (row.get("needs") or {}).get("waiting") is False
+      and bool((row.get("needs") or {}).get("link")), json.dumps(row.get("needs")))
 check("...dismissable and never 'clearable' (its own dismiss is the way off)",
       row.get("dismissable") is True and row.get("clearable") is False,
       json.dumps(row))
@@ -318,8 +332,8 @@ rate_tracks(GAP)
 check("the fixture is complete now",
       import_policy.gaps(GAP, import_policy.effective_config(CFG)) == {})
 payload = queue()
-left = [r for r in payload["sections"]["needs_attention"] if r["kind"] == "prompt"]
-check("no prompt row survives the fix — no import, no restart, no dismiss",
+left = [r for r in payload["sections"]["completed"] if r["kind"] == "prompt"]
+check("no warning row survives the fix — no import, no restart, no dismiss",
       left == [], json.dumps(left))
 check("...and the entry is gone from the table",
       import_autonomy.for_album(GAP, dict(CFG)) == {})
@@ -333,19 +347,19 @@ GAP2 = make_album("Gap Album Two", cover=False, advisory=False)
 import_autonomy.raise_prompt(GAP2, dict(CFG),
                              {"cover": fam("cover", "Cover art")},
                              mode="automatic", reason="missing")
-check("the prompt is listed while its family is missing",
+check("the warning is listed while its family is missing",
       any(r["kind"] == "prompt" for r in
-          queue()["sections"]["needs_attention"]))
+          queue()["sections"]["completed"]))
 r = client.post("/api/import/prompts/dismiss", json={"path": GAP2})
 check("POST /api/import/prompts/dismiss answers ok",
       r.status_code == 200 and r.json().get("ok") is True, r.text)
 check("...the row is gone", not any(
-    r_["kind"] == "prompt" for r_ in queue()["sections"]["needs_attention"]))
+    r_["kind"] == "prompt" for r_ in queue()["sections"]["completed"]))
 check("...and it stays gone on the next payload (the user's own answer wins)",
-      not any(r_["kind"] == "prompt" for r_ in queue()["sections"]["needs_attention"]))
+      not any(r_["kind"] == "prompt" for r_ in queue()["sections"]["completed"]))
 
 # --------------------------------------------------------------------------- #
-# 5. ONE album, ONE section: a prompt supersedes the settled row for its album
+# 5. ONE album, ONE row: a warning rides the settled row for its album
 # --------------------------------------------------------------------------- #
 print("\n== one album, one row ==")
 
@@ -360,18 +374,25 @@ payload = queue()
 sections_of_album = [name for name, rows in payload["sections"].items()
                      for r in rows if r.get("album_path")
                      and api_queue._album_key(r["album_path"]) == api_queue._album_key(GAP3)]
-check("the album is in exactly ONE section while the prompt stands",
-      sections_of_album == ["needs_attention"], json.dumps(sections_of_album))
-check("...the row shown is the prompt (the actionable, current state)",
-      any(r["kind"] == "prompt" for r in payload["sections"]["needs_attention"]))
-check("...and the wish it superseded is not in Completed as well",
-      not any(r.get("id") == f"wish:{WISH['id']}"
-              for r in payload["sections"]["completed"]))
+check("the album is in exactly ONE section while its warning stands",
+      sections_of_album == ["completed"], json.dumps(sections_of_album))
+check("...and there is exactly ONE row for it (no second 'waiting' row)",
+      len([r for r in payload["sections"]["completed"]
+           if r.get("album_path")
+           and api_queue._album_key(r["album_path"]) == api_queue._album_key(GAP3)]) == 1,
+      json.dumps([r["id"] for r in payload["sections"]["completed"]]))
+_wish_row = [r for r in payload["sections"]["completed"]
+             if r.get("id") == f"wish:{WISH['id']}"]
+check("...the row is the release's OWN finished row, carrying the warning",
+      bool(_wish_row) and (_wish_row[0].get("needs") or {}).get("families") == ["cover"]
+      and _wish_row[0].get("dismissable") is True,
+      json.dumps(_wish_row[0].get("needs") if _wish_row else None))
 r = client.post("/api/import/prompts/dismiss", json={"path": GAP3})
 check("dismissing answers ok", r.status_code == 200 and r.json().get("ok") is True, r.text)
 payload = queue()
-check("...the settled row comes back, still clearable, once the prompt is gone",
+check("...the row goes on being the release's finished row, warning gone",
       any(r_["id"] == f"wish:{WISH['id']}" and r_["clearable"]
+          and not r_.get("needs")
           for r_ in payload["sections"]["completed"]),
       json.dumps([r_["id"] for r_ in payload["sections"]["completed"]]))
 r = client.post("/api/queue/clear", json={"id": f"wish:{WISH['id']}"})
@@ -490,23 +511,38 @@ with Patch(auto, jobs=REG.list, forget=REG.forget), \
     check("...so the section shrank by exactly what was cleared",
           len(queue()["sections"]["failed"]) == len(before_failed) - len(failed_job_only))
 
-    # needs_attention holds a STANDING row (the prompt) beside a finished one.
+    # needs_attention holds a STANDING row (a wish nothing was found for,
+    # which is terminal: only the user's retry moves it) beside a prompt — and
+    # the prompt is NOT there any more: a finished import's gap is a warning on
+    # its own finished row (spec R166), so the section is exactly the rows that
+    # really are holding on a person.
     NL = make_album("Needs You Album", cover=False, advisory=False)
     import_autonomy.raise_prompt(NL, dict(CFG), {"cover": fam("cover", "Cover art")},
                                  mode="automatic", reason="missing")
+    STANDING = wishes.add_wish("33333333-3333-3333-3333-333333333333",
+                               title="Standing", artist="An Artist")
+    wishes.mark_not_found(STANDING["id"], "nothing usable found", attempts=3)
     before = queue()
-    prompt_ids = {r_["id"] for r_ in before["sections"]["needs_attention"]
-                  if r_["kind"] == "prompt"}
+    here = {r_["id"] for r_ in before["sections"]["needs_attention"]}
+    warn_rows = [r_ for r_ in before["sections"]["completed"] if r_["kind"] == "prompt"]
+    check("Needs you holds the standing wish and NO prompt row",
+          f"wish:{STANDING['id']}" in here
+          and not any(r_["kind"] == "prompt"
+                      for r_ in before["sections"]["needs_attention"]),
+          json.dumps(sorted(here)))
+    check("...and the finished import's warning is a row in COMPLETED, saying it waits for nobody",
+          len(warn_rows) == 1
+          and (warn_rows[0].get("needs") or {}).get("waiting") is False,
+          json.dumps([r_["id"] for r_ in before["sections"]["completed"]]))
     clearable_here = {r_["id"] for r_ in before["sections"]["needs_attention"]
                       if r_["clearable"]}
-    check("Needs you holds both a prompt and a finished wish",
-          bool(prompt_ids) and bool(clearable_here), json.dumps(sorted(prompt_ids)))
     r = client.post("/api/queue/clear", json={"scope": "needs_attention"})
-    check("clearing Needs you removes only its finished rows",
+    check("clearing Needs you removes exactly its clearable rows",
           r.status_code == 200 and set(r.json()["ids"]) == clearable_here, r.text)
     after = rows_by_id()
-    check("...and never the prompt, which has its own dismiss",
-          prompt_ids <= set(after), json.dumps(sorted(after)))
+    check("...and the import's warning is untouched by that (its own dismiss is the way off)",
+          any(row.get("kind") == "prompt" for _, row in after.values()),
+          json.dumps(sorted(after)))
 
     # The one state that had NO action at all: a failed wish the worker will
     # search again. Cancelling is the way off the list.

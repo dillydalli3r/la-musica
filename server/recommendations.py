@@ -1,10 +1,12 @@
 """Home-page payload: library highlights and the open Soulseek wishlist.
 
 Everything is built from the library itself — stats, recent additions, best
-grades, favorites, a random rediscovery shelf, most-collected artists and
-albums failing their checks — plus the wishes the background worker is
-hunting. Best-effort and TTL-cached: a failing sub-source degrades to a
-missing shelf rather than failing the Home page.
+grades, the user's own rated releases, favorites, a random rediscovery shelf,
+most-collected artists and albums failing their checks — plus the wishes the
+background worker is hunting, and the ratings store for the one shelf that is
+the caller's own verdict rather than the library's. Best-effort and
+TTL-cached: a failing sub-source degrades to a missing shelf rather than
+failing the Home page.
 """
 import os
 import random
@@ -124,7 +126,19 @@ def _favorites(lib, limit, user=""):
 
 
 def _top_artists(artists, limit):
-    """Most-collected artists, with a representative cover for the card."""
+    """Most-collected artists, with a representative cover for the card.
+
+    `artist` is the library row's `display_name` (server.library builds it:
+    the tag-derived name, or the folder name without its MusicBrainz id) rather
+    than the folder's own basename, which is how Home came to draw
+    "Radiohead [a74b1b7f-71a5-4011-9441-d0b5e4122711]".
+
+    `has_image` answers for `GET /api/artist/image`, which 404s on a folder
+    holding no artist picture: the shelf draws that picture first and the
+    cover behind it, and asking for the URL anyway paints the broken-image
+    glyph before the fallback replaces it. Read from the directory itself for
+    the handful of rows this returns — never a walk, and never a provider.
+    """
     rows = []
     for ar in artists:
         name = str(ar.get("display_name") or ar.get("name") or "").strip()
@@ -143,7 +157,63 @@ def _top_artists(artists, limit):
             "cover": first.get("cover_file"),
         })
     rows.sort(key=lambda r: (-r["album_count"], r["artist"].lower()))
-    return rows[:limit]
+    rows = rows[:limit]
+    # Imported here, at the point of use: only this shelf asks the filesystem
+    # anything, and an artistdata that cannot answer must not cost the page.
+    from mlo import artistdata
+    for r in rows:
+        try:
+            r["has_image"] = artistdata.has_image(r["path"])
+        except Exception:
+            r["has_image"] = False
+    return rows
+
+
+def _rated(albums, user, limit):
+    """The user's own rated RELEASES, best first.
+
+    The verdict lives in the ratings store, and the store's own rule is what
+    keeps this shelf cheap: a rating is refused for any path no page draws
+    (`server.ratings.target_missing`), so every stored row has a library album
+    behind it and both halves of the join are already in hand — the store's map
+    and the album rows. One table read, no walk, no provider.
+
+    UNRATED releases are deliberately not a shelf: "no star yet" is not a
+    reason a row is here, the set has no order to give it (it is most of the
+    library), and the Rediscover shelf already draws a random slice of owned
+    albums for exactly that "you own it and have not looked at it" case.
+
+    `rating` rides on the row in HALF-STARS — the store's own unit, the one
+    `GET /api/ratings?scope=album` answers in and web/src/lib/ratings.ts turns
+    into the stars a reader sees — so the shelf's order and the stars on its
+    cards come from the same number.
+    """
+    if not albums:
+        return []  # nothing to rate: the store read below is not even worth it
+    try:
+        from server import ratings as store
+        got = store.map_for(user=user, scope="album")
+    except Exception:
+        return []  # an unreadable store loses the shelf, never the whole page
+    if not got:
+        return []
+    # Keyed the way `_favorites` reads the same payload: the library spells a
+    # path with forward slashes, a store row is whatever its writer stored.
+    by_path = {os.path.normcase(os.path.normpath(p)): int(v)
+               for p, v in got.items()}
+    rated = []
+    for alb in albums:
+        half = by_path.get(os.path.normcase(os.path.normpath(str(alb.get("path") or ""))))
+        if not half:
+            continue  # an unrated album, or a row the caller has no verdict on
+        row = _owned_row(alb)
+        row["rating"] = half
+        rated.append(row)
+    # Highest first, then by artist and title so two albums of one value never
+    # swap places between builds (the shelf is cached, not re-sorted per view).
+    rated.sort(key=lambda r: (-r["rating"], r["artist"].lower(),
+                              str((r.get("meta") or {}).get("ALBUM") or "").lower()))
+    return rated[:limit]
 
 
 _WISH_REASON = {"wanted": "Wishlist", "searching": "Searching Soulseek",
@@ -242,6 +312,7 @@ def build_home(cfg, user=""):
 
     recent = _recent(albums, recent_count)
     top = _top_rated(albums, max(4, recent_count // 2))
+    rated = _rated(albums, user, max(4, recent_count // 2))
     favorites = _favorites(lib, max(4, recent_count // 2), user)
     pending = _pending(albums, max(4, recent_count))
 
@@ -259,6 +330,9 @@ def build_home(cfg, user=""):
         "stats": stats,
         "recent": recent,
         "top_rated": top,
+        # The user's own stars on the releases they gave them to — the one
+        # shelf whose rows the CALLER chose rather than the library's grades.
+        "rated": rated,
         "favorites": favorites,
         "discover": discover,
         # Every album still waiting for its audio, in one place.

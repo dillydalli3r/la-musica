@@ -122,6 +122,13 @@ in the background.
 
 ### Configuration & credentials
 
+- **First run asks six things and nothing else**: the music folder, your account
+  (the login gate), the external tools (one download), the source keys and
+  cookies, the Soulseek login and sharing, done. Every quality knob —
+  the grading switches, the audit and verification options, the script chain,
+  the naming, the interface — is NOT asked: the shipped defaults ARE the strict
+  ones, and each setting is one click away in Settings afterwards (nothing a
+  shorter wizard drops loses its only editor).
 - The whole configuration is `<music>/.mlo/data/config.json`, edited through the
   Settings pages (`GET/POST /api/config`; `GET /api/config/defaults` is what
   *Reset to defaults* writes back). `MLO_MUSIC_FOLDER`, `MLO_SERVER_HOST` /
@@ -203,7 +210,19 @@ being made, so nothing costs an extra MusicBrainz call. Entity pages carry
 grading and auditing detail, MusicBrainz + RateYourMusic links, cover
 upload/search, Wikipedia descriptions, manual tag editing, a lyrics editor, and a
 **Credits** view built from MusicBrainz `artist-rels` (falling back to the file's
-own PERFORMER/COMPOSER/… tags, and saying so). The cover finder ranks every
+own PERFORMER/COMPOSER/… tags, and saying so). **Add to library answers at
+the press**: the framework album (the folder the naming script names, with the
+release's own tracklist and the release-group cover), its wish and the kick of
+the one queue are what the reply carries, and everything the reply does not
+need — the release resolution for an id-only add, and the album page's provider
+content (cover candidates, links, metadata) — happens after the reply, on the
+same daemon threads the rest of the app uses. A bare-release add that used to
+sit on the button for 13 s of page-content fetches now answers in about a
+second. The waiting itself is the Soulseek queue's: an add records a wish and
+starts the worker's own pass (`POST /api/library/add` never searches), and the
+album shows one tile for the whole acquisition — the framework album the add
+created is the folder the import lands in, so it is never listed beside a
+second folder it is about to become. The cover finder ranks every
 candidate with the album's OWN identity — a karaoke/tribute row, another artist's
 release or a different album can no longer win, an image whose size was never
 measured cannot beat the `cover_target_size` floor, and the autonomous Covers
@@ -212,7 +231,9 @@ step refuses to store a below-target cover — and it WRITES the winner by defau
 stages them instead, for a library that would rather pick by eye. The album's reference cover is the **release group's**
 (`coverartarchive.org/release-group/<rg>/front-500`) — the image the finder shows
 beside the candidates, the wizard's preview, and what a candidate is preferred
-against; one release's own sleeve is a single edition's art, not the album's.
+against; one release's own sleeve is a single edition's art, not the album's, and
+an album that carries only its release id gets the group read anyway (the group
+is read from the release, `spec R163`).
 **The cover you pick is the cover that is written**: the pick is fetched from the
 very URL you chose, and when that URL cannot be fetched the write says so and
 writes nothing rather than letting another provider's image stand in for it (an
@@ -241,7 +262,21 @@ They appear on library rows (both views), album rows, the album header average,
 the album/track page headers and the player bar, and the query engine compares
 in star space, so `rating >= 4` and the rating facet mean the same thing the
 stars show. `write_rating_tags` decides whether the file's own `RATING` tag is
-written too.
+written too. Home carries a **Your ratings** shelf of the releases you have
+rated, highest first.
+
+**The library's five views** are Grid, Compact, Albums, Artists and Tracks —
+each one draws rows, each with its own sort, column set and (for Tracks) a star
+rating column of its own. The toolbar's filter menu carries the presets (*All*,
+*Failing*, *CD rips*, *Digital*, *Instrumental*, *Music videos*, *No lyrics*)
+plus two facets with live counts: **star rating** (Any / Rated / Unrated — over
+your own ratings; an album counts as rated when its own folder rating is set or
+any track in it is rated, an artist when any of its albums is, and nothing is an
+average) and **advisory** (Any / Explicit / Clean, where Explicit is
+`ITUNESADVISORY` 1 and Clean is everything that does not flag it — the clean
+edition and the tracks nothing marked). The chip names every filter in force and
+marks itself while any is on. A table filtered down to nothing says so in the
+table instead of drawing a header over blank space.
 
 ### Discover, recommendations and watching
 
@@ -279,18 +314,17 @@ animated karaoke lyrics. The fullscreen view is a two-column layout on a wide
 window (cover + controls, lyrics beside it) and a scrolling single column on a
 narrow or heavily zoomed one, where the lyrics pane keeps a real minimum height
 instead of being squeezed under the fold. Nothing floats over the art as a
-panel: the lyrics pane, the metadata block, the queue drawer and the player's
-own popovers each draw a *veil* — the same polarity tint the ink table picks,
-under a backdrop blur, at low alpha and dissolving at its edges — so the cover
-stays visible behind the text instead of being covered by a slab. The lyrics
-pane carries that veil (and every line a tight text shadow) because the backdrop
-is a light additive color field: over a white cover the old 2 px blur at 60 %
-made the text unreadable, which is what the veil is tuned for now. The title,
-the format line and the album/artist lines under the cover take that same ink
-decision and the same veil: the ambience is dark even under a light cover
-(measured, in `tools/check_np_metadata_contrast.cjs` — every metadata tier at
-4.5:1 or better, the title at 3:1), so a block with fixed white/grey steps put
-its secondary lines at ~2.5:1 on both polarities. Both lyric surfaces — this
+panel: the lyrics pane, the metadata block, the transport and the top bar draw
+**no** background, border or blur of their own, and what keeps their text
+readable is the ink itself — its colour is **derived from the cover** (the
+cover's average colour, the same value the ambience is painted from): a dark
+cover gets the white table and **nothing at all behind the text**, a bright one
+flips to near-black ink over a lift built from the cover's own colour, never a
+grey scrim (`spec R52c`, `npInk`). The glyph shadow flips with the ink — a dark
+halo under light text, a light one under dark. Measured on three covers (dark,
+mid-grey and a white one, in `tools/check_np_metadata_contrast.cjs`): every
+metadata tier at 4.5:1 and the title at 3:1 or better, on both polarities. The player's floating menus (the display options, the
+queue) keep a frosted panel, because a menu is a menu. Both lyric surfaces — this
 pane and the right-docked sidebar viewer — carry the same size control: `−`, a
 percentage you can type into, `+`, 5 % a press (85-160 %), remembered per
 surface because a 380 px sidebar and a full-screen pane want different numbers.
@@ -300,7 +334,19 @@ visualizer and the display options — and the same button on the player bar for
 the sidebar pane) shows and hides it, the toggle only appears while the current
 track actually has lyrics, and hiding is seamless — the pane keeps its scroll
 position, its zoom and its sung line while its box animates away and the cover
-glides back to the middle. Nothing is ever drawn on top of the artwork.
+glides back to the middle. Nothing is ever drawn on top of the artwork. Both
+lyric surfaces also carry the same **offset** control — `−`, the pending shift
+in seconds, `+`, Save — for lyrics that arrive early or late against the track:
+the step is a tenth of a second, the shift previews live (the highlight follows
+the buttons), and Save writes it into the track's own lyrics, wherever they
+live (the `.lrc` beside the file and/or its `LYRICS` tag). Every timestamp in
+the text moves by that amount; a line with no timestamp is left exactly as it
+was, and a stamp that would land before the start of the file clamps at
+`[00:00.00]` instead of going negative. The same details the library rows offer
+are one click from the player itself: the bar's own **ⓘ** and the fullscreen
+player's options menu both open the track's **Details & credits** — the stored
+readout, the audit verdicts and the MusicBrainz credits — without leaving what
+you are listening to.
 ReplayGain is applied through the WebAudio gain stage in
 **track**, **album** or **off** mode (`replaygain_mode`) with a preamp
 (`replaygain_preamp_db`, ±24 dB); a file without ReplayGain tags is measured on
@@ -333,14 +379,15 @@ decide an album. The wizard's **Submit to AcoustID** action then publishes the
 pair the files already carry to AcoustID's database — a two-press confirm, and
 it needs `acoustid_user_key` (a *user* key from the same account; the
 application key can only look up). The wizard's eight steps are **Select & separate → Links → Match → Covers →
-Genres → Lyrics → Advisory → Finish**, and *Finish* can run the import chain or
-the whole `run_all_order` over that album. **Run the import chain** re-runs the
-configured chain on this album, and it never sits on a press: while another job
-is already finishing that album it says so at once, naming the job that has it,
-instead of waiting behind it — and an import that *does* queue (the bulk queue, a
-one-click download, a wish) shows what it waits for and on which album, with the
-steps before its chain (links, metadata, cover art) named on the progress bar
-while they run. The **import script chain** then runs
+Genres → Lyrics → Advisory → Finish**, and *Finish* runs the scripts you ticked
+on this album — the import chain's own ids, in its own order, until you change
+them. There is **no "re-run the import chain" button** on that step: that press
+went back through the whole import, which re-fetches the links, genres, cover art
+and advisory and *empties* the four families an import decides first — it undid
+the work just done by hand in those eight steps (`spec R9`). An album you
+finished by hand is finished; any single script can still be re-run from the
+album page, and Run All over the library lives on the Optimization page. The
+**import script chain** then runs
 (default `import_scripts`, i.e. `DEFAULT_CHAIN`, which *is* `run_all_order` —
 one list, in `mlo/config.py`, so a script added to Run All can never be missing
 from an import); `import_auto_scripts` turns it off, `import_scripts` replaces it
@@ -357,6 +404,63 @@ one in review mode) is left exactly as it arrived, and
 `import_keep_synced_lyrics` is the lyric family's one exception — on, a track
 whose lyric already carries timestamps keeps it. **Bulk import** queues several
 albums with `import_bulk_concurrency` (2 by default, 1–8).
+
+**An import finishes on its own, and only asks when the answer is yours.**
+`import_autonomy` ships as `automatic`: the pipeline decides every family it can
+— links, cover, genres, lyrics, advisory, artist image and descriptions — runs
+the configured chain, and then *reports* what no source could supply; it never
+stops to ask. A lyrics search that comes back empty settles the track instead of
+parking the album: with no lyrics from any configured provider and no source
+saying the track has vocals, it is marked `INSTRUMENTAL=1` with the app's own
+provenance (`lyrics-none`, `spec R162`) — so a library of instrumentals imports
+to a graded album rather than to a queue of questions, and a track whose lyrics
+*are* found is never touched. What is left after all of that is genuine: a
+family you kept for yourself (`import_review_families`, `cover_review`, or
+`import_autonomy: "review"`), or one no source could state at all — and THAT is
+what the notification menu and the Soulseek page's *Needs you* row carry
+(`spec R121`). **While an album waits on you it is parked**: a library-wide
+`Run All` skips it and logs which albums it left alone, so scripts cannot
+rewrite a release you are halfway through answering (`spec R161`); the wizard's
+own steps are the press that finishes it, and each family's own button in the tag
+menu re-decides one thing by hand through the same code the automatic path runs.
+
+**An import never loses the album it is working on.** The chain is scoped to one
+album, and *Beets tagging* (script 14) moves that album into the library under
+the naming script and renames every file in it — so the app follows it: every
+later script acts on the folder the album is in *now*, and where the chain ended
+is what the queue row, the album page and the notification all name
+(`spec R164`). Measured on a real import: the report used to name the folder
+beets left, which the very same step's organize pass had already renamed, so
+every script after it ran against the emptied download folder — Format all and
+Grade both reporting nothing while the import looked like a success. The album's
+own files travel with it too: the cover the import fetched, its description, its
+expected-tracklist manifest and the rip's CUE/LOG all move with the audio
+wherever it lands, and a file whose name the album folder already holds is never
+overwritten — you are told which one stayed (`spec R165`). In practice an
+automatic import lands a graded album **with its cover art**, instead of handing
+you a release to finish by hand over artwork the app had just fetched.
+
+**When the edition the app picked is not on the network, it does not give the
+album up.** *Add to library* on a release group tries that group's ranked
+editions IN ORDER — the best pressing first, then the next, **three by default**
+(`soulseek_fallback_candidates`, 1–10; `1` is the best edition only) — and each
+of those searches gets its own window before it counts as not found and the walk
+moves on (`soulseek_search_timeout_seconds`, **60 s**, per candidate). Editions
+that would be the SAME search are skipped, not re-asked: separate MusicBrainz
+releases really do share a catalog number (one CD issued under two labels —
+`GED 24425` beside `GED24425` — a reissue, a country variant printed unchanged),
+and the number is what a CD search is keyed on, so the second of those could only
+find the folders the first already found (`spec R169`; the walk names what it
+skipped, and an edition stating no number at all is always still worth asking
+for). A release
+group with fewer editions than that simply ends at the end of its own list, and
+nothing waits for an edition that does not exist. It never looks stuck while it
+does: the album's row and the queue say where the search is (*"release 2 of 3"*),
+and a search that lands an edition other than the best says which one it was. If
+none of them is there, the release is **not dropped and its album is not
+removed**: it moves to the queue's own **Background** list — one row per release,
+however many editions it is trying — and keeps being searched on the worker's
+schedule until one lands.
 
 The **Genres** step asks the whole configured chain with **one button**: every
 source the app knows, asked in the order `genre_sources` lists them —
@@ -391,28 +495,22 @@ MusicBrainz holds for its recording), Apple's explicit-edition album route and
 Apple's exact-title song search — merged so explicit anywhere wins, and derives
 `ALBUMITUNESADVISORY` from the per-track values with script 8's own rule (the
 *Fetch / refresh advisory rating* action derives it too, so a manual fetch never
-leaves the album tag stale). The configured AI provider is one of those sources: it is
-asked once for every track (when `advisory_ai_classify` is on) and its answer is
-ranked with the providers' by the same rule, so an AI `1` overrules a stated `0`
-or `2` while a stated `1` survives whatever it says — and it only overrules one
-when it actually read the track's words (embedded lyrics first, else the `.lrc`
-sidecar). It is asked about the SONG, not its vocabulary: `1` is profanity that
-is excessive or a slur or a very strong word, or graphic sex/violence/drug use,
-while a mild word in passing — a lone `ass`, `damn` or `hell`, an idiom, a quote,
-a word ordinary in another language — is `0`, and lyrics in any language or
-script are judged in that language. The lyrics scan below it works the same way:
-its mild tier (`mlo/advisory_words.MILD`: the English "ass" family, `culo`,
-`arsch`, `reet`) is reported in the reply's `hits` and decides nothing, so a song
-carrying one is `0` like any clean track, and only a STRONG hit can escalate a
-provider's stated `0`. Per source the STRONGEST answer wins —
-every ISRC is asked, so a later pressing's explicit answer is not lost to an
-earlier clean one — and a provider-stated 0 can still be escalated to 1 by a
-word-reading stage (the configured AI, then the multilingual scan), whose source
-says so (`lyrics-scan (escalated)`). Each track's value names the source behind
-it, and the reply carries every answer it weighed beside it; a track no source
-could state anything about is not invented — `mlo/advisory.py`
-decides (instrumental → configured AI → the multilingual lyrics scan →
-`advisory_fallback`) and reports the stage it used. What an IMPORT fetches on its
+leaves the album tag stale). A source that STATED a value ends the question: it
+is written as it stands, with that source's own provenance, and a stated `0` is
+final — nothing re-opens it. The configured AI provider answers what nothing else
+could: it is asked ONLY when every source came up with nothing at all (when
+`advisory_ai_classify` is on) and it is fed the track's own words (embedded
+lyrics first, else the `.lrc` sidecar). It is asked about the SONG, not its
+vocabulary: `1` is profanity that is excessive or a slur or a very strong word,
+or graphic sex/violence/drug use, while a mild word in passing — a lone `ass`,
+`damn` or `hell`, an idiom, a quote, a word ordinary in another language — is
+`0`, and lyrics in any language or script are judged in that language. Per source
+the STRONGEST answer wins — every ISRC is asked, so a later pressing's explicit
+answer is not lost to an earlier clean one. Each track's value names the source
+behind it, and the reply carries every answer it weighed beside it; a track no
+source could state anything about is not invented — `mlo/advisory.py`
+decides (instrumental → the configured AI → `advisory_fallback`) and reports the
+stage it used. What an IMPORT fetches on its
 own never re-asks a track that already holds 0/1/2: it reports the value back
 with its provenance — `the file's own tag, not re-checked` — because nobody
 pressed anything there. Every action a person presses asks the providers again
@@ -430,7 +528,39 @@ A managed slskd instance (autostart, shares = the library folder
 `<music>/Artists`, a share rescan scheduled whenever the library changes), with
 search & download UI, a live status
 dot, share browsing, bulk and whole-user downloads, transfer-level clearing and
-staging management (`GET /api/soulseek/staging`). **Is the port open?** — the
+staging management (`GET /api/soulseek/staging`). **Transfer progress is
+pushed, not polled**: the same rows `GET /api/soulseek/downloads` returns —
+and every live job's own progress block — also ride the progress WebSocket as
+`{"type":"transfers"}` frames (`server/main.py`; the page draws its Downloads
+tab, Auto-import card and queue-row bars from them, `spec R120`). The cadence
+follows the bytes: 0.4 s while a transfer is in progress or a job is running,
+5 s otherwise, nothing at all when nothing changed and no slskd request while
+no client is connected. Measured against a 2 MB/s transfer on a scratch
+instance (a fake slskd serving slskd's own transfer tree, the real backend and
+the real UI): the bar moved every **0.40 s** and what it showed was **0.17 s**
+old on average (p90 0.31 s), where the **3 s** poll it replaced gave **3.02 s**
+and **1.48 s** (p90 2.79 s); a transfer finishing left the Active list
+**0.38 s** after slskd reported it; the frames cost ~370 bytes each (2.5 a
+second while bytes move, 0 when a queue has settled). The page's own poll of
+that query stays as a 30 s fallback for a dead socket. Progress is status, not
+an outcome — those frames never reach the notification tray or the OS
+notifications.
+**An import that needs a hand is an outcome, and it is announced in three
+places** (`spec R121`, `spec R166`): an album the pipeline could not finish
+raises `import_needs_data`, which the desktop/mobile shell raises as a system
+notification and the bell's tray keeps, arrives in-app on the same event
+channel, and appears on the Soulseek page's **finished row for that release** —
+which carries the warning "*Needs data: …*" naming the missing families in the
+app's own words, beside *Enter manually* (the import wizard at that album's
+first missing step, `/import?album=…&step=…`) and *Mark complete* (stop asking;
+a later import of the album asks again only if something is still missing) —
+and on the album page itself, which shows the same sentence with the same link.
+**Nothing about the album waits**: it is in the library, graded like any other,
+and the release reads as finished rather than as a stall. Only a genuine wait —
+a *review* import stopped before its chain ran, or a disc structure whose main
+feature is unpicked — sits in the *Needs you* section, and only those are
+skipped by a library-wide Run All. It fires on that state only: never for
+progress, and never twice for the same album unless what is missing changes. **Is the port open?** — the
 tab's *Test port* action (`GET /api/soulseek/port-check`) answers it with five
 rows that each say what they prove: a real TCP connection to the listen port
 here (plus a bind test to tell "nothing is listening" from "something else holds
@@ -510,7 +640,9 @@ rejected candidate left behind.
 download at once; **the app enforces both itself** — the fourth release is never
 refused, it takes its place in the queue's **Waiting** group (with its position,
 and cancellable there without ever starting a byte) and starts by itself the
-moment one of the running releases finishes. slskd's own
+moment one of the running releases finishes. Releases whose ranked-edition walk
+is spent are their own **Background** group, one row per release: they are still
+being searched, just not right now. slskd's own
 `soulseek_download_slots` is the OUTER ceiling on the transfers that produces,
 which is why it defaults to 9 — the product of the two (3 × 3) — and a config
 that sets fewer slots than its two limits need gets each release's candidate
@@ -521,7 +653,20 @@ A release is imported **once**, into one album folder: the destination is
 checked against the release's own MusicBrainz ids, so a download of an album the
 library already holds is refused with a sentence instead of appearing beside it
 as `… (2)` — and two jobs heading for one folder serialize on that folder while
-their chain runs scoped to it, never over the library. Adding a release to the
+their chain runs scoped to it, never over the library. That claim belongs to the
+download **job**, and it is carried onto the background chain the import starts
+(`server.script_runners.claim_paths`, `server.soulseek_auto._start_import_chain`):
+the album stays locked from the first tag write through the last script — and so
+does the folder the download came from, so nothing imports or clears it while
+the chain is still finishing that release. The album page's chain press (the
+tag-actions entry) on such an album is therefore answered at once, naming the
+job that holds it, instead of starting a second chain over the same files. The bar takes **any MusicBrainz link**: a release, a
+release-group (the group's ranked editions are walked, R150), an artist (its
+discography is queued in the background, the albums appearing as they are
+created) or a recording — paste the page URL or the bare MBID, and it goes
+through the same `POST /api/library/add` the MusicBrainz pages' own *Add to
+library* uses, with a bare MBID resolved server-side so both paths agree about
+what was asked (`spec R170`). Adding a release to the
 library **starts its search immediately** and puts it on
 the **download queue**, Notifications cover the whole way in, switchable in Settings → Notifications (on by default): the add itself, the download starting and finishing, and the import starting and finishing with the chain's own summary. which is the one surface for wanted releases: a row shows
 what the search is doing, and it stays **In progress** — never Completed — while
@@ -541,6 +686,25 @@ re-marked pending, which is what keeps a filled album from reading as a wish
 again. *Import all completed*
 imports every finished download **sequentially**, with cancel finishing the album
 in flight (`GET /api/soulseek/import-all/status`).
+
+The download dir is also capped: **two independent size caps**, both 5 GB by
+default and both editable in Settings → Storage (`soulseek_cache_cap_gb`,
+`trash_cap_gb` — 0 turns one off; one store filling up never eats the other's
+room). The Soulseek one covers the download dir plus the `incomplete` sibling
+slskd stages partials in, the trash one covers `<music folder>/.mlo/trash`
+across every per-user bin; over its cap, a store is emptied **oldest entry
+first** — the same entries the Downloads and Trash pages delete, one at a time —
+until it fits, and the pass stops there. What is **in use is never touched**: a
+path an import or a script run holds (`server/job_locks`, and the report names
+that job), or anything a transfer still running is writing into (its peer, the
+folder it is writing in and, for a loose partial, its file name — read from
+slskd's own transfer list). An entry that will not delete is kept and reported,
+so the cap simply stays over until the transfer ends. A trash entry the cap
+deletes loses its origin record with it, exactly as the Trash page's own Delete
+does, so everything the prune KEPT is still restorable to where it came from.
+The pass runs in the background (a worker that starts with the app and ticks
+every few minutes), so the caps hold on an install nobody is watching, and each
+prune announces itself with one notification naming what was freed.
 
 The queue's own controls follow from those two limits. **Clear all** empties the
 *queued/waiting* work in one press — every release that has not started goes,
@@ -568,7 +732,13 @@ Optimization → *Run All* executes `run_all_order`, shipped as **11 → 3 → 1
 → 2 → 1 → 13 → 18 → 17 → 8 → 5 → 19 → 6 → 7 → 9 → 12 → 16 → 10 → 20 → 21 → 4** —
 everything that moves a file first, everything that reads it last. Every script
 also runs on its own, on a selection, or with its force flag from the *Re-run &
-overwrite* menu.
+overwrite* menu. A library-wide run holds every folder it walks — the library
+root and any album filed elsewhere in the music folder, since the sweeps start at
+`music_folder` — so nothing else can rewrite one of those albums underneath it,
+while an album-scoped run (an import chain, a press) holds only its own album.
+A script that **moves** an album takes that claim with it: the folder the audio
+left is freed and the album's new folder is locked before the next script writes
+a byte into it (`server.job_locks.move`).
 
 | # | Script | What it does |
 | --- | --- | --- |
@@ -594,14 +764,39 @@ overwrite* menu.
 | 20 | Scan library layout | Walks the music folder's shape and — with `layout_apply` (ON) — FIXES the three unambiguous findings: a name whose letter case differs from `naming_script` is renamed to the script's spelling, audio sitting outside any album folder is moved into the one its own tags name, and an artist folder with no album goes to the Trash. Everything else (stray files, unexpected folders, empty albums, unreadable albums) is reported, never guessed at: nothing is deleted, a destination that already holds a file is refused rather than overwritten, and only paths inside the music folder are ever touched. Writes `.mlo/data/layout_report.json` (`scanned_at` + per-row `fixes` included) — the Library page's warning and the Optimization panel's report read it instead of walking again |
 | 21 | Fix AcoustID pairs | Completes a half-written AcoustID pair: an `ACOUSTID_ID` with no `ACOUSTID_FINGERPRINT` gets the local `fpcalc` fingerprint, a fingerprint with no id gets the lookup. Both halves present (or none) is left alone — it is the fixer for the grading failure *Missing ACOUSTID_FINGERPRINT (incomplete AcoustID pair)*, and it writes only the half that is missing |
 
+**What script 17 transliterates and translates is decided from evidence, not
+from the letters alone** (`spec R167`). The one rule
+(`mlo/lyrics_xlit.xlit_needs` — asked by the script *and* by the grader, so the
+two can never disagree) reads, in order: the track's own `LANGUAGE` tag, which
+an import fills from **MusicBrainz's release text representation**
+(`text-representation.language`, e.g. `jpn`, normalized to the app's own codes;
+written only into an empty tag, so your own value stands) — then the lyrics'
+own script (kana is Japanese, hangul is Korean, and Cyrillic or Han states
+nothing, which is exactly the case a declared language settles) — then the
+function words of the languages the app knows. A declared language is what
+separates two Latin-script languages, which a script test cannot: a Turkish
+track with no English stopwords in it used to read as "English" and got no
+translation, and it does now. When nothing can say what the lyrics are in,
+script 17 asks the configured AI **one question about that track** and stores
+the answer in the `LANGUAGE` tag, so the question is paid once per track and
+the grader reads a stored fact instead of asking a model anything. Codes that
+state nothing (`mul` — a compilation, `und`, `zxx`) are asked past rather than
+obeyed. The run's summary reports `language stored N` beside its transforms.
+
 Force flags, one per script: `force_lyrics`, `force_cue`, `force_tracklist`,
 `force_reencode_flac`, `force_reencode_images`, `force_audit`, `force_accurip`,
 `force_dr_replaygain`, `force_audiometa`, `force_mood`, `force_auto_tag`,
-`force_xlit`, `force_publish`. Scripts whose feature has its own off switch are
-skipped rather than run as no-ops: `dr_replaygain_enabled` (7),
-`audiometa_enabled` (12), `mood_enabled` (16), `lyrics_xlit_enabled` /
-`lyrics_translate_enabled` (17), `lrclib_auto_publish` (18),
-`acoustid_enabled` (21).
+`force_xlit`, `force_publish`. A run's force selection is *authoritative and
+complete*: the flags it does not name are turned off, so unchecking a script in
+the one-shot **Force** menu really turns it off rather than falling back to a
+saved switch — and a caller that has no selection of its own omits it entirely
+(every import path does), which is what leaves the saved switches in charge.
+Script 20 is the one key that turns work OFF (`layout_apply`): untick it and the
+layout pass reports without renaming or moving anything. Scripts whose feature
+has its own off switch are skipped rather than run as no-ops:
+`dr_replaygain_enabled` (7), `audiometa_enabled` (12), `mood_enabled` (16),
+`lyrics_xlit_enabled` / `lyrics_translate_enabled` (17), `lrclib_auto_publish`
+(18), `acoustid_enabled` (21).
 
 By default the optimizer does **not** embed cover art — it removes it, and
 covers live on disk as `cover.*` plus per-track sidecars; Settings → *Embedded
@@ -651,6 +846,17 @@ first-value rule all read that one form. `grade_check_tag_case` and
 (`TITLE`, `ALBUM`, `ARTIST`, `LABEL`, the lyrics) is never touched, which is what
 keeps `AC/DC` and `k.d. lang` intact. Genres are stored broad-first too:
 `Rock / Shoegaze / Dream Pop`, the family and then what names the music.
+
+A tag with more than one answer is a LIST, stored as repeated container fields
+(one comment / frame / atom per value, `; `-joined on read) — the credit roles
+(performer, producer, engineer, mixer, arranger, conductor, the work's
+songwriters), the track's ISRCs, the release's countries and the genres — and a
+list is DATA: a release with two engineers is written with both, and a file that
+already states one keeps it and gains the other rather than being cut down to
+one value. A music video's container holds one string per key, so there the same
+list is stored `; `-joined; `%genre%` is that whole list both in the beets
+import and in the organizer (only `RELEASECOUNTRY` and `LABEL` reduce to their
+first value, to keep one album's path deterministic).
 
 **The specification** — every check id, what it asserts, its default, the
 presets, the audit workflow, tag families, quality bars, score semantics and a
@@ -904,7 +1110,7 @@ Where the app stores what it fetches (all under `<music>/.mlo/`):
 | `GET /api/cover/search` `…/sources`, `POST /api/cover` `…/fromurl` | cover meta-search, upload and save-as-cover |
 | `POST /api/soulseek/download-bulk` `…/download-user` `…/search/cancel`, `GET /api/soulseek/ready`, `POST …/import-one` `…/import-all` `GET …/import-all/status` `POST …/import-all/cancel` | Soulseek downloads, the ready list and the sequential importer |
 | `GET /api/soulseek/port-check` | the listen port's own check (the tab's "Test port"): a real TCP connection to the port here, what the router holds for it (`GetSpecificPortMappingEntry`, the gateway's own words), the LAN/WAN address shape (a CGNAT or double NAT setup named as such), a connection from here to the public address, and slskd's login — every row states what it proves and what it cannot, and a definite answer about the internet needs a probe from outside, which this app does not ship |
-| `WS /ws/progress` `WS /ws/events` | live script progress; the notification channel (every published kind — `wish_found`, `download_started`, `download_done`, `upload_started`, `import_ready`, `script_done`, `grade_done`, `update_available`, …), `?since=` replays the 100-event ring |
+| `WS /ws/progress` `WS /ws/events` | live script progress, the live transfer/job frames (`{"type":"transfers"}`, `spec R120`) and the daemon's state frames; the notification channel (every published kind — `wish_found`, `download_started`, `download_done`, `upload_started`, `import_ready`, `script_done`, `grade_done`, `update_available`, …), `?since=` replays the 100-event ring |
 
 ## Tests & development
 

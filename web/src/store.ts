@@ -74,9 +74,13 @@ interface Store {
   filter: Record<string, unknown>;
   setFilter: (f: Record<string, unknown>) => void;
   /** Toasts queue instead of overwriting each other; the shell renders them
-   *  stacked, each with its own severity and dismiss control. */
+   *  stacked, each with its own severity and dismiss control. `updateToast`
+   *  rewrites one that is still on screen — the press acknowledgement an
+   *  action showed before its request settled, replaced by the server's own
+   *  answer when it lands, WITHOUT a second toast beside it. */
   toasts: ToastItem[];
   addToast: (t: ToastItem) => void;
+  updateToast: (id: number, message: string, severity: ToastSeverity) => void;
   dismissToast: (id: number) => void;
   selection: { tracks: string[]; albums: string[]; artists: string[] };
   setSelection: (s: Partial<{ tracks: string[]; albums: string[]; artists: string[] }>) => void;
@@ -175,6 +179,10 @@ export const useStore = create<Store>((set) => ({
   setFilter: (filter) => set({ filter }),
   toasts: [],
   addToast: (t) => set((st) => ({ toasts: [...st.toasts, t].slice(-TOAST_MAX) })),
+  updateToast: (id, message, severity) =>
+    set((st) => ({
+      toasts: st.toasts.map((t) => (t.id === id ? { ...t, message, severity } : t)),
+    })),
   dismissToast: (id) => set((st) => ({ toasts: st.toasts.filter((t) => t.id !== id) })),
   selection: { tracks: [], albums: [], artists: [] },
   setSelection: (s) => set((st) => ({ selection: { ...st.selection, ...s } })),
@@ -224,26 +232,48 @@ let volWrite: number | undefined;
 
 let toastSeq = 0;
 
+/** Dismiss timer per toast id. Kept so `toast.update` can put the server's own
+ *  answer in the place of the acknowledgement a press showed: without
+ *  re-arming, the FIRST timer (3 s, started when the press happened) would pull
+ *  the toast off screen mid-answer. */
+const toastTimers = new Map<number, number>();
+
+function armToast(id: number, severity: ToastSeverity) {
+  clearTimeout(toastTimers.get(id));       // no-op when this id has no timer
+  toastTimers.set(
+    id,
+    window.setTimeout(() => {
+      toastTimers.delete(id);
+      useStore.getState().dismissToast(id);
+    }, severity === "error" ? TOAST_TTL_ERROR_MS : TOAST_TTL_MS)
+  );
+}
+
 /** Severity-aware toast: `toast(msg)` is informational, `toast.error(msg)` /
  *  `toast.success(msg)` are the explicit variants. Toasts queue (never
  *  overwrite), each dismisses on its own timer — errors stay twice as long —
- *  and any of them can be dismissed by hand from the shell. */
+ *  and any of them can be dismissed by hand from the shell.
+ *
+ *  All of them return the toast's id, and `toast.update(id, msg, severity)`
+ *  rewrites that toast in place with a fresh timer: that is how a press is
+ *  acknowledged at once (the id it gets) and then answered by what the server
+ *  actually said, in one toast rather than two. */
 type ToastFn = {
-  (message: string, severity?: ToastSeverity): void;
-  info: (message: string) => void;
-  success: (message: string) => void;
-  error: (message: string) => void;
+  (message: string, severity?: ToastSeverity): number;
+  info: (message: string) => number;
+  success: (message: string) => number;
+  error: (message: string) => number;
+  update: (id: number, message: string, severity?: ToastSeverity) => void;
 };
 
 function pushToast(message: string, severity: ToastSeverity) {
+  // Ids are never reused, so the timer map needs no cross-checking: an id whose
+  // toast already left the queue is a no-op filter on dismiss and a stale
+  // entry nothing reads.
   const id = ++toastSeq;
   useStore.getState().addToast({ id, message, severity });
-  // Ids are never reused, so the timer needs no bookkeeping: dismissing an id
-  // that already left the queue is a no-op filter.
-  setTimeout(
-    () => useStore.getState().dismissToast(id),
-    severity === "error" ? TOAST_TTL_ERROR_MS : TOAST_TTL_MS
-  );
+  armToast(id, severity);
+  return id;
 }
 
 export const toast: ToastFn = Object.assign(
@@ -252,5 +282,9 @@ export const toast: ToastFn = Object.assign(
     info: (message: string) => pushToast(message, "info"),
     success: (message: string) => pushToast(message, "success"),
     error: (message: string) => pushToast(message, "error"),
+    update: (id: number, message: string, severity: ToastSeverity = "info") => {
+      useStore.getState().updateToast(id, message, severity);
+      armToast(id, severity);
+    },
   }
 );

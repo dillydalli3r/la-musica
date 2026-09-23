@@ -400,7 +400,8 @@ assert body["release_group"] == {"title": "Album", "first_release_date": "1997-0
                                  "primary_type": "Album", "secondary_types": [],
                                  "track_count": 12}, body["release_group"]
 assert set(body["chosen"]) == {"release_mbid", "title", "date", "country", "status",
-                               "media", "track_count", "disambiguation", "score",
+                               "media", "track_count", "disambiguation",
+                               "catalog_numbers", "score",
                                "eligible", "reasons"}, sorted(body["chosen"])
 assert body["chosen"]["release_mbid"] == body["candidates"][0]["release_mbid"]
 assert len(body["candidates"]) == rc.CANDIDATE_LIMIT          # capped at ~20

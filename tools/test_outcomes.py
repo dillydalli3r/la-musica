@@ -586,8 +586,12 @@ MISSING = {
 }
 drain()
 autonomy.raise_prompt(ALBUM, dict(CFG), MISSING, mode="automatic", reason="missing")
-prompts = [r for r in queue()["sections"]["needs_attention"] if r["kind"] == "prompt"]
-check("a stalled album is a row in the queue's Needs you", len(prompts) == 1,
+prompts = [r for r in queue()["sections"]["completed"] if r["kind"] == "prompt"]
+check("an album a finished import is short of is a row in the queue's Completed",
+      len(prompts) == 1,
+      str([r["kind"] for r in queue()["sections"]["completed"]]))
+check("...and never a row in Needs you: nothing about it waits (spec R166)",
+      not [r for r in queue()["sections"]["needs_attention"] if r["kind"] == "prompt"],
       str([r["kind"] for r in queue()["sections"]["needs_attention"]]))
 row = prompts[0] if prompts else {}
 check("...naming the families that are missing, in wizard order",
@@ -602,6 +606,10 @@ check("...linking to the wizard AT the first missing family, with the whole list
 check("...offering manual entry and the dismiss, and nothing to cancel",
       row.get("action") == "manual" and row.get("dismissable") is True
       and row.get("cancelable") is False, json.dumps(row))
+check("...and saying in the row itself that the album is in the library",
+      (row.get("needs") or {}).get("waiting") is False
+      and (row.get("needs") or {}).get("reason") == "missing",
+      json.dumps(row.get("needs")))
 check("...and exactly one import_needs_data frame went out",
       len(frames("import_needs_data")) == 1, str(len(frames("import_needs_data"))))
 check("...whose link is the same manual-completion link",
@@ -622,11 +630,11 @@ r = client.post("/api/import/prompts/dismiss", json={"path": ALBUM})
 check("dismissing the prompt answers ok", r.status_code == 200 and r.json().get("ok") is True,
       r.text)
 check("...and the row is gone from the queue",
-      not [x for x in queue()["sections"]["needs_attention"] if x["kind"] == "prompt"],
+      not [x for x in queue()["sections"]["completed"] if x["kind"] == "prompt"],
       str(queue()["counts"]))
 drain()
 autonomy.raise_prompt(ALBUM, dict(CFG), MISSING, mode="automatic", reason="missing")
-again = [x for x in queue()["sections"]["needs_attention"] if x["kind"] == "prompt"]
+again = [x for x in queue()["sections"]["completed"] if x["kind"] == "prompt"]
 check("a later import of the same album raises the prompt again",
       len(again) == 1 and len(frames("import_needs_data")) == 1)
 
@@ -699,18 +707,6 @@ UI_PAYLOAD = {
         "queued": [],
         "in_progress": [],
         "needs_attention": [
-            {"id": "prompt:album", "kind": "prompt", "job_id": None, "wish_id": None,
-             "stage": "needs_attention", "source_key": "import", "source": "Import",
-             "title": "An Album", "artist": "", "release_mbid": "",
-             "album_path": ALBUM, "progress": None,
-             "missing": ["cover", "genres"],
-             "missing_labels": ["Cover art", "Genres"],
-             "wizard_link": "/import?album=x&step=Covers&missing=cover,genres",
-             "action": "manual", "action_link": "/import?album=x&step=Covers&missing=cover,genres",
-             "dismissable": True, "retryable": False,
-             "reason": "Cover art — no source could supply it",
-             "note": "Enter what is missing by hand, or dismiss it",
-             "created_at": 1.0, "updated_at": 1.0, "cancelable": False, "log_tail": []},
             {"id": "job:9", "kind": "job", "job_id": 9, "wish_id": None,
              "stage": "needs_attention", "source_key": "soulseek", "source": "Soulseek",
              "title": "Parked Album", "artist": "An Artist", "release_mbid": "",
@@ -727,7 +723,27 @@ UI_PAYLOAD = {
              "note": "Nothing found — not searched again unless you retry it",
              "created_at": 1.0, "updated_at": 1.0, "cancelable": True, "log_tail": []},
         ],
-        "completed": [],
+        # An import that finished short of a family: a FINISHED row carrying the
+        # warning, exactly as `build_queue` now emits it (spec R166) — the row is
+        # in Completed and nothing about it waits.
+        "completed": [
+            {"id": "wish:4", "kind": "wish", "job_id": None, "wish_id": 4,
+             "stage": "completed", "source_key": "soulseek", "source": "Soulseek",
+             "title": "An Album", "artist": "An Artist", "release_mbid": "",
+             "album_path": ALBUM, "progress": None, "clearable": True,
+             "missing": ["cover", "genres"],
+             "missing_labels": ["Cover art", "Genres"],
+             "needs": {"families": ["cover", "genres"], "labels": ["Cover art", "Genres"],
+                       "link": "/import?album=x&step=Covers&missing=cover,genres",
+                       "detail": "Cover art — no source could supply it (cover art); "
+                                 "Genres — no source could supply it (genre)",
+                       "reason": "missing", "mode": "automatic", "waiting": False},
+             "wizard_link": "/import?album=x&step=Covers&missing=cover,genres",
+             "action": "manual", "action_link": "/import?album=x&step=Covers&missing=cover,genres",
+             "dismissable": True, "retryable": False,
+             "reason": "", "note": "Imported into the library",
+             "created_at": 1.0, "updated_at": 1.0, "cancelable": False, "log_tail": []},
+        ],
         "failed": [
             {"id": "job:8", "kind": "job", "job_id": 8, "wish_id": None,
              "stage": "failed", "source_key": "soulseek", "source": "Soulseek",
@@ -739,8 +755,8 @@ UI_PAYLOAD = {
              "created_at": 1.0, "updated_at": 1.0, "cancelable": False, "log_tail": []},
         ],
     },
-    "counts": {"queued": 0, "in_progress": 0, "needs_attention": 3,
-               "completed": 0, "failed": 1, "total": 3},
+    "counts": {"queued": 0, "in_progress": 0, "needs_attention": 2,
+               "completed": 1, "failed": 1, "total": 4},
     "running": 0, "concurrency": 3, "download_slots": 3,
 }
 
@@ -797,7 +813,7 @@ try {
   );
   const flat = html.replace(/<!-- -->/g, "").replace(/\s+/g, " ");
   const want = [
-    ["the stalled album's missing families", "Missing: Cover art, Genres"],
+    ["the finished album's warning", "Needs data: Cover art, Genres"],
     ["the manual-entry button", "Enter manually"],
     ["the dismiss button", "Mark complete"],
     ["a parked question's own action", "Answer"],

@@ -373,11 +373,18 @@ try:
     assert _rg_calls == [], _rg_calls
 
     # nothing owned: BOTH paths queue exactly as before (the guard must never
-    # eat a legitimate import)
+    # eat a legitimate import). The row also carries `candidates` now — the
+    # ranked fallback list (spec R150) — so the assertion names the fields it
+    # has always been about (what to queue) and checks the list starts on the
+    # row's own edition, instead of pinning the whole dict: a named RELEASE is
+    # one candidate by definition, since the caller asked for that pressing.
     wishes.owned_mbids = lambda cfg=None: {}
     _patch_mb_transport([_Resp(200, dict(_REL_DATA))])
     _rows, _skipped = _auto_targets(MBID_RELEASE, "release", "best")
-    assert _rows == [{"mbid": MBID_RELEASE, "title": "Some Album"}], _rows
+    assert [(r["mbid"], r["title"]) for r in _rows] == \
+        [(MBID_RELEASE, "Some Album")], _rows
+    assert _rows[0]["candidates"] == [{"mbid": MBID_RELEASE,
+                                       "title": "Some Album"}], _rows[0]
     assert _skipped == [], _skipped
 
     _rg_calls.clear()

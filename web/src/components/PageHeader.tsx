@@ -41,8 +41,17 @@ export default function PageHeader({
       )}
       {/* One column below md — a wide actions set (Segmented + buttons) takes
           the full row and wraps there instead of squeezing the title to a
-          sliver — and the original side-by-side row from md up, where the
-          actions box stays `shrink-0` so their row is untouched on desktop. */}
+          sliver — and the original side-by-side row from md up.
+          Up there the actions box GROWS INTO the leftover room instead of
+          being held at its content width by `shrink-0`: at 834 px the Favorites
+          actions row is 630 px (four tabs, two buttons) against a 594 px row,
+          so a content-sized box that may not shrink took its 630 px out of the
+          one sibling allowed to give any (the title column is `min-w-0`, for
+          its own truncation) — the page title measured 0 px wide on
+          /favorites/tracks and on /playlists, the title of the page with no
+          room at all. Sized from the leftover, that same box wraps its own
+          buttons onto another line and the title keeps the width its text
+          needs. */}
       <div className="flex flex-col md:flex-row md:items-start md:justify-between gap-3 md:gap-4">
         <div className="min-w-0">
           {overline && <div className="text-[10px] uppercase tracking-widest text-zinc-500">{overline}</div>}
@@ -67,7 +76,7 @@ export default function PageHeader({
           )}
         </div>
         {actions && (
-          <div className="flex items-center justify-end flex-wrap gap-1.5 shrink-0 min-w-0">{actions}</div>
+          <div className="flex items-center justify-end flex-wrap gap-1.5 md:flex-1 min-w-0">{actions}</div>
         )}
       </div>
       {children}

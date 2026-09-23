@@ -132,10 +132,16 @@ export function SortHeader({
       style={style}
     >
       {/* the sort target is a real button so Enter/Space sort too — the resizer
-          (children) stays a sibling, outside the button */}
+          (children) stays a sibling, outside the button.
+          `whitespace-nowrap` because a header label is a WORD, not a paragraph:
+          a column narrower than its label used to break it mid-word ("Yea r",
+          "Sourc e", "Video s"), which reads as a rendering fault. The floors in
+          `lib/columns.tsx` / the pages are sized so the nowrap label fits —
+          a label wider than its column would paint over the neighbour in a
+          fixed-layout table, which is worse than a smaller font. */}
       <button
         type="button"
-        className="inline-flex items-center gap-1 cursor-pointer hover:text-zinc-300"
+        className="inline-flex items-center gap-1 cursor-pointer hover:text-zinc-300 whitespace-nowrap"
         onClick={() => onSort(sortKey)}
       >
         {label}

@@ -613,82 +613,44 @@ table td {
   pointer-events: none;
   background: radial-gradient(ellipse 125% 100% at 50% 45%, transparent 46%, rgb(9 9 11 / 0.42) 100%);
 }
-/* Lyrics legibility: the fullscreen player's backdrop is the cover's own
-   color field, so the pane picks its ink from the cover's luminance (see
-   NowPlayingView). The DARK polarity — white glyphs — carries the shadow:
-   1px/2px under the glyph plus an 8px halo is what separates a line from the
-   busier mid-tones of the ambience once the pane's own panel is gone.
-   The LIGHT polarity takes no shadow at all. Its ink is near-black and the
-   polarity rule only hands it over when the field measured bright, where the
-   contrast is already around 9:1 — a white halo there darkens nothing and
-   hides nothing, and over an off-white cover it drew a white outline around
-   every glyph (the "lyrics on a white background look outlined" report). */
-.np-shade-dark {
-  text-shadow: 0 1px 2px rgb(0 0 0 / 0.55), 0 0 8px rgb(0 0 0 / 0.35);
+/* Lyrics legibility: the fullscreen player puts its text straight onto the
+   ambience with NOTHING between them — no panel, no tint (the owner's "I
+   don't want backgrounds on UI elements" report was two grey rectangles, one
+   across the lyrics and one under the title). Two things carry the legibility
+   instead. The field itself is darkened for every cover by the player's
+   full-bleed wash (NowPlayingView), and the ink — always the light table now —
+   carries its own shadow: a TIGHT near-opaque core that outlines the glyph
+   against whatever it crosses, plus a WIDE soft halo that lifts the whole line
+   out of the busier mid-tones of the colour field. Core-only was the old
+   0.55/0.35 pair and it lost faded lines in the drift; halo-only smears the
+   glyph. Both stops are near-opaque on purpose: this shadow is the only local
+   contrast the text has left. */
+/* The same two stops, mirrored for the DARK ink a bright cover asks for
+   (the polarity is decided once, in `npInk`): a light halo is what separates a
+   near-black glyph from a bright field, exactly as the dark one does for white
+   glyphs. Both stops are the ink's opposite, so a cover that flips the table
+   flips its shadow with it. */
+.np-shade-light {
+  text-shadow: 0 1px 3px rgb(255 255 255 / 0.75), 0 2px 14px rgb(255 255 255 / 0.45);
+}
+.np-shade {
+  text-shadow: 0 1px 3px rgb(0 0 0 / 0.92), 0 2px 14px rgb(0 0 0 / 0.62);
 }
 /* ------------------------------------------------------------------ */
-/* The fullscreen player's veils                                       */
+/* The player's frosted menus                                          */
 /* ------------------------------------------------------------------ */
-/* The player puts its text straight onto the artwork, so legibility has to
-   come from BETWEEN the glyphs and the picture — never from a panel: a flat
-   35 % scrim across the lyrics and another under the title read as boxes
-   pasted on the cover (the owner's "I don't want backgrounds on UI elements"
-   report; the photographed layout was two grey rectangles, one across the
-   lyrics and one under the title). A VEIL is what replaces them: the same
-   polarity tint the ink table already picks, now under a backdrop blur, weak
-   enough to keep the picture readable through it, and DISSOLVED at its edges
-   so nothing is drawn around the text.
-
-   `--np-veil` is the tint the polarity sets (zinc-950 under white ink, white
-   under near-black) and it INHERITS, so the fullscreen root stamps the
-   polarity once and every surface — the pane's layer, the metadata pill —
-   reads that one decision. The geometry class decides how the tint is drawn;
-   the prefixes are the build's job. */
+/* Left for the surfaces that ARE floating panels — the player's own menus
+   (options, add-to-playlist, via Popover) and the queue drawer: frosted
+   instead of an opaque `bg-zinc-950` slab over the artwork. They pin the dark
+   tint themselves (`np-veil-dark`), because their rows are zinc-300 on a dark
+   panel and a lighter tint would wash them out. Nothing else uses these: the
+   lyrics pane and the metadata block carry no veil at all — the classes that
+   drew them (`np-veil-pane`, `np-veil-pill`) and the white tint
+   (`np-veil-light`) are gone with the polarity chooser that fed them. */
 .np-veil {
   backdrop-filter: blur(16px) saturate(1.05);
 }
 .np-veil-dark { --np-veil: 9 9 11; }
-.np-veil-light { --np-veil: 255 255 255; }
-/* The lyrics reading surface: a decorative layer inside the pane's BOX (not
-   the scroller), so it never scrolls with the lines. It is a ramp, not a
-   rectangle — nothing at the pane's left edge, full strength where the lines
-   start, back down to almost nothing by the right edge — plus a fade at the
-   top and bottom. That is what takes the drawn panel away: the pane's own
-   corners and sides are the backdrop, and the tint only ever sits under text.
-   No lyric can land on a thinned part of it: the scroller keeps 1.5rem of
-   padding and a leader spacer of a third of the pane's height. */
-.np-veil-pane {
-  pointer-events: none;
-  background: linear-gradient(
-    90deg,
-    rgb(var(--np-veil) / 0) 0,
-    rgb(var(--np-veil) / 0.42) 2.5rem,
-    rgb(var(--np-veil) / 0.34) 60%,
-    rgb(var(--np-veil) / 0.2) 85%,
-    rgb(var(--np-veil) / 0.05) 100%
-  );
-  mask-image: linear-gradient(
-    180deg,
-    transparent 0,
-    #000 2rem,
-    #000 calc(100% - 2rem),
-    transparent 100%
-  );
-}
-/* The metadata cluster (title / format / album / artist). Its tint holds
-   across the whole box — the tier contrast is measured against the pixels
-   just inside its edges (tools/check_np_metadata_contrast.cjs), so a fade
-   there would measure the bare ambience instead of the field the glyphs sit
-   on — and the veil is spread PAST the box as a blurred halo, which is what
-   takes the drawn rectangle away without thinning the field under the text. */
-.np-veil-pill {
-  background: rgb(var(--np-veil) / 0.35);
-  box-shadow: 0 0 3rem 1.25rem rgb(var(--np-veil) / 0.28);
-}
-/* The player's own menus (options, add-to-playlist) and the queue drawer:
-   frosted instead of an opaque `bg-zinc-950` slab over the artwork. They pin
-   their tint to the dark one themselves — their rows are zinc-300 on a dark
-   panel, so a light-polarity veil would invert them into unreadability. */
 .np-veil-panel {
   background: rgb(var(--np-veil) / 0.72);
 }

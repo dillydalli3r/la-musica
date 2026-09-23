@@ -392,6 +392,120 @@ def write_lyrics_sidecar(audio_path, text):
     return path
 
 
+def _shift_ts(match, delta_ms, bracket):
+    """One timestamp moved by *delta_ms*, keeping its own precision.
+
+    `[mm:ss.xxx]` stays three decimals and `[mm:ss.xx]` two, because the
+    precision is the file's own choice and an offset must not silently round a
+    centisecond file to whole seconds. The carry is the same one
+    :func:`_reformat_ts` does: rounding a fraction up can tip the second, and a
+    second tipping can tip the minute.
+
+    A stamp that would land before the file's start CLAMPS at zero instead of
+    going negative. Negative stamps in an LRC are unplayable — a player seeks
+    to them, nothing sounds — so the line that asked for one keeps the start of
+    the file, which is the closest thing to what the shift meant.
+    """
+    mins, secs = int(match.group(1)), int(match.group(2))
+    frac = match.group(3) or ""
+    digits = len(frac)
+    scale = 10 ** digits
+    total_ms = mins * 60000 + secs * 1000
+    if digits:
+        total_ms += int(round(float("0." + frac) * 1000))
+    total_ms = max(0, total_ms + int(delta_ms))
+    new_mins = total_ms // 60000
+    rest = total_ms % 60000
+    new_secs = rest // 1000
+    if digits:
+        value = int(round((rest % 1000) / 1000 * scale))
+        if value >= scale:
+            value -= scale
+            new_secs += 1
+            if new_secs == 60:
+                new_secs = 0
+                new_mins += 1
+        frac_out = f".{value:0{digits}d}"
+    else:
+        frac_out = ""
+    open_ch, close_ch = bracket
+    return f"{open_ch}{new_mins:02d}:{new_secs:02d}{frac_out}{close_ch}"
+
+
+def shift_lyrics_timestamps(text, delta_ms):
+    """Every timestamp in *text* moved by *delta_ms* milliseconds.
+
+    Both LRC stamps move: the line's `[mm:ss.xx]` and the Enhanced
+    `<mm:ss.xx>` word stamps inside it, because they are one sync read two
+    ways and shifting only the first would leave every word of a sung line
+    behind its own line by the offset. A line that carries NO timestamp is
+    returned untouched — plain text has no sync to move, and inventing one
+    would turn an unsynced file into a wrong one. LRC metadata headers
+    (`[offset:…]`, `[ar:…]`) are not timestamps and are left alone too.
+
+    Offset 0 is the identity, which is what a reader that has not touched the
+    control must get: byte-for-byte what the file holds.
+    """
+    if not text or not delta_ms:
+        return text
+    delta = int(delta_ms)
+    out = TIMESTAMP_RE.sub(lambda m: _shift_ts(m, delta, "[]"), text)
+    return WORD_TS_RE.sub(lambda m: _shift_ts(m, delta, "<>"), out)
+
+
+def shift_stored_lyrics(audio_path, delta_ms, cfg=None):
+    """Apply a lyric offset to the lyrics this track stores.
+
+    Writes back to the SAME places the text already lives — the `.lrc` beside
+    the track when that carries lyrics, its `LYRICS` tag when that does (both,
+    when both do) — so an offset corrects the copy the reader is looking at
+    instead of migrating a track between storage shapes: moving lyrics between
+    the tag and the sidecar is `lyrics_format`'s job (script 1), and doing it
+    here would rewrite a file the user only asked to re-time. The per-filetype
+    LYRICS switch still gates the tag write (`should_write_audio_tag`), exactly
+    as the format pass gates it.
+
+    Returns ``(text, targets)``: the shifted text as the reader will see it
+    (sidecar first, the same preference :func:`read_lyrics` uses) and the
+    targets written ("lrc" / "embedded"). ``(None, [])`` means the track holds
+    no lyrics — there is nothing to shift, and this MUST NOT create lyrics.
+    """
+    if cfg is None:
+        from .config import load_config
+        cfg = load_config()
+    delta = int(delta_ms)
+    shifted = None
+    targets = []
+
+    sidecar = _lrc_for(audio_path)
+    try:
+        with open(sidecar, "r", encoding="utf-8", errors="replace") as f:
+            current = f.read()
+    except OSError:
+        current = ""
+    if has_lyrics_text(current):
+        moved = _format_for_storage(
+            shift_lyrics_timestamps(current, delta), cfg, optimize=True, is_for_lrc=True)
+        if write_lyrics_sidecar(audio_path, moved):
+            shifted = moved
+            targets.append("lrc")
+
+    try:
+        af = AudioFile(audio_path)
+    except Exception:
+        af = None
+    embedded = af.get_lyrics() if af is not None and af.audio is not None else None
+    if has_lyrics_text(embedded) and should_write_audio_tag(cfg, "LYRICS", filepath=audio_path):
+        moved = _format_for_storage(
+            shift_lyrics_timestamps(embedded, delta), cfg, optimize=True, is_for_lrc=False)
+        if af.set_lyrics(moved):
+            targets.append("embedded")
+            if shifted is None:
+                shifted = moved
+    return (shifted, targets)
+
+
+
 # Non-blank is not the same as "has lyrics". An aborted run leaves a 0-byte
 # sidecar, a metadata-only write leaves "[ar:…]" / "[offset:…]" headers, and
 # a synced provider with empty text leaves bare "[00:00.00]" / "<00:00.00>"

@@ -44,6 +44,14 @@ endings are the block itself and :func:`release` at the end of a job whose
 outermost block owns several steps (the import queue). A block may also hand
 one reference of its claim to a worker thread (:func:`in_background`), which
 keeps the paths locked until that thread is finished.
+
+The one thing that moves a claim WITHOUT ending a block is :func:`move`: a
+script that renames the album's folder (beets' import, the organizer) takes the
+album to a path the claim does not name yet, and the claim has to follow it —
+the album's new folder is locked before the next byte is written into it, and
+the folder it left is freed. The invariant everywhere else in the app is the
+one this registry enforces: while ANY job is rewriting an album, no other job
+holds that album, its tracks, or a folder above them.
 """
 import contextlib
 import contextvars
@@ -228,7 +236,7 @@ def _record(job, kind="", label=""):
     if rec is None:
         rec = {"job": job, "kind": str(kind or ""), "label": str(label or ""),
                "started_at": time.time(), "paths": [], "keys": set(),
-               "refs": {}, "progress": None}
+               "refs": {}, "moved": {}, "progress": None}
         _jobs[job] = rec
     else:
         # A kind/label that arrives with a later step refines the row the UI is
@@ -324,23 +332,110 @@ def release(job):
         _cond.notify_all()
 
 
+def _current_key(rec, key):
+    """Where *key*'s claim is now, following this job's re-points (:func:`move`).
+
+    A block that captured a folder a script later MOVED still has to release
+    something: its reference went with the album, so the release lands on the
+    folder the album is in now. Chained moves (beets files the album, then the
+    naming script renames it again) are followed to the end — the map is tiny
+    and a stale claim is what this exists to prevent.
+    """
+    moved = rec.get("moved") or {}
+    seen = set()
+    while key in moved and key not in seen:
+        seen.add(key)
+        key = moved[key]
+    return key
+
+
+def _drop_keys(job, keys):
+    """Give back *job*'s references on *keys*: refcount down, claim when it hits
+    zero. Caller holds ``_lock``."""
+    rec = _jobs.get(job)
+    if rec is None:
+        return
+    moved = rec["moved"]
+    for key in keys:
+        key = _current_key(rec, key)
+        refs = rec["refs"].get(key, 0)
+        if refs > 1:
+            rec["refs"][key] = refs - 1
+            continue
+        rec["refs"].pop(key, None)
+        rec["keys"].discard(key)
+        rec["paths"] = [p for p in rec["paths"] if normalize(p) != key]
+        if _owners.get(key) == job:
+            del _owners[key]
+        # Aliases pointing here have nothing left to translate, and keeping
+        # them would misread a LATER claim on the folder the album left as the
+        # moved one.
+        for stale in [old for old, target in moved.items() if target == key]:
+            moved.pop(stale, None)
+
+
 def _release_slots(job, keys):
     """Undo ONE block's claims on *keys*, keeping the job's other ones."""
     with _cond:
-        rec = _jobs.get(job)
-        if rec is not None:
-            for key in keys:
-                refs = rec["refs"].get(key, 0)
-                if refs > 1:
-                    rec["refs"][key] = refs - 1
-                    continue
-                rec["refs"].pop(key, None)
-                rec["keys"].discard(key)
-                rec["paths"] = [p for p in rec["paths"] if normalize(p) != key]
-                if _owners.get(key) == job:
-                    del _owners[key]
+        _drop_keys(job, keys)
         _pop(job)
         _cond.notify_all()
+
+
+def move(job, old, new, *, wait=True, timeout=None):
+    """Follow a claim: the album *job* holds at *old* is at *new* now.
+
+    A script that MOVES an album — beets' import (script 14) files it into its
+    canonical folder and the naming script renames it, the organizer renames it
+    — leaves the job holding a folder the album has left, and the work still
+    going on around it (the rest of the chain, the import's own tail) writes the
+    album where it is NOW. Two things have to be true for that:
+
+      * the album's new folder is claimed BEFORE anything else can claim it —
+        a folder that has just appeared is exactly what a second import, a
+        re-download of the same release or a fresh run would take, and the album
+        in it is mid-rewrite;
+      * the folder it left is let go — an empty shell that reads as "in use" is
+        worse than no claim at all: a delete, an organize or a run over the
+        folder the album left is refused for the rest of this job for no reason.
+
+    EVERY reference the job holds on *old* is re-pointed, and the blocks that
+    made them keep their accounting: a block's release of *old* lands on *new*
+    instead (the alias is dropped once *new*'s last reference goes, so an
+    unrelated later claim on the old path is never mistranslated). A job that
+    holds nothing at *old* has nothing to follow and this is a no-op; a *new*
+    folder a FOREIGN job holds is waited for (or refused after *timeout*) like
+    any other claim, rather than stolen — the album is being rewritten, so
+    queueing is the only honest answer.
+
+    Returns *new* when the claim was re-pointed, "" when there was nothing of
+    this job's to follow.
+    """
+    if not job or not new:
+        return ""
+    old_key, new_key = normalize(old), normalize(new)
+    if old_key == new_key:
+        return ""
+    with _cond:
+        rec = _jobs.get(job)
+        if rec is None or old_key not in rec["refs"]:
+            return ""
+        # The new folder is taken FIRST: the album must never be unclaimed in
+        # between (the next byte written into it is the whole point).
+        _await_free([(new_key, str(new))], job, wait, timeout)
+        refs = rec["refs"].pop(old_key, 0)
+        rec["keys"].discard(old_key)
+        rec["paths"] = [p for p in rec["paths"] if normalize(p) != old_key]
+        if _owners.get(old_key) == job:
+            del _owners[old_key]
+        rec["refs"][new_key] = rec["refs"].get(new_key, 0) + refs
+        if new_key not in rec["keys"]:
+            rec["keys"].add(new_key)
+            rec["paths"].append(str(new))
+        _owners[new_key] = job
+        rec["moved"][old_key] = new_key
+        _cond.notify_all()
+    return str(new)
 
 
 def in_background(paths, target, *args, kind="", label="", **kwargs):

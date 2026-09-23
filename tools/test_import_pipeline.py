@@ -763,7 +763,7 @@ try:
     adv = imports.fetch_advisories([_stamp_lib], CFG)
     assert adv["updated"] == 2, adv
     assert set(adv["sources"].values()) == {"fallback"}, adv
-    assert adv["answers"] == {} and adv["hits"] == {}, adv
+    assert adv["answers"] == {}, adv
     for tags in _written.values():
         assert tags["ITUNESADVISORY"] == "0", tags
     # With the fallback switched off nothing is written at all — an unrated
@@ -1190,6 +1190,108 @@ assert finished == [os.path.join(SL_MF, "Artists", "Second Album")], finished
 rows = _slsk.last_import_scripts()
 assert len(rows) == 1 and rows[0]["path"] == finished[0], rows
 assert rows[0]["chain"] == [] and rows[0]["scripts"] == [] and rows[0]["errors"] == [], rows
+
+# --------------------------------------------------------------------------- #
+# The mover's report is where the album is WHEN THE SCRIPT RETURNS, and the
+# album's own files travel with it
+# --------------------------------------------------------------------------- #
+# beets moves the album into the library and THIS runner then renames it again
+# (`beets_organize_after`): beets' own %mlo_dir spelling and MLO's naming script
+# differ by more than the extension case — measured on a real Creep EP import,
+# beets wrote "…Creep {GB - 7243 8 80234 2 9} [Parlophone] [<release id>]" and
+# the organize step renamed it to "…Creep {GB - CD - 7243 8 80234 2 9}
+# [Parlophone] [<release id>] [<group id>]". A `moved_targets` computed before
+# that step therefore named a folder that no longer existed by the time the
+# runner returned, the chain dropped the claim as stale, and every script after
+# it ran against the emptied staging folder ("no audio left in …", Format all
+# and Grade both reporting 0).
+import contextlib  # noqa: E402
+import io  # noqa: E402
+
+from server import beetscfg as _beetscfg  # noqa: E402
+from server import main as _mlo_main  # noqa: E402
+
+MOVE_MF = tempfile.mkdtemp(prefix="mlo_import_pipeline_move_")
+MOVE_LIB = os.path.join(MOVE_MF, "Artists")
+MOVE_STAGING = os.path.join(MOVE_LIB, "Creep")
+BEETS_DIR = os.path.join(MOVE_LIB, "Radiohead", "Creep [beets spelling]")
+ORGANIZED = os.path.join(MOVE_LIB, "Radiohead", "[EP] Creep [naming script]")
+for _i in (1, 2):
+    make_wav(os.path.join(MOVE_STAGING, f"{_i:02d} - track.wav"))
+# what the steps BEFORE the chain (and the chain's own earlier scripts) leave in
+# the album folder: the cover the autonomous step fetched, the description
+# beside it, the expected-tracklist manifest
+for _name in ("cover.jpg", "description.txt", ".mlo_expected.json"):
+    with open(os.path.join(MOVE_STAGING, _name), "w", encoding="utf-8") as _f:
+        _f.write(_name)
+
+
+def _fake_beets_import(paths, cfg=None, timeout=None, on_line=None):
+    """What `beet import` does: move the audio into the library under the
+    naming script's beets spelling, leaving everything else behind."""
+    os.makedirs(BEETS_DIR, exist_ok=True)
+    for _f in sorted(os.listdir(MOVE_STAGING)):
+        if _f.lower().endswith(".wav"):
+            shutil.move(os.path.join(MOVE_STAGING, _f),
+                        os.path.join(BEETS_DIR, "1-" + _f))
+    return True, ""
+
+
+def _fake_organize(req):
+    """The runner's own `organize after beets`: the album moves AGAIN."""
+    rows = []
+    for p in req.paths:
+        if os.path.normcase(os.path.normpath(p)) == \
+                os.path.normcase(os.path.normpath(BEETS_DIR)):
+            shutil.move(BEETS_DIR, ORGANIZED)
+            rows.append({"path": p, "ok": True, "moved": 2, "leftovers": 0,
+                         "album_root": ORGANIZED.replace("\\", "/"),
+                         "pruned": 0, "notes": [], "errors": []})
+    return {"results": rows}
+
+
+_after_14 = []
+def _after_mover(cfg):
+    _after_14.append(list(cfg.get("targets") or []))
+    return {"modified_count": 0}
+
+
+_real_beets_import = _beetscfg.run_beets_import
+_real_organize = _mlo_main.organize
+_real_available = _beetscfg.beets_available
+script_runners.RUNNERS[5] = ("Process images", _after_mover)
+_move_log = io.StringIO()
+final = []
+try:
+    _beetscfg.run_beets_import = _fake_beets_import
+    _mlo_main.organize = _fake_organize
+    _beetscfg.beets_available = lambda: "stub"
+    with contextlib.redirect_stdout(_move_log):
+        results = script_runners.run_chain({"music_folder": MOVE_MF}, [14, 5],
+                                           targets=[MOVE_STAGING], final=final)
+finally:
+    _beetscfg.run_beets_import = _real_beets_import
+    _mlo_main.organize = _real_organize
+    _beetscfg.beets_available = _real_available
+    script_runners.RUNNERS.clear()
+    script_runners.RUNNERS.update(_REAL_RUNNERS)
+
+assert results[0]["id"] == 14 and not results[0].get("error"), results[0]
+assert results[0]["stats"]["modified_count"] == 1, results[0]["stats"]
+assert results[0]["stats"]["moved_targets"] == [ORGANIZED], \
+    f"the mover reports the folder the album is in when it returns: {results[0]['stats']}"
+assert [os.path.normcase(p) for p in final] == [os.path.normcase(ORGANIZED)], final
+assert [os.path.normcase(p) for p in _after_14[0]] == [os.path.normcase(ORGANIZED)], \
+    f"the script after the mover ran on that folder: {_after_14}"
+assert "no audio left" not in _move_log.getvalue(), _move_log.getvalue()
+# the album's own files travelled with it — cover, description, manifest
+assert sorted(os.listdir(ORGANIZED)) == [
+    ".mlo_expected.json", "1-01 - track.wav", "1-02 - track.wav", "cover.jpg",
+    "description.txt"], sorted(os.listdir(ORGANIZED))
+# …and the staging folder is gone, not an audio-less shell holding somebody's
+# cover art (which is what the scan reports as a broken album)
+assert not os.path.exists(MOVE_STAGING), sorted(os.listdir(MOVE_LIB))
+shutil.rmtree(MOVE_MF, ignore_errors=True)
 
 shutil.rmtree(ROOT, ignore_errors=True)
 shutil.rmtree(SL_FILES, ignore_errors=True)

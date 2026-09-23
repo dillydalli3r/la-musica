@@ -13,7 +13,10 @@ What this pins, with LRCLIB and Spotify stubbed (no network at all):
     says not instrumental;
   * Spotify audio-features bands `instrumentalness` (>= 0.5 instrumental,
     <= 0.2 not, in between no answer) and the deprecated endpoint's 403/404 is
-    NO ANSWER plus ONE log line, never a crash;
+    NO ANSWER plus ONE log line, never a crash; EVERY ISRC the file states is
+    asked (the advisory ladder's own `_isrc_codes`), so a clean first code
+    cannot hide the instrumental second one, and a source asked more than once
+    keeps its strongest answer;
   * the merge rule lives in ONE place, `merge_instrumental`: instrumental
     anywhere → 1, else not-instrumental anywhere → 0, else None with NOTHING
     written (absence of evidence is never recorded as a value);
@@ -79,14 +82,19 @@ def stub_lrclib(routes):
 
 def stub_spotify(routes=None, token="tok"):
     """Spotify's two calls (the ISRC search and audio-features). A `None`
-    payload is exactly what the real seam returns for a 403/404."""
+    payload is exactly what the real seam returns for a 403/404.
+
+    A payload may be a callable `(url, params)` — the ISRC search is asked
+    once per code and has to answer per code (the same shape `stub_lrclib`
+    allows for its own per-track routing).
+    """
     calls = []
 
     def fake_json(url, params=None, headers=None, timeout=None, host=None):
         calls.append((url, dict(params or {})))
         for key, payload in (routes or {}).items():
             if key in url:
-                return payload
+                return payload(url, params or {}) if callable(payload) else payload
         return None
 
     intg._advisory_json = fake_json
@@ -120,6 +128,11 @@ class FakeAudio:
 
     def get_lyrics(self):
         return self._lyrics
+
+    def set_lyrics(self, text):
+        self._lyrics = text
+        FakeAudio.files.setdefault(self.path, {})["lyrics"] = text
+        return True
 
 
 from mlo import audio as mlo_audio
@@ -275,6 +288,54 @@ try:
     hit = sp(0.35, "07c")[1]
     assert hit["value"] is None and hit["answers"] == {}, hit
 
+    # EVERY ISRC the file states is asked, not just the first: one recording
+    # is published in several territories under several codes, and the old
+    # `.split(";")[0]` let a clean first code hide the instrumental second
+    # one. `integrations._isrc_codes` is the advisory ladder's own reader, so
+    # the two paths ask the same codes in the same (tag) order, and the
+    # strongest answer wins over the later clean code.
+    clear()
+    p = track("07d - TwoPressings.flac", title="TwoPressings",
+              extra={"ISRC": "USRC17607839; GBAYE0601498"})
+    stub_lrclib({})
+
+    def _search(_url, params):
+        code = str(params.get("q") or "").split(":", 1)[-1]
+        return {"tracks": {"items": [{"id": "sp-" + code.lower(),
+                                      "external_ids": {"isrc": code}}]}}
+
+    calls = stub_spotify({
+        "v1/search": _search,
+        "audio-features": lambda url, _params: (
+            {"instrumentalness": 0.9} if url.endswith("sp-gbaye0601498")
+            else {"instrumentalness": 0.05}),
+    })
+    hit = detect(p, ISRC_CFG)
+    assert [c[1]["q"] for c in calls if "search" in c[0]] == \
+        ["isrc:USRC17607839", "isrc:GBAYE0601498"], calls
+    assert hit["value"] == 1 and hit["answers"] == {"spotify": 1}, hit
+    # the same two codes, in the other order: the answer does not depend on
+    # which pressing answered first
+    clear()
+    p2 = track("07e - TwoPressings2.flac", title="TwoPressings2",
+               extra={"ISRC": "GBAYE0601498; USRC17607839"})
+    stub_lrclib({})
+    stub_spotify({"v1/search": _search,
+                  "audio-features": lambda url, _params: (
+                      {"instrumentalness": 0.9}
+                      if url.endswith("sp-gbaye0601498")
+                      else {"instrumentalness": 0.05})})
+    hit = detect(p2, ISRC_CFG)
+    assert hit["value"] == 1 and hit["answers"] == {"spotify": 1}, hit
+
+    # A file with NO ISRC is never asked at all (unchanged).
+    clear()
+    p3 = track("07f - NoIsrc.flac", title="NoIsrc")
+    stub_lrclib({})
+    calls = stub_spotify({"v1/search": SEARCH_HIT})
+    assert detect(p3, ISRC_CFG)["value"] is None
+    assert calls == [], calls
+
     # the deprecated endpoint (403/404) is NO answer, one log line, no crash
     clear()
     p = track("08 - Gone.flac", title="Gone", extra={"ISRC": "USRC17607839"})
@@ -347,6 +408,98 @@ try:
     # instrumental_auto_fetch off → nothing at all
     assert imports.fetch_instrumentals(
         [ROOT], {"instrumental_auto_fetch": False})["updated"] == 0
+
+    # ----------------------------------------------------------------- #
+    # 7) The lyrics-absent rule (R162): a lyrics search that found nothing
+    #    settles the track, unless something better already states it — and
+    #    the fetch that DID find lyrics never reaches it
+    # ----------------------------------------------------------------- #
+    from mlo import lyrics_fetch
+
+    ROOT = tempfile.mkdtemp(prefix="mlo_instrumental_lyrics_")
+    clear()
+
+    def empty_chain(config, artist, title, album, duration,
+                    youtube_id=None, min_score=None):
+        return None
+
+    real_fetch_lyrics = lyrics_fetch.fetch_lyrics
+    real_fetch_audio = lyrics_fetch.AudioFile
+    lyrics_fetch.fetch_lyrics = empty_chain
+    lyrics_fetch.AudioFile = FakeAudio
+    CFG = {"music_folder": ROOT, "instrumental_auto_fetch": True,
+           "lyrics_format": "EMBEDDED", "lyrics_sources": ["lrclib"]}
+    try:
+        # nothing anywhere: the app's own answer, with its own source
+        silent = track("20 - Silent.flac", title="Silent", duration=200)
+        res = lyrics_fetch.fetch_one(silent, CFG)
+        assert res["status"] == "skipped" and res["marked_instrumental"] is True, res
+        assert res["reason"] == "no lyrics found — marked INSTRUMENTAL", res
+        assert res["instrumental"] == {"value": 1,
+                                       "evidence": {inst.LYRICS_ABSENT: 1}}, res
+        assert written(silent) == "1", FakeAudio.files[silent]
+        assert "no provider" in res["instrumental_note"], res
+
+        # the same rule through the writer alone, and the switch it honours
+        assert inst.lyrics_absent([silent], CFG)["updated"] == 0   # already 1
+        off = inst.lyrics_absent([silent], {"instrumental_auto_fetch": False})
+        assert off["updated"] == 0 and off["values"] == {} and off["skipped"], off
+
+        # a source that says the track HAS vocals wins over the empty search
+        clear()
+        vocals = track("21 - Vocals.flac", title="Vocals", duration=200)
+        stub_lrclib({"get": {"instrumental": False, "trackName": "Vocals",
+                             "duration": 200}})
+        res = lyrics_fetch.fetch_one(vocals, CFG)
+        assert not res.get("marked_instrumental"), res
+        assert written(vocals) is None, FakeAudio.files[vocals]
+        assert "states vocals" in res.get("instrumental_note", ""), res
+
+        # a source that says INSTRUMENTAL states the value itself
+        clear()
+        stated = track("22 - Stated.flac", title="Stated", duration=200)
+        stub_lrclib({"get": {"instrumental": True, "trackName": "Stated",
+                             "duration": 200}})
+        res = lyrics_fetch.fetch_one(stated, CFG)
+        assert res["instrumental"]["evidence"] == {"lrclib": 1}, res
+        assert written(stated) == "1", FakeAudio.files[stated]
+
+        # lyrics the fetch DID find change nothing: no mark, and the tag stays
+        # empty on the file
+        clear()
+        found = track("23 - Found.flac", title="Found", duration=200)
+        stub_lrclib({})
+        lyrics_fetch.fetch_lyrics = lambda *a, **k: {
+            "provider": "lrclib", "provider_label": "LRCLIB", "synced": "",
+            "plain": "[00:01.00]words\n"}
+        try:
+            import mlo.lyrics as mlo_lyrics
+
+            real_write = mlo_lyrics._atomic_write_text
+            mlo_lyrics._atomic_write_text = lambda *a, **k: None
+            real_proc = lyrics_fetch._process_lyrics_for_audio
+            lyrics_fetch._process_lyrics_for_audio = lambda *a, **k: None
+            try:
+                res = lyrics_fetch.fetch_one(found, CFG)
+            finally:
+                mlo_lyrics._atomic_write_text = real_write
+                lyrics_fetch._process_lyrics_for_audio = real_proc
+        finally:
+            lyrics_fetch.fetch_lyrics = empty_chain
+        assert res["status"] == "ok" and not res.get("marked_instrumental"), res
+        assert written(found) is None, FakeAudio.files[found]
+
+        # a track that already carries lyrics is skipped before the search and
+        # is never marked (its words ARE the evidence it has vocals)
+        clear()
+        sung = track("24 - Sung.flac", title="Sung", duration=200,
+                     lyrics="[00:01.00]words")
+        res = lyrics_fetch.fetch_one(sung, CFG)
+        assert res["reason"] == "lyrics already present", res
+        assert written(sung) is None, FakeAudio.files[sung]
+    finally:
+        lyrics_fetch.fetch_lyrics = real_fetch_lyrics
+        lyrics_fetch.AudioFile = real_fetch_audio
 finally:
     mlo_audio.AudioFile = _real_audiofile
     intg._lrclib_get, intg._advisory_json, intg._spotify_token = (

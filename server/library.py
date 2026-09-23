@@ -12,6 +12,7 @@ from concurrent.futures import ThreadPoolExecutor
 from mlo.stats import _find_albums, worker_count, WALK_FILES
 from mlo.grader import _empty_folder_result, _find_empty_folders, _grade_album
 from mlo.audio import AudioFile
+from mlo.artistdata import strip_mbid_suffix
 from mlo.paths import (LIB_VIDEO_EXTS, load_expected_tracks, load_pending,
                        load_track_covers, _album_file, SIDECAR_COVER_EXTS)
 from server import tagcache
@@ -330,8 +331,9 @@ def _wish_state_of(w, cfg):
         from server import wishes
         due = wishes.due_at(w, cfg)
         terminal = wishes.is_terminal(w, cfg)
+        walk = wishes.candidate_state(w, cfg)
     except Exception:
-        due, terminal = 0.0, False
+        due, terminal, walk = 0.0, False, None
     import math
     import time as _time
     due_in = None if (terminal or not math.isfinite(due)) else max(0, int(due - _time.time()))
@@ -348,6 +350,11 @@ def _wish_state_of(w, cfg):
         "note": str(w.get("note") or ""),
         "source": str(w.get("source") or ""),
         "queries": list(w.get("queries") or []),
+        # WHICH ranked candidate the search is on (spec R150-R154): the album a
+        # pending row links to says where its acquisition is ("release 2 of 3")
+        # from the SAME block the queue row reads, so the tile and the queue row
+        # can never disagree about it. None for a wish with one candidate.
+        "walk": walk,
     }
 
 
@@ -611,6 +618,25 @@ def build_albums_parallel(album_dirs, cfg, light=False):
     return results
 
 
+def _artist_display_name(artist_dir, albums_data):
+    """The artist's name as a page should draw it — ``name`` stays the folder's
+    own basename, which is library IDENTITY (paths, lookups), not a caption.
+
+    The naming script builds artist folders as "Slowdive [a16371b9-…]" (and
+    ``short_folder_names`` truncates the id), so Home's artist shelf was
+    drawing "Radiohead [a74b1b7f-71a5-4011-9441-d0b5e4122711]" at the reader:
+    the folder name is where the id lives, and the id is not part of the name.
+
+    A tag-derived album artist wins — the same first non-empty ALBUMARTIST the
+    artist page reads for its header (main.py's ``/api/artist``), so both pages
+    spell the artist the way the tags do; the folder name minus the id is the
+    answer for a folder whose audio carries no artist tag at all (an empty or
+    framework-only folder)."""
+    from_tags = next((str(a.get("album_artist") or "").strip()
+                      for a in albums_data if a.get("album_artist")), "")
+    return from_tags or strip_mbid_suffix(os.path.basename(artist_dir))
+
+
 def library_cache_key(cfg):
     """The tagcache key for a library payload.
 
@@ -685,6 +711,7 @@ def build_library(cfg, progress=None):
             result.append({
                 "path": artist_dir.replace("\\", "/"),
                 "name": os.path.basename(artist_dir),
+                "display_name": _artist_display_name(artist_dir, albums_data),
                 "albums": albums_data,
                 "aggregate": agg,
             })

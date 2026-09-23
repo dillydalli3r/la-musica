@@ -7,6 +7,15 @@ with the same formatting rules as script 1. Tracks tagged INSTRUMENTAL=1
 and tracks that already carry lyrics (embedded or an .lrc sidecar) are
 skipped unless the run is forced. Standard library only, so the runner
 works in every install (no httpx dependency).
+
+A search that comes back with nothing is not the end of the track here: the
+app's own rule settles it (`server.instrumental.lyrics_absent`, spec R162) —
+no lyrics from any configured provider, over a track no source calls vocal,
+means the track is marked INSTRUMENTAL=1 with the note that says so. That is
+what keeps a whole library's instrumentals out of the import's "needs you"
+prompt without inventing a single tag: the alternative was a LYRICS grading
+failure for every instrumental a source had no lyrics for, which is exactly
+what an unattended import must not hand to a person.
 """
 import os
 
@@ -35,12 +44,50 @@ from .ui import print_header, log, c, Color
 _AUTO_MIN_SCORE = 0.85
 
 
+def _mark_lyrics_absent(path, config, result):
+    """The app's own answer to a lyrics search that found nothing (R162).
+
+    `server.instrumental.lyrics_absent` owns the rule and the write; this is
+    just the per-track hand-off, so script 13 and the "auto-import lyrics"
+    route settle a vocal-less track the same way. It never fails a fetch: the
+    track's own result already says the search came back empty, and marking it
+    is the extra fact that stops the album from being reported as missing
+    lyrics.
+
+    The result gains ``marked_instrumental`` and ``instrumental`` (the value
+    and the source that stated it) when the tag was written, and
+    ``instrumental_note`` with the app's sentence either way — a track left
+    alone because a source states vocals says so rather than looking ignored.
+    """
+    from server import instrumental as inst
+
+    try:
+        marked = inst.lyrics_absent([path], config)
+    except Exception:
+        return
+    key = os.path.normpath(str(path))
+    note = str((marked.get("reason") or {}).get(key)
+               or marked.get("skipped") or "")
+    if note:
+        result["instrumental_note"] = note
+    if not (marked.get("values") or {}).get(key):
+        return
+    result["marked_instrumental"] = True
+    result["instrumental"] = {
+        "value": 1,
+        "evidence": dict((marked.get("evidence") or {}).get(key) or {}),
+    }
+    result["reason"] = "no lyrics found — marked INSTRUMENTAL"
+
+
 def fetch_one(path, config, force=False):
     """Fetch + write lyrics for ONE track; the shared core of script 13 and
     the API's "auto-import lyrics" button.
 
     Returns `{path, status: "ok"|"skipped"|"failed", provider,
-    provider_label, synced, wrote: {embedded, lrc}, reason, error}`. The skip
+    provider_label, synced, wrote: {embedded, lrc}, reason, error}`, plus
+    `marked_instrumental` / `instrumental` / `instrumental_note` on a track
+    whose search found nothing (`_mark_lyrics_absent`). The skip
     rules (INSTRUMENTAL, existing embedded/sidecar lyrics unless *force*),
     the `lyrics_format` write mode and the canonicalization pass are the same
     ones the batch runner uses, so a lyrics run from the UI and a lyrics run
@@ -102,12 +149,18 @@ def fetch_one(path, config, force=False):
             # Either no provider had it, or every answer was a weak match —
             # both mean "nothing safe to write", and both are retried by the
             # next run (nothing is written, so nothing is remembered as done).
+            # What they also mean is that this track has no lyrics anywhere the
+            # app can find them, which is the family's OWN automatic answer
+            # (`_mark_lyrics_absent`): mark it instrumental instead of leaving
+            # the album in the "needs you" queue for a person to answer.
             result["reason"] = "no confident match"
+            _mark_lyrics_absent(path, config, result)
             return result
         # A synced provider hit keeps its timestamps; a plain one does not.
         text = ((hit or {}).get("synced") or (hit or {}).get("plain") or "").strip()
         if not text:
             result["reason"] = "no provider had lyrics"
+            _mark_lyrics_absent(path, config, result)
             return result
         result["provider"] = hit["provider"]
         result["provider_label"] = hit.get("provider_label") or hit["provider"]
@@ -137,6 +190,9 @@ def run_fetch_lyrics(config):
     folder = config.get("music_folder") or ""
     stats = new_stats()
     stats["by_provider"] = {}
+    # Tracks this run's empty searches settled as instrumental (R162) — booked
+    # apart from the provider counts, since no provider answered for them.
+    stats["instrumental_count"] = 0
 
     print_header("Fetch Lyrics")
     fmt = str(config.get("lyrics_format") or "EMBEDDED").upper()
@@ -168,6 +224,13 @@ def run_fetch_lyrics(config):
     def _finish(path, res):
         """Book one track's result — the runner thread owns every counter, so
         the workers below never touch shared state."""
+        if res.get("marked_instrumental"):
+            # The family's own automatic answer (`server.instrumental
+            # .lyrics_absent`), counted on its own: the track is booked as
+            # skipped below — nothing was fetched — and "skipped: 12" must not
+            # read as "twelve tracks nobody looked at" when the app wrote the
+            # tag that settles them.
+            stats["instrumental_count"] += 1
         if res["status"] == "ok":
             pid = res["provider"]
             stats["by_provider"][pid] = stats["by_provider"].get(pid, 0) + 1
@@ -221,4 +284,9 @@ def run_fetch_lyrics(config):
             for p, n in sorted(stats["by_provider"].items(), key=lambda kv: -kv[1])
         )
         log(f"sources: {summary}")
+    if stats["instrumental_count"]:
+        # The decision, out loud: these tracks are why the album is not
+        # reported as missing lyrics (see the module docstring).
+        log(f"marked instrumental (no lyrics found by any provider): "
+            f"{stats['instrumental_count']} track(s)")
     return stats

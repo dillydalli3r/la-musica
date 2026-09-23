@@ -5,6 +5,7 @@ import { parsePlayerLrc, parseLrc, splitStoredLines, hasLyricsText, activeLineRa
 import { useLyricsFollow, LYRICS_PAD_BOTTOM, LYRICS_PAD_TOP } from "../lib/lyrScroll";
 import Visualizer from "./Visualizer";
 import LyricZoom, { LYRIC_ZOOM_MAX, LYRIC_ZOOM_MIN } from "./LyricZoom";
+import LyricOffset from "./LyricOffset";
 
 // Shared with the fullscreen player: toggling the visualizer from either
 // surface keeps the same preference.
@@ -111,9 +112,14 @@ export default function LyricsSidebar({
   // is still in flight (matches NowPlayingView's staleLyrics gate).
   const staleLyrics = (payload?.forPath ?? null) !== path;
   const hasLyrics = hasLyricsText(payload?.lyrics) && !instrumental && !staleLyrics;
+  // The offset control's pending nudge, in ms — a PREVIEW: the parsed line
+  // times move so the highlight lines up with what the reader hears, and Save
+  // writes it into the track's own lyrics (see LyricOffset). Zero at rest, so
+  // the pane renders exactly the stored sync until someone dials it.
+  const [offsetMs, setOffsetMs] = useState(0);
   const lines: LrcLine[] = useMemo(
-    () => (payload?.lyrics && hasLyrics ? parsePlayerLrc(payload.lyrics) : []),
-    [payload?.lyrics, hasLyrics]
+    () => (payload?.lyrics && hasLyrics ? parsePlayerLrc(payload.lyrics, offsetMs) : []),
+    [payload?.lyrics, hasLyrics, offsetMs]
   );
   const synced = lines.length > 0;
   const displayLines: LrcLine[] = useMemo(
@@ -195,6 +201,16 @@ export default function LyricsSidebar({
           <div className="text-xs font-semibold truncate">{title}</div>
           {album && <div className="text-[10px] text-zinc-500 truncate">{album}</div>}
         </div>
+        <LyricOffset
+          className="mr-1"
+          path={path}
+          ms={offsetMs}
+          onChange={setOffsetMs}
+          /* The saved text replaces the pane's copy: the server's shift is the
+             canonical one (it formats for the storage target), and the pending
+             nudge that produced it is spent — the control resets itself. */
+          onSaved={(lrc) => setPayload((p) => (p ? { ...p, lyrics: lrc } : p))}
+        />
         <LyricZoom
           pct={zoom}
           onChange={(p) => {

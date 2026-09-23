@@ -584,7 +584,7 @@ try:
                               FILES[2]: "fallback"}, out
     assert out["status"] == {FILES[0]: "written", FILES[1]: "existing",
                              FILES[2]: "written"}, out
-    assert out["answers"] == {} and out["hits"] == {}, out
+    assert out["answers"] == {}, out
     assert FakeAudio.written[FILES[0]]["ITUNESADVISORY"] == "0", FakeAudio.written
     assert FakeAudio.written[FILES[1]]["ITUNESADVISORY"] == "2", FakeAudio.written
     assert FakeAudio.written[FILES[2]]["ITUNESADVISORY"] == "0", FakeAudio.written

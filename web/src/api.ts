@@ -7,18 +7,18 @@ import type {
   ArtistArtworkImage,
   CoverChoicePolicy,
   CoverInfo,
-  CoverSourceCatalog,
   CoverResult,
   CoverSearch,
+  CoverSourceCatalog,
   CoverWriteResult,
   DiscoveryCatalog,
   DiscoveryImageRow,
   DownloadEntry,
   DownloadsPayload,
   HomeData,
+  ImportAutonomy,
   ImportBulkJob,
   ImportBulkResult,
-  ImportAutonomy,
   ImportPrompt,
   ImportScriptsPreview,
   LayoutReport,
@@ -34,6 +34,7 @@ import type {
   MBReleaseChoicePayload,
   MBSearchFieldHelp,
   MBSearchRows,
+  NeedsWarning,
   ScriptRunResult,
   SlskReleaseIdentity,
   SourceHealth,
@@ -829,6 +830,10 @@ export interface SlskAutoProgress {
 /** Auto-import job state (server/soulseek_auto.py job_state()). `confirm` is
  *  set while the job waits for the user to approve a lossy-only download. */
 export interface SlskAutoJob {
+  /** The job's own id, as server/soulseek_auto.py publishes every job (its
+   *  `_published`). The queue rows carry the same id as `job_id`, which is what
+   *  lets a live progress frame be matched to the job it belongs to. */
+  id?: number;
   state: "idle" | "running" | "confirm" | "done" | "error" | "cancelled";
   stage: string;
   search: SlskSearchProgress | null;
@@ -888,7 +893,7 @@ export interface SlskQueueItem {
   /** Set when a wish owns this row. */
   wish_id: number | null;
   stage: "queued" | "searching" | "downloading" | "verifying" | "importing"
-       | "completed" | "failed" | "needs_attention";
+       | "completed" | "failed" | "needs_attention" | "background";
   source_key: "musicbrainz" | "soulseek" | "auto" | string;
   source: string;
   title: string;
@@ -950,13 +955,22 @@ export interface SlskQueueItem {
   /** Whether POST /api/queue/retry can bring this row back (a terminal state:
    *  nothing found, or a failed job). */
   retryable?: boolean;
-  /** Families this album is still missing (kind "prompt"), in wizard order. */
+  /** Families this album is still missing, in wizard order — the ids the
+   *  wizard's `?missing=` parameter takes. Set on the row of ANY album an
+   *  import is short of a family, whatever the row's own kind and stage: the
+   *  release is finished (the album is in the library), and this is the
+   *  warning on it, not a hold. */
   missing?: string[];
   missing_labels?: string[];
+  /** The whole warning, when there is one: what is missing, the wizard link
+   *  and which kind of entry it came from (`NeedsWarning.waiting` is the one
+   *  case that really is held — a review import). */
+  needs?: NeedsWarning;
   /** The wizard link that opens the album AT the first missing family — the
    *  same link the import_needs_data notification carries. */
   wizard_link?: string;
-  /** Whether POST /api/import/prompts/dismiss applies (kind "prompt"). */
+  /** Whether POST /api/import/prompts/dismiss applies (a row carrying
+   *  `needs`, or a standalone warning row). */
   dismissable?: boolean;
   /** Empty searches so far (wish rows): the budget `wishes_not_found_attempts`
    *  is compared against. */
@@ -964,6 +978,12 @@ export interface SlskQueueItem {
   /** When the next AUTOMATIC attempt may run, 0 when none will (a terminal
    *  row waits for the user's own retry). */
   retry_at?: number;
+  /** The ranked-candidate FALLBACK WALK this release is being searched with
+   *  (spec R150-R154): the release-choice policy's ranked editions, best first,
+   *  walked one at a time inside the one wish — so a release is ONE row however
+   *  many candidates it is trying. `{index, total, label, mbid, title, tried}`,
+   *  null for a wish with nothing to walk (one candidate, or none). */
+  walk?: SlskWalk | null;
   /** A wish whose framework album ("Add to library") is on disk with no audio
    *  yet: cancelling it removes the folder too. */
   pending?: boolean;
@@ -972,6 +992,23 @@ export interface SlskQueueItem {
   cancelable: boolean;
   /** The job's last few log lines, for the row's expander. */
   log_tail: string[];
+}
+
+/** One step of the ranked-candidate fallback walk (`SlskQueueItem.walk`).
+ *  Built by `server.wishes.candidate_state`, so the row, the album page and the
+ *  notification all describe the position the same way. */
+export interface SlskWalk {
+  /** 0-based position being asked for right now. */
+  index: number;
+  /** How many ranked editions the walk may ask (`soulseek_fallback_candidates`,
+   *  clamped to the list the release group actually has). */
+  total: number;
+  /** "release 2 of 3" — the ONE wording for the position. */
+  label: string;
+  mbid: string;
+  title: string;
+  /** The candidates already asked in this attempt, best first. */
+  tried: { mbid: string; title: string }[];
 }
 
 /** `GET /api/queue` — every section with its rows, plus the counts the tab
@@ -984,12 +1021,16 @@ export interface SlskQueuePayload {
   sections: {
     queued: SlskQueueItem[];
     in_progress: SlskQueueItem[];
+    /** Releases whose ranked-candidate walk is spent: still searched, in their
+     *  own subsection (spec R153). */
+    background: SlskQueueItem[];
     needs_attention: SlskQueueItem[];
     completed: SlskQueueItem[];
     failed: SlskQueueItem[];
   };
   counts: {
-    queued: number; in_progress: number; needs_attention: number;
+    queued: number; in_progress: number; background: number;
+    needs_attention: number;
     completed: number; failed: number; total: number;
   };
   running: number;
@@ -1003,7 +1044,8 @@ export interface SlskQueuePayload {
  *  of the queue by name — what a section header's own Clear button sends, and
  *  exactly the rows it counted. */
 export type SlskQueueScope = "finished" | "wishes"
-  | "queued" | "in_progress" | "needs_attention" | "completed" | "failed";
+  | "queued" | "in_progress" | "background" | "needs_attention" | "completed"
+  | "failed";
 
 /** One slskd transfer (download or upload). `state` is slskd's own enum:
  *  Queued / InProgress / Completed / Errored / Cancelled / Rejected / … */
@@ -3128,6 +3170,17 @@ export const api = {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ paths, force, staged }),
     }, 600000),
+  /** Move every timestamp of ONE track's stored lyrics by `deltaMs` and save
+   *  it where the lyrics live (the `.lrc` beside the track and/or its LYRICS
+   *  tag — never a migration between the two). `lrc` is the text that was
+   *  stored, so a caller renders the file's own copy; `targets` names what was
+   *  written. Untimed lines are left as they were. */
+  lyricsOffset: (path: string, deltaMs: number, staged = false) =>
+    json<{ ok: boolean; lrc: string; targets: string[] }>(`${API}/lyrics/offset`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ path, delta_ms: Math.round(deltaMs), staged }),
+    }),
   /** Give LRCLIB the lyrics these tracks carry and the database lacks — script
    *  18's per-track core over a selection, the album-level counterpart of the
    *  editor's per-track publish. Each result carries LRCLIB's own answer in
@@ -3189,13 +3242,22 @@ export const api = {
    *  could not finish, see server/imports._report_gaps) and the chain's own
    *  `note` line — which is where an import says that a family it was
    *  CONFIGURED not to fetch was skipped (`skipped_families`, the same reasons
-   *  spelled out in the note), since a switched-off family is not a gap. */
-  importFinish: (paths: string[], force: Record<string, boolean> = {}, staged = false) =>
+   *  spelled out in the note), since a switched-off family is not a gap.
+   *
+   *  `force` is omitted, not defaulted to `{}`: a SUPPLIED dict is
+   *  authoritative and complete (every flag it does not name is turned off),
+   *  so `{}` meant "clear everything" — including `layout_apply`, which left
+   *  the chain's layout pass a read-only report and the album it just imported
+   *  unfixed. Omitting it leaves the saved switches alone, which is what the
+   *  bulk queue and the Soulseek import already do (`finish_album(force=None)`);
+   *  the wizard's re-run and the row menu were the two paths that disagreed
+   *  with them. */
+  importFinish: (paths: string[], force?: Record<string, boolean>, staged = false) =>
     json<{
       albums: {
         path: string; chain: number[]; scripts: unknown[]; errors: unknown[];
         note?: string; skipped_families?: string[];
-        autonomy?: ImportAutonomy;
+        autonomy: ImportAutonomy;
       }[];
     }>(
       `${API}/import/finish`,

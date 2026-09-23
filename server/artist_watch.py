@@ -727,7 +727,7 @@ def candidates(artist_mbid, watch=None, cfg=None, *, artist="", policy=None,
 # --------------------------------------------------------------------------- #
 # Queueing — the one seam to "Add to library"
 # --------------------------------------------------------------------------- #
-def queue_release(release, cfg, *, title="", artist="", year=""):
+def queue_release(release, cfg, *, title="", artist="", year="", candidates=None):
     """The ONE call this feature makes into "Add to library".
 
     `server.pending_albums.create` is the helper the route uses — folder,
@@ -735,6 +735,10 @@ def queue_release(release, cfg, *, title="", artist="", year=""):
     the existing queue — and the existing wish worker searches it. Isolated
     here so the watcher has exactly one line to redirect if that entry point
     ever moves, and so a test can stub the whole "add to library" step.
+
+    `candidates` is the acquisition's fallback list (the policy's eligible
+    editions, best first): the wish stores it and the worker walks it, so a
+    watched release is acquired with the same fallback an add gets.
     """
     from server import pending_albums, wishes_worker
 
@@ -744,7 +748,8 @@ def queue_release(release, cfg, *, title="", artist="", year=""):
     # those fetches reach the providers. The album's page still fills in on its
     # own a moment later.
     row = pending_albums.create(release, cfg, queries=None, title=title,
-                                artist=artist, year=year, prefetch=False)
+                                artist=artist, year=year, prefetch=False,
+                                candidates=candidates)
     if row.get("album_path"):
         pending_albums.prefetch_content(row["album_path"], cfg, background=True)
     if row.get("wish_id") and row.get("created"):
@@ -902,7 +907,15 @@ def run_watch(watch, cfg=None, *, force=False):
         try:
             row = queue_release(release, cfg, title=cand["title"],
                                artist=watch.get("name") or "",
-                               year=cand["year"])
+                               year=cand["year"],
+                               # The watch walks the SAME candidate list an
+                               # "Add to library" walks: the policy's eligible
+                               # editions in order (`group_targets`' own
+                               # `candidates`), so an unattended watch falls back
+                               # to the next-best pressing exactly like a manual
+                               # add does instead of giving up on the first one
+                               # the network does not have.
+                               candidates=pick.get("candidates") if pick else None)
         except Exception as e:
             out["errors"].append(f"{cand['title']}: {e}")
             _record(wid, cand["release_group_mbid"], title=cand["title"],

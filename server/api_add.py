@@ -249,12 +249,17 @@ def _create_all(targets, cfg, *, queries=None, title="", artist="", year="",
     from server import pending_albums, wishes_worker
 
     auto = import_policy.auto_acquisition_enabled(cfg)
-    # One album is pre-created INLINE (the user is waiting for exactly that one
-    # and its page is a click away); a batch — a discography, mode="all" — has
-    # its page content fetched per album on a daemon thread instead, so one
-    # request does not become dozens of provider calls (see
-    # `pending_albums.create`'s own `prefetch` argument).
-    batch = len(targets) > 1
+    # NO album has its page content fetched INLINE — not even the single one a
+    # "Add to library" press is about. Measured on a real add by release id
+    # (`.pi/profile_add.py`, case b): 10-20 s of the request's ~11-21 s were
+    # `pending_albums.prefetch_content`'s provider calls (`cover_search` ~3-8 s,
+    # the RYM link lookup ~2.7 s, MusicBrainz metadata ~3-5 s) — content that
+    # is only ever read when the user OPENS the album's page, and that the
+    # reply does not need: the folder, its manifest, its cover and its wish are
+    # already on disk by then, which is what the album row shows. So every
+    # album's page content goes to `prefetch_content(background=True)` — the
+    # same call the batch caller already used — and the request answers with
+    # the record it wrote.
     albums, errors = [], []
     recorded = False
     for t in targets:
@@ -266,7 +271,7 @@ def _create_all(targets, cfg, *, queries=None, title="", artist="", year="",
             row = pending_albums.create(
                 release, cfg, queries=queries,
                 title=t.get("title") or title, artist=artist, year=year,
-                prefetch=not batch,
+                prefetch=False,
                 # The FIRST album this resolution creates takes over the
                 # framework album the add already put on disk (`deferred`);
                 # every later one (mode="all") gets its own folder, exactly as
@@ -275,7 +280,7 @@ def _create_all(targets, cfg, *, queries=None, title="", artist="", year="",
                 # not one edition's.
                 deferred=deferred if not albums else None)
             albums.append(row)
-            if batch and row.get("created") and row.get("album_path"):
+            if row.get("created") and row.get("album_path"):
                 pending_albums.prefetch_content(row["album_path"], cfg, background=True)
             recorded = recorded or bool(row.get("created") and row.get("wish_id"))
         except Exception as e:

@@ -178,6 +178,7 @@ export default {
   "home.shelf.wanted": "Soulseek で探しているもの",
   "home.shelf.wanted_blurb": "バックグラウンドで探しています",
   "home.shelf.best": "評価の高いもの",
+  "home.shelf.rated": "あなたの評価",
   "home.shelf.attention": "確認が必要",
   "home.shelf.attention_blurb": "1 つ以上のチェックに失敗したアルバム",
   "home.shelf.artists": "トップアーティスト",
@@ -284,7 +285,6 @@ export default {
 
   // —— MusicBrainz artist page: add / download one release TYPE ——————————
   "mb.actions_title": "種類ごとに追加・ダウンロード",
-  "mb.actions_whole": "アーティスト全体",
   "mb.actions_groups": "リリースグループ {n} 件",
   "mb.add_to_library": "ライブラリに追加",
   "mb.actions_working": "処理中…",

@@ -15,14 +15,19 @@ This file pins the contract of writing all of it:
     strip pass deletes (or the grade fails);
   * a MULTI-VALUE credit is stored as REPEATED container fields, never as one
     "; "-joined blob: two performers are two Vorbis comments, two TMCL pairs,
-    two MP4 atoms — and they read back as the same list on every container;
+    two MP4 atoms — and they read back as the same list on every container.
+    A video container holds ONE string per key and so cannot repeat: there the
+    list is stored as its "; "-joined value, never as a Python repr (`str(v)`
+    put "['Alice', 'Bob']" in an MKV through /api/mb/assign and
+    /api/tags/bulk), and tag_values() reads its parts back;
   * the ID3 spellings are Picard's own (TIPL for the involvement roles, TMCL
     for the musician credits, TPE3 for the conductor, TLAN/TSST for the
     language and disc title), including the v2.3 spelling of the people list
     (IPLS) — a v2.3 file must read back what was written to it;
-  * a field the release does NOT state is never written as an empty tag, and
-    a tag that already holds a value is never overwritten (a re-run writes
-    nothing at all);
+  * a field the release does NOT state is never written as an empty tag; a
+    SCALAR tag that already holds a value is never overwritten, a LIST tag it
+    already holds is COMPLETED (the file's own values first, then the ones it
+    does not state), and a re-run over a completed file writes nothing at all;
   * a tag a container REFUSES is reported per file instead of being silently
     skipped;
   * the excess check still catches a genuinely foreign tag in the same album
@@ -104,6 +109,39 @@ def make_m4a(path):
                     "-i", "anullsrc=r=44100:cl=stereo", "-t", "1",
                     "-c:a", "aac", path], check=True, capture_output=True)
     return True
+
+
+def make_video(path, vcodec, acodec):
+    """A real video container through ffmpeg (1 s of testsrc + a tone).
+
+    Only encoders every ffmpeg build has (ffv1/mpeg4, flac/aac), so the
+    fixture never depends on a libx264 this build may not carry. False when
+    ffmpeg is not installed.
+    """
+    if not FFMPEG_EXE:
+        return False
+    subprocess.run([FFMPEG_EXE, "-v", "quiet", "-y",
+                    "-f", "lavfi", "-i", "testsrc=duration=1:size=64x64:rate=5",
+                    "-f", "lavfi", "-i", "anullsrc=r=44100:cl=stereo",
+                    "-t", "1", "-map", "0:v", "-map", "1:a",
+                    "-c:v", vcodec, "-c:a", acodec, path],
+                   check=True, capture_output=True)
+    return True
+
+
+def raw_video_tags(path):
+    """The container's OWN metadata, read by ffprobe — what is really on disk.
+
+    A video file has no mutagen reader, so this is the raw view: the string
+    the tag write left in the file, not the app's reading of it.
+    """
+    probe = _dep_exe("ffprobe.exe")
+    assert probe, "ffprobe.exe not found under .dependencies"
+    out = subprocess.run([probe, "-v", "quiet", "-print_format", "json",
+                          "-show_format", path], check=True,
+                         capture_output=True, text=True).stdout
+    tags = (json.loads(out).get("format") or {}).get("tags") or {}
+    return {str(k).upper(): str(v) for k, v in tags.items()}
 
 
 # --------------------------------------------------------------------------- #
@@ -409,6 +447,69 @@ else:
     print("  -- skipped: ffmpeg is not installed, so no .m4a fixture")
 
 # --------------------------------------------------------------------------- #
+print("== a video container stores a list the one spelling it can ==")
+# A video's metadata block is a flat key -> STRING map (ffmpeg's
+# `-metadata name=value` takes one value), so a list written there has to be
+# the "; "-joined value every reader of a repeated field joins to. The write
+# used to stringify whatever it got: `set_tag("PERFORMER", ["Alice", "Bob"])`
+# on an MKV — what /api/mb/assign and /api/tags/bulk hand over — stored the
+# Python repr "['Alice', 'Bob']" as the credit's name, and tag_values() handed
+# back nothing at all.
+# Fixtures of their own folder: the excess-tag check below grades the FLAC
+# album's whole directory, and a container ffmpeg wrote carries its own muxer
+# metadata (ENCODER, DURATION) that has nothing to do with this contract.
+_VIDEO_DIR = os.path.join(TMP, "video")
+os.makedirs(_VIDEO_DIR, exist_ok=True)
+mkv = os.path.join(_VIDEO_DIR, "video.mkv")
+if make_video(mkv, "ffv1", "flac"):
+    _af = AudioFile(mkv)
+    ok(_af.kind == "video", f"an .mkv takes the ffmpeg video path ({_af.kind})")
+    ok(_af.set_tag("PERFORMER", ["Alice", "Bob"]),
+       f"a list writes to a real MKV ({_af.error})")
+    ok(_af.set_tag("ISRC", ["USSM19800758", "USSM19800763"]),
+       f"and so does a two-ISRC list ({_af.error})")
+    _disk = raw_video_tags(mkv)
+    ok(_disk.get("PERFORMER") == "Alice; Bob",
+       f"the container holds the '; '-joined value, not a Python repr "
+       f"({_disk.get('PERFORMER')!r})")
+    ok(_disk.get("ISRC") == "USSM19800758; USSM19800763",
+       f"every ISRC is on the file, '; '-joined ({_disk.get('ISRC')!r})")
+    # …and the app's own reader sees the same value: the string, and the
+    # pieces a writer needs back.
+    _fresh = AudioFile(mkv)
+    ok(_fresh.get_tag("PERFORMER") == "Alice; Bob",
+       f"get_tag reads the joined value back ({_fresh.get_tag('PERFORMER')!r})")
+    ok(_fresh.tag_values("PERFORMER") == ["Alice", "Bob"],
+       f"tag_values hands the pieces back "
+       f"({_fresh.tag_values('PERFORMER')})")
+    ok(_fresh.tag_values("ISRC") == ["USSM19800758", "USSM19800763"],
+       f"and the same for the ISRC list ({_fresh.tag_values('ISRC')})")
+    ok(_fresh.all_tags().get("PERFORMER") == "Alice; Bob",
+       f"all_tags agrees with get_tag ({_fresh.all_tags().get('PERFORMER')!r})")
+else:
+    print("  -- skipped: ffmpeg is not installed, so no .mkv fixture")
+
+# The other video-flavoured container: .m4v is the MP4 family, which mutagen
+# writes itself (repeated atoms, one per value) — the same list, read back the
+# same way, so a credit is one value per container family.
+m4v = os.path.join(_VIDEO_DIR, "video.m4v")
+if make_video(m4v, "mpeg4", "aac"):
+    _af = AudioFile(m4v)
+    ok(_af.kind == "mp4",
+       f"an .m4v is the MP4 container the tag layer writes itself ({_af.kind})")
+    ok(_af.set_tag("PERFORMER", ["Alice", "Bob"]),
+       f"the list writes to the .m4v ({_af.error})")
+    _fresh = AudioFile(m4v)
+    ok(_fresh.tag_values("PERFORMER") == ["Alice", "Bob"],
+       f"the MP4 atoms hold one value per credit "
+       f"({_fresh.tag_values('PERFORMER')})")
+    ok(_fresh.get_tag("PERFORMER") == "Alice; Bob",
+       f"and get_tag joins them like every other container "
+       f"({_fresh.get_tag('PERFORMER')!r})")
+else:
+    print("  -- skipped: ffmpeg is not installed, so no .m4v fixture")
+
+# --------------------------------------------------------------------------- #
 print("== the grade: a credit passes, a foreign tag still fails ==")
 # Every check but the excess one is off, so an issue list is ONLY about tags:
 # a foreign tag MUST fail, and the same album's MusicBrainz credits MUST NOT.
@@ -466,20 +567,49 @@ ok(not [t for t in _forbidden if t in _bare_tags],
 ok(_bare_tags.get("LABEL") == "American Recordings",
    "…while the release facts it does state are still written")
 
-# A tag that already holds ANOTHER tagger's value is kept — a re-run over the
-# same file must change nothing at all.
+# A SCALAR tag that already holds ANOTHER tagger's value is kept — a re-run
+# over the same file must change nothing at all.
 _af = AudioFile(flac)
-_af.set_tag("PRODUCER", "Someone Else Entirely")
+_af.set_tag("LABEL", "Some Other Label")
 _af.defer_save(True)
 _done, _ref = write_mb_tags(_af, _VALUES, None)
 _af.defer_save(False)
 ok(_done == 0 and not _ref,
    f"a second run writes NOTHING: every tag is already filled ({_done})")
-ok(AudioFile(flac).get_tag("PRODUCER") == "Someone Else Entirely",
-   "and the value another tagger wrote is still there, not overwritten")
+ok(AudioFile(flac).get_tag("LABEL") == "Some Other Label",
+   "and the scalar value another tagger wrote is still there, not overwritten")
 _af = AudioFile(flac)
-_af.delete_tag("PRODUCER")
-_af.set_tag("PRODUCER", ["Rick Rubin"])
+_af.delete_tag("LABEL")
+_af.set_tag("LABEL", _WANT["LABEL"])
+
+# A LIST tag is DATA, not one slot: the file states ONE engineer and the
+# release states two, so the answer COMPLETES the list — the file's own value
+# first, then the ones it does not already state. The old blanket "a tag that
+# already has a value is kept" cut the release's two engineers down to
+# whichever single credit the file happened to arrive with.
+_af = AudioFile(flac)
+_af.set_tag("ENGINEER", "A Third Engineer")
+_af.defer_save(True)
+_done, _ref = write_mb_tags(_af, _VALUES, None)
+_af.defer_save(False)
+_eng = AudioFile(flac).tag_values("ENGINEER")
+ok(_done == 1 and not _ref,
+   f"only the short list is written, and nothing else ({_done}, {_ref})")
+ok(_eng == ["A Third Engineer"] + _WANT["ENGINEER"],
+   f"the release's engineers are ADDED to the one the file already stated, "
+   f"in that order ({_eng})")
+# …the list is complete now, so the same write again changes nothing: the
+# completion rule is idempotent, which is what the prescan and the "nothing
+# to fill" report line rely on.
+_af = AudioFile(flac)
+_af.defer_save(True)
+_again, _ref2 = write_mb_tags(_af, _VALUES, None)
+_af.defer_save(False)
+ok(_again == 0 and not _ref2,
+   f"a re-run over the completed list writes nothing ({_again})")
+_af = AudioFile(flac)
+_af.delete_tag("ENGINEER")
+_af.set_tag("ENGINEER", _WANT["ENGINEER"])
 
 # --------------------------------------------------------------------------- #
 print("== the album pass: the same fields, through _fill_release_tags ==")

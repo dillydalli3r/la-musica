@@ -2,7 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState, type CSSProperties, 
 import { createPortal } from "react-dom";
 import { Link } from "react-router-dom";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
-import { Disc3, Heart, ListMusic, ListPlus, Maximize2, Mic2, Play, Pause, SkipBack, SkipForward, Shuffle, Repeat, Timer, Volume2, X } from "lucide-react";
+import { Disc3, Heart, Info, ListMusic, ListPlus, Maximize2, Mic2, Play, Pause, SkipBack, SkipForward, Shuffle, Repeat, Timer, Volume2, X } from "lucide-react";
 import { api, isOffline } from "../api";
 import { toast, useStore } from "../store";
 import { fmtDuration } from "../lib/fmt";
@@ -20,6 +20,7 @@ import { applyReplayGain, attachAnalyser, resumeAnalyser } from "../lib/analyser
 import NowPlayingView from "./NowPlayingView";
 import LyricsSidebar from "./LyricsSidebar";
 import TrackDownloadExport from "./TrackDownloadExport";
+import { DetailsDialog } from "./AlbumDetails";
 import Popover, { MenuItem } from "./Popover";
 import { trackRef } from "../lib/refs";
 import useSubtitleTracks from "./SubtitledVideo";
@@ -208,6 +209,9 @@ export default function PlayerBar() {
   const [dragOff, setDragOff] = useState<number | null>(null);
   const [overOff, setOverOff] = useState<number | null>(null);
   const [lyricsOpen, setLyricsOpen] = useState(false);
+  // Track details & credits for whatever is playing (the ⓘ in the right-hand
+  // cluster and, in the fullscreen player, its options menu).
+  const [detailsOpen, setDetailsOpen] = useState(false);
   // sleep timer: an epoch-ms deadline, or "pause when this track ends"
   const [sleepOpen, setSleepOpen] = useState(false);
   const [sleepAt, setSleepAt] = useState<number | null>(null);
@@ -1543,6 +1547,24 @@ export default function PlayerBar() {
               </div>
 
               <TrackDownloadExport path={current?.path ?? ""} iconOnly disabled={!current} up />
+
+              {/* Track details & credits, right where the track is: the same
+                  modal the library row's ⓘ opens (DetailsDialog resolves the
+                  library Track out of the album payload — a request the bar
+                  does not make until this is pressed). The fullscreen player
+                  carries the same entry in its own options menu, so the info
+                  button a listener reaches for exists on both surfaces. */}
+              <button
+                className={`p-2 rounded-lg hover:bg-raise shrink-0 ${
+                  detailsOpen ? "text-accent bg-raise" : "text-zinc-400 hover:text-white"
+                } ${idle ? "opacity-40 pointer-events-none" : ""}`}
+                onClick={() => setDetailsOpen(true)}
+                disabled={idle}
+                title="Track details & credits"
+                aria-label="Track details and credits"
+              >
+                <Info className="h-4 w-4" />
+              </button>
             </div>
 
             {/* layer 2: the volume bar beneath the buttons — hidden on tablet
@@ -1733,6 +1755,18 @@ export default function PlayerBar() {
             />
           </div>,
           document.body
+        )}
+
+        {/* Track details & credits, mounted only while open: the dialog reads
+            the album payload itself (DetailsDialog → api.album), so the bar
+            carries no track object of its own and the modal shows exactly what
+            the library row's ⓘ shows for the same file. */}
+        {detailsOpen && current && (
+          <DetailsDialog
+            albumPath={current.albumPath}
+            trackPath={current.path}
+            onClose={() => setDetailsOpen(false)}
+          />
         )}
 
         {/* portal to <body>: the fullscreen player must escape the right
