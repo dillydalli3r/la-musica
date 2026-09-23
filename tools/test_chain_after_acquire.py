@@ -1252,6 +1252,59 @@ check_page_download_auto_import()
 
 # --------------------------------------------------------------------------- #
 print()
+# --------------------------------------------------------------------------- #
+# (h) the fetched cover is on disk BEFORE the chain runs
+#
+# "Process images" (script 5) re-encodes and renames the album's artwork and it
+# sits mid-chain, so a cover that lands AFTER the chain leaves an unprocessed
+# image in a library that normalises everything else — and the metadata+cover
+# steps run on a THREAD (`_files_pool`) while the chain is started on the calling
+# one, so "was the pool awaited" is the entire question. The owner's ask, in his
+# words: "ensure it's properly running the process image script when this is
+# done".
+print("\n(h) the fetched cover is on disk before the chain runs")
+
+
+def check_cover_before_chain():
+    folder = os.path.join(LIB, "Cover Artist", "Cover Album (2002)")
+    os.makedirs(folder, exist_ok=True)
+    make_wav(os.path.join(folder, "01 - one.wav"))
+    cover = os.path.join(folder, "cover.jpg")
+    order, seen_at_chain = [], {}
+
+    real_cover, real_chain = imports.run_cover_step, script_runners.run_chain
+
+    def cover_step(album_dir, cfg=None):
+        # What the real step does with `cover_review` off: writes the file
+        # through the same writer an upload goes through.
+        with open(os.path.join(album_dir, "cover.jpg"), "wb") as fh:
+            fh.write(b"\xff\xd8\xff\xe0" + b"0" * 32)
+        order.append("cover")
+        return {"note": "", "staged": False, "fetched": 1, "source": "smoke"}
+
+    def chain(cfg, ids, targets=None, force=None, progress=None, wait=False,
+              timeout=None, final=None):
+        order.append("chain")
+        seen_at_chain["cover"] = os.path.isfile(cover)
+        if final is not None:
+            final[:] = [norm(p) for p in (targets or [])]
+        return [{"id": ids[0], "label": "Script 5", "stats": {}, "error": None}]
+
+    imports.run_cover_step, script_runners.run_chain = cover_step, chain
+    try:
+        imports.finish_album(folder, CFG)
+    finally:
+        imports.run_cover_step, script_runners.run_chain = real_cover, real_chain
+
+    assert order == ["cover", "chain"], order
+    assert seen_at_chain.get("cover") is True, \
+        "the chain started before the fetched cover was on disk"
+    print("ok  the fetched cover is on disk before the chain runs "
+          "(so Process images sees it)")
+
+
+check_cover_before_chain()
+
 if FAILED:
     print(f"chain after acquire: {len(FAILED)} FAILED")
     for label in FAILED:

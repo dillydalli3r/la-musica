@@ -3201,7 +3201,12 @@ screen; above `lg` the pane sits beside the artwork.
   placeholder was deleted before the cover step could say whether it had
   anything better, so an album whose every candidate `mlo.cover_choice`'s
   minimum refused ended with no cover file at all and graded "Missing cover
-  image" while an image of that very release sat on disk.
+  image" while an image of that very release sat on disk. **And the step
+  FINISHES before the chain starts** — the metadata+cover pair runs on its own
+  thread and `_finish_album` waits for it before `run_chain` — which is what
+  makes "Process images" (script 5, mid-chain) see the fetched file: a cover
+  landing afterwards would sit unprocessed in a library that normalises
+  everything else. Pinned in `tools/test_chain_after_acquire.py`.
 - **R202 — an import that cannot place every file is reported, not aborted, and
   "Imported" means the pipeline really finished.** A naming-script failure no
   longer raises out of the auto-importer's `_import`: the album is in the
