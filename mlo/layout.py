@@ -709,13 +709,16 @@ def scan_library(cfg=None, stats=None):
                     closed(sink, skipped=True)      # cover art
                 elif album_sidecar_of(f):
                     # The album's description.txt — or a NUMBERED COPY of it
-                    # ("description (2).txt"), which a file manager, a sync
-                    # client or an older build leaves behind: the app's own
-                    # writer replaces the file, so it never makes one itself.
-                    # The canonical name is what it should be called, so a copy
-                    # with no canonical file beside it is offered the rename;
-                    # one that has the canonical next to it is a real stray
-                    # (two descriptions — the reader must not guess which).
+                    # ("description (2).txt"): a file manager, a sync client, a
+                    # re-run of the import chain, or the organizer's own
+                    # leftover sweep (two writers, one destination) leaves one
+                    # behind. The canonical name is what it should be called,
+                    # so a copy with no canonical beside it is offered the
+                    # rename; a copy that HAS the canonical next to it is a
+                    # duplicate of a file the app already reads — reported as
+                    # its own row so it can be removed, which is what the owner
+                    # asked for after finding three of them in their library
+                    # ("description (2).txt") while the report said issues: [].
                     canonical = album_sidecar_of(f)
                     canonical_on_disk = False
                     try:
@@ -723,8 +726,18 @@ def scan_library(cfg=None, stats=None):
                             other.lower() == canonical for other in os.listdir(ap))
                     except OSError:
                         pass
-                    if f.lower() == canonical or canonical_on_disk:
-                        closed(sink, skipped=True)  # the app's own description
+                    if f.lower() == canonical:
+                        closed(sink, skipped=True)      # the app's own description
+                    elif canonical_on_disk:
+                        rows.append(_issue(
+                            "sidecar_copy", fp, folder,
+                            "album \u201c%s / %s\u201d holds \u201c%s\u201d beside "
+                            "\u201c%s\u201d" % (name, an, f, canonical),
+                            "a duplicate of the description the app already "
+                            "reads \u2014 nothing reads \u201c%s\u201d, and "
+                            "Apply moves it to the Trash" % f,
+                            fix={"action": "trash"}))
+                        closed(sink, reported=True)
                     else:
                         rows.append(_issue(
                             "sidecar_copy", fp, folder,
@@ -1122,9 +1135,21 @@ def _may_trash(src, kind, lib, folder):
         return False, "it is a folder now"
     name = os.path.basename(src)
     ext = os.path.splitext(name)[1].lower()
+    # A NUMBERED COPY of an album sidecar whose canonical sits beside it is the
+    # duplicate the scan reports (kind "sidecar_copy", fix "trash"): the app
+    # reads the canonical name, so removing the copy takes nothing away — and
+    # without this arm the row the scan just reported could never be acted on,
+    # because everything below refuses anything sidecar-shaped.
+    try:
+        canonical = album_sidecar_of(name)
+    except Exception:
+        canonical = ""
+    if canonical and name.lower() != canonical.lower() and \
+            os.path.exists(os.path.join(os.path.dirname(src), canonical)):
+        return True, ""
     if (_is_audio(name) or name.startswith(".")
             or (ext and ext in _ALBUM_SIDECARS) or ext in IMAGE_EXTS
-            or album_sidecar_of(name)):
+            or canonical):
         return False, "it is audio, artwork or a sidecar now"
     return True, ""
 

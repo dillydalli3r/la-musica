@@ -581,9 +581,10 @@ export interface ExportForm {
   sidecars: boolean;
   /** WHICH files the run writes: the family keys of server.exporter.
    *  FILE_FAMILIES — "audio" (the tracks themselves), "cover", "lyrics",
-   *  "cue", "log", "description", "checksum", "text", "playlist", "other".
-   *  An EMPTY list is refused by the server with a sentence (a run that copies
-   *  nothing would write an empty folder), so the form must leave one ticked. */
+   *  "cue", "log", "accurip", "description", "checksum", "text", "playlist",
+   *  "other". An EMPTY list is refused by the server with a sentence (a run
+   *  that copies nothing would write an empty folder), so the form must leave
+   *  one ticked. */
   copy_files: string[];
   /** Write `checksums.sha256` at the export root (sha256sum -c compatible). */
   manifest: boolean;
@@ -3057,6 +3058,12 @@ export const api = {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(body),
     }, timeoutMs),
+  /** Ask the RUNNING export to stop. It stops at the next FILE BOUNDARY and
+   *  KEEPS everything it has already written — nothing is deleted — so the
+   *  files that landed before the request stand. `cancelled` is false when no
+   *  run was in flight (it had already finished, or was never started). */
+  exportCancel: () =>
+    json<{ ok: boolean; cancelled: boolean }>(`${API}/export/cancel`, { method: "POST" }),
   /** Write the Export page's form back into config.json (its saved defaults).
    * Every field maps onto the `export_<field>` config key the server reads. */
   exportSaveDefaults: (form: ExportForm) =>

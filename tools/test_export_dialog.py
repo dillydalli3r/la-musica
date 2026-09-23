@@ -362,6 +362,58 @@ try:
     finally:
         assert listing(empty_dest) == [], listing(empty_dest)
 
+    # --------------------------------------------------------- cancelling a run
+    # The owner's report: a long export to a slow drive had no way to stop. The
+    # route asks the running export to stop, the pass checks at the next FILE
+    # boundary, what is already written stays, and the answer says `cancelled`.
+    r = client.post("/api/export/cancel")
+    assert r.status_code == 200 and r.json() == {"ok": True, "cancelled": False}, r.text[:200]
+
+    cancel_src = [make(os.path.join(MUSIC, "Cancel", "Album C", f"1-0{i} C.flac"),
+                       1.0, 400 + i, tags=album_tags("Album C", i))
+                  for i in (1, 2, 3)]
+    cancel_dest = os.path.join(ROOT, "DeviceCancel")
+    os.makedirs(cancel_dest)
+    # The user presses Cancel while the FIRST file is being written. Patching
+    # the exporter's OWN `shutil` name (not the stdlib module: that would leak
+    # into every other caller in the process) makes the press land at a fixed
+    # point in the pass — no sleep, no timing race — and the pass checks the
+    # flag before the NEXT file, which is exactly the boundary it promises.
+    seen = {"n": 0}
+    real_shutil = exporter.shutil
+
+    class _CopyShim:
+        def __getattr__(self, name):
+            return getattr(real_shutil, name)
+
+        def copy2(self, src, dst, *a, **k):
+            out = real_shutil.copy2(src, dst, *a, **k)
+            seen["n"] += 1
+            if seen["n"] == 1:
+                exporter._CANCEL.set()
+            return out
+
+    exporter.shutil = _CopyShim()
+    try:
+        r = client.post("/api/export", json=dialog_body(
+            cancel_src, cancel_dest, workers=1, copy_files=["audio"]))
+    finally:
+        exporter.shutil = real_shutil
+    assert r.status_code == 200, r.text[:300]
+    body = r.json()
+    assert body["cancelled"] is True, body
+    assert body["ok"] is False, body
+    assert body["exported"] == 1, body
+    written = [f for f in listing(cancel_dest) if f.endswith(".flac")]
+    assert len(written) == 1, written
+    # The flag is cleared per run: the NEXT export is not still cancelled. Its
+    # first file is already at the destination (this is the idempotent re-run),
+    # so it is skipped rather than copied — exported + skipped is the three.
+    r = client.post("/api/export", json=dialog_body(
+        cancel_src, cancel_dest, workers=1, copy_files=["audio"]))
+    assert r.status_code == 200 and r.json()["cancelled"] is False, r.text[:300]
+    assert r.json()["exported"] + r.json()["skipped"] == 3, r.json()
+
     # ------------------------------------------- an unusable target is refused
     r = client.post("/api/export", json=dialog_body([one], MUSIC))
     assert r.status_code == 400 and "music folder" in r.json()["detail"].lower(), r.text[:200]
@@ -375,4 +427,5 @@ print("ok  export dialog: shared option set == the API's run options, the defaul
       "file, album + transcode runs produce one file per track, the file selection "
       "(menu == the exporter's table, audio-only / audio+artwork, empty + unknown "
       "refused), the classic sidecar switch and playlists opt-in, the structure "
-      "menu + custom structure preview/run agree, bad structures and targets 400")
+      "menu + custom structure preview/run agree, bad structures and targets 400, "
+      "a running export stops at a file boundary and keeps what it wrote")

@@ -799,8 +799,18 @@ rating.
   the matching pass/notch — so a band's frequency, gain and order are identical
   in the app and in an export; a SHELF's width is the one honest difference
   (APO's custom slope reaches ffmpeg as a Q, while a WebAudio shelf is
-  fixed-slope), and it is stated in the page rather than hidden. The editor
-  (`pages/EqualizerPage.tsx`, sidebar → MAINTAIN) lists the presets and the
+  fixed-slope), and it is stated in the page rather than hidden. The BOUNDS are
+  shared as well: a band's Fc/gain/Q and the profile's preamp are clamped to
+  the same numbers on both sides — fc 20 Hz–20 kHz, gain ±20 dB, Q 0.1–30,
+  preamp ±24 dB (`lib/eqNodes`' `EQ_FC_MIN`/`EQ_FC_MAX`/`EQ_GAIN_LIMIT`/
+  `EQ_PREAMP_LIMIT`, and `mlo.eq`'s `FC_MIN_HZ`…`PREAMP_LIMIT_DB` the export
+  chain clamps with) — so a file asking for more cannot sound wider or louder
+  in the app than in an exported copy; the file's own value stays in the
+  profile and the import reports that it is clamped. A profile the export
+  would REFUSE is not played either: one whose parse carried an error installs
+  nothing, because the bands that did parse are not the curve the file wrote
+  (R72). The editor (`pages/EqualizerPage.tsx`, sidebar → MAINTAIN) lists the
+  presets and the
   stored profiles, imports APO/Peace text or a dropped file, draws the response
   from the browser's own `getFrequencyResponse` (never a second implementation
   of the filter maths), gives every band a DRAGGABLE handle plus typeable Fc /
@@ -1453,11 +1463,26 @@ user asked for, in the order they asked for it. `server/exporter.py` owns both.
   named.** `export_eq_profile` selects a built-in preset or a profile imported
   from **Equalizer APO / Peace EQ** text (`mlo/eq.py`): `Preamp:`, `Filter N:
   ON|OFF PK|LS|HS|LP|HP|BP|NO|LSC|HSC Fc … Gain … Q …`, `GraphicEQ:` band lists, free
-  field order, optional units, case-insensitive keywords. OFF filters are
-  skipped; a line with no equivalent (`Include:`, unknown constructs) is IGNORED
-  and REPORTED in `unsupported` rather than dropped, while a BAND line that
-  cannot be read is an ERROR naming its attribute or its line, and an import of
-  it is REFUSED whole — a profile missing the band that failed to parse is not
+  field order, optional units, case-insensitive keywords. APO's OWN other
+  spellings are read as the filter its configuration reference says they are —
+  `PEQ` and `Modal` are its peaking row, `LPQ`/`HPQ` its pass filters with a Q,
+  `LS 6dB`/`LS 12dB`/`HS 6dB`/`HS 12dB` its fixed-slope shelves, `LSC x dB`/
+  `HSC x dB` its custom-slope shelves, `BW Oct n` a bandwidth — so a low-pass
+  stays a low-pass and a shelf stays a shelf; a shelf's own slope in dB/octave
+  and a Modal's `T60 target` are what the rendered filter cannot carry, and the
+  import result states that rather than looking exact. OFF filters are
+  skipped; a line with no equivalent (`Include:`, unknown constructs, an `AP`
+  all-pass — phase only, so leaving it out leaves the magnitude exactly as the
+  file wrote it — and an `IIR` filter, which IS the file's own coefficients) is
+  IGNORED and REPORTED in `unsupported` rather than dropped, and so are the
+  bands inside an `If:`/`ElseIf:` block: APO evaluates those against its own
+  variables (sample rate, channel count, device name, user variables), which
+  this app does not model, so a conditional band is NOT applied and the block
+  is named with the count of lines it cost. A BAND line that
+  cannot be read is an ERROR naming its attribute or its line, and a profile
+  carrying one is REFUSED WHOLE on every path — the import, the export AND the
+  player (`mlo.eq.apply_refusal`, one sentence, the words the editor's banner
+  shows) — because a profile missing the band that failed to parse is not
   the curve the user asked for. Profiles live in
   `<music>/.mlo/data/eq/` with a sanitized id and a 64 KiB cap.
 - **R73 — the chain order is ReplayGain gain → EQ preamp → EQ filters →
@@ -3809,7 +3834,12 @@ screen; above `lg` the pane sits beside the artwork.
   (`albumRef`) or the track (`trackRef`), the list is capped at 12 with the
   rest as a `+N` link into the Library's existing Failing filter, and
   `["gradesSummary"]` is in `invalidateLibrary`'s list — a run that graded,
-  tagged or imported just changed the very checks the strip reports.
+  tagged or imported just changed the very checks the strip reports. **A long
+  list opens folded**: past three findings the strip shows the first three and a
+  real button (`aria-expanded`) reading *Read more — N findings*, and *Show
+  less* folds it back, so seven failing albums cannot push the page's own
+  content below the fold. The summary line is always first and is never folded:
+  it is the answer, and the list is what you open when you want it.
 - **R233 — the tools install themselves, and the cookie imports are named
   where the keys are.** `dependencies_auto_update` is **ON by default**: the
   app's checks are worth what the tools behind them are, and a user who never
@@ -3828,6 +3858,67 @@ screen; above `lg` the pane sits beside the artwork.
   devtools header. One limitation, stated: while the first-run wizard is up,
   `/settings` is not routable (App.tsx's first-run gate), so the wizard's Keys
   step NAMES both imports and the clickable jump appears once setup is finished.
+
+### 7.38 Exporting what you chose, stopping it when you want, and seeing it
+
+- **R234 — the export menu offers one toggle per file family, and `.accurip` is
+  its own.** The file selection is `server.exporter.FILE_FAMILIES` — the ONE
+  table the menu, the run's copy pass and the run's report all read — and
+  `.accurip` was bundled into `log` (a single "rip log and accuracy report"
+  switch). It is now `accurip`: its own label ("AccurateRip report (.accurip)")
+  and hint, its own `_EXTRA_REASONS` entry, its own checkbox in both surfaces
+  (the panel renders the table, so the family appears without a UI change), and
+  `LEGACY_SIDECAR_FAMILIES` gains it so a caller still sending the old
+  `sidecars` boolean copies exactly the files it always did. Eleven families,
+  one toggle each: audio, cover, lyrics, cue, log, accurip, description,
+  checksum, text, playlist, other.
+- **R235 — a running export can be stopped, and it keeps what it wrote.**
+  `POST /api/export/cancel` asks the in-flight run to stop (answering
+  `cancelled: false` when nothing was running, rather than pretending). The
+  pass checks the flag BEFORE each file, so a stop lands on a file boundary and
+  never mid-file; everything already written STAYS (an export is a copy
+  service — deleting finished files because the user stopped the run would
+  destroy what they may still want), and the finishing passes are skipped,
+  because a manifest, a playlist, an album ReplayGain pass and `prune` all
+  describe a COMPLETE export. The result carries `cancelled: true` and the
+  route answers `ok: false`. The flag is cleared at the start of every run, so
+  a press between two exports cannot arm the next one. Pinned by
+  `tools/test_export_dialog.py` (a run stopped during its first file: one file
+  written, `cancelled`, and the next run unaffected).
+- **R236 — an export holds its destination as well as its sources.**
+  `POST /api/export` claims the source tracks AND the destination root
+  (`_export_claim_paths`), so two exports into one drive answer 409 instead of
+  racing — one run's `_copy_once` overwriting the other's files while its
+  `prune` deletes them. A destination outside the library never collides with a
+  script run, so export-B-during-import-A stays legal (disjoint paths), which is
+  what "exporting while other albums import" needs.
+- **R237 — the shell draws one progress bar per producer, labelled, until that
+  producer ends.** One store field and one slot meant a run and an export on
+  screen together overwrote each other, and the client cleared the bar 2.5 s
+  after any frame that looked complete — so a long job's bar blinked off
+  between steps. A frame now names its producer (`job`/`kind`/`label`, read
+  from the job registry's thread-local by `job_locks.frame_identity`), the shell
+  keeps a map keyed by that id, and an entry leaves the screen on ONE fact:
+  `{"type": "progress_end", "job": …}`, sent by `job_locks.release`. Each row
+  shows its label beside the bar; the row whose kind is `export` carries a
+  Cancel control that calls the route above. A frame with no identity (a chain
+  ticking between two scripts) still draws on the single legacy bar, so an older
+  producer never loses its bar.
+- **R238 — a duplicate sidecar is reported, removable, and no longer made.**
+  The app itself wrote `description (2).txt`: the import chain wrote
+  `description.txt` into the pre-organize staging folder while
+  `pending_albums.prefetch_content` had already written it into the album folder
+  an "Add to library" prepared, and the organizer's leftover sweep carried the
+  second copy in under a ` (2)` name (three of the owner's six albums held one).
+  Now: the sweep DROPS a source file whose bytes are identical to the file
+  already at the destination (`filecmp.cmp(..., shallow=False)`; a genuinely
+  different file still takes the ` (2)` name rather than overwriting), the
+  layout scan reports a numbered copy that sits beside its canonical as its own
+  `sidecar_copy` row with a **trash** fix (`_may_trash` gained the matching arm —
+  before it, the row the scan reported could never be acted on, because
+  everything sidecar-shaped is refused), the Optimization panel draws that kind,
+  and the Library page's layout warning counts it like any other finding. The
+  canonical file is never the one moved: it is what every reader opens.
 
 ## 8. Recommended runbook
 
@@ -4051,8 +4142,11 @@ which file a verdict is later computed on, never the verdict itself:
   order agree between the app and an exported copy — but a SHELF's width does
   not (APO's custom slope reaches ffmpeg as a Q, and a WebAudio shelf is
   fixed-slope), and any line the parser reports as unsupported (`Include:`,
-  `Convolution:`, an unknown construct) is reported and NOT applied, in playback
-  exactly as in an export.
+  `Convolution:`, an `AP`/`IIR` filter, an unknown construct) is reported and
+  NOT applied, in playback exactly as in an export — including the bands inside
+  an `If:`/`ElseIf:` block, which this app does not evaluate and therefore does
+  not apply, and the two sides clamp a band's Fc/gain/Q and the preamp to the
+  same bounds, so nothing about a band's level or width differs between them.
 - **A notification a client missed survives a restart, but not for ever**
   (R216): the durable log keeps the newest 400 frames, so a device that was
   away longer than that (or that is reopened after a long absence) sees the most

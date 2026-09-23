@@ -519,8 +519,10 @@ try:
         "Album.accurip", "Album.log", "Album.cue", "notes.txt", "Artist.jpg",
         "Album.m3u8", "release.nfo", "Album.md5", "Album.sfv", "Thumbs.db",
         "liner.bak", "cover.jpg", "description.txt", "Scans/"}, sorted(reported)
-    for name in ("Album.accurip", "Album.log"):
-        assert reported[name]["kind"] == "log", reported[name]
+    assert reported["Album.log"]["kind"] == "log", reported["Album.log"]
+    # `.accurip` is its OWN family — it has its own toggle in the menu, so a
+    # run's report names it as the family a user ticks, not as "log".
+    assert reported["Album.accurip"]["kind"] == "accurip", reported["Album.accurip"]
     for name in ("Album.md5", "Album.sfv"):
         assert reported[name]["kind"] == "checksum", reported[name]
     assert reported["Album.cue"]["kind"] == "cue", reported["Album.cue"]
@@ -536,9 +538,9 @@ try:
     assert all(r["reason"] for r in ex_run["excluded"]), ex_run["excluded"]
     assert all(r["album"] == "Artist One/Extras Album" for r in ex_run["excluded"])
     assert ex_run["excluded_total"] == 14, ex_run["excluded_total"]
-    assert ex_run["excluded_counts"] == {"log": 2, "checksum": 2, "cue": 1, "text": 2,
-                                         "description": 1, "playlist": 1, "cover": 2,
-                                         "other": 3}, ex_run["excluded_counts"]
+    assert ex_run["excluded_counts"] == {"accurip": 1, "log": 1, "checksum": 2, "cue": 1,
+                                         "text": 2, "description": 1, "playlist": 1,
+                                         "cover": 2, "other": 3}, ex_run["excluded_counts"]
     assert "14 non-audio file(s) not exported" in ex_run["excluded_note"], ex_run["excluded_note"]
     assert ex_run["copy_files"] == ["audio"], ex_run["copy_files"]
 
@@ -601,9 +603,20 @@ try:
     files_only = exporter.export_tracks(CFG, [ex_track], EX_FILES, codec="copy",
                                         copy_files=["cue", "log"], verify=True)
     assert files_only["failed"] == 0, files_only["errors"]
+    # `.accurip` is its OWN family now: asking for `log` does not bring it.
     assert sorted(os.path.basename(p) for p in listing(EX_FILES)) == \
-        ["Album.accurip", "Album.cue", "Album.log"], listing(EX_FILES)
+        ["Album.cue", "Album.log"], listing(EX_FILES)
     assert files_only["exported"] == 0, files_only
+
+    # …and asking for it brings exactly it.
+    EX_ACC = os.path.join(ROOT, "ExtrasAccuripOnly")
+    os.makedirs(EX_ACC)
+    acc_only = exporter.export_tracks(CFG, [ex_track], EX_ACC, codec="copy",
+                                      copy_files=["accurip"], verify=True)
+    assert acc_only["failed"] == 0, acc_only["errors"]
+    assert sorted(os.path.basename(p) for p in listing(EX_ACC)) == \
+        ["Album.accurip"], listing(EX_ACC)
+    assert acc_only["exported"] == 0, acc_only
 
     # An EMPTY selection is refused with a sentence, before the destination is
     # touched: an export that copies nothing must not write an empty folder and

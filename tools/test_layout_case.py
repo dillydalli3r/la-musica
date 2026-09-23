@@ -161,6 +161,21 @@ album("Artists/Files/My Album", tags("Files", "My Album"),
 with open(os.path.join(MF, "Artists", "Good", "Good Album", "notes.txt"), "wb") as f:
     f.write(b"junk")                                                  # stray_file
 
+# A NUMBERED COPY of the album's description beside the canonical one — the
+# duplicate the owner found three of in their own library ("description (2).txt").
+# The app's writers put the description in the staging folder AND the album
+# folder an import prepared, and the organizer's leftover sweep used to carry
+# the second copy in under a " (2)" name; the scan used to SKIP it (the report
+# said issues: []), so nothing could ever remove it. It is its own row now, with
+# a trash fix — the canonical file is what every reader opens, so the copy is
+# dead weight.
+DUP_ALBUM = os.path.join(MF, "Artists", "Dup", "Dup Album")
+album("Artists/Dup/Dup Album", tags("Dup", "Dup Album"))
+with open(os.path.join(DUP_ALBUM, "description.txt"), "w", encoding="utf-8") as f:
+    f.write("the album's own description\n")
+with open(os.path.join(DUP_ALBUM, "description (2).txt"), "w", encoding="utf-8") as f:
+    f.write("the album's own description\n")
+
 # The two rows the apply must NEVER touch: a foreign folder in the music root
 # that holds audio (nothing can say where its contents belong, so it is
 # reported and left) and a hidden folder inside Artists/ (a tool's marker — a
@@ -286,6 +301,21 @@ ok("wrong_case" not in {i["kind"] for i in issues
                         if i["path"] in ("Artists/Good/Good Album", "Artists/Caps/Empty")},
    "the untouched issue kinds did not gain rows of their own")
 
+print("== a duplicate description is its own row, and removable ==")
+sc = [i for i in issues if i["kind"] == "sidecar_copy"]
+ok(res["counts"].get("sidecar_copy") == 1
+   and [i["path"] for i in sc] == ["Artists/Dup/Dup Album/description (2).txt"],
+   f"the numbered copy beside the canonical description is reported "
+   f"({[i['path'] for i in sc]})")
+ok(bool(sc[0]["fix"]) and sc[0]["fix"].get("action") == "trash",
+   f"…with a trash fix — the canonical file is what every reader opens, so the "
+   f"copy can be removed ({sc[0]['fix']})")
+ok("beside" in sc[0]["detail"] and "description (2).txt" in sc[0]["detail"]
+   and "description.txt" in sc[0]["detail"]
+   and "duplicate" in sc[0]["hint"].lower(),
+   f"…and the row names the file it duplicates ({sc[0]['detail']} / "
+   f"{sc[0]['hint']})")
+
 print("== empty artist (an artist folder with no album) ==")
 ea = [i for i in issues if i["kind"] == "empty_artist"]
 ok(res["counts"].get("empty_artist") == 1
@@ -401,8 +431,8 @@ ok(not os.path.exists(NOBODY),
 
 # The counts, and the rows: what is settled leaves `issues`, what may not move
 # stays — with its reason.
-ok(res.get("fixed") == 7 and res.get("fix_failed") == 0,
-   f"seven fixes, none failed (got fixed={res.get('fixed')} failed={res.get('fix_failed')})")
+ok(res.get("fixed") == 8 and res.get("fix_failed") == 0,
+   f"eight fixes, none failed (got fixed={res.get('fixed')} failed={res.get('fix_failed')})")
 ok(res.get("skipped") == 2
    and sorted(res["counts"]) == ["hidden_folder", "unexpected_folder"],
    f"the two rows nothing may act on are still reported — the foreign folder "
@@ -427,6 +457,16 @@ stray_dest = binned("notes.txt")
 ok(not os.path.exists(stray), "the stray file is gone from the album")
 ok(stray_dest and open(stray_dest, "rb").read() == b"junk",
    f"…and it is in the Trash, byte for byte ({stray_dest})")
+# The duplicate description: the copy goes, the canonical stays — removing the
+# wrong one would leave the album with no description at all.
+dup = os.path.join(MF, "Artists", "Dup", "Dup Album", "description (2).txt")
+dup_dest = binned("description (2).txt")
+ok(not os.path.exists(dup),
+   "the duplicate description is gone from the album")
+ok(os.path.isfile(os.path.join(MF, "Artists", "Dup", "Dup Album", "description.txt")),
+   "…and the canonical description.txt the app reads is untouched")
+ok(dup_dest and open(dup_dest, "r", encoding="utf-8").read().startswith("the album's own"),
+   f"…while the copy is in the Trash, byte for byte ({dup_dest})")
 empty_dest = binned("Empty")
 ok(not os.path.exists(os.path.join(MF, "Artists", "Caps", "Empty")),
    "the empty album folder is gone from Artists/")

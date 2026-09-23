@@ -29,8 +29,11 @@ Two kinds of line are treated differently, because they cost different things:
   a frequency that is not a number, a ``GraphicEQ`` pair that is not two
   numbers — is an ERROR naming its line (``errors``). It is never dropped: a
   profile that silently loses one of its bands is a different curve, which for
-  audio is worse than a refusal, so ``import_profile`` refuses the whole file
-  and the run refuses to apply such a profile from disk.
+  audio is worse than a refusal, so ``import_profile`` refuses the whole file,
+  the export refuses to apply such a profile from disk, and the PLAYER installs
+  nothing either — one sentence (``apply_refusal``) says so on all three
+  surfaces, because a profile that cannot be exported must not be auditioned
+  through as a shorter curve.
 
 Anything this module cannot render is reported rather than dropped, because a
 profile that silently loses its Convolution/Include half is not the curve the
@@ -75,6 +78,46 @@ MAX_PROFILE_BYTES = 64 * 1024
 _TYPES = {t.lower(): t for t in
           ("PK", "LS", "HS", "LP", "HP", "BP", "NO", "LSC", "HSC")}
 
+# APO's OTHER spellings for the same filters, mapped to the type this module
+# renders. The right-hand side is the type the spelling NAMES — APO's own
+# configuration reference lists each alias in the row of the filter it is, and a
+# low-pass stays a low-pass:
+#
+#   PEQ            peaking filter (its "Parametric EQ" row, the same row as PK) → PK
+#   Modal          peaking filter (the same row; its T60 target is reported)    → PK
+#   LPQ            low-pass with a Q (the LP row)                               → LP
+#   HPQ            high-pass with a Q (the HP row)                              → HP
+#   LS 6dB, LS 12dB   low shelf, 6 / 12 dB per octave                           → LS
+#   HS 6dB, HS 12dB   high shelf, 6 / 12 dB per octave                          → HS
+#   LSC 10.8 dB    low shelf with a custom slope in dB/octave                   → LSC
+#   HSC 6 dB       high shelf with a custom slope in dB/octave                  → HSC
+#
+# The shelves keep their own Fc and Gain and are rendered as the shelf this
+# module has; the slope in dB/octave itself is not carried over (ffmpeg's shelf
+# takes a Q, and APO's own shelf Q is what its slope is expressed as in the
+# profiles seen in the wild), and the result's notes say so.
+_ALIASES = {"peq": "PK", "modal": "PK", "lpq": "LP", "hpq": "HP"}
+
+# The shelf spellings APO writes as TWO words — "Filter 1: ON LS 6dB Fc …". The
+# second word is the shelf's own slope; the type is APO's LS/HS shelf.
+_SHELF_SPELLINGS = {"6db": 6.0, "12db": 12.0}
+
+# APO types this module UNDERSTANDS and deliberately does not render, with the
+# sentence the import reports. Neither can become one of the nine filters both
+# renderers have, and guessing at one would invent a curve:
+#
+#   AP    all-pass: phase only, its magnitude is flat — a chain without it has
+#         exactly the curve the file asked for, so nothing is lost by leaving
+#         it out and nothing is honest in faking it with a notch.
+#   IIR   the file's own b0…bm / a0…am coefficients, which a fixed filter bank
+#         has no equivalent for.
+_UNRENDERED = {
+    "ap": ("an all-pass filter changes phase only — its magnitude response is "
+           "flat, so leaving it out leaves the curve as the file wrote it"),
+    "iir": ("an IIR filter is the file's own coefficients (b0…bm / a0…am), "
+            "which this app has no filter for"),
+}
+
 # APO's parameter names, including the short forms files in the wild use.
 _KEYS = {"fc": "fc", "f": "fc", "freq": "fc", "frequency": "fc",
          "gain": "gain", "g": "gain", "q": "q", "bw": "bw",
@@ -95,6 +138,19 @@ _DEFAULT_Q = {"PK": 1.41, "LS": 0.7, "LSC": 0.7, "HS": 0.7, "HSC": 0.7,
 # Q AutoEQ writes for a GraphicEQ band list converted to peaking filters.
 _GRAPHICEQ_Q = 1.41
 
+# The bounds a RENDERED band is clamped to — the same numbers the in-app player
+# clamps with (web/src/lib/eqNodes.ts: EQ_FC_MIN/EQ_FC_MAX, EQ_GAIN_LIMIT,
+# EQ_PREAMP_LIMIT and the Q range its `configure` uses). The player clamps
+# because its node and the editor's own boxes are bounded; the ffmpeg chain
+# applies the SAME limits because otherwise one profile would sound like two
+# different curves — the app's own auditioning bounds are the promise the export
+# has to keep. The file's own values stay in the parsed band (that is the
+# file's provenance) and the result's notes say when one was outside them.
+FC_MIN_HZ, FC_MAX_HZ = 20.0, 20000.0
+GAIN_LIMIT_DB = 20.0
+Q_MIN, Q_MAX = 0.1, 30.0
+PREAMP_LIMIT_DB = 24.0
+
 _NUMBER_RE = re.compile(r"[-+]?(?:\d+(?:\.\d*)?|\.\d+)")
 # The preamp is matched by its NAME, not by "a name followed by a number": a
 # "Preamp: high" line must come back as an error naming the line, never fall
@@ -103,6 +159,13 @@ _NUMBER_RE = re.compile(r"[-+]?(?:\d+(?:\.\d*)?|\.\d+)")
 _PREAMP_RE = re.compile(r"^\s*preamp\s*:\s*(.*)$", re.IGNORECASE)
 _FILTER_RE = re.compile(r"^\s*filter\s*\d*\s*:(.*)$", re.IGNORECASE)
 _GRAPHIC_RE = re.compile(r"^\s*graphiceq\s*:(.*)$", re.IGNORECASE)
+
+# APO's conditional execution: ``If:``/``ElseIf:``/``Else:``/``EndIf:``. The
+# condition is an expression over APO's OWN variables (sampleRate,
+# inputChannelCount, deviceName, user variables — its reference's own list),
+# which this app does not model at all; see parse_apo for what is done instead
+# of evaluating one.
+_COND_RE = re.compile(r"^\s*(if|elseif|else|endif)\s*:\s*(.*)$", re.IGNORECASE)
 
 # The APO token that means "this slot holds no filter" ("Filter 3: ON None").
 # Peace writes one for every unused band, so it is skipped like a comment.
@@ -131,6 +194,21 @@ def _num(value):
     return f"{float(value):g}"
 
 
+def _clamp(value, lo, hi):
+    """*value* inside ``[lo, hi]`` — the bounds BOTH renderers use."""
+    return min(hi, max(lo, float(value)))
+
+
+def _out_of_bounds(band):
+    """Whether *band* carries a value the renderers clamp (see the bounds)."""
+    if not FC_MIN_HZ <= float(band["fc"]) <= FC_MAX_HZ:
+        return True
+    if not Q_MIN <= float(band["q"]) <= Q_MAX:
+        return True
+    return (band["type"] in _GAIN_TYPES
+            and not -GAIN_LIMIT_DB <= float(band.get("gain") or 0.0) <= GAIN_LIMIT_DB)
+
+
 def _band_to_q(bandwidth_octaves):
     """APO's ``BW`` (bandwidth in octaves) as the Q ffmpeg's filters take, or
     None when the file's own value cannot be one (a width of 0 or less)."""
@@ -148,14 +226,18 @@ def _parse_filter(body):
     """One ``Filter N: …`` body as ``(filter, error)``.
 
     ``filter`` is the band dict, the string ``"none"`` for APO's own empty slot
-    (``Filter 1: ON None``), or None with *error* saying what could not be
-    read. The tokens are scanned in the order the file wrote them, so any field
-    order works and ``ON``/``OFF`` may sit wherever the writer put it. A token
-    this parser does not know is an ERROR, not a loss to report: guessing at it
-    (or dropping the band) would apply a curve the user did not write.
+    (``Filter 1: ON None``) or for an OFF band of a type this app cannot hold,
+    or the SENTENCE naming a filter APO defines and this app has no equivalent
+    for (``AP``, ``IIR`` — reported, never applied). None with *error* says what
+    could not be read. The tokens are scanned in the order the file wrote them,
+    so any field order works and ``ON``/``OFF`` may sit wherever the writer put
+    it. A token this parser does not know is an ERROR, not a loss to report:
+    guessing at it (or dropping the band) would apply a curve the user did not
+    write.
     """
     tokens = body.replace(",", " ").split()
     enabled, ftype, values = True, None, {}
+    slope, t60 = None, None
     i = 0
     while i < len(tokens):
         token = tokens[i].lower()
@@ -167,23 +249,73 @@ def _parse_filter(body):
             # The slot holds no filter at all — Peace writes one per unused
             # band. Enabled or not, there is no curve here to render.
             return "none", None
+        if ftype is None and token in _UNRENDERED:
+            # Understood, and deliberately not rendered (see _UNRENDERED). An
+            # OFF one is skipped silently: it contributed nothing either way.
+            if not enabled:
+                return "none", None
+            return _UNRENDERED[token], None
+        if ftype is None and token in _ALIASES:
+            ftype = _ALIASES[token]
+            i += 1
+            continue
         if token in _TYPES and ftype is None:
+            if (token in ("ls", "hs") and i + 1 < len(tokens)
+                    and tokens[i + 1].lower() in _SHELF_SPELLINGS):
+                # "ON LS 6dB Fc …": APO's reference lists the type and its own
+                # slope as those two words. The slope is kept for the report.
+                slope = _SHELF_SPELLINGS[tokens[i + 1].lower()]
+                ftype = _TYPES[token]
+                i += 2
+                continue
             ftype = _TYPES[token]
             i += 1
             continue
         if token in _UNITS:
             i += 1
             continue
+        if token == "t60":
+            # APO's Modal filter carries a decay on top of the band's shape
+            # ("T60 target 100 ms", and files in the wild also write it without
+            # the word). The peaking part is rendered; the decay is reported
+            # instead of dropped in silence.
+            at = i + 1
+            if at < len(tokens) and tokens[at].lower() == "target":
+                at += 1
+            if at >= len(tokens):
+                return None, "T60 needs a value (T60 target 100 ms)"
+            value = _number(tokens[at])
+            if value is None:
+                return None, f"T60 needs a number, got {tokens[at]!r}"
+            t60 = value
+            i = at + 1
+            if i < len(tokens) and tokens[i].lower() in ("ms", "s"):
+                i += 1
+            continue
         if token in _KEYS:
             name = _KEYS[token]
-            if i + 1 >= len(tokens):
+            at = i + 1
+            # APO writes a bandwidth as "BW Oct 0.5": the unit word sits between
+            # the key and its value.
+            if name == "bw" and at < len(tokens) and tokens[at].lower() == "oct":
+                at += 1
+            if at >= len(tokens):
                 return None, f"{token.capitalize()} has no value"
-            value = _number(tokens[i + 1])
+            value = _number(tokens[at])
             if value is None:
                 return None, (f"{token.capitalize()} needs a number, got "
-                              f"{tokens[i + 1]!r}")
+                              f"{tokens[at]!r}")
             values[name] = value
-            i += 2
+            i = at + 1
+            continue
+        if (ftype in ("LSC", "HSC") and slope is None
+                and _NUMBER_RE.fullmatch(tokens[i])):
+            # A custom shelf's own slope, written right after its type:
+            # "ON LSC 10.8 dB Fc 300 Hz Gain 5.0 dB".
+            slope = float(tokens[i])
+            i += 1
+            if i < len(tokens) and tokens[i].lower() == "db":
+                i += 1
             continue
         if ftype is None and token.isalpha():
             # A word where the filter type goes: say what a type may be rather
@@ -211,6 +343,12 @@ def _parse_filter(body):
         # The file's own bandwidth, kept as provenance: the import result
         # states the BW→Q conversion instead of looking exact.
         band["bw"] = converted
+    if slope is not None:
+        # The shelf's own slope in dB/octave, kept for the same reason: it is
+        # the one number of the band the rendered shelf cannot carry.
+        band["slope"] = slope
+    if t60 is not None:
+        band["t60"] = t60
     return band, None
 
 
@@ -339,10 +477,17 @@ def parse_apo(text, name=""):
 
     ``unsupported`` names every line that was IGNORED without changing the
     curve: ``Include:`` (a profile that pulls in another file cannot be
-    reproduced from one text block), other APO constructs, a Peace banner.
-    ``errors`` names every line that carries a band this module could not read,
-    with its line number, and the caller must REFUSE those rather than import
-    the remains — a curve missing the band that failed to parse is a different
+    reproduced from one text block), other APO constructs, a Peace banner, a
+    band this module understands and deliberately does not render (``AP``,
+    ``IIR``), and every ``If:`` that opens a conditional block. The bands
+    INSIDE such a block are not applied either — APO evaluates the condition
+    against its own variables and this app does not model them, so anything
+    that MIGHT apply is left out and the count of skipped lines is in the
+    notes; a band that cannot be evaluated must not be applied as though it
+    were unconditional. ``errors`` names every line that carries a band this
+    module could not read, with its line number, and the caller must REFUSE
+    those rather than import the remains — a curve missing the band that failed
+    to parse is a different
     curve. ``empty`` is True when the file held no filter and no preamp at all,
     which is a profile that exports the audio unchanged, never a flat curve
     standing in for one. ``Channel: all`` is not a loss: it means "every
@@ -353,9 +498,12 @@ def parse_apo(text, name=""):
     graphic_bands = 0
     slope_shelves = 0
     bw_filters = 0
+    t60_filters = 0
     curve_points = 0
     curve_qs = []
     curve_meta = {}
+    conditional_depth = 0
+    conditional_lines = 0
     # A BOM can arrive from a FILE and from a paste through the API: Windows
     # tools write one, and an un-stripped "\ufeffPreamp:" is a line this parser
     # would otherwise have to call unknown — losing the preamp without saying
@@ -365,6 +513,38 @@ def parse_apo(text, name=""):
         line = raw.strip()
         if not line or line.startswith("#") or line.startswith(";"):
             continue  # comments and blank lines carry nothing to render
+        m = _COND_RE.match(line)
+        if m:
+            word = m.group(1).lower()
+            if word == "endif":
+                if conditional_depth:
+                    conditional_depth -= 1
+                else:
+                    profile["unsupported"].append(
+                        f"line {lineno}: {line} — an EndIf: with no If: to end")
+            elif word == "if":
+                # APO evaluates this against its OWN variables (sample rate,
+                # channel count, device name, user variables) and this app does
+                # not model them — so the block is REPORTED and the bands inside
+                # it are NOT applied. Applying them unconditionally would change
+                # the sound of a profile that never asked for them, and an
+                # expression evaluator is not what this app is.
+                conditional_depth += 1
+                profile["unsupported"].append(
+                    f"line {lineno}: {line} — a conditional block: this app does "
+                    "not evaluate APO's expressions, so the bands inside it are "
+                    "not applied")
+            elif conditional_depth:
+                # ElseIf:/Else: are another branch of the block already named.
+                pass
+            else:
+                profile["unsupported"].append(
+                    f"line {lineno}: {line} — an Else:/ElseIf: with no If: block")
+            continue
+        if conditional_depth and (_PREAMP_RE.match(line) or _FILTER_RE.match(line)
+                                  or _GRAPHIC_RE.match(line) or _CURVE_RE.match(line)):
+            conditional_lines += 1
+            continue
         if re.match(r"^channel\s*:\s*all\s*$", line, re.IGNORECASE):
             continue
         m = _PREAMP_RE.match(line)
@@ -382,11 +562,21 @@ def parse_apo(text, name=""):
             parsed, why = _parse_filter(m.group(1))
             if why:
                 profile["errors"].append(f"line {lineno}: {line} — {why}")
-            elif parsed != "none":
-                if parsed["type"] in ("LSC", "HSC"):
+            elif isinstance(parsed, str):
+                # "none" is APO's own empty slot — nothing to render, nothing
+                # lost. Any OTHER string is the sentence naming a filter that
+                # was understood and deliberately NOT rendered (AP, IIR): the
+                # line is named and reported, never guessed at.
+                if parsed != "none":
+                    profile["unsupported"].append(
+                        f"line {lineno}: {line} — {parsed}")
+            else:
+                if parsed["type"] in ("LSC", "HSC") or "slope" in parsed:
                     slope_shelves += 1
                 if "bw" in parsed:
                     bw_filters += 1
+                if "t60" in parsed:
+                    t60_filters += 1
                 profile["filters"].append(parsed)
             continue
         m = _GRAPHIC_RE.match(line)
@@ -428,23 +618,52 @@ def parse_apo(text, name=""):
                         profile["preamp_db"] = value
             continue
         profile["unsupported"].append(line)
+    # How many of the file's own numbers the renderers have to clamp (see the
+    # bounds above): the bands that are actually rendered first, then the
+    # preamp. An OFF band is rendered by neither path, so it is not counted.
+    clamped = sum(1 for band in profile["filters"]
+                  if band.get("on", True) and _out_of_bounds(band))
+    if not -PREAMP_LIMIT_DB <= profile["preamp_db"] <= PREAMP_LIMIT_DB:
+        clamped += 1
     if graphic_bands:
         profile["notes"].append(
             "GraphicEQ bands are rendered as peaking filters with Q 1.41 "
             "(AutoEQ's own conversion); %d band(s)" % graphic_bands)
     if slope_shelves:
-        # APO's LSC/HSC take a slope; ffmpeg's shelf takes a Q. The slope and
-        # the Q are two spellings of the same shaped curve (APO's own shelf Q
-        # is what its slope produces), but the file's own value is not carried
-        # through, so the result says so instead of looking exact.
+        # APO's LSC/HSC take a slope, and "LS 6dB"/"LS 12dB" name one; ffmpeg's
+        # shelf takes a Q. The slope and the Q are two spellings of the same
+        # shaped curve (APO's own shelf Q is what its slope produces), but the
+        # file's own value is not carried through, so the result says so instead
+        # of looking exact.
         profile["notes"].append(
-            "LSC/HSC shelves are rendered as ffmpeg's LS/HS shelf with the "
-            "profile's own shelf Q; APO's slope parameter itself is not "
-            "carried over; %d filter(s)" % slope_shelves)
+            "LSC/HSC shelves, and the fixed 'LS 6dB'/'LS 12dB' spellings, are "
+            "rendered as ffmpeg's LS/HS shelf with the profile's own shelf Q; "
+            "APO's slope parameter itself is not carried over; %d filter(s)"
+            % slope_shelves)
     if bw_filters:
         profile["notes"].append(
             "BW (bandwidth in octaves) was converted to the Q ffmpeg's filters "
             "take, with APO's own conversion; %d filter(s)" % bw_filters)
+    if t60_filters:
+        profile["notes"].append(
+            "Modal filters are rendered as peaking filters — APO's own "
+            "reference lists Modal in its peaking-filter row — and the filter's "
+            "T60 target (the decay, not the band's shape) is not carried over; "
+            "%d filter(s)" % t60_filters)
+    if conditional_lines:
+        profile["notes"].append(
+            "%d filter line(s) inside If:/ElseIf: blocks were NOT applied: APO "
+            "evaluates those blocks against its own variables (sample rate, "
+            "channel count, device name, user variables), which this app does "
+            "not model, and a band it cannot evaluate must not be applied as "
+            "though it were unconditional" % conditional_lines)
+    if clamped:
+        profile["notes"].append(
+            "%d value(s) of this profile are outside the bounds this app "
+            "renders within (Fc 20 Hz–20 kHz, gain ±20 dB, Q 0.1–30, preamp "
+            "±24 dB — the bounds the in-app player applies) and are clamped to "
+            "them when the curve is played or exported; the file's own values "
+            "are kept" % clamped)
     if curve_points:
         qs = sorted(curve_qs)
         profile["notes"].append(
@@ -494,18 +713,42 @@ def parse_apo(text, name=""):
 
 
 def _filter_af(filt):
-    """One filter as an ffmpeg ``-af`` entry."""
+    """One filter as an ffmpeg ``-af`` entry.
+
+    Every number is clamped to the bounds BOTH renderers use (see FC_MIN_HZ):
+    the band's own Fc/Gain/Q are what the file wrote, and what the player
+    actually renders is what these bounds allow — the export has to be that
+    same curve, not a wider or louder one.
+    """
     ftype = filt["type"]
     name = _FFMPEG_FILTER[ftype]
+    fc = _num(_clamp(filt["fc"], FC_MIN_HZ, FC_MAX_HZ))
+    q = _num(_clamp(filt["q"], Q_MIN, Q_MAX))
+    gain = _num(_clamp(filt["gain"], -GAIN_LIMIT_DB, GAIN_LIMIT_DB))
     if ftype in ("LP", "HP", "BP", "NO"):
-        return f"{name}=f={_num(filt['fc'])}:t=q:w={_num(filt['q'])}"
+        return f"{name}=f={fc}:t=q:w={q}"
     if name == "equalizer":
-        return (f"{name}=f={_num(filt['fc'])}:t=q:w={_num(filt['q'])}"
-                f":g={_num(filt['gain'])}")
+        return f"{name}=f={fc}:t=q:w={q}:g={gain}"
     # bass/treble: the gain leads, the corner frequency and the shelf width
     # follow — the same three numbers, the order those filters document.
-    return (f"{name}=g={_num(filt['gain'])}:f={_num(filt['fc'])}"
-            f":t=q:w={_num(filt['q'])}")
+    return f"{name}=g={gain}:f={fc}:t=q:w={q}"
+
+
+def apply_refusal(profile):
+    """The sentence a profile that parsed WITH ERRORS is refused with, or "".
+
+    Refusing is the conservative half of the choice this module makes for a
+    profile that lost a band: the bands that DID parse are not the curve the
+    file wrote, and while a warning would leave the app usable, it would also
+    let a run bake that different curve into files the user keeps — and let the
+    player audition a curve no export of theirs will ever produce. All three
+    surfaces use THIS sentence — the import (``import_profile``), the export
+    (server/exporter.py) and the player (web/src/lib/eqNodes.ts
+    `eqApplyRefusal`, whose words are the editor's banner's) — so a user cannot
+    be told three different things about one profile.
+    """
+    errors = (profile or {}).get("errors") or []
+    return f"this profile cannot be applied: {errors[0]}" if errors else ""
 
 
 def chain(profile):
@@ -515,11 +758,19 @@ def chain(profile):
     A gain filter set to 0 dB is skipped too: it is transparent, and rendering
     it would multiply every sample of every exported file for nothing.
     ``GraphicEQ`` band lists are full of them.
+
+    A profile that parsed with ERRORS renders nothing at all — it raises, so no
+    caller can build a chain out of the bands that happened to parse (see
+    ``apply_refusal``).
     """
     if not profile:
         return []
+    refusal = apply_refusal(profile)
+    if refusal:
+        raise ValueError(refusal)
     parts = []
-    preamp = profile.get("preamp_db") or 0.0
+    preamp = _clamp(profile.get("preamp_db") or 0.0, -PREAMP_LIMIT_DB,
+                    PREAMP_LIMIT_DB)
     if preamp:
         # The preamp is what keeps a boosted curve from clipping the encoder;
         # a 0 dB one is not emitted at all (same reason as the flat filters).
@@ -793,12 +1044,15 @@ def catalog(music_folder):
         "presets": preset_rows(),
         "profiles": list_profiles(music_folder),
         "note": ("Equalizer APO / Peace profile text: Preamp, Filter lines "
-                 "(PK/LS/HS/LP/HP/BP/NO/LSC/HSC, ON/OFF, BW instead of Q) and "
-                 "GraphicEQ band lists, in any field order, as UTF-8 (with or "
-                 "without a BOM) or UTF-16. Include: and any other line is "
-                 "reported as unsupported rather than applied; a band line that "
-                 "cannot be read is refused with its line number, never "
-                 "imported into a different curve."),
+                 "(PK/LS/HS/LP/HP/BP/NO/LSC/HSC and APO's own spellings for "
+                 "them — PEQ, Modal, LPQ, HPQ, 'LS 6dB'/'LS 12dB', 'HSC 6 dB', "
+                 "ON/OFF, BW Oct instead of Q) and GraphicEQ band lists, in any "
+                 "field order, as UTF-8 (with or without a BOM) or UTF-16. "
+                 "Include: and any other line is reported as unsupported rather "
+                 "than applied — so are AP and IIR filters, and the bands inside "
+                 "an If:/ElseIf: block (this app does not evaluate APO's "
+                 "expressions); a band line that cannot be read is refused with "
+                 "its line number, never imported into a different curve."),
     }
 
 

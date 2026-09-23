@@ -330,6 +330,63 @@ def release(job):
         if rec is not None and not rec["keys"]:
             del _jobs[job]
         _cond.notify_all()
+    # Tell the UI this producer is GONE, so its bar can leave the screen on the
+    # fact rather than on a timer. The client used to clear its single bar 2.5 s
+    # after any frame that looked complete, which is what made a long run's bar
+    # blink off between steps (see web/src/store.ts's bars map).
+    _end_hook = _END_HOOK
+    if _end_hook is not None:
+        try:
+            _end_hook({"type": "progress_end", "job": job})
+        except Exception:
+            pass
+
+
+# Who hears that a producer ended (the server's WebSocket relay, registered at
+# import). A plain callable rather than a second progress-hook protocol: an end
+# marker has no numbers, and a relay that is not installed must cost nothing.
+_END_HOOK = None
+
+
+def set_end_hook(fn):
+    """Install the callable that hears `{"type": "progress_end", "job": …}`."""
+    global _END_HOOK
+    _END_HOOK = fn
+
+
+# The producer the frames on THIS thread belong to, set around the hook call in
+# publish() below and read by the relay that composes the frame. A thread-local
+# rather than a frame argument because the hook protocol is positional
+# `(done, total, desc[, steps])` and every existing caller — and every test —
+# keeps working unchanged; the worker thread that runs a job is the same one
+# that publishes its frames, so the answer is exact.
+_FRAME = threading.local()
+
+
+def job_record(job):
+    """`{kind, label, …}` for one job id, `{}` when it is gone.
+
+    The relay reads a frame's producer from the thread-local (frame_identity),
+    and falls back to this for a frame that carried only an id — an older
+    publisher, or one whose identity block ran before its record was written."""
+    with _lock:
+        return dict(_jobs.get(job) or {})
+
+
+def frame_identity():
+    """`(job, kind, label)` for the frame being published on this thread now.
+
+    Job ids are STRINGS (`"job-1"`, minted by `acquire`) — this used to cast
+    them to `int`, which raised `ValueError` on every frame a job published and
+    was swallowed by `publish`'s `except Exception: return`: the bar lost every
+    tick and only the end marker arrived. They travel as they are.
+
+    `("", "", "")` when no job owns it — a chain publishing between two scripts,
+    a legacy caller — which the client reads as the single legacy bar."""
+    if not getattr(_FRAME, "job", None):
+        return ("", "", "")
+    return (str(_FRAME.job), str(getattr(_FRAME, "kind", "") or ""),
+            str(getattr(_FRAME, "label", "") or ""))
 
 
 def _current_key(rec, key):
@@ -628,16 +685,30 @@ def publish(done=None, total=None, text="", steps=None, job=None, hook=None):
         hook = getattr(mlo_stats, "progress_hook", None)
     if not callable(hook):
         return
-    frames = [(done, total, text)] if steps is None else [
-        (done, total, text, steps), (done, total, text)]
-    for frame in frames:
-        try:
-            hook(*frame)
-            return
-        except TypeError:
-            continue          # a hook that takes only the 3-argument frame
-        except Exception:
-            return
+    # Name the producer for the DURATION of these frames: the relay that
+    # composes the WebSocket payload reads it back (frame_identity) so one
+    # frame says whose bar it belongs to — which is what lets a run's bar and
+    # an export's bar be on screen together.
+    prev = frame_identity()
+    if job is not None:
+        with _lock:
+            rec = _jobs.get(job) or {}
+        _FRAME.job = job
+        _FRAME.kind = rec.get("kind") or ""
+        _FRAME.label = rec.get("label") or rec.get("kind") or "Job"
+    try:
+        frames = [(done, total, text)] if steps is None else [
+            (done, total, text, steps), (done, total, text)]
+        for frame in frames:
+            try:
+                hook(*frame)
+                return
+            except TypeError:
+                continue          # a hook that takes only the 3-argument frame
+            except Exception:
+                return
+    finally:
+        _FRAME.job, _FRAME.kind, _FRAME.label = prev
 
 
 def jobs():

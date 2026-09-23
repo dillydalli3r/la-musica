@@ -662,11 +662,14 @@ export const CONFIG_GROUPS: CfgGroup[] = [
         { k: "export_prune", label: "Delete the destination leftovers first", type: "bool" },
         { k: "export_playlists", label: "Export playlists", type: "bool" },
         /* The file selection the Export page saves as this device's default
-           (`export_copy_files`): the same ten families its own checkboxes draw,
-           named here for installs whose exports are always the same shape. An
-           empty selection is NOT "copy nothing" — it means nobody has chosen, so
-           the classic sidecar switch below still decides. */
-        { k: "export_copy_files", label: "What an export copies (blank = the switch below decides)", type: "multi", options: [["audio", "The tracks themselves"], ["cover", "Covers and artwork"], ["lyrics", "Lyrics (.lrc)"], ["cue", "Cue sheets (.cue)"], ["log", "Rip log and accuracy report"], ["description", "Album description"], ["checksum", "Checksum lists and .torrent"], ["text", "Notes, links and scans"], ["playlist", "Playlists the album carries"], ["other", "Anything else"]], help: "The families an export writes BESIDE the audio, as the Export page's own 'What gets copied' section offers them. A family left out stays in the library and is named in the run's report — never dropped in silence." },
+           (`export_copy_files`): the same ELEVEN families its own checkboxes
+           draw — the keys of server.exporter.FILE_FAMILIES, in that table's
+           own order — named here for installs whose exports are always the
+           same shape. A family left out stays in the library and is named in
+           the run's report; an empty selection is NOT "copy nothing" — it
+           means nobody has chosen, so the classic sidecar switch below still
+           decides. */
+        { k: "export_copy_files", label: "What an export copies (blank = the switch below decides)", type: "multi", options: [["audio", "The tracks themselves"], ["cover", "Covers and artwork"], ["lyrics", "Lyrics (.lrc)"], ["cue", "Cue sheets (.cue)"], ["log", "Rip log (.log)"], ["accurip", "AccurateRip report (.accurip)"], ["description", "Album description"], ["checksum", "Checksum lists and .torrent"], ["text", "Notes, links and scans"], ["playlist", "Playlists the album carries"], ["other", "Anything else"]], help: "The families an export writes BESIDE the audio, as the Export page's own 'What gets copied' section offers them. A family left out stays in the library and is named in the run's report — never dropped in silence." },
         /* The switch the Export page's file selection replaced
            (`export_copy_files`): it still decides WHEN no selection has been
            saved, so a device that always wants the classic set can be served

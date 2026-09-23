@@ -12,7 +12,7 @@ import ConfirmButton from "../components/ConfirmButton";
 import { PageLoading } from "../components/Badges";
 import { applyEq } from "../lib/analyser";
 import {
-  EQ_GAIN_LIMIT, EQ_NEW_BAND, EQ_PREAMP_LIMIT, EQ_TYPES, eqToApoText, eqType,
+  EQ_GAIN_LIMIT, EQ_NEW_BAND, EQ_PREAMP_LIMIT, EQ_TYPES, eqApplyRefusal, eqToApoText, eqType,
 } from "../lib/eqNodes";
 import { toast } from "../store";
 
@@ -188,7 +188,10 @@ export default function EqualizerPage() {
   }, [playId, all]);
   useEffect(() => () => {
     const row = allRef.current.find((p) => p.id === playIdRef.current);
-    applyEq(row?.filters ?? [], row?.preamp_db ?? 0);
+    // The same refusal as PlayerBar's install: leaving the editor puts the
+    // CONFIGURED curve back, and a profile that parsed with errors does not
+    // play anywhere (R219).
+    applyEq(row && !eqApplyRefusal(row) ? (row.filters ?? []) : [], row?.preamp_db ?? 0);
   }, []);
 
   const saved = all.find((p) => p.id === draft?.sourceId) ?? null;

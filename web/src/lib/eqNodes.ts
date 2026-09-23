@@ -58,6 +58,17 @@ export const EQ_FC_MAX = 20000;
  *  is a curve that will clip, and the preamp is the right answer there. */
 export const EQ_GAIN_LIMIT = 20;
 export const EQ_PREAMP_LIMIT = 24;
+/** The Q a rendered band is clamped to — the width outside this range is not a
+ *  band any profile means. */
+const Q_MIN = 0.1;
+const Q_MAX = 30;
+/** These four bounds are a CONTRACT with the exporter, not a local choice: a
+ *  profile's Fc/gain/Q/preamp are clamped to exactly the same numbers when
+ *  mlo.eq renders the ffmpeg chain (its FC_MIN_HZ…PREAMP_LIMIT_DB), so a band
+ *  outside them cannot sound wider or louder in the app than in an export. A
+ *  file's own out-of-range value is kept in the profile and reported at import
+ *  (mlo.eq's notes); here it is clamped, because the node and the editor's own
+ *  boxes are bounded. */
 
 export type EqChain = {
   /** Where the signal enters (the preamp gain, or the first band without one). */
@@ -92,8 +103,20 @@ function configure(node: BiquadFilterNode, band: EqBand, type: string) {
   node.frequency.value = clamp(Number(band.fc), EQ_FC_MIN, EQ_FC_MAX);
   // A shelf and a pass ignore Q in WebAudio; setting it is harmless and keeps
   // the node's own state the profile's state if it is ever read back.
-  node.Q.value = clamp(Number(band.q) || 0.707, 0.1, 30);
+  node.Q.value = clamp(Number(band.q) || 0.707, Q_MIN, Q_MAX);
   node.gain.value = SHAPE_ONLY.has(type) ? 0 : clamp(Number(band.gain), -EQ_GAIN_LIMIT, EQ_GAIN_LIMIT);
+}
+
+/** The sentence a profile that parsed WITH errors is refused with, in the same
+ *  words the export fails a track with (mlo.eq's `apply_refusal`) and the same
+ *  ones the editor's banner shows (`pages/EqualizerPage.tsx`): a band that
+ *  could not be read means the bands that did are not the curve the file wrote,
+ *  so the player must not install them either. "" when the profile may play.
+ *  `PlayerBar` is where the row's own profile is installed, so it is the caller
+ *  that refuses one of these instead of handing its bands to `applyEq`. */
+export function eqApplyRefusal(profile: { errors?: string[] } | null | undefined): string {
+  const first = (profile?.errors ?? [])[0];
+  return first ? `this profile cannot be applied: ${first}` : "";
 }
 
 /** Build the chain for one profile: preamp first (a boosted curve that is not

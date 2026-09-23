@@ -10,7 +10,10 @@ container, so this suite pins the parts of that which a tag cannot show:
     with a BOM and CRLF, and a file with nothing to apply), including the lines
     it REFUSES to guess at — a profile that silently loses one of its bands is
     a different curve, so a band line that cannot be read refuses the whole
-    import and names itself;
+    import and names itself — plus APO's own aliases and spellings, each read
+    as the filter its reference says it is, the ``If:``/``ElseIf:`` blocks whose
+    bands are reported and left out instead of applied unconditionally, and the
+    AP/IIR filters reported rather than approximated;
   * the rendered ``-af`` chain, asserted literally and then actually run
     through ffmpeg, since a chain that only looks right is worth nothing;
   * ``replaygain_mode=apply``: an album's quiet and loud track must come out
@@ -175,6 +178,132 @@ assert [e.split(" — ")[-1] for e in broken["errors"]] == [
 ], broken["errors"]
 assert [e.split(":")[0] for e in broken["errors"]] == [
     "line 2", "line 3", "line 4", "line 5", "line 6"], broken["errors"]
+
+# --- APO's own type spellings, each read as the filter it NAMES --------------
+# APO's configuration reference lists these aliases in the row of the filter
+# they are, so the mapping is its own and not a guess: PEQ/Modal are its
+# peaking row, LPQ/HPQ its pass filters with a Q, "LS 6dB"/"LS 12dB" and
+# "HSC 6 dB" shelves with their slope in dB per octave, and "BW Oct 0.5" a
+# bandwidth. A low-pass stays a low-pass.
+aliased = eq_mod.parse_apo(
+    "Filter 1: ON PEQ Fc 100 Hz Gain 1.0 dB BW Oct 0.5\n"
+    "Filter 2: ON Modal Fc 200 Hz Gain 3.0 dB Q 5.41 T60 target 100 ms\n"
+    "Filter 3: ON LPQ Fc 10000 Hz Q 0.400\n"
+    "Filter 4: ON HPQ Fc 20 Hz Q 0.5\n"
+    "Filter 5: ON LS 6dB Fc 50 Hz Gain 7.2 dB\n"
+    "Filter 6: ON LS 12dB Fc 2000 Hz Gain -5.0 dB\n"
+    "Filter 7: ON HS 6dB Fc 12000 Hz Gain 10.0 dB\n"
+    "Filter 8: ON HS 12dB Fc 500 Hz Gain 5.0 dB\n"
+    "Filter 9: ON LSC 10.8 dB Fc 300 Hz Gain 5.0 dB\n"
+    "Filter 10: ON HSC 6 dB Fc 100 Hz Gain -6.0 dB\n")
+assert aliased["errors"] == [] and aliased["unsupported"] == [], aliased
+assert [(f["type"], f["fc"], f["gain"]) for f in aliased["filters"]] == [
+    ("PK", 100.0, 1.0),      # PEQ is APO's "Parametric EQ" row...
+    ("PK", 200.0, 3.0),      # ...and Modal is the same row
+    ("LP", 10000.0, 0.0),    # LPQ is the LP row with a Q
+    ("HP", 20.0, 0.0),
+    ("LS", 50.0, 7.2),       # "LS 6dB"/"LS 12dB": the shelf, slope and all
+    ("LS", 2000.0, -5.0),
+    ("HS", 12000.0, 10.0),
+    ("HS", 500.0, 5.0),
+    ("LSC", 300.0, 5.0),     # "LSC 10.8 dB": APO's custom-slope shelf
+    ("HSC", 100.0, -6.0),
+], aliased["filters"]
+# "BW Oct 0.5" is the same bandwidth as "BW 0.5": APO's own relation, and the
+# unit word between the key and its value carries nothing else.
+bw_oct = 0.5
+bw_plain = eq_mod.parse_apo("Filter 1: ON PK Fc 100 Hz Gain 1.0 dB BW 0.5")
+assert aliased["filters"][0]["bw"] == 0.5, aliased["filters"][0]
+assert abs(aliased["filters"][0]["q"]
+           - math.sqrt(2 ** bw_oct) / (2 ** bw_oct - 1)) < 1e-9, aliased["filters"][0]
+assert aliased["filters"][0]["q"] == bw_plain["filters"][0]["q"], aliased["filters"][0]
+# What a shelf cannot carry (its own slope) and what Modal cannot (its T60
+# decay) is stated rather than implied, and the file's own Q is kept.
+alias_notes = " ".join(aliased["notes"])
+assert "Modal" in alias_notes and "T60" in alias_notes, aliased["notes"]
+assert "LS 6dB" in alias_notes and "slope" in alias_notes, aliased["notes"]
+assert aliased["filters"][1]["q"] == 5.41 and aliased["filters"][1]["t60"] == 100.0, \
+    aliased["filters"][1]
+# The chain renders each alias as the filter it NAMES — never as a lookalike.
+alias_chain = eq_mod.to_af(aliased)
+for rendered in ("lowpass=f=10000:t=q:w=0.4", "highpass=f=20:t=q:w=0.5",
+                 "bass=g=7.2:f=50:t=q:w=0.7", "treble=g=10:f=12000:t=q:w=0.7"):
+    assert rendered in alias_chain, (rendered, alias_chain)
+
+# --- AP and IIR: understood, reported, never rendered ------------------------
+# An all-pass is phase-only (its magnitude is flat, so leaving it out leaves the
+# file's own curve intact) and an IIR filter IS the file's own coefficients.
+# Neither has a filter on either path, so both are reported by name instead of
+# guessed at; an OFF one has nothing left to report.
+unrenderable = eq_mod.parse_apo(
+    "Filter 1: ON AP Fc 900 Hz Q 0.707\n"
+    "Filter 2: ON IIR Order 2 Coefficients 0.0380602 0.0761205 0.0380602 "
+    "1.2706 -1.84776 0.729402\n"
+    "Filter 3: OFF AP Fc 400 Hz Q 1\n"
+    "Filter 4: ON PK Fc 1000 Hz Gain 2 dB Q 1\n")
+assert unrenderable["errors"] == [], unrenderable["errors"]
+assert [f["fc"] for f in unrenderable["filters"]] == [1000.0], unrenderable["filters"]
+assert len(unrenderable["unsupported"]) == 2, unrenderable["unsupported"]
+assert "all-pass" in unrenderable["unsupported"][0], unrenderable["unsupported"]
+assert "coefficients" in unrenderable["unsupported"][1], unrenderable["unsupported"]
+assert eq_mod.to_af(unrenderable) == "equalizer=f=1000:t=q:w=1:g=2", \
+    eq_mod.to_af(unrenderable)
+
+# --- If:/ElseIf: — a condition this app cannot evaluate is NOT applied -------
+# APO evaluates the block against its own variables (sample rate, channel
+# count, device name, user variables). Applying the bands inside it
+# unconditionally would change the sound of every config that uses one, so they
+# are left out, the block is named, and the count of skipped lines is in the
+# notes.
+conditional = eq_mod.parse_apo(
+    "Preamp: -2 dB\n"
+    "Filter 1: ON PK Fc 100 Hz Gain 3 dB Q 1\n"
+    "If: inputChannelCount == 2\n"
+    "Filter 2: ON PK Fc 200 Hz Gain 6 dB Q 1\n"
+    "ElseIf: sampleRate > 44100\n"
+    "Filter 3: ON PK Fc 300 Hz Gain -6 dB Q 1\n"
+    "Else:\n"
+    "Filter 4: ON PK Fc 400 Hz Gain 6 dB Q 1\n"
+    "EndIf:\n"
+    "Filter 5: ON PK Fc 500 Hz Gain 2 dB Q 1\n")
+assert conditional["errors"] == [], conditional["errors"]
+assert [f["fc"] for f in conditional["filters"]] == [100.0, 500.0], conditional["filters"]
+assert any(u.startswith("line 3:") and "conditional block" in u
+           for u in conditional["unsupported"]), conditional["unsupported"]
+assert any("3 filter line(s)" in n for n in conditional["notes"]), conditional["notes"]
+assert "f=200" not in eq_mod.to_af(conditional), eq_mod.to_af(conditional)
+
+# A nested block is reported once per If:, and each EndIf: ends exactly one.
+nested = eq_mod.parse_apo(
+    "If: sampleRate == 48000\n"
+    "If: outputChannelCount == 2\n"
+    "Filter 1: ON PK Fc 700 Hz Gain 3 dB Q 1\n"
+    "EndIf:\n"
+    "EndIf:\n")
+assert nested["filters"] == [] and nested["empty"] is True, nested
+assert sum("conditional block" in u for u in nested["unsupported"]) == 2, \
+    nested["unsupported"]
+
+# --- one profile, one curve: the renderers' bounds are the SAME --------------
+# The player clamps a band's Fc/gain/Q and the profile's preamp — the WebAudio
+# node and the editor's own boxes are bounded — and the ffmpeg chain clamps to
+# exactly these numbers (web/src/lib/eqNodes.ts: EQ_FC_MIN, EQ_FC_MAX,
+# EQ_GAIN_LIMIT, EQ_PREAMP_LIMIT and its 0.1…30 Q). A file that asks for more
+# therefore sounds the same in the app and in an export, its own values are
+# kept in the profile, and the difference is stated.
+hot = eq_mod.parse_apo(
+    "Preamp: -40 dB\n"
+    "Filter 1: ON PK Fc 5 Hz Gain 30 dB Q 500\n"
+    "Filter 2: ON PK Fc 40000 Hz Gain 12 dB Q 0.01\n")
+assert (eq_mod.FC_MIN_HZ, eq_mod.FC_MAX_HZ, eq_mod.GAIN_LIMIT_DB,
+        eq_mod.Q_MIN, eq_mod.Q_MAX, eq_mod.PREAMP_LIMIT_DB) == \
+    (20.0, 20000.0, 20.0, 0.1, 30.0, 24.0)
+assert [(f["fc"], f["gain"], f["q"]) for f in hot["filters"]] == [
+    (5.0, 30.0, 500.0), (40000.0, 12.0, 0.01)], hot["filters"]
+assert eq_mod.to_af(hot) == ("volume=-24dB,"
+                             "equalizer=f=20:t=q:w=30:g=20,"
+                             "equalizer=f=20000:t=q:w=0.1:g=12"), eq_mod.to_af(hot)
+assert any("clamped" in n for n in hot["notes"]), hot["notes"]
 
 # A GraphicEQ band list (what AutoEQ publishes) becomes peaking filters with
 # Q 1.41 — AutoEQ's own conversion — and says so in the notes.
@@ -773,6 +902,25 @@ try:
     broken_body = broken_run.json()
     assert broken_body["failed"] == 1 and broken_body["eq_applied"] == 0, broken_body
     assert "Fc needs a number" in broken_body["errors"][0], broken_body["errors"]
+    # The refusal is ONE sentence on every path: this module owns it
+    # (`apply_refusal`), the export fails the track with the same line named,
+    # the player installs nothing through it (PlayerBar), and the editor's
+    # banner shows the same words. Nothing may build a chain from the bands that
+    # happened to parse, either.
+    stored_broken = eq_mod.find(MUSIC, "half_broken")
+    refusal = eq_mod.apply_refusal(stored_broken)
+    assert refusal == "this profile cannot be applied: " + stored_broken["errors"][0], \
+        refusal
+    assert stored_broken["errors"][0] in broken_body["errors"][0], broken_body["errors"]
+    assert "cannot be applied" in broken_body["errors"][0], broken_body["errors"]
+    assert eq_mod.apply_refusal(eq_mod.find(MUSIC, "test_bass")) == "", \
+        eq_mod.find(MUSIC, "test_bass")
+    try:
+        eq_mod.chain(stored_broken)
+    except ValueError as e:
+        assert str(e) == refusal, str(e)
+    else:
+        raise AssertionError("a profile with errors must not build a chain")
     os.remove(os.path.join(eq_folder, "hand_copied.txt"))
     os.remove(os.path.join(eq_folder, "half_broken.txt"))
 
@@ -1129,10 +1277,14 @@ print("ok  export audio: lyrics embedded / .lrc / both per setting (tag vs file 
       "the audit reporting a travelling source .lrc as output and a non-selected one as an "
       "extra, and the option surviving a config round trip); Equalizer APO/Peace parsing of the real fixture files "
       "(parametric, graphic, FilterCurve, empty, BOM/CRLF, UTF-16) with the malformed "
-      "cases refused by name, the literal -af chain and its real ffmpeg run, album gain "
+      "cases refused by name and APO's own type spellings (PEQ/Modal/LPQ/HPQ, "
+      "'LS 6dB'/'LS 12dB', 'LSC 10.8 dB', 'BW Oct 0.5') read as the filter they name, "
+      "AP/IIR reported and not applied, If:/ElseIf: blocks reported and their bands "
+      "left out, the render bounds clamped the same way the player clamps them, "
+      "the literal -af chain and its real ffmpeg run, album gain "
       "applied to the samples with REPLAYGAIN_* stripped, track gain for a partial "
       "selection, tags mode unchanged, a measurable bass shelf with the mids left alone, "
-      "a missing or unreadable profile failing its tracks, copy refusing to filter, the "
+      "a missing or unreadable profile refused by every path with the one sentence, copy refusing to filter, the "
       "EQ endpoints (list/import/delete/traversal/oversize), saved export configs "
       "(save/load/delete, validation, and the equalizer profile surviving the round trip "
       "by identity or reporting itself gone) and a zip export that replaces the "

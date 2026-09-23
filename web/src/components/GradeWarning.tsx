@@ -1,5 +1,6 @@
+import { useState } from "react";
 import { useQuery } from "@tanstack/react-query";
-import { AlertTriangle, CheckCircle2 } from "lucide-react";
+import { AlertTriangle, CheckCircle2, ChevronDown, ChevronUp } from "lucide-react";
 import { Link } from "react-router-dom";
 import { api } from "../api";
 import { albumRef, trackRef } from "../lib/refs";
@@ -58,6 +59,12 @@ function Finding({ item }: { item: GradeWarningItem }) {
   );
 }
 
+/** How many findings a collapsed strip shows before it asks to be opened.
+ *  Three fills about a phone screen without pushing the page's own content
+ *  below the fold — the owner's report was a Library page whose grading strip
+ *  took the top of the screen on seven failing albums. */
+const COLLAPSED_ITEMS = 3;
+
 /** Whether the library passes its grading checks, and — when it does not —
  *  what is wrong, specifically: one row per finding, each linking to the thing
  *  it names. Sits at the top of the Home page and of the Library page, which
@@ -74,6 +81,7 @@ function Finding({ item }: { item: GradeWarningItem }) {
  *  grades only change when something runs, and re-asking per view would spend
  *  a library build to paint the same strip. */
 export default function GradeWarning({ initial }: { initial?: GradeSummary }) {
+  const [open, setOpen] = useState(false);
   const { data } = useQuery({
     queryKey: ["gradesSummary"],
     queryFn: api.gradesSummary,
@@ -99,6 +107,14 @@ export default function GradeWarning({ initial }: { initial?: GradeSummary }) {
       </div>
     );
   }
+
+  // A LONG list opens collapsed, and the summary line is ALWAYS the first
+  // line: it is one sentence, and it is the answer. The toggle is a real
+  // button (keyboard-reachable, with `aria-expanded`) rather than a text link,
+  // because it controls a region of the page.
+  const long = data.items.length > COLLAPSED_ITEMS;
+  const shown = long && !open ? data.items.slice(0, COLLAPSED_ITEMS) : data.items;
+  const hidden = data.items.length - shown.length;
 
   return (
     <div className="text-xs text-amber-200 bg-amber-950/30 border border-amber-900/60 rounded-lg px-3 py-2 space-y-1.5">
@@ -126,19 +142,36 @@ export default function GradeWarning({ initial }: { initial?: GradeSummary }) {
         </span>
       </div>
       <ul className="space-y-1 pl-5 list-disc marker:text-amber-700">
-        {data.items.map((item) => (
+        {shown.map((item) => (
           <Finding key={`${item.kind}:${item.album_path}:${item.track_path ?? ""}`} item={item} />
         ))}
       </ul>
-      {/* The rest are not printed: the Library's own Failing filter lists every
-          failing album and track, which is what a reader wants past a dozen. */}
-      {data.more > 0 && (
-        <Link
-          to={MORE_HREF}
-          className="inline-block text-amber-300/90 underline underline-offset-2 hover:text-white"
-        >
-          +{data.more} more in the Library →
-        </Link>
+      <div className="flex flex-wrap items-center gap-x-3 gap-y-1 pl-5">
+        {long && (
+          <button
+            type="button"
+            className="inline-flex items-center gap-1 text-amber-100 hover:text-white underline underline-offset-2"
+            aria-expanded={open}
+            onClick={() => setOpen((v) => !v)}
+            title={open ? "Hide the rest of the findings" : "Show every failing album and track"}
+          >
+            {open ? <ChevronUp className="h-3 w-3" /> : <ChevronDown className="h-3 w-3" />}
+            {open ? "Show less" : `Read more — ${data.items.length} finding${data.items.length === 1 ? "" : "s"}`}
+          </button>
+        )}
+        {/* The rest are not printed: the Library's own Failing filter lists every
+            failing album and track, which is what a reader wants past a dozen. */}
+        {data.more > 0 && (
+          <Link
+            to={MORE_HREF}
+            className="text-amber-300/90 underline underline-offset-2 hover:text-white"
+          >
+            +{data.more} more in the Library →
+          </Link>
+        )}
+      </div>
+      {hidden > 0 && !open && (
+        <span className="sr-only">{hidden} more finding(s) hidden</span>
       )}
     </div>
   );

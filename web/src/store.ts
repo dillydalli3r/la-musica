@@ -34,12 +34,96 @@ const TOAST_MAX = 4;
 const TOAST_TTL_MS = 3000;
 const TOAST_TTL_ERROR_MS = 6000;
 
+/** The single-bar shape: what one progress bar draws. `steps` is the
+ *  whole-step pair a chained script run publishes ("script 3 of 18") —
+ *  readouts print that instead of the fractional done/total the bar is drawn
+ *  from. */
+export interface ProgressSample {
+  done: number;
+  total: number;
+  desc: string;
+  steps?: number[];
+}
+
+/** A frame off /ws/progress as this build reads it. The producer's identity
+ *  (`job`/`kind`/`label`) is what the shell needs to give each running job its
+ *  own bar; an older server sends the numbers alone and still gets a bar. */
+export interface ProgressFrame {
+  job?: number | string | null;
+  kind?: string | null;
+  label?: string | null;
+  done: number;
+  total: number;
+  desc: string;
+  steps?: number[];
+}
+
+/** One live producer's bar, as the map holds it. A frame updates its own
+ *  entry and nothing else's, so an export and a run are on screen together
+ *  instead of overwriting one another in a single slot. */
+export interface ProgressEntry extends ProgressSample {
+  /** The producer's id, as /api/jobs/locks lists it ("" for the legacy frame
+   *  that names none). */
+  job: string;
+  /** "export" | "run" | "script" ("" when the frame names none). */
+  kind: string;
+  /** The producer's own name, "" when the frame names none. */
+  label: string;
+  /** When the last frame landed (ms). Only the fallback removal reads it, and
+   *  it is the half that keeps a merely SLOW job on screen: an entry is never
+   *  dropped for standing still while its job is still listed. */
+  t: number;
+}
+
+/** Where a frame lands in the map: its producer's own id, so two jobs are two
+ *  bars. A frame that names no id is keyed by its kind — which is what the
+ *  relay published before producers were named — and one that names neither
+ *  keeps the single legacy slot, so an old server still shows its bar. */
+export function progressKey(f: { job?: number | string | null; kind?: string | null }): string {
+  const job = f.job === undefined || f.job === null ? "" : String(f.job);
+  if (job) return `j:${job}`;
+  return `k:${f.kind ? String(f.kind) : "legacy"}`;
+}
+
+/** The newest entry, for the surfaces that draw ONE bar (an entry IS the
+ *  single-bar shape, so the newest one is the answer without a copy). */
+function newest(m: Record<string, ProgressEntry>): ProgressSample | null {
+  let top: ProgressEntry | null = null;
+  for (const e of Object.values(m)) if (!top || e.t >= top.t) top = e;
+  return top;
+}
+
+/** How long a job must be BOTH missing from /api/jobs/locks and quiet before
+ *  its bar is dropped. Neither half alone is proof of anything: a stalled
+ *  export still holds its locks and keeps its bar, and a job between two
+ *  frames is not gone. */
+const PROGRESS_GONE_MS = 5000;
+
+/** The id-less legacy frame never gets a `progress_end` — the relay did not
+ *  send one. The old client cleared it 2.5 s after a total-complete frame, and
+ *  that is still the only thing that ends it; kept as a rule the fallback
+ *  sweep applies rather than a timer armed per frame. */
+const PROGRESS_LEGACY_DONE_MS = 2500;
+
 interface Store {
-  /** Live progress frame from the engine relay. `steps` is the whole-step
-   *  pair a chained script run publishes ("script 3 of 18") — readouts print
-   *  that instead of the fractional done/total the bar is drawn from. */
-  progress: { done: number; total: number; desc: string; steps?: number[] } | null;
-  setProgress: (p: { done: number; total: number; desc: string; steps?: number[] } | null) => void;
+  /** Every live producer's bar, keyed by `progressKey`. Frames land here and
+   *  only `progress_end` (or the fallback in `pruneProgress`) clears one: a
+   *  bar must not vanish while its job is still working. */
+  progresses: Record<string, ProgressEntry>;
+  /** The single-bar view of the map, for the surfaces that draw ONE strip (the
+   *  optimization page, the import wizard). Derived on every write, so the map
+   *  stays the only place a frame is stored. */
+  progress: ProgressSample | null;
+  /** One relay frame: upserts its producer's entry. */
+  setProgress: (p: ProgressFrame) => void;
+  /** `progress_end` — the producer said it is done; its bar goes. */
+  dropProgress: (job: number | string) => void;
+  /** The fallback for a producer that died without `progress_end`: drop the
+   *  entries whose job the lock registry (`live`) no longer lists whose
+   *  numbers have also stopped moving, plus — those producers send no end
+   *  frame at all — the id-less legacy entry once it reports its own
+   *  completion and stops. */
+  pruneProgress: (live: string[], now: number) => void;
   playing: string | null;
   setPlaying: (p: string | null) => void;
   queue: QueueTrack[];
@@ -104,8 +188,50 @@ function initialVol(): number {
 }
 
 export const useStore = create<Store>((set) => ({
+  progresses: {},
   progress: null,
-  setProgress: (progress) => set({ progress }),
+  setProgress: (p) =>
+    set((st) => {
+      const key = progressKey(p);
+      const prev = st.progresses[key];
+      const job = p.job === undefined || p.job === null ? "" : String(p.job);
+      const entry: ProgressEntry = {
+        job,
+        // Identity a frame omits keeps what the last one said: the relay sends
+        // a step change as two frames (with the pair, then without), and the
+        // second must not blank the label the first just put on the row.
+        kind: p.kind ? String(p.kind) : prev?.kind ?? "",
+        label: p.label ? String(p.label) : prev?.label ?? "",
+        done: p.done,
+        total: p.total,
+        desc: p.desc,
+        steps: p.steps ?? prev?.steps,
+        t: Date.now(),
+      };
+      return { progresses: { ...st.progresses, [key]: entry }, progress: entry };
+    }),
+  dropProgress: (job) =>
+    set((st) => {
+      const key = progressKey({ job });
+      if (!(key in st.progresses)) return {};
+      const progresses = { ...st.progresses };
+      delete progresses[key];
+      return { progresses, progress: newest(progresses) };
+    }),
+  pruneProgress: (live, now) =>
+    set((st) => {
+      const listed = new Set(live);
+      const kept: Record<string, ProgressEntry> = {};
+      let dropped = false;
+      for (const [key, e] of Object.entries(st.progresses)) {
+        const gone = e.job
+          ? !listed.has(e.job) && now - e.t >= PROGRESS_GONE_MS
+          : e.total > 0 && e.done >= e.total && now - e.t >= PROGRESS_LEGACY_DONE_MS;
+        if (gone) dropped = true;
+        else kept[key] = e;
+      }
+      return dropped ? { progresses: kept, progress: newest(kept) } : {};
+    }),
   playing: null,
   setPlaying: (playing) => set({ playing }),
   queue: [],

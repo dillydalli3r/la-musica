@@ -17,6 +17,7 @@ import StarRating from "./StarRating";
 import { ratingOf, useRatings, useSetRating } from "../lib/ratings";
 import VolumePct from "./VolumePct";
 import { applyEq, applyReplayGain, attachAnalyser, resumeAnalyser } from "../lib/analyser";
+import { eqApplyRefusal } from "../lib/eqNodes";
 import NowPlayingView from "./NowPlayingView";
 import ScrollingText from "./ScrollingText";
 import LyricsSidebar from "./LyricsSidebar";
@@ -460,7 +461,11 @@ export default function PlayerBar() {
   useEffect(() => {
     const rows = [...(eqCatalog?.presets ?? []), ...(eqCatalog?.profiles ?? [])];
     const row = eqProfileId ? rows.find((p) => p.id === eqProfileId) : undefined;
-    applyEq(row?.filters ?? [], row?.preamp_db ?? 0);
+    // A profile that parsed with errors is NOT played (R219): the bands that did
+    // parse are not the curve the file wrote, so the player would audition a
+    // curve no export of theirs can produce. The strip that shows the sentence
+    // is the Equalizer page's banner; here the curve is simply not installed.
+    applyEq(row && !eqApplyRefusal(row) ? (row.filters ?? []) : [], row?.preamp_db ?? 0);
   }, [eqProfileId, eqCatalog]);
   const rgCache = useRef<Map<string, RgResult>>(new Map());
   // One in-flight request per path: the load (which needs the gain before it

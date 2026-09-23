@@ -318,9 +318,14 @@ FILE_FAMILIES = {
                 "FILE lines at the files it wrote.",
     },
     "log": {
-        "label": "Rip log and accuracy report (.log, .accurip)",
-        "hint": "The rip's own verification evidence — the log the audit "
-                "checksums and the AccurateRip report.",
+        "label": "Rip log (.log)",
+        "hint": "The ripper's own log — the file the audit reads for the disc's "
+                "SHA256 and the per-track CRCs.",
+    },
+    "accurip": {
+        "label": "AccurateRip report (.accurip)",
+        "hint": "The CUETools AccurateRip evidence the audit verifies — the "
+                "pressing's own verdict, independent of the rip log.",
     },
     "description": {
         "label": "Album description (description.txt)",
@@ -353,8 +358,11 @@ FILE_FAMILIES = {
 # cover.*/description.txt/artist image/.lrc/.cue/.log beside the exported audio,
 # and nothing else. A caller that still sends that boolean — or a config that
 # still holds ``export_sidecars`` — gets exactly this set, so the switch the
-# file selection replaced keeps meaning what it always meant.
-LEGACY_SIDECAR_FAMILIES = ("audio", "cover", "lyrics", "cue", "log", "description")
+# file selection replaced keeps meaning what it always meant. `accurip` is in
+# it because the legacy set's `log` covered BOTH files before they had a family
+# each: dropping it would quietly stop copying .accurip for those callers.
+LEGACY_SIDECAR_FAMILIES = ("audio", "cover", "lyrics", "cue", "log", "accurip",
+                           "description")
 
 # Run options and their defaults. ``export_<name>`` in the config holds the
 # saved default for each; a per-run value (the Export page's form) wins.
@@ -423,6 +431,40 @@ _LYRICS_TAGS = ("LYRICS", "UNSYNCEDLYRICS", "SYNCLYRICS")
 # archive. Read by the endpoint that validates a request, by the run itself and
 # by the saved-config store, so the three cannot disagree about what a target is.
 TARGETS = ("server", "zip")
+
+# ---- cancelling a run ---------------------------------------------------- #
+# One export runs at a time (the route holds a job), and the owner's report is
+# that a long export to a slow drive had no way to stop: the request blocked
+# until every file was written. `POST /api/export/cancel` sets this event; the
+# per-file pass checks it before it writes anything more, so a run stops at a
+# file boundary — never mid-file, which would leave a half-written audio file
+# on the destination.
+#
+# What is already written STAYS: an export is a copy service, and deleting a
+# finished file because the user stopped the run would be the app destroying
+# data it just produced. The run reports itself cancelled with the counts, and
+# the destination is exactly the files it managed to write.
+_CANCEL = threading.Event()
+
+
+def request_cancel() -> bool:
+    """Ask the running export to stop. True when one was in flight.
+
+    "In flight" is read off the job registry rather than a flag of this module:
+    the route that runs an export registers an `export` job for its whole call,
+    so the registry already knows — and a press between two exports cannot arm
+    the NEXT run. False means nothing was running, which the caller reports as
+    "nothing to cancel" instead of pretending it stopped something."""
+    busy = any(j.get("kind") == "export" for j in job_locks.jobs())
+    if not busy:
+        return False
+    _CANCEL.set()
+    return True
+
+
+def cancel_requested() -> bool:
+    """Whether the CURRENT run was asked to stop (read by the pass)."""
+    return _CANCEL.is_set()
 
 # The one thing a processing run needs that the copy codec cannot give it. The
 # API hands this exact text to the UI, so there is one wording for it.
@@ -1518,7 +1560,7 @@ def _verify(dst, src_seconds):
 # as "left behind" a file it just wrote.
 _EXTRA_REASONS = {
     ".log": ("log", "the rip log — the audit verifies its checksum"),
-    ".accurip": ("log", "the AccurateRip report the audit verifies"),
+    ".accurip": ("accurip", "the AccurateRip report the audit verifies"),
     ".cue": ("cue", "the rip's track layout, which stays with the audio it describes"),
     ".md5": ("checksum", "a checksum list for the rip"),
     ".sfv": ("checksum", "a checksum list for the rip"),
@@ -1856,9 +1898,13 @@ def export_tracks(cfg, paths, dest, subfolder="Music", codec="copy",
     # job_locks.publish then writes the in-progress row and the header bar from
     # the same frame.
     job = job_locks.current()
+    # A flag left armed by a cancelled run must not kill THIS one: the next
+    # export starts clean, whatever the last press was for.
+    _CANCEL.clear()
     out = {"total": len(paths), "exported": 0, "skipped": 0, "failed": 0,
            "bytes": 0, "sidecars": 0, "playlists": 0, "verified": 0,
            "pruned": 0, "pruned_files": [], "warnings": [], "errors": [],
+           "cancelled": False,
            "error_count": 0, "estimated_bytes": None,
            "processed": 0, "eq_applied": 0, "zip": None,
            "lyrics_mode": "", "lyrics_files": 0,
@@ -1993,10 +2039,12 @@ def export_tracks(cfg, paths, dest, subfolder="Music", codec="copy",
     elif eq_profile and eq_profile.get("errors"):
         # A profile file on disk with a band line this app cannot read: applying
         # the rest would put a curve on the device that the profile never asked
-        # for, which for audio is worse than refusing. The line is named.
+        # for, which for audio is worse than refusing. The line is named — in the
+        # SAME sentence the import and the player refuse it with, so one profile
+        # is never described three ways.
         eq_filters = []
-        eq_error = (f"equalizer profile {eq_id!r} cannot be applied — "
-                    f"{eq_profile['errors'][0]}")
+        eq_error = (f"equalizer profile {eq_id!r} — "
+                    f"{eq_mod.apply_refusal(eq_profile)}")
     else:
         eq_filters = eq_mod.chain(eq_profile) if eq_profile else []
         eq_error = None
@@ -2132,6 +2180,12 @@ def export_tracks(cfg, paths, dest, subfolder="Music", codec="copy",
 
     def _one(path):
         try:
+            if cancel_requested():
+                # Cancelled: nothing more is written. Checked BEFORE the file is
+                # opened, so a stop never leaves a half-written audio file —
+                # the price is that up to `workers` files already in flight
+                # still finish.
+                return
             if eq_error:
                 # The run asked for an equalizer profile that is not there any
                 # more (deleted, or a saved default from another library).
@@ -2429,6 +2483,19 @@ def export_tracks(cfg, paths, dest, subfolder="Music", codec="copy",
     else:
         for path in paths:
             _one(path)
+
+    if cancel_requested():
+        # Stopped at a file boundary. Everything written stays (an export is a
+        # copy service — deleting finished files because the user stopped the
+        # run would destroy what they may still want), and the finishing passes
+        # are SKIPPED: a manifest, a playlist, a ReplayGain album pass and a
+        # prune all describe a COMPLETE export, and `prune` in particular would
+        # delete the audio a previous run put beside these files.
+        out["cancelled"] = True
+        job_locks.publish(out["total"], out["total"],
+                          f"Export cancelled — {out['exported']} of "
+                          f"{out['total']} file(s) written", job=job)
+        return out
 
     # Album ReplayGain: one correction for the whole album, so its quiet and
     # loud tracks keep their relative levels. Written after every track of the

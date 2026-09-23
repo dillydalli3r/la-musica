@@ -20,6 +20,7 @@ import NotificationBell from "./components/NotificationBell";
 import ShortcutsOverlay from "./components/Shortcuts";
 import { applyConfigLocale, useI18n, type MessageKey } from "./lib/i18n";
 import { publishTransfers } from "./lib/notifications";
+import { useJobLocks, type LocksPayload } from "./lib/locks";
 
 // Route-level code splitting: only the landing page ships in the initial
 // bundle, every other page is fetched on first visit. Without this the whole
@@ -74,7 +75,7 @@ import { onAppEvent } from "./lib/notify";
 import { affectsLibrary, invalidateLibrary } from "./lib/invalidate";
 
 import PlayerBar from "./components/PlayerBar";
-import { ProgressInline } from "./components/ProgressBar";
+import { ProgressStack } from "./components/ProgressBar";
 import { EmptyState, PendingMark } from "./components/Badges";
 
 // Sidebar sections: a long flat list of 14 entries is hard to scan, so the
@@ -245,17 +246,64 @@ function SlskIconDot({ dot }: { dot: { cls: string; tip: string; name?: string |
   );
 }
 
-/** The live script-progress readout, with a store subscription of its own.
+/** How often the bars check the lock registry for a producer that died without
+ *  saying so. ONE timer for the whole stack, and none at all while no bar is
+ *  up — never a timer per bar. */
+const PROGRESS_SWEEP_MS = 1000;
+
+/** Bars end on the producer's own `progress_end` (the socket handler below).
+ *  A producer that dies without one — an older server, a killed run — would
+ *  otherwise leave its bar up forever, so this asks the lock registry instead:
+ *  a job the server no longer lists, whose numbers have ALSO stopped moving,
+ *  is gone. A job that is merely slow still holds its lock, so a stalled
+ *  export keeps its bar. */
+function useProgressSweep(count: number) {
+  // Mounting the poll here keeps the fallback honest wherever the stack is
+  // drawn: same query key, so it is the request the player bar already makes.
+  useJobLocks();
+  const qc = useQueryClient();
+  const prune = useStore((s) => s.pruneProgress);
+  const live = count > 0;
+  useEffect(() => {
+    if (!live) return;
+    const tick = window.setInterval(() => {
+      const payload = qc.getQueryData<LocksPayload>(["jobLocks"]);
+      // No answer from the registry yet (a server that is not there): keep
+      // every bar — this only ever drops what it can prove is gone.
+      if (payload) prune(payload.jobs.map((j) => String(j.job)), Date.now());
+    }, PROGRESS_SWEEP_MS);
+    return () => window.clearInterval(tick);
+  }, [live, prune, qc]);
+}
+
+/** The export row's ✕. The server checks its own flag at the next file
+ *  boundary and keeps everything already written, so the answer's `cancelled`
+ *  is what says a press was taken — the row stays pressed until its bar goes.
+ *  A refusal (nothing running, server gone) re-arms the button. */
+function cancelExport() {
+  return api.exportCancel().then(
+    (r) => r.cancelled,
+    (err: unknown) => {
+      toast.error(String(err));
+      return false;
+    }
+  );
+}
+
+/** The live progress bars, with a store subscription of its own.
  *  The relay pushes a progress frame per step — during a chained run that is
  *  many per second — and App re-rendering the whole shell for each of them is
  *  what a phone shows as the page refreshing while the user tries to scroll.
- *  Subscribing here repaints this 40px bar and nothing else. */
+ *  Subscribing here repaints these bars and nothing else; one bar per live
+ *  producer is what lets an export and a run be on screen at the same time. */
 function LiveProgress() {
-  const progress = useStore((s) => s.progress);
-  if (!progress) return null;
+  const progresses = useStore((s) => s.progresses);
+  const entries = useMemo(() => Object.values(progresses), [progresses]);
+  useProgressSweep(entries.length);
+  if (!entries.length) return null;
   return (
-    <div className="absolute right-4 top-full mt-1 z-40">
-      <ProgressInline progress={progress} />
+    <div className="absolute right-4 top-full mt-1 z-40 flex flex-col gap-1">
+      <ProgressStack entries={entries} onCancelExport={cancelExport} />
     </div>
   );
 }
@@ -368,7 +416,6 @@ export default function App() {
     };
   }, [qc]);
   const { t } = useI18n();
-  const progressClear = useRef<Timer | undefined>(undefined);
   // The shortcut sheet: opened by "?" or the keyboard button in the top bar.
   const [shortcutsOpen, setShortcutsOpen] = useState(false);
   const searchRef = useRef<HTMLInputElement>(null);
@@ -753,16 +800,18 @@ export default function App() {
             publishTransfers(p);
             return;
           }
-          if (typeof p?.done !== "number") return; // ping / non-progress frame
-          // Through getState, not a hook value: App does not subscribe to
-          // `progress` (see LiveProgress), so a frame repaints the bar alone.
-          useStore.getState().setProgress(p);
-          // The relay never sends an explicit "finished" frame — clear the
-          // indicator shortly after the bar completes.
-          clearTimeout(progressClear.current);
-          if (p.total && p.done >= p.total) {
-            progressClear.current = setTimeout(() => useStore.getState().setProgress(null), 2500);
+          if (p?.type === "progress_end") {
+            // The producer's own "finished" — the ONE thing that ends its bar.
+            // A total-complete frame does NOT: producers publish those
+            // mid-job, which is what used to blink the bar out 2.5 s later.
+            if (p.job !== undefined && p.job !== null) useStore.getState().dropProgress(p.job);
+            return;
           }
+          if (typeof p?.done !== "number") return; // ping / non-progress frame
+          // Through getState, not a hook value: App does not subscribe to the
+          // bars (see LiveProgress), so a frame repaints the bars alone. The
+          // frame's own `job` is what keeps two producers on their own rows.
+          useStore.getState().setProgress(p);
         } catch {
           /* ignore */
         }
@@ -786,7 +835,6 @@ export default function App() {
       alive = false;
       clearTimeout(retry);
       ws?.close();
-      clearTimeout(progressClear.current);
     };
     // Re-run when the gate changes: the socket belongs to a signed-in shell,
     // and re-entering one must not wait for the backoff to expire.

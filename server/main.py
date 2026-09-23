@@ -11,6 +11,7 @@ import re
 import sys
 import traceback
 import asyncio
+import filecmp
 import inspect
 import json
 import threading
@@ -357,20 +358,43 @@ def _relay(done, total, desc, steps=None):
     18" — sent beside the fractional ``done`` the bar is drawn from, so the
     readout can print a whole number while the bar keeps moving inside the
     step that is still running.
+
+    The frame carries WHO it belongs to (``job``/``kind``/``label``, read from
+    the job registry's thread-local — see job_locks.frame_identity): with one
+    store field the shell could only ever draw one bar, and a run and an export
+    on screen together overwrote each other. A producer that owns no job (a
+    chain ticking between two scripts) sends no identity, and the client keeps
+    drawing those on its single legacy bar.
     """
     try:
         if orig_hook:
             orig_hook(done, total, desc)
     except Exception:
         pass
-    payload = {"done": done, "total": total, "desc": desc}
+    payload = {"type": "progress", "done": done, "total": total, "desc": desc}
     if steps:
         payload["steps"] = [int(steps[0]), int(steps[1])]
+    job_id, kind, label = job_locks.frame_identity()
+    if job_id:
+        if not kind or not label:
+            # A frame that carried only its id (an older publisher, or one whose
+            # identity block ran before its record landed): the registry still
+            # knows whose it is, and a labelled bar is the point.
+            rec = job_locks.job_record(job_id)
+            kind = kind or str(rec.get("kind") or "")
+            label = label or str(rec.get("label") or rec.get("kind") or "Job")
+        payload["job"] = job_id
+        payload["kind"] = kind
+        payload["label"] = label
     _broadcast(payload)
 
 
 stats_mod.progress_hook = _relay
 stats_mod.tqdm = None
+# A producer that ENDS tells the UI directly (job_locks.release): the client
+# takes a bar off the screen on that fact instead of clearing on a timer, which
+# is what made a running job's bar blink off between its steps.
+job_locks.set_end_hook(_broadcast)
 
 
 # --------------------------------------------------------------------------- #
@@ -3548,16 +3572,46 @@ def export_zip_delete(zip_id: str):
     return {"ok": True, "id": zip_id}
 
 
+def _export_claim_paths(req):
+    """What one export HOLDS for the whole call: the source tracks, and the
+    destination it writes into.
+
+    The sources were always held (an export reads the library files it was
+    pointed at, and a script run rewriting them mid-copy is the collision the
+    lock exists to prevent). The DESTINATION was not, and that is a real race
+    the owner asked about: two exports into one root run `_copy_once` over the
+    same names at once, and the second run's `prune` deletes audio the first
+    just wrote. A destination outside the library never collides with a script
+    run, so holding it costs nothing elsewhere — and two exports to one drive
+    now answer 409 instead of fighting."""
+    paths = list(getattr(req, "paths", None) or [])
+    target = str(getattr(req, "target", "") or "server").strip().lower()
+    if target == "server" and str(getattr(req, "dest", "") or "").strip():
+        sub = str(getattr(req, "subfolder", "") or "").replace("\\", "/").strip("/")
+        paths.append(os.path.join(str(req.dest), *([sub] if sub else [])))
+    return paths
+
+
+@app.post("/api/export/cancel")
+def export_cancel():
+    """Ask the running export to stop (see exporter.request_cancel).
+
+    Stops at the next file boundary, keeps everything already written, and
+    reports `cancelled: true` in that run's result. `cancelled` here answers
+    whether a run was in flight at all — a press when nothing is exporting says
+    so instead of pretending."""
+    stopped = exporter.request_cancel()
+    return {"ok": True, "cancelled": stopped}
+
+
 @app.post("/api/export")
-@job_locks.holds(lambda req: req.paths, kind="export", label="Export")
+@job_locks.holds(_export_claim_paths, kind="export", label="Export")
 def export_run(req: ExportRequest):
     """Copy/transcode the selected tracks onto the target drive. Runs in the
     worker thread pool (sync def) and reports progress via the shared hook,
     so the header progress bar behaves exactly like a library script run.
 
-    The SOURCE tracks are held (not the destination drive): an export reads the
-    library files it was pointed at, and a script run rewriting them mid-copy
-    is exactly the collision the lock exists to prevent."""
+    The SOURCE tracks and the DESTINATION are held (see _export_claim_paths)."""
     if not req.paths:
         raise HTTPException(400, "no tracks selected")
     target = (req.target or "server").strip().lower()
@@ -3591,7 +3645,10 @@ def export_run(req: ExportRequest):
         # The archive is fetched by id, so the client needs the URL to hand the
         # browser (a download, or a link the user can click).
         res["zip"]["url"] = f"/api/export/zip/{res['zip']['id']}"
-    return {"ok": res["failed"] == 0, **res}
+    # A cancelled run is not a success: it copied what it copied and stopped,
+    # and `ok` is what every caller reads as "the export is done".
+    ok = res["failed"] == 0 and not res.get("cancelled")
+    return {"ok": ok, **res}
 
 
 # --------------------------------------------------------------------------- #
@@ -7688,6 +7745,23 @@ def organize(req: OrganizeRequest):
                             target = os.path.join(ddir, dstem + fext.lower())
                             if fpath == target:
                                 continue  # already in place (exact)
+                            # The app's OWN writers put the album description in
+                            # two places — the staging folder of an import and
+                            # the album folder `prefetch_content` prepared — and
+                            # this sweep is where the two meet. When the file
+                            # already sitting at the destination is the SAME
+                            # file (same bytes), carrying it again only invents
+                            # a "description (2).txt": the library then holds
+                            # two copies and the canonical one is what every
+                            # reader opens. Identical → drop the source copy,
+                            # nothing is lost (the loser is the staging copy of
+                            # a file the album already has).
+                            if os.path.exists(target) and filecmp.cmp(fpath, target, shallow=False):
+                                try:
+                                    os.remove(fpath)
+                                except OSError:
+                                    pass
+                                continue
                             # Same rule as the track moves above: a name the
                             # destination already holds is never overwritten.
                             # move_path ends in os.replace, so without this a

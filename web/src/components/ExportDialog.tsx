@@ -1,7 +1,7 @@
 import { useEffect, useState } from "react";
 import type { ReactNode } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
-import { AlertTriangle, Download, FileOutput, HardDrive, HardDriveDownload, RotateCcw, Save, Trash2, Upload } from "lucide-react";
+import { AlertTriangle, Download, FileOutput, HardDrive, HardDriveDownload, RotateCcw, Save, Square, Trash2, Upload } from "lucide-react";
 import { api, IN_TAURI } from "../api";
 import type { ExportCodecSpec, ExportEq, ExportFamily, ExportForm, ExportStructurePreview, ExportStructures } from "../api";
 import { toast } from "../store";
@@ -207,6 +207,14 @@ export interface ExportOptions {
   seconds: number;
   /** True when a run started and finished; false when validation refused it. */
   run: () => Promise<boolean>;
+  /** Ask the RUNNING run to stop (`POST /api/export/cancel`). The server stops
+   *  at the next FILE BOUNDARY and KEEPS everything it has already written —
+   *  nothing is deleted — so the run's own report of what it wrote still
+   *  stands. A no-op when no run is in flight. */
+  cancel: () => Promise<void>;
+  /** True once the server has accepted a stop and the run has not ended yet:
+   *  the button says so and takes no second request. */
+  cancelling: boolean;
   saveDefaults: () => Promise<void>;
   resetDefaults: () => void;
   refreshDrives: () => void;
@@ -240,6 +248,11 @@ export function useExportOptions(paths: string[], seconds = 0, page?: ExportPage
   const [form, setForm] = useState<ExportForm | null>(null);
   const [customValue, setCustomValue] = useState("192");
   const [busy, setBusy] = useState(false);
+  /* Set once the server has ACCEPTED a stop request. The run does not end at
+   * that moment — it finishes the file in flight and stops at the next file
+   * boundary — so `busy` is what says the run is still going, and this is what
+   * tells the button it must not ask twice. */
+  const [cancelling, setCancelling] = useState(false);
 
   const f = form ?? savedDefaults ?? BLANK_FORM;
   /* Both writers take a FUNCTIONAL update: they derive the next form from what
@@ -283,6 +296,7 @@ export function useExportOptions(paths: string[], seconds = 0, page?: ExportPage
       dest = destRoot;
     }
     setBusy(true);
+    setCancelling(false); // a fresh run is not a cancelled one
     toast(target === "zip"
       ? `Building a .zip of ${paths.length} track(s)…`
       : `Exporting ${paths.length} track(s)…`);
@@ -326,6 +340,27 @@ export function useExportOptions(paths: string[], seconds = 0, page?: ExportPage
     }
   };
 
+  /** Asks the server to stop the run in flight. The ANSWER decides what the
+   *  user is told, because the client cannot stop a run by itself:
+   *  `cancelled: false` means there was nothing left to stop (the run had
+   *  already finished), which is not a failure and must not read like one. A
+   *  stop KEEPS every file the run has already written — the server stops at a
+   *  file boundary by design and deletes nothing — so the run's own summary
+   *  and the saved-zip link below are exactly the ones it would have shown. */
+  const cancel = async () => {
+    try {
+      const r = await api.exportCancel();
+      if (r.cancelled) {
+        setCancelling(true);
+        toast("Stopping the export at the next file — the files already written are kept");
+      } else {
+        toast("The export had already finished");
+      }
+    } catch (e) {
+      toast.error(String(e));
+    }
+  };
+
   const saveDefaults = async () => {
     try {
       await api.exportSaveDefaults(f);
@@ -346,7 +381,7 @@ export function useExportOptions(paths: string[], seconds = 0, page?: ExportPage
     f, set, setMany, customValue, setCustomValue, busy, spec, kbps, estBytes,
     specs, structures, fileFamilies: fileMenu?.families ?? [],
     drives, selectedDrive, overCapacity, target, eq, paths,
-    seconds, run, saveDefaults, resetDefaults,
+    seconds, run, cancel, cancelling, saveDefaults, resetDefaults,
     sourceKind: page?.sourceKind,
     setSourceKind: page?.setSourceKind,
     refreshDrives: () => void queryClient.invalidateQueries({ queryKey: ["exportDrives"] }),
@@ -358,9 +393,8 @@ export function useExportOptions(paths: string[], seconds = 0, page?: ExportPage
  *  and the equalizer), WHICH files a run copies (the file-family checkboxes,
  *  server.exporter.FILE_FAMILIES), the files written beside the audio
  *  (playlists, a checksum manifest), verification, concurrency and sync mode —
- *  plus the
- *  run / save / reset row. The Export page and the per-page dialog both render
- *  exactly this, so the two can never drift apart.
+ *  plus the run / cancel / save / reset row. The Export page and the per-page
+ *  dialog both render exactly this, so the two can never drift apart.
  *
  *  The destination is a CHOICE, and each mode hides what does not exist in it
  *  rather than disabling it: a zip never touches a drive, so the drive picker,
@@ -372,7 +406,7 @@ export function ExportOptionsPanel({ e, hint }: {
   hint?: ReactNode;
 }) {
   const queryClient = useQueryClient();
-  const { f, set, setMany, spec, kbps, estBytes, seconds, paths, busy, target, eq } = e;
+  const { f, set, setMany, spec, kbps, estBytes, seconds, paths, busy, target, eq, cancelling } = e;
   const zip = target === "zip";
   const eqSelected = [...(eq?.presets ?? []), ...(eq?.profiles ?? [])].find((p) => p.id === f.eq_profile);
   /* The id the form carries but the catalogue does not: a profile that was
@@ -876,13 +910,32 @@ export function ExportOptionsPanel({ e, hint }: {
 
       <SavedConfigs e={e} />
 
-      <div className="grid grid-cols-2 sm:grid-cols-[2fr_1fr_auto] gap-2 mt-4">
+      {/* The row is a template either way, so the two small buttons keep their
+          places as a run starts and ends; Cancel takes a column of its own
+          only while there is a run to cancel. */}
+      <div className={`grid grid-cols-2 gap-2 mt-4 ${busy ? "sm:grid-cols-[2fr_auto_1fr_auto]" : "sm:grid-cols-[2fr_1fr_auto]"}`}>
         <button className="btn-primary text-xs col-span-2 sm:col-span-1 tap" disabled={busy || !paths.length} onClick={e.run}>
           <HardDriveDownload className="h-3.5 w-3.5" />
           {busy
             ? "Exporting…"
             : `${zip ? "Export & download" : "Export"} ${paths.length || ""} track${paths.length === 1 ? "" : "s"}`}
         </button>
+        {/* Beside the primary, for the whole time a run is in flight. The
+            request only ASKS: the run keeps its current file, stops at the next
+            boundary, and everything it has already written stays — so this is
+            never a "discard the export" button, and the summary it prints
+            afterwards is the truth about what landed. */}
+        {busy && (
+          <button
+            className="btn text-xs col-span-2 sm:col-span-1 tap"
+            disabled={cancelling}
+            onClick={e.cancel}
+            title="Stop at the next file — the files this run has already written are kept"
+          >
+            <Square className="h-3.5 w-3.5" />
+            {cancelling ? "Cancelling…" : "Cancel"}
+          </button>
+        )}
         <button className="btn text-xs tap" disabled={busy} onClick={e.saveDefaults} title="Save these choices as the defaults for the next export">
           <Save className="h-3.5 w-3.5" />
           Save as default
