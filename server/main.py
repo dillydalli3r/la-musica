@@ -8197,17 +8197,24 @@ def library_layout_remove_empty_artist(req: AlbumRemove, request: Request = None
 @app.post("/api/library/layout/apply")
 @job_locks.holds(
     lambda request=None, **_: [library_root(load_config().get("music_folder") or "")],
-    kind="layout", label="Fix library layout")
+    kind="layout", label="Optimize library layout")
 def library_layout_apply(request: Request = None):
-    """Scan the library and FIX what can be fixed — script 20, on demand.
+    """Scan the library and SETTLE what the folder itself proves — script 20,
+    on demand.
 
     What the Optimization page's Apply fixes button runs, and the same call
     script 20 makes for itself: names spelled in the wrong letter case are
     renamed to the naming script's spelling, audio that is not in an album
-    folder is moved into the one its own tags name, and an artist folder with
-    no album under it goes to the app's Trash. Everything else is reported,
-    untouched. Nothing is ever deleted, and no file outside the music folder is
-    touched.
+    folder is moved into the one its own tags name, and what is EXCESS goes to
+    the app's Trash — a stray file, a folder inside an album that holds no
+    audio, an album folder with no audio in it, a foreign root folder holding
+    no audio, an album-less artist folder, the old layout's ``.mlo_*``
+    leftovers. A foreign folder that HOLDS AUDIO and a hidden folder inside
+    ``Artists/`` are reported and left: nothing here can say where their
+    contents belong (R185). Every removal's reason is re-derived from the
+    folder at the move, so a folder that gained audio since the scan is
+    refused. Nothing is ever deleted — the Trash lists every removal and can
+    put it back — and no file outside the music folder is touched.
 
     The whole library, not a target list: this is the panel's action on the
     library it is showing. A targeted run is what the import chain does with

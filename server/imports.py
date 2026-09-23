@@ -64,7 +64,7 @@ from server import tagcache
 # has to diff. Nothing else may be dropped: a script added to the run order
 # lands in this chain unless it is named here.
 #
-# The tuple is empty today, and 20 (Scan library layout) is why it was not: its
+# The tuple is empty today, and 20 (Optimize library layout) is why it was not: its
 # runner used to walk the ENTIRE music folder and write ONE report describing
 # the whole library, ignoring `targets` on purpose, so an import chain would
 # have re-walked the library once per album for a report about the library

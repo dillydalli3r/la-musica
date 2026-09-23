@@ -161,6 +161,15 @@ album("Artists/Files/My Album", tags("Files", "My Album"),
 with open(os.path.join(MF, "Artists", "Good", "Good Album", "notes.txt"), "wb") as f:
     f.write(b"junk")                                                  # stray_file
 
+# The two rows the apply must NEVER touch: a foreign folder in the music root
+# that holds audio (nothing can say where its contents belong, so it is
+# reported and left) and a hidden folder inside Artists/ (a tool's marker — a
+# sync client, a checkout — which is not the app's to move).
+album("Downloads", tags("Someone", "Some Album"))                     # unexpected_folder
+os.makedirs(os.path.join(MF, "Artists", ".stfolder"), exist_ok=True)
+with open(os.path.join(MF, "Artists", ".stfolder", "marker"), "wb") as f:
+    f.write(b"x")                                                     # hidden_folder
+
 # a size-only, untagged album: real audio files, no tags at all
 os.makedirs(os.path.join(MF, "Artists", "Caps", "Untagged"), exist_ok=True)
 with open(os.path.join(MF, "Artists", "Caps", "Untagged", "1-01 Song.flac"), "wb") as f:
@@ -390,13 +399,52 @@ ok(stored(os.path.join(MF, "Artists", "Loose"), "Loose Album")
 ok(not os.path.exists(NOBODY),
    "the album-less artist folder is gone from Artists/")
 
-# The counts, and the rows: what is fixed leaves `issues`, what is not stays.
-ok(res.get("fixed") == 5 and res.get("fix_failed") == 0,
-   f"five fixes, none failed (got fixed={res.get('fixed')} failed={res.get('fix_failed')})")
-ok(res.get("skipped") == 2 and sorted(res["counts"]) == ["empty_album", "stray_file"],
-   f"the two rows nothing may act on are still reported ({res.get('skipped')} skipped, {res['counts']})")
+# The counts, and the rows: what is settled leaves `issues`, what may not move
+# stays — with its reason.
+ok(res.get("fixed") == 7 and res.get("fix_failed") == 0,
+   f"seven fixes, none failed (got fixed={res.get('fixed')} failed={res.get('fix_failed')})")
+ok(res.get("skipped") == 2
+   and sorted(res["counts"]) == ["hidden_folder", "unexpected_folder"],
+   f"the two rows nothing may act on are still reported — the foreign folder "
+   f"that holds audio and the hidden folder ({res.get('skipped')} skipped, "
+   f"{res['counts']})")
 ok(res["total"] == len(res["issues"]) == 2,
    f"total/counts/issues agree after the fixes ({res['total']}, {len(res['issues'])})")
+# The stray file and the empty album the scan reported are GONE from the
+# library, and both are in the Trash with their origin recorded — which is the
+# whole of "removed" here: the Trash page lists them and can put them back.
+def binned(name):
+    """The path a Trash entry called *name* has, or "" when there is none."""
+    root = os.path.join(MF, ".mlo", "trash")
+    for scope in os.listdir(root):
+        p = os.path.join(root, scope, name)
+        if os.path.exists(p):
+            return p
+    return ""
+
+stray = os.path.join(MF, "Artists", "Good", "Good Album", "notes.txt")
+stray_dest = binned("notes.txt")
+ok(not os.path.exists(stray), "the stray file is gone from the album")
+ok(stray_dest and open(stray_dest, "rb").read() == b"junk",
+   f"…and it is in the Trash, byte for byte ({stray_dest})")
+empty_dest = binned("Empty")
+ok(not os.path.exists(os.path.join(MF, "Artists", "Caps", "Empty")),
+   "the empty album folder is gone from Artists/")
+ok(empty_dest and os.path.isfile(os.path.join(empty_dest, "cover.jpg")),
+   f"…and it is in the Trash with the file it held, not deleted ({empty_dest})")
+with open(os.path.join(os.path.dirname(stray_dest), ".mlo_manifest.json"),
+          encoding="utf-8") as f:
+    trashed = json.load(f).get("entries", {})
+ok(str(trashed.get("notes.txt", {}).get("origin", "")).replace("\\", "/")
+   == stray.replace("\\", "/")
+   and str(trashed.get("Empty", {}).get("origin", "")).replace("\\", "/")
+   == os.path.join(MF, "Artists", "Caps", "Empty").replace("\\", "/"),
+   f"…and each records where it came from, so the Trash page can restore it "
+   f"({sorted(trashed)})")
+ok("stray file" in fixes.get("Artists/Good/Good Album/notes.txt", {}).get("action", ""),
+   f"the removal is worded for the user ({fixes.get('Artists/Good/Good Album/notes.txt')})")
+ok("empty album folder" in fixes.get("Artists/Caps/Empty", {}).get("action", ""),
+   f"…and so is the folder's ({fixes.get('Artists/Caps/Empty')})")
 ok(all(f["result"] in ("fixed", "failed", "skipped") and f["action"]
        for f in res.get("fixes", [])),
    "every outcome is a result plus words, so the panel can say what happened")
@@ -436,7 +484,7 @@ album("Artists/Quiet/case album", tags("Quiet", "Case Album"))
 album("Artists/Other/case album", tags("Other", "Case Album"))
 
 # Quietly: the runner writes to stdout, which is not what this asserts.
-stats = layoutmod.run_scan_layout({"music_folder": MF, "naming_script": SCRIPT,
+stats = layoutmod.run_optimize_layout({"music_folder": MF, "naming_script": SCRIPT,
                                    "layout_apply": False})
 ok(stored(os.path.join(MF, "Artists", "Quiet"), "case album")
    and stored(os.path.join(MF, "Artists", "Other"), "case album"),
@@ -473,8 +521,17 @@ def outside_hashes():
             if not is_target(p) and not p.startswith(".mlo/")}
 
 
+# The issue this pass answers: junk in an album goes when that album is
+# optimized, and it goes to the Trash. One junk file in the target album, one
+# in the other artist's album — the scoped run settles the first, and the hash
+# comparison below is what proves it did not touch the second (so both exist
+# before the baseline is taken).
+with open(os.path.join(MF, "Artists", "Quiet", "case album", "rip notes.txt"), "wb") as f:
+    f.write(b"junk from the ripper")
+with open(os.path.join(MF, "Artists", "Other", "case album", "rip notes.txt"), "wb") as f:
+    f.write(b"junk in another artist")
 before_outside = outside_hashes()
-stats = layoutmod.run_scan_layout({"music_folder": MF, "naming_script": SCRIPT,
+stats = layoutmod.run_optimize_layout({"music_folder": MF, "naming_script": SCRIPT,
                                    "layout_apply": True, "targets": [target]})
 after_outside = outside_hashes()
 ok(after_outside == before_outside,
@@ -486,15 +543,30 @@ ok(stored(os.path.join(MF, "Artists", "Quiet"), "Case Album")
    "the targeted album folder is fixed")
 ok(stored(os.path.join(MF, "Artists", "Other"), "case album"),
    "an artist outside the target is left exactly as it was")
-ok(stats.get("layout_fixed") == 1 and stats.get("layout_total", 0) == 0,
-   f"the scoped run counts only its own subtree ({stats.get('layout_fixed')} fixed, "
+ok(stats.get("layout_fixed") == 2 and stats.get("layout_total", 0) == 0,
+   f"the scoped run counts only its own subtree — the folder's rename and the "
+   f"stray file ({stats.get('layout_fixed')} fixed, "
    f"{stats.get('layout_total')} left)")
 ok(not stats.get("report_path"),
    f"a scoped run stores nothing — a partial report must never become 'the last "
    f"scan' ({stats.get('report_path')!r})")
+# The junk the issue is about: gone from the album the import just wrote, in
+# the Trash with its bytes, and the same-named junk in another artist's album
+# untouched — which is what the scoped run being confined to its album means.
+quiet_junk = os.path.join(MF, "Artists", "Quiet", "Case Album", "rip notes.txt")
+ok(not os.path.exists(quiet_junk),
+   "the stray file in the targeted album is gone — script 20 settles it on the "
+   "import, not only on a whole-library Run All")
+found = [os.path.join(b, f) for b, _d, fs in os.walk(os.path.join(MF, ".mlo", "trash"))
+         for f in fs if f == "rip notes.txt"]
+ok(bool(found) and open(found[0], "rb").read() == b"junk from the ripper",
+   f"…and it is in the Trash, byte for byte ({found})")
+ok(os.path.isfile(os.path.join(MF, "Artists", "Other", "case album", "rip notes.txt")),
+   "…while the junk in another artist's album is left alone — the scoped run "
+   "is confined to the album it was handed")
 
 # …and the whole-library run still fixes what the scoped one left alone.
-stats = layoutmod.run_scan_layout({"music_folder": MF, "naming_script": SCRIPT,
+stats = layoutmod.run_optimize_layout({"music_folder": MF, "naming_script": SCRIPT,
                                    "layout_apply": True})
 ok(stored(os.path.join(MF, "Artists", "Other"), "Case Album"),
    "an untargeted run is the whole library again — it fixed the other artist")
@@ -603,5 +675,47 @@ ok(not os.path.exists(CARRY_SRC),
    "the emptied folder is pruned — not an audio-less shell the scan reports")
 shutil.rmtree(CARRY_DST, ignore_errors=True)
 shutil.rmtree(CARRY_DST2, ignore_errors=True)
+
+print("== the re-derivation: a report that no longer describes the folder ==")
+# apply_fixes is handed a report by its callers. The panel's route re-scans
+# first, but a runner passes the report it just built, and either way a row is
+# only a claim about the folder: what may go is asked again AT THE MOVE. Here
+# the folder the report calls an empty album is FILLED between the two — the
+# user's own edit, mid-run — and the removal has to refuse rather than act.
+LATER = os.path.join(MF, "Artists", "Caps", "Later")
+os.makedirs(LATER, exist_ok=True)
+with open(os.path.join(LATER, "cover.jpg"), "wb") as f:
+    f.write(b"x")
+
+stale = layoutmod.scan_library({"music_folder": MF, "naming_script": SCRIPT})
+row = [i for i in stale["issues"] if i["path"] == "Artists/Caps/Later"]
+ok(len(row) == 1 and row[0]["kind"] == "empty_album" and bool(row[0].get("fix")),
+   f"the scan reports it as an empty album, with a removal to carry out ({row})")
+
+with open(os.path.join(LATER, "1-01 Song.flac"), "wb") as f:
+    f.write(b"\0" * 4096)                       # the user drops the album in
+
+out = layoutmod.apply_fixes({"music_folder": MF, "naming_script": SCRIPT}, stale)
+later = [f for f in out["fixes"] if f["path"] == "Artists/Caps/Later"]
+ok(len(later) == 1 and later[0]["result"] == "failed",
+   f"the stale row's removal FAILS instead of acting on it ({later})")
+ok("holds audio" in later[0]["action"],
+   f"…and the words say why ({later[0]['action']})")
+ok(os.path.isdir(LATER) and os.path.isfile(os.path.join(LATER, "1-01 Song.flac")),
+   "the folder and the album the user put in it are both still there")
+
+# The same apply is handed the two rows that may never move, and leaves them
+# with a reason rather than an action: a foreign folder HOLDING AUDIO (the
+# whole reason its row carries no fix) and a hidden folder (which never does).
+by_path = {f["path"]: f for f in out["fixes"]}
+ok(by_path.get("Downloads", {}).get("result") == "skipped"
+   and "foreign folder holding audio" in by_path.get("Downloads", {}).get("action", ""),
+   f"a foreign folder holding audio is left, with the reason ({by_path.get('Downloads')})")
+ok(by_path.get("Artists/.stfolder", {}).get("result") == "skipped"
+   and "hidden folder" in by_path.get("Artists/.stfolder", {}).get("action", ""),
+   f"a hidden folder is left, with the reason ({by_path.get('Artists/.stfolder')})")
+ok(os.path.isdir(os.path.join(MF, "Downloads"))
+   and os.path.isdir(os.path.join(MF, "Artists", ".stfolder")),
+   "…and both are still exactly where they were")
 
 print(f"\nAll {passed} checks passed.")

@@ -6,15 +6,17 @@ Everything else that holds audio, or that sits where no audio belongs, is
 reported here.
 
 The SCAN moves nothing: it says what is wrong and where. :func:`apply_fixes`
-then fixes the three things that are unambiguous — a name spelled in the wrong
-letter case, audio that is not in an album folder at all, and an artist folder
-with no album under it — and reports every other row as left alone. Nothing is
-ever deleted: a folder it removes goes to the app's own Trash, and a file whose
-album cannot be read from its own tags is named, never guessed at.
+then fixes what the folder itself proves — a name spelled in the wrong letter
+case, audio that is not in an album folder at all, an artist folder with no
+album under it — and removes what is excess: a stray file, a foreign folder
+holding no audio, an album folder with no audio in it. Every removal goes to
+the app's own Trash, which lists it and can put it back, so nothing is
+destroyed; a file whose album cannot be read from its own tags is named, never
+guessed at.
 
 One scan answers every surface, so their numbers cannot disagree:
 
-  * script 20 (``run_scan_layout``) — the Run All step: scans, applies (the
+  * script 20 (``run_optimize_layout``) — the Run All step: scans, applies (the
     ``layout_apply`` config key / the runner's force flag) and persists what is
     left;
   * ``POST /api/library/layout/apply`` (server/main.py) — the same scan and
@@ -36,7 +38,8 @@ import tempfile
 import time
 
 from . import stats as mlo_stats
-from .paths import app_data_dir, library_root, move_path, trash_path
+from .paths import (IMAGE_EXTS, album_sidecar_of, app_data_dir, library_root,
+                    mlo_root, move_path, trash_path)
 from .ui import Color, c, log, print_header
 
 # --------------------------------------------------------------------------- #
@@ -53,27 +56,28 @@ _DISC_RE = re.compile(r"^(cd|disc|disk)\s*\d+$", re.I)
 # with the music folder it describes and the library itself never gains a file.
 REPORT_NAME = "layout_report.json"
 
-# What the apply phase may act on, and why each remaining kind is left alone.
-# The split is the whole safety argument of this module: a fix exists only
-# where the answer is already proven (letter case, the file's own tags, a
-# folder with no music under it). Everything else — a foreign folder, junk in
-# an album, a leftover state file — would need a judgement about somebody
-# else's files, so it is REPORTED and nothing more. Never deleted: the one
-# removal goes through the app's Trash.
+# Why a row of each kind was left as it is. The split is the safety argument of
+# this module: a fix exists only where the answer can be re-proven AT THE MOMENT
+# OF THE MOVE — letter case, the file's own tags, a folder with no audio under
+# it, a file that is not audio, artwork or a known sidecar (see
+# :func:`_may_trash`). A row that carries a fix never consults this table; a row
+# whose reason stopped being true between the scan and the apply — an album that
+# gained audio, a stray that was renamed away — falls back to it, so the report
+# still says why it stayed. Nothing is deleted outright: every removal is a move
+# into the app's Trash (mlo.paths.trash_path), which keeps the origin manifest
+# the Trash page restores from.
 _UNFIXABLE = {
-    "unexpected_folder": "a foreign folder in the music folder root — where its "
-                         "contents belong is the user's call",
-    "unexpected_subfolder": "only disc folders belong inside an album — nothing "
-                            "here can name the album that folder belongs to",
-    "empty_album": "an album folder holding no audio — removing it is the "
-                   "user's call",
-    "stray_file": "not audio, artwork or a known sidecar — deleting it is the "
-                  "user's call",
-    "stray_in_artists": "not audio — nothing can say which album it belongs to",
-    "hidden_folder": "hidden folders are not library content — moving or "
-                     "deleting it is the user's call",
-    "legacy_state_file": "leftover app state from the old layout — deleting it "
-                         "is the user's call",
+    "unexpected_folder": "a foreign folder holding audio — where its contents "
+                         "belong is the user's call",
+    "hidden_folder": "a hidden folder is a tool's marker (a sync client, a "
+                     "checkout) — moving or deleting one is the user's call",
+    "unexpected_subfolder": "a folder that holds audio or is a disc folder — "
+                            "left where it is",
+    "empty_album": "an album folder that holds audio again — left where it is",
+    "stray_file": "no longer a stray — it is audio, artwork or a sidecar now",
+    "stray_in_artists": "no longer a stray — it is audio, artwork or a sidecar "
+                        "now",
+    "legacy_state_file": "no longer the app's own leftover — left where it is",
 }
 
 
@@ -571,8 +575,11 @@ def scan_library(cfg=None, stats=None):
             issues.append(_issue(
                 "unexpected_folder", p, folder,
                 "folder in the music folder root%s" % (" holding audio" if holds else ""),
-                "the library lives in Artists/ — move anything real into "
-                "Artists/<Artist>/<Album>/"))
+                "the library lives in Artists/ \u2014 move anything real into "
+                "Artists/<Artist>/<Album>/"
+                + ("" if holds else "; Apply fixes moves the folder itself to "
+                                  "the Trash"),
+                fix=None if holds else {"action": "trash"}))
             closed(stats, reported=True)
         elif _is_audio(name):
             opened(stats)
@@ -587,7 +594,9 @@ def scan_library(cfg=None, stats=None):
             issues.append(_issue(
                 "legacy_state_file", p, folder,
                 "leftover from the old .mlo_data layout",
-                "safe to delete once the migration has been confirmed"))
+                "the app does not read it any more \u2014 Apply fixes moves it "
+                "to the Trash, which can put it back",
+                fix={"action": "trash"}))
             closed(stats, reported=True)
         else:
             # Any other loose file at the root is not the layout's business:
@@ -657,7 +666,10 @@ def scan_library(cfg=None, stats=None):
                 rows.append(_issue(
                     "empty_album", ap, folder,
                     "album folder \u201c%s / %s\u201d holds no audio" % (name, an),
-                    "remove it, or fill it \u2014 an empty album grades as an error"))
+                    "an empty album grades as an error \u2014 Apply fixes moves "
+                    "the folder to the Trash, so put the album in it first if "
+                    "it is one you are still filling",
+                    fix={"action": "trash"}))
             # Letter-case drift: the folder or file is in the right PLACE but
             # spells its name the way the filesystem let somebody type it,
             # not the way the naming script spells it. Reported next to the
@@ -682,7 +694,9 @@ def scan_library(cfg=None, stats=None):
                             "folder \u201c%s\u201d inside album \u201c%s / %s\u201d"
                             % (f, name, an),
                             "only disc folders (CD1, Disc 2, \u2026) belong "
-                            "inside an album"))
+                            "inside an album \u2014 Apply fixes moves it to the "
+                            "Trash",
+                            fix={"action": "trash"}))
                         closed(sink, reported=True)
                     continue
                 ext = os.path.splitext(f)[1].lower()
@@ -729,8 +743,10 @@ def scan_library(cfg=None, stats=None):
                         "stray_file", fp, folder,
                         "file \u201c%s\u201d is not audio, artwork or a known "
                         "sidecar" % f,
-                        "delete it if it is junk (nfo/db/txt) — it is dead "
-                        "weight in the library"))
+                        "dead weight in the library (an nfo, a db, a stray "
+                        "text file) \u2014 Apply fixes moves it to the Trash, "
+                        "which lists it and can put it back",
+                        fix={"action": "trash"}))
                     closed(sink, reported=True)
             closed(sink, reported=len(rows) > rows_before)
 
@@ -784,7 +800,10 @@ def scan_library(cfg=None, stats=None):
                     rows = [_issue(
                         "stray_in_artists", p, folder,
                         "non-audio file directly in Artists/",
-                        "delete it, or move it into the album it belongs to")]
+                        "nothing here can name the album it belongs to \u2014 "
+                        "Apply fixes moves it to the Trash, which lists it and "
+                        "can put it back",
+                        fix={"action": "trash"})]
                 closed(stats, reported=True)
                 plan.append(("rows", rows))
                 continue
@@ -1036,6 +1055,80 @@ def carry_track_files(src_file, dst_file):
     return _carry_entries(src_dir, dst_dir, _track_companions(src_dir, name))
 
 
+# What a removal is called in the report, per kind: "the stray file" and "the
+# foreign folder" are what the user saw in the panel, so the outcome line reads
+# as the same finding being settled rather than as a second vocabulary.
+_TRASH_WORDS = {
+    "empty_artist": "the album-less artist folder",
+    "empty_album": "the empty album folder",
+    "unexpected_subfolder": "the unexpected folder",
+    "unexpected_folder": "the foreign folder",
+    "stray_file": "the stray file",
+    "stray_in_artists": "the stray file",
+    "legacy_state_file": "the leftover state file",
+}
+
+
+def _may_trash(src, kind, lib, folder):
+    """``(ok, why)`` — may this scanned row still be removed?
+
+    The scan's own questions, asked a second time of the folder itself at the
+    moment of the move: the user may have filled the empty album, dropped
+    audio into the foreign folder or renamed the stray in between, and each of
+    those has to refuse. The absolute answers come first — only what is inside
+    the music folder is touched, never that folder or the library itself, never
+    the app's own state dir — then the kind's own reason, re-derived. A refusal
+    carries *why*, so the run says what it left and because of what.
+    """
+    base = os.path.basename(os.path.normpath(src))
+    if not _within(src, folder):
+        return False, "it is outside the music folder"
+    if (os.path.normcase(os.path.abspath(src)) == os.path.normcase(os.path.abspath(folder))
+            or (lib and os.path.normcase(os.path.abspath(src))
+                == os.path.normcase(os.path.abspath(lib)))):
+        return False, "it is the music folder or the library itself"
+    if base in _ROOT_ALLOWED or _within(src, mlo_root(folder)):
+        return False, "it is the app's own state folder"
+    under_lib = {"stray_file", "stray_in_artists", "empty_album",
+                 "unexpected_subfolder", "empty_artist"}
+    if kind in under_lib and not (lib and _within(src, lib)):
+        return False, "it is outside the library"
+    if kind in ("unexpected_folder", "legacy_state_file"):
+        # The scan only ever builds these for a direct child of the music
+        # folder; anything deeper is not the row it claims to be.
+        if os.path.normcase(os.path.dirname(os.path.normpath(src))) \
+                != os.path.normcase(os.path.normpath(folder)):
+            return False, "it is not a folder or file the layout reports"
+    if kind == "legacy_state_file":
+        if not base.startswith(".mlo_"):
+            return False, "it is no longer the app's own leftover"
+        return True, ""
+    if kind in ("unexpected_folder", "empty_album", "unexpected_subfolder"):
+        if not os.path.isdir(src):
+            return False, "it is not a folder any more"
+        if _DISC_RE.match(base) or _is_disc_structure(src):
+            return False, "it is a disc folder \u2014 the layout wants it"
+        if _has_audio(src):
+            return False, "it holds audio now"
+        return True, ""
+    if kind == "empty_artist":
+        if not empty_artist(src):
+            return False, ("it is no longer an artist folder without albums "
+                           "\u2014 it holds an album or audio now")
+        return True, ""
+    # A stray: the file the scan reported as neither audio, artwork nor a
+    # known sidecar — the row's own detail line, checked again.
+    if os.path.isdir(src):
+        return False, "it is a folder now"
+    name = os.path.basename(src)
+    ext = os.path.splitext(name)[1].lower()
+    if (_is_audio(name) or name.startswith(".")
+            or (ext and ext in _ALBUM_SIDECARS) or ext in IMAGE_EXTS
+            or album_sidecar_of(name)):
+        return False, "it is audio, artwork or a sidecar now"
+    return True, ""
+
+
 def _perform(row, intent, folder, lib, user, moved):
     """``(result, words)`` for one row's fix; the actual move is here and
     nowhere else, so the guards below are the only way a file can be touched.
@@ -1044,22 +1137,23 @@ def _perform(row, intent, folder, lib, user, moved):
     action = intent.get("action")
 
     if action == "trash":
-        if not _within(src, lib):
-            return "failed", "%s is outside the library" % row["path"]
-        # The removal is re-derived from the folder itself, exactly as the
-        # route does: only a folder with no album and no audio may go, so a
-        # folder that gained music since the scan is refused, not moved.
-        if not empty_artist(src):
-            return "failed", ("%s is no longer an artist folder without "
-                              "albums — it holds an album or audio now"
-                              % row["path"])
+        # Gone already: the report was scanned before this run, and a parent
+        # row's removal (or the user) may have taken it. Not a failure — there
+        # is nothing left to do — but it is not a fix either.
+        if not os.path.exists(src):
+            return "skipped", "%s is already gone" % row["path"]
+        ok, why = _may_trash(src, row["kind"], lib, folder)
+        if not ok:
+            return "failed", ("%s was left where it is \u2014 %s"
+                              % (row["path"], why))
         dest = trash_path(src, folder, user)
         if not dest:
-            return "failed", ("could not move %s to the Trash — a file inside "
-                              "it is still in use (stop playback and retry)"
-                              % row["path"])
-        return "fixed", ("moved the album-less artist folder %s to the Trash "
-                         "(%s)" % (row["path"], _rel(dest, folder)))
+            return "failed", ("could not move %s to the Trash \u2014 a file "
+                              "inside it is still in use (stop playback and "
+                              "retry)" % row["path"])
+        return "fixed", ("moved %s %s to the Trash (%s)"
+                         % (_TRASH_WORDS.get(row["kind"], "the entry"),
+                            row["path"], _rel(dest, folder)))
 
     dst = _rebase(intent.get("to") or "", moved)
     if not src or not dst:
@@ -1106,12 +1200,15 @@ def apply_fixes(cfg=None, report=None, stats=None, user=None):
     row it acted on — and of every row it did not.
 
     *report* defaults to a fresh scan. Rows carrying a ``fix`` (the scan puts
-    one on each row that can be fixed) are carried out: a name spelled in the
-    wrong letter case is renamed to the script's spelling, audio that is not
-    in an album folder is moved into the one its own tags name, and an artist
-    folder with no album goes to the app's Trash. Every other row is reported
-    as left alone, with the reason — the report says what happened to the
-    library, both ways.
+    one on each row it can settle) are carried out: a name spelled in the
+    wrong letter case is renamed to the script's spelling, audio that is not in
+    an album folder is moved into the one its own tags name, and what is excess
+    — a stray file, a foreign folder holding no audio, an album folder with no
+    audio in it, an artist folder with no album — goes to the app's Trash.
+    Every row's reason is re-derived from the folder itself at the move (see
+    :func:`_may_trash`), so a library that changed since the scan is refused,
+    not acted on, and every row is reported either way — the report says what
+    happened to the library, both ways.
 
     The report gains ``fixes`` (one row per outcome: ``kind``, ``path``,
     ``result`` = fixed|failed|skipped, and ``action`` in words), the counts
@@ -1272,8 +1369,9 @@ def load_report(cfg=None):
 # --------------------------------------------------------------------------- #
 # Script 20
 # --------------------------------------------------------------------------- #
-def run_scan_layout(config):
-    """Script 20 — scan the library, fix what can be fixed, remember the rest.
+def run_optimize_layout(config):
+    """Script 20 — optimize the library's layout: scan it, settle what it can
+    prove, remember the rest.
 
     Scans and APPLIES by default: the run is what puts a library back in shape,
     not just what notices it is not. ``layout_apply`` (off = report only, the
@@ -1285,10 +1383,12 @@ def run_scan_layout(config):
     Library page warn — or stay silent — about a library whose other half was
     never looked at.
 
-    Nothing is deleted: a folder it cannot keep goes to the app's Trash, and a
-    file whose album it cannot name from the file's own tags is left exactly
-    where it is and reported instead. The only file it writes is its own
-    report under <music>/.mlo/data.
+    Nothing is deleted: what it cannot keep — a stray file, a foreign folder
+    holding no audio, an empty album folder, an album-less artist folder — goes
+    to the app's Trash, which lists it and can put it back, and a file whose
+    album it cannot name from the file's own tags is left exactly where it is
+    and reported instead. The only file it writes is its own report under
+    <music>/.mlo/data.
 
     No progress bar: the walk lists directories and reads one file's tags per
     album through the app's tag cache, so its total is not known before it is
@@ -1296,7 +1396,7 @@ def run_scan_layout(config):
     """
     config = config or {}
     stats = mlo_stats.new_stats()
-    print_header("Scan library layout")
+    print_header("Optimize library layout")
     folder = str(config.get("music_folder") or "")
     # The same answer scan_library works from (`_scope` is pure): a run that
     # was given targets looks at those and nothing else, and one that was not

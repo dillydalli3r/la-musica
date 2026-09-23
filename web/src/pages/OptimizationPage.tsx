@@ -488,7 +488,7 @@ function LayoutPanel() {
             look at. What it will touch is what the rows below mark. */}
         {report?.exists && (
           <button className="btn-ghost !py-1 text-xs tap" disabled={busy} onClick={apply}
-            title="Rename wrongly-cased names, move loose audio into its album folder, and send album-less artist folders to the Trash — nothing is deleted">
+            title="Rename wrongly-cased names, move loose audio into its album folder, and send what is excess to the Trash — stray files, foreign folders holding no audio, empty album folders, album-less artist folders. Nothing is deleted, and the Trash page can put any of it back">
             <Wand2 className={`h-3.5 w-3.5 ${busy ? "animate-spin" : ""}`} />
             {busy ? "Fixing…" : "Apply fixes"}
           </button>
@@ -498,14 +498,16 @@ function LayoutPanel() {
       <div className="text-[10px] text-zinc-600 mt-1.5">
         Walks the whole music folder and reports anything that is not
         <span className="font-mono text-zinc-500"> Artists/&lt;Artist&gt;/&lt;Album&gt;/ </span>
-        — misplaced files, unexpected folders, empty albums, artist folders with
-        no albums. Rows marked
+        — misplaced files, stray files, unexpected folders, empty albums, artist
+        folders with no albums. Rows marked
         <span className="font-mono text-zinc-500"> will be renamed </span>/
         <span className="font-mono text-zinc-500"> moved </span>/
         <span className="font-mono text-zinc-500"> to the Trash </span>
         are the ones <span className="font-mono text-zinc-500">Apply fixes</span> settles by
-        itself (script 20 does this on every run too, unless the layout_apply setting is off);
-        every other row is yours to fix, and nothing is ever deleted.
+        itself (script 20, Optimize library layout, does this on every import and every run
+        too, unless the layout_apply setting is off); every other row is yours to fix.
+        Nothing is ever deleted — a removal goes to the Trash, which lists it and can put
+        it back.
       </div>
 
       {/* What the apply phase just did, in words. Only present on a report that

@@ -1,6 +1,6 @@
 # la musica
 
-**v3.20.2** — a self-hosted app that *manages, optimizes, audits, grades and
+**v3.20.3** — a self-hosted app that *manages, optimizes, audits, grades and
 plays* your music library, from the browser, a desktop window or a phone.
 
 **la musica** (formerly Music Library Optimizer) is a FastAPI backend plus a
@@ -784,7 +784,7 @@ a byte into it (`server.job_locks.move`).
 | 17 | Lyrics transliterate (AI) | `TRANSLITERATION-<LANG>-LATN` / `TRANSLATION-<LANG>` tags and sidecars, re-synced at `lrc_sync_level` |
 | 18 | Publish lyrics (LRCLIB) | Submits this library's lyrics for recordings LRCLIB does not have (`lrclib_auto_publish`, `force_publish`) |
 | 19 | Optimize artist images | Crops `Artists/<Artist>/artist.*` to `artist_image_aspect`, downscales to `artist_image_target_size` (never upscales, and back to the size it recorded writing when a file was enlarged afterwards), re-encodes as `artist.jpg`/`artist.png` |
-| 20 | Scan library layout | Walks the music folder's shape and — with `layout_apply` (ON) — FIXES the three unambiguous findings: a name whose letter case differs from `naming_script` is renamed to the script's spelling, audio sitting outside any album folder is moved into the one its own tags name, and an artist folder with no album goes to the Trash. Everything else (stray files, unexpected folders, empty albums, unreadable albums) is reported, never guessed at: nothing is deleted, a destination that already holds a file is refused rather than overwritten, and only paths inside the music folder are ever touched. Writes `.mlo/data/layout_report.json` (`scanned_at` + per-row `fixes` included) — the Library page's warning and the Optimization panel's report read it instead of walking again |
+| 20 | Optimize library layout | Walks the music folder's shape and — with `layout_apply` (ON) — SETTLES what it can prove: a name whose letter case differs from `naming_script` is renamed to the script's spelling, audio sitting outside any album folder is moved into the one its own tags name, and what is excess goes to the Trash — a stray file (an nfo, a db, a stray text file), a foreign folder holding no audio, an album folder with no audio in it, an artist folder with no album under it. Nothing is deleted (the Trash lists every removal and can put it back), a destination that already holds a file is refused rather than overwritten, every removal's reason is re-derived at the move so a folder that gained audio since the scan is refused, and only paths inside the music folder are ever touched. Runs on every import too, scoped to the album just written. Writes `.mlo/data/layout_report.json` (`scanned_at` + per-row `fixes` included) — the Library page's warning and the Optimization panel's report read it instead of walking again |
 | 21 | Fix AcoustID pairs | Completes a half-written AcoustID pair: an `ACOUSTID_ID` with no `ACOUSTID_FINGERPRINT` gets the local `fpcalc` fingerprint, a fingerprint with no id gets the lookup. Both halves present (or none) is left alone — it is the fixer for the grading failure *Missing ACOUSTID_FINGERPRINT (incomplete AcoustID pair)*, and it writes only the half that is missing |
 
 **What script 17 transliterates and translates is decided from evidence, not

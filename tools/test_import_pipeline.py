@@ -88,7 +88,7 @@ CFG = {"music_folder": MF, "import_auto_scripts": False, "import_scripts": [],
 # Run All can never be silently missing from the import path again. Three were
 # (16 Mood & Energy, 17 Lyrics transliterate (AI), 19 Optimize artist images:
 # Run All ran them, an import never did), which is what this assertion now
-# catches — and nothing is left out today: 20 (Scan library layout) was the one
+# catches — and nothing is left out today: 20 (Optimize library layout) was the one
 # declared exception while its runner ignored `targets` and re-walked the whole
 # library per album, and it now scopes itself to the album it is handed.
 assert imports.DEFAULT_CHAIN == [sid for sid in DEFAULT_RUN_ALL_ORDER

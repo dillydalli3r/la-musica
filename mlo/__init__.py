@@ -44,7 +44,7 @@ from .cue import run_format_cues
 from .flac import run_optimize_flacs
 from .grader import run_grade_library
 from .images import run_process_images
-from .layout import run_scan_layout
+from .layout import run_optimize_layout
 from .loudness import run_calc_dr_replaygain
 from .lyrics import run_format_lyrics
 from .audit import run_audit_library
@@ -53,14 +53,14 @@ try:
 except ImportError:
     run_format_all = None
 
-__version__ = "3.20.2"
+__version__ = "3.20.3"
 __all__ = [
     "load_config", "save_config", "DEFAULT_CONFIG",
     "run_auto_tagging",
     "run_format_lyrics", "run_format_cues", "run_optimize_flacs",
     "run_grade_library", "run_process_images", "run_audit_library",
     "run_calc_dr_replaygain", "run_format_all",
-    "run_optimize_artist_images", "run_scan_layout",
+    "run_optimize_artist_images", "run_optimize_layout",
 ]
 
 

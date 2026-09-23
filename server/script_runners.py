@@ -21,7 +21,7 @@ import traceback
 from mlo import (
     run_audit_library, run_auto_tagging, run_format_cues, run_format_lyrics,
     run_grade_library, run_optimize_artist_images, run_optimize_flacs,
-    run_process_images, run_scan_layout,
+    run_process_images, run_optimize_layout,
 )
 from mlo import stats as mlo_stats
 from mlo.loudness import run_calc_dr_replaygain
@@ -217,7 +217,7 @@ RUNNERS: dict[int, tuple[str, "callable"]] = {
     # also apply what it finds (rename wrong-case names, gather loose audio)
     # under `layout_apply`, which is its force key — the report is written
     # either way, so the run never becomes a no-op.
-    20: ("Scan library layout", run_scan_layout),
+    20: ("Optimize library layout", run_optimize_layout),
     # 21 completes an AcoustID PAIR a file only half carries. That pair is a
     # grading check of its own (grade_check_acoustid), and no other script
     # could clear it, so this is the fixer the Grading page's failure points

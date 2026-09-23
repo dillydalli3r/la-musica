@@ -18,7 +18,7 @@ from .audit import run_audit_library
 from .autotag import run_auto_tagging
 from .cue import run_format_cues
 from .deps import HAS_MUTAGEN
-from .layout import run_scan_layout
+from .layout import run_optimize_layout
 from .paths import DEFAULT_DIGITAL_SOURCE
 from .flac import run_optimize_flacs
 from .grader import run_grade_library
@@ -60,7 +60,7 @@ SCRIPTS = (
     (17, "Lyrics transliterate (AI)", "TRANSLITERATION/TRANSLATION tags + sidecars"),
     (18, "Publish lyrics (LRCLIB)", "submit missing lyrics to the community DB"),
     (19, "Optimize artist images", "crop/resize artist artwork to the configured aspect and size"),
-    (20, "Scan library layout", "layout report + fixes (case, loose audio, empty artist)"),
+    (20, "Optimize library layout", "layout report + fixes (case, loose audio, empty artist, strays to the Trash)"),
     (21, "Fix AcoustID pairs", "complete ACOUSTID_ID / ACOUSTID_FINGERPRINT pairs"),
 )
 SCRIPT_LABELS = {sid: name for sid, name, _ in SCRIPTS}
@@ -576,7 +576,7 @@ def build_script_runners():
         17: ("mlo.lyrics_xlit", "run_lyrics_xlit"),
         18: ("mlo.lyrics_publish", "run_publish_lyrics"),
         19: run_optimize_artist_images,
-        20: run_scan_layout,
+        20: run_optimize_layout,
         # 21 writes ACOUSTID_* tags, so it is resolved on first use like the
         # other tag-writing scripts (and it is not re-exported by mlo itself).
         21: ("mlo.acoustid", "run_fix_pairs"),

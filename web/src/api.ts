@@ -2379,12 +2379,16 @@ export const api = {
    *  walk-free, which is why the Library page can afford to ask on load. */
   libraryLayoutReport: () => json<LayoutSnapshot>(`${API}/library/layout/report`),
 
-  /** Scan the library AND fix what can be fixed (script 20's apply phase):
-   *  wrong-case names, audio outside any album folder, album-less artist
-   *  folders — the last ones to the Trash, never deleted. Returns the rows
-   *  that are left plus `fixes`, and stores the report, so the panel and the
-   *  Library page's warning stay the same answer. Long-running: it walks and
-   *  reads one file's tags per album. */
+  /** Scan the library AND settle what the folder itself proves (script 20's
+   *  apply phase): wrong-case names, audio outside any album folder, and what
+   *  is excess — a stray file, an album folder with no audio, a folder inside
+   *  an album that holds no audio, a foreign root folder holding no audio, an
+   *  album-less artist folder, the old layout's leftovers — all to the Trash,
+   *  never deleted. A foreign folder that HOLDS AUDIO and a hidden folder are
+   *  reported, not moved, and every removal's reason is re-derived server-side.
+   *  Returns the rows that are left plus `fixes`, and stores the report, so the
+   *  panel and the Library page's warning stay the same answer. Long-running:
+   *  it walks and reads one file's tags per album. */
   libraryLayoutApply: () =>
     json<LayoutReport>(`${API}/library/layout/apply`, { method: "POST" }, 1800000),
 

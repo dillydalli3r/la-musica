@@ -125,7 +125,7 @@ default, which is `DEFAULT_RUN_ALL_ORDER` minus `LIBRARY_WIDE_SCRIPTS` — one
 list, so a script added to Run All cannot go missing from an import, and the
 scripts an import deliberately does not run are named as data with their reason
 rather than kept as a second hand-written list. The exception set is **empty
-today**: it held 20 (Scan library layout) while that runner walked the whole
+today**: it held 20 (Optimize library layout) while that runner walked the whole
 music folder and wrote ONE report about the library, which an import would have
 re-scanned once per album and then overwritten with a partial scan. Script 20
 now scopes BOTH its scan and its fixes to `targets` when a run names them (and
@@ -184,7 +184,7 @@ publishes, including the ones that write nothing until they do.
 | 17 | Lyrics transliterate (AI) | Romanization/translation tags and sidecars, re-synced at `lrc_sync_level`; the per-track work runs through the worker pool (one track's chunk requests used to be paid one after another) | `TRANSLITERATION-*`, `TRANSLATION-*`, sidecars | no | **yes** (configured AI endpoint) |
 | 18 | Publish lyrics (LRCLIB) | Submits missing lyrics to the community database (every examined track counts as scanned, published included) | nothing locally | no (external side effect) | **yes** (LRCLIB) |
 | 19 | Optimize artist images | Re-fits `Artists/<Artist>/artist.*` to `artist_image_aspect` / `artist_image_target_size`, re-encodes as `artist.jpg`/`artist.png` | the artist image in place (only when it has to move) | re-encodes in place; never deletes | no |
-| 20 | Scan library layout | The music folder's shape against `<music>/Artists/<Artist>/<Album>/…`: audio at the root or in an artist folder, stray files, unexpected folders, empty albums, `wrong_case` rows. FIXES the unambiguous three when `layout_apply` (ON) is set — a wrong-case name is renamed, audio outside an album folder is moved into the one its tags name, an album-less artist folder goes to the Trash — and reports the rest as left alone, with the reason. Writes ONE report describing the whole library (plus a `fixes` list) to `<music>/.mlo/data/`, which the Library page warns from; scoped to `targets` when a run names them, and library-wide when it does not (R9) | one report file + the renamed/moved paths | `layout_apply` | no |
+| 20 | Optimize library layout | The music folder's shape against `<music>/Artists/<Artist>/<Album>/…`: audio at the root or in an artist folder, stray files, unexpected folders, empty albums, `wrong_case` rows. With `layout_apply` (ON) it SETTLES what the folder itself proves — a wrong-case name is renamed, audio outside an album folder is moved into the one its tags name, and what is excess goes to the Trash (a stray file, a folder inside an album that is neither a disc folder nor holds audio, an album folder with no audio, a foreign root folder holding no audio, an album-less artist folder, the `.mlo_*` leftovers) — and reports every other row with the reason it stayed, re-derived at the move (R185). Writes ONE report describing the whole library (plus a `fixes` list) to `<music>/.mlo/data/`, which the Library page warns from; scoped to `targets` when a run names them, and library-wide when it does not (R9) | one report file + the renamed/moved/removed paths | `layout_apply` (removals go to the Trash) | no |
 | 21 | Fix AcoustID pairs | Completes an INCOMPLETE `ACOUSTID_ID`/`ACOUSTID_FINGERPRINT` pair — the failure `Missing ACOUSTID_FINGERPRINT (incomplete AcoustID pair)`, which had no fixer before. An id already on the file has its fingerprint recomputed locally; the reverse half needs a lookup and is counted, never invented | `ACOUSTID_ID`, `ACOUSTID_FINGERPRINT` | no | only when the id half must be looked up |
 
 **R11 — force flags are the only way to redo work.** Each script has one, and it
@@ -193,9 +193,9 @@ is what makes the script look at a file it has already processed:
 (5), `force_audit` (6), `force_dr_replaygain` (7), `force_auto_tag` (8),
 `force_accurip` (9), `force_audiometa` (12), `force_mood` (16), `force_xlit` (17),
 `force_publish` (18), `force_tracklist` (15). Grade (4) needs none — it re-reads.
-Scan library layout (20) carries `layout_apply`, the ONE key that turns work OFF
+Optimize library layout (20) carries `layout_apply`, the ONE key that turns work OFF
 instead of forcing a redo: the scan always reports, and the key is what lets it
-rename and move (see §2's row 20). A supplied force dict is authoritative AND
+rename, move and remove (see §2's row 20 and R185). A supplied force dict is authoritative AND
 complete — every flag it does not name is cleared — so the *Re-run & overwrite*
 menu sends a COMPLETE selection: a saved one is completed with the defaults
 (`web/src/lib/force.ts::loadForceSel`), which is what keeps a switch added later
@@ -2909,19 +2909,61 @@ user asked for, in the order they asked for it. `server/exporter.py` owns both.
   imports) is graded after the fact, never refused. Lowering any of the three is
   a settings change, never a default.
 
+### 7.20 The library layout: what it tolerates, and what the optimize pass removes
+
+The canonical library is `<music>/Artists/<Artist>/<Album>/<files>`, and the
+layout module's job is to say where a library is not that — then, for what the
+folder itself proves, to settle it. ONE scan answers every surface (script 20,
+`GET /api/library/layout` for the Optimization panel, and the stored report the
+Library page warns from), so their numbers cannot disagree, and ONE apply does
+the work (`POST /api/library/layout/apply`, or script 20's own run).
+
+- **R185 — the optimize pass removes excess to the Trash, and re-derives every
+  removal at the move.** The scan reports; the apply settles what the folder
+  itself proves: a wrong-case name is renamed to `naming_script`'s spelling,
+  audio outside any album folder is moved into the album its own tags name, and
+  what is EXCESS goes to the app's Trash — a stray file (not audio, artwork or
+  a known sidecar: an nfo, a db, a stray text file), a folder inside an album
+  that is neither a disc folder nor holding audio, an album folder with no
+  audio in it, a foreign folder in the music-folder root holding no audio, an
+  album-less artist folder, and the `.mlo_*` leftovers of the old layout.
+  NOTHING IS DELETED: every removal is `mlo.paths.trash_path`, carrying the
+  origin manifest the Trash page restores from, and `layout_apply` off makes
+  the whole pass a report again. Two kinds are never removed — a foreign folder
+  that HOLDS AUDIO (nothing can say where its contents belong) and a hidden
+  folder inside `Artists/` (a sync client's or a checkout's marker) — and every
+  row that is left is reported with the reason it stayed.
+  **The reason is asked again at the move** (`mlo.layout._may_trash`), never
+  trusted from the report: a row's path must be inside the music folder (never
+  that folder itself, never `Artists/`, never `.mlo`), and a folder that gained
+  audio between the scan and the apply — or a stray that became a sidecar — is
+  refused and reported instead of acted on. The panel's route re-scans first;
+  a runner passes the report it just built, which is exactly what that guard is
+  for.
+  **It runs automatically, and scoped.** Script 20 is in the import chain, and
+  `mlo.layout._scope` confines a run handed `targets` to those albums, so an
+  import optimizes the one album it just wrote (after beets (14) has put it in
+  its canonical place, before the grade (4) reads it) rather than re-walking the
+  library once per album. A library-wide *Run All* still gets the whole-folder
+  pass and the stored report; a scoped run stores nothing, so the report never
+  describes half a library.
+
 ## 8. Recommended runbook
 
 Nothing here is a substitute for the app's own Dependencies page: run it first
 and install what the platform supports.
 
-1. **Before touching anything** — set the music folder, then script **20 (Scan
+1. **Before touching anything** — set the music folder, then script **20 (Optimize
    library layout)** and script **4 (Grade)**. The grade is read-only and tells
    you what is missing; script 20 walks the canonical
    `<music>/Artists/<Artist>/<Album>/…` shape and, with `layout_apply` (ON),
-   fixes the three findings that have exactly one answer — a wrong-case name is
-   renamed, audio outside any album folder is moved into the one its own tags
-   name, an album-less artist folder goes to the Trash — while everything else
-   (stray files, unexpected folders, empty albums) is reported and left alone.
+   settles what the folder itself proves — a wrong-case name is renamed, audio
+   outside any album folder is moved into the one its own tags name, and what is
+   excess goes to the Trash (stray files, folders inside an album that hold no
+   audio, empty album folders, foreign root folders holding no audio, album-less
+   artist folders, the `.mlo_*` leftovers) — while a foreign folder that HOLDS
+   AUDIO and a hidden folder inside `Artists/` are reported and left alone.
+   Nothing is deleted: the Trash lists every removal and can put it back (R185).
    Set `layout_apply` off for a report-only pass. Script 20 writes that one
    report to `<music>/.mlo/data/` and the Library page warns from it, so the
    same facts are one click away from the album list.
