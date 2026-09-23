@@ -1581,6 +1581,25 @@ user asked for, in the order they asked for it. `server/exporter.py` owns both.
   reader scrolls, and the fallback button stays for the two cases where the
   observer cannot run (no `IntersectionObserver`, or a stalled fetch).
 
+- **R177 — an entity page's genre chips are drawn in the app's own
+  capitalization, and the cascade keeps MusicBrainz's.** MusicBrainz publishes
+  genre names lowercase (`shoegaze`, `art pop`) — a database convention, and
+  the reason `server.integrations._genre_names` keeps the spelling it reads:
+  that list is what the genre CASCADE hands the writers, and
+  `mlo.genres.normalize_genres` capitalizes once, at the one place a tag is
+  written. A page draws a CAPTION instead, so the four entity payloads that
+  carry a chip row — the release header, `artist_identity` (whose `tags` ride
+  the same row, so they are capitalized with the genres rather than leaving
+  "Art Pop · britpop"), the release-group page and the recording page — pass
+  their names through `_display_genres` → `mlo.genres.display_name`, the same
+  function the tag writers, the grader's `grade_check_tag_case` and
+  `server.discover`'s list already use. Nothing else moves: a release's
+  per-TRACK genre rows and the cascade's `per_track`/`per_source` lists keep
+  MusicBrainz's spelling (`tools/test_genres.py` pins the source order and the
+  mixed spelling of that merge), identity is untouched — every comparison
+  folds case — and the string a reader copies off a chip is the string a tag
+  holds.
+
 ### 7.12 What enters the library: the edition, the source, and the name in your language
 
 - **R84 — one deterministic policy decides which edition is fetched.** The nine

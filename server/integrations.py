@@ -688,7 +688,7 @@ def release_lookup(mbid):
         "primary_type": rg_obj.get("primary-type") or "",
         "secondary_types": [s for s in (rg_obj.get("secondary-types") or [])],
         "artists": release_artists,
-        "genres": _genre_names(_genres(data)),
+        "genres": _display_genres(_genre_names(_genres(data))),
         "media": tracks,
         "medium_count": len(data.get("media", [])),
         "medium_formats": [m.get("format") or "" for m in data.get("media", [])],
@@ -3815,27 +3815,31 @@ def _genre_track_key(disc, position):
 
 
 def _genre_names(names):
-    """Trimmed, case-insensitively deduped names, in the app's own spelling.
-
-    MusicBrainz publishes its genre names lowercase ("shoegaze", "art pop") and
-    that is a database convention, not a caption: every name a page draws goes
-    through `mlo.genres.display_name`, the one capitalization the writers, the
-    grader and the Discover lists already share — so the artist page's chips
-    read "Art Pop" without a second casing rule existing anywhere, and the
-    string a user copies off that page is the string a tag holds.
-
-    Capitalization is display, never identity (`mlo.genres`): the dedupe below
-    folds case, and so does every comparison downstream.
-    """
+    """Trimmed, case-insensitively deduped names, original spelling kept."""
     out = []
-    seen = set()
     for name in names or []:
         text = str(name or "").strip()
-        folded = text.casefold()
-        if text and folded not in seen:
-            seen.add(folded)
-            out.append(_genre_display(text) or text)
+        if text and text.lower() not in {g.lower() for g in out}:
+            out.append(text)
     return out
+
+
+def _display_genres(names):
+    """A genre list as a PAGE draws it: the app's own capitalization.
+
+    MusicBrainz publishes its genre names lowercase ("shoegaze", "art pop") and
+    that is a database convention, not a caption — `_genre_names` keeps what it
+    publishes, which is what the genre CASCADE must hand the writers
+    (`mlo.genres.normalize_genres` capitalizes once, at the one place that
+    writes a tag). An entity page's chip row is a caption instead, so its
+    payload goes through `mlo.genres.display_name` — the same capitalization
+    the tag writers, the grader and server.discover already share — and the
+    name a reader copies off a page is the name a tag holds.
+
+    Capitalization is display, never identity: every comparison downstream
+    folds case (`mlo.genres`).
+    """
+    return [_genre_display(n) or n for n in names]
 
 
 def _genre_row(level, names, title=""):
@@ -5626,11 +5630,12 @@ def artist_identity(mbid):
             (data.get("life-span") or {}).get("begin") or "",
             (data.get("life-span") or {}).get("end") or "",
         ],
-        "genres": _genre_names(_genres(data)),
+        "genres": _display_genres(_genre_names(_genres(data))),
         # Tags ride the same chip row as the genres, so they are capitalized
-        # the same way — a row reading "Art Pop · britpop" is the bug this
+        # the same way — a row reading "Art Pop · britpop" is the defect this
         # fixes, and a tag is no more a sentence than a genre is.
-        "tags": _genre_names([t.get("name") for t in (data.get("tags") or [])[:8]]),
+        "tags": _display_genres(_genre_names(
+            [t.get("name") for t in (data.get("tags") or [])[:8]])),
     }
 
 
@@ -6160,7 +6165,7 @@ def release_group_browse(mbid, limit=300, offset=0):
         ),
         "primary_type": data.get("primary-type") or "",
         "secondary_types": data.get("secondary-types") or [],
-        "genres": _genre_names(_genres(data)),
+        "genres": _display_genres(_genre_names(_genres(data))),
         "first_release_date": data.get("first-release-date") or "",
         "countries": release_group_countries(
             ranked_rows, cfg.get("prefer_release_country")),
@@ -6219,7 +6224,7 @@ def recording_browse(mbid, limit=300, offset=0):
             (ac["artist"]["id"] for ac in data.get("artist-credit") or [] if "artist" in ac), None
         ),
         "length": data.get("length"),
-        "genres": _genre_names(_genres(data)),
+        "genres": _display_genres(_genre_names(_genres(data))),
         # a recording lookup returns bare ISRC strings ("USRC17607839") while
         # some other entities wrap them in {"isrc": ...} — .get() on a string
         # raised AttributeError and 502'd the whole recording page.

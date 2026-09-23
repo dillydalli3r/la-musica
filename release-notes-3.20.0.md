@@ -1,7 +1,7 @@
 # la musica 3.20.0 — downloads you can size, a copy you can choose to play, and a search that asks more than one pressing
 
 Everything below came from reports on the running app. The house rules are in
-`docs/OPTIMIZATION-GRADING-SPEC.md` (`R171`–`R176` new here).
+`docs/OPTIMIZATION-GRADING-SPEC.md` (`R171`–`R177` new here).
 
 ## A downloaded copy is the file's own codec, unless you say otherwise
 
@@ -68,9 +68,12 @@ then miss the very request the service worker matches.
 
 Verified in a Chromium webview against a scratch server: with the download in
 the cache, `playback_source: downloaded` plays a `blob:` URL (readyState 4,
-`currentTime` advancing), and the same holds with the server stopped, and with
-the service worker unregistered — which is the shell's own condition. The
-artwork warmed beside the audio is keyed the same way.
+`currentTime` advancing) — and so does a stream-preferred player once the server
+is stopped, because the copy is the only thing left. That `blob:` source is the
+hand-off `offlineMediaUrl`/`playbackSource` performs, which is the ONLY path a
+shell has (it registers no service worker, so nothing else can hand Cache
+Storage's bytes to an element); the artwork warmed beside the audio is keyed the
+same way.
 
 ## Every add records the walk, and the row says which pressing it is asking
 
@@ -125,6 +128,21 @@ rate as `-b:a 320kbps`, and ffmpeg rejects that suffix outright — *"Invalid ch
 rendition. The unit is now ffmpeg's own (`320k`) in the one table that builds the
 argv, and both suites that pin the command line were updated with it
 (`tools/test_codec_policy.py`, `tools/test_download_queue.py`).
+
+## Fix: an artist page's genres read as words, not as database rows
+
+MusicBrainz publishes genre names lowercase — `alternative rock`, `art pop`,
+`britpop` — and the artist page's chips drew them exactly as the database had
+them. They now go through `mlo.genres.display_name`, the one capitalization the
+tag writers, the grader and the Discover lists already share, so the row reads
+**Alternative Rock · Ambient Pop · Art Pop · Art Rock · Britpop · Chamber Pop ·
+Crossover Prog · Electronic** (`spec R177`). The release, release-group and
+recording pages' chip rows take the same path (they are the same component and
+the same data), the artist page's tag chips are capitalized with them so the row
+is uniform, and nothing else moves: the genre cascade that feeds the writers
+keeps MusicBrainz's spelling — `mlo.genres.normalize_genres` capitalizes once, at
+the one place a tag is written — and identity is untouched, because every
+comparison downstream folds case.
 
 ## Upgrading
 

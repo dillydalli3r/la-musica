@@ -1083,12 +1083,10 @@ else:
     eq([r.get("catalog_numbers") for r in stored], [["WALK-1"], ["WALK-1J"]],
        "with the catalog numbers the walk dedupes by")
     walk_row = rows_for(walk_wish_id)
-    eq(len(walk_row), 1, "the walk is still ONE row of the queue", walk_row)
-    eq((walk_row[0].get("walk") or {}).get("total"), 2,
-       "and the row says how many editions it may ask",
-       walk_row[0].get("walk"))
-    eq((walk_row[0].get("walk") or {}).get("label"), "release 1 of 2",
-       "with the wording every surface shares", walk_row[0].get("walk"))
+    eq(len(walk_row), 1, "the walk is still ONE row of the queue")
+    walk = walk_row[0].get("walk") or {}
+    eq((walk.get("total"), walk.get("label")), (2, "release 1 of 2"),
+       "and the row states the walk's size and position in the shared wording")
     intg.auto_import_targets = real_targets
     intg.resolve_release = real_resolve
 
