@@ -290,10 +290,11 @@ async function drawerChecks(browser, check, errs) {
       check(`phone drawer: "${e.label}" is marked current after the press`,
         (await reopened().getAttribute("aria-current")) === "page",
         String(await reopened().getAttribute("aria-current")));
-      const ink = await reopened().evaluate((a) => getComputedStyle(a).backgroundColor);
-      const other = await page.locator('aside[role="dialog"] a:not([aria-current])').first()
-        .evaluate((a) => getComputedStyle(a).backgroundColor);
-      check(`phone drawer: "${e.label}" reads as active without hover`, ink !== other, `${ink} vs ${other}`);
+      // Same settled read as the rail walk: the active block is the ACCENT
+      // paint, not merely "painted differently from its transparent siblings".
+      const ink = await reopened().evaluate(settledInk);
+      check(`phone drawer: "${e.label}" reads as active without hover`,
+        ink.bg === accentRgb(ink.accent), `${JSON.stringify(ink)} vs accent ${accentRgb(ink.accent)}`);
       await page.keyboard.press("Escape");
       await page.waitForTimeout(200);
       check(`phone drawer: Esc closes it after "${e.label}"`,
@@ -374,6 +375,7 @@ async function sheetChecks(browser, page, check, errs) {
     // below asks about a control the user can actually press.
     await panel.locator("input").first().fill("Menus check");
     await phone.waitForTimeout(200);
+    await panel.evaluate(settledRect);
     let g = await panel.evaluate(panelState);
 
     check("phone sheet: full device width, flush left", near(g.box.width, g.vw) && g.box.left <= 1,
@@ -400,6 +402,7 @@ async function sheetChecks(browser, page, check, errs) {
       document.documentElement.style.setProperty("--mlo-inset-top", "47px");
     });
     await phone.waitForTimeout(120);
+    await panel.evaluate(settledRect);
     g = await panel.evaluate(panelState);
     check("phone sheet: the home indicator is the sheet's own bottom padding",
       near(parseFloat(g.padBottom), 34), g.padBottom);
@@ -417,6 +420,7 @@ async function sheetChecks(browser, page, check, errs) {
       overlay.style.setProperty("--mlo-vv-h", "420px");
     });
     await phone.waitForTimeout(120);
+    await panel.evaluate(settledRect);
     g = await panel.evaluate(panelState);
     check("phone sheet: the keyboard lifts the sheet out of its way",
       near(g.box.bottom, g.vh - 320), `panel.bottom ${Math.round(g.box.bottom)} of ${g.vh - 320}`);
@@ -438,7 +442,9 @@ async function sheetChecks(browser, page, check, errs) {
   await page.waitForTimeout(1000);
   await page.locator(SAVE).first().click();
   await page.waitForTimeout(300);
-  const desk = await page.locator('[role="dialog"][aria-modal="true"]').first().evaluate(panelState);
+  const deskPanel = page.locator('[role="dialog"][aria-modal="true"]').first();
+  await deskPanel.evaluate(settledRect);
+  const desk = await deskPanel.evaluate(panelState);
   const middle = desk.box.top + desk.box.height / 2;
   check("desktop dialog: the panel is still centred",
     near(middle, desk.vh / 2, 2), `centre ${Math.round(middle)} of ${desk.vh}`);
@@ -478,6 +484,7 @@ async function pageMenuChecks(page, check) {
     await page.waitForTimeout(250);
     const panel = page.locator('[role="menu"]');
     check(`${tag}: opens a role=menu panel`, await panel.isVisible().catch(() => false));
+    await panel.evaluate(settledRect);
     check(`${tag}: every row is a menu item`,
       (await panel.locator('[role="menuitem"]').count()) >= 4,
       String(await panel.locator('[role="menuitem"]').count()));
@@ -507,6 +514,7 @@ async function pageMenuChecks(page, check) {
   await page.waitForTimeout(900);
   await page.locator('button[title="Sort the downloads"]').click();
   await page.waitForTimeout(250);
+  await page.locator('[role="menu"]').evaluate(settledRect);
   const fit = await page.locator('[role="menu"]').evaluate((el) => {
     const r = el.getBoundingClientRect();
     return { left: r.left, right: r.right, vw: window.innerWidth };
@@ -585,6 +593,7 @@ async function flyoutChecks(page, check) {
     await page.waitForTimeout(300);
     const panel = page.locator('[role="menu"]').first();
     check(`${c.label}: the Force menu opens`, await panel.isVisible().catch(() => false));
+    await panel.evaluate(settledRect);
     const g = await panel.evaluate(flyoutState);
     check(`${c.label}: the flyout never runs past the bottom edge`,
       g.box.bottom <= g.vh - 8 + 1, `bottom ${g.box.bottom} of ${g.vh}`);
@@ -692,6 +701,91 @@ async function lyricsChecks(page, check) {
   await page.setViewportSize({ width: 1440, height: 900 });
 }
 
+/* ---- reading a nav entry's ACTIVE paint ---------------------------------
+ * `bg-accent` does not land in one frame: the active class swap goes through
+ * the `.nav-link` `background-color` transition (index.css), so a single
+ * `getComputedStyle` read can catch the entry on its way — and a starved
+ * renderer can serve that pre-swap frame to two consecutive runs. That is the
+ * whole of a flake this check used to report as
+ *   `nav "Grading" reads as current after the press 1 rgba(0,0,0,0) vs …`
+ * while the DOM was already correct (aria-current="page", the accent class
+ * applied, the live value "rgb(255, 255, 255)").
+ *
+ * So settle first: sample until two consecutive reads agree, the pointer is
+ * not hovering the entry (a hover paint is not its resting state), spaced by a
+ * TIMER rather than by rAF — a stalled rAF is exactly the starvation this
+ * defends against — and give up after 2s so a genuinely wrong value fails the
+ * assertion instead of hanging the run.
+ *
+ * The settled value is then compared with the entry's OWN `--accent` triplet,
+ * not with a sibling's transparent background: "different from the others" is
+ * satisfied by any paint at all, including a half-applied one. */
+const settledInk = async (el) => {
+  const read = () => {
+    const cs = getComputedStyle(el);
+    return {
+      bg: cs.backgroundColor,
+      accent: cs.getPropertyValue("--accent").trim(),
+      hover: el.matches(":hover"),
+    };
+  };
+  const deadline = performance.now() + 2000;
+  let last = null;
+  let stable = 0;
+  let s = read();
+  while (performance.now() < deadline) {
+    await new Promise((r) => setTimeout(r, 50));
+    s = read();
+    if (s.hover) {
+      last = null;
+      stable = 0;
+      continue;
+    }
+    if (s.bg === last) {
+      if (++stable >= 2) break;
+    } else {
+      stable = 0;
+      last = s.bg;
+    }
+  }
+  return s;
+};
+
+/** `--accent` is an RGB triplet ("255 255 255", commas tolerated); the paint it
+ *  produces is `rgb(255, 255, 255)`. */
+const accentRgb = (triplet) => {
+  const n = String(triplet || "").split(/[\s,]+/).map(Number).filter((v) => !Number.isNaN(v));
+  return n.length >= 3 ? `rgb(${n[0]}, ${n[1]}, ${n[2]})` : "";
+};
+
+/** The same "wait for it to stop moving" rule for a BOX, used before any
+ *  geometry is measured on a panel that animates in: `.anim-pop` scales and
+ *  translates the dialog (6px of `pop-in` is exactly the tolerance the
+ *  sheet/centred assertions work in) and `sheet-up` slides it. A starved
+ *  renderer can still be serving a mid-animation frame at the first
+ *  measurement — the value moves, the layout is right. */
+const settledRect = async (el) => {
+  const read = () => {
+    const r = el.getBoundingClientRect();
+    return { box: [r.left, r.top, r.width, r.height].map((n) => Math.round(n * 10) / 10).join(","), vh: window.innerHeight };
+  };
+  const deadline = performance.now() + 2000;
+  let last = null;
+  let stable = 0;
+  let s = read();
+  while (performance.now() < deadline) {
+    await new Promise((r) => setTimeout(r, 50));
+    s = read();
+    if (s.box === last) {
+      if (++stable >= 2) break;
+    } else {
+      stable = 0;
+      last = s.box;
+    }
+  }
+  return s;
+};
+
 (async () => {
   const browser = await chromium.launch({ executablePath: process.env.CHROME, headless: true });
   const page = await browser.newContext({ viewport: { width: 1440, height: 900 } }).then((c) => c.newPage());
@@ -773,14 +867,13 @@ async function lyricsChecks(page, check) {
       (landed === href || landed.startsWith(href + "/")) && h1.trim().length > 0,
       `${page.url()} ${JSON.stringify(h1)}`);
     // The active entry has to be readable as ACTIVE, not merely present: the
-    // same assertion the phone drawer's walk makes (a solid accent block, whose
-    // background differs from every inactive entry's).
+    // same assertion the phone drawer's walk makes, read once the paint has
+    // stopped moving (see settledInk) and required to be the accent block.
     const active = page.locator(`aside a[href="${href}"][aria-current="page"]`);
-    const ink = await active.evaluate((a) => getComputedStyle(a).backgroundColor).catch(() => "");
-    const other = await page.locator("aside a:not([aria-current])").first()
-      .evaluate((a) => getComputedStyle(a).backgroundColor).catch(() => "");
+    const ink = await active.evaluate(settledInk).catch(() => null);
     check(`nav "${label}" reads as current after the press`,
-      (await active.count()) === 1 && !!ink && ink !== other, `${await active.count()} ${ink} vs ${other}`);
+      (await active.count()) === 1 && !!ink && ink.bg === accentRgb(ink.accent),
+      `${JSON.stringify(ink)} vs accent ${ink ? accentRgb(ink.accent) : "?"}`);
   }
 
   // The rail above is the desktop nav. The phone drawer is the same menu on

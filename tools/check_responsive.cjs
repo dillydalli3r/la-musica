@@ -89,6 +89,39 @@ const results = [];
 const check = (name, pass, detail) => results.push({ name, pass: !!pass, detail: String(detail) });
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
+/** Wait until a box stops moving, then read it.
+ *
+ *  A dialog animates in (`.anim-pop` scales and translates the panel, the phone
+ *  sheet slides up), so the FIRST measurement after opening it can land on a
+ *  frame that is still in flight — 6px of `pop-in` is exactly the tolerance the
+ *  "still centred" assertion works in, and a starved renderer can serve that
+ *  same frame to two consecutive runs. Sampled on a TIMER rather than rAF (a
+ *  stalled rAF is the starvation being defended against), two agreeing reads,
+ *  capped at 2s so a genuinely misplaced dialog still fails rather than hangs.
+ *  A moving value is not a wrong one: this is what made the dialog sweep flaky
+ *  the same way the nav active-state read was. */
+const settleBox = async (el) => {
+  const read = () => {
+    const r = el.getBoundingClientRect();
+    return [r.left, r.top, r.width, r.height].map((n) => Math.round(n * 10) / 10).join(",");
+  };
+  const deadline = performance.now() + 2000;
+  let last = null;
+  let stable = 0;
+  let v = read();
+  while (performance.now() < deadline) {
+    await new Promise((r) => setTimeout(r, 50));
+    v = read();
+    if (v === last) {
+      if (++stable >= 2) break;
+    } else {
+      stable = 0;
+      last = v;
+    }
+  }
+  return v;
+};
+
 /* ---- the controls that stay small on purpose, per page ------------------
  *
  * The phone tap floor (28px here; the app's own `.tap`/`.btn-icon*` recipes aim
@@ -570,6 +603,11 @@ const MEASURE = `(() => {
         await sleep(900);
         await d.open(page);
         await sleep(350);
+        // Settled first: the panel animates in (see settleBox). Skipped when no
+        // dialog is on screen so a dialog that never opened reports as such
+        // instead of waiting out an element that will not arrive.
+        const dialog = page.locator('[role="dialog"][aria-modal="true"]').first();
+        if (await dialog.count()) await dialog.evaluate(settleBox);
         const m = await page.evaluate(DIALOG_MEASURE);
         check(`${label} — opens from ${d.hint}`, m.open);
         if (!m.open) continue;
