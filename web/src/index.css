@@ -20,6 +20,12 @@
      Defaults are the black & white theme. */
   --accent: 255 255 255;
   --accent-soft: 212 212 216;
+  /* The ink drawn ON the accent (.on-accent, the play button). Declared here
+     too, not only by applyAccent(): the default accent is white, so the ink
+     that goes with it is near-black, and without a default `rgb(var(--accent-fg))`
+     is an invalid colour until the shell's first apply — which a page rendered
+     out of the shell (the wizard, a print) would draw as unstyled text. */
+  --accent-fg: 9 9 11;
   /* App-wide motion tokens (mirrored in tailwind.config.js): one clock so
   a duration tweak lands everywhere instead of per-rule magic numbers. */
   --motion-fast: 150ms;
@@ -81,7 +87,37 @@ input[type="range"]::-moz-range-track {
 /* Fat seek/volume sliders (player bar + fullscreen): a tall invisible hit
    area around a slim visible track, with a big thumb — easy to grab and
    drag without changing the bar's layout. The INPUT height is the draggable
-   strip; the visible track stays 5px. */
+   strip; the visible track stays 5px.
+ *
+ *  The slider's whole paint is the four `--seek-*` values plus the position
+ *  `--seek-pct`, and the defaults here are exactly what this slider has always
+ *  drawn (a zinc track, an accent thumb and ring), so the player bar and the
+ *  equalizer keep their look. The FULLSCREEN player overrides all five from
+ *  its own ink/polarity table (NowPlayingView's LyricInk `seek*`): a fixed
+ *  zinc track on a near-black cover is 1.7:1 and a white accent thumb on a
+ *  bright one is 1.6:1 — the two "the bars disappear into the artwork"
+ *  failures tools/check_np_metadata_contrast.cjs measures per cover polarity.
+ *
+ *  `--seek-pct` also gives the bar a real FILLED run: below the position the
+ *  track paints `--seek-fill`, above it `--seek-track`. It defaults to 0 %, so
+ *  a caller that does not set it (the player bar) keeps the flat track it has
+ *  today; the fullscreen seek and volume sliders set it from their own value.
+ *
+ *  The five values are declared on `:root` and NOT on the slider itself, and
+ *  that is deliberate: a custom property declared ON an element beats the one
+ *  it inherits, so declaring them here would make the fullscreen player's own
+ *  `--seek-*` (an inline style on its chrome container, closer in the tree)
+ *  silently do nothing — the first draft did exactly that, and the sliders
+ *  kept the fixed zinc on every cover while the check read the variables as
+ *  "set". From the root, everything that does not override them (the player
+ *  bar, the equalizer) keeps the look it has always had. */
+:root {
+  --seek-track: #3a3a42;
+  --seek-fill: rgb(var(--accent));
+  --seek-thumb: rgb(var(--accent));
+  --seek-ring: rgb(var(--accent) / 0.15);
+  --seek-pct: 0%;
+}
 input[type="range"].seek-fat {
   height: 28px;
   background: transparent;
@@ -90,7 +126,11 @@ input[type="range"].seek-fat {
 input[type="range"].seek-fat::-webkit-slider-runnable-track {
   height: 5px;
   border-radius: 3px;
-  background: #3a3a42;
+  background: linear-gradient(
+    to right,
+    var(--seek-fill) 0 var(--seek-pct),
+    var(--seek-track) var(--seek-pct) 100%
+  );
 }
 input[type="range"].seek-fat::-webkit-slider-thumb {
   -webkit-appearance: none;
@@ -99,9 +139,9 @@ input[type="range"].seek-fat::-webkit-slider-thumb {
   height: 18px;
   margin-top: -6.5px;
   border-radius: 9999px;
-  background: rgb(var(--accent));
+  background: var(--seek-thumb);
   border: none;
-  box-shadow: 0 0 0 4px rgb(var(--accent) / 0.15);
+  box-shadow: 0 0 0 4px var(--seek-ring);
 }
 input[type="range"].seek-fat:hover::-webkit-slider-thumb {
   transform: scale(1.15);
@@ -109,15 +149,21 @@ input[type="range"].seek-fat:hover::-webkit-slider-thumb {
 input[type="range"].seek-fat::-moz-range-track {
   height: 5px;
   border-radius: 3px;
-  background: #3a3a42;
+  background: var(--seek-track);
+}
+/* Firefox paints the played run natively — no gradient needed there. */
+input[type="range"].seek-fat::-moz-range-progress {
+  height: 5px;
+  border-radius: 3px;
+  background: var(--seek-fill);
 }
 input[type="range"].seek-fat::-moz-range-thumb {
   width: 18px;
   height: 18px;
   border-radius: 9999px;
-  background: rgb(var(--accent));
+  background: var(--seek-thumb);
   border: none;
-  box-shadow: 0 0 0 4px rgb(var(--accent) / 0.15);
+  box-shadow: 0 0 0 4px var(--seek-ring);
 }
 
 /* Keyboard focus is always visible, everywhere. */
@@ -259,6 +305,86 @@ body {
   top: calc(3rem + max(env(safe-area-inset-top, 0px), var(--mlo-inset-top, 0px)));
   padding-right: max(env(safe-area-inset-right, 0px), var(--mlo-inset-right, 0px));
   padding-bottom: max(env(safe-area-inset-bottom, 0px), var(--mlo-inset-bottom, 0px));
+}
+/* The lyrics pane is `fixed` too, and is anchored between the two bars rather
+   than inside them: under the top bar (3rem tall, itself pushed down by the
+   notch) and above the player bar (5.75rem = its 0.25rem + 4.75rem row +
+   0.75rem padding). The shell has already lifted the player bar by the
+   home-indicator inset, so an offset measured from the viewport edge has to
+   repeat both insets — otherwise the pane covers the bar's top row on a
+   notched device, and swallows the bar's own controls. */
+.safe-lyrics {
+  top: calc(3rem + max(env(safe-area-inset-top, 0px), var(--mlo-inset-top, 0px)));
+  bottom: calc(5.75rem + max(env(safe-area-inset-bottom, 0px), var(--mlo-inset-bottom, 0px)));
+  padding-right: max(env(safe-area-inset-right, 0px), var(--mlo-inset-right, 0px));
+}
+
+/* Every flyout panel (Popover.tsx) — the ONE clamp that keeps a long menu
+   reachable, wherever it is rendered from.
+   `fixed` mode measures the room its trigger leaves and writes a max-height
+   inline, which wins over this; an in-place panel has no trigger rect to
+   measure, so this is its bound: the viewport, less the app's 8px gutter.
+   `overflow-y: auto` is the half that was missing: a max-height on its own
+   only shrinks the BOX while the list keeps painting past it (the default
+   `overflow: visible`), so every row below the fold was unreachable and
+   nothing could be scrolled — the Force menu on /optimize, whose last force
+   flags and its All/None row sat under the window with no way to reach them
+   (#53). With it, a clamped flyout is a scrolling one, on a mouse wheel, a
+   trackpad, a touch drag and the keyboard.
+   `overscroll-behavior: contain` keeps a touch drag inside the list: without
+   it, a finger carrying on past the last row scrolls the PAGE underneath the
+   open menu, which moves the menu out from under the thumb. */
+.popover-panel {
+  max-height: calc(100dvh - 1rem);
+  overflow-y: auto;
+  overscroll-behavior: contain;
+}
+
+/* Dialogs, phone form (Modal.tsx). From `sm` up nothing here applies and every
+   dialog keeps the centred panel it was laid out for; below it the same panel
+   is a BOTTOM SHEET: the device's full width, anchored to the bottom of the
+   visible strip, with the same header/body/footer structure. The 640px line is
+   Tailwind's `sm` — the width below which the installed clients run, where a
+   centred 85vh panel put the confirm row in the middle of the screen and a
+   phone keyboard over it.
+   Only geometry lives here: a caller's own width class still caps the panel,
+   so a `max-w-4xl` dialog is a full-width sheet on a phone and a 4xl panel on
+   a desktop. */
+@media (max-width: 639px) {
+  .modal-overlay {
+    /* Anchored to the bottom edge, and the desktop frame moves to the sheet's
+       own edges: a sheet is full-bleed, so a 1rem gutter there would show a
+       ring of page behind it. */
+    align-items: flex-end;
+    padding: 0;
+    /* How much of the layout viewport the on-screen keyboard covers. Modal.tsx
+       measures it from the visual viewport (the viewport meta resizes the
+       VISUAL viewport, not the layout one) and writes 0 when there is none —
+       so this is `padding: 0` on every device without a keyboard. */
+    padding-bottom: var(--mlo-vv-lift, 0px);
+  }
+  .modal-sheet {
+    /* Never taller than what is actually visible: 92dvh normally, the measured
+       visual viewport once a keyboard is up, and never past the notch. */
+    max-height: min(
+      92dvh,
+      calc(var(--mlo-vv-h, 100dvh) - 0.5rem),
+      calc(100dvh - max(env(safe-area-inset-top, 0px), var(--mlo-inset-top, 0px)) - 0.75rem)
+    );
+    /* Flat at the bottom, rounded at the top — a sheet has no bottom edge to
+       round, and the round top is the affordance that says "this rose from
+       the bottom". Same 0.75rem as the panel's own `rounded-xl`, so the sheet
+       and the desktop dialog have the same corner. */
+    border-radius: 0.75rem 0.75rem 0 0;
+    /* The inset is the sheet's OWN padding, because the panel is the thing
+       touching the screen edge: without it the close cross and the confirm row
+       sit under the home indicator. The overlay is `fixed` and inherits
+       nothing from `.safe-shell`, hence the repetition — same padding, same
+       env()/hook fallback order as the `.safe-*` recipes above. */
+    padding-left: max(env(safe-area-inset-left, 0px), var(--mlo-inset-left, 0px));
+    padding-right: max(env(safe-area-inset-right, 0px), var(--mlo-inset-right, 0px));
+    padding-bottom: max(env(safe-area-inset-bottom, 0px), var(--mlo-inset-bottom, 0px));
+  }
 }
 
 /* Nothing may scroll sideways: a wide table, an unbreakable file path or a
@@ -767,6 +893,21 @@ table td {
   animation: pop-in 0.18s var(--ease-motion);
 }
 
+/* A phone dialog rides in from the bottom edge it is anchored to (see the
+   `.modal-sheet` recipe), instead of popping out of the middle of a screen it
+   no longer sits in. Declared here, after `.anim-pop`, because a panel carries
+   BOTH classes and the two are equally specific — source order is what decides
+   it. */
+@keyframes sheet-up {
+  from { opacity: 0.5; transform: translateY(16px); }
+  to   { opacity: 1; transform: none; }
+}
+@media (max-width: 639px) {
+  .modal-sheet {
+    animation: sheet-up 0.18s var(--ease-motion);
+  }
+}
+
 /* An icon button changing state (download → progress → done) swaps its glyph
    in place: a small scale-in instead of a hard cut, and never a label. */
 @keyframes icon-swap {
@@ -842,6 +983,7 @@ table td {
   .stagger > *,
   .anim-pop,
   .anim-fade,
+  .modal-sheet,
   .icon-swap,
   .btn-armed,
   .page-enter,

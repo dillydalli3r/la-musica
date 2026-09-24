@@ -138,8 +138,12 @@ import inspect  # noqa: E402
 
 src = inspect.getsource(intg)
 for key, where in (('"genres+aliases"', "artist identity"),
-                   ('{"artist": mbid, "inc": "aliases"}', "artist discography browse"),
-                   ('"artist-credits+genres+aliases"', "release-group lookup"),
+                   # `+series-rels` rides the SAME browse request: it is what
+                   # each row's `podcast` block (the Podcast series an episode
+                   # is `part of`) comes from, at no extra MusicBrainz call.
+                   ('{"artist": mbid, "inc": "aliases+series-rels"}',
+                    "artist discography browse"),
+                   ('"artist-credits+genres+aliases', "release-group lookup"),
                    # …+labels: the same request carries each edition's catalog
                    # numbers, which the fallback walk's distinct-pressing rule
                    # reads (spec R169)

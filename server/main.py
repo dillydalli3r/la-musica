@@ -26,7 +26,7 @@ ROOT = pathlib.Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from fastapi import FastAPI, HTTPException, Query, Request, WebSocket, WebSocketDisconnect, UploadFile, File
+from fastapi import FastAPI, HTTPException, Query, Request, WebSocket, WebSocketDisconnect, UploadFile, File, Form
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.middleware.gzip import GZipMiddleware
 from fastapi.responses import FileResponse, JSONResponse, PlainTextResponse, Response
@@ -35,6 +35,8 @@ from pydantic import BaseModel
 from mlo import __version__ as APP_VERSION
 from mlo import load_config, save_config
 from mlo.config import DEFAULT_CONFIG
+from mlo import archives as archives_mod
+from mlo import cover_choice
 from mlo import layout as mlo_layout
 from mlo import stats as stats_mod
 from mlo import eq as eq_mod
@@ -62,10 +64,13 @@ from server import api_queue
 from server import api_add
 from server import api_choice
 from server import api_stack
+from server import script_menu
 from server import api_storage
+from server import api_streaming
 from server import api_soulseek
 from server import api_youtube
 from server import api_rym
+from server import api_cookies
 from server import auth as auth_mod
 from server import events as events_mod
 from server import job_locks
@@ -73,10 +78,12 @@ from server import discovery
 from server import artcache
 from server import version as version_mod
 from mlo.naming import sanitize_segment
-from mlo.paths import (SKIP_DIRS, clear_track_covers, downloads_dir,
-                       is_video_file, library_root, load_track_covers, move_path,
-                       save_track_covers, set_track_covers, trash_dir, trash_path)
+from mlo.paths import (AUDIO_EXTS, SKIP_DIRS, clear_track_covers, downloads_dir,
+                       is_video_file, library_root, load_track_covers, mlo_root,
+                       move_path, save_track_covers, set_track_covers, trash_dir,
+                       trash_path)
 from mlo.subproc import tool_path
+from server import imports as imports_svc
 
 # Captured at startup — worker threads use run_coroutine_threadsafe against
 # this loop to relay script progress over the WebSocket (get_event_loop()
@@ -299,10 +306,13 @@ app.include_router(api_choice.router)
 app.include_router(api_jobs.router)
 app.include_router(api_media.router)
 app.include_router(api_stack.router)
+app.include_router(script_menu.router)
 app.include_router(api_storage.router)
+app.include_router(api_streaming.router)
 app.include_router(api_soulseek.router)
 app.include_router(api_youtube.router)
 app.include_router(api_rym.router)
+app.include_router(api_cookies.router)
 
 # Script 8 (Auto tagging) never imports a genre: it derives MOOD/ENERGY from
 # the audio, cross-references INSTRUMENTAL and derives the album advisory.
@@ -1569,6 +1579,27 @@ def get_album(path: str = Query(...), staged: bool = Query(False)):
     return res
 
 
+@app.get("/api/podcasts")
+def podcast_series(series: str = Query(...)):
+    """ONE podcast series and every episode the library holds, newest first.
+
+    A podcast is a MusicBrainz SERIES of type Podcast whose episodes are
+    release groups linked `part of` it; the app records that series on each
+    episode's files (`mlo.autotag` writes the PODCASTSERIES tags), so this
+    answers from the library scan alone — no MusicBrainz request per page view.
+
+    `series` is the NAME a shelf row links by (the name the app stored, with
+    MusicBrainz's disambiguation when it stated one: that is what keeps two
+    same-named shows apart). A series the library holds no episode of is a
+    404, not an empty page — the same rule the album and artist pages follow.
+    """
+    from server import recommendations
+    payload = recommendations.podcast_series_payload(load_config(), series)
+    if payload is None:
+        raise HTTPException(404, f"no podcast series: {series}")
+    return payload
+
+
 @app.get("/api/artist")
 def get_artist(path: str = Query(...)):
     """Artist detail; `path` may be a real folder or an "mb:<artist MBID>"."""
@@ -2459,7 +2490,7 @@ def _sniff_image_ext(data: bytes, content_type: str) -> str:
 
 @app.get("/api/cover/search")
 async def cover_search(artist: str = Query(""), album: str = Query(""),
-                       limit: int = Query(40, ge=1, le=100),
+                       limit: int = Query(cover_choice.SEARCH_LIMIT, ge=1, le=100),
                        sources: Optional[str] = Query(None),
                        country: Optional[str] = Query(None),
                        release_group_mbid: Optional[str] = Query(None),
@@ -2498,7 +2529,6 @@ async def cover_search(artist: str = Query(""), album: str = Query(""),
     if not artist.strip() and not album.strip():
         raise HTTPException(400, "artist or album is required")
     src = [s.strip() for s in (sources or "").split(",") if s.strip()] or None
-    from mlo import cover_choice
     cfg = load_config()
     try:
         found = await asyncio.to_thread(
@@ -4079,7 +4109,12 @@ def _add_lyrics_state(tracks):
         row = graded.get(os.path.normpath(t["path"])) or {}
         t["lyrics_embedded"] = bool(row.get("lyrics_embedded"))
         t["lyrics_lrc"] = bool(row.get("lyrics_lrc"))
-        t["lyrics_present"] = t["lyrics_embedded"] or t["lyrics_lrc"]
+        # The wizard's per-track lyrics step reads the KIND the same way the
+        # library payload carries it (mlo.grader stamped both from one read of
+        # the two stored texts), and presence is the kind not being null — so a
+        # track the wizard shows as "Plain" is "plain" in the library too.
+        t["lyrics_kind"] = row.get("lyrics_kind") or None
+        t["lyrics_present"] = bool(t["lyrics_kind"])
 
 
 @app.post("/api/mb/match")
@@ -5247,8 +5282,8 @@ def _queue_downloads(soulseek, username, files):
     slskd answers the enqueue with 500 plus the reason in the body (`User
     <name> appears to be offline`) or with a 201 whose `Failed` list names the
     files the peer would not take. Both are the user's answer — "why did
-    nothing queue" — so they must not arrive as a bare "Internal Server
-    Error" from this app.
+    nothing queue" — so they must not arrive as a bare "Internal Server Error"
+    from this app.
     """
     try:
         return soulseek.enqueue_download(username, files)
@@ -5258,6 +5293,38 @@ def _queue_downloads(soulseek, username, files):
         # SlskdHTTPError is an httpx.HTTPStatusError; its str() now carries
         # slskd's own message (see soulseek._error_text).
         raise HTTPException(502, f"slskd did not queue the download: {e}")
+
+
+def _active_downloads(soulseek, username):
+    """The filenames this user ALREADY has queued or downloading in slskd.
+
+    slskd's enqueue is per-user and does not dedupe: asking again for a file a
+    live transfer already covers starts a SECOND batch for it, so the album
+    comes down twice — and, since the page's own downloads import themselves,
+    is imported and chained twice. The identity is slskd's own transfer row:
+    the full remote filename, exactly as it appears in the queue, in any state
+    that is not finished (`soulseek.finished_transfer`, the same rule the rest
+    of the app drops transfers by). No second notion of identity lives here.
+
+    slskd unreachable -> empty: the press is then queued exactly as before,
+    because a duplicate is the smaller harm next to refusing a download the
+    user asked for (and a route whose daemon is down 503s before this)."""
+    active = set()
+    try:
+        for entry in soulseek.downloads_state() or []:
+            if not isinstance(entry, dict):
+                continue
+            if str(entry.get("username") or "").lower() != str(username or "").lower():
+                continue
+            for d in entry.get("directories") or []:
+                for f in (d or {}).get("files") or []:
+                    if not isinstance(f, dict):
+                        continue
+                    if not soulseek.finished_transfer(f.get("state")):
+                        active.add(str(f.get("filename") or ""))
+    except Exception:
+        return set()
+    return active
 
 
 # --------------------------------------------------------------------------- #
@@ -5283,12 +5350,99 @@ def _queue_downloads(soulseek, username, files):
 # as a press would report it.
 _PAGE_LOCK = threading.Lock()
 _PAGE_DOWNLOADS: list = []
+_PAGE_INTENTS_NAME = "page_downloads.json"
+# Where the records above are kept between runs, and whether they have been
+# read back yet. A backend restart (a config save, an update, a crash) between
+# the press and the arrival must not silently drop the "a download queued HERE
+# is mine" knowledge: the transfer keeps arriving, and an album nobody imports
+# is exactly the second press this feature exists to remove.
+_PAGE_STORE = {"path": "", "loaded": False}
 # How long a recorded intent is worth honouring. An intent is only ever matched
 # against the very files it queued (see `_page_download_albums`), so this is a
 # bound on a list that must not grow for ever, not a staleness rule — a
 # download can sit queued behind a peer overnight.
 _PAGE_INTENT_TTL_S = 24 * 3600
 _PAGE_IMPORT_INTERVAL_S = 5.0
+
+
+def _page_store_path(cfg=None):
+    """Where the recorded page downloads live between runs.
+
+    Beside the rest of the app's state — `<music folder>/.mlo/data`, the folder
+    the notification log is kept in (see mlo.paths.app_data_dir) — and not in a
+    store of its own: these are a handful of small records whose only job is to
+    outlive the process."""
+    from mlo.paths import app_data_dir
+    cfg = cfg if isinstance(cfg, dict) else load_config()
+    mf = str((cfg or {}).get("music_folder") or "").strip()
+    return os.path.join(app_data_dir(mf or None), _PAGE_INTENTS_NAME)
+
+
+def _read_page_intents(path):
+    """The intents a previous run wrote to `path` ([] when there are none).
+
+    Every record is validated on the way in: the file is on the disk a user can
+    reach, and a truncated or hand-edited one must not put a malformed record
+    into a background pass (a missing size or filename is dropped, not
+    defaulted)."""
+    try:
+        with open(path, encoding="utf-8") as fh:
+            data = json.load(fh)
+    except (OSError, ValueError):
+        return []
+    out = []
+    for item in (data if isinstance(data, list) else []):
+        if not isinstance(item, dict):
+            continue
+        who = str(item.get("username") or "").strip()
+        rows = [{"filename": str((r or {}).get("filename") or ""),
+                 "size": int((r or {}).get("size") or 0)}
+                for r in (item.get("files") or []) if isinstance(r, dict)]
+        rows = [r for r in rows if r["filename"]]
+        if not who or not rows:
+            continue
+        out.append({"username": who, "files": rows,
+                    "at": float(item.get("at") or 0)})
+    return out
+
+
+def _load_page_intents():
+    """Read the persisted intents back, once per process, on first use.
+
+    Lazily and not at import time: the store lives under the music folder of
+    whatever config is live (see `_page_store_path`), which a test or a scoped
+    install moves before the first press. Expired records are dropped here, so
+    a store left behind by a run that died keeps nothing stale."""
+    if _PAGE_STORE["loaded"]:
+        return
+    _PAGE_STORE["loaded"] = True
+    _PAGE_STORE["path"] = _page_store_path()
+    cutoff = time.time() - _PAGE_INTENT_TTL_S
+    with _PAGE_LOCK:
+        _PAGE_DOWNLOADS[:] = [i for i in _read_page_intents(_PAGE_STORE["path"])
+                              if i["at"] >= cutoff]
+
+
+def _save_page_intents():
+    """Write the live intents out; a failure never loses the download.
+
+    Best effort on purpose: the pass works from memory exactly as before, so a
+    read-only or missing data folder costs the restart survival, not the
+    import."""
+    path = _PAGE_STORE["path"]
+    if not path:
+        return
+    with _PAGE_LOCK:
+        payload = [{"username": i["username"],
+                    "files": [dict(r) for r in i["files"]],
+                    "at": i["at"]} for i in _PAGE_DOWNLOADS]
+    try:
+        from mlo import atomic
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        atomic.write_bytes(path, json.dumps(payload, ensure_ascii=False)
+                           .encode("utf-8"))
+    except OSError:
+        pass
 
 
 def _remember_page_download(username, files):
@@ -5298,7 +5452,9 @@ def _remember_page_download(username, files):
     Which folder they became is decided later, from where those files really
     landed (`_local_download_candidates`/`_index_download_tree`, the mapping
     the auto-importer itself uses), so nothing here has to know slskd's
-    staging layout."""
+    staging layout. It is written out as well (see `_save_page_intents`), so a
+    restart mid-download does not forget it."""
+    _load_page_intents()
     rows = [{"filename": str((f or {}).get("filename") or ""),
              "size": int((f or {}).get("size") or 0)}
             for f in (files or [])]
@@ -5308,6 +5464,7 @@ def _remember_page_download(username, files):
     with _PAGE_LOCK:
         _PAGE_DOWNLOADS.append({"username": str(username), "files": rows,
                                 "at": time.time()})
+    _save_page_intents()
 
 
 def _page_intents():
@@ -5315,14 +5472,31 @@ def _page_intents():
 
     The records themselves are handed back, not copies: the pass marks the
     files an import has taken over ON them and prunes what is left empty."""
+    _load_page_intents()
     cutoff = time.time() - _PAGE_INTENT_TTL_S
     with _PAGE_LOCK:
         _PAGE_DOWNLOADS[:] = [i for i in _PAGE_DOWNLOADS if i["at"] >= cutoff]
         return list(_PAGE_DOWNLOADS)
 
 
+def _page_file_arrived(f, path):
+    """True when the bytes on this disk are the file the intent asked for.
+
+    The intent carries the size the press asked for (slskd's/browse's own), so
+    a local file of a different size is a different file — or this one, still
+    half written — and the album it lies in is a download that has not arrived
+    yet."""
+    want = int(f.get("size") or 0)
+    if not want:
+        return True        # the press had no size to compare against
+    try:
+        return os.path.getsize(path) == want
+    except OSError:
+        return False       # gone/renamed under us: not present yet
+
+
 def _page_intent_files(intent, ddir):
-    """`[(this intent's file, where it is on disk)]` — present files only.
+    """`[(this intent's file, where it is on disk)]` — arrived files only.
 
     The lookup is the auto-importer's own, in the same two steps: one index of
     this peer's tree for the leaves this intent queued
@@ -5330,7 +5504,8 @@ def _page_intent_files(intent, ddir):
     (`_local_download_candidates`). That is what makes a batch-dir download, an
     older leaf-shaped one and a slskd-sanitised share name all resolve the way
     the pipeline resolves them, instead of this module growing a second idea of
-    where a transfer lands."""
+    where a transfer lands. A file that is there at another SIZE is skipped
+    (see `_page_file_arrived`), and the next candidate for it is tried."""
     from server import soulseek_auto
     leaves = sorted({os.path.basename(str(f["filename"]).replace("\\", "/"))
                      for f in intent["files"]})
@@ -5339,7 +5514,7 @@ def _page_intent_files(intent, ddir):
     for f in intent["files"]:
         for p in soulseek_auto._local_download_candidates(
                 ddir, intent["username"], f["filename"], f["size"], index=index):
-            if os.path.isfile(p):
+            if os.path.isfile(p) and _page_file_arrived(f, p):
                 out.append((f, os.path.abspath(p)))
                 break
     return out
@@ -5351,7 +5526,16 @@ def _page_download_albums(cfg, ddir):
     Only folders that hold a file the user queued from the page are returned:
     an album somebody else is downloading (a wish's job, a bulk run) is not
     this pass's business — those import themselves under their own job, and a
-    second import of the same folder is the duplicate this scoping prevents."""
+    second import of the same folder is the duplicate this scoping prevents.
+
+    An intent is only ever considered WHOLE: it is the record of what the press
+    asked slskd for, and a folder holding only part of that set is a download
+    still coming (slskd reports each transfer on its own, so the rest can
+    arrive minutes later). Importing it would chain and grade an album from a
+    partial set, and the files that land afterwards would arrive into a folder
+    nothing is watching any more — `_consume_page_intents` has already spent
+    the intent. The whole set at the sizes that were asked for is what makes
+    the album ready, and nothing less."""
     from server import soulseek, soulseek_auto
     intents = _page_intents()
     if not intents:
@@ -5364,7 +5548,12 @@ def _page_download_albums(cfg, ddir):
         return []
     if not ready:
         return []
-    where = [(intent, _page_intent_files(intent, ddir)) for intent in intents]
+    where = []
+    for intent in intents:
+        files = _page_intent_files(intent, ddir)
+        if len(files) < len(intent["files"]):
+            continue       # part of what was queued is still on its way
+        where.append((intent, files))
     out = []
     for root in ready:
         held = [(intent, [fp for fp in files if soulseek_auto._under(fp[1], root)])
@@ -5386,6 +5575,7 @@ def _consume_page_intents(held):
         for intent, _files in held:
             intent["files"] = [f for f in intent["files"] if id(f) not in taken]
         _PAGE_DOWNLOADS[:] = [i for i in _PAGE_DOWNLOADS if i["files"]]
+    _save_page_intents()
 
 
 def _drop_page_intents(note=""):
@@ -5394,10 +5584,13 @@ def _drop_page_intents(note=""):
     Used when the install does not want imports to run by themselves (see
     `mlo.import_policy.page_download_auto_import`): the album keeps its row in
     the download folder — "ready to import" — and the press that imports it is
-    the review those settings asked for."""
+    the review those settings asked for. Forgetting is written out too: the
+    next run must not pick these records back up."""
+    _load_page_intents()
     with _PAGE_LOCK:
         count = len(_PAGE_DOWNLOADS)
         _PAGE_DOWNLOADS.clear()
+    _save_page_intents()
     if count and note:
         print(f"[mlo] {count} download(s) queued from the Soulseek page: {note}")
 
@@ -5462,15 +5655,32 @@ def soulseek_download(req: SoulseekDownloadRequest):
     A download queued HERE is imported by itself once it lands (see the
     page-download section above): the user has already said the album belongs
     in the library by asking for it, and a second press for the same act was
-    the queue's own "and now import it"."""
+    the queue's own "and now import it".
+
+    A file slskd is already fetching for this user is not asked for a second
+    time (see `_active_downloads`): slskd would open a NEW batch for it and
+    download the album over again, and the page's own auto-import would import
+    and chain it a second time. `skipped` says how many of the asked-for files
+    were already on their way."""
     from server import soulseek
     if not (soulseek.is_running() or soulseek.web_up()):
         raise HTTPException(400, "slskd is not running — start it first")
-    if not req.username or not req.files:
+    files = [{"filename": str((f or {}).get("filename") or ""),
+              "size": int((f or {}).get("size") or 0)}
+             for f in (req.files or [])]
+    files = [f for f in files if f["filename"]]
+    if not req.username or not files:
         raise HTTPException(400, "username and files required")
-    _queue_downloads(soulseek, req.username, req.files)
-    _remember_page_download(req.username, req.files)
-    return {"ok": True, "queued": len(req.files)}
+    active = _active_downloads(soulseek, req.username)
+    queue = [f for f in files if f["filename"] not in active]
+    if queue:
+        _queue_downloads(soulseek, req.username, queue)
+        # Only what THIS press queued: a file a live transfer already covers was
+        # not asked for again, and its album is already on its way with the
+        # intent of the press that did queue it.
+        _remember_page_download(req.username, queue)
+    return {"ok": True, "queued": len(queue),
+            "skipped": len(files) - len(queue)}
 
 
 @app.get("/api/soulseek/downloads")
@@ -5502,7 +5712,10 @@ def soulseek_download_bulk(req: SoulseekBulkDownloadRequest):
     """Queue a list of files from one user in a single POST.
 
     slskd's enqueue route is per-user, so several folders (or a whole share)
-    are one call — the UI sends what the user selected. Returns {queued}."""
+    are one call — the UI sends what the user selected. Returns
+    {queued, skipped}, and a file slskd is already fetching for this user is
+    skipped rather than queued a second time (see `_active_downloads` — the
+    same rule /api/soulseek/download-user applies)."""
     from server import soulseek
     if not (soulseek.is_running() or soulseek.web_up()):
         raise HTTPException(503, "slskd is not running — start it first")
@@ -5510,9 +5723,12 @@ def soulseek_download_bulk(req: SoulseekBulkDownloadRequest):
              for f in (req.files or []) if str(f.get("filename") or "").strip()]
     if not str(req.username or "").strip() or not files:
         raise HTTPException(400, "username and a non-empty files list are required")
-    _queue_downloads(soulseek, req.username, files)
-    _remember_page_download(req.username, files)
-    return {"queued": len(files)}
+    active = _active_downloads(soulseek, req.username)
+    queue = [f for f in files if f["filename"] not in active]
+    if queue:
+        _queue_downloads(soulseek, req.username, queue)
+        _remember_page_download(req.username, queue)
+    return {"queued": len(queue), "skipped": len(files) - len(queue)}
 
 
 @app.post("/api/soulseek/download-user")
@@ -5552,17 +5768,7 @@ def soulseek_download_user(req: SoulseekUserDownloadRequest):
     if not wanted:
         raise HTTPException(404, "no files to queue (folder not found in the share?)")
 
-    active = set()
-    try:
-        for entry in soulseek.downloads_state() or []:
-            if str(entry.get("username") or "").lower() != username.lower():
-                continue
-            for d in entry.get("directories") or []:
-                for f in d.get("files") or []:
-                    if not soulseek.finished_transfer(f.get("state")):
-                        active.add(str(f.get("filename") or ""))
-    except Exception:
-        active = set()
+    active = _active_downloads(soulseek, username)
 
     queue = [f for f in wanted if f["filename"] not in active]
     if queue:
@@ -6728,8 +6934,11 @@ def _resolve_release(mbid):
     One resolution path for every caller in this file: the edition is picked
     by the release-choice policy in `mlo.release_choice` (Official above
     promotional/bootleg, the configured medium order with physical before
-    digital, the most complete tracklist, then the earliest date; the
-    preferred country and the original-over-reissue rule break ties), and its
+    digital — the video carriers DVD, Blu-ray, VHS, Video CD and LaserDisc
+    named ahead of Digital Media, so a music video on a disc beats the same
+    video published as a download — the most complete tracklist, then the
+    earliest date; the preferred country and the original-over-reissue rule
+    break ties), and its
     reasons are reported next to the pick by `/api/mb/release-choice`. Raises
     502 when MusicBrainz cannot resolve the id at all."""
     try:
@@ -7982,10 +8191,243 @@ def organize(req: OrganizeRequest):
     return {"results": results}
 
 
+# --------------------------------------------------------------------------- #
+# Unpacked archives: the import path's one staging area for a user's archive
+# --------------------------------------------------------------------------- #
+# A dropped/picked archive is unpacked into <music>/.mlo/unpacked-<random> and
+# its tree then goes through the SAME upload route a folder does (the files are
+# already on the server's disk, so they are moved into the album rather than
+# uploaded a second time). The state folder is the app's own — the library walk
+# prunes it (SKIP_DIRS) — and the prefix is what marks a folder as one the app
+# made, which is the only thing a server-side staged path may point into.
+_UNPACK_PREFIX = "unpacked-"
+# A folder whose wizard went away is swept the next time one is created. Nothing
+# the user can see is deleted: the folder holds a copy of an archive's contents
+# that was never imported.
+_UNPACK_STALE_SECONDS = 24 * 3600
+
+
+def _unpack_area(folder: str) -> str:
+    """The realpath of the app's state folder — where unpacked trees live."""
+    return os.path.realpath(mlo_root(folder))
+
+
+def _sweep_unpacked(folder: str) -> None:
+    """Delete unpacked trees a previous wizard run left behind (24h old)."""
+    import shutil
+    area = _unpack_area(folder)
+    now = time.time()
+    try:
+        entries = os.listdir(area)
+    except OSError:
+        return
+    for name in entries:
+        if not name.startswith(_UNPACK_PREFIX):
+            continue
+        full = os.path.join(area, name)
+        try:
+            if not os.path.isdir(full) or now - os.path.getmtime(full) < _UNPACK_STALE_SECONDS:
+                continue
+        except OSError:
+            continue
+        shutil.rmtree(full, ignore_errors=True)
+
+
+def _unpack_root(folder: str) -> str:
+    """A fresh, app-made folder for one archive's contents."""
+    area = _unpack_area(folder)
+    os.makedirs(area, exist_ok=True)
+    _sweep_unpacked(folder)
+    return tempfile.mkdtemp(prefix=_UNPACK_PREFIX, dir=area)
+
+
+def _staged_paths(blob: Optional[str], folder: str) -> List[tuple]:
+    """The unpacked files the wizard kept, from its own JSON list.
+
+    The body carries PATHS, not bytes: an archive the server unpacked needs no
+    second upload. Each one comes back as ``(rel path, absolute path)`` — the
+    relative half is the file's place inside the folder this app unpacked it
+    into, which is what gives the album the structure the archive had (a rip's
+    CD1/ folder, its .cue, its .log).
+
+    The one rule that matters is WHERE such a path may point: a folder THIS app
+    made under its own state root (<music>/.mlo/unpacked-*), resolved through
+    realpath so a link cannot be used to name somebody else's file. Anything
+    else is refused outright; the alternative is an upload route that will place
+    any file on the server into the library on request.
+    """
+    if not blob:
+        return []
+    try:
+        items = json.loads(blob)
+    except ValueError:
+        raise HTTPException(400, "staged is not a JSON list of paths")
+    if not isinstance(items, list) or any(not isinstance(i, str) for i in items):
+        raise HTTPException(400, "staged is not a JSON list of paths")
+    area = _unpack_area(folder)
+    out: List[tuple] = []
+    for raw in items:
+        real = os.path.realpath(os.path.normpath(raw))
+        rel = os.path.relpath(real, area).replace("\\", "/")
+        top = rel.split("/")[0]
+        if rel.startswith("..") or not top.startswith(_UNPACK_PREFIX) or \
+                len(rel.split("/")) < 2:
+            raise HTTPException(400, "staged file outside the unpack area")
+        if os.path.islink(raw) or not os.path.isfile(real):
+            raise HTTPException(400, f"staged file is not a plain file: {rel}")
+        out.append((rel[len(top) + 1:], real))
+    return out
+
+
+@app.post("/api/import/unpack")
+async def import_unpack(
+    file: Optional[UploadFile] = File(None),
+    path: str = Query(None),
+):
+    """Unpack ONE archive into the app's staging area and list what came out.
+
+    The wizard sends the user's archive either as bytes (a drop or a pick in the
+    browser) or as a PATH (the desktop shell hands over OS paths; the shell and
+    the server share a filesystem there). Both land in the same place: a fresh
+    folder under <music>/.mlo, unpacked by `mlo.archives.extract`, whose rules
+    are the reason an absolute member, a `..` escape, a link or a device node is
+    refused BEFORE anything is written — with the reason in this reply, not a
+    half-unpacked album in the library.
+
+    The reply is what the wizard shows before it commits: the folder, every
+    file in it, and how many of them are audio. `audio: 0` is a FACT the wizard
+    turns into "this archive holds no audio" — an archive of images and sheets
+    is not an empty album.
+
+    Nothing is imported here: the extracted tree is only staged. It goes into
+    the library through the existing upload route (the wizard passes the files
+    it kept as `staged`), and `/api/import/unpack/discard` — or the 24h sweep —
+    removes what was left.
+    """
+    cfg = load_config()
+    folder = cfg.get("music_folder") or ""
+    if not folder or not os.path.isdir(folder):
+        raise HTTPException(400, "music_folder not set or not found")
+    if file is None and not path:
+        raise HTTPException(400, "send either an archive file or an archive path")
+    import shutil
+    label = ""
+    root = ""
+    tmp = ""          # the uploaded archive itself — never inside `root`
+    try:
+        if file is not None:
+            label = os.path.basename((file.filename or "archive").replace("\\", "/"))
+            if "." not in label:
+                raise HTTPException(400, "the uploaded archive has no filename")
+        else:
+            source_path = os.path.realpath(os.path.normpath(path))
+            if not os.path.isfile(source_path):
+                raise HTTPException(404, "archive not found")
+            label = os.path.basename(source_path)
+        if archives_mod.import_kind(label) is None:
+            raise HTTPException(
+                400, f"{label}: not an archive this app can unpack — it "
+                     f"reads {archives_mod.SUPPORTED_ARCHIVES}")
+        root = _unpack_root(folder)
+        if file is not None:
+            fd, tmp = tempfile.mkstemp(
+                prefix="incoming-", suffix=os.path.splitext(label)[1],
+                dir=os.path.dirname(root))
+            with os.fdopen(fd, "wb") as out:
+                # A rip archive is hundreds of megabytes: off the event loop,
+                # or every other request (and the progress socket) waits for it.
+                await asyncio.to_thread(shutil.copyfileobj, file.file, out)
+            source = tmp
+        else:
+            source = source_path
+
+        try:
+            await asyncio.to_thread(archives_mod.extract, source, root)
+        except archives_mod.ArchiveError as e:
+            raise HTTPException(400, str(e))
+
+        audio_exes = tuple(AUDIO_EXTS)
+        files_out = []
+        audio = 0
+        for walk_root, _dirs, names in os.walk(root):
+            for name in names:
+                full = os.path.join(walk_root, name)
+                inside = os.path.relpath(full, root).replace("\\", "/")
+                try:
+                    size = os.path.getsize(full)
+                except OSError:
+                    size = 0
+                if inside.lower().endswith(audio_exes):
+                    audio += 1
+                files_out.append({"relPath": inside,
+                                  "path": full.replace("\\", "/"),
+                                  "size": size})
+        files_out.sort(key=lambda f: f["relPath"].lower())
+        return {"ok": True, "label": label, "dir": root.replace("\\", "/"),
+                "files": files_out, "unpacked": len(files_out), "audio": audio}
+    except Exception:
+        if root and os.path.isdir(root):
+            shutil.rmtree(root, ignore_errors=True)
+        raise
+    finally:
+        if tmp:
+            try:
+                os.remove(tmp)
+            except OSError:
+                pass
+
+
+@app.post("/api/import/unpack/discard")
+async def import_unpack_discard(
+    dirs: List[str] = Form(default=[]),
+):
+    """Remove unpacked trees the wizard has finished with (or given up on).
+
+    Only a folder this app made is ever removed: a name under the state root
+    with the app's own prefix, and never a link. Everything else is answered as
+    "not removed" rather than obeyed — this route takes paths from the client.
+    """
+    cfg = load_config()
+    folder = cfg.get("music_folder") or ""
+    if not folder or not os.path.isdir(folder):
+        raise HTTPException(400, "music_folder not set or not found")
+    import shutil
+    area = _unpack_area(folder)
+    removed, skipped = [], []
+    for raw in dirs:
+        real = os.path.realpath(os.path.normpath(raw))
+        rel = os.path.relpath(real, area).replace("\\", "/")
+        if rel.startswith("..") or "/" in rel or not rel.startswith(_UNPACK_PREFIX) or \
+                not os.path.isdir(real) or os.path.islink(raw):
+            skipped.append(str(raw).replace("\\", "/"))
+            continue
+        shutil.rmtree(real, ignore_errors=True)
+        removed.append(rel)
+    return {"ok": True, "removed": removed, "skipped": skipped}
+
+
+def _place_staged(staged, album_path: str) -> None:
+    """Move each staged file to its own relative path inside `album_path`.
+
+    The album folder is made if it does not exist. A file a lock holds refuses
+    the whole placement with the app's usual sentence — move_path retried every
+    sharing violation and never copies blindly, so the source is still whole.
+    """
+    os.makedirs(album_path, exist_ok=True)
+    for rel, src in staged:
+        dest = os.path.join(album_path, *rel.split("/"))
+        os.makedirs(os.path.dirname(dest), exist_ok=True)
+        if not move_path(src, dest):
+            raise HTTPException(
+                500, f"could not place {rel} — a file inside it is "
+                     f"still in use (stop playback and retry)")
+
+
 @app.post("/api/import/upload")
 async def import_upload(
     target_dir: str = Query(...),
-    files: List[UploadFile] = File(...),
+    files: List[UploadFile] = File(default=[]),
+    staged: Optional[str] = Form(None),
 ):
     """Upload files into a new album directory under the library (Artists).
 
@@ -7997,11 +8439,30 @@ async def import_upload(
     BASENAME is used: `_in_music_folder` alone would accept a name like
     "../Escape" (it resolves to <music>/Escape — inside the music folder, but
     outside Artists/ where the library actually lives).
+
+    ONE song out of an album does not become an album of its own: when the
+    whole upload is a single track, `target_dir` names that track (the wizard
+    has no album to name for a dropped file) and the file is placed on the
+    album it belongs to instead — see `server.imports.import_album_target`,
+    which reads the release identity the library already holds and the album
+    the file's own tags state. The response's `album_path`/`album_name` are
+    the album it actually landed in, and `merged` says the library already
+    had it.
+
+    `staged` is the other way in, for files that are ALREADY on this server: an
+    archive the wizard unpacked (`POST /api/import/unpack`) or a file the
+    desktop shell handed over as a path. A JSON list of absolute paths inside
+    the app's own unpack area, moved into the album rather than uploaded again —
+    everything after that point is the same code as a byte upload, so an album
+    that came out of an archive is grouped, merged and marked partial exactly
+    like the folder it was meant to be.
     """
     cfg = load_config()
     folder = cfg.get("music_folder") or ""
     if not folder or not os.path.isdir(folder):
         raise HTTPException(400, "music_folder not set or not found")
+    if not files and not staged:
+        raise HTTPException(400, "no files to upload")
     raw = os.path.basename(target_dir)
     safe = re_safe_filename(raw) or "Imported"
     # A name of nothing but dots or blanks has no legal spelling: os.path
@@ -8012,27 +8473,87 @@ async def import_upload(
     # silently inventing a folder for it.
     if not raw.strip(" ."):
         raise HTTPException(400, "invalid album name")
-    target = os.path.normpath(os.path.join(library_root(folder), safe))
+    root = library_root(folder)
+    target = os.path.normpath(os.path.join(root, safe))
     if not _in_music_folder(target, folder):
         raise HTTPException(400, "target outside music folder")
-    os.makedirs(target, exist_ok=True)
-    saved = []
-    for f in files:
-        name = (f.filename or "file").replace("\\", "/")
-        parts = [p for p in name.split("/") if p and p not in (".", "..")]
-        if not parts:
-            continue
-        # reject absolute/escaping paths
-        if os.path.isabs(name) or ".." in name.split("/"):
-            raise HTTPException(400, f"unsafe filename: {name!r}")
-        dest = os.path.join(target, *parts)
-        os.makedirs(os.path.dirname(dest), exist_ok=True)
-        data = await f.read()
-        # Large albums must not stall the event loop (it would freeze the
-        # progress websocket and every other request mid-upload).
-        await asyncio.to_thread(_write_upload_bytes, dest, data)
-        saved.append(dest.replace("\\", "/"))
-    return {"ok": True, "saved": saved, "album_path": target.replace("\\", "/")}
+    # Staged inside the app's own state folder (<music>/.mlo — the one the
+    # library walk prunes, SKIP_DIRS), then placed in one rename: WHICH album
+    # these tracks belong to is not known until they are on disk, because the
+    # answer is in the files themselves (a single song's own ALBUM/MBID tags,
+    # or the release identity the library already holds — see
+    # server.imports.import_album_target). A staging folder under Artists/
+    # would be listed as an album while the upload is in flight; keeping it in
+    # the music folder keeps the placement a same-volume rename.
+    try:
+        state = mlo_root(folder)
+        os.makedirs(state, exist_ok=True)
+        stage = tempfile.mkdtemp(prefix="import-", dir=state) if files else ""
+    except OSError as e:
+        raise HTTPException(500, f"could not stage the upload: {e}")
+    staged_files = []  # (rel path as sent, staged absolute path)
+    try:
+        for f in files:
+            name = (f.filename or "file").replace("\\", "/")
+            parts = [p for p in name.split("/") if p and p not in (".", "..")]
+            if not parts:
+                continue
+            # reject absolute/escaping paths
+            if os.path.isabs(name) or ".." in name.split("/"):
+                raise HTTPException(400, f"unsafe filename: {name!r}")
+            dest = os.path.join(stage, *parts)
+            os.makedirs(os.path.dirname(dest), exist_ok=True)
+            data = await f.read()
+            # Large albums must not stall the event loop (it would freeze the
+            # progress websocket and every other request mid-upload).
+            await asyncio.to_thread(_write_upload_bytes, dest, data)
+            staged_files.append(("/".join(parts), dest))
+        # Files the server already holds (an unpacked archive): the same list,
+        # with the paths they have inside their own unpacked root, so the album
+        # comes out of an archive with the structure the archive gave it.
+        staged_files.extend(_staged_paths(staged, folder))
+        if not staged_files:
+            raise HTTPException(400, "no files to upload")
+        album_name, album_path, how = imports_svc.import_album_target(
+            [p for rel, p in staged_files if rel.lower().endswith(AUDIO_EXTS)], raw, cfg)
+        if not album_path:
+            album_path = os.path.normpath(
+                os.path.join(root, re_safe_filename(album_name) or safe))
+        if not _in_music_folder(album_path, folder):
+            raise HTTPException(400, "target outside music folder")
+        merged = bool(how == "library" and os.path.isdir(album_path))
+        if merged:
+            # The library already holds this album: fill it, and never
+            # overwrite what it has (its own rip sheets, a same-named track).
+            imports_svc.merge_into_album(album_path, [p for _rel, p in staged_files])
+        elif os.path.isdir(album_path) or not stage:
+            # Either the same album again — the bytes land where they are sent,
+            # as they always have (a retried upload replaces its own files) — or
+            # files the server already held (an unpacked archive), whose album
+            # folder is made here and filled file by file.
+            _place_staged(staged_files, album_path)
+        else:
+            if not move_path(stage, album_path):
+                raise HTTPException(
+                    500, f"could not import {os.path.basename(album_path)} — a "
+                         f"file inside it is still in use (stop playback and "
+                         f"retry)")
+            stage = ""
+        saved = [os.path.join(album_path, *rel.split("/")).replace("\\", "/")
+                 for rel, _p in staged_files]
+        # A rip that shipped its sheets and only part of its tracks just told
+        # us what the album is missing (server.imports.record_sidecar_
+        # tracklist): record it here, so ONE track of a CD rip is a partial
+        # release from the moment it lands, not a one-track album.
+        imports_svc.record_sidecar_tracklist(album_path, cfg)
+    finally:
+        if stage and os.path.isdir(stage):
+            import shutil
+            shutil.rmtree(stage, ignore_errors=True)
+    tagcache.invalidate_all()
+    return {"ok": True, "saved": saved,
+            "album_path": album_path.replace("\\", "/"),
+            "album_name": os.path.basename(album_path), "merged": merged}
 
 
 def _write_upload_bytes(dest: str, data: bytes) -> None:
@@ -8047,8 +8568,22 @@ def import_scan(path: str = Query(...)):
 
     The folder may live anywhere — the follow-up ingest step moves it into
     the library.
+
+    A single FILE is answered as a one-entry listing: a desktop shell hands
+    over OS drop PATHS, and "one track dragged out of a folder" is a normal
+    thing to drop. The folder it lists itself as its own root then reads as one
+    file at the top level, which is exactly what the ingest step's single-track
+    rule expects.
     """
     p = os.path.realpath(os.path.normpath(path))
+    if os.path.isfile(p):
+        try:
+            size = os.path.getsize(p)
+        except OSError:
+            size = 0
+        return {"root": p.replace("\\", "/"), "file": True,
+                "files": [{"relPath": os.path.basename(p).replace("\\", "/"),
+                           "size": size}]}
     if not os.path.isdir(p):
         raise HTTPException(404, "folder not found")
     out = []
@@ -8072,6 +8607,41 @@ def import_scan(path: str = Query(...)):
     return {"root": p.replace("\\", "/"), "files": out}
 
 
+def _ingest_one_file(src, target, cfg, folder):
+    """Place ONE file that already sits on this server's disk.
+
+    What a desktop shell's OS drop yields is a path, not bytes, and one track
+    dragged out of a folder is the ordinary case. It goes through the SAME
+    single-track rule a folder holding one track does
+    (`imports.import_album_target`): the track joins the album the library
+    already holds, or the album its own tags name, and only a file that answers
+    neither becomes a folder named after the wizard's field. The file MOVES —
+    an ingest of a path is the user handing the app that file, exactly as
+    dropping a folder moves the folder.
+    """
+    raw = os.path.basename(target or os.path.basename(src))
+    name = re_safe_filename(raw)
+    if not name or not raw.strip(" ."):
+        raise HTTPException(400, "invalid album name")
+    _got, album_path, _how = imports_svc.import_album_target([src], raw, cfg)
+    if not album_path:
+        album_path = os.path.normpath(os.path.join(library_root(folder), name))
+    if not _in_music_folder(album_path, folder):
+        raise HTTPException(400, "target outside music folder")
+    os.makedirs(album_path, exist_ok=True)
+    dest_file = os.path.join(album_path, os.path.basename(src))
+    if os.path.normcase(os.path.abspath(dest_file)) != os.path.normcase(os.path.abspath(src)):
+        if not move_path(src, dest_file):
+            raise HTTPException(
+                500, f"could not import {os.path.basename(src)} — a file inside "
+                     f"it is still in use (stop playback and retry)")
+    tagcache.invalidate_all()
+    mbresolve.invalidate()
+    imports_svc.record_sidecar_tracklist(album_path, cfg)
+    return {"ok": True, "path": album_path.replace("\\", "/"),
+            "album_name": os.path.basename(album_path), "merged": False}
+
+
 def _ingest_paths(source, target):
     """The folders ``POST /api/import/ingest`` touches: the album being moved
     and the library folder it lands in.
@@ -8087,7 +8657,31 @@ def _ingest_paths(source, target):
     paths = [source]
     if folder and name:
         paths.append(os.path.join(library_root(folder), name))
+    # A folder holding nothing but one track is that TRACK, and the album it
+    # belongs to is its destination (see the upload route): the job lock has
+    # to claim the folder the move will really touch, or a same-named album
+    # could be organized while the file is being placed in it.
+    only = _only_audio(source)
+    if len(only) == 1:
+        try:
+            _n, album_path, _how = imports_svc.import_album_target(
+                only, os.path.basename(target or source), load_config())
+        except Exception:
+            album_path = ""
+        if album_path and album_path not in paths:
+            paths.append(album_path)
     return paths
+
+
+def _only_audio(folder):
+    """The folder's audio files, or [] — its contents when it holds one
+    track and nothing else."""
+    try:
+        names = sorted(os.listdir(folder))
+    except OSError:
+        return []
+    return [os.path.join(folder, f) for f in names
+            if f.lower().endswith(AUDIO_EXTS) and os.path.isfile(os.path.join(folder, f))]
 
 
 @app.post("/api/import/ingest")
@@ -8095,12 +8689,24 @@ def _ingest_paths(source, target):
 def import_ingest(source: str = Query(...), target: str = Query(...)):
     """Move an album folder into the library. Same volume it is one rename;
     across devices it is a verified copy followed by the source's removal —
-    never a blind copytree + rmtree."""
+    never a blind copytree + rmtree.
+
+    A folder holding ONE track is not an album: it is placed on the album the
+    track belongs to (see `server.imports.import_album_target`), and a folder
+    that ships the rip's sheets with only part of its tracks has the sheets'
+    tracklist recorded, so the album reads as partial.
+
+    A single FILE is that same case with the file named directly — what a
+    desktop shell's OS drop yields (paths, not bytes). It is placed by the one
+    single-track rule rather than inventing a one-file album.
+    """
     cfg = load_config()
     folder = cfg.get("music_folder") or ""
     if not folder or not os.path.isdir(folder):
         raise HTTPException(400, "music_folder not set or not found")
     src = os.path.normpath(source)
+    if os.path.isfile(src):
+        return _ingest_one_file(src, target, cfg, folder)
     if not os.path.isdir(src):
         raise HTTPException(404, "source folder not found")
     raw = os.path.basename(target or os.path.basename(src))
@@ -8109,14 +8715,43 @@ def import_ingest(source: str = Query(...), target: str = Query(...)):
     # above: ".." joined to the library root IS the library root.
     if not name or not raw.strip(" ."):
         raise HTTPException(400, "invalid album name")
-    dest = os.path.normpath(os.path.join(library_root(folder), name))
+    root = library_root(folder)
+    dest = os.path.normpath(os.path.join(root, name))
     if not _in_music_folder(dest, folder):
         raise HTTPException(400, "target outside music folder")
     if os.path.normcase(os.path.abspath(dest)) == os.path.normcase(os.path.abspath(src)):
-        return {"ok": True, "path": dest.replace("\\", "/")}
+        return {"ok": True, "path": dest.replace("\\", "/"), "album_name": name}
+    only = _only_audio(src)
+    if len(only) == 1:
+        got, album_path, how = imports_svc.import_album_target(only, raw, cfg)
+        if album_path and os.path.isdir(album_path):
+            # The library already holds this album: the track joins it, and
+            # the album becomes partial.
+            one = os.path.join(album_path, os.path.basename(only[0]))
+            if not move_path(only[0], one):
+                raise HTTPException(
+                    500, f"could not place {os.path.basename(only[0])} into "
+                         f"{os.path.basename(album_path)} — a file inside it "
+                         f"is still in use (stop playback and retry)")
+            try:
+                os.rmdir(src)  # the one file left: the folder goes with it
+            except OSError:
+                pass
+            tagcache.invalidate_all()
+            mbresolve.invalidate()
+            imports_svc.record_sidecar_tracklist(album_path, cfg)
+            return {"ok": True, "path": album_path.replace("\\", "/"),
+                    "album_name": os.path.basename(album_path), "merged": True}
+        if got and re_safe_filename(got) != name:
+            # The track's own tags name the album: the folder it is imported
+            # into is the album's, not the track's.
+            name = re_safe_filename(got)
+            dest = os.path.normpath(os.path.join(root, name))
+            if not _in_music_folder(dest, folder):
+                raise HTTPException(400, "target outside music folder")
     n = 2
     while os.path.exists(dest):
-        dest = os.path.normpath(os.path.join(library_root(folder), f"{name} ({n})"))
+        dest = os.path.normpath(os.path.join(root, f"{name} ({n})"))
         n += 1
     if not move_path(src, dest):
         # move_path retried every lock/sharing violation and refuses to copy
@@ -8127,7 +8762,9 @@ def import_ingest(source: str = Query(...), target: str = Query(...)):
             f"(stop playback and retry)")
     tagcache.invalidate_all()
     mbresolve.invalidate()
-    return {"ok": True, "path": dest.replace("\\", "/")}
+    imports_svc.record_sidecar_tracklist(dest, cfg)
+    return {"ok": True, "path": dest.replace("\\", "/"),
+            "album_name": os.path.basename(dest), "merged": False}
 
 
 @app.post("/api/import/commit")
@@ -8232,7 +8869,9 @@ def import_expected(req: ImportExpected):
     This is what makes a PARTIAL import legible: the album page diffs the
     files on disk against this list and greys out the ones that never came
     in. Sending an empty `tracks` clears the manifest again (a full import
-    leaves nothing behind)."""
+    leaves nothing behind) — unless the album's own .cue/.log states a
+    tracklist that is not complete on disk, in which case THAT is recorded
+    (the rip's own answer is better than none)."""
     from mlo.paths import save_expected_tracks
     cfg = load_config()
     folder = cfg.get("music_folder") or ""
@@ -8244,10 +8883,23 @@ def import_expected(req: ImportExpected):
     _guard_folder(target, req.staged, "target", folder)
     if not os.path.isdir(target):
         raise HTTPException(404, "album not found")
-    if not save_expected_tracks(target, req.release_id, req.tracks):
+    tracks = req.tracks or []
+    if not tracks:
+        # An empty request is normally "clear the manifest", but it is ALSO
+        # what a release lookup with no tracklist sends. A rip that shipped
+        # its .cue/.log knows what the album holds, so that is recorded
+        # instead of discarding the only statement of what is missing: it
+        # writes only when the folder has no manifest of its own and part of
+        # the rip is not there (server.imports.record_sidecar_tracklist).
+        recorded = imports_svc.record_sidecar_tracklist(target, cfg)
+        if recorded:
+            tagcache.invalidate_all()
+            return {"ok": True, "tracks": len(recorded["tracks"]),
+                    "source": "sidecars"}
+    if not save_expected_tracks(target, req.release_id, tracks):
         raise HTTPException(500, "could not write the release tracklist")
     tagcache.invalidate_all()
-    return {"ok": True, "tracks": len(req.tracks or [])}
+    return {"ok": True, "tracks": len(tracks)}
 
 
 # --------------------------------------------------------------------------- #

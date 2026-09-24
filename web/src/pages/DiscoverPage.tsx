@@ -198,7 +198,7 @@ export default function DiscoverPage() {
                 <Segmented value={kind} onChange={(k) => write({ kind: k })} options={KINDS} />
                 <div className="flex flex-wrap items-center gap-1.5">
                   <button
-                    className={`chip border transition-colors ${
+                    className={`chip border transition-colors tap ${
                       source === "all" ? "bg-accent/20 border-accent/50 text-white" : "bg-raise border-border text-zinc-400 hover:text-white"
                     }`}
                     title="Ask every source this server can use"
@@ -209,7 +209,7 @@ export default function DiscoverPage() {
                   {sourceIds.map((id) => (
                     <button
                       key={id}
-                      className={`chip border transition-colors ${
+                      className={`chip border transition-colors tap ${
                         source === id ? "bg-accent/20 border-accent/50 text-white" : "bg-raise border-border text-zinc-400 hover:text-white"
                       }`}
                       title={`Only ${sourceLabel(id, labels.get(id))}`}

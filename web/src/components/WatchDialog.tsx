@@ -35,6 +35,17 @@ export const SECONDARY_TYPES = [
   "remix", "dj-mix", "mixtape/street", "demo", "field recording",
 ] as const;
 
+/** The app's DERIVED release types (mlo.naming.DERIVED_RELEASE_TYPES), kept
+ *  apart from MusicBrainz's own lists above because MusicBrainz publishes no
+ *  such release-group type: a podcast is a SERIES of type Podcast and an
+ *  episode is a release group linked `part of` it, which the app derives from
+ *  the group's own series relation (server.integrations.podcast_series_of —
+ *  carried on every browse row). A watch may select one, and the gate matches
+ *  it against that derived identity (server.artist_watch.evaluate) — it is
+ *  never sent to MusicBrainz as a `primarytype:` query, which is exactly why
+ *  it is not in the two lists above. */
+export const DERIVED_TYPES = ["podcast"] as const;
+
 /** The label of every type MusicBrainz can state — its own capitalization. */
 export const TYPE_LABELS: Record<string, string> = {
   album: "Album",
@@ -53,6 +64,7 @@ export const TYPE_LABELS: Record<string, string> = {
   "mixtape/street": "Mixtape/Street",
   demo: "Demo",
   "field recording": "Field recording",
+  podcast: "Podcast",
 };
 
 /** A new watch's starting point — the server's own defaults. */
@@ -76,8 +88,12 @@ export function typeSummary(types: string[]): string {
 /** Does a release group of this shape fall under the ticked types? A row
  *  matches when its PRIMARY type is ticked OR any SECONDARY type is — the rule
  *  the server applies, mirrored here only for the picker's own count readout
- *  (`allowed` on each row stays the server's verdict). */
+ *  (`allowed` on each row stays the server's verdict) — plus, for the derived
+ *  "podcast" selection, when the row carries the series the app read off its
+ *  MusicBrainz relation (a plain Broadcast carries none, so it never matches
+ *  it). */
 function matchesTypes(c: WatchCandidate, types: Set<string>): boolean {
+  if (types.has("podcast") && c.podcast) return true;
   if (types.has(c.primary_type)) return true;
   return (c.secondary_types ?? []).some((s) => types.has(s));
 }
@@ -471,7 +487,12 @@ export default function WatchDialog({
       <div>
         <div className="text-[11px] font-semibold uppercase tracking-wider text-zinc-500 pb-1.5">Which release types</div>
         <div className="space-y-2">
-          {([["Primary", PRIMARY_TYPES], ["Secondary", SECONDARY_TYPES]] as const).map(([group, ids]) => (
+          {([
+            ["Primary", PRIMARY_TYPES, "MusicBrainz's own primary type"],
+            ["Secondary", SECONDARY_TYPES, "MusicBrainz's own secondary type"],
+            ["Derived", DERIVED_TYPES,
+             "the app's own type, read from the release group's MusicBrainz series relation"],
+          ] as const).map(([group, ids, why]) => (
             <div key={group}>
               <div className="text-[10px] uppercase tracking-wider text-zinc-600 pb-1">{group}</div>
               <div className="flex flex-wrap gap-1.5">
@@ -482,7 +503,7 @@ export default function WatchDialog({
                       ? "bg-accent/15 border-accent/40 text-accent-soft"
                       : "bg-white/5 border-white/15 text-zinc-400 hover:text-white"}`}
                     aria-pressed={types.has(id)}
-                    title={`${typeLabel(id)} — MusicBrainz's own type name: ${id}`}
+                    title={`${typeLabel(id)} — ${why}: ${id}`}
                     onClick={() => toggleType(id)}
                   >
                     {typeLabel(id)}
@@ -494,7 +515,9 @@ export default function WatchDialog({
         </div>
         <div className="text-[11px] text-zinc-500 pt-2 leading-snug">
           The watcher only downloads release groups of these types — a row counts when its primary type is ticked
-          or any of its secondary types is.
+          or any of its secondary types is. Podcast is the app's own type, not one MusicBrainz publishes: a podcast
+          is a series, and an episode is a Broadcast release group linked to it, so ticking Podcast takes the
+          episodes and leaves other broadcasts alone.
         </div>
       </div>
 

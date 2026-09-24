@@ -92,7 +92,12 @@ def _script_entry(sid: int, cfg: dict, order: List[int]) -> dict:
     label, runner = RUNNERS[sid]
     name, desc = _MENU.get(sid, (label, ""))
     gates = _gate_keys(sid)
-    gated_on = all(bool(cfg.get(k, True)) for k in gates) if gates else True
+    # ANY-of, matching the run (and `_gate_keys`'s own docstring): a chain
+    # skips a script only when EVERY switch is off (script_runners.run_script:
+    # `if not any(cfg.get(k, True) for k in keys)`). `all` here reported 17 as
+    # gated off with transliteration ON and translation off, while a run of 17
+    # really runs — the page and the chain disagreed about the same config.
+    gated_on = any(bool(cfg.get(k, True)) for k in gates) if gates else True
     return {
         "id": sid,
         "label": name,
@@ -119,9 +124,18 @@ def _scripts(cfg: dict, order: List[int]) -> List[dict]:
 def _with_script(order: List[int], sid: int, on: bool) -> List[int]:
     """Tick / untick a script in the Run All order. A re-ticked script goes
     back to its default pipeline position instead of jumping to the end (the
-    same rule Settings -> Scripts uses)."""
+    same rule Settings -> Scripts uses).
+
+    A script the default order deliberately does not carry (see
+    ``script_runners.OPT_IN_SCRIPTS`` — the outward-facing ones, which would
+    otherwise publish on every import of every install) has no default position
+    to go back to, so ticking it lands it at the END of the chain: where a run
+    puts somebody else's database is the user's own decision, and there is no
+    shipped answer to restore (mlo.config.normalize_config keeps it there)."""
     if not on:
         return [i for i in order if i != sid]
+    if sid not in DEFAULT_RUN_ALL_ORDER:
+        return [i for i in order if i != sid] + [sid]
     at = len([i for i in order
               if DEFAULT_RUN_ALL_ORDER.index(i) < DEFAULT_RUN_ALL_ORDER.index(sid)])
     return order[:at] + [sid] + order[at:]

@@ -11,9 +11,9 @@ config validator, the wizard and the notification all need the same answer:
   then reports what is missing ("automatic", the default), or stops before the
   first step that needs a decision and hands the album over ("review").
 * **families** — the things an album carries that no script can invent from the
-  audio alone, in the wizard's own step order (Links, Covers, Genres, Lyrics,
-  Advisory). ``import_review_families`` names the ones the user wants to decide
-  by hand even in automatic mode; review mode keeps all of them.
+  audio alone, in the wizard's own step order (Links, Source, Covers, Genres,
+  Lyrics, Advisory). ``import_review_families`` names the ones the user wants to
+  decide by hand even in automatic mode; review mode keeps all of them.
 * **manual counterparts** — every family entry carries the options a person
   uses instead (`manual_options`), one row per thing the step decides, each
   naming the route it calls, the entry point both halves share and the tags and
@@ -80,6 +80,34 @@ FAMILIES = (
              "auto": "server.imports:stamp_rym_links",
              "service": "server.main:rym_resolve",
              "tags": ("RATEYOURMUSIC_ALBUM", "RATEYOURMUSIC_ARTIST"),
+             "files": ()},
+        ),
+    },
+    {
+        "id": "source",
+        "label": "Source",
+        "step": "Match",
+        # SOURCE is where the rip came from, and the grader requires one on
+        # every track of a Digital Media album. The import settles it from
+        # evidence it may honestly write — the release's own store URLs, or the
+        # provider the acquisition knew — and nothing else may invent one, so
+        # an album neither answer reaches is ASKED for it. No `off` key: no
+        # switch writes a SOURCE on the import's behalf, so there is nothing to
+        # turn off — keeping this family for yourself (`import_review_families`)
+        # is what "I will set SOURCE by hand" means, and it is also the one
+        # family whose row writes a value the user TYPED rather than a fetched
+        # one.
+        "codes": {"SOURCE": "source"},
+        "manual": (
+            {"id": "source-set",
+             "surface": ("wizard", "album-page"),
+             "route": "/api/import/source",
+             "method": "POST",
+             # The button and the pipeline run ONE code path: the route's
+             # handler IS `stamp_album_source`, the same call the import makes.
+             "auto": "server.imports:stamp_album_source",
+             "service": "server.imports:stamp_album_source",
+             "tags": ("SOURCE",),
              "files": ()},
         ),
     },

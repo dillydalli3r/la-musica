@@ -14,7 +14,8 @@ from mlo.grader import (_empty_folder_result, _find_empty_folders, _grade_album,
                         printed_pct)
 from mlo.audio import AudioFile
 from mlo.artistdata import has_image, strip_mbid_suffix
-from mlo.paths import (LIB_VIDEO_EXTS, load_expected_tracks, load_pending,
+from mlo.paths import (expected_tracks_state, LIB_VIDEO_EXTS,
+                       load_expected_tracks, load_pending,
                        load_track_covers, _album_file, SIDECAR_COVER_EXTS)
 from server import tagcache
 
@@ -30,6 +31,11 @@ TRACK_TAGS = [
     "RATEYOURMUSIC_ALBUM", "RATEYOURMUSIC_TRACK", "RATEYOURMUSIC_ARTIST",
     "ALBUMARTISTSORT", "ORIGINALDATE", "RELEASETYPE", "RELEASESTATUS",
     "RELEASECOUNTRY", "CATALOGNUMBER", "LABEL", "BARCODE", "SCRIPT",
+    # The podcast identity (mlo.naming's DERIVED type): the SERIES MusicBrainz
+    # links an episode's release group to, and the episode number it states.
+    # Read here so the Podcasts shelf, the series page and the Podcasts
+    # preset answer a scan without asking MusicBrainz once.
+    "PODCASTSERIES", "PODCASTSERIESMBID", "PODCASTEPISODE",
     "TRACKTOTAL", "DISCTOTAL",
     "COMPOSER", "COPYRIGHT", "ISRC", "LYRICIST", "REMIXER",
     "DYNAMIC RANGE",
@@ -53,6 +59,10 @@ ALBUM_LEVEL_TAGS = [
     "MUSICBRAINZ_RELEASEGROUPID",
     "RATEYOURMUSIC_ALBUM", "MEDIA", "CATALOGNUMBER", "LABEL", "BARCODE",
     "RELEASETYPE", "RELEASESTATUS", "RELEASECOUNTRY", "SCRIPT",
+    # Album-level like every other release fact: one episode folder states one
+    # series (the tag is written to every file of it, and the first readable
+    # track is what an album-level value is read from).
+    "PODCASTSERIES", "PODCASTSERIESMBID", "PODCASTEPISODE",
     "ALBUM DYNAMIC RANGE",
 ]
 
@@ -201,7 +211,16 @@ def _enrich_track(tr, album_dir, cover_for=None):
         tr["tags"]["TITLE"] = _video_title_from_filename(tr["file"])
     # Per-track audit/grade convenience fields for sorting.
     tr["grade_pass"] = not tr.get("issues")
-    tr["lyrics_present"] = bool(tr.get("lyrics_embedded") or tr.get("lyrics_lrc"))
+    # WHICH KIND the track's stored lyrics are — "synced", "plain" or null —
+    # stamped by mlo.grader beside the `lyrics_embedded` / `lyrics_lrc` flags
+    # it reads the same two stored texts for (`mlo.lyrics.stored_lyrics_kind`),
+    # so this is the stored truth, not a second opinion about it.
+    kind = tr.get("lyrics_kind") or None
+    tr["lyrics_kind"] = kind
+    # Presence is the kind not being null: one fact, two fields, and no reader
+    # can ever see them disagree — `lyrics_present` stays because the queries,
+    # the players and the grading stats read it.
+    tr["lyrics_present"] = bool(kind)
     return tr
 
 
@@ -215,6 +234,32 @@ def _album_meta(album_dir, tracks):
                 meta[t] = tags.get(t)
             break
     return meta
+
+
+def podcast_info(meta):
+    """The podcast block an album row carries, or None.
+
+    An episode is a release group MusicBrainz links `part of` a series of type
+    Podcast; the app records that on the files (mlo.autotag writes
+    PODCASTSERIES / PODCASTSERIESMBID / PODCASTEPISODE), so a scan reads it off
+    the album's own tags and never asks MusicBrainz again — and a rescan, a
+    moved folder or a fresh install sees the same fact.
+
+    `series` is the name a reader sees (with MusicBrainz's disambiguation when
+    it stated one, which is what keeps two same-named shows apart), and
+    `episode` is MusicBrainz's own episode number or None when it states none.
+    None (not an empty block) for everything that is not an episode — which is
+    every music album, so no surface has to test the fields one by one.
+    """
+    meta = meta or {}
+    series = str(meta.get("PODCASTSERIES") or "").strip()
+    if not series:
+        return None
+    return {
+        "series": series,
+        "series_mbid": str(meta.get("PODCASTSERIESMBID") or "").strip() or None,
+        "episode": _parse_num(meta.get("PODCASTEPISODE")),
+    }
 
 
 def _aggregate_albums(albums_data):
@@ -404,6 +449,11 @@ def build_album(album_dir, cfg, light=False):
     for tr in res.get("tracks", []):
         _enrich_track(tr, album_dir, cover_for)
     res["meta"] = _album_meta(album_dir, res.get("tracks", []))
+    # The DERIVED podcast identity of this album, read from its own tags (see
+    # podcast_info) — the field the Home shelf, the series page, the Podcasts
+    # preset and the Artist page's Podcast bucket all read. None for anything
+    # that is not an episode.
+    res["podcast"] = podcast_info(res["meta"])
     _add_expected_tracks(res, album_dir)
     # Every row carries the flag, so no reader has to treat "absent" as a case
     # of its own. A folder whose audio HAS arrived is a normal album: the
@@ -560,9 +610,15 @@ def _add_expected_tracks(res, album_dir):
 
     A partially imported album has no on-disk trace of the tracks that never
     arrived, so the release's own running order (written by the import
-    wizard) is diffed against the files here. `expected_tracks` carries every
-    release track with a `missing` flag; `partial` is the album-level "this
-    is not the whole release" answer the album page greys out on."""
+    wizard, or read off the rip's own .cue/.log) is diffed against the files
+    here. `expected_tracks` carries every release track with a `missing` flag;
+    `partial` is the album-level "this is not the whole release" answer the
+    album page greys out on.
+
+    The diff itself lives in mlo.paths.expected_tracks_state, because the
+    grader asks the same question (a partial CD must not be graded on a full
+    disc's evidence) and two readings of "is this album complete" would
+    eventually disagree."""
     res.setdefault("expected_tracks", [])
     res.setdefault("partial", False)
     try:
@@ -573,14 +629,21 @@ def _add_expected_tracks(res, album_dir):
     if not tracks:
         return
     # (disc, track) as the library derived them — tags first, file name
-    # fallback — so an untagged partial import still lines up.
+    # fallback — so an untagged partial import still lines up; plus the file
+    # names, which is how a track the rip's own .cue names is found even when
+    # nothing about it says which position it occupies.
     on_disk = {(tr.get("discnumber") or 1, tr.get("tracknumber"))
                for tr in res.get("tracks", [])}
-    rows = [{**e, "missing": (e["disc"], e["position"]) not in on_disk}
-            for e in tracks]
+    names = [tr.get("file") for tr in res.get("tracks", []) if tr.get("file")]
+    rows = expected_tracks_state(tracks, on_disk, names)
     res["expected_tracks"] = rows
     res["expected_release_id"] = exp.get("release_id")
-    res["partial"] = any(r["missing"] for r in rows)
+    present = sum(1 for r in rows if not r["missing"])
+    res["partial"] = present < len(rows)
+    if res["partial"]:
+        # The album page's own words for why it is not the whole release.
+        res["partial_reason"] = (f"{present} of {len(rows)} tracks of the "
+                                 f"album's tracklist are in this folder")
 
 
 def build_albums_parallel(album_dirs, cfg, light=False):

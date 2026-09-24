@@ -748,7 +748,13 @@ def _expected_tracks_path(album_dir):
 
 def _clean_expected(tracks):
     """Normalise a release tracklist to [{disc, position, title,
-    recording_mbid}], dropping entries with no usable position."""
+    recording_mbid, file}], dropping entries with no usable position.
+
+    `file` is optional and only a rip's own sheets fill it: a `.cue` FILE
+    entry (or a rip log's per-track Filename) names the track's file, which is
+    the one piece of evidence that places an imported track whose tags say
+    nothing about its position (see `expected_tracks_state`).
+    """
     rows = []
     for t in tracks or []:
         if not isinstance(t, dict):
@@ -765,7 +771,46 @@ def _clean_expected(tracks):
             "position": pos,
             "title": str(t.get("title") or ""),
             "recording_mbid": str(t.get("recording_mbid") or "") or None,
+            "file": str(t.get("file") or "").replace("\\", "/").split("/")[-1],
         })
+    return rows
+
+
+def _same_name(a, b):
+    """True when two file names are the same file name.
+
+    Compared the way `mlo.discs` compares cue references (`_norm_name`):
+    case- and extension-insensitively, so "01 - Song.flac" in a `.cue` matches
+    the FLAC on disk that the same track was transcoded to.
+    """
+    if not a or not b:
+        return False
+    from .discs import _norm_name
+    return _norm_name(a) == _norm_name(b)
+
+
+def expected_tracks_state(tracks, disk_keys=(), disk_names=()):
+    """The recorded tracklist diffed against the album's own audio.
+
+    The ONE completeness rule the library and the grader share (server
+    .library._add_expected_tracks and mlo.grader): a row counts as present
+    when its (disc, position) is one the album derives from its tracks' tags
+    or file names, OR when the row names a file (a `.cue`/`.log` reference)
+    that is on disk under that name. The file test is what makes a rip's own
+    tracklist usable: an album holding `track12.flac` with no TRACKNUMBER tag
+    still lines up with the `.cue` entry that names it.
+
+    Returns [{**row, "missing": bool}] — the rows the album page and the grade
+    both read.
+    """
+    keys = {(int(d), int(p)) for d, p in disk_keys if p is not None}
+    names = [n for n in disk_names if n]
+    rows = []
+    for e in tracks or []:
+        present = (int(e["disc"]), int(e["position"])) in keys
+        if not present and e.get("file"):
+            present = any(_same_name(e["file"], n) for n in names)
+        rows.append({**e, "missing": not present})
     return rows
 
 

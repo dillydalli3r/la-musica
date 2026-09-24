@@ -26,6 +26,9 @@ import os
 import tempfile
 import time
 
+import httpx
+
+from server import httpclient
 from server import integrations as intg
 
 # --------------------------------------------------------------------------- #
@@ -294,23 +297,23 @@ def _get(url, headers, timeout):
 
     The one HTTP seam every fetch goes through (the tests replace it). The body
     is STREAMED with a cap: an oversized answer is a mistake or an attack, not
-    a cover, and must not be held in memory.
+    a cover, and must not be held in memory. The client is the app's shared one
+    (`server.httpclient`) — entering it as a context manager would close it for
+    every later caller — and the redirect/timeout stay this request's own.
     """
-    import httpx
-
     try:
-        with httpx.Client(timeout=httpx.Timeout(timeout, read=timeout),
-                          follow_redirects=True) as client:
-            with client.stream("GET", url, headers=headers) as r:
-                if r.status_code != 200:
+        with httpclient.client().stream(
+                "GET", url, headers=headers, follow_redirects=True,
+                timeout=httpx.Timeout(timeout, read=timeout)) as r:
+            if r.status_code != 200:
+                return r.status_code, b"", ""
+            raw = r.headers.get("content-type")
+            chunks, size = [], 0
+            for chunk in r.iter_bytes(65536):
+                size += len(chunk)
+                if size > intg.IMAGE_MAX_BYTES:
                     return r.status_code, b"", ""
-                raw = r.headers.get("content-type")
-                chunks, size = [], 0
-                for chunk in r.iter_bytes(65536):
-                    size += len(chunk)
-                    if size > intg.IMAGE_MAX_BYTES:
-                        return r.status_code, b"", ""
-                    chunks.append(chunk)
+                chunks.append(chunk)
     except Exception:
         return None, b"", ""
     data = b"".join(chunks)

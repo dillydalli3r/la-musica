@@ -2,7 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState, type SyntheticEvent 
 import { createPortal } from "react-dom";
 import { Link } from "react-router-dom";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
-import { Disc3, Heart, Info, ListMusic, ListPlus, Maximize2, Mic2, Play, Pause, SkipBack, SkipForward, Shuffle, Repeat, Timer, Volume2, X } from "lucide-react";
+import { Disc3, Info, ListMusic, ListPlus, Maximize2, Mic2, Play, Pause, SkipBack, SkipForward, Shuffle, Repeat, Timer, Volume2, X } from "lucide-react";
 import { api, isOffline } from "../api";
 import { toast, useStore } from "../store";
 import { fmtDuration } from "../lib/fmt";
@@ -11,6 +11,8 @@ import { nextSpeed, fmtSpeed } from "../lib/playback";
 import { playbackSource } from "../lib/mediaCache";
 import { heldBy, useJobLocks, useLockLabel, useLockWhy } from "../lib/locks";
 import { useI18n } from "../lib/i18n";
+import { likeToasts } from "../lib/favs";
+import { useIosFavBridge } from "../lib/iosFavs";
 import LockedChip from "./LockedChip";
 import { AdvisoryMark } from "./Badges";
 import StarRating from "./StarRating";
@@ -18,6 +20,7 @@ import { ratingOf, useRatings, useSetRating } from "../lib/ratings";
 import VolumePct from "./VolumePct";
 import { applyEq, applyReplayGain, attachAnalyser, resumeAnalyser } from "../lib/analyser";
 import { eqApplyRefusal } from "../lib/eqNodes";
+import FavHeart from "./FavHeart";
 import NowPlayingView from "./NowPlayingView";
 import ScrollingText from "./ScrollingText";
 import LyricsSidebar from "./LyricsSidebar";
@@ -439,18 +442,17 @@ export default function PlayerBar() {
     }
   }, [playing, current]);
 
-  const { data: likesData } = useQuery({ queryKey: ["likes"], queryFn: api.likes });
-  const liked = !!current && (likesData?.paths ?? []).includes(current.path);
-  const toggleLike = () => {
-    if (!current) return;
-    api
-      .likeToggle(current.path, currentTags?.tags?.MUSICBRAINZ_TRACKID ?? undefined)
-      .then((r) => {
-        qc.invalidateQueries({ queryKey: ["likes"] });
-        toast(`${r.liked ? "Liked" : "Unliked"} — ${displayTitle}`);
-      })
-      .catch((e) => toast.error(String(e)));
-  };
+  // ---- The track's favourite, and the OS's star ---------------------------
+  // Every heart in the player — the desktop bar's, the phone bar's and both
+  // placements of the fullscreen player's — is the shared components/FavHeart
+  // with the shared toast pair, so the bar owns no like state of its own any
+  // more. The iOS bridge below is the same writer under another name: it
+  // toggles this same track when the OS's Now Playing star is pressed, and
+  // pushes this track's liked state back to the shell so the star is drawn
+  // filled when it is favourited. Outside the Tauri shell it is completely
+  // inert (lib/iosFavs), which is the whole reason it is safe to call it on
+  // every platform.
+  useIosFavBridge(current?.path, currentTags?.tags?.MUSICBRAINZ_TRACKID);
 
   // ---- ReplayGain: decided BEFORE a track makes a sound ------------------
   // The gain has to be in the WebAudio stage by the time the first sample is
@@ -1319,17 +1321,20 @@ export default function PlayerBar() {
           </div>
           <div className="flex items-center gap-0.5">
             {/* like — far LEFT of the transport, mirroring the speed chip on
-                the far right */}
-            <button
-              className={`p-2 rounded-lg hover:bg-raise min-w-[46px] flex items-center justify-center shrink-0 ${
-                liked ? "text-accent" : "text-zinc-500 hover:text-zinc-300"
-              } ${idle ? "opacity-40 pointer-events-none" : ""}`}
-              onClick={toggleLike}
+                the far right. The shared heart (components/FavHeart), bound to
+                the track that is playing: same writer, same state and same
+                idle treatment as the library rows' hearts and the fullscreen
+                player's. */}
+            <FavHeart
+              kind="track"
+              id={current?.path}
+              mbid={currentTags?.tags?.MUSICBRAINZ_TRACKID}
+              boxClass="p-2 rounded-lg hover:bg-raise min-w-[46px] flex items-center justify-center shrink-0"
+              unlikedClass="text-zinc-500 hover:text-zinc-300"
+              likeLabels
               disabled={idle}
-              title={liked ? "Unlike" : "Like this track"}
-            >
-              <Heart className={`h-4 w-4 ${liked ? "fill-current" : ""}`} />
-            </button>
+              {...likeToasts(() => displayTitle)}
+            />
             <button
               className={`p-2 rounded-lg hover:bg-raise ${shuffle ? "text-accent" : "text-zinc-500"}`}
               onClick={() => setShuffle(!shuffle)}
@@ -1730,14 +1735,16 @@ export default function PlayerBar() {
               <div className="text-sm truncate font-semibold text-zinc-500">Nothing playing</div>
             )}
           </div>
-          <button
-            className={`tap-hit p-2 rounded-lg hover:bg-raise shrink-0 ${liked ? "text-accent" : "text-zinc-500"} ${idle ? "opacity-40 pointer-events-none" : ""}`}
-            onClick={toggleLike}
+          <FavHeart
+            kind="track"
+            id={current?.path}
+            mbid={currentTags?.tags?.MUSICBRAINZ_TRACKID}
+            boxClass="tap-hit p-2 rounded-lg hover:bg-raise shrink-0"
+            unlikedClass="text-zinc-500"
+            likeLabels
             disabled={idle}
-            title={liked ? "Unlike" : "Like this track"}
-          >
-            <Heart className={`h-4 w-4 ${liked ? "fill-current" : ""}`} />
-          </button>
+            {...likeToasts(() => displayTitle)}
+          />
           <button className="tap-hit p-2 rounded-lg hover:bg-raise text-zinc-300 shrink-0" onClick={() => step(-1)} disabled={idle} title="Previous track">
             <SkipBack className="h-4 w-4" />
           </button>
@@ -1856,7 +1863,6 @@ export default function PlayerBar() {
               duration={effDuration}
               shuffle={shuffle}
               loop={loop}
-              liked={liked}
               onTogglePlay={togglePlay}
               onSeek={(t) => {
                 const a = media();
@@ -1867,7 +1873,6 @@ export default function PlayerBar() {
               onStep={step}
               onToggleShuffle={() => setShuffle(!shuffle)}
               onToggleLoop={() => setLoop(!loop)}
-              onToggleLike={toggleLike}
               onClose={closeFullscreen}
               getAudioTime={getAudioTime}
               speed={speed}

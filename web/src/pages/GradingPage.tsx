@@ -175,7 +175,7 @@ const CHECK_DESC: Record<string, string> = {
   grade_check_filename_case: "Filenames and folder names must match the naming script's letter case exactly — TOXICITY vs Toxicity fails. Organize applies the canonical casing.",
   grade_check_ext_case: "File extensions must be lowercase (01 - Song.FLAC fails). Organize lowercases every extension it touches.",
   grade_check_key_bpm: "INITIALKEY and BPM tags (written by script 12) are required.",
-  grade_check_acoustid: "Files already carrying ACOUSTID_ID or ACOUSTID_FINGERPRINT must keep both — a library without them is never graded.",
+  grade_check_acoustid: "Files already carrying ACOUSTID_ID or ACOUSTID_FINGERPRINT must keep both — a library without them is never graded. Script 21 'Fix AcoustID pairs' completes (or creates) a missing half from the file itself, and script 22 'Submit fingerprints (AcoustID)' gives AcoustID the fingerprint together with the MusicBrainz recording id the file states — a submission IS that link, and MusicBrainz itself never receives a fingerprint. A pair AcoustID already links is not re-sent.",
   grade_check_excess_tags: "Any tag the optimizer would strip — outside the known tag set — fails the track. Run Optimization to remove them.",
   grade_check_media: "The MEDIA tag must be present and consistent with the release.",
   grade_check_source: "The SOURCE tag must be present (with different rules for CD vs digital releases).",

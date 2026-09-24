@@ -270,6 +270,83 @@ export function InstrumentalBadge({ value }: { value: string | null | undefined 
   return null;
 }
 
+/** Which KIND a track's stored lyrics are — the server's own field
+ *  (`lyrics_kind`, mlo.grader → mlo.lyrics.stored_lyrics_kind). */
+export type LyricsKind = "synced" | "plain";
+
+/** The user's own `lyrics_allow_plain` (mlo/config.py, off by default) as the
+ *  chip wants it: the boolean once the config has arrived, `undefined` while it
+ *  has not — an unknown setting must not claim a failure the app has not
+ *  verified, so `undefined` renders the neutral "Plain" and no cross. */
+export function allowPlainOf(cfg: Record<string, unknown> | undefined): boolean | undefined {
+  const v = cfg?.lyrics_allow_plain;
+  return typeof v === "boolean" ? v : undefined;
+}
+
+/** The one lyrics-kind mark every surface wears, so a track's lyrics read the
+ *  same in a table row, a page header and the stored readout:
+ *
+ *  * "synced" — the timed-lyrics chip: the player follows the line, so this is
+ *    a fact, not a verdict (the same green the lyric candidates wear);
+ *  * "plain" — the same chip in the neutral tone WHEN the user's own
+ *    `lyrics_allow_plain` says untimed lyrics are acceptable, and the app's
+ *    FAILING vocabulary when it does not: a red cross beside the word, the
+ *    reason — which names the setting — on hover (and inline where the caller
+ *    has room: `showReason`);
+ *  * null — NOTHING. A track with no lyrics is a different state with its own
+ *    affordance; rendering "Plain" for it would state lyrics it does not have.
+ *
+ *  The failing state follows the SETTING, never a second rule about grading:
+ *  the grader's own presence check is unchanged, and this mark is only how the
+ *  user's stated policy is shown to them. */
+export function LyricsKindChip({
+  kind, allowPlain, size = "md", showReason = false,
+}: {
+  kind: LyricsKind | null | undefined;
+  /** The user's `lyrics_allow_plain`. `false` is the one value that makes a
+   *  plain lyric a FAILING state; `undefined` (config not read yet) does not. */
+  allowPlain?: boolean;
+  size?: "sm" | "md";
+  /** Also print the reason as text beside the chip (roomy surfaces only). */
+  showReason?: boolean;
+}) {
+  const { t } = useI18n();
+  if (kind !== "synced" && kind !== "plain") return null;
+  const synced = kind === "synced";
+  const failing = !synced && allowPlain === false;
+  const label = synced ? t("lyrics.kind.synced") : t("lyrics.kind.plain");
+  const reason = synced
+    ? t("lyrics.kind.synced_hint")
+    : failing
+      ? t("lyrics.kind.plain_reason")
+      : t("lyrics.kind.plain_hint");
+  const cls = `chip shrink-0 border ${size === "sm" ? "text-[9px]" : "text-[10px]"} ${
+    failing
+      ? "bg-red-900/50 text-red-300 border-red-900"
+      : synced
+        ? "bg-emerald-900/50 text-emerald-300 border-emerald-800"
+        : "bg-zinc-800 text-zinc-400 border-border"
+  }`;
+  const mark = (
+    <span
+      className={failing ? `${cls} inline-flex items-center gap-1` : cls}
+      title={reason}
+      data-lyrics-kind={kind}
+      {...(failing ? { "data-lyrics-fail": "true" } : {})}
+    >
+      {failing && <X className={size === "sm" ? "h-3 w-3" : "h-3.5 w-3.5"} />}
+      {label}
+    </span>
+  );
+  if (!failing || !showReason) return mark;
+  return (
+    <span className="inline-flex items-center gap-1.5 min-w-0">
+      {mark}
+      <span className="text-[11px] text-red-300/90 truncate" title={reason}>{reason}</span>
+    </span>
+  );
+}
+
 /** Linear grade meter (rectangular language — no progress rings): a slim
  * bar filled by the % of checks passed, quiet colors, details on hover. */
 export function GradeBar({ pct, width = 64 }: { pct: number | null; width?: number }) {

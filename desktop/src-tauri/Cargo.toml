@@ -1,6 +1,6 @@
 [package]
 name = "mlo-desktop"
-version = "3.23.4"
+version = "4.0.0"
 description = "la musica desktop shell (Tauri v2)"
 authors = ["dillydalli3r"]
 edition = "2021"
@@ -22,6 +22,17 @@ tauri-plugin-autostart = "2"
 tauri-plugin-notification = "2"
 # A parking_lot Mutex for the tray checkbox state (see lib.rs).
 parking_lot = "0.12"
+
+# The iOS Now Playing star only (src/ios_like.rs): MediaPlayer's
+# `MPRemoteCommandCenter.likeCommand` is Objective-C, and the Media Session API
+# the webview already uses has no like action at all, so this one piece of the
+# feature has to be native. Both crates are ALREADY in Cargo.lock as transitive
+# dependencies of Tauri on Apple targets (objc2 0.6.4 / block2 0.6.2), so this
+# makes them direct dependencies of the iOS build without resolving anything
+# new — and not one line of the module compiles on any other target.
+[target.'cfg(target_os = "ios")'.dependencies]
+objc2 = "0.6.4"
+block2 = "0.6.2"
 
 [profile.release]
 codegen-units = 1

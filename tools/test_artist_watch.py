@@ -684,6 +684,14 @@ eq(base["artist_watch_types"], ["album", "ep"], "types default")
 eq(base["artist_watch_auto_add"], True, "auto_add default")
 eq(cfgmod.normalize_config({"artist_watch_types": ["Album", "live", "bogus"]})["artist_watch_types"],
    ["album", "live"], "the config vocabulary is closed too")
+# …and the app's DERIVED type is part of that vocabulary (mlo.naming
+# .RELEASE_TYPES = MusicBrainz's own names + "podcast", the app's own reading
+# of a Podcast series relation), so a configured podcast watch is kept rather
+# than dropped as an unknown name — while a name nobody knows still is.
+eq(cfgmod.normalize_config({"artist_watch_types": ["Podcast", "broadcast"]})["artist_watch_types"],
+   ["podcast", "broadcast"], "the derived podcast type is a watch type too")
+eq(cfgmod.normalize_config({"artist_watch_types": ["podcast", "bogus"]})["artist_watch_types"],
+   ["podcast"], "an unknown name is still dropped beside it")
 eq(cfgmod.normalize_config({"artist_watch_max_per_cycle": 0})["artist_watch_max_per_cycle"],
    1, "the cap can never be zero")
 eq(cfgmod.normalize_config({"artist_watch_interval_hours": 99999})["artist_watch_interval_hours"],

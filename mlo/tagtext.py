@@ -68,6 +68,13 @@ MEDIA_VALUES: Tuple[str, ...] = (
     '12" Vinyl', '10" Vinyl', '7" Vinyl', "8-Track", "Blu-ray", "Blu-spec CD",
     "Cassette", "CD", "CD-R", "Digital Media", "DVD", "DVD-Audio",
     "DVD-Video", "LaserDisc", "Minidisc", "SACD", "SHM-CD", "VHS", "Vinyl",
+    # "Web" is MusicBrainz's own spelling for a release published online only
+    # (its release pages say "Web" where a download's says "Digital Media").
+    # It is the SAME kind of medium to every rule that reads one — the
+    # download search (server.soulseek_auto._is_digital) and the acquisition
+    # route both treat the two spellings alike — so it belongs to the
+    # vocabulary rather than being dropped as an unknown value.
+    "Web",
 )
 
 # MusicBrainz release types, primary and secondary, in MusicBrainz's own
@@ -81,6 +88,15 @@ RELEASE_TYPE_VALUES: Tuple[str, ...] = (
     "Compilation", "Soundtrack", "Spokenword", "Interview", "Audiobook",
     "Live", "Remix", "DJ-mix", "Mixtape/Street", "Demo", "Audio drama",
     "Field recording",
+    # DERIVED: the app's own name for a release group that is `part of` a
+    # MusicBrainz series of type Podcast (mlo.naming.DERIVED_RELEASE_TYPES).
+    # MusicBrainz types those groups Broadcast, so "Broadcast" is what the
+    # tag still carries for them — this value is here because the app DERIVES
+    # and compares that identity as a type of its own (a "Podcast" selection,
+    # or a hand-set RELEASETYPE on an episode MusicBrainz never typed), and a
+    # value the app compares must have a canonical spelling. It is never sent
+    # to MusicBrainz as a query.
+    "Podcast",
 )
 
 # MusicBrainz release statuses — the same five-plus-two the app's release

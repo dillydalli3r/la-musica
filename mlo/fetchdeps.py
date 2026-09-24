@@ -50,21 +50,22 @@ Each archive's LICENSE/COPYING/README is copied next to the installed binaries
 Standard-library only - no requests.
 """
 
-import ctypes
 import json
-import lzma
 import os
 import re
 import shutil
-import subprocess
 import sys
-import tarfile
 import tempfile
 import threading
 import time
-import zipfile
 import urllib.request
 
+# Every archive rule lives in one place: mlo/archives.py holds the extractor per
+# format (zip, tar, lzip, deb, 7z, NSIS), the 7-Zip locator and the safety rule
+# the import path applies to a USER's archive. The installer uses its own
+# looser entry point there (extract_installer) — a release asset, not the user's
+# file — so the two paths cannot drift apart.
+from .archives import archive_suffix, extract_installer
 from .paths import tools_dir, tools_dirs
 from .subproc import run_tool
 from .tools import (
@@ -1474,305 +1475,6 @@ def _download(url, dest_path, progress=None):
         raise RuntimeError("downloaded file is unexpectedly small")
 
 
-def _find_7z():
-    path = shutil.which("7z") or shutil.which("7za")
-    if path:
-        return path
-    for candidate in (
-        r"C:\Program Files\7-Zip\7z.exe",
-        r"C:\Program Files (x86)\7-Zip\7z.exe",
-    ):
-        if os.path.isfile(candidate):
-            return candidate
-    return None
-
-
-def _windows_short_path(path):
-    """8.3 short path (space-free) for NSIS /D=, or None on failure."""
-    try:
-        buf = ctypes.create_unicode_buffer(1024)
-        n = ctypes.windll.kernel32.GetShortPathNameW(
-            os.path.abspath(path), buf, len(buf)
-        )
-        if 0 < n < len(buf):
-            return buf.value
-    except Exception:
-        pass
-    return None
-
-
-def _extract_with_7z(sevenz, archive_path, dest_dir):
-    result = run_tool(
-        [sevenz, "x", "-y", f"-o{dest_dir}", archive_path],
-        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-        timeout=180, check=False,
-    )
-    if result.returncode != 0:
-        raise RuntimeError(f"7-Zip extraction failed (rc={result.returncode})")
-
-
-def _archive_suffix(asset):
-    """The archive extension of a release asset, compression chain included.
-
-    `os.path.splitext` alone cuts "….tar.gz" down to ".gz", and a temp file
-    named "*.gz" is not recognisable as a tarball to _extract_archive — it fell
-    through to the "run it as an installer" branch and died with rc=126 on the
-    first Linux tarball this installer ever fetched.
-    """
-    lower = asset.lower()
-    for suffix in (".tar.gz", ".tar.xz", ".tar.bz2", ".tar.lz", ".tgz", ".tar",
-                   ".zip", ".7z", ".exe", ".deb", ".phar"):
-        if lower.endswith(suffix):
-            return suffix
-    return os.path.splitext(asset)[1]
-
-
-def _extract_tar(source, dest_dir, *, allow_absolute_links=False):
-    """Extract a tarball — a path, or an open file object — into *dest_dir*.
-
-    tarfile restores each entry's mode, which is what makes the unpacked binary
-    executable; `filter="data"` (3.12+) keeps that while refusing entries that
-    would escape dest_dir or carry device nodes, the same guarantee zipfile
-    gives. Compression is detected from the content (xz, gz, bz2), so a temp
-    file's name decides nothing.
-
-    `allow_absolute_links` relaxes exactly one of those rules, for the one
-    archive shape that needs it: a Debian package's data.tar carries absolute
-    symlinks into /usr/share/doc beside its binaries, and the data filter
-    refuses those outright (measured on libjpeg-turbo's .deb). The `tar` filter
-    keeps what matters — nothing is written outside *dest_dir* and no relative
-    link may point out of it — and only stores the absolute link as the link it
-    says it is. Nothing follows it: the install copies the binaries folder and
-    the lib folder, and a dangling link beside them is never traversed.
-    """
-    with tarfile.open(source) as tf:
-        try:
-            tf.extractall(dest_dir,
-                          filter="tar" if allow_absolute_links else "data")
-        except TypeError:          # Python < 3.12: no extraction filters
-            tf.extractall(dest_dir)
-
-
-_LZIP_MAGIC = b"LZIP"
-
-
-def _lzip_plain_bytes(archive_path, dest_path):
-    """Write the decompressed contents of an lzip file to *dest_path*.
-
-    libjxl publishes its static Linux build as `.tar.lz` and nothing else (see
-    LINUX_BINARIES), and **Python's lzma module cannot read lzip as a
-    container**: `lzma.open` knows .xz and the LZMA-alone header, so handing it
-    a lzip file fails with "Input format not supported by decoder" (measured
-    against the v0.12.0 asset). What lzip wraps is a raw LZMA1 stream though —
-    its own 6-byte header carries the magic, a version and the dictionary size,
-    and a 20-byte trailer follows the compressed data — so that is what is
-    decoded here, exactly as the `lzip` binary would: FORMAT_RAW with the
-    dictionary size from the header and lzip's fixed lc/lp/pb (3/0/2). No lzip
-    executable has to exist on the host for this, which is what makes the
-    install work in a container.
-
-    A lzip file is a SEQUENCE of members, and the libjxl asset really has two:
-    the tarball, then a 44-byte member holding tar's two empty end blocks
-    (measured). Each member is decoded in turn and the next one found after the
-    previous one's trailer, so the result is the whole tar stream. Anything
-    that is not lzip raises with the reason instead of leaving half a tarball
-    behind.
-    """
-    with open(archive_path, "rb") as fh:
-        data = fh.read()
-    with open(dest_path, "wb") as out:
-        pos = 0
-        while pos < len(data):
-            if data[pos:pos + 4] != _LZIP_MAGIC:
-                raise RuntimeError(
-                    f"{os.path.basename(archive_path)} is not an lzip archive "
-                    f"(no LZIP signature at byte {pos})")
-            code = data[pos + 5]
-            size = 1 << (code & 0x1F)
-            try:
-                member = lzma.LZMADecompressor(
-                    format=lzma.FORMAT_RAW,
-                    filters=[{"id": lzma.FILTER_LZMA1,
-                              "dict_size": size - (size // 16) * ((code >> 5) & 7),
-                              "lc": 3, "lp": 0, "pb": 2}])
-                out.write(member.decompress(data[pos + 6:]))
-            except lzma.LZMAError as e:
-                raise RuntimeError(
-                    f"could not decompress the lzip member at byte {pos}: {e}") from e
-            if not member.eof:
-                raise RuntimeError(
-                    f"the lzip member at byte {pos} is truncated")
-            # The trailer (crc, sizes) ends where the next member begins; the
-            # decoder hands back everything after the compressed stream, so the
-            # next magic is looked up from there.
-            tail = data.find(_LZIP_MAGIC, len(data) - len(member.unused_data))
-            pos = tail if tail > pos else len(data)
-
-
-def _zstd_decompress(src, dst):
-    """Copy a zstd-compressed file to *dst* plain, or say what is missing.
-
-    dpkg can compress a .deb's data member with zstd (the amd64/arm64
-    libjpeg-turbo packages ship xz, but the format is dpkg's own choice), and
-    Python's stdlib only learned to read zstd in 3.14 — so this names the
-    missing piece rather than writing a tar nothing can read.
-    """
-    try:
-        import zstandard
-    except ImportError as e:
-        raise RuntimeError(
-            "this .deb's data member is zstd-compressed and this Python has no "
-            "zstd reader — install the `zstandard` package and retry") from e
-    with open(src, "rb") as fh, open(dst, "wb") as out:
-        with zstandard.ZstdDecompressor().stream_reader(fh) as reader:
-            shutil.copyfileobj(reader, out)
-
-
-def _extract_deb(archive_path, dest_dir, log):
-    """Extract a Debian package's file tree without dpkg.
-
-    libjpeg-turbo publishes its Linux builds as .deb and nothing else (see
-    LINUX_BINARIES), and dpkg-deb is not on every host — and not on Windows at
-    all — so the wrapper is read here directly. It is a Unix `ar` archive: a
-    fixed 60-byte header per member (name, mtime, owner, mode, size in plain
-    decimal), odd-sized members padded by one byte, and only `data.tar.*` is the
-    file tree (`debian-binary` and `control.tar.*` are metadata). The data
-    member is itself a tarball and goes through _extract_tar like every other
-    asset, which is also what restores the file modes a package's binaries need
-    to be runnable.
-    """
-    fd, data_file = tempfile.mkstemp(prefix="mlo_deb_")
-    member = ""
-    try:
-        with open(archive_path, "rb") as fh, os.fdopen(fd, "wb") as out:
-            if fh.read(8) != b"!<arch>\n":
-                raise RuntimeError(
-                    f"{os.path.basename(archive_path)} is not a Debian package "
-                    f"(no ar signature)")
-            while True:
-                header = fh.read(60)
-                if len(header) < 60:
-                    raise RuntimeError(
-                        f"{os.path.basename(archive_path)} holds no data.tar member")
-                member = header[:16].decode("ascii", "replace").strip().rstrip("/")
-                try:
-                    size = int(header[48:58].decode("ascii").strip())
-                except ValueError:
-                    raise RuntimeError(
-                        f"unreadable ar member header for {member!r}")
-                if not member.startswith("data.tar"):
-                    fh.seek(size + (size % 2), os.SEEK_CUR)
-                    continue
-                log(f"  package data: {member} ({size} bytes)")
-                remaining = size
-                while remaining:
-                    chunk = fh.read(min(65536, remaining))
-                    if not chunk:
-                        raise RuntimeError(f"truncated ar member {member!r}")
-                    out.write(chunk)
-                    remaining -= len(chunk)
-                break
-        if member.endswith(".zst"):
-            plain = data_file + ".tar"
-            try:
-                _zstd_decompress(data_file, plain)
-                _extract_tar(plain, dest_dir, allow_absolute_links=True)
-            finally:
-                try:
-                    os.remove(plain)
-                except OSError:
-                    pass
-        else:
-            _extract_tar(data_file, dest_dir, allow_absolute_links=True)
-    finally:
-        try:
-            os.remove(data_file)
-        except OSError:
-            pass
-
-
-def _extract_archive(archive_path, dest_dir, log):
-    """Extract zip / tar / lzip / deb / 7z / NSIS installer into dest_dir."""
-    lower = archive_path.lower()
-
-    if lower.endswith((".tar.gz", ".tgz", ".tar.xz", ".tar.bz2", ".tar")):
-        # Linux release assets are tarballs (oxipng) as often as zips.
-        _extract_tar(archive_path, dest_dir)
-        return
-
-    if lower.endswith(".tar.lz"):
-        # lzip is a decompression of its own (see _lzip_plain_bytes), so the
-        # members are written out as a plain tarball first and that goes through
-        # the same extraction as the others.
-        fd, plain = tempfile.mkstemp(prefix="mlo_lz_", suffix=".tar")
-        os.close(fd)
-        try:
-            _lzip_plain_bytes(archive_path, plain)
-            _extract_tar(plain, dest_dir)
-        finally:
-            try:
-                os.remove(plain)
-            except OSError:
-                pass
-        return
-
-    if lower.endswith(".deb"):
-        _extract_deb(archive_path, dest_dir, log)
-        return
-
-    if lower.endswith(".zip"):
-        try:
-            with zipfile.ZipFile(archive_path) as zf:
-                zf.extractall(dest_dir)
-            return
-        except Exception:
-            # Some release zips (libjxl) use methods zipfile cannot read;
-            # fall through to 7-Zip if it is available.
-            sevenz = _find_7z()
-            if not sevenz:
-                raise RuntimeError(
-                    "This zip uses a compression method Python cannot read "
-                    "and 7-Zip is not installed. Install 7-Zip and retry."
-                )
-            _extract_with_7z(sevenz, archive_path, dest_dir)
-            return
-
-    if lower.endswith(".7z"):
-        sevenz = _find_7z()
-        if not sevenz:
-            raise RuntimeError("Extracting .7z archives requires 7-Zip.")
-        _extract_with_7z(sevenz, archive_path, dest_dir)
-        return
-
-    # NSIS installer.
-    sevenz = _find_7z()
-    if sevenz:
-        _extract_with_7z(sevenz, archive_path, dest_dir)
-        return
-
-    log("  7-Zip not found - falling back to silent install of the installer.")
-    target = _windows_short_path(dest_dir) or dest_dir
-    if " " in target:
-        raise RuntimeError(
-            "Cannot silently install: temporary path contains spaces and "
-            "7-Zip is unavailable. Install 7-Zip and retry."
-        )
-    # /D= is passed through cmd.exe unquoted, so shell metacharacters in the
-    # path would either break the command or inject into it.
-    if any(ch in target for ch in '&^|<>"'):
-        raise RuntimeError(
-            "Cannot silently install: temporary path contains shell "
-            "metacharacters and 7-Zip is unavailable."
-        )
-    # /D must be the last argument and unquoted.
-    result = run_tool(
-        f'"{archive_path}" /S /D={target}',
-        shell=True, timeout=300, capture_output=True,
-    )
-    if result.returncode != 0:
-        raise RuntimeError(f"silent install failed (rc={result.returncode})")
-
-
 def _locate_binaries(root, key):
     """Find the directory containing the tool's marker files here.
 
@@ -2055,7 +1757,7 @@ def _install_php(log=print, progress=None):
     try:
         _download(zip_url, tmp_zip, progress)
         log(f"Extracting PHP v{version} …")
-        _extract_archive(tmp_zip, workdir, log)
+        extract_installer(tmp_zip, workdir, log)
         src = _locate_binaries(workdir, "php")
         if src is None:
             # Fallback: workdir itself may contain php.exe directly
@@ -2211,7 +1913,7 @@ def _install_one(key, log=print, progress=None):
     dest_dir = os.path.join(tools_dir(), existing or f"{prefix} v{version}")
 
     tmp_archived_fd, tmp_archived = tempfile.mkstemp(
-        suffix=_archive_suffix(asset))
+        suffix=archive_suffix(asset))
     os.close(tmp_archived_fd)
     workdir = tempfile.mkdtemp(prefix="mlo_dep_")
 
@@ -2229,8 +1931,8 @@ def _install_one(key, log=print, progress=None):
             if not fallbacks:
                 raise
             asset = fallbacks[0]
-            suffix = _archive_suffix(asset)
-            if suffix != _archive_suffix(os.path.basename(tmp_archived)):
+            suffix = archive_suffix(asset)
+            if suffix != archive_suffix(os.path.basename(tmp_archived)):
                 os.remove(tmp_archived)
                 fd, tmp_archived = tempfile.mkstemp(suffix=suffix)
                 os.close(fd)
@@ -2243,7 +1945,7 @@ def _install_one(key, log=print, progress=None):
             shutil.copy2(tmp_archived, os.path.join(dest_dir, wanted[0]))
         else:
             log(f"Extracting {asset} …")
-            _extract_archive(tmp_archived, workdir, log)
+            extract_installer(tmp_archived, workdir, log)
 
             src = _locate_binaries(workdir, key)
             if src is None:

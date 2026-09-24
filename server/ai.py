@@ -23,6 +23,10 @@ import threading
 
 import httpx
 
+# Importing it installs the ONE shared client behind the module-level
+# `httpx.post` the chat call uses (server/httpclient.py).
+from server import httpclient  # noqa: F401
+
 from server.integrations import USER_AGENT
 
 _GEMINI_HOST = "generativelanguage.googleapis.com"

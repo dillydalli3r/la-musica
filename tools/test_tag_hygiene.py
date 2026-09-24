@@ -118,6 +118,17 @@ ok(canonical_value("SCRIPT", "latn") == "Latn", "SCRIPT 'latn' -> 'Latn'")
 # An unknown value inside a closed vocabulary is NEVER mangled.
 ok(canonical_value("MOOD", "melancholic") == "melancholic",
    "a mood outside the vocabulary is left exactly as typed")
+# The DERIVED release type (mlo.naming.DERIVED_RELEASE_TYPES) is inside the
+# RELEASETYPE vocabulary, so the value the app derives and compares has one
+# canonical spelling — MusicBrainz itself states no such release-group type
+# (an episode is Broadcast `part of` a Podcast series, see mlo.autotag), so
+# this is the one value in the list that is the APP's, not MusicBrainz's.
+ok(canonical_value("RELEASETYPE", "podcast") == "Podcast",
+   "RELEASETYPE 'podcast' -> 'Podcast' (the app's derived type)")
+ok(canonical_value("RELEASETYPE", "Podcast; Broadcast") == "Podcast; Broadcast",
+   "and a combined value keeps it beside the MusicBrainz type")
+ok(canonical_value("RELEASETYPE", "podcast special") == "podcast special",
+   "while a value that only starts with it is not a type and is left alone")
 ok(canonical_value("MEDIA", "squishy disc") == "squishy disc",
    "an unknown MEDIA is left exactly as typed")
 ok(canonical_value("SOURCE", "my own rip") == "my own rip",

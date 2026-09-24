@@ -53,7 +53,7 @@ for _mod in (cfgmod, pathmod):
 
 from fastapi import HTTPException  # noqa: E402
 
-from server import api_youtube, youtube  # noqa: E402
+from server import api_youtube, cookies as cookie_mod, youtube  # noqa: E402
 
 URL = "https://www.youtube.com/watch?v=jNQXAC9IVRw"
 JAR = os.path.join(music, ".mlo", "data", "cookies.txt")
@@ -174,14 +174,14 @@ try:
     # ----------------------------------------------------------------- #
     # 1. The validator
     # ----------------------------------------------------------------- #
-    cookies, error = api_youtube.parse_cookie_file(REAL_JAR)
+    cookies, error = cookie_mod.parse_cookie_file(REAL_JAR)
     assert error is None, f"a real Netscape file was refused: {error}"
     assert cookies == [("youtube.com", "LOGIN_INFO"),
                        ("youtube.com", "__Secure-3PSID"),
                        ("youtube.com", "SID"),
                        ("google.com", "NID")], cookies
 
-    cookies, error = api_youtube.parse_cookie_file(SHAPED_ONLY)
+    cookies, error = cookie_mod.parse_cookie_file(SHAPED_ONLY)
     assert error is None, f"a headerless but well-shaped jar was refused: {error}"
     assert cookies == [("youtube.com", "SID")], cookies
 
@@ -189,21 +189,21 @@ try:
     # profile exports one) — it is accepted, and the warnings say it holds
     # nothing. Refusing it would only make the user re-export to be told the
     # same thing.
-    cookies, error = api_youtube.parse_cookie_file(
+    cookies, error = cookie_mod.parse_cookie_file(
         "# Netscape HTTP Cookie File\n# a signed-out profile\n")
     assert error is None and cookies == [], (cookies, error)
     assert api_youtube.cookie_warnings(cookies), \
         "an empty jar was saved with nothing said about it"
 
     for text, want in JUNK:
-        cookies, error = api_youtube.parse_cookie_file(text)
+        cookies, error = cookie_mod.parse_cookie_file(text)
         assert error and want in error, f"junk accepted: {text!r} -> {error!r}"
         assert not cookies, f"junk yielded cookies: {text!r}"
 
     # The warnings name what a real jar holds, so the user can tell a
     # signed-in export from a signed-out one without decoding the file.
     warnings = api_youtube.cookie_warnings(
-        api_youtube.parse_cookie_file(REAL_JAR)[0])
+        cookie_mod.parse_cookie_file(REAL_JAR)[0])
     assert warnings and "youtube.com" in warnings[0], warnings
     only_google = api_youtube.cookie_warnings([("google.com", "NID")])
     assert "no youtube.com cookie" in only_google[0], only_google
@@ -353,7 +353,7 @@ try:
         api_youtube.CookieUpload(text=SHAPED_ONLY))
     assert saved["lines"] == 1, saved
     on_disk = open(JAR, encoding="utf-8").read()
-    assert on_disk.splitlines()[0] == api_youtube.NETSCAPE_HEADER, on_disk
+    assert on_disk.splitlines()[0] == cookie_mod.NETSCAPE_HEADER, on_disk
     assert on_disk.endswith(SHAPED_ONLY), on_disk
 
     # The same jar through yt-dlp's OWN loader — the check that matters, since

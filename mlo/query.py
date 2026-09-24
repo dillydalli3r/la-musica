@@ -417,6 +417,10 @@ def _library_value(row: Row, key: str):
         return bool(track.get("lyrics_embedded")) if row.track is not None else None
     if key == "lyrics_lrc":
         return bool(track.get("lyrics_lrc")) if row.track is not None else None
+    if key == "lyrics_kind":
+        # 'synced' | 'plain' | None — a track-only fact (an album row's own
+        # lyrics count says nothing about either kind).
+        return (track.get("lyrics_kind") or None) if row.track is not None else None
     if key == "has_log":
         return bool(album.get("has_log")) if album else None
     if key == "has_cue":
@@ -502,6 +506,7 @@ ALIASES = {
     "is_video": "library.is_video",
     "unreadable": "library.unreadable",
     "lyrics_present": "library.lyrics_present",
+    "lyrics_kind": "library.lyrics_kind",
     "has_log": "library.has_log",
     "has_cue": "library.has_cue",
     "grade_pct": "grade_pct",

@@ -411,6 +411,118 @@ def grade_warning(lib):
     }
 
 
+# --------------------------------------------------------------------------- #
+# Podcasts
+# --------------------------------------------------------------------------- #
+# A podcast is not an album by a band: MusicBrainz models it as a SERIES of
+# type Podcast whose episodes are release groups linked `part of` it (there is
+# no Podcast release-group type — see mlo.naming.DERIVED_RELEASE_TYPES), and
+# the app records that series on each episode's files. server.library reads the
+# PODCASTSERIES / PODCASTSERIESMBID / PODCASTEPISODE tags into every album
+# row's `podcast` block, so everything below is built from a SCAN — the shelf
+# and the series page never ask MusicBrainz once.
+#
+# Episodes are ordered newest first by the episode's own date and then by
+# MusicBrainz's episode number: a show that published twice in a day is in the
+# right order, and an episode whose date MusicBrainz does not state is placed
+# by its number instead of dropping out. The date is the album's DATE tag (an
+# episode IS a release, so its own date is the right one), falling back to
+# ORIGINALDATE.
+def _episode_order(al):
+    """(date, episode number) of one episode row — the shelf's own sort key."""
+    meta = al.get("meta") or {}
+    pod = al.get("podcast") or {}
+    try:
+        number = int(pod.get("episode") or 0)
+    except (TypeError, ValueError):
+        number = 0
+    return (str(meta.get("DATE") or meta.get("ORIGINALDATE") or ""), number)
+
+
+def _podcast_groups(albums):
+    """The library's episodes grouped by series, newest series first.
+
+    Returns ``[{"series", "series_mbid", "episodes"}, ...]`` with each series'
+    episodes newest first. A row whose `podcast` block names no series is not
+    an episode — a Broadcast MusicBrainz links to no series — and is left out
+    entirely rather than collected under an empty name.
+    """
+    groups = {}
+    for al in albums or []:
+        pod = al.get("podcast") or {}
+        series = str(pod.get("series") or "").strip()
+        if not series:
+            continue
+        g = groups.setdefault(series, {"series": series,
+                                       "series_mbid": pod.get("series_mbid") or None,
+                                       "episodes": []})
+        # A series re-tagged since (or an episode an older run wrote a bare
+        # name for) must not lose its id: the first row that states one wins.
+        if not g["series_mbid"] and pod.get("series_mbid"):
+            g["series_mbid"] = pod["series_mbid"]
+        g["episodes"].append(al)
+    out = []
+    for g in groups.values():
+        g["episodes"].sort(key=_episode_order, reverse=True)
+        out.append(g)
+    out.sort(key=lambda g: _episode_order(g["episodes"][0]), reverse=True)
+    return out
+
+
+def _podcasts(albums, limit=12):
+    """Home's Podcasts shelf: ONE row per series, carrying its newest episode.
+
+    The row IS the newest episode's library row (`_owned_row`), so the shared
+    album card draws it, with the three facts a SERIES card needs added: the
+    series name (the caption — an episode title alone does not say which show
+    it belongs to), its MusicBrainz id, and how many of its episodes the
+    library holds. Empty when the library has no podcast at all, which is what
+    keeps the shelf off Home for everyone else.
+    """
+    rows = []
+    for g in _podcast_groups(albums)[:limit]:
+        row = _owned_row(g["episodes"][0])
+        row["podcast_series"] = g["series"]
+        row["podcast_series_mbid"] = g["series_mbid"]
+        row["podcast_episode_count"] = len(g["episodes"])
+        rows.append(row)
+    return rows
+
+
+def podcast_series_payload(cfg, series):
+    """ONE podcast series and every episode the library holds, newest first.
+
+    The series page's payload: `series` is the name a shelf row links by (the
+    name a reader sees, MusicBrainz's disambiguation included when it stated
+    one, so two same-named shows are two pages), each episode is a library
+    album row the shared card draws, and None means the library holds no
+    episode of it — a 404, not an empty page.
+    """
+    from server import library as lib_mod
+
+    series = str(series or "").strip()
+    if not series:
+        return None
+    episodes, artist_of = [], {}
+    for ar in lib_mod.build_library(cfg).get("artists", []):
+        name = str(ar.get("display_name") or ar.get("name") or "")
+        for al in ar.get("albums", []):
+            if al.get("podcast"):
+                episodes.append(al)
+                artist_of[al.get("path")] = name
+    for g in _podcast_groups(episodes):
+        if g["series"] != series:
+            continue
+        return {
+            "series": g["series"],
+            "series_mbid": g["series_mbid"],
+            "episode_count": len(g["episodes"]),
+            "episodes": [_owned_row(e, fallback_artist=artist_of.get(e.get("path"), ""))
+                         for e in g["episodes"]],
+        }
+    return None
+
+
 def build_home(cfg, user=""):
     """Full Home payload for the given config and user (TTL-cached).
 
@@ -473,6 +585,9 @@ def build_home(cfg, user=""):
         "rated": rated,
         "favorites": favorites,
         "discover": discover,
+        # One row per podcast SERIES in the library, its newest episode on it —
+        # empty (and so the shelf is not drawn) unless the library holds one.
+        "podcasts": _podcasts(albums, recent_count),
         # Every album still waiting for its audio, in one place.
         "pending": pending,
         "top_artists": _top_artists(artists, 6),

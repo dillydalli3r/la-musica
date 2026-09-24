@@ -299,35 +299,86 @@ def _mentions(haystack, needle):
     return need in hay or need.replace(" ", "") in hay.replace(" ", "")
 
 
-def _search(query, config):
-    """Flat ytsearch results for *query*; [] when nothing usable."""
-    url = f"ytsearch{SEARCH_RESULTS}:{query}"
+def _flat_info(url, config, playlist=False):
+    """Flat (no download, no per-entry page) yt-dlp report → `(info, error)`.
+
+    The ONE flat probe. The track search below reads its results with these
+    flags and this module's two paths (the importable `yt_dlp` module, else the
+    vendored binary driven through ``run_tool`` with the same flags), and
+    ``flat_playlist`` reads a playlist with the same ones — so a search hit and
+    a playlist entry can never be read differently. `playlist` turns yt-dlp's
+    `noplaylist` off, which is the whole difference: a playlist URL expands
+    into its entries instead of being treated as the one video it points at,
+    and `--yes-playlist`/`noplaylist: False` are the module's and the binary's
+    spelling of that same flag.
+
+    `error` is yt-dlp's own last words ("" when it answered), so a caller that
+    must report a failure can say what happened rather than that nothing did.
+    """
     mod = _load_ytdlp()
     if mod is not None:
+        opts = _ydl_opts(config, flat=True)
+        if playlist:
+            opts["noplaylist"] = False
         try:
-            with mod.YoutubeDL(_ydl_opts(config, flat=True)) as ydl:
+            with mod.YoutubeDL(opts) as ydl:
                 info = ydl.extract_info(url, download=False)
-        except Exception:
-            return []
-        entries = (info or {}).get("entries") or []
-        return [e for e in entries if e]
+        except Exception as e:
+            return None, f"{type(e).__name__}: {e}"
+        if not isinstance(info, dict):
+            return None, "yt-dlp produced no video info"
+        return info, ""
 
     exe = _binary_exe()
     if not exe or not os.path.isfile(exe):
-        return []
+        return None, "yt-dlp is not installed"
+    cmd = [exe, "--dump-single-json", "--flat-playlist", "--no-warnings",
+           "--no-progress"]
+    if playlist:
+        cmd.append("--yes-playlist")
     try:
         proc = run_tool(
-            [exe, "--dump-single-json", "--flat-playlist", "--no-warnings",
-             "--no-progress", *cookie_args(config), url],
+            [*cmd, *cookie_args(config), url],
             capture_output=True, text=True, encoding="utf-8",
             errors="replace", timeout=_PROBE_TIMEOUT,
         )
-    except Exception:
-        return []
+    except Exception as e:
+        return None, f"{type(e).__name__}: {e}"
+    if proc.returncode != 0:
+        tail = "; ".join((proc.stderr or "").strip().splitlines()[-3:])
+        return None, tail or f"exit {proc.returncode}"
     info = _json_line(proc.stdout)
     if not isinstance(info, dict):
-        return []
-    return [e for e in (info.get("entries") or []) if e]
+        return None, "yt-dlp produced no video info"
+    return info, ""
+
+
+def _search(query, config):
+    """Flat ytsearch results for *query*; [] when nothing usable."""
+    info, _error = _flat_info(f"ytsearch{SEARCH_RESULTS}:{query}", config)
+    return [e for e in ((info or {}).get("entries") or []) if e]
+
+
+def flat_playlist(url, config=None):
+    """The flat `(title, entries)` of a YouTube / YouTube Music playlist URL.
+
+    `entries` are yt-dlp's own — ``{id, url, title, duration, channel`` /
+    ``uploader}`` — read through the SAME module-or-binary probe and the SAME
+    cookie jar a track search uses. `title` is the playlist's own name (yt-dlp's
+    `title` field), so an import can name the playlist the way the service does
+    instead of guessing one.
+
+    Raises RuntimeError with yt-dlp's words when the probe could not answer at
+    all, which is deliberately not `_search`'s "[] for a search that found
+    nothing": a caller importing a playlist has to tell "the playlist lists
+    nothing" (its own answer) from "yt-dlp never ran" (the app's installation),
+    and it can only do that if the failure is a raise.
+    """
+    info, error = _flat_info(url, config, playlist=True)
+    if info is None:
+        raise RuntimeError(error or "yt-dlp produced no playlist info")
+    return (str(info.get("title") or "").strip(),
+            [e for e in (info.get("entries") or []) if e])
 
 
 def _score(entry, artist, title, want_seconds):

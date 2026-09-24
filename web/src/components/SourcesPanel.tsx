@@ -3,7 +3,9 @@ import { Link } from "react-router-dom";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { ExternalLink, RotateCcw } from "lucide-react";
 import { api } from "../api";
+import CookieJarPanel from "./CookieJarPanel";
 import { toast } from "../store";
+import { useI18n } from "../lib/i18n";
 import type { SourceHealth, SourceKind, SourcesHealth } from "../types";
 
 /** The provider families, in the order the panel lists them. The rows
@@ -64,7 +66,7 @@ const KEY_INFO: Record<string, { label: string; hint: string; url?: string; link
   rym_cookie: {
     label: "RateYourMusic cookie",
     hint:
-      "Two ways in: a cookies.txt in Netscape format — what a browser-extension exporter like \"Get cookies.txt\" writes — is imported by the box on Settings' Discovery tab (paste it or drop the file; only its rateyourmusic.com cookies are kept), " +
+      "Two ways in: a cookies.txt in Netscape format — what a browser-extension exporter like \"Get cookies.txt\" writes — is imported by the cookie box below, or by the same box on Settings' Discovery tab (paste it or drop the file; only its rateyourmusic.com cookies are kept), " +
       "or sign in to rateyourmusic.com in your browser → F12 (dev tools) → Network → reload the page → click any request to rateyourmusic.com → Headers → Request Headers → copy everything after \"Cookie:\" and paste it in the field above. " +
       "Either way take the WHOLE value — every name=value pair it shows, not just one token like cf_clearance: RYM checks the session cookies together, and the app normalises the paste for you (newlines, a stray \"Cookie:\" label). " +
       "Its `session` cookie is HttpOnly, so a browser extension's export is the only way to hand that one over at all. " +
@@ -90,7 +92,7 @@ const KEY_INFO: Record<string, { label: string; hint: string; url?: string; link
   acoustid_user_key: {
     label: "AcoustID user key",
     hint:
-      "Sign in at acoustid.org → your account → API keys, and copy YOUR user key (a different key from the application one). Only needed to publish a matched fingerprint pair back to AcoustID's database; lookups never use it.",
+      "Sign in at acoustid.org → your account → API keys, and copy YOUR user key (a different key from the application one). It is needed ONLY to submit: a submission gives AcoustID one fingerprint together with the MusicBrainz recording id it is (MusicBrainz itself never sees a fingerprint). Test proves the key with one probe submission; lookups never use it.",
     url: "https://acoustid.org/account",
     link: "acoustid.org — your account",
     secret: true,
@@ -148,7 +150,7 @@ const TOOL_INFO: Record<string, { label: string; hint: string; tab?: string; tab
     label: "yt-dlp",
     hint:
       "The downloader behind every YouTube path: it searches, fetches the missing music videos (script 11) and reads YouTube captions for lyrics (script 18). Installed from the Tools step (or Settings → Dependencies). " +
-      "Its cookies are a cookies.txt in Netscape format — what a browser-extension exporter like \"Get cookies.txt\" writes — imported into the app's own YouTube cookie jar on the Videos tab, which yt-dlp then reads for age-gated, members-only and throttled videos.",
+      "Its cookies are a cookies.txt in Netscape format — what a browser-extension exporter like \"Get cookies.txt\" writes — imported by the cookie box below, or by the same box on the Videos tab, into the app's own YouTube cookie jar, which yt-dlp then reads for age-gated, members-only and throttled videos.",
     tab: "videos",
     tabLink: "Import its cookies — Settings → Videos",
   },
@@ -235,6 +237,7 @@ function StatusChip({ row }: { row: SourceHealth }) {
  *  panel was 4,800 px of exactly that on the step that exists to ask for keys. */
 export default function SourcesPanel({ only, askKeys }: { only?: SourceKind | SourceKind[]; askKeys?: boolean } = {}) {
   const qc = useQueryClient();
+  const { t } = useI18n();
   const { data: config } = useQuery({ queryKey: ["config"], queryFn: api.config });
   const { data, isLoading, error } = useQuery({
     queryKey: ["sourcesHealth"],
@@ -364,6 +367,18 @@ export default function SourcesPanel({ only, askKeys }: { only?: SourceKind | So
           ))}
         </div>
       )}
+
+      {/* The cookie logins: every credential whose auth is a cookies.txt gets
+          its import box HERE too, so a first run (this step) and Settings →
+          Sources can hand the file over without hunting for the tab that owns
+          the credential — and so the box that asks for the value is the box
+          that accepts the export for it. ONE component for both (and for the
+          Videos/Discovery tabs), never a second paste box to keep in step. */}
+      <div className="rounded-md border border-border bg-zinc-950/40 px-3 py-2 space-y-1.5">
+        <div className="text-[10px] uppercase tracking-widest text-zinc-500">{t("cookies.sectionTitle")}</div>
+        <CookieJarPanel source="youtube" compact />
+        <CookieJarPanel source="rym" compact />
+      </div>
 
       {groups.map(([kind, list]) => (
         <div key={kind} className="space-y-1">

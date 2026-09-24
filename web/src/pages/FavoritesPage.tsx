@@ -35,9 +35,9 @@ export default function FavoritesPage() {
   const navigate = useNavigate();
   const kind: Kind = (TABS.some((t) => t.id === raw) ? raw : "tracks") as Kind;
 
-  const { artists, albums, tracks } = useLibraryMaps();
-  const { data: likes } = useTrackLikes();
-  const { data: favs } = useFavorites();
+  const { artists, albums, tracks, libError } = useLibraryMaps();
+  const { data: likes, isError: likesFailed } = useTrackLikes();
+  const { data: favs, isError: favsFailed } = useFavorites();
 
   // A liked playlist holds no paths of its own — only the playlists tab needs
   // them, so the detail fetches wait for that tab (same shared hook the
@@ -66,6 +66,24 @@ export default function FavoritesPage() {
     [favPaths, tracks]
   );
 
+  // The header's Download/Export act on the CURRENT tab's liked set, and to
+  // them an empty set and a failed fetch look identical: "this favorites tab
+  // is empty" would then report a request failure as the user having nothing.
+  // The two tabs whose paths are joined against the library count its failure
+  // as theirs for the same reason.
+  const tabFailed =
+    kind === "tracks"
+      ? likesFailed
+      : kind === "albums" || kind === "artists"
+        ? favsFailed || !!libError
+        : favsFailed;
+  const downloadHint = tabFailed
+    ? "Could not load this favorites tab — nothing is known to be downloadable"
+    : "Nothing to download — this favorites tab is empty";
+  const exportHint = tabFailed
+    ? "Could not load this favorites tab — nothing is known to be exportable"
+    : "Nothing to export — this favorites tab is empty";
+
   return (
     <div className="p-6 space-y-5 mx-auto max-w-6xl">
       <PageHeader
@@ -91,13 +109,13 @@ export default function FavoritesPage() {
             <DownloadButton
               paths={favPaths}
               label={kind === "tracks" ? "Download likes" : "Download all"}
-              emptyReason="Nothing to download — this favorites tab is empty"
+              emptyReason={downloadHint}
             />
             <ExportButton
               paths={favPaths}
               seconds={favSeconds}
               label={kind === "tracks" ? "Export likes" : "Export all"}
-              emptyReason="Nothing to export — this favorites tab is empty"
+              emptyReason={exportHint}
               title="Export these favorites to a drive"
               dialogSubtitle={`${favPaths.length} track${favPaths.length === 1 ? "" : "s"} from your favorites`}
             />
@@ -118,10 +136,13 @@ export default function FavoritesPage() {
   );
 }
 
-/** Flat library lookups shared by every tab. */
+/** Flat library lookups shared by every tab. The query's own state rides
+ *  along: every tab JOINS its favorite ids against these maps, so a library
+ *  that failed to load produces rows that are empty for a reason the tab has
+ *  to be able to tell apart from "you have none". */
 function useLibraryMaps() {
-  const { data: lib } = useQuery({ queryKey: ["library"], queryFn: () => api.library() });
-  return useMemo(() => {
+  const { data: lib, isError, error, refetch } = useQuery({ queryKey: ["library"], queryFn: () => api.library() });
+  const maps = useMemo(() => {
     const tracks = new Map<string, { track: Track; album: Album; artist: Artist }>();
     const albums = new Map<string, { album: Album; artist: Artist }>();
     const artists = new Map<string, Artist>();
@@ -134,6 +155,21 @@ function useLibraryMaps() {
     }
     return { lib, tracks, albums, artists };
   }, [lib]);
+  return { ...maps, libError: isError ? error : null, refetchLib: refetch };
+}
+
+/** A failed fetch is not an empty set. Every tab below renders "No … yet" when
+ *  its rows come back empty — which is only the truth once the payload
+ *  ARRIVED. A request that failed says so here instead of reporting the user's
+ *  favorites as none, and offers the retry rather than a dead end. */
+function LoadFailed({ what, error, onRetry }: { what: string; error: unknown; onRetry?: () => void }) {
+  return (
+    <EmptyState
+      title={`Could not load ${what}`}
+      hint={`${error instanceof Error ? error.message : String(error)} — this is a failed request, not an empty list; what you have here is unchanged.`}
+      onAction={onRetry && { label: "Try again", onClick: onRetry }}
+    />
+  );
 }
 
 function displayArtist(al: Album, a: Artist) {
@@ -202,7 +238,7 @@ function likedHide(id: string): string {
 }
 
 function LikedTracks() {
-  const { data: likes, isLoading } = useTrackLikes();
+  const { data: likes, isLoading, isError, error, refetch } = useTrackLikes();
   const { tracks } = useLibraryMaps();
   const playNow = useStore((s) => s.playNow);
   const navigate = useNavigate();
@@ -282,6 +318,7 @@ function LikedTracks() {
   };
 
   if (isLoading) return <PageLoading />;
+  if (isError) return <LoadFailed what="your liked tracks" error={error} onRetry={() => refetch()} />;
   if (!rows.length)
     return (
       <EmptyState
@@ -406,8 +443,8 @@ function LikedTracks() {
 // Favorite albums
 // ------------------------------------------------------------------------ //
 function FavAlbums() {
-  const { data: favs, isLoading } = useFavorites();
-  const { albums } = useLibraryMaps();
+  const { data: favs, isLoading, isError, error, refetch } = useFavorites();
+  const { albums, libError, refetchLib } = useLibraryMaps();
 
   const rows = useMemo(
     () =>
@@ -418,6 +455,8 @@ function FavAlbums() {
   );
 
   if (isLoading) return <PageLoading />;
+  if (isError) return <LoadFailed what="your favorite albums" error={error} onRetry={() => refetch()} />;
+  if (libError) return <LoadFailed what="the library" error={libError} onRetry={refetchLib} />;
   if (!rows.length)
     return <EmptyState title="No favorite albums yet" hint="Heart an album on its page or in the library grid." />;
 
@@ -440,8 +479,8 @@ function FavAlbums() {
 // Favorite artists
 // ------------------------------------------------------------------------ //
 function FavArtists() {
-  const { data: favs, isLoading } = useFavorites();
-  const { artists } = useLibraryMaps();
+  const { data: favs, isLoading, isError, error, refetch } = useFavorites();
+  const { artists, libError, refetchLib } = useLibraryMaps();
   const playNow = useStore((s) => s.playNow);
 
   const rows = useMemo(
@@ -453,6 +492,8 @@ function FavArtists() {
   );
 
   if (isLoading) return <PageLoading />;
+  if (isError) return <LoadFailed what="your favorite artists" error={error} onRetry={() => refetch()} />;
+  if (libError) return <LoadFailed what="the library" error={libError} onRetry={refetchLib} />;
   if (!rows.length) return <EmptyState title="No favorite artists yet" hint="Heart an artist on their page." />;
 
   // Same table language as the library's artist view (Artist / Albums /
@@ -516,11 +557,15 @@ function FavArtists() {
 // Favorite playlists
 // ------------------------------------------------------------------------ //
 function FavPlaylists() {
-  const { data: favs, isLoading } = useFavorites();
-  const { data: playlists } = useQuery({ queryKey: ["playlists"], queryFn: api.playlists });
+  const { data: favs, isLoading, isError, error, refetch } = useFavorites();
+  const {
+    data: playlists,
+    isError: playlistsFailed,
+    error: playlistsError,
+    refetch: refetchPlaylists,
+  } = useQuery({ queryKey: ["playlists"], queryFn: api.playlists });
   const { tracks } = useLibraryMaps();
   const playNow = useStore((s) => s.playNow);
-  const navigate = useNavigate();
 
   const rows = useMemo(() => {
     const byId = new Map<string, Playlist>((playlists ?? []).map((p) => [String(p.id), p]));
@@ -554,6 +599,12 @@ function FavPlaylists() {
   };
 
   if (isLoading) return <PageLoading />;
+  // The rows are a JOIN: the favorite ids come from /api/favorites and the
+  // names from /api/playlists, so a failure in either one is an empty table
+  // for a reason that is not "you have none".
+  if (isError) return <LoadFailed what="your favorite playlists" error={error} onRetry={() => refetch()} />;
+  if (playlistsFailed)
+    return <LoadFailed what="the playlists" error={playlistsError} onRetry={() => refetchPlaylists()} />;
   if (!rows.length) return <EmptyState title="No favorite playlists yet" hint="Heart a playlist on the Playlists page." />;
 
   // Same table language as the other favorites tabs / the library tables.
@@ -578,13 +629,16 @@ function FavPlaylists() {
                   >
                     <Play className="h-3.5 w-3.5" />
                   </button>
-                  <button
+                  {/* The playlist's OWN page (`/playlist/:id`), which is where
+                      its tracks, rules and rename live — this used to send
+                      every row to the Playlists index instead. */}
+                  <Link
+                    to={`/playlist/${p.id}`}
                     className="font-medium hover:text-accent-soft break-words flex-1 min-w-0 text-left"
-                    onClick={() => navigate("/playlists")}
-                    title="Open the Playlists page"
+                    title="Open the playlist page"
                   >
                     {p.name}
-                  </button>
+                  </Link>
                   {p.kind === "smart" && <span className="chip bg-accent/10 text-accent-soft border border-accent/25 text-[10px] shrink-0">SMART</span>}
                   <span className="shrink-0">
                     <FavHeart kind="playlist" id={String(p.id)} iconClass="h-3.5 w-3.5" revealOnHover />

@@ -11,7 +11,14 @@ const GUTTER = 8;
  *  trigger, pass `open`, and it renders the click shield (a full-viewport
  *  catcher that closes on outside click, which keeps the panel from being
  *  clipped by overflow containers), an Escape handler and the shared
- *  `.anim-fade` entry on a positioned panel. `MenuItem` is the row inside. */
+ *  `.anim-fade` entry on a positioned panel. `MenuItem` is the row inside.
+ *
+ *  Every panel is clamped to the viewport and scrolls inside itself
+ *  (`.popover-panel`, index.css): a menu taller than the room it has — the
+ *  Force menu's 14 flags, a long field catalogue, a grid of covers — scrolls
+ *  instead of running past the fold, which is what makes its last row
+ *  reachable at all. `fixed` mode measures that room from the trigger; an
+ *  in-place panel gets the viewport as its bound. */
 export default function Popover({
   open,
   onClose,
@@ -78,11 +85,24 @@ export default function Popover({
 
   const markerRef = useRef<HTMLSpanElement>(null);
   const panelRef = useRef<HTMLDivElement>(null);
+  // An in-place panel that does not FIT is re-rendered in the measured form
+  // below, before the browser paints it. In-place is the cheap path — no
+  // portal, no measuring, the panel is a child of the caller's own `relative`
+  // wrapper — and it is wrong for exactly one reason: the wrapper decides
+  // where the panel starts, so a trigger near the right edge of a phone puts
+  // the panel's rows off the screen, where they cannot be read or pressed.
+  // Promoting those (and only those) keeps every caller that fits pixel-for-
+  // pixel as it was while every caller that does not gets the clamped form.
+  const [promoted, setPromoted] = useState(false);
+  const mode = fixed || promoted;
+  useEffect(() => {
+    if (!open) setPromoted(false);
+  }, [open]);
   const [at, setAt] = useState<
     { top: number; bottom: number; above: number; right: number; left: number; center: number; vw: number } | null
   >(null);
   useLayoutEffect(() => {
-    if (!open || !fixed) return;
+    if (!open || !mode) return;
     const place = () => {
       const box = (anchorRef?.current ?? markerRef.current)?.getBoundingClientRect();
       if (!box) return;
@@ -111,7 +131,17 @@ export default function Popover({
       window.removeEventListener("resize", place);
       window.removeEventListener("scroll", place, true);
     };
-  }, [open, fixed, rightGap, anchorRef]);
+  }, [open, mode, rightGap, anchorRef]);
+
+  // Measure it before paint: a layout effect re-renders synchronously, so the
+  // promoted panel is what the first frame shows — no flicker, and no chance
+  // to interact with a panel that is about to move.
+  useLayoutEffect(() => {
+    if (!open || mode) return;
+    const r = panelRef.current?.getBoundingClientRect();
+    if (!r) return;
+    if (r.left < GUTTER - 0.5 || r.right > window.innerWidth - GUTTER + 0.5) setPromoted(true);
+  });
 
   // The panel's own width, read once it is on screen: it is what decides
   // whether a right-aligned panel has room on the left at all. Measured (and
@@ -119,7 +149,7 @@ export default function Popover({
   // the panel class is the caller's.
   const [panelWidth, setPanelWidth] = useState(0);
   useLayoutEffect(() => {
-    if (!open || !fixed) return;
+    if (!open || !mode) return;
     const w = panelRef.current?.getBoundingClientRect().width ?? 0;
     if (w && Math.abs(w - panelWidth) > 0.5) setPanelWidth(w);
   });
@@ -138,9 +168,29 @@ export default function Popover({
   const flipLeft = at
     ? Math.min(at.left, Math.max(GUTTER, at.vw - GUTTER - panelWidth))
     : GUTTER;
+  // …and the same clamp for the other two alignments, which had none: a panel
+  // as wide as the Force menu (240px, `w-60`) hanging off a trigger that sits
+  // at the right end of a wrapped toolbar row ended past the phone's right
+  // edge, where its labels were cut off and its rows could not be pressed
+  // (390px window: left 216 + 240 = 456). A left-aligned panel now slides
+  // left until it fits — never past the trigger's own left edge, so it keeps
+  // as much of its alignment as the window allows — and a centred one keeps
+  // its centre inside the gutters.
+  const clampedLeft = Math.max(GUTTER, at ? at.vw - GUTTER - panelWidth : GUTTER);
+  const leftAligned = at ? Math.min(Math.max(GUTTER, at.left), clampedLeft) : GUTTER;
+  const centerAligned = at
+    ? Math.min(Math.max(GUTTER + panelWidth / 2, at.center), Math.max(GUTTER, at.vw - GUTTER - panelWidth / 2))
+    : GUTTER;
 
   if (!open) return null;
-  const portaled = fixed && at;
+  const portaled = mode && at;
+  // The room a fixed panel is allowed, in CSS: the trigger's own rect bound
+  // (see below) less the app's GUTTER — and less the DEVICE's inset, because
+  // a flyout that stops 8px above the bottom edge stops under a phone's home
+  // indicator (20-34px of chrome) and its last row ends up under the system
+  // bar. Same env()/hook fallback order as the `.safe-*` recipes.
+  const boundBelow = `max(${GUTTER}px, env(safe-area-inset-bottom, 0px), var(--mlo-inset-bottom, 0px))`;
+  const boundAbove = `max(${GUTTER}px, env(safe-area-inset-top, 0px), var(--mlo-inset-top, 0px))`;
   const panel = (
     <div
       ref={panelRef}
@@ -157,27 +207,27 @@ export default function Popover({
               // clipped by the window with no way to scroll to it. The cap is
               // measured from the same trigger rect the position is, so it
               // follows the row on scroll and resize, and `dvh` keeps a phone's
-              // URL bar out of the arithmetic. Panels that carry
-              // `overflow-y-auto` scroll inside it; the rest simply stop.
+              // URL bar out of the arithmetic. The panel scrolls inside it
+              // (`overflow-y: auto`, index.css's `.popover-panel`).
               maxHeight: placement === "top"
-                ? `calc(${at!.above}px - ${GUTTER}px)`
-                : `calc(100dvh - ${at!.top}px - ${GUTTER}px)`,
+                ? `calc(${at!.above}px - ${boundAbove})`
+                : `calc(100dvh - ${at!.top}px - ${boundBelow})`,
               ...(align === "right"
                 ? flipped
                   ? { left: flipLeft }
                   : { right: at!.right }
                 : align === "left"
-                  ? { left: at!.left }
-                  : { left: at!.center, transform: "translateX(-50%)" }),
+                  ? { left: leftAligned }
+                  : { left: centerAligned, transform: "translateX(-50%)" }),
             }
           : undefined
       }
-      className={`anim-fade ${fixed ? "z-[60]" : "absolute z-50"} ${
-        fixed ? "" : placement === "top" ? "bottom-full mb-1" : "mt-1"
+      className={`popover-panel anim-fade ${mode ? "z-[60]" : "absolute z-50"} ${
+        mode ? "" : placement === "top" ? "bottom-full mb-1" : "mt-1"
       } rounded-xl shadow-2xl border border-white/10 ${
         frost ? "np-veil np-veil-dark np-veil-panel" : "bg-zinc-950"
       } ${
-        fixed
+        mode
           ? ""
           : align === "right"
             ? "right-0"
@@ -192,7 +242,7 @@ export default function Popover({
   return (
     <>
       {shield && <div className="fixed inset-0 z-40" onClick={onClose} />}
-      {fixed ? (
+      {mode ? (
         <>
           {/* The in-place marker the panel is positioned from: the caller's
               own wrapper, measured instead of assumed. It is a BLOCK box of

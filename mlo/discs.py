@@ -32,7 +32,8 @@ import threading
 from .audio import AudioFile
 from .config import should_write_audio_tag
 from . import naming
-from .paths import AUDIO_EXTS, fsync_dir
+from .paths import (AUDIO_EXTS, fsync_dir, expected_tracks_state,
+                    load_expected_tracks)
 from .stats import is_audio_file
 from .subproc import run_tool
 from .tagtext import canonical_text
@@ -80,6 +81,20 @@ COPY_CRC_RE = re.compile(r"^Copy CRC\s+([0-9A-Fa-f]{8})")
 TEST_CRC_RE = re.compile(r"^Test CRC\s+([0-9A-Fa-f]{8})")
 XLD_CRC_RE = re.compile(r"^CRC32 hash(?:\s+\(test run\))?\s*:\s*([0-9A-Fa-f]{8})")
 ACCURATE_CRC_RE = re.compile(r"\[([0-9A-Fa-f]{8})\]")
+
+# A cue sheet's own tracklist: "  TRACK 01 AUDIO", the TITLE/PERFORMER lines
+# that belong to it, and the FILE line that names the audio it describes. The
+# TOC of an EAC/XLD log states the same running order for a rip whose cue is
+# gone: "    1  |  0:00.00  |  3:13.27  | ..." (track, start, LENGTH). Both are
+# read with the sheet/log readers below so a single song imported out of a rip
+# can be placed on the album's real tracklist (mlo.discs.sidecar_tracklist).
+CUE_TRACK_LINE_RE = re.compile(r"^\s*TRACK\s+(\d{1,3})\s+\S+", re.IGNORECASE)
+CUE_TITLE_LINE_RE = re.compile(r'^\s*TITLE\s+"?([^"\r\n]*?)"?\s*$', re.IGNORECASE)
+TOC_TRACK_ROW_RE = re.compile(
+    r"^\s*(\d{1,3})\s*\|\s*\d+:\d{2}\.\d{2}\s*\|\s*(\d+):(\d{2})\.(\d{2})\s*\|",
+    re.MULTILINE,
+)
+LOG_FILENAME_RE = re.compile(r"^\s*Filename\s+(.+?)\s*$", re.IGNORECASE)
 
 # Containers whose decoded PCM can be the WAV an EAC/XLD log's CRC was taken
 # from. Anything else (mp3/m4a/ogg/opus/aac) is lossy: it can never decode to
@@ -191,6 +206,255 @@ def parse_log_checksums(text):
                     per_track[current] = m.group(1).upper()
                     priority[current] = 0
     return per_track
+
+
+# --------------------------------------------------------------------------- #
+# What a rip's own sheets say about its tracklist
+#
+# A single song imported out of a CD rip brings its sheets with it (.cue, .log,
+# .accurip). Those know what the file alone cannot: which album the track is
+# part of, which position it occupies, and whether its samples are the ones
+# that were ripped. The readers below turn them into the running order the
+# import records as .mlo_expected.json — the same rows the wizard writes from
+# a MusicBrainz release, so a partial album reads as partial either way.
+# --------------------------------------------------------------------------- #
+
+def read_cue_text(path):
+    """Decode a cue sheet (utf-8-sig, then latin-1 — an EAC ANSI sheet must
+    not come back as replacement characters)."""
+    try:
+        with open(path, "rb") as fh:
+            raw = fh.read()
+    except OSError:
+        return ""
+    try:
+        return raw.decode("utf-8-sig")
+    except UnicodeDecodeError:
+        return raw.decode("latin-1")
+
+
+def _sheet_disc(name):
+    """The disc a sheet's own file name claims (CD-2.cue / "2 - Album.log"),
+    else 1 — a sheet that names no disc describes disc 1."""
+    return _log_name_disc(os.path.basename(name)) or 1
+
+
+def cue_track_rows(path, disc=None):
+    """The tracklist a cue sheet states: [{disc, position, title, file}].
+
+    `file` is the sheet's own FILE reference for that track — the evidence
+    that places an imported file on the tracklist (a per-track rip writes one
+    FILE per track; an image rip writes one FILE for the whole disc, and then
+    only the track number or the playtime can place a file). A track the sheet
+    gives no TITLE of its own keeps an empty one rather than the sheet's file
+    name: the album's title is not the track's.
+    """
+    text = read_cue_text(path)
+    rows = []
+    current_file = ""
+    for line in text.splitlines():
+        m = CUE_FILE_RE.match(line)
+        if m:
+            current_file = m.group(1)
+            continue
+        m = CUE_TRACK_LINE_RE.match(line)
+        if m:
+            rows.append({"disc": disc or 1, "position": int(m.group(1)),
+                         "title": "", "file": current_file})
+            continue
+        m = CUE_TITLE_LINE_RE.match(line)
+        if m and rows and not rows[-1]["title"]:
+            # A TITLE after a TRACK line is that track's title; one before any
+            # TRACK line is the album's, which belongs to no row.
+            rows[-1]["title"] = m.group(1).strip()
+    # A FILE a single row claims names that row's file, so its stem is the
+    # track's name when the sheet states no title.
+    seen = {}
+    for r in rows:
+        if r["file"]:
+            seen[r["file"]] = seen.get(r["file"], 0) + 1
+    for r in rows:
+        if not r["title"] and r["file"] and seen[r["file"]] == 1:
+            r["title"] = os.path.splitext(os.path.basename(r["file"]))[0]
+    return rows
+
+
+def parse_log_track_seconds(text):
+    """Track number -> playtime in seconds, from the log's TOC table."""
+    out = {}
+    for m in TOC_TRACK_ROW_RE.finditer(text):
+        try:
+            out[int(m.group(1))] = (int(m.group(2)) * 60 + int(m.group(3))
+                                    + int(m.group(4)) / 75.0)
+        except ValueError:
+            continue
+    return out
+
+
+def parse_log_track_files(text):
+    """Track number -> audio file name, from a log's per-track Filename
+    lines (EAC writes them; XLD does not)."""
+    out = {}
+    current = None
+    for raw in text.splitlines():
+        line = raw.strip()
+        m = re.match(r"^Track\s+(\d{1,3})\b", line, re.IGNORECASE)
+        if m:
+            current = int(m.group(1))
+            continue
+        if current is None:
+            continue
+        m = LOG_FILENAME_RE.match(line)
+        if m:
+            out[current] = os.path.basename(m.group(1).replace("\\", "/"))
+    return out
+
+
+def log_track_rows(text, disc=1):
+    """The tracklist a rip log states: [{disc, position, title, file}].
+
+    A log has no titles, so `title` is the file's stem when the log names the
+    file and empty otherwise. The running order and the playtimes come from
+    its TOC ("the log's own evidence", the same table
+    `parse_log_toc_seconds` totals), never from the order the folder happens
+    to list.
+    """
+    seconds = parse_log_track_seconds(text)
+    files = parse_log_track_files(text)
+    numbers = sorted(set(seconds) | set(files) | set(parse_log_checksums(text)))
+    rows = []
+    for n in numbers:
+        ref = files.get(n, "")
+        rows.append({"disc": disc, "position": n, "title": "",
+                     "file": ref, "seconds": seconds.get(n)})
+    for r in rows:
+        if not r["title"] and r["file"]:
+            r["title"] = os.path.splitext(r["file"])[0]
+    return rows
+
+
+def sidecar_tracklist(album_dir):
+    """The album's own tracklist, read from its .cue and .log sheets.
+
+    Returns {"source": "cue"|"log"|None, "cue": path|None, "log": path|None,
+    "rows": [{disc, position, title, file, seconds}]} — the cue's tracklist
+    when one is there (it is the sheet that names titles AND files), the log's
+    TOC otherwise. Both are needed: an imported rip may ship only one of them,
+    and a partial album must still be able to state what it is missing.
+    """
+    try:
+        names = sorted(os.listdir(album_dir))
+    except OSError:
+        return {"source": None, "cue": None, "log": None, "rows": []}
+    cues = [f for f in names if f.lower().endswith(".cue")]
+    logs = [f for f in names if f.lower().endswith(".log")]
+    rows = []
+    cue = None
+    used_log = None
+    for f in cues:
+        path = os.path.join(album_dir, f)
+        got = cue_track_rows(path, disc=_sheet_disc(f))
+        if not got:
+            continue
+        rows.extend(got)
+        cue = cue or path
+    source = "cue" if rows else None
+    if not rows:
+        # No cue: the log's TOC is the only statement of the running order
+        # left, and it names the disc it was taken from.
+        for f in logs:
+            path = os.path.join(album_dir, f)
+            got = log_track_rows(read_log_text(path), disc=_sheet_disc(f))
+            if not got:
+                continue
+            rows.extend(got)
+            used_log = used_log or path
+        source = "log" if rows else None
+    rows.sort(key=lambda r: (r["disc"], r["position"]))
+    return {"source": source, "cue": cue,
+            "log": used_log or (os.path.join(album_dir, logs[0]) if logs else None),
+            "rows": rows}
+
+
+def match_disc_row(rows, audio_path, duration=None):
+    """The tracklist row an audio file occupies, or None.
+
+    Evidence in order of strength:
+      1. the row names this file (a .cue FILE entry or a log's Filename —
+         exact, and it is what a rip writes),
+      2. the file's own track number (tag, then the 'NN'/'D-TT' prefix),
+      3. a unique playtime match against the log's TOC within the same
+         tolerance the disc mapping trusts.
+    A row is only ever returned when the evidence is unambiguous: placing an
+    imported track on the wrong row is worse than leaving it unplaced, which
+    reads as "this track is not on the sheet" and is reported as such.
+    """
+    if not rows:
+        return None
+    for r in rows:
+        if r.get("file") and _norm_name(r["file"]) == _norm_name(audio_path):
+            return r
+    tn = _file_track_number(audio_path)
+    if tn is not None:
+        same = [r for r in rows if int(r["position"]) == int(tn)]
+        if len(same) == 1:
+            return same[0]
+    if duration is None:
+        # The album module's own reader (it totals a disc's playtime for the
+        # log mapping); a file it cannot measure is no evidence at all.
+        duration = _audio_seconds([audio_path])
+    if duration:
+        close = [r for r in rows if r.get("seconds")
+                 and abs(float(r["seconds"]) - float(duration)) <= TOC_TOLERANCE_S]
+        if len(close) == 1:
+            return close[0]
+    return None
+
+
+def disk_track_keys(album_dir, audio_paths=None):
+    """The album's audio as the two ways a manifest row can name it:
+    ({(disc, track number)}, {file names})."""
+    if audio_paths is None:
+        try:
+            audio_paths = [os.path.join(album_dir, f) for f in os.listdir(album_dir)
+                           if f.lower().endswith(AUDIO_EXTS)]
+        except OSError:
+            return set(), []
+    discs = album_discs(album_dir) or {}
+    disc_of = {}
+    for d, paths in discs.items():
+        for p in paths:
+            disc_of[os.path.normcase(os.path.abspath(p))] = d
+    keys, names = set(), []
+    for p in audio_paths:
+        names.append(os.path.basename(p))
+        tn = _file_track_number(p)
+        if tn is None:
+            continue
+        d = disc_of.get(os.path.normcase(os.path.abspath(p))) or disc_of_filename(p) or 1
+        keys.add((int(d), int(tn)))
+    return keys, names
+
+
+def album_expected_state(album_dir, audio_paths=None):
+    """How much of the album's recorded tracklist is on disk.
+
+    Returns None when the folder carries no manifest (nothing was recorded, so
+    nothing can be missing), else {"total", "present", "missing", "rows"} with
+    each row flagged — the same rule the library page and the grader read
+    (mlo.paths.expected_tracks_state).
+    """
+    from .paths import expected_tracks_state, load_expected_tracks
+    from .paths import expected_tracks_state, load_expected_tracks
+    from .paths import expected_tracks_state, load_expected_tracks
+    tracks = load_expected_tracks(album_dir)["tracks"]
+    if not tracks:
+        return None
+    keys, names = disk_track_keys(album_dir, audio_paths)
+    rows = expected_tracks_state(tracks, keys, names)
+    present = sum(1 for r in rows if not r["missing"])
+    return {"total": len(rows), "present": present,
+            "missing": len(rows) - present, "rows": rows}
 
 
 def _file_track_number(path):

@@ -9,7 +9,7 @@ import type { AdvisoryFetchResult, CreditRow, InstrumentalFetchResult } from "..
 import type { Track } from "../types";
 import { fmtDuration, fmtTech } from "../lib/fmt";
 import { trackRef } from "../lib/refs";
-import { AuditBadge, GradeBadge, advisoryLine, advisoryOutcome, instrumentalLine } from "./Badges";
+import { AuditBadge, GradeBadge, LyricsKindChip, advisoryLine, advisoryOutcome, allowPlainOf, instrumentalLine } from "./Badges";
 import TrackDownloadExport from "./TrackDownloadExport";
 import Modal from "./Modal";
 import LogReport from "./LogReport";
@@ -104,7 +104,14 @@ export default function TrackDetails({
   // registry carries for it (shown as the row's tooltip).
   const reg = useTagRegistry();
   const tech = [fmtTech(track.tech), track.tech.length ? fmtDuration(track.tech.length) : ""].filter(Boolean).join(" · ");
-  const lyricsState = track.lyrics_embedded ? "embedded" : track.lyrics_lrc ? ".lrc sidecar" : "missing";
+  // WHERE the lyrics are stored (the payload's two booleans) — the pair is
+  // what "which kind" is read beside, and a sidecar beats the tag exactly as
+  // mlo.lyrics.read_lyrics resolves them.
+  const lyricsSource = track.lyrics_embedded ? "embedded" : track.lyrics_lrc ? ".lrc sidecar" : null;
+  // The user's own answer on plain lyrics — the config is in the app-wide
+  // cache, so this row's mark follows the same setting as every other one.
+  const { data: config } = useQuery({ queryKey: ["config"], queryFn: api.config });
+  const allowPlain = allowPlainOf(config);
   const trackPath = track.path ?? "";
   // Credits are looked up only once the section is opened — the panel below
   // mounts on open, so the modal never waits on MusicBrainz.
@@ -184,7 +191,12 @@ export default function TrackDetails({
               title: tagTooltip(reg, key),
               value: String(tags[key as keyof typeof tags]),
             })),
-            { label: "Lyrics", value: lyricsState },
+            { label: "Lyrics", value: track.lyrics_kind ? (
+              <span className="inline-flex items-center gap-1.5 min-w-0">
+                <LyricsKindChip kind={track.lyrics_kind} allowPlain={allowPlain} size="sm" />
+                <span className="text-zinc-500">{lyricsSource}</span>
+              </span>
+            ) : "missing" },
             { label: "Advisory", value: advisory },
             { label: "Instrumental", value: instrumental },
             { label: "AudioAuditor", value: <AuditOverride path={track.path} current={track.audit} /> },

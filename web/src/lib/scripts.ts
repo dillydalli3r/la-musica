@@ -25,7 +25,16 @@ export const SCRIPTS: { ids: number[]; label: string }[] = [
   { ids: [19], label: "Optimize artist images" },
   { ids: [20], label: "Scan library layout" },
   { ids: [21], label: "Fix AcoustID pairs" },
+  { ids: [22], label: "Submit fingerprints (AcoustID)" },
 ];
+
+/** The scripts the SHIPPED Run All chain deliberately does not carry
+ *  (`server.script_runners.OPT_IN_SCRIPTS`): their work leaves the machine —
+ *  22 publishes a fingerprint + MusicBrainz recording id to AcoustID's public
+ *  database — so shipping them in the default chain would publish on every
+ *  import of every install without anyone asking. They are offered everywhere
+ *  a script is; a user who ticks one gets it in their own order. */
+export const OPT_IN_SCRIPTS: number[] = [22];
 
 /** Script number → label, for surfaces that render a bare id. */
 export const SCRIPT_LABEL: Record<number, string> = Object.fromEntries(

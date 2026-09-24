@@ -408,4 +408,95 @@ try:
 finally:
     shutil.rmtree(_strip_dir, ignore_errors=True)
 
+# --------------------------------------------------------------------------- #
+# The Podcasts shelf. A podcast in MusicBrainz is a SERIES of type Podcast —
+# there is no Podcast release-group type — and the app records that series on
+# the episodes' own files (server.library reads the PODCASTSERIES tags into
+# each album row's `podcast` block), so the shelf is built from the LIBRARY and
+# never from a request. One row per series, carrying its newest episode; no row
+# and no shelf at all for a library without a podcast.
+# --------------------------------------------------------------------------- #
+from server import library as lib_mod  # noqa: E402  (after the payload cases above)
+
+
+def _episode(path, series, number, date, mbid="", artist="WNYC"):
+    return {
+        "path": path, "cover_file": "cover.jpg", "media": "Digital Media",
+        "pass": True, "audit_summary": None, "grade_pct": 100.0, "track_count": 1,
+        "meta": {"ALBUM": f"New Sounds #{number}", "ALBUMARTIST": artist,
+                 "DATE": date, "RELEASETYPE": "Broadcast",
+                 "PODCASTSERIES": series},
+        "podcast": {"series": series, "series_mbid": mbid or None, "episode": number},
+        "tracks": [{"path": path + "/1.mp3", "file": "1.mp3"}],
+    }
+
+
+_eps = [
+    _episode("C:/M/W/2515", "New Sounds (WNYC radio show)", 2515, "2008-09-13", "sg-1"),
+    _episode("C:/M/W/2606", "New Sounds (WNYC radio show)", 2606, "2008-11-15", "sg-1"),
+    _episode("C:/M/W/1", "The Bugle", 1, "2015-01-01", "sg-2", "Andy Zaltzman"),
+]
+_music = {"path": "C:/M/A/X", "meta": {"ALBUM": "X"}, "tracks": []}
+shelf = r._podcasts(_eps + [_music], 10)
+# ONE row per series and the row is the NEWEST episode of it (by the episode's
+# own date), so the caption says the show and the card shows what arrived last.
+# The SHELVES are ordered by that newest episode too: The Bugle's 2015 episode
+# is newer than New Sounds' 2008 one, so it leads.
+assert [row["podcast_series"] for row in shelf] == \
+    ["The Bugle", "New Sounds (WNYC radio show)"], shelf
+assert shelf[0]["path"] == "C:/M/W/1", shelf[0]
+assert shelf[1]["path"] == "C:/M/W/2606", shelf[1]
+assert shelf[1]["podcast_episode_count"] == 2 and shelf[0]["podcast_episode_count"] == 1
+assert shelf[1]["podcast_series_mbid"] == "sg-1" and shelf[0]["podcast_series_mbid"] == "sg-2"
+# The row IS the library's own album row (the shared card reads its tracks,
+# meta, cover, grade and audit off it) plus the series facts, exactly like
+# every other shelf row.
+assert shelf[1]["owned"] is True and shelf[1]["artist"] == "WNYC", shelf[1]
+assert shelf[1]["meta"]["PODCASTSERIES"] == "New Sounds (WNYC radio show)"
+assert shelf[1]["tracks"] == _eps[1]["tracks"]
+# A music album is no episode; neither is a row whose `podcast` block names no
+# series (a Broadcast MusicBrainz links to no series).
+assert r._podcasts([_music], 10) == []
+assert r._podcasts([{**_music, "podcast": None}], 10) == []
+# An episode MusicBrainz dates not at all is placed by its episode NUMBER
+# rather than dropped: #999 is older than the dated #2515 of the same show.
+_undated = _episode("C:/M/W/999", "New Sounds (WNYC radio show)", 999, "")
+assert r._podcasts([_eps[0], _undated], 10)[0]["path"] == "C:/M/W/2515"
+# The shelf's own limit, like every other shelf's.
+assert len(r._podcasts(_eps, 1)) == 1
+
+# The series payload: every episode of ONE series, newest first, each a library
+# album row the card draws; a series the library holds no episode of is None
+# (the route's 404, not an empty page).
+_lib_with_podcasts = {"artists": [{"path": "C:/M/W", "name": "W",
+                                   "display_name": "WNYC", "albums": _eps}]}
+_real_build_library = lib_mod.build_library
+_real_map_for = store.map_for
+store.map_for = lambda **kw: {}
+try:
+    lib_mod.build_library = lambda cfg, progress=None: _lib_with_podcasts
+    one = r.podcast_series_payload({"music_folder": "C:/M"},
+                                   "New Sounds (WNYC radio show)")
+    assert [e["podcast"]["episode"] for e in one["episodes"]] == [2606, 2515], one
+    assert one["episode_count"] == 2 and one["series_mbid"] == "sg-1", one
+    assert one["episodes"][0]["artist"] == "WNYC", one["episodes"][0]
+    assert r.podcast_series_payload({"music_folder": "C:/M"}, "No Such Show") is None
+    # The Home payload carries the shelf under `podcasts` — and an empty one
+    # (no shelf drawn: PodcastShelf returns null for no items) for a library
+    # that holds no podcast at all.
+    lib_mod.build_library = lambda cfg, progress=None: {"artists": []}
+    r.invalidate()
+    quiet = r.build_home({"music_folder": "C:/M"})
+    assert quiet["podcasts"] == [], quiet["podcasts"]
+    lib_mod.build_library = lambda cfg, progress=None: _lib_with_podcasts
+    r.invalidate()
+    hot = r.build_home({"music_folder": "C:/M"})
+    assert [row["podcast_series"] for row in hot["podcasts"]] == \
+        ["The Bugle", "New Sounds (WNYC radio show)"], hot["podcasts"]
+    assert hot["podcasts"][1]["path"] == "C:/M/W/2606", hot["podcasts"][1]
+finally:
+    lib_mod.build_library = _real_build_library
+    store.map_for = _real_map_for
+    r.invalidate()
+
 print("ok")

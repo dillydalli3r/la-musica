@@ -74,6 +74,20 @@ export default function LyricsSidebar({
     localStorage.setItem(VIZ_KEY, v ? "1" : "0");
   };
 
+  // Esc closes the pane, like the queue drawer and every dialog in the app.
+  // An inner surface gets first refusal: a dialog (or the nav drawer) on top
+  // owns the key while it is open, so the pane stands down rather than closing
+  // under it — the rule the fullscreen player uses for its own Escape.
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key !== "Escape" || e.defaultPrevented) return;
+      if (document.querySelector('[aria-modal="true"]')) return;
+      onClose();
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [onClose]);
+
   const path = current?.path ?? null;
   useEffect(() => {
     if (!path) {
@@ -195,7 +209,7 @@ export default function LyricsSidebar({
   const album = payload?.album || current?.album || "";
 
   return (
-    <aside className="fixed top-12 bottom-[5.75rem] right-0 w-full max-w-[100vw] sm:w-[380px] z-30 bg-panel/95 backdrop-blur border-l border-border shadow-2xl flex flex-col">
+    <aside className="safe-lyrics fixed right-0 w-full max-w-[100vw] sm:w-[380px] z-30 bg-panel/95 backdrop-blur border-l border-border shadow-2xl flex flex-col">
       <div className="flex items-center gap-2 px-4 py-2.5 border-b border-border/60">
         <div className="min-w-0 flex-1">
           <div className="text-xs font-semibold truncate">{title}</div>

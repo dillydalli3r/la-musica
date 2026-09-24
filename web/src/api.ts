@@ -22,6 +22,8 @@ import type {
   ImportBulkResult,
   ImportPrompt,
   ImportScriptsPreview,
+  ImportSettleResult,
+  ImportSourceResult,
   LayoutReport,
   LayoutSnapshot,
   LibraryAddResult,
@@ -37,11 +39,15 @@ import type {
   MBSearchFieldHelp,
   MBSearchRows,
   NeedsWarning,
+  PodcastSeries,
   ScriptRunResult,
+  ScriptMenu,
   SlskReleaseIdentity,
   SourceHealth,
   SourceKind,
   SourcesHealth,
+  StreamingImportResult,
+  UnpackedTree,
   Wish,
   WishesPayload,
 } from "./types";
@@ -453,6 +459,14 @@ export interface YoutubeCookies {
   warnings: string[];
 }
 
+/** What an import answers with: the same state, plus how many cookie lines the
+ *  import LEFT OUT because YouTube is never sent them (a browser export is the
+ *  whole profile), and — for a file with no youtube.com cookie in it — nothing
+ *  at all: that file is refused (400) rather than stored. */
+export interface YoutubeCookiesSaveReply extends YoutubeCookies {
+  filtered: number;
+}
+
 /** The RateYourMusic credential (`server/api_rym.py`): what the stored
  *  `rym_cookie` holds. NAMES only — a `session` cookie is a live credential,
  *  so no route returns a value — plus the server's own sentences about it (a
@@ -470,11 +484,41 @@ export interface RymCookies {
 
 /** What an import answers with: the same state, plus how many pairs the last
  *  import actually stored (`0` when the file held no rateyourmusic.com cookie —
- *  nothing was replaced) and whether the stored credential now carries RYM's
- *  `session` cookie. */
+ *  nothing was replaced), how many cookie lines in the file were for other
+ *  sites, and whether the stored credential now carries RYM's `session`
+ *  cookie. */
 export interface RymCookiesSaveReply extends RymCookies {
   stored: number;
   session: boolean;
+  filtered: number;
+}
+
+/** One cookie of a credential, as `GET /api/cookies/{source}` states it
+ *  (`server/api_cookies.py`) — the row a user reads and writes against. There
+ *  is NO value: a session cookie is a live credential. `expires_at` and
+ *  `expired` are the server's own reading of the expiry column, so the browser
+ *  never has to do date arithmetic on a timestamp. */
+export interface CookieEntry {
+  /** the host this cookie is sent to, lower-cased, no leading dot. */
+  domain: string;
+  path: string;
+  name: string;
+  /** the Netscape expiry column as written; "" is a session cookie. */
+  expiry: string;
+  /** that expiry as an ISO 8601 UTC date, or "" when none is stated. */
+  expires_at: string;
+  expired: boolean;
+  /** the user's own note for this cookie ("" when none). */
+  comment: string;
+}
+
+/** The per-cookie view of one cookie login: what it stores, and the hosts its
+ *  import keeps cookies for (a browser export is the whole profile). */
+export interface CookieList {
+  source: string;
+  hosts: string[];
+  present: boolean;
+  cookies: CookieEntry[];
 }
 
 /** One credit row of `/api/credits`: who did what on a track or an album.
@@ -2159,6 +2203,12 @@ export const api = {
       body: JSON.stringify({ ids, targets, force }),
     }, 3600000),
 
+  /** The registry, as the details menu needs it: every script, its slot in the
+   *  stack's order, its force flag, its feature switch and the entity kinds a
+   *  run of it makes sense from (server/script_menu.py). Read-only — a menu
+   *  runs its ids through the same /api/run above. */
+  scriptMenu: () => json<ScriptMenu>(`${API}/script-menu`),
+
   // playlists
   playlists: () => json<import("./types").Playlist[]>(`${API}/playlists`),
   playlist: (id: number) => json<import("./types").Playlist>(`${API}/playlists/${id}`),
@@ -2210,6 +2260,30 @@ export const api = {
       body: fd,
     });
   },
+  /** Import a playlist from a streaming service (Deezer, Spotify, YouTube
+   *  Music, Apple Music). The answer carries the report first — every row,
+   *  matched or not, with the reason — and the created playlist second.
+   *  `dryRun` is the same read and match with no write: what "Check" asks for.
+   *  A refused URL, a missing credential or a service that did not answer
+   *  comes back as the service's own sentence. */
+  playlistImportStreaming: (req: {
+    url: string;
+    name?: string;
+    service?: string;
+    parentAlbums?: boolean;
+    dryRun?: boolean;
+  }) =>
+    json<StreamingImportResult>(`${API}/playlists/import/streaming`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        url: req.url,
+        name: req.name ?? "",
+        service: req.service ?? "",
+        parent_albums: req.parentAlbums,
+        dry_run: req.dryRun ?? false,
+      }),
+    }, 180000),
 
   // integrations
   mbRelease: (id: string) => json<import("./types").MBRelease>(`${API}/mb/release?mbid=${encodeURIComponent(id)}`),
@@ -2427,22 +2501,74 @@ export const api = {
       8000
     ),
 
-  importUpload: (targetDir: string, files: { file: File; relPath: string }[]) => {
+  /** Upload a set of files as ONE album.
+   *
+   *  `album_name`/`merged` are what actually happened to a SINGLE-song
+   *  upload: the server places one track on the album it belongs to (the
+   *  release the library already holds, or the album the file's own tags
+   *  name) instead of making an album out of the track, so the name that
+   *  comes back can differ from `targetDir`.
+   *
+   *  `staged` is the other way in, and it is the same call: absolute paths the
+   *  server already holds — the files `importUnpack` unpacked out of a user's
+   *  archive — are moved into the album instead of being uploaded a second
+   *  time. A group may carry both (a drop of a folder AND an archive), and the
+   *  album that comes out is the same one either way. */
+  importUpload: (targetDir: string, files: { file: File; relPath: string }[], staged?: string[]) => {
     const fd = new FormData();
     for (const { file, relPath } of files) fd.append("files", file, relPath);
-    return json<{ ok: boolean; saved: string[]; album_path: string }>(
+    if (staged?.length) fd.append("staged", JSON.stringify(staged));
+    return json<{ ok: boolean; saved: string[]; album_path: string; album_name?: string; merged?: boolean }>(
       `${API}/import/upload?target_dir=${encodeURIComponent(targetDir)}`,
       { method: "POST", body: fd },
       1800000
     );
   },
+  /** Unpack ONE archive on the server and list what came out — the wizard
+   *  shows that list BEFORE anything is committed, so an archive is a
+   *  selection like a folder is.
+   *
+   *  No parallel import path: this only stages the tree (under <music>/.mlo).
+   *  The commit is the ordinary `importUpload`, which takes the files it kept
+   *  as `staged`. `audio` is the server's own count over the extracted tree —
+   *  an archive with none is a fact (`audio: 0`), not an empty album.
+   *
+   *  `path` is for a shell that hands over OS paths instead of bytes (the
+   *  desktop app): the archive is read from the filesystem the server shares.
+   *  The same ceiling as an upload applies — this request carries the app's
+   *  30-minute allowance, and a bigger/slower archive fails with "no answer
+   *  within 1800s" rather than hanging. */
+  importUnpack: (archive: File | { path: string }) => {
+    const to = 1800000;
+    if (archive instanceof File) {
+      const fd = new FormData();
+      fd.append("file", archive, archive.name);
+      return json<UnpackedTree>(`${API}/import/unpack`, { method: "POST", body: fd }, to);
+    }
+    return json<UnpackedTree>(
+      `${API}/import/unpack?path=${encodeURIComponent(archive.path)}`,
+      { method: "POST" },
+      to
+    );
+  },
+  /** Drop unpacked trees the wizard is done with. Only a folder the app made
+   *  under its own state root is ever removed (the server answers the rest as
+   *  `skipped`), and one left behind by a closed wizard is swept after a day. */
+  importUnpackDiscard: (dirs: string[]) => {
+    const fd = new FormData();
+    for (const d of dirs) fd.append("dirs", d);
+    return json<{ ok: boolean; removed: string[]; skipped: string[] }>(
+      `${API}/import/unpack/discard`,
+      { method: "POST", body: fd }
+    );
+  },
   importScan: (path: string) =>
-    json<{ root: string; files: { relPath: string; size: number }[] }>(
+    json<{ root: string; file?: boolean; files: { relPath: string; size: number }[] }>(
       `${API}/import/scan?path=${encodeURIComponent(path)}`,
       { method: "POST" }
     ),
   importIngest: (source: string, target: string) =>
-    json<{ ok: boolean; path: string }>(
+    json<{ ok: boolean; path: string; album_name?: string; merged?: boolean }>(
       `${API}/import/ingest?source=${encodeURIComponent(source)}&target=${encodeURIComponent(target)}`,
       { method: "POST" }
     ),
@@ -3247,6 +3373,15 @@ export const api = {
   home: (refresh = false) =>
     json<HomeData>(`${API}/home${refresh ? "?refresh=1" : ""}`, undefined, 120000),
 
+  /** ONE podcast series and its episodes, newest first. `series` is the name
+   *  the Home shelf links by — the name the app stored on the episodes' files
+   *  (MusicBrainz's disambiguation included), which is also what keeps two
+   *  same-named shows apart. A series the library holds no episode of answers
+   *  404, which the page renders as "not in the library" rather than as an
+   *  empty show. */
+  podcastSeries: (series: string) =>
+    json<PodcastSeries>(`${API}/podcasts?series=${encodeURIComponent(series)}`, undefined, 60000),
+
   // ----------------------------------------------------------------- //
   // Discovery — the provider catalogue behind Settings' order editors. //
   // ----------------------------------------------------------------- //
@@ -3396,13 +3531,18 @@ export const api = {
       },
       600000
     ),
-  /** Publish to AcoustID's public database the fingerprint/id pair the files
-   *  already carry (POST /api/import/acoustid/submit). Outward-facing and
-   *  public, so `confirm: true` is sent from the UI's second, explicitly
-   *  labelled press; the ids come off the files (nothing is re-fingerprinted,
-   *  nothing is written locally). A refusal — no `acoustid_user_key`, or the
-   *  one it was given refused — comes back as `available: false` with the
-   *  service's own `note`/`code`. */
+  /** Publish to AcoustID's public database what the files state: their
+   *  fingerprint and the MusicBrainz recording id they name
+   *  (POST /api/import/acoustid/submit). Outward-facing and public, so
+   *  `confirm: true` is sent from the UI's second, explicitly labelled press.
+   *  The fingerprint comes off the file (`ACOUSTID_FINGERPRINT`) or is taken
+   *  locally when the file carries none, and nothing is written locally. A pair
+   *  AcoustID already links — or that this app already submitted — is reported
+   *  as `already_known` and NOT re-sent; a file that names no recording is a
+   *  named skip; `results` is the per-track report. A refusal — no
+   *  `acoustid_user_key`, or the one it was given refused — comes back as
+   *  `available: false` with the service's own `note`/`code`, and nothing is
+   *  read or sent. */
   importAcoustidSubmit: (paths: string[], staged = false) =>
     json<AcoustidSubmitResult>(
       `${API}/import/acoustid/submit`,
@@ -3476,6 +3616,47 @@ export const api = {
         body: JSON.stringify({ paths }),
       }
     ),
+  /** Settle a digital release's own three answers before the ticked scripts
+   *  run — the same call `server.imports.settle_digital_import` makes on every
+   *  other import path, so an album imported by hand ends in the state an
+   *  unattended import leaves:
+   *
+   *   * `source` — SOURCE written when the release (its own store URLs) or the
+   *     acquisition's provider states one; `state: "asked"` (with the config's
+   *     `default`) when nothing may honestly be written, which is what the
+   *     Match step's own control answers;
+   *   * `lyrics` — the untimed lyrics this install refuses (`state:
+   *     "cleaned"` with the count, or `"no-fetch"` when script 13 is not in
+   *     `scripts` and nothing could replace them);
+   *   * `metadata` — the album description (and artist image/description)
+   *     fetched through the import's own metadata step, the same machinery the
+   *     album page's fetch uses.
+   *
+   *  `source` is the value the user just answered (written here), `scripts`
+   *  the chain the Finish step is about to run. */
+  importSettle: (
+    path: string,
+    opts: { scripts?: number[]; source?: string; metadata?: boolean; release?: Record<string, unknown>; staged?: boolean } = {}
+  ) =>
+    json<ImportSettleResult>(`${API}/import/settle`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ path, ...opts }),
+    }),
+  /** Report or write a Digital Media album's SOURCE (POST /api/import/source).
+   *  No `value` = the value the pipeline would write (`state: "suggested"`) or
+   *  `"asked"`, plus the config's own default — what the wizard pre-fills;
+   *  `value` given = THE user's answer, written to every track that lacks one
+   *  (fill-only, the pipeline's own rule). */
+  importSource: (
+    path: string,
+    opts: { value?: string; release?: Record<string, unknown>; provider?: string; staged?: boolean } = {}
+  ) =>
+    json<ImportSourceResult>(`${API}/import/source`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ path, ...opts }),
+    }),
 
   // ----------------------------------------------------------------- //
   // Bulk acquisition, genre facets, metadata review, video matching.   //
@@ -3762,7 +3943,7 @@ export const api = {
    *  Netscape cookie file first, so junk comes back as a 400 with the reason
    *  instead of replacing a jar that worked. */
   youtubeCookiesSave: (text: string) =>
-    json<YoutubeCookies>(`${API}/youtube/cookies`, {
+    json<YoutubeCookiesSaveReply>(`${API}/youtube/cookies`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ text }),
@@ -3784,6 +3965,25 @@ export const api = {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ text }),
+    }, 60000),
+  /** The cookies ONE cookie login stores, with each cookie's own comment —
+   *  `GET /api/cookies/{source}` (server/api_cookies.py). The same shape for
+   *  the yt-dlp jar (`youtube`) and the RYM credential (`rym`), so one panel
+   *  draws both. Never carries a cookie value. */
+  cookieList: (source: "youtube" | "rym") =>
+    json<CookieList>(`${API}/cookies/${source}`),
+  /** Write (or, with an empty `comment`, clear) one cookie's comment. The
+   *  cookie is named by its IDENTITY — domain, path, name — so the note follows
+   *  the cookie across a re-import instead of the line it sat on. Answers with
+   *  the fresh list. */
+  cookieComment: (
+    source: "youtube" | "rym",
+    body: { domain: string; path: string; name: string; comment: string }
+  ) =>
+    json<CookieList>(`${API}/cookies/${source}/comments`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
     }, 60000),
   /** Write TITLE/TRACKNUMBER/DISCNUMBER onto video files from the match-assist
    *  panel (one assignment per video file). */
@@ -3935,6 +4135,11 @@ export interface WatchCandidate {
   year: string;
   primary_type: string;
   secondary_types: string[];
+  /** The Podcast SERIES this release group is `part of` (server.integrations
+   *  reads it off the browse's own series relations), or null — the app's
+   *  DERIVED "podcast" type, which MusicBrainz publishes no release-group type
+   *  for. A plain Broadcast (a radio play) has none. */
+  podcast?: { series?: string; title?: string; mbid?: string; number?: string } | null;
   first_release_date: string;
   in_library: boolean;
   queued: boolean;

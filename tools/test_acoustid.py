@@ -795,6 +795,12 @@ check("a submission reports what the service took",
       and res["submissions"][0]["id"] == 123456789
       and res["submissions"][0]["status"] == "pending"
       and res["submissions"][0]["path"] == PATHS[0])
+check("…and every track gets its own line of the report",
+      res["results"][0]["outcome"] == acoustid.ACCEPTED
+      and res["results"][0]["path"] == PATHS[0]
+      and res["results"][0]["recording_id"] == "rec-1"
+      and res["results"][0]["id"] == 123456789
+      and res["results"][0]["status"] == "pending")
 sent = POSTED[0]
 check("…to the v2/submit endpoint", sent["url"] == acoustid.SUBMIT_API_URL)
 form = sent["form"]
@@ -810,11 +816,29 @@ check("source 1 marks a fingerprint whose file named the recording",
       form["source.0"] == ["1"])
 check("a lookup's `meta` has no place in a submission", "meta" not in form)
 
+# A submission needs BOTH halves. AcoustID itself takes a fingerprint with no
+# metadata, but the pair it stores is a fingerprint + a MusicBrainz RECORDING
+# id (MusicBrainz never receives a fingerprint), so this app refuses the entry
+# by name instead of publishing a fingerprint nothing points at.
 POSTED.clear()
 set_transport(urlopen(json.dumps(ACCEPT).encode()))
-acoustid.submit_fingerprints(SUB_CFG, [dict(SUBMIT_ITEM, recording_id="")])
-check("a fingerprint-only entry is source 3, with no mbid",
-      POSTED[0]["form"]["source.0"] == ["3"]
+res = acoustid.submit_fingerprints(SUB_CFG, [dict(SUBMIT_ITEM, recording_id="")])
+check("a fingerprint with no recording id is refused, with nothing sent",
+      POSTED == [] and res["code"] == acoustid.NO_TRACKS and res["failed"] == 0
+      and res["skips"][0]["code"] == acoustid.NO_RECORDING_ID
+      and "MusicBrainz recording id" in res["skips"][0]["reason"]
+      and res["results"][0]["outcome"] == acoustid.OUTCOME_SKIPPED)
+
+# …and the credential probe is the ONE caller that turns that rule off: a key
+# can only be proved by a real submission, and the probe has no recording to
+# attach (see verify_user_key below).
+POSTED.clear()
+set_transport(urlopen(json.dumps(ACCEPT).encode()))
+got = acoustid.submit_fingerprints(SUB_CFG,
+                                   [dict(SUBMIT_ITEM, recording_id="")],
+                                   require_mbid=False)
+check("…unless the caller is the no-metadata credential probe",
+      got["ok"] is True and POSTED[0]["form"]["source.0"] == ["3"]
       and "mbid.0" not in POSTED[0]["form"])
 
 
@@ -830,7 +854,8 @@ def batch_urlopen(req, timeout=None):
 
 POSTED.clear()
 set_transport(batch_urlopen)
-many = [{"path": f"{i}.flac", "fingerprint": "AQAB", "duration": 10}
+many = [{"path": f"{i}.flac", "fingerprint": "AQAB", "duration": 10,
+         "recording_id": f"rec-{i}"}
         for i in range(acoustid.MAX_SUBMIT + 50)]
 res = acoustid.submit_fingerprints(SUB_CFG, many)
 check("AcoustID's own per-call limit is respected",
@@ -854,6 +879,10 @@ check("a refused user key is reported in the service's own words",
       and "invalid user API key" in res["reason"] and "HTTP 400" in res["reason"])
 check("…and nothing is claimed as submitted",
       res["submitted"] == 0 and res["failed"] == 1)
+check("…and every track of the refused batch carries the same sentence",
+      [r["outcome"] for r in res["results"]] == [acoustid.REJECTED]
+      and res["results"][0]["reason"] == res["reason"]
+      and res["results"][0]["recording_id"] == "rec-1")
 
 POSTED.clear()
 set_transport(urlopen(json.dumps(ACCEPT).encode()))
@@ -867,6 +896,18 @@ check("check_submit names each missing half",
       and acoustid.check_submit(cfg(acoustid_enabled=False))["code"] == acoustid.DISABLED
       and acoustid.check_submit(SUB_CFG)["available"] is True)
 
+# The feature switch off is the whole feature off: no request, and no track
+# reported as submitted.
+POSTED.clear()
+set_transport(urlopen(json.dumps(ACCEPT).encode()))
+res = acoustid.submit_fingerprints(cfg(acoustid_user_key="ac-user-key-99",
+                                       acoustid_enabled=False), [SUBMIT_ITEM])
+check("acoustid_enabled off sends nothing, with the named reason",
+      POSTED == [] and res["available"] is False
+      and res["code"] == acoustid.DISABLED
+      and res["reason"] == "AcoustID disabled in settings"
+      and res["submitted"] == 0)
+
 POSTED.clear()
 res = acoustid.submit_fingerprints(
     SUB_CFG, [{"path": "a.flac", "fingerprint": "", "duration": 5},
@@ -875,6 +916,52 @@ check("a track with no fingerprint or no duration is skipped by name",
       POSTED == [] and res["code"] == acoustid.NO_TRACKS
       and [s["code"] for s in res["skips"]]
       == [acoustid.NO_FINGERPRINT, acoustid.NO_DURATION])
+
+# The dedupe QUESTION, asked of the endpoint that can answer it: `v2/submit`
+# only says a batch was taken, so "the service already has this pair" is a
+# lookup — at EVERY score (a question about the database, not the app's
+# display threshold).
+POSTED.clear()
+set_transport(urlopen(json.dumps({
+    "status": "ok",
+    "results": [{"id": "t1", "score": 0.1, "recordings": [
+        {"id": "rec-1", "title": "X", "artists": []}]}],
+}).encode()))
+got = acoustid.pair_known(SUB_CFG, "AQABKNOWN", 289.4, "rec-1")
+check("pair_known reports a pair the service already links, below min_score too",
+      got["ok"] is True and got["known"] is True and got["rows"] == 1
+      and POSTED[0]["url"] == acoustid.API_URL
+      and POSTED[0]["form"]["fingerprint"] == ["AQABKNOWN"]
+      and "recordings" in POSTED[0]["form"]["meta"][0])
+got = acoustid.pair_known(SUB_CFG, "AQABKNOWN", 289.4, "rec-other")
+check("…and says no for a recording it does not link", got["known"] is False)
+got = acoustid.pair_known(SUB_CFG, "AQABKNOWN", 289.4, "")
+check("pair_known never guesses without a recording id or a fingerprint",
+      got["ok"] is False and got["code"] == acoustid.NO_RECORDING_ID
+      and got["known"] is False
+      and acoustid.pair_known(SUB_CFG, "", 289.4, "rec-1")["code"]
+      == acoustid.NO_FINGERPRINT)
+
+# The local half of the dedupe: one key per fingerprint + recording pair, and
+# a record that survives the run (the service imports asynchronously, so
+# "pending a minute ago" must not be re-sent).
+check("a submission's identity is its fingerprint + its recording id",
+      acoustid.submission_key("AQAB", "rec") == acoustid.submission_key(" AQAB ", " rec ")
+      and acoustid.submission_key("AQAB", "rec")
+      != acoustid.submission_key("AQAB", "other"))
+LEDGER_CFG = {"music_folder": TMP.name}
+check("nothing has been submitted from this folder yet",
+      acoustid.load_submissions(LEDGER_CFG) == {})
+acoustid.record_submissions(LEDGER_CFG, [
+    {"fingerprint": "AQAB", "recording_id": "rec-1", "id": 42,
+     "status": "pending", "path": PATHS[0]},
+    {"fingerprint": "AQAB", "recording_id": "rec-2", "id": None, "status": None},
+])
+ledger = acoustid.load_submissions(LEDGER_CFG)
+key = acoustid.submission_key("AQAB", "rec-1")
+check("the pairs the service took are remembered; the refused one is not",
+      list(ledger) == [key] and ledger[key]["id"] == 42
+      and ledger[key]["status"] == "pending")
 
 # verify_user_key: the probe is a real (fingerprint-only) submission
 POSTED.clear()

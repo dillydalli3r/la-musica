@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { EqBand } from "../api";
 import { EQ_FC_MAX, EQ_FC_MIN, EQ_GAIN_LIMIT, EQ_PREAMP_LIMIT, eqBandResponseDb, eqBandActive, eqResponseDb, eqType } from "../lib/eqNodes";
+import { currentAccent, subscribeAccent } from "../lib/accent";
 
 /** The decibel window the plot draws. Wider than any sane correction (AutoEq's
  *  are within ±12 dB) and narrower than the ±20 a single band may be set to, so
@@ -110,8 +111,7 @@ export default function EqCurve({
     const c = canvas.getContext("2d");
     if (!c) return;
     c.setTransform(dpr, 0, 0, dpr, 0, 0);
-    const style = getComputedStyle(document.documentElement);
-    const accent = style.getPropertyValue("--accent").trim() || "255 255 255";
+    const accent = currentAccent()[0];
     const rgb = (a: number) => `rgb(${accent.split(/\s+/).join(" ")} / ${a})`;
     const muted = "#71717a";
 
@@ -207,6 +207,13 @@ export default function EqCurve({
       c.setLineDash([]);
     }
   }, [audio, filters, freqs, geom, preampDb, selected]);
+
+  // Repaint when the accent changes. `draw` re-reads the colour on every call,
+  // so the subscription is all that was missing: the curve kept whatever colour
+  // it was first drawn with until an unrelated dependency moved (the reported
+  // "the equalizer stays purple after I pick orange"). One shared mechanism
+  // (lib/accent), not a timer per canvas.
+  useEffect(() => subscribeAccent(draw), [draw]);
 
   useEffect(() => { draw(); }, [draw]);
 

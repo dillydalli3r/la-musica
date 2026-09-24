@@ -294,6 +294,24 @@ print("ok  generated slskd config shares the library root, filters .mlo/@eaDir "
 # --------------------------------------------------------------------------- #
 # 2) the audit names each failure mode
 # --------------------------------------------------------------------------- #
+# This machine's own listen-port probe (`soulseek.listen_port_state`) is two
+# real socket tests on a REAL port, and a test machine has nothing accepting on
+# it — which the port check's own rule (server/soulseek_port._listen_check)
+# calls a fail, and the audit now reports as one too (see the dead-port case
+# below). Every fixture here is about the SHARE, so the listener is stubbed as
+# the one slskd would be running; the router half of the payload stays real.
+_REAL_LISTEN_STATE = soulseek.listen_port_state
+
+
+def _listening_port(cfg=None):
+    """A payload whose listen row is ok: something accepts on the port."""
+    return dict(_REAL_LISTEN_STATE(cfg), listening=True, holder="slskd",
+                bindable=False, conflict=None, error="")
+
+
+soulseek.listen_port_state = _listening_port
+
+
 def ready(**over):
     """A healthy slskd: scan complete, the library indexed and served."""
     fake.error = None
@@ -384,6 +402,46 @@ audit = soulseek.share_audit(CFG)
 assert audit["status"] == "ok", (audit["status"], audit["problems"])
 assert audit["ok"] is True
 soulseek._PORTMAP["result"] = saved_map
+
+# a DEAD listen port is not "ok" either: with nothing accepting on the port (or
+# another program holding it) slskd still serves the index, so the card used to
+# answer status "ok" and "other users can ... download them" while
+# /api/soulseek/port-check's OWN listen row (soulseek_port._listen_check — the
+# same port_status_payload measurement) said fail. The audit's verdict is that
+# row's, so the two can never disagree.
+from server import soulseek_port
+
+ready()
+soulseek.listen_port_state = lambda cfg=None: dict(
+    _REAL_LISTEN_STATE(cfg), listening=False, holder="", bindable=True,
+    conflict=None,
+    error="slskd is running but nothing is listening on the Soulseek listen "
+          "port 50000")
+audit = soulseek.share_audit(CFG, probe=True)
+assert audit["status"] == "listen_unconfirmed", (audit["status"], audit["problems"])
+assert audit["ok"] is False
+assert soulseek_port._listen_check(audit["port"])["state"] == "fail", \
+    "the audit must agree with the port check's own listen row"
+codes = [p["code"] for p in audit["problems"]]
+assert "listen_unreachable" in codes, codes
+assert "nothing accepts a connection on the listen port" in audit["summary"], \
+    audit["summary"]
+assert "download them" not in audit["summary"], audit["summary"]
+
+# ...and another program holding the port is the same verdict, in the port's own
+# words (slskd cannot listen on a port somebody else holds, so a peer reaches
+# that program and nothing of this share)
+soulseek.listen_port_state = lambda cfg=None: dict(
+    _REAL_LISTEN_STATE(cfg), listening=True, holder="another program",
+    bindable=False,
+    conflict="another program is listening on the Soulseek listen port 50000 "
+             "— slskd cannot use it while that program runs")
+audit = soulseek.share_audit(CFG)
+assert audit["status"] == "listen_unconfirmed", (audit["status"], audit["problems"])
+assert audit["ok"] is False
+assert "another program is listening on the listen port" in audit["summary"], \
+    audit["summary"]
+soulseek.listen_port_state = _listening_port
 
 # never scanned: the index is empty and the daemon is not scanning it either
 ready(ready=False, files=0, directories=0, scanProgress=0.0)

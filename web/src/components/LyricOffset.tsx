@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import { Check, Loader2, Minus, Plus, RotateCcw } from "lucide-react";
 import { api } from "../api";
+import { LYRIC_STEP_BTN, LYRIC_VALUE_BOX, LYRIC_VALUE_UNIT } from "./LyricZoom";
 
 /** The lyric-offset control both lyric surfaces carry: `−`, the pending shift,
  *  `+`, and a Save that appears only once there is something to save.
@@ -22,11 +23,15 @@ import { api } from "../api";
 export const LYRIC_OFFSET_STEP_MS = 100;
 export const LYRIC_OFFSET_MAX_MS = 10000;
 
-/** `+0.3s` / `−0.2s` / `0.0s` — one decimal, the unit the buttons move in. */
+/** `+0.3` / `−0.2` / `0.0` — one decimal, the unit the buttons move in. The
+ *  `s` the chip prints after it is NOT part of this string: the offset chip and
+ *  the zoom chip beside it lay their value out identically (number, then the
+ *  unit as a 9 px sub-element — see LYRIC_VALUE_UNIT in LyricZoom), so the unit
+ *  is the chip's own element rather than something the formatter bakes in. */
 export function fmtOffset(ms: number): string {
   const secs = ms / 1000;
   const sign = secs > 0 ? "+" : secs < 0 ? "−" : "";
-  return `${sign}${Math.abs(secs).toFixed(1)}s`;
+  return `${sign}${Math.abs(secs).toFixed(1)}`;
 }
 
 export default function LyricOffset({ path, ms, onChange, onSaved, className }: {
@@ -100,7 +105,13 @@ export default function LyricOffset({ path, ms, onChange, onSaved, className }: 
   // and the box is the size of the buttons beside it on every surface (`h-7
   // w-7` is the sidebar header's own `p-1.5` + `h-4 w-4`) — the Save beside
   // them takes the same box so the row reads as one control.
-  const btn = "h-7 w-7 inline-flex items-center justify-center rounded-md text-current opacity-70 hover:opacity-100 hover:bg-white/10 disabled:opacity-30 disabled:hover:bg-transparent transition-colors";
+  //
+  // The STEPPER and the VALUE BOX are the ones LyricZoom exports, not copies:
+  // this chip sits directly beside that one in the fullscreen player's footer
+  // and in the sidebar header, and a value printed straight into a
+  // `text-right` box here against an inset `%` there is what put the two
+  // `−`/`+` pairs at different distances from the numbers they step.
+  const btn = LYRIC_STEP_BTN;
   const dirty = ms !== 0;
 
   return (
@@ -115,14 +126,18 @@ export default function LyricOffset({ path, ms, onChange, onSaved, className }: 
         <Minus className="h-3 w-3" />
       </button>
       <span
-        className={`w-10 text-right text-[10px] font-mono tabular-nums ${dirty ? "text-accent" : "text-current opacity-80"}`}
+        className={LYRIC_VALUE_BOX}
         title={
           error
             ? `Could not save the offset: ${error}`
             : "Lyric offset — press − / + to line the lyrics up, then Save to write it to the track's tags"
         }
       >
-        {fmtOffset(ms)}
+        {/* the pending shift is the one value in the pair that carries state
+            of its own, so it is the one that turns accent while it is unsaved;
+            the ink of the chip around it stays the surface's (text-current) */}
+        <span className={dirty ? "text-accent" : undefined}>{fmtOffset(ms)}</span>
+        <span className={LYRIC_VALUE_UNIT} aria-hidden>s</span>
       </span>
       <button
         className={btn}

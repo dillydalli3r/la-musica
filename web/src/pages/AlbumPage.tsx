@@ -5,7 +5,7 @@ import { ChevronDown, ChevronRight, CircleAlert, Play, Wand2, Trash2, FolderSync
 import { api } from "../api";
 import { LinkChips, LinkEditorButton } from "../components/Links";
 import { SubtitledVideo } from "../components/SubtitledVideo";
-import { EmptyState, AdvisoryMark, CachedMark, GradeBadge, PageLoading, PendingMark, pendingSummary, mediaCountryLabel } from "../components/Badges";
+import { EmptyState, AdvisoryMark, CachedMark, GradeBadge, LyricsKindChip, PageLoading, PendingMark, pendingSummary, mediaCountryLabel, allowPlainOf } from "../components/Badges";
 import CoverImg, { TrackCover } from "../components/CoverImg";
 import CoverSearchModal from "../components/CoverSearchModal";
 import Description from "../components/Description";
@@ -167,6 +167,9 @@ export default function AlbumPage() {
   // Whether the album-description check grades this folder (Settings →
   // Grading). The config is already in the app-wide cache, so this is free.
   const { data: config } = useQuery({ queryKey: ["config"], queryFn: api.config });
+  // The user's own answer on plain lyrics, read once for the whole tracklist:
+  // every row's lyrics chip follows it (undefined until the config arrives).
+  const allowPlain = allowPlainOf(config);
   // Where this album's acquisition is, from the shared queue row and the
   // pushed job frames (lib/acquisition) — the queue is asked only while this
   // IS a framework album waiting for its audio.
@@ -793,7 +796,7 @@ export default function AlbumPage() {
                     mark is NOT here any more: it sits with the title. */}
                 <div className="flex items-center gap-2 flex-wrap">
                   <button
-                    className={`h-2 w-2 rounded-full shrink-0 transition-opacity ${verdictPass ? "bg-emerald-500/70" : "bg-red-500/80"}`}
+                    className={`tap-hit h-2 w-2 rounded-full shrink-0 transition-opacity ${verdictPass ? "bg-emerald-500/70" : "bg-red-500/80"}`}
                     title={verdictPass ? `Pass — ${data.grade_pct ?? "?"}% of checks` : `Fail — ${data.grade_pct ?? "?"}% · ${issueEntries.length} problem type(s)`}
                     onClick={() => setIssuesOpen(!issuesOpen)}
                     aria-label="Grading verdict"
@@ -1582,6 +1585,12 @@ export default function AlbumPage() {
                           slot on the right; see TrackTitleCell). */}
                       <AdvisoryMark value={tr.tags.ITUNESADVISORY} />
                       <LockedChip path={tr.path} />
+                      {/* WHICH KIND this track's lyrics are — the same chip the
+                          library row and the track page wear, fed by the
+                          payload's own `lyrics_kind`. A plain lyric is a
+                          failing mark only while the user's
+                          `lyrics_allow_plain` says it is one. */}
+                      <LyricsKindChip kind={tr.lyrics_kind} allowPlain={allowPlain} size="sm" />
                       {!!tr.issues?.length && (
                         <button
                           className="text-[9px] text-red-400/70 shrink-0 hover:text-red-300"

@@ -81,6 +81,13 @@ export interface TrackTags {
   CATALOGNUMBER?: string | null;
   LABEL?: string | null;
   RELEASETYPE?: string | null;
+  /** The podcast identity (server.library reads it off the album's files):
+   *  the MusicBrainz SERIES an episode's release group is `part of`, its
+   *  series id, and the episode number MusicBrainz states. Absent on every
+   *  release that is not an episode — which is every music album. */
+  PODCASTSERIES?: string | null;
+  PODCASTSERIESMBID?: string | null;
+  PODCASTEPISODE?: string | null;
   RELEASECOUNTRY?: string | null;
   COMPOSER?: string | null;
   LYRICIST?: string | null;
@@ -102,6 +109,13 @@ export interface Track {
   checksum_status?: string;
   lyrics_embedded: boolean;
   lyrics_lrc: boolean;
+  /** WHICH KIND the track's stored lyrics are: "synced" when the stored text
+   *  carries timestamps (either source — a timed `.lrc` beside plain embedded
+   *  lyrics IS synced), "plain" when it holds lyrics without any, null when
+   *  the track has none. Stamped server-side from the two stored texts
+   *  (mlo.lyrics.stored_lyrics_kind), so `lyrics_present` is exactly
+   *  `lyrics_kind !== null` — the two can never disagree. */
+  lyrics_kind?: "synced" | "plain" | null;
   unreadable: boolean;
   tech: Tech;
   tags: TrackTags;
@@ -112,6 +126,38 @@ export interface Track {
   sidecar_cover_file?: string | null;
   /** Music-video container (MKV/MP4/VOB/…) — plays with <video>. */
   is_video?: boolean;
+}
+
+/** The podcast identity of ONE album (server.library.podcast_info). */
+export interface PodcastInfo {
+  /** The series NAME a reader sees — MusicBrainz's disambiguation in
+   *  parentheses when it states one, which is what keeps two same-named shows
+   *  apart (it is also the key the series page is asked by). */
+  series: string;
+  /** The MusicBrainz series id, when the tag chain recorded one. */
+  series_mbid?: string | null;
+  /** MusicBrainz's own episode number for this release group, when stated. */
+  episode?: number | null;
+}
+
+/** One Home shelf row of the Podcasts shelf: the newest episode's OWN library
+ *  row, plus the series facts the card shows instead of an artist. */
+export type HomePodcast = HomeAlbum & {
+  podcast_series: string;
+  podcast_series_mbid?: string | null;
+  /** How many episodes of this series the library holds (not the whole show:
+   *  the app lists what is on disk). */
+  podcast_episode_count: number;
+};
+
+/** `GET /api/podcasts?series=…`: one series and every episode the library
+ *  holds, newest first. `episode_count` counts the EPISODES in `episodes`,
+ *  each of which is a library album row the shared card draws. */
+export interface PodcastSeries {
+  series: string;
+  series_mbid?: string | null;
+  episode_count: number;
+  episodes: HomeAlbum[];
 }
 
 /** What an import could not supply for an album, if anything — one shape for
@@ -136,6 +182,14 @@ export interface Album {
   path: string;
   error?: string;
   meta?: AlbumMeta;
+  /** The podcast identity of this album, or absent (server.library's
+   *  `podcast_info`). A podcast in MusicBrainz is a SERIES of type Podcast —
+   *  there is no Podcast release-group type — so an episode is recognised by
+   *  the series its release group is `part of`, never by RELEASETYPE (which
+   *  stays what MusicBrainz says: "Broadcast"). `series` is the name a reader
+   *  sees, disambiguation included; `episode` is MusicBrainz's own episode
+   *  number when it states one. */
+  podcast?: PodcastInfo | null;
   /** Set when an import could not supply a family for this album (see
    *  `NeedsWarning`). The album is IN the library either way. */
   needs?: NeedsWarning;
@@ -605,6 +659,77 @@ export interface Playlist {
   tracks?: string[];
   created?: number;
   updated?: number;
+  /** Where the playlist came from: the streaming service id it was imported
+   *  from ("deezer" | "spotify" | "youtube" | "apple"), "" for one made here. */
+  origin?: string;
+  /** That service's own playlist URL, when `origin` is set. */
+  origin_url?: string;
+}
+
+/** One row of a streaming import report: what the service listed, whether the
+ *  library has it, and — when it does not — why not. */
+export interface StreamingImportRow {
+  index: number;
+  title: string;
+  artist: string;
+  album: string;
+  duration?: number;
+  isrc?: string;
+  url?: string;
+  matched: boolean;
+  /** Library path (forward slashes — the form the library payload uses). */
+  path: string | null;
+  library_title: string;
+  library_artist: string;
+  library_album: string;
+  mbid: string;
+  /** A later row in the same playlist already holds this path. */
+  duplicate: boolean;
+  /** Why it did not match ("" when it did). */
+  reason: string;
+  /** "album" or "wish" when this row queued something, "" otherwise. */
+  queued: string;
+}
+
+/** One queue attempt an import made (an album, or an unmatched track). */
+export interface StreamingQueueRow {
+  kind: "album" | "track";
+  title: string;
+  artist: string;
+  album?: string;
+  queued: boolean;
+  matched: boolean;
+  by_name: boolean;
+  wish_id: number | null;
+  mbid: string;
+  note: string;
+  error: string;
+  reason?: string;
+}
+
+export interface StreamingImportReport {
+  service: string;
+  service_label: string;
+  source_url: string;
+  /** The service's own playlist title (used when the import named none). */
+  title: string;
+  total: number;
+  matched: number;
+  unmatched: number;
+  duplicates: number;
+  tracks: StreamingImportRow[];
+  parent_albums: { enabled: boolean; queued: StreamingQueueRow[] };
+  unmatched_tracks: { mode: string; queued: StreamingQueueRow[] };
+  note: string;
+}
+
+export interface StreamingImportResult {
+  ok: boolean;
+  report: StreamingImportReport;
+  /** The created playlist (null for a check, or when nothing was created). */
+  playlist: Playlist | null;
+  created: boolean;
+  dry_run: boolean;
 }
 
 export interface FilterCondition {
@@ -1045,6 +1170,10 @@ export interface HomeData {
   favorites: HomeAlbum[];
   discover: HomeAlbum[];
   top_artists: HomeArtist[];
+  /** One row per podcast SERIES the library holds, its newest episode on it.
+   *  Empty (and so the shelf is not drawn) unless the library has a podcast:
+   *  the identity comes from the episodes' own tags, never from MusicBrainz. */
+  podcasts?: HomePodcast[];
   wanted: HomeAlbum[];
   needs_attention: HomeAlbum[];
   /** Every album added but not downloaded yet, newest first — the one shelf a
@@ -1361,19 +1490,30 @@ export interface AcoustidWrite {
 }
 
 /** POST /api/import/acoustid/submit — the AcoustID database's own answer to
- *  publishing what the files already carry (nothing is written locally).
+ *  publishing what the files state (nothing is written locally).
  *
- *  `available: false` is a refusal: no user key configured, or the key
- *  AcoustID refused, in the service's own words (`note`, `code`). `submitted`
- *  counts what it accepted (each with its submission id and status), `skips`
- *  names the files there was nothing to submit for, and `tracks` accounts for
- *  every file the paths resolved to. */
+ *  `available: false` is a refusal: no user key configured, the key AcoustID
+ *  refused, or the feature switched off — in the service's own words (`note`,
+ *  `code`), and nothing was read or sent. `submitted` counts what the service
+ *  accepted (each with its submission id and status), `known` the pairs it
+ *  already linked (or this app had already sent), `skips` names the files
+ *  there was nothing to submit for, and `tracks` accounts for every file the
+ *  paths resolved to.
+ *
+ *  `results` is the per-track report, one row per file in the order they were
+ *  resolved: `outcome` is "accepted" (the service took it), "already_known"
+ *  (its `reason` says which half of the dedupe said so), "rejected" (the
+ *  service's own sentence) or "skipped" (a named cause: no MusicBrainz
+ *  recording id on the file, no fpcalc, no duration, or a question that could
+ *  not be asked). */
 export interface AcoustidSubmitResult {
   available: boolean;
   note: string;
   ok: boolean;
   code?: string | null;
   submitted: number;
+  /** Pairs AcoustID already had, or that this app had already given it. */
+  known: number;
   failed: number;
   skips: AcoustidTrackProblem[];
   submissions: {
@@ -1382,7 +1522,21 @@ export interface AcoustidSubmitResult {
     id?: string | null;
     status?: string | null;
   }[];
-  tracks: { total: number; submitted: number; skipped: number };
+  results: AcoustidSubmitTrack[];
+  tracks: { total: number; submitted: number; known: number; skipped: number; failed: number };
+}
+
+/** One track of a submission run (`AcoustidSubmitResult.results`). */
+export interface AcoustidSubmitTrack {
+  path: string;
+  outcome: "accepted" | "already_known" | "rejected" | "skipped" | string;
+  code?: string | null;
+  reason?: string | null;
+  /** The MusicBrainz recording this fingerprint was submitted with. */
+  recording_id?: string | null;
+  id?: number | null;
+  status?: string | null;
+  index?: number | null;
 }
 
 /** One tag-vs-fingerprint disagreement (`conflicts`). */
@@ -1422,6 +1576,25 @@ export interface ImportBulkItem {
   scripts?: { id: number; name?: string; error?: string }[];
 }
 
+/** An archive the server unpacked for an import, before anything is committed
+ *  (`POST /api/import/unpack`).
+ *
+ *  `files[].relPath` is the path INSIDE the archive (so a rip's CD1/ folder,
+ *  its .cue and its .log keep their places), and `files[].path` is where the
+ *  server staged it — what the commit passes back as `staged`. `audio` is the
+ *  server's own count over that tree: 0 means the archive holds no music, and
+ *  the wizard says so instead of offering an empty album. */
+export interface UnpackedTree {
+  ok: boolean;
+  /** The archive's own name, for the "what was unpacked" line. */
+  label: string;
+  /** The staging folder; discarded once the import finishes with it. */
+  dir: string;
+  files: { relPath: string; path: string; size: number }[];
+  unpacked: number;
+  audio: number;
+}
+
 export interface ImportBulkJob {
   id?: string;
   kind?: string;
@@ -1445,6 +1618,46 @@ export interface ImportScriptsPreview {
   chain: number[];
   labels: Record<string, string>;
   count: number;
+}
+
+/** One half of the digital settle (POST /api/import/settle): the SOURCE the
+ *  import could state, written / "present" / "suggested" / "asked" /
+ *  "not-digital" / "gated" (the user's own per-filetype write gate) / "failed",
+ *  with the value, where it came from and the config's own default. */
+export interface ImportSourceResult {
+  state: string;
+  value: string;
+  from: string;
+  default: string;
+  media: string;
+  tracks: number;
+  missing: number;
+  written: number;
+  failed: number;
+}
+
+/** The lyrics half: `state` "cleaned" (with `dropped` files), "ok",
+ *  "allow-plain" (untimed lyrics are this install's own answer), "no-fetch"
+ *  (script 13 is not in the chain — nothing was touched) or "failed". */
+export interface ImportLyricsSettle {
+  state: string;
+  checked: number;
+  dropped: number;
+  kept: number;
+  failed: number;
+  tracks: string[];
+  allow_plain: boolean;
+  fetch: boolean;
+}
+
+/** What `POST /api/import/settle` answers — the wizard's Finish step shows it
+ *  before it runs the ticked scripts. `metadata` is the import's own metadata
+ *  step (`run_metadata_step`), i.e. the album/artist descriptions and image. */
+export interface ImportSettleResult {
+  path: string;
+  source: ImportSourceResult;
+  lyrics: ImportLyricsSettle;
+  metadata?: { staged: boolean; applied: Record<string, string | null> };
 }
 
 /** One family an import could not finish by itself — the wizard's own steps
@@ -1527,6 +1740,56 @@ export interface ScriptRunResult {
   skipped?: boolean;
   reason?: string;
   error?: string;
+}
+
+/** The entity a details menu is mounted on — what its selection IS, which is
+ *  what decides the scripts it may offer (`server/script_menu.py`). A track row
+ *  and a playlist hold FILES; an album, an artist and the library hold
+ *  FOLDERs. */
+export type EntityKind = "album" | "track" | "artist" | "playlist" | "library";
+
+/** One script of `/api/script-menu`.
+ *
+ *  `scope` is what the runner is handed for it: its work unit is a FILE (hand
+ *  it the selection's own paths) or the FOLDER that holds them (its sidecars,
+ *  its cover art, a per-album measurement). `applies_to` is the kinds whose
+ *  menus may offer it, derived from `scope`; both come from the runner's own
+ *  code, never from the menu. */
+export interface ScriptMenuScript {
+  id: number;
+  label: string;
+  description: string;
+  group: string;
+  /** Slot in the stack's Run All order; null when the script holds none. */
+  order: number | null;
+  in_order: boolean;
+  scope: "file" | "folder" | null;
+  applies_to: EntityKind[];
+  /** The force flag a forced re-run of this script sends through /api/run.
+   *  `key` is absent for a script with no single flag (10 re-runs what the
+   *  flags above it force), which is why it gets no forced entry. */
+  force: { keys: string[]; key: string | null };
+  /** The feature switch that makes the run skip it — `reason` is the run's own
+   *  sentence, so the menu and the report say the same thing. */
+  gate: { keys: string[]; enabled: boolean; reason: string };
+  /** False when this install has no such runner (a stripped checkout). */
+  available: boolean;
+}
+
+/** Every script, for every entity kind — the details menu's one source of
+ *  truth, so no menu keeps its own list of ids. */
+export interface ScriptMenu {
+  kinds: EntityKind[];
+  groups: { id: string; title: string }[];
+  /** The section the forced re-runs go in — a variant of the entries above,
+   *  not a script group of its own. */
+  forced_group: { id: string; title: string };
+  /** In the stack's order. */
+  scripts: ScriptMenuScript[];
+  /** Registry ids with no applicability entry: offered everywhere and named
+   *  here, because a menu that silently dropped one is the drift this payload
+   *  exists to stop (`tools/test_script_menu.py` fails on a non-empty list). */
+  unclassified: number[];
 }
 
 /* ---------------------------------------------------------------------- *

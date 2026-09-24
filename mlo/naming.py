@@ -418,6 +418,21 @@ _SECONDARY_TYPE_CAPS = {
     "audio drama": "Audio drama", "field recording": "Field recording",
 }
 
+# The app's OWN type, DERIVED from a fact MusicBrainz states BESIDE the
+# release-group type rather than AS one: a podcast in MusicBrainz is a SERIES
+# of type "Podcast" (/ws/2/series/<id> → "type":"Podcast", type-id
+# ef6f7b93-868a-43a9-b59c-a73b62c2c51e), and an episode is a release group
+# linked to that series with a "part of" relationship. MusicBrainz has NO
+# "Podcast" release-group type — every episode it types is "Broadcast" — so
+# this name is deliberately kept OUT of the two tables above: it is never sent
+# to MusicBrainz as a query (`primarytype:"podcast"` matches nothing by
+# MusicBrainz's own design) and it is not a value the MB-side field help
+# offers. What it IS: the one name the app compares a DERIVED podcast
+# identity by (mlo.release_choice.type_matches' `derived` argument) and the
+# value a RELEASETYPE tag carries once the app has derived it by hand, so a
+# "show me the podcasts" filter or watch selection has a spelling.
+_DERIVED_TYPE_CAPS = {"podcast": "Podcast"}
+
 # The same vocabulary as plain type NAMES, in MusicBrainz's own lowercase
 # spelling — what a release-group TYPE FILTER selects and compares against
 # (see server/artist_watch). Derived from the maps above so a type the app can
@@ -425,7 +440,18 @@ _SECONDARY_TYPE_CAPS = {
 # never drift apart.
 PRIMARY_RELEASE_TYPES = tuple(_PRIMARY_TYPE_CAPS)
 SECONDARY_RELEASE_TYPES = tuple(_SECONDARY_TYPE_CAPS)
-RELEASE_TYPES = PRIMARY_RELEASE_TYPES + SECONDARY_RELEASE_TYPES
+# Names the app DERIVES rather than reads from MusicBrainz — selected and
+# compared like any other type, but answered from the app's own identity for
+# the group (see `_DERIVED_TYPE_CAPS` and server.integrations.podcast_series_of).
+DERIVED_RELEASE_TYPES = tuple(_DERIVED_TYPE_CAPS)
+# Everything a selection may NAME. `PRIMARY_RELEASE_TYPES` stays MusicBrainz's
+# own list, which is what the MB-facing field help and query paths iterate.
+RELEASE_TYPES = PRIMARY_RELEASE_TYPES + SECONDARY_RELEASE_TYPES + DERIVED_RELEASE_TYPES
+
+
+def is_derived_type(name):
+    """Whether *name* is one of the app's DERIVED types (case-insensitive)."""
+    return str(name or "").strip().lower() in DERIVED_RELEASE_TYPES
 
 
 def _type_parts(value):
@@ -438,7 +464,8 @@ def mb_style_release_type(value):
     "album+live" → "Album; Live", "ep" → "EP". Unknown parts pass through."""
     return "; ".join(
         _PRIMARY_TYPE_CAPS.get(p.lower())
-        or _SECONDARY_TYPE_CAPS.get(p.lower()) or p
+        or _SECONDARY_TYPE_CAPS.get(p.lower())
+        or _DERIVED_TYPE_CAPS.get(p.lower()) or p
         for p in _type_parts(value))
 
 

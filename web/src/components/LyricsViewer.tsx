@@ -3,6 +3,7 @@ import { useQuery } from "@tanstack/react-query";
 import { CloudDownload, PenLine, Play, Square, Plus, Trash2, Undo2, Keyboard, Upload } from "lucide-react";
 import { api, isOffline } from "../api";
 import { toast, useStore } from "../store";
+import { LyricsKindChip } from "./Badges";
 import { playbackSource } from "../lib/mediaCache";
 import LrclibPublishPanel from "./LrclibPublish";
 import Popover from "./Popover";
@@ -61,6 +62,21 @@ export function hasLyricsText(text: string | null | undefined): boolean {
     if (body.replace(META_RE, "").trim()) return true;
   }
   return false;
+}
+
+/** The KIND of a lyrics TEXT: "synced" when it carries timestamps, "plain"
+ *  when it holds words without any, null when it holds no lyrics at all.
+ *
+ *  The stored kind of a TRACK is the payload's own `lyrics_kind` (the server
+ *  reads the same two facts — presence and timestamps — off the stored files);
+ *  this is the same question asked of the text an editor is holding, which is
+ *  what the editor's own pane needs while its text is being stamped. There is
+ *  no second detector here: presence is `hasLyricsText` and "carries
+ *  timestamps" is `parseLrc`, which answers [] for a text with no timestamps
+ *  at all (its own documented rule). */
+export function lyricsKindOf(text: string | null | undefined): "synced" | "plain" | null {
+  if (!hasLyricsText(text)) return null;
+  return parseLrc(text ?? "").length ? "synced" : "plain";
 }
 
 
@@ -268,6 +284,7 @@ export default function LyricsViewer({
   duration,
   decimals = 2,
   staged = false,
+  allowPlain,
   onEnhancedEditor,
 }: {
   path: string;
@@ -282,6 +299,10 @@ export default function LyricsViewer({
   /** The track is in an album the import wizard is editing that is not in the
    *  library yet, so the read asks the server for its staged allowance. */
   staged?: boolean;
+  /** The user's `lyrics_allow_plain`: false makes the pane's "Plain" chip the
+   *  failing mark (the same rule the track's own payload kind follows).
+   *  Undefined while the config is unread — the neutral chip, no failure. */
+  allowPlain?: boolean;
   /** Opens the full-screen enhanced editor (syllable tap-sync, playback
    * speed) when provided. */
   onEnhancedEditor?: () => void;
@@ -728,7 +749,14 @@ export default function LyricsViewer({
   return (
     <div data-lrc-editor className="bg-card rounded-lg border border-border p-4 flex flex-col">
       <div className="flex items-center justify-between mb-3 flex-wrap gap-1.5">
-        <div className="text-xs font-semibold uppercase tracking-wider text-zinc-500">Lyrics</div>
+        <div className="flex items-center gap-2 min-w-0">
+          <div className="text-xs font-semibold uppercase tracking-wider text-zinc-500">Lyrics</div>
+          {/* Which KIND the text in this pane is — live, so stamping a line
+              turns it into "Synced" before anything is saved. The track's own
+              stored kind is the payload's (`lyrics_kind`), shown by the page
+              header and the rows; this one describes the words being edited. */}
+          <LyricsKindChip kind={lyricsKindOf(rawMode ? raw : serializeLrc(lines, dec))} allowPlain={allowPlain} size="sm" />
+        </div>
         <div className="flex gap-1.5 flex-wrap">
           <button className="btn-ghost !py-1 text-xs" onClick={togglePlay}>
             {playing ? <Square className="h-3.5 w-3.5" /> : <Play className="h-3.5 w-3.5" />}

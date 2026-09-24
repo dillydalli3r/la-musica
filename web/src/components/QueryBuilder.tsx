@@ -361,7 +361,7 @@ function FieldPicker({
         <span className={`truncate ${def ? "" : "text-amber-300/80"}`}>{def?.label ?? field}</span>
         <ChevronDown className="h-3.5 w-3.5 shrink-0 text-zinc-500" />
       </button>
-      <Popover open={open} onClose={() => setOpen(false)} align="left" panelClass="w-72 max-h-[60vh] overflow-y-auto p-1.5">
+      <Popover open={open} onClose={() => setOpen(false)} align="left" panelClass="w-72 p-1.5">
         <div className="sticky top-0 -mt-1.5 pt-1.5 pb-1 bg-zinc-950 z-10">
           <div className="relative">
             <Search className="h-3.5 w-3.5 absolute left-2.5 top-1/2 -translate-y-1/2 text-zinc-600" />

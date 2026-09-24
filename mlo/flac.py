@@ -397,8 +397,23 @@ def _convert_lossless_source(args):
             err = "; ".join((proc.stderr or "").strip().splitlines()[-2:])
             return (filename, False, f"convert failed: {err}", 0, 0)
 
-        # Verify duration before touching anything else.
+        # Verify duration before touching anything else. The output container
+        # is opened right below for the tag copy, so its own stream info
+        # answers the question — one process spawn less per converted file
+        # (ffprobe on a file this pipeline just wrote). A container mutagen
+        # cannot read falls back to the probe, exactly as before.
+        out_af = None
+        out_dur = 0.0
         if src_dur:
+            try:
+                from .audio import AudioFile
+                out_af = AudioFile(tmp)
+                info = getattr(getattr(out_af, "audio", None), "info", None)
+                out_dur = float(getattr(info, "length", 0) or 0)
+            except Exception:
+                out_af = None
+                out_dur = 0.0
+        if src_dur and not out_dur:
             try:
                 out_probe = run_tool(
                     [ffprobe_exe, "-v", "error", "-print_format", "json",
@@ -408,16 +423,16 @@ def _convert_lossless_source(args):
                 )
                 out_dur = float((json.loads(out_probe.stdout or "{}")
                                  .get("format") or {}).get("duration") or 0)
-                if out_dur and abs(src_dur - out_dur) > max(1.0, 0.005 * src_dur):
-                    return (filename, False,
-                            f"duration changed ({src_dur:.2f}s -> {out_dur:.2f}s)", 0, 0)
             except Exception:
-                pass
+                out_dur = 0.0
+        if src_dur and out_dur and abs(src_dur - out_dur) > max(1.0, 0.005 * src_dur):
+            return (filename, False,
+                    f"duration changed ({src_dur:.2f}s -> {out_dur:.2f}s)", 0, 0)
 
         # Copy text tags from the source metadata.
         try:
             from .audio import AudioFile
-            out_af = AudioFile(tmp)
+            out_af = out_af or AudioFile(tmp)
             seen = set()
             out_af.defer_save(True)
             for k, v in raw_tags.items():

@@ -5,14 +5,16 @@ import { useQuery, useQueryClient } from "@tanstack/react-query";
 import {
   UploadCloud, ExternalLink, Check, ChevronLeft, ChevronRight, ChevronDown, Wand2,
   Plus, Trash2, Disc3, FolderOpen, X, Search, Loader2, Image as ImageIcon, AlertTriangle,
-  Languages,
+  Languages, FileArchive,
 } from "lucide-react";
-import { api, answerSources, replyFor, IN_MOBILE_SHELL } from "../api";
+import { api, answerSources, replyFor, IN_MOBILE_SHELL, IN_TAURI } from "../api";
 import type { AdvisoryFetchResult, MetadataFetchItem, MetadataItemKind } from "../api";
 import { toast, useStore } from "../store";
-import { advisoryLine, advisoryOutcome } from "../components/Badges";
+import {
+  advisoryLine, advisoryOutcome, allowPlainOf, LyricsKindChip,
+} from "../components/Badges";
 import { LinkValidChip } from "../components/Links";
-import LyricsViewer, { parseLrc } from "../components/LyricsViewer";
+import LyricsViewer, { lyricsKindOf, parseLrc } from "../components/LyricsViewer";
 import CoverSearchModal from "../components/CoverSearchModal";
 import GenreSourcesTray from "../components/GenreSourcesTray";
 import CoverImg, { TrackCover } from "../components/CoverImg";
@@ -21,8 +23,8 @@ import { useI18n } from "../lib/i18n";
 import MetadataReviewModal from "../components/MetadataReviewModal";
 import type {
   AcoustidAlbumMatch, AcoustidMatch, AcoustidSubmitResult, AcoustidWrite, CoverResult,
-  ImportBulkJob, ImportPrompt, ImportScriptsPreview, LyricsAutoResult, MBRelease, MatchSuggestion,
-  ScriptRunResult, Track,
+  ImportBulkJob, ImportPrompt, ImportScriptsPreview, ImportSettleResult, LyricsAutoResult, MBRelease, MatchSuggestion,
+  ScriptRunResult, Track, UnpackedTree,
 } from "../types";
 import { DEFAULT_RUN_ALL, SCRIPT_LABEL } from "../lib/scripts";
 import { fmtCounts, fmtSteps } from "../lib/fmt";
@@ -51,6 +53,10 @@ const ROW_WRAP = `${ROW} flex-wrap`;
  *  land a prompt's link on the wrong one. */
 const FAMILY_STEP: Record<string, string> = {
   links: "Links",
+  // SOURCE is asked on the MATCH step: the release's own medium is what makes
+  // it required (MEDIA=Digital Media), and the release's store URLs are the
+  // one piece of evidence that may answer it — both live on that step.
+  source: "Match",
   cover: "Covers",
   genres: "Genres",
   lyrics: "Lyrics",
@@ -59,6 +65,7 @@ const FAMILY_STEP: Record<string, string> = {
 
 const FAMILY_LABEL: Record<string, string> = {
   links: "Links",
+  source: "Source",
   cover: "Cover art",
   genres: "Genres",
   lyrics: "Lyrics",
@@ -154,20 +161,67 @@ const QUEUE_STATE_LABEL: Record<string, string> = {
 };
 
 // Everything the importer accepts: audio, all common image formats, and the
-// sidecars the optimizer understands (.lrc, .cue, .log, .accurip).
+// sidecar the optimizer understands (.lrc, .cue, .log, .accurip).
 const ALLOWED = /\.(flac|mp3|m4a|mp4|ogg|opus|wav|aac|wv|ape|alac|aiff|aif|dsf|dff|mka)$|\.(jpg|jpeg|png|webp|bmp|gif|tiff|tif|avif|heic|heif|jxl|svg)$|\.(lrc|cue|log|accurip)$/i;
 const AUDIO_RE = /\.(flac|mp3|m4a|mp4|ogg|opus|wav|aac|wv|ape|alac|aiff|aif|dsf|dff|mka)$/i;
 const DISC_RE = /^(cd|disc|disk)\s*\d+$/i;
 
+/** The archive formats the server unpacks for an import — the same table as
+ *  `mlo.archives.ARCHIVE_FORMATS`, so the drop and the picker offer exactly
+ *  what the server can open. An archive is a SELECTION like a folder: it is
+ *  unpacked server-side and the album detection runs on what came out, never
+ *  on the file itself. */
+const ARCHIVE_RE = /\.(zip|7z|rar|tar|tar\.gz|tgz|tar\.bz2|tbz2|tar\.xz|txz)$/i;
+
+/** What the file picker offers. The list is `ALLOWED` plus the archives, and
+ *  it is only an affordance: the wizard's own filter decides what is used, so
+ *  a file picked through "All files" is still handled the same way. */
+const ACCEPT = [
+  ".flac", ".mp3", ".m4a", ".mp4", ".ogg", ".opus", ".wav", ".aac", ".wv",
+  ".ape", ".alac", ".aiff", ".aif", ".dsf", ".dff", ".mka",
+  ".jpg", ".jpeg", ".png", ".webp", ".bmp", ".gif", ".tiff", ".tif", ".avif",
+  ".heic", ".heif", ".jxl", ".svg",
+  ".lrc", ".cue", ".log", ".accurip",
+  ".zip", ".7z", ".rar", ".tar", ".tar.gz", ".tgz", ".tar.bz2", ".tbz2",
+  ".tar.xz", ".txz",
+].join(",");
+
 interface ImportFile {
-  file: File | null; // null = native pick (already on disk)
+  file: File | null; // null = native pick / unpacked archive (already on disk)
   relPath: string;
+  /** Where the SERVER holds this file: the absolute path inside the folder
+   *  `POST /api/import/unpack` extracted it into. Set only for an archive's
+   *  files, and what the commit hands back as `staged` — the bytes are already
+   *  on the server, so they are moved into the album, never uploaded twice. */
+  staged?: string | null;
+  /** The absolute path of a file the DESKTOP SHELL handed over (an OS drop
+   *  says where the file is, not what is in it). Committed through the ingest
+   *  route, which moves it — the single-file case of a folder ingest. */
+  native?: string | null;
+  /** The folder on this server a `native` file was SCANNED from. A dropped
+   *  folder keeps its own path here: the group is committed by moving the
+   *  subfolder it names, exactly as the folder picker's albums are. */
+  nativeRoot?: string | null;
 }
 
 interface AlbumGroup {
   name: string;
   root: string; // rel path of the album dir under the drop/native root ("" = root itself)
   files: ImportFile[];
+}
+
+/** One archive a drop or a pick carried, and what became of it. Shown in the
+ *  selection step BEFORE anything is committed, which is the point: an archive
+ *  is unpacked so its albums can be named and separated like a folder's, and
+ *  the counts say what actually came out. `error` is the server's own refusal
+ *  (an absolute member, a `..` escape, a link, no extractor) — never a silent
+ *  skip and never a half-unpacked album. */
+interface UnpackSummary {
+  label: string;
+  dir: string;
+  files: number;
+  audio: number;
+  error?: string;
 }
 
 /** One track of `/api/album/scan-tracks` — the folder-scan payload the wizard
@@ -180,6 +234,9 @@ interface ScanTrackRow {
   lyrics_embedded?: boolean;
   lyrics_lrc?: boolean;
   lyrics_present?: boolean;
+  /** Synced (timed) or plain (untimed) — the SERVER's own reading of what is
+   *  stored (mlo.lyrics.stored_lyrics_kind), never a guess from a fetch. */
+  lyrics_kind?: "synced" | "plain" | null;
   tech?: Track["tech"];
   tags?: Track["tags"];
 }
@@ -374,6 +431,11 @@ export default function ImportWizard() {
   const [uploaded, setUploaded] = useState<{ name: string; path: string }[]>([]);
   const [albumIndex, setAlbumIndex] = useState(0);
   const [uploading, setUploading] = useState(false);
+  // What the archives a drop or a pick carried turned into: one row per
+  // archive, shown before anything is committed. `dir` is the server's staging
+  // folder (empty when it was refused) — what the import discards when it is
+  // done with it.
+  const [unpacked, setUnpacked] = useState<UnpackSummary[]>([]);
   // relPaths the user unticked: PARTIAL import. Excluded files are never
   // uploaded or moved, and the release tracklist recorded at match time lets
   // the album page grey out exactly those tracks.
@@ -400,6 +462,16 @@ export default function ImportWizard() {
   const [release, setRelease] = useState<MBRelease | null>(null);
   const [releaseId, setReleaseId] = useState("");
   const [suggestions, setSuggestions] = useState<MatchSuggestion[]>([]);
+  // SOURCE — the one thing a Digital Media release must state and nothing in
+  // the audio can tell us: where the rip came from. The server works out what
+  // it may honestly write (the release's own store URLs, or the provider the
+  // acquisition knew) and reports `asked` when it may not, which is when this
+  // field is the answer. Never pre-filled with an invented value: the empty
+  // case offers the config's own default (`digital_media_source_value`) and
+  // says why the tag is required.
+  const [sourceDraft, setSourceDraft] = useState("");
+  const [sourceNotice, setSourceNotice] = useState<string | null>(null);
+  const [sourceBusy, setSourceBusy] = useState(false);
   // Per-track genre LIST (the derived family first, the specific genres after
   // it) — a track's GENRE tag is repeated fields, so a joined string here
   // would collapse three genres into one tag on save.
@@ -516,12 +588,6 @@ export default function ImportWizard() {
   const queueMode = uploaded.length > 1 || albums.length > 1;
   const [acoustid, setAcoustid] = useState<AcoustidMatch | null>(null);
   const [acoustidBusy, setAcoustidBusy] = useState(false);
-  // Albums whose accepted match was WRITTEN into the files (ACOUSTID_ID +
-  // ACOUSTID_FINGERPRINT). Only those can be submitted to AcoustID — the
-  // submission reads the pair back off the files — so the block offers the
-  // action per applied row and nothing else. Cleared by a new fingerprint run,
-  // whose rows have not been applied yet.
-  const [acoustidApplied, setAcoustidApplied] = useState<Record<string, true>>({});
   const [matchAllBusy, setMatchAllBusy] = useState(false);
   // Per-track results of the last lyrics auto-import (provider per track).
   const [lyrResults, setLyrResults] = useState<Record<string, LyricsAutoResult>>({});
@@ -537,6 +603,25 @@ export default function ImportWizard() {
     queryKey: ["importScripts"],
     queryFn: () => api.importScriptsPreview(),
   });
+
+  // What the pipeline can honestly say about this album's SOURCE — the same
+  // function every import path calls (`server.imports.stamp_album_source`,
+  // asked dry): a value it MAY write, derived from the release's own store
+  // URLs or from the provider the acquisition knew, or `asked` when nothing
+  // states one. The Match step is where the release identity is settled, so
+  // that is when it is read; the field is pre-filled with the value, never
+  // with an invented one (`default` is the config's own
+  // `digital_media_source_value`, offered as the user's starting point).
+  const { data: sourceInfo } = useQuery({
+    queryKey: ["importSource", albumPath],
+    queryFn: () => api.importSource(albumPath!),
+    enabled: !!albumPath && step === 2,
+    retry: false,
+  });
+  useEffect(() => {
+    if (!sourceInfo) return;
+    setSourceDraft((draft) => draft || sourceInfo.value || sourceInfo.default || "");
+  }, [sourceInfo]);
 
   // Albums an import could not finish by itself, raised by
   // server.imports.finish_album (one entry per album, with the wizard link
@@ -567,6 +652,11 @@ export default function ImportWizard() {
 
   // Metadata review is off unless the config explicitly turns it on.
   const { data: cfg } = useQuery({ queryKey: ["config"], queryFn: api.config });
+  /** The user's own `lyrics_allow_plain` (off by default): with it off, a
+   *  track whose lyrics are plain — untimed — is shown as a FAILING state on
+   *  the Lyrics step, the same mark the album and track pages wear.
+   *  `undefined` while the config has not arrived states no verdict. */
+  const allowPlain = allowPlainOf(cfg);
   /** The album is NOT in the library yet (a finished download, a folder the
    *  user pointed the wizard at). Every path-taking call below passes this, so
    *  the server's opt-in staged allowance covers this album — and only it. */
@@ -1031,6 +1121,7 @@ export default function ImportWizard() {
     tags: t.tags ?? {},
     grade_pass: false,
     lyrics_present: !!t.lyrics_present,
+    lyrics_kind: t.lyrics_kind ?? null,
   });
 
   /** Re-read the folder a step works on — the wizard's own source of truth
@@ -1093,6 +1184,7 @@ export default function ImportWizard() {
             lyrics_embedded: s.lyrics_embedded,
             lyrics_lrc: s.lyrics_lrc,
             lyrics_present: s.lyrics_present,
+            lyrics_kind: s.lyrics_kind,
           }
         : t;
     });
@@ -1131,22 +1223,60 @@ export default function ImportWizard() {
     setExcluded(new Set());
   };
 
-  const handleFiles = (list: FileList | File[]) => {
-    const arr: ImportFile[] = [];
-    for (const f of Array.from(list)) {
-      const rel = (f as any).webkitRelativePath
-        ? (f as any).webkitRelativePath.replace(/\\/g, "/")
-        : f.name.replace(/\\/g, "/");
-      if (ALLOWED.test(rel)) arr.push({ file: f, relPath: rel });
+  /** Unpack ONE archive on the server; what came out is the selection.
+   *
+   * The archive is never an import file itself — the tree INSIDE it is, and
+   * the album detection runs on that tree, so a rip in a zip takes exactly the
+   * path the same rip in a folder takes (sidecars, disc folders, partial
+   * marking and all). Each file's relPath is prefixed with the archive's own
+   * name, which keeps two albums that arrived in one drop apart and gives the
+   * grouping the same shape a dropped folder has.
+   *
+   * `audio: 0` is the SERVER's own count over the extracted tree, said out
+   * loud: an archive of scans and rip sheets must not become an empty album.
+   * Every outcome — unpacked, no audio, refused (an absolute member, a `..`
+   * escape, a link, no extractor for the format) — is recorded and shown
+   * before anything is committed.
+   */
+  const unpackArchive = async (source: File | { path: string; label: string }): Promise<ImportFile[]> => {
+    const label = source instanceof File ? source.name : source.label;
+    const keep = (tree: UnpackedTree) =>
+      setUnpacked((u) => [...u, { label: tree.label, dir: tree.dir, files: tree.unpacked, audio: tree.audio }]);
+    try {
+      const tree = await api.importUnpack(source);
+      if (!tree.audio) {
+        // Nothing here to import: the staged tree is left for the discard
+        // pass, and no album is invented for it.
+        keep(tree);
+        return [];
+      }
+      keep(tree);
+      const stem = tree.label.replace(ARCHIVE_RE, "");
+      return tree.files
+        .filter((f) => ALLOWED.test(f.relPath))
+        .map((f) => ({ file: null, relPath: `${stem}/${f.relPath}`, staged: f.path }));
+    } catch (e) {
+      setUnpacked((u) => [...u, { label, dir: "", files: 0, audio: 0, error: String(e) }]);
+      return [];
     }
-    adoptImports(arr, arr[0]?.relPath.split("/")[0] ?? "");
   };
 
-  const walkEntry = async (entry: any, prefix: string, out: ImportFile[]) => {
+  /** One dropped entry's contents, under the path it had inside the drop.
+   *
+   * `prefix` is the path of the ENTRY itself ("" at the top of a drop), so a
+   * file's relPath is `${prefix}/${name}` and a SUBFOLDER's children get that
+   * subfolder's own segment. Getting this wrong is invisible on a flat drop and
+   * merges every album of a folder-of-folders into one — the path is what the
+   * album detection groups on.
+   */
+  const walkEntry = async (entry: any, prefix: string, out: ImportFile[], archives: File[]) => {
     if (entry.isFile) {
       const f = await new Promise<File>((resolve, reject) => entry.file(resolve, reject));
-      out.push({ file: f, relPath: prefix ? `${prefix}/${f.name}` : f.name });
+      const rel = prefix ? `${prefix}/${f.name}` : f.name;
+      if (ARCHIVE_RE.test(rel)) archives.push(f);
+      else if (ALLOWED.test(rel)) out.push({ file: f, relPath: rel });
     } else if (entry.isDirectory) {
+      const here = prefix ? `${prefix}/${entry.name}` : entry.name;
       const reader = entry.createReader();
       const entries: any[] = await new Promise((resolve, reject) => {
         const all: any[] = [];
@@ -1158,26 +1288,109 @@ export default function ImportWizard() {
           }, reject);
         readBatch();
       });
-      for (const e of entries) await walkEntry(e, prefix ? `${prefix}/${entry.name}` : entry.name, out);
+      for (const e of entries) await walkEntry(e, here, out, archives);
     }
   };
 
-  const handleDrop = async (items: DataTransferItemList) => {
+  /** What a file pick took in: the files themselves plus every archive, each
+   *  unpacked by the server. `webkitRelativePath` — a folder picked through the
+   *  folder input — is the path inside the picked folder. */
+  const collectSelection = async (list: FileList | File[]): Promise<ImportFile[]> => {
     const out: ImportFile[] = [];
+    const archives: File[] = [];
+    for (const f of Array.from(list)) {
+      const rel = (f as any).webkitRelativePath
+        ? (f as any).webkitRelativePath.replace(/\\/g, "/")
+        : f.name.replace(/\\/g, "/");
+      if (ARCHIVE_RE.test(rel)) archives.push(f);
+      else if (ALLOWED.test(rel)) out.push({ file: f, relPath: rel });
+    }
+    for (const a of archives) out.push(...(await unpackArchive(a)));
+    return out;
+  };
+
+  const nothingHere = () =>
+    toast("Nothing to import in that selection — no audio, images, rip sheets or archives");
+
+  /** The picker's own entry: individual files (one or many, in any mix) and
+   *  archives, all of them a SELECTION the wizard shows before it commits. */
+  const handleFiles = async (list: FileList | File[]) => {
+    setUnpacked([]);
+    const arr = await collectSelection(list);
+    if (!arr.length) nothingHere();
+    adoptImports(arr, arr[0]?.relPath.split("/")[0] ?? "");
+  };
+
+  /** A browser drop: files, folders (nested), and archives — any mix of them.
+   *
+   * A drop with no FileSystemEntry API at all (some shells) still carries the
+   * plain file list, which is the same selection; only when the event held
+   * neither is the user told nothing arrived, instead of watching a drop do
+   * nothing. */
+  const handleDrop = async (items: DataTransferItemList, dropped: FileList) => {
     const roots: any[] = [];
     for (const item of Array.from(items)) {
       const entry = item.webkitGetAsEntry?.();
       if (entry) roots.push(entry);
     }
-    if (roots.some((r) => r.isDirectory)) {
-      for (const root of roots) {
-        await walkEntry(root, root.isDirectory ? root.name : "", out);
-      }
-      adoptImports(out.filter((o) => ALLOWED.test(o.relPath)), roots.find((r) => r.isDirectory)?.name ?? "");
-    } else {
-      const files = roots.filter((r) => r.isFile).map((r) => r.file) as File[];
-      handleFiles(files);
+    if (!roots.length) {
+      if (dropped?.length) await handleFiles(dropped);
+      else nothingHere();
+      return;
     }
+    setUnpacked([]);
+    const out: ImportFile[] = [];
+    const archives: File[] = [];
+    for (const root of roots) await walkEntry(root, "", out, archives);
+    for (const a of archives) out.push(...(await unpackArchive(a)));
+    if (!out.length) nothingHere();
+    adoptImports(out, roots.find((r) => r.isDirectory)?.name ?? out[0]?.relPath.split("/")[0] ?? "");
+  };
+
+  /** A desktop OS drop: the shell says WHERE a file is, never what is in it.
+   *
+   *  Every path here is on the server's own filesystem (the desktop app is a
+   *  client of a server the user runs), so each one goes through the ordinary
+   *  path for it — a folder through the same scan the folder button uses, an
+   *  archive through the server-side unpack, a single file as the one-entry
+   *  listing that scan answers with. A phone reaches no server filesystem at
+   *  all: there the wizard says so rather than swallowing the drop. */
+  const handleDropPaths = async (paths: string[]) => {
+    if (IN_MOBILE_SHELL) {
+      toast("A phone cannot read dropped files — use Browse individual files, or the web UI.");
+      return;
+    }
+    setUnpacked([]);
+    const out: ImportFile[] = [];
+    let folders = 0;
+    for (const p of paths) {
+      const name = p.split(/[\\/]/).filter(Boolean).pop() ?? p;
+      if (ARCHIVE_RE.test(name)) {
+        out.push(...(await unpackArchive({ path: p, label: name })));
+        continue;
+      }
+      let scan;
+      try {
+        scan = await api.importScan(p);
+      } catch (e) {
+        toast.error(`${name}: ${e}`);
+        continue;
+      }
+      if (scan.file) {
+        if (ALLOWED.test(name)) out.push({ file: null, relPath: name, native: p });
+        continue;
+      }
+      folders += 1;
+      for (const f of scan.files) {
+        if (ALLOWED.test(f.relPath)) {
+          out.push({ file: null, relPath: f.relPath, nativeRoot: scan.root });
+        }
+      }
+    }
+    if (!out.length) nothingHere();
+    setSource(folders && folders === paths.length ? "native" : "web");
+    if (folders) setNativeRoot(null);
+    adoptImports(out, out[0]?.relPath.split("/")[0] ?? "");
   };
 
   const pickFolderBrowser = async () => {
@@ -1186,19 +1399,25 @@ export default function ImportWizard() {
       const picker = (window as any).showDirectoryPicker;
       if (picker) {
         const dir = await picker({ mode: "read" });
+        setUnpacked([]);
         const out: ImportFile[] = [];
+        const archives: File[] = [];
         const walk = async (entry: any, prefix: string) => {
           for await (const e of entry.values()) {
             if (e.kind === "file") {
               const f = await e.getFile();
-              out.push({ file: f, relPath: prefix ? `${prefix}/${f.name}` : f.name });
+              const rel = prefix ? `${prefix}/${f.name}` : f.name;
+              if (ARCHIVE_RE.test(rel)) archives.push(f);
+              else if (ALLOWED.test(rel)) out.push({ file: f, relPath: rel });
             } else if (e.kind === "directory") {
               await walk(e, prefix ? `${prefix}/${e.name}` : e.name);
             }
           }
         };
         await walk(dir, "");
-        adoptImports(out.filter((o) => ALLOWED.test(o.relPath)), dir.name || "");
+        for (const a of archives) out.push(...(await unpackArchive(a)));
+        if (!out.length) nothingHere();
+        adoptImports(out, dir.name || "");
         return;
       }
     } catch (e) {
@@ -1232,18 +1451,51 @@ export default function ImportWizard() {
       const scan = await api.importScan(picked);
       setSource("native");
       setNativeRoot(picked);
+      setUnpacked([]);
       const list: ImportFile[] = scan.files
         .filter((f) => ALLOWED.test(f.relPath))
-        .map((f) => ({ file: null, relPath: f.relPath }));
+        .map((f) => ({ file: null, relPath: f.relPath, nativeRoot: scan.root }));
       adoptImports(list, picked.split(/[\\/]/).pop() ?? "");
     } catch (e) {
       toast.error(String(e));
     }
   };
 
+  // A desktop OS drop comes from the SHELL, not from the webview: Tauri
+  // intercepts the OS drag (dragDropEnabled, on by default) and reports PATHS.
+  // The browser's own drop event therefore never fires there — driving by path
+  // is the only way a dragged folder does anything at all in the desktop app,
+  // and `handleDropPaths` is where each path is resolved to what it really is.
+  // The module is imported on demand because `getCurrentWebview` exists only
+  // inside the shell (it throws in a plain browser).
+  const dropPathsRef = useRef(handleDropPaths);
+  dropPathsRef.current = handleDropPaths;
+  useEffect(() => {
+    if (!IN_TAURI) return;
+    let stop: (() => void) | null = null;
+    let gone = false;
+    void (async () => {
+      try {
+        const { getCurrentWebview } = await import("@tauri-apps/api/webview");
+        stop = await getCurrentWebview().onDragDropEvent(({ payload }) => {
+          if (payload.type === "drop" && payload.paths.length) {
+            void dropPathsRef.current(payload.paths);
+          }
+        });
+        if (gone) stop();
+      } catch {
+        // An older shell with no drag-drop event: the drop is left to the
+        // webview's own handler above, which is all that shell can offer.
+      }
+    })();
+    return () => {
+      gone = true;
+      stop?.();
+    };
+  }, []);
+
   const renameGroup = (i: number, name: string) =>
     setAlbums((gs) => gs.map((g, j) => (j === i ? { ...g, name } : g)));
-
   const moveFile = (from: number, to: number, f: ImportFile) => {
     if (from === to) return;
     setAlbums((gs) =>
@@ -1274,39 +1526,54 @@ export default function ImportWizard() {
     // Excluded files are dropped here, before anything is uploaded or moved:
     // that is what makes a PARTIAL album import (one track of twelve) work.
     // The native/folder import MOVES the source directory, so there is no
-    // subset to move — exclusion only exists on the upload path.
-    const skip = source === "web" ? excluded : new Set<string>();
-    const included = (g: AlbumGroup) => g.files.filter((f) => !skip.has(f.relPath));
+    // subset to move — exclusion only exists for the files the app places one
+    // by one (an upload, an unpacked archive, a file the shell handed over).
+    const asIs = (g: AlbumGroup) =>
+      !g.files.some((f) => f.file || f.staged || f.native) && g.files.some((f) => f.nativeRoot);
+    const included = (g: AlbumGroup) =>
+      asIs(g) ? g.files : g.files.filter((f) => !excluded.has(f.relPath));
     const groups = albums.filter((g) => g.name.trim() && included(g).length);
     if (!groups.length) {
       toast("Nothing to import — add files first");
       return;
     }
     setUploading(true);
+    // The staging folders the archives were unpacked into, discarded whatever
+    // the import above did with them (a failure leaves a copy of an archive's
+    // contents nobody needs — the file the user dropped is untouched).
+    const unpackDirs = [...new Set(unpacked.filter((u) => u.dir).map((u) => u.dir))];
     try {
       const results: { name: string; path: string }[] = [];
       const failed: { name: string; error: unknown }[] = [];
       for (const g of groups) {
         const name = g.name.trim();
         const keep = included(g);
-        if (source === "web") {
-          const filesToSend = keep.filter((f) => f.file) as { file: File; relPath: string }[];
-          if (!filesToSend.length) continue;
-          try {
-            const res = await api.importUpload(name, filesToSend);
-            results.push({ name, path: res.album_path });
-          } catch (e) {
-            failed.push({ name, error: e });
-          }
-        } else {
-          const src = nativeRoot ? (g.root ? `${nativeRoot}/${g.root}` : nativeRoot) : "";
-          if (!src) continue;
-          try {
+        const filesToSend = keep.filter((f) => f.file) as { file: File; relPath: string }[];
+        // Files the server already holds: an archive it unpacked, or a file the
+        // desktop shell named. They are moved into the album, never re-uploaded.
+        const stagedPaths = keep.map((f) => f.staged).filter((p): p is string => !!p);
+        const onDisk = keep.map((f) => f.native).filter((p): p is string => !!p);
+        const folder = keep.find((f) => f.nativeRoot)?.nativeRoot ?? nativeRoot;
+        try {
+          if (filesToSend.length || stagedPaths.length) {
+            const res = await api.importUpload(name, filesToSend, stagedPaths);
+            // A single song is placed on the album it belongs to, so the name
+            // that comes back is the album's, not the track's: show what the
+            // album ended up being called (server/imports.import_album_target).
+            results.push({ name: res.album_name || name, path: res.album_path });
+          } else if (onDisk.length === keep.length) {
+            // Every file here is a path on this server's disk (an OS drop of
+            // single files): the one-file case of the ingest, once per file.
+            let last: { album_name?: string; path: string } | null = null;
+            for (const p of onDisk) last = await api.importIngest(p, name);
+            if (last) results.push({ name: last.album_name || name, path: last.path });
+          } else if (folder) {
+            const src = g.root ? `${folder}/${g.root}` : folder;
             const res = await api.importIngest(src, name);
-            results.push({ name, path: res.path });
-          } catch (e) {
-            failed.push({ name, error: e });
+            results.push({ name: res.album_name || name, path: res.path });
           }
+        } catch (e) {
+          failed.push({ name, error: e });
         }
       }
       if (!results.length) {
@@ -1343,6 +1610,13 @@ export default function ImportWizard() {
       toast.error(String(e));
     } finally {
       setUploading(false);
+      // Nothing points at the unpacked trees any more: their files were either
+      // moved into the library above or left behind by a failure. The archive
+      // the user chose is untouched either way.
+      if (unpackDirs.length) {
+        setUnpacked((u) => u.map((s) => (s.dir ? { ...s, dir: "" } : s)));
+        api.importUnpackDiscard(unpackDirs).catch(() => {});
+      }
     }
   };
 
@@ -1568,9 +1842,6 @@ export default function ImportWizard() {
     try {
       const res = await api.importAcoustid(paths, false, staged);
       setAcoustid(res);
-      // A fresh run's rows carry no accepted match yet, so no row may offer
-      // the submission the ids alone make possible.
-      setAcoustidApplied({});
       if (!res.available) toast(`Fingerprinting unavailable — ${res.note}`);
     } catch (e) {
       toast.error(String(e));
@@ -1636,7 +1907,6 @@ export default function ImportWizard() {
         } else {
           toast(`Identity tags written to ${tagged} track(s)`);
         }
-        if (tagged) setAcoustidApplied((m) => ({ ...m, [row.path]: true }));
       } catch (e) {
         toast(`Matched, but the AcoustID identity tags failed: ${e}`);
       }
@@ -1649,14 +1919,15 @@ export default function ImportWizard() {
     }
   };
 
-  /** "Submit to AcoustID" — publish the fingerprint/id pair the ACCEPTED match
-   *  wrote into the files to AcoustID's public database. Nothing is
-   *  fingerprinted again and nothing is written locally (mlo.acoustid.
-   *  submit_fingerprints reads the pair back off the files), and the reply is
-   *  the service's own: how many it took, or the sentence it refused with
-   *  (no `acoustid_user_key`, or the key refused) — never a generic "failed".
-   *  The block only offers this for a row whose ids are on the files, which is
-   *  what makes the press mean something. */
+  /** "Submit to AcoustID" — give AcoustID's public database the fingerprint +
+   *  MusicBrainz recording id these files state (the submission IS that link:
+   *  MusicBrainz itself never receives a fingerprint). The pair comes off the
+   *  files; a file carrying no fingerprint tag is fingerprinted locally when
+   *  it names its own recording (`mlo.acoustid.submit_files`). Nothing is
+   *  written locally, and a pair the service already links — or one this app
+   *  already sent — is NOT re-sent. The reply is the service's own: how many
+   *  it took, or the sentence it refused with (no `acoustid_user_key`, or the
+   *  key refused) — never a generic "failed". */
   const submitAcoustidRelease = async (
     row: AcoustidAlbumMatch
   ): Promise<AcoustidSubmitReply> => {
@@ -1668,12 +1939,20 @@ export default function ImportWizard() {
         toast.error(`AcoustID refused the submission — ${result.note}`);
       } else if (result.submitted) {
         toast.success(
-          `AcoustID accepted ${result.submitted} of ${result.tracks.total} fingerprint(s)` +
+          `AcoustID took ${result.submitted} of ${result.tracks.total} fingerprint(s)` +
+            (result.known ? ` · ${result.known} already known` : "") +
             (result.tracks.skipped ? ` · ${result.tracks.skipped} skipped` : "")
+        );
+      } else if (result.known || result.tracks.skipped) {
+        // Nothing to send is not a failure: the service already links these
+        // pairs (or this app already gave them to it) — the point of the run.
+        toast.success(
+          `AcoustID already has every pair in these files — ${result.known} already known` +
+            (result.tracks.skipped ? `, ${result.tracks.skipped} skipped` : "")
         );
       } else {
         toast.error(
-          `AcoustID took no fingerprint — ${result.note || `${result.tracks.skipped} track(s) had nothing to submit`}`
+          `AcoustID took no fingerprint — ${result.note || `${result.tracks.failed} rejected`}`
         );
       }
       return { ok: true, result };
@@ -1804,6 +2083,44 @@ export default function ImportWizard() {
     }
   };
 
+  /** Write the SOURCE this album's Digital Media release needs — the
+   *  pipeline's own function through the pipeline's own route, so nothing
+   *  here decides for itself: the value lands on every track that lacks one
+   *  (fill-only), only on a digital medium, and the reply says which of those
+   *  happened (`written` / `present` / `asked` / `not-digital` / `gated`).
+   *
+   *  Called by the Match step's own Save (with the release identity, which is
+   *  the one moment the release's store URLs are known) and by its Save
+   *  button on its own. An empty field writes nothing: a SOURCE nobody states
+   *  is a question, not a value to invent. */
+  const saveSource = async (value?: string) => {
+    const target = albumPath;
+    const wanted = String(value ?? sourceDraft).trim();
+    if (!target || !wanted) return null;
+    setSourceBusy(true);
+    setSourceNotice(null);
+    try {
+      const res = await api.importSource(target, { value: wanted });
+      setSourceNotice(
+        res.state === "written"
+          ? t("import.source.written", { n: res.written })
+          : res.state === "present"
+            ? t("import.source.present")
+            : res.state === "not-digital"
+              ? t("import.source.not_digital")
+              : t("import.source.asked")
+      );
+      qc.invalidateQueries({ queryKey: ["importSource", target] });
+      qc.invalidateQueries({ queryKey: ["album", target] });
+      return res;
+    } catch (e) {
+      setSourceNotice(String(e));
+      return null;
+    } finally {
+      setSourceBusy(false);
+    }
+  };
+
   const confirmMatch = async () => {
     if (!albumPath || !release) {
       toast("Fetch the MusicBrainz release first");
@@ -1814,6 +2131,20 @@ export default function ImportWizard() {
     setFetchStatus("Writing MusicBrainz metadata to files…");
     try {
       await assignTracks(albumPath, release, suggestions);
+      // MEDIA lands with the identity, and a Digital Media release is exactly
+      // the one that must also state a SOURCE: the Match step's own answer is
+      // written in the same breath (fill-only and gated server-side), so
+      // walking through the wizard cannot leave the album failing
+      // "Missing SOURCE (required for Digital Media)". A failure here must not
+      // lose the tag writes that just succeeded.
+      const mediumFormat = release.medium_formats?.[0] || mediaType;
+      if (mediumFormat === "Digital Media" && sourceDraft.trim()) {
+        try {
+          await saveSource(sourceDraft);
+        } catch (e) {
+          toast(`Matched, but SOURCE was not written: ${e}`);
+        }
+      }
       toast("MusicBrainz metadata written to files (titles, artists, album, dates, MBIDs)");
       setStep(3);
     } catch (e) {
@@ -2223,15 +2554,20 @@ export default function ImportWizard() {
     return parseDisc(t.tags?.DISCNUMBER) ?? t.discnumber ?? numsFromName(t.file || p).disc;
   };
 
-  /** Whether this track will actually carry lyrics once the step is saved.
-   *  A checkmark used to appear for any track whose .lrc sidecar merely
-   *  EXISTED, so empty sidecars from an aborted run claimed lyrics they did
-   *  not have. Instrumentals never count. */
-  const hasLyrics = (t: Track): boolean => {
-    if ((instrumental[t.path] ?? t.tags.INSTRUMENTAL) === "1") return false;
+  /** What a track's lyrics ARE right now — the one question the lyrics step
+   *  asks, in the two shapes its own mark needs:
+   *
+   *  * a draft the row is being edited with wins: it is what this step would
+   *    WRITE, so a pasted plain text reads plain even over a synced file;
+   *  * otherwise the SERVER's own reading of what is stored (`lyrics_kind`,
+   *    mlo.lyrics.stored_lyrics_kind) — never a guess from the fetch step, and
+   *    never the state of an empty sidecar (a blank `.lrc` is no lyrics);
+   *  * an instrumental is neither: it has its own badge and no lyrics by
+   *    definition. */
+  const lyricsKindOfTrack = (t: Track): "synced" | "plain" | null => {
+    if ((instrumental[t.path] ?? t.tags.INSTRUMENTAL) === "1") return null;
     const draft = lyricsDrafts[t.path];
-    if (draft && draft.trim()) return true;   // what this step is about to write
-    return !!(t.lyrics_embedded || t.lyrics_lrc); // what is already on disk
+    return draft?.trim() ? lyricsKindOf(draft) : t.lyrics_kind ?? null;
   };
 
   /** Auto-import lyrics through the configured provider chain (script 13's own
@@ -2557,6 +2893,11 @@ const [finishMsg, setFinishMsg] = useState<string | null>(null);
 // One row per chain id of the last run (null = nothing run here yet). A
 // failing script is a row with its own error text, not just a count.
 const [runRows, setRunRows] = useState<RunRow[] | null>(null);
+// What the digital settle answered for this album (null = not settled yet):
+// the SOURCE, the untimed lyrics this install refuses, and the album
+// description — `POST /api/import/settle`, the same call every other import
+// path makes. Shown in the Finish step because it is what THIS press did.
+const [settleResult, setSettleResult] = useState<ImportSettleResult | null>(null);
 
 /** Is this the sentence a claim raises (`job_locks.refusal`)? Then the album is
  *  in use by another job: nothing ran here, and nothing is broken — which the
@@ -2643,6 +2984,28 @@ const runTickedHere = async () => {
 
 const finish = async () => {
   try {
+    // The digital release's OWN three answers first — SOURCE, the untimed
+    // lyrics this install refuses, and the album description — through the
+    // pipeline's own entry point (`server.imports.settle_digital_import`, the
+    // call every other import path makes). BEFORE the ticked scripts, because
+    // the lyrics fetch (13) and the formatter (1) read what this leaves
+    // behind, and because the description is a file the grade wants. Its
+    // outcome is kept for the step to show, either way: a wizard import must
+    // not be the one path that skips a step the grader checks.
+    if (albumPath) {
+      setFinishMsg("Settling the release (source, lyrics, description)…");
+      try {
+        const settled = await api.importSettle(albumPath, {
+          scripts: runAfterImportIds,
+          source: sourceDraft.trim(),
+          staged,
+        });
+        setSettleResult(settled);
+        await Promise.all([refetchAlbumDetail(), refetchArtistArt()]);
+      } catch (e) {
+        setFinishMsg(`Settle failed — ${e}`);
+      }
+    }
     // Same targets as the chain: an album opened via ?album= is just as real
     // an import, it simply has nothing "uploaded". The ids are the import
     // chain (the ticked boxes, which ARE the chain until changed), so Finish
@@ -2657,6 +3020,8 @@ const finish = async () => {
   }
   qc.invalidateQueries({ queryKey: ["library"] });
   qc.invalidateQueries({ queryKey: ["importPrompts"] });
+  qc.invalidateQueries({ queryKey: ["importSource"] });
+  qc.invalidateQueries({ queryKey: ["album"] });
   setParams({});
   toast(uploaded.length > 1 ? `Imported ${uploaded.length} albums — enrich each from its album page` : "Import complete — album graded");
 };
@@ -2668,6 +3033,9 @@ const finish = async () => {
     setDetectedFromTags(false);
     setRelease(null);
     setReleaseId("");
+    setSourceDraft("");
+    setSourceNotice(null);
+    setSettleResult(null);
     setSuggestions([]);
     setGenres({});
     setDiscGenres({});
@@ -3094,7 +3462,6 @@ const finish = async () => {
             queue
             canMatchAll={!!(releaseId || extractMbid(mbLink))}
             matchAllBusy={matchAllBusy}
-            applied={acoustidApplied}
             onRun={runAcoustid}
             onUse={useAcoustidRelease}
             onSubmit={submitAcoustidRelease}
@@ -3119,12 +3486,12 @@ const finish = async () => {
             onDragOver={(e) => e.preventDefault()}
             onDrop={(e) => {
               e.preventDefault();
-              handleDrop(e.dataTransfer.items);
+              handleDrop(e.dataTransfer.items, e.dataTransfer.files);
             }}
             onClick={() => pickFolderBrowser()}
           >
             <UploadCloud className="h-10 w-10 text-zinc-600 mx-auto mb-3" />
-            <div className="font-medium text-zinc-300">Drop albums or files here</div>
+            <div className="font-medium text-zinc-300">Drop albums, files or archives here</div>
             <div className="text-xs text-zinc-600 mt-1">
               drop one or more folders (even from different artists) — they are separated into albums below
             </div>
@@ -3133,6 +3500,7 @@ const finish = async () => {
             </div>
             <div className="text-[11px] text-zinc-600 mt-1">
               audio (flac, mp3, m4a, ogg, opus, wav, …) · images (jpg, png, webp, tiff, avif, heic, …) · .lrc .cue .log .accurip
+              · archives (.zip .tar .tar.gz/.tgz .tar.bz2 .tar.xz .7z .rar) — unpacked here, then imported as the folder inside
             </div>
             <div className="text-xs text-zinc-600 mt-2">
               click to <b className="text-zinc-400">pick a folder</b> · or{" "}
@@ -3144,9 +3512,17 @@ const finish = async () => {
                 }}
               >
                 browse individual files
-              </span>
+              </span>{" "}
+              (one file, several, or an archive)
             </div>
-            <input id="import-files" type="file" multiple className="hidden" onChange={(e) => e.target.files && handleFiles(e.target.files)} />
+            <input
+              id="import-files"
+              type="file"
+              multiple
+              accept={ACCEPT}
+              className="hidden"
+              onChange={(e) => e.target.files && handleFiles(e.target.files)}
+            />
             <input
               id="import-folder"
               type="file"
@@ -3194,6 +3570,35 @@ const finish = async () => {
             </div>
           )}
 
+          {unpacked.length > 0 && (
+            <div className="panel p-3 space-y-1">
+              <div className="flex items-center gap-2">
+                <FileArchive className="h-4 w-4 text-zinc-500 shrink-0" />
+                <span className="text-sm font-semibold">Archives unpacked</span>
+                <span className="text-xs text-zinc-500">
+                  nothing is committed yet — review what came out below
+                </span>
+              </div>
+              {unpacked.map((u, i) => (
+                <div key={i} className="text-xs">
+                  <span className="text-zinc-300">{u.label}</span>
+                  {u.error ? (
+                    <span className="text-red-300/90"> — refused: {u.error}</span>
+                  ) : u.audio ? (
+                    <span className="text-zinc-500">
+                      {" "}— {u.files} file{u.files === 1 ? "" : "s"} unpacked, {u.audio} with audio
+                    </span>
+                  ) : (
+                    <span className="text-amber-300/90">
+                      {" "}— {u.files} file{u.files === 1 ? "" : "s"} unpacked and none of them audio:
+                      nothing was added (those files are not imported)
+                    </span>
+                  )}
+                </div>
+              ))}
+            </div>
+          )}
+
           {totalFiles > 0 && (
             <div className="space-y-3">
               <div className="flex flex-wrap items-center gap-2">
@@ -3234,7 +3639,7 @@ const finish = async () => {
                         gi={gi}
                         albums={albums}
                         groupFiles={g.files}
-                        selectable={source === "web"}
+                        selectable={!!(f.file || f.staged || f.native)}
                         excluded={excluded.has(f.relPath)}
                         onToggleExcluded={() =>
                           setExcluded((s) => {
@@ -3287,7 +3692,6 @@ const finish = async () => {
                 queue={false}
                 canMatchAll={false}
                 matchAllBusy={false}
-                applied={acoustidApplied}
                 onRun={runAcoustid}
                 onUse={useAcoustidRelease}
                 onSubmit={submitAcoustidRelease}
@@ -3506,6 +3910,48 @@ const finish = async () => {
               })}
             </DiscSection>
           ))}
+          {/* SOURCE — the one tag a Digital Media release must carry and the
+              audio cannot state: where the rip came from. Shown on the step
+              that decides the medium, because the medium is what makes it
+              required; a release whose MEDIA is not digital gets no block at
+              all (the server's own answer, `not-digital`), since a SOURCE
+              there is graded as a failure. */}
+          {sourceInfo?.state !== "not-digital" && (
+            <div className="panel px-3 py-2 space-y-1.5">
+              <div className="flex items-center gap-2 flex-wrap">
+                <span className="text-sm font-semibold text-zinc-300">{t("import.source.title")}</span>
+                <span className="text-[11px] text-zinc-500">
+                  {t("import.source.why")}
+                  {sourceInfo?.media ? <span className="font-mono"> · MEDIA {sourceInfo.media}</span> : null}
+                  {sourceInfo?.tracks ? ` · ${sourceInfo.tracks - sourceInfo.missing}/${sourceInfo.tracks}` : ""}
+                </span>
+                <button
+                  className="btn-ghost !py-1 text-xs ml-auto tap"
+                  onClick={() => saveSource()}
+                  disabled={sourceBusy || !sourceDraft.trim()}
+                  title={t("import.source.save_hint")}
+                >
+                  {t("import.source.save")}
+                </button>
+              </div>
+              <div className="flex items-center gap-2 flex-wrap">
+                <input
+                  className="input max-w-xs tap"
+                  placeholder={sourceInfo?.default || "Digital"}
+                  value={sourceDraft}
+                  onChange={(e) => setSourceDraft(e.target.value)}
+                />
+                {sourceInfo?.state === "suggested" && sourceInfo.value ? (
+                  <span className="text-[11px] text-emerald-300/90">
+                    {t("import.source.suggested", { value: sourceInfo.value })}
+                  </span>
+                ) : (
+                  <span className="text-[11px] text-amber-300/90">{t("import.source.asked")}</span>
+                )}
+                {sourceNotice && <span className="text-[11px] text-zinc-400">{sourceNotice}</span>}
+              </div>
+            </div>
+          )}
           <div className="flex justify-end">
             <button className="btn-primary tap" onClick={confirmMatch} disabled={busy}>
               Save matching
@@ -4264,22 +4710,40 @@ const finish = async () => {
             )}
           </MinBlock>
           <MinBlock min={minMode} here={missingHere} mine="lyrics">
+            {/* The album's own answer, before the rows: how many tracks hold
+                synced lyrics and how many only plain ones — and when plain is
+                not acceptable by the user's own setting, what that means. */}
+            {(() => {
+              const kinds = stepTracks.map(lyricsKindOfTrack);
+              const synced = kinds.filter((k) => k === "synced").length;
+              const plain = kinds.filter((k) => k === "plain").length;
+              if (!synced && !plain) return null;
+              return (
+                <div className="flex flex-wrap items-center gap-2 text-xs text-zinc-400">
+                  <span>{t("lyrics.kind.counts", { synced, plain })}</span>
+                  {plain > 0 && allowPlain === false && (
+                    <span className="text-red-300/90">
+                      {t("lyrics.kind.plain_failing", { n: plain })}
+                    </span>
+                  )}
+                </div>
+              );
+            })()}
             {/* One compact row per track, like every other step: badge, title and
                 the chips on a single line, the editor behind Edit. */}
             {stepTracks.map((t) => {
               const inst = instrumental[t.path] ?? t.tags.INSTRUMENTAL;
-              const hasDraft = hasLyrics(t);
+              // Synced, or plain — and plain is a FAILING state while
+              // Settings → Lyrics leaves `lyrics_allow_plain` off. The same
+              // mark every other surface wears, from the same field.
+              const kind = lyricsKindOfTrack(t);
               const open = lyrOpen.has(t.path);
               return (
                 <div key={t.path} className={`${ROW} flex-col items-stretch space-y-2`}>
                   <div className="flex flex-wrap items-center gap-3">
                     <TrackNoBadge disc={discNoOf(t.path)} track={trackNoOf(t.path)} />
                     <span className="flex-1 truncate text-sm">{displayTitle(t.path)}</span>
-                    {hasDraft && (
-                      <span className="chip bg-emerald-900/60 text-emerald-300 border border-emerald-800 shrink-0">
-                        <Check className="h-3 w-3" /> Lyrics
-                      </span>
-                    )}
+                    <LyricsKindChip kind={kind} allowPlain={allowPlain} showReason />
                     {lyrResults[t.path] && (
                       <span
                         className={`chip border shrink-0 ${
@@ -4468,6 +4932,57 @@ const finish = async () => {
           <div className="mt-4">
             <ScriptChainNote preview={scriptChain} />
           </div>
+          {/* What THIS press settled before the scripts: the release's SOURCE,
+              the untimed lyrics this install refuses, and the album
+              description — the same three things every other import path
+              settles (`server.imports.settle_digital_import`). Every row
+              carries the server's own state, including the honest ones: a
+              SOURCE nothing states is a question for the Match step, and a
+              chain without the fetch means the lyrics were left alone. */}
+          {settleResult && (
+            <div className="mt-4 panel px-3 py-2 space-y-1 text-[11px]">
+              <div className="text-xs font-semibold uppercase tracking-wider text-zinc-400">
+                {t("import.settle.title")}
+              </div>
+              <div className="flex items-center gap-2">
+                <span className="w-28 shrink-0 text-zinc-400">{t("import.source.title")}</span>
+                <span className={settleResult.source.state === "written" || settleResult.source.state === "present" ? "text-emerald-300" : "text-amber-300"}>
+                  {settleResult.source.state === "written"
+                    ? t("import.source.written", { n: settleResult.source.written })
+                    : settleResult.source.state === "present"
+                      ? t("import.source.present")
+                      : settleResult.source.state === "not-digital"
+                        ? t("import.source.not_digital")
+                        : t("import.source.asked")}
+                </span>
+                {settleResult.source.value && (
+                  <span className="font-mono text-zinc-400">{settleResult.source.value}</span>
+                )}
+              </div>
+              <div className="flex items-center gap-2">
+                <span className="w-28 shrink-0 text-zinc-400">{t("import.settle.lyrics")}</span>
+                <span className={settleResult.lyrics.state === "cleaned" ? "text-amber-300" : "text-zinc-400"}>
+                  {settleResult.lyrics.state === "cleaned"
+                    ? t("import.settle.lyrics_removed", { n: settleResult.lyrics.dropped })
+                    : settleResult.lyrics.state === "no-fetch"
+                      ? t("import.settle.lyrics_no_fetch")
+                      : settleResult.lyrics.state === "allow-plain"
+                        ? t("import.settle.lyrics_allow_plain")
+                        : t("import.settle.lyrics_ok")}
+                </span>
+              </div>
+              <div className="flex items-center gap-2">
+                <span className="w-28 shrink-0 text-zinc-400">{t("import.settle.description")}</span>
+                <span className="text-zinc-400">
+                  {settleResult.metadata?.applied?.album_description
+                    ? t("import.settle.description_fetched")
+                    : settleResult.metadata?.staged
+                      ? t("import.settle.description_staged")
+                      : t("import.settle.description_missing")}
+                </span>
+              </div>
+            </div>
+          )}
           <div className="mt-5 bg-panel rounded-lg border border-border p-4">
             <div className="text-xs font-semibold uppercase tracking-wider text-zinc-400 mb-2">
               Run scripts after import (on the new album{uploaded.length > 1 ? "s" : ""})
@@ -4722,6 +5237,21 @@ type AcoustidSubmitReply = { ok: true; result: AcoustidSubmitResult } | { ok: fa
 /** The reply of one submission, in the service's own words: how many
  *  fingerprints it accepted, or the sentence it refused with — the two are
  *  never collapsed into a generic "failed". */
+/** What one track of a submission answered, in the app's own words — the
+ *  outcomes the endpoint reports ("accepted", "already_known", "rejected",
+ *  "skipped"); an outcome it does not know is shown as it came. */
+const SUBMIT_OUTCOME_WORDS: Record<string, string> = {
+  accepted: "accepted",
+  already_known: "already known",
+  rejected: "rejected",
+  skipped: "skipped",
+};
+
+/** One submission's answer: the counts, then the tracks that did NOT go in —
+ *  a rejection in the service's own words, a skip with its own named cause —
+ *  and the ones AcoustID already had. `results` is one row per file, in the
+ *  order the paths resolved to, so the per-track report is the whole answer
+ *  rather than a count the reader has to trust. */
 function SubmitReplyText({ reply }: { reply: AcoustidSubmitReply }) {
   if (!reply.ok) return <span className="text-red-300">{reply.error}</span>;
   const r = reply.result;
@@ -4730,20 +5260,32 @@ function SubmitReplyText({ reply }: { reply: AcoustidSubmitReply }) {
       <span className="text-amber-300">
         AcoustID refused the submission — {r.note}
         {r.code ? ` (${r.code})` : ""}. It is the USER key that submits: set it in{" "}
-        <b className="text-amber-100">Settings → Import</b>.
+        <b className="text-amber-100">Settings → Import</b>. Nothing was read, fingerprinted or sent.
       </span>
     );
   }
+  // Every non-accepted row, named: what did not go in is the part a person
+  // needs, and "already known" is not a failure — it is the dedupe working.
+  const others = (r.results ?? []).filter((t) => t.outcome !== "accepted");
+  const named = others.slice(0, 4).map((t) => {
+    const file = t.path.split(/[\\/]/).pop() ?? t.path;
+    const word = SUBMIT_OUTCOME_WORDS[t.outcome] ?? t.outcome;
+    return `${file} — ${word}: ${t.reason || t.code || ""}`;
+  });
   return (
     <>
-      AcoustID accepted <b className="text-zinc-300">{r.submitted}</b> of {r.tracks.total} fingerprint(s)
-      {r.tracks.skipped
-        ? ` · ${r.tracks.skipped} skipped (${(r.skips ?? [])
-            .slice(0, 2)
-            .map((s) => s.reason || s.code)
-            .join("; ")})`
-        : ""}
-      .
+      AcoustID took <b className="text-zinc-300">{r.submitted}</b> of {r.tracks.total} fingerprint(s)
+      {r.known ? ` · ${r.known} already known` : ""}
+      {r.failed ? ` · ${r.failed} rejected` : ""}
+      {r.tracks.skipped ? ` · ${r.tracks.skipped} skipped` : ""}.
+      {named.map((line) => (
+        <span key={line} className="block text-zinc-600">
+          · {line}
+        </span>
+      ))}
+      {others.length > named.length ? (
+        <span className="block text-zinc-600">· and {others.length - named.length} more</span>
+      ) : null}
     </>
   );
 }
@@ -4769,11 +5311,13 @@ function writeProblems(problems: AcoustidWrite[]): string {
 /** AcoustID stage: fingerprint the staged audio and name the release group it
  *  really is. "Use this release" hands the result back to the wizard's own
  *  release fetch + auto-match flow — there is no second tag writer. Accepting
- *  it also writes the identity pair onto the files, and THAT is what makes the
- *  second action possible: "Submit to AcoustID" publishes the pair the files
- *  carry, so it is offered per applied row only. */
+ *  it also writes the identity pair onto the files; "Submit to AcoustID" is
+ *  offered on EVERY row regardless, because a row AcoustID could not identify
+ *  is exactly the one whose files may state their own recording (a CD rip
+ *  tagged by beets): the submission takes the fingerprint locally then, and
+ *  reports per track when a file names no recording at all. */
 function AcoustidBlock({
-  match, busy, queue, canMatchAll, matchAllBusy, applied, onRun, onUse, onSubmit,
+  match, busy, queue, canMatchAll, matchAllBusy, onRun, onUse, onSubmit,
   onMatchAll,
 }: {
   match: AcoustidMatch | null;
@@ -4782,11 +5326,9 @@ function AcoustidBlock({
   queue: boolean;
   canMatchAll: boolean;
   matchAllBusy: boolean;
-  /** Album paths whose accepted match was written into the files. */
-  applied: Record<string, true>;
   onRun: () => void;
   onUse: (row: AcoustidAlbumMatch) => void;
-  /** Publish this row's already-tagged fingerprints to AcoustID. */
+  /** Give AcoustID this row's fingerprints + recording ids. */
   onSubmit: (row: AcoustidAlbumMatch) => Promise<AcoustidSubmitReply>;
   onMatchAll: () => void;
 }) {
@@ -4902,38 +5444,6 @@ function AcoustidBlock({
                   >
                     Use this release
                   </button>
-                  {/* Beside it: the ids are on the files (this row was
-                      applied), so the fingerprints can be published. Two
-                      presses, with the second one labelled — AcoustID's
-                      database is public. */}
-                  {applied[row.path] && (
-                    <button
-                      className={`btn-ghost !py-0.5 text-[11px] tap ${arm === row.path ? "!bg-red-600 !text-white" : ""}`}
-                      onClick={() => submit(row)}
-                      disabled={busy || submitting === row.path}
-                      title={
-                        arm === row.path
-                          ? "Publishes the ACOUSTID_FINGERPRINT/ID pair already on these files to AcoustID's public database — press again to confirm"
-                          : "Publish the fingerprint and recording id already on these files to AcoustID's public database (nothing is re-fingerprinted)"
-                      }
-                    >
-                      {submitting === row.path ? (
-                        <Loader2 className="h-3.5 w-3.5 animate-spin" />
-                      ) : (
-                        <UploadCloud className="h-3.5 w-3.5" />
-                      )}
-                      {arm === row.path ? "Confirm — publishes publicly" : "Submit to AcoustID"}
-                    </button>
-                  )}
-                  {arm === row.path && (
-                    <button
-                      className="btn-ghost !py-0.5 text-[11px] tap"
-                      onClick={() => setArm(null)}
-                      title="Leave the fingerprints unpublished"
-                    >
-                      <X className="h-3 w-3" /> Cancel
-                    </button>
-                  )}
                 </>
               ) : row.status === "error" ? (
                 // A lookup that FAILED is not a lookup that found nothing: the
@@ -4955,6 +5465,45 @@ function AcoustidBlock({
                   {row.reason || `No release group matched ${row.total} track(s)`} — search by title or paste
                   a release link below.
                 </span>
+              )}
+              {/* The submission is NOT tied to a match: an album AcoustID
+                  could not identify is exactly the one whose files may still
+                  state their own recording (a CD rip tagged by beets, the
+                  naming script's MBID) — `mlo.acoustid.submit_files` takes the
+                  fingerprint locally then, and reports per track when a file
+                  names no recording at all. A pair the service already links,
+                  or one this app already sent, just reports "already known".
+                  Two presses, second one labelled: AcoustID's database is
+                  public, and a submission is a fingerprint linked to a
+                  MusicBrainz RECORDING ID (MusicBrainz never sees a
+                  fingerprint). */}
+              <button
+                className={`btn-ghost !py-0.5 text-[11px] tap ${arm === row.path ? "!bg-red-600 !text-white" : ""} ${
+                  row.release_group_id ? "" : "ml-auto"
+                }`}
+                onClick={() => submit(row)}
+                disabled={busy || submitting === row.path}
+                title={
+                  arm === row.path
+                    ? "Publishes these files' fingerprints with their MusicBrainz recording ids to AcoustID's public database — press again to confirm"
+                    : "Give AcoustID the fingerprint + MusicBrainz recording id these files state (a file without a fingerprint tag is fingerprinted locally; a pair AcoustID already links is not re-sent)"
+                }
+              >
+                {submitting === row.path ? (
+                  <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                ) : (
+                  <UploadCloud className="h-3.5 w-3.5" />
+                )}
+                {arm === row.path ? "Confirm — publishes publicly" : "Submit to AcoustID"}
+              </button>
+              {arm === row.path && (
+                <button
+                  className="btn-ghost !py-0.5 text-[11px] tap"
+                  onClick={() => setArm(null)}
+                  title="Leave the fingerprints unpublished"
+                >
+                  <X className="h-3 w-3" /> Cancel
+                </button>
               )}
               {/* Reply of the last submission for this row — the service's own
                   answer, in its own words. A refusal (no user key, or one it

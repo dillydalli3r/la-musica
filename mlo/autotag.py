@@ -712,6 +712,26 @@ def _slot_open(af, tag):
     return False
 
 
+def _podcast_slot_open(af):
+    """Whether this file could still gain its PODCAST tags.
+
+    A Broadcast release — what MusicBrainz types every podcast episode — that
+    carries no PODCASTSERIES tag may be an episode whose series nobody has
+    asked MusicBrainz about yet (the album was tagged before this feature, or
+    by hand). That is the ONE case where "this album already carries
+    everything this stage could write" cannot be answered from the file: the
+    series is a fact about the release GROUP's relations, which no tag of the
+    album states. So a Broadcast without the tag counts as an open slot and
+    costs the release request the album would otherwise skip (plus, for a
+    Broadcast, the one series request `release_lookup` then makes); every
+    other release — a music album of any type — keeps the prescan's contract
+    exactly as it was, never asked about a podcast it cannot be.
+    """
+    if "broadcast" not in str(af.get_tag("RELEASETYPE") or "").lower():
+        return False
+    return not str(af.get_tag("PODCASTSERIES") or "").strip()
+
+
 def mb_track_tags(release, slot, disc=1, album_artist_mbid=""):
     """EVERY MusicBrainz value ONE track's file should carry, as (tag, value).
 
@@ -744,6 +764,21 @@ def mb_track_tags(release, slot, disc=1, album_artist_mbid=""):
             values.append((tag, value))
     for tag, key in _EXTRA_RELEASE_TAGS:
         value = str(release.get(key) or "").strip()
+        if value:
+            values.append((tag, value))
+    # The app's DERIVED podcast identity (mlo.naming.DERIVED_RELEASE_TYPES):
+    # MusicBrainz states it as a SERIES the release's GROUP is `part of`, never
+    # as a release-group type, so it arrives as the payload's own `podcast`
+    # block — filled by server.integrations for a Broadcast group only. The
+    # series TITLE (name + MusicBrainz's disambiguation) is what a reader
+    # groups episodes by, the id is what survives a rename, and the episode
+    # number is MusicBrainz's own when it states one. A release that is no
+    # episode has no block and writes nothing.
+    pod = release.get("podcast") if isinstance(release.get("podcast"), dict) else {}
+    for tag, key in (("PODCASTSERIES", "title"),
+                     ("PODCASTSERIESMBID", "mbid"),
+                     ("PODCASTEPISODE", "number")):
+        value = str((pod or {}).get(key) or "").strip()
         if value:
             values.append((tag, value))
     title = str((release.get("medium_titles") or {}).get(int(disc or 1)) or "")
@@ -947,7 +982,8 @@ def _fill_release_tags(info, config, album_dir):
     # first event of a release out in several countries — the one case where
     # the request is what tells the two apart).
     slots = [tag for tag, _key in _RELEASE_TAGS] + list(_PER_TRACK_TAGS)
-    if not any(_slot_open(d["af"], tag) for d in info for tag in slots):
+    if not any(_slot_open(d["af"], tag) for d in info for tag in slots) \
+            and not any(_podcast_slot_open(d["af"]) for d in info):
         return 0, "release tags: nothing to fill"
 
     release = _cached_release(mbid)
@@ -962,9 +998,11 @@ def _fill_release_tags(info, config, album_dir):
             _release_country_codes(release) if tag == "RELEASECOUNTRY"
             else str(release.get(key) or "").strip())
             for tag, key in _RELEASE_TAGS + _EXTRA_RELEASE_TAGS) \
-            and not release["tracks"] and not manifest_ids:
+            and not release["tracks"] and not manifest_ids \
+            and not (release.get("podcast") or {}):
         # Nothing to write: the release states no identity, no extra fact and
-        # no tracklist this album can be matched against.
+        # no tracklist this album can be matched against — and it is no
+        # podcast episode either, whose series alone would be worth writing.
         return 0, "release tags: release carries none"
 
     written = 0

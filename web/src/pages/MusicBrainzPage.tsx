@@ -637,7 +637,7 @@ function SearchFieldHelp({ kind, onInsert }: {
         <HelpCircle className="h-3.5 w-3.5" /> Fields &amp; syntax
       </button>
       <Popover open={open} onClose={() => setOpen(false)} align="left"
-               panelClass="w-[min(30rem,calc(100vw-1rem))] max-h-[70vh] overflow-y-auto p-1.5">
+               panelClass="w-[min(30rem,calc(100vw-1rem))] p-1.5">
         <div className="text-[10px] uppercase tracking-wider text-zinc-500 px-2.5 pt-1.5 pb-1">Syntax</div>
         {syntax.map((s) => (
           <button
@@ -1864,6 +1864,10 @@ export function MBReleaseGroupPage() {
   // never disagree about which edition the app is about to fetch.
   const [edition, setEdition] = useState("");
   const { busy, run } = useAddToLibrary();
+  // WHICH row's own action is in flight, so the spinner sits on the edition
+  // that was pressed instead of on all seven of them. `busy` (the hook's one
+  // flag) still disables every add control on the page for the duration.
+  const [rowBusy, setRowBusy] = useState("");
   const toggleSel = (rid: string) =>
     setSel((s) => (s.includes(rid) ? s.filter((x) => x !== rid) : [...s, rid]));
   // rows the payload could not identify still count as selected, so the batch
@@ -2018,7 +2022,7 @@ export function MBReleaseGroupPage() {
                   <SortTh label="Tracks" k="track_count" sort={sort} onSort={onSort} className="w-[96px] cell-nowrap text-right" />
                   <th className="th w-[72px]">Country</th>
                   <th className="th w-[150px]">Barcode</th>
-                  <th className="th w-10"></th>
+                  <th className="th w-20"></th>
                 </tr>
               </thead>
               <tbody className="stagger">
@@ -2057,8 +2061,37 @@ export function MBReleaseGroupPage() {
                     </td>
                     <td className="td text-zinc-500">{r.country || "—"}</td>
                     <td className="td text-zinc-600 font-mono text-[11px] truncate">{r.barcode || ""}</td>
-                    <td className="td w-10 pr-2">
-                      <ExtLink href={mbUrl("release", r.id)} title="Open on MusicBrainz" />
+                    {/* The row's own action adds THIS edition: the release's
+                        own id with kind "release" — the same call the release
+                        page's header makes — never the group. It sends no
+                        `release_mbid` override, which is the page-level
+                        button's way of picking an edition; the row's own
+                        title and date ride along so the server can name the
+                        framework folder without waiting on MusicBrainz, and
+                        the reply reports the queued search in exactly the
+                        words the page-level button's does. */}
+                    <td className="td w-20 pr-1">
+                      <span className="flex items-center justify-end gap-0.5">
+                        <button
+                          className="p-1.5 rounded-lg text-accent-soft hover:text-white hover:bg-raise transition-colors shrink-0 disabled:opacity-50 disabled:pointer-events-none"
+                          disabled={busy}
+                          title="Add this edition to your library and start searching for it"
+                          aria-label={`Add this edition to your library: ${withAlias(r.title, r.alias)}${r.date ? ` · ${r.date}` : ""}`}
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            const rid = String(r.id);
+                            setRowBusy(rid);
+                            void run([rid], "release", "best", 0, {
+                              title: r.title || "",
+                              artist: rg.artist || "",
+                              year: (r.date || "").slice(0, 4),
+                            }).finally(() => setRowBusy(""));
+                          }}
+                        >
+                          <AddIcon busy={rowBusy === String(r.id)} />
+                        </button>
+                        <ExtLink href={mbUrl("release", r.id)} title="Open on MusicBrainz" />
+                      </span>
                     </td>
                   </tr>
                 ))}

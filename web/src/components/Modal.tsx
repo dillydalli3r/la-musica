@@ -12,7 +12,15 @@ const FOCUSABLE =
  *  the opener on close, Tab trapped inside, and the shared `.anim-pop` entry.
  *
  *  The header (title / subtitle / extra actions) and the close button are
- *  supplied here; the body is whatever the caller passes as children. */
+ *  supplied here; the body is whatever the caller passes as children.
+ *
+ *  Two forms, one component: from `sm` up it is the centred panel every
+ *  desktop call site was laid out for, and on a phone the same panel becomes a
+ *  bottom sheet — full device width, anchored to the bottom of the visible
+ *  area, home-indicator aware, with the header/footer rows pinned around a
+ *  scrolling body so the close cross and the confirm row are always reachable
+ *  (see the `.modal-overlay` / `.modal-sheet` recipe in index.css, and the
+ *  visualViewport hook below that keeps the keyboard off it). */
 export default function Modal({
   onClose,
   title,
@@ -41,9 +49,43 @@ export default function Modal({
   z?: string;
   children: ReactNode;
 }) {
+  const overlay = useRef<HTMLDivElement>(null);
   const panel = useRef<HTMLDivElement>(null);
   const body = useRef<HTMLDivElement>(null);
   const opener = useRef<HTMLElement | null>(null);
+
+  // Phones: keep the sheet clear of the on-screen keyboard. The viewport meta
+  // asks for `interactive-widget=resizes-visual` (index.html), so the keyboard
+  // shrinks the VISUAL viewport while `dvh` keeps describing the whole screen —
+  // a bottom-anchored sheet would sit behind the keyboard with its confirm row
+  // unreachable, and no CSS unit expresses the visual viewport. So the overlay
+  // is told how much of the layout viewport is hidden (it lifts the sheet by
+  // exactly that, index.css) and how tall the visible strip is (it caps the
+  // sheet to it). Both are 0 when there is no keyboard, which is what leaves
+  // the desktop panel byte-identical.
+  useEffect(() => {
+    const vv = window.visualViewport;
+    const el = overlay.current;
+    if (!vv || !el) return;
+    const measure = () => {
+      const hidden = window.innerHeight - vv.height - vv.offsetTop;
+      // 150px is the line between a keyboard and an iOS URL bar collapsing:
+      // a phone keyboard takes 250px+, the URL bar 110px at most, and
+      // reacting to the URL bar would make the sheet twitch as the page is
+      // flicked. Below the line the sheet keeps its `dvh` height.
+      const lift = hidden > 150 ? Math.round(hidden) : 0;
+      el.style.setProperty("--mlo-vv-lift", `${lift}px`);
+      if (lift) el.style.setProperty("--mlo-vv-h", `${Math.round(vv.height)}px`);
+      else el.style.removeProperty("--mlo-vv-h");
+    };
+    measure();
+    vv.addEventListener("resize", measure);
+    vv.addEventListener("scroll", measure);
+    return () => {
+      vv.removeEventListener("resize", measure);
+      vv.removeEventListener("scroll", measure);
+    };
+  }, []);
 
   useEffect(() => {
     opener.current = document.activeElement as HTMLElement | null;
@@ -97,7 +139,8 @@ export default function Modal({
   // depending on which container happened to hold the row.
   return createPortal(
     <div
-      className={`fixed inset-0 ${z} bg-black/70 backdrop-blur-sm flex items-center justify-center p-4`}
+      ref={overlay}
+      className={`modal-overlay fixed inset-0 ${z} bg-black/70 backdrop-blur-sm flex items-center justify-center p-4`}
       onClick={onClose}
     >
       <div
@@ -105,7 +148,7 @@ export default function Modal({
         role="dialog"
         aria-modal="true"
         aria-label={typeof title === "string" ? title : "Dialog"}
-        className={`anim-pop w-full ${width} max-h-[85vh] flex flex-col bg-card border border-border rounded-xl shadow-2xl ${panelClass}`}
+        className={`modal-sheet anim-pop w-full ${width} max-h-[85vh] flex flex-col bg-card border border-border rounded-xl shadow-2xl ${panelClass}`}
         onClick={(e) => e.stopPropagation()}
       >
         {(title || headerExtra) && (
@@ -130,7 +173,10 @@ export default function Modal({
             </button>
           </div>
         )}
-        <div ref={body} className={`flex-1 min-h-0 overflow-auto ${bodyClass}`}>{children}</div>
+        {/* `data-modal-body` is the check hook (tools/check_menus.cjs): the
+            sheet's scrolling area is what the pinned header/footer rows are
+            pinned around. */}
+        <div ref={body} data-modal-body className={`flex-1 min-h-0 overflow-auto ${bodyClass}`}>{children}</div>
         {/* The footer is caller markup, so the wrap has to be applied to whatever
             row the caller hands in: `[&>*]` keeps every button reachable at
             390px (the rows are full-width block children, so a wrapping row can

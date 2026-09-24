@@ -61,7 +61,9 @@ SCRIPTS = (
     (18, "Publish lyrics (LRCLIB)", "submit missing lyrics to the community DB"),
     (19, "Optimize artist images", "crop/resize artist artwork to the configured aspect and size"),
     (20, "Optimize library layout", "layout report + fixes (case, loose audio, empty artist, strays to the Trash)"),
-    (21, "Fix AcoustID pairs", "complete ACOUSTID_ID / ACOUSTID_FINGERPRINT pairs"),
+    (21, "Fix AcoustID pairs", "complete or create ACOUSTID_ID / ACOUSTID_FINGERPRINT pairs"),
+    (22, "Submit fingerprints (AcoustID)",
+     "give AcoustID the fingerprint + MusicBrainz recording each track states"),
 )
 SCRIPT_LABELS = {sid: name for sid, name, _ in SCRIPTS}
 
@@ -70,7 +72,8 @@ SCRIPT_LABELS = {sid: name for sid, name, _ in SCRIPTS}
 # skips the script instead of reporting an empty run.
 SCRIPT_GATES = {7: "dr_replaygain_enabled", 12: "audiometa_enabled",
                 16: "mood_enabled", 17: ("lyrics_xlit_enabled", "lyrics_translate_enabled"),
-                18: "lrclib_auto_publish", 21: "acoustid_enabled"}
+                18: "lrclib_auto_publish", 21: "acoustid_enabled",
+                22: "acoustid_enabled"}
 
 
 def _print_script_list(with_desc=True):
@@ -580,6 +583,10 @@ def build_script_runners():
         # 21 writes ACOUSTID_* tags, so it is resolved on first use like the
         # other tag-writing scripts (and it is not re-exported by mlo itself).
         21: ("mlo.acoustid", "run_fix_pairs"),
+        # 22 submits to AcoustID's public database (the same module, the same
+        # reason for a lazy import). It is NOT in the shipped Run All order:
+        # see server.script_runners.OPT_IN_SCRIPTS.
+        22: ("mlo.acoustid", "run_submit_fingerprints"),
     }
     runners = {}
     for sid, name, _desc in SCRIPTS:

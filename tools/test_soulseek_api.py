@@ -525,10 +525,15 @@ assert [f["path"] for f in failed4] == [LOCKED], failed4
 assert failed4[0]["reason"] == _REASON, failed4
 assert not os.path.exists(os.path.join(MF3, "Artists", "Locked Album"))
 
-# the still-downloading guard keys off slskd's REAL layout: the local album
-# folder is `<downloads>/<leaf of the remote folder>`, so the leaf is what
-# must match (case-insensitively) — and only for a live transfer
+# the still-downloading guard matches the IDENTITY the download has, not the
+# folder's leaf name: the peer slskd reports plus the transfer's own remote
+# folder path (the local directory is `<peer>/<batch id>/<remote folder>`, and
+# the batch id is slskd's own). Two peers' folders of the same name are two
+# different downloads, so one peer's live transfer must never make the other
+# peer's complete album look busy.
 _LEAF = "Wish You Were Here (1975) - U.S. - CD (Capitol)"
+_A = put3("a-peer/1001/Music/" + _LEAF + "/01 - a.flac")
+_B = put3("b-peer/1002/Music/" + _LEAF + "/01 - b.flac")
 soulseek.downloads_state = lambda cfg=None: [
     {"username": "a-peer", "directories": [{"directory": "Music\\" + _LEAF, "files": [
         {"id": "9", "filename": "Music\\" + _LEAF + "\\02 - t.flac",
@@ -539,9 +544,12 @@ soulseek.downloads_state = lambda cfg=None: [
 ]
 try:
     _pend = soulseek._pending_album_folders(IFG)
+    _ready = soulseek.ready_albums(IFG)
 finally:
     soulseek.downloads_state = _real_state
-assert _pend == {_LEAF.lower()}, _pend
+assert _pend == {("a-peer", ("music", _LEAF.lower()))}, _pend
+assert os.path.dirname(_B) in _ready, "the OTHER peer's complete album is ready"
+assert os.path.dirname(_A) not in _ready, "this peer's own live folder is not"
 
 # --------------------------------------------------------------------------- #
 # Soulseek private messaging (contract §0/§1): slskd faked at the request

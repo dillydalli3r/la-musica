@@ -340,15 +340,22 @@ def _collect_targets(targets, extensions):
         elif os.path.isdir(t):
             # Same memo as _find_albums: the walker hands one directory's files
             # over together, and normcase(normpath(parent + sep + name)) is
-            # normcase(normpath(parent)) + normcase(sep + name) — the parent's
-            # two string operations run once per directory, not once per file.
+            # normcase(normpath(parent)) + normcase(normpath(sep + name)) — the
+            # parent's two string operations run once per directory, not once
+            # per file. The REMAINDER goes through the same two calls, so a file
+            # selected twice (the folder it sits in AND the file itself, which
+            # is exactly a mixed selection) keys IDENTICALLY either way and is
+            # processed once: with the parent's spelling alone, a target spelled
+            # "F:/…/Album" and the walker's "/1-02 …" remainder produced a key no
+            # file target could match, and the track was scanned twice.
             last_raw = last_key = None
             for f in _walk_files(t, extensions):
                 raw = os.path.dirname(f)
                 if raw != last_raw:
                     last_raw = raw
                     last_key = os.path.normcase(os.path.normpath(raw))
-                files[last_key + f[len(raw):]] = f
+                files[last_key
+                      + os.path.normcase(os.path.normpath(f[len(raw):]))] = f
     return sorted(files.values())
 
 

@@ -19,6 +19,7 @@ import AccountMenu from "./components/AccountMenu";
 import NotificationBell from "./components/NotificationBell";
 import ShortcutsOverlay from "./components/Shortcuts";
 import { applyConfigLocale, useI18n, type MessageKey } from "./lib/i18n";
+import { applyAccentVars, resolveAccent } from "./lib/accent";
 import { publishTransfers } from "./lib/notifications";
 import { useJobLocks, type LocksPayload } from "./lib/locks";
 
@@ -47,6 +48,9 @@ const DownloadsPage = lazy(() => import("./pages/DownloadsPage"));
 const ImportWizard = lazy(() => import("./pages/ImportWizard"));
 const DonationsPage = lazy(() => import("./pages/DonationsPage"));
 const InProgressPage = lazy(() => import("./pages/InProgressPage"));
+// A podcast SERIES page (route only — podcasts are reached from Home's shelf
+// and from an episode's own page, so the sidebar needs no entry for them).
+const PodcastPage = lazy(() => import("./pages/PodcastPage"));
 const BrowsePage = lazy(() => import("./pages/BrowsePage"));
 const DiscoverPage = lazy(() => import("./pages/DiscoverPage"));
 const RecommendedPage = lazy(() => import("./pages/RecommendedPage"));
@@ -178,21 +182,18 @@ function useSettled<T>(value: T, ms = 400): T {
  *  locals readable and gives the pair one place to change. */
 type Timer = ReturnType<typeof setTimeout>;
 
-const ACCENTS: Record<string, [string, string, string]> = {
-  violet: ["139 92 246", "167 139 250", "255 255 255"],
-  pink: ["236 72 153", "249 168 212", "255 255 255"],
-  emerald: ["16 185 129", "110 231 183", "255 255 255"],
-  sky: ["14 165 233", "125 211 252", "255 255 255"],
-  amber: ["245 158 11", "252 211 77", "24 24 27"],
-  red: ["239 68 68", "252 165 165", "255 255 255"],
-  mono: ["255 255 255", "212 212 216", "9 9 11"],
-};
-
+/** Paint the app's accent. The ONLY caller-facing setter: the shell calls it at
+ *  boot with whatever this browser stored, and the settings page calls it when
+ *  a swatch or a custom hex is picked. The colour maths, the table of presets
+ *  and the write itself live in lib/accent (which also announces the change to
+ *  the canvas consumers); this is the app's own entry point into it, kept here
+ *  because both the shell and the settings page already import it from App.
+ *
+ *  `name` is a preset id ("violet") or a custom "#rrggbb"; anything else —
+ *  including null, an empty string, a value from an older build — resolves to
+ *  the default black & white, never to an unset colour. */
 export function applyAccent(name: string | null) {
-  const [accent, soft, fg] = ACCENTS[name ?? "mono"] ?? ACCENTS.mono;
-  document.documentElement.style.setProperty("--accent", accent);
-  document.documentElement.style.setProperty("--accent-soft", soft);
-  document.documentElement.style.setProperty("--accent-fg", fg);
+  applyAccentVars(resolveAccent(name));
 }
 
 /** Soulseek availability dot: green = logged into the Soulseek network,
@@ -1291,6 +1292,7 @@ export default function App() {
             <Route path="/downloads" element={<DownloadsPage />} />
             <Route path="/trash" element={<TrashPage />} />
             <Route path="/artist/:path" element={<ArtistPage />} />
+            <Route path="/podcast/:series" element={<PodcastPage />} />
             <Route path="/album/:path" element={<AlbumPage />} />
             <Route path="/track/:path" element={<TrackPage />} />
             <Route path="/playlists" element={<PlaylistsPage />} />

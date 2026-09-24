@@ -106,6 +106,14 @@ def _init():
                 "ALTER TABLE likes ADD COLUMN mbid TEXT",
                 "ALTER TABLE favorites ADD COLUMN mbid TEXT",
                 "ALTER TABLE playlist_tracks ADD COLUMN mbid TEXT",
+                # Where a playlist CAME FROM: the streaming service it was
+                # imported from ("deezer", "spotify", "youtube", "apple"), and
+                # that service's own playlist URL. Empty for every playlist
+                # made here (and for the ones written before this existed), so
+                # a playlist imported from Spotify stays identifiable after the
+                # import — the detail page says where it came from.
+                "ALTER TABLE playlists ADD COLUMN origin TEXT",
+                "ALTER TABLE playlists ADD COLUMN origin_url TEXT",
             ):
                 try:
                     c.execute(stmt)
@@ -159,6 +167,17 @@ def _ensure_user_key(c, table, columns, body):
 # --------------------------------------------------------------------------- #
 # CRUD
 # --------------------------------------------------------------------------- #
+def _origin_fields(item):
+    """Every playlist row's origin as a string.
+
+    The two columns were added in place, so a playlist written before they
+    existed reads back NULL — normalised here, once, so no client has to treat
+    "no origin" as two different values."""
+    item["origin"] = str(item.get("origin") or "")
+    item["origin_url"] = str(item.get("origin_url") or "")
+    return item
+
+
 def list_playlists(user=""):
     with _conn() as c:
         rows = c.execute(
@@ -166,7 +185,7 @@ def list_playlists(user=""):
         ).fetchall()
         out = []
         for r in rows:
-            item = dict(r)
+            item = _origin_fields(dict(r))
             item["filter"] = json.loads(item.pop("filter_json")) if item.get("filter_json") else None
             n = c.execute("SELECT COUNT(*) FROM playlist_tracks WHERE playlist_id=? AND user=?",
                           (item["id"], user)).fetchone()[0]
@@ -181,7 +200,7 @@ def get_playlist(pid, user=""):
         r = c.execute("SELECT * FROM playlists WHERE id=? AND user=?", (pid, user)).fetchone()
         if r is None:
             return None
-        item = dict(r)
+        item = _origin_fields(dict(r))
         item["filter"] = json.loads(item.pop("filter_json")) if item.get("filter_json") else None
         rows = c.execute(
             "SELECT path, mbid FROM playlist_tracks WHERE playlist_id=? AND user=? ORDER BY position",
@@ -209,14 +228,19 @@ def get_playlist(pid, user=""):
     return item
 
 
-def create_playlist(name, kind="manual", filter_spec=None, user=""):
+def create_playlist(name, kind="manual", filter_spec=None, user="",
+                    origin="", origin_url=""):
+    """Make an empty playlist. `origin`/`origin_url` are the streaming service
+    and playlist URL it was imported from (both empty for one made here)."""
     with _lock:
         with _conn() as c:
             now = time.time()
             cur = c.execute(
-                "INSERT INTO playlists (name, kind, filter_json, created, updated, user)"
-                " VALUES (?,?,?,?,?,?)",
-                (name, kind, json.dumps(filter_spec) if filter_spec else None, now, now, user),
+                "INSERT INTO playlists"
+                " (name, kind, filter_json, created, updated, user, origin, origin_url)"
+                " VALUES (?,?,?,?,?,?,?,?)",
+                (name, kind, json.dumps(filter_spec) if filter_spec else None,
+                 now, now, user, str(origin or ""), str(origin_url or "")),
             )
             return cur.lastrowid
 

@@ -20,6 +20,28 @@ export const LYRIC_ZOOM_MIN = 85;
 export const LYRIC_ZOOM_MAX = 160;
 export const LYRIC_ZOOM_STEP = 5;
 
+/** The lyric chips' geometry — the zoom (`− 100 % +`) and the offset
+ *  (`− 0.0s +`) are ONE layout, so these three strings are shared with
+ *  components/LyricOffset.tsx rather than written out in both.
+ *
+ *  Why it has to be shared: the two chips sit side by side in the fullscreen
+ *  player's footer and in the sidebar header, and the buttons were already the
+ *  same box — but the VALUE between them was not. The offset printed straight
+ *  into a `text-right` box while the zoom put a 3-digit input plus an
+ *  absolutely-positioned `%` inside its own, so the number sat flush right on
+ *  one chip and inset on the other and the `−`/`+` stood at visibly different
+ *  distances from the number they step. Measured, the gap from the value to
+ *  the `+` was 17 px on the zoom against 13 px on the offset. Both now use one
+ *  fixed 40 px value box, right-packed, number + unit as two inline elements
+ *  (the unit is a 9 px sub-element on BOTH chips — `%` and `s` read the same
+ *  way), so the two buttons land at the same offset from either end of either
+ *  chip. tools/check_np_metadata_contrast.cjs asserts the rects. */
+export const LYRIC_STEP_BTN =
+  "h-7 w-7 inline-flex items-center justify-center rounded-md text-current opacity-70 hover:opacity-100 hover:bg-white/10 disabled:opacity-30 disabled:hover:bg-transparent transition-colors";
+export const LYRIC_VALUE_BOX =
+  "h-5 w-10 inline-flex items-center justify-end gap-0.5 shrink-0 text-[10px] leading-none font-mono tabular-nums text-current opacity-80 hover:opacity-100 focus-within:opacity-100 transition-opacity";
+export const LYRIC_VALUE_UNIT = "text-[9px]";
+
 export default function LyricZoom({ pct, onChange, className }: {
   /** The current size, as a percentage (100 = the surface's own base size). */
   pct: number;
@@ -61,7 +83,7 @@ export default function LyricZoom({ pct, onChange, className }: {
   // value between them. Both sides use the same lucide icon at the same size,
   // and the box is the size of the buttons beside it on every surface (`h-7
   // w-7` is the sidebar header's own `p-1.5` + `h-4 w-4`).
-  const btn = "h-7 w-7 inline-flex items-center justify-center rounded-md text-current opacity-70 hover:opacity-100 hover:bg-white/10 disabled:opacity-30 disabled:hover:bg-transparent transition-colors";
+  const btn = LYRIC_STEP_BTN;
 
   return (
     <span className={`inline-flex items-center gap-0.5 shrink-0 ${className ?? ""}`}>
@@ -77,9 +99,17 @@ export default function LyricZoom({ pct, onChange, className }: {
       >
         <Minus className="h-3 w-3" />
       </button>
-      <span className="relative inline-flex items-center shrink-0">
+      <span className={LYRIC_VALUE_BOX}>
+        {/* The input is exactly three mono digits wide (`ch`, so no font or
+            browser text-size setting can clip the value — the same rule
+            components/VolumePct documents) with a transparent 1 px border that
+            only takes a colour on hover/focus: the border is always there, so
+            the digits never shift when it lights up. The `%` is a SIBLING of
+            the input rather than a superscript inside its padding — that is
+            what makes this chip's value box identical to the offset chip's
+            (see LYRIC_VALUE_BOX). */}
         <input
-          className="w-10 bg-transparent border border-transparent hover:border-border focus:border-accent rounded px-1 pr-3.5 text-right text-[10px] font-mono tabular-nums text-current opacity-80 hover:opacity-100 focus:opacity-100 outline-none"
+          className="w-[calc(3ch+2px)] bg-transparent border border-transparent hover:border-border focus:border-accent rounded text-right text-current outline-none"
           inputMode="numeric"
           value={text}
           title={`Lyrics size — type a percentage (${LYRIC_ZOOM_MIN}–${LYRIC_ZOOM_MAX})`}
@@ -95,7 +125,7 @@ export default function LyricZoom({ pct, onChange, className }: {
             }
           }}
         />
-        <span className="absolute right-1 text-[9px] text-current opacity-60 pointer-events-none">%</span>
+        <span className={LYRIC_VALUE_UNIT} aria-hidden>%</span>
       </span>
       <button
         className={btn}

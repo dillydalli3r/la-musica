@@ -20,12 +20,23 @@ import uuid
 
 import httpx
 
+# Importing it installs the ONE shared HTTP client behind the module-level
+# `httpx.get`/`httpx.post` helpers this module (and discovery, the playlist
+# importer and the AI caller) makes every provider call with — see
+# server/httpclient.py. Those helpers stay the call sites' spelling on purpose:
+# they are the seam the provider suites replace.
+from . import httpclient  # noqa: F401
+
 from mlo import cover_choice as _cover_choice
 from mlo import release_choice
 # The app's own capitalization of a genre name (mlo.genres.display_name): one
 # home for it, shared with the writers, the grader and server.discover, so a
 # page can never render a genre the way a tag would not hold it.
 from mlo.genres import display_name as _genre_display
+# The app's DERIVED release types (mlo.naming): a name the app derives from a
+# fact MusicBrainz states beside the release-group type — "podcast", read from
+# the series relation below — rather than one MusicBrainz publishes.
+from mlo.naming import is_derived_type
 
 MB_BASE = "https://musicbrainz.org/ws/2"
 LRCLIB_BASE = "https://lrclib.net/api"
@@ -630,6 +641,23 @@ def release_lookup(mbid):
     secondary = [s.lower() for s in (rg_obj.get("secondary-types") or [])]
     release_type = "+".join([primary] + secondary) if primary else ""
 
+    # A podcast in MusicBrainz is a SERIES of type Podcast that the release
+    # GROUP is `part of` — the relation lives on the group, so it is not in
+    # this release payload, and it costs one more (cached) request to ask for.
+    # Asked ONLY for the release groups MusicBrainz types Broadcast — which is
+    # what every podcast episode it types is (confirmed on 124 episodes of one
+    # series: primary-type "Broadcast", some with secondary "Live") — so a
+    # music library pays nothing for this feature and a radio-broadcast
+    # library pays one request per such release. A refusal is not "not a
+    # podcast": the payload carries None and the caller's own tagging run
+    # simply writes no podcast tags.
+    podcast = None
+    if primary and primary == PODCAST_EPISODE_PRIMARY_TYPE.lower():
+        try:
+            podcast = release_group_series(rg_obj.get("id"))
+        except Exception:  # noqa: BLE001 — an MB outage must not lose the release
+            podcast = None
+
     # labels -> label name + every catalog number. A release can carry several
     # (one per label/pressing) and auto-import searches each as its OWN query,
     # so keeping only the first lost every other pressing's number. Order is
@@ -687,6 +715,12 @@ def release_lookup(mbid):
         "release_type": release_type,
         "primary_type": rg_obj.get("primary-type") or "",
         "secondary_types": [s for s in (rg_obj.get("secondary-types") or [])],
+        # The Podcast SERIES this release's group is `part of`, or None (see
+        # the block above: read only for a Broadcast group, which is the type
+        # MusicBrainz gives a podcast episode). `mlo.autotag.mb_track_tags`
+        # turns it into the PODCASTSERIES / PODCASTSERIESMBID /
+        # PODCASTEPISODE tags every writer of this payload shares.
+        "podcast": podcast,
         "artists": release_artists,
         "genres": _display_genres(_genre_names(_genres(data))),
         "media": tracks,
@@ -704,6 +738,108 @@ def release_lookup(mbid):
         "language": str((data.get("text-representation") or {}).get("language") or ""),
         "script": str((data.get("text-representation") or {}).get("script") or ""),
     }
+
+
+# --------------------------------------------------------------------------- #
+# Podcasts: a SERIES of type "Podcast", never a release-group type
+# --------------------------------------------------------------------------- #
+# MusicBrainz has no "Podcast" release-group type (the primary types are
+# Album/EP/Single/Broadcast/Other). What it has is a SERIES of type Podcast
+# (/ws/2/series/<id> → "type":"Podcast", type-id below, ~1.35k of them), and
+# an episode is a release group linked to that series with a `part of`
+# relationship — confirmed live: `/ws/2/release-group/<mbid>?inc=series-rels`
+# answers
+#   {"relations": [{"type": "part of", "target-type": "series",
+#                   "attribute-values": {"number": "2515"},
+#                   "series": {"type": "Podcast", "name": "New Sounds",
+#                              "disambiguation": "WNYC radio show", ...}}]}
+# and the relationship lives on the RELEASE GROUP, never on the release (a
+# release's own `inc=series-rels` is empty). The series relations ride along
+# on a release-group BROWSE too (`?artist=<mbid>&inc=series-rels`), which is
+# what makes the app's discography paths carry the identity at no extra
+# request.
+PODCAST_SERIES_TYPE = "Podcast"
+PODCAST_SERIES_TYPE_ID = "ef6f7b93-868a-43a9-b59c-a73b62c2c51e"
+# The release-group PRIMARY type MusicBrainz gives a podcast episode. It is
+# what decides whether a release lookup is worth one more request for the
+# series relation (see `release_lookup`): nothing else in a music library is
+# a Broadcast, and every episode of the series checked is one.
+PODCAST_EPISODE_PRIMARY_TYPE = "Broadcast"
+
+
+def podcast_series_of(node):
+    """The Podcast SERIES *node* is `part of`, or None.
+
+    *node* is a release-group payload that asked for `inc=series-rels` (see
+    `release_group_series` for the lookup, `artist_release_groups` and
+    `release_group_browse` for the browse paths). A release group can be
+    `part of` SEVERAL series — a radio show's episodes are often parts of both
+    the podcast series and the program's own series — so the relations are
+    filtered twice: to `part of` relations pointing at a SERIES, and then to
+    the one that IS a Podcast (by type-id first — a renamed or translated type
+    label cannot make the app stop seeing podcasts — falling back to MusicBrainz's
+    own type name). Returns
+    ``{"mbid", "name", "disambiguation", "title", "number"}`` where `title` is
+    the name a reader sees (with MusicBrainz's disambiguation in parentheses
+    when it states one, so two same-named series stay apart) and `number` is
+    the episode number MusicBrainz states on the relationship ("" when it
+    states none).
+
+    None when the group is in no Podcast series — including the ordinary case
+    of a release group with no series relations at all.
+    """
+    node = node if isinstance(node, dict) else {}
+    found = []
+    for rel in node.get("relations") or []:
+        if not isinstance(rel, dict):
+            continue
+        if str(rel.get("type") or "").strip().lower() != "part of":
+            continue
+        series = rel.get("series")
+        if not isinstance(series, dict):
+            continue
+        if str(rel.get("target-type") or "series") != "series":
+            continue
+        if (str(series.get("type-id") or "").strip().lower() != PODCAST_SERIES_TYPE_ID
+                and str(series.get("type") or "").strip().lower()
+                != PODCAST_SERIES_TYPE.lower()):
+            continue
+        attrs = rel.get("attribute-values")
+        number = ""
+        if isinstance(attrs, dict):
+            number = str(attrs.get("number") or "").strip()
+        name = str(series.get("name") or "").strip()
+        disambiguation = str(series.get("disambiguation") or "").strip()
+        found.append({
+            "mbid": series.get("id") or "",
+            "name": name,
+            "disambiguation": disambiguation,
+            "title": f"{name} ({disambiguation})" if disambiguation else name,
+            "number": number,
+        })
+    if not found:
+        return None
+    # Several Podcast series on one release group (a re-published episode):
+    # the one MusicBrainz states an episode number for is the episode's own,
+    # and otherwise MusicBrainz's relation order decides — never a random one.
+    return next((s for s in found if s["number"]), found[0])
+
+
+def release_group_series(rg_mbid):
+    """The Podcast series the release group *rg_mbid* is `part of`, or None.
+
+    ONE cached MusicBrainz request (`release-group/<id>?inc=series-rels`): the
+    relation is not part of a release payload, so a path that starts from a
+    RELEASE has to ask the group — see `mlo.autotag`, which asks only for the
+    releases MusicBrainz types Broadcast rather than for every album in a
+    library. An outage is not "not a podcast": this raises MusicBrainzError
+    (mb_get_cached's own refusal) and the caller decides what to do with it.
+    """
+    mbid = _mbid(rg_mbid)
+    if not mbid:
+        return None
+    return podcast_series_of(mb_get_cached(f"release-group/{mbid}",
+                                           {"inc": "series-rels", "fmt": "json"}))
 
 
 def recording_isrcs(recording_mbid):
@@ -5661,8 +5797,19 @@ def artist_release_groups(mbid, limit=100, offset=0, primary_type="", secondary_
     at all, and filtering the loaded window is what made an artist page claim
     no albums for an artist whose albums sat beyond the first page. The index
     filters and counts on the server, so the chips and the "N of M" line are
-    about the whole discography, not about what happened to be loaded."""
-    if primary_type or secondary_type:
+    about the whole discography, not about what happened to be loaded.
+
+    A DERIVED type (mlo.naming.DERIVED_RELEASE_TYPES — "podcast") is the one
+    filter the index can NEVER answer: MusicBrainz stores no Podcast release-
+    group type to match, so `primarytype:"podcast"` returns nothing by
+    MusicBrainz's own design. Such a selection therefore reads the BROWSE
+    (which carries `inc=series-rels`, hence each row's own `podcast` block)
+    and leaves the selection to the caller's gate — `release_choice.type_matches`
+    with the row's derived types. Every row this returns carries `podcast`:
+    the series block, or None.
+    """
+    if (primary_type or secondary_type) and not any(
+            is_derived_type(t) for t in (primary_type, secondary_type) if t):
         page = search_mb("release-group", "", limit, "free", offset,
                          primary_type=primary_type, secondary_type=secondary_type,
                          artist_id=mbid)
@@ -5679,6 +5826,10 @@ def artist_release_groups(mbid, limit=100, offset=0, primary_type="", secondary_
                         "primary_type": rg.get("primary_type") or "",
                         "secondary_types": rg.get("secondary_types") or [],
                         "first_release_date": rg.get("first_release_date") or "",
+                        # The search index carries no relationships, so a row
+                        # from it states no series (the reason a derived-type
+                        # filter never takes this branch — above).
+                        "podcast": None,
                     }
                     for rg in page["rows"]
                 ),
@@ -5686,10 +5837,12 @@ def artist_release_groups(mbid, limit=100, offset=0, primary_type="", secondary_
             ),
         }
     # `inc=aliases` on the browse: every row then carries its own aliases, so
-    # the alias costs no extra request (the search path below cannot — the
-    # search index returns no aliases at all).
+    # the alias costs no extra request (the search path above cannot — the
+    # search index returns no aliases at all). `series-rels` rides the SAME
+    # request: it is what each row's `podcast` block (the series an episode is
+    # `part of`) comes from, at no extra MusicBrainz call.
     rgs, total, served = _browse_collect(
-        "release-group", {"artist": mbid, "inc": "aliases"},
+        "release-group", {"artist": mbid, "inc": "aliases+series-rels"},
         "release-groups", "release-group-count",
         limit=limit, offset=offset,
     )
@@ -5708,6 +5861,10 @@ def artist_release_groups(mbid, limit=100, offset=0, primary_type="", secondary_
                 "primary_type": rg.get("primary-type") or "",
                 "secondary_types": rg.get("secondary-types") or [],
                 "first_release_date": rg.get("first-release-date") or "",
+                # The Podcast series this release group is `part of` (None for
+                # everything that is not an episode) — mlo.naming's DERIVED
+                # type, read off the browse's own series-rels.
+                "podcast": podcast_series_of(rg),
             }
             for rg in sorted(
                 rgs,
@@ -5894,7 +6051,8 @@ def group_targets(rg_mbid, mode, *, types=None, primary_type="", secondary_type=
     # with the type it actually is, never answered with an edition of a group
     # that was not asked for.
     if types and not release_choice.type_matches(
-            rg.get("primary_type"), rg.get("secondary_types"), types):
+            rg.get("primary_type"), rg.get("secondary_types"), types,
+            release_choice.derived_types(rg)):
         return [], type_skip_reason(rg.get("primary_type"),
                                     rg.get("secondary_types"))
     ranked = ranked_releases(rg, rg.get("releases") or [], strict=True,
@@ -5976,7 +6134,8 @@ def groups_of_types(groups, types):
     kept, skipped = [], []
     for g in groups or []:
         if release_choice.type_matches(g.get("primary_type"),
-                                       g.get("secondary_types"), types):
+                                       g.get("secondary_types"), types,
+                                       release_choice.derived_types(g)):
             kept.append(g)
         else:
             skipped.append({"mbid": str(g.get("id") or ""),
@@ -6120,7 +6279,7 @@ def release_group_browse(mbid, limit=300, offset=0):
     """
     data = mb_get_cached(
         f"release-group/{mbid}",
-        {"inc": "artist-credits+genres+aliases", "fmt": "json"},
+        {"inc": "artist-credits+genres+aliases+series-rels", "fmt": "json"},
     )
     # `labels` rides the SAME request (MusicBrainz's browse answers it), and it
     # is what each row's `label-info` — hence every edition's CATALOG NUMBERS —
@@ -6186,6 +6345,11 @@ def release_group_browse(mbid, limit=300, offset=0):
         "secondary_types": data.get("secondary-types") or [],
         "genres": _display_genres(_genre_names(_genres(data))),
         "first_release_date": data.get("first-release-date") or "",
+        # The Podcast series this group is `part of`, or None — MusicBrainz
+        # has no Podcast release-group type, so a podcast is only ever this
+        # relation (mlo.naming's DERIVED type; the `inc=series-rels` above is
+        # what makes it free on this request).
+        "podcast": podcast_series_of(data),
         "countries": release_group_countries(
             ranked_rows, cfg.get("prefer_release_country")),
         "total": total,
@@ -6595,11 +6759,11 @@ def _cov_headers():
 @contextlib.contextmanager
 def _cov_stream(body, headers, timeout=60.0):
     """POST a search and yield COV's streamed JSON lines (the HTTP seam)."""
-    with httpx.Client(timeout=httpx.Timeout(timeout, read=timeout)) as client:
-        with client.stream("POST", f"{COV_BASE}/api/search", json=body,
-                           headers=headers) as r:
-            r.raise_for_status()
-            yield r.iter_lines()
+    with httpclient.client().stream(
+            "POST", f"{COV_BASE}/api/search", json=body, headers=headers,
+            timeout=httpx.Timeout(timeout, read=timeout)) as r:
+        r.raise_for_status()
+        yield r.iter_lines()
 
 
 _CAA_GROUP_URL_RE = re.compile(r"coverartarchive\.org/release-group/", re.I)
@@ -6775,18 +6939,22 @@ def _probe_get(url, nbytes=COVER_PROBE_BYTES, timeout=10.0):
     file, so the body is read in chunks and dropped once *nbytes* are in hand.
     """
     try:
-        with httpx.Client(timeout=httpx.Timeout(timeout, read=timeout),
-                          follow_redirects=True) as client:
-            with client.stream("GET", url,
-                               headers={"Range": f"bytes=0-{nbytes - 1}",
-                                        "User-Agent": COV_UA}) as r:
-                r.raise_for_status()
-                out = bytearray()
-                for chunk in r.iter_bytes(nbytes):
-                    out += chunk
-                    if len(out) >= nbytes:
-                        break
-                return bytes(out[:nbytes])
+        # The shared client (server/httpclient): the redirect and the read
+        # timeout are this request's own, so a probe behaves exactly as the
+        # per-call client did.
+        with httpclient.client().stream(
+                "GET", url,
+                headers={"Range": f"bytes=0-{nbytes - 1}",
+                         "User-Agent": COV_UA},
+                timeout=httpx.Timeout(timeout, read=timeout),
+                follow_redirects=True) as r:
+            r.raise_for_status()
+            out = bytearray()
+            for chunk in r.iter_bytes(nbytes):
+                out += chunk
+                if len(out) >= nbytes:
+                    break
+            return bytes(out[:nbytes])
     except Exception:
         return None
 
@@ -7110,7 +7278,7 @@ def _cover_fallback(artist, album, limit, cfg, rg_mbid, timeout):
     return [], None, report
 
 
-def cover_search(artist, album, limit=40, timeout=60.0, sources=None,
+def cover_search(artist, album, limit=_cover_choice.SEARCH_LIMIT, timeout=60.0, sources=None,
                  country=None, cfg=None, release_group_mbid="", release_mbid=""):
     """Album covers for artist/album → ``{"results", "provider", "sources"}``.
 
@@ -7138,13 +7306,31 @@ def cover_search(artist, album, limit=40, timeout=60.0, sources=None,
     ``release_group_mbid``/``release_mbid``, when the caller has them, are the
     identities the Cover Art Archive is asked about: the album's own front
     cover by the GROUP id (the reference the policy prefers) and one specific
-    release's own by the release id. The name-based fallbacks (Deezer, iTunes)
-    run only when the meta-search and the identity read both came back empty
-    (or refused) — a dead meta-search is a fallback case, not an error the user
-    has to understand.
+    release's own by the release id. A caller holding only the RELEASE id gets
+    the group resolved here (`release_lookup`), because that reference is what
+    `mlo.cover_choice`'s first rule is built around: without it the search could
+    only ever offer a name-searched row or one edition's sleeve, and the
+    unattended import and the finder's dialog would be ranking different
+    candidate sets for the same album. The lookup is cached, and one that fails
+    leaves the identity as it was — a cover search never fails over it. The
+    name-based fallbacks (Deezer, iTunes) run only when the meta-search and the
+    identity read both came back empty (or refused) — a dead meta-search is a
+    fallback case, not an error the user has to understand.
+
+    ``limit`` is how many candidates to ask for, and its default is the ONE
+    number every caller passes (`mlo.cover_choice.SEARCH_LIMIT`): the answer is
+    truncated at it, so a caller asking for a different amount is ranking a
+    different set of rows.
     """
     if not artist and not album:
         raise ValueError("artist or album is required")
+    if not str(release_group_mbid or "").strip() and str(release_mbid or "").strip():
+        try:
+            release_group_mbid = str(
+                (release_lookup(str(release_mbid).strip()) or {}
+                 ).get("release_group_id") or "").strip()
+        except Exception:
+            release_group_mbid = ""       # an outage is not a search failure
     src_ids, ctry = resolve_cov_search(sources, country, cfg)
     report = []
     # A source the catalogue reports as switched off is never asked, and that
@@ -7288,28 +7474,31 @@ def fetch_image_bytes(url, timeout=60.0):
         raise ValueError("invalid image url")
     if not _public_host(parsed.hostname):
         raise ValueError("image url is not a public host")
-    with httpx.Client(timeout=httpx.Timeout(timeout, read=timeout),
-                      follow_redirects=False) as client:
-        for _hop in range(IMAGE_MAX_REDIRECTS + 1):
-            with client.stream("GET", url, headers=headers) as r:
-                if r.is_redirect:
-                    target = urljoin(url, str(r.headers.get("location") or ""))
-                    hop = urlparse(target)
-                    if hop.scheme not in ("http", "https") or not hop.netloc:
-                        raise ValueError("invalid image redirect")
-                    if not _public_host(hop.hostname):
-                        raise ValueError("image redirect leaves the public internet")
-                    url = target
-                    continue
-                r.raise_for_status()
-                ctype = (r.headers.get("content-type") or "").split(";")[0].strip().lower()
-                chunks, size = [], 0
-                for chunk in r.iter_bytes(65536):
-                    size += len(chunk)
-                    if size > IMAGE_MAX_BYTES:
-                        raise ValueError("image is too large")
-                    chunks.append(chunk)
-                return b"".join(chunks), ctype
+    # The shared client (server/httpclient) — never entered as a context
+    # manager, which would close the process-wide client on the way out.
+    client = httpclient.client()
+    for _hop in range(IMAGE_MAX_REDIRECTS + 1):
+        with client.stream("GET", url, headers=headers,
+                           timeout=httpx.Timeout(timeout, read=timeout),
+                           follow_redirects=False) as r:
+            if r.is_redirect:
+                target = urljoin(url, str(r.headers.get("location") or ""))
+                hop = urlparse(target)
+                if hop.scheme not in ("http", "https") or not hop.netloc:
+                    raise ValueError("invalid image redirect")
+                if not _public_host(hop.hostname):
+                    raise ValueError("image redirect leaves the public internet")
+                url = target
+                continue
+            r.raise_for_status()
+            ctype = (r.headers.get("content-type") or "").split(";")[0].strip().lower()
+            chunks, size = [], 0
+            for chunk in r.iter_bytes(65536):
+                size += len(chunk)
+                if size > IMAGE_MAX_BYTES:
+                    raise ValueError("image is too large")
+                chunks.append(chunk)
+            return b"".join(chunks), ctype
     raise ValueError("too many image redirects")
 
 

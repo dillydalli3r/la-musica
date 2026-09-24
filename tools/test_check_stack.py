@@ -87,7 +87,7 @@ from mlo.cli import SCRIPTS, SCRIPT_GATES  # noqa: E402
 from mlo.config import DEFAULT_CONFIG, STRICT_DEFAULT_KEYS, load_config  # noqa: E402
 from mlo.grader import check_gates  # noqa: E402
 from server import api_stack, script_runners  # noqa: E402
-from server.script_runners import RUNNERS  # noqa: E402
+from server.script_runners import OPT_IN_SCRIPTS, RUNNERS  # noqa: E402
 from server.tags_registry import registry  # noqa: E402
 
 FAILED = []
@@ -154,6 +154,39 @@ def srow(resp, sid):
     return [s for s in resp["stack"]["scripts"] if s["id"] == sid][0]
 
 
+def _run_would_skip(sid, config):
+    """The RUN's own rule: every switch off (script_runners.run_script)."""
+    gate = script_runners._DISABLED.get(sid)
+    if gate is None:
+        return False
+    keys = gate if isinstance(gate, tuple) else (gate,)
+    return not any(bool(config.get(k, True)) for k in keys)
+
+
+def _gate_agrees_for_every_combination(sid):
+    """The page's gate.enabled == the run's skip decision, for EVERY on/off
+    combination of that script's switches.
+
+    A gate is ANY-of: script 17 runs while transliteration OR translation is
+    on. Aggregating it with `all` reported 17 as "gated off" on Checks &
+    scripts while a run of 17 really ran — the page and the chain disagreeing
+    about the same config (only 17 carries two switches, so only 17 showed it).
+    """
+    keys = api_stack._gate_keys(sid)
+    if not keys:
+        return True, ""
+    for mask in range(1 << len(keys)):
+        config = dict(cfg)
+        config.update({k: bool(mask >> i & 1) for i, k in enumerate(keys)})
+        entry = api_stack._script_entry(sid, config, list(order))
+        if entry["gate"]["enabled"] != (not _run_would_skip(sid, config)):
+            on_off = {k: bool(mask >> i & 1) for i, k in enumerate(keys)}
+            return False, (f"script {sid} {on_off} -> page says "
+                           f"enabled={entry['gate']['enabled']}, the run skips="
+                           f"{_run_would_skip(sid, config)}")
+    return True, ""
+
+
 # --------------------------------------------------------------------------- #
 print("== GET: the described stack is the code's stack ==")
 r = client.get("/api/stack")
@@ -166,7 +199,16 @@ ids = sorted(s["id"] for s in scripts)
 check("script ids == RUNNERS", ids == sorted(RUNNERS), f"{ids} vs {sorted(RUNNERS)}")
 check("script ids == mlo.cli.SCRIPTS", ids == sorted(MENU), f"{ids} vs {sorted(MENU)}")
 check("script ids cover the default Run All order",
-      sorted(DEFAULT_CONFIG["run_all_order"]) == ids)
+      sorted(DEFAULT_CONFIG["run_all_order"]) == [i for i in ids
+                                                  if i not in OPT_IN_SCRIPTS],
+      f"{sorted(DEFAULT_CONFIG['run_all_order'])} vs {ids} (opt-in: "
+      f"{sorted(OPT_IN_SCRIPTS)})")
+check("the opt-in scripts are offered by the page without holding a slot",
+      all(not s["in_order"] and s["removable"] and s["available"]
+          for s in scripts if s["id"] in OPT_IN_SCRIPTS)
+      and all(s["id"] not in OPT_IN_SCRIPTS
+              for s in scripts if s["id"] in DEFAULT_CONFIG["run_all_order"]),
+      [s["id"] for s in scripts if s["id"] in OPT_IN_SCRIPTS])
 check("every script carries the menu label and a description",
       all(s["label"] == MENU[s["id"]][0] and s["description"] == MENU[s["id"]][1]
           for s in scripts))
@@ -183,6 +225,11 @@ check("in_order/order agree with the chain",
 check("enabled == in the chain AND the feature switch is on",
       all(s["enabled"] == (s["in_order"] and s["gate"]["enabled"])
           for s in scripts))
+_gate_results = {sid: _gate_agrees_for_every_combination(sid)
+                 for sid in sorted(script_runners._DISABLED)}
+check("a gate is ANY-of (the page agrees with the run for every switch combination)",
+      all(ok for ok, _detail in _gate_results.values()),
+      "; ".join(detail for _ok, detail in _gate_results.values() if detail))
 check("only the ids the app re-anchors are marked non-removable",
       sorted(s["id"] for s in scripts if not s["removable"])
       == sorted(api_stack._anchored_ids())
@@ -314,7 +361,9 @@ check("the returned stack agrees",
 r = put({"order": [4, 1]})
 got = load_config()["run_all_order"]
 check("a partial order keeps its sequence and completes the rest",
-      got[:2] == [4, 1] and sorted(got) == sorted(RUNNERS), got)
+      got[:2] == [4, 1]
+      and sorted(got) == sorted(i for i in RUNNERS if i not in OPT_IN_SCRIPTS),
+      got)
 
 r = put({"scripts": {"7": {"enabled": False}}})
 check("a gated script is switched off through its own feature switch",

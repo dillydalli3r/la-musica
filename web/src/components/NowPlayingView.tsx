@@ -1,15 +1,18 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState, type CSSProperties } from "react";
 import { Link } from "react-router-dom";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import {
-  AudioLines, Captions, ChevronDown, Heart, Info, ListMusic, ListPlus, Maximize2, Mic2, Minimize2, Pause, Play,
+  AudioLines, Captions, ChevronDown, Info, ListMusic, ListPlus, Maximize2, Mic2, Minimize2, Pause, Play,
   Repeat, Settings2, Shuffle, SkipBack, SkipForward, Volume1, Volume2, VolumeX, X,
 } from "lucide-react";
 import { api } from "../api";
 import VolumePct from "./VolumePct";
+import FavHeart from "./FavHeart";
+import { likeToasts } from "../lib/favs";
 import LyricZoom from "./LyricZoom";
 import LyricOffset from "./LyricOffset";
 import { DetailsDialog } from "./AlbumDetails";
+import { parseHexColor } from "../lib/accent";
 import { toast, useStore } from "../store";
 import { fmtTech, fmtPair, isVideoFile } from "../lib/fmt";
 import { albumRef, artistRef, libraryRow, trackRef } from "../lib/refs";
@@ -49,6 +52,25 @@ const ZOOM_KEY = "mlo.np.lyrzoom.v2"; // lyrics zoom multiplier (persisted)
 // 150 % is the new 100 %: the multiplier 1.5 (the shipped default) is what the
 // box now calls 100 %, because that is the size the pane was always read at.
 const LYRIC_ZOOM_BASE = 1.5;
+
+/** How long the pointer may sit still before the fullscreen pane drops it
+ *  (≈3 s). That window is the media-pane one: aim-then-reach between the
+ *  artwork and the transport row costs ~1-2 s, so three seconds never punishes
+ *  a hand that is on its way somewhere, and past it the arrow is only in the
+ *  way of the picture — short enough that it is gone by the time the viewer
+ *  has settled in to listen, long enough that it cannot flicker while a line
+ *  of lyrics is read. The video overlay's own 2.5 s chrome timer (below) is a
+ *  separate, older decision about the CONTROLS; this one is about the arrow. */
+const IDLE_CURSOR_MS = 3000;
+/** Whether there is a pointer to hide at all: a finger has no arrow, so a
+ *  device whose primary input is coarse / cannot hover never arms the timer. */
+const FINE_POINTER = "(hover: hover) and (pointer: fine)";
+/** Surfaces that must never sit under a hidden arrow — any open modal or menu
+ *  over the pane, whoever opened it. The player's own menus are known from
+ *  state; this is for the ones it does not own (the shortcut sheet arrives on
+ *  a keystroke, so "the pointer moved recently" is not a safe proxy for
+ *  "nothing on screen is waiting for it"). */
+const OPEN_OVER_PANE = '[aria-modal="true"], [role="menu"], dialog[open]';
 
 /** The ambience window, in dB, measured RELATIVE to this track's own rolling
  * loud reference — a fixed window cannot work across masters. On a real
@@ -90,13 +112,11 @@ interface Props {
   duration: number;
   shuffle: boolean;
   loop: boolean;
-  liked: boolean;
   onTogglePlay: () => void;
   onSeek: (t: number) => void;
   onStep: (d: 1 | -1) => void;
   onToggleShuffle: () => void;
   onToggleLoop: () => void;
-  onToggleLike: () => void;
   onClose: () => void;
   getAudioTime?: () => number;
   /** Shared with the player bar — the bar owns the decoders, the fullscreen
@@ -124,14 +144,6 @@ interface Props {
     onMode: (m: RgMode) => void;
     onPreamp: (db: number) => void;
   };
-}
-
-function hexToRgbTriplet(hex?: string | null): [number, number, number] | null {
-  if (!hex) return null;
-  const m = /^#?([0-9a-f]{6})$/i.exec(hex.trim());
-  if (!m) return null;
-  const n = parseInt(m[1], 16);
-  return [(n >> 16) & 255, (n >> 8) & 255, n & 255];
 }
 
 /** The fullscreen player's ink — TWO tables, ONE choice, and the scrim that
@@ -204,8 +216,9 @@ interface LyricInk {
   chromeStrong: string;
   chromeButton: string;
   chromeText: string;
-  /** A chrome icon TOGGLE's two states — the visualizer and the lyrics pane,
-   *  the two controls in the top bar that are ON or OFF rather than buttons.
+  /** The TOP BAR's icon buttons — every one of them, in one pair of states:
+   *  the exit button top-left and the queue, visualizer, lyrics, fullscreen
+   *  and options buttons top-right.
    *
    *  ON is what the app lights a pressed control with: `text-accent` on the
    *  player bar's own lyrics button and on the sidebar's visualizer button,
@@ -219,9 +232,37 @@ interface LyricInk {
    *  the white accent, so a toggle that swapped one for the other read as
    *  neither on nor off — the state was in the class list and nowhere on the
    *  screen. The same gesture mutes the queue readout and the lyric controls,
-   *  and hover takes it back, so the row still answers the pointer. */
+   *  and hover takes it back, so the row still answers the pointer.
+   *
+   *  Both halves belong to the WHOLE bar, not to the two toggles it started
+   *  with (that is what the earlier version of this comment said, and the
+   *  pair was only used on them): three of the buttons beside them spelled
+   *  out `text-current hover:text-white` at full ink, the fullscreen button a
+   *  bare `text-accent`, and the options button an open-state `text-white
+   *  bg-white/10` — three different brightnesses in one row, two of which the
+   *  LIGHT table could not honour at all (a fixed `hover:text-white` on a
+   *  white cover is invisible). NowPlayingView's `barOn` / `barOff` are the
+   *  only place either half is read, and every icon button in the bar uses
+   *  them, so the row cannot drift apart again. The queue readout and the
+   *  "Up next" chip's own label are text: the readout keeps `chromeText`. */
   chromeOn: string;
   chromeOff: string;
+  /** The SLIDERS' ink — the seek bar and the volume bar, the two controls
+   *  that paint a track rather than a glyph. They are four values because a
+   *  track is four surfaces (the unplayed run, the played run, the thumb and
+   *  the thumb's ring) and one number cannot carry them: a single zinc
+   *  `#3a3a42` track measured 1.70:1 on a near-black cover and 1.01:1 on the
+   *  mid-grey one, and a white accent thumb measured 1.64:1 on a white one —
+   *  the bars the owner could not see. They live HERE, in the same table as
+   *  the text, because a slider and the label above it disagreeing about the
+   *  polarity is the same bug twice; the player writes them onto the slider's
+   *  container as the `--seek-*` custom properties index.css paints with.
+   *  (`--seek-pct`, the played run's end, is geometry rather than ink and is
+   *  set by the controls themselves.) */
+  seekTrack: string;
+  seekFill: string;
+  seekThumb: string;
+  seekRing: string;
   /** The frequency strip's ink, when the visualizer is shown over the artwork.
    *  Same rule as the chrome above, and the same table: a canvas cannot wear a
    *  Tailwind class, so it takes the polarity itself and picks its own
@@ -246,6 +287,13 @@ const INK_ON_DARK: LyricInk = {
   chromeText: "text-zinc-300",
   chromeOn: "text-accent hover:bg-white/10",
   chromeOff: "text-zinc-300 hover:text-white hover:bg-white/10 opacity-60 hover:opacity-100",
+  // White at two strengths for the two runs, so the played run is told from
+  // the unplayed one by more than the thumb's position, and a solid white
+  // thumb with a dark ring so the dot reads as a knob on both runs.
+  seekTrack: "rgb(255 255 255 / 0.42)",
+  seekFill: "rgb(255 255 255)",
+  seekThumb: "rgb(255 255 255)",
+  seekRing: "rgb(0 0 0 / 0.45)",
   viz: "light",
   scrim: "",
 };
@@ -262,7 +310,19 @@ const INK_ON_LIGHT: LyricInk = {
   chromeButton: "text-zinc-950/75 hover:text-zinc-950 hover:bg-black/5",
   chromeText: "text-zinc-950/75",
   chromeOn: "text-zinc-950 hover:bg-black/5",
-  chromeOff: "text-zinc-950/75 hover:text-zinc-950 hover:bg-black/5 opacity-60 hover:opacity-100",
+  // One ink, one opacity — never a translucent ink AND an opacity on top:
+  // `text-zinc-950/75` at `opacity-60` (0.45 alpha over the field) measured
+  // 2.9:1 on the white cover, i.e. the dimmed glyphs the owner read as
+  // "not the same brightness" AND as blending into the artwork. 0.65 of the
+  // solid ink clears the 3:1 non-text floor on every measured field.
+  chromeOff: "text-zinc-950 opacity-65 hover:opacity-100 hover:bg-black/5",
+  // Near-black at two strengths, the same rule as the dark table above: the
+  // unplayed run at 0.50 alpha (3.8:1 on the white cover's washed field) and
+  // the played run solid, with a white ring so the dark dot reads as a knob.
+  seekTrack: "rgb(0 0 0 / 0.50)",
+  seekFill: "rgb(9 9 11)",
+  seekThumb: "rgb(9 9 11)",
+  seekRing: "rgb(255 255 255 / 0.5)",
   viz: "dark",
   scrim: "",
 };
@@ -390,6 +450,9 @@ function VolumeControl() {
         value={vol}
         onChange={(e) => setVol(Number(e.target.value))}
         className="w-24 max-w-full seek-fat"
+        /* the level as the played run's end — the same `--seek-pct` the seek
+           bar sets, so the two bars in this row read the same way */
+        style={{ "--seek-pct": `${Math.round(vol * 100)}%` } as CSSProperties}
         title="Volume"
         aria-label="Volume"
       />
@@ -402,13 +465,16 @@ function VolumeControl() {
  *  line and the `md:` classes the layout switches on cannot drift apart. */
 const MD_UP = "(min-width: 48rem)";
 
-/** True at `md` and up, live. The compact phone header (see `compact`) is the
- *  one piece of this player that asks JavaScript for the width instead of
- *  letting a breakpoint class do the switching: what the lyrics button DOES
- *  changes with it — expand the block, or only toggle the pane — and no `md:`
- *  utility can pick a click handler. Read on mount so the first paint already
- *  knows, and on `change` so a rotation or a dragged window re-decides instead
- *  of leaving the phone's mode on a desktop-width screen. */
+/** True at `md` and up, live. The compact phone header (see `compactMode`) is
+ *  the one piece of this player that asks JavaScript for the width instead of
+ *  letting a breakpoint class do the switching: the block below `md` is not a
+ *  narrower version of the desktop one but a different composition of it (the
+ *  thumbnail row, the block it stands in for), and which of the two the
+ *  VOICE-OVER reads — and whether the pane is a sibling of the phone's header
+ *  or the desktop's right-hand column — cannot be expressed as a `md:` utility
+ *  on one subtree. Read on mount so the first paint already knows, and on
+ *  `change` so a rotation or a dragged window re-decides instead of leaving the
+ *  phone's layout on a desktop-width screen. */
 function useMdUp() {
   const [up, setUp] = useState(() => window.matchMedia?.(MD_UP).matches ?? true);
   useEffect(() => {
@@ -512,18 +578,20 @@ export default function NowPlayingView(p: Props) {
   // Lyrics pane, default on; the toggle sits beside the visualizer's in the
   // top bar (LYRICS_KEY carries the why).
   const [showLyrics, setShowLyrics] = useState(() => localStorage.getItem(LYRICS_KEY) !== "0");
-  // ---- the phone's compact mode -------------------------------------------
+  // ---- the phone's compact header ------------------------------------------
   // Reported on a phone: the cover art, the title + format readout, the
   // album · artist row and the star row together took the whole screen before
   // the first control, so below `md` this overlay opens COMPACT — ONE header
   // row (thumbnail, title, artist · album) with the transport and the seek bar
-  // under it, and the lyrics pane away. The lyrics button in the top bar is the
-  // expand/collapse control there (see its handler): one press opens the full
-  // block AND the pane the button is named for, the next puts both back. At
-  // `md` and up nothing reads this state — the block, the pane and the button
-  // are exactly what they were.
+  // under it. It was a MODE the lyrics button flipped, which is what broke the
+  // phone: below `md` that press moved the block and the pane together, so the
+  // reader's own "lyrics on" pick meant the pane at `md` and up and the whole
+  // block below it — the same control, two different things, and a phone came
+  // up showing no lyrics at all (the owner's report) with the zoom / offset
+  // controls the pane carries nowhere on screen. The header is now just the
+  // phone's LAYOUT — one button, one meaning, every width (see the toggle) —
+  // and the pane sits under it with the lyrics off it always did.
   const mdUp = useMdUp();
-  const [compact, setCompact] = useState(true);
   // ReplayGain preamp: the slider drags locally and commits to the config on a
   // short debounce, so one drag is one config write (and one re-fetch of the
   // track's gain), not one per 0.5 dB step. The commit goes through a ref —
@@ -659,7 +727,7 @@ export default function NowPlayingView(p: Props) {
   });
   const coverHex = colorData?.color ?? null;
   const rgb = useMemo<[number, number, number]>(
-    () => hexToRgbTriplet(coverHex) ?? [113, 113, 122],
+    () => parseHexColor(coverHex) ?? [113, 113, 122],
     [coverHex]
   );
   // The ONE polarity decision for the whole player, off the cover's own average
@@ -808,6 +876,95 @@ export default function NowPlayingView(p: Props) {
     if (!p.playing) setChromeVisible(true);
   }, [p.playing]);
 
+  // ---- idle cursor ---------------------------------------------------------
+  // A bright arrow parked over the picture is the one piece of chrome nobody
+  // asked for: after a beat of stillness the pane drops it, and the next move,
+  // click or key brings it straight back. Same shape as the video chrome above
+  // — ONE piece of state, one class on the pane, one effect with the listeners
+  // — but its own clock, because that one owns the controls (and waits while
+  // the picture is paused) while this one owns only the arrow.
+  //
+  // The arrow is only ever withheld while nothing on screen is waiting for it:
+  //   * an open surface over the pane — the queue drawer, the options menu, the
+  //     playlist popover, the track details, or a dialog this pane does not own
+  //     (looked up in the DOM at hide time, since a keystroke can open one) —
+  //     restores it when it opens and keeps it while it is up;
+  //   * any press in progress — the seek bar being scrubbed, a queue row being
+  //     reordered: the button is held and the pointer can sit perfectly still
+  //     through the gesture (and a scrub can be dragged right off the seek
+  //     row), so a held button is never idleness wherever the pointer has gone;
+  //   * the player's own controls: those rows opt out of the pane's
+  //     `cursor-none` in CSS (`cursor-auto`), so the arrow is there whenever it
+  //     hovers anything clickable — the seek bar's hover preview included —
+  //     without a second listener measuring hover.
+  // A touch screen has no arrow to drop: with no fine pointer the timer is
+  // never armed, and a tap cancels it instead of re-arming, so nothing here can
+  // fight a finger-scroll or leave the pane in `cursor: none`.
+  const [idleCursor, setIdleCursor] = useState(false);
+  const idleRef = useRef(false);
+  const cursorBusy = queueOpen || options || plOpen || detailsOpen || dragIdx !== null;
+  useEffect(() => {
+    if (videoPath || cursorBusy) {
+      // The video overlay hands the arrow to its own chrome timer, and an open
+      // surface or a drag always has it.
+      idleRef.current = false;
+      setIdleCursor(false);
+      return;
+    }
+    if (!window.matchMedia?.(FINE_POINTER).matches) return; // nothing to hide
+    let timer: number | null = null;
+    // A held button — a scrub, a queue reorder, any press — is a gesture in
+    // progress, never idleness: the arrow stays for as long as the button is
+    // down, wherever the drag has taken the pointer (a scrub can legitimately
+    // leave the seek row, and a hidden cursor mid-drag is the bug).
+    let held = false;
+    const disarm = () => {
+      if (timer !== null) window.clearTimeout(timer);
+      timer = null;
+    };
+    const arm = () => {
+      disarm();
+      timer = window.setTimeout(() => {
+        timer = null;
+        // Something opened over the pane while the pointer sat still (a
+        // keystroke is enough): keep the arrow, and look again in a window
+        // rather than drop it under a dialog. Same for a button still down.
+        if (held || document.querySelector(OPEN_OVER_PANE)) arm();
+        else {
+          idleRef.current = true;
+          setIdleCursor(true);
+        }
+      }, IDLE_CURSOR_MS);
+    };
+    const poke = (e: Event) => {
+      if (e.type === "pointerdown") held = true;
+      // `blur` too: a release outside the window is never delivered, and a
+      // stuck "held" would only ever cost a hidden arrow that never comes back.
+      else if (e.type === "pointerup" || e.type === "pointercancel" || e.type === "blur") held = false;
+      if (idleRef.current) {
+        idleRef.current = false;
+        setIdleCursor(false);
+      }
+      // A finger owns the glass while it is down: cancel, and let the next real
+      // pointer event start the clock again.
+      if (e.type === "touchstart") disarm();
+      else arm();
+    };
+    arm();
+    // `wheel` because scrolling a long lyric while the pointer rests still is
+    // not idleness; `touchstart` only ever cancels (above); `pointerup` /
+    // `blur` only ever release a hold.
+    const evts: (keyof WindowEventMap)[] = [
+      "pointermove", "pointerdown", "pointerup", "pointercancel", "keydown", "wheel", "touchstart", "blur",
+    ];
+    evts.forEach((e) => window.addEventListener(e, poke, { passive: true }));
+    return () => {
+      evts.forEach((e) => window.removeEventListener(e, poke));
+      disarm();
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [videoPath, cursorBusy]);
+
   // ---- lyrics for the current track --------------------------------------
   // Stored translations / transliterations (TRANSLATION-<lang> /
   // TRANSLITERATION-<lang>-LATN tags, or .romaji.lrc / .<lang>.lrc sidecars)
@@ -869,17 +1026,20 @@ export default function NowPlayingView(p: Props) {
   // Layout (cover sizing, pane presence) follows the on-screen lyrics even
   // while stale so next/previous never reflows the whole view.
   const layoutHasLyrics = hasLyricsText(lyricsText) && !instrumental;
-  // The compact header is a PHONE mode: at `md` and up this is false whatever
-  // the state says, so a window dragged wide (or a mode left over from a
-  // phone-width open) cannot leave the desktop layout without its block.
-  const compactMode = compact && !mdUp;
-  // Whether the pane is actually on screen: the track has lyrics AND the
-  // reader has not dismissed them — and, below `md`, the overlay is not in its
-  // compact header, where the pane is the expanded HALF of the mode and the
-  // one button that opens it is the same lyrics button. The track's lyrics
-  // still decide the toggle's presence (below) — a button that cannot do
-  // anything is hidden, not rendered inert.
-  const paneOpen = layoutHasLyrics && (mdUp ? showLyrics : !compactMode);
+  // The compact header is a PHONE layout: at `md` and up this is false whatever
+  // happened at a narrower width, so a window dragged wide cannot leave the
+  // desktop layout without its block. No state feeds it — it is a function of
+  // the width alone, which is what keeps it from competing with the lyrics
+  // button for ownership of the pane (see the toggle and the state above).
+  const compactMode = !mdUp;
+  // Whether the pane is on screen, in ONE derivation for both layouts: the
+  // track has lyrics AND the reader has not put them away. It used to branch on
+  // the width (`mdUp ? showLyrics : !compactMode`), which gave the phone a
+  // second, hidden owner of the same pane — the reason the persisted pick was
+  // ignored below `md` and the offset / zoom controls never mounted there. The
+  // track's lyrics decide the toggle's presence (below): a button that cannot
+  // do anything is hidden, not rendered inert.
+  const paneOpen = layoutHasLyrics && showLyrics;
   const hasLyrics = layoutHasLyrics && !staleLyrics;
   const plainLines = useMemo(() => {
     if (!hasLyrics) return [];
@@ -1243,22 +1403,33 @@ export default function NowPlayingView(p: Props) {
    *  `className` carries the size and the PLACEMENT, because the two homes are
    *  different rooms: above lg it is one control in the transport row, and on a
    *  phone the same control sits alone at the player's bottom-left — the spot
-   *  Apple Music keeps its favourite in, which is what the owner asked for. One
-   *  definition, so the two can never drift into two different affordances. */
+   *  Apple Music keeps its favourite in, which is what the owner asked for.
+   *
+   *  The button itself is the shared `components/FavHeart`, bound to the track
+   *  this view is showing: the same writer, the same optimistic update and the
+   *  same `aria-pressed` the player bar's hearts and every library row use (it
+   *  used to be a fourth copy of the button, reading a `liked` prop the bar
+   *  passed down and writing likes its own way). What stays local is the INK:
+   *  the fullscreen chrome draws its unlit controls in `ink.chromeButton`, not
+   *  in zinc, because this row sits straight on the artwork. */
   const likeButton = (className: string) => (
-    <button
-      aria-label={p.liked ? "Unlike" : "Like this track"}
-      aria-pressed={p.liked}
-      className={`tap-hit rounded-lg transition-colors ${p.liked ? "text-accent" : ink.chromeButton} ${className}`}
-      onClick={p.onToggleLike}
-      title={p.liked ? "Unlike" : "Like this track"}
-    >
-      <Heart className={`h-[18px] w-[18px] ${p.liked ? "fill-current" : ""}`} />
-    </button>
+    <FavHeart
+      kind="track"
+      id={p.current.path}
+      mbid={freshTags?.MUSICBRAINZ_TRACKID}
+      boxClass="tap-hit rounded-lg transition-colors"
+      unlikedClass={ink.chromeButton}
+      iconClass="h-[18px] w-[18px]"
+      likeLabels
+      className={className}
+      {...likeToasts(() => title)}
+    />
   );
 
   const transportRow = (
-    <div className={`flex items-center justify-center gap-2.5 flex-wrap ${ink.shade}`}>
+    /* `cursor-auto`: the transport row keeps the arrow while the pane is
+       idling — see the idle-cursor effect. */
+    <div className={`cursor-auto flex items-center justify-center gap-2.5 flex-wrap ${ink.shade}`}>
       <button aria-label="Shuffle" aria-pressed={p.shuffle} className={`p-2 rounded-lg transition-colors ${p.shuffle ? "text-accent" : ink.chromeButton}`} onClick={p.onToggleShuffle} title="Shuffle">
         <Shuffle className="h-4 w-4" />
       </button>
@@ -1342,7 +1513,10 @@ export default function NowPlayingView(p: Props) {
     </div>
   );
   const seekRow = (
-    <div className={`flex items-center gap-2 text-xs w-[26rem] max-w-full px-2 ${ink.shade} ${ink.chromeText}`}>
+    /* `cursor-auto`: seek bar and volume keep the arrow while the pane is
+       idling — the scrubber's hover preview is the moment the arrow is needed
+       most, see the idle-cursor effect. */
+    <div className={`cursor-auto flex items-center gap-2 text-xs w-[26rem] max-w-full px-2 ${ink.shade} ${ink.chromeText}`}>
       <span className="w-10 text-right font-mono tabular-nums">{fmtDuration(dispTime)}</span>
       <ScrubSeek
         videoPath={videoPath}
@@ -1411,26 +1585,48 @@ export default function NowPlayingView(p: Props) {
     </div>
   );
 
-  // The lyrics button's own wording, per width: above `md` it toggles the pane
-  // and nothing else; below `md` it is the compact header's expand / collapse
-  // control (its handler carries the why).
-  const lyricsTitle = mdUp
-    ? "Toggle the lyrics pane"
-    : compact
-      ? "Expand the player"
-      : "Collapse the player";
-  // What that button lights on: the reader's pane pick above `md` (exactly as
-  // it always has), the expanded block below it. Not `paneOpen`, which is false
-  // for a track with no lyrics even when the phone has expanded it — the
-  // control owns the mode there, and the mode exists for every track.
-  const lyricsOn = mdUp ? showLyrics : !compactMode;
+  // The lyrics button's own wording and lit state — ONE of each, on every
+  // width. It used to read the width twice (it was the compact header's
+  // expand / collapse control below `md`), which is exactly how "lyrics on"
+  // came to mean the pane on a desktop and the whole block on a phone.
+  const lyricsTitle = "Toggle the lyrics pane";
+  // What the control lights on is the reader's pane pick itself. The button is
+  // drawn only for a track that HAS lyrics (below), so on screen `lyricsOn` and
+  // `paneOpen` agree; reading the state keeps `aria-pressed` honest about what
+  // the press just did.
+  const lyricsOn = showLyrics;
+  // Who owns the arrow in this mode: over a music video the chrome already
+  // carries it away (the older rule above), in the audio pane it is dropped on
+  // idle (the effect above). Either way it is ONE class on this root.
+  const cursorHidden = videoPath ? !chromeVisible : idleCursor;
+  /** The sliders' ink as CSS, for the one subtree that draws them (see
+   *  LyricInk's `seek*`). Not the video path: that chrome sits on the player's
+   *  own black gradient rather than on the cover's ambience, so it keeps the
+   *  fixed dark track and white thumb index.css defaults to — the ink table
+   *  answers to the ARTWORK, and there is no artwork behind those controls. */
+  const seekInk = videoPath
+    ? undefined
+    : ({
+        "--seek-track": ink.seekTrack,
+        "--seek-fill": ink.seekFill,
+        "--seek-thumb": ink.seekThumb,
+        "--seek-ring": ink.seekRing,
+      } as CSSProperties);
+  /** The top bar's one icon pair: engaged / idle. Over the artwork it is the
+   *  ink table's own pair (see the bar's comment); over a VIDEO the idle half
+   *  stays the fixed `text-zinc-300` that bar has always used, because that
+   *  chrome sits on the player's black gradient rather than on the cover's
+   *  ambience and the table has nothing to say about a field it is not on (a
+   *  bright album cover must not paint near-black glyphs onto it). */
+  const barOn = videoPath ? "text-accent hover:bg-white/10" : ink.chromeOn;
+  const barOff = videoPath ? "text-current hover:text-white hover:bg-white/10" : ink.chromeOff;
 
   return (
     /* No polarity tint on the root anymore: the whole player draws its text on
        the ambience through the wash below, and the only surfaces that still
        frost anything are the floating menus, which pin their own tint
        (`np-veil-dark np-veil-panel`, index.css). */
-    <div className={`fixed inset-0 z-50 overflow-clip ${videoPath ? "bg-transparent" : "bg-zinc-950"} ${videoPath && !chromeVisible ? "cursor-none" : ""}`}>
+    <div className={`fixed inset-0 z-50 overflow-clip ${videoPath ? "bg-transparent" : "bg-zinc-950"} ${cursorHidden ? "cursor-none" : ""}`}>
       {/* overflow-clip (not hidden): a hidden box is still a scroll container,
           so wheel / scrollIntoView can silently scroll the whole overlay and
           leave the view "stuck" half-rendered. Clip can never be scrolled. */}
@@ -1542,20 +1738,51 @@ export default function NowPlayingView(p: Props) {
           opts back in so its buttons still work. z-[2]: the video layer's
           click-catcher is z-[1] in the same (root) stacking context — the
           bar must paint and hit-test above it, while the bottom controls
-          (z-10) and queue drawer (z-20) stay above the bar. */}
-      <div className={`relative z-[2] h-full flex flex-col ${videoPath ? "pointer-events-none" : ""}`}>
+          (z-10) and queue drawer (z-20) stay above the bar.
+          `style` carries the slider ink (LyricInk's `seek*`) down to the
+          seek row and the volume cluster: the seek bar and the volume bar are
+          the two controls that paint a track rather than a glyph, and a
+          slider tinted from a fixed zinc while the label above it flips with
+          the cover is the same grey-on-grey bug twice. The whole subtree gets
+          it, so a future slider in here is covered by the same rule. */}
+      <div
+        className={`relative z-[2] h-full flex flex-col ${videoPath ? "pointer-events-none" : ""}`}
+        style={seekInk}
+      >
         {/* top bar — exit button top-left, queue/options cluster top-right;
             eases away with the bottom overlay while the video plays.
             `safe-np-top` carries the base padding AND the notch/status-bar
             inset: the overlay is `fixed inset-0`, so without it the system
-            clock, the queue readout and the options button share one line. */}
+            clock, the queue readout and the options button share one line.
+            `cursor-auto` is this row opting back OUT of the pane's idle
+            `cursor-none`: a row of controls is never idle, so the arrow stays
+            for as long as it is over one (see the idle-cursor effect). Over a
+            video the class is inert — that bar is pointer-events-none while
+            the chrome is away, so it cannot resurrect the arrow.
+
+            Every ICON button in this bar draws its two states from ONE pair
+            of ink classes — `chromeOn` while it is engaged, `chromeOff` while
+            it is not — and every one of them is the same 36 px box around a
+            20 px glyph with the row's `gap-1`. That is the whole point of the
+            pair: the toggles already used it, while the three plain buttons
+            beside them spelled out `text-current hover:text-white` (full
+            ink), the fullscreen button an `text-accent`, and the settings
+            button an open-state `text-white bg-white/10`. Measured across the
+            row that is three different brightnesses on one bar — the owner's
+            "one much brighter, one dimmer than its neighbours" — and the
+            `hover:text-white` in the old ones was a fixed white that the
+            LIGHT table could not honour at all. `chromeOff` is one dimmed
+            ink, `chromeOn` is the accent (or, on the light table, full ink,
+            because the default accent IS white), hover takes either back to
+            full. The queue readout beside them is a READOUT, not a control:
+            it keeps the row's own `chromeText`, like the time readouts. */}
         <div
-          className={`safe-np-top flex items-center justify-between transition-[opacity,transform] duration-300 ease-out ${
+          className={`safe-np-top cursor-auto flex items-center justify-between transition-[opacity,transform] duration-300 ease-out ${
             videoPath ? (chromeVisible ? "pointer-events-auto" : "pointer-events-none opacity-0 -translate-y-3") : ""
           } ${videoPath ? "text-zinc-300" : `${ink.shade} ${ink.chromeText}`}`}
         >
           <button
-            className="p-2 rounded-lg transition-colors hover:bg-white/10 text-current hover:text-white"
+            className={`p-2 rounded-lg transition-colors ${barOff}`}
             onClick={p.onClose}
             title="Exit fullscreen (Esc)"
             aria-label="Exit fullscreen"
@@ -1569,13 +1796,13 @@ export default function NowPlayingView(p: Props) {
               </span>
             )}
             {/* up next — lives beside the queue it describes; click opens it.
-                Always on the bar: inert when nothing is queued. */}
+                Always on the bar: inert when nothing is queued, and then it
+                wears the family's idle ink rather than an opacity of its own
+                (`pointer-events-none` already makes the hover half inert). */}
             <button
               className={`max-w-[15rem] min-w-0 items-center gap-1.5 px-1.5 py-1 rounded-md text-[10px] font-mono hidden sm:flex ${
-                upNextLabel
-                  ? "text-current hover:text-white hover:bg-white/10 transition-colors"
-                  : "text-current opacity-60 pointer-events-none"
-              }`}
+                queueOpen ? barOn : barOff
+              } ${upNextLabel ? "transition-colors" : "pointer-events-none"}`}
               onClick={() => setQueueOpen(true)}
               title={upNextLabel ? `Up next — ${upNextLabel} · click to view the queue` : "Up next — nothing queued"}
             >
@@ -1584,7 +1811,7 @@ export default function NowPlayingView(p: Props) {
             </button>
             <button
               ref={queueTriggerRef}
-              className={`p-2 rounded-lg transition-colors hover:bg-white/10 ${queueOpen ? "text-white bg-white/10" : "text-current hover:text-white"}`}
+              className={`p-2 rounded-lg transition-colors ${queueOpen ? barOn : barOff}`}
               onClick={() => setQueueOpen(!queueOpen)}
               title="Up next (queue)"
               aria-label="Up next queue"
@@ -1594,12 +1821,13 @@ export default function NowPlayingView(p: Props) {
             </button>
             {/* inert over a music video: <Visualizer> only renders in the
                 audio layout, so the toggle is hidden rather than a no-op.
-                Its two states come from the ink table (`chromeOn` /
-                `chromeOff`) — a bare `text-accent` on/off pair is what made
-                both of these read as neither (the table says why). */}
+                Its two states come from the bar's own pair (`barOn` /
+                `barOff` — the ink table's `chromeOn` / `chromeOff`): a bare
+                `text-accent` on/off pair is what made both of these read as
+                neither (the table says why). */}
             {!videoPath && (
               <button
-                className={`p-2 rounded-lg transition-colors ${viz ? ink.chromeOn : ink.chromeOff}`}
+                className={`p-2 rounded-lg transition-colors ${viz ? barOn : barOff}`}
                 onClick={() => {
                   const v = !viz;
                   setViz(v);
@@ -1618,35 +1846,28 @@ export default function NowPlayingView(p: Props) {
                 lyrics button (Mic2 on the bar toggles the docked pane).
                 Hidden when the track has no lyrics rather than shown inert —
                 the same rule the visualizer follows over a music video: a
-                control that cannot do anything is not drawn (below `md` the
-                compact header is the exception; see the last paragraph). It
-                used to be nothing at all: the pane appeared whenever lyrics
-                existed and could not be put away, which is what made it feel
-                like an accident of the layout instead of something you own.
+                control that cannot do anything is not drawn. It used to be
+                nothing at all: the pane appeared whenever lyrics existed and
+                could not be put away, which is what made it feel like an
+                accident of the layout instead of something you own.
 
-                Below `md` it is ALSO the compact header's one control (one
-                button, not one per width): the expanded view it opens is the
-                pane the button is named for plus the block the phone report
-                asked to collapse, so one press brings both back. It lights on
-                `lyricsOn` rather than on `paneOpen` for the same reason the
-                compact mode reads it — below `md` the MODE owns the pane, and
-                at `md` and up the two flags are equal. A phone press never
-                writes LYRICS_KEY: the compact mode is a mode, not the reader's
-                pane pick, and it should not follow them to the desktop.
-
-                Which is also why the button is drawn for EVERY track below
-                `md`, lyrics or not: there it is the only way out of the
-                compact header, and an instrumental stuck in it would have no
-                art and no rating at all. Above `md` the old rule stands — no
-                lyrics, no button. */}
-            {!videoPath && (layoutHasLyrics || !mdUp) && (
+                ONE press, ONE thing, at EVERY width: it writes the reader's
+                pane pick (`showLyrics`, persisted), and `paneOpen` is the one
+                derivation both layouts read. Below `md` it used to flip the
+                compact MODE instead and write nothing — so a phone could not
+                show lyrics without also unfolding the whole block, the
+                persisted pick was ignored there, and the offset / zoom
+                controls the pane carries never mounted on a phone at all
+                (the owner's report). The phone's compact header is now the
+                width's own layout (see `compactMode`), never a second owner of
+                this pane, so the press does the same thing in both layouts and
+                the pick follows the reader between them. Below `md` the button
+                is drawn only where it can act too: no lyrics, no button, the
+                same as the desktop rule it used to be the exception to. */}
+            {!videoPath && layoutHasLyrics && (
               <button
-                className={`p-2 rounded-lg transition-colors ${lyricsOn ? ink.chromeOn : ink.chromeOff}`}
+                className={`p-2 rounded-lg transition-colors ${lyricsOn ? barOn : barOff}`}
                 onClick={() => {
-                  if (!mdUp) {
-                    setCompact(!compact);
-                    return;
-                  }
                   const v = !showLyrics;
                   setShowLyrics(v);
                   persist(LYRICS_KEY, v ? "1" : "0");
@@ -1660,7 +1881,7 @@ export default function NowPlayingView(p: Props) {
             )}
             <div className="relative">
               <button
-                className={`p-2 rounded-lg transition-colors hover:bg-white/10 ${nativeFs ? "text-accent" : "text-current hover:text-white"}`}
+                className={`p-2 rounded-lg transition-colors ${nativeFs ? barOn : barOff}`}
                 onClick={toggleNativeFs}
                 title={nativeFs ? "Leave browser fullscreen (Esc)" : "Browser fullscreen — hide the browser's own chrome"}
                 aria-label={nativeFs ? "Leave browser fullscreen" : "Enter browser fullscreen"}
@@ -1671,7 +1892,7 @@ export default function NowPlayingView(p: Props) {
             </div>
             <div className="relative">
               <button
-                className={`p-2 rounded-lg transition-colors hover:bg-white/10 ${options ? "text-white bg-white/10" : "text-current hover:text-white"}`}
+                className={`p-2 rounded-lg transition-colors ${options ? barOn : barOff}`}
                 onClick={() => setOptions(!options)}
                 title="Lyrics & display options"
                 aria-label="Lyrics and display options"
@@ -1898,11 +2119,11 @@ export default function NowPlayingView(p: Props) {
             }`}
           >
             {/* the phone's compact header — the whole top block as ONE row
-                (the note on `compact` above carries the report). `md:hidden`
-                as well as the state: this must never render at md and up
-                whatever the state says, and the block below must never show
-                below md while it does. Fixed row heights like the block's own
-                rows, so a track change cannot make the header jump. */}
+                (the note on `compactMode` above carries the report). `md:hidden`
+                as well as the flag: this must never render at md and up, and
+                the block below must never show below md while it does. Fixed
+                row heights like the block's own rows, so a track change cannot
+                make the header jump. */}
             {compactMode && (
               <div className="md:hidden w-[26rem] max-w-full min-w-0 flex items-center gap-3 px-1">
                 <CoverImg
@@ -1993,6 +2214,17 @@ export default function NowPlayingView(p: Props) {
               unreachable. With the floor the body scrolls (overflow-y-auto
               below lg) and the pane is a real reading surface.
 
+              Below `md` this column is the PHONE's reading surface: the
+              compact header (`compactMode`) is a 48 px row plus the transport,
+              the seek line and the visualizer, and everything left under it
+              belongs to the pane — `flex-1` with `min-h-0`, so it scrolls
+              inside the body rather than pushing the chrome off the screen,
+              and it stays inside `safe-np-body` so the notch / home-indicator
+              insets below `lg` apply to it exactly as they do to the desktop
+              column. The offset / zoom controls ride its bottom edge there,
+              which is the pair the owner's report asked for and the reason the
+              pane has to exist on a phone at all.
+
               Shown and hidden by the toggle in the top bar, and the BOX is the
               same one in both states — only its size changes. Collapsing
               (w-0 / max-h-0 / overflow-clip) is what makes it take no room, so
@@ -2065,16 +2297,31 @@ export default function NowPlayingView(p: Props) {
                   fitting the size to the room meant leaving the words to go
                   and find them — and neither is a thing a listener should have
                   to hunt for while the song plays. Chrome, not a panel: no
-                  background, no border, the ink's own tone at reduced opacity
-                  (it brightens on hover, and it fades with the pane's own
-                  stale state because it rides the same surface), so it reads
-                  as part of the words rather than a control strip pasted over
-                  the artwork (R52c). Rendered only while the pane is OPEN:
-                  collapsed, there is nothing on screen to size or to shift. */}
+                  background, no border, the ink's own tone (it brightens on
+                  hover, and it fades with the pane's own stale state because
+                  it rides the same surface), so it reads as part of the words
+                  rather than a control strip pasted over the artwork (R52c).
+                  Rendered only while the pane is OPEN: collapsed, there is
+                  nothing on screen to size or to shift.
+
+                  The ink is the table's FULL strength (`ink.chromeStrong`) and
+                  the row rests at it: the controls inside dim their own glyphs
+                  (0.7 on the step buttons, 0.8 on the value), and that is the
+                  whole of the "subtle" this strip needs. It used to be the
+                  muted `ink.chromeText` at 0.6, and on the light table that is
+                  a translucent near-black at 0.75 × 0.6 — 0.45 alpha, 2.9:1 on
+                  the white cover — and 0.42 alpha after the glyph dim, which
+                  is the "they blend into the background" report. The row's own
+                  rest opacity is 1 now, so nothing multiplies on top of the
+                  values: measured at 11.6:1 on the dark cover and 6.4:1 on the
+                  white one, from 2.4:1 and 1.9:1 before
+                  (tools/check_np_metadata_contrast.cjs asserts both per cover).
+                  The stale fade stays where it was: that is a state, not the
+                  resting tone. */}
               {paneOpen && (
-                <div className={`shrink-0 flex items-center justify-end gap-4 px-6 pb-2 pt-1 text-[11px] transition-opacity duration-300 ${ink.shade} ${ink.chromeText} ${
-                  staleLyrics ? "opacity-40" : "opacity-60"
-                } hover:opacity-100 focus-within:opacity-100`}>
+                <div className={`shrink-0 flex items-center justify-end gap-4 px-6 pb-2 pt-1 text-[11px] transition-opacity duration-300 ${ink.shade} ${ink.chromeStrong} ${
+                  staleLyrics ? "opacity-40" : "opacity-100"
+                }`}>
                   <LyricZoom
                     pct={Math.round((lyricZoom / LYRIC_ZOOM_BASE) * 100)}
                     onChange={(p) => {
@@ -2095,14 +2342,16 @@ export default function NowPlayingView(p: Props) {
           )}
         </div>
 
-        <div className="lg:hidden w-full shrink-0 flex items-center px-1 sm:px-2 pb-1">
+        <div className="cursor-auto lg:hidden w-full shrink-0 flex items-center px-1 sm:px-2 pb-1">
           {/* The phone's favourite: bottom-left of the player, where a thumb
               looks for it and where Apple Music keeps its own. Outside the
               scrolling body on purpose — a control that can scroll off a
               phone's screen is not the control the owner asked for. The heart
               is the app's own favourite (a STAR in this app means a rating, a
               different store — see lib/ratings), and this row draws it only
-              below lg, where the transport row does not. */}
+              below lg, where the transport row does not.
+              `cursor-auto`: this row is a control too — see the idle-cursor
+              effect (inert on a phone, which has no arrow to drop). */}
           {likeButton("p-2.5 flex items-center justify-center")}
         </div>
         </>
@@ -2110,9 +2359,17 @@ export default function NowPlayingView(p: Props) {
       </div>
 
       {/* up-next queue drawer — same features as the player bar's queue
-          popover: CLEAR upcoming, per-track ✕, drag to reorder */}
+          popover: CLEAR upcoming, per-track ✕, drag to reorder.
+          It sits above the player (`z-20` against the chrome's `z-[2]`), and a
+          press anywhere else closes it — the rule the nav drawer and every
+          Popover already follow. It was the one menu in the app that ignored a
+          press outside itself, so on a phone the drawer stayed over the player
+          until its own cross was found. The shield is between the two layers,
+          so the rows keep their drag/press targets. */}
       {queueOpen && (
-        <div role="dialog" aria-modal="true" aria-label="Up next queue" className="safe-np-queue absolute right-0 bottom-0 w-80 max-w-[85vw] z-20 np-veil np-veil-dark np-veil-panel flex flex-col rounded-l-2xl border-l border-t border-border">
+        <>
+          <div className="absolute inset-0 z-[15]" onClick={() => setQueueOpen(false)} />
+          <div role="dialog" aria-modal="true" aria-label="Up next queue" className="safe-np-queue absolute right-0 bottom-0 w-80 max-w-[85vw] z-20 np-veil np-veil-dark np-veil-panel flex flex-col rounded-l-2xl border-l border-t border-border">
           <div className="flex items-center justify-between px-4 py-3 border-b border-white/10 gap-2">
             <div className="text-[11px] uppercase tracking-widest text-zinc-400 min-w-0 truncate">
               Queue · {queue.length} track{queue.length === 1 ? "" : "s"}
@@ -2206,6 +2463,7 @@ export default function NowPlayingView(p: Props) {
             })}
           </div>
         </div>
+        </>
       )}
 
       {/* Track details & credits, opened from the options menu. Rendered from

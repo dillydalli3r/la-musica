@@ -23,7 +23,7 @@ Every claim below is about the real code, not a copy of it:
     sentence, and an oversize body by size, all three before any write;
   * nothing this module answers with ever contains a cookie VALUE: no route
     returns it, so no state a client can hold can leak it;
-  * the shared Netscape parser (`server/api_youtube.parse_cookie_file`) still
+  * the shared Netscape parser (`server/cookies.py`) still
     answers the yt-dlp jar with names only unless values are asked for.
 
 Hermetic: the music folder is redirected to a temp dir (MLO_MUSIC_FOLDER) and
@@ -57,7 +57,7 @@ for _mod in (cfgmod,):
 
 from fastapi import HTTPException  # noqa: E402
 
-from server import api_rym, api_youtube, integrations  # noqa: E402
+from server import api_rym, cookies as cookie_mod, integrations  # noqa: E402
 
 # What a browser extension writes for a profile signed in to rateyourmusic.com:
 # the header, comment lines, and one line per cookie for EVERY site the profile
@@ -155,7 +155,7 @@ try:
     # ----------------------------------------------------------------- #
     # 1. The parse: one parser, no fork
     # ----------------------------------------------------------------- #
-    plain, error = api_youtube.parse_cookie_file(REAL_JAR)
+    plain, error = cookie_mod.parse_cookie_file(REAL_JAR)
     assert error is None, error
     assert plain == [("rateyourmusic.com", "session"),
                      ("rateyourmusic.com", "cf_clearance"),
@@ -164,7 +164,7 @@ try:
                      ("google.com", "NID"),
                      ("rateyourmusic.com.example.net", "not_ours")], plain
 
-    with_values, error = api_youtube.parse_cookie_file(REAL_JAR, with_values=True)
+    with_values, error = cookie_mod.parse_cookie_file(REAL_JAR, with_values=True)
     assert error is None, error
     assert with_values[0] == ("rateyourmusic.com", "session", "S3SSION-VALUE"), \
         with_values[0]

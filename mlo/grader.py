@@ -8,7 +8,7 @@ from .audio import AudioFile, TAG_MAP
 from .config import DEFAULT_CONFIG, should_write_audio_tag
 from .lyrics import (
     _lrc_for, _canonical_lyrics, format_lyrics_text, has_lyrics_text,
-    text_meets_sync_level,
+    stored_lyrics_kind, text_meets_sync_level,
 )
 # The genre list rules and the lyric-transform need rule each live in ONE
 # module the writers already use (mlo.genres for the import / scripts 8, 10,
@@ -1450,6 +1450,55 @@ def _ambiguous_lrc_stems(filenames):
     return {stem for stem, n in counts.items() if n > 1}
 
 
+# Checks that only make sense for a MUSIC release.
+#
+# An episode of a podcast carries the PODCASTSERIES tag (mlo.autotag, written
+# from MusicBrainz's `part of` a series of type Podcast): it has no lyrics to
+# embed (the LYRICS check requires them of every non-instrumental track), no
+# RateYourMusic page to link, no album bio any source would write, and no
+# MusicBrainz genre vocabulary that describes it. Grading it with those checks
+# ON is what would fail a podcast FOR BEING a podcast — they are the music
+# catalogue's expectations, not defects of the episode.
+#
+# The CD-rip expectations need nothing here: every one of them is already
+# gated on MEDIA=CD (mlo.grader._is_cd, mlo.audit), and an episode's medium is
+# Digital Media. A release that carries no PODCASTSERIES tag — every music
+# album, and anything whose tags nobody derived — is graded by cfg UNCHANGED,
+# so this rule cannot weaken one existing check for a music release.
+_PODCAST_MUSIC_ONLY_CHECKS = (
+    "grade_check_lyrics",
+    "grade_check_rym_links",
+    "grade_check_album_description",
+    "grade_check_genre",
+    "grade_check_genre_count",
+    "grade_check_genre_order",
+    "grade_check_genre_vocab",
+)
+
+
+def _podcast_effective_cfg(cfg, audio_paths):
+    """*cfg* with the MUSIC-only checks off for a podcast episode's folder.
+
+    The marker is the PODCASTSERIES tag (`mlo.autotag` writes it to every file
+    of the episode from MusicBrainz's series relation), read once from the
+    folder's first audio file — the same file `_album_meta` reads album-level
+    facts from. A folder without the tag, or one whose first file cannot be
+    opened, returns *cfg* unchanged.
+    """
+    if not any(cfg.get(key, True) for key in _PODCAST_MUSIC_ONLY_CHECKS):
+        return cfg
+    for path in audio_paths or ():
+        try:
+            af = AudioFile(path)
+            marked = bool(str(af.get_tag("PODCASTSERIES") or "").strip())
+        except Exception:
+            continue
+        if marked:
+            return {**cfg, **{key: False for key in _PODCAST_MUSIC_ONLY_CHECKS}}
+        break  # one file answers for the album: the tag is written to all of them
+    return cfg
+
+
 def _grade_album(album_dir, lyrics_format, cfg=None):
     if cfg is None:
         cfg = {}
@@ -1466,6 +1515,11 @@ def _grade_album(album_dir, lyrics_format, cfg=None):
 
     if not audio_paths:
         return None
+
+    # A podcast episode is graded as what it is — see
+    # _PODCAST_MUSIC_ONLY_CHECKS. One tag read of the first file decides, and
+    # a folder that is not an episode gets its cfg back untouched.
+    cfg = _podcast_effective_cfg(cfg, audio_paths)
 
     total_checks = 0
     failed_checks = 0
@@ -1579,6 +1633,11 @@ def _grade_album(album_dir, lyrics_format, cfg=None):
             "values": {},
             "lyrics_embedded": False,
             "lyrics_lrc": False,
+            # WHICH KIND the track's stored lyrics are — stamped below, from
+            # the texts the two flags above are read from (mlo.lyrics'
+            # `stored_lyrics_kind`). None here because this row's lyrics have
+            # not been read yet, and for an unreadable file they never are.
+            "lyrics_kind": None,
             "unreadable": False,
             "audit": None,
             "log_grade": None,
@@ -2236,15 +2295,27 @@ def _grade_album(album_dir, lyrics_format, cfg=None):
         lyr = af.get_lyrics()
         embedded = bool(lyr and str(lyr).strip())
         lrc = False
+        lrc_text = None
         if os.path.normcase(os.path.splitext(basename)[0]) not in ambiguous_lrc_stems:
             try:
                 with open(_lrc_for(ap), "r", encoding="utf-8", errors="replace") as _f:
-                    lrc = has_lyrics_text(_f.read())
+                    lrc_text = _f.read()
+                lrc = has_lyrics_text(lrc_text)
             except OSError:
                 lrc = False
+                lrc_text = None
 
         track["lyrics_embedded"] = embedded
         track["lyrics_lrc"] = lrc
+        # WHICH KIND those lyrics are, from the two texts this loop has just
+        # read — the same texts the flags above document, so the kind and the
+        # flags can never disagree (`lyrics_present` is the kind not being
+        # None; see server.library._enrich_track). The text of a source the
+        # rules above did NOT count (a metadata-only tag, a .lrc shared with a
+        # same-stem sibling) is passed as absent, exactly as it is in those
+        # rules.
+        track["lyrics_kind"] = stored_lyrics_kind(
+            lyr if embedded else None, lrc_text if lrc else None)
 
         inst = af.get_tag("INSTRUMENTAL")
         inst_val = str(inst).strip() if inst is not None else None
@@ -2610,13 +2681,39 @@ def _grade_album(album_dir, lyrics_format, cfg=None):
             for tr in tracks:
                 tr["values"][t] = album_val
 
+    # ---- is this the whole release? -----------------------------------------
+    # A PARTIAL album (one track of a twelve-track rip, imported as a single
+    # song) must not be graded on a whole disc's evidence. Its .log/.cue may
+    # legitimately never have been imported with the one track, and the rules
+    # below that read a whole disc (sheet presence, per-track CRC coverage,
+    # the AccurateRip verdict) have to say WHICH rule cannot apply here rather
+    # than report the generic "Missing .log file" on an album that is not a
+    # broken disc but a slice of one. The answer comes from the release's
+    # recorded tracklist — the same rule the album page shows
+    # (mlo.discs.album_expected_state → mlo.paths.expected_tracks_state).
+    try:
+        from .discs import album_expected_state
+        partial_state = album_expected_state(album_dir, audio_paths)
+    except Exception:
+        partial_state = None
+    partial = bool(partial_state and partial_state["missing"])
+
+    def partial_reason(text):
+        """A CD rule's failing sentence when the album is a slice of a disc."""
+        if not partial:
+            return text
+        return (f"{text} — this album holds {partial_state['present']} of "
+                f"{partial_state['total']} tracks of its recorded tracklist, "
+                f"and a CD is graded on the whole disc's sheets: import the "
+                f"rest of the rip, or its .cue/.log next to this track")
+
     # Media-specific file requirements.
     if _is_cd(media_summary):
         if cfg.get("grade_check_cd_log", True):
             total_checks += 1
             if not has_log:
                 failed_checks += 1
-                add_issue("Missing .log file", "album")
+                add_issue(partial_reason("Missing .log file"), "album")
             elif not usable_logs:
                 # A file that merely ENDS in .log (empty, or whitespace only)
                 # is not a rip log: it cannot carry a CRC or a LOG_GRADE.
@@ -2628,7 +2725,7 @@ def _grade_album(album_dir, lyrics_format, cfg=None):
             total_checks += 1
             if not has_cue:
                 failed_checks += 1
-                add_issue("Missing .cue file", "album")
+                add_issue(partial_reason("Missing .cue file"), "album")
 
         # CD rip naming: .log/.cue must match discs_rename_pattern (default
         # CD-{n} → CD-1 … CD-11) — the deterministic scheme from discs.py.
@@ -2673,6 +2770,9 @@ def _grade_album(album_dir, lyrics_format, cfg=None):
                 lg = tr.get("log_grade")
                 if lg is None:
                     failed_checks += 1
+                    # Not partial-worded: the reason LOG_GRADE is missing on a
+                    # partial album with its .log present is that the audit has
+                    # not run, which is what this says.
                     add_issue("Missing LOG_GRADE tag (run Audit Library)",
                               tr["file"])
                     tr["issues"].append("LOG_GRADE")
@@ -2743,8 +2843,9 @@ def _grade_album(album_dir, lyrics_format, cfg=None):
                 if not per_disc_crc and not unmapped_crc:
                     total_checks += 1
                     failed_checks += 1
-                    add_issue("Rip .log has no per-track CRC checksums "
-                              "(cannot verify CD integrity)", "album")
+                    add_issue(partial_reason(
+                        "Rip .log has no per-track CRC checksums "
+                        "(cannot verify CD integrity)"), "album")
                 else:
                     discs_map = _album_discs(album_dir)
                     disc_by_path = {p: d for d, paths in (discs_map or {}).items()
@@ -3146,6 +3247,16 @@ def _grade_album(album_dir, lyrics_format, cfg=None):
                 # (the three legs), so nothing is marked FAKE here: marking a
                 # leg NONE as FAKE is what made "nobody could check this
                 # pressing" read exactly like "your rip is bad".
+            if partial:
+                # A PARTIAL album states the verdict its OWN tracks carry, not
+                # the disc's: the .accurip describes the whole disc, and reading
+                # its album-level word for a folder holding one track claims a
+                # verification of the eleven tracks that are not here (and
+                # charges this album for a track nobody imported).
+                states = {str(tr.get("accuraterip_status") or "NONE") for tr in tracks}
+                accuraterip_status = ("FAKE" if "FAKE" in states
+                                      else "REAL" if "REAL" in states
+                                      else "NONE")
             # ---- the three legs of a MEDIA=CD verdict ----------------------
             # Script 6 writes a CD's verdict from exactly three legs
             # (mlo.audit.run_audit_library — spec R21), so the readout below
@@ -3289,6 +3400,17 @@ def _grade_album(album_dir, lyrics_format, cfg=None):
                                 "database reads the same as a disc with no "
                                 ".accurip"),
             }
+            if partial:
+                # The missing artefact is the WHOLE DISC's, and this album is
+                # not the whole disc: say that, so a slice of a rip does not
+                # read as a rip whose sheets are lost.
+                _missing_wording = {
+                    n: (f"{w} — this album holds {partial_state['present']} of "
+                        f"{partial_state['total']} tracks of its recorded "
+                        f"tracklist, and the disc's own evidence was not "
+                        f"imported with them")
+                    for n, w in _missing_wording.items()
+                }
             for name in sorted(cd_legs_missing):
                 subject = (f"the CD verdict's '{name}' evidence for "
                            f"{len(cd_legs_missing[name])} track(s)")
@@ -3925,6 +4047,17 @@ def _grade_album(album_dir, lyrics_format, cfg=None):
         "media": media_summary or "(unknown)",
         "source_summary": _summarize_values(source_values),
         "track_count": len(audio_paths),
+        # Is this the whole release? A partial album is a different album from
+        # a small one, and the readout has to be able to say so (the grade's
+        # own rules are read against the disc the album IS, see the CD
+        # requirements above).
+        "partial": partial,
+        "partial_reason": (f"{partial_state['present']} of "
+                           f"{partial_state['total']} tracks of the album's "
+                           f"tracklist are in this folder"
+                           if partial else None),
+        "expected_total": partial_state["total"] if partial_state else None,
+        "expected_present": partial_state["present"] if partial_state else None,
         "pass_count": pass_count,
         "total_checks": total_checks,
         "cover_file": cover_file,
@@ -4189,6 +4322,10 @@ def format_grade_report(res, lyrics_format, track_file=None):
         f"Cue: {'yes' if res['has_cue'] else 'no'}",
         None,
     ))
+    # A partial album is not a small one: say which it is, before the rules
+    # that read a whole disc are listed below.
+    if res.get("partial_reason"):
+        lines.append((f"Partial album: {res['partial_reason']}", None))
 
     if res.get("audit_summary"):
         audit = res["audit_summary"]

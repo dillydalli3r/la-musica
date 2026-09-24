@@ -105,6 +105,32 @@ TAG_MAP = {
         "flac": "SCRIPT", "mp3": ("TXXX", "SCRIPT"),
         "mp4": ("freeform", "com.apple.iTunes", "SCRIPT"),
     },
+    # Podcast identity — the app's DERIVED release type, kept BESIDE the
+    # release-group type rather than in it (MLO's RELEASETYPE stays what
+    # MusicBrainz says, "Broadcast", so the naming script and every existing
+    # tag keep their meaning). MusicBrainz has no Podcast release-group type:
+    # a podcast is a SERIES of type "Podcast" and an episode is a release
+    # group linked to it `part of`, so the SERIES is what identifies an
+    # episode. Written by the tagging chain (mlo.autotag) from
+    # server.integrations.podcast_series_of, read by server.library, the Home
+    # shelf, the Podcasts filter and mlo.grader's non-music rule — one scan
+    # never asks MusicBrainz again.
+    #
+    # No MusicBrainz/Picard spelling exists for these three: they are the
+    # app's own facts, so the TXXX/freeform description is the plain tag name
+    # (readable by any tagger, and the app's own reader folds case).
+    "PODCASTSERIES": {
+        "flac": "PODCASTSERIES", "mp3": ("TXXX", "PODCASTSERIES"),
+        "mp4": ("freeform", "com.apple.iTunes", "PODCASTSERIES"),
+    },
+    "PODCASTSERIESMBID": {
+        "flac": "PODCASTSERIESMBID", "mp3": ("TXXX", "PODCASTSERIESMBID"),
+        "mp4": ("freeform", "com.apple.iTunes", "PODCASTSERIESMBID"),
+    },
+    "PODCASTEPISODE": {
+        "flac": "PODCASTEPISODE", "mp3": ("TXXX", "PODCASTEPISODE"),
+        "mp4": ("freeform", "com.apple.iTunes", "PODCASTEPISODE"),
+    },
     # Record label. ID3 keeps it in the standard TPUB frame (what beets and
     # Picard write; TXXX:LABEL is not part of the MusicBrainz ID3 TXXX set),
     # MP4 in the freeform atom both write. Earlier versions of this app used

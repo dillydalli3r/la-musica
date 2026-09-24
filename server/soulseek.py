@@ -2239,6 +2239,10 @@ def share_audit(cfg=None, probe=False):
     reported as working that was not observed working."""
     cfg = cfg or load_config()
     problems, notes, fired = [], [], set()
+    # What the share's reachability problem IS, in the summary's own words (see
+    # the listen-port block below). Empty until that block names one — and
+    # `listen_unconfirmed` cannot be the status before it runs.
+    listen_why = ""
 
     def add(status, code, message, hint=""):
         fired.add(status)
@@ -2355,9 +2359,9 @@ def share_audit(cfg=None, probe=False):
         elif status == "listen_unconfirmed":
             summary = (f"slskd is sharing {scan['files']} files in "
                        f"{scan['directories']} folders — other users can find and "
-                       f"search them, but no forward was confirmed for the "
-                       f"listen port, so a browse or a download FROM this "
-                       f"client can fail until it is reachable.")
+                       f"search them, but {listen_why} the listen port, so a "
+                       f"browse or a download FROM this client can fail until it "
+                       f"is reachable.")
         elif status == "misconfigured":
             summary = ("slskd is sharing, but part of the share configuration was "
                        "left out of the generated config.")
@@ -2443,21 +2447,29 @@ def share_audit(cfg=None, probe=False):
              "over the Soulseek listen port, which has to be published by "
              "docker-compose.yml (ports: \"<port>:<port>\") to the same port "
              "configured here.")
-    # The listen port is what a peer connects BACK to in order to download from
-    # this share: a client whose port is closed looks offline to the network
-    # even while search, login and the share index all work. Every case below is
-    # a fact read off this machine or off the router — nothing is inferred from
-    # intent, and a mapping nobody confirmed is never reported as one.
+    # Every case below is a fact read off this machine or off the router —
+    # nothing is inferred from intent, and a mapping nobody confirmed is never
+    # reported as one.
     port_state = audit["port"]
-    if port_state["conflict"]:
-        note(f"{port_state['conflict']}.")
-    elif port_state["error"]:
-        note(f"{port_state['error']}.")
-    elif not port_state["listening"]:
-        note(f"Nothing is accepting connections on the Soulseek listen port "
-             f"{port_state['listen_port']}.")
     mapping = port_state["mapping"]
-    # A gateway verdict that is not a mapping is the one case where a green
+    # The listen port is what a peer connects BACK to in order to download from
+    # this share: a client whose port nobody accepts on looks offline to the
+    # network even while search, login and the share index all work. The audit
+    # and "Test port" (/api/soulseek/port-check) answer that same question from
+    # the same measurement (port_status_payload), so they must not answer it
+    # differently: while the listen row says fail, the card used to answer
+    # status "ok" and "other users can search, browse and download them". A
+    # share a peer cannot connect back to is not "ok", and an upload served
+    # yesterday does not overrule it — the listen row is about the port as it
+    # is now.
+    from server import soulseek_port
+    listen_row = soulseek_port._listen_check(port_state)
+    if listen_row["state"] == "fail":
+        listen_why = ("another program is listening on" if port_state["conflict"]
+                      else "nothing accepts a connection on")
+        add("listen_unconfirmed", "listen_unreachable", listen_row["detail"],
+            _listen_hint(port_state))
+    # A gateway verdict that is not a mapping is the other case where a green
     # share lies: search, login and the index all work, so the audit used to say
     # "other users can search, browse and download them" — while a peer reaches
     # this library by connecting BACK to the listen port, and the app had just
@@ -2467,8 +2479,8 @@ def share_audit(cfg=None, probe=False):
     # install that is running (a container forwards through the host, see
     # _listen_hint). `refused`/`error` are the gateway's own refusals, which are
     # the same "no forward was confirmed" for the peer waiting to connect.
-    if mapping["enabled"] and mapping["state"] in ("refused", "no_gateway",
-                                                   "unsupported", "error"):
+    elif mapping["enabled"] and mapping["state"] in ("refused", "no_gateway",
+                                                     "unsupported", "error"):
         note(f"Peers cannot connect back to this client: {mapping['detail']} "
              f"Forward the listen port on the router (or check it on the "
              f"Soulseek page) — an unforwarded listener cannot be reached from "
@@ -2484,6 +2496,7 @@ def share_audit(cfg=None, probe=False):
                  f"reach this client, and the mapping this app asks for is not "
                  f"what is carrying them.")
         else:
+            listen_why = "no forward was confirmed for"
             add("listen_unconfirmed", "listen_unreachable",
                 f"Nothing confirmed a forward for the listen port "
                 f"{mapping['listen_port']}: {mapping['detail']}",
@@ -2936,16 +2949,42 @@ def _move(src, dst):
     return ok, (notes[-1] if notes else "move did not complete")
 
 
-def _pending_album_folders(cfg=None):
-    """Leaf names of remote folders whose transfers are still running.
+def _path_components(path, root):
+    """`path` below `root` as lowercase components, () when it is not below it.
 
-    The destination template keeps the remote folder structure below the
-    username and the batch id (see DESTINATION_SUBDIR), so the LEAF of a
-    transfer's remote path is still the name of the local directory the file
-    lands in — slskd recreates that directory wherever the rest of the path
-    puts it. `take_album` therefore matches a name anywhere inside the folder
-    it is about to move (a multi-disc album is moved as one `Album` folder
-    while its running transfers sit in `CD1`/`CD2`).
+    The one spelling every identity comparison in this file uses: a real path
+    is compared as the tuple of its parts so "inside the download dir" and
+    "which peer's tree" are decidable, where a string prefix/leaf test is not
+    (the same leaf sits under every peer, and a sibling folder can share it).
+    """
+    try:
+        rel = os.path.relpath(os.path.abspath(os.path.normpath(str(path))),
+                              os.path.abspath(os.path.normpath(str(root))))
+    except (OSError, ValueError):
+        return ()
+    rel = rel.replace("\\", "/")
+    if rel in ("", ".") or rel.startswith("../") or rel == "..":
+        return ()
+    return tuple(x.lower() for x in rel.split("/") if x not in ("", "."))
+
+
+def _pending_album_folders(cfg=None):
+    """The REMOTE folders with running transfers — `{(peer, folder path)}`.
+
+    A folder's identity is the peer slskd reports AND the transfer's own remote
+    folder path below the share root (as `_path_components`, lowercased). That
+    pair names exactly one directory on disk: the pinned destination template
+    puts the download at `<ddir>/<peer>/<batch id>/<that path>` (see
+    DESTINATION_SUBDIR), which is the same tail `soulseek_auto._candidate_dirs`
+    matches a candidate's own folders by.
+
+    The LEAF alone was not an identity: every peer and every batch has its own
+    folder of any given name, so an unrelated peer's unfinished transfer made a
+    complete album look busy (and a finished download's own still-running
+    sibling under another peer/batch let it be moved). `_still_downloading`
+    therefore compares both halves, stepping over the one component between the
+    peer and the folder path — the batch id, which slskd keeps to itself and
+    never reports in this tree.
     """
     from server.soulseek_auto import _remote_rel
     try:
@@ -2954,21 +2993,68 @@ def _pending_album_folders(cfg=None):
         # slskd unreachable: refusing every import would be worse than moving
         # one folder early, and the UI already reports slskd as down.
         return set()
-    leaves = set()
+    pending = set()
     for user in tree:
         if not isinstance(user, dict):
             continue
+        who = str(user.get("username") or "").strip().lower()
         for d in user.get("directories") or []:
             if not isinstance(d, dict):
                 continue
             for f in d.get("files") or []:
                 if not isinstance(f, dict) or finished_transfer(f.get("state")):
                     continue
+                # `_remote_rel` is already a clean relative path joined with
+                # "/": the folder the file lands in is it minus the file name.
                 rel = _remote_rel(str(f.get("filename") or ""))
-                leaf = os.path.basename(os.path.dirname(rel.replace("/", os.sep)))
-                if leaf:
-                    leaves.add(leaf.strip().lower())
-    return leaves
+                folder = tuple(x.lower() for x in rel.split("/")[:-1] if x)
+                if not folder:
+                    # A file at the top of the peer's share has no folder below
+                    # the batch id: the batch directory itself is where it
+                    # lands, and slskd reports no id to name it by. Left out,
+                    # as the old leaf rule left it out.
+                    continue
+                pending.add((who, folder))
+    return pending
+
+
+def _still_downloading(src, ddir, pending):
+    """True when a folder about to be moved holds a live transfer's own folder.
+
+    A multi-disc album is moved as ONE `Album` folder while the transfers still
+    coming down sit in its `CD1`/`CD2`, so every directory inside `src` counts,
+    not only `src` itself.
+
+    Each candidate is named the way its download named it (see
+    `_pending_album_folders`: the peer slskd reports and the remote folder path
+    below the share root), against the path it has below the download dir:
+
+    * deeper than the folder path — `<peer>/<batch id>/<folder path>…` (the
+      pinned destination template) or `<peer>/<folder path>…`: the peer is the
+      first component and the folder path the tail, with slskd's own batch id
+      the one component in between;
+    * exactly the folder path — `<folder path>…`: the layout that kept the
+      peer's own directory structure and nothing else;
+    * shallower — the layers that dropped components below the leaf (slskd's
+      old `${SOURCE_DIRECTORY}` default): there is no path and often no peer
+      left to compare, so the leaf is all the identity those folders ever had.
+    """
+    if not pending:
+        return False
+    for base, _dirs, _files in os.walk(src):
+        rel = _path_components(base, ddir)
+        if not rel:
+            continue
+        for peer, folder in pending:
+            if len(rel) > len(folder):
+                if rel[0] == peer and rel[-len(folder):] == folder:
+                    return True
+            elif len(rel) == len(folder):
+                if rel == folder:
+                    return True
+            elif rel[-1] == folder[-1]:
+                return True
+    return False
 
 
 # Album folders the LAST import_completed() left in the download dir (still
@@ -3090,20 +3176,9 @@ def import_completed(cfg=None, finish=False, progress=None):
     moved = []
 
     def still_downloading(src):
-        """True when a folder about to be moved holds a remote folder whose
-        transfers are still running.
-
-        A multi-disc album is moved as ONE `Album` folder while the transfers
-        still coming down sit in its `CD1`/`CD2`, so matching the moved
-        folder's own name is not enough: every directory name inside it counts
-        (the remote folder's leaf is the local directory name — one per
-        running file)."""
-        if not pending:
-            return False
-        for base, _dirs, _files in os.walk(src):
-            if os.path.basename(base).lower() in pending:
-                return True
-        return False
+        """True when a folder about to be moved holds a live transfer's own
+        folder (see `_still_downloading` and `_pending_album_folders`)."""
+        return _still_downloading(src, ddir, pending)
 
     def take_album(src):
         """Move one album folder whole — unless it is still downloading."""
@@ -3260,12 +3335,7 @@ def ready_albums(cfg=None):
     pending = _pending_album_folders(cfg)
 
     def still_downloading(src):
-        if not pending:
-            return False
-        for base, _dirs, _files in os.walk(src):
-            if os.path.basename(base).lower() in pending:
-                return True
-        return False
+        return _still_downloading(src, ddir, pending)
 
     def disc_parent(path):
         from server.soulseek_auto import _disc_number

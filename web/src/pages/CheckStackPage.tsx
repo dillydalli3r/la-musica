@@ -9,6 +9,7 @@ import { toast } from "../store";
 import Segmented from "../components/Segmented";
 import { PageLoading } from "../components/Badges";
 import PageHeader from "../components/PageHeader";
+import { gateOn, gateStateFrom, toggleGate, type GateState } from "../lib/stackDraft";
 
 /** MAINTAIN → Check stack: the whole stack in one page.
  *
@@ -136,17 +137,17 @@ interface Draft {
   order: number[];
   checks: Record<string, boolean>;
   audit: Record<string, boolean>;
-  gates: Record<string, boolean>;
+  /** Script id -> its feature switch, one boolean per script: the aggregate the
+   *  payload states and the save writes (see `lib/stackDraft.ts`). */
+  gates: GateState;
 }
 
 function draftFrom(stack: Stack): Draft {
-  const gates: Record<string, boolean> = {};
-  for (const s of stack.scripts) for (const k of s.gate.keys) gates[k] = s.gate.enabled;
   return {
     order: [...stack.run_all_order],
     checks: Object.fromEntries(stack.checks.map((c) => [c.key, c.enabled])),
     audit: Object.fromEntries(stack.audit.steps.map((s) => [s.key, !!s.enabled])),
-    gates,
+    gates: gateStateFrom(stack.scripts),
   };
 }
 
@@ -181,7 +182,9 @@ export default function CheckStackPage() {
     if (Object.keys(audit).length) edit.audit = audit;
     const scripts: Record<string, { enabled: boolean }> = {};
     for (const s of stack.scripts) {
-      const now = s.gate.keys.length ? s.gate.keys.every((k) => draft.gates[k]) : s.in_order;
+      // The feature switch's own aggregate — the same answer the checkbox
+      // shows (`gateOn`), never a second spelling of the any-of rule.
+      const now = s.gate.keys.length ? gateOn(draft.gates, s) : s.in_order;
       if (now !== s.enabled) scripts[String(s.id)] = { enabled: now };
     }
     if (Object.keys(scripts).length) edit.scripts = scripts;
@@ -238,10 +241,8 @@ export default function CheckStackPage() {
     setDraft((d) => {
       if (!d) return d;
       if (s.gate.keys.length) {
-        const gates = { ...d.gates };
-        for (const k of s.gate.keys) gates[k] = on;
         const order = on && !d.order.includes(s.id) ? [...d.order, s.id] : d.order;
-        return { ...d, gates, order };
+        return { ...d, gates: toggleGate(d.gates, s, on), order };
       }
       return { ...d, order: on ? [...d.order, s.id] : d.order.filter((i) => i !== s.id) };
     });
@@ -288,7 +289,7 @@ export default function CheckStackPage() {
   ];
   const checksOn = stack.checks.filter((c) => draft.checks[c.key]).length;
   const scriptsOn = stack.scripts.filter((s) => draft.order.includes(s.id)
-    && (s.gate.keys.length ? s.gate.keys.every((k) => draft.gates[k]) : true)).length;
+    && gateOn(draft.gates, s)).length;
 
   return (
     <div className="p-6 space-y-5 mx-auto max-w-6xl">
@@ -347,8 +348,7 @@ export default function CheckStackPage() {
         </div>
         <div className="stagger divide-y divide-border/40 rounded-lg border border-border/60 bg-panel/40">
           {visible(ordered).map((s) => {
-            const on = draft.order.includes(s.id)
-              && (s.gate.keys.length ? s.gate.keys.every((k) => draft.gates[k]) : true);
+            const on = draft.order.includes(s.id) && gateOn(draft.gates, s);
             return (
               <div key={s.id} className="flex items-start gap-3 px-3.5 py-2.5">
                 <input
@@ -375,7 +375,7 @@ export default function CheckStackPage() {
                   <span className="text-[11px] text-zinc-500 block leading-snug">{s.description}</span>
                   <span className="text-[10px] text-zinc-600 block leading-snug font-mono">
                     {s.gate.keys.length
-                      ? `switch ${s.gate.keys.join(" · ")} ${s.gate.enabled ? "on" : "off"}`
+                      ? `switch ${s.gate.keys.join(" · ")} ${gateOn(draft.gates, s) ? "on" : "off"}`
                       : s.removable ? "no feature switch" : "position fixed by the app"}
                   </span>
                 </span>

@@ -1302,6 +1302,93 @@ def check_audit_one_tag_read_per_file(tmp):
        f"(measured {len(opens)} opens for 2 files)")
 
 
+def check_ffprobe_asked_only_when_needed(tmp):
+    """No pass spawns ffprobe for an answer it already holds.
+
+    Counted by SPAWN COUNT, not by time (a timing assertion is flaky):
+      * script 7's meter took the channel count from the container the pass
+        ALREADY had open, instead of one `ffprobe` process per track — a
+        process spawn per file, per run, for a number the header states;
+      * a converted file's duration came from the container this pipeline had
+        just written and was about to open for its tags anyway, so one
+        conversion spawns ffprobe once (the source probe), not twice.
+    """
+    from mlo import dr as mlo_dr
+    from mlo import flac as mlo_flac
+    from mlo import loudness
+    if not (FFMPEG_EXE and FFPROBE_EXE):
+        skip("no ffmpeg/ffprobe: the DR meter and the conversion cannot run")
+        return
+
+    # --- script 7: the DR pass asks the handle it is holding --------------
+    album = os.path.join(tmp, "dr_handle_album")
+    os.makedirs(album)
+    files = [_tone_flac(os.path.join(album, f"0{n} - Track.flac"), 7)
+             for n in (1, 2)]
+    opened = mlo_audio.AudioFile(files[0])
+    from_handle = (mlo_dr.handle_channels(opened)
+                   if hasattr(mlo_dr, "handle_channels") else 0)
+    ok(from_handle == 2,
+       f"script 7: the open handle states the channel count "
+       f"(measured {from_handle})")
+
+    probes, restore_probe = count_calls(mlo_dr, "probe_channels")
+    try:
+        modified, failures = loudness._dr_album(
+            album, FFMPEG_EXE, False, write_tags=True,
+            config=cfg(music_folder=album))
+    finally:
+        restore_probe()
+
+    ok(not probes,
+       f"script 7: the DR pass spawns NO ffprobe per track — the handle it "
+       f"already holds answers (measured {len(probes)} probes for "
+       f"{len(files)} tracks)")
+    ok(not failures and modified == len(files),
+       f"script 7: every track is still measured and written (modified="
+       f"{modified}, failures={failures})")
+    written = str(mlo_audio.AudioFile(files[0]).get_tag("DYNAMIC RANGE") or "").strip()
+    ok(written and written == str(mlo_dr.measure_track(files[0], FFMPEG_EXE)),
+       f"script 7: the tag holds the meter's own number ({written})")
+
+    # --- script 3 / the import: one ffprobe per converted file ------------
+    src = os.path.join(tmp, "convert_once.wav")
+    with wave.open(src, "w") as w:
+        w.setnchannels(2)
+        w.setsampwidth(2)
+        w.setframerate(44100)
+        w.writeframes(b"\x00\x01\x00\x02" * (44100 * 2))
+
+    spawns = []
+    real_run = mlo_flac.run_tool
+
+    def counting_run(args, *a, **kw):
+        spawns.append(os.path.basename(str(args[0])).lower())
+        return real_run(args, *a, **kw)
+
+    mlo_flac.run_tool = counting_run
+    try:
+        name, converted, info, _rem, _add = mlo_flac._convert_lossless_source((
+            FFMPEG_EXE, FFPROBE_EXE, METAFLAC_EXE, src, 5, "1.5.0", {},
+            cfg(music_folder=tmp, lossless_remove_original=False)))
+    finally:
+        mlo_flac.run_tool = real_run
+
+    out = os.path.splitext(src)[0] + ".flac"
+    ok(converted and os.path.exists(out) and os.path.exists(src),
+       f"script 3: the WAV still converts and the original is kept ({info})")
+    ok(sum(1 for s in spawns if s.startswith("ffprobe")) == 1,
+       f"script 3: ONE ffprobe per converted file — the source probe; the "
+       f"output's duration came from the container we were about to open "
+       f"anyway (measured {spawns.count('ffprobe.exe') + spawns.count('ffprobe')}"
+       f" ffprobe spawns: {spawns})")
+    tags = {str(k).lower(): v
+            for k, v in (mlo_audio.AudioFile(out).all_tags() or {}).items()}
+    ok(str(tags.get("encoder_program") or "").strip() == "FLAC reference encoder",
+       f"script 3: the converted file still carries this pipeline's ENCODER "
+       f"identity (measured {tags.get('encoder_program')!r})")
+
+
 def main():
     print("Script optimization audit (measurements, not claims)")
     tmp = tempfile.mkdtemp(prefix="mlo_script_opt_")
@@ -1331,6 +1418,7 @@ def main():
         ("script 1  Format lyrics (one open)", check_lyrics_one_open_per_track),
         ("script 1  Format lyrics (album pass reads)", check_lyrics_album_pass_still_reads),
         ("script 10 Format all (cover cache)", check_format_all_cover_prepared_once),
+        ("script 7/3 ffprobe spawns", check_ffprobe_asked_only_when_needed),
         ("all       atomic sidecar writes", check_fsync_dir),
     ]
     bad = 0

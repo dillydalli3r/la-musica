@@ -62,6 +62,7 @@ import tempfile
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from mlo import config as mlo_config
+from mlo import cover_choice as cc
 from mlo import lyrics_providers as lp
 from server import integrations as intg
 
@@ -673,8 +674,11 @@ assert mlo_config.normalize_config({})["cover_auto_fetch"] is True
 assert mlo_config.normalize_config({"cover_review": True})["cover_review"] is True
 assert mlo_config.DEFAULT_CONFIG["cover_review"] is False
 assert mlo_config.DEFAULT_CONFIG["cover_auto_fetch"] is True
-# a review is a pick-one screen, so the step asks for a screenful
-assert imp.COVER_REVIEW_LIMIT == 12
+# a review is a pick-one screen, so the step asks for a screenful — and it is
+# the SAME ask the cover dialog's own route defaults to (`mlo.cover_choice`
+# holds the one number; `tools/test_cover_parity.py` drives both paths and
+# checks they ask it and land the same image).
+assert imp.COVER_REVIEW_LIMIT == cc.SEARCH_LIMIT
 
 REVIEW_ON = {"music_folder": MUSIC, "cover_review": True}
 # A pass-through recorder around the finder: the review limit is applied a
@@ -698,10 +702,10 @@ calls = stub_cov(cover_lines(20, width=1200, height=1200,
                              release=release_of("Radiohead", "OK Computer", 12)))
 stub_json({})
 out = imp.run_cover_step(staged_album, REVIEW_ON)
-# staged, NOT fetched, and the count is the review limit — not the finder's
-# own default of 40, and not the single hit the auto-apply used to take.
-assert (out["staged"], out["fetched"], out["candidates"]) == (True, False, 12), out
-assert out["source"] == "cov" and "12 cover" in out["note"], out
+# staged, NOT fetched, and the count is what the finder answered the step's own
+# ask with (the stub streams 20 rows), not whatever the auto-apply used to take.
+assert (out["staged"], out["fetched"], out["candidates"]) == (True, False, 20), out
+assert out["source"] == "cov" and "20 cover" in out["note"], out
 assert out["choice"] and out["choice"]["big"] == "https://img.test/a0.jpg", out["choice"]
 assert "best: itunes" in out["note"], out["note"]
 assert set(out) == set(NOOP), out
@@ -738,7 +742,7 @@ assert len(covers["staged_at"]) == 20 and covers["staged_at"].endswith("Z"), \
 # the provider's rows, ranked best first by the ONE cover policy: every row
 # carries what it was measured from plus the reasons that put it there, and the
 # winner is recorded separately so the picker opens ON the pick.
-assert len(covers["results"]) == 12, len(covers["results"])
+assert len(covers["results"]) == 20, len(covers["results"])
 first = covers["results"][0]
 assert {k: first[k] for k in ("source", "small", "big", "title", "artist",
                               "tracks", "url", "width", "height")} == {
@@ -753,7 +757,7 @@ assert covers["policy"]["minimum"] == 1200, covers["policy"]
 # identical rows tie on every rule, so the provider's own order (the position
 # it listed them in) keeps them in the order it sent them
 assert [r["big"] for r in covers["results"]] == \
-    [f"https://img.test/a{i}.jpg" for i in range(12)], covers["results"]
+    [f"https://img.test/a{i}.jpg" for i in range(20)], covers["results"]
 
 # The import chain relocates the album (beets/organize), so the record must be
 # findable from a path the import never saw: `staged_metadata` falls back to
@@ -874,14 +878,14 @@ stub_probe({f"https://coverartarchive.org/release/rg/{i}.png": jpeg(1500, 1500)
             for i in range(15)})
 out = imp.run_cover_step(rg_album, REVIEW_ON)
 assert (out["staged"], out["candidates"], out["source"]) == \
-    (True, 12, "coverartarchive"), out
+    (True, 15, "coverartarchive"), out
 # the meta-search WAS asked (by name) and had nothing — which is why the
 # identity read ran at all: an empty answer is a fallback case, never a
 # silent one
 assert len(cov_calls) == 1 and cov_calls[0]["body"]["artist"] == "Radiohead", cov_calls
 assert [c[0] for c in jcalls] == [f"{intg.CAA_BASE}/release-group/{CAA_RG}"], jcalls
 entry = imp.staged_metadata(rg_album, REVIEW_ON)["covers"]
-assert entry["release_group"] == CAA_RG and len(entry["results"]) == 12, entry
+assert entry["release_group"] == CAA_RG and len(entry["results"]) == 15, entry
 # the group's images ARE the album's own art — the reference the policy
 # prefers — and the policy says so in the row's own reasons
 assert entry["results"][0]["release_cover"] is False, entry["results"][0]

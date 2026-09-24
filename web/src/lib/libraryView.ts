@@ -51,7 +51,8 @@ export type Preset =
   | "digital"
   | "instrumental"
   | "missingLyrics"
-  | "videos";
+  | "videos"
+  | "podcasts";
 
 export const PRESETS: { id: Preset; label: string }[] = [
   { id: "all", label: "All" },
@@ -60,6 +61,12 @@ export const PRESETS: { id: Preset; label: string }[] = [
   { id: "digital", label: "Digital" },
   { id: "instrumental", label: "Instrumental" },
   { id: "videos", label: "Music videos" },
+  // Not a medium and not a MusicBrainz release-group type: a podcast episode
+  // is a release group linked `part of` a series of type Podcast (see
+  // mlo.naming.DERIVED_RELEASE_TYPES), and the app records that series on the
+  // episode's own files — so this preset asks the album's `podcast` block,
+  // which a scan fills without asking MusicBrainz.
+  { id: "podcasts", label: "Podcasts" },
   { id: "missingLyrics", label: "No lyrics" },
 ];
 

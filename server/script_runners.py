@@ -224,7 +224,32 @@ RUNNERS: dict[int, tuple[str, "callable"]] = {
     # at. No force flag: its subject IS the incomplete pair, so a file holding
     # both halves is deliberately left alone.
     21: ("Fix AcoustID pairs", _optional("mlo.acoustid", "run_fix_pairs")),
+    # 22 gives back: the fingerprint + MusicBrainz recording id the files
+    # state go to AcoustID's public database (mlo.acoustid.submit_files, the
+    # same pass the import route runs). It is NOT in the Run All order and not
+    # anchored into it (see OPT_IN_SCRIPTS below): a submission is a public,
+    # outward-facing write, so it happens when someone asks for it — from a
+    # details menu, from the import wizard's AcoustID step, or from a Run All
+    # the user put it in themselves. Its only switch is `acoustid_enabled`
+    # (the chain's own gate), so a missing user key is a named error from the
+    # runner, never a silent skip.
+    22: ("Submit fingerprints (AcoustID)",
+         _optional("mlo.acoustid", "run_submit_fingerprints")),
 }
+
+# Scripts the Run All order deliberately does NOT carry. Every other script
+# holds a slot in `mlo.config.DEFAULT_RUN_ALL_ORDER` (and so in the import
+# chain DEFAULT_CHAIN derives from it): a script nobody can reach is the drift
+# the registry exists to stop. These are the ones whose work is OUTWARD-FACING
+# — 22 publishes a fingerprint + recording id to AcoustID's public database —
+# so shipping it in the default chain would publish on every import of every
+# install without anyone asking. They are offered everywhere a script is
+# (the Optimization page's individual list, the details menus, /api/run) and a
+# user who ticks one gets it in their own order, where it stays
+# (mlo.config.normalize_config keeps a saved 22 instead of re-anchoring it).
+# tests/../test_check_stack.py and test_script_menus.py read this declaration
+# rather than an assumption about the order.
+OPT_IN_SCRIPTS: frozenset = frozenset({22})
 
 # The config key a script's own force flag lives under. `force` may be keyed by
 # script id ("5") or by these UI names ("images") — both reach the same key.
@@ -293,6 +318,13 @@ _DISABLED = {
     # feature the user turned off (the runner refuses too; this is what makes
     # the run report say WHY it did nothing).
     21: "acoustid_enabled",
+    # 22 SUBMITS to AcoustID's public database, which is exactly what the
+    # AcoustID switch governs; `mlo.acoustid.check_submit` refuses on the same
+    # key, so the feature off means nothing is read, fingerprinted or sent.
+    # The switch is not "may this run automatically" (the Run All order is:
+    # 22 is not in it — see OPT_IN_SCRIPTS), or an explicit press from a
+    # details menu would be refused for the very reason it exists.
+    22: "acoustid_enabled",
 }
 
 

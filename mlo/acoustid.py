@@ -62,6 +62,29 @@ it had just matched:
     write_failed / verify_failed   the writer refused, or the pair did not read
                             back off the file afterwards
 
+The submission contract (`submit_files`, `run_submit_fingerprints`) is the one
+place this module gives something to somebody else's database, so it is
+stricter than `v2/submit` itself allows. AcoustID accepts a fingerprint with no
+metadata at all, but it is not useful (the service says so) and this app only
+ever sends what a file STATES, so an entry needs BOTH halves:
+
+    * a MusicBrainz recording id — the `mbid.N` a submission links the
+      fingerprint to. MusicBrainz never receives a raw fingerprint; the link IS
+      the recording id. Read off the file by `_recording_identity` (ACOUSTID_ID,
+      MUSICBRAINZ_TRACKID, or the recording MBID this app's naming script wrote
+      into the name), never guessed.
+    * a fingerprint — the tag when the file carries one, else taken from the
+      AUDIO by fpcalc (local, no key): the pair a CD rip needs is exactly the
+      one no lookup could have given it.
+
+and it is never sent twice: `pair_known` asks the lookup endpoint whether the
+service already links that fingerprint to that recording, and the pairs this
+app has already handed over are recorded under `<music>/.mlo/data` (the service
+imports asynchronously, so "pending" a minute ago is already in flight). With
+`acoustid_enabled` off nothing is read, fingerprinted or sent — and with no
+`acoustid_user_key` the answer is the named NO_USER_KEY refusal, never a
+request: the application key looks up and can never submit.
+
 A fingerprint that could not be taken (`fpcalc_failed`) and a lookup that
 could not be answered (`lookup_failed` / `bad_response`) are their OWN codes:
 they are never reported as NO_MATCH, which means exactly "the service answered
@@ -71,9 +94,11 @@ fingerprint/lookup-shaped in `failures` (which make the verdict "error"), and
 NO_MATCH counted as evidence, not as a failure.
 """
 
+import hashlib
 import json
 import math
 import os
+import re
 import shutil
 import socket
 import threading
@@ -82,6 +107,7 @@ import urllib.error
 import urllib.parse
 import urllib.request
 
+from .atomic import write_bytes
 from .paths import LIB_AUDIO_EXTS, tools_dirs
 from .stats import (is_audio_file, new_stats, _collect_targets, _find_albums,
                     _make_pbar, _pbar_skip, _pbar_update, worker_count)
@@ -147,6 +173,18 @@ UNSUPPORTED = "unsupported_container"
 UNREADABLE = "unreadable_file"
 WRITE_FAILED = "write_failed"
 VERIFY_FAILED = "verify_failed"
+
+# Submission outcomes (`submit_files`), one per track in its `results`. The
+# service's own answer for an entry it took is an id plus a status
+# (asynchronous: "pending"); these are what THIS app reports, so a report can
+# say "already known" for a pair AcoustID already holds without inventing a
+# service answer for a request that was deliberately never sent.
+ACCEPTED = "accepted"          # the service took this entry (see id / status)
+ALREADY_KNOWN = "already_known"  # the pair is already there (or already sent)
+REJECTED = "rejected"          # the service refused the batch it was in
+OUTCOME_SKIPPED = "skipped"    # nothing to send - `code`/`reason` say why
+SUBMISSION_OUTCOMES = frozenset({ACCEPTED, ALREADY_KNOWN, REJECTED,
+                                 OUTCOME_SKIPPED})
 
 _NOTES = {
     DISABLED: "AcoustID disabled in settings",
@@ -692,7 +730,7 @@ def _submit_form(user, items):
     return form
 
 
-def submit_fingerprints(cfg, items):
+def submit_fingerprints(cfg, items, require_mbid=True):
     """Give AcoustID the fingerprints + metadata a set of tracks carries.
 
     `items` are `{"path", "fingerprint", "duration", "recording_id"/"mbid",
@@ -703,6 +741,14 @@ def submit_fingerprints(cfg, items):
     code and reason before any request: the service cannot store half an entry,
     and a guessed duration would put a wrong one in a public database.
 
+    `require_mbid` is the submission's own rule, not the service's: AcoustID
+    accepts a fingerprint with no metadata, but the pair it stores is a
+    FINGERPRINT + a MusicBrainz RECORDING ID (MusicBrainz itself never sees a
+    fingerprint), so an entry that names no recording is refused here with
+    NO_RECORDING_ID rather than published as a fingerprint nothing points at.
+    `verify_user_key` is the one caller that turns it off, and only for its
+    no-metadata credential probe (see there).
+
     Batches of MAX_SUBMIT (AcoustID's own per-call limit) go out in order, and
     the service's answer is reported as it gives it: `submitted` counts the
     submissions it accepted (each with its id and status), a refused user key
@@ -711,15 +757,21 @@ def submit_fingerprints(cfg, items):
     accepted by a key the first one was refused for.
 
     -> {"ok", "code", "reason", "submitted", "failed", "skips", "submissions",
-        "batches"}. Never raises.
+        "results", "batches"}. `results` carries one row per track that went
+    anywhere, in order: {"path", "outcome" (ACCEPTED / REJECTED /
+    OUTCOME_SKIPPED), "code", "reason", "id", "status", "recording_id",
+    "index"}. Never raises.
     """
     cfg = cfg or {}
     items = [dict(item) for item in (items or []) if isinstance(item, dict)]
-    ready, skips = [], []
+    ready, skips, results = [], [], []
     for item in items:
         if not str(item.get("fingerprint") or "").strip():
             skips.append({"path": item.get("path"), "code": NO_FINGERPRINT,
                           "reason": "no fingerprint to submit"})
+            results.append(_sub_row(item, OUTCOME_SKIPPED,
+                                    code=NO_FINGERPRINT,
+                                    reason="no fingerprint to submit"))
             continue
         try:
             duration = float(item.get("duration") or 0)
@@ -729,6 +781,19 @@ def submit_fingerprints(cfg, items):
             skips.append({"path": item.get("path"), "code": NO_DURATION,
                           "reason": "the track's duration is unknown, so its "
                                     "fingerprint cannot be submitted"})
+            results.append(_sub_row(item, OUTCOME_SKIPPED, code=NO_DURATION,
+                                    reason="the track's duration is unknown, so "
+                                           "its fingerprint cannot be submitted"))
+            continue
+        if require_mbid and not str(item.get("mbid")
+                                    or item.get("recording_id") or "").strip():
+            reason = ("the file names no MusicBrainz recording id to submit — "
+                      "AcoustID stores a fingerprint WITH the recording it is, "
+                      "and this app does not send a fingerprint nothing points at")
+            skips.append({"path": item.get("path"), "code": NO_RECORDING_ID,
+                          "reason": reason})
+            results.append(_sub_row(item, OUTCOME_SKIPPED,
+                                    code=NO_RECORDING_ID, reason=reason))
             continue
         item["duration"] = duration
         ready.append(item)
@@ -737,16 +802,16 @@ def submit_fingerprints(cfg, items):
     if not chk["available"]:
         return _result(False, chk["code"], chk["reason"], submitted=0,
                        failed=len(ready), skips=skips, submissions=[],
-                       batches=[])
+                       results=results, batches=[], available=False)
     if not ready:
         return _result(False, NO_TRACKS,
                        "no track carries a fingerprint to submit",
                        submitted=0, failed=0, skips=skips, submissions=[],
-                       batches=[])
+                       results=results, batches=[], available=True)
 
     who = {"client": str(cfg.get("acoustid_api_key")).strip(),
            "user": str(cfg.get("acoustid_user_key")).strip()}
-    accepted, batches, failed = [], [], 0
+    batches, failed = [], 0
     code, reason = OK, ""
     for start in range(0, len(ready), MAX_SUBMIT):
         batch = ready[start:start + MAX_SUBMIT]
@@ -754,7 +819,13 @@ def submit_fingerprints(cfg, items):
         batches.append({"ok": got["ok"], "code": got["code"],
                         "reason": got["reason"], "count": len(batch)})
         if not got["ok"]:
+            # The service's own sentence IS the report for every entry of the
+            # batch, and the batches after this one are not sent: a key the
+            # service just refused will refuse them too.
             code, reason = got["code"], got["reason"]
+            for i, item in enumerate(batch):
+                results.append(_sub_row(item, REJECTED, index=start + i,
+                                        code=code, reason=reason))
             failed += len(ready) - start
             break
         submissions = got["payload"].get("submissions")
@@ -762,6 +833,9 @@ def submit_fingerprints(cfg, items):
             code, reason = (BAD_RESPONSE,
                             "AcoustID answered ok but carried no submission list")
             batches[-1].update(ok=False, code=code, reason=reason)
+            for i, item in enumerate(batch):
+                results.append(_sub_row(item, REJECTED, index=start + i,
+                                        code=code, reason=reason))
             failed += len(ready) - start
             break
         answers = {}
@@ -781,15 +855,161 @@ def submit_fingerprints(cfg, items):
                 code, reason = (BAD_RESPONSE,
                                 f"AcoustID accepted the batch but answered for "
                                 f"{len(answers)} of {len(batch)} submissions")
-                accepted.append({"path": item.get("path"), "index": start + i,
-                                 "id": None, "status": None})
+                results.append(_sub_row(item, REJECTED, index=start + i,
+                                        code=code, reason=reason))
                 continue
-            accepted.append({"path": item.get("path"), "index": start + i,
-                             "id": sub.get("id"), "status": sub.get("status")})
-    landed = [row for row in accepted if row.get("id") is not None]
+            results.append(_sub_row(item, ACCEPTED, index=start + i,
+                                    id=sub.get("id"), status=sub.get("status")))
+    landed = [row for row in results
+              if row["outcome"] == ACCEPTED and row.get("id") is not None]
     return _result(not failed and code == OK, code, reason,
                    submitted=len(landed), failed=failed, skips=skips,
-                   submissions=landed, batches=batches)
+                   submissions=landed, results=results, batches=batches,
+                   available=True)
+
+
+def _sub_row(item, outcome, index=None, id=None, status=None, code=OK,
+             reason=""):
+    """One track's own line of a submission report (`submit_fingerprints`)."""
+    return {"path": item.get("path"), "outcome": outcome, "index": index,
+            "id": id, "status": status, "code": code, "reason": reason,
+            "recording_id": str(item.get("mbid")
+                                or item.get("recording_id") or "").strip()}
+
+
+def pair_known(cfg, fingerprint, duration, recording_id):
+    """Does AcoustID already link this fingerprint to this recording?
+
+    The dedupe half of a submission, and the only honest place to ask it:
+    `v2/submit` reports only that a batch was TAKEN, so "the service already
+    has this pair" is a question for the lookup endpoint — `meta=recordings`
+    is the recordings a fingerprint's cluster is linked to, at EVERY score.
+    That is deliberately not the configured `acoustid_min_score`: this asks
+    what the database holds, not what the app would show a user as a match.
+
+    -> {"ok", "code", "reason", "known", "rows"}. `ok` False means the question
+    could not be asked at all (no key, network, unusable body) — `known` is
+    then NOT a verdict, and `submit_files` refuses to send blind. Never raises.
+    """
+    rid = str(recording_id or "").strip()
+    if not rid:
+        return _result(False, NO_RECORDING_ID,
+                       "no MusicBrainz recording id to look for",
+                       known=False, rows=0)
+    if not str(fingerprint or "").strip():
+        return _result(False, NO_FINGERPRINT, "no fingerprint to ask about",
+                       known=False, rows=0)
+    try:
+        seconds = float(duration or 0)
+    except (TypeError, ValueError):
+        seconds = 0.0
+    if seconds <= 0:
+        return _result(False, NO_DURATION,
+                       "the track's duration is unknown, so its fingerprint "
+                       "cannot be asked about", known=False, rows=0)
+    resp = _request(cfg, {"fingerprint": str(fingerprint), "duration": seconds})
+    if not resp["ok"]:
+        return _result(False, resp["code"], resp["reason"], known=False, rows=0)
+    rows = parse_payload({"status": "ok", "results": resp["results"]})
+    want = rid.casefold()
+    known = any(str(row.get("recording_id") or "").strip().casefold() == want
+                for row in rows)
+    return _result(True, OK, "", known=known, rows=len(rows))
+
+
+# --------------------------------------------------------------------------- #
+# What this app has already given AcoustID (the local half of "don't re-send")
+# --------------------------------------------------------------------------- #
+# AcoustID imports a submission asynchronously, so a pair sent a minute ago is
+# still "pending" when the lookup endpoint is asked about it again: without a
+# local note, a second press — or the next run over the same album — would send
+# the very same pair. One small JSON file under the music folder's .mlo/data
+# records the pairs the service ACCEPTED (with its submission id and status);
+# an entry the service refused is deliberately NOT recorded, so it is retried,
+# and nothing here is ever read as a verdict about the audio.
+SUBMISSIONS_FILE = "acoustid_submissions.json"
+# Bounded: a library-wide run over a huge library must not grow this forever.
+# The oldest entries drop first — the service check covers what falls out.
+_SUBMISSIONS_MAX = 20000
+
+
+def submission_key(fingerprint, recording_id):
+    """The identity of one submission: sha1 of fingerprint + recording id.
+
+    A fingerprint is thousands of characters, so the pair is hashed rather than
+    stored whole: the same file fingerprinted twice gives the same fingerprint,
+    so the same key, which is exactly the re-send this is here to catch.
+    """
+    material = f"{str(fingerprint or '').strip()}|" \
+               f"{str(recording_id or '').strip()}"
+    return hashlib.sha1(material.encode("utf-8")).hexdigest()
+
+
+def submissions_file(cfg=None):
+    """<music>/.mlo/data/acoustid_submissions.json, or "" when there is none."""
+    try:
+        from .paths import app_data_dir
+
+        return os.path.join(app_data_dir((cfg or {}).get("music_folder")),
+                            SUBMISSIONS_FILE)
+    except Exception:
+        return ""
+
+
+def load_submissions(cfg=None):
+    """{key: {"recording_id", "fingerprint", "id", "status", "at"}}; {} on any
+    failure — a record that cannot be read must not stop a submission."""
+    path = submissions_file(cfg)
+    if not path:
+        return {}
+    try:
+        with open(path, "r", encoding="utf-8") as fh:
+            data = json.load(fh)
+    except Exception:
+        return {}
+    if not isinstance(data, dict):
+        return {}
+    out = {}
+    for key, row in data.items():
+        if isinstance(row, dict) and str(key).strip():
+            out[key] = row
+    return out
+
+
+def record_submissions(cfg, rows):
+    """Remember the pairs the service accepted. Atomic, bounded, never raises.
+
+    `rows` are this module's own result rows ({"fingerprint", "recording_id",
+    "id", "status", "path"}) — only the ones the service gave an id to.
+    """
+    rows = [row for row in (rows or [])
+            if isinstance(row, dict) and row.get("id") is not None
+            and str(row.get("fingerprint") or "").strip()
+            and str(row.get("recording_id") or "").strip()]
+    if not rows:
+        return
+    path = submissions_file(cfg)
+    if not path:
+        return
+    data = load_submissions(cfg)
+    at = time.strftime("%Y-%m-%dT%H:%M:%S")
+    for row in rows:
+        data[submission_key(row["fingerprint"], row["recording_id"])] = {
+            "recording_id": str(row["recording_id"]),
+            "fingerprint": str(row["fingerprint"]),
+            "id": row.get("id"), "status": row.get("status"), "at": at,
+            "path": row.get("path"),
+        }
+    if len(data) > _SUBMISSIONS_MAX:
+        keep = sorted(data.items(),
+                      key=lambda kv: str(kv[1].get("at") or ""),
+                      reverse=True)[: _SUBMISSIONS_MAX]
+        data = dict(keep)
+    try:
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        write_bytes(path, json.dumps(data, indent=0).encode("utf-8"))
+    except Exception:                             # pragma: no cover - disk
+        pass
 
 
 # The probe submission `verify_user_key` sends, when the caller has no
@@ -797,7 +1017,10 @@ def submit_fingerprints(cfg, items):
 # artist (source 3, "fingerprint only"), so nothing in it can ever attach wrong
 # metadata to a recording — which is the one thing a credential probe must not
 # do. A fingerprint-only submission with no recording to point at is what
-# AcoustID's own unmatched queue is made of.
+# AcoustID's own unmatched queue is made of, and it is the ONE place this app
+# turns `require_mbid` off: a key can only be proved by a real submission, and
+# the probe has nothing to attach (record_submissions is never reached with
+# it).
 def verify_user_key(cfg=None, fingerprint=None, duration=None):
     """Does the live service accept this USER key? One probe submission.
 
@@ -822,7 +1045,7 @@ def verify_user_key(cfg=None, fingerprint=None, duration=None):
     body = {"fingerprint": str(fingerprint or PROBE_FINGERPRINT),
             "duration": float(duration or PROBE_DURATION),
             "source": SOURCE_FINGERPRINT}
-    got = submit_fingerprints(cfg, [body])
+    got = submit_fingerprints(cfg, [body], require_mbid=False)
     if not got["ok"]:
         return _result(False, got["code"], got["reason"],
                        submitted=got.get("submitted") or 0, id=None,
@@ -830,6 +1053,267 @@ def verify_user_key(cfg=None, fingerprint=None, duration=None):
     first = (got.get("submissions") or [{}])[0]
     return _result(True, OK, "", submitted=got.get("submitted") or 0,
                    id=first.get("id"), status=first.get("status"))
+
+
+# --------------------------------------------------------------------------- #
+# One submission pass over a set of FILES (the route and the script runner)
+# --------------------------------------------------------------------------- #
+def prepare_submission(cfg, path):
+    """(item, skip) for ONE file: exactly one of the two is set.
+
+    What a submission needs is what the FILE says, read in the order the rest of
+    this module trusts (`_recording_identity`): the recording id from
+    ACOUSTID_ID, then MUSICBRAINZ_TRACKID, then the one bracketed recording UUID
+    in the file's own name; the fingerprint from the ACOUSTID_FINGERPRINT tag
+    when there is one, else taken from the AUDIO with fpcalc (local, no key, no
+    request). That second half is what makes the CD rip AcoustID has never heard
+    of submittable at all — a lookup cannot identify audio the database has
+    never seen, and this app's own library is full of exactly that.
+
+    A file that names no recording is SKIPPED (`no_recording_id`), never
+    fingerprinted and sent: a submission stores a fingerprint WITH the recording
+    it is (MusicBrainz itself never receives a fingerprint), and this app sends
+    only what a file states. Reads only — `get_tag`, the stream's own length,
+    fpcalc — so a submission never writes to the file it describes.
+    """
+    from .audio import AudioFile
+
+    base = os.path.basename(str(path))
+    try:
+        af = AudioFile(path)
+    except Exception as e:
+        return None, {"path": path, "code": UNREADABLE,
+                      "reason": f"could not read {base}: {e}"}
+    try:
+        if af.audio is None:
+            return None, {"path": path, "code": UNREADABLE,
+                          "reason": (f"cannot read {base}: "
+                                     f"{af.error or 'no tag reader for this file'}")}
+        rid, where = _recording_identity(path, af)
+        value = str(af.get_tag("ACOUSTID_FINGERPRINT") or "").strip()
+        info = getattr(getattr(af, "audio", None), "info", None)
+        duration = 0.0
+        for candidate in (getattr(info, "length", None),
+                          (getattr(af, "tech", None) or {}).get("length")):
+            try:
+                duration = float(candidate or 0)
+            except (TypeError, ValueError):
+                duration = 0.0
+            if duration > 0:
+                break
+        if not value:
+            if not rid:
+                return None, {"path": path, "code": NO_RECORDING_ID,
+                              "reason": (f"{base} carries no "
+                                         f"ACOUSTID_FINGERPRINT and names no "
+                                         f"MusicBrainz recording to submit one "
+                                         f"with")}
+            taken = fingerprint(path, cfg)
+            if not taken["ok"]:
+                return None, {"path": path, "code": taken["code"],
+                              "reason": taken["reason"]}
+            value = taken["fingerprint"]
+            duration = float(taken.get("duration") or 0)
+        if not rid:
+            return None, {"path": path, "code": NO_RECORDING_ID,
+                          "reason": (f"{base} names no MusicBrainz recording to "
+                                     f"submit its fingerprint with (ACOUSTID_ID, "
+                                     f"MUSICBRAINZ_TRACKID, or the recording id "
+                                     f"in the file name)")}
+        if duration <= 0:
+            return None, {"path": path, "code": NO_DURATION,
+                          "reason": (f"{base} states no duration, and AcoustID "
+                                     f"stores one beside every fingerprint")}
+        item = {"path": path, "fingerprint": value, "duration": duration,
+                "recording_id": rid, "identity_from": where}
+        for key, tag in (("track", "TITLE"), ("artist", "ARTIST"),
+                         ("album", "ALBUM"), ("album_artist", "ALBUMARTIST"),
+                         ("year", "DATE"), ("track_no", "TRACKNUMBER"),
+                         ("disc_no", "DISCNUMBER")):
+            text = str(af.get_tag(tag) or "").strip()
+            if text:
+                item[key] = text.split("-")[0].strip() if key == "year" else text
+        return item, None
+    except Exception as e:      # a reader that fails mid-ask is not a crash
+        return None, {"path": path, "code": INTERNAL,
+                      "reason": f"could not read {base}: {e}"}
+
+
+def _known_row(path, item, reason):
+    """A track AcoustID already has (either half of the dedupe)."""
+    return {"path": path, "outcome": ALREADY_KNOWN, "code": ALREADY_KNOWN,
+            "reason": reason, "recording_id": str(item.get("recording_id") or ""),
+            "id": None, "status": None, "index": None}
+
+
+def submit_files(cfg, files, progress=None):
+    """Give AcoustID the fingerprint + recording id every one of *files* states.
+
+    The one pass both callers use (the route's `POST /api/import/acoustid/submit`
+    and script 22): per file `prepare_submission`, then the TWO dedupes — what
+    the service already links (`pair_known`, one lookup per candidate) and what
+    this app has already handed over (`load_submissions`) — and only then ONE
+    batched `v2/submit` for everything that is genuinely new. A track is
+    reported either way: ACCEPTED (with the service's submission id + status),
+    ALREADY_KNOWN (with which half said so), REJECTED (with the service's own
+    sentence) or OUTCOME_SKIPPED (with a named cause: no recording id, no
+    fpcalc, a duration the file does not state, or a dedupe question that could
+    not be asked — this never sends blind to a service it could not ask).
+
+    `acoustid_enabled` off means nothing at all happens: no file is read, no
+    fingerprint is taken and no request is made — `check_submit` answers first.
+    A missing user key is the same named refusal, and neither is ever a silent
+    skip. `progress(row)` is called per file's own report, as it is decided.
+
+    -> {"available", "ok", "code", "reason", "note", "total", "submitted",
+        "known", "skipped", "failed", "results", "submissions", "skips",
+        "tracks"}. Never raises.
+    """
+    cfg = cfg or {}
+    files = [str(f) for f in (files or []) if str(f).strip()]
+    empty = {"available": True, "ok": False, "code": NO_TRACKS, "note": "",
+             "reason": "", "total": len(files), "submitted": 0, "known": 0,
+             "skipped": 0, "failed": 0, "results": [], "submissions": [],
+             "skips": [],
+             "tracks": {"total": len(files), "submitted": 0, "known": 0,
+                        "skipped": 0, "failed": 0}}
+    chk = check_submit(cfg)
+    if not chk["available"]:
+        # A gate, not a failure per file: with no key (or the feature off)
+        # nothing is read or fingerprinted, and the reason is the named one.
+        return dict(empty, available=False, code=chk["code"],
+                    note=chk["reason"], reason=chk["reason"])
+    if not files:
+        return dict(empty, note="no audio file to submit")
+    ledger = load_submissions(cfg)
+    plan = {}
+    rows = []
+    seen = {}
+    # The fingerprinted half of the work (fpcalc on every file without a tag)
+    # runs in the same bounded lanes every other multi-file runner uses; the
+    # dedupe questions and the batch below stay in order, because the service
+    # layer's shared throttle — not the CPU — decides how fast they go.
+    workers = worker_count(cfg, default=4, maximum=8, items=len(files))
+    if len(files) == 1 or workers == 1:
+        prepared = [prepare_submission(cfg, path) for path in files]
+    else:
+        from concurrent.futures import ThreadPoolExecutor
+
+        with ThreadPoolExecutor(max_workers=workers) as ex:
+            prepared = list(ex.map(lambda p: prepare_submission(cfg, p), files))
+    for path, (item, skip) in zip(files, prepared):
+        if skip:
+            row = {"path": path, "outcome": OUTCOME_SKIPPED,
+                   "code": skip.get("code"), "reason": skip.get("reason"),
+                   "recording_id": "", "id": None, "status": None,
+                   "index": None}
+            rows.append(row)
+            if progress:
+                progress(row)
+            continue
+        key = submission_key(item["fingerprint"], item["recording_id"])
+        if key in seen:
+            row = _known_row(path, item,
+                             "the same fingerprint and recording id appear "
+                             "twice in this selection (also "
+                             f"{os.path.basename(str(seen[key]))})")
+        elif key in ledger:
+            prior = ledger[key] or {}
+            row = _known_row(
+                path, item,
+                "this app already submitted this pair"
+                + (f" on {prior.get('at')}" if prior.get("at") else "")
+                + (f" (submission {prior.get('id')}, {prior.get('status')})"
+                   if prior.get("id") is not None else ""))
+        else:
+            seen[key] = path
+            plan[len(rows)] = (item, key)
+            rows.append(None)
+            continue
+        rows.append(row)
+        if progress:
+            progress(row)
+
+    # What AcoustID already has: one lookup per candidate, at every score (a
+    # question about the DATABASE, not about the app's display threshold).
+    sending = []
+    for index, row in enumerate(rows):
+        if row is not None:
+            continue
+        item, _key = plan[index]
+        asked = pair_known(cfg, item["fingerprint"], item["duration"],
+                           item["recording_id"])
+        if not asked["ok"]:
+            # The question could not be asked, so "it is new" could not be
+            # established either: the track is skipped with the reason rather
+            # than sent to a service this run could not talk to.
+            rows[index] = {
+                "path": item["path"], "outcome": OUTCOME_SKIPPED,
+                "code": asked["code"],
+                "reason": ("could not ask AcoustID what it already knows: "
+                           f"{asked['reason']}"),
+                "recording_id": item["recording_id"], "id": None, "status": None,
+                "index": None}
+        elif asked["known"]:
+            rows[index] = _known_row(
+                item["path"], item,
+                "AcoustID already links this fingerprint to recording "
+                f"{item['recording_id']}")
+        else:
+            sending.append(index)
+        if progress and rows[index] is not None:
+            progress(rows[index])
+
+    if sending:
+        res = submit_fingerprints(cfg, [plan[i][0] for i in sending])
+        answers = res.get("results") or []
+        for n, index in enumerate(sending):
+            if n < len(answers):
+                rows[index] = dict(answers[n])
+            else:
+                # The batch layer answered nothing for this track (an
+                # unavailable config, an empty batch): report it as unwritten
+                # rather than as something the service took.
+                rows[index] = {
+                    "path": plan[index][0]["path"], "outcome": REJECTED,
+                    "code": res.get("code") or BAD_RESPONSE,
+                    "reason": res.get("reason") or "AcoustID answered nothing "
+                                                   "for this track",
+                    "recording_id": plan[index][0]["recording_id"], "id": None,
+                    "status": None, "index": None}
+            if progress:
+                progress(rows[index])
+        record_submissions(cfg, [
+            {"fingerprint": plan[index][0]["fingerprint"],
+             "recording_id": rows[index].get("recording_id")
+                             or plan[index][0]["recording_id"],
+             "id": rows[index].get("id"), "status": rows[index].get("status"),
+             "path": rows[index].get("path")}
+            for index in sending
+            if rows[index] and rows[index].get("outcome") == ACCEPTED
+            and rows[index].get("id") is not None])
+
+    results = [row for row in rows if row is not None]
+    counted = {name: len([r for r in results if r["outcome"] == name])
+               for name in SUBMISSION_OUTCOMES}
+    submitted = counted[ACCEPTED]
+    known = counted[ALREADY_KNOWN]
+    skipped = counted[OUTCOME_SKIPPED]
+    failed = counted[REJECTED]
+    rejected = [r for r in results if r["outcome"] == REJECTED]
+    code = rejected[0].get("code") if rejected else OK
+    note = rejected[0].get("reason") if rejected else ""
+    return {"available": True, "ok": failed == 0, "code": code, "note": note,
+            "reason": note, "total": len(files), "submitted": submitted,
+            "known": known, "skipped": skipped, "failed": failed,
+            "results": results,
+            "submissions": [r for r in results
+                            if r["outcome"] == ACCEPTED and r.get("id") is not None],
+            "skips": [{"path": r.get("path"), "code": r.get("code"),
+                       "reason": r.get("reason")}
+                      for r in results if r["outcome"] == OUTCOME_SKIPPED],
+            "tracks": {"total": len(files), "submitted": submitted,
+                       "known": known, "skipped": skipped, "failed": failed}}
 
 
 # --------------------------------------------------------------------------- #
@@ -1149,38 +1633,85 @@ def acoustid_enabled_note(cfg=None):
 # --------------------------------------------------------------------------- #
 # Completing an incomplete tag pair (script runner)
 # --------------------------------------------------------------------------- #
-def _pair_state(af):
-    """(recording id, fingerprint) as the file states them, "" when absent.
+# A UUID exactly as the app's own naming script and every tagger spell it.
+_UUID_RE = re.compile(r"[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-"
+                      r"[0-9a-fA-F]{4}-[0-9a-fA-F]{12}")
+# The identity tags whose ids the file NAME also spells (the naming script
+# embeds `[%musicbrainz_albumid%]`, `[%musicbrainz_releasegroupid%]` and
+# `[%musicbrainz_trackid%]`). None of these may be mistaken for the recording
+# when the name is read as evidence.
+_NAME_OTHER_ID_TAGS = ("MUSICBRAINZ_ALBUMID", "MUSICBRAINZ_RELEASEGROUPID",
+                       "MUSICBRAINZ_RELEASETRACKID", "MUSICBRAINZ_ARTISTID",
+                       "MUSICBRAINZ_ALBUMARTISTID")
 
-    Read through the same semantic names `write_tags` writes and the grader's
-    pair check reads, so "incomplete" can never mean one thing to the fixer
-    and another to the check that reported it.
+
+def _recording_identity(path, af):
+    """(recording id, where it was read) this file states, or ("", "").
+
+    The one question `fix_pair` answers is "which recording is this?", and a
+    file that already answers it must never be sent to a service to be told
+    again — the CD rips AcoustID does not know are exactly the library the
+    grader is failing and the app could not repair. Read in the order the app
+    itself trusts:
+
+    * `ACOUSTID_ID` — the pair's own half; a file that already states one keeps
+      it (`write_tags` refuses a lone id, but a library tagged elsewhere can
+      carry one).
+    * `MUSICBRAINZ_TRACKID` — THE recording tag of this app's own output:
+      beets/autotag write it on every import, the naming script puts it in the
+      file name and the wizard's match writes the same id as `ACOUSTID_ID`
+      (see `write_tags`), so a track carrying it states its own recording.
+    * the file NAME — the app's own naming script writes
+      `[%musicbrainz_trackid%] [%musicbrainz_releasegroupid%]` into it, so a
+      name carrying exactly ONE bracketed UUID that none of the file's other
+      identity tags claims is the recording the app itself wrote there. Two
+      candidates (or the id of another entity) mean the name does not say
+      WHICH is the recording, and a coin toss is how a wrong identity gets
+      written.
     """
-    return (str(af.get_tag("ACOUSTID_ID") or "").strip(),
-            str(af.get_tag("ACOUSTID_FINGERPRINT") or "").strip())
+    for tag in ("ACOUSTID_ID", "MUSICBRAINZ_TRACKID"):
+        value = str(af.get_tag(tag) or "").strip()
+        if value:
+            return value, tag
+    claimed = set()
+    for tag in _NAME_OTHER_ID_TAGS + ("MUSICBRAINZ_TRACKID",):
+        value = str(af.get_tag(tag) or "").strip().casefold()
+        if value:
+            claimed.add(value)
+    stem = os.path.splitext(os.path.basename(str(path or "")))[0]
+    found = [u for u in _UUID_RE.findall(stem) if u.casefold() not in claimed]
+    if len(found) == 1:
+        return found[0], "the file name"
+    return "", ""
 
 
 def fix_pair(path, cfg=None):
-    """Complete one file's ACOUSTID_ID / ACOUSTID_FINGERPRINT pair.
+    """Complete — or create — one file's ACOUSTID_ID / ACOUSTID_FINGERPRINT pair.
 
     -> {"path", "status": "modified"|"unchanged"|"skipped"|"failed",
         "reason"} — never raises, so one bad file cannot stop a library run.
 
     What each half can be completed FROM decides how it is completed:
 
-    * id present, fingerprint missing: the fingerprint is a property of the
-      audio, so fpcalc takes it locally — no network, nothing guessed — and
-      the id the file already states is kept.
-    * fingerprint present, id missing: nothing on the file says which
-      recording this is, so only the service can answer (`lookup`, the
-      configured key and the shared rate limit). The pair written is the one
-      the returned identity was matched FROM, so both halves describe the
-      same fingerprint by construction — and with no key, no match or no
-      answer, nothing is written at all.
+    * the recording id is on the file (see `_recording_identity`) and the
+      fingerprint half is missing: the fingerprint is a property of the AUDIO,
+      so fpcalc takes it locally — no network, nothing guessed, nothing asked
+      — and the id the file states is kept. This is the CD rip AcoustID does
+      not know: the id it needs is in the file's own `MUSICBRAINZ_TRACKID`
+      (and in the name this app wrote), so the service was never the only way
+      to complete the pair, only the only way this pass used to try.
+    * a half pair whose file names no recording: only the service can say
+      which recording this audio is (`lookup`, the configured key, fpcalc and
+      the shared rate limit). The pair written is the one the returned
+      identity was matched FROM, so both halves describe the same fingerprint
+      by construction — and with no match or no answer, nothing is written at
+      all.
 
-    A file carrying BOTH halves is left alone, and one carrying NEITHER is
-    not this pass's business: the wizard's `write_tags` is what creates a
-    pair, and it never creates half of one.
+    A file carrying BOTH halves is left alone, and one carrying NEITHER and
+    naming no recording is not this pass's business: there is nothing on it to
+    complete a pair from, and fingerprinting a whole library for a pair
+    nothing asked for would make every run pay the service for it. Nothing is
+    ever written from a guess.
     """
     out = {"path": path, "status": "skipped", "reason": ""}
     try:
@@ -1194,31 +1725,46 @@ def fix_pair(path, cfg=None):
                        reason=(f"cannot read {os.path.basename(str(path))}: "
                                f"{af.error or 'no tag reader for this file'}"))
             return out
-        rid, fp = _pair_state(af)
-        if not rid and not fp:
-            out["reason"] = "carries no AcoustID tags"
-            return out
-        if rid and fp:
+        aid = str(af.get_tag("ACOUSTID_ID") or "").strip()
+        fp = str(af.get_tag("ACOUSTID_FINGERPRINT") or "").strip()
+        if aid and fp:
             out["status"] = "unchanged"
             return out
+        rid, where = _recording_identity(path, af)
         if rid:
+            # The file names the recording (its own ACOUSTID_ID, its
+            # MUSICBRAINZ_TRACKID, or the MBID this app's naming script wrote
+            # into its name); the fingerprint is a property of the AUDIO and
+            # fpcalc takes it here — no key, no request, no rate limit, so a
+            # rip AcoustID has never seen is repairable.
             got = fingerprint(path, cfg)
             if not got["ok"]:
                 out.update(status="failed", reason=got["reason"])
                 return out
             wrote = write_tags(path, rid, got["fingerprint"], cfg)
-        else:
+        elif fp:
+            # A half pair whose file names no recording: only the service can
+            # say which recording this audio is.
             got = lookup(cfg, path)
             if not got["ok"]:
                 out.update(status="failed", reason=got["reason"])
                 return out
             wrote = write_tags(path, got["rows"][0]["recording_id"],
                                got["fingerprint"], cfg)
+        else:
+            # Nothing on the file to complete a pair FROM — no AcoustID tag,
+            # no recording id anywhere. Fingerprinting a whole library for a
+            # pair nothing asked for is not this pass's business, and
+            # inventing an identity is the one thing it must never do.
+            out["reason"] = ("carries no AcoustID tag and no recording id — "
+                             "nothing to complete a pair from")
+            return out
         if not wrote.get("ok"):
             out.update(status="failed",
                        reason=wrote.get("reason") or "the pair was not written")
             return out
-        out.update(status="modified", reason="")
+        out.update(status="modified",
+                   reason=(f"id read from {where}" if where else ""))
         return out
     except Exception as e:
         out.update(status="failed", reason=str(e))
@@ -1226,22 +1772,31 @@ def fix_pair(path, cfg=None):
 
 
 def run_fix_pairs(cfg=None):
-    """Script: complete the half AcoustID pairs a library already carries.
+    """Script: complete the AcoustID pairs a library carries (half — or none).
 
     `write_tags` writes ACOUSTID_ID and ACOUSTID_FINGERPRINT in one save and
-    refuses a lone id, so nothing in this app can leave half a pair behind —
-    but a library tagged elsewhere (hand-tagged, an older Picard pass, a
-    restored backup) can carry one, and the grader fails every such track
-    ("incomplete AcoustID pair", `mlo.grader`). This pass walks the configured
-    targets, and for each track with exactly one half writes the missing one
-    (see `fix_pair` for what each half is completed from).
+    refuses a lone id, so nothing in this app writes half a pair on purpose —
+    but a library tagged elsewhere (Picard's own "generate fingerprints"
+    writes the fingerprint alone, hand-tagging, an older pass, a restored
+    backup) can carry one, and the grader fails every such track
+    ("Missing ACOUSTID_ID (run Fix AcoustID pairs)", `mlo.grader`). This pass
+    walks the configured targets and, for each track, COMPLETES the half pair
+    — or CREATES the pair where the file names its own recording but carries
+    no AcoustID tag at all, because "which recording is this" is a question
+    the file usually answers itself (`_recording_identity`: ACOUSTID_ID,
+    MUSICBRAINZ_TRACKID, or the recording MBID this app's naming script wrote
+    into the file name) while the fingerprint is taken locally by fpcalc. The
+    AcoustID service is asked only for a half pair whose file names no
+    recording at all; see `fix_pair`.
 
     Stats, in the runner shape: `total_scanned` is every audio file examined,
-    `modified_count` the pairs completed, `unchanged_count` the files that
-    already carried both halves, `skipped_count` those carrying neither, and
-    `error_count`/`errors` the files whose incomplete pair could NOT be
-    completed — each named with its own reason (a container this app cannot
-    tag, a track too short for fpcalc, a missing fpcalc, no API key, no
+    `modified_count` the pairs completed or created, `unchanged_count` the
+    files that already carried both halves, `skipped_count` those carrying no
+    AcoustID tag and naming no recording (nothing to complete from — a guess
+    is never written), and
+    `error_count`/`errors` the files whose pair could NOT be completed — each
+    named with its own reason (a container this app cannot tag, a track too
+    short for fpcalc, a missing fpcalc, no API key, no
     lookup answer). Nothing is written for those, and the run never raises.
     """
     cfg = cfg or {}
@@ -1319,7 +1874,128 @@ def run_fix_pairs(cfg=None):
 
     log(c(f"AcoustID pairs completed {stats['modified_count']}"
           f" · already complete {stats['unchanged_count']}"
-          f" · no pair {stats['skipped_count']}"
+          f" · nothing to complete from {stats['skipped_count']}"
           f" · failed {stats['error_count']}",
+          Color.GREEN if not stats["error_count"] else Color.YELLOW))
+    return stats
+
+
+# --------------------------------------------------------------------------- #
+# Script 22: give AcoustID what this library's files state (v2/submit)
+# --------------------------------------------------------------------------- #
+# A submission's skips that are a FACT about the file rather than a failure:
+# it names no recording, states no duration, carries nothing to submit. Every
+# other cause (fpcalc could not run, the service could not be asked at all) is
+# a failure and reaches `errors` beside the service's own refusals, exactly
+# like the fingerprint passes treat tooling that would not answer.
+_SUBMIT_SKIP_CODES = frozenset({NO_RECORDING_ID, NO_FINGERPRINT, NO_DURATION,
+                                NOT_AUDIO, TOO_SHORT})
+
+
+def run_submit_fingerprints(cfg=None):
+    """Script: give AcoustID the fingerprint + recording id the files state.
+
+    The whole-library / whole-selection half of the submission contract —
+    `submit_files` is the per-file work, and this is the script registry's
+    entry to it (scope "file": one fingerprint + one recording id belong to one
+    file). Targets when the run was given any, else every album under the music
+    folder, exactly like script 21.
+
+    A config that cannot submit AT ALL raises with the named reason instead of
+    reporting an empty run: the whole point of the run is to hand AcoustID
+    something, and "nothing happened" without a reason is the one answer this
+    must never give — the chain's own gate (`script_runners._DISABLED`) only
+    covers `acoustid_enabled`, and a missing USER key is a thing the user has
+    to fix (Settings → Import). Nothing is read, fingerprinted or sent in that
+    case, and nothing is written locally by this script at all.
+
+    Stats, in the runner shape: `total_scanned` every audio file examined,
+    `submitted`/`modified_count` the pairs AcoustID took (each with its
+    submission id in the route's report), `already_known`/`unchanged_count`
+    those the service already had or this app had already sent,
+    `skipped_count` nothing-to-submit with a named cause each (`by_cause`),
+    and `error_count`/`errors` the service's own refusals plus anything that
+    stopped the app asking.
+    """
+    cfg = cfg or {}
+    stats = new_stats()
+    stats.update({"submitted": 0, "already_known": 0, "by_cause": {}})
+    print_header("Submit fingerprints (AcoustID)")
+
+    chk = check_submit(cfg)
+    if not chk["available"]:
+        # A named, actionable state — never a silent skip: without the USER key
+        # there is no submission at all (an application key only looks up), and
+        # with the feature switched off the chain skips this script before it
+        # is asked (script_runners._DISABLED).
+        raise RuntimeError(
+            f"{chk['reason']} — nothing was submitted. The USER key of your "
+            "acoustid.org account (Settings → Import → 'AcoustID user key') is "
+            "what submits fingerprints; an application key can only look up.")
+
+    folder = str(cfg.get("music_folder") or "")
+    if cfg.get("targets") is not None:
+        files = sorted(_collect_targets(cfg["targets"], LIB_AUDIO_EXTS))
+    else:
+        if not os.path.isdir(folder):
+            log(c(f"ERROR: folder does not exist: {folder}", Color.RED))
+            return stats
+        files = []
+        for album_dir in _find_albums(folder):
+            files.extend(sorted(
+                os.path.join(album_dir, f)
+                for f in os.listdir(album_dir) if is_audio_file(f)))
+    if not files:
+        log("No audio files found.")
+        return stats
+
+    counts = {"ok": 0, "skip": 0, "fail": 0}
+    pbar = _make_pbar(total=len(files), desc="Submit to AcoustID")
+
+    def _finish(row):
+        """Book one track's own report (nothing here shares state)."""
+        stats["total_scanned"] += 1
+        outcome = row.get("outcome")
+        if outcome == ACCEPTED:
+            stats["submitted"] += 1
+            stats["modified_count"] += 1
+            _pbar_update(pbar, counts, "ok")
+            return
+        if outcome == ALREADY_KNOWN:
+            stats["already_known"] += 1
+            stats["unchanged_count"] += 1
+            _pbar_skip(pbar, counts)
+            return
+        code = str(row.get("code") or "unknown")
+        stats["by_cause"][code] = stats["by_cause"].get(code, 0) + 1
+        if outcome == OUTCOME_SKIPPED and code in _SUBMIT_SKIP_CODES:
+            stats["skipped_count"] += 1
+            _pbar_skip(pbar, counts)
+            return
+        # A refusal from the service, or a step that could not be taken
+        # (fpcalc, the dedupe question): both are failures, with their own
+        # sentence, and a run that cannot say why it did nothing is the one
+        # answer this script must never give.
+        stats["error_count"] += 1
+        if len(stats["errors"]) < 25:
+            stats["errors"].append(
+                f"{os.path.basename(str(row.get('path')))}: {row.get('reason')}")
+        _pbar_update(pbar, counts, "fail")
+
+    try:
+        submit_files(cfg, files, progress=_finish)
+    finally:
+        try:
+            pbar.close()
+        except Exception:
+            pass
+
+    causes = " · ".join(f"{count} {code}"
+                        for code, count in sorted(stats["by_cause"].items()))
+    log(c(f"AcoustID submitted {stats['submitted']}"
+          f" · already known {stats['already_known']}"
+          f" · nothing to submit {stats['skipped_count']}"
+          f" · failed {stats['error_count']}"
+          + (f"  ({causes})" if causes else ""),
           Color.GREEN if not stats["error_count"] else Color.YELLOW))
     return stats

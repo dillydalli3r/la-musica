@@ -8,7 +8,7 @@ import { uncacheTrack } from "../lib/mediaCache";
 import { LinkEditorButton, MbIcon, RymIcon } from "../components/Links";
 import { SubtitledVideo } from "../components/SubtitledVideo";
 import { useStore, toast } from "../store";
-import { AuditBadge, GradeBadge, IssueList, EmptyState, PageLoading } from "../components/Badges";
+import { AuditBadge, GradeBadge, IssueList, EmptyState, PageLoading, LyricsKindChip, allowPlainOf } from "../components/Badges";
 import CoverImg from "../components/CoverImg";
 import DownloadButton from "../components/DownloadButton";
 import { ExportButton } from "../components/ExportDialog";
@@ -60,6 +60,11 @@ export default function TrackPage() {
     retry: false,
     enabled: !!albumDir,
   });
+  // The user's own answer on plain lyrics — whether a plain lyric is shown as
+  // the failing state or as the plain fact it is (the config is already in the
+  // app-wide cache, so this costs no request of its own).
+  const { data: config } = useQuery({ queryKey: ["config"], queryFn: api.config });
+  const allowPlain = allowPlainOf(config);
   const realPath = data?.path ?? decoded;
   const track = (album?.tracks ?? []).find((t) => t.path === decoded || t.path === realPath);
 
@@ -258,16 +263,29 @@ export default function TrackPage() {
 
   return (
     <div className="p-6 space-y-5">
+      {/* A music video in a dialog, not a hand-rolled overlay: the portal,
+          backdrop click, Escape, focus trap and the phone sheet all come from
+          `Modal` (#53) — the old `fixed inset-0 z-50` box had none of them, so
+          on iOS the only way out was the one Close button, and the file name
+          scrolled under the video on a phone. The name is the dialog title and
+          the Close sits in the pinned footer, both always reachable. */}
       {videoOpen && isVideo && (
-        <div className="fixed inset-0 z-50 bg-black/85 flex items-center justify-center p-6" onClick={() => setVideoOpen(false)}>
-          <div className="w-full max-w-4xl" onClick={(e) => e.stopPropagation()}>
-            <SubtitledVideo path={decoded} className="w-full max-h-[80vh] rounded-lg border border-border bg-black" />
-            <div className="flex justify-between items-center mt-2 text-xs text-zinc-400">
-              <span className="truncate">{fileName}</span>
-              <button className="btn-ghost !py-1" onClick={() => setVideoOpen(false)}>Close</button>
+        <Modal
+          onClose={() => setVideoOpen(false)}
+          title={fileName}
+          icon={Clapperboard}
+          width="max-w-4xl"
+          bodyClass="p-2"
+          footer={
+            <div className="flex justify-end">
+              <button className="btn-ghost !py-1.5 tap" onClick={() => setVideoOpen(false)}>
+                Close
+              </button>
             </div>
-          </div>
-        </div>
+          }
+        >
+          <SubtitledVideo path={decoded} className="w-full max-h-[70vh] rounded-lg border border-border bg-black" />
+        </Modal>
       )}
 
       <PageHeader
@@ -327,6 +345,11 @@ export default function TrackPage() {
               paths={[track?.path ?? realPath]}
               artist={tags.ALBUMARTIST ?? tags.ARTIST}
               albumPath={albumDir}
+              // The page holds the album folder for its own panels, but what
+              // this menu acts on is ONE track: the album-shaped scripts (a
+              // .cue rewrite, a per-album grade, the layout of the subtree)
+              // are the album page's, not this row's.
+              kind="track"
               releaseMbid={tags.MUSICBRAINZ_ALBUMID}
               covers={() => coverInput.current?.click()}
               onDone={refreshAfterEditor}
@@ -375,6 +398,11 @@ export default function TrackPage() {
               {albumError ? "Grading data unavailable" : "Grading —"}
             </span>
           )}
+          {/* WHICH KIND the stored lyrics are, beside the verdicts: a synced
+              lyric is a fact, and a plain one is a failing state while the
+              user's `lyrics_allow_plain` says plain is not acceptable — never
+              for a track with no lyrics at all (nothing is rendered then). */}
+          <LyricsKindChip kind={track?.lyrics_kind} allowPlain={allowPlain} showReason />
         </div>
       </PageHeader>
 
@@ -538,6 +566,7 @@ export default function TrackPage() {
             track={tags.TITLE}
             album={tags.ALBUM}
             duration={tech.length ? Math.round(tech.length) : undefined}
+            allowPlain={allowPlain}
             onEnhancedEditor={() => setEditorOpen(true)}
           />
         </div>
@@ -566,6 +595,7 @@ export default function TrackPage() {
           album={tags.ALBUM || undefined}
           duration={tech.length ? Math.round(tech.length) : undefined}
           currentText={lyrics}
+          allowPlain={allowPlain}
           onApplied={applyFoundLyrics}
           onSaved={refreshAfterEditor}
           onClose={() => setManagerOpen(false)}

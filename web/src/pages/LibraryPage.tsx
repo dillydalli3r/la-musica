@@ -58,7 +58,15 @@ import {
  *  floor, summed by TABLE_FIT's `min-w-max`, so a window wider than their sum
  *  shares the extra out in proportion — the old percentages took their cut of
  *  whatever width the table had, which is how the album name column in this
- *  very table ended up at 0 px even on a 1440 px screen. */
+ *  very table ended up at 0 px even on a 1440 px screen.
+ *
+ *  A floor has to clear TWO things, and the second one is what a floor sized
+ *  from its values alone forgets: `td`/`th` carry 12 px of gutter on each side
+ *  (index.css `.th`), and a header label is `whitespace-nowrap` with a 12 px
+ *  sort arrow beside it (lib/sort.tsx), so a fixed-layout column narrower than
+ *  `12 + label + 4 + 12` paints the label over its neighbour. ADR is the one
+ *  that shipped short: its 48 px floor was the DR value's width, while "ADR"
+ *  plus the arrow is 41 px — 53 px before the label clears its own cell. */
 const ALBUM_COL_W: Record<string, string> = {
   // `md:` because below that the phone fold has already dropped the columns
   // beside it, and the name shares the row with the cover, the chevron and the
@@ -76,7 +84,11 @@ const ALBUM_COL_W: Record<string, string> = {
   // "Digital Media" is the MediumChip's own longest label: 108 px, measured —
   // the old 88 broke the chip across two lines.
   media: "w-[112px]",
-  dr: "w-12",
+  // 56: the ADR label plus its sort arrow is 41 px and the cell's gutter 12, so
+  // 53 px is the floor before the header paints over the column beside it (the
+  // Tracks view's `dr` column, labelled "DR", still fits its 48). A two-digit
+  // dynamic range is 42 px, well inside it.
+  dr: "w-[56px]",
   source: "w-20",
   videos: "w-20",
   inst: "w-20",
@@ -395,6 +407,11 @@ export default function LibraryPage() {
       case "instrumental": return t.tags.INSTRUMENTAL === "1";
       case "videos": return !!t.is_video;
       case "missingLyrics": return !t.lyrics_present;
+      // A podcast episode is recognised by the SERIES its release group is
+      // `part of` — MusicBrainz has no Podcast release-group type, so the
+      // RELEASETYPE tag says what it really is ("Broadcast") and the series
+      // is the tag the app derived from it (mlo.autotag).
+      case "podcasts": return !!t.tags.PODCASTSERIES;
     }
   };
   const albumPresetOK = (al: Album, preset: Preset) => {
@@ -403,6 +420,7 @@ export default function LibraryPage() {
       case "failing": return !al.pass;
       case "cd": return (al.media ?? "").toUpperCase().includes("CD");
       case "digital": return (al.media ?? "").toUpperCase().includes("DIGITAL");
+      case "podcasts": return !!al.podcast?.series;
       case "instrumental":
       case "videos":
       case "missingLyrics": return (al.tracks ?? []).some((t) => trackPresetOK(t, preset));
@@ -1554,8 +1572,16 @@ export default function LibraryPage() {
                               must not push the same route a second time. The
                               NAME is the folder's display name: the folder is
                               named "Radiohead [a74b1b7f-…]", and the raw basename
-                              was what this table used to print. */}
-                          <Link to={artistRef(a)} onClick={(e) => e.stopPropagation()} className="font-medium hover:text-accent-soft truncate">
+                              was what this table used to print.
+                              `truncate` clips a name longer than the column —
+                              the title carries the whole one, so the clip is
+                              never silent (the interface checks that). */}
+                          <Link
+                            to={artistRef(a)}
+                            onClick={(e) => e.stopPropagation()}
+                            className="font-medium hover:text-accent-soft truncate"
+                            title={a.display_name || a.name}
+                          >
                             {a.display_name || a.name}
                           </Link>
                         </div>
@@ -1676,8 +1702,8 @@ export default function LibraryPage() {
                           >
                             <Link
                               to={trackRef(tr)}
-                              className="hover:text-accent-soft break-words min-w-0"
-                              title="Click to play · Ctrl-click to open track page"
+                              className="hover:text-accent-soft cell-ellipsis min-w-0"
+                              title={`${tr.tags.TITLE ?? tr.file} · Click to play · Ctrl-click to open track page`}
                               onClick={(e) => entityLinkClick(e, () => navigate(trackRef(tr)))}
                             >
                               {tr.tags.TITLE ?? tr.file}
@@ -1727,10 +1753,10 @@ export default function LibraryPage() {
                           />
                         </td>
                       )}
-                      {trackCols.includes("artist") && <td className={`td text-zinc-400 break-words${phoneHide(TRACK_PHONE_CLS, "artist")}`}>{tr.artist}</td>}
-                      {trackCols.includes("album") && <td className={`td text-zinc-500 break-words${phoneHide(TRACK_PHONE_CLS, "album")}`}>{tr.album}</td>}
+                      {trackCols.includes("artist") && <td className={`td text-zinc-400 cell-ellipsis${phoneHide(TRACK_PHONE_CLS, "artist")}`} title={tr.artist}>{tr.artist}</td>}
+                      {trackCols.includes("album") && <td className={`td text-zinc-500 cell-ellipsis${phoneHide(TRACK_PHONE_CLS, "album")}`} title={tr.album}>{tr.album}</td>}
                       {trackCols.includes("year") && <td className={`td text-zinc-500${phoneHide(TRACK_PHONE_CLS, "year")}`} title={tr.tags.DATE ?? undefined}>{fmtDateCell(tr.tags.DATE, fullDates)}</td>}
-                      {trackCols.includes("genre") && <td className={`td text-zinc-500 break-words${phoneHide(TRACK_PHONE_CLS, "genre")}`}>{tr.tags.GENRE ?? "—"}</td>}
+                      {trackCols.includes("genre") && <td className={`td text-zinc-500 cell-ellipsis${phoneHide(TRACK_PHONE_CLS, "genre")}`} title={tr.tags.GENRE ?? "Genre"}>{tr.tags.GENRE ?? "—"}</td>}
                       {trackCols.includes("media") && <td className={`td${phoneHide(TRACK_PHONE_CLS, "media")}`}><MediaChip media={tr.tags.MEDIA} /></td>}
                       {trackCols.includes("duration") && (
                         /* Duration only. A 64 px cell cannot hold the 70 px
@@ -1750,7 +1776,7 @@ export default function LibraryPage() {
                           {tr.tags["DYNAMIC RANGE"] ?? "—"}
                         </td>
                       )}
-                      {trackCols.includes("source") && <td className={`td text-zinc-500 break-words${phoneHide(TRACK_PHONE_CLS, "source")}`}>{tr.tags.SOURCE ?? "—"}</td>}
+                      {trackCols.includes("source") && <td className={`td text-zinc-500 cell-ellipsis${phoneHide(TRACK_PHONE_CLS, "source")}`} title={tr.tags.SOURCE ?? "Source"}>{tr.tags.SOURCE ?? "—"}</td>}
                       {trackCols.includes("type") && (
                         <td className={`td text-zinc-500${phoneHide(TRACK_PHONE_CLS, "type")}`} title={tr.is_video ? "Music video" : "Audio track"}>
                           {tr.is_video ? (
@@ -1765,9 +1791,13 @@ export default function LibraryPage() {
                             : <span className="text-zinc-600">—</span>}
                         </td>
                       )}
-                      {trackCols.includes("composer") && <td className={`td text-zinc-500 break-words${phoneHide(TRACK_PHONE_CLS, "composer")}`} title="Composer">{tr.tags.COMPOSER ?? "—"}</td>}
-                      {trackCols.includes("lyricist") && <td className={`td text-zinc-500 break-words${phoneHide(TRACK_PHONE_CLS, "lyricist")}`} title="Lyricist">{tr.tags.LYRICIST ?? "—"}</td>}
-                      {trackCols.includes("remixer") && <td className={`td text-zinc-500 break-words${phoneHide(TRACK_PHONE_CLS, "remixer")}`} title="Remixer">{tr.tags.REMIXER ?? "—"}</td>}
+                      {/* The credit cells are free text on a fixed floor, so they
+                          clip on one line like the name columns: the whole value
+                          rides in the title (the label first, so a hover still
+                          says which column this is). */}
+                      {trackCols.includes("composer") && <td className={`td text-zinc-500 cell-ellipsis${phoneHide(TRACK_PHONE_CLS, "composer")}`} title={`Composer: ${tr.tags.COMPOSER ?? "—"}`}>{tr.tags.COMPOSER ?? "—"}</td>}
+                      {trackCols.includes("lyricist") && <td className={`td text-zinc-500 cell-ellipsis${phoneHide(TRACK_PHONE_CLS, "lyricist")}`} title={`Lyricist: ${tr.tags.LYRICIST ?? "—"}`}>{tr.tags.LYRICIST ?? "—"}</td>}
+                      {trackCols.includes("remixer") && <td className={`td text-zinc-500 cell-ellipsis${phoneHide(TRACK_PHONE_CLS, "remixer")}`} title={`Remixer: ${tr.tags.REMIXER ?? "—"}`}>{tr.tags.REMIXER ?? "—"}</td>}
                       {trackCustom.filter((c) => trackCols.includes(c.id)).map((c) => (
                         <td key={c.id} className={`td text-zinc-500 break-words${phoneHide(TRACK_PHONE_CLS, c.id)}`} title={`Tag: ${c.tag}`}>
                           {customColValue(tr, c.tag) || "—"}
@@ -1909,7 +1939,14 @@ function AlbumRowGroup({
   const showAlbumCol = visibleCols.includes("album");
   const cells: AlbumRowCell[] = [];
   if (visibleCols.includes("artist"))
-    cells.push({ id: "artist", cls: `td text-zinc-400 break-words${phoneHide(ALBUM_PHONE_CLS, "artist")}`, node: album.artist });
+    /* Free text can outgrow any floor a fixed-layout column carries, and this
+       table's rule for that is the app's own: clip it on one line (the
+       interface checks every such cell) and keep the whole value in the title
+       — never wrap the row three lines tall or paint over the next column. */
+    cells.push({
+      id: "artist", cls: `td text-zinc-400 cell-ellipsis${phoneHide(ALBUM_PHONE_CLS, "artist")}`,
+      title: album.artist, node: album.artist,
+    });
   if (visibleCols.includes("year"))
     cells.push({
       id: "year", cls: `td text-zinc-500${phoneHide(ALBUM_PHONE_CLS, "year")}`,
@@ -1950,7 +1987,10 @@ function AlbumRowGroup({
       node: album.meta?.["ALBUM DYNAMIC RANGE"] ?? "—",
     });
   if (visibleCols.includes("source"))
-    cells.push({ id: "source", cls: `td text-zinc-500 break-words${phoneHide(ALBUM_PHONE_CLS, "source")}`, node: album.source_summary ?? "—" });
+    cells.push({
+      id: "source", cls: `td text-zinc-500 cell-ellipsis${phoneHide(ALBUM_PHONE_CLS, "source")}`,
+      title: album.source_summary ?? "Source", node: album.source_summary ?? "—",
+    });
   if (visibleCols.includes("videos"))
     cells.push({
       id: "videos", cls: `td text-zinc-500 tabular-nums${phoneHide(ALBUM_PHONE_CLS, "videos")}`, title: "Music videos in this album",
@@ -2105,8 +2145,8 @@ function AlbumRowGroup({
                               >
                                 <Link
                                   to={trackRef(t)}
-                                  className="hover:text-accent-soft break-words min-w-0"
-                                  title="Click to play · Ctrl-click to open track page"
+                                  className="hover:text-accent-soft cell-ellipsis min-w-0"
+                                  title={`${t.tags.TITLE ?? t.file} · Click to play · Ctrl-click to open track page`}
                                   onClick={(e) => entityLinkClick(e, () => navigate(trackRef(t)))}
                                 >
                                   {t.tags.TITLE ?? t.file}

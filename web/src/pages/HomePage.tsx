@@ -1,13 +1,14 @@
 import { useQuery } from "@tanstack/react-query";
 import { useMemo, useRef, useState } from "react";
 import { Link } from "react-router-dom";
-import { AlertTriangle, ArrowDownUp, BarChart3, Clock, Disc3, Heart, ListChecks, Loader2, RefreshCw, Sparkles, Star, Users } from "lucide-react";
+import { AlertTriangle, ArrowDownUp, BarChart3, Clock, Disc3, Heart, ListChecks, Loader2, Radio, RefreshCw, Sparkles, Star, Users } from "lucide-react";
 import { api } from "../api";
 import { EmptyState, PageLoading } from "../components/Badges";
 import StorageCard from "../components/StorageCard";
 import GradeWarning from "../components/GradeWarning";
 import PageHeader from "../components/PageHeader";
 import AlbumCard from "../components/AlbumCard";
+import CoverImg from "../components/CoverImg";
 import Segmented from "../components/Segmented";
 import StarRating from "../components/StarRating";
 import StatsPanel from "../components/StatsPanel";
@@ -19,7 +20,7 @@ import { GRID_SIZES, useGridSize, useSelectMode } from "../lib/libraryView";
 import { toUi } from "../lib/ratings";
 import { useStore } from "../store";
 import type { ReactNode } from "react";
-import type { HomeAlbum, HomeArtist, Track } from "../types";
+import type { HomeAlbum, HomeArtist, HomePodcast, Track } from "../types";
 
 /** Shelf chip: why a row is here (a wish's status, a favorite's origin). */
 function Chip({ text, title }: { text: string; title?: string }) {
@@ -139,6 +140,62 @@ function ArtistShelf({ title, artists }: { title: string; artists?: HomeArtist[]
   );
 }
 
+function PodcastShelf({ title, items, gridSize }: {
+  title: string;
+  items?: HomePodcast[];
+  gridSize: "s" | "m" | "l";
+}) {
+  const { t } = useI18n();
+  // An empty shelf is not drawn at all (see Shelf): a library with no podcast
+  // shows no podcast shelf.
+  if (!items?.length) return null;
+  return (
+    <section className="space-y-2">
+      <div className="flex items-baseline gap-2 px-1">
+        <Radio className="h-4 w-4 text-accent self-center" />
+        <h2 className="text-sm font-semibold tracking-tight">{title}</h2>
+        <span className="text-[11px] text-zinc-600">{t("home.shelf.podcasts_blurb")}</span>
+      </div>
+      {/* One card per SERIES, not per episode: the shelf answers "what shows
+          do I have", and each card's own line is the newest episode on disk.
+          The card opens the series page, where every episode of it is listed
+          with its own number and date — an episode title alone does not say
+          which show it belongs to. */}
+      <div
+        className="grid gap-x-4 gap-y-5 stagger"
+        style={{ gridTemplateColumns: `repeat(auto-fill, minmax(${GRID_SIZE_MIN[gridSize]}px, 1fr))` }}
+      >
+        {items.map((row) => {
+          const newest = row.meta?.ALBUM || "";
+          const date = row.meta?.DATE || row.meta?.ORIGINALDATE || "";
+          return (
+            <Link
+              key={row.podcast_series}
+              to={`/podcast/${encodeURIComponent(row.podcast_series)}`}
+              className="group rounded-xl p-1 transition-all duration-200 hover:bg-panel/70"
+              title={`${row.podcast_series} — ${t("podcast.episodes")} ${row.podcast_episode_count}; ${t("podcast.newest_episode")}: ${newest}`}
+            >
+              <CoverImg
+                albumPath={row.path}
+                coverFile={row.cover_file}
+                wrapperClass="aspect-square w-full rounded-lg bg-raise overflow-hidden"
+              />
+              <div className="mt-2 px-1 text-sm font-medium truncate w-full">{row.podcast_series}</div>
+              <div className="px-1 text-[11px] text-zinc-400 truncate w-full" title={newest}>
+                {newest}
+              </div>
+              <div className="px-1 text-[11px] text-zinc-600 tabular-nums truncate w-full">
+                {row.podcast_episode_count} {t("podcast.episodes")}
+                {date && <span> · {date}</span>}
+              </div>
+            </Link>
+          );
+        })}
+      </div>
+    </section>
+  );
+}
+
 export default function HomePage() {
   const { t } = useI18n();
   // Refresh means "look at the music folder again", not "ask again": the
@@ -178,7 +235,7 @@ export default function HomePage() {
     for (const row of [
       ...(data?.recent ?? []), ...(data?.pending ?? []), ...(data?.wanted ?? []),
       ...(data?.top_rated ?? []), ...(data?.rated ?? []), ...(data?.needs_attention ?? []),
-      ...(data?.discover ?? []), ...(data?.favorites ?? []),
+      ...(data?.discover ?? []), ...(data?.favorites ?? []), ...(data?.podcasts ?? []),
     ]) {
       const key = row.path || `mb:${row.mbid ?? ""}`;
       if (seen.has(key)) continue;
@@ -378,6 +435,13 @@ export default function HomePage() {
         {...shelfProps}
       />
       <ArtistShelf title={t("home.shelf.artists")} artists={data.top_artists} />
+      {/* What the library holds that is not an album by a band: one card per
+          podcast series, nothing at all when there is no podcast. */}
+      <PodcastShelf
+        title={t("home.shelf.podcasts")}
+        items={data.podcasts}
+        gridSize={gridSize}
+      />
       <Shelf title={t("home.shelf.rediscover")} icon={Disc3} items={data.discover} {...shelfProps} />
       <Shelf title={t("page.favorites")} icon={Heart} items={data.favorites} {...shelfProps} />
 

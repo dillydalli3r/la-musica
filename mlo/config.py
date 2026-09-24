@@ -7,8 +7,7 @@ import tempfile
 from .paths import (CONFIG_FILE, DEFAULT_DIGITAL_SOURCE, app_data_dir, downloads_dir,
                     legacy_state_dirs, read_music_folder_guess, trash_dir,
                     trash_root)
-from .naming import (DEFAULT_NAMING_SCRIPT, PRIMARY_RELEASE_TYPES,
-                     SECONDARY_RELEASE_TYPES)
+from .naming import DEFAULT_NAMING_SCRIPT, RELEASE_TYPES
 # The genre-list ceiling, so `mb_genre_count`'s validated range below and the
 # value mlo.genres enforces can never drift apart: one number, one home.
 from .genres import GENRE_COUNT_MAX
@@ -104,6 +103,16 @@ LEGACY_DEFAULT_CD_QUERIES = (
 LEGACY_DEFAULT_GENRE_COUNTS = (3,)
 LEGACY_DEFAULT_DIGITAL_QUERIES = (
     ["artist album year", "artist album"],
+)
+
+# The medium order previous releases shipped, before the video carriers were
+# named ahead of Digital Media (DVD, Blu-ray, VHS, Video CD, LaserDisc — see
+# DEFAULT_CONFIG). Settings writes the whole list into the config, so an
+# untouched install holds a copy of the OLD order and would keep ranking a
+# physical music-video release last; a list the user actually edited is theirs
+# and is kept exactly as saved.
+LEGACY_DEFAULT_MEDIUM_ORDER = (
+    ["CD", "Vinyl", "Cassette", "Other", "Digital Media"],
 )
 
 # Run All order — PATH-CHANGING SCRIPTS FIRST (11 videos → 3 FLACs → 14
@@ -955,11 +964,12 @@ DEFAULT_CONFIG = {
     # "missing" means is `mlo.grader`'s own checks — this adds no second
     # completeness opinion.
     "import_autonomy": "automatic",
-    # Families the USER decides even in automatic mode: "links", "cover",
-    # "genres", "lyrics", "advisory" (the wizard's own steps). A family named
-    # here is never auto-decided — the cover step stages candidates instead of
-    # writing the first hit, the links and advisory fetches are skipped, the
-    # lyrics script drops out of the chain — and the album's prompt names it as
+    # Families the USER decides even in automatic mode: "links", "source",
+    # "cover", "genres", "lyrics", "advisory" (the wizard's own steps). A
+    # family named here is never auto-decided — the cover step stages
+    # candidates instead of writing the first hit, the links and advisory
+    # fetches are skipped, the lyrics script drops out of the chain and no
+    # SOURCE is written on the user's behalf — and the album's prompt names it as
     # awaiting a decision instead of as unsourced. Empty = the app decides
     # everything any configured source can answer, which is the point of
     # automatic mode.
@@ -1203,11 +1213,16 @@ DEFAULT_CONFIG = {
     "auto_import_require_country": True,
     # Best medium first, by MusicBrainz format name. CD leads (the pressings
     # rips and the folder templates are built for), the other PHYSICAL media
-    # follow, and digital is last: a digital edition carries no catalog number
-    # and no pressing to match against, so it is the edition a Soulseek folder
-    # matches least reliably. A format the list does not name ranks after every
-    # configured one.
-    "auto_import_medium_order": ["CD", "Vinyl", "Cassette", "Other", "Digital Media"],
+    # follow — the video carriers (DVD, Blu-ray, VHS, Video CD, LaserDisc)
+    # named ABOVE Digital Media, so a music video published on a disc is
+    # preferred over the same video published as a download (issue #53: a
+    # physical release is the one worth archiving) — and digital is last: a
+    # digital edition carries no catalog number and no pressing to match
+    # against, so it is the edition a Soulseek folder matches least reliably.
+    # A format the list does not name ranks after every configured one.
+    "auto_import_medium_order": ["CD", "Vinyl", "Cassette", "Other", "DVD",
+                                 "Blu-ray", "VHS", "Video CD", "LaserDisc",
+                                 "Digital Media"],
     # The release country preferred among otherwise EQUAL editions — a
     # tie-breaker, never a filter. An ISO 3166-1 alpha-2 code, the spelling
     # MusicBrainz publishes on the release ("US", "GB", "XW" for worldwide),
@@ -1292,8 +1307,9 @@ DEFAULT_CONFIG = {
     # this feature exists to avoid.
     "artist_watch_max_per_cycle": 1,
     # Which release-group TYPES a watch may queue. MusicBrainz's own type names
-    # (lowercase) — the vocabulary is mlo.naming.PRIMARY_RELEASE_TYPES /
-    # SECONDARY_RELEASE_TYPES, and the rule is server.artist_watch's: a
+    # (lowercase) plus the app's DERIVED one ("podcast", read from the group's
+    # series relation — see mlo.naming.DERIVED_RELEASE_TYPES): the vocabulary is
+    # mlo.naming.RELEASE_TYPES, and the rule is server.artist_watch's: a
     # secondary type is a QUALIFIER and decides the match (a live album is
     # Album + Live, so "album" alone must not queue it and ticking "live"
     # must), otherwise the group's primary type has to be selected. Album + EP
@@ -1357,6 +1373,14 @@ DEFAULT_CONFIG = {
     "discogs_token": "",
     "lastfm_api_key": "",
     "rym_cookie": "",
+    # The per-cookie notes for the cookie logins (server/api_cookies.py): one
+    # JSON object per source, one entry per cookie identity
+    # ("domain\tpath\tname"), holding the comment the user wrote against an
+    # imported cookie and — for a source whose credential is a bare `Cookie`
+    # header — the expiry the export stated for it. Empty means no notes; the
+    # value is written by the cookie routes, never by the settings form, which
+    # is why no Settings row offers it (see HIDDEN_KEYS in configMeta.ts).
+    "cookie_notes": "",
     # Read RateYourMusic's genre pages from the Wayback Machine when the live
     # site will not serve them: no `rym_cookie`, or one RYM refused to honour.
     # An archived copy is RYM's OWN data — the same page, read by the same
@@ -1397,6 +1421,23 @@ DEFAULT_CONFIG = {
     # entirely; it is never required and its absence can never fail an import.
     "spotify_client_id": "",
     "spotify_client_secret": "",
+    # Importing a playlist from a streaming service (Playlists → Import from a
+    # streaming service). Three decisions, all of them about what an import
+    # does with a track the library does NOT have:
+    #   * parent_albums — OFF: the import is informational, the playlist holds
+    #     the matched paths and nothing is queued. ON: every imported track
+    #     whose album the library does not hold queues its PARENT ALBUM through
+    #     the existing add-by-name path (server.api_add: MusicBrainz match, then
+    #     the wish queue). Albums, never tracks — the dialog can override this
+    #     per import.
+    #   * unmatched — "skip": unmatched rows are reported and left out (the
+    #     default). "wish": each unmatched track is also queued by name, so the
+    #     wish queue searches for it too.
+    #   * create_empty — whether an import that matched nothing still creates
+    #     the (empty) playlist, so the attempt is visible in the playlists list.
+    "playlist_import_parent_albums": False,
+    "playlist_import_unmatched": "skip",
+    "playlist_import_create_empty": True,
     # Artist image / artist description / album description auto-fetch on
     # import. With metadata_review on, candidates are staged and only written
     # when the user applies one.
@@ -1735,6 +1776,9 @@ _CHOICES = {
     "soulseek_auto_lossy_policy": {"never", "best"},
     "auth_mode": {"auto", "required", "off"},
     "advisory_fallback": {"0", "2", "none"},
+    # What a streaming playlist import does with a track the library does not
+    # have (see DEFAULT_CONFIG): report it only, or queue it by name too.
+    "playlist_import_unmatched": {"skip", "wish"},
     "ai_genre_effort": {"minimal", "low", "medium", "high", "max"},
     "lrc_zero_timestamp_target": {"EMBEDDED", "LRC", "BOTH"},
     # Sync granularity required of (and targeted for) synced lyrics:
@@ -1998,9 +2042,15 @@ def normalize_config(user=None) -> dict:
         v = [t for t in v.replace("\n", ";").split(";") if t.strip()]
     if not isinstance(v, (list, tuple)):
         v = []
+    order = [str(t).strip() for t in v if str(t).strip()][:12]
+    # An untouched install holds a copy of the OLD shipped order, which is not
+    # a choice (Settings carried the default): it follows the current one, so
+    # the video carriers it never named stop ranking last. A list the user
+    # actually edited is kept exactly as saved.
+    if order in LEGACY_DEFAULT_MEDIUM_ORDER:
+        order = []
     cfg["auto_import_medium_order"] = (
-        [str(t).strip() for t in v if str(t).strip()][:12]
-        or list(DEFAULT_CONFIG["auto_import_medium_order"])
+        order or list(DEFAULT_CONFIG["auto_import_medium_order"])
     )
     v = cfg.get("genre_sources")
     if isinstance(v, str):
@@ -2022,16 +2072,18 @@ def normalize_config(user=None) -> dict:
     cfg["genre_sources"] = saved or list(DEFAULT_CONFIG["genre_sources"])
 
     # Release-group types a watch may queue: a CLOSED vocabulary (MusicBrainz's
-    # own names, compared case-insensitively), so an unknown name is dropped
-    # rather than kept as a filter that could never match anything — and a list
-    # left with nothing selectable falls back to the shipped default (album+EP)
-    # instead of leaving every watch type-less.
+    # own names plus the app's DERIVED ones — "podcast", which is read from
+    # the series relation rather than a release-group type — compared
+    # case-insensitively), so an unknown name is dropped rather than kept as a
+    # filter that could never match anything — and a list left with nothing
+    # selectable falls back to the shipped default (album+EP) instead of
+    # leaving every watch type-less.
     v = cfg.get("artist_watch_types")
     if isinstance(v, str):
         v = [t for t in v.replace("\n", ";").split(";") if t.strip()]
     if not isinstance(v, (list, tuple)):
         v = []
-    known = {t.lower() for t in (PRIMARY_RELEASE_TYPES + SECONDARY_RELEASE_TYPES)}
+    known = {t.lower() for t in RELEASE_TYPES}
     picked = []
     for t in v:
         name = str(t).strip().lower()
@@ -2205,13 +2257,17 @@ def normalize_config(user=None) -> dict:
             # xlit/translate script when the id last moved), and the anchor
             # rule puts every later id where the pipeline wants it.
             #
-            # 20 (layout scan) and 21 (AcoustID pairs) are KEPT instead: they
-            # are the newest ids and have never meant anything else, so a saved
-            # order that holds one holds the user's own position for it, and
-            # shedding it would silently undo that. An order written before
-            # they existed simply has neither and gets them from the same
-            # anchor rule below.
-            if ((1 <= script_id <= 14 or script_id in (20, 21))
+            # 20 (layout scan), 21 (AcoustID pairs) and 22 (AcoustID submit)
+            # are KEPT instead: they are the newest ids and have never meant
+            # anything else, so a saved order that holds one holds the user's
+            # own position for it, and shedding it would silently undo that. An
+            # order written before they existed simply has neither and gets
+            # them from the same anchor rule below — except 22, which is
+            # deliberately never anchored: it submits to a PUBLIC database, so
+            # it runs when a person put it in their chain (or pressed it in a
+            # menu), never because an install was upgraded
+            # (server.script_runners.OPT_IN_SCRIPTS).
+            if ((1 <= script_id <= 14 or script_id in (20, 21, 22))
                     and script_id not in clean_order):
                 clean_order.append(script_id)
     # Migrate legacy sequential default [1..8] to systematic pipeline

@@ -60,6 +60,11 @@ EXPECTED_SCRIPTS = {
     # carries — the grading check that had no fixer in the registry at all
     # (mlo/acoustid.py run_fix_pairs).
     21: "Fix AcoustID pairs",
+    # 22 gives back: the fingerprint + MusicBrainz recording id a file states
+    # goes to AcoustID's public database (mlo/acoustid.py submit_files, the
+    # same pass the import route runs). Deliberately NOT in the shipped Run All
+    # order — see OPT_IN_SCRIPTS in server/script_runners.py.
+    22: "Submit fingerprints (AcoustID)",
 }
 
 
@@ -76,6 +81,20 @@ def server_runners():
     src = read("server/script_runners.py")
     block = re.search(r"RUNNERS[^=]*= \{(.*?)\n\}", src, re.S).group(1)
     return {int(n) for n in re.findall(r"(\d+):", block)}
+
+
+def opt_in_scripts():
+    """The ids the shipped Run All order deliberately does not carry, from BOTH
+    halves: ``server.script_runners.OPT_IN_SCRIPTS`` (what the chain and the
+    stack page read) and the ``OPT_IN_SCRIPTS`` the web registry mirrors (what
+    the Settings grid offers them from). A declared exception, not a forgotten
+    script: the checks in main() require every other id to hold a slot."""
+    server = re.search(r"OPT_IN_SCRIPTS[^=]*= frozenset\(\{([^}]*)\}\)",
+                       read("server/script_runners.py"))
+    web = re.search(r"OPT_IN_SCRIPTS[^=]*=\s*\[([^\]]*)\]",
+                    read("web/src/lib/scripts.ts"))
+    return ({int(n) for n in re.findall(r"\d+", server.group(1))} if server else set(),
+            {int(n) for n in re.findall(r"\d+", web.group(1))} if web else set())
 
 
 def web_scripts():
@@ -527,8 +546,14 @@ def main():
             fail += 1
 
     print("scripts registry")
-    check("canonical registry has 21 scripts", len(canon) == 21, str(sorted(canon)))
-    check("canonical numbers are 1..21", sorted(canon) == list(range(1, 22)))
+    opt_in_py, opt_in_web = opt_in_scripts()
+    check("the web and the server declare the same opt-in scripts",
+          opt_in_py == opt_in_web and bool(opt_in_py),
+          f"server={sorted(opt_in_py)} web={sorted(opt_in_web)}")
+    check("canonical registry has 22 scripts", len(canon) == 22, str(sorted(canon)))
+    check("canonical numbers are 1..22", sorted(canon) == list(range(1, 23)))
+    check("every opt-in script is a real script", opt_in_py <= set(canon),
+          f"unknown={sorted(opt_in_py - set(canon))}")
     check("server RUNNERS == canonical numbers", runners == set(canon), f"server={sorted(runners)}")
     check("web SCRIPTS == canonical numbers", set(web) == set(canon), f"web={sorted(web)}")
     check("README table == canonical numbers", readme == set(canon), f"readme={sorted(readme)}")
@@ -547,10 +572,15 @@ def main():
 
     print("run-all order")
     py_run_all = python_default_run_all()
-    check("DEFAULT_RUN_ALL covers every script", sorted(run_all) == list(range(1, 22)), str(sorted(run_all)))
+    check("DEFAULT_RUN_ALL covers every script that ships in the order",
+          sorted(run_all) == [i for i in range(1, 23) if i not in opt_in_py],
+          str(sorted(run_all)))
+    check("…and leaves the opt-in scripts out of it",
+          not (set(run_all) & opt_in_py), str(sorted(set(run_all) & opt_in_py)))
     check("DEFAULT_RUN_ALL has no duplicates", len(run_all) == len(set(run_all)), str(run_all))
     check("mlo/config.py DEFAULT_RUN_ALL_ORDER covers every script",
-          sorted(py_run_all) == list(range(1, 22)), str(sorted(py_run_all)))
+          sorted(py_run_all) == [i for i in range(1, 23) if i not in opt_in_py],
+          str(sorted(py_run_all)))
     check("python and web run-all order agree", py_run_all == run_all,
           f"python={py_run_all} web={run_all}")
 

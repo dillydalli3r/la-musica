@@ -433,7 +433,7 @@ export const CONFIG_GROUPS: CfgGroup[] = [
         { k: "soulseek_auto_response_limit", label: "Responses before a search is scored (5–500)", type: "number", min: 5, max: 500, help: "slskd only hands back a search's results once it has ENDED, and a popular album never goes quiet — this ends the search early instead of waiting out the whole window. Lower = faster and fewer peers; higher = slower and more candidates." },
         { k: "auto_import_avoid_promo", label: "Never auto-import promotional / bootleg editions", type: "bool" },
         { k: "auto_import_require_country", label: "Only auto-import editions with a release country", type: "bool", help: "A MusicBrainz release without RELEASECOUNTRY is usually an unsorted import, and the CD query templates are built from that field — such editions are skipped, and a group whose only editions lack one is reported as ineligible instead." },
-        { k: "auto_import_medium_order", label: "Medium preference (comma-separated, best first)", type: "csv", help: "Editions are ranked by this media order first, then by how close the edition is to the release group's original date; a format not named here ranks after every configured one. Blank = the built-in order (CD, Vinyl, Cassette, Other, Digital Media) — CD first, other physical media next, digital last." },
+        { k: "auto_import_medium_order", label: "Medium preference (comma-separated, best first)", type: "csv", help: "Editions are ranked by this media order first, then by how close the edition is to the release group's original date; a format not named here ranks after every configured one. Blank = the built-in order (CD, Vinyl, Cassette, Other, DVD, Blu-ray, VHS, Video CD, LaserDisc, Digital Media) — CD first, the other physical media next (the video carriers included, so a music video on a disc beats the same video published as a download), digital last." },
         { k: "prefer_release_country", label: "Preferred release country (ISO code, blank = none)", type: "text", help: "The spelling MusicBrainz publishes on the release, e.g. US or GB. A tie-breaker only: it never outranks status, medium, track count or the original-edition rule." },
         { k: "prefer_original_edition", label: "Prefer the original (explicit) edition over a clean or edited one", type: "bool", help: "MusicBrainz states this in the release title or its disambiguation comment. Off, a clean edition is ranked on the other rules like any other — a clean edition may carry altered audio." },
         { k: "prefer_disc_streams", label: "Prefer a disc's own streams over a compressed re-encode", type: "bool",
@@ -478,14 +478,33 @@ export const CONFIG_GROUPS: CfgGroup[] = [
         { k: "artist_image_sources", label: "Artist image sources (order)", type: "list", catalog: "discovery", help: "Used when fetching an artist image automatically; the picked image can still be overridden per artist." },
         { k: "description_sources", label: "Description sources (order)", type: "list", catalog: "discovery", help: "Used for artist and album descriptions." },
         { k: "discovery_timeout_s", label: "Request timeout (s)", type: "number", min: 3, max: 30 },
-        { k: "rym_cookie", label: "RateYourMusic cookie", type: "password", help: "Only needed when RYM answers with a challenge. Two ways in: a cookies.txt in Netscape format — what a browser-extension exporter like \"Get cookies.txt\" writes — is imported by the panel on Settings' Discovery tab (paste it or drop the file on the box; only its rateyourmusic.com cookies are kept), or open the devtools route — sign in to rateyourmusic.com, press F12 → Network → reload → click any request to rateyourmusic.com → Headers → Request Headers → copy everything after \"Cookie:\" and paste it here (newlines and the \"Cookie:\" label are handled for you). RYM's `session` cookie is HttpOnly, so a browser extension's export is the only way to get it out of a browser at all. It is a session credential — do not share it, and paste a fresh one when RYM starts refusing, since signing out or clearing cookies invalidates it. Blank = RYM is skipped like any other unavailable source; MusicBrainz still resolves RYM links for well-known releases. Test it with the Sources panel's Test button." },
+        { k: "rym_cookie", label: "RateYourMusic cookie", type: "password", help: "Only needed when RYM answers with a challenge. Two ways in: a cookies.txt in Netscape format — what a browser-extension exporter like \"Get cookies.txt\" writes — is imported by the cookie panel below (the same panel is on Settings' Sources and in this wizard) (paste it or drop the file on the box; only its rateyourmusic.com cookies are kept), or open the devtools route — sign in to rateyourmusic.com, press F12 → Network → reload → click any request to rateyourmusic.com → Headers → Request Headers → copy everything after \"Cookie:\" and paste it here (newlines and the \"Cookie:\" label are handled for you). RYM's `session` cookie is HttpOnly, so a browser extension's export is the only way to get it out of a browser at all. It is a session credential — do not share it, and paste a fresh one when RYM starts refusing, since signing out or clearing cookies invalidates it. Blank = RYM is skipped like any other unavailable source; MusicBrainz still resolves RYM links for well-known releases. Test it with the Sources panel's Test button." },
         { k: "rym_links_auto", label: "Auto-find RateYourMusic links", type: "bool", help: "Asks rateyourmusic.com for the album and artist pages during an import (and from the link editor's Auto-find button). An existing link is never overwritten, and when RYM refuses the request the import carries on untouched — the link is then left for you to paste by hand." },
         { k: "rym_archive_fallback", label: "Read archived RateYourMusic pages when the live site refuses", type: "bool", help: "With no cookie — or one RYM no longer accepts — the Wayback Machine is asked for the release page instead. An archived page can predate the release, so its genre list may be short; the live site is always tried first." },
         { k: "spotify_client_id", label: "Spotify client ID (optional)", type: "text", help: "Optional second advisory source (Spotify's ISRC lookup) behind Deezer and ahead of Apple. Empty = Spotify is skipped; an import never fails without it." },
         { k: "spotify_client_secret", label: "Spotify client secret (optional)", type: "password", help: "Pairs with the client ID above — both are needed before the Spotify lookup runs." },
         { k: "discogs_token", label: "Discogs token (optional)", type: "password", help: "A personal access token from discogs.com/settings/developers. Used to rate a release while a genre import runs; without it Discogs is skipped." },
         { k: "lastfm_api_key", label: "Last.fm API key (optional)", type: "password", help: "A free API key from last.fm/api. Only used by the discovery providers; without it Last.fm is skipped." },
-        { k: "discovery_enabled", label: "Use online discovery providers", type: "bool", help: "Off, the Home shelves and every artist/album lookup answer from the library and MusicBrainz alone: no Deezer, ListenBrainz, Last.fm or Wikipedia request leaves the machine." },
+        { k: "discovery_enabled", label: "Use online discovery providers", type: "bool", help: "Off, the Home shelves and every artist/album lookup answer from the library and MusicBrainz alone: no Deezer, ListenBrainz, Last.fm or Wikipedia request leaves the server." },
+      ],
+    },
+    {
+      title: "Streaming playlist import",
+      blurb: "Playlists → “Import from a streaming service” reads one playlist URL per import: Deezer's public API (no key), Spotify's Web API (the client ID/secret from the Discovery tab — a public playlist needs nothing else), YouTube Music through the app's own yt-dlp, and Apple Music's playlist page (no public API without a developer token). Every track is matched against the library and the report says which ones did not match and why.",
+      fields: [
+        {
+          k: "playlist_import_parent_albums", label: "Queue the parent album of a track the library does not have", type: "bool",
+          help: "Off (the default), an import is informational: the playlist holds the matched paths and nothing is downloaded. On, every imported track whose album is not in the library queues its PARENT ALBUM through the same add-by-name path the Discover page uses (MusicBrainz match, then the wish queue) — albums, never single tracks. A track whose album is already in the library queues nothing. The import dialog can override this for one import.",
+        },
+        {
+          k: "playlist_import_unmatched", label: "Tracks the library does not have", type: "select",
+          options: [["skip", "Report them and leave them out (default)"], ["wish", "Also queue each one by name"]],
+          help: "An import always reports every unmatched track and the reason. “Also queue each one by name” saves a wish for each of them too, so the queue's own name search looks for the track — unless the parent-album option above already queued the album it is on.",
+        },
+        {
+          k: "playlist_import_create_empty", label: "Still create the playlist when no track matched", type: "bool",
+          help: "Off, an import that matched nothing writes no playlist and the report says so. On (the default), the empty playlist is created so the attempt is visible in the playlists list.",
+        },
       ],
     },
     {
@@ -520,7 +539,7 @@ export const CONFIG_GROUPS: CfgGroup[] = [
         { k: "acoustid_api_key", label: "AcoustID application key (free, acoustid.org)", type: "password" },
         {
           k: "acoustid_user_key", label: "AcoustID user key (fingerprint submissions)", type: "password",
-          help: "The USER key of your own acoustid.org account (AcoustID → your account → API keys), which is a different key from the application key above. It is needed ONLY to submit fingerprints — the wizard's Submit to AcoustID publishes the ACOUSTID_FINGERPRINT/ID pair a matched album carries to AcoustID's public database, and AcoustID refuses that submission in its own words while this is blank or wrong. Looking a release up never uses it: the application key alone can do that.",
+          help: "The USER key of your own acoustid.org account (AcoustID → your account → API keys), which is a different key from the application key above. It is needed ONLY to submit fingerprints — a submission gives AcoustID one fingerprint TOGETHER WITH the MusicBrainz recording id it is — MusicBrainz itself never receives a fingerprint. The wizard's AcoustID step, the details menus' 'Submit fingerprints (AcoustID)' entry and Run All (once you tick it) all submit with it, and a pair AcoustID already links — or one this app already sent — is never re-sent. Looking a release up never uses this key: the application key alone can do that. Test it in Settings → Sources.",
         },
         { k: "acoustid_min_score", label: "Minimum AcoustID match score", type: "number", min: 0, max: 1, step: 0.05 },
         { k: "acoustid_fpcalc_path", label: "fpcalc path (blank = the bundled one)", type: "text", help: "Only needed when AcoustID should use a fingerprint tool outside the dependencies folder." },
@@ -741,7 +760,7 @@ export const CONFIG_GROUPS: CfgGroup[] = [
         { k: "artist_watch_enabled", label: "Watch artists for new releases", type: "bool" },
         { k: "artist_watch_interval_hours", label: "Check interval (hours)", type: "number", min: 1, max: 720, help: "How long between two checks of the SAME artist; the worker itself ticks far more often." },
         { k: "artist_watch_max_per_cycle", label: "Releases queued per artist per check", type: "number", min: 1, max: 50, help: "The hard anti-dump cap. One is the shipped default: a watch that queued a hundred at once is the discography dump this feature exists to avoid." },
-        { k: "artist_watch_types", label: "Release types a watch may queue", type: "multi", options: [["album","Album"],["ep","EP"],["single","Single"],["broadcast","Broadcast"],["other","Other"],["compilation","Compilation"],["soundtrack","Soundtrack"],["spokenword","Spoken word"],["interview","Interview"],["audiobook","Audiobook"],["live","Live"],["remix","Remix"],["dj-mix","DJ mix"],["mixtape/street","Mixtape / street"],["demo","Demo"],["audio drama","Audio drama"],["field recording","Field recording"]], help: "MusicBrainz's own type names. A release group matches when its primary type is ticked or ANY secondary type is (a live album is Album + Live, so ticking Live finds it). A watch can narrow this per artist." },
+        { k: "artist_watch_types", label: "Release types a watch may queue", type: "multi", options: [["album","Album"],["ep","EP"],["single","Single"],["broadcast","Broadcast"],["other","Other"],["compilation","Compilation"],["soundtrack","Soundtrack"],["spokenword","Spoken word"],["interview","Interview"],["audiobook","Audiobook"],["live","Live"],["remix","Remix"],["dj-mix","DJ mix"],["mixtape/street","Mixtape / street"],["demo","Demo"],["audio drama","Audio drama"],["field recording","Field recording"],["podcast","Podcast"]], help: "MusicBrainz's own type names, plus the app's derived one: Podcast (a podcast is a MusicBrainz SERIES, and an episode is a Broadcast release group linked to it — not a release-group type MusicBrainz publishes). A release group matches when its primary type is ticked or ANY secondary type is (a live album is Album + Live, so ticking Live finds it); Podcast matches only a group whose series relation the app read. A watch can narrow this per artist." },
         { k: "artist_watch_auto_add", label: "Queue a matched release into the library automatically", type: "bool", help: "Off, a watch only reports what it found (the notification is the whole output) — which is what you want if you pick the edition by hand." },
       ],
     },
@@ -830,6 +849,12 @@ export const HIDDEN_KEYS: string[] = [
   // set through /api/auth/setup, which is where the wizard's own password
   // fields send it. Reading it back would publish the credential too.
   "auth_password_hash",
+  // The per-cookie notes the cookie logins keep (server/api_cookies.py): the
+  // comment the user wrote against an imported cookie, and the expiry an
+  // import remembered for a credential that has nowhere to carry one. They are
+  // edited in the cookie panel itself — next to the cookie they describe —
+  // never in a raw JSON box, so no Settings row offers this key.
+  "cookie_notes",
   // One-shot re-run switches. They say "process this track even though it
   // already carries a result", which cannot be answered before the library has
   // been through the pipeline once; each one lives on the Settings tab of the

@@ -423,12 +423,12 @@ with simulated_platform("posix"), tempfile.TemporaryDirectory() as tmp:
     # a tarball to _extract_archive: it fell through to "run it as an installer"
     # and died with rc=126 the first time a Linux tarball was fetched.
     check("a tarball asset keeps its whole extension on disk",
-          fetchdeps._archive_suffix("oxipng-10.2.0-x86_64-unknown-linux-musl.tar.gz")
+          fetchdeps.archive_suffix("oxipng-10.2.0-x86_64-unknown-linux-musl.tar.gz")
           == ".tar.gz")
     check("a zip asset keeps its own",
-          fetchdeps._archive_suffix("slskd-0.26.0-linux-musl-x64.zip") == ".zip")
+          fetchdeps.archive_suffix("slskd-0.26.0-linux-musl-x64.zip") == ".zip")
     check("a bare-exe asset still gets its name",
-          fetchdeps._archive_suffix("yt-dlp.exe") == ".exe")
+          fetchdeps.archive_suffix("yt-dlp.exe") == ".exe")
 
     src = os.path.join(tmp, "oxipng-10.2.0-x86_64-unknown-linux-musl")
     os.makedirs(src)
@@ -442,7 +442,7 @@ with simulated_platform("posix"), tempfile.TemporaryDirectory() as tmp:
         tf.add(src, arcname=os.path.basename(src))
     out = os.path.join(tmp, "out")
     os.makedirs(out)
-    fetchdeps._extract_archive(tarball, out, log=lambda m: None)
+    fetchdeps.extract_installer(tarball, out, log=lambda m: None)
     landed = os.path.join(out, os.path.basename(src), "oxipng")
     check("a .tar.gz release asset extracts", os.path.isfile(landed))
     check("the marker lookup finds the native build",

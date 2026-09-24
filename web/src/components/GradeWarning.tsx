@@ -25,7 +25,9 @@ const CODE_WORDS: Record<string, string> = {
   // The one code whose bare form says what is missing and not what to do about
   // it ("acoustid id"). A half pair is completed by a step this app already
   // has, named the way the grader's own messages name their actions ("run
-  // Audit Library") so the words here are words the reader can find again.
+  // Audit Library") so the words here are words the reader can find again —
+  // the strip names the step that fixes THIS file's tag (script 21); what a
+  // submission is for is on the Grading page's own check description.
   ACOUSTID_ID: "AcoustID id missing (run Fix AcoustID pairs)",
   ACOUSTID_FINGERPRINT: "AcoustID fingerprint missing (run Fix AcoustID pairs)",
 };
@@ -194,7 +196,7 @@ export default function GradeWarning({ initial }: { initial?: GradeSummary }) {
         {long && (
           <button
             type="button"
-            className="inline-flex items-center gap-1 text-amber-100 hover:text-white underline underline-offset-2"
+            className="tap inline-flex items-center gap-1 text-amber-100 hover:text-white underline underline-offset-2"
             aria-expanded={open}
             onClick={() => setOpen((v) => !v)}
             title={open ? "Hide the rest of the findings" : "Show every failing album and track"}
@@ -204,11 +206,14 @@ export default function GradeWarning({ initial }: { initial?: GradeSummary }) {
           </button>
         )}
         {/* The rest are not printed: the Library's own Failing filter lists every
-            failing album and track, which is what a reader wants past a dozen. */}
+            failing album and track, which is what a reader wants past a dozen.
+            Both affordances carry `.tap`: as bare text links they were 16px
+            tall, which is a coin toss with a thumb — the phone geometry check
+            (tools/check_responsive.cjs) reports anything under 28px. */}
         {data.more > 0 && (
           <Link
             to={MORE_HREF}
-            className="text-amber-300/90 underline underline-offset-2 hover:text-white"
+            className="tap inline-flex items-center text-amber-300/90 underline underline-offset-2 hover:text-white"
           >
             +{data.more} more in the Library →
           </Link>

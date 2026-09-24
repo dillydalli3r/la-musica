@@ -46,7 +46,7 @@ import threading
 import time
 
 from mlo import import_policy
-from mlo.naming import PRIMARY_RELEASE_TYPES, SECONDARY_RELEASE_TYPES
+from mlo import release_choice
 
 # Reentrant: add_watch()/_record() hold the lock while calling _conn(), and on
 # FIRST use _conn() creates the schema under this same lock (the trap
@@ -70,9 +70,10 @@ STATUSES = ("queued", "notified", "imported", "failed", "retry")
 # resurrected; the user removes the watch or excludes the group for that).
 _HANDLED = ("queued", "notified", "imported")
 
-# Every type name a watch may select, case-insensitively compared. One
-# vocabulary, in mlo.naming, shared with the naming script's own type map.
-RELEASE_TYPES = tuple(PRIMARY_RELEASE_TYPES + SECONDARY_RELEASE_TYPES)
+# Every type name a watch may select, case-insensitively compared, lives in
+# mlo.naming (RELEASE_TYPES = the MusicBrainz names + the app's DERIVED ones,
+# "podcast") and every validation goes through `release_choice.type_names`
+# (`clean_types` below) — this module keeps no second copy of the vocabulary.
 
 # One browse window per artist per cycle. MusicBrainz's browse has NO
 # server-side sort, so integrations walks its pages itself (one cached browse
@@ -267,7 +268,7 @@ def is_new(first_release_date, added_at):
     return date > tuple(made)
 
 
-def type_matches(primary_type, secondary_types, wanted):
+def type_matches(primary_type, secondary_types, wanted, derived=()):
     """Whether a release group's type is one of the selected *wanted* names.
 
     A secondary type is a QUALIFIER and it decides the match: a live album is
@@ -284,10 +285,18 @@ def type_matches(primary_type, secondary_types, wanted):
     choice applies the SAME selection to the edition it queues (a watch for
     albums must not queue a single), and one implementation is what keeps the
     group a watch accepts and the edition it takes talking about one type.
+
+    `derived` is that function's own argument (mlo.naming's DERIVED types,
+    e.g. "podcast"): a name the app derives from a fact MusicBrainz states
+    beside the release-group type. A caller passes what
+    `mlo.release_choice.derived_types` read off the group — the candidate row
+    carries it as `podcast` — and a group with no such fact matches no derived
+    selection.
     """
     from mlo import release_choice
 
-    return release_choice.type_matches(primary_type, secondary_types, wanted)
+    return release_choice.type_matches(primary_type, secondary_types, wanted,
+                                       derived)
 
 
 def evaluate(rg, watch, owned=None, queued=None):
@@ -308,6 +317,12 @@ def evaluate(rg, watch, owned=None, queued=None):
         "year": date[:4],
         "primary_type": rg.get("primary_type") or "",
         "secondary_types": [str(s) for s in (rg.get("secondary_types") or [])],
+        # The Podcast series the group is `part of` (server.integrations
+        # reads it off the browse's own series-rels), or None. It is what the
+        # app's DERIVED type selection ("podcast", mlo.naming) is matched
+        # against — MusicBrainz states no such release-group type, so a plain
+        # Broadcast never answers to it.
+        "podcast": rg.get("podcast") or None,
         "first_release_date": date,
         "in_library": rg_id in owned,
         "queued": rg_id in queued,
@@ -326,7 +341,8 @@ def evaluate(rg, watch, owned=None, queued=None):
         row["reason"] = "not in this watch's list"
         return row
     if not type_matches(row["primary_type"], row["secondary_types"],
-                        watch.get("release_types")):
+                        watch.get("release_types"),
+                        release_choice.derived_types(row)):
         row["reason"] = ("no type selected"
                          if not watch.get("release_types")
                          else "type not in this watch's selected types")
@@ -763,7 +779,9 @@ def _release_for(rg_id, cfg=None, *, types=None):
 
     The ONE release-choice policy picks the edition (``mlo.release_choice``
     through ``integrations.group_targets``: official first, then the configured
-    medium order — CD, other physical, digital — then completeness, then the
+    medium order — CD, the other physical media (the video carriers DVD,
+    Blu-ray, VHS, Video CD and LaserDisc included, ahead of Digital Media),
+    digital last — then completeness, then the
     original edition) — the same choice "Add to library" and the bulk import
     make, so a watch can never queue a pressing those would refuse.
 

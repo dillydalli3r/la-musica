@@ -19,11 +19,12 @@ import { fmtDuration, fmtTech, GRID_SIZE_MIN, originalYear } from "../lib/fmt";
 import { albumRef } from "../lib/refs";
 import { GRID_SIZES, useGridSize, useLocalSort } from "../lib/libraryView";
 import type { Album, Track } from "../types";
-import { CachedMark, EmptyState } from "../components/Badges";
+import { CachedMark, EmptyState, PageLoading } from "../components/Badges";
 import AlbumCard from "../components/AlbumCard";
 import AlbumRow, { type AlbumRowCell } from "../components/AlbumRow";
 import ConfirmButton from "../components/ConfirmButton";
 import PageHeader from "../components/PageHeader";
+import Popover, { MenuItem } from "../components/Popover";
 import Segmented from "../components/Segmented";
 
 /** Human byte size. Local deliberately: the player bar's formatter is tuned for
@@ -371,8 +372,21 @@ export default function DownloadsPage() {
   const [trackCols, toggleTrackCol] = useColumnPrefs("cached-tracks", TRACK_COLS);
   const [trackW, setTrackW, resetTrackW] = useColumnWidths("cached-tracks");
 
-  const { data: lib } = useQuery({ queryKey: ["library"], queryFn: () => api.library() });
-  const { data: tracks, isFetching, refetch } = useQuery({ queryKey: CACHED_PATHS_KEY, queryFn: cachedTracks });
+  const {
+    data: lib,
+    isLoading: libLoading,
+    isError: libFailed,
+    error: libError,
+    refetch: refetchLib,
+  } = useQuery({ queryKey: ["library"], queryFn: () => api.library() });
+  const {
+    data: tracks,
+    isLoading: cacheLoading,
+    isError: cacheFailed,
+    error: cacheError,
+    isFetching,
+    refetch,
+  } = useQuery({ queryKey: CACHED_PATHS_KEY, queryFn: cachedTracks });
   const { data: sizes } = useQuery({ queryKey: CACHED_SIZES_KEY, queryFn: cachedEntrySizes });
 
   // A cached track is matched to the library by IDENTITY (its MusicBrainz
@@ -471,6 +485,27 @@ export default function DownloadsPage() {
 
   const count = tracks?.length ?? 0;
   const albums = rows.list.length;
+
+  /** What this page may claim, and the whole point of the states below.
+   *
+   *  The orphan verdict, the album breakdown and the byte totals are all
+   *  COMPARISONS between the cache and the library: `rows` walks `lib.artists`
+   *  and counts what no library row claims. Read against a library that has not
+   *  arrived (a cold load) or that failed, that comparison is not an answer —
+   *  it is an empty library, and it used to fall straight through to "only
+   *  tracks the library does not list", i.e. the page accusing the user's whole
+   *  offline cache from beside an unguarded Clear all. Loading is its own
+   *  state, a failed fetch is its own state, and the verdict is reachable only
+   *  with both payloads in. */
+  const state: "loading" | "cache-error" | "library-error" | "ready" =
+    cacheLoading || libLoading
+      ? "loading"
+      : cacheFailed
+        ? "cache-error"
+        : libFailed
+          ? "library-error"
+          : "ready";
+
   const toggleRow = (path: string) =>
     setOpen((s) => {
       const next = new Set(s);
@@ -496,32 +531,30 @@ export default function DownloadsPage() {
             className={`btn-ghost !py-1.5 text-xs tap ${sortOpen ? "!text-white !bg-raise" : ""}`}
             onClick={() => setSortOpen(!sortOpen)}
             title="Sort the downloads"
+            aria-haspopup="menu"
+            aria-expanded={sortOpen}
           >
             <ArrowDownUp className="h-3.5 w-3.5" />
             {sort ? `${SORTS.find((s) => s.key === sort.key)?.label ?? "Sort"} ${sort.dir === 1 ? "↑" : "↓"}` : "Sort"}
           </button>
-          {sortOpen && (
-            <>
-              <div className="fixed inset-0 z-30" onClick={() => setSortOpen(false)} />
-              <div className="absolute left-0 top-full mt-1 z-40 w-44 rounded-lg border border-border bg-zinc-950 shadow-2xl p-1.5">
-                {SORTS.map((s) => (
-                  <button
-                    key={s.key}
-                    onClick={() => {
-                      setSort(s.key);
-                      setSortOpen(false);
-                    }}
-                    className={`w-full text-left px-2.5 py-1.5 rounded-md text-xs flex items-center justify-between gap-3 ${
-                      sort?.key === s.key ? "bg-raise text-white" : "text-zinc-400 hover:text-white hover:bg-raise"
-                    }`}
-                  >
-                    <span>{s.label}</span>
-                    {sort?.key === s.key && <span className="font-mono">{sort.dir === 1 ? "↑" : "↓"}</span>}
-                  </button>
-                ))}
-              </div>
-            </>
-          )}
+          {/* The sort list is a Popover like every other menu in the app — the
+              shield, Escape, click-outside and `role="menu"` come from the
+              primitive. It used to be a hand-rolled panel with its own
+              full-viewport catcher and no Escape at all, so the only way out
+              of it was a mouse. `align="left"` keeps it under its trigger. */}
+          <Popover open={sortOpen} onClose={() => setSortOpen(false)} align="left" panelClass="w-44 p-1.5">
+            {SORTS.map((s) => (
+              <MenuItem
+                key={s.key}
+                active={sort?.key === s.key}
+                label={sort?.key === s.key ? `${s.label} ${sort.dir === 1 ? "↑" : "↓"}` : s.label}
+                onClick={() => {
+                  setSort(s.key);
+                  setSortOpen(false);
+                }}
+              />
+            ))}
+          </Popover>
         </div>
 
         {/* Cover size is a grid control — it is shared with the library's own
@@ -560,7 +593,12 @@ export default function DownloadsPage() {
           >
             <RefreshCw className={`h-3.5 w-3.5 ${isFetching ? "animate-spin" : ""}`} /> Refresh
           </button>
-          {count > 0 && (
+          {/* Only offered where the state it clears is KNOWN: a page that
+              cannot read the library (or has not read the cache yet) does not
+              know what is in there, and an eviction button next to an
+              unproven accusation is how "Clear all" got clicked on a download
+              the user wanted. */}
+          {count > 0 && state === "ready" && (
             <ConfirmButton
               className="btn-danger !py-1.5 text-xs tap"
               confirmLabel="Clear all"
@@ -570,14 +608,55 @@ export default function DownloadsPage() {
               <Trash2 className="h-3.5 w-3.5" /> Clear all
             </ConfirmButton>
           )}
-          <span className="text-xs text-zinc-500 whitespace-nowrap">
-            {albums} album{albums === 1 ? "" : "s"} · {count} track{count === 1 ? "" : "s"} · {fmtSize(total)}
-          </span>
+          {/* The album/cache breakdown is a comparison too (albums comes off
+              the library join), so it is printed only once that comparison
+              means something; before then the cache's own count is the one
+              readout that is true. */}
+          {state === "ready" ? (
+            <span className="text-xs text-zinc-500 whitespace-nowrap">
+              {albums} album{albums === 1 ? "" : "s"} · {count} track{count === 1 ? "" : "s"} · {fmtSize(total)}
+            </span>
+          ) : count > 0 ? (
+            <span className="text-xs text-zinc-500 whitespace-nowrap">
+              {count} track{count === 1 ? "" : "s"} cached · {fmtSize(total)}
+            </span>
+          ) : null}
         </div>
       </div>
       </PageHeader>
 
-      {count === 0 ? (
+      {/* Four states, and the order matters: the cache is read first (it is
+          what this page IS), then the library the comparison needs. Only the
+          last one may call anything orphaned. */}
+      {state === "loading" ? (
+        <PageLoading label="Reading this browser's offline cache…" />
+      ) : state === "cache-error" ? (
+        <EmptyState
+          title="Could not read this browser's offline cache"
+          hint={
+            `${cacheError instanceof Error ? cacheError.message : String(cacheError)} — ` +
+            "the cache lives in this browser, so a page that cannot open it knows nothing about " +
+            "what is downloaded. Nothing has been removed."
+          }
+          onAction={{ label: "Try again", onClick: () => refetch() }}
+        />
+      ) : state === "library-error" ? (
+        <EmptyState
+          title="Could not read the library"
+          hint={
+            `${libError instanceof Error ? libError.message : String(libError)} — ` +
+            "without it there is no way to tell which of the cached tracks the library still " +
+            "lists, so nothing here is called orphaned and the cache is left alone."
+          }
+          onAction={{
+            label: "Try again",
+            onClick: () => {
+              refetchLib();
+              refetch();
+            },
+          }}
+        />
+      ) : count === 0 ? (
         <EmptyState
           title="Nothing cached yet"
           hint="Download an album, artist or single track and its audio is kept in this browser for offline playback."

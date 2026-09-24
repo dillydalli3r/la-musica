@@ -992,8 +992,15 @@ else:
     failed_wish = wishes.get_wish(bad_wish)
     eq(failed_wish["status"], "wanted",
        "the request itself stays on the queue, so the search can still be run")
-    ok("MusicBrainz" in str(failed_wish.get("last_error") or ""),
-       "with the reason recorded on it", failed_wish.get("last_error"))
+    # The reason is written one step AFTER the placeholder folder comes down
+    # (server.api_add: `remove_for_wish`, then the library look-up, then
+    # `mark_wanted`), and the placeholder's removal is what the wait above
+    # polls for — so reading the row at this instant raced the write and lost
+    # on a loaded machine. The claim is the same one; the read waits for it.
+    ok(until(lambda: "MusicBrainz" in str(
+            (wishes.get_wish(bad_wish) or {}).get("last_error") or "")),
+       "with the reason recorded on it",
+       (wishes.get_wish(bad_wish) or {}).get("last_error"))
     bad_rows = rows_for(bad_wish)
     eq(len(bad_rows), 1, "the queue still has its row")
     ok("MusicBrainz" in str(bad_rows[0].get("reason") or ""),

@@ -1,25 +1,39 @@
 #!/usr/bin/env python3
-"""A music video is fetched from the network its MEDIUM names.
+"""A music video is fetched from the network its MEDIUM names — and from the
+other one when that network comes up empty.
 
 What this pins, in the order the acquisition pipeline takes the decision:
 
   * `acquisition_route` — the ONE place the routing rule lives: a VIDEO release
-    (its recordings are videos) published as DIGITAL MEDIA goes to YouTube; a
-    music video on a DISC (DVD/Blu-ray/VHS/Video CD) keeps the Soulseek path; an
-    AUDIO release is untouched, digital medium or not. A payload that cannot
-    answer (no medium, no track list) answers "soulseek", which is what every
-    release took before this routing existed.
+    (its recordings are videos) published as DIGITAL MEDIA or WEB goes to
+    YouTube FIRST; a music video on a DISC (DVD/Blu-ray/VHS/Video CD) searches
+    Soulseek first; an AUDIO release is untouched, digital medium or not, and a
+    payload that cannot answer (no medium, no track list) answers "soulseek",
+    which is what every release took before this routing existed. "Web" is the
+    same medium as "Digital Media" (mlo.tagtext.MEDIA_VALUES and
+    soulseek_auto._is_digital agree on both spellings).
   * the YouTube branch runs INSIDE the auto-import job: no search is sent to
     slskd at all (the search seam is asserted NOT called, and slskd is reported
     DOWN for that job), every track is looked up by artist + title and
     downloaded, the files land in the album folder under the names the rest of
     the pipeline reads a track's place out of (`_parse_trackno` maps them back
-    to disc+position), the MB identity/MEDIA/SOURCE tags land, and the album
-    finishes through the SAME `_import` — organizer, then
-    `imports.finish_album`.
-  * the disc and audio cases keep today's path: the search IS run, YouTube is
-    never consulted, and a search that finds nothing still ends on the
-    Soulseek dead end rather than in silence.
+    to disc+position), the MB identity/MEDIA/SOURCE tags land (MEDIA from the
+    medium MusicBrainz states, SOURCE per file), and the album finishes through
+    the SAME `_import` — organizer, then `imports.finish_album`.
+  * a DISC music video whose Soulseek search comes back with nothing is not
+    reported as not found: YouTube is tried per track, and an album it serves
+    imports and settles the job as done (that is the "physical media first,
+    the other network second" half of issue #53).
+  * a Web release with YouTube switched off (or yt-dlp missing) is not a
+    failure before any fetch either: it falls through to the Soulseek search,
+    which is the attempt it has always deserved.
+  * the NETWORK's fallback is really attempted: an unreachable or signed-out
+    slskd does not stand in for a search. The per-track miss then reports that
+    state as its reason — never "no copy", which is a claim about a search
+    nobody ran.
+  * the audio cases keep today's path: the search IS run, YouTube is never
+    consulted, and a search that finds nothing still ends on the Soulseek dead
+    end rather than in silence.
   * a track YouTube has no usable upload for falls back to the NETWORK
     (`soulseek_auto.fetch_video_on_soulseek`): one search of the track's own
     artist + title, the best of the peer copies that are really that track
@@ -38,9 +52,9 @@ What this pins, in the order the acquisition pipeline takes the decision:
     counted (`error_count`), named in the log and in the job's note, and the
     rest of the album is still imported; a release with NOTHING found ends the
     way the Soulseek search ends (the wish offer), never as a silent success.
-  * the vocabularies know the new spelling: SOURCE "YouTube" is canonical in
-    mlo.tagtext, and a wish an auto-import job offers for such a release
-    records source "youtube" (server.wishes).
+  * the vocabularies know the new spelling: SOURCE "YouTube" and MEDIA "Web"
+    are canonical in mlo.tagtext, and a wish an auto-import job offers for such
+    a release records source "youtube" (server.wishes).
 
 No network, no slskd, no yt-dlp, no ffmpeg: yt-dlp is stubbed, slskd is faked,
 the tag layer is an in-memory double and the music folder is a temp directory.
@@ -366,6 +380,18 @@ eq(auto.acquisition_route(release("Blu-ray")), "soulseek",
    "a Blu-ray too")
 eq(auto.acquisition_route(release("VHS")), "soulseek", "and a VHS")
 eq(auto.acquisition_route(release("Video CD")), "soulseek", "and a Video CD")
+eq(auto.acquisition_route(release("Web")), "youtube",
+   "a Web release is the same medium as Digital Media: YouTube first")
+eq(auto._is_digital(release("Web")), True,
+   "the digital test knows both spellings of a download-only release")
+eq(auto._is_digital({"medium_formats": ["Web", "Digital Media"], "media": []}), True,
+   "and a payload stating either one is digital")
+eq(auto._is_digital({"medium_formats": ["Web", "CD"]}), False,
+   "…while a Web release bundled with a disc is not")
+eq(auto.acquisition_route(release("Web", video=False)), "soulseek",
+   "an AUDIO release published as Web is untouched like any other")
+eq(auto._release_medium(release("Web")), "Web",
+   "and the album says the medium MusicBrainz states, not 'Digital Media'")
 eq(auto.acquisition_route(release("Digital Media", video=False)), "soulseek",
    "a DIGITAL AUDIO release is untouched (its recordings are not videos)")
 eq(auto.acquisition_route(release("CD", video=False)), "soulseek",
@@ -392,6 +418,10 @@ ok("YouTube" in tagtext.SOURCE_VALUES, "SOURCE_VALUES carries YouTube",
    tagtext.SOURCE_VALUES)
 eq(tagtext.canonical_text("SOURCE", "youtube"), "YouTube",
    "the canonical spelling of a source tag written in any case")
+ok("Web" in tagtext.MEDIA_VALUES, "MEDIA_VALUES knows the Web spelling",
+   tagtext.MEDIA_VALUES)
+eq(tagtext.canonical_text("MEDIA", "web"), "Web",
+   "and canonicalises it like every other medium")
 ok("youtube" in wishes.SOURCES, "the wish source list carries youtube",
    wishes.SOURCES)
 _wish = wishes.add_wish("99999999-0000-1111-2222-333333333333",
@@ -468,6 +498,10 @@ clear_registry()
 # --------------------------------------------------------------------------- #
 print("\n(4) a track that fails is reported; the album still imports")
 # --------------------------------------------------------------------------- #
+# slskd is DOWN for this one (see section 3): the network's fallback is asked
+# ANYWAY — a state read taken when the album started is not a search, and it is
+# what the per-track miss reports, rather than "no copy", which would be a
+# claim about a search nobody ran.
 UNFINDABLE.clear()
 UNFINDABLE.add("Second Video")
 CANDIDATES.clear()
@@ -477,10 +511,16 @@ ORGANIZED.clear()
 jid, state = run_job(release("Digital Media"))
 join_chain()
 UNFINDABLE.clear()
-eq(SEARCHES, [], "still no Soulseek search")
+eq(SEARCHES, [["Test Artist Second Video"]],
+   "the network WAS asked for the track YouTube missed, slskd down or not")
 log = " · ".join(str(l.get("msg")) for l in state.get("log") or [])
 ok("Second Video" in log and "no usable YouTube upload found" in log,
    "the missing track is named in the job log", log[-300:])
+ok("Soulseek is not running" in log,
+   "and the miss says WHY — the unreachable slskd, never a network that "
+   "answered 'nothing'", log[-300:])
+ok("no Soulseek copy either" not in log,
+   "…which is a claim about a search that could not run", log[-300:])
 result = state.get("result") or {}
 eq(int(result.get("error_count") or 0), 1, "and counted in the result")
 ok("Second Video" in str(result.get("note") or ""),
@@ -602,14 +642,16 @@ auto.forget(jid)
 clear_registry()
 
 # --------------------------------------------------------------------------- #
-print("\n(7) a DISC music video and an AUDIO release keep the Soulseek path")
+print("\n(7) an AUDIO release is never routed to YouTube")
 # --------------------------------------------------------------------------- #
+# The routing rule only ever moves a VIDEO release: an album whose recordings
+# are audio keeps the search it always had, even a digital one, and YouTube is
+# never consulted for it.
 install_stubs()
 set_slskd(True)
-for label, rel in (("a DVD music video", release("DVD")),
-                   ("a Blu-ray music video", release("Blu-ray")),
-                   ("an audio album", release("CD", video=False)),
-                   ("a digital audio album", release("Digital Media", video=False))):
+for label, rel in (("an audio album", release("CD", video=False)),
+                   ("a digital audio album", release("Digital Media", video=False)),
+                   ("an audio album published as Web", release("Web", video=False))):
     SEARCHES.clear()
     CANDIDATES.clear()
     DOWNLOADS.clear()
@@ -788,6 +830,200 @@ ok("Soulseek is not running" in str(r.get("error") or ""),
 eq(SEARCHES, [], "and no search was sent to a network that is not there")
 set_slskd(True)
 UNFINDABLE.clear()
+
+# --------------------------------------------------------------------------- #
+print("\n(11) a DISC music video searches Soulseek first, then YouTube")
+# --------------------------------------------------------------------------- #
+# Issue #53: a music video on physical media is the release worth having, so the
+# DISC is searched for first (it is a folder like any pressing) — and a disc
+# nobody shares is still a video somebody put on YouTube. The search finding
+# nothing must therefore fall back to YouTube per track, and the file must say
+# which network produced it.
+install_stubs()
+set_slskd(True)
+SLSK_FILES[:] = []
+UNFINDABLE.clear()
+CANDIDATES.clear()
+DOWNLOADS.clear()
+SEARCHES.clear()
+ORGANIZED.clear()
+FINISHED.clear()
+# WHICH network was asked first, in order: both seams write one word into this
+# trace, so "Soulseek first, YouTube after it" is asserted as the sequence the
+# job really took, not inferred from two counters.
+TRACE = []
+_real_candidate = youtube.best_candidate
+_real_search = auto._search_queries
+
+
+def traced_candidate(artist, title, want_seconds=None, config=None):
+    TRACE.append("youtube")
+    return _real_candidate(artist, title, want_seconds, config)
+
+
+def traced_search(slsk_mod, queries, wait_s, usable=None, response_limit=0):
+    TRACE.append("soulseek")
+    return _real_search(slsk_mod, queries, wait_s, usable, response_limit)
+
+
+youtube.best_candidate = traced_candidate
+auto._search_queries = traced_search
+try:
+    jid, state = run_job(release("DVD"))
+finally:
+    youtube.best_candidate = _real_candidate
+    auto._search_queries = _real_search
+join_chain()
+eq(TRACE[:1], ["soulseek"], "the Soulseek search runs FIRST (the disc is a folder)")
+ok(SEARCHES and len(SEARCHES) == 1, "one search window of the release's own templates",
+   SEARCHES)
+eq(TRACE.count("soulseek"), 1,
+   "the network is asked once, before YouTube — not the per-track fallback")
+eq(TRACE[1:], ["youtube"] * 3, "and YouTube is then asked for every track of the disc")
+eq(len(CANDIDATES), 3, "…once per track, in the release's own order")
+eq([c["title"] for c in CANDIDATES], TITLES[:3], "each looked up by its own title")
+eq(len(DOWNLOADS), 3, "each of which yt-dlp delivers")
+eq(state["state"], "done", "so the album is fetched from the second network")
+result = state.get("result") or {}
+eq(int(result.get("error_count") or 0), 0, "with nothing missing")
+album = str(result.get("album_path") or "")
+eq(sorted(os.listdir(album)) if os.path.isdir(album) else [],
+   ["1-01 First Video.mkv", "1-02 Second Video.mkv", "1-03 Third Video.mkv"],
+   "named exactly as the tracks YouTube delivers are")
+first = tags_of(os.path.join(album, "1-01 First Video.mkv"))
+eq(first.get("SOURCE"), "YouTube", "the file is reported as fetched from YouTube")
+eq(first.get("MEDIA"), "DVD",
+   "and MEDIA is the disc the release is pressed on, not 'Digital Media'")
+eq(first.get("TITLE"), "First Video", "with the track's own title")
+eq(first.get("MUSICBRAINZ_ALBUMID"), MBID, "and the release's identity")
+log = " · ".join(str(l.get("msg")) for l in state.get("log") or [])
+ok("trying YouTube" in log,
+   "the log says the other network is being tried after the empty search",
+   log[-400:])
+ok("No candidate folder" not in log,
+   "and the search's dead end is never reached", log[-400:])
+auto.forget(jid)
+clear_registry()
+
+# A Blu-ray where the network HAS one of the three: the album still imports,
+# and each FILE says which network served it — the per-file origin the job log
+# reports is written into the tags too.
+UNFINDABLE.clear()
+UNFINDABLE.add("Second Video")
+SLSK_FILES[:] = [slsk_video("Second Video", user="peer0", speed=4 * 1024 * 1024)]
+CANDIDATES.clear()
+DOWNLOADS.clear()
+SEARCHES.clear()
+ENQUEUED.clear()
+ARRIVED.clear()
+ORGANIZED.clear()
+FINISHED.clear()
+jid, state = run_job(release("Blu-ray"))
+join_chain()
+UNFINDABLE.clear()
+SLSK_FILES[:] = []
+eq(state["state"], "done", "a mixed album finishes")
+result = state.get("result") or {}
+album = str(result.get("album_path") or "")
+eq(sorted(os.listdir(album)) if os.path.isdir(album) else [],
+   ["1-01 First Video.mkv", "1-02 Second Video.mkv", "1-03 Third Video.mkv"],
+   "with every track of the disc")
+eq(len(DOWNLOADS), 2, "YouTube served the two it had")
+eq(len(ENQUEUED), 1, "and the network was queued for the one it did not")
+eq(tags_of(os.path.join(album, "1-01 First Video.mkv")).get("SOURCE"), "YouTube",
+   "the YouTube downloads say YouTube")
+eq(tags_of(os.path.join(album, "1-02 Second Video.mkv")).get("SOURCE"), "Soulseek",
+   "and the peer's file says Soulseek — per file, not one word for the album")
+eq(tags_of(os.path.join(album, "1-03 Third Video.mkv")).get("SOURCE"), "YouTube",
+   "…so a mixed album reports which network produced WHICH file")
+eq(tags_of(os.path.join(album, "1-02 Second Video.mkv")).get("MEDIA"), "Blu-ray",
+   "and MEDIA stays the disc the release is")
+auto.forget(jid)
+clear_registry()
+
+# --------------------------------------------------------------------------- #
+print("\n(12) a Web release with YouTube switched off is still searched")
+# --------------------------------------------------------------------------- #
+# The route names which network is tried FIRST, never the only one that may be
+# tried: with YouTube disabled the release must fall through to the Soulseek
+# search (the attempt it has always deserved) instead of raising before any
+# fetch — and with nothing on the network either, it ends on the SEARCH's own
+# reason, not on a YouTube refusal.
+install_stubs()
+set_slskd(True)
+_real_enabled = youtube.enabled
+youtube.enabled = lambda config=None: False
+try:
+    CANDIDATES.clear()
+    SEARCHES.clear()
+    ORGANIZED.clear()
+    FINISHED.clear()
+    jid, state = run_job(release("Web"))
+finally:
+    youtube.enabled = _real_enabled
+eq(CANDIDATES, [], "YouTube is never consulted while it is switched off")
+ok(SEARCHES, "but the Soulseek search IS run", SEARCHES)
+eq(state["state"], "error", "the job ends on the search's dead end")
+err = str((state.get("result") or {}).get("error") or "")
+ok("No candidate folder" in err,
+   "with the SEARCH's own reason, not a YouTube refusal", err)
+eq(ORGANIZED, [], "nothing was imported")
+log = " · ".join(str(l.get("msg")) for l in state.get("log") or [])
+ok("disabled in Settings" in log,
+   "and the log says why YouTube was skipped", log[-400:])
+auto.forget(jid)
+clear_registry()
+
+# --------------------------------------------------------------------------- #
+print("\n(13) a Web release goes to YouTube, and says Web as its medium")
+# --------------------------------------------------------------------------- #
+install_stubs()
+set_slskd(True)
+UNFINDABLE.clear()
+CANDIDATES.clear()
+DOWNLOADS.clear()
+SEARCHES.clear()
+ORGANIZED.clear()
+FINISHED.clear()
+jid, state = run_job(release("Web"))
+join_chain()
+eq(SEARCHES, [], "a Web release is not searched for on the network first")
+eq(len(CANDIDATES), 3, "it is fetched from YouTube, one lookup per track")
+eq(state["state"], "done", "and imports")
+result = state.get("result") or {}
+album = str(result.get("album_path") or "")
+eq(tags_of(os.path.join(album, "1-01 First Video.mkv")).get("MEDIA"), "Web",
+   "MEDIA is the medium MusicBrainz states — Web, not 'Digital Media'")
+eq(tags_of(os.path.join(album, "1-01 First Video.mkv")).get("SOURCE"), "YouTube",
+   "and SOURCE where it came from")
+auto.forget(jid)
+clear_registry()
+
+# --------------------------------------------------------------------------- #
+print("\n(14) neither network has the DISC: the search's dead end stands")
+# --------------------------------------------------------------------------- #
+# The fallback is not an excuse to report a success: when YouTube has nothing
+# either, the job ends exactly as a Soulseek search that found nothing does.
+install_stubs()
+set_slskd(True)
+UNFINDABLE.update(TITLES)
+SLSK_FILES[:] = []
+CANDIDATES.clear()
+SEARCHES.clear()
+ORGANIZED.clear()
+FINISHED.clear()
+jid, state = run_job(release("Video CD"))
+UNFINDABLE.clear()
+eq(state["state"], "error", "the job failed rather than reporting success")
+err = str((state.get("result") or {}).get("error") or "")
+ok("No candidate folder" in err,
+   "with the Soulseek search's own reason (that is where the job gave up)", err)
+ok(SEARCHES, "the search ran first", SEARCHES)
+eq(len(CANDIDATES), 3, "and YouTube was asked for every track before giving up")
+eq(ORGANIZED, [], "nothing was imported")
+eq(FINISHED, [], "and no chain ran")
+auto.forget(jid)
+clear_registry()
 
 # --------------------------------------------------------------------------- #
 print()

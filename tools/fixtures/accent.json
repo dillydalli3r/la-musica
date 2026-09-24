@@ -1,0 +1,59 @@
+{
+  "_comment": "Golden data for tools/check_accent.mjs — the accent colour maths of web/src/lib/accent.ts. `pre_picker` is the table App.tsx carried before the colour picker (issue #53) and MUST NOT move: an install that picked one of these years ago keeps the exact colour it has. `presets` covers every entry of ACCENT_PRESETS. `custom` is hexes a user can pick, with the triplets the app must paint. `invalid` are values that must resolve to `fallback` rather than to nothing.",
+
+  "pre_picker": {
+    "violet": ["139 92 246", "167 139 250", "255 255 255"],
+    "pink": ["236 72 153", "249 168 212", "255 255 255"],
+    "emerald": ["16 185 129", "110 231 183", "255 255 255"],
+    "sky": ["14 165 233", "125 211 252", "255 255 255"],
+    "amber": ["245 158 11", "252 211 77", "24 24 27"],
+    "red": ["239 68 68", "252 165 165", "255 255 255"],
+    "mono": ["255 255 255", "212 212 216", "9 9 11"]
+  },
+
+  "presets": {
+    "red": ["239 68 68", "252 165 165", "255 255 255"],
+    "orange": ["249 115 22", "251 171 116", "0 0 0"],
+    "amber": ["245 158 11", "252 211 77", "24 24 27"],
+    "yellow": ["234 179 8", "250 218 117", "0 0 0"],
+    "lime": ["132 204 22", "196 241 126", "0 0 0"],
+    "emerald": ["16 185 129", "110 231 183", "255 255 255"],
+    "teal": ["20 184 166", "126 241 228", "0 0 0"],
+    "sky": ["14 165 233", "125 211 252", "255 255 255"],
+    "blue": ["59 130 246", "118 168 249", "0 0 0"],
+    "indigo": ["99 102 241", "155 157 246", "0 0 0"],
+    "violet": ["139 92 246", "167 139 250", "255 255 255"],
+    "fuchsia": ["217 70 239", "229 126 244", "0 0 0"],
+    "pink": ["236 72 153", "249 168 212", "255 255 255"],
+    "rose": ["244 63 94", "247 121 143", "0 0 0"],
+    "mono": ["255 255 255", "212 212 216", "9 9 11"]
+  },
+
+  "fallback": ["255 255 255", "212 212 216", "9 9 11"],
+
+  "custom": [
+    { "input": "#ff7a18", "expect": ["255 122 24", "255 173 112", "0 0 0"] },
+    { "input": "f70", "expect": ["255 119 0", "255 179 112", "0 0 0"] },
+    { "input": "  #FF7A18 ", "expect": ["255 122 24", "255 173 112", "0 0 0"] },
+    { "input": "0ea5e9", "expect": ["14 165 233", "120 208 247", "0 0 0"] },
+    { "input": "#ffffff", "expect": ["255 255 255", "224 224 224", "0 0 0"] },
+    { "input": "#000000", "expect": ["0 0 0", "184 184 184", "255 255 255"] },
+    { "input": "#7a7a7a", "expect": ["122 122 122", "184 184 184", "0 0 0"] },
+    { "input": "#1f6feb", "expect": ["31 111 235", "124 171 243", "255 255 255"] },
+    { "input": "#123456", "expect": ["18 52 86", "137 184 230", "255 255 255"] }
+  ],
+
+  "normalize": [
+    { "input": "f70", "expect": "#ff7700" },
+    { "input": "#F70", "expect": "#ff7700" },
+    { "input": "  #FF7A18 ", "expect": "#ff7a18" },
+    { "input": "FF7A18", "expect": "#ff7a18" },
+    { "input": "#8b5cf6", "expect": "#8b5cf6" }
+  ],
+
+  "invalid": ["", "   ", "#12", "#ff7a1", "#ff7a18ff", "#12345", "blurple", "#gggggg", "Violet", null],
+
+  "contrast_floor": 4.5,
+  "hue_tolerance_deg": 1.5,
+  "saturation_tolerance": 0.01
+}

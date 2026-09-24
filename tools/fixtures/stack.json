@@ -1,0 +1,2201 @@
+{
+ "scripts": [
+  {
+   "id": 1,
+   "label": "Format lyrics",
+   "description": "multi-format + MEDIA/SOURCE normalization",
+   "in_order": true,
+   "enabled": true,
+   "order": 5,
+   "gate": {
+    "keys": [],
+    "enabled": true
+   },
+   "removable": true,
+   "available": true
+  },
+  {
+   "id": 2,
+   "label": "Format CUEs",
+   "description": "CD-N rename + FILE/INDEX layout",
+   "in_order": true,
+   "enabled": true,
+   "order": 4,
+   "gate": {
+    "keys": [],
+    "enabled": true
+   },
+   "removable": true,
+   "available": true
+  },
+  {
+   "id": 3,
+   "label": "Optimize FLACs",
+   "description": "lossless re-encode",
+   "in_order": true,
+   "enabled": true,
+   "order": 1,
+   "gate": {
+    "keys": [],
+    "enabled": true
+   },
+   "removable": true,
+   "available": true
+  },
+  {
+   "id": 4,
+   "label": "Grade",
+   "description": "per-album tag/lyrics/cover report",
+   "in_order": true,
+   "enabled": true,
+   "order": 20,
+   "gate": {
+    "keys": [],
+    "enabled": true
+   },
+   "removable": true,
+   "available": true
+  },
+  {
+   "id": 5,
+   "label": "Process images",
+   "description": "JXL / lossless / JXL-back",
+   "in_order": true,
+   "enabled": true,
+   "order": 10,
+   "gate": {
+    "keys": [],
+    "enabled": true
+   },
+   "removable": true,
+   "available": true
+  },
+  {
+   "id": 6,
+   "label": "Audit library",
+   "description": "AudioAuditor: fake lossless / upscaled / MQA",
+   "in_order": true,
+   "enabled": true,
+   "order": 12,
+   "gate": {
+    "keys": [],
+    "enabled": true
+   },
+   "removable": true,
+   "available": true
+  },
+  {
+   "id": 7,
+   "label": "DR & ReplayGain",
+   "description": "in-process DR + rsgain ReplayGain tags",
+   "in_order": true,
+   "enabled": true,
+   "order": 13,
+   "gate": {
+    "keys": [
+     "dr_replaygain_enabled"
+    ],
+    "enabled": true
+   },
+   "removable": true,
+   "available": true
+  },
+  {
+   "id": 8,
+   "label": "Auto tagging",
+   "description": "advisory / instrumental / mood / energy / genre",
+   "in_order": true,
+   "enabled": true,
+   "order": 9,
+   "gate": {
+    "keys": [],
+    "enabled": true
+   },
+   "removable": true,
+   "available": true
+  },
+  {
+   "id": 9,
+   "label": "AccurateRip",
+   "description": "CUETools .accurip files",
+   "in_order": true,
+   "enabled": true,
+   "order": 14,
+   "gate": {
+    "keys": [],
+    "enabled": true
+   },
+   "removable": true,
+   "available": true
+  },
+  {
+   "id": 10,
+   "label": "Format all",
+   "description": "final pass: .accurip / .cue / .lrc / tags",
+   "in_order": true,
+   "enabled": true,
+   "order": 17,
+   "gate": {
+    "keys": [],
+    "enabled": true
+   },
+   "removable": true,
+   "available": true
+  },
+  {
+   "id": 11,
+   "label": "Remux videos (MKV)",
+   "description": "any video -> MKV, audio -> FLAC",
+   "in_order": true,
+   "enabled": true,
+   "order": 0,
+   "gate": {
+    "keys": [],
+    "enabled": true
+   },
+   "removable": true,
+   "available": true
+  },
+  {
+   "id": 12,
+   "label": "Key & BPM",
+   "description": "musical key + tempo tags",
+   "in_order": true,
+   "enabled": true,
+   "order": 15,
+   "gate": {
+    "keys": [
+     "audiometa_enabled"
+    ],
+    "enabled": true
+   },
+   "removable": false,
+   "available": true
+  },
+  {
+   "id": 13,
+   "label": "Fetch lyrics",
+   "description": "LRCLIB synced/plain",
+   "in_order": true,
+   "enabled": true,
+   "order": 6,
+   "gate": {
+    "keys": [],
+    "enabled": true
+   },
+   "removable": false,
+   "available": true
+  },
+  {
+   "id": 14,
+   "label": "Beets tagging",
+   "description": "MusicBrainz via beets",
+   "in_order": true,
+   "enabled": true,
+   "order": 2,
+   "gate": {
+    "keys": [],
+    "enabled": true
+   },
+   "removable": false,
+   "available": true
+  },
+  {
+   "id": 15,
+   "label": "Release tracklist",
+   "description": ".mlo_expected.json manifests",
+   "in_order": true,
+   "enabled": true,
+   "order": 3,
+   "gate": {
+    "keys": [],
+    "enabled": true
+   },
+   "removable": false,
+   "available": true
+  },
+  {
+   "id": 16,
+   "label": "Mood & Energy",
+   "description": "MOOD/ENERGY from the track's audio",
+   "in_order": true,
+   "enabled": false,
+   "order": 16,
+   "gate": {
+    "keys": [
+     "mood_enabled"
+    ],
+    "enabled": false
+   },
+   "removable": false,
+   "available": true
+  },
+  {
+   "id": 17,
+   "label": "Lyrics transliterate (AI)",
+   "description": "TRANSLITERATION/TRANSLATION tags + sidecars",
+   "in_order": true,
+   "enabled": true,
+   "order": 8,
+   "gate": {
+    "keys": [
+     "lyrics_xlit_enabled",
+     "lyrics_translate_enabled"
+    ],
+    "enabled": true
+   },
+   "removable": false,
+   "available": true
+  },
+  {
+   "id": 18,
+   "label": "Publish lyrics (LRCLIB)",
+   "description": "submit missing lyrics to the community DB",
+   "in_order": true,
+   "enabled": true,
+   "order": 7,
+   "gate": {
+    "keys": [
+     "lrclib_auto_publish"
+    ],
+    "enabled": true
+   },
+   "removable": false,
+   "available": true
+  },
+  {
+   "id": 19,
+   "label": "Optimize artist images",
+   "description": "crop/resize artist artwork to the configured aspect and size",
+   "in_order": true,
+   "enabled": true,
+   "order": 11,
+   "gate": {
+    "keys": [],
+    "enabled": true
+   },
+   "removable": false,
+   "available": true
+  },
+  {
+   "id": 20,
+   "label": "Optimize library layout",
+   "description": "layout report + fixes (case, loose audio, empty artist, strays to the Trash)",
+   "in_order": true,
+   "enabled": true,
+   "order": 18,
+   "gate": {
+    "keys": [],
+    "enabled": true
+   },
+   "removable": false,
+   "available": true
+  },
+  {
+   "id": 21,
+   "label": "Fix AcoustID pairs",
+   "description": "complete ACOUSTID_ID / ACOUSTID_FINGERPRINT pairs",
+   "in_order": true,
+   "enabled": true,
+   "order": 19,
+   "gate": {
+    "keys": [
+     "acoustid_enabled"
+    ],
+    "enabled": true
+   },
+   "removable": false,
+   "available": true
+  }
+ ],
+ "run_all_order": [
+  11,
+  3,
+  14,
+  15,
+  2,
+  1,
+  13,
+  18,
+  17,
+  8,
+  5,
+  19,
+  6,
+  7,
+  9,
+  12,
+  16,
+  10,
+  20,
+  21,
+  4
+ ],
+ "checks": [
+  {
+   "key": "grade_include_music",
+   "label": "Audio tracks",
+   "default": true,
+   "tags": [],
+   "group": "categories",
+   "description": "decides whether audio tracks count toward the album grade \u00b7 toggle grade_include_music \u2014 on by default",
+   "enabled": true,
+   "issue_codes": [],
+   "writers": [],
+   "presets": [
+    "strict",
+    "balanced",
+    "relaxed"
+   ]
+  },
+  {
+   "key": "grade_include_cover",
+   "label": "Cover art",
+   "default": true,
+   "tags": [],
+   "group": "categories",
+   "description": "decides whether cover art count toward the album grade \u00b7 toggle grade_include_cover \u2014 on by default",
+   "enabled": true,
+   "issue_codes": [],
+   "writers": [],
+   "presets": [
+    "strict",
+    "balanced",
+    "relaxed"
+   ]
+  },
+  {
+   "key": "grade_include_cue",
+   "label": "CUE sheets",
+   "default": true,
+   "tags": [],
+   "group": "categories",
+   "description": "decides whether cue sheets count toward the album grade \u00b7 toggle grade_include_cue \u2014 on by default",
+   "enabled": true,
+   "issue_codes": [],
+   "writers": [],
+   "presets": [
+    "strict",
+    "balanced",
+    "relaxed"
+   ]
+  },
+  {
+   "key": "grade_include_log",
+   "label": "Log files",
+   "default": true,
+   "tags": [],
+   "group": "categories",
+   "description": "decides whether log files count toward the album grade \u00b7 toggle grade_include_log \u2014 on by default",
+   "enabled": true,
+   "issue_codes": [],
+   "writers": [],
+   "presets": [
+    "strict",
+    "balanced",
+    "relaxed"
+   ]
+  },
+  {
+   "key": "grade_include_lrc",
+   "label": "LRC lyrics",
+   "default": true,
+   "tags": [],
+   "group": "categories",
+   "description": "decides whether lrc lyrics count toward the album grade \u00b7 toggle grade_include_lrc \u2014 on by default",
+   "enabled": true,
+   "issue_codes": [],
+   "writers": [],
+   "presets": [
+    "strict",
+    "balanced",
+    "relaxed"
+   ]
+  },
+  {
+   "key": "grade_include_accurip",
+   "label": "AccurateRip files",
+   "default": true,
+   "tags": [],
+   "group": "categories",
+   "description": "decides whether accuraterip files count toward the album grade \u00b7 toggle grade_include_accurip \u2014 on by default",
+   "enabled": true,
+   "issue_codes": [],
+   "writers": [],
+   "presets": [
+    "strict",
+    "balanced",
+    "relaxed"
+   ]
+  },
+  {
+   "key": "grade_include_other",
+   "label": "Other files",
+   "default": true,
+   "tags": [],
+   "group": "categories",
+   "description": "decides whether other files count toward the album grade \u00b7 toggle grade_include_other \u2014 on by default",
+   "enabled": true,
+   "issue_codes": [],
+   "writers": [],
+   "presets": [
+    "strict",
+    "relaxed"
+   ]
+  },
+  {
+   "key": "grade_include_video",
+   "label": "Remuxed videos",
+   "default": true,
+   "tags": [],
+   "group": "categories",
+   "description": "decides whether remuxed videos count toward the album grade \u00b7 toggle grade_include_video \u2014 on by default",
+   "enabled": true,
+   "issue_codes": [],
+   "writers": [],
+   "presets": [
+    "strict",
+    "balanced",
+    "relaxed"
+   ]
+  },
+  {
+   "key": "grade_check_tag_spaces",
+   "label": "Tags \u2014 no padding",
+   "default": true,
+   "tags": [],
+   "group": "formatting",
+   "description": "graded on the album folder and its files rather than on a tag \u00b7 toggle grade_check_tag_spaces \u2014 on by default",
+   "enabled": true,
+   "issue_codes": [],
+   "writers": [],
+   "presets": [
+    "strict",
+    "balanced"
+   ]
+  },
+  {
+   "key": "grade_check_tag_case",
+   "label": "Tags \u2014 canonical value case",
+   "default": true,
+   "tags": [
+    "AUDIT",
+    "MEDIA",
+    "MOOD",
+    "RELEASECOUNTRY",
+    "RELEASESTATUS",
+    "RELEASETYPE",
+    "SCRIPT",
+    "SOURCE"
+   ],
+   "group": "formatting",
+   "description": "grades AUDIT, MEDIA, MOOD, RELEASECOUNTRY, RELEASESTATUS, RELEASETYPE, SCRIPT, SOURCE \u00b7 toggle grade_check_tag_case \u2014 on by default",
+   "enabled": true,
+   "issue_codes": [],
+   "writers": [
+    "Audit library (6)",
+    "Auto tagging (8)",
+    "Beets tagging (14)",
+    "Format lyrics (1)"
+   ],
+   "presets": [
+    "strict",
+    "balanced"
+   ]
+  },
+  {
+   "key": "grade_check_lyrics_spaces",
+   "label": "Lyrics \u2014 no padding",
+   "default": true,
+   "tags": [],
+   "group": "formatting",
+   "description": "graded on the album folder and its files rather than on a tag \u00b7 toggle grade_check_lyrics_spaces \u2014 on by default",
+   "enabled": true,
+   "issue_codes": [],
+   "writers": [],
+   "presets": [
+    "strict",
+    "balanced"
+   ]
+  },
+  {
+   "key": "grade_check_cue_spaces",
+   "label": "CUE \u2014 no padding",
+   "default": true,
+   "tags": [],
+   "group": "formatting",
+   "description": "graded on the album folder and its files rather than on a tag \u00b7 toggle grade_check_cue_spaces \u2014 on by default",
+   "enabled": true,
+   "issue_codes": [],
+   "writers": [],
+   "presets": [
+    "strict",
+    "balanced"
+   ]
+  },
+  {
+   "key": "grade_check_cover_crop",
+   "label": "Cover aspect ratio (squareness)",
+   "default": true,
+   "tags": [],
+   "group": "covers",
+   "description": "graded on the album folder and its files rather than on a tag \u00b7 toggle grade_check_cover_crop \u2014 on by default",
+   "enabled": true,
+   "issue_codes": [],
+   "writers": [],
+   "presets": [
+    "strict",
+    "balanced"
+   ]
+  },
+  {
+   "key": "grade_check_lyrics_zero",
+   "label": "Lyrics \u2014 zero timestamp rule",
+   "default": true,
+   "tags": [],
+   "group": "formatting",
+   "description": "graded on the album folder and its files rather than on a tag \u00b7 toggle grade_check_lyrics_zero \u2014 on by default",
+   "enabled": true,
+   "issue_codes": [],
+   "writers": [],
+   "presets": [
+    "strict",
+    "balanced"
+   ]
+  },
+  {
+   "key": "grade_check_tag_blank_lines",
+   "label": "Tags \u2014 no blank lines",
+   "default": true,
+   "tags": [],
+   "group": "formatting",
+   "description": "graded on the album folder and its files rather than on a tag \u00b7 toggle grade_check_tag_blank_lines \u2014 on by default",
+   "enabled": true,
+   "issue_codes": [],
+   "writers": [],
+   "presets": [
+    "strict",
+    "balanced"
+   ]
+  },
+  {
+   "key": "grade_check_lyrics_blank_lines",
+   "label": "Lyrics \u2014 blank line rules",
+   "default": true,
+   "tags": [],
+   "group": "formatting",
+   "description": "graded on the album folder and its files rather than on a tag \u00b7 toggle grade_check_lyrics_blank_lines \u2014 on by default",
+   "enabled": true,
+   "issue_codes": [],
+   "writers": [],
+   "presets": [
+    "strict",
+    "balanced"
+   ]
+  },
+  {
+   "key": "grade_check_cue_blank_lines",
+   "label": "CUE \u2014 no blank lines",
+   "default": true,
+   "tags": [],
+   "group": "formatting",
+   "description": "graded on the album folder and its files rather than on a tag \u00b7 toggle grade_check_cue_blank_lines \u2014 on by default",
+   "enabled": true,
+   "issue_codes": [],
+   "writers": [],
+   "presets": [
+    "strict",
+    "balanced"
+   ]
+  },
+  {
+   "key": "grade_check_log_checksum",
+   "label": "Log checksum valid",
+   "default": true,
+   "tags": [],
+   "group": "auditing",
+   "description": "graded on the album folder and its files rather than on a tag \u00b7 toggle grade_check_log_checksum \u2014 on by default",
+   "enabled": true,
+   "issue_codes": [],
+   "writers": [],
+   "presets": [
+    "strict",
+    "balanced",
+    "relaxed"
+   ]
+  },
+  {
+   "key": "grade_check_accuraterip",
+   "label": "AccurateRip verified (audit only)",
+   "default": true,
+   "tags": [],
+   "group": "auditing",
+   "description": "graded on the album folder and its files rather than on a tag \u00b7 toggle grade_check_accuraterip \u2014 on by default",
+   "enabled": true,
+   "issue_codes": [],
+   "writers": [],
+   "presets": [
+    "strict",
+    "balanced",
+    "relaxed"
+   ]
+  },
+  {
+   "key": "grade_check_unreadable",
+   "label": "Unreadable files",
+   "default": true,
+   "tags": [],
+   "group": "tracks",
+   "description": "graded on the album folder and its files rather than on a tag \u00b7 toggle grade_check_unreadable \u2014 on by default",
+   "enabled": true,
+   "issue_codes": [],
+   "writers": [],
+   "presets": [
+    "strict",
+    "balanced",
+    "relaxed"
+   ]
+  },
+  {
+   "key": "grade_check_missing_tags",
+   "label": "Required tags",
+   "default": true,
+   "tags": [
+    "ALBUM",
+    "ALBUMARTIST",
+    "ARTIST",
+    "DATE",
+    "DISCNUMBER",
+    "DYNAMIC RANGE",
+    "INSTRUMENTAL",
+    "ITUNESADVISORY",
+    "TITLE",
+    "TRACKNUMBER"
+   ],
+   "group": "tracks",
+   "description": "grades ALBUM, ALBUMARTIST, ARTIST, DATE, DISCNUMBER, DYNAMIC RANGE, INSTRUMENTAL, ITUNESADVISORY, TITLE, TRACKNUMBER \u00b7 toggle grade_check_missing_tags \u2014 on by default",
+   "enabled": true,
+   "issue_codes": [],
+   "writers": [
+    "Auto tagging (8)",
+    "Beets tagging (14)",
+    "DR & ReplayGain (7)"
+   ],
+   "presets": [
+    "strict",
+    "balanced",
+    "relaxed"
+   ]
+  },
+  {
+   "key": "grade_check_encoder",
+   "label": "Encoder identity",
+   "default": true,
+   "tags": [
+    "ENCODER_PROGRAM",
+    "ENCODER_QUALITY",
+    "ENCODER_VERSION"
+   ],
+   "group": "tracks",
+   "description": "grades ENCODER_PROGRAM, ENCODER_QUALITY, ENCODER_VERSION \u00b7 toggle grade_check_encoder \u2014 on by default",
+   "enabled": true,
+   "issue_codes": [],
+   "writers": [
+    "Optimize FLACs (3)"
+   ],
+   "presets": [
+    "strict",
+    "balanced",
+    "relaxed"
+   ]
+  },
+  {
+   "key": "grade_check_audit",
+   "label": "Require audit tag",
+   "default": true,
+   "tags": [
+    "AUDIOAUDITOR_OVERRIDE",
+    "AUDIT"
+   ],
+   "group": "auditing",
+   "description": "grades AUDIOAUDITOR_OVERRIDE, AUDIT \u00b7 toggle grade_check_audit \u2014 on by default",
+   "enabled": true,
+   "issue_codes": [],
+   "writers": [
+    "Audit library (6)",
+    "the track editor (manual) \u2014 beats every verdict"
+   ],
+   "presets": [
+    "strict",
+    "relaxed"
+   ]
+  },
+  {
+   "key": "grade_check_instrumental",
+   "label": "Instrumental consistency",
+   "default": true,
+   "tags": [
+    "INSTRUMENTAL"
+   ],
+   "group": "tracks",
+   "description": "grades INSTRUMENTAL \u00b7 toggle grade_check_instrumental \u2014 on by default",
+   "enabled": true,
+   "issue_codes": [],
+   "writers": [
+    "Auto tagging (8)"
+   ],
+   "presets": [
+    "strict",
+    "balanced",
+    "relaxed"
+   ]
+  },
+  {
+   "key": "grade_check_lyrics",
+   "label": "Lyrics present",
+   "default": true,
+   "tags": [
+    "LYRICS",
+    "UNSYNCEDLYRICS"
+   ],
+   "group": "lyrics",
+   "description": "grades LYRICS, UNSYNCEDLYRICS \u00b7 toggle grade_check_lyrics \u2014 on by default",
+   "enabled": true,
+   "issue_codes": [],
+   "writers": [
+    "Fetch lyrics (13)"
+   ],
+   "presets": [
+    "strict",
+    "balanced",
+    "relaxed"
+   ]
+  },
+  {
+   "key": "grade_check_lyrics_format",
+   "label": "Lyrics \u2014 canonical formatting",
+   "default": true,
+   "tags": [
+    "LYRICS"
+   ],
+   "group": "formatting",
+   "description": "grades LYRICS \u00b7 toggle grade_check_lyrics_format \u2014 on by default",
+   "enabled": true,
+   "issue_codes": [],
+   "writers": [
+    "Fetch lyrics (13)"
+   ],
+   "presets": [
+    "strict",
+    "balanced",
+    "relaxed"
+   ]
+  },
+  {
+   "key": "grade_check_lyrics_lang_tags",
+   "label": "Transform language tags",
+   "default": true,
+   "tags": [],
+   "group": "lyrics",
+   "description": "graded on the album folder and its files rather than on a tag \u00b7 toggle grade_check_lyrics_lang_tags \u2014 on by default",
+   "enabled": true,
+   "issue_codes": [],
+   "writers": [],
+   "presets": [
+    "strict",
+    "balanced",
+    "relaxed"
+   ]
+  },
+  {
+   "key": "grade_check_sidecar_cover",
+   "label": "Per-track sidecar covers",
+   "default": true,
+   "tags": [],
+   "group": "covers",
+   "description": "graded on the album folder and its files rather than on a tag \u00b7 toggle grade_check_sidecar_cover \u2014 on by default",
+   "enabled": true,
+   "issue_codes": [],
+   "writers": [],
+   "presets": [
+    "strict",
+    "balanced",
+    "relaxed"
+   ]
+  },
+  {
+   "key": "grade_check_media",
+   "label": "Media type",
+   "default": true,
+   "tags": [
+    "MEDIA"
+   ],
+   "group": "tracks",
+   "description": "grades MEDIA \u00b7 toggle grade_check_media \u2014 on by default",
+   "enabled": true,
+   "issue_codes": [],
+   "writers": [
+    "Format lyrics (1)"
+   ],
+   "presets": [
+    "strict",
+    "balanced",
+    "relaxed"
+   ]
+  },
+  {
+   "key": "grade_check_source",
+   "label": "Source tag",
+   "default": true,
+   "tags": [
+    "SOURCE"
+   ],
+   "group": "tracks",
+   "description": "grades SOURCE \u00b7 toggle grade_check_source \u2014 on by default",
+   "enabled": true,
+   "issue_codes": [],
+   "writers": [
+    "Format lyrics (1)"
+   ],
+   "presets": [
+    "strict",
+    "balanced",
+    "relaxed"
+   ]
+  },
+  {
+   "key": "grade_check_album_tags",
+   "label": "Album-level tags",
+   "default": true,
+   "tags": [
+    "ALBUM DYNAMIC RANGE",
+    "ALBUMITUNESADVISORY"
+   ],
+   "group": "tracks",
+   "description": "grades ALBUM DYNAMIC RANGE, ALBUMITUNESADVISORY \u00b7 toggle grade_check_album_tags \u2014 on by default",
+   "enabled": true,
+   "issue_codes": [],
+   "writers": [
+    "Auto tagging (8)",
+    "DR & ReplayGain (7)"
+   ],
+   "presets": [
+    "strict",
+    "balanced",
+    "relaxed"
+   ]
+  },
+  {
+   "key": "grade_check_cd_log",
+   "label": "CD \u2014 .log present",
+   "default": true,
+   "tags": [],
+   "group": "tracks",
+   "description": "graded on the album folder and its files rather than on a tag \u00b7 toggle grade_check_cd_log \u2014 on by default",
+   "enabled": true,
+   "issue_codes": [],
+   "writers": [],
+   "presets": [
+    "strict",
+    "balanced",
+    "relaxed"
+   ]
+  },
+  {
+   "key": "grade_check_cd_cue",
+   "label": "CD \u2014 .cue present",
+   "default": true,
+   "tags": [],
+   "group": "tracks",
+   "description": "graded on the album folder and its files rather than on a tag \u00b7 toggle grade_check_cd_cue \u2014 on by default",
+   "enabled": true,
+   "issue_codes": [],
+   "writers": [],
+   "presets": [
+    "strict",
+    "balanced",
+    "relaxed"
+   ]
+  },
+  {
+   "key": "grade_check_disc_naming",
+   "label": "Disc rip-sheet naming",
+   "default": true,
+   "tags": [],
+   "group": "tracks",
+   "description": "graded on the album folder and its files rather than on a tag \u00b7 toggle grade_check_disc_naming \u2014 on by default",
+   "enabled": true,
+   "issue_codes": [],
+   "writers": [],
+   "presets": [
+    "strict",
+    "balanced",
+    "relaxed"
+   ]
+  },
+  {
+   "key": "grade_check_log_grade",
+   "label": "Log grade present & in range",
+   "default": true,
+   "tags": [
+    "LOG_GRADE"
+   ],
+   "group": "auditing",
+   "description": "grades LOG_GRADE \u00b7 toggle grade_check_log_grade \u2014 on by default",
+   "enabled": true,
+   "issue_codes": [],
+   "writers": [
+    "Audit library (6)"
+   ],
+   "presets": [
+    "strict",
+    "balanced",
+    "relaxed"
+   ]
+  },
+  {
+   "key": "grade_check_crc",
+   "label": "CRC checksums",
+   "default": true,
+   "tags": [],
+   "group": "tracks",
+   "description": "graded on the album folder and its files rather than on a tag \u00b7 toggle grade_check_crc \u2014 on by default",
+   "enabled": true,
+   "issue_codes": [],
+   "writers": [],
+   "presets": [
+    "strict",
+    "balanced",
+    "relaxed"
+   ]
+  },
+  {
+   "key": "grade_check_cd_format",
+   "label": "CD \u2014 lossless format",
+   "default": true,
+   "tags": [],
+   "group": "tracks",
+   "description": "graded on the album folder and its files rather than on a tag \u00b7 toggle grade_check_cd_format \u2014 on by default",
+   "enabled": true,
+   "issue_codes": [],
+   "writers": [],
+   "presets": [
+    "strict",
+    "balanced",
+    "relaxed"
+   ]
+  },
+  {
+   "key": "grade_check_cover",
+   "label": "Cover art",
+   "default": true,
+   "tags": [],
+   "group": "covers",
+   "description": "graded on the album folder and its files rather than on a tag \u00b7 toggle grade_check_cover \u2014 on by default",
+   "enabled": true,
+   "issue_codes": [],
+   "writers": [],
+   "presets": [
+    "strict",
+    "balanced",
+    "relaxed"
+   ]
+  },
+  {
+   "key": "grade_check_cue_format",
+   "label": "CUE \u2014 canonical formatting",
+   "default": true,
+   "tags": [],
+   "group": "formatting",
+   "description": "graded on the album folder and its files rather than on a tag \u00b7 toggle grade_check_cue_format \u2014 on by default",
+   "enabled": true,
+   "issue_codes": [],
+   "writers": [],
+   "presets": [
+    "strict",
+    "balanced",
+    "relaxed"
+   ]
+  },
+  {
+   "key": "grade_check_cue_files",
+   "label": "CUE \u2014 referenced files exist",
+   "default": true,
+   "tags": [],
+   "group": "formatting",
+   "description": "graded on the album folder and its files rather than on a tag \u00b7 toggle grade_check_cue_files \u2014 on by default",
+   "enabled": true,
+   "issue_codes": [],
+   "writers": [],
+   "presets": [
+    "strict",
+    "balanced",
+    "relaxed"
+   ]
+  },
+  {
+   "key": "grade_check_accurip_format",
+   "label": ".accurip \u2014 canonical formatting",
+   "default": true,
+   "tags": [],
+   "group": "formatting",
+   "description": "graded on the album folder and its files rather than on a tag \u00b7 toggle grade_check_accurip_format \u2014 on by default",
+   "enabled": true,
+   "issue_codes": [],
+   "writers": [],
+   "presets": [
+    "strict",
+    "balanced",
+    "relaxed"
+   ]
+  },
+  {
+   "key": "grade_check_disallowed",
+   "label": "Disallowed file types",
+   "default": true,
+   "tags": [],
+   "group": "tracks",
+   "description": "graded on the album folder and its files rather than on a tag \u00b7 toggle grade_check_disallowed \u2014 on by default",
+   "enabled": true,
+   "issue_codes": [],
+   "writers": [],
+   "presets": [
+    "strict",
+    "balanced",
+    "relaxed"
+   ]
+  },
+  {
+   "key": "grade_check_empty_folders",
+   "label": "Empty folders",
+   "default": true,
+   "tags": [],
+   "group": "tracks",
+   "description": "graded on the album folder and its files rather than on a tag \u00b7 toggle grade_check_empty_folders \u2014 on by default",
+   "enabled": true,
+   "issue_codes": [],
+   "writers": [],
+   "presets": [
+    "strict",
+    "balanced",
+    "relaxed"
+   ]
+  },
+  {
+   "key": "grade_check_expected_tracks",
+   "label": "Release tracklist manifest",
+   "default": true,
+   "tags": [],
+   "group": "tracks",
+   "description": "graded on the album folder and its files rather than on a tag \u00b7 toggle grade_check_expected_tracks \u2014 on by default",
+   "enabled": true,
+   "issue_codes": [],
+   "writers": [],
+   "presets": [
+    "strict",
+    "balanced",
+    "relaxed"
+   ]
+  },
+  {
+   "key": "grade_check_extra_images",
+   "label": "Stray images",
+   "default": true,
+   "tags": [],
+   "group": "tracks",
+   "description": "graded on the album folder and its files rather than on a tag \u00b7 toggle grade_check_extra_images \u2014 on by default",
+   "enabled": true,
+   "issue_codes": [],
+   "writers": [],
+   "presets": [
+    "strict",
+    "balanced",
+    "relaxed"
+   ]
+  },
+  {
+   "key": "grade_check_naming",
+   "label": "Naming script match",
+   "default": true,
+   "tags": [],
+   "group": "tracks",
+   "description": "graded on the album folder and its files rather than on a tag \u00b7 toggle grade_check_naming \u2014 on by default",
+   "enabled": true,
+   "issue_codes": [],
+   "writers": [],
+   "presets": [
+    "strict",
+    "balanced",
+    "relaxed"
+   ]
+  },
+  {
+   "key": "grade_check_filename_case",
+   "label": "Path capitalization",
+   "default": true,
+   "tags": [],
+   "group": "tracks",
+   "description": "graded on the album folder and its files rather than on a tag \u00b7 toggle grade_check_filename_case \u2014 on by default",
+   "enabled": true,
+   "issue_codes": [],
+   "writers": [],
+   "presets": [
+    "strict",
+    "balanced"
+   ]
+  },
+  {
+   "key": "grade_check_ext_case",
+   "label": "Lowercase extensions",
+   "default": true,
+   "tags": [],
+   "group": "tracks",
+   "description": "graded on the album folder and its files rather than on a tag \u00b7 toggle grade_check_ext_case \u2014 on by default",
+   "enabled": true,
+   "issue_codes": [],
+   "writers": [],
+   "presets": [
+    "strict",
+    "balanced"
+   ]
+  },
+  {
+   "key": "grade_check_key_bpm",
+   "label": "Key & BPM",
+   "default": true,
+   "tags": [
+    "BPM",
+    "INITIALKEY"
+   ],
+   "group": "tracks",
+   "description": "grades BPM, INITIALKEY \u00b7 toggle grade_check_key_bpm \u2014 on by default",
+   "enabled": true,
+   "issue_codes": [],
+   "writers": [
+    "Key & BPM (12)"
+   ],
+   "presets": [
+    "strict",
+    "balanced",
+    "relaxed"
+   ]
+  },
+  {
+   "key": "grade_check_excess_tags",
+   "label": "Excess tags",
+   "default": true,
+   "tags": [
+    "AUDIO_MD5",
+    "INTEGRITY",
+    "LOG_CRC"
+   ],
+   "group": "tracks",
+   "description": "grades AUDIO_MD5, INTEGRITY, LOG_CRC \u00b7 toggle grade_check_excess_tags \u2014 on by default",
+   "enabled": true,
+   "issue_codes": [],
+   "writers": [
+    "Audit library (6)",
+    "nothing \u2014 legacy, read only"
+   ],
+   "presets": [
+    "strict",
+    "balanced"
+   ]
+  },
+  {
+   "key": "grade_check_raw_video",
+   "label": "Raw videos",
+   "default": true,
+   "tags": [],
+   "group": "tracks",
+   "description": "graded on the album folder and its files rather than on a tag \u00b7 toggle grade_check_raw_video \u2014 on by default",
+   "enabled": true,
+   "issue_codes": [],
+   "writers": [],
+   "presets": [
+    "strict",
+    "balanced",
+    "relaxed"
+   ]
+  },
+  {
+   "key": "grade_check_mb_links",
+   "label": "MusicBrainz release link",
+   "default": true,
+   "tags": [
+    "MUSICBRAINZ_ALBUMID"
+   ],
+   "group": "links",
+   "description": "grades MUSICBRAINZ_ALBUMID \u00b7 toggle grade_check_mb_links \u2014 on by default",
+   "enabled": true,
+   "issue_codes": [],
+   "writers": [
+    "Beets tagging (14)"
+   ],
+   "presets": [
+    "strict",
+    "balanced"
+   ]
+  },
+  {
+   "key": "grade_check_rym_links",
+   "label": "RateYourMusic release link",
+   "default": true,
+   "tags": [
+    "RATEYOURMUSIC_ALBUM"
+   ],
+   "group": "links",
+   "description": "grades RATEYOURMUSIC_ALBUM \u00b7 toggle grade_check_rym_links \u2014 on by default",
+   "enabled": true,
+   "issue_codes": [],
+   "writers": [
+    "Beets tagging (14)"
+   ],
+   "presets": [
+    "strict",
+    "balanced"
+   ]
+  },
+  {
+   "key": "grade_check_lossless_source",
+   "label": "Lossless sources",
+   "default": true,
+   "tags": [],
+   "group": "tracks",
+   "description": "graded on the album folder and its files rather than on a tag \u00b7 toggle grade_check_lossless_source \u2014 on by default",
+   "enabled": true,
+   "issue_codes": [],
+   "writers": [],
+   "presets": [
+    "strict",
+    "balanced",
+    "relaxed"
+   ]
+  },
+  {
+   "key": "grade_check_mood",
+   "label": "Mood tag present",
+   "default": true,
+   "tags": [
+    "MOOD"
+   ],
+   "group": "tracks",
+   "description": "grades MOOD \u00b7 issue codes MOOD_MISSING \u00b7 toggle grade_check_mood \u2014 on by default",
+   "enabled": true,
+   "issue_codes": [
+    "MOOD_MISSING"
+   ],
+   "writers": [
+    "Auto tagging (8)"
+   ],
+   "presets": [
+    "strict",
+    "balanced",
+    "relaxed"
+   ]
+  },
+  {
+   "key": "grade_check_energy",
+   "label": "Energy tag present",
+   "default": true,
+   "tags": [
+    "ENERGY"
+   ],
+   "group": "tracks",
+   "description": "grades ENERGY \u00b7 issue codes ENERGY_MISSING \u00b7 toggle grade_check_energy \u2014 on by default",
+   "enabled": true,
+   "issue_codes": [
+    "ENERGY_MISSING"
+   ],
+   "writers": [
+    "Auto tagging (8)"
+   ],
+   "presets": [
+    "strict",
+    "balanced",
+    "relaxed"
+   ]
+  },
+  {
+   "key": "grade_check_genre",
+   "label": "Genre tag present",
+   "default": true,
+   "tags": [
+    "GENRE"
+   ],
+   "group": "tracks",
+   "description": "grades GENRE \u00b7 issue codes GENRE_MISSING \u00b7 toggle grade_check_genre \u2014 on by default",
+   "enabled": true,
+   "issue_codes": [
+    "GENRE_MISSING"
+   ],
+   "writers": [
+    "Auto tagging (8)"
+   ],
+   "presets": [
+    "strict",
+    "balanced",
+    "relaxed"
+   ]
+  },
+  {
+   "key": "grade_check_genre_count",
+   "label": "Genre count per track",
+   "default": true,
+   "tags": [
+    "GENRE"
+   ],
+   "group": "tracks",
+   "description": "grades GENRE \u00b7 toggle grade_check_genre_count \u2014 on by default",
+   "enabled": true,
+   "issue_codes": [],
+   "writers": [
+    "Auto tagging (8)"
+   ],
+   "presets": [
+    "strict",
+    "balanced",
+    "relaxed"
+   ]
+  },
+  {
+   "key": "grade_check_genre_order",
+   "label": "Genre order (family first)",
+   "default": true,
+   "tags": [
+    "GENRE"
+   ],
+   "group": "tracks",
+   "description": "grades GENRE \u00b7 toggle grade_check_genre_order \u2014 on by default",
+   "enabled": true,
+   "issue_codes": [],
+   "writers": [
+    "Auto tagging (8)"
+   ],
+   "presets": [
+    "strict",
+    "balanced",
+    "relaxed"
+   ]
+  },
+  {
+   "key": "grade_check_genre_vocab",
+   "label": "Genre vocabulary",
+   "default": true,
+   "tags": [
+    "GENRE"
+   ],
+   "group": "tracks",
+   "description": "grades GENRE \u00b7 toggle grade_check_genre_vocab \u2014 on by default",
+   "enabled": true,
+   "issue_codes": [],
+   "writers": [
+    "Auto tagging (8)"
+   ],
+   "presets": [
+    "strict",
+    "balanced",
+    "relaxed"
+   ]
+  },
+  {
+   "key": "grade_check_xlit_transliteration",
+   "label": "Transliteration \u2014 needed, never extra",
+   "default": true,
+   "tags": [
+    "TRANSLITERATION"
+   ],
+   "group": "lyrics",
+   "description": "grades TRANSLITERATION \u00b7 toggle grade_check_xlit_transliteration \u2014 on by default",
+   "enabled": true,
+   "issue_codes": [],
+   "writers": [
+    "Lyrics transliterate (AI) (17)"
+   ],
+   "presets": [
+    "strict",
+    "balanced",
+    "relaxed"
+   ]
+  },
+  {
+   "key": "grade_check_xlit_translation",
+   "label": "Translation \u2014 needed, never extra",
+   "default": true,
+   "tags": [
+    "TRANSLATION"
+   ],
+   "group": "lyrics",
+   "description": "grades TRANSLATION \u00b7 toggle grade_check_xlit_translation \u2014 on by default",
+   "enabled": true,
+   "issue_codes": [],
+   "writers": [
+    "Lyrics transliterate (AI) (17)"
+   ],
+   "presets": [
+    "strict",
+    "balanced",
+    "relaxed"
+   ]
+  },
+  {
+   "key": "grade_check_replaygain",
+   "label": "ReplayGain tags present",
+   "default": true,
+   "tags": [
+    "REPLAYGAIN_ALBUM_GAIN",
+    "REPLAYGAIN_ALBUM_PEAK",
+    "REPLAYGAIN_TRACK_GAIN",
+    "REPLAYGAIN_TRACK_PEAK"
+   ],
+   "group": "tracks",
+   "description": "grades REPLAYGAIN_ALBUM_GAIN, REPLAYGAIN_ALBUM_PEAK, REPLAYGAIN_TRACK_GAIN, REPLAYGAIN_TRACK_PEAK \u00b7 issue codes REPLAYGAIN_ALBUM_GAIN, REPLAYGAIN_ALBUM_PEAK, REPLAYGAIN_TRACK_GAIN, REPLAYGAIN_TRACK_PEAK \u00b7 toggle grade_check_replaygain \u2014 on by default",
+   "enabled": true,
+   "issue_codes": [
+    "REPLAYGAIN_ALBUM_GAIN",
+    "REPLAYGAIN_ALBUM_PEAK",
+    "REPLAYGAIN_TRACK_GAIN",
+    "REPLAYGAIN_TRACK_PEAK"
+   ],
+   "writers": [
+    "DR & ReplayGain (7)"
+   ],
+   "presets": [
+    "strict",
+    "balanced"
+   ]
+  },
+  {
+   "key": "grade_check_acoustid",
+   "label": "AcoustID tags present",
+   "default": true,
+   "tags": [
+    "ACOUSTID_FINGERPRINT",
+    "ACOUSTID_ID"
+   ],
+   "group": "tracks",
+   "description": "grades ACOUSTID_FINGERPRINT, ACOUSTID_ID \u00b7 toggle grade_check_acoustid \u2014 on by default",
+   "enabled": true,
+   "issue_codes": [],
+   "writers": [
+    "Beets tagging (14)"
+   ],
+   "presets": [
+    "strict",
+    "balanced",
+    "relaxed"
+   ]
+  },
+  {
+   "key": "grade_include_description",
+   "label": "Album description",
+   "default": true,
+   "tags": [],
+   "group": "categories",
+   "description": "decides whether album description count toward the album grade \u00b7 toggle grade_include_description \u2014 on by default",
+   "enabled": true,
+   "issue_codes": [],
+   "writers": [],
+   "presets": [
+    "strict",
+    "balanced",
+    "relaxed"
+   ]
+  },
+  {
+   "key": "grade_check_album_description",
+   "label": "Album description stored",
+   "default": true,
+   "tags": [],
+   "group": "tracks",
+   "description": "graded on the album folder and its files rather than on a tag \u00b7 toggle grade_check_album_description \u2014 on by default",
+   "enabled": true,
+   "issue_codes": [],
+   "writers": [],
+   "presets": [
+    "strict",
+    "balanced"
+   ]
+  },
+  {
+   "key": "grade_check_artist_image",
+   "label": "Artist image stored",
+   "default": true,
+   "tags": [],
+   "group": "artist",
+   "description": "graded on the album folder and its files rather than on a tag \u00b7 issue codes ARTIST_IMAGE_ASPECT, ARTIST_IMAGE_CORRUPT, ARTIST_IMAGE_FORMAT, ARTIST_IMAGE_MISSING, ARTIST_IMAGE_OVERSIZED, ARTIST_IMAGE_UNDERSIZED, ARTIST_IMAGE_UPSCALED \u00b7 toggle grade_check_artist_image \u2014 on by default",
+   "enabled": true,
+   "issue_codes": [
+    "ARTIST_IMAGE_ASPECT",
+    "ARTIST_IMAGE_CORRUPT",
+    "ARTIST_IMAGE_FORMAT",
+    "ARTIST_IMAGE_MISSING",
+    "ARTIST_IMAGE_OVERSIZED",
+    "ARTIST_IMAGE_UNDERSIZED",
+    "ARTIST_IMAGE_UPSCALED"
+   ],
+   "writers": [],
+   "presets": [
+    "strict",
+    "balanced"
+   ]
+  },
+  {
+   "key": "grade_check_artist_description",
+   "label": "Artist description stored",
+   "default": true,
+   "tags": [],
+   "group": "artist",
+   "description": "graded on the album folder and its files rather than on a tag \u00b7 issue codes ARTIST_DESCRIPTION_MISSING \u00b7 toggle grade_check_artist_description \u2014 on by default",
+   "enabled": true,
+   "issue_codes": [
+    "ARTIST_DESCRIPTION_MISSING"
+   ],
+   "writers": [],
+   "presets": [
+    "strict",
+    "balanced"
+   ]
+  }
+ ],
+ "groups": [
+  {
+   "id": "tracks",
+   "title": "Tracks & albums",
+   "keys": [
+    "grade_check_unreadable",
+    "grade_check_missing_tags",
+    "grade_check_encoder",
+    "grade_check_instrumental",
+    "grade_check_media",
+    "grade_check_source",
+    "grade_check_album_tags",
+    "grade_check_cd_log",
+    "grade_check_cd_cue",
+    "grade_check_disc_naming",
+    "grade_check_crc",
+    "grade_check_cd_format",
+    "grade_check_disallowed",
+    "grade_check_empty_folders",
+    "grade_check_expected_tracks",
+    "grade_check_extra_images",
+    "grade_check_naming",
+    "grade_check_filename_case",
+    "grade_check_ext_case",
+    "grade_check_key_bpm",
+    "grade_check_excess_tags",
+    "grade_check_raw_video",
+    "grade_check_lossless_source",
+    "grade_check_mood",
+    "grade_check_energy",
+    "grade_check_genre",
+    "grade_check_genre_count",
+    "grade_check_genre_order",
+    "grade_check_genre_vocab",
+    "grade_check_replaygain",
+    "grade_check_acoustid",
+    "grade_check_album_description"
+   ]
+  },
+  {
+   "id": "artist",
+   "title": "Artist",
+   "keys": [
+    "grade_check_artist_image",
+    "grade_check_artist_description"
+   ]
+  },
+  {
+   "id": "auditing",
+   "title": "Auditing",
+   "keys": [
+    "grade_check_log_checksum",
+    "grade_check_accuraterip",
+    "grade_check_audit",
+    "grade_check_log_grade"
+   ]
+  },
+  {
+   "id": "links",
+   "title": "Identity links",
+   "keys": [
+    "grade_check_mb_links",
+    "grade_check_rym_links"
+   ]
+  },
+  {
+   "id": "covers",
+   "title": "Covers",
+   "keys": [
+    "grade_check_cover_crop",
+    "grade_check_sidecar_cover",
+    "grade_check_cover"
+   ]
+  },
+  {
+   "id": "formatting",
+   "title": "Strict formatting",
+   "keys": [
+    "grade_check_tag_spaces",
+    "grade_check_tag_case",
+    "grade_check_lyrics_spaces",
+    "grade_check_cue_spaces",
+    "grade_check_lyrics_zero",
+    "grade_check_tag_blank_lines",
+    "grade_check_lyrics_blank_lines",
+    "grade_check_cue_blank_lines",
+    "grade_check_lyrics_format",
+    "grade_check_cue_format",
+    "grade_check_cue_files",
+    "grade_check_accurip_format"
+   ]
+  },
+  {
+   "id": "lyrics",
+   "title": "Lyrics & translations",
+   "keys": [
+    "grade_check_lyrics",
+    "grade_check_lyrics_lang_tags",
+    "grade_check_xlit_transliteration",
+    "grade_check_xlit_translation"
+   ]
+  },
+  {
+   "id": "categories",
+   "title": "File categories",
+   "keys": [
+    "grade_include_music",
+    "grade_include_cover",
+    "grade_include_cue",
+    "grade_include_log",
+    "grade_include_lrc",
+    "grade_include_accurip",
+    "grade_include_other",
+    "grade_include_video",
+    "grade_include_description"
+   ]
+  }
+ ],
+ "presets": [
+  {
+   "id": "strict",
+   "label": "Strict",
+   "description": "Every check on (the file-category permissions keep their configured value \u2014 what counts toward a grade is the user's call)",
+   "keys": [
+    "grade_include_music",
+    "grade_include_cover",
+    "grade_include_cue",
+    "grade_include_log",
+    "grade_include_lrc",
+    "grade_include_accurip",
+    "grade_include_other",
+    "grade_include_video",
+    "grade_check_tag_spaces",
+    "grade_check_tag_case",
+    "grade_check_lyrics_spaces",
+    "grade_check_cue_spaces",
+    "grade_check_cover_crop",
+    "grade_check_lyrics_zero",
+    "grade_check_tag_blank_lines",
+    "grade_check_lyrics_blank_lines",
+    "grade_check_cue_blank_lines",
+    "grade_check_log_checksum",
+    "grade_check_accuraterip",
+    "grade_check_unreadable",
+    "grade_check_missing_tags",
+    "grade_check_encoder",
+    "grade_check_audit",
+    "grade_check_instrumental",
+    "grade_check_lyrics",
+    "grade_check_lyrics_format",
+    "grade_check_lyrics_lang_tags",
+    "grade_check_sidecar_cover",
+    "grade_check_media",
+    "grade_check_source",
+    "grade_check_album_tags",
+    "grade_check_cd_log",
+    "grade_check_cd_cue",
+    "grade_check_disc_naming",
+    "grade_check_log_grade",
+    "grade_check_crc",
+    "grade_check_cd_format",
+    "grade_check_cover",
+    "grade_check_cue_format",
+    "grade_check_cue_files",
+    "grade_check_accurip_format",
+    "grade_check_disallowed",
+    "grade_check_empty_folders",
+    "grade_check_expected_tracks",
+    "grade_check_extra_images",
+    "grade_check_naming",
+    "grade_check_filename_case",
+    "grade_check_ext_case",
+    "grade_check_key_bpm",
+    "grade_check_excess_tags",
+    "grade_check_raw_video",
+    "grade_check_mb_links",
+    "grade_check_rym_links",
+    "grade_check_lossless_source",
+    "grade_check_mood",
+    "grade_check_energy",
+    "grade_check_genre",
+    "grade_check_genre_count",
+    "grade_check_genre_order",
+    "grade_check_genre_vocab",
+    "grade_check_xlit_transliteration",
+    "grade_check_xlit_translation",
+    "grade_check_replaygain",
+    "grade_check_acoustid",
+    "grade_include_description",
+    "grade_check_album_description",
+    "grade_check_artist_image",
+    "grade_check_artist_description"
+   ]
+  },
+  {
+   "id": "balanced",
+   "label": "Balanced",
+   "description": "The factory defaults as they were before 3.7.0 made grading strict: the same list, with the audit tag not required and unclassified files still failing the album",
+   "keys": [
+    "grade_include_music",
+    "grade_include_cover",
+    "grade_include_cue",
+    "grade_include_log",
+    "grade_include_lrc",
+    "grade_include_accurip",
+    "grade_include_video",
+    "grade_check_tag_spaces",
+    "grade_check_tag_case",
+    "grade_check_lyrics_spaces",
+    "grade_check_cue_spaces",
+    "grade_check_cover_crop",
+    "grade_check_lyrics_zero",
+    "grade_check_tag_blank_lines",
+    "grade_check_lyrics_blank_lines",
+    "grade_check_cue_blank_lines",
+    "grade_check_log_checksum",
+    "grade_check_accuraterip",
+    "grade_check_unreadable",
+    "grade_check_missing_tags",
+    "grade_check_encoder",
+    "grade_check_instrumental",
+    "grade_check_lyrics",
+    "grade_check_lyrics_format",
+    "grade_check_lyrics_lang_tags",
+    "grade_check_sidecar_cover",
+    "grade_check_media",
+    "grade_check_source",
+    "grade_check_album_tags",
+    "grade_check_cd_log",
+    "grade_check_cd_cue",
+    "grade_check_disc_naming",
+    "grade_check_log_grade",
+    "grade_check_crc",
+    "grade_check_cd_format",
+    "grade_check_cover",
+    "grade_check_cue_format",
+    "grade_check_cue_files",
+    "grade_check_accurip_format",
+    "grade_check_disallowed",
+    "grade_check_empty_folders",
+    "grade_check_expected_tracks",
+    "grade_check_extra_images",
+    "grade_check_naming",
+    "grade_check_filename_case",
+    "grade_check_ext_case",
+    "grade_check_key_bpm",
+    "grade_check_excess_tags",
+    "grade_check_raw_video",
+    "grade_check_mb_links",
+    "grade_check_rym_links",
+    "grade_check_lossless_source",
+    "grade_check_mood",
+    "grade_check_energy",
+    "grade_check_genre",
+    "grade_check_genre_count",
+    "grade_check_genre_order",
+    "grade_check_genre_vocab",
+    "grade_check_xlit_transliteration",
+    "grade_check_xlit_translation",
+    "grade_check_replaygain",
+    "grade_check_acoustid",
+    "grade_include_description",
+    "grade_check_album_description",
+    "grade_check_artist_image",
+    "grade_check_artist_description"
+   ]
+  },
+  {
+   "id": "relaxed",
+   "label": "Relaxed",
+   "description": "Only the essential checks: the strict formatting family, the identity links and the content checks nothing breaks without",
+   "keys": [
+    "grade_include_music",
+    "grade_include_cover",
+    "grade_include_cue",
+    "grade_include_log",
+    "grade_include_lrc",
+    "grade_include_accurip",
+    "grade_include_other",
+    "grade_include_video",
+    "grade_check_log_checksum",
+    "grade_check_accuraterip",
+    "grade_check_unreadable",
+    "grade_check_missing_tags",
+    "grade_check_encoder",
+    "grade_check_audit",
+    "grade_check_instrumental",
+    "grade_check_lyrics",
+    "grade_check_lyrics_format",
+    "grade_check_lyrics_lang_tags",
+    "grade_check_sidecar_cover",
+    "grade_check_media",
+    "grade_check_source",
+    "grade_check_album_tags",
+    "grade_check_cd_log",
+    "grade_check_cd_cue",
+    "grade_check_disc_naming",
+    "grade_check_log_grade",
+    "grade_check_crc",
+    "grade_check_cd_format",
+    "grade_check_cover",
+    "grade_check_cue_format",
+    "grade_check_cue_files",
+    "grade_check_accurip_format",
+    "grade_check_disallowed",
+    "grade_check_empty_folders",
+    "grade_check_expected_tracks",
+    "grade_check_extra_images",
+    "grade_check_naming",
+    "grade_check_key_bpm",
+    "grade_check_raw_video",
+    "grade_check_lossless_source",
+    "grade_check_mood",
+    "grade_check_energy",
+    "grade_check_genre",
+    "grade_check_genre_count",
+    "grade_check_genre_order",
+    "grade_check_genre_vocab",
+    "grade_check_xlit_transliteration",
+    "grade_check_xlit_translation",
+    "grade_check_acoustid",
+    "grade_include_description"
+   ]
+  }
+ ],
+ "audit": {
+  "script": {
+   "id": 6,
+   "label": "Audit library",
+   "description": "AudioAuditor: fake lossless / upscaled / MQA"
+  },
+  "steps": [
+   {
+    "key": "audit_thorough",
+    "label": "Audit Thorough",
+    "kind": "bool",
+    "default": true,
+    "enabled": true,
+    "flag": null,
+    "used": true,
+    "description": "toggle audit_thorough \u2014 on by default"
+   },
+   {
+    "key": "audit_cutoff_allow",
+    "label": "Audit Cutoff Allow",
+    "kind": "number",
+    "default": 0,
+    "enabled": 0,
+    "flag": null,
+    "used": true,
+    "description": "value audit_cutoff_allow \u2014 0 by default"
+   },
+   {
+    "key": "audit_verify_cd_checksums",
+    "label": "Audit Verify CD Checksums",
+    "kind": "bool",
+    "default": true,
+    "enabled": true,
+    "flag": null,
+    "used": true,
+    "description": "toggle audit_verify_cd_checksums \u2014 on by default"
+   },
+   {
+    "key": "audit_cd_require_both",
+    "label": "Audit CD Require Both",
+    "kind": "bool",
+    "default": true,
+    "enabled": true,
+    "flag": null,
+    "used": true,
+    "description": "toggle audit_cd_require_both \u2014 on by default"
+   },
+   {
+    "key": "audit_integrity",
+    "label": "Audit Integrity",
+    "kind": "bool",
+    "default": true,
+    "enabled": true,
+    "flag": null,
+    "used": true,
+    "description": "toggle audit_integrity \u2014 on by default"
+   },
+   {
+    "key": "audit_fail_on_unscorable_log",
+    "label": "Audit Fail On Unscorable Log",
+    "kind": "bool",
+    "default": true,
+    "enabled": true,
+    "flag": null,
+    "used": true,
+    "description": "toggle audit_fail_on_unscorable_log \u2014 on by default"
+   },
+   {
+    "key": "audit_verify_log_checksum",
+    "label": "Audit Verify Log Checksum",
+    "kind": "bool",
+    "default": true,
+    "enabled": true,
+    "flag": null,
+    "used": true,
+    "description": "toggle audit_verify_log_checksum \u2014 on by default"
+   },
+   {
+    "key": "audit_require_accuraterip",
+    "label": "Audit Require Accuraterip",
+    "kind": "bool",
+    "default": true,
+    "enabled": true,
+    "flag": null,
+    "used": true,
+    "description": "toggle audit_require_accuraterip \u2014 on by default"
+   },
+   {
+    "key": "audit_log_score_threshold",
+    "label": "Audit Log Score Threshold",
+    "kind": "number",
+    "default": 100,
+    "enabled": 100,
+    "flag": null,
+    "used": true,
+    "description": "value audit_log_score_threshold \u2014 100 by default"
+   },
+   {
+    "key": "audit_check_cd_format",
+    "label": "Audit Check CD Format",
+    "kind": "bool",
+    "default": true,
+    "enabled": true,
+    "flag": null,
+    "used": true,
+    "description": "toggle audit_check_cd_format \u2014 on by default"
+   },
+   {
+    "key": "audit_batch_size",
+    "label": "Audit Batch Size",
+    "kind": "number",
+    "default": 250,
+    "enabled": 250,
+    "flag": null,
+    "used": true,
+    "description": "value audit_batch_size \u2014 250 by default"
+   },
+   {
+    "key": "audit_batch_timeout_s",
+    "label": "Audit Batch Timeout S",
+    "kind": "number",
+    "default": 30,
+    "enabled": 30,
+    "flag": null,
+    "used": true,
+    "description": "value audit_batch_timeout_s \u2014 30 by default"
+   },
+   {
+    "key": "audit_per_file_timeout_s",
+    "label": "Audit Per File Timeout S",
+    "kind": "number",
+    "default": 30,
+    "enabled": 30,
+    "flag": null,
+    "used": true,
+    "description": "value audit_per_file_timeout_s \u2014 30 by default"
+   },
+   {
+    "key": "audit_clipping",
+    "label": "Audit Clipping",
+    "kind": "bool",
+    "default": true,
+    "enabled": true,
+    "flag": "--no-clipping",
+    "used": true,
+    "description": "toggle audit_clipping \u2014 on by default \u00b7 switching it off appends --no-clipping to the scan"
+   },
+   {
+    "key": "audit_scaled_clipping",
+    "label": "Audit Scaled Clipping",
+    "kind": "bool",
+    "default": true,
+    "enabled": true,
+    "flag": null,
+    "used": true,
+    "description": "toggle audit_scaled_clipping \u2014 on by default"
+   },
+   {
+    "key": "audit_mqa",
+    "label": "Audit Mqa",
+    "kind": "bool",
+    "default": true,
+    "enabled": true,
+    "flag": "--no-mqa",
+    "used": true,
+    "description": "toggle audit_mqa \u2014 on by default \u00b7 switching it off appends --no-mqa to the scan"
+   },
+   {
+    "key": "audit_ai",
+    "label": "Audit Ai",
+    "kind": "bool",
+    "default": true,
+    "enabled": true,
+    "flag": "--no-ai",
+    "used": true,
+    "description": "toggle audit_ai \u2014 on by default \u00b7 switching it off appends --no-ai to the scan"
+   },
+   {
+    "key": "audit_fake_stereo",
+    "label": "Audit Fake Stereo",
+    "kind": "bool",
+    "default": true,
+    "enabled": true,
+    "flag": "--no-fake-stereo",
+    "used": true,
+    "description": "toggle audit_fake_stereo \u2014 on by default \u00b7 switching it off appends --no-fake-stereo to the scan"
+   },
+   {
+    "key": "audit_silence",
+    "label": "Audit Silence",
+    "kind": "bool",
+    "default": true,
+    "enabled": true,
+    "flag": "--no-silence",
+    "used": true,
+    "description": "toggle audit_silence \u2014 on by default \u00b7 switching it off appends --no-silence to the scan"
+   },
+   {
+    "key": "audit_dynamic_range",
+    "label": "Audit Dynamic Range",
+    "kind": "bool",
+    "default": true,
+    "enabled": true,
+    "flag": "--no-dynamic-range",
+    "used": true,
+    "description": "toggle audit_dynamic_range \u2014 on by default \u00b7 switching it off appends --no-dynamic-range to the scan"
+   },
+   {
+    "key": "audit_true_peak",
+    "label": "Audit True Peak",
+    "kind": "bool",
+    "default": true,
+    "enabled": true,
+    "flag": "--no-true-peak",
+    "used": true,
+    "description": "toggle audit_true_peak \u2014 on by default \u00b7 switching it off appends --no-true-peak to the scan"
+   },
+   {
+    "key": "audit_lufs",
+    "label": "Audit Lufs",
+    "kind": "bool",
+    "default": true,
+    "enabled": true,
+    "flag": "--no-lufs",
+    "used": true,
+    "description": "toggle audit_lufs \u2014 on by default \u00b7 switching it off appends --no-lufs to the scan"
+   },
+   {
+    "key": "audit_bpm",
+    "label": "Audit BPM",
+    "kind": "bool",
+    "default": true,
+    "enabled": true,
+    "flag": "--no-bpm",
+    "used": true,
+    "description": "toggle audit_bpm \u2014 on by default \u00b7 switching it off appends --no-bpm to the scan"
+   }
+  ]
+ },
+ "totals": {
+  "scripts": 21,
+  "scripts_enabled": 20,
+  "checks": 68,
+  "checks_enabled": 68
+ },
+ "grader_gates": [
+  "grade_check_accuraterip",
+  "grade_check_accurip_format",
+  "grade_check_acoustid",
+  "grade_check_album_description",
+  "grade_check_album_tags",
+  "grade_check_artist_description",
+  "grade_check_artist_image",
+  "grade_check_audit",
+  "grade_check_cd_cue",
+  "grade_check_cd_format",
+  "grade_check_cd_log",
+  "grade_check_cover",
+  "grade_check_cover_crop",
+  "grade_check_crc",
+  "grade_check_cue_blank_lines",
+  "grade_check_cue_files",
+  "grade_check_cue_format",
+  "grade_check_cue_spaces",
+  "grade_check_disallowed",
+  "grade_check_disc_naming",
+  "grade_check_empty_folders",
+  "grade_check_encoder",
+  "grade_check_energy",
+  "grade_check_excess_tags",
+  "grade_check_expected_tracks",
+  "grade_check_ext_case",
+  "grade_check_extra_images",
+  "grade_check_filename_case",
+  "grade_check_genre",
+  "grade_check_genre_count",
+  "grade_check_genre_order",
+  "grade_check_genre_vocab",
+  "grade_check_instrumental",
+  "grade_check_key_bpm",
+  "grade_check_log_checksum",
+  "grade_check_log_grade",
+  "grade_check_lossless_source",
+  "grade_check_lyrics",
+  "grade_check_lyrics_blank_lines",
+  "grade_check_lyrics_format",
+  "grade_check_lyrics_lang_tags",
+  "grade_check_lyrics_spaces",
+  "grade_check_lyrics_zero",
+  "grade_check_mb_links",
+  "grade_check_media",
+  "grade_check_missing_tags",
+  "grade_check_mood",
+  "grade_check_naming",
+  "grade_check_raw_video",
+  "grade_check_replaygain",
+  "grade_check_rym_links",
+  "grade_check_sidecar_cover",
+  "grade_check_source",
+  "grade_check_tag_blank_lines",
+  "grade_check_tag_case",
+  "grade_check_tag_spaces",
+  "grade_check_unreadable",
+  "grade_check_xlit_translation",
+  "grade_check_xlit_transliteration",
+  "grade_include_accurip",
+  "grade_include_cover",
+  "grade_include_cue",
+  "grade_include_description",
+  "grade_include_log",
+  "grade_include_lrc",
+  "grade_include_music",
+  "grade_include_other",
+  "grade_include_video"
+ ]
+}

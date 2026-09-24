@@ -39,6 +39,9 @@ from urllib.parse import quote
 
 import httpx
 
+# Importing it installs the ONE shared client behind the module-level
+# `httpx.get` this module's provider JSON seam uses (server/httpclient.py).
+from server import httpclient  # noqa: F401
 from server import integrations
 
 DEEZER_BASE = "https://api.deezer.com"

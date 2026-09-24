@@ -34,7 +34,9 @@ def cfg(**over):
     """A config with this policy's keys stated, so no case rides the real one."""
     c = {"auto_import_avoid_promo": True, "auto_import_require_country": True,
          "prefer_disc_streams": True,
-         "auto_import_medium_order": ["CD", "Vinyl", "Cassette", "Other", "Digital Media"],
+         "auto_import_medium_order": ["CD", "Vinyl", "Cassette", "Other", "DVD",
+                                      "Blu-ray", "VHS", "Video CD", "LaserDisc",
+                                      "Digital Media"],
          "prefer_release_country": "", "prefer_original_edition": True}
     c.update(over)
     return c
@@ -68,14 +70,30 @@ def pick(rows, g=None, **kw):
 
 # --------------------------------------------------------------------------- #
 # 0. The shipped medium order IS the policy's intent: CD first, the other
-#    physical media next, digital last (a digital edition carries no catalog
-#    number and no pressing, so it is what a Soulseek folder matches least).
+#    physical media next — the video carriers (DVD, Blu-ray, VHS, Video CD,
+#    LaserDisc) NAMED, so a music video published on a disc outranks the same
+#    video published as a download — and digital last (a digital edition
+#    carries no catalog number and no pressing, so it is what a Soulseek folder
+#    matches least). A format the order does not name still ranks last of all.
 # --------------------------------------------------------------------------- #
 assert DEFAULT_CONFIG["auto_import_medium_order"] == \
-    ["CD", "Vinyl", "Cassette", "Other", "Digital Media"], \
+    ["CD", "Vinyl", "Cassette", "Other", "DVD", "Blu-ray", "VHS", "Video CD",
+     "LaserDisc", "Digital Media"], \
     DEFAULT_CONFIG["auto_import_medium_order"]
 assert DEFAULT_CONFIG["prefer_release_country"] == ""
 assert DEFAULT_CONFIG["prefer_original_edition"] is True
+
+# 0b. An install that still holds the order the app SHIPPED BEFORE this change
+#     was never a decision (Settings carries the default), so it follows the
+#     current one — the same rule the genre sources and the query templates
+#     already use. A list the user edited is kept exactly as saved.
+assert mloconfig.normalize_config(
+    {"auto_import_medium_order": ["CD", "Vinyl", "Cassette", "Other",
+                                  "Digital Media"]}
+)["auto_import_medium_order"] == DEFAULT_CONFIG["auto_import_medium_order"]
+assert mloconfig.normalize_config(
+    {"auto_import_medium_order": ["Cassette", "CD"]}
+)["auto_import_medium_order"] == ["Cassette", "CD"]
 
 # 1. Medium order decides first among otherwise equal editions: CD > vinyl >
 #    cassette > (unlisted) > digital.
@@ -117,24 +135,45 @@ ranked = rc.rank_releases(group(), [boxed, plain])
 box = [c for c in ranked if c.release_mbid == "box"][0]
 assert any("DVD" in r and "Blu-ray" in r and "box set" in r for r in box.reasons), box.reasons
 
-# a Blu-ray-only edition is the same statement
-assert pick([rel("bd", fmt="Blu-ray"), plain]) == "plain"
-# …and a video-only edition is still returned when it is ALL the group has
-only = rc.choose_release(group(), [rel("bd", fmt="Blu-ray")])
+# a SINGLE-DISC video release is NOT a bundle: its own medium IS the video
+# carrier, so this tier must not zero it. It is ranked by the medium order
+# like every other edition — which is what lets a DVD/Blu-ray beat the same
+# video published as a download (rule 1d), and still lose to the album's own
+# CD (rule 2).
+bd_only = rel("bd", fmt="Blu-ray")
+only = rc.choose_release(group(), [bd_only], cfg())
 assert only is not None and only.release_mbid == "bd", only
-assert any("box set" in r for r in only.reasons), only.reasons
+assert not any("box set" in r for r in only.reasons), only.reasons
+assert any("one disc" in r for r in only.reasons), only.reasons
+assert any("preferred medium" in r for r in only.reasons), only.reasons
+assert pick([bd_only, plain], cfg=cfg()) == "plain", order([bd_only, plain], cfg=cfg())
+single_dvd = rel("dvd", fmt="DVD")
+assert pick([single_dvd, rel("dig", fmt="Digital Media")], cfg=cfg()) == "dvd"
+
+# …and a disc BESIDE the album's own media IS one: the tier asks whether the
+# video rides along with something else, so a 3-CD anniversary box with a DVD
+# still sorts below the album's own CD.
+anniv = rel("anniv", fmt="CD",
+            media=[{"format": "CD", "track-count": 12}] * 3
+                  + [{"format": "DVD", "track-count": 4}])
+assert pick([anniv, plain], cfg=cfg()) == "plain", order([anniv, plain], cfg=cfg())
+anniv_row = [c for c in rc.rank_releases(group(), [anniv, plain], cfg())
+             if c.release_mbid == "anniv"][0]
+assert any("DVD" in r and "box set" in r for r in anniv_row.reasons), anniv_row.reasons
 
 # DVD AUDIO is audio: it must not be read as a video medium
 assert not rc.is_video_format("DVD Audio") and not rc.is_video_format("HDCD")
 dvd_a = rc.rank_releases(group(), [rel("dvd-a", fmt="DVD Audio"),
-                                    rel("dig", fmt="Digital Media")])
+                                    rel("dig", fmt="Digital Media")], cfg())
 da = [c for c in dvd_a if c.release_mbid == "dvd-a"][0]
 assert not any("box set" in r for r in da.reasons), da.reasons
 assert any("one disc" in r for r in da.reasons), da.reasons
-# (it still loses to Digital Media here — "DVD Audio" is simply a label the
-# shipped medium order does not name, which is the PRE-EXISTING rule and not
-# this tier's business)
-assert pick([rel("dvd-a", fmt="DVD Audio"), rel("dig", fmt="Digital Media")]) == "dig"
+# (it still beats Digital Media here: it is not a video medium, so this tier
+# has nothing to say about it — but it IS a physical disc, and the order names
+# "DVD", whose label catches MusicBrainz's "DVD Audio" spelling exactly as "CD"
+# catches "8cm CD". Physical above digital is the shipped intent.)
+assert pick([rel("dvd-a", fmt="DVD Audio"), rel("dig", fmt="Digital Media")],
+            cfg=cfg()) == "dvd-a"
 
 # many discs of the same album are a box set too, even without video
 multi = rel("multi", fmt="CD", media=[{"format": "CD", "track-count": 12}] * 5)
@@ -153,6 +192,19 @@ assert pick([over, plain], group(track_count=12)) == "plain", order([over, plain
 # with no stated count the fullest edition DEFINES the target, so it is not
 # penalised for being the fullest (the pre-existing rule, unchanged)
 assert pick([over, plain]) == "over", order([over, plain])
+
+# 1d. Physical video carriers rank ABOVE Digital Media (issue #53): a music
+#     video published on a disc is the release worth archiving, and naming the
+#     carriers in the order is the whole mechanism — the ACQUISITION route is
+#     not special-cased. MusicBrainz's own spellings match the labels that name
+#     them ("DVD-Video" contains "DVD", "Blu-ray-R" contains "Blu-ray").
+for carrier in ("DVD", "DVD-Video", "Blu-ray", "VHS", "Video CD", "LaserDisc"):
+    assert pick([rel("dig", fmt="Digital Media"), rel("disc", fmt=carrier)],
+                cfg=cfg()) == "disc", carrier
+# …while a format the order does not name still loses to digital, which is the
+# rule this one extends and not a thing it changes.
+assert pick([rel("dig", fmt="Digital Media"), rel("md", fmt="Minidisc")],
+            cfg=cfg()) == "dig"
 
 # 1c. COMPRESSED derivatives: an edition that names itself a re-encode of a
 #     disc sorts below the disc's own streams — `prefer_disc_streams`, ON by
@@ -710,7 +762,8 @@ try:
     assert body["candidates"][0]["eligible"] is True
     assert body["candidates"][0]["reasons"]
     assert body["policy"]["medium_order"] == ["CD", "Vinyl", "Cassette", "Other",
-                                              "Digital Media"]
+                                              "DVD", "Blu-ray", "VHS", "Video CD",
+                                              "LaserDisc", "Digital Media"]
     # The type the caller asked about is echoed, and a single is not offered
     # where an album was asked for.
     _transport(SINGLE_PAYLOAD, SINGLE_RAW)

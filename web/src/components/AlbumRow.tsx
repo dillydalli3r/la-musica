@@ -62,6 +62,10 @@ export default function AlbumRow({
       onToggleSel?.();
     } else e.stopPropagation();
   };
+  // The cell's content is a node (it may carry a badge), but the `title`
+  // attribute that keeps a clipped name readable is plain text: callers pass
+  // the album's name as a string.
+  const titleText = typeof title === "string" ? title : undefined;
   return (
     <>
       <tr
@@ -101,18 +105,23 @@ export default function AlbumRow({
           <td className="td">
             {/* `flex-wrap`, the same guard the track title cell carries: a
                 fixed-layout column cannot grow, so a name sharing its line
-                with badges had to win or vanish (see TrackTitleCell). */}
+                with badges had to win or vanish (see TrackTitleCell).
+                The name itself CLIPS on one line rather than wrapping the row
+                three lines tall — a fixed column has no other honest answer for
+                a name longer than any floor — and the whole name rides in the
+                link's title so nothing is lost silently. */}
             <div className="flex items-center gap-1.5 min-w-0 flex-wrap">
               {titleHref ? (
                 <Link
                   to={titleHref}
                   onClick={linkClick}
-                  className="font-medium hover:text-accent-soft break-words flex-1 min-w-0"
+                  title={titleText}
+                  className="font-medium hover:text-accent-soft cell-ellipsis flex-1 min-w-0"
                 >
                   {title}
                 </Link>
               ) : (
-                <span className="font-medium hover:text-accent-soft break-words flex-1 min-w-0">{title}</span>
+                <span className="font-medium hover:text-accent-soft cell-ellipsis flex-1 min-w-0" title={titleText}>{title}</span>
               )}
               {titleExtra}
             </div>

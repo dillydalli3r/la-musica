@@ -75,8 +75,14 @@ the reason, instead of offering an Install button that cannot succeed.
 - **Capabilities** are split by platform: `capabilities/default.json` is
   desktop-only (folder picker + notifications), `capabilities/mobile.json`
   gives Android/iOS the core commands and notifications but no dialog
-  permission, since there is no folder to pick. The shell registers no app
-  command of its own on mobile, so there is nothing else to permit.
+  permission, since there is no folder to pick. The mobile shell's one app
+  command — `set_now_playing_liked`, the iOS star's state (see below) — needs no
+  entry in either file, and neither does the desktop shell's `pick_folder`: Tauri
+  checks the ACL for *plugin* commands, and for the app's own commands only when
+  the crate ships an ACL manifest (`tauri-build` writes one from a
+  `permissions/` tree, which this crate has never had). `core:default` is what
+  the web side actually needs from the shell — including `event:listen`, which
+  is how the star's press reaches the web UI.
 - **Background audio** stays declared (`UIBackgroundModes: [audio]` in
   `Info.plist`): music playing with the screen locked is what a music client is
   for. `mobile.yml` now reads that key — and the ATS exemption below — back out
@@ -85,9 +91,68 @@ the reason, instead of offering an Install button that cannot succeed.
   keeping an embedded backend alive with a silent session — and that job, with
   its sideload-only caveat, went away with the backend.
 
+### The Now Playing star on iOS
+
+iOS draws the Now Playing module (Control Center, the lock screen, CarPlay) from
+whatever owns the audio session, and the star in it is MediaPlayer's
+`MPRemoteCommandCenter.likeCommand`. This app's playback is HTML5 `<audio>` in
+the webview, whose Media Session API covers play/pause/previous/next/seek and
+nothing else — there is no like action to register there — so the star is the
+one part of "mark this track as a favourite" that must be native.
+`src-tauri/src/ios_like.rs` is that part, and it is compiled for **iOS only**:
+the split elsewhere in this crate is Tauri's own `desktop`/`mobile`, but Android
+drives its media notification from the webview's Media Session alone, and a
+`cfg(mobile)` star would have dragged Android into a MediaPlayer framework it
+does not have. The wiring is four steps:
+
+1. **Setup** (`ios_like::register`, from the mobile shell's setup): look
+   `MPRemoteCommandCenter` up dynamically, enable `likeCommand` (the star has to
+   be pressable *before* anything has been said about the track, or the first
+   press — the one that likes an unliked track — has nothing to hit), pin
+   `active` to NO (nothing is liked yet), pin `dislikeCommand` inactive (this app
+   has no dislike concept) and attach one handler with
+   `addTargetWithHandler:`. MediaPlayer is linked explicitly, because a framework
+   that is not loaded has no classes to look up.
+2. **The star is pressed**: the handler emits the `mlo-ios-like` event to the
+   webview and answers `MPRemoteCommandHandlerStatusSuccess`. The shell writes
+   no like itself.
+3. **The web toggles**: `web/src/lib/iosFavs.ts`, mounted by the player bar,
+   listens for that event and calls the app's one like writer —
+   `useFav`/`api.likeToggle`, i.e. the same optimistic update, the same query
+   invalidation and the same query keys every heart in the UI uses, so all of
+   them flip together. Outside the Tauri shell the module is inert
+   (`IN_TAURI` gates both wires), and inside it every failure — no such event,
+   no such command in an older shell — is swallowed: a favourite must never
+   break playback.
+4. **The state goes back**: the same module calls the `set_now_playing_liked`
+   command whenever the current track or its liked state changes, which on iOS
+   sets `MPFeedbackCommand.active` — the OS's "the user already likes this item"
+   (`MPFeedbackCommand.h`), i.e. a **filled** star when the track is favourited
+   and a hollow one when it is not. The command is registered on every target
+   with an empty body off iOS, so the web UI calls it unconditionally.
+
+What the star cannot do: the app has no dislike or bookmark, so only the like
+command is ever activated; and the star belongs to the OS's module, so it
+appears only while a now-playing session exists at all — i.e. while this
+webview owns one (playing, or paused mid-track). Hand the session to another app
+and the module, star included, goes with it. `MPNowPlayingInfoCenter` is left
+untouched because the webview's own Media Session metadata is what the OS reads
+for title/artist/album/artwork; `localizedTitle`/`localizedShortTitle` are left
+untouched so the OS's already-localised wording is used instead of an English
+string hard-coded in the shell.
+
+What is verified here and what is not: `cargo check` proves the crate still
+builds for the non-iOS targets with the module excluded, and the objc2/block2 API
+in the module was written against those crates' vendored sources (the
+`&DynBlock<dyn Fn(…) -> _>` argument shape, `Option<Retained<_>>` returns,
+`msg_send!`'s encoding rules) — but compiling for iOS and watching the star on a
+device both need Xcode, which is not installed on this machine, so neither has
+been run locally. `mobile.yml` (macOS) is the first build that type-checks this
+file.
+
 ## Bundle config
 
-`bundle.iOS.minimumSystemVersion` 14.0, `bundle.iOS.bundleVersion` 3.23.4,
+`bundle.iOS.minimumSystemVersion` 14.0, `bundle.iOS.bundleVersion` 4.0.0,
 `bundle.iOS.infoPlist` and `bundle.android.minSdkVersion` 24 in
 `tauri.conf.json`. The Android package name and the iOS bundle id both come from
 the top-level `identifier` (`com.musiclibraryoptimizer.lamusica` — the old

@@ -59,6 +59,16 @@ export function AlbumDetails({ album, onClose }: { album: Album; onClose: () => 
   // reader may not have been on.
   const paths = album.tracks.map((t) => t.path);
   const seconds = album.tracks.reduce((s, t) => s + (t.tech?.length ?? 0), 0);
+  // WHICH KIND this album's lyrics are, counted off its own tracks' payload
+  // kinds — the same field the tracklist chips wear, so this readout can never
+  // state a kind the table does not show. Counted here rather than sent as two
+  // more payload numbers: `lyrics_kind` is the fact, and a count is a summary
+  // of facts already in the payload.
+  const syncedTracks = album.tracks.filter((tr) => tr.lyrics_kind === "synced").length;
+  const plainTracks = album.tracks.filter((tr) => tr.lyrics_kind === "plain").length;
+  const lyricsKinds = syncedTracks || plainTracks
+    ? ` · ${t("lyrics.kind.counts", { synced: syncedTracks, plain: plainTracks })}`
+    : "";
 
   const infoRows: DetailItem[] = [
     // A framework album is added but its audio has not arrived: that is the
@@ -73,7 +83,7 @@ export function AlbumDetails({ album, onClose }: { album: Album; onClose: () => 
     { label: "Tracks", value: `${album.track_count}${missing ? ` (+${missing} missing)` : ""}` },
     { label: "Cover", value: album.cover_file || "—" },
     { label: "Log / CUE", value: `${yesNo(album.has_log)} / ${yesNo(album.has_cue)}` },
-    { label: "Lyrics", value: `${album.lyrics_present} of ${album.lyrics_expected} tracks` },
+    { label: "Lyrics", value: `${album.lyrics_present} of ${album.lyrics_expected} tracks${lyricsKinds}` },
     { label: "Instrumental", value: `${album.instrumental_count}` },
     { label: "Path", value: album.path },
   ];

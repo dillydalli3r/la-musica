@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import {
   Check, ChevronDown, ChevronDown as Down, ChevronUp as Up, FolderTree, Gauge, Play, RefreshCw, Wand2, X, Zap,
@@ -6,11 +6,12 @@ import {
 import { api } from "../api";
 import { toast, useStore } from "../store";
 import { ProgressInline } from "../components/ProgressBar";
+import Modal from "../components/Modal";
 import PageHeader from "../components/PageHeader";
 import Popover from "../components/Popover";
 import { FORCE_SCRIPTS, forceDict, loadForceSel, saveForceSel } from "../lib/force";
 import { SCRIPTS, DEFAULT_RUN_ALL, isScriptId } from "../lib/scripts";
-import type { LayoutIssue, LayoutReport } from "../types";
+import type { LayoutIssue, LayoutReport, ScriptRunResult } from "../types";
 
 // Selected scripts + their custom run order, persisted across reloads.
 const SEL_KEY = "mlo.opt.sel.v1";
@@ -52,7 +53,17 @@ export default function OptimizationPage() {
   const { data: config } = useQuery({ queryKey: ["config"], queryFn: api.config });
   const { forceRun, toggle: toggleForce, forceSel, setSel } = useForceRun();
   const [forceMenu, setForceMenu] = useState(false);
+  // The Force menu is the tallest flyout in the app (14 flags + its All/None
+  // row): measured from this trigger it opens into whatever room the window
+  // leaves and scrolls inside it, instead of running past the bottom edge with
+  // its lower flags unreachable (#53).
+  const forceBtn = useRef<HTMLButtonElement>(null);
   const [busy, setBusy] = useState(false);
+  // The last run's own per-script report, on the page. A run that failed some
+  // of its scripts used to say "see console" and leave it there — the one
+  // surface that showed which script failed and why was a place the user
+  // cannot open.
+  const [run, setRun] = useState<{ label: string; results: ScriptRunResult[] } | null>(null);
 
   const runAll = async () => {
     setBusy(true);
@@ -65,8 +76,10 @@ export default function OptimizationPage() {
         : DEFAULT_RUN_ALL;
       const force = forceRun ? forceDict(forceSel) : undefined;
       const res = await api.run(order, undefined, force);
-      const failed = (res.results ?? []).filter((r) => r.error);
-      if (failed.length) toast.error(`${failed.length} script(s) failed — see console`);
+      const results = res.results ?? [];
+      setRun({ label: forceRun ? "Run All (forced)" : "Run All", results });
+      const failed = results.filter((r) => r.error);
+      if (failed.length) toast.error(`${failed.length} of ${results.length} script(s) failed — the run's results are below`);
       else toast.success("Run All finished");
     } catch (e) {
       toast.error(String(e));
@@ -108,8 +121,10 @@ export default function OptimizationPage() {
     toast(`Running ${label}${force ? " (forced)" : ""}…`);
     try {
       const res = await api.run(ids, undefined, force);
-      const failed = (res.results ?? []).filter((r) => r.error);
-      if (failed.length) toast.error(`${label} failed: ${failed[0].error}`);
+      const results = res.results ?? [];
+      setRun({ label, results });
+      const failed = results.filter((r) => r.error);
+      if (failed.length) toast.error(`${failed.length} of ${results.length} script(s) failed — the run's results are below`);
       else toast.success(`${label} finished`);
     } catch (e) {
       toast.error(String(e));
@@ -152,13 +167,23 @@ export default function OptimizationPage() {
               )}
             </button>
             <button
+              ref={forceBtn}
               className={`btn-ghost text-xs tap min-w-11 md:min-w-0 rounded-l-none !px-1 ${forceRun ? "!text-accent" : ""}`}
               onClick={() => setForceMenu(!forceMenu)}
               title="Choose which scripts are forced"
+              aria-haspopup="menu"
+              aria-expanded={forceMenu}
             >
               <ChevronDown className="h-3.5 w-3.5" />
             </button>
-            <Popover open={forceMenu} onClose={() => setForceMenu(false)} align="left" panelClass="w-60 p-1.5">
+            <Popover
+              open={forceMenu}
+              onClose={() => setForceMenu(false)}
+              align="left"
+              fixed
+              anchorRef={forceBtn}
+              panelClass="w-60 p-1.5"
+            >
                   <div className="text-[10px] uppercase tracking-wider text-zinc-500 px-1 pb-1.5">
                     Force when Force is on
                   </div>
@@ -204,6 +229,56 @@ export default function OptimizationPage() {
         {/* Live progress while a script / export runs */}
         <div className="mt-2 min-h-[20px]">{progress && <ProgressInline progress={progress} />}</div>
       </div>
+
+      {/* ---- the last run's own results ---------------------------------
+          Every script the run reported, with what it said when it failed —
+          the summary a "see console" toast never was. It stays until it is
+          dismissed or the next run replaces it, so a run that outlived its
+          toast still has an answer on the page. */}
+      {run && (
+        <div className="panel">
+          <div className="flex items-center gap-2 flex-wrap">
+            <div className="text-xs font-bold text-zinc-300 flex items-center gap-1.5 flex-1 min-w-0">
+              <Check className="h-3.5 w-3.5 shrink-0" />
+              <span className="min-w-0 break-words">{run.label} — results</span>
+            </div>
+            <span className="text-[11px] text-zinc-500">
+              {run.results.filter((r) => !r.error && !r.skipped).length} ran ·{" "}
+              {run.results.filter((r) => r.error).length} failed ·{" "}
+              {run.results.filter((r) => r.skipped && !r.error).length} skipped
+            </span>
+            <button className="btn-ghost !py-1 text-[11px] tap" onClick={() => setRun(null)}>
+              <X className="h-3 w-3" /> Dismiss
+            </button>
+          </div>
+          {run.results.length === 0 ? (
+            <div className="mt-2 text-[11px] text-zinc-500">
+              The run reported no per-script results.
+            </div>
+          ) : (
+            <div className="mt-2 stagger divide-y divide-border/60 border border-border rounded-lg overflow-hidden">
+              {run.results.map((r) => {
+                const label = r.label ?? r.name ?? SCRIPTS.find((s) => s.ids[0] === r.id)?.label ?? `#${r.id}`;
+                return (
+                  <div key={r.id} className="px-2.5 py-1.5 text-[11px] flex items-start gap-2">
+                    <span
+                      className={`shrink-0 font-mono ${
+                        r.error ? "text-amber-200" : r.skipped ? "text-zinc-500" : "text-emerald-300"
+                      }`}
+                    >
+                      {r.error ? "failed" : r.skipped ? "skipped" : "ok"}
+                    </span>
+                    <span className="min-w-0 break-words text-zinc-300">
+                      {label}
+                      {(r.error ?? r.reason) && <span className="text-zinc-500"> — {r.error ?? r.reason}</span>}
+                    </span>
+                  </div>
+                );
+              })}
+            </div>
+          )}
+        </div>
+      )}
 
       {/* ---- individual scripts + custom multi-select run ------------- */}
       <div className="panel">
@@ -349,6 +424,7 @@ function LayoutPanel() {
   const [scannedAt, setScannedAt] = useState<string | null>(null);
   const [foreign, setForeign] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
+  const [confirmingApply, setConfirmingApply] = useState(false);
   const [open, setOpen] = useState<Set<string>>(new Set());
   const [copied, setCopied] = useState<string | null>(null);
 
@@ -419,6 +495,18 @@ function LayoutPanel() {
     }
   };
 
+  // What Apply fixes would settle, off the report on screen: a row carries a
+  // `fix` exactly when the script owns it, so the confirmation counts the same
+  // rows the row badges mark — the scan's answer, not this panel's guess.
+  const applyScope = useMemo(() => {
+    const byAction = new Map<string, number>();
+    for (const i of report?.issues ?? []) {
+      if (i.fix) byAction.set(i.fix.action, (byAction.get(i.fix.action) ?? 0) + 1);
+    }
+    return byAction;
+  }, [report]);
+  const applyScopeTotal = [...applyScope.values()].reduce((n, v) => n + v, 0);
+
   const copyPath = async (p: string) => {
     try {
       await navigator.clipboard.writeText(p);
@@ -488,7 +576,7 @@ function LayoutPanel() {
             and it is only offered once a scan has shown there is a library to
             look at. What it will touch is what the rows below mark. */}
         {report?.exists && (
-          <button className="btn-ghost !py-1 text-xs tap" disabled={busy} onClick={apply}
+          <button className="btn-ghost !py-1 text-xs tap" disabled={busy} onClick={() => setConfirmingApply(true)}
             title="Rename wrongly-cased names, move loose audio into its album folder, and send what is excess to the Trash — stray files, foreign folders holding no audio, empty album folders, album-less artist folders. Nothing is deleted, and the Trash page can put any of it back">
             <Wand2 className={`h-3.5 w-3.5 ${busy ? "animate-spin" : ""}`} />
             {busy ? "Fixing…" : "Apply fixes"}
@@ -644,6 +732,56 @@ function LayoutPanel() {
             );
           })}
         </div>
+      )}
+
+      {/* Apply fixes is one click on a whole-library rename/move/trash pass,
+          so it asks first — the confirmation names what it will do and, from
+          the report on screen, exactly how much of it this library needs.
+          Cancel, Escape and an outside click all close it without a request;
+          only the confirm button reaches the endpoint. */}
+      {confirmingApply && (
+        <Modal
+          onClose={() => setConfirmingApply(false)}
+          icon={Wand2}
+          title="Apply the layout fixes?"
+          width="max-w-[560px]"
+          bodyClass="px-5 py-4 space-y-3"
+          footer={
+            <div className="flex justify-end gap-2">
+              <button className="btn-ghost" onClick={() => setConfirmingApply(false)}>Cancel</button>
+              <button
+                className="btn-danger"
+                onClick={() => {
+                  setConfirmingApply(false);
+                  apply();
+                }}
+              >
+                <Wand2 className="h-3.5 w-3.5" /> Rename, move &amp; trash
+              </button>
+            </div>
+          }
+        >
+          <p className="text-sm text-zinc-300 leading-relaxed">
+            This walks the <span className="text-zinc-100">whole music folder</span> and does what script 20
+            (Optimize library layout) does on every import: <span className="text-zinc-100">renames</span> names
+            that differ from the naming script, <span className="text-zinc-100">moves</span> loose audio into its
+            album folder, and sends what is excess to the <span className="text-zinc-100">Trash</span> — stray
+            files, foreign folders holding no audio, empty album folders, album-less artist folders. Nothing is
+            deleted: a removal goes to the app's Trash, which lists it and can put it back.
+          </p>
+          {applyScopeTotal > 0 ? (
+            <div className="text-xs text-amber-200 bg-amber-950/30 border border-amber-900/60 rounded-lg px-3 py-2">
+              The report on screen holds {applyScopeTotal} row{applyScopeTotal === 1 ? "" : "s"} this will act
+              on: {[...applyScope].map(([action, n]) => `${n} ${FIX_LABEL_BY_ACTION[action] ?? "fixed"}`).join(" · ")}.
+              Every other row stays as it is.
+            </div>
+          ) : (
+            <div className="text-xs text-zinc-400 bg-raise border border-border rounded-lg px-3 py-2">
+              The report on screen marks no row for it, so it expects nothing to change — it still walks the
+              whole folder.
+            </div>
+          )}
+        </Modal>
       )}
     </div>
   );

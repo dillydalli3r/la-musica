@@ -219,7 +219,8 @@ def _dr_album(album, ffmpeg_exe, force, write_tags=True, config=None, rg=None):
                 failures.append((os.path.basename(path),
                                  "the file could not be opened"))
                 continue
-            result = dr.measure_track_detailed(path, ffmpeg_exe)
+            result = dr.measure_track_detailed(
+                path, ffmpeg_exe, channels=dr.handle_channels(af))
             if result.dr is None:
                 name = os.path.basename(path)
                 if result.failed:

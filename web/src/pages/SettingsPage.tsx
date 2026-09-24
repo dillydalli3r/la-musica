@@ -1,9 +1,10 @@
-import { useEffect, useState, type DragEvent } from "react";
+import { useEffect, useRef, useState } from "react";
 import { useNavigate, useSearchParams } from "react-router-dom";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
-import { Bell, Save, RotateCcw, LayoutGrid, Settings as SettingsIcon, Check, Eye, EyeOff, ChevronDown, ChevronUp, Wand2, X, FolderOpen, Loader2, Trash2 } from "lucide-react";
+import { Bell, Save, RotateCcw, LayoutGrid, Settings as SettingsIcon, Check, Eye, EyeOff, ChevronDown, ChevronUp, Wand2, X, FolderOpen, Loader2 } from "lucide-react";
 import { api, deviceUnavailable, unavailableFeatures } from "../api";
 import ConfirmButton from "../components/ConfirmButton";
+import CookieJarPanel from "../components/CookieJarPanel";
 import FolderPicker from "../components/FolderPicker";
 import SourcesPanel from "../components/SourcesPanel";
 import SecurityPanel from "../components/SecurityPanel";
@@ -11,21 +12,43 @@ import AiTestButton from "../components/AiTestButton";
 import PageHeader from "../components/PageHeader";
 import { toast } from "../store";
 import { applyAccent } from "../App";
-import { DEFAULT_RUN_ALL, SCRIPT_LABEL, isScriptId } from "../lib/scripts";
-import { LOCALES, applyConfigLocale, setLocale, useI18n } from "../lib/i18n";
+import { ACCENT_PRESETS, DEFAULT_ACCENT, accentHex, normalizeHex, parseHexColor, presetHex, resolveAccent } from "../lib/accent";
+import { DEFAULT_RUN_ALL, OPT_IN_SCRIPTS, SCRIPT_LABEL, isScriptId } from "../lib/scripts";
+import { LOCALES, applyConfigLocale, setLocale, useI18n, type MessageKey } from "../lib/i18n";
 import { CODEC_CHOICES } from "../lib/codecMeta";
-import { fmtBytes } from "../lib/fmt";
 import { notificationState, requestNotifications, type NotifyState } from "../lib/notify";
 
-const ACCENT_OPTIONS: { id: string; name: string; color: string }[] = [
-  { id: "violet", name: "Violet", color: "#8b5cf6" },
-  { id: "pink", name: "Pink", color: "#ec4899" },
-  { id: "emerald", name: "Emerald", color: "#10b981" },
-  { id: "sky", name: "Sky", color: "#0ea5e9" },
-  { id: "amber", name: "Amber", color: "#f59e0b" },
-  { id: "red", name: "Red", color: "#ef4444" },
-  { id: "mono", name: "Black & white", color: "#ffffff" },
-];
+/** The accent swatches, each with the ink its own colour needs for the tick —
+ *  derived (lib/accent), not a hardcoded `text-black`, which was invisible on
+ *  the dark swatches. The row itself comes from ACCENT_PRESETS, so a preset
+ *  that exists is a preset that is offered. */
+const ACCENT_OPTIONS: { id: string; hex: string; fg: string }[] = ACCENT_PRESETS.map((p) => ({
+  id: p.id,
+  hex: p.hex,
+  fg: resolveAccent(p.id)[2],
+}));
+
+/** The swatches' names, one translated key per preset id. A `Record` keyed by
+ *  id rather than a template string, so `t()` is type-checked here: a preset
+ *  whose name was never added to the bundles fails the build instead of
+ *  showing its raw key in the tooltip. */
+const ACCENT_LABEL: Record<string, MessageKey> = {
+  red: "settings.accent_red",
+  orange: "settings.accent_orange",
+  amber: "settings.accent_amber",
+  yellow: "settings.accent_yellow",
+  lime: "settings.accent_lime",
+  emerald: "settings.accent_emerald",
+  teal: "settings.accent_teal",
+  sky: "settings.accent_sky",
+  blue: "settings.accent_blue",
+  indigo: "settings.accent_indigo",
+  violet: "settings.accent_violet",
+  fuchsia: "settings.accent_fuchsia",
+  pink: "settings.accent_pink",
+  rose: "settings.accent_rose",
+  mono: "settings.accent_mono",
+};
 
 const ENCODER_FORMATS = ["flac", "jpeg", "png", "jxl"] as const;
 const ENCODER_FIELDS = ["ENCODER_PROGRAM", "ENCODER_QUALITY", "ENCODER_VERSION"] as const;
@@ -72,7 +95,8 @@ const CFG_DEFAULTS: Record<string, unknown> = {
   prefer_release_country: "",
   prefer_original_edition: true,
   prefer_disc_streams: true,
-  auto_import_medium_order: ["CD", "Vinyl", "Cassette", "Other", "Digital Media"],
+  auto_import_medium_order: ["CD", "Vinyl", "Cassette", "Other", "DVD",
+    "Blu-ray", "VHS", "Video CD", "LaserDisc", "Digital Media"],
   cover_auto_fetch: true,
   cover_review: false,
 };
@@ -318,333 +342,27 @@ function CoverDefaults() {
   );
 }
 
-/** The YouTube cookie jar (Settings → Videos): paste or drop a cookies.txt,
- *  see what is in it, remove it.
+/** The YouTube cookie jar (Settings → Videos).
  *
- *  This is the one part of the Videos tab the generic field renderer cannot
- *  draw, because the value is a FILE: it arrives as text (pasted into the box
- *  or dropped onto it) and the app owns the path it lands on
- *  (<music>/.mlo/data/cookies.txt). So there is no path to type, no second
- *  place a jar can live, and the server validates the text BEFORE it replaces
- *  a jar that already works — a bad paste must not cost the user the cookies
- *  that were doing their job.
+ *  The panel itself is `components/CookieJarPanel.tsx` — ONE implementation for
+ *  every cookie login, shared with Settings → Sources, the wizard's Keys step
+ *  and the Discovery tab's RYM box, so the two credentials' import boxes (and
+ *  the per-cookie comment list both now show) cannot drift apart. This wrapper
+ *  is only where the Videos tab renders it, exactly as before.
  */
 function YoutubeCookieJar() {
-  const qc = useQueryClient();
-  const { data: jar } = useQuery({ queryKey: ["youtubeCookies"], queryFn: api.youtubeCookies, retry: false });
-  const [text, setText] = useState("");
-  const [busy, setBusy] = useState(false);
-  const [dragging, setDragging] = useState(false);
-
-  const save = async (body: string) => {
-    if (!body.trim()) {
-      toast.error("Nothing to save — paste the contents of cookies.txt first");
-      return;
-    }
-    setBusy(true);
-    try {
-      const r = await api.youtubeCookiesSave(body);
-      setText("");
-      toast.success(
-        `Cookie file saved — ${r.lines} cookie(s)${r.sites.length ? ` for ${r.sites.join(", ")}` : ""}`
-      );
-      // The server's own sentences about what the jar holds come through as
-      // warnings: a jar with no youtube.com cookie cannot sign anything in,
-      // and a plain "saved!" would hide exactly that.
-      for (const w of r.warnings) toast(w);
-      qc.invalidateQueries({ queryKey: ["youtubeCookies"] });
-    } catch (e) {
-      toast.error(String(e));
-    } finally {
-      setBusy(false);
-    }
-  };
-
-  const drop = async (e: DragEvent) => {
-    e.preventDefault();
-    setDragging(false);
-    const file = e.dataTransfer.files?.[0];
-    if (!file) return;
-    try {
-      await save(await file.text());
-    } catch (err) {
-      toast.error(String(err));
-    }
-  };
-
-  const remove = async () => {
-    setBusy(true);
-    try {
-      await api.youtubeCookiesDelete();
-      toast("Cookie file removed — downloads run anonymously again");
-      qc.invalidateQueries({ queryKey: ["youtubeCookies"] });
-    } catch (e) {
-      toast.error(String(e));
-    } finally {
-      setBusy(false);
-    }
-  };
-
-  return (
-    <div className="pt-2 border-t border-border space-y-2">
-      <div className="flex items-center gap-2 flex-wrap">
-        <span className="text-xs font-semibold uppercase tracking-wider text-zinc-500">Cookie file</span>
-        <span
-          className={`chip ${
-            jar?.present
-              ? "border-emerald-900/50 bg-emerald-950/30 text-emerald-300"
-              : "border-border bg-zinc-900 text-zinc-500"
-          }`}
-        >
-          {jar?.present ? `${jar.lines} cookie${jar.lines === 1 ? "" : "s"}` : "none saved"}
-        </span>
-        {jar?.present && (
-          <span className="text-[10px] text-zinc-500">
-            {fmtBytes(jar.bytes)}
-            {jar.saved_at ? ` · saved ${new Date(jar.saved_at).toLocaleString()}` : ""}
-          </span>
-        )}
-        {jar?.present && (
-          <ConfirmButton
-            className="btn-ghost !py-0.5 text-[11px] tap ml-auto"
-            confirmLabel="Delete the cookie file?"
-            onConfirm={remove}
-            disabled={busy}
-          >
-            <Trash2 className="h-3 w-3" /> Delete
-          </ConfirmButton>
-        )}
-      </div>
-      <div className="text-[11px] text-zinc-600">
-        In the browser you are signed in to YouTube with, export its cookies to a <span className="text-zinc-400">cookies.txt</span>{" "}
-        (a "Get cookies.txt" extension writes exactly this file, in Netscape format — the only shape this box accepts), then paste its
-        contents below or drop the file onto the box.
-        yt-dlp reads the saved copy for age-gated, members-only and throttled videos — the jar belongs to this app, at{" "}
-        <span className="text-zinc-400">{jar?.path ?? "<music folder>/.mlo/data/cookies.txt"}</span>.
-      </div>
-      {jar?.sites?.length ? (
-        <div className="flex items-center gap-1.5 flex-wrap">
-          <span className="text-[10px] text-zinc-600">Domains:</span>
-          {jar.sites.map((s) => (
-            <span key={s} className="chip border-border bg-zinc-900 text-zinc-400">{s}</span>
-          ))}
-        </div>
-      ) : null}
-      {jar?.warnings?.map((w) => (
-        <div key={w} className="text-[10px] text-amber-400/90 border border-amber-900/40 bg-amber-950/20 rounded px-2 py-1">
-          {w}
-        </div>
-      ))}
-      <div
-        onDragOver={(e) => {
-          e.preventDefault();
-          setDragging(true);
-        }}
-        onDragLeave={() => setDragging(false)}
-        onDrop={drop}
-        className={`rounded-md border border-dashed p-2 ${dragging ? "border-accent bg-accent/5" : "border-border"}`}
-      >
-        <textarea
-          className="input w-full h-24 font-mono text-[10px] tap"
-          placeholder={"# Netscape HTTP Cookie File\n.youtube.com\tTRUE\t/\tTRUE\t…\tLOGIN_INFO\t…\n\n(paste here, or drop cookies.txt on this box)"}
-          value={text}
-          onChange={(e) => setText(e.target.value)}
-          spellCheck={false}
-        />
-        <div className="flex items-center gap-2 flex-wrap mt-1.5">
-          <button
-            className="btn-primary !py-1 text-xs min-h-10 md:min-h-0 tap"
-            onClick={() => save(text)}
-            disabled={busy || !text.trim()}
-          >
-            {busy ? <Loader2 className="h-3 w-3 animate-spin" /> : <Check className="h-3 w-3" />} Save cookie file
-          </button>
-          {text.trim() && (
-            <button className="btn-ghost !py-1 text-xs tap" onClick={() => setText("")} disabled={busy}>
-              <X className="h-3 w-3" /> Clear
-            </button>
-          )}
-          <span className="text-[10px] text-zinc-600">
-            Up to {fmtBytes(jar?.max_bytes ?? 524288)} — a jar is a few dozen lines, so anything bigger is a browser profile folder,
-            not a cookies.txt.
-          </span>
-        </div>
-      </div>
-    </div>
-  );
+  return <CookieJarPanel source="youtube" />;
 }
 
-/** The RateYourMusic cookie (Settings → Discovery): import the RYM cookies out
- *  of a cookies.txt, see which ones are stored, clear the credential.
+/** The RateYourMusic cookie (Settings → Discovery): the same shared panel for
+ *  the RYM credential.
  *
- *  The row above stays exactly as it was — the credential is ONE config value
- *  (`rym_cookie`), and this panel writes the very string that box accepts, so
- *  the box keeps working and the two can never disagree (after an import the
- *  stored value is pulled back into the form, or the next "Save all settings"
- *  would post the old cookie over the new one).
- *
- *  What the box cannot do is the reason this exists: RYM's `session` cookie is
- *  HttpOnly, so no script — and no "copy the Cookie header" from devtools —
- *  can see it. A browser extension's Netscape `cookies.txt` export is the only
- *  way a user can hand that cookie over, and only the rateyourmusic.com lines
- *  of it are kept. No cookie VALUE is shown, toasted or posted by this panel:
- *  the server answers with names, counts and sentences.
+ *  `onStored` pulls the imported value back into the `rym_cookie` field above:
+ *  the credential is ONE config value, so after an import the box (and the next
+ *  "Save all settings") has to agree with what RYM is actually sent.
  */
 function RymCookieJar({ onStored }: { onStored: (value: string) => void }) {
-  const qc = useQueryClient();
-  const { data: jar } = useQuery({ queryKey: ["rymCookies"], queryFn: api.rymCookies, retry: false });
-  const [text, setText] = useState("");
-  const [busy, setBusy] = useState(false);
-  const [dragging, setDragging] = useState(false);
-
-  const save = async (body: string) => {
-    if (!body.trim()) {
-      toast.error("Nothing to save — paste the contents of cookies.txt first");
-      return;
-    }
-    setBusy(true);
-    try {
-      const r = await api.rymCookiesSave(body);
-      setText("");
-      if (r.stored > 0) {
-        toast.success(
-          `Cookie saved — ${r.stored} rateyourmusic.com cookie${r.stored === 1 ? "" : "s"}${r.session ? ", session included" : ""}`
-        );
-        // The import wrote the config, so the form has to follow it: the box
-        // above (and the next "Save all settings") must agree with what RYM is
-        // sent from now on. The value comes from the config, never from the
-        // import's answer, which is names and counts only.
-        const fresh = await api.config();
-        onStored(String(fresh.rym_cookie ?? ""));
-      } else {
-        toast.error("No rateyourmusic.com cookie in that file — nothing was stored");
-      }
-      // The server's own sentences come through as warnings: a stored cookie
-      // with no `session` pair means RYM answers as a guest, and a plain
-      // "saved!" would hide exactly that.
-      for (const w of r.warnings) toast(w);
-      qc.invalidateQueries({ queryKey: ["rymCookies"] });
-      qc.invalidateQueries({ queryKey: ["config"] });
-    } catch (e) {
-      toast.error(String(e));
-    } finally {
-      setBusy(false);
-    }
-  };
-
-  const drop = async (e: DragEvent) => {
-    e.preventDefault();
-    setDragging(false);
-    const file = e.dataTransfer.files?.[0];
-    if (!file) return;
-    try {
-      await save(await file.text());
-    } catch (err) {
-      toast.error(String(err));
-    }
-  };
-
-  const remove = async () => {
-    setBusy(true);
-    try {
-      // Clearing goes through the ordinary config route: `rym_cookie` IS the
-      // credential, so "remove it" is "save it empty" — no second endpoint and
-      // no second place it could live.
-      await api.saveConfig({ rym_cookie: "" });
-      onStored("");
-      toast("Cookie cleared — RYM is asked as a guest again");
-      qc.invalidateQueries({ queryKey: ["rymCookies"] });
-      qc.invalidateQueries({ queryKey: ["config"] });
-    } catch (e) {
-      toast.error(String(e));
-    } finally {
-      setBusy(false);
-    }
-  };
-
-  return (
-    <div className="pt-2 border-t border-border space-y-2">
-      <div className="flex items-center gap-2 flex-wrap">
-        <span className="text-xs font-semibold uppercase tracking-wider text-zinc-500">Import from cookies.txt</span>
-        <span
-          className={`chip ${
-            jar?.present
-              ? "border-emerald-900/50 bg-emerald-950/30 text-emerald-300"
-              : "border-border bg-zinc-900 text-zinc-500"
-          }`}
-        >
-          {jar?.present ? `${jar.lines} cookie${jar.lines === 1 ? "" : "s"}` : "none saved"}
-        </span>
-        {jar?.present && (
-          <ConfirmButton
-            className="btn-ghost !py-0.5 text-[11px] tap ml-auto"
-            confirmLabel="Delete the RateYourMusic cookie?"
-            onConfirm={remove}
-            disabled={busy}
-          >
-            <Trash2 className="h-3 w-3" /> Delete
-          </ConfirmButton>
-        )}
-      </div>
-      <div className="text-[11px] text-zinc-600">
-        Signed in to rateyourmusic.com, export the browser's cookies to a <span className="text-zinc-400">cookies.txt</span>{" "}
-        in Netscape format — the Firefox extension <span className="text-zinc-400">"cookies.txt"</span> by Rob W writes exactly
-        that file, and it is the only shape this box accepts — then paste its
-        contents below or drop the file onto the box. It replaces the manual paste above: only the{" "}
-        <span className="text-zinc-400">rateyourmusic.com</span> cookies are kept (RYM's{" "}
-        <span className="text-zinc-400">session</span> cookie is HttpOnly, so this export is the only way to hand it over), and they
-        are sent to rateyourmusic.com and nowhere else.
-      </div>
-      {jar?.names?.length ? (
-        <div className="flex items-center gap-1.5 flex-wrap">
-          <span className="text-[10px] text-zinc-600">Cookies:</span>
-          {jar.names.map((n, i) => (
-            <span key={`${n}-${i}`} className="chip border-border bg-zinc-900 text-zinc-400">{n}</span>
-          ))}
-        </div>
-      ) : null}
-      {jar?.warnings?.map((w) => (
-        <div key={w} className="text-[10px] text-amber-400/90 border border-amber-900/40 bg-amber-950/20 rounded px-2 py-1">
-          {w}
-        </div>
-      ))}
-      <div
-        onDragOver={(e) => {
-          e.preventDefault();
-          setDragging(true);
-        }}
-        onDragLeave={() => setDragging(false)}
-        onDrop={drop}
-        className={`rounded-md border border-dashed p-2 ${dragging ? "border-accent bg-accent/5" : "border-border"}`}
-      >
-        <textarea
-          className="input w-full h-24 font-mono text-[10px] tap"
-          placeholder={"# Netscape HTTP Cookie File\n.rateyourmusic.com\tTRUE\t/\tTRUE\t…\tsession\t…\n\n(paste here, or drop cookies.txt on this box)"}
-          value={text}
-          onChange={(e) => setText(e.target.value)}
-          spellCheck={false}
-        />
-        <div className="flex items-center gap-2 flex-wrap mt-1.5">
-          <button
-            className="btn-primary !py-1 text-xs min-h-10 md:min-h-0 tap"
-            onClick={() => save(text)}
-            disabled={busy || !text.trim()}
-          >
-            {busy ? <Loader2 className="h-3 w-3 animate-spin" /> : <Check className="h-3 w-3" />} Save cookies
-          </button>
-          {text.trim() && (
-            <button className="btn-ghost !py-1 text-xs tap" onClick={() => setText("")} disabled={busy}>
-              <X className="h-3 w-3" /> Clear
-            </button>
-          )}
-          <span className="text-[10px] text-zinc-600">
-            Up to {fmtBytes(jar?.max_bytes ?? 524288)} — the export is the cookies.txt itself; a whole browser profile is bigger than
-            that.
-          </span>
-        </div>
-      </div>
-    </div>
-  );
+  return <CookieJarPanel source="rym" onStored={onStored} />;
 }
 
 export default function SettingsPage() {
@@ -672,7 +390,18 @@ export default function SettingsPage() {
   // empty there) — the shipped default is the server's, never a copy here.
   const [namingScript, setNamingScript] = useState("");
   const [shortFolderNames, setShortFolderNames] = useState(false);
-  const [accent, setAccent] = useState<string>(() => localStorage.getItem("mlo.accent") ?? "mono");
+  const [accent, setAccent] = useState<string>(() => localStorage.getItem("mlo.accent") ?? DEFAULT_ACCENT);
+  // The custom-colour row: the native picker's swatch and the text field are two
+  // views of ONE value. `customHex` is always a whole "#rrggbb" (what a Use
+  // applies, and what <input type="color"> requires); `customText` is whatever
+  // has been typed, so a half-finished "#ff7" is not rewritten mid-keystroke.
+  // Both start on the accent in force, so the picker opens where the app is.
+  const [customHex, setCustomHex] = useState<string>(() => accentHex(accent));
+  const [customText, setCustomText] = useState<string>(() => accentHex(accent));
+  // What "back to presets" returns to: the last preset this page applied, so a
+  // custom colour is a detour and not a one-way door (a stored custom value
+  // leaves the default as the way back).
+  const lastPreset = useRef<string>(presetHex(accent) ?? DEFAULT_ACCENT);
   const [defaultView, setDefaultView] = useState<string>(() => localStorage.getItem("mlo.defaultView.v2") ?? "grid");
   const [loaded, setLoaded] = useState(false);
   // Settings search: matches field labels/keys across every tab; picking a
@@ -1179,7 +908,7 @@ export default function SettingsPage() {
         },
         {
           k: "auto_import_medium_order", label: "Medium preference (comma-separated, best first)", type: "csv",
-          help: "Editions are ranked by this media order first, then by how close the edition is to the release group's original date; a format not named here ranks after every configured one. Blank = the built-in order (CD, Vinyl, Cassette, Other, Digital Media) — CD first, other physical media next, digital last.",
+          help: "Editions are ranked by this media order first, then by how close the edition is to the release group's original date; a format not named here ranks after every configured one. Blank = the built-in order (CD, Vinyl, Cassette, Other, DVD, Blu-ray, VHS, Video CD, LaserDisc, Digital Media) — CD first, the other physical media next (the video carriers included, so a music video on a disc beats the same video published as a download), digital last.",
         },
       ],
     },
@@ -1227,7 +956,7 @@ export default function SettingsPage() {
         { k: "artist_watch_enabled", label: "Watch artists for new releases", type: "bool" },
         { k: "artist_watch_interval_hours", label: "Check interval (hours)", type: "number", min: 1, max: 720, help: "How long between two checks of the SAME artist; the worker itself ticks far more often." },
         { k: "artist_watch_max_per_cycle", label: "Releases queued per artist per check", type: "number", min: 1, max: 50, help: "The hard anti-dump cap. One is the shipped default: a watch that queued a hundred at once is the discography dump this feature exists to avoid." },
-        { k: "artist_watch_types", label: "Release types a watch may queue", type: "multi", options: [["album","Album"],["ep","EP"],["single","Single"],["broadcast","Broadcast"],["other","Other"],["compilation","Compilation"],["soundtrack","Soundtrack"],["spokenword","Spoken word"],["interview","Interview"],["audiobook","Audiobook"],["live","Live"],["remix","Remix"],["dj-mix","DJ mix"],["mixtape/street","Mixtape / street"],["demo","Demo"],["audio drama","Audio drama"],["field recording","Field recording"]], help: "MusicBrainz's own type names. A release group matches when its primary type is ticked or ANY secondary type is (a live album is Album + Live, so ticking Live finds it). A watch can narrow this per artist." },
+        { k: "artist_watch_types", label: "Release types a watch may queue", type: "multi", options: [["album","Album"],["ep","EP"],["single","Single"],["broadcast","Broadcast"],["other","Other"],["compilation","Compilation"],["soundtrack","Soundtrack"],["spokenword","Spoken word"],["interview","Interview"],["audiobook","Audiobook"],["live","Live"],["remix","Remix"],["dj-mix","DJ mix"],["mixtape/street","Mixtape / street"],["demo","Demo"],["audio drama","Audio drama"],["field recording","Field recording"],["podcast","Podcast"]], help: "MusicBrainz's own type names, plus the app's derived one: Podcast (a podcast is a MusicBrainz SERIES, and an episode is a Broadcast release group linked to it — not a release-group type MusicBrainz publishes). A release group matches when its primary type is ticked or ANY secondary type is (a live album is Album + Live, so ticking Live finds it); Podcast matches only a group whose series relation the app read. A watch can narrow this per artist." },
         { k: "artist_watch_auto_add", label: "Queue a matched release into the library automatically", type: "bool", help: "Off, a watch only reports what it found (the notification is the whole output) — which is what you want if you pick the edition by hand." },
       ],
     },
@@ -1369,7 +1098,7 @@ export default function SettingsPage() {
         { k: "acoustid_api_key", label: "AcoustID application key (free, acoustid.org)", type: "password" },
         {
           k: "acoustid_user_key", label: "AcoustID user key (fingerprint submissions)", type: "password",
-          help: "The USER key of your own acoustid.org account (AcoustID → your account → API keys), a different key from the application one above. It is needed ONLY to submit fingerprints: the wizard's Submit to AcoustID publishes the ACOUSTID_FINGERPRINT/ID pair a matched album carries to AcoustID's public database, and a blank or refused key comes back in AcoustID's own words. Looking a release up never uses it — the application key alone can do that.",
+          help: "The USER key of your own acoustid.org account (AcoustID → your account → API keys), a different key from the application one above. It is needed ONLY to submit fingerprints: a submission gives AcoustID one fingerprint TOGETHER WITH the MusicBrainz recording id it is (MusicBrainz itself never receives a fingerprint), and it comes from the wizard's AcoustID step, the details menus' 'Submit fingerprints (AcoustID)' entry or Run All once you tick it. A pair AcoustID already links — or one this app already sent — is never re-sent, and a blank or refused key comes back in AcoustID's own words. Looking a release up never uses it — the application key alone can do that. The Test button in Settings → Sources proves the key with one probe submission.",
         },
         {
           k: "acoustid_fpcalc_path", label: "fpcalc path (blank = bundled/next to the app)", type: "text",
@@ -1586,18 +1315,25 @@ export default function SettingsPage() {
 
   // The grid follows the live order (Run All executes exactly this list), so
   // a tick can never move a script in the pipeline without saying so. Scripts
-  // that are switched off stay listed after the enabled ones, in factory order.
+  // that are switched off stay listed after the enabled ones, in factory order
+  // — plus the opt-in ones (OPT_IN_SCRIPTS: the outward-facing scripts the
+  // shipped chain deliberately does not carry), which have no factory slot at
+  // all and would otherwise be invisible here.
   const runAllScripts: { id: number; label: string }[] = [
     ...runAll,
     ...DEFAULT_RUN_ALL.filter((id) => !runAll.includes(id)),
+    ...OPT_IN_SCRIPTS.filter((id) => !runAll.includes(id)),
   ].map((id) => ({ id, label: SCRIPT_LABEL[id] ?? `#${id}` }));
 
   /** Tick / untick a script; a re-ticked script goes back to its default
-   * pipeline position instead of jumping to the end. */
+   * pipeline position instead of jumping to the end. A script the shipped
+   * chain does not carry has no such position, so it lands at the end. */
   const toggleRunAllScript = (id: number, on: boolean) =>
     setRunAll((ids) => {
       if (!on) return ids.filter((i) => i !== id);
-      const at = ids.filter((i) => DEFAULT_RUN_ALL.indexOf(i) < DEFAULT_RUN_ALL.indexOf(id)).length;
+      const at = DEFAULT_RUN_ALL.includes(id)
+        ? ids.filter((i) => DEFAULT_RUN_ALL.indexOf(i) < DEFAULT_RUN_ALL.indexOf(id)).length
+        : ids.length;
       return [...ids.slice(0, at), id, ...ids.slice(at)];
     });
 
@@ -1740,11 +1476,29 @@ export default function SettingsPage() {
     setLoaded(true);
   }, [config, loaded]);
 
+  /** Apply an accent for this browser: a preset id or a custom "#rrggbb". The
+   *  value is stored AND painted — the paint is what makes every other page
+   *  (and the canvases, via lib/accent's subscribers) follow along without a
+   *  reload. */
   const pickAccent = (id: string) => {
     setAccent(id);
     localStorage.setItem("mlo.accent", id);
     applyAccent(id);
+    const hex = presetHex(id);
+    // A preset pick moves the custom row onto it too, so the picker and the
+    // text field always show the colour actually in force.
+    if (hex) {
+      lastPreset.current = id;
+      setCustomHex(hex);
+      setCustomText(hex);
+    }
   };
+
+  // The custom row's two derived facts: what the text field currently spells,
+  // and whether the accent in force IS a custom colour (a preset id never
+  // parses as a hex).
+  const typedHex = normalizeHex(customText);
+  const customActive = parseHexColor(accent) !== null;
 
   const pickDefaultView = (v: string) => {
     setDefaultView(v);
@@ -2344,23 +2098,79 @@ export default function SettingsPage() {
                 </span>
               </label>
               <div>
-                <span className="text-xs text-zinc-500 uppercase">Accent color</span>
-                <div className="flex gap-2 mt-1.5">
+                <span className="text-xs text-zinc-500 uppercase">{t("settings.accent")}</span>
+                <div className="flex flex-wrap gap-2 mt-1.5">
                   {ACCENT_OPTIONS.map((a) => (
                     <button
                       key={a.id}
-                      title={a.name}
-                      onClick={() => pickAccent(a.id)}
-                      className="h-8 w-8 rounded-lg border-2 flex items-center justify-center transition-transform hover:scale-110"
+                      // The tick's OWN ink comes from the swatch's colour, so it
+                      // stays visible on a light preset (the old hardcoded black
+                      // vanished on every dark one).
                       style={{
-                        backgroundColor: a.color,
+                        backgroundColor: a.hex,
                         borderColor: accent === a.id ? "#fff" : "#3f3f46",
+                        color: `rgb(${a.fg})`,
                       }}
+                      title={t(ACCENT_LABEL[a.id])}
+                      aria-label={t(ACCENT_LABEL[a.id])}
+                      aria-pressed={accent === a.id}
+                      onClick={() => pickAccent(a.id)}
+                      className="h-8 w-8 rounded-lg border-2 flex items-center justify-center transition-transform hover:scale-110 tap"
                     >
-                      {accent === a.id && <Check className="h-4 w-4 text-black" />}
+                      {accent === a.id && <Check className="h-4 w-4" />}
                     </button>
                   ))}
                 </div>
+                {/* Custom colour: the native picker and the text field are two
+                    views of one value, and the field takes #rgb / #rrggbb with
+                    or without the hash — whichever form is to hand. */}
+                <div className="flex flex-wrap items-center gap-2 mt-2">
+                  <input
+                    type="color"
+                    value={customHex}
+                    title={t("settings.accent_custom")}
+                    aria-label={t("settings.accent_custom")}
+                    onChange={(e) => {
+                      setCustomHex(e.target.value);
+                      setCustomText(e.target.value);
+                    }}
+                    className="h-8 w-10 shrink-0 cursor-pointer rounded-lg border border-border bg-transparent p-0.5"
+                  />
+                  <input
+                    value={customText}
+                    spellCheck={false}
+                    placeholder="#ff7a18"
+                    title={t("settings.accent_hex")}
+                    aria-label={t("settings.accent_hex")}
+                    onChange={(e) => {
+                      setCustomText(e.target.value);
+                      // Only a WHOLE colour moves the swatch, so the field can be
+                      // typed through "#ff7", "#ff7a18" without the picker
+                      // jumping to a colour that was never meant.
+                      const next = normalizeHex(e.target.value);
+                      if (next) setCustomHex(next);
+                    }}
+                    className="input !w-28 !py-1 font-mono text-xs"
+                  />
+                  <button
+                    className="btn !py-1 text-xs tap"
+                    disabled={!typedHex}
+                    onClick={() => typedHex && pickAccent(typedHex)}
+                  >
+                    {t("settings.accent_use")}
+                  </button>
+                  {customText.trim() !== "" && !typedHex && (
+                    <span className="text-[10px] text-red-400">{t("settings.accent_invalid")}</span>
+                  )}
+                  {/* The presets are always one tap above; this is the way back
+                      for a colour that REPLACED the preset that was in force. */}
+                  {customActive && (
+                    <button className="btn-ghost !py-1 text-xs tap" onClick={() => pickAccent(lastPreset.current)}>
+                      {t("settings.accent_back")}
+                    </button>
+                  )}
+                </div>
+                <div className="text-[10px] text-zinc-600 mt-1">{t("settings.accent_help")}</div>
               </div>
               <label className="block">
                 <span className="text-xs text-zinc-500 uppercase">Default library view</span>

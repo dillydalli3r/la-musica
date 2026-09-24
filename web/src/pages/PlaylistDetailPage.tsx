@@ -17,6 +17,7 @@ import { TrackActionsMenu } from "../components/TagActionsMenu";
 import FavHeart from "../components/FavHeart";
 import OverflowMenu from "../components/OverflowMenu";
 import { trackRef, entityLinkClick } from "../lib/refs";
+import { useI18n } from "../lib/i18n";
 import { fmtDuration } from "../lib/fmt";
 import {
   fieldIndex, newCondition, opsFor, useLibraryFields, ValueControl,
@@ -34,6 +35,16 @@ import type { Playlist } from "../types";
  *  selectable option and the engine still resolves it, so opening an older
  *  smart playlist can never silently rewrite or drop its rules. */
 
+/** The streaming services an imported playlist can name. The ids and labels
+ *  are the server's own (`server/streaming_playlists.py` SERVICE_LABELS); an id
+ *  no map here lists is shown as it is rather than hidden. */
+const SERVICE_LABELS: Record<string, string> = {
+  deezer: "Deezer",
+  spotify: "Spotify",
+  youtube: "YouTube Music",
+  apple: "Apple Music",
+};
+
 /** Deterministic per-playlist cover gradient (same recipe as the cards). */
 function coverGradient(p: Playlist): string {
   const hue = Math.round((p.id * 137.5) % 360);
@@ -50,6 +61,7 @@ export default function PlaylistDetailPage() {
   const navigate = useNavigate();
   const qc = useQueryClient();
   const { playNow, queue, queueAdd } = useStore();
+  const { t } = useI18n();
 
   const { data: playlist, isLoading, error } = useQuery({
     queryKey: ["playlists"],
@@ -264,11 +276,15 @@ export default function PlaylistDetailPage() {
           className="hero-flat relative"
           style={{ background: `linear-gradient(135deg, hsl(${Math.round((pid * 137.5) % 360)} 42% 32% / 0.15) 0%, transparent 60%)` }}
         >
-          <div className="flex items-start gap-5">
+          {/* The album and artist heroes' own fold, reused verbatim: a column
+              on a phone (the 224 px mosaic used to squeeze the title block to
+              nothing beside it) and the cover-beside-identity row from `sm`
+              up. */}
+          <div className="flex flex-col sm:flex-row items-start gap-5">
             {/* mosaic cover — the first four tracks' artwork in a 2x2 grid */}
-            <div className="shrink-0">
+            <div className="shrink-0 mx-auto sm:mx-0">
               <div
-                className="h-56 w-56 rounded-md bg-raise overflow-hidden shadow-2xl relative grid grid-cols-2 grid-rows-2"
+                className="h-40 w-40 sm:h-56 sm:w-56 rounded-md bg-raise overflow-hidden shadow-2xl relative grid grid-cols-2 grid-rows-2"
                 style={{ background: coverGradient(playlist) }}
               >
                 {mosaic.map((m, i) => (
@@ -283,7 +299,10 @@ export default function PlaylistDetailPage() {
                 ))}
               </div>
             </div>
-            <div className="flex-1 min-w-0">
+            {/* `w-full` is the fold's other half, exactly as on the album and
+                artist heroes: a flex child in a column is only as wide as its
+                content, so the title block would otherwise sit narrow. */}
+            <div className="flex-1 min-w-0 w-full">
               <PageHeader
                 icon={ListMusic}
                 overline={playlist.kind === "smart" ? "Smart playlist" : "Manual playlist"}
@@ -301,7 +320,35 @@ export default function PlaylistDetailPage() {
                   )
                 }
                 chips={playlist.kind === "smart" ? ["SMART"] : undefined}
-                subtitle={`${tracks.length} track${tracks.length === 1 ? "" : "s"} · ${totalDur > 0 ? fmtDuration(totalDur) : "—"}`}
+                subtitle={
+                  <>
+                    {tracks.length} track{tracks.length === 1 ? "" : "s"} ·{" "}
+                    {totalDur > 0 ? fmtDuration(totalDur) : "—"}
+                    {/* Where an imported playlist came from: the service, and a
+                        link to that service's own playlist page. */}
+                    {playlist.origin && (
+                      <>
+                        {" · "}
+                        {t("plimport.origin", {
+                          service: SERVICE_LABELS[playlist.origin] ?? playlist.origin,
+                        })}
+                        {playlist.origin_url && (
+                          <>
+                            {" "}
+                            <a
+                              href={playlist.origin_url}
+                              target="_blank"
+                              rel="noreferrer"
+                              className="underline hover:text-zinc-300"
+                            >
+                              {t("plimport.origin_link")}
+                            </a>
+                          </>
+                        )}
+                      </>
+                    )}
+                  </>
+                }
                 actions={
                   <>
                     {renaming && (

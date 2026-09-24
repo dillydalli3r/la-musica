@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState, type PointerEvent as ReactPointerEvent } from "react";
+import { useEffect, useRef, useState, type CSSProperties, type PointerEvent as ReactPointerEvent } from "react";
 import { api } from "../api";
 import { fmtDuration } from "../lib/fmt";
 
@@ -83,6 +83,12 @@ export default function ScrubSeek({ videoPath, value, max, className, onChange }
     timer.current = window.setTimeout(() => cut(t), DEBOUNCE_MS);
   };
 
+  /** Where the played run ends, as the percentage the CSS paints the track
+   *  with (`--seek-pct`, index.css). The fullscreen slider draws its own fill:
+   *  the native track is one flat colour, so the whole bar read as unplayed
+   *  and its zinc tone vanished into a dark cover. */
+  const playedPct = max > 0 ? Math.min(100, Math.max(0, (Math.min(value, max) / max) * 100)) : 0;
+
   return (
     <div
       ref={boxRef}
@@ -99,6 +105,7 @@ export default function ScrubSeek({ videoPath, value, max, className, onChange }
         value={Math.min(value, max || 0)}
         onChange={(e) => onChange(Number(e.target.value))}
         className="w-full seek-fat"
+        style={{ "--seek-pct": `${playedPct}%` } as CSSProperties}
         title="Seek"
       />
       {tip && (

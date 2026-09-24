@@ -1425,6 +1425,31 @@ def text_meets_sync_level(text, level):
     return lv in ("line", "word", "syllable")
 
 
+def stored_lyrics_kind(embedded=None, lrc=None):
+    """Which KIND of lyrics a track stores: 'synced', 'plain' or None.
+
+    *embedded* and *lrc* are this track's two stored lyric TEXTS — the tag
+    (LYRICS/UNSYNCEDLYRICS) and the sidecar `.lrc` — passed by the caller
+    only when that source is present, i.e. exactly the two texts the
+    `lyrics_embedded` / `lyrics_lrc` flags are computed from. Presence is
+    then "a kind is not None", so the kind and the flags cannot disagree.
+
+    Synced wins when EITHER present source carries timestamps: a timed
+    `.lrc` beside plain embedded lyrics IS a synced track (the player
+    follows it), while a track whose only lyrics are untimed text is plain.
+    None for a track with no lyrics at all — the absence, which every
+    surface states with its own affordance.
+
+    The question "does this text carry timestamps" is asked of
+    `sync_level_of`, the one parser the writers, the grader and the
+    word-sync endpoint already share — never a second detector."""
+    present = [str(t) for t in (embedded, lrc)
+               if t is not None and str(t).strip()]
+    if not present:
+        return None
+    return "synced" if any(sync_level_of(t) != "plain" for t in present) else "plain"
+
+
 def elrc_word_sync(lrc_text, max_line_spread_s=6.0, min_word_span_s=0.18,
                    level="word"):
     """Turn line-synced LRC into word- or syllable-synced ELRC.

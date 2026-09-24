@@ -1,9 +1,9 @@
 import { useState } from "react";
 import { useNavigate } from "react-router-dom";
-import { useQueryClient } from "@tanstack/react-query";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
 import {
-  Activity, ArrowDownToLine, BadgeInfo, Disc3, Ellipsis, FileOutput, Flame, Gauge, ImagePlus, Info, Languages,
-  ListMusic, Music2, RefreshCw, ShieldCheck, Sparkles, Tags, UploadCloud, Users,
+  ArrowDownToLine, BadgeInfo, Disc3, Ellipsis, FileOutput, ImagePlus, Info, Music2, RefreshCw, Sparkles,
+  Tags, Users, Wand2,
 } from "lucide-react";
 import type { LucideIcon } from "lucide-react";
 import { api } from "../api";
@@ -15,10 +15,12 @@ import Modal from "./Modal";
 import { CreditsPanel } from "./TrackDetails";
 import { DetailsDialog } from "./AlbumDetails";
 import { advisoryOutcome } from "./Badges";
+import { entityKind, scriptSections, type ScriptEntry } from "../lib/scriptMenu";
+import { useI18n } from "../lib/i18n";
 import { CACHED_PATHS_KEY, CACHED_SIZES_KEY } from "../lib/mediaCache";
 import { downloadForOffline } from "../lib/offline";
 import { toast } from "../store";
-import type { LyricsPublishBatchResult, LyricsXlitResult, ScriptRunResult } from "../types";
+import type { EntityKind, ScriptRunResult } from "../types";
 
 /** The one "tag actions" menu, mounted wherever a selection exists (artist /
  *  album / track level). Every entry re-runs on the CURRENT selection, so any
@@ -26,10 +28,12 @@ import type { LyricsPublishBatchResult, LyricsXlitResult, ScriptRunResult } from
 export default function TagActionsMenu({
   paths,
   artist,
+  artistPath,
   albumPath,
   releaseMbid,
   covers,
   onDone,
+  kind,
   buttonClass = "btn-ghost",
   buttonTitle = "Tag actions",
   buttonLabel,
@@ -39,12 +43,19 @@ export default function TagActionsMenu({
   paths: string[];
   /** Artist folder path or name — enables the artist image/description review. */
   artist?: string;
+  /** The artist's folder, when the caller has it: what a folder-scoped script
+   *  (the artist image, the layout of the artist's subtrees) runs on. */
+  artistPath?: string;
   /** Album folder — enables the album description review. */
   albumPath?: string;
   /** Release MBID, when known, so the advisory lookup can go straight to it. */
   releaseMbid?: string;
   /** Opens the page's cover search for the same selection, when it has one. */
   covers?: () => void;
+  /** What the selection IS, when the caller knows better than the props imply
+   *  (the track page holds its album's folder for its own panels, and is still
+   *  a track). Left out, it is read from the props — see `entityKind`. */
+  kind?: EntityKind;
   onDone?: () => void;
   buttonClass?: string;
   buttonTitle?: string;
@@ -67,6 +78,21 @@ export default function TagActionsMenu({
   const viewable = !!albumPath || paths.length === 1;
   const singleTrack = albumPath ? undefined : paths[0];
   const navigate = useNavigate();
+  const { t } = useI18n();
+
+  // What this menu is ON decides which scripts it may offer (server/script_menu.py
+  // derives the kinds each script applies to from the runner's own code).
+  const entity = entityKind({ kind, albumPath, artist, paths });
+  // The registry, asked once per session: ids, labels, groups, the stack's
+  // order, each script's force flag and its feature switch. A menu that cannot
+  // reach the server (or is still loading) simply shows no script entries —
+  // the tag editors, imports and reviews below are unaffected.
+  const { data: scripts } = useQuery({
+    queryKey: ["script-menu"],
+    queryFn: api.scriptMenu,
+    staleTime: 5 * 60 * 1000,
+  });
+  const generated = scriptSections(scripts, entity, { paths, albumPath, artistPath });
 
   // Generic over the reply: each action reports from its OWN payload, so the
   // handler type is the real response shape, not a lowest common denominator.
@@ -99,33 +125,11 @@ export default function TagActionsMenu({
       silent.join("; "),
     ].filter(Boolean).join(" — ");
   };
-  /** Script 17's own answer: the files it changed, what it left alone, its
-   *  per-file errors, and the reason it changed nothing when it had nothing to
-   *  work with (both switches off, no AI configured) — never a bare "done". */
-  const xlitDone = (r: LyricsXlitResult) =>
-    [
-      `${r.ok} file(s) updated`,
-      r.skipped ? `${r.skipped} unchanged` : "",
-      r.errors.length ? `${r.errors.length} failed — ${r.errors[0]}` : "",
-      r.note,
-    ].filter(Boolean).join(" · ");
-  /** Script 18's own answer per track: submissions, what LRCLIB said about the
-   *  rest, and the failures with the provider's own words. */
-  const publishDone = (r: LyricsPublishBatchResult) => {
-    const reasons = new Map<string, number>();
-    for (const res of r.results) {
-      if (res.status !== "skipped") continue;
-      const why = res.reason || "skipped";
-      reasons.set(why, (reasons.get(why) ?? 0) + 1);
-    }
-    const fails = r.results.filter((res) => res.status === "failed");
-    return [
-      `${r.ok} submitted`,
-      ...[...reasons].map(([why, n]) => `${n} × ${why}`),
-      fails.length ? `${fails.length} failed — ${fails[0].reason || fails[0].message || "no message"}` : "",
-    ].filter(Boolean).join(" · ");
-  };
   // A script run answers with per-script stats; the menu speaks in files.
+  // The generated script entries below all report through it, so a script that
+  // fixed four files, and one that failed, read the same way here as on the
+  // Optimization page — and a skipped script says WHY it skipped, in the
+  // runner's own words.
   const ran = (r: { results?: ScriptRunResult[] }) => {
     const results = r.results ?? [];
     const failed = results.filter((x) => x.error);
@@ -138,6 +142,28 @@ export default function TagActionsMenu({
     );
     return `${touched} file(s) updated`;
   };
+  /** One generated line: the script's own id, run over the paths THIS entity
+   *  gives it, through the same /api/run the Optimization page uses — plain, or
+   *  with the script's force key when the line is its forced twin. The force
+   *  dict names exactly the one key the run needs (a supplied dict is
+   *  authoritative server-side), so a forced entry can never force anything
+   *  else on the way. */
+  const scriptItem = (e: ScriptEntry) => ({
+    // A forced twin reads as one ("Force: 6 · Audit library"): the two sections
+    // hold the same scripts, and a bare repeated label would leave a reader
+    // scrolling the panel unable to tell which one insists.
+    label: e.force ? t("menu.forceEntry", { script: e.label }) : e.label,
+    icon: Wand2,
+    disabled: e.disabled || !e.targets.length,
+    title: e.title,
+    onClick: () =>
+      run(() => api.run([e.id], e.targets, e.force ? { [e.force]: true } : undefined), ran),
+  });
+  /** The section a group of generated entries is shown under: the bundle's own
+   *  name for the group the payload named (the payload's title is the fallback
+   *  for a group a bundle does not know yet). */
+  const scriptGroupTitle = (id: string, fallback: string): string =>
+    id === "scripts" ? t("menu.scripts") : id === "force" ? t("menu.forced") : fallback;
 
   return (
     <>
@@ -276,91 +302,28 @@ export default function TagActionsMenu({
               },
             ],
           },
-          {
-            // The lyrics family in full: an import runs script 13 (fetch) →
-            // 17 (transliterate/translate) → 18 (publish), and each half is
-            // here by hand. Every entry calls the half's own entry point, so
-            // the tags and sidecars a click writes are the ones an import
-            // writes — and the publish, which owns no local tag, is the one
-            // step that only talks to LRCLIB.
-            title: "Lyrics",
-            items: [
-              {
-                label: "Fetch / refresh lyrics",
-                icon: ListMusic,
-                disabled: !paths.length,
-                title: "Script 13's engine over the selection: every configured provider in order, written per the lyrics format (tags and/or .lrc)",
-                onClick: () => run(() => api.lyricsAuto(paths, true), (r) => `${r?.ok ?? 0} lyrics fetched`),
-              },
-              {
-                label: "Transliterate / translate lyrics…",
-                icon: Languages,
-                disabled: !paths.length,
-                title: "Script 17 over the selection: the TRANSLITERATION-<lang> / TRANSLATION-<lang> tags the lyrics need, plus the .romaji.lrc / .<lang>.lrc sidecars the LRC formats write. Needs AI configured in Settings → AI.",
-                onClick: () => run(() => api.lyricsXlit(paths), xlitDone),
-              },
-              {
-                label: "Publish lyrics to LRCLIB…",
-                icon: UploadCloud,
-                disabled: !paths.length,
-                title: "Script 18 over the selection: submit only the lyrics LRCLIB does not have yet. Writes nothing to the files — this is the one outward lyrics step.",
-                onClick: () => run(() => api.lyricsPublishBatch(paths), publishDone),
-              },
-            ],
-          },
-          {
-            // Library scripts that write an artefact the selection already
-            // carries (an AUDIT tag, a .accurip, a DR value). The PLAIN run
-            // fills what is missing and leaves a matching file alone — that is
-            // the entry a library missing its .accurip files wants — and the
-            // FORCE flag beside it redoes the work instead of skipping it,
-            // which is the only way to fix a wrong verdict/sidecar from here.
-            title: "Re-run & overwrite",
-            items: [
-              {
-                label: "Generate AccurateRip (.accurip)",
-                icon: Disc3,
-                disabled: !paths.length,
-                title: "Script 9 over the selection: each disc's .accurip is written where it is missing (CUETools), and a file that already matches is left alone — the Force entry below rewrites it whatever it says",
-                onClick: () => run(() => api.run([9], paths), ran),
-              },
-              {
-                label: "Force re-audit (rewrite AUDIT tags)",
-                icon: ShieldCheck,
-                disabled: !paths.length,
-                title: "Audit the selection again even where an AUDIT tag already exists, and overwrite it with the new verdict",
-                onClick: () => run(() => api.run([6], paths, { audit: true }), ran),
-              },
-              {
-                label: "Force AccurateRip (.accurip rewrite)",
-                icon: Disc3,
-                disabled: !paths.length,
-                title: "Regenerate each disc's .accurip from CUETools, overwriting the existing file",
-                onClick: () => run(() => api.run([9], paths, { accurip: true }), ran),
-              },
-              {
-                label: "Force DR & ReplayGain (rewrite tags)",
-                icon: Activity,
-                disabled: !paths.length,
-                title: "Re-measure dynamic range / ReplayGain and overwrite the stored values",
-                onClick: () => run(() => api.run([7], paths, { dr: true }), ran),
-              },
-              {
-                label: "Force re-encode FLACs",
-                icon: Flame,
-                disabled: !paths.length,
-                title: "Re-encode the selection even where a FLAC is already optimized",
-                onClick: () => run(() => api.run([3], paths, { flac: true }), ran),
-              },
-              {
-                label: "Re-grade",
-                icon: Gauge,
-                disabled: !paths.length,
-                title: "Grade the selection again and refresh the cached verdicts",
-                onClick: () => run(() => api.run([4], paths), ran),
-              },
-            ],
-          },
+          // The scripts THEMSELVES, generated from the registry
+          // (GET /api/script-menu): every script that applies to what this
+          // menu is ON, in the stack's own Run All order, each running over
+          // the current selection through the same /api/run the Optimization
+          // page uses. Nothing here types a script id — a script added to the
+          // registry appears in this menu by itself, and one that does not
+          // apply (an album-shaped script on a single track row) is not
+          // offered. The group titles and the order are the server's.
+          ...generated.groups.map((g) => ({
+            title: scriptGroupTitle(g.id, g.title),
+            items: g.entries.map(scriptItem),
+          })),
+          // The same scripts again, as the FORCED variant: the flag each one
+          // owns, so work that was already done can be asked for again. Shown
+          // only for the scripts that own a single flag, which is the set the
+          // Optimization page's Force switch lists.
+          ...(generated.forced
+            ? [{
+                title: scriptGroupTitle(generated.forced.id, generated.forced.title),
+                items: generated.forced.entries.map(scriptItem),
+              }]
+            : []),
           {
             title: "Artwork & text",
             items: [

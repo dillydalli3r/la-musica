@@ -4,6 +4,8 @@ import { api } from "../api";
 import { toast } from "../store";
 import LrclibPublishPanel from "./LrclibPublish";
 import LyricsEditorModal from "./LyricsEditorModal";
+import { LyricsKindChip } from "./Badges";
+import { lyricsKindOf } from "./LyricsViewer";
 import Modal from "./Modal";
 
 interface Candidate {
@@ -60,6 +62,7 @@ export default function LyricsManagerModal({
   album,
   duration,
   currentText,
+  allowPlain,
   onApplied,
   onSaved,
   onClose,
@@ -70,6 +73,9 @@ export default function LyricsManagerModal({
   album?: string;
   duration?: number;
   currentText?: string;
+  /** The user's `lyrics_allow_plain` — the same flag the page header's chip
+   *  reads, so the track's current lyrics are marked the same way here. */
+  allowPlain?: boolean;
   /** Receives the chosen LRC/plain text plus a short source label. */
   onApplied: (lrc: string, source: string) => void;
   /** Fired after the embedded editor saves — invalidate the host page's
@@ -159,7 +165,11 @@ export default function LyricsManagerModal({
           </div>
         }
       >
-      <div className="flex gap-2 flex-wrap">
+      <div className="flex gap-2 flex-wrap items-center">
+        {/* WHICH KIND the track's CURRENT lyrics are, beside the actions that
+            replace them: the candidates below wear their own SYNCED/PLAIN
+            marks, and this is the text already on the track. */}
+        <LyricsKindChip kind={lyricsKindOf(currentText)} allowPlain={allowPlain} showReason />
         <button className="btn-ghost !py-1.5 text-xs" onClick={search} disabled={loading}>
           <CloudDownload className="h-3.5 w-3.5" /> Re-search
         </button>

@@ -37,11 +37,14 @@ import uuid
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 from mlo.config import DEFAULT_RUN_ALL_ORDER, load_config
-from mlo.paths import library_root, move_path
+from mlo.discs import disk_track_keys, match_disc_row, sidecar_tracklist
+from mlo.paths import (AUDIO_EXTS, expected_tracks_state, library_root,
+                       load_expected_tracks, move_path, save_expected_tracks)
 # The shared worker-count policy (`worker_limit`): the per-track tag writes
 # below fan out to the same lane count every other multi-file runner uses.
 from mlo.stats import worker_count
 from mlo import advisory
+from mlo import cover_choice
 from mlo import import_policy
 
 from server import import_autonomy
@@ -237,7 +240,7 @@ def finish_album(album_dir, cfg=None, progress=None, force=None, release=None,
     artist-watch pipeline behind it, so what an album ends up as cannot depend
     on which button was pressed. Returns ``{"path", "chain", "scripts",
     "errors", "chained", "chain_off", "note", "autonomy", "dropped",
-    "skipped_families"}``:
+    "skipped_families", "settled"}``:
     ``scripts`` is one
     result per chain id (``server.script_runners`` shape), ``errors`` a flat
     list for a caller that only wants to know what went wrong, and ``path`` the
@@ -300,6 +303,14 @@ def finish_album(album_dir, cfg=None, progress=None, force=None, release=None,
     files whose tags it could not touch (they keep what they arrived with),
     and how many files lost an arrived value per family. ``import_keep_synced_lyrics``
     is the lyric family's one exception — see the key.
+
+    ``settled`` is the digital release's OWN two answers, decided by
+    :func:`settle_digital_import` before the chain: SOURCE (from the release's
+    own store URLs or the acquisition's provider — never invented; a Digital
+    Media album that still has none is a ``source`` gap, and that gap is what
+    raises the prompt asking the user) and the untimed lyrics this install
+    cannot use, which are removed when the chain will fetch (`chain_summary`
+    carries the count).
 
     WHAT IS LEFT is always reported, in both modes, by
     ``_report_gaps``: the album's ``autonomy`` block carries what it is still
@@ -371,6 +382,28 @@ def finish_album(album_dir, cfg=None, progress=None, force=None, release=None,
                              release=release, wait=wait)
 
 
+def _refresh_shares_after_import():
+    """Ask slskd to re-index the library after an import that ran NO chain.
+
+    An import rewrites the library — the album moves in, its tags and files
+    change — and slskd keeps serving the view it indexed at boot until it
+    re-scans (`soulseek.refresh_shares_soon`, debounced). A chain's own script
+    runs already ask for that (`server.script_runners` refreshes once per run),
+    so the only exits that have to ask from here are the ones that finish an
+    import WITHOUT running a chain: `import_auto_scripts` off / every id held
+    for review, and a review stop. Without this those albums simply were not in
+    the share — a search for them found nothing — until some later run happened
+    to refresh.
+
+    Never raises: a share refresh must not fail an import that already
+    happened."""
+    try:
+        from server import soulseek
+        soulseek.refresh_shares_soon()
+    except Exception:
+        traceback.print_exc()
+
+
 def _finish_album(path, cfg, progress=None, force=None, release=None,
                   wait=True):
     """The body of :func:`finish_album`, already holding *path*.
@@ -392,6 +425,14 @@ def _finish_album(path, cfg, progress=None, force=None, release=None,
         out["errors"].append("album folder not found")
         out["note"] = "the album folder is not there"
         return out
+    # What the RIP itself says the album holds, recorded before anything reads
+    # the album: a folder that arrived with part of a CD rip and its .cue/.log
+    # has no other way to state that the rest of the disc is missing — the
+    # files on disk only describe themselves, and every step below (grading
+    # first of all) needs to know this is a partial release rather than a
+    # small album. Filled, never overwritten: a tracklist already recorded
+    # (the release's own, from the wizard) wins.
+    record_sidecar_tracklist(path, cfg)
     # How far this import goes on its own, decided BEFORE anything runs:
     # `run_cfg` is what every family step below reads, so a family the user
     # kept for themselves (`import_review_families`) is left alone by the very
@@ -435,6 +476,9 @@ def _finish_album(path, cfg, progress=None, force=None, release=None,
         out["chain"] = []
         out["note"] = (f"stopped for review at {policy['stop']} — the script "
                        "chain has not run")
+        # The album is in the library and no chain will run over it here, so
+        # this is the last word on the share (see _refresh_shares_after_import).
+        _refresh_shares_after_import()
         return _report_gaps(out, cfg, policy, path)
     # WHAT IT ARRIVED WITH goes now, before every writer below and before the
     # chain: the four families this import decides are the import's, and each
@@ -503,6 +547,52 @@ def _finish_album(path, cfg, progress=None, force=None, release=None,
                         f"{failed} track(s) took no genre (see the genre sources)")
             except Exception:
                 traceback.print_exc()
+
+    # ---- the digital release's own two answers -----------------------------
+    # SOURCE (the grader requires it on a Digital Media release and nothing in
+    # the audio states it) and the untimed lyrics an import that will fetch
+    # cannot use — one entry point, `settle_digital_import`, so a manual import
+    # and an unattended one settle the same release the same way (the wizard's
+    # own route calls this same function).
+    #
+    # BEFORE the chain, because script 1 (Format lyrics) is what normalizes
+    # MEDIA/SOURCE: a SOURCE the release states is written here, and the write
+    # gate the user configured is honored rather than second-guessed. The
+    # lyrics half is the lyric family's own decision, and it is a no-op for the
+    # common case — `drop_arrived_values` above already cleared the arrived
+    # lyrics when the chain fetches — so what it actually catches is the lyric
+    # a KEPT family or a dropped fetch left behind: an untimed lyric the
+    # grader's own check calls "Lyrics not optimally formatted (run Lyrics
+    # script)" and no script can repair.
+    #
+    # Its result rides in this import's report (`settled`): a SOURCE nobody
+    # could state is a `source` gap the report raises as a prompt, and lyrics
+    # that went are named in `chain_summary`'s own line — never silent.
+    _phase("Settling the digital release…")
+    try:
+        _settle_rel = release
+        if _settle_rel is None and album_mbid:
+            # The identity the album carries is enough to ask for the release,
+            # and that release's own store URLs are the SOURCE's one piece of
+            # evidence (see `mlo.digital_source`). Cached, and never fatal.
+            try:
+                from server import integrations as intg
+                _settle_rel, _rid = intg.resolve_release(album_mbid)
+            except Exception:
+                _settle_rel = None
+        out["settled"] = settle_digital_import(path, run_cfg,
+                                               release=_settle_rel, chain=chain)
+        _lyr = out["settled"].get("lyrics") or {}
+        if _lyr.get("state") == "cleaned":
+            print(f"[mlo] import: {_lyr['dropped']} file(s) lost untimed lyrics "
+                  f"— {os.path.basename(path)}")
+        _src = out["settled"].get("source") or {}
+        if _src.get("state") == SOURCE_ASKED:
+            print(f"[mlo] import: no SOURCE for this Digital Media release — "
+                  f"{os.path.basename(path)}")
+    except Exception:
+        traceback.print_exc()
+
 
     # ---- the FILE-writing pair, beside the TAG-writing steps ---------------
     # Metadata (artist image, artist/album description) and cover art write
@@ -596,6 +686,9 @@ def _finish_album(path, cfg, progress=None, force=None, release=None,
         out["note"] = _with_families(_chain_off_note(cfg), out["skipped_families"])
         _invalidate_caches(path)        # the steps above wrote tags/files
         _clear_pending(path, cfg, chained=False, chain_off=True)
+        # Nothing will run over this album (no chain is configured), so nothing
+        # else asks slskd to index what just joined the library.
+        _refresh_shares_after_import()
         return out
 
     # The folder the chain ends on, filled by `run_chain` (`final`): a script
@@ -752,6 +845,22 @@ def _with_families(text, skipped):
     return f"{text} — {extra}" if text else extra
 
 
+def _with_settled(text, settled):
+    """*text* plus what the digital settle had to do (see `chain_summary`).
+
+    Only the lyric half is named here: a SOURCE the pipeline could not state is
+    a `source` GAP, and the report's own prompt is what asks for it — telling
+    the user twice would read as two problems. Removing lyrics is not a gap (a
+    gap would be lyrics that are MISSING): it is something this import DID, and
+    the user has to hear it from the import rather than discover it later.
+    """
+    lyr = (settled or {}).get("lyrics") or {}
+    if lyr.get("state") == "cleaned" and lyr.get("dropped"):
+        return (f"{text} — untimed lyrics removed on {lyr['dropped']} file(s) "
+                "(synced lyrics are required here; see Settings → Lyrics)")
+    return text
+
+
 def chain_summary(result):
     """The ONE honest line about what an import's script chain did.
 
@@ -776,26 +885,29 @@ def chain_summary(result):
     if not any(k in res for k in ("chain", "scripts", "chained", "chain_off")):
         return ""
     skipped = res.get("skipped_families") or []
+    settled = res.get("settled")
     scripts = list(res.get("scripts") or [])
     errors = [str(e) for e in (res.get("errors") or []) if str(e)]
     if not scripts:
         if res.get("note"):
             return str(res["note"])
         if res.get("chain_off") or not res.get("chain"):
-            return _with_families("no script chain was run (import_auto_scripts is off)",
-                                  skipped)
-        return _with_families("the script chain did not run"
-                              + (f": {errors[0]}" if errors else ""), skipped)
+            return _with_settled(_with_families(
+                "no script chain was run (import_auto_scripts is off)",
+                skipped), settled)
+        return _with_settled(_with_families(
+            "the script chain did not run"
+            + (f": {errors[0]}" if errors else ""), skipped), settled)
     failed = [s for s in scripts if isinstance(s, dict) and s.get("error")]
     total = len(scripts)
     if not failed:
-        return _with_families(
+        return _with_settled(_with_families(
             f"the script chain ran {total} script" + ("" if total == 1 else "s"),
-            skipped)
+            skipped), settled)
     names = ", ".join(str(s.get("label") or s.get("id")) for s in failed[:3])
-    return _with_families(
+    return _with_settled(_with_families(
         f"the script chain ran {total - len(failed)} of {total} scripts — "
-        f"{len(failed)} failed ({names})", skipped)
+        f"{len(failed)} failed ({names})", skipped), settled)
 
 
 def _chain_off_note(cfg):
@@ -965,6 +1077,195 @@ def _audio_files(folder):
 _ACOUSTID_ROW = {"release_group_id": None, "release_group_title": None,
                  "release_group_type": None, "artists": [], "score": None,
                  "matched": 0, "total": 0, "recordings": []}
+
+
+# --------------------------------------------------------------------------- #
+# Single songs out of an album (issue #53)
+#
+# A one-track import used to become an album of its own, named after the track
+# ("Artists/01 - Song.flac"), sitting beside the album it was taken from: the
+# wizard hands the upload route an album NAME, and for a dropped file that name
+# was the file. Two things follow from the rip's own evidence — where the track
+# belongs, and what the album is missing — and both are decided here rather
+# than in the wizard, because the tags and the sheets (.cue/.log) are on this
+# side of the wire.
+# --------------------------------------------------------------------------- #
+
+def _tag_identity(path):
+    """(release id, album, album artist) as a file's own tags state them."""
+    from mlo.audio import AudioFile
+    try:
+        af = AudioFile(path)
+        if af.audio is None:
+            return "", "", ""
+        def get(key):
+            return str(af.get_tag(key) or "").strip()
+        return (get("MUSICBRAINZ_ALBUMID"), get("ALBUM"),
+                get("ALBUMARTIST") or get("ARTIST"))
+    except Exception:
+        return "", "", ""
+
+
+def _canon(value):
+    """A tag value compared the way the rest of the app compares tags."""
+    from mlo.tagtext import canonical_text
+    return canonical_text("ALBUM", str(value or "")).strip().lower()
+
+
+def library_album_for(album_mbid, album, album_artist, cfg=None):
+    """The library folder that already IS this album, or "".
+
+    Matched on the release id a full import of the release writes
+    (MUSICBRAINZ_ALBUMID — the release identity the pipeline assigns), then on
+    the album tags themselves, read off the tracks the library already holds.
+    The library payload is TTL-cached, so this costs one library read per
+    single-song import, not one per call.
+    """
+    want_id = str(album_mbid or "").strip().lower()
+    want = (_canon(album), _canon(album_artist)) if album else None
+    if not want_id and not (want and all(want)):
+        return ""
+    try:
+        from server import library as lib_mod
+        lib = lib_mod.build_library(cfg or load_config())
+    except Exception:
+        return ""
+    for artist in lib.get("artists", []):
+        for alb in artist.get("albums", []):
+            path = alb.get("path") or ""
+            # A framework album (the "Add to library" placeholder) is a
+            # request on disk, not the album: importing a track into it would
+            # fill a folder the user never asked to be a library album.
+            if not path or alb.get("pending"):
+                continue
+            for tr in (alb.get("tracks") or []):
+                tags = tr.get("tags") or {}
+                if want_id:
+                    got = str(tags.get("MUSICBRAINZ_ALBUMID") or "").strip().lower()
+                    if got and got == want_id:
+                        return path
+                if want and all(want):
+                    got = (_canon(tags.get("ALBUM")),
+                           _canon(tags.get("ALBUMARTIST")))
+                    if got == want:
+                        return path
+    return ""
+
+
+def import_album_target(audio_paths, requested_name, cfg=None):
+    """Where a set of arriving tracks belongs: (name, album_path, how).
+
+    Only a SINGLE-song import is resolved, and only when the caller named the
+    "album" after the track itself — that name is not an album name, and
+    nobody means it as one (the wizard's album-name field is free text, and a
+    dropped file has no folder to take a name from). A multi-track import
+    keeps the requested name: the caller dropped a folder and its name is the
+    album's.
+
+    `how` says which evidence answered:
+      "library"    an album the library already holds, keyed by the release
+                   identity the pipeline writes on a full import — the song
+                   lands IN that album (and the album becomes partial),
+      "album-tag"  the album the arriving file's own ALBUM tag names,
+      "requested"  nothing said otherwise: the caller's name stands.
+    """
+    if not audio_paths or len(audio_paths) != 1:
+        return str(requested_name or ""), "", "requested"
+    audio = audio_paths[0]
+    stem = os.path.splitext(os.path.basename(str(requested_name or "")))[0]
+    own = os.path.splitext(os.path.basename(audio))[0]
+    if not own or stem.strip().lower() != own.strip().lower():
+        return str(requested_name or ""), "", "requested"
+    album_mbid, album, album_artist = _tag_identity(audio)
+    if not album_mbid and not album:
+        # A file that names no album is a single, not a slice of one.
+        return str(requested_name or ""), "", "requested"
+    path = library_album_for(album_mbid, album, album_artist, cfg)
+    if path:
+        return os.path.basename(path), path, "library"
+    if album:
+        return album, "", "album-tag"
+    return str(requested_name or ""), "", "requested"
+
+
+def merge_into_album(album_dir, paths):
+    """Move files into an album that is already in the library.
+
+    Fills, never overwrites: a name the album already holds (its own .cue/.log
+    from the rip, a same-titled track) is left exactly as it is, and the
+    arriving copy is reported as `kept` so the caller can say what it did.
+    Returns (moved, kept) as destination paths.
+    """
+    moved, kept = [], []
+    for src in paths:
+        if not os.path.isfile(src):
+            continue
+        dest = os.path.join(album_dir, os.path.basename(src))
+        if os.path.exists(dest):
+            kept.append(dest)
+            continue
+        if move_path(src, dest):
+            moved.append(dest)
+        else:
+            kept.append(src)
+    return moved, kept
+
+
+def record_sidecar_tracklist(album_dir, cfg=None):
+    """Record a rip's own tracklist when part of the album is not there.
+
+    The sheets know what a lone file cannot: which album it is part of and how
+    many tracks that album has. With one track of a rip imported, the folder
+    would otherwise hold nothing that says the other eleven are missing — and
+    a partial CD that cannot say it is partial is graded as if it were a whole
+    disc (or, worse, as a complete album).
+
+    Returns the manifest it wrote as {"release_id", "tracks"}, or None when it
+    wrote nothing:
+      * the folder already carries one — the release's own tracklist wins
+        (writers fill, they do not overwrite; the wizard writes it at match
+        time),
+      * the sheets state no tracklist,
+      * every track the sheets name is on disk (a complete import leaves
+        nothing behind).
+    """
+    album_dir = _album_dir(album_dir)
+    if not os.path.isdir(album_dir):
+        return None
+    if load_expected_tracks(album_dir)["tracks"]:
+        return None
+    sheets = sidecar_tracklist(album_dir)
+    rows = sheets.get("rows") or []
+    if not rows:
+        return None
+    audio = [os.path.join(album_dir, f) for f in sorted(os.listdir(album_dir))
+             if f.lower().endswith(AUDIO_EXTS)]
+    manifest = []
+    for r in rows:
+        row = {"disc": r["disc"], "position": r["position"],
+               "title": r.get("title") or "", "recording_mbid": None,
+               "file": r.get("file") or ""}
+        if not row["file"]:
+            # A log's TOC states the running order but names no files, so the
+            # track each row belongs to is found by the evidence that is left
+            # (the file's own track number, then its playtime against the
+            # log's) and written into the manifest: that name is what lets the
+            # library line the file up with this row later.
+            for p in audio:
+                if match_disc_row([row], p) is not None:
+                    row["file"] = os.path.basename(p)
+                    break
+        manifest.append(row)
+    keys, names = disk_track_keys(album_dir, audio)
+    state = expected_tracks_state(manifest, keys, names)
+    if not any(s["missing"] for s in state):
+        return None
+    if not save_expected_tracks(album_dir, None, manifest):
+        return None
+    print(f"[mlo] {os.path.basename(album_dir)}: {sum(1 for s in state if s['missing'])}"
+          f" of {len(state)} tracks of its {sheets.get('source')} tracklist are missing")
+    return {"release_id": None, "tracks": manifest}
+
 
 # The provenance a value the file ALREADY carried is reported with when this
 # run did not ask anyone about it (`force=False`). `sources` is normally "who
@@ -1577,8 +1878,13 @@ COVER_FETCH_TIMEOUT = 30.0
 # screenful to pick from; the unattended path ranks the SAME set and writes the
 # winner, so the cover that lands is the best of what exists rather than
 # whatever answered first. 20+ CDNs is what the finder deals in; a screenful
-# plus its ranked tail is the whole point of a pick-one screen.
-COVER_REVIEW_LIMIT = 12
+# plus its ranked tail is the whole point of a pick-one screen. ONE number,
+# shared with the dialog's own route (mlo.cover_choice.SEARCH_LIMIT): the
+# finder truncates its answer at what it is asked for, so asking for fewer here
+# would rank a smaller set than the dialog and could land an image the dialog
+# never saw — the policy's size tier outranks its source tier, so the row past
+# this cut is exactly the one that can win.
+COVER_REVIEW_LIMIT = cover_choice.SEARCH_LIMIT
 
 
 def _album_cover_present(album_dir):
@@ -2273,37 +2579,51 @@ def _supplied_report(supplied, album, expect):
 
 
 def acoustid_submit(paths, cfg=None):
-    """Give AcoustID the fingerprints these files already carry.
+    """Give AcoustID the fingerprints + recording ids these files state.
 
-    Album folders or track paths. The fingerprint and the recording id are read
-    back OFF THE FILES (`ACOUSTID_FINGERPRINT` / `ACOUSTID_ID`, the pair
-    accepting a match wrote) and never recomputed: the tag is the identity the
-    user accepted, and re-fingerprinting would submit something the library
-    does not claim to be. Nothing is written here — this is the one
-    outward-facing step of the AcoustID path, and it owns no tag and no file,
-    exactly like the LRCLIB publish.
+    Album folders or single track paths — a track path is THAT track (the
+    selection is what the user pointed at; publishing its twelve neighbours was
+    never what it meant). Path resolution is this module's (the download-side
+    extension set, so an album of raw WAVs/APEs is not invisible to it);
+    everything after it is `mlo.acoustid.submit_files`, which is the submission
+    contract in one place: the recording id comes off the file
+    (`_recording_identity` — ACOUSTID_ID, MUSICBRAINZ_TRACKID, or the recording
+    MBID this app's own naming script wrote into the name), the fingerprint
+    from its `ACOUSTID_FINGERPRINT` tag or — when it carries none — from the
+    AUDIO itself (fpcalc, local, no key), then the two dedupes (what AcoustID
+    already links, what this app already sent), then one batched `v2/submit`.
+    A file that names no recording is skipped by name: a submission stores a
+    fingerprint WITH the recording it is, and nothing here is invented.
 
-    The duration comes from the file's own tech (AcoustID needs one and it is
-    not part of the fingerprint); a track whose duration cannot be read is
-    SKIPPED with its own reason rather than submitted with a guess. Returns
-    ``{"available", "note", "ok", "code", "submitted", "failed", "skips",
-    "submissions", "tracks"}``: ``submitted`` counts what the service accepted
-    (each with its submission id and status), and a refused user key comes back
-    in ``note`` with the service's own sentence. Never raises.
+    Nothing is written locally — this is the one outward-facing step of the
+    AcoustID path, and it owns no tag and no file, exactly like the LRCLIB
+    publish. Returns the route's shape: ``{"available", "note", "ok", "code",
+    "submitted", "known", "failed", "skips", "submissions", "results",
+    "tracks"}`` where ``results`` is one row per track (accepted / already
+    known / rejected / skipped, each with its own sentence) and a refused user
+    key comes back in ``note`` with the service's own words. Never raises.
     """
     cfg = cfg or load_config()
     try:
         from mlo import acoustid
     except ImportError as e:                      # pragma: no cover - stripped backend
         return {"available": False, "note": f"acoustid unavailable: {e}",
-                "ok": False, "code": "unavailable", "submitted": 0,
-                "failed": 0, "skips": [], "submissions": [],
-                "tracks": {"total": 0, "submitted": 0, "skipped": 0}}
+                "ok": False, "code": "unavailable", "submitted": 0, "known": 0,
+                "failed": 0, "skips": [], "submissions": [], "results": [],
+                "tracks": {"total": 0, "submitted": 0, "known": 0,
+                           "skipped": 0, "failed": 0}}
+
+    from server.soulseek_auto import _AUDIO_EXTS
 
     files = []
     for p in paths or []:
         try:
-            found = _audio_files(_album_dir(p))
+            if os.path.isfile(p):
+                # The user pointed at a FILE: that file, not its album.
+                found = ([p] if os.path.splitext(p)[1].lower() in _AUDIO_EXTS
+                         else [])
+            else:
+                found = _audio_files(_album_dir(p))
         except Exception:
             traceback.print_exc()
             found = []
@@ -2311,88 +2631,13 @@ def acoustid_submit(paths, cfg=None):
             if f not in files:
                 files.append(f)
 
-    chk = acoustid.check_submit(cfg)
-    if not chk["available"]:
-        return {"available": False, "note": chk["reason"], "ok": False,
-                "code": chk["code"], "submitted": 0, "failed": len(files),
-                "skips": [], "submissions": [],
-                "tracks": {"total": len(files), "submitted": 0, "skipped": 0}}
-
-    # Every file answers something: an item to submit, or a skip naming what it
-    # lacks (no AcoustID pair, an unreadable container). A file that vanishes
-    # from both lists would make `tracks.total` a number nobody can account for.
-    items, skips = [], []
-    for f in files:
-        item, skip = _submit_item(f)
-        if skip:
-            skips.append(skip)
-        elif item:
-            items.append(item)
-    res = acoustid.submit_fingerprints(cfg, items)
-    skips.extend(res["skips"])
-    return {"available": True,
-            "note": res["reason"] if not res["ok"] else "",
-            "ok": bool(res["ok"]),
-            "code": res["code"],
-            "submitted": res["submitted"],
-            "failed": res["failed"],
-            "skips": skips,
-            "submissions": res["submissions"],
-            "tracks": {"total": len(files), "submitted": res["submitted"],
-                       "skipped": len(skips)}}
-
-
-def _submit_item(path):
-    """(item, skip) for one file: exactly one of the two is set.
-
-    Reads only — `get_tag` for the pair and the text metadata, `tech` for the
-    duration — so submitting never touches the file it describes. A file with
-    no `ACOUSTID_FINGERPRINT` is a SKIP with that reason: there is nothing to
-    give AcoustID, and inventing one would submit audio the library never
-    claimed.
-    """
-    from mlo.audio import AudioFile
-
-    try:
-        af = AudioFile(path)
-        if af.audio is None:
-            return None, {"path": path, "code": "unreadable_file",
-                          "reason": (f"cannot read {os.path.basename(path)}: "
-                                     f"{af.error or 'no tag reader for this file'}")}
-        fingerprint = str(af.get_tag("ACOUSTID_FINGERPRINT") or "").strip()
-        if not fingerprint:
-            return None, {"path": path, "code": "no_fingerprint",
-                          "reason": "no ACOUSTID_FINGERPRINT tag to submit"}
-        # Duration: mutagen's stream info for audio, ffprobe's for a video
-        # container (a VideoHandle carries no `info`). AcoustID requires one and
-        # it is not part of the fingerprint, so a file that cannot state its
-        # own length is SKIPPED rather than submitted with a guess.
-        info = getattr(getattr(af, "audio", None), "info", None)
-        duration = 0.0
-        for value in (getattr(info, "length", None), (af.tech or {}).get("length")):
-            try:
-                duration = float(value or 0)
-            except (TypeError, ValueError):
-                duration = 0.0
-            if duration > 0:
-                break
-        item = {"path": path, "fingerprint": fingerprint,
-                "duration": duration,
-                "recording_id": str(af.get_tag("ACOUSTID_ID") or "").strip(),
-                "track": str(af.get_tag("TITLE") or "").strip(),
-                "artist": str(af.get_tag("ARTIST") or "").strip(),
-                "album": str(af.get_tag("ALBUM") or "").strip(),
-                "album_artist": str(af.get_tag("ALBUMARTIST") or "").strip()}
-        for key, tag in (("year", "DATE"), ("track_no", "TRACKNUMBER"),
-                         ("disc_no", "DISCNUMBER")):
-            value = str(af.get_tag(tag) or "").strip()
-            if value:
-                item[key] = value.split("-")[0].strip() if key == "year" else value
-        return item, None
-    except Exception:
-        traceback.print_exc()
-        return None, {"path": path, "code": "unreadable_file",
-                      "reason": f"could not read {os.path.basename(path)}"}
+    res = acoustid.submit_files(cfg, files)
+    return {"available": res["available"], "note": res.get("note") or "",
+            "ok": bool(res["ok"]), "code": res["code"],
+            "submitted": res["submitted"], "known": res["known"],
+            "failed": res["failed"], "skips": res["skips"],
+            "submissions": res["submissions"], "results": res["results"],
+            "tracks": res["tracks"]}
 
 
 def _tag_candidate(album_dir):
@@ -2628,6 +2873,466 @@ def drop_arrived_values(album_dir, cfg=None, chain=None):
             out[family] += 1
     return out
 
+
+# --------------------------------------------------------------------------- #
+# The digital release's two own answers: SOURCE and the lyrics it cannot use
+# --------------------------------------------------------------------------- #
+# The states both functions below report with, spelled once so a caller (the
+# wizard, a test, a log line) never has to guess what a word means:
+#
+#   written/present   SOURCE landed on every track that lacked one / every
+#                     track already had one (the import wrote nothing)
+#   suggested         a dry call: here is the value a real one would write
+#   asked             nothing the pipeline knows states a SOURCE and none may
+#                     be invented — the user is asked (the `source` family)
+#   not-digital       MEDIA is not Digital Media, which is the only medium the
+#                     grader requires a SOURCE on (script 1 strips one)
+#   no-tracks/failed  nothing to write / the tags could not be read
+SOURCE_WRITTEN, SOURCE_PRESENT = "written", "present"
+SOURCE_SUGGESTED, SOURCE_ASKED = "suggested", "asked"
+SOURCE_NOT_DIGITAL, SOURCE_NO_TRACKS = "not-digital", "no-tracks"
+# The value was known but no track took it: `audio_tag_writes` has SOURCE off
+# for this filetype, so the write is the user's own setting, not a failure.
+SOURCE_GATED = "gated"
+
+def _release_relations_mb(release):
+    """The url-relations MusicBrainz states for a release — cached, never fatal.
+
+    Only asked when the release payload the caller handed in carries no URL of
+    its own: the wizard's search row and the acquisition paths already hold
+    one, and `mb_get_cached` answers instantly for a release the app has looked
+    at before (the links step and the release-resolution paths do). A
+    MusicBrainz outage states no source, which is the same answer as a release
+    with no store URL — never a failure of the import.
+    """
+    rel = release or {}
+    rid = str(rel.get("id") or rel.get("release_mbid") or "").strip()
+    if not rid:
+        return []
+    try:
+        from server import integrations as intg
+        data = intg.mb_get_cached(f"release/{rid}",
+                                  {"inc": "url-rels", "fmt": "json"})
+    except Exception:
+        return []
+    return [r for r in ((data or {}).get("relations") or []) if isinstance(r, dict)]
+
+def stamp_album_source(album_dir, cfg=None, *, value="", release=None,
+                       provider="", url="", dry=False):
+    """Settle a Digital Media album's ``SOURCE`` — or report that it must be asked.
+
+    ``SOURCE`` is required on every track of a Digital Media album
+    (``grade_check_source``) and it is the one tag whose honest value the
+    pipeline cannot derive from the audio: where the release came from. So the
+    order is evidence, never invention — *value* (a caller that already knows,
+    i.e. the wizard's own answer), the RELEASE's own store URLs
+    (`mlo.digital_source`, read from the payload or from MusicBrainz'
+    url-relations) and *provider* (the acquisition's own statement: "Soulseek",
+    "YouTube"). Nothing states one → nothing is written, the state is
+    ``asked``, and the import's own report hands the decision to the user (the
+    ``source`` family in ``mlo.import_policy``).
+
+    FILL only, like every writer in this module: a track that already carries a
+    SOURCE keeps it, so the user's own word survives an import. Nothing is
+    written for a non-digital medium either — script 1 deletes a SOURCE there,
+    so writing one would only be undone.
+
+    *dry* answers the same question without touching a file: what value the
+    pipeline would write, and what the config's own default is
+    (``digital_media_source_value``) — what a pick list or an input is
+    pre-filled with.
+
+    Returns ``{"state", "value", "from", "default", "media", "tracks",
+    "missing", "written", "failed"}`` — see the states above. Never raises:
+    an album whose tags cannot be read is reported, not failed.
+    """
+    from mlo.audio import AudioFile
+    from mlo.config import should_write_audio_tag
+    from mlo.digital_source import source_from_release, source_from_url, source_from_urls
+    from mlo.paths import DEFAULT_DIGITAL_SOURCE
+    from mlo.tagtext import canonical_text
+
+    cfg = cfg or {}
+    out = {"state": SOURCE_NO_TRACKS, "value": "", "from": "", "media": "",
+           "tracks": 0, "missing": 0, "written": 0, "failed": 0,
+           "default": str(cfg.get("digital_media_source_value")
+                          or DEFAULT_DIGITAL_SOURCE).strip() or DEFAULT_DIGITAL_SOURCE}
+    files = _audio_files(album_dir)
+    if not files:
+        return out
+    rows, media_values = [], []
+    for path in files:
+        try:
+            af = AudioFile(path)
+        except Exception:
+            out["failed"] += 1
+            continue
+        if af.audio is None:
+            out["failed"] += 1
+            continue
+        media = str(af.get_tag("MEDIA") or "").strip()
+        source = str(af.get_tag("SOURCE") or "").strip()
+        rows.append((path, af, source))
+        if media:
+            media_values.append(canonical_text("MEDIA", media))
+        if not source:
+            out["missing"] += 1
+    out["tracks"] = len(rows)
+    unique = sorted({m for m in media_values if m})
+    out["media"] = unique[0] if len(unique) == 1 else ", ".join(unique)
+    if out["media"] != "Digital Media":
+        # The grader requires a SOURCE only here, and script 1 removes one from
+        # every other medium: an import has nothing to settle.
+        out["state"] = SOURCE_NOT_DIGITAL
+        return out
+    resolved, origin = "", ""
+    for candidate, source_from in ((value, "value"),
+                                   (str(provider or "").strip(), "provider"),
+                                   (source_from_url(url), "release")):
+        if str(candidate or "").strip():
+            resolved, origin = str(candidate).strip(), source_from
+            break
+    if not resolved:
+        rel = dict(release or {})
+        if rel and not (rel.get("relations") or rel.get("urls")
+                        or rel.get("url") or rel.get("source")
+                        or rel.get("provider")):
+            rel["relations"] = _release_relations_mb(rel)
+        resolved = source_from_release(rel)
+        if resolved:
+            origin = "release"
+    out["value"], out["from"] = resolved, origin
+    if dry or not resolved:
+        out["state"] = SOURCE_SUGGESTED if resolved else SOURCE_ASKED
+        return out
+    wrote = 0
+    for path, af, existing in rows:
+        if existing:
+            continue
+        if not should_write_audio_tag(cfg, "SOURCE", filepath=path):
+            continue
+        try:
+            defer = hasattr(af, "defer_save")
+            if defer:
+                af.defer_save(True)
+            ok = bool(af.set_tag("SOURCE", resolved))
+            if defer and af.defer_save(False) is False:
+                ok = False
+            if ok:
+                wrote += 1
+            else:
+                out["failed"] += 1
+        except Exception:
+            out["failed"] += 1
+    out["written"] = wrote
+    if wrote:
+        out["state"] = SOURCE_WRITTEN
+    elif out["missing"]:
+        # The value was known and the tracks still lack it: either the write
+        # gate refused every one (`audio_tag_writes` has SOURCE off for this
+        # filetype) or the container refused the write. The two are different
+        # facts and the counts tell them apart.
+        out["state"] = "failed" if out["failed"] else SOURCE_GATED
+    else:
+        out["state"] = SOURCE_PRESENT
+    return out
+
+# What an import says when it removed lyrics it cannot use. ONE sentence, for
+# the import's own note (`chain_summary`) and the wizard's Finish line: the
+# user has to know their lyrics are gone and WHY, or they find out from the
+# grader.
+def _album_lyric_verdict(album_dir, cfg):
+    """The files whose stored lyrics the app's OWN grade still rejects.
+
+    `mlo.grader._grade_album` is the single opinion about what "optimally
+    formatted" means — the function that produces "Lyrics not optimally
+    formatted (run Lyrics script)" — so it is asked here rather than
+    reimplemented: any second detector would be exactly the drift this module
+    exists to prevent. A track is named only when it HAS a lyric (the grade's
+    own `lyrics_embedded` / `lyrics_lrc` flags) and the grade still flags it:
+    a track with no lyrics at all is "Missing lyrics", a different fact the
+    lyrics family already reports.
+
+    Run with the import's own lyric settings, and never a reason to fail an
+    import: a grade that cannot run answers nothing.
+    """
+    try:
+        from mlo.grader import _grade_album
+        res = _grade_album(
+            album_dir, str(cfg.get("lyrics_format", "EMBEDDED")).upper(), cfg)
+    except Exception:
+        traceback.print_exc()
+        return []
+    out = []
+    for track in (res or {}).get("tracks") or []:
+        if "LYRICS" not in (track.get("issues") or []):
+            continue
+        if not (track.get("lyrics_embedded") or track.get("lyrics_lrc")):
+            continue
+        name = str(track.get("file") or "")
+        if name:
+            out.append(os.path.join(album_dir, name))
+    return out
+
+
+LYRICS_UNTIMED_DROPPED = (
+    "untimed lyrics were removed: this install requires synced lyrics "
+    "(lyrics_allow_plain is off) and no script can time a lyric that arrived "
+    "without timestamps — the fetch replaced them where a source had the "
+    "track, otherwise fetch lyrics for it or allow plain lyrics in "
+    "Settings → Lyrics")
+
+# The same sentence for the OTHER way a lyric is unusable: it is timed, but the
+# app's own formatting check still fails it after the formatter has run. The
+# message it would leave behind ("Lyrics not optimally formatted (run Lyrics
+# script)") names a script that cannot help, so the import removes it and says
+# what it did rather than hand the user a dead end.
+LYRICS_UNFORMATTABLE_DROPPED = (
+    "lyrics were removed: they are not in the form this install's grading "
+    "check asks for and the Lyrics script cannot make them so — fetch lyrics "
+    "for those tracks instead")
+
+def settle_digital_lyrics(album_dir, cfg=None, *, chain=None, dry=False):
+    """Drop the lyrics an import cannot use, and say how many went.
+
+    TWO facts decide it, both the install's own:
+
+    * ``lyrics_allow_plain`` off (the default) means an UNTIMED lyric is one
+      the app's own grader fails — "Lyrics not optimally formatted (run Lyrics
+      script)", a message no script can act on, because nothing can invent a
+      timestamp the provider did not state. The provider chain already refuses
+      to STORE one in that state (`mlo.lyrics_providers._accept`), so the only
+      way an album ends up with one is that it ARRIVED carrying it — which is
+      exactly what a download does, and what a manual import used to keep.
+    * a lyric that is TIMED but still fails the grader's own formatting check
+      (`_lyrics_are_formatted`, i.e. `mlo.grader._lyrics_formatted`) after the
+      formatter's own per-file pass has run over it — a stacked "[a][b]text"
+      line is the usual one. Script 1 cannot repair it either, so it is the
+      same dead end under the same message; `unformatted` counts these files
+      apart from the untimed ones the count above reports.
+    * the import must be about to FETCH (script 13 in *chain*, the family not
+      kept for the user). With nothing to put in the lyric's place, removing it
+      would turn one grading failure into another; the honest report there is
+      the family's own ("lyrics were not fetched…", see `_skipped_families`).
+
+    The rule itself is `mlo.lyrics.stored_lyrics_kind`'s — the same parser the
+    grader, the fetch and the UI's own lyric-kind mark read — so "plain" here
+    and "plain" everywhere else cannot drift. Synced lyrics are never touched,
+    a kept lyrics family is never touched, and the embedded lyric, its ``.lrc``
+    sidecar and the transliteration/translation derived from it go together
+    (the same three `drop_arrived_values` clears, by the same helper).
+
+    Returns ``{"state", "checked", "dropped", "unformatted", "kept", "failed",
+    "tracks", "allow_plain", "fetch"}`` — *unformatted* is how many of
+    *dropped* were timed but not in the form the grade asks for. *state* is one
+    of:
+
+        cleaned      the unusable lyrics were removed (*dropped* files)
+        would-clean  a *dry* call: that many WOULD go (nothing was touched)
+        ok           nothing was unusable — every lyric is timed (or none)
+        allow-plain  untimed lyrics are the install's own answer: kept
+        no-fetch     script 13 is not in the chain (or the family is kept):
+                     nothing was removed, the import reports the skip instead
+        no-tracks    nothing to walk
+        failed       some files' tags could not be read (counted, never hidden)
+    """
+    from mlo import import_policy
+    from mlo.audio import AudioFile
+    from mlo.config import should_write_audio_tag
+    from mlo.lyrics import _lrc_for, stored_lyrics_kind
+
+    cfg = cfg or {}
+    chain = chain_for(cfg) if chain is None else list(chain)
+    allow_plain = bool(cfg.get("lyrics_allow_plain", False))
+    fetch = 13 in chain and "lyrics" not in import_policy.review_families(cfg)
+    out = {"state": "", "checked": 0, "dropped": 0, "unformatted": 0,
+           "kept": 0, "failed": 0, "tracks": [], "allow_plain": allow_plain,
+           "fetch": bool(fetch)}
+    files = _audio_files(album_dir)
+    if not files:
+        out["state"] = "no-tracks"
+        return out
+    if allow_plain:
+        out["state"] = "allow-plain"
+        out["checked"] = len(files)
+        return out
+    if not fetch:
+        out["state"] = "no-fetch"
+        out["checked"] = len(files)
+        return out
+
+    def _one(path):
+        """One file: "dropped", "kept", "none" or "failed".
+
+        *drop* ("dropped") is only ever returned when the file's own lyric was
+        really removed — a dry call reports "would" instead, so a count can
+        never claim a write that did not happen.
+        """
+        try:
+            af = AudioFile(path)
+            if af.audio is None:
+                return "failed"
+            lrc_path = _lrc_for(path)
+            try:
+                with open(lrc_path, "r", encoding="utf-8", errors="replace") as fh:
+                    lrc_text = fh.read()
+            except OSError:
+                lrc_text = None
+            embedded = af.get_lyrics() or None
+            kind = stored_lyrics_kind(embedded, lrc_text)
+            if kind is None:
+                return "none"
+            if not should_write_audio_tag(cfg, "LYRICS", filepath=path):
+                return "none"
+            if dry:
+                return "would"
+            if not all(hasattr(af, m) for m in ("has_tag", "delete_tag",
+                                                "delete_lyrics")):
+                # A stand-in AudioFile (a test double) has no container to
+                # clear: nothing was removed, and the caller hears "kept".
+                return "none"
+            unusable = kind == "plain"
+            reason = "untimed" if unusable else ""
+            if not unusable:
+                # FORMAT FIRST, with the very script the grader names: the
+                # Lyrics formatter's own per-file pass — what "run Lyrics
+                # script" means. Whether that was ENOUGH is not decided here:
+                # pass two asks the app's own grade (`_album_lyric_verdict`),
+                # so this import keeps exactly the lyrics the grade accepts.
+                try:
+                    from mlo.lyrics import _process_lyrics_for_audio
+                    _process_lyrics_for_audio(path, cfg)
+                except Exception:
+                    traceback.print_exc()
+                return "none"
+            removed = bool(str(embedded or "").strip())
+            if removed:
+                af.delete_lyrics()
+            if os.path.isfile(lrc_path):
+                os.remove(lrc_path)
+                removed = True
+            if not removed:
+                return "none"
+            try:
+                from mlo import lyrics_xlit
+                for kind in ("TRANSLITERATION", "TRANSLATION"):
+                    lyrics_xlit._drop_stored_transforms(af, path, kind)
+            except Exception:
+                traceback.print_exc()
+            if dry:
+                return "would-unformatted" if reason == "unformatted" else "would"
+            return "dropped-unformatted" if reason == "unformatted" else "dropped"
+        except Exception:
+            traceback.print_exc()
+            return "failed"
+
+    workers = worker_count(cfg, default=8, maximum=8, items=len(files))
+    with ThreadPoolExecutor(max_workers=workers) as ex:
+        outcomes = list(ex.map(_one, files))
+    for path, row in zip(files, outcomes):
+        out["checked"] += 1
+        if row in ("dropped", "would", "dropped-unformatted", "would-unformatted"):
+            out["dropped"] += 1
+            if "unformatted" in row:
+                out["unformatted"] += 1
+            out["tracks"].append(path)
+        elif row == "failed":
+            out["failed"] += 1
+        else:
+            out["kept"] += 1
+    if out["dropped"]:
+        out["state"] = "would-clean" if dry else "cleaned"
+    elif out["failed"]:
+        out["state"] = "failed"
+    else:
+        out["state"] = "ok"
+
+    # PASS TWO — the lyrics the formatter could not make acceptable. Asked of
+    # the app's OWN grade rather than a second opinion about formatting: the
+    # grade flags exactly the tracks whose stored lyric fails
+    # `_lyrics_formatted` or one of the checks beside it (a stacked
+    # "[a][b]text" line is the usual one), and a track that still carries a
+    # lyric while the grade calls it bad is a track this import cannot finish
+    # with. Removing them is what makes "Lyrics not optimally formatted (run
+    # Lyrics script)" impossible to leave behind — the script it names is one
+    # that cannot help — and the count says how many went.
+    if not dry:
+        for path in _album_lyric_verdict(album_dir, cfg):
+            if path in out["tracks"]:
+                continue
+            try:
+                af = AudioFile(path)
+                if af.audio is None or not all(
+                        hasattr(af, m) for m in ("has_tag", "delete_tag",
+                                                 "delete_lyrics")):
+                    continue
+                removed = bool(str(af.get_lyrics() or "").strip())
+                if removed:
+                    af.delete_lyrics()
+                lrc_path = _lrc_for(path)
+                if os.path.isfile(lrc_path):
+                    os.remove(lrc_path)
+                    removed = True
+                if not removed:
+                    continue
+                try:
+                    from mlo import lyrics_xlit
+                    for kind in ("TRANSLITERATION", "TRANSLATION"):
+                        lyrics_xlit._drop_stored_transforms(af, path, kind)
+                except Exception:
+                    traceback.print_exc()
+                out["dropped"] += 1
+                out["unformatted"] += 1
+                out["tracks"].append(path)
+                out["state"] = "cleaned"
+            except Exception:
+                traceback.print_exc()
+                out["failed"] += 1
+    return out
+
+def settle_digital_import(album_dir, cfg=None, *, release=None, provider="",
+                          value="", chain=None, metadata=False, dry=False):
+    """The THREE things a digital release's import settles beyond the chain.
+
+    ONE entry point, called by the pipeline (``_finish_album``) and by the
+    wizard's own route, so a manual import and an unattended one cannot settle
+    the same release differently:
+
+    * **SOURCE** — `stamp_album_source`, i.e. the value the release or the
+      acquisition states, else the ``source`` gap the prompt mechanism asks
+      about (never an invented one);
+    * **the lyrics it cannot use** — `settle_digital_lyrics`, i.e. an arrived
+      untimed lyric when this install requires synced ones and the fetch will
+      run;
+    * **the album description** (*metadata*) — `run_metadata_step`, the
+      import's own artist/album description step, i.e. the same machinery the
+      album page's fetch uses. Only the wizard's route asks for it here: the
+      pipeline runs that step in its own file pool, in parallel with the
+      lookups above.
+
+    Never raises: each half reports its own state.
+    """
+    cfg = cfg or {}
+    out = {"path": os.path.normpath(str(album_dir))}
+    try:
+        out["source"] = stamp_album_source(album_dir, cfg, value=value,
+                                           release=release, provider=provider,
+                                           dry=dry)
+    except Exception:
+        traceback.print_exc()
+        out["source"] = {"state": "failed"}
+    try:
+        out["lyrics"] = settle_digital_lyrics(album_dir, cfg, chain=chain, dry=dry)
+    except Exception:
+        traceback.print_exc()
+        out["lyrics"] = {"state": "failed"}
+    if metadata:
+        try:
+            out["metadata"] = run_metadata_step(album_dir, cfg)
+        except Exception:
+            traceback.print_exc()
+            out["metadata"] = {"staged": False, "applied": {}}
+    return out
 
 # --------------------------------------------------------------------------- #
 # Identity tags for a release-driven import

@@ -40,6 +40,14 @@ use tauri_plugin_autostart::{MacosLauncher, ManagerExt as AutostartManagerExt};
 #[cfg(desktop)]
 use tauri_plugin_dialog::DialogExt;
 
+// The iOS Now Playing star (Control Center / lock screen): MediaPlayer's
+// `MPRemoteCommandCenter.likeCommand`. iOS alone has it — Android's
+// now-playing notification follows the webview's Media Session, and the
+// desktop targets have no such centre — so the module, and everything it
+// calls, is compiled for iOS only. See src/ios_like.rs for the whole story.
+#[cfg(target_os = "ios")]
+mod ios_like;
+
 /// The tray's "Start on Login" checkbox, kept in managed state so the
 /// click handler can re-sync its visual with the registry after toggling.
 #[cfg(desktop)]
@@ -59,6 +67,31 @@ fn pick_folder(app: tauri::AppHandle) -> Option<String> {
         .blocking_pick_folder()
         .and_then(|p| p.into_path().ok())
         .map(|p| p.to_string_lossy().to_string())
+}
+
+/// Tell the shell whether the track playing right now is favourited.
+///
+/// This is how the iOS Now Playing star (Control Center / lock screen) is kept
+/// in step with the app's own hearts: the web UI calls it whenever the current
+/// track or its liked state changes (`web/src/lib/iosFavs.ts`), and on iOS the
+/// answer is mirrored onto `MPFeedbackCommand.active` — the OS's "the user
+/// already likes this item", which is what draws the star filled rather than
+/// hollow (see src/ios_like.rs).
+///
+/// Registered on EVERY target, with an empty body off iOS, for one reason: the
+/// web UI must be able to make this call unconditionally. In a plain browser
+/// `invoke` is never reached at all (the bridge is inert), while the desktop
+/// and Android shells have no such star — there the call is a no-op, not an
+/// error, so nothing in the player has to know which shell it is running in.
+#[tauri::command]
+fn set_now_playing_liked(liked: bool) {
+    #[cfg(target_os = "ios")]
+    ios_like::set_liked(liked);
+    // Everywhere else there is nothing that mirrors the state; the argument is
+    // taken (and here explicitly dropped) so the command's signature — and
+    // therefore the web UI's call — is identical on all five targets.
+    #[cfg(not(target_os = "ios"))]
+    let _ = liked;
 }
 
 /// Show and focus the main window (tray click / tray menu "Open").
@@ -172,15 +205,17 @@ pub fn run() {
     // folder picker — all things with no mobile counterpart
     // (tauri-plugin-autostart does not even compile for Android or iOS, its
     // lib.rs is `#![cfg(not(any(target_os = "android", target_os = "ios")))]`).
-    // Mobile therefore registers no commands at all: nothing asks for a folder,
-    // and the server address is the UI's own setting on every target.
+    // The one command BOTH shells register is `set_now_playing_liked`: it is
+    // how the web UI tells the shell what the current track's favourite state
+    // is, and off iOS its body does nothing (see its docs above — the desktop
+    // and Android now-playing UI is the webview's own Media Session).
     #[cfg(desktop)]
     let builder = builder
         .plugin(tauri_plugin_autostart::init(
             MacosLauncher::LaunchAgent,
             None,
         ))
-        .invoke_handler(tauri::generate_handler![pick_folder])
+        .invoke_handler(tauri::generate_handler![pick_folder, set_now_playing_liked])
         .manage(AutostartItem(Mutex::new(None)))
         .setup(|app| {
             // The window opens visible (tauri.conf.json `visible: true`): its
@@ -204,13 +239,28 @@ pub fn run() {
     // may create, recreate, hide or reload this window — a webview torn down and
     // rebuilt is exactly the "the app keeps refreshing" a user sees as the app
     // restarting.
+    //
+    // The phone shells also register `set_now_playing_liked` — the same command
+    // the desktop shell does — because that is the ONE command a phone needs:
+    // the favourite state the web UI pushes for the OS's now-playing UI. On
+    // Android the body is empty (its media notification follows the webview's
+    // own Media Session); on iOS it drives the star registered just below.
     #[cfg(mobile)]
-    let builder = builder.setup(|app| {
-        if let Some(window) = app.get_webview_window("main") {
-            let _ = window.show();
-        }
-        Ok(())
-    });
+    let builder = builder
+        .invoke_handler(tauri::generate_handler![set_now_playing_liked])
+        .setup(|app| {
+            if let Some(window) = app.get_webview_window("main") {
+                let _ = window.show();
+            }
+            // iOS additionally owns the OS's Now Playing star. Setup is the one
+            // place the runtime hands us the app handle before any track can
+            // play, which is what the star's handler needs to reach the webview
+            // (see src/ios_like.rs). A failure here is logged, never fatal:
+            // losing the OS star must not cost the user the app.
+            #[cfg(target_os = "ios")]
+            ios_like::register(app.handle());
+            Ok(())
+        });
 
     builder
         .on_window_event(|_window, _event| {

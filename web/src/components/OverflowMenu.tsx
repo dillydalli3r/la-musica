@@ -80,7 +80,7 @@ export default function OverflowMenu({
         align={align}
         fixed={fixed}
         anchorRef={btnRef}
-        panelClass="w-64 overflow-y-auto overscroll-contain p-1.5"
+        panelClass="w-64 p-1.5"
       >
         {visible.map((s, si) => (
           <div key={si} className={si > 0 ? "mt-1 pt-1 border-t border-white/10" : ""}>

@@ -73,9 +73,11 @@ check("the album folders are found", "Album One" in names and "Album Two" in nam
 check("a disc parent is the album, not its discs", "Album With Discs" in names, str(names))
 check("a rip-evidence-only folder is not an album", "Peer Logs" not in names, str(names))
 
-# A running transfer is reported by slskd as a file path whose leaf names the
-# remote folder — soulseek._pending_album_folders() reads that tree.
-soulseek._pending_album_folders = lambda cfg=None: {"still downloading"}
+# A running transfer is reported by slskd as a peer plus a remote folder path,
+# and the local folder is `<peer>/<batch id>/<folder path>` —
+# soulseek._pending_album_folders() reads that tree (see _still_downloading for
+# the shapes it matches).
+soulseek._pending_album_folders = lambda cfg=None: {("peer", ("still downloading",))}
 check("a folder still downloading is not ready",
       "Still Downloading" not in sorted(os.path.basename(p) for p in soulseek.ready_albums(cfg)))
 soulseek._pending_album_folders = lambda cfg=None: set()

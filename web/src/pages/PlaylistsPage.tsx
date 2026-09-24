@@ -1,26 +1,30 @@
 import { useMemo, useRef, useState } from "react";
 import { Link, useNavigate } from "react-router-dom";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { ListFilter, ListMusic, Play, Plus, Upload } from "lucide-react";
+import { CloudDownload, ListFilter, ListMusic, Play, Plus, Upload } from "lucide-react";
 import { api } from "../api";
 import { toast, useStore } from "../store";
 import { EmptyState, PageLoading } from "../components/Badges";
 import PageHeader from "../components/PageHeader";
+import Modal from "../components/Modal";
 import DownloadButton from "../components/DownloadButton";
 import { ExportButton, usePlaylistTracks } from "../components/ExportDialog";
 import { TrackCover } from "../components/CoverImg";
 import FavHeart from "../components/FavHeart";
+import { useI18n } from "../lib/i18n";
 import { fmtDuration, GRID_SIZE_MIN } from "../lib/fmt";
-import type { Playlist } from "../types";
+import type { Playlist, StreamingImportResult } from "../types";
 
 export default function PlaylistsPage() {
   const qc = useQueryClient();
   const navigate = useNavigate();
   const { playNow } = useStore();
+  const { t } = useI18n();
   const { data: playlists, isLoading } = useQuery({ queryKey: ["playlists"], queryFn: api.playlists });
   const { data: lib } = useQuery({ queryKey: ["library"], queryFn: () => api.library() });
   const gridSize = (localStorage.getItem("mlo.gridSize") as "s" | "m" | "l" | null) ?? "m";
   const [newName, setNewName] = useState("");
+  const [importOpen, setImportOpen] = useState(false);
   const fileRef = useRef<HTMLInputElement>(null);
 
   // path -> tag-derived info (title/artist/album/duration/cover) shared by
@@ -165,6 +169,13 @@ export default function PlaylistsPage() {
             <button className="btn-ghost tap" onClick={() => fileRef.current?.click()}>
               <Upload className="h-4 w-4" /> Import .m3u8
             </button>
+            <button
+              className="btn-ghost tap"
+              onClick={() => setImportOpen(true)}
+              title="Read a public playlist from Deezer, Spotify, YouTube Music or Apple Music and make it a playlist here"
+            >
+              <CloudDownload className="h-4 w-4" /> {t("plimport.action")}
+            </button>
             {/* bulk actions on every playlist's tracks: nothing here is
                 "selected", so the page covers all of them */}
             <DownloadButton
@@ -202,6 +213,13 @@ export default function PlaylistsPage() {
           <h2 className="text-xs font-semibold uppercase tracking-wider text-zinc-500">Smart playlists</h2>
           {cardGrid(smart)}
         </div>
+      )}
+
+      {importOpen && (
+        <StreamingImportDialog
+          onClose={() => setImportOpen(false)}
+          onImported={() => refresh()}
+        />
       )}
     </div>
   );
@@ -309,5 +327,233 @@ function PlaylistGridCard({ playlist, trackMeta, onPlay }: {
         </div>
       </div>
     </div>
+  );
+}
+
+/** Import a playlist from a streaming service — the form, then the report.
+ *
+ * One call, two actions: **Check** is a dry run (`dry_run: true`: the same
+ * read and the same match, nothing created and nothing queued) and **Import**
+ * makes the playlist. The report is the point of both — how many rows the
+ * library has, and every row it does not with the reason it does not — and it
+ * stays on screen with a link to the created playlist.
+ *
+ * The parent-albums checkbox starts at the configured default
+ * (`playlist_import_parent_albums`, Settings → Streaming playlist import) and
+ * overrides it for this one import only. The other two settings that decide
+ * what an import does with a track the library lacks are shown as the notes
+ * they are, so what is about to happen is read here rather than guessed. */
+function StreamingImportDialog({ onClose, onImported }: {
+  onClose: () => void;
+  onImported: () => void;
+}) {
+  const { t } = useI18n();
+  const { data: cfg } = useQuery({ queryKey: ["config"], queryFn: api.config });
+  const [url, setUrl] = useState("");
+  const [name, setName] = useState("");
+  // null = "the configured default", so a config that arrives after the first
+  // render still decides the box — and the user's own click always wins.
+  const [parentAlbums, setParentAlbums] = useState<boolean | null>(null);
+  const [result, setResult] = useState<StreamingImportResult | null>(null);
+  const [error, setError] = useState("");
+  const [busy, setBusy] = useState<"" | "check" | "import">("");
+  const effectiveParentAlbums = parentAlbums ?? !!cfg?.playlist_import_parent_albums;
+  const queueTrackWishes = cfg?.playlist_import_unmatched === "wish";
+  const createEmpty = cfg?.playlist_import_create_empty !== false;
+
+  const run = async (dryRun: boolean) => {
+    if (!url.trim() || busy) return;
+    setBusy(dryRun ? "check" : "import");
+    setError("");
+    try {
+      const res = await api.playlistImportStreaming({
+        url: url.trim(),
+        name: name.trim(),
+        parentAlbums: effectiveParentAlbums,
+        dryRun,
+      });
+      setResult(res);
+      if (!dryRun) onImported();
+    } catch (e) {
+      setError(String(e));
+    } finally {
+      setBusy("");
+    }
+  };
+
+  const report = result?.report;
+  const unmatched = (report?.tracks ?? []).filter((r) => !r.matched);
+  const queuedAlbums = report?.parent_albums.queued ?? [];
+  const queuedTracks = report?.unmatched_tracks.queued ?? [];
+
+  return (
+    <Modal
+      onClose={onClose}
+      icon={CloudDownload}
+      title={t("plimport.title")}
+      subtitle={t("plimport.subtitle")}
+      width="max-w-lg"
+      footer={
+        <div className="flex flex-wrap justify-end gap-2">
+          <button className="btn-ghost" onClick={onClose}>
+            {t("plimport.close")}
+          </button>
+          <button
+            className="btn-ghost tap"
+            onClick={() => run(true)}
+            disabled={!url.trim() || !!busy}
+            title={t("plimport.check_help")}
+          >
+            {busy === "check" ? t("plimport.working") : t("plimport.check")}
+          </button>
+          <button className="btn-primary tap" onClick={() => run(false)} disabled={!url.trim() || !!busy}>
+            {busy === "import" ? t("plimport.working") : t("plimport.import")}
+          </button>
+        </div>
+      }
+    >
+      {/* One column, phone first: the dialog is the mobile path into this
+          feature, so nothing here is a wide row that has to scroll. */}
+      <div className="space-y-3">
+        <div>
+          <label className="label">{t("plimport.url")}</label>
+          <input
+            className="input"
+            autoFocus
+            inputMode="url"
+            autoComplete="off"
+            placeholder={t("plimport.url_placeholder")}
+            value={url}
+            onChange={(e) => setUrl(e.target.value)}
+            onKeyDown={(e) => {
+              if (e.key === "Enter" && url.trim() && !busy) run(false);
+            }}
+          />
+        </div>
+        <div>
+          <label className="label">{t("plimport.name")}</label>
+          <input
+            className="input"
+            placeholder={t("plimport.name_placeholder")}
+            value={name}
+            onChange={(e) => setName(e.target.value)}
+          />
+        </div>
+        <label className="flex items-start gap-2 cursor-pointer">
+          <input
+            type="checkbox"
+            className="mt-0.5"
+            checked={effectiveParentAlbums}
+            onChange={(e) => setParentAlbums(e.target.checked)}
+          />
+          <span className="text-xs text-zinc-300">
+            {t("plimport.parent_albums")}
+            <span className="block text-[11px] text-zinc-500 mt-0.5">{t("plimport.parent_albums_help")}</span>
+          </span>
+        </label>
+        {queueTrackWishes && (
+          <div className="text-[11px] text-zinc-500">{t("plimport.hint.wish")}</div>
+        )}
+        {!createEmpty && (
+          <div className="text-[11px] text-zinc-500">{t("plimport.hint.create_empty")}</div>
+        )}
+
+        {error && (
+          <div className="rounded-lg border border-red-500/40 bg-red-500/10 p-3 text-xs text-red-300 break-words">
+            <div className="font-medium">{t("plimport.failed")}</div>
+            <div className="mt-1">{error}</div>
+          </div>
+        )}
+
+        {report && (
+          <div className="space-y-3 border-t border-border pt-3">
+            <div className="rounded-lg border border-border bg-raise/40 p-3 text-xs space-y-1">
+              <div className="font-medium text-zinc-200">
+                {t("plimport.report_counts", { matched: report.matched, total: report.total })}
+              </div>
+              <div className="text-zinc-400">
+                {t("plimport.report_unmatched", { n: report.unmatched })}
+                {report.duplicates > 0 && ` · ${t("plimport.report_duplicates", { n: report.duplicates })}`}
+              </div>
+              <div className="text-zinc-400 break-words">{report.note}</div>
+            </div>
+
+            {unmatched.length > 0 && (
+              <div>
+                <div className="text-[10px] uppercase tracking-widest text-zinc-500">
+                  {t("plimport.report_unmatched_title")}
+                </div>
+                <ul className="mt-1 divide-y divide-border/60 rounded-lg border border-border overflow-hidden">
+                  {unmatched.map((r) => (
+                    <li key={r.index} className="px-3 py-2 text-xs">
+                      <div className="truncate text-zinc-200">
+                        {r.title || "—"}
+                        {r.artist && <span className="text-zinc-500"> · {r.artist}</span>}
+                      </div>
+                      <div className="truncate text-[11px] text-zinc-500" title={r.reason}>
+                        {r.album ? `${r.album} — ` : ""}
+                        {r.reason}
+                      </div>
+                    </li>
+                  ))}
+                </ul>
+              </div>
+            )}
+
+            {queuedAlbums.length > 0 && (
+              <div>
+                <div className="text-[10px] uppercase tracking-widest text-zinc-500">
+                  {t("plimport.report_queued_albums", { n: queuedAlbums.filter((q) => q.queued).length })}
+                </div>
+                <ul className="mt-1 divide-y divide-border/60 rounded-lg border border-border overflow-hidden">
+                  {queuedAlbums.map((q, i) => (
+                    <li key={i} className="px-3 py-2 text-xs">
+                      <div className="truncate text-zinc-200">
+                        {q.title}
+                        {q.artist && <span className="text-zinc-500"> · {q.artist}</span>}
+                      </div>
+                      <div className="truncate text-[11px] text-zinc-500" title={q.reason || q.note || q.error}>
+                        {q.error || q.reason || q.note || (q.queued ? t("plimport.queued") : "")}
+                      </div>
+                    </li>
+                  ))}
+                </ul>
+              </div>
+            )}
+
+            {queuedTracks.length > 0 && (
+              <div>
+                <div className="text-[10px] uppercase tracking-widest text-zinc-500">
+                  {t("plimport.report_queued_tracks", { n: queuedTracks.filter((q) => q.queued).length })}
+                </div>
+                <ul className="mt-1 divide-y divide-border/60 rounded-lg border border-border overflow-hidden">
+                  {queuedTracks.map((q, i) => (
+                    <li key={i} className="px-3 py-2 text-xs">
+                      <div className="truncate text-zinc-200">
+                        {q.title}
+                        {q.artist && <span className="text-zinc-500"> · {q.artist}</span>}
+                      </div>
+                      <div className="truncate text-[11px] text-zinc-500" title={q.note || q.error}>
+                        {q.error || q.note || (q.queued ? t("plimport.queued") : "")}
+                      </div>
+                    </li>
+                  ))}
+                </ul>
+              </div>
+            )}
+
+            {result?.playlist ? (
+              <Link
+                to={`/playlist/${result.playlist.id}`}
+                className="btn-primary tap inline-flex"
+                onClick={onClose}
+              >
+                {t("plimport.open_playlist")} · {result.playlist.name}
+              </Link>
+            ) : null}
+          </div>
+        )}
+      </div>
+    </Modal>
   );
 }

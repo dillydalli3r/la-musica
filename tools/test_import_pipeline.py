@@ -30,6 +30,7 @@ Run:  python tools/test_import_pipeline.py
 """
 import os
 import shutil
+import subprocess
 import sys
 import tempfile
 import threading
@@ -120,7 +121,7 @@ assert imports.chain_for({"import_auto_scripts": False}) == []
 # --------------------------------------------------------------------------- #
 # Registry + one script
 # --------------------------------------------------------------------------- #
-assert sorted(script_runners.RUNNERS) == list(range(1, 22)), sorted(script_runners.RUNNERS)
+assert sorted(script_runners.RUNNERS) == list(range(1, 23)), sorted(script_runners.RUNNERS)
 assert script_runners.RUNNERS[2][0] == "Format CUEs", script_runners.RUNNERS[2]
 assert script_runners.RUNNERS[2][1].__name__ == "run_format_cues", script_runners.RUNNERS[2]
 assert all(label for label, _ in script_runners.RUNNERS.values())
@@ -190,6 +191,40 @@ assert missing["chain"] == [4] and missing["errors"] == ["album folder not found
 assert missing["chain_off"] is False and missing["chained"] is False, missing
 # a result that says nothing about a chain claims nothing about one
 assert imports.chain_summary({"path": album}) == "", imports.chain_summary({"path": album})
+
+# ...and an import that ran NO chain still has to tell slskd to re-index the
+# library: the album just moved in and its files changed, while slskd serves
+# its boot-time view until it re-scans. A chain's own script runs do that
+# (server.script_runners refreshes once per run) — and they are the ONLY thing
+# that did, so with `import_auto_scripts` off (or a review stop) the album was
+# never indexed and never shared.
+import server.soulseek as _soulseek
+
+_refresh_calls = []
+_real_refresh = _soulseek.refresh_shares_soon
+_soulseek.refresh_shares_soon = lambda *a, **k: _refresh_calls.append(1)
+_REAL_RUNNERS_NOW = dict(script_runners.RUNNERS)
+script_runners.RUNNERS.update({5: ("Process images", _fine)})
+try:
+    imports.finish_album(staging_album("Refresh Off Album"), dict(CFG))
+    assert len(_refresh_calls) == 1, f"a no-chain import asked for a rescan once: {_refresh_calls}"
+    # the review stop is the other exit that runs no chain, and the album is in
+    # the library by then as well
+    _refresh_calls.clear()
+    imports.finish_album(staging_album("Refresh Review Album"),
+                         dict(CFG, import_autonomy="review"), force=True)
+    assert len(_refresh_calls) == 1, f"a review stop asked for a rescan once: {_refresh_calls}"
+    # ...and an import whose chain RAN does not ask a second time on top of the
+    # run's own refresh (that one call is script_runners' — see its own block)
+    _refresh_calls.clear()
+    imports.finish_album(staging_album("Refresh Chained Album"),
+                         dict(CFG, import_auto_scripts=True, import_scripts=[5]))
+    assert len(_refresh_calls) == 1, (
+        f"exactly the run's own refresh, not the finish's as well: {_refresh_calls}")
+finally:
+    _soulseek.refresh_shares_soon = _real_refresh
+    script_runners.RUNNERS.clear()
+    script_runners.RUNNERS.update(_REAL_RUNNERS_NOW)
 
 # --------------------------------------------------------------------------- #
 # EVERY path runs the chain on the album — the auto-import included
@@ -1303,3 +1338,167 @@ shutil.rmtree(MOVE_MF, ignore_errors=True)
 shutil.rmtree(ROOT, ignore_errors=True)
 shutil.rmtree(SL_FILES, ignore_errors=True)
 print("import pipeline: all assertions passed")
+
+# --------------------------------------------------------------------------- #
+# A digital release's own three answers (server.imports.settle_digital_import)
+# --------------------------------------------------------------------------- #
+# What the owner's grading messages were about: a folder of audio that arrived
+# with no SOURCE, no album description and lyrics a script cannot repair.
+# Before this step a manual import landed all three as grading failures —
+# "Missing SOURCE (required for Digital Media)", "Lyrics not optimally
+# formatted (run Lyrics script)" and "Album description missing — fetch one on
+# the album page". What is asserted here is the SETTLE, the one entry point
+# both the pipeline and the wizard's Finish call:
+#
+#   * SOURCE asks (never invents) when nothing states one, and is written to
+#     every track that lacks it once the release or the user answers;
+#   * an untimed lyric — and one the formatter cannot canonicalise — is removed
+#     when the chain will fetch, and NOT touched when it will not (the honest
+#     report is the family's own skip there);
+#   * the album description comes from the import's own metadata step, whose
+#     "nothing found" answer is reported rather than left to the grade.
+print("== the digital release's own answers ==")
+
+DIG_MF = os.path.join(ROOT, "digital_music")
+DIG_LIB = os.path.join(DIG_MF, "Artists")
+DIG_ALBUM = os.path.join(DIG_LIB, "Digital Album")
+os.makedirs(DIG_ALBUM)
+DIG_CFG = {"music_folder": DIG_MF, "import_auto_scripts": False,
+           "import_scripts": [], "advisory_auto_fetch": False,
+           "metadata_auto_fetch": False, "cover_auto_fetch": False,
+           "rym_links_auto": False, "instrumental_auto_fetch": False}
+DIG_PLAIN = "Setting sun on the neon drift\na chrome horizon"
+DIG_MERGED = "[00:00.00][00:45.53]Setting  sun  on the neon drift\n[00:46.86]Against her skin"
+
+
+FLAC_EXE = None
+_deps = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+                     ".dependencies")
+if os.path.isdir(_deps):
+    for _entry in sorted(os.listdir(_deps)):
+        if _entry.lower().startswith("flac"):
+            _cand = os.path.join(_deps, _entry, "flac.exe")
+            if os.path.isfile(_cand):
+                FLAC_EXE = _cand
+                break
+if FLAC_EXE is None:
+    FLAC_EXE = shutil.which("flac")
+assert FLAC_EXE, "flac.exe not found — the digital-release case needs real FLACs"
+
+
+def _dig_flac(name, tags):
+    path = os.path.join(DIG_ALBUM, name)
+    wav = path + ".wav"
+    with wave.open(wav, "w") as w:
+        w.setnchannels(2)
+        w.setsampwidth(2)
+        w.setframerate(44100)
+        w.writeframes(b"\x00\x00\x00\x00" * 4410)
+    subprocess.run([FLAC_EXE, "-s", "-f", "-8", "-o", path, wav],
+                   check=True, capture_output=True)
+    os.remove(wav)
+    from mutagen.flac import FLAC
+    f = FLAC(path)
+    for k, v in tags.items():
+        f[k] = [v]
+    f.save()
+    return path
+
+
+_dig_files = [
+    _dig_flac("1-01 - plain.flac", {
+        "TITLE": "Plain", "ARTIST": "Digital Artist", "ALBUMARTIST": "Digital Artist",
+        "ALBUM": "Digital Album", "TRACKNUMBER": "1", "DISCNUMBER": "1",
+        "MEDIA": "Digital Media", "INSTRUMENTAL": "0", "LYRICS": DIG_PLAIN}),
+    _dig_flac("1-02 - merged.flac", {
+        "TITLE": "Merged", "ARTIST": "Digital Artist", "ALBUMARTIST": "Digital Artist",
+        "ALBUM": "Digital Album", "TRACKNUMBER": "2", "DISCNUMBER": "1",
+        "MEDIA": "Digital Media", "INSTRUMENTAL": "0", "LYRICS": DIG_MERGED}),
+]
+
+
+def _dig_issues():
+    from mlo.grader import _grade_album
+    res = _grade_album(DIG_ALBUM, "EMBEDDED", DIG_CFG) or {}
+    return res.get("issues") or {}
+
+
+_before = _dig_issues()
+assert "Missing SOURCE (required for Digital Media)" in _before, sorted(_before)
+assert "Lyrics not optimally formatted (run Lyrics script)" in _before, sorted(_before)
+assert "Album description missing — fetch one on the album page" in _before, sorted(_before)
+
+# the suggestion: nothing states a source, so it is ASKED, with the config's
+# own default for the field — and nothing is written
+_sug = imports.stamp_album_source(DIG_ALBUM, DIG_CFG, dry=True)
+assert _sug["state"] == "asked" and _sug["value"] == "" and _sug["default"], _sug
+assert _sug["missing"] == 2 and _sug["written"] == 0, _sug
+assert _dig_issues().get("Missing SOURCE (required for Digital Media)"), "a dry ask writes nothing"
+
+# the release's own store URL is evidence the pipeline MAY write
+_derived = imports.stamp_album_source(
+    DIG_ALBUM, DIG_CFG, release={"id": "", "urls": ["https://qobuz.com/album/x"]})
+assert _derived["state"] == "written" and _derived["value"] == "Qobuz", _derived
+assert _derived["from"] == "release" and _derived["written"] == 2, _derived
+assert "Missing SOURCE (required for Digital Media)" not in _dig_issues(), _dig_issues()
+
+# the user's own answer fills what the release did not
+from mutagen.flac import FLAC as _MFLAC
+for _p in _dig_files:
+    _f = _MFLAC(_p)
+    del _f["SOURCE"]
+    _f.save()
+_answered = imports.stamp_album_source(DIG_ALBUM, DIG_CFG, value="Bandcamp")
+assert _answered["state"] == "written" and _answered["value"] == "Bandcamp", _answered
+assert all(_MFLAC(p).get("SOURCE") == ["Bandcamp"] for p in _dig_files)
+
+# the lyrics: the formatter cannot repair either lyric, and the fetch will run
+assert imports.settle_digital_lyrics(DIG_ALBUM, DIG_CFG, chain=[1, 13], dry=True) \
+    ["state"] == "would-clean"
+_no_fetch = imports.settle_digital_lyrics(DIG_ALBUM, DIG_CFG, chain=[1])
+assert _no_fetch["state"] == "no-fetch" and _no_fetch["dropped"] == 0, _no_fetch
+assert _dig_issues().get("Lyrics not optimally formatted (run Lyrics script)"), \
+    "a chain without the fetch leaves the lyrics alone"
+_cleaned = imports.settle_digital_lyrics(DIG_ALBUM, DIG_CFG, chain=[1, 13])
+assert _cleaned["state"] == "cleaned" and _cleaned["dropped"] == 2, _cleaned
+assert _cleaned["unformatted"] == 1, _cleaned  # the merged one the formatter cannot fix
+assert "Lyrics not optimally formatted (run Lyrics script)" not in _dig_issues(), _dig_issues()
+# …and with plain lyrics allowed by the install, nothing is theirs to remove
+from mutagen.flac import FLAC as _MFLAC2
+_MFLAC2(_dig_files[0])["LYRICS"] = DIG_PLAIN
+_MFLAC2(_dig_files[0]).save()
+_allowed = imports.settle_digital_lyrics(DIG_ALBUM, dict(DIG_CFG, lyrics_allow_plain=True),
+                                         chain=[1, 13])
+assert _allowed["state"] == "allow-plain" and _allowed["dropped"] == 0, _allowed
+
+# the description: the import's OWN metadata step, and its honest answer when
+# nothing is found (no provider reachable / nothing to find)
+from server import discovery as _dig_discovery
+_real_album_description = _dig_discovery.album_description
+try:
+    _dig_discovery.album_description = lambda *a, **k: {}
+    _meta_cfg = dict(DIG_CFG, metadata_auto_fetch=True)
+    _nope = imports.settle_digital_import(DIG_ALBUM, _meta_cfg, chain=[1, 13], metadata=True)
+    assert _nope["metadata"]["applied"]["album_description"] is None, _nope["metadata"]
+    assert "Album description missing — fetch one on the album page" in _dig_issues(), \
+        "an album nothing can describe still grades as missing — and the settle says so"
+    _dig_discovery.album_description = lambda *a, **k: {
+        "text": "A digital release described by its own source.",
+        "source": "wikipedia", "source_url": "https://en.wikipedia.org/wiki/x"}
+    _got = imports.settle_digital_import(DIG_ALBUM, _meta_cfg, chain=[1, 13], metadata=True)
+    assert _got["metadata"]["applied"]["album_description"], _got["metadata"]
+    assert "Album description missing — fetch one on the album page" not in _dig_issues(), \
+        _dig_issues()
+finally:
+    _dig_discovery.album_description = _real_album_description
+for _probe in ("Missing SOURCE (required for Digital Media)",
+               "Lyrics not optimally formatted (run Lyrics script)",
+               "Album description missing — fetch one on the album page"):
+    assert _probe not in _dig_issues(), (_probe, _dig_issues())
+
+# the whole thing again through the import itself: a chain-less import still
+# settles both halves and reports them (there is no wizard-only path)
+_res = imports.finish_album(DIG_ALBUM, DIG_CFG)
+assert _res["settled"]["source"]["state"] in ("present", "written", "asked"), _res["settled"]
+assert _res["settled"]["lyrics"]["state"] == "no-fetch", _res["settled"]
+shutil.rmtree(DIG_MF, ignore_errors=True)

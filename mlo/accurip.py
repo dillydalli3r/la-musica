@@ -911,6 +911,25 @@ def run_generate_accurip(config):
             """A line for the run's log: ``info``, ``warn`` or ``error``."""
             row["notes"].append((level, text))
 
+        # A PARTIAL album's .accurip describes a disc this folder only holds
+        # part of. Generating one from the tracks that are here would ask
+        # AccurateRip about a disc of one track and write its answer over the
+        # rip's own file — a lie about the eleven tracks that are missing, and
+        # one that reads perfectly current afterwards. The stored file is the
+        # whole disc's evidence, so it is left exactly as it is.
+        try:
+            from .discs import album_expected_state
+            state = album_expected_state(album_dir)
+        except Exception:
+            state = None
+        if state and state["missing"]:
+            row["skipped"] += 1
+            note("info", f"  {os.path.basename(album_dir)}: partial album "
+                         f"({state['present']} of {state['total']} tracks "
+                         f"present) — its .accurip describes the whole disc and "
+                         f"is not regenerated from a slice of it")
+            return row
+
         discs = album_discs(album_dir)
         if not discs:
             # Single-disc fallback: an album whose tracks carry no D-TT prefix

@@ -85,7 +85,7 @@ def have_numpy():
 
 
 def measure_track(path, ffmpeg_exe, *, block_seconds=BLOCK_SECONDS,
-                  sample_rate=MEASURE_SAMPLE_RATE):
+                  sample_rate=MEASURE_SAMPLE_RATE, channels=0):
     """The track's DR (the loudness-war value), or None.
 
     None means the meter has no value for the file at all — silent, shorter
@@ -93,18 +93,28 @@ def measure_track(path, ffmpeg_exe, *, block_seconds=BLOCK_SECONDS,
     which, which is what the caller logs.
     """
     return measure_track_detailed(path, ffmpeg_exe, block_seconds=block_seconds,
-                                  sample_rate=sample_rate).dr
+                                  sample_rate=sample_rate,
+                                  channels=channels).dr
 
 
 def measure_track_detailed(path, ffmpeg_exe, *, block_seconds=BLOCK_SECONDS,
-                           sample_rate=MEASURE_SAMPLE_RATE):
-    """measure_track(), plus why there is no value when there is none."""
+                           sample_rate=MEASURE_SAMPLE_RATE, channels=0):
+    """measure_track(), plus why there is no value when there is none.
+
+    *channels* is the channel count the caller already knows (an open handle's
+    own stream info — see :func:`handle_channels`); 0 asks for it to be probed
+    with ffprobe, which is one process spawn per track. The batch pass holds
+    the handle already, so it passes the number and pays for the probe only
+    when the container states none.
+    """
     if np is None:
         return TrackDR(None, NUMPY_REASON, True)
 
-    channels, why = probe_channels(path, ffmpeg_exe)
-    if not channels:
-        return TrackDR(None, why, True)
+    channels = int(channels or 0)
+    if channels < 1:
+        channels, why = probe_channels(path, ffmpeg_exe)
+        if not channels:
+            return TrackDR(None, why, True)
 
     samples_per_block = max(1, int(block_seconds * sample_rate))
     block_bytes = samples_per_block * _SAMPLE_BYTES * channels
@@ -189,6 +199,29 @@ def album_dr(values):
     if not valid:
         return None
     return int(np.round(np.mean(valid)))
+
+
+def handle_channels(af):
+    """The channel count an already-open handle states, else 0.
+
+    The DR pass opens every track anyway (to read and write its tags), and
+    mutagen's stream info is the app's OWN answer for "channels" — the tech
+    panel reads the same field through `server.tagcache`, and both parse the
+    container header. So the pass asks the handle it holds instead of spawning
+    one ffprobe per track (one process per file, on a library-wide run, for a
+    number the file had already handed us). A handle that states nothing — an
+    unopened container, a video container whose tech came from ffprobe, a
+    format mutagen has no stream info for — returns 0 and the caller probes,
+    exactly as before.
+    """
+    try:
+        if getattr(af, "is_video", False):
+            return 0
+        info = getattr(getattr(af, "audio", None), "info", None)
+        channels = int(getattr(info, "channels", 0) or 0)
+    except (TypeError, ValueError, AttributeError):
+        return 0
+    return channels if channels > 0 else 0
 
 
 def probe_channels(path, ffmpeg_exe):

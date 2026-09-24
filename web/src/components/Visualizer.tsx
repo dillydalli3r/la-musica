@@ -1,5 +1,6 @@
 import { useEffect, useRef } from "react";
 import { MAX_DB, MIN_DB, activeAnalyser } from "../lib/analyser";
+import { currentAccent, subscribeAccent } from "../lib/accent";
 
 /** Height-mapping constants, all in dBFS. FLOOR_DB is the empty baseline,
  *  CEIL_DB the full height (full scale), TILT_DB the lift of the top band
@@ -125,17 +126,23 @@ export default function Visualizer({ playing, className = "", ink }: {
     const ctx = canvas.getContext("2d");
     if (!ctx) return;
 
-    const accentRoot = getComputedStyle(document.documentElement)
-      .getPropertyValue("--accent")
-      .trim() || "255 255 255";
-    const accentSoftRoot = getComputedStyle(document.documentElement)
-      .getPropertyValue("--accent-soft")
-      .trim() || "212 212 216";
     // The strip's own palette: the app's accent, or — when the caller says the
     // bars are drawn over ARTWORK — the same two tones the lyrics use, so a
     // bright cover gets dark bars and a dark one gets white (see `ink`).
-    const accent = ink === "dark" ? "9 9 11" : ink === "light" ? "255 255 255" : accentRoot;
-    const accentSoft = ink === "dark" ? "63 63 70" : ink === "light" ? "244 244 245" : accentSoftRoot;
+    //
+    // Read from the live custom properties every time, including on an accent
+    // change: the tones used to be read ONCE here and cached in the closure, so
+    // a colour picked in Settings left an already-mounted strip painting the
+    // old one until a reload.
+    const palette = () => {
+      const [accentRoot, accentSoftRoot] = currentAccent();
+      return ink === "dark"
+        ? (["9 9 11", "63 63 70"] as const)
+        : ink === "light"
+        ? (["255 255 255", "244 244 245"] as const)
+        : ([accentRoot, accentSoftRoot] as const);
+    };
+    let [accent, accentSoft] = palette();
     // Read once: a matchMedia change mid-session is not worth a listener for a
     // halo this small (the ambient background re-reads its own on every open).
     const motion = !window.matchMedia("(prefers-reduced-motion: reduce)").matches;
@@ -144,6 +151,21 @@ export default function Visualizer({ playing, className = "", ink }: {
     let onTimer = false;
     let freq: Uint8Array | null = null;
     let lastIdle = 0;
+    // A frame the accent change asked for even though the strip is idle: an
+    // idle strip skips repainting by design (see the idle skip below), and a
+    // paused one at rest draws nothing at all, so without this the new colour
+    // would only arrive with the next track.
+    let repaint = false;
+    const unsubscribe = subscribeAccent(() => {
+      [accent, accentSoft] = palette();
+      repaint = true;
+      // An idle strip is asleep for IDLE_MS; wake it now, replacing that one
+      // timer rather than adding a second loop beside it.
+      if (onTimer) {
+        window.clearTimeout(handle);
+        handle = window.setTimeout(tick, 0);
+      }
+    });
 
     const tick = () => {
       const dpr = Math.min(2, window.devicePixelRatio || 1);
@@ -204,13 +226,14 @@ export default function Visualizer({ playing, className = "", ink }: {
       // only as a 4 Hz flash). An idle frame leaves the previous one on
       // screen.
       const now = performance.now();
-      if (synthetic && !resized) {
+      if (synthetic && !resized && !repaint) {
         if (now - lastIdle < IDLE_MS) return;
         if (atRest(levels.current, n)) {
           lastIdle = now;
           return;
         }
       }
+      repaint = false;
       lastIdle = now;
       ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
       ctx.clearRect(0, 0, w, h);
@@ -278,6 +301,7 @@ export default function Visualizer({ playing, className = "", ink }: {
 
     handle = requestAnimationFrame(tick);
     return () => {
+      unsubscribe();
       if (onTimer) window.clearTimeout(handle);
       else cancelAnimationFrame(handle);
     };

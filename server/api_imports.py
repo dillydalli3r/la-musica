@@ -22,12 +22,17 @@ names:
          reason}) so a container this app cannot tag is named, not silent.
 
     POST /api/import/acoustid/submit  {paths: [str], staged?: bool, confirm: bool}
-         -> {available, note, ok, code, submitted, failed, skips,
-             submissions, tracks}
-         Publishes the ACOUSTID_FINGERPRINT/ID pair the files already carry to
-         AcoustID (nothing is written locally). `confirm` is required — it is
-         a public, outward-facing submission — and a refused `acoustid_user_key`
-         answers in the service's own words.
+         -> {available, note, ok, code, submitted, known, failed, skips,
+             submissions, results, tracks}
+         Gives AcoustID the fingerprint + MusicBrainz recording id these files
+         state (nothing is written locally). `paths` are album folders OR single
+         track paths — a file path is THAT file, not the album it sits in.
+         `confirm` is required — it is a public, outward-facing submission — and
+         a refused `acoustid_user_key` answers in the service's own words with
+         nothing read or sent. `results` is the per-track report (accepted /
+         already_known / rejected / skipped, each with its own sentence); a pair
+         the service already links, or one this app already submitted, is never
+         re-sent.
 
     POST /api/import/finish           {paths: [str], force?: {script_id: bool}}
          -> {albums: [{path, scripts, chain, errors}]}
@@ -192,15 +197,25 @@ def import_acoustid(req: AcoustidRequest):
 
 @router.post("/api/import/acoustid/submit")
 def import_acoustid_submit(req: AcoustidSubmitRequest):
-    """Give AcoustID the fingerprints the files in these albums already carry.
+    """Give AcoustID the fingerprint + recording id the files in these paths state.
 
     The one outward-facing route of the AcoustID path: it submits to a public
-    database and writes NOTHING locally (the `ACOUSTID_ID` /
-    `ACOUSTID_FINGERPRINT` pair is read back off the files with `get_tag`).
+    database and writes NOTHING locally. `paths` are album folders or single
+    track paths — a track path is that track, and the album beside it stays out
+    of it. The fingerprint is the file's own `ACOUSTID_FINGERPRINT` or, when it
+    carries none, one taken from the AUDIO locally (fpcalc); the recording id is
+    the one the file names (`mlo.acoustid._recording_identity`: ACOUSTID_ID,
+    MUSICBRAINZ_TRACKID, or the recording MBID this app's naming script wrote
+    into the file name). A pair AcoustID already links — or that this app has
+    already submitted — is reported `already_known` and never re-sent, and a
+    file that names no recording is a named skip (a submission stores a
+    fingerprint WITH the recording it is).
+
     `confirm: true` is required — the UI asks on a second, explicitly-labelled
     press — and without it this route makes no request at all. `acoustid_user_key`
-    is the credential that makes it work; a key AcoustID refuses comes back in
-    its own words.
+    is the credential that makes it work; a key AcoustID refuses, or a config
+    without one, comes back in the service's own words (`available: false`,
+    `note`, `code`) with nothing read, fingerprinted or sent.
     """
     _require_manual()
     _cap(len(req.paths), MAX_PATHS, "paths")
@@ -324,3 +339,92 @@ def import_prompt_dismiss(req: DismissRequest):
     from server import import_autonomy
     _guard([req.path], req.staged)
     return {"ok": import_autonomy.clear(req.path, load_config())}
+
+
+# --------------------------------------------------------------------------- #
+# The digital release's own answers: SOURCE, the unusable lyrics, the
+# description. Both routes run the SAME functions `finish_album` does
+# (`server.imports.settle_digital_import` / `stamp_album_source`), because a
+# release imported by hand and one imported unattended must settle the same
+# way — the only difference is WHO the SOURCE question is asked of.
+# --------------------------------------------------------------------------- #
+class SettleRequest(BaseModel):
+    path: str
+    # The chain this finish is about to run — the wizard's own ticked boxes.
+    # It decides whether the lyrics half may remove an untimed lyric: with no
+    # fetch coming there is nothing to replace it with, and the honest report
+    # is the skip itself (see `settle_digital_lyrics`). None = the configured
+    # chain.
+    scripts: Optional[List[int]] = None
+    source: str = ""            # the SOURCE value the user just answered
+    # The release the wizard confirmed, when it has one: its own store URLs are
+    # the one piece of evidence `stamp_album_source` may turn into a SOURCE.
+    release: Optional[dict] = None
+    metadata: bool = True       # run the import's own description step too
+    staged: bool = False        # the wizard's album folder, wherever it put it
+
+
+class SourceRequest(BaseModel):
+    path: str
+    # Empty = REPORT what the pipeline would write and what the config's own
+    # default is (the suggestion the Match step pre-fills). Non-empty = write
+    # THAT value, which is the user's answer to the question.
+    value: str = ""
+    release: Optional[dict] = None
+    provider: str = ""
+    staged: bool = False
+
+
+@router.post("/api/import/settle")
+def import_settle(req: SettleRequest):
+    """Settle a digital release's SOURCE, unusable lyrics and description.
+
+    What the wizard's Finish step calls before it runs the ticked scripts, so a
+    release imported by hand ends in the state an unattended import leaves:
+    SOURCE written when the release or the acquisition states it (else
+    reported as still to be asked, the wizard's Match step), the untimed lyrics
+    this install refuses removed and counted, and the album description fetched
+    through the import's OWN metadata step (`run_metadata_step` — the same
+    machinery the album page's fetch and every other import path use).
+
+    Every half reports its own state; nothing here is silent, and nothing is
+    invented: a SOURCE no evidence states comes back ``asked`` with the
+    config's default for the wizard to offer.
+    """
+    from mlo.config import load_config
+
+    _require_manual()
+    _guard([req.path], req.staged)
+    cfg = load_config()
+    chain = None
+    if req.scripts is not None:
+        chain = [int(s) for s in req.scripts]
+    return imports.settle_digital_import(
+        req.path, cfg, chain=chain, value=req.source,
+        release=req.release, metadata=req.metadata)
+
+
+@router.post("/api/import/source")
+def import_source(req: SourceRequest):
+    """Report or write a Digital Media album's ``SOURCE``.
+
+    ONE entry point for both halves, and the pipeline's own function
+    (`imports.stamp_album_source`) — the row `mlo.import_policy` publishes
+    beside the ``source`` family, so the button and the import cannot drift:
+
+    * no *value* → the value the pipeline would write, derived from the
+      release's own store URLs (or the provider), plus the config's default
+      (`digital_media_source_value`) and why the tag is required — what the
+      Match step pre-fills;
+    * *value* given → written to every track of the album that lacks one (the
+      write gate and the fill-only rule are the pipeline's own), and nothing is
+      touched on a non-digital medium.
+    """
+    from mlo.config import load_config
+
+    _require_manual()
+    _guard([req.path], req.staged)
+    value = str(req.value or "").strip()
+    return imports.stamp_album_source(req.path, load_config(), value=value,
+                                      release=req.release,
+                                      provider=req.provider, dry=not value)

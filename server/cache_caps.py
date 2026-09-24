@@ -247,11 +247,14 @@ def running_transfer_names(cfg) -> tuple:
     ``folders`` are the peer's username — the first path segment under either
     staging root in the layout slskd writes today (see
     ``soulseek.DESTINATION_SUBDIR``) — and the leaf of the remote folder it is
-    writing into (what ``soulseek._pending_album_folders`` matches an album
-    against). ``files`` are the transfer's own file names, which only ever
-    protect a LOOSE candidate: a directory candidate under a staging root is
-    already named by the username or the remote folder slskd writes through,
-    while a partial dropped straight in the root has nothing but its name.
+    writing into. (``soulseek._pending_album_folders``/``_still_downloading``
+    name the same folders for an import: there the peer AND the remote folder
+    path are the identity, because a leaf alone is shared by every peer's and
+    every batch's own folder.) ``files`` are the transfer's own file names,
+    which only ever protect a LOOSE candidate: a directory candidate under a
+    staging root is already named by the username or the remote folder slskd
+    writes through, while a partial dropped straight in the root has nothing
+    but its name.
 
     An unreachable slskd answers with two empty sets: guessing "nothing is
     running" is what the entry-level delete cannot prove, so it keeps whatever

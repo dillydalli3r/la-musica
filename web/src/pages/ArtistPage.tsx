@@ -46,15 +46,25 @@ const SOURCE_NAMES: Record<string, string> = {
 };
 
 /** The album sections the list groups by, in display order. */
-const TYPE_ORDER = ["Album", "EP", "Single", "Live", "Compilation", "Other"] as const;
+const TYPE_ORDER = ["Album", "EP", "Single", "Live", "Compilation", "Podcast", "Other"] as const;
 type ReleaseType = (typeof TYPE_ORDER)[number];
 
 /** AlbumMeta carries no RELEASETYPE, so the type comes from the first track
  *  that tags one (the importer stamps the same value on every track). A
  *  combined type ("Album + Compilation") buckets by the first match in
- *  releaseType's precedence. */
+ *  releaseType's precedence.
+ *
+ *  A PODCAST episode is asked about FIRST and answers for itself: it is not
+ *  an album by a band, and MusicBrainz states no Podcast release-group type
+ *  (an episode is Broadcast + `part of` a series of type Podcast), so the
+ *  RELEASETYPE tag alone can never name it. The app's own derived identity
+ *  does — the album `podcast` block, or a RELEASETYPE an editor set to
+ *  "Podcast" — and without this check every episode would fall through to
+ *  "Other", which says nothing about why it is there. */
 function releaseType(al: Album): ReleaseType {
-  const raw = (al.tracks.find((t) => t.tags?.RELEASETYPE)?.tags?.RELEASETYPE ?? "").toLowerCase();
+  const tags = al.tracks.find((t) => t.tags?.RELEASETYPE)?.tags;
+  const raw = (tags?.RELEASETYPE ?? "").toLowerCase();
+  if (al.podcast?.series || raw.includes("podcast") || tags?.PODCASTSERIES) return "Podcast";
   if (raw.includes("compilation")) return "Compilation";
   if (raw.includes("live")) return "Live";
   if (raw.includes("ep")) return "EP";
@@ -444,6 +454,10 @@ export default function ArtistPage() {
                 <TagActionsMenu
                   paths={allTracks.map((t) => t.path)}
                   artist={decoded}
+                  // The artist's own folder, so the folder-scoped scripts run on
+                  // the artist (its image, the layout of its subtrees) instead
+                  // of being derived from the tracks one album at a time.
+                  artistPath={data.path}
                   onDone={refresh}
                   buttonTitle="Tag actions on every track of this artist"
                 />
@@ -653,6 +667,7 @@ export default function ArtistPage() {
               <TagActionsMenu
                 paths={selectedTrackPaths}
                 artist={decoded}
+                artistPath={data.path}
                 onDone={refresh}
                 buttonClass="btn-ghost !py-1 text-xs"
                 buttonTitle="Tag actions on the selected albums"
@@ -680,7 +695,7 @@ export default function ArtistPage() {
               <section key={type} className="section space-y-1">
                 <button
                   type="button"
-                  className="flex w-full items-center gap-1.5 pb-2 text-left text-xs font-bold uppercase tracking-wider text-zinc-400 select-none"
+                  className="tap flex w-full items-center gap-1.5 pb-2 text-left text-xs font-bold uppercase tracking-wider text-zinc-400 select-none"
                   onClick={() => setCollapsed((prev) => {
                     const next = new Set(prev);
                     if (next.has(type)) next.delete(type);

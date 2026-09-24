@@ -37,7 +37,7 @@ the thing it is about — the album, the download folder, or this queue (see
 succeeded, found nothing, or gave up with a reason.
 
 ONE release is often not on the network at all, and this module says so before
-it searches: a music video whose medium is DIGITAL MEDIA (its recordings
+it searches: a music video whose medium is DIGITAL MEDIA or WEB (its recordings
 MusicBrainz states are videos) is a set of YouTube uploads, so it is fetched
 through ``server.youtube`` instead of searched for — see ``acquisition_route``
 and ``_run_youtube``. A track YouTube has no usable upload for (or cannot
@@ -45,8 +45,11 @@ deliver) is then looked for on the network itself, as the plain video file it
 is — see ``fetch_video_on_soulseek`` — because "not on YouTube" is not the same
 as "nowhere". That branch lives inside the same job, so its album takes
 the same import, the same queue row, the same stages and the same log as a
-downloaded folder; a music video on a DISC (DVD, Blu-ray, VHS, Video CD) and
-every audio release keep the Soulseek path unchanged.
+downloaded folder; a music video on a DISC (DVD, Blu-ray, VHS, Video CD) is
+SEARCHED for first — a disc is a folder like any pressing — and falls back to
+YouTube per track when the search comes back empty, and every audio release
+keeps the Soulseek path unchanged. Each network is thus the other's fallback,
+whichever the release's medium prefers first.
 
 Progress is reported through mlo.stats.progress_hook (the same relay the
 WebSocket /ws/progress endpoint forwards to the UI) and mirrored into a
@@ -1193,12 +1196,19 @@ def _expand_template(tpl, fields, catalogs):
 # --------------------------------------------------------------------------- #
 # Which templates search which kind of release
 # --------------------------------------------------------------------------- #
-# The one medium in mlo.tagtext.MEDIA_VALUES that is not a physical carrier: a
-# release made ENTIRELY of it has no pressing trait to search by, and the broad
-# artist/album/year wording is all it has. Everything else the vocabulary names
-# (CD, CD-R, SHM-CD, Blu-spec CD, Vinyl, Cassette, SACD, DVD-Audio, …) IS a
-# pressing, and a pressing is searched by what identifies THAT pressing.
+# The media in mlo.tagtext.MEDIA_VALUES that are not physical carriers: a
+# release made ENTIRELY of one has no pressing trait to search by, and the
+# broad artist/album/year wording is all it has. There are TWO spellings of
+# that kind of release — "Digital Media" (the vocabulary's own name) and "Web"
+# (what MusicBrainz's release pages say for one published online only) — and
+# they are the SAME medium to every rule here: the query templates
+# (`_templates_for`) and the routing rule (`acquisition_route`) must not treat
+# a Web release as a disc. Everything else the vocabulary names (CD, CD-R,
+# SHM-CD, Blu-spec CD, Vinyl, Cassette, SACD, DVD-Audio, …) IS a pressing, and
+# a pressing is searched by what identifies THAT pressing.
 _DIGITAL_MEDIA = "Digital Media"
+_WEB_MEDIA = "Web"
+_DIGITAL_FORMATS = frozenset(f.lower() for f in (_DIGITAL_MEDIA, _WEB_MEDIA))
 
 # A CD is physical like every other pressing, but it owns a settings key of its
 # own — the one every CD was searched with until the physical key existed. A
@@ -1209,7 +1219,13 @@ _DIGITAL_QUERIES_KEY = "soulseek_auto_digital_queries"
 
 
 def _is_digital(release):
-    """True when every STATED medium of the release is Digital Media.
+    """True when every STATED medium of the release is digital media.
+
+    "Digital Media" and "Web" mean the same thing here (`_DIGITAL_FORMATS`):
+    one is the vocabulary's own name and the other is what MusicBrainz's
+    release pages say for a release published online only, and both name an
+    edition with no pressing to search by — so both earn the broad query
+    wording, and both route a music-video release to YouTube.
 
     mlo.release_choice.media_formats reads the format out of whichever payload
     the caller holds (a browse row, a normalized row, a full release lookup),
@@ -1218,7 +1234,23 @@ def _is_digital(release):
     handed the broad query a real digital release earns.
     """
     formats = [str(f).strip() for f in media_formats(release)]
-    return bool(formats) and all(f == _DIGITAL_MEDIA for f in formats)
+    return bool(formats) and all(f.lower() in _DIGITAL_FORMATS for f in formats)
+
+
+def _release_medium(release, default=_DIGITAL_MEDIA):
+    """The medium the release's OWN data states, for the MEDIA tag of an album
+    this module fetches itself.
+
+    A peer's folder arrives with the medium the candidate's own detection
+    found; an album this module fetches (the YouTube branch, and the disc
+    fallback beside it) has no such thing, so it states what MusicBrainz
+    states: "Web" stays Web rather than being called "Digital Media", and a
+    music video on a disc keeps its "DVD". A release whose medium nobody
+    stated falls back to `default` — the same rule the rest of the tag layer
+    follows (an unstated medium is never guessed at, it is only defaulted
+    where a MEDIA value has to be written)."""
+    names = [str(f).strip() for f in media_formats(release) if str(f).strip()]
+    return names[0] if names else default
 
 
 # Which network fetches a release — the two names `acquisition_route` answers
@@ -1257,20 +1289,27 @@ def video_tracks(release):
 
 
 def acquisition_route(release):
-    """Which network fetches *release*: "soulseek" or "youtube".
+    """Which network fetches *release* FIRST: "soulseek" or "youtube".
 
     THE ROUTING RULE, in one place, read where the release and its medium are
     both in hand (server.soulseek_auto._run, before any search):
 
     * a VIDEO release — one whose recordings MusicBrainz states are videos
-      (`video_tracks`) — published as DIGITAL MEDIA is fetched from YouTube:
-      those uploads are not folders on the Soulseek network, so a search for
-      one would only ever spend the user's time and end in "nothing found";
+      (`video_tracks`) — published as DIGITAL MEDIA or WEB is fetched from
+      YouTube first: those uploads are not folders on the Soulseek network, so
+      a search for one would only ever spend the user's time and end in
+      "nothing found";
     * a music video on a DISC (DVD / Blu-ray / VHS / Video CD — the formats
       mlo.release_choice.is_video_format classifies) is a folder like any
-      pressing and keeps the Soulseek path, byte for byte;
+      pressing and keeps the Soulseek path, byte for byte, with YouTube tried
+      only after the search comes back empty;
     * an AUDIO release is untouched: its recordings are not videos, so it is
       never routed anywhere but Soulseek, digital medium or not.
+
+    The answer is a PREFERENCE, never a closed door: each side of it falls
+    through to the other network at its own dead end or when the preferred one
+    cannot run at all (a Web release with YouTube switched off is still
+    searched for on Soulseek).
 
     A payload that cannot answer (no release yet, no medium, no track list)
     answers "soulseek": the caller's job then behaves exactly as every job did
@@ -1283,6 +1322,43 @@ def acquisition_route(release):
     if video_formats(release):
         return _ROUTE_SOULSEEK
     return _ROUTE_YOUTUBE if _is_digital(release) else _ROUTE_SOULSEEK
+
+
+def _youtube_ready(cfg):
+    """Whether the YouTube half of a video release's acquisition can run: the
+    setting is on AND yt-dlp is installed.
+
+    Read where the ROUTE is turned into a branch (_run), so a Web release whose
+    YouTube half cannot run falls through to the Soulseek search — the attempt
+    it has always deserved — instead of raising before any fetch."""
+    from server import youtube
+    return bool(youtube.enabled(cfg)) and bool(youtube.ytdlp_available(cfg))
+
+
+def _youtube_unavailable(cfg):
+    """WHY the YouTube half cannot run, in the words the job log uses."""
+    from server import youtube
+    if not youtube.enabled(cfg):
+        return "YouTube downloads are disabled in Settings → Videos"
+    if not youtube.ytdlp_available(cfg):
+        return "yt-dlp is not available — install it under Dependencies"
+    return ""
+
+
+def _require_slskd(cfg):
+    """The Soulseek path's precondition, in the app's own words.
+
+    Raises when slskd cannot be asked at all. ONE helper for both places that
+    start searching: the top of _run, where a job that will search fails fast,
+    and the point where a YouTube-preferred job falls back to the search."""
+    from server import soulseek as slsk
+    if not (slsk.is_running() or slsk.web_up(cfg)):
+        raise RuntimeError("slskd is not running — start Soulseek first")
+    server = slsk.server_state(cfg)
+    if not (server or {}).get("isLoggedIn"):
+        raise RuntimeError("Soulseek is not logged in — set your Soulseek "
+                           "username and password in Settings → Soulseek, "
+                           "then restart slskd")
 
 
 def _templates(cfg, key, default):
@@ -4458,9 +4534,12 @@ def _youtube_fetch(release, dest, cfg):
     is looked for on the network before it is given up on: a music video that
     nobody put on YouTube is often a plain file on a peer's share, and
     fetch_video_on_soulseek is the same machinery the album path downloads
-    with. The line that reports a track neither source served names both of
-    them, and where the network was never asked the line says why (slskd not
-    running) instead of blaming the network for a copy nobody looked for.
+    with. The network IS asked whatever slskd's state was when the album
+    started — a state read that said it could not answer is not a search, and
+    must not be recorded as one — and when the attempt finds nothing that
+    state IS the reason the line reports, instead of blaming the network for a
+    copy nobody looked for. The line that reports a track neither source
+    served names both of them.
 
     Tracks are fetched `worker_limit` at a time (the same setting every other
     multi-file runner in the app obeys), each on a thread that re-binds the job
@@ -4479,11 +4558,15 @@ def _youtube_fetch(release, dest, cfg):
     problems = []
     lock = threading.Lock()
     done = [0]
-    # The Soulseek half's own gate, read ONCE for the whole album: the same
-    # precondition every search in this module runs behind (_run), turned into
-    # the words the per-track lines report it with. Signed out is its OWN
-    # answer — a slskd that cannot search must not be reported as a network
-    # with nothing on it, or the miss reads as "this video is not out there".
+    # The Soulseek half's own state read, taken ONCE for the whole album: the
+    # same precondition every search in this module runs behind (_run), turned
+    # into the words the per-track lines report a miss with. It is NOT a gate:
+    # the per-track fallback asks the network regardless (slskd may come up
+    # mid-album, and skipping the request is what used to turn "we never
+    # asked" into "nobody has it"), and this string is what a track that
+    # nothing came back for says instead of "no copy" when slskd could not
+    # answer. Signed out is its OWN answer — a slskd that cannot search must
+    # not be reported as a network with nothing on it.
     if not (slsk.is_running() or slsk.web_up(cfg)):
         slsk_why = "Soulseek is not running"
     elif not (slsk.server_state(cfg) or {}).get("isLoggedIn"):
@@ -4522,19 +4605,20 @@ def _youtube_fetch(release, dest, cfg):
             # peer that refuses the file) is this track's miss like any other
             # — reported, never raised: the album's other tracks are still
             # coming.
-            if slsk_why:
-                missed = slsk_why
-            else:
-                with lock:
-                    _stage("downloading",
-                           f"Soulseek: track {i + 1}/{total} — {label}")
-                try:
-                    alt = fetch_video_on_soulseek(by, title, dest, cfg, seconds)
-                except Exception as e:
-                    missed = f"Soulseek download failed ({e})"
-                path = str((alt or {}).get("path") or "")
-                if not path and not missed:
-                    missed = "no Soulseek copy either"
+            with lock:
+                _stage("downloading",
+                       f"Soulseek: track {i + 1}/{total} — {label}")
+            try:
+                alt = fetch_video_on_soulseek(by, title, dest, cfg, seconds)
+            except Exception as e:
+                missed = f"Soulseek download failed ({e})"
+            path = str((alt or {}).get("path") or "")
+            if not path and not missed:
+                # The network was really asked, so this miss is about the
+                # network and nothing else. When the state read said slskd
+                # could not answer, that is the reason to report — never
+                # "no copy", which is a claim about a search nobody ran.
+                missed = slsk_why or "no Soulseek copy either"
         if not path:
             if _cancelled():
                 return
@@ -4584,36 +4668,48 @@ def _youtube_fetch(release, dest, cfg):
     return [g for g in got if g], problems
 
 
-def _run_youtube(release, cfg, confirm_lossy):
-    """Fetch a Digital Media music-video release (YouTube first, Soulseek for
-    what YouTube does not have) and import it.
+def _file_origins(got):
+    """{file name: SOURCE} for the files `_youtube_fetch` fetched — the network
+    that served EACH one.
 
-    Runs INSTEAD of the search, inside the same job (see _run). Its outcomes
-    are the Soulseek path's own:
+    An album this branch fetches is routinely MIXED (YouTube for the uploads it
+    has, a peer's share for the tracks it does not), and `_import` can only
+    stamp one SOURCE for the whole album. The map is keyed by the file's NAME
+    because that is what survives the move into the library (the naming script
+    runs after the stamping), and it is built from the SAME entries the job log
+    and the result report each track from — one origin per file, from where it
+    really came. Both values are spellings mlo.tagtext.SOURCE_VALUES knows."""
+    names = {"youtube": "YouTube", "soulseek": "Soulseek"}
+    out = {}
+    for entry in (got or ()):
+        path = str((entry or {}).get("path") or "")
+        want = names.get(str((entry or {}).get("source") or "").lower())
+        if path and want:
+            out[os.path.basename(path)] = want
+    return out
 
-    * every track downloaded — _import() (MB stamping, the naming script,
-      imports.finish_album) and a done job;
-    * SOME tracks — a music-video collection is routinely uploaded as a dozen
-      separate videos, so the album is imported from what came back and every
-      missing track is named in the log and counted in the result;
-    * NOTHING served by EITHER source — the same dead end a search that found
-      nothing ends on (_ask_to_wish: park and offer the wish list), never a
-      silent success.
-    """
-    from server import youtube
 
+def _video_album_fetch(release, cfg):
+    """Fetch EVERY track of a VIDEO release from YouTube — each track asked of
+    the network too — and import what came back.
+
+    The one implementation behind both halves of the music-video rule: the
+    YouTube-first route a Digital Media/Web release takes (_run_youtube), and
+    the fallback a DISC music video gets when the Soulseek search came back
+    with nothing (_youtube_after_empty_search). Both stage the tracks in the
+    album's own folder, verify them through the same pipeline, and report where
+    each file came from.
+
+    Returns (outcome, payload):
+
+    * ("done", result) — the finished-job payload, with `error_count`/`note`
+      naming every track no source served;
+    * ("cancelled", None) — the user stopped the job; the staged bytes are
+      swept, exactly as the Soulseek path sweeps a cancelled candidate's;
+    * ("empty", (total, problems)) — NEITHER YouTube nor Soulseek served a
+      single track. The caller owns that dead end (the wish offer on the
+      YouTube-first path, the Soulseek dead end on the disc path)."""
     total = len([t for t in (release.get("media") or []) if isinstance(t, dict)])
-    _log(f"{total} track(s) of this release are music videos published as "
-         f"Digital Media — fetching them from YouTube (a track YouTube does "
-         f"not have is looked for on Soulseek) instead of searching for a "
-         f"folder that cannot be there.")
-    if not youtube.enabled(cfg):
-        raise RuntimeError("YouTube downloads are disabled in Settings → Videos "
-                           "— enable them to fetch this music-video release")
-    if not youtube.ytdlp_available(cfg):
-        raise RuntimeError("yt-dlp is not available — install it under "
-                           "Dependencies to fetch this music-video release")
-
     dest = _youtube_album_dir(release, cfg)
     try:
         os.makedirs(dest, exist_ok=True)
@@ -4628,26 +4724,9 @@ def _run_youtube(release, cfg, confirm_lossy):
         # the Soulseek path sweeps a cancelled candidate's bytes. A FAILED job
         # keeps its files — they are what its retry downloads from.
         _drop_youtube_staging(dest)
-        return _finish("cancelled")
+        return "cancelled", None
     if not got:
-        # Phrased in the app's own dead-end vocabulary ("nothing usable", see
-        # wishes._NOT_FOUND_HINTS) on purpose: this is "the network does not
-        # have it", not a transient outage, so the wish policy classifies the
-        # attempt as an empty search and stops re-asking on a timer. Both
-        # sources are named: neither YouTube nor the network had a usable copy
-        # of ANY of these tracks.
-        msg = (f"Nothing usable found for “{release.get('title') or ''}” on "
-               f"YouTube or Soulseek — no usable upload for any of its "
-               f"{total} track(s) (see the log).")
-        for line in problems[:20]:
-            _log("  ✕ " + line)
-        wished = _ask_to_wish(release, [], 0, cfg, confirm_lossy, error=msg,
-                              source="youtube")
-        if _cancelled():
-            return _finish("cancelled")
-        if wished:
-            return _finish("done", wished)
-        raise RuntimeError(msg)
+        return "empty", (total, problems)
 
     # The fetch is over: drop its block, or the queue keeps painting its last
     # frame (100 % of the tracks) through verify and import.
@@ -4657,8 +4736,12 @@ def _run_youtube(release, cfg, confirm_lossy):
     _log(f"  {len(got)}/{total} track file(s) are in the album folder.")
     for line in problems[:20]:
         _log("  ✕ " + line)
+    # Which network served WHICH file, handed to the import: a mixed album
+    # whose tracks all claimed one origin would be the report lying about its
+    # own files (SOURCE is written where the tag is empty, one value per file).
     _stage("importing", "Importing into the library…")
-    result = _import(dest, release, cfg, _DIGITAL_MEDIA, source="YouTube")
+    result = _import(dest, release, cfg, _release_medium(release),
+                     source="YouTube", sources=_file_origins(got))
     # What did NOT come back, in the three places the user looks: the job log
     # (below), the job's own note, and `error_count` for a caller that counts —
     # an album missing two of its twelve videos must not read as a whole one.
@@ -4675,7 +4758,89 @@ def _run_youtube(release, cfg, confirm_lossy):
                              if len(problems) > 3 else ""))
         _log(f"{len(problems)} of {total} track(s) could not be fetched from "
              f"either source — the rest of the album is in the library.")
-    _finish("done", result)
+    return "done", result
+
+
+def _run_youtube(release, cfg, confirm_lossy):
+    """Fetch a Digital Media/Web music-video release (YouTube first, Soulseek
+    for what YouTube does not have) and import it.
+
+    Runs INSTEAD of the search, inside the same job (see _run) — reached only
+    while the YouTube half can really run (`_youtube_ready`). A Web release
+    whose YouTube half cannot run is SEARCHED FOR instead, the same
+    fall-through that release needs (see _run). Its outcomes are the Soulseek
+    path's own:
+
+    * every track downloaded — _import() (MB stamping, the naming script,
+      imports.finish_album) and a done job;
+    * SOME tracks — a music-video collection is routinely uploaded as a dozen
+      separate videos, so the album is imported from what came back and every
+      missing track is named in the log and counted in the result;
+    * NOTHING served by EITHER source — the same dead end a search that found
+      nothing ends on (_ask_to_wish: park and offer the wish list), never a
+      silent success.
+    """
+    total = len([t for t in (release.get("media") or []) if isinstance(t, dict)])
+    _log(f"{total} track(s) of this release are music videos published as "
+         f"{_release_medium(release)} — fetching them from YouTube (a track "
+         f"YouTube does not have is looked for on Soulseek) instead of "
+         f"searching for a folder that cannot be there.")
+    outcome, payload = _video_album_fetch(release, cfg)
+    if outcome == "cancelled":
+        return _finish("cancelled")
+    if outcome == "done":
+        return _finish("done", payload)
+
+    # NEITHER source served a track. Phrased in the app's own dead-end
+    # vocabulary ("nothing usable", see wishes._NOT_FOUND_HINTS) on purpose:
+    # this is "the network does not have it", not a transient outage, so the
+    # wish policy classifies the attempt as an empty search and stops re-asking
+    # on a timer. Both sources are named: neither YouTube nor the network had a
+    # usable copy of ANY of these tracks.
+    total, problems = payload
+    msg = (f"Nothing usable found for “{release.get('title') or ''}” on "
+           f"YouTube or Soulseek — no usable upload for any of its "
+           f"{total} track(s) (see the log).")
+    for line in problems[:20]:
+        _log("  ✕ " + line)
+    wished = _ask_to_wish(release, [], 0, cfg, confirm_lossy, error=msg,
+                          source="youtube")
+    if _cancelled():
+        return _finish("cancelled")
+    if wished:
+        return _finish("done", wished)
+    raise RuntimeError(msg)
+
+
+def _youtube_after_empty_search(release, cfg, confirm_lossy):
+    """The OTHER network for a DISC music video whose Soulseek search found
+    nothing: YouTube, per track, before the release is reported as not found.
+
+    The routing rule hands a physical music video to Soulseek first — a disc is
+    a folder like any pressing — but a disc no peer shares is still a video
+    somebody put on YouTube, and the job must exhaust both networks before it
+    says a release is nowhere. Only a VIDEO release is looked up here (an audio
+    album has no uploads to find), and only while YouTube can really run.
+
+    Returns (handled, result): handled is True when this call settled the job —
+    the album was fetched and imported, or the user cancelled — and the caller
+    returns `result`; False means NEITHER network served anything, so the
+    caller ends the job exactly as it did before this fallback existed (the
+    wish offer, and the Soulseek reason)."""
+    if not video_tracks(release) or not _youtube_ready(cfg):
+        return False, None
+    total = len([t for t in (release.get("media") or []) if isinstance(t, dict)])
+    _log(f"Soulseek has no usable folder for this release — trying YouTube for "
+         f"its {total} music video(s) before giving up on it.")
+    outcome, payload = _video_album_fetch(release, cfg)
+    if outcome == "cancelled":
+        return True, _finish("cancelled")
+    if outcome == "done":
+        return True, _finish("done", payload)
+    total, problems = payload
+    for line in problems[:20]:
+        _log("  ✕ " + line)
+    return False, None
 
 
 def _lossy_allowed(cfg):
@@ -4711,21 +4876,23 @@ def _run(release_mbid=None, release=None, queries=None, username=None,
     cfg = load_config()
     try:
         # WHICH NETWORK FETCHES THIS RELEASE (acquisition_route): a Digital
-        # Media music-video release is fetched from YouTube, so the slskd
-        # precondition below — and every search this job would otherwise run —
-        # does not apply to it. Read from the payload the caller already holds
-        # when there is one; a payload that cannot answer yet (the release has
-        # to be resolved first) answers "soulseek", which is the conservative
-        # path every release took before this routing existed.
+        # Media or Web music-video release is fetched from YouTube, so the
+        # slskd precondition below — and every search this job would otherwise
+        # run — does not apply to it. Read from the payload the caller already
+        # holds when there is one; a payload that cannot answer yet (the
+        # release has to be resolved first) answers "soulseek", which is the
+        # conservative path every release took before this routing existed.
+        #
+        # The route is a PREFERENCE and not a closed door: when the YouTube
+        # half cannot run at all (the setting is off, yt-dlp is missing) the
+        # job must still get its Soulseek attempt, so the precondition is
+        # asked for that case too — instead of the release raising before any
+        # fetch, which is what a Web release with YouTube switched off used to
+        # do.
         route = acquisition_route(release)
-        if route != _ROUTE_YOUTUBE:
-            if not (slsk.is_running() or slsk.web_up(cfg)):
-                raise RuntimeError("slskd is not running — start Soulseek first")
-            server = slsk.server_state(cfg)
-            if not (server or {}).get("isLoggedIn"):
-                raise RuntimeError("Soulseek is not logged in — set your Soulseek "
-                                   "username and password in Settings → Soulseek, "
-                                   "then restart slskd")
+        youtube_first = route == _ROUTE_YOUTUBE and _youtube_ready(cfg)
+        if not youtube_first:
+            _require_slskd(cfg)
         min_score = int(cfg.get("soulseek_auto_log_min_score", 100) or 100)
         ddir = slsk.download_dir(cfg)
 
@@ -4854,13 +5021,21 @@ def _run(release_mbid=None, release=None, queries=None, username=None,
                 pass      # a library that cannot be read must not block the job
 
         # ---- the network this release comes from -----------------------------
-        # A Digital Media music-video release is fetched from YouTube INSIDE
-        # this job — no search is sent to slskd at all, and the album it
+        # A Digital Media/Web music-video release is fetched from YouTube
+        # INSIDE this job — no search is sent to slskd at all, and the album it
         # produces goes through the same _import below (MB stamping, the
         # naming script, imports.finish_album) as a downloaded folder does.
-        # Everything else falls through to the search unchanged.
+        # Everything else falls through to the search unchanged — and so does a
+        # YouTube route whose YouTube half cannot run (the setting is off, or
+        # yt-dlp is missing): a Web release with YouTube switched off must
+        # still reach the other network, which is what "the fallback actually
+        # happens" means.
         if route == _ROUTE_YOUTUBE:
-            return _run_youtube(release, cfg, confirm_lossy)
+            if _youtube_ready(cfg):
+                return _run_youtube(release, cfg, confirm_lossy)
+            _log(f"{_youtube_unavailable(cfg)} — searching Soulseek for this "
+                 f"release instead.")
+            _require_slskd(cfg)
 
         # ---- candidates ------------------------------------------------------
         # The queries this job searched with and the window it waited out are
@@ -5089,6 +5264,13 @@ def _run(release_mbid=None, release=None, queries=None, username=None,
                     declined = True
 
             if not candidates and search_failed:
+                # A search slskd itself refused is the emptiest answer there
+                # is, and a video release is still worth the other network
+                # before the job fails on the search error.
+                handled, served = _youtube_after_empty_search(
+                    release, cfg, confirm_lossy)
+                if handled:
+                    return served
                 raise RuntimeError("; ".join(search_failed[:3]))
             if not candidates or declined:
                 # slskd answered, but no folder held the whole album. That used
@@ -5113,6 +5295,20 @@ def _run(release_mbid=None, release=None, queries=None, username=None,
                 no_folder_msg = ("No candidate folder contained every track "
                                  "(and cue/log per disc for CD). Try the "
                                  "manual entry or different search terms.")
+                # A music video on a DISC is a folder like any pressing, and a
+                # disc nobody shares is still a video somebody put on YouTube:
+                # when the search came back with NOTHING, the other network is
+                # tried per track before the job is parked on the wish prompt
+                # (see _youtube_after_empty_search). An album that comes back
+                # from YouTube is imported here and settles the job as done.
+                # A user who DECLINED a lossy copy is not asked about another
+                # network: their answer stands, and the job goes straight to
+                # the offer.
+                if not declined:
+                    handled, served = _youtube_after_empty_search(
+                        release, cfg, confirm_lossy)
+                    if handled:
+                        return served
                 wished = _ask_to_wish(release, queries_built, searched_s, cfg,
                                       confirm_lossy, error=no_folder_msg)
                 if _cancelled():
@@ -5235,7 +5431,13 @@ def _run(release_mbid=None, release=None, queries=None, username=None,
         # as the no-usable-folder dead end (_ask_to_wish): the release goes into
         # the wish list — with the queries this job already searched with — and
         # the background worker keeps looking for it. The offer carries the
-        # seconds the searches REALLY took, like the other dead end.
+        # seconds the searches REALLY took, like the other dead end. A VIDEO
+        # release asks the other network first: a disc every peer failed to
+        # deliver is still a video on YouTube (see
+        # _youtube_after_empty_search).
+        handled, served = _youtube_after_empty_search(release, cfg, confirm_lossy)
+        if handled:
+            return served
         reasons = _rejection_detail(_job["attempts"])
         # With no reasons recorded the sentence is byte-for-byte what it always
         # was: a caller (and a test) that knows this failure must not be reading
@@ -5308,7 +5510,7 @@ def _stamp_media(album_dir, media, cfg):
     return n, problems
 
 
-def _stamp_source(album_dir, source):
+def _stamp_source(album_dir, source, per_file=None):
     """Write SOURCE on the tracks of an album this app did not download from
     the network.
 
@@ -5320,10 +5522,17 @@ def _stamp_source(album_dir, source):
     itself rather than let a later pass call it "Digital": SOURCE is written
     only where it is EMPTY, so a value the user chose is never overwritten.
 
+    `per_file` maps a file's NAME to the network that really served IT, for an
+    album fetched from more than one (see _youtube_fetch: YouTube for the
+    uploads it has, a peer for the tracks it does not). It wins over `source`,
+    which stays the album-wide value for every other file — including one this
+    map does not name, whose origin nobody recorded.
+
     Returns (stamped, problems), the same contract as `_stamp_media`: a tag
     that cannot be written is reported, never swallowed."""
     from mlo.audio import AudioFile
     from server.main import is_audio_file
+    origins = dict(per_file or {})
     n, problems = 0, []
     for root, _dirs, files in os.walk(album_dir):
         for f in sorted(files):
@@ -5336,7 +5545,7 @@ def _stamp_source(album_dir, source):
                     problems.append(f"{f}: cannot be read for tagging")
                     continue
                 if not str(af.get_tag("SOURCE") or "").strip():
-                    af.set_tag("SOURCE", source)
+                    af.set_tag("SOURCE", origins.get(f) or source)
                 n += 1
             except Exception as e:
                 problems.append(f"{f}: SOURCE tag not written ({str(e)[:80]})")
@@ -5843,14 +6052,16 @@ def _adopt_into(hold, local_root):
         pass
 
 
-def _import(local_root, release, cfg, media, source=""):
+def _import(local_root, release, cfg, media, source="", sources=None):
     """Move the verified download into the library and run the pipeline.
 
     `media` is the medium already detected for this candidate — MEDIA is
     stamped from it instead of re-detecting the medium of the whole folder.
     `source` is where the album came from, for the one caller whose origin the
     rest of the app cannot infer (the YouTube branch): it is written as SOURCE
-    where the file does not already say something.
+    where the file does not already say something. `sources` maps a file NAME
+    to the network that served THAT file, for an album fetched from two of
+    them at once (see `_stamp_source`); it wins over `source` per file.
 
     The result says three separate things, because they are: `imported` (the
     album is in the library and its chain was started), `organized` (the naming
@@ -5917,11 +6128,19 @@ def _import(local_root, release, cfg, media, source=""):
     _stamped, tag_problems = _stamp_media(dest, media, cfg)
     for pr in tag_problems[:4]:
         _log("  ! " + pr)
-    if source:
-        _sourced, source_problems = _stamp_source(dest, source)
+    if source or sources:
+        _sourced, source_problems = _stamp_source(dest, source, sources)
         for pr in source_problems[:4]:
             _log("  ! " + pr)
-        _log(f"Tagged the album's origin: SOURCE={source}.")
+        if sources:
+            # Every file's own origin, not one word for the album: a music
+            # video fetched from YouTube AND from a peer's share says which of
+            # the two served each track.
+            _log("Tagged the album's origin: SOURCE is the network that "
+                 "served each file" + (f" ({source} where it was not recorded)."
+                                       if source else "."))
+        else:
+            _log(f"Tagged the album's origin: SOURCE={source}.")
 
     organized = False
     organize_error = None

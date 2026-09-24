@@ -10,6 +10,7 @@ import { GRID_SIZE_MIN } from "../lib/fmt";
 import { EmptyState, PageLoading } from "../components/Badges";
 import Segmented from "../components/Segmented";
 import PageHeader from "../components/PageHeader";
+import Popover, { MenuItem } from "../components/Popover";
 import AlbumCard from "../components/AlbumCard";
 import AlbumRow, { type AlbumRowCell } from "../components/AlbumRow";
 import type { Album } from "../types";
@@ -459,34 +460,30 @@ export default function TrashPage() {
             className={`btn-ghost !py-1.5 text-xs tap ${sortOpen ? "!text-white !bg-raise" : ""}`}
             onClick={() => setSortOpen(!sortOpen)}
             title="Sort the trash"
+            aria-haspopup="menu"
+            aria-expanded={sortOpen}
           >
             <ArrowDownUp className="h-3.5 w-3.5" />
             {sort
               ? `${SORTS.find((s) => s.key === sort.key)?.label ?? "Sort"} ${sort.dir === 1 ? "↑" : "↓"}`
               : "Sort"}
           </button>
-          {sortOpen && (
-            <>
-              <div className="fixed inset-0 z-30" onClick={() => setSortOpen(false)} />
-              <div className="absolute left-0 top-full mt-1 z-40 w-44 rounded-lg border border-border bg-zinc-950 shadow-2xl p-1.5">
-                {SORTS.map((s) => (
-                  <button
-                    key={s.key}
-                    onClick={() => {
-                      setSort(toggleSort(sort, s.key));
-                      setSortOpen(false);
-                    }}
-                    className={`w-full text-left px-2.5 py-1.5 rounded-md text-xs flex items-center justify-between gap-3 ${
-                      sort?.key === s.key ? "bg-raise text-white" : "text-zinc-400 hover:text-white hover:bg-raise"
-                    }`}
-                  >
-                    <span>{s.label}</span>
-                    {sort?.key === s.key && <span className="font-mono">{sort.dir === 1 ? "↑" : "↓"}</span>}
-                  </button>
-                ))}
-              </div>
-            </>
-          )}
+          {/* Same Popover idiom as the downloads page's sort list (and every
+              other menu): shield, Escape, click-outside and `role="menu"` from
+              the primitive, not re-implemented per page. */}
+          <Popover open={sortOpen} onClose={() => setSortOpen(false)} align="left" panelClass="w-44 p-1.5">
+            {SORTS.map((s) => (
+              <MenuItem
+                key={s.key}
+                active={sort?.key === s.key}
+                label={sort?.key === s.key ? `${s.label} ${sort.dir === 1 ? "↑" : "↓"}` : s.label}
+                onClick={() => {
+                  setSort(toggleSort(sort, s.key));
+                  setSortOpen(false);
+                }}
+              />
+            ))}
+          </Popover>
         </div>
 
         {view === "albums" && <ColumnsMenu cols={TRASH_COLS} visible={cols} onToggle={toggleCol} />}

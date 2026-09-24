@@ -368,7 +368,7 @@ if fetchdeps.installable("oxipng"):
     with tempfile.TemporaryDirectory() as tmp:
         real = (sandbox_deps(tmp), fetchdeps._existing_install,
                 fetchdeps.installed_versions, fetchdeps.get_latest_release,
-                fetchdeps._download, fetchdeps._extract_archive,
+                fetchdeps._download, fetchdeps.extract_installer,
                 fetchdeps._locate_binaries)
         seen = {}
 
@@ -396,7 +396,7 @@ if fetchdeps.installable("oxipng"):
         fetchdeps.get_latest_release = lambda key, upstream=False: {
             "version": "10.2.1" if upstream else "10.2.0",
             "assets": [asset], "urls": {asset: "https://example.invalid/" + asset}}
-        fetchdeps._download, fetchdeps._extract_archive = _download, _extract
+        fetchdeps._download, fetchdeps.extract_installer = _download, _extract
         fetchdeps._locate_binaries = lambda root, key: os.path.join(root, "payload")
         try:
             got = fetchdeps.install_dependency("oxipng", log=lambda m: None)
@@ -423,7 +423,7 @@ if fetchdeps.installable("oxipng"):
         finally:
             (fetchdeps._existing_install, fetchdeps.installed_versions,
              fetchdeps.get_latest_release, fetchdeps._download,
-             fetchdeps._extract_archive, fetchdeps._locate_binaries) = real[1:]
+             fetchdeps.extract_installer, fetchdeps._locate_binaries) = real[1:]
             restore_deps(real[0])
 else:
     print("  (no oxipng build for this host — skipping the PATH-copy checks)")
@@ -834,9 +834,9 @@ with tempfile.TemporaryDirectory() as tmp:
         fh.write(deb_bytes(LJT_TAR))
 
     check("an lzip asset keeps its whole extension on disk",
-          fetchdeps._archive_suffix(os.path.basename(jxl_lz)) == ".tar.lz")
+          fetchdeps.archive_suffix(os.path.basename(jxl_lz)) == ".tar.lz")
     check("a .deb keeps its own",
-          fetchdeps._archive_suffix(os.path.basename(ljt_deb)) == ".deb")
+          fetchdeps.archive_suffix(os.path.basename(ljt_deb)) == ".deb")
 
     # The extraction step on its own: what lands, and where the marker lookup
     # finds it. This is the part that used to fall through to "run it as an
@@ -848,7 +848,7 @@ with tempfile.TemporaryDirectory() as tmp:
         found = None
         with linux_host():
             try:
-                fetchdeps._extract_archive(archive, out, log=lambda m: None)
+                fetchdeps.extract_installer(archive, out, log=lambda m: None)
                 found = fetchdeps._locate_binaries(out, key)
             except Exception as e:      # noqa: BLE001 - reported, not raised
                 check(f"{os.path.basename(archive)} extracts ({e})", False)
@@ -929,7 +929,7 @@ with tempfile.TemporaryDirectory() as tmp:
     out = os.path.join(tmp, "out")
     os.makedirs(out)
     try:
-        fetchdeps._extract_archive(bogus, out, log=lambda m: None)
+        fetchdeps.extract_installer(bogus, out, log=lambda m: None)
         check("a file that is not lzip is refused", False)
     except RuntimeError as e:
         check(f"a file that is not lzip is refused ({e})", "not an lzip" in str(e))

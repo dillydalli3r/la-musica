@@ -107,6 +107,14 @@ it beat the runner-up, every loser carrying the reason it lost — and `notes`,
 the lines that must not be left implicit: what each source did (answered, had
 nothing, refused, or was skipped and why: a missing key is stated, never
 worked around) and why nothing could be chosen when nothing could.
+
+`SEARCH_LIMIT` is the ONE number of candidates a search ASKS the finder for:
+the surfaces above all ask it (the dialog's route default, `cover_search`'s own
+default and `imports.COVER_REVIEW_LIMIT`), because the finder truncates its
+answer at the ask — two callers asking for different amounts are ranking
+different candidate sets, and the unattended one could then land an image the
+dialog never even saw. `CANDIDATE_LIMIT` is the other side of that: how many of
+the ranked rows a response carries.
 """
 import re
 import unicodedata
@@ -116,6 +124,16 @@ from typing import Mapping, Optional, Sequence
 # Candidates a response lists. Everything is still RANKED in full — only the
 # response is capped, so a page never carries hundreds of rows.
 CANDIDATE_LIMIT = 20
+
+# Candidates a search ASKS the finder for. ONE number for every surface that
+# asks — the cover finder's own dialog (`server.main`'s `/api/cover/search`)
+# and the unattended import / add-to-library path
+# (`server.imports.cover_candidates`) — because the finder TRUNCATES its answer
+# at what it is asked for (`server.integrations._cov_results` stops at `limit`):
+# two callers asking for different numbers are ranking different candidate sets,
+# and the unattended one could then land an image the dialog never even saw.
+# This is the ASK; `CANDIDATE_LIMIT` above is what the ANSWER carries.
+SEARCH_LIMIT = 40
 
 # The shipped default source order, best first. One place: the finder's own
 # catalogue order (`server.integrations.COV_SOURCE_PRIORITY`) is this list, so

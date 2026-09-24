@@ -14,10 +14,16 @@ lower tier can ever outvote a higher one, which is why the score IS the order:
                promotion > bootleg. An unofficial edition is only ever chosen
                when the group offers nothing official, and its reason says so.
 2. medium      `auto_import_medium_order`, best first — CD, then the other
-               physical media, digital last by default. A format the order
-               does not name ranks after every configured one.
-3. set         a box set — media this library cannot use (a DVD, a Blu-ray),
-               or three discs of the album — sorts below the album's own.
+               physical media (the video carriers DVD, Blu-ray, VHS, Video CD
+               and LaserDisc named ahead of Digital Media, so a physical music
+               video beats the same video published as a download), digital
+               last by default. A format the order does not name ranks after
+               every configured one.
+3. set         a box set — media this library cannot use (a DVD, a Blu-ray)
+               carried BESIDE the album's own, or three discs of the album —
+               sorts below the album's own. A release whose own medium is the
+               video carrier (a single-disc DVD/Blu-ray/VHS) is not a bundle
+               and is ranked by rule 2 like any other medium.
 4. compressed  a release that names itself a re-encode of a disc (BDRip,
                DVDRip, x264, …) sorts below the disc's own streams — a remux or
                a full-disc edition is taken as it comes, never a derivative.
@@ -71,7 +77,7 @@ import re
 from dataclasses import dataclass, replace
 from typing import Mapping, Optional
 
-from mlo.naming import RELEASE_TYPES
+from mlo.naming import DERIVED_RELEASE_TYPES, RELEASE_TYPES
 
 # Editions a response may list. A group with more is still ranked in full —
 # only the response is capped, so a page never carries hundreds of rows.
@@ -169,10 +175,13 @@ _RULES = (
     "official beats promotion beats bootleg — an unofficial edition is only "
     "chosen when nothing official exists",
     "the configured medium order decides first: CD, then the other physical "
-    "media, digital last",
+    "media — the video carriers DVD/Blu-ray/VHS/Video CD/LaserDisc included — "
+    "and digital last",
     "a release short of the release group's own track count is penalised",
-    "a box set — an edition carrying DVD/Blu-ray media, or one disc after "
-    "another — sorts below the album's own CD/digital media",
+    "a box set — an edition carrying DVD/Blu-ray media BESIDE the album's own "
+    "(a CD album with a bonus DVD), or one disc after another — sorts below "
+    "the album's own CD/digital media; a release whose own medium IS the video "
+    "carrier is ranked by the medium order instead",
     "a COMPRESSED derivative of a disc (a BDRip/DVDRip/x264 re-encode) sorts "
     "below the disc's own streams, which are taken as they are",
     "the EARLIEST release date wins: an earlier edition of the group beats a "
@@ -364,7 +373,35 @@ def first_release_date(node):
     return str(node.get("first_release_date") or node.get("first-release-date") or "").strip()
 
 
-def type_matches(primary_type, secondary_types, wanted):
+def derived_types(node):
+    """The app's DERIVED release types a payload carries (mlo.naming).
+
+    MusicBrainz has no "Podcast" release-group type: a podcast is a SERIES of
+    type Podcast and an episode is a release group linked to it `part of`. The
+    app puts that fact on the payloads it builds (`server.integrations`
+    podcast_series_of reads inc=series-rels; a library album row carries the
+    PODCASTSERIES tag), and this is what turns it into a TYPE a selection can
+    name — the OTHER half of `type_matches`. A payload that carries no such
+    fact has no derived type, which is why a plain Broadcast (a radio play)
+    never matches a "podcast" selection.
+    """
+    node = node if isinstance(node, dict) else {}
+    if node.get("podcast") or node.get("podcast_series"):
+        return ("podcast",)
+    tags = node.get("tags") if isinstance(node.get("tags"), dict) else {}
+    for key in ("PODCASTSERIES", "podcast_series"):
+        if str(tags.get(key) or node.get(key) or "").strip():
+            return ("podcast",)
+    # A RELEASETYPE tag the app derived by hand ("Broadcast; Podcast" is not
+    # one of these — the tag holds one selection, and a combined one is read
+    # as the group's whole type, see type_matches).
+    stated = str(tags.get("RELEASETYPE") or node.get("RELEASETYPE") or "").lower()
+    if "podcast" in stated:
+        return ("podcast",)
+    return ()
+
+
+def type_matches(primary_type, secondary_types, wanted, derived=()):
     """Whether a release group's type is one of the *wanted* selections.
 
     A selection naming ONE type is that type, by the SAME rule the artist
@@ -380,15 +417,28 @@ def type_matches(primary_type, secondary_types, wanted):
     + Live" row therefore selects the live albums and not its plain albums,
     and its "Album" row selects neither.
 
+    A DERIVED type selection (`derived` — mlo.naming.DERIVED_RELEASE_TYPES,
+    the app's own "podcast") is matched against the *derived* argument alone
+    and never against the release-group type, because MusicBrainz states no
+    such type: a podcast episode really is Broadcast, so "broadcast" and
+    "podcast" are independent selections and neither hides the other. The
+    caller passes what `derived_types` read off the payload — a group whose
+    payload carries no derived fact matches no derived selection.
+
     An EMPTY selection matches nothing: "no type selected" is not a licence to
     match everything.
     """
     secondary = [str(s).strip().lower() for s in (secondary_types or ())
                  if str(s).strip()]
     primary = str(primary_type or "").strip().lower()
+    present = {str(d).strip().lower() for d in (derived or ()) if str(d).strip()}
     for value in (wanted or ()):
         parts = [p.strip().lower() for p in _split_types(value) if p.strip()]
         if not parts:
+            continue
+        if len(parts) == 1 and parts[0] in DERIVED_RELEASE_TYPES:
+            if parts[0] in present:
+                return True
             continue
         if len(parts) > 1:
             if parts[0] == primary and set(parts[1:]) == set(secondary):
@@ -818,9 +868,18 @@ def _set_level(rel):
     same record. Both signals score below an edition that holds just the
     album, which is what makes a plain CD or digital release win before the
     track-count and date rules ever see the box.
+
+    What makes video media a BOX SET is that it rides ALONG with the album's
+    own medium: a 3-CD anniversary box with a DVD is the same album twice
+    over plus a disc of video. An edition whose own medium IS the video
+    carrier — a single-disc DVD/Blu-ray/VHS, i.e. a music video released on
+    a disc — is not that: it holds one thing, its own recording, and its
+    medium is ranked by the medium order like any other (which is what puts
+    a physical video release ahead of a Web one).
     """
-    video = video_formats(rel)
-    if video:
+    formats = list(media_formats(rel))
+    video = [f for f in formats if is_video_format(f)]
+    if video and len(video) < len(formats):
         return 0.0, ("carries " + ", ".join(sorted(set(video)))
                      + " — a box set, not the album's own media")
     discs = disc_count(rel)

@@ -77,6 +77,10 @@ export default {
   "action.back": "Back",
   "action.next": "Next",
   "action.done": "Done",
+  // —— The details ("…") menu: the generated script entries ————————————
+  "menu.scripts": "Scripts",
+  "menu.forced": "Forced re-run",
+  "menu.forceEntry": "Force: {script}",
 
   // —— Playback: the file a library job is using right now ——————————————
   "player.locked_playing": "“{name}” is in use by {label} — it keeps playing; starting it again may fail.",
@@ -203,6 +207,35 @@ export default {
   "page.trash": "Trash",
   "page.playlists": "Playlists",
   "page.playlist": "Playlist",
+
+  // —— Streaming playlist import (Playlists → Import from a streaming service) ——
+  "plimport.action": "Import from a streaming service",
+  "plimport.title": "Import from a streaming service",
+  "plimport.subtitle": "Paste a public playlist link from Deezer, Spotify, YouTube Music or Apple Music. Every track is matched against the library, and the report says which ones it does not have — and why.",
+  "plimport.url": "Playlist URL",
+  "plimport.url_placeholder": "https://open.spotify.com/playlist/…",
+  "plimport.name": "Playlist name",
+  "plimport.name_placeholder": "Blank uses the service's own playlist name",
+  "plimport.parent_albums": "Queue the parent album of a track the library does not have",
+  "plimport.parent_albums_help": "Albums, never single tracks. A track whose album is already in the library queues nothing. The default comes from Settings → Streaming playlist import.",
+  "plimport.check": "Check",
+  "plimport.check_help": "Read the playlist and match it without creating or queueing anything",
+  "plimport.working": "Reading the playlist…",
+  "plimport.import": "Import",
+  "plimport.close": "Close",
+  "plimport.failed": "The import failed",
+  "plimport.report_counts": "{matched} of {total} tracks are in the library",
+  "plimport.report_unmatched": "{n} not in the library",
+  "plimport.report_duplicates": "{n} duplicate row(s) skipped",
+  "plimport.report_unmatched_title": "Not in the library",
+  "plimport.report_queued_albums": "Albums queued: {n}",
+  "plimport.report_queued_tracks": "Tracks queued by name: {n}",
+  "plimport.queued": "queued",
+  "plimport.hint.wish": "Unmatched tracks are also queued by name (Settings → Streaming playlist import).",
+  "plimport.hint.create_empty": "An import that matches nothing creates no playlist (Settings → Streaming playlist import).",
+  "plimport.open_playlist": "Open the playlist",
+  "plimport.origin": "Imported from {service}",
+  "plimport.origin_link": "the original playlist",
   "page.favorites": "Favorites",
   "page.downloads": "Downloads",
   "page.import": "Import",
@@ -239,6 +272,17 @@ export default {
   "home.shelf.attention_blurb": "Albums failing at least one check",
   "home.shelf.artists": "Top artists",
   "home.shelf.artists_blurb": "Deepest artist collections",
+  // Podcasts: a podcast in MusicBrainz is a SERIES of type Podcast (there is
+  // no Podcast release-group type), so these name the show and its episodes,
+  // never a release type.
+  "home.shelf.podcasts": "Podcasts",
+  "home.shelf.podcasts_blurb": "Shows you have episodes of — each card carries the newest one",
+  "page.podcast": "Podcast",
+  "podcast.episodes": "episodes",
+  "podcast.episode": "Episode",
+  "podcast.newest_episode": "Newest episode",
+  "podcast.order": "Newest first",
+  "podcast.missing_hint": "No episode of “{series}” is in the library — a series is stored on its episodes' own files, so nothing here holds it.",
   "home.shelf.rediscover": "Rediscover",
   "home.stat.artists": "artists",
   "home.stat.albums": "albums",
@@ -300,6 +344,32 @@ export default {
   // —— Settings ———————————————————————————————————————————————————————
   "settings.language": "Language",
   "settings.language_help": "Applies to this browser — the app's own labels, never your file names or tags.",
+  // —— Accent colour (issue #53): the swatches' names and the custom row ——
+  // One key per preset id, looked up through a typed Record in SettingsPage, so
+  // a preset whose name is missing here fails the build instead of showing a
+  // raw key in the tooltip.
+  "settings.accent": "Accent color",
+  "settings.accent_red": "Red",
+  "settings.accent_orange": "Orange",
+  "settings.accent_amber": "Amber",
+  "settings.accent_yellow": "Yellow",
+  "settings.accent_lime": "Lime",
+  "settings.accent_emerald": "Emerald",
+  "settings.accent_teal": "Teal",
+  "settings.accent_sky": "Sky",
+  "settings.accent_blue": "Blue",
+  "settings.accent_indigo": "Indigo",
+  "settings.accent_violet": "Violet",
+  "settings.accent_fuchsia": "Fuchsia",
+  "settings.accent_pink": "Pink",
+  "settings.accent_rose": "Rose",
+  "settings.accent_mono": "Black & white",
+  "settings.accent_custom": "Pick a color",
+  "settings.accent_hex": "Hex color",
+  "settings.accent_use": "Use",
+  "settings.accent_invalid": "Not a color — try #ff7a18 or #f70",
+  "settings.accent_back": "Back to presets",
+  "settings.accent_help": "The swatch and the box are one color. The hex box takes #rgb or #rrggbb, with or without the #. This device only.",
 
   // —— Donations ——————————————————————————————————————————————————————
   "donations.title": "Donations",
@@ -390,4 +460,48 @@ export default {
   "pending.queued": "waiting its turn in the wish queue",
   "pending.not_found": "not found yet — retry it from Soulseek",
   "pending.failed": "the last search failed",
+
+  // —— Lyrics kind: synced (timed) or plain ————————————————————————————
+  // The two kinds a track's stored lyrics can be, and the reason a plain one
+  // is a FAILING state when the user's own `lyrics_allow_plain` is off (the
+  // shipped default) — the reason names that setting, because the policy is
+  // the user's, not a rule about the words.
+  "lyrics.kind.synced": "Synced",
+  "lyrics.kind.plain": "Plain",
+  "lyrics.kind.synced_hint": "Timed lyrics — the player follows the line",
+  "lyrics.kind.plain_hint": "Untimed lyrics — no timestamps, so nothing follows the words",
+  "lyrics.kind.plain_reason": "Plain lyrics — Settings → Lyrics has “Accept plain (unsynced) lyrics” off, so this track should hold a synced version.",
+  "lyrics.kind.counts": "{synced} synced · {plain} plain",
+  "lyrics.kind.plain_failing": "{n} track(s) hold plain lyrics — Settings → Lyrics has “Accept plain (unsynced) lyrics” off, so those tracks fail this check.",
+  // —— Import: the digital release's own answers ——————————————————————
+  // SOURCE is required on a Digital Media release and nothing in the
+  // audio states it; the settle line names what an import decided about
+  // the lyrics and the album description when it finished an album.
+  "import.source.title": "Source",
+  "import.source.why": "Required when the release is Digital Media — nothing in the files says where it came from.",
+  "import.source.suggested": "Suggested from the release: {value}",
+  "import.source.save": "Save source",
+  "import.source.save_hint": "Write this value to every track of the album that has no SOURCE yet — required when MEDIA is Digital Media",
+  "import.source.written": "SOURCE written to {n} file(s)",
+  "import.source.present": "SOURCE already on every file",
+  "import.source.not_digital": "Not a Digital Media release — no SOURCE is required",
+  "import.source.asked": "Nothing states a source — say where this release came from",
+  "import.settle.title": "Settled by this import",
+  "import.settle.lyrics": "Lyrics",
+  "import.settle.lyrics_removed": "{n} file(s) had untimed lyrics removed (synced lyrics are required here)",
+  "import.settle.lyrics_no_fetch": "Left alone: the fetch (script 13) is not in this run's chain",
+  "import.settle.lyrics_allow_plain": "Untimed lyrics are allowed here — kept",
+  "import.settle.lyrics_ok": "Every lyric is timed",
+  "import.settle.description": "Album description",
+  "import.settle.description_fetched": "Fetched",
+  "import.settle.description_staged": "Candidates staged for your review",
+  "import.settle.description_missing": "Not found — you can fetch one on the album page",
+  // —— Cookie logins: a cookies.txt import, and a note per cookie ————————————
+  "cookies.commentPlaceholder": "comment",
+  "cookies.commentFor": "Comment for the {name} cookie",
+  "cookies.session": "session",
+  "cookies.expired": "expired",
+  "cookies.keptHosts": "Only cookies for {hosts} are kept — everything else in the export is left out.",
+
+  "cookies.sectionTitle": "Cookie logins — import a cookies.txt",
 } as const;
