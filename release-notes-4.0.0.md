@@ -434,6 +434,12 @@ plain is simply "Plain", and a setting that cannot be read never claims a
 failure. The kind is measured from the stored file, not from what a fetch once
 returned.
 
+*After the release:* the mark was narrowed to a single track's own surfaces —
+the track page, its readout, its lyrics pane and manager, and the import
+wizard's Lyrics step. On the album's tracklist it read as clutter beside the
+advisory mark and the issue count, so a list of tracks carries no kind at all
+(`tools/check_lyrics_kind.mjs` pins both directions now).
+
 ## A digital release settles itself
 
 The three things the grader reported after a manual digital import — no
