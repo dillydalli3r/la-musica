@@ -419,8 +419,12 @@ try:
     ROOT = tempfile.mkdtemp(prefix="mlo_instrumental_lyrics_")
     clear()
 
+    # The double mirrors `mlo.lyrics_providers.fetch_lyrics`, which
+    # `lyrics_fetch` re-exports: a parameter the real one grows has to appear
+    # here too (`aliases` is the alias second pass), or every caller that
+    # passes it dies inside this fake with a TypeError instead of testing.
     def empty_chain(config, artist, title, album, duration,
-                    youtube_id=None, min_score=None):
+                    youtube_id=None, min_score=None, aliases=None):
         return None
 
     real_fetch_lyrics = lyrics_fetch.fetch_lyrics
