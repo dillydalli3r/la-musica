@@ -163,6 +163,12 @@ jobs:
         # outlive an unmounted pane.
         run: node tools/check_lyrscroll.cjs
 
+      - name: The lyric clock's audible correction (R266)
+        # `audibleLatencySec` against hand-built contexts: the graph's
+        # baseLatency + outputLatency, zero without a graph, and the cap that
+        # keeps a nonsense reading from skewing the words.
+        run: node tools/check_lyric_clock.mjs
+
   desktop:
     runs-on: ubuntu-latest
     steps:

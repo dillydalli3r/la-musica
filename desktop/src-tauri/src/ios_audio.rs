@@ -27,8 +27,9 @@
 //! category: WebKit keeps that process alive for a web page only while it can
 //! justify it, and a page that is merely playing audio is a case iOS has to be
 //! told about on every transition. The same three facts are in the field
-//! reports for every other WKWebView host (Cordova's `WKCWebView` background
-//! audio threads, WebKit bug reports, and Tauri's own iOS audio issue): the
+//! reports for every other WKWebView host (Cordova's
+//! `cordova-plugin-ionic-webview` background-audio threads, WebKit bug
+//! reports, and Tauri's own iOS audio issue): the
 //! webview stops when the app is backgrounded, and a fresh `play()` in the
 //! foreground is what starts the clock again — exactly the owner's pause/play
 //! observation. Two things fix it, and both are here or in the app's config:
