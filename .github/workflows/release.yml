@@ -239,7 +239,8 @@ jobs:
           VERSION="${GITHUB_REF_NAME#v}"
           IPA="$(find clients -type f -name '*.ipa' -print -quit)"
           test -n "$IPA" || { echo "::error::no IPA to build a source from"; exit 1; }
-          python tools/make_sidestore_source.py "$IPA" "$VERSION" "${GITHUB_REF_NAME}" source.json
+          python tools/make_sidestore_source.py "$IPA" "$VERSION" "${GITHUB_REF_NAME}" source.json \
+            --date="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
           python -c "import json;d=json.load(open('source.json'));print(d['apps'][0]['bundleIdentifier'], d['apps'][0]['versions'][0]['downloadURL'])"
 
       - name: Create GitHub release
