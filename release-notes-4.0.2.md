@@ -56,7 +56,10 @@ compared it, so a file damaged *after* ripping graded clean. **FLAC stream MD5
 rest): the stored checksum is verified against the decoded audio, the same
 verification runs in the audit and in the AccurateRip handling, and the check
 sits in the Grading page's Integrity group beside the other tag checks
-(`mlo/flac.py`, `tools/test_flac_md5.py`).
+(`mlo/flac.py`, `tools/test_flac_md5.py`). A file whose header states a digest
+its own audio does not have is never re-encoded either: the optimizer drops its
+own output and keeps the original byte-for-byte, naming the mismatch, so damage
+can never be laundered into a file that passes every check.
 
 ## The Storage card adds up
 
