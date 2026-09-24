@@ -4843,6 +4843,7 @@ checks see or how they judge it.
 | `library_codec_optimize` | `lossless_to_lossy` | what script 3 may convert: a lossless source to the target (`lossless_to_lossy`), lossy sources too (`all`), or nothing (`keep`) |
 | `lrclib_auto_publish` / `force_publish` | ON / off | whether script 18 publishes, and whether it overrides LRCLIB's refusal |
 | `run_all_order` / `import_scripts` / `import_auto_scripts` | see R8 / R9 | what runs, and in which order |
+| `digital_media_source_value` | `Digital` | the answer an import offers when nothing states where a Digital Media release came from (R262); the `SOURCE` it writes is what the source checks then read |
 
 Two keys deliberately do **not** change a verdict on their own:
 `grade_check_accuraterip` (AUDIT-only, R5) and `show_sidecar_files` —
