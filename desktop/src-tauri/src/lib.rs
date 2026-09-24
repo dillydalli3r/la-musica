@@ -48,6 +48,14 @@ use tauri_plugin_dialog::DialogExt;
 #[cfg(target_os = "ios")]
 mod ios_like;
 
+// The iOS audio session (AVAudioSession, category `playback`): what keeps the
+// music playing when the app is not in front, and what makes the Now Playing
+// module — the card the star above is drawn on — exist at all. iOS only, for
+// the same reason as the star: Android plays through its own audio path and the
+// desktop targets have no AVAudioSession. See src/ios_audio.rs.
+#[cfg(target_os = "ios")]
+mod ios_audio;
+
 /// The tray's "Start on Login" checkbox, kept in managed state so the
 /// click handler can re-sync its visual with the registry after toggling.
 #[cfg(desktop)]
@@ -252,6 +260,12 @@ pub fn run() {
             if let Some(window) = app.get_webview_window("main") {
                 let _ = window.show();
             }
+            // The audio session comes FIRST: a playback category is what keeps
+            // playback alive once the app is not in front, and what makes the
+            // Now Playing card — the star's home — exist at all (see
+            // src/ios_audio.rs). Logged, never fatal, exactly as the star is.
+            #[cfg(target_os = "ios")]
+            ios_audio::activate();
             // iOS additionally owns the OS's Now Playing star. Setup is the one
             // place the runtime hands us the app handle before any track can
             // play, which is what the star's handler needs to reach the webview

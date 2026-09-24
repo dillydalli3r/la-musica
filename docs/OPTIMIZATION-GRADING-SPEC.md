@@ -107,7 +107,7 @@ An issue is `{code, label, where, reason}` for album-level and artist problems
 
 ---
 
-## 2. The 21 optimization scripts
+## 2. The 22 optimization scripts
 
 Ids, titles and the shipped order are `mlo/cli.py:SCRIPTS` and
 `mlo/config.py:DEFAULT_RUN_ALL_ORDER`; the runners are
@@ -117,7 +117,7 @@ chain both call).
 **R8 — Run All runs `run_all_order`**, shipped as
 `[11, 3, 14, 15, 2, 1, 13, 18, 17, 8, 5, 19, 6, 7, 9, 12, 16, 10, 20, 21, 4]`:
 everything that moves a file first, everything that reads it last. A saved order
-is honoured as saved (ids outside 1–21 are dropped; legacy 8/9-id orders are
+is honoured as saved (ids outside 1–22 are dropped; legacy 8/9-id orders are
 migrated).
 **R9 — the import chain is DERIVED from the run order, minus a declared
 exception.** `import_scripts` replaces it outright; an empty list means the
@@ -186,6 +186,7 @@ publishes, including the ones that write nothing until they do.
 | 19 | Optimize artist images | Re-fits `Artists/<Artist>/artist.*` to `artist_image_aspect` / `artist_image_target_size`, re-encodes as `artist.jpg`/`artist.png` | the artist image in place (only when it has to move) | re-encodes in place; never deletes | no |
 | 20 | Optimize library layout | The music folder's shape against `<music>/Artists/<Artist>/<Album>/…`: audio at the root or in an artist folder, stray files, unexpected folders, empty albums, `wrong_case` rows. With `layout_apply` (ON) it SETTLES what the folder itself proves — a wrong-case name is renamed, audio outside an album folder is moved into the one its tags name, and what is excess goes to the Trash (a stray file, a folder inside an album that is neither a disc folder nor holds audio, an album folder with no audio, a foreign root folder holding no audio, an album-less artist folder, the `.mlo_*` leftovers) — and reports every other row with the reason it stayed, re-derived at the move (R185). Writes ONE report describing the whole library (plus a `fixes` list) to `<music>/.mlo/data/`, which the Library page warns from; scoped to `targets` when a run names them, and library-wide when it does not (R9) | one report file + the renamed/moved/removed paths | `layout_apply` (removals go to the Trash) | no |
 | 21 | Fix AcoustID pairs | Completes (or CREATES) a track's `ACOUSTID_ID`/`ACOUSTID_FINGERPRINT` pair — the failure `Missing ACOUSTID_ID (run Fix AcoustID pairs)`. The recording the pair must name is a question the FILE answers itself (its own `ACOUSTID_ID`, its `MUSICBRAINZ_TRACKID`, or the recording MBID this app's naming script wrote into the file name), and the fingerprint is taken from the audio locally by fpcalc — so a CD rip AcoustID has never seen, or a run with no usable key, is repairable with no request at all. The service is asked only for a half pair whose file names no recording anywhere; a file carrying no AcoustID tag and naming no recording is skipped, never written from a guess | `ACOUSTID_ID`, `ACOUSTID_FINGERPRINT` | no | only for a half pair that names no recording |
+| 22 | Submit fingerprints (AcoustID) | Gives AcoustID the fingerprint and the MusicBrainz recording id a file already states (`mlo.acoustid.submit_files`): the recording is read the way script 21 reads it, the fingerprint is taken locally, the service is asked what it already links (`pair_known`) and what this app already handed over (`load_submissions`), and only what is genuinely new goes in ONE batched `v2/submit` — each track reported ACCEPTED, ALREADY_KNOWN, REJECTED or skipped with a named cause. **Not in the shipped order** (`OPT_IN_SCRIPTS`): a submission is a public, outward-facing write, so it runs only when someone asks — a details menu, `POST /api/import/acoustid/submit`, the wizard's AcoustID step, or a `run_all_order` the user put it in themselves | nothing locally | no | **yes** (AcoustID database) |
 
 **R243 — Fix AcoustID pairs (21) completes OR creates the pair from the file
 itself, and only asks the service for a half pair that names no recording.**
@@ -3417,20 +3418,34 @@ user asked for, in the order they asked for it. `server/exporter.py` owns both.
   description (`mlo.cli.SCRIPTS` — never a second copy of the names), its slot
   in the Run All order (`order`, `in_order`), its feature switch (`gate`:
   the config keys that skip it and the run's own sentence, `enabled` false when
-  all of them are off), and its force flag (`force.key` — the SHORT key
-  `/api/run` accepts, from `_FORCE_KEYS` + `_FORCE_ALIASES`; a script whose
-  flag is composite like 10 offers none, exactly the set `web/src/lib/force.ts`
-  lists). What the menu may offer is DERIVED, not typed into it: `applies_to`
+  all of them are off), and its force flags (the SHORT keys
+  `/api/run` accepts, from `_FORCE_KEYS` + `_FORCE_ALIASES`). What the menu may offer is DERIVED, not typed into it: `applies_to`
   follows the script's own work unit — a FILE-scoped script (1, 3, 6, 11, 12,
-  13, 16, 17, 18, 21) applies from every kind of selection, a FOLDER-scoped one
+  13, 16, 17, 18, 21, 22) applies from every kind of selection, a FOLDER-scoped one
   (2, 4, 5, 7, 8, 9, 10, 14, 15, 19, 20) only where a folder is in hand, which
   is album, artist and library (`KINDS` = album/track/artist/playlist/library,
-  `_FOLDER_KINDS` the three). So an album's menu offers **21** entries and a
-  track row or playlist selection offers the **10** file-scoped ones, computed
-  from the table rather than counted by hand. A registry id with no scope is
+  `_FOLDER_KINDS` the three). So an album's menu offers **22** entries and a
+  track row or playlist selection offers the **11** file-scoped ones, computed
+  from the table rather than counted by hand — and the section is headed by a **Run all N scripts** entry (N is
+  `ids.length`, so the label and the request cannot drift): the chain's own
+  order scoped to the entity, posted as ONE `POST /api/run` over the menu's own
+  targets after a confirm. `run_all.by_kind`/`run_all.order` EXCLUDE the
+  OPT-IN scripts (`script_runners.OPT_IN_SCRIPTS`: 22 submits to AcoustID's
+  public database and is never swept up by a menu button, even if a user put it
+  in their own order) and the payload NAMES them under `run_all.excluded` with
+  the reason; `tools/check_script_menu.mjs` pins that 22 appears in no posted
+  body. The force flags are one entry PER FLAG the registry knows, not one per
+  script: `force.options[]` carries `{key, config, owner, owner_label}` beside
+  `force.keys`, so 10 (whose flag is the composite `force_accurip`/`force_cue`/
+  `force_lyrics`/`force_auto_tag`) offers all four, each labelled with the pass
+  it re-runs ("9 · AccurateRip"), a flag with no short spelling `/api/run`
+  accepts is reported with `key: null` rather than dropped, and every
+  single-flag script keeps its one forced twin. A registry id with no scope is
   reported in `unclassified` and offered everywhere (fail OPEN) — and
   `tools/test_script_menu.py` fails on it, which is the rule that makes the
-  table complete rather than aspirational. The set is served in the stack's own
+  table complete rather than aspirational (it also asserts one force option per
+  `_FORCE_KEYS` entry, and that the option set is exactly what
+  `web/src/lib/force.ts` can send). The set is served in the stack's own
   order (`scripts.sort` on `order`, then the id) and `web/src/components/
   TagActionsMenu.tsx` renders one entry per applicable script — with a forced
   twin where the script owns one flag — and every entry runs `POST /api/run`
@@ -3740,6 +3755,27 @@ screen; above `lg` the pane sits beside the artwork.
   `MPNowPlayingInfoCenter` is left untouched because the Media Session metadata
   is what the OS already reads. The shell side is documented in
   `desktop/README.md` ("The Now Playing star on iOS").
+
+- **R265 — a playback session is what "keeps playing" means, and the Now
+  Playing card comes with it.** iOS plays a webview's audio through whatever
+  `AVAudioSession` category the app has configured, and the default
+  (`soloAmbient`) is incidental-UI sound: muted the moment the app stops being
+  the frontmost app, and by the ringer switch. `UIBackgroundModes: [audio]` in
+  `Info.plist` is the app's *permission* to play in the background — the category
+  is what makes it true, which is why that key alone left the owner's 4.0.0
+  report standing ("audio is muted when app is unfocused").
+  `desktop/src-tauri/src/ios_audio.rs` sets `AVAudioSessionCategoryPlayback`
+  (the framework's own exported constant, not a copied string) with the default
+  mode and NO options — this app mixes with nothing — then activates the
+  session, once, at setup; AVFAudio is linked explicitly because the dynamic
+  class lookup finds nothing until it is loaded. It is also R251's prerequisite:
+  the Now Playing module draws a card only for an app whose session is a
+  playback session, so with no category there was no card for the star to be
+  drawn on — "the like button still isn't on ios" and the muted audio were ONE
+  bug, settled in one place. A session that will not take the category, or will
+  not activate, is logged and never fatal (the same rule as the star), and the
+  module is compiled for iOS alone (`#[cfg(target_os = "ios")]`; Android plays
+  through its own audio path and the desktop targets have no `AVAudioSession`).
 
 ### 7.23 The export archive, and the offline shell that must not become it
 

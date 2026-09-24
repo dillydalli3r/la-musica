@@ -26,13 +26,20 @@ parking_lot = "0.12"
 # The iOS Now Playing star only (src/ios_like.rs): MediaPlayer's
 # `MPRemoteCommandCenter.likeCommand` is Objective-C, and the Media Session API
 # the webview already uses has no like action at all, so this one piece of the
-# feature has to be native. Both crates are ALREADY in Cargo.lock as transitive
-# dependencies of Tauri on Apple targets (objc2 0.6.4 / block2 0.6.2), so this
-# makes them direct dependencies of the iOS build without resolving anything
-# new — and not one line of the module compiles on any other target.
+# feature has to be native. All three crates are ALREADY in Cargo.lock as
+# transitive dependencies of Tauri on Apple targets (objc2 0.6.4 / block2 0.6.2
+# / objc2-foundation 0.3.2), so this makes them direct dependencies of the iOS
+# build without resolving anything new — and not one line of either module
+# compiles on any other target.
+#
+# objc2-foundation is for the iOS audio session (src/ios_audio.rs): AVFAudio's
+# category constants are `NSString *const` symbols, and objc2 0.6 cannot hand
+# `msg_send!` a raw pointer, so the symbols are declared the way objc2's own
+# bindings declare theirs — as `&'static NSString`.
 [target.'cfg(target_os = "ios")'.dependencies]
 objc2 = "0.6.4"
 block2 = "0.6.2"
+objc2-foundation = { version = "0.3", features = ["NSString"] }
 
 [profile.release]
 codegen-units = 1

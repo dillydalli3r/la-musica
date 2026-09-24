@@ -90,6 +90,12 @@ the reason, instead of offering an Install button that cannot succeed.
   an app that goes quiet when backgrounded. It used to carry a second job —
   keeping an embedded backend alive with a silent session — and that job, with
   its sideload-only caveat, went away with the backend.
+  The mode is the PERMISSION, not the fact: until `src/ios_audio.rs` existed the
+  app never configured an `AVAudioSession` category, and the default
+  (`soloAmbient`) is muted the moment the app stops being frontmost — the
+  owner's own 4.0.0 report, "audio is muted when app is unfocused". That module
+  puts the session in `AVAudioSessionCategoryPlayback` (default mode, no options)
+  and activates it at setup; with the plist key it is what makes the mode true.
 
 ### The Now Playing star on iOS
 
@@ -134,21 +140,27 @@ does not have. The wiring is four steps:
 What the star cannot do: the app has no dislike or bookmark, so only the like
 command is ever activated; and the star belongs to the OS's module, so it
 appears only while a now-playing session exists at all — i.e. while this
-webview owns one (playing, or paused mid-track). Hand the session to another app
-and the module, star included, goes with it. `MPNowPlayingInfoCenter` is left
-untouched because the webview's own Media Session metadata is what the OS reads
-for title/artist/album/artwork; `localizedTitle`/`localizedShortTitle` are left
+webview owns one (playing, or paused mid-track) — and a session is a *playback*
+session only because `src/ios_audio.rs` says so: before that module the app had
+the plist's background mode but no category, so the module had no card to be
+drawn on (the owner's "the like button still isn't on ios" was the same bug as
+the muted audio — spec R265). Hand the session to another app and the module,
+star included, goes with it. `MPNowPlayingInfoCenter` is left untouched because
+the webview's own Media Session metadata is what the OS reads for
+title/artist/album/artwork; `localizedTitle`/`localizedShortTitle` are left
 untouched so the OS's already-localised wording is used instead of an English
 string hard-coded in the shell.
 
 What is verified here and what is not: `cargo check` proves the crate still
-builds for the non-iOS targets with the module excluded, and the objc2/block2 API
-in the module was written against those crates' vendored sources (the
+builds for the non-iOS targets with both modules excluded, and the objc2/block2
+API in them was written against those crates' vendored sources (the
 `&DynBlock<dyn Fn(…) -> _>` argument shape, `Option<Retained<_>>` returns,
-`msg_send!`'s encoding rules) — but compiling for iOS and watching the star on a
-device both need Xcode, which is not installed on this machine, so neither has
-been run locally. `mobile.yml` (macOS) is the first build that type-checks this
-file.
+`msg_send!`'s encoding rules — `None::<&mut AnyObject>` is how an out-parameter
+like `NSError**` is passed, since raw pointers are not `Encode`, which is also
+why the audio category is read from AVFAudio's exported `NSString *const` rather
+than built) — but compiling for iOS and watching the star on a device both need
+Xcode, which is not installed on this machine, so neither has been run locally.
+`mobile.yml` (macOS) is the first build that type-checks these files.
 
 ## Bundle config
 
