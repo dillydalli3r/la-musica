@@ -36,11 +36,14 @@ the thing it is about — the album, the download folder, or this queue (see
 ``_notify_finish``): no acquisition is allowed to end in silence, whether it
 succeeded, found nothing, or gave up with a reason.
 
-ONE release is not on the network at all, and this module says so before it
-searches: a music video whose medium is DIGITAL MEDIA (its recordings
+ONE release is often not on the network at all, and this module says so before
+it searches: a music video whose medium is DIGITAL MEDIA (its recordings
 MusicBrainz states are videos) is a set of YouTube uploads, so it is fetched
 through ``server.youtube`` instead of searched for — see ``acquisition_route``
-and ``_run_youtube``. That branch lives inside the same job, so its album takes
+and ``_run_youtube``. A track YouTube has no usable upload for (or cannot
+deliver) is then looked for on the network itself, as the plain video file it
+is — see ``fetch_video_on_soulseek`` — because "not on YouTube" is not the same
+as "nowhere". That branch lives inside the same job, so its album takes
 the same import, the same queue row, the same stages and the same log as a
 downloaded folder; a music video on a DISC (DVD, Blu-ray, VHS, Video CD) and
 every audio release keep the Soulseek path unchanged.
@@ -71,8 +74,10 @@ from mlo.stats import worker_count
 # acquisition_route).
 from mlo.release_choice import media_formats, video_formats
 # The library's definition of a track, for the one step that must see a
-# music-video album's files as tracks (the MB stamping below).
-from mlo.paths import LIB_AUDIO_EXTS
+# music-video album's files as tracks (the MB stamping below), and its
+# definition of a music VIDEO — the app's ONE container vocabulary, which the
+# video fallback below judges a peer's file by (never a second extension list).
+from mlo.paths import LIB_AUDIO_EXTS, is_video_file
 # The app's ONE filename rule (see _safe_component): a folder this module names
 # has to be the same folder the organizer and the export would name.
 from mlo.naming import sanitize_segment
@@ -4171,6 +4176,179 @@ class _AlbumClaim:
 
 
 # --------------------------------------------------------------------------- #
+# Music videos on the network
+# --------------------------------------------------------------------------- #
+# A music video is ONE FILE, not a folder: the album machinery above
+# (find_candidates and everything it feeds) scores FOLDERS against a release's
+# tracklist, which is the wrong question for a video. What a music video needs
+# asked is "is there a video of THIS track on the network, and who has it" —
+# asked per track by the YouTube branch below when YouTube has no usable upload
+# (see _youtube_fetch), and once by the HTTP grab route in server.main. Both go
+# through fetch_video_on_soulseek, so the search, the candidate rule and the
+# transfer stay one piece of code instead of two that can drift apart (spec
+# R241).
+
+# The window ONE video's search gets. The album path spends its window once for
+# a whole album (every template at once, its results scored in one pass); here
+# it is spent per TRACK and only once, so it stays short: a video that is on
+# the network at all is answered for well inside it, and a track nobody answers
+# for must not hold the album's other tracks up.
+_VIDEO_SEARCH_S = 10
+# A handful of answers is all one file needs, and slskd ends the search as soon
+# as that many peers have replied (see soulseek.search) — which is what keeps
+# the HTTP route's answer seconds rather than a whole window.
+_VIDEO_RESPONSE_LIMIT = 8
+# How far a response's own length may be from the track's and still be the same
+# recording — the tolerance find_candidates matches a track to a file by.
+_VIDEO_LENGTH_SLACK_S = 15
+
+
+def _video_candidates(files, artist, title, seconds=None):
+    """The network's copies of ONE track's music video, best first.
+
+    A response file qualifies when it is a video container the library
+    supports (mlo.paths.is_video_file — the app's ONE container vocabulary) and
+    its NAME carries the track's own artist AND title: the network is full of
+    other people's takes on a song (live versions, covers, remixes), and a
+    music video that is not this track's is worse than none — the album imports
+    and tags whatever it is given. A response that states a length is also held
+    to the track's own, with the slack find_candidates allows, so a whole
+    concert uploaded under the song's name is not taken for the track.
+
+    One candidate per peer+folder — the same folder grouping the album matcher
+    works in — ordered by the app's own ranking (_rank). Of the fields that
+    ranking reads, only the peer's own figures mean anything here: a video is
+    not a lossless audio folder and was not scored against a tracklist, so the
+    candidate ties on those two and the speed it uploads at, its queue and the
+    names decide the order (fastest peer first, deterministically — see _rank).
+    """
+    want_artist = _norm_text(artist).lower()
+    want_title = _norm_text(title).lower()
+    if not want_title:
+        return []
+    try:
+        want_len = float(seconds or 0)
+    except (TypeError, ValueError):
+        want_len = 0.0
+    groups = {}
+    for f in files:
+        remote = str(f.get("file") or "")
+        if not is_video_file(remote):
+            continue
+        stem = _norm_text(
+            os.path.splitext(os.path.basename(_remote_rel(remote)))[0]).lower()
+        if want_title not in stem:
+            continue
+        if want_artist and want_artist not in stem:
+            continue
+        try:
+            length = float(f.get("duration") or 0)
+        except (TypeError, ValueError):
+            length = 0.0
+        if want_len and length and abs(length - want_len) > _VIDEO_LENGTH_SLACK_S:
+            continue
+        groups.setdefault((str(f.get("username") or ""),
+                           os.path.dirname(_remote_rel(remote))), []).append(f)
+    out = []
+    for (username, folder), group in groups.items():
+        # ONE file per peer+folder: a peer offering the same video twice (a
+        # second container) must not be asked for both, and picking by name
+        # keeps the choice the same on every run.
+        pick = min(group, key=lambda f: str(f.get("file") or "").lower())
+        size = int(pick.get("size") or 0)
+        speeds = [float(f.get("speed") or 0) for f in group]
+        out.append({
+            "username": username, "dir": folder, "file": str(pick.get("file") or ""),
+            "files": [pick], "size": size, "total_size": size,
+            "queue": min(int(f.get("queue") or 0) for f in group),
+            "speed": min([s for s in speeds if s > 0] or [0]),
+            # _rank's own two fields. A video candidate is neither lossless nor
+            # scored, so every one of them ties on these: the peer facts above
+            # (speed, queue, names) are what order videos.
+            "lossless": False, "score": 0,
+        })
+    out.sort(key=_rank)
+    return out
+
+
+def _video_files(slsk, artist, title, seconds=None):
+    """What the network answers for one track's music video: its result files.
+
+    ONE query — the track's artist and title, which is how a music video is
+    filed on a share — with the candidate rule above ending the search the
+    moment a copy turns up (see _search_queries, which posts the query and
+    polls it in a single window). Never raises: a query slskd refuses, a search
+    nobody answers for and an unreachable slskd all arrive here as "no files",
+    and the callers own the reason they report for that."""
+    query = " ".join(p for p in (str(artist or "").strip(),
+                                 str(title or "").strip()) if p)
+    if not query:
+        return []
+    results, _errors, _skipped = _search_queries(
+        slsk, [query], _VIDEO_SEARCH_S,
+        usable=lambda files: _video_candidates(files, artist, title, seconds),
+        response_limit=_VIDEO_RESPONSE_LIMIT)
+    # The search is over: the job's live search frame must not outlive it (an
+    # HTTP caller has no job of its own, and the queue view reads that frame).
+    _job_search_done()
+    return [f for _q, res in results for f in (res.get("responses") or [])]
+
+
+def fetch_video_on_soulseek(artist, title, dest, cfg, seconds=None):
+    """The music video of *artist* — *title* as a file on the network, or None.
+
+    The second source of a music video, beside YouTube: the network's copy is
+    looked for with the app's own search and transfer machinery (`_video_files`,
+    `_video_candidates`, `_wait_for_files` — nothing here speaks to slskd
+    itself), the best candidate is queued and the transfer is waited out.
+
+    `dest` is the folder the fetched video is MOVED into: the release's own
+    staging folder (see _youtube_album_dir), where the caller renames it to the
+    track's name before the import. A falsy `dest` queues the transfer and
+    returns at once with no local path — an HTTP request cannot be held open
+    for a download that takes minutes, and what it asked for is the transfer
+    the Downloads page shows from then on (server.main's video grab route).
+
+    Returns {"path", "user", "filename", "size", "source"} — `path` the local
+    file ("" for a queued-only transfer), `source` always "soulseek". None is
+    an ANSWER, never an exception: the network has nothing of this track, the
+    transfer did not land within its own budget, or slskd could not be asked at
+    all. What does raise is slskd's refusal to QUEUE the file (an offline peer,
+    a file it will not take) — the callers report that reason in their own
+    words rather than as a silent "not found".
+
+    The move is a MOVE, not a copy: the staged file IS that track's file, and a
+    cancelled job sweeps its staging folder (_drop_youtube_staging), which must
+    take the network's bytes with it too."""
+    from server import soulseek as slsk
+
+    candidates = _video_candidates(_video_files(slsk, artist, title, seconds),
+                                   artist, title, seconds)
+    if not candidates:
+        return None
+    cand = candidates[0]
+    wanted = [{"filename": cand["file"], "size": cand["size"]}]
+    slsk.enqueue_download(cand["username"], wanted)
+    name = os.path.basename(_remote_rel(cand["file"]))
+    got = {"path": "", "user": cand["username"], "filename": name,
+           "size": cand["size"], "source": "soulseek"}
+    if not dest:
+        return got
+    local = str(_wait_for_files(slsk, slsk.download_dir(cfg), cand["username"],
+                                wanted, timeout_s=_est_timeout(cand),
+                                cancel_check=_cancelled,
+                                queue_budget_s=_queue_budget(cand)).get(
+                                    cand["file"]) or "")
+    if not local or not os.path.isfile(local):
+        return None
+    target = os.path.join(dest, name)
+    shutil.move(local, target)
+    got["path"] = target
+    got["size"] = int(os.path.getsize(target))
+    return got
+
+
+# --------------------------------------------------------------------------- #
 # YouTube — a DIGITAL music-video release
 # --------------------------------------------------------------------------- #
 # The YouTube route is the release's own medium's answer (acquisition_route
@@ -4185,9 +4363,12 @@ class _AlbumClaim:
 # (server.youtube.best_candidate — the artist's own channel preferred, lyric /
 # cover / tribute re-uploads rejected, the track's own length a ±5 s filter)
 # and downloaded with the app's one quality policy (best video+audio stream,
-# merged into MKV by the app's own ffmpeg). A track that cannot be found or
-# downloaded is THAT track's failure: the rest of the album is still imported,
-# and the job reports every one of them by name.
+# merged into MKV by the app's own ffmpeg). A track YouTube has no usable
+# upload for — or one yt-dlp could not deliver — falls back to the NETWORK
+# before it is given up on (fetch_video_on_soulseek above): a music video that
+# nobody uploaded to YouTube is often a plain file on a peer's share. A track
+# neither source serves is THAT track's failure: the rest of the album is
+# still imported, and the job reports every one of them by name.
 
 
 def _safe_component(name, fallback="Soulseek Import"):
@@ -4264,19 +4445,29 @@ def _drop_youtube_staging(dest):
 
 
 def _youtube_fetch(release, dest, cfg):
-    """Find and download every track of *release* from YouTube.
+    """Find and download every track of *release* — YouTube first, Soulseek
+    second — and stage the files in `dest`.
 
     Returns (got, problems): one entry per downloaded track, in the release's
-    own track order, and one line per track that could not be found or
-    downloaded. A per-track failure is REPORTED, never raised — the other
-    tracks of a music-video collection are worth having, and the caller ends
-    the job on the count.
+    own track order, and one line per track that NO source could serve. A
+    per-track failure is REPORTED, never raised — the other tracks of a
+    music-video collection are worth having, and the caller ends the job on
+    the count.
+
+    A track YouTube has no usable upload for (or one yt-dlp could not deliver)
+    is looked for on the network before it is given up on: a music video that
+    nobody put on YouTube is often a plain file on a peer's share, and
+    fetch_video_on_soulseek is the same machinery the album path downloads
+    with. The line that reports a track neither source served names both of
+    them, and where the network was never asked the line says why (slskd not
+    running) instead of blaming the network for a copy nobody looked for.
 
     Tracks are fetched `worker_limit` at a time (the same setting every other
     multi-file runner in the app obeys), each on a thread that re-binds the job
     it reports into, so a few videos download side by side and their log lines
     still land in THIS job."""
     from concurrent.futures import ThreadPoolExecutor
+    from server import soulseek as slsk
     from server import youtube
 
     tracks = [t for t in (release.get("media") or []) if isinstance(t, dict)]
@@ -4288,6 +4479,17 @@ def _youtube_fetch(release, dest, cfg):
     problems = []
     lock = threading.Lock()
     done = [0]
+    # The Soulseek half's own gate, read ONCE for the whole album: the same
+    # precondition every search in this module runs behind (_run), turned into
+    # the words the per-track lines report it with. Signed out is its OWN
+    # answer — a slskd that cannot search must not be reported as a network
+    # with nothing on it, or the miss reads as "this video is not out there".
+    if not (slsk.is_running() or slsk.web_up(cfg)):
+        slsk_why = "Soulseek is not running"
+    elif not (slsk.server_state(cfg) or {}).get("isLoggedIn"):
+        slsk_why = "Soulseek is not logged in"
+    else:
+        slsk_why = ""
 
     def one(i):
         track = tracks[i]
@@ -4305,21 +4507,46 @@ def _youtube_fetch(release, dest, cfg):
             _stage("downloading", f"YouTube: track {i + 1}/{total} — {label}")
             _job["progress"] = _youtube_progress(done[0], total, label)
         candidate = youtube.best_candidate(by, title, seconds, cfg)
-        if not candidate:
-            with lock:
-                problems.append(f"{label}: no usable YouTube upload found")
-            return
-        try:
-            fetched = youtube.download(candidate["url"], dest, cfg)
-        except Exception as e:
-            with lock:
-                problems.append(f"{label}: YouTube download failed ({e})")
-            return
+        fetched = None
+        why = "no usable YouTube upload found"
+        if candidate:
+            try:
+                fetched = youtube.download(candidate["url"], dest, cfg)
+            except Exception as e:
+                why = f"YouTube download failed ({e})"
         path = str((fetched or {}).get("path") or "")
+        alt, missed = None, ""
+        if not path:
+            # No usable upload, or one that never arrived: ask the NETWORK
+            # before this track is given up on. A failure there (slskd, or a
+            # peer that refuses the file) is this track's miss like any other
+            # — reported, never raised: the album's other tracks are still
+            # coming.
+            if slsk_why:
+                missed = slsk_why
+            else:
+                with lock:
+                    _stage("downloading",
+                           f"Soulseek: track {i + 1}/{total} — {label}")
+                try:
+                    alt = fetch_video_on_soulseek(by, title, dest, cfg, seconds)
+                except Exception as e:
+                    missed = f"Soulseek download failed ({e})"
+                path = str((alt or {}).get("path") or "")
+                if not path and not missed:
+                    missed = "no Soulseek copy either"
+        if not path:
+            if _cancelled():
+                return
+            with lock:
+                problems.append(f"{label}: {why}; {missed}")
+            return
+        source = (str(alt.get("user") or "") if alt
+                  else str(candidate.get("channel") or "YouTube"))
         target = os.path.join(dest, _youtube_filename(
             track, os.path.splitext(path)[1]))
         try:
-            if path and os.path.abspath(path) != os.path.abspath(target):
+            if os.path.abspath(path) != os.path.abspath(target):
                 os.replace(path, target)
         except OSError as e:
             with lock:
@@ -4334,9 +4561,10 @@ def _youtube_fetch(release, dest, cfg):
                 problems.append(f"{label}: the download left no file")
             return
         got[i] = {"path": target, "track": track,
-                  "video_id": str(candidate.get("id") or ""),
-                  "url": str(candidate.get("url") or ""),
-                  "channel": str(candidate.get("channel") or ""),
+                  "video_id": str((candidate or {}).get("id") or ""),
+                  "url": str((candidate or {}).get("url") or ""),
+                  "channel": str((candidate or {}).get("channel") or ""),
+                  "source": ("soulseek" if alt else "youtube"),
                   "height": (fetched or {}).get("height"),
                   "abr": (fetched or {}).get("abr"), "size": size}
         with lock:
@@ -4347,7 +4575,7 @@ def _youtube_fetch(release, dest, cfg):
                 quality += (f", {int(fetched['abr'])} kbps audio)"
                             if fetched.get("abr") else ")")
             _log(f"  {done[0]}/{total} {os.path.basename(target)} — from "
-                 f"{candidate.get('channel') or 'YouTube'}{quality}")
+                 f"{source}{quality}")
             _job["progress"] = _youtube_progress(done[0], total, label)
 
     workers = worker_count(cfg, default=3, maximum=4, items=total)
@@ -4357,7 +4585,8 @@ def _youtube_fetch(release, dest, cfg):
 
 
 def _run_youtube(release, cfg, confirm_lossy):
-    """Fetch a Digital Media music-video release from YouTube and import it.
+    """Fetch a Digital Media music-video release (YouTube first, Soulseek for
+    what YouTube does not have) and import it.
 
     Runs INSTEAD of the search, inside the same job (see _run). Its outcomes
     are the Soulseek path's own:
@@ -4367,15 +4596,17 @@ def _run_youtube(release, cfg, confirm_lossy):
     * SOME tracks — a music-video collection is routinely uploaded as a dozen
       separate videos, so the album is imported from what came back and every
       missing track is named in the log and counted in the result;
-    * NOTHING found — the same dead end a search that found nothing ends on
-      (_ask_to_wish: park and offer the wish list), never a silent success.
+    * NOTHING served by EITHER source — the same dead end a search that found
+      nothing ends on (_ask_to_wish: park and offer the wish list), never a
+      silent success.
     """
     from server import youtube
 
     total = len([t for t in (release.get("media") or []) if isinstance(t, dict)])
     _log(f"{total} track(s) of this release are music videos published as "
-         f"Digital Media — fetching them from YouTube instead of searching "
-         f"Soulseek for a folder that cannot be there.")
+         f"Digital Media — fetching them from YouTube (a track YouTube does "
+         f"not have is looked for on Soulseek) instead of searching for a "
+         f"folder that cannot be there.")
     if not youtube.enabled(cfg):
         raise RuntimeError("YouTube downloads are disabled in Settings → Videos "
                            "— enable them to fetch this music-video release")
@@ -4402,10 +4633,12 @@ def _run_youtube(release, cfg, confirm_lossy):
         # Phrased in the app's own dead-end vocabulary ("nothing usable", see
         # wishes._NOT_FOUND_HINTS) on purpose: this is "the network does not
         # have it", not a transient outage, so the wish policy classifies the
-        # attempt as an empty search and stops re-asking on a timer.
+        # attempt as an empty search and stops re-asking on a timer. Both
+        # sources are named: neither YouTube nor the network had a usable copy
+        # of ANY of these tracks.
         msg = (f"Nothing usable found for “{release.get('title') or ''}” on "
-               f"YouTube — no usable upload for any of its {total} track(s) "
-               f"(see the log).")
+               f"YouTube or Soulseek — no usable upload for any of its "
+               f"{total} track(s) (see the log).")
         for line in problems[:20]:
             _log("  ✕ " + line)
         wished = _ask_to_wish(release, [], 0, cfg, confirm_lossy, error=msg,
@@ -4434,14 +4667,14 @@ def _run_youtube(release, cfg, confirm_lossy):
     if problems:
         # The note names the tracks, not just the count: "2 of 12 missing" is
         # not something a user can act on, "Second Video: no usable YouTube
-        # upload found" is.
+        # upload found; no Soulseek copy either" is.
         result["note"] = (f"{len(problems)} of {total} track(s) were not "
-                          f"fetched from YouTube: "
+                          f"fetched from YouTube or Soulseek: "
                           + "; ".join(problems[:3])
                           + (f" (+{len(problems) - 3} more)"
                              if len(problems) > 3 else ""))
         _log(f"{len(problems)} of {total} track(s) could not be fetched from "
-             f"YouTube — the rest of the album is in the library.")
+             f"either source — the rest of the album is in the library.")
     _finish("done", result)
 
 

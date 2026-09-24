@@ -16,21 +16,33 @@ lower tier can ever outvote a higher one, which is why the score IS the order:
 2. medium      `auto_import_medium_order`, best first — CD, then the other
                physical media, digital last by default. A format the order
                does not name ranks after every configured one.
-3. compressed  a release that names itself a re-encode of a disc (BDRip,
+3. set         a box set — media this library cannot use (a DVD, a Blu-ray),
+               or three discs of the album — sorts below the album's own.
+4. compressed  a release that names itself a re-encode of a disc (BDRip,
                DVDRip, x264, …) sorts below the disc's own streams — a remux or
                a full-disc edition is taken as it comes, never a derivative.
-4. tracks      a release short of the release group's OWN track count is
+5. tracks      a release short of the release group's OWN track count is
                penalised, so a 1-track promo can never beat the full album.
-4. date        the edition closest to the group's first release date — the
-               original, not a reissue or a deluxe — unless a later one is
-               materially more complete (tier 3 outranks this one); among
-               editions of the same year the one that states its date in full,
-               because the album folder is named after it.
-5. edition     `prefer_original_edition` (default true): a clean/explicit-edited
+6. date        the EARLIEST release date wins — the original pressing, not a
+               reissue or a deluxe — unless a later one is materially more
+               complete (tier 5 outranks this one). The reference is the
+               earliest edition this group OFFERS, not the group's stated
+               first-release-date: a pressing that predates that date is still
+               the earlier record of the two, and an album whose original is
+               not on offer is decided by the editions that are.
+7. precision   an edition that states its date in full (YYYY-MM-DD) beats one
+               that states only its month or its year when the two could be the
+               same day — the album folder is named after this date.
+8. edition     `prefer_original_edition` (default true): a clean/explicit-edited
                edition sorts below the original — a clean edition may carry
                altered audio.
-6. plain       a plain release beats a disambiguated/parenthesised one.
-7. country     `prefer_release_country` — a TIE-BREAKER and nothing else.
+9. plain       a plain title beats a disambiguated/parenthesised one. A
+               MusicBrainz comment ("(BMG Club edition)", "(CB 811)", "edited
+               version") is the data saying this edition needed distinguishing,
+               so it loses the tie to a title that carries none. Nothing is
+               read INTO the comment: club, promo and remaster mean the same
+               thing here — one comment against no comment.
+10. country    `prefer_release_country` — a TIE-BREAKER and nothing else.
 
 Country is rule 5 in the brief and sorts LAST here on purpose: a tie-breaker
 must not outvote any rule above it, and every tier above is lexicographic.
@@ -95,7 +107,7 @@ _PROMO_STATUSES = frozenset({"promotion", "bootleg", "pseudo-release", "pseudo r
 # score monotone in every tier while staying readable (0.8757).
 _SCORE_BASE = 8
 _TIER_NAMES = ("status", "medium", "set", "compressed", "tracks", "date",
-               "edition", "disambiguation", "country")
+               "precision", "edition", "disambiguation", "country")
 # What a tie-break sentence calls each tier (see _deciding_reason).
 _TIER_LABELS = {
     "status": "release status",
@@ -104,9 +116,21 @@ _TIER_LABELS = {
     "compressed": "the disc-versus-re-encode rule",
     "tracks": "the track count",
     "date": "the release date",
+    "precision": "the date-precision rule",
     "edition": "the clean/edited-edition rule",
-    "disambiguation": "the plain-release rule",
+    "disambiguation": "the plain-title rule",
     "country": "the preferred country",
+}
+# …and the substance of the three rules a reader cannot get from the losing
+# edition's own reasons: that the winner IS the earliest rather than merely
+# first in the list, that its fuller date is what beat the other, and that the
+# other edition's comment is what lost it. A reason a user has to infer from a
+# difference between two rows is the silent tie-break this exists to avoid.
+_TIER_NOTES = {
+    "date": "the earliest release date offered wins",
+    "precision": "a full date beats one that states only its month or its year",
+    "disambiguation": "a title with no MusicBrainz disambiguation comment "
+                      "ranks above one with it",
 }
 
 # A COMPRESSED derivative of a disc: a re-encode someone else made, not the
@@ -151,14 +175,15 @@ _RULES = (
     "another — sorts below the album's own CD/digital media",
     "a COMPRESSED derivative of a disc (a BDRip/DVDRip/x264 re-encode) sorts "
     "below the disc's own streams, which are taken as they are",
-    "the original edition beats a later reissue unless the later one is "
-    "materially more complete",
+    "the EARLIEST release date wins: an earlier edition of the group beats a "
+    "later reissue or deluxe unless the later one is materially more complete",
     "an edition that states its release date in full (YYYY-MM-DD) beats one "
-    "that states only its month or its year — the album folder is named "
-    "after it",
+    "that states only its month or its year when the two could be the same "
+    "day — the album folder is named after it",
     "prefer_release_country only ever breaks a tie",
     "prefer_original_edition prefers the original over a clean/edited edition",
-    "a plain release beats a disambiguated one when everything else ties",
+    "a plain title beats a disambiguated one: a comment like \"(BMG Club "
+    "edition)\" loses the tie to a title that carries none",
 )
 
 
@@ -449,6 +474,12 @@ class _Context:
     expected_stated: bool
     first_date: str
     first_year: Optional[int]
+    # The earliest edition this payload OFFERS — the date tier's reference
+    # (see `_release_date_level`), and the three facts a reason needs to name
+    # it. None/"" when nothing states a date.
+    earliest_date: str
+    earliest_key: Optional[int]
+    earliest_year: Optional[int]
     has_official: bool
 
 
@@ -656,9 +687,12 @@ def _stated_granularity(date):
 
 def _date_precision(date):
     """How much of the date MusicBrainz states: 1.0 day, 0.66 month, 0.33
-    year, 0.0 nothing. The album folder is named after this date, so an
-    edition stating only "1983" pins the folder to a year — and among
-    editions of the same year the fully-dated one is the edition to take."""
+    year, 0.0 nothing — the date tier's own tie-break (rule 7).
+
+    The album folder is named after this date, so an edition stating only
+    "1983" pins the folder to a year while one stating "1983-09-13" pins it to
+    the day — and when two editions could be the same day, the one that states
+    more of its date is the one to take."""
     return {"day": 1.0, "month": 0.66, "year": 0.33}.get(
         _stated_granularity(date), 0.0)
 
@@ -671,41 +705,94 @@ def _year(date):
         return None
 
 
-def _release_date_level(date, ctx):
-    """(level, reason) for the date tier — the original edition wins.
+# One year in `_date_key` units (see it): a year is 12 months of 31, so no two
+# years can overlap and the date tier needs no calendar.
+_YEAR_KEY = 372
 
-    The group's first release date is the reference; an edition from that year
-    (or earlier — a pressing can predate the group's stated date) is the
-    original, and the penalty for distance is strictly increasing in the gap
-    while staying smaller than the precision bonus at ANY gap, so an earlier
-    year-only edition always beats a later, fully-dated one and two reissues a
-    decade apart are never a tie. An undated edition sorts after every dated
-    one.
+
+def _date_key(date):
+    """The date as one sortable number — the END of the range it states, None
+    when nothing usable is stated.
+
+    MusicBrainz states a date at whatever precision it knows, and an edition
+    that states only "1983" is not a pressing from New Year's Day: it is one
+    from somewhere in 1983. Reading a date as the LAST day its range can mean
+    is what lets ONE comparison answer both halves of the date order: an
+    earlier edition is the earlier range (a bare year ends in December, so
+    every dated edition inside that year ends before it), and when two ranges
+    end on the same day the precision tier says which of them is the more
+    precise fact — "1983-12-31" against "1983".
+
+    An unstated or unreadable part is the end of what WAS stated, so a
+    malformed date degrades to the coarser reading rather than raising: this
+    runs over MusicBrainz's free text.
     """
     year = _year(date)
     if year is None:
+        return None
+    text = str(date).strip()
+    stated = _stated_granularity(date)
+    month = 0
+    if stated in ("month", "day"):
+        try:
+            month = int(text[5:7])
+        except (TypeError, ValueError):
+            month = 0
+        if not 1 <= month <= 12:
+            month = 0
+    day = 0
+    if stated == "day":
+        try:
+            day = int(text[8:10])
+        except (TypeError, ValueError):
+            day = 0
+        if not 1 <= day <= 31:
+            day = 0
+    return (year * _YEAR_KEY + (month - 1 if month else 11) * 31
+            + (day - 1 if day else 30))
+
+
+def _release_date_level(date, ctx):
+    """(level, reason) for the date tier — the EARLIEST release date wins.
+
+    The reference is the earliest edition this release group OFFERS
+    (`ctx.earliest_key`), and an earlier one of those wins outright. Not the
+    group's stated first-release-date: a pressing that predates it is still
+    the earlier record of the two, and a group whose original is not on offer
+    (a 1973 first release beside two 2010s remasters) is decided by the
+    editions that are, rather than by a date none of them states. The penalty
+    for being later is strictly decreasing in the distance and never flat, so
+    two reissues a decade apart are never a tie and listing order can never
+    promote the later one — that is how a 2016 remaster once came back as "The
+    Dark Side of the Moon" and named the album folder 2016. An undated edition
+    sorts after every dated one.
+    """
+    key = _date_key(date)
+    if key is None:
         return (0.0, "no release date on MusicBrainz")
-    if ctx.first_year is None:
-        return (0.5, f"released {date}" if date else "no release date on MusicBrainz")
-    gap = max(0, year - ctx.first_year)
+    gap = max(0, key - ctx.earliest_key) if ctx.earliest_key is not None else 0
     # Hyperbolic, NOT a line that can reach zero: a linear term hit 0 at a
-    # nine-year gap, so every edition more than nine years after the original
+    # nine-year gap, so every edition more than nine years after the earliest
     # scored the same and a 2016 CD could beat a 2011 one on nothing but
-    # MusicBrainz's listing order — which is how "The Dark Side of the Moon"
-    # came back as a 2016 reissue and the album folder was named 2016. This
-    # term is strictly decreasing in the gap and never flat.
-    level = 0.9 / (1.0 + gap / 9.0) + 0.1 * _date_precision(date)
+    # MusicBrainz's listing order.
+    level = 1.0 / (1.0 + gap / _YEAR_KEY)
     # Say WHICH part is missing: "1983-06" is not "only the year", and a
     # reason that names the wrong field reads as a bug in the data.
     stated = _stated_granularity(date)
     vague = (f" (MusicBrainz states only the {stated})"
              if stated in ("month", "year") else "")
     if not gap:
-        reason = (f"original release date {ctx.first_date}" if ctx.first_date
-                  else f"earliest edition offered, {date}")
-        return (level, reason + vague)
-    return (level, f"reissued {date} — {gap} year(s) after the original "
-                   f"{ctx.first_date}{vague}")
+        # The earliest edition offered from the group's own first-release
+        # year IS the original; anything else is the earliest this group
+        # happens to offer, and the reason says which of the two it is.
+        if ctx.first_date and (_year(date) or 0) <= (ctx.first_year or 0):
+            return (level, f"original release date {ctx.first_date}" + vague)
+        return (level, f"earliest edition offered, {date}" + vague)
+    years = max(0, (_year(date) or 0) - (ctx.earliest_year or 0))
+    later = (f"{years} year(s) after" if years
+             else "later the same year as")
+    return (level, f"reissued {date} — {later} the earliest edition offered "
+                   f"({ctx.earliest_date}){vague}")
 
 
 def _status_reason(status):
@@ -811,11 +898,16 @@ def _evaluate(rel, ctx, index):
                            + ("the release group's own count" if ctx.expected_stated
                               else "the fullest edition offered"))
 
-    # 6. date ...
+    # 6. date — the EARLIEST edition offered wins (see `_release_date_level`).
     level_date, date_reason = _release_date_level(date, ctx)
     reasons.append(date_reason)
 
-    # 7. edition kind ...
+    # 7. date precision — the tie-break INSIDE the date rule: two editions that
+    #    could be the same day are separated by which of them states more of
+    #    its date, because the album folder is named after it.
+    level_precision = _date_precision(date)
+
+    # 8. edition kind ...
     clean = bool(_CLEAN_RE.search(f"{title} {disambiguation}"))
     if clean and ctx.keep_original:
         level_edition = 0.0
@@ -825,12 +917,16 @@ def _evaluate(rel, ctx, index):
         if clean:
             reasons.append("clean edition — prefer_original_edition is off, so it is not penalised")
 
-    # 8. plain title ...
+    # 9. plain title — a MusicBrainz disambiguation comment is that data saying
+    #    this edition needed distinguishing, so a title carrying one loses the
+    #    tie to a title that carries none. Nothing is read INTO the comment
+    #    (see the module docstring): club, promo and remaster are one case.
     level_plain = 0.0 if disambiguation else 1.0
     if disambiguation:
-        reasons.append(f'MusicBrainz disambiguation "{disambiguation}"')
+        reasons.append(f'MusicBrainz disambiguation "{disambiguation}" — a '
+                       "title with no comment ranks above it")
 
-    # 9. country (a tie-breaker, so it is the last tier) ...
+    # 10. country (a tie-breaker, so it is the last tier) ...
     if ctx.country:
         if country and country.lower() == ctx.country.lower():
             level_country = 1.0
@@ -869,7 +965,8 @@ def _evaluate(rel, ctx, index):
         index=index, type_ok=type_ok,
     )
     return ((level_status, level_medium, level_set, level_compressed, level_tracks,
-             level_date, level_edition, level_plain, level_country), candidate)
+             level_date, level_precision, level_edition, level_plain,
+             level_country), candidate)
 
 
 def _row_types(rel, ctx):
@@ -899,12 +996,21 @@ def rank_releases(release_group, releases, cfg=None, *, strict=False,
     rows = list(releases or [])
     wanted, asked_type = _wanted_types(wanted_types, primary_type, secondary_type)
     primary, secondary = group_types(release_group) if isinstance(release_group, Mapping) else ("", [])
+    # The group's own first-release-date is read for WORDING alone (the earliest
+    # edition offered IS the original when the two agree); what the date tier
+    # ranks against is the earliest edition in *rows*, so a group whose stated
+    # date the provider never offered — or a pressing that predates it — is
+    # still decided by the records in hand.
     first = first_release_date(release_group) if isinstance(release_group, Mapping) else ""
     first_year = _year(first) if first else None
-    if first_year is None:
-        years = [y for y in (_year(r.get("date")) for r in rows) if y]
-        first_year = min(years) if years else None
-        first = ""   # no group date: "the earliest edition offered", not "the original"
+    earliest_date, earliest_key, earliest_year = "", None, None
+    for r in rows:
+        key = _date_key(r.get("date"))
+        if key is None:
+            continue
+        if earliest_key is None or key < earliest_key:
+            earliest_date = str(r.get("date") or "").strip()
+            earliest_key, earliest_year = key, _year(r.get("date"))
     ctx = _Context(
         order=tuple(conf["auto_import_medium_order"]),
         country=str(conf.get("prefer_release_country") or "").strip(),
@@ -921,6 +1027,9 @@ def rank_releases(release_group, releases, cfg=None, *, strict=False,
         expected_stated=bool(_stated_track_count(release_group)),
         first_date=first,
         first_year=first_year,
+        earliest_date=earliest_date,
+        earliest_key=earliest_key,
+        earliest_year=earliest_year,
         has_official=any(str(r.get("status") or "").strip().lower() == "official" for r in rows),
     )
 
@@ -938,6 +1047,36 @@ def rank_releases(release_group, releases, cfg=None, *, strict=False,
     return out
 
 
+def rank_stored(rows, cfg=None):
+    """An ALREADY-STORED candidate list, ranked by THIS policy.
+
+    A wish records the editions behind the one it was added for, and that
+    stored list is a SNAPSHOT: it holds what each edition stated when the add
+    resolved it and nothing about the policy that ordered it. The order is
+    therefore recomputed here — at every read, from those facts alone, with no
+    network request and no release-group lookup — so a release queued before a
+    rule changed is walked by the rule in force now rather than by the order
+    captured at add time.
+
+    Each row is read exactly as a release payload is (`rank_releases` ranks
+    them), so a row stating only its id and title ties on every rule and keeps
+    the position it was stored in. The sort is stable and nothing is dropped:
+    a fallback that silently loses a ranked edition is what the walk exists to
+    avoid. A row stating SOME facts ranks on those and ties with its peers on
+    the rest — degrading to the rules the data can answer is the honest
+    answer, and the alternative is a silent reordering by nothing at all.
+    """
+    kept = [r for r in (rows or []) if isinstance(r, Mapping)]
+    if len(kept) < 2 or not any(
+            any(r.get(k) for k in ("date", "status", "country", "disambiguation",
+                                   "medium_formats", "media", "track_count"))
+            for r in kept):
+        # Nothing stored states a fact any rule could reorder by (every list
+        # written before the rows carried their facts) — the order stands.
+        return kept
+    return [kept[c.index] for c in rank_releases({}, kept, cfg)]
+
+
 def _score(levels):
     """The tier tuple as one number in [0, 1) — see `_SCORE_BASE`."""
     total, place = 0.0, 1.0
@@ -952,12 +1091,18 @@ def _deciding_reason(levels, other_levels, other):
 
     `reasons` otherwise lists the winner's own facts; this is the one sentence
     that names WHY it beat the runner-up, which is what a user asks when two
-    editions look alike.
+    editions look alike. For the rules a reader cannot see on the loser — that
+    the winner is the EARLIEST rather than merely first, that its fuller date
+    is what beat the other, that the other's comment is what lost it — the
+    tier's own substance travels with the sentence (`_TIER_NOTES`).
     """
     for i, (mine, theirs) in enumerate(zip(levels, other_levels)):
         if mine != theirs:
+            tier = _TIER_NAMES[i]
+            note = _TIER_NOTES.get(tier)
             return (f'ranked above "{other.title}" ({other.release_mbid}) on '
-                    f"{_TIER_LABELS[_TIER_NAMES[i]]}")
+                    f"{_TIER_LABELS[tier]}"
+                    + (f" — {note}" if note else ""))
     return (f'tied with "{other.title}" ({other.release_mbid}) on every rule — '
             "MusicBrainz's own order kept")
 

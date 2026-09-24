@@ -17,7 +17,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from mlo.grader import (ALBUM_TAGS, EMPTY_FOLDER, EXPECTED_TRACKS_MISSING,
                         PER_TRACK_TAGS, REPLAYGAIN_TAGS,
                         _grade_album, _naming_mismatch, _release_type_candidates,
-                        run_grade_library, tag_key_allowed)
+                        printed_pct, run_grade_library, tag_key_allowed)
 from mlo.paths import save_expected_tracks
 from mlo.naming import (DEFAULT_NAMING_SCRIPT, UNKNOWN_RELEASE_TYPE,
                         eval_script, track_variables)
@@ -1507,6 +1507,20 @@ else:
         _BeetsItem(path=os.path.join(_gdir, "gone.flac"), title="Gone",
                    genre="Jazz"))["genre"] == "Jazz",
        "and an unreadable path falls back to it instead of failing the name")
+
+# The percentage EVERY surface prints (the library header, an album row, the
+# grading strip) comes from one rule: 100 belongs to a score with nothing
+# failed. The owner's own library — thousands of checks — showed the failure
+# this prevents: `round(100 * 10 280 / 10 281, 1)` is `100.0`, so a strip that
+# named a failing album claimed "100% of checks pass" in the same sentence, and
+# a Fail badge would read "Fail · 100% of checks passed".
+ok(printed_pct(10_280, 10_281) == 99.9,
+   "one failed check in ten thousand is not 100 %")
+ok(printed_pct(10_281, 10_281) == 100.0, "and a perfect score still is 100 %")
+ok(printed_pct(3, 3) == 100.0 and printed_pct(2, 3) == 66.7,
+   "ordinary scores are rounded as before")
+ok(printed_pct(0, 0) is None and printed_pct(5, 0) is None,
+   "a score with no checks has no percentage")
 
 print(f"\nAll {passed} checks passed.")
 shutil.rmtree(tmp, ignore_errors=True)

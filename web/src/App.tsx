@@ -1120,7 +1120,13 @@ export default function App() {
               field itself gets too narrow to say anything (phone widths, and
               any app zoom — see the rule). */}
           <div className="search-field relative flex-1 pointer-events-auto">
-            <Search className="absolute left-3.5 top-1/2 -translate-y-1/2 h-4 w-4 text-zinc-500" />
+            {/* Above the input, not under it: the input paints its own
+                translucent panel background and comes LATER in the DOM, so a
+                positioned icon with no z-index sat behind it — the field then
+                read as a 40px gap before the placeholder, with nothing in it
+                (the owner's report). `pointer-events-none` keeps the click on
+                the field where it belongs. */}
+            <Search className="absolute left-3.5 top-1/2 -translate-y-1/2 h-4 w-4 text-zinc-500 z-10 pointer-events-none" />
             <input
               ref={searchRef}
               className="input !py-2 !pl-10 text-xs w-full !bg-panel/60 backdrop-blur"

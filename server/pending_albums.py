@@ -579,13 +579,15 @@ def create(release, cfg=None, *, source=SOURCE, queries=None, title="",
                                target_dir=folder, queries=queries, source=source)
     if wish and candidates:
         # The ranked fallback (spec R150) the caller resolved from the release
-        # GROUP — every eligible edition, best first. It is the same list the
-        # row the album was created from carried, so the search starts on the
-        # best edition and can move on without another MusicBrainz browse. The
-        # store only ever FILLS an empty list (`wishes.set_candidates`), so a
-        # wish already walking its own editions cannot be reordered by a
-        # re-add, and a re-add of an ENDED wish starts a fresh walk
-        # (`wishes.rearm`).
+        # GROUP — every eligible edition with its own facts. It is the same list
+        # the row the album was created from carried, so the walk can move on
+        # without another MusicBrainz browse, and the store only ever FILLS an
+        # empty list (`wishes.set_candidates`): a wish already walking its own
+        # editions cannot have its rows replaced by a re-add. The ORDER those
+        # rows are walked in is never stored at all — the walk derives it from
+        # the policy in force at each attempt (`wishes.walked_rows`), so a
+        # release queued before a rule changed is searched by the new rule. A
+        # re-add of an ENDED wish starts a fresh walk (`wishes.rearm`).
         wishes.set_candidates(wish["id"], candidates)
     row["wish_id"] = wish["id"] if wish else None
 

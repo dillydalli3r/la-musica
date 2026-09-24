@@ -617,6 +617,27 @@ def holder(path, asker=None):
         return dict(rec) if rec else dict(hit[1])
 
 
+def busy(path):
+    """Whether ANY job holds *path* right now — asked from outside every job.
+
+    :func:`holder` answers for its CALLER, and the calling job's own claim is
+    deliberately not a conflict to it: that is what lets a job ask about the
+    paths it holds. A reader that is not a job — the grading strip, a route no
+    chain is running in — must not inherit that. It would read an album as free
+    exactly when the request arrived inside the job holding it, and the same
+    code would answer differently for a real client than for a harness that
+    drives the app in-process (a TestClient hands its own context to the
+    request, see :func:`current`).
+
+    Containment is the registry's own (:func:`_conflict`): *path* answers for
+    itself, for a folder above it — a job holding the artist folder is working
+    on every album in it — and for everything inside it, so a claim on one
+    track file answers for the album that holds it.
+    """
+    with _lock:
+        return _conflict(_slots([path]), None) is not None
+
+
 def register(job, kind="", label=""):
     """Give *job* a row before it holds anything.
 

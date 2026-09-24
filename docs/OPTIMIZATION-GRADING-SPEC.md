@@ -185,7 +185,7 @@ publishes, including the ones that write nothing until they do.
 | 18 | Publish lyrics (LRCLIB) | Submits missing lyrics to the community database (every examined track counts as scanned, published included) | nothing locally | no (external side effect) | **yes** (LRCLIB) |
 | 19 | Optimize artist images | Re-fits `Artists/<Artist>/artist.*` to `artist_image_aspect` / `artist_image_target_size`, re-encodes as `artist.jpg`/`artist.png` | the artist image in place (only when it has to move) | re-encodes in place; never deletes | no |
 | 20 | Optimize library layout | The music folder's shape against `<music>/Artists/<Artist>/<Album>/…`: audio at the root or in an artist folder, stray files, unexpected folders, empty albums, `wrong_case` rows. With `layout_apply` (ON) it SETTLES what the folder itself proves — a wrong-case name is renamed, audio outside an album folder is moved into the one its tags name, and what is excess goes to the Trash (a stray file, a folder inside an album that is neither a disc folder nor holds audio, an album folder with no audio, a foreign root folder holding no audio, an album-less artist folder, the `.mlo_*` leftovers) — and reports every other row with the reason it stayed, re-derived at the move (R185). Writes ONE report describing the whole library (plus a `fixes` list) to `<music>/.mlo/data/`, which the Library page warns from; scoped to `targets` when a run names them, and library-wide when it does not (R9) | one report file + the renamed/moved/removed paths | `layout_apply` (removals go to the Trash) | no |
-| 21 | Fix AcoustID pairs | Completes an INCOMPLETE `ACOUSTID_ID`/`ACOUSTID_FINGERPRINT` pair — the failure `Missing ACOUSTID_FINGERPRINT (incomplete AcoustID pair)`, which had no fixer before. An id already on the file has its fingerprint recomputed locally; the reverse half needs a lookup and is counted, never invented | `ACOUSTID_ID`, `ACOUSTID_FINGERPRINT` | no | only when the id half must be looked up |
+| 21 | Fix AcoustID pairs | Completes an INCOMPLETE `ACOUSTID_ID`/`ACOUSTID_FINGERPRINT` pair — the failure `Missing ACOUSTID_FINGERPRINT (run Fix AcoustID pairs)`, which had no fixer before. An id already on the file has its fingerprint recomputed locally; the reverse half needs a lookup and is counted, never invented | `ACOUSTID_ID`, `ACOUSTID_FINGERPRINT` | no | only when the id half must be looked up |
 
 **R11 — force flags are the only way to redo work.** Each script has one, and it
 is what makes the script look at a file it has already processed:
@@ -1841,7 +1841,7 @@ user asked for, in the order they asked for it. `server/exporter.py` owns both.
 
 ### 7.12 What enters the library: the edition, the source, and the name in your language
 
-- **R84 — one deterministic policy decides which edition is fetched.** The nine
+- **R84 — one deterministic policy decides which edition is fetched.** The ten
   tiers of `mlo/release_choice.py`, in the order they are scored
   (`_TIER_NAMES`): release **status** (official → promotion → bootleg — an
   unofficial edition is chosen only when nothing official exists), the
@@ -1851,17 +1851,24 @@ user asked for, in the order they asked for it. `server/exporter.py` owns both.
   CD/digital media, so a 3-CD anniversary box no longer outranks the plain CD it
   contains), the **disc-versus-re-encode** rule (R85), the **track count** (an
   edition short of the release group's own count is penalised), the **release
-  date** — the group's own `first-release-date` is the reference, the penalty
-  for distance is strictly increasing in the gap and NEVER flat (two reissues a
-  decade apart are never a tie, which is what a linear term that reached zero
-  at a nine-year gap let happen: a live "The Dark Side of the Moon" browse came
-  back as a 2016 reissue over the 1988 CD, and the album folder was named 2016)
-  and an edition that states its date in FULL (`YYYY-MM-DD`) beats one stating
-  only its month or year, because the folder is named after that date — the
-  **clean/edited-edition** rule (`prefer_original_edition`: the
-  original beats a later reissue unless the later one is materially more
-  complete), the **plain-release** rule (a plain release beats a disambiguated
-  one) and **prefer_release_country**, which only ever breaks a tie. The order is
+  date** — the EARLIEST edition wins, and the reference is the earliest edition
+  the group OFFERS, not the group's own `first-release-date`: a pressing that
+  predates that date is still the earlier record of the two, and an album whose
+  original is not on offer (a 1973 first release beside two 2010s remasters) is
+  decided by the editions that are. The penalty for being later is strictly
+  decreasing in the distance and NEVER flat (two reissues a decade apart are
+  never a tie, which is what a linear term that reached zero at a nine-year gap
+  let happen: a live "The Dark Side of the Moon" browse came back as a 2016
+  reissue over the 1988 CD, and the album folder was named 2016) — the **date
+  precision** tier (an edition that states its date in FULL, `YYYY-MM-DD`, beats
+  one stating only its month or its year when the two could be the same day,
+  because the folder is named after that date) — the **clean/edited-edition**
+  rule (`prefer_original_edition`: a clean/edited edition sorts below the
+  original), the **plain-title** rule (a title carrying a MusicBrainz
+  disambiguation comment — "(BMG Club edition)", "(CB 811)", "edited version" —
+  loses the tie to a title that carries none; nothing is read INTO the comment,
+  one comment against no comment is the whole of it) and
+  **prefer_release_country**, which only ever breaks a tie. The order is
   fixed and total: equal scores are broken by MusicBrainz's own listing order,
   never by chance, and `_deciding_reason` names the tier that decided
   (`"the disc-versus-re-encode rule"`). The SAME module serves the release-group
@@ -1879,7 +1886,7 @@ user asked for, in the order they asked for it. `server/exporter.py` owns both.
   `compressed`. Deliberately NOT markers: `remux`, `bdmv`, `dvd`, `blu-ray`
   (those name the disc ITSELF — what wins) and codec names such as `h264` or
   `hevc`, which a remux carries just as well. With the setting **off** the tier
-  scores every candidate the same, so the other eight decide exactly as they did
+  scores every candidate the same, so the other nine decide exactly as they did
   before the rule existed. It is not a grade key: it decides which file the
   grade is computed on, and the same switch decides the disc-folder case of
   §7.13.
@@ -2002,26 +2009,47 @@ user asked for, in the order they asked for it. `server/exporter.py` owns both.
   own album, each with itself as its only candidate, because the user asked for
   all of them.
 
-  What "best" MEANS is `mlo/release_choice.py` and nothing else. The nine tiers,
+  What "best" MEANS is `mlo/release_choice.py` and nothing else. The ten tiers,
   in the order they are scored (`_TIER_NAMES`, `_evaluate`):
   `status` (official → an unstated status → withdrawn/expired/cancelled →
   promotion → bootleg), `medium` (`auto_import_medium_order`, CD first, a format
   the order does not name last), `set` (an edition carrying DVD/Blu-ray media,
   or one disc after another, sorts below the album's own media), `compressed`
   (R85), `tracks` (short of the release group's own count is penalised),
-  `date` (closest to the group's `first-release-date`; the penalty is strictly
-  increasing in the gap and NEVER flat, and a fully-dated edition beats a
-  year-only one from the same year), `edition` (a clean/edited edition sorts
+  `date` (the EARLIEST edition the group offers wins; the penalty for being
+  later is strictly decreasing and NEVER flat, so two reissues a decade apart
+  are never a tie), `precision` (a fully-dated edition beats a year-only one
+  when the two could be the same day), `edition` (a clean/edited edition sorts
   below the original while `prefer_original_edition` is on), `disambiguation`
-  (a plain release beats a disambiguated one) and `country`
-  (`prefer_release_country` — a TIE-BREAKER and nothing else, which is why it is
-  last). The score is that tier tuple encoded positionally in base 8
+  (a title with no MusicBrainz disambiguation comment beats one with it) and
+  `country` (`prefer_release_country` — a TIE-BREAKER and nothing else, which is
+  why it is last). The score is that tier tuple encoded positionally in base 8
   (`_score`), so a bigger score IS a better pick and no lower tier can ever
   outvote a higher one; equal scores are broken by the order MusicBrainz listed
   the editions in — never by chance — and `_deciding_reason` names the tier that
-  decided. `rank_releases` returns EVERY edition in that order, and
+  decided, with the two rules a reader cannot see on the loser said out loud
+  (`_TIER_NOTES`: "the earliest release date offered wins", "a title with no
+  MusicBrainz disambiguation comment ranks above one with it").
+  `rank_releases` returns EVERY edition in that order, and
   `group_targets` truncates the ROWS to the first while `mode` is "best" — the
   ranking itself is never truncated, which is exactly what the walk walks.
+
+  **THE STORED LIST IS A SNAPSHOT, NEVER AN AUTHORITY.** What `candidates`
+  records is the editions an add resolved and the facts each of them stated
+  (date, status, country, medium, track count, disambiguation and the catalog
+  numbers) — NOT an order that outlives the policy that produced it. Every read
+  of that list re-derives the order with the policy in force then
+  (`mlo.release_choice.rank_stored`, called from `wishes.walked_rows`, which the
+  walk, the row's `walk` block and `wishes.advance_candidate` all go through),
+  so a release queued before a rule changed is searched by the new rule on its
+  next attempt instead of by the order captured at add time. The re-rank is
+  offline — each row carries its own facts, so it costs no MusicBrainz request
+  and never re-asks the release group — it is pure and deterministic over those
+  facts (the readers therefore cannot disagree about the position), it is NEVER
+  persisted on read, and it never drops a row. A list whose rows state no facts
+  at all (every list written before the facts travelled with them) comes back
+  exactly as stored: there is nothing to rank by, and dropping or reordering on
+  nothing would be the silent shortcut the walk exists to avoid.
 
   There is ONE such policy. `integrations.ranked_releases`, `pick_releases`,
   `pick_release`, `resolve_release`, `group_targets`, `auto_import_targets`, the
@@ -2528,7 +2556,9 @@ user asked for, in the order they asked for it. `server/exporter.py` owns both.
   says so in its own notification — "the best edition was not available, so this
   is release 2 of 3" — because an album that arrived from a different pressing
   must never read as the one the user asked for. All of it is data the store
-  already holds: a row still costs no MusicBrainz request of its own.
+  already holds — the ORDER included, re-derived from each row's own facts at
+  every read and never written back (R150) — so a row still costs no MusicBrainz
+  request of its own.
 
 - **R153 — a spent walk is not a give-up: the release goes to the BACKGROUND.**
   When every edition the walk may ask has answered with nothing, the wish does
@@ -2538,6 +2568,9 @@ user asked for, in the order they asked for it. `server/exporter.py` owns both.
   re-walked on the worker's own ticks (`wishes_interval_hours`: a background wish
   is not terminal, so the pass picks it up exactly as it picks up any other open
   wish) and ends only when one of its candidates lands or the user cancels it.
+  Every re-walk re-derives its order from the policy in force then (R150), so a
+  wish that settled into the background before a rule changed is walked by the
+  new rule — the background phase is not a frozen snapshot either.
   What still ends `not_found` — terminal, announced once, framework album removed
   — is a wish that carries NO ranked list at all: a name-keyed wishlist row
   (R95), which has nothing left to ask. The background phase is its own
@@ -2744,7 +2777,9 @@ user asked for, in the order they asked for it. `server/exporter.py` owns both.
   rule is applied where the list is BUILT (`integrations.group_targets`, so the
   count a row shows is the walk it will really take) and again where the walk is
   built (`server.wishes_worker._walk_candidates`, so a list stored before the
-  rule existed is deduplicated on its next attempt), and the walk LOGS what it
+  rule existed is deduplicated on its next attempt) — the same place, and the
+  same read, that re-derives the walk's ORDER from the policy in force (R150) —
+  and the walk LOGS what it
   skipped — naming the editions — because a fallback that quietly loses a ranked
   edition is exactly the kind of shortcut nobody notices until an album never
   lands.
@@ -2782,13 +2817,19 @@ user asked for, in the order they asked for it. `server/exporter.py` owns both.
   report, so no surface can say where the search is. The list is passed straight
   through to `pending_albums.create(candidates=…)`, which is the ONE writer of
   `wishes.set_candidates`: it fills an EMPTY list only (a wish already walking
-  keeps its order; `rearm` starts a fresh walk), it accepts a ONE-entry list as
-  readily as three — that single entry is what tells the store this wish carries
+  keeps its ROWS — their ORDER is re-derived at every read, R150, so a re-add can
+  never freeze a search into a stale ranking — while `rearm` starts a fresh
+  walk), it accepts a ONE-entry list as readily as three — that single entry is
+  what tells the store this wish carries
   the ranked editions of an album request, and therefore keeps a spent walk in
   the BACKGROUND (R153) instead of ending it — and it keeps each entry's catalog
-  numbers, which is what the walk dedupes by. Every other writer of that list
-  (the artist watch's `queue_release`) already did this; the add path is the one
-  that did not.
+  numbers (what the walk dedupes by) AND the edition's own facts — date, status,
+  country, medium formats, track count and disambiguation comment — which is what
+  the walk ranks its order by, so the order a queued release is walked in is the
+  policy's NOW rather than the one captured when it was added.
+  `integrations.group_targets` puts those facts on each `candidates` entry.
+  Every other writer of that list (the artist watch's `queue_release`) already
+  did this; the add path is the one that did not.
 
 - **R176 — a walk is ONE row, and that row says which edition it is asking.**
   The candidates are asked one at a time INSIDE the one wish
@@ -3823,16 +3864,50 @@ screen; above `lg` the pane sits beside the artwork.
   in the Home payload, so Home needs no second request) returns whether the
   library passes, the totals the Home header prints (`pass_count` over
   `total_checks`, one sum, so the strip can never contradict the percentage
-  beside it), and — when it does not — the findings themselves. The owner's
+  beside it), and — when it does not — the findings themselves. **A library
+  that passes says `All checks pass` and no number**: the count is a fact about
+  the checks, not about the library, and it is printed where it is read (the
+  Home header's percentage). An install with every check switched off is the
+  one other thing the strip can say — `No grading checks to report yet` — since
+  "all checks pass" would be a claim about a library nothing looked at.
+  **Nothing in the strip may read as a perfect pass while it lists a finding**,
+  which is what the two things printed beside the list have to obey: the
+  percentage is printed to one decimal and **held below 100 whenever any check
+  failed** (`pass_count < total_checks`) — a library failing one check in ten
+  thousand reads `99.9`, not the `100.0` the old rounding produced next to the
+  album that failed it, and exactly 100 is printed only by a library with no
+  failed check at all — and the rule is ONE function, `mlo.grader.printed_pct`,
+  used by every surface that prints a percentage (the Home header's library
+  score, an album row's `Fail · N% of checks passed`, the strip), because they
+  are read within inches of each other and two of them rounding differently is
+  the contradiction again — and the headline is a sentence with the complement
+  its verb needs: `1 album falls short of the library's grading checks` / `2
+  albums fall short of …`. A code that says nothing a reader can act on is printed
+  with the grader's own instruction (`AcoustID id missing (run Fix AcoustID
+  pairs)`, `mlo.grader`'s message) rather than bare (`acoustid id`). The
+  owner's
   rule decides the shape of a finding: **one failing track in an album is shown
   as the track, two or more as the album** (carrying `failing_tracks` and the
   union of their codes), and a failure the grader recorded against the folder
-  itself always makes an album row carrying the grader's own sentence. Two
+  itself always makes an album row carrying the grader's own sentence. Three
   albums are never findings: a PENDING framework album (nothing was graded
-  because its audio has not arrived) and an album with `total_checks` 0 (which
-  passes by the grader's own rule, `0 == 0`). Each row links to the album
-  (`albumRef`) or the track (`trackRef`), the list is capped at 12 with the
-  rest as a `+N` link into the Library's existing Failing filter, and
+  because its audio has not arrived), an album with `total_checks` 0 (which
+  passes by the grader's own rule, `0 == 0`), and **an album a live job holds**
+  (`server.job_locks.busy` — the claim is on the album's folder, on a folder
+  above it or on a file inside it, the registry's own containment rule): a chain
+  writes an album across its steps, so the tag a later step has not written yet
+  is missing right up until that step runs, and a strip that named it would be
+  reporting the run rather than the library. `albums_failing`, `tracks_failing`,
+  `items` and `more` are the findings that are LISTED and a busy album is in
+  none of them, while `pass_count`/`total_checks`/`grade_pct` stay the library's
+  own sums including it, so the strip never disagrees with the header printed
+  beside it. **The strip cannot stay stale through a run**: `["gradesSummary"]`
+  is refetched whenever the client's own lock list (`web/src/lib/locks`, the 2 s
+  poll behind the row's *Script run* chip) changes its held-path signature —
+  never once per poll tick, or the summary would be refetched forever. Each row
+  links to the album (`albumRef`) or the track (`trackRef`), the list is capped
+  at 12 with the rest as a `+N` link into the Library's existing Failing
+  filter, and
   `["gradesSummary"]` is in `invalidateLibrary`'s list — a run that graded,
   tagged or imported just changed the very checks the strip reports. **A long
   list opens folded**: past three findings the strip shows the first three and a
@@ -3919,6 +3994,77 @@ screen; above `lg` the pane sits beside the artwork.
   everything sidecar-shaped is refused), the Optimization panel draws that kind,
   and the Library page's layout warning counts it like any other finding. The
   canonical file is never the one moved: it is what every reader opens.
+- **R239 — a column preference cannot gut a table, and an artist row wears a
+  face.** The Library's Albums / Artists / Tracks views draw every data cell
+  behind a visible-column id list persisted per view in `localStorage`
+  (`useColumnPrefs`), and that list is **versioned with the ids**: a list under
+  the previous key is MIGRATED — the ids it still carries are kept, and every
+  column this build ships visible by default is restored — because a list
+  written before an id existed cannot be evidence that the user hid it. (An
+  unversioned key that kept only the ids it recognised drew the owner an Albums
+  view with its chevron and no album names, a Tracks view with its row numbers,
+  and a Columns menu in which nothing looked wrong.) The Artists view draws
+  `ArtistAvatar` per row — `GET /api/artist/image` when the payload's
+  `has_image` says the folder holds a picture (`mlo.artistdata.has_image`, the
+  same helper Home's shelf asks, so no request is made that would 404), a
+  representative album cover otherwise — and its count column is labelled
+  **Releases** (the artist's albums in this library, pending ones included).
+- **R240 — the player's metadata is a door, and it marquees.** The title,
+  artist and album in the now-playing bar and in the fullscreen player link to
+  the track, artist and album pages (`trackRef` / `artistRef` / `albumRef`,
+  resolved from the library payload the client already holds; a row whose album
+  or artist is not in the library keeps plain text rather than a route that
+  cannot resolve). A plain click opens the page and does not also fire the
+  surrounding block's own handler (the bar's metadata block opens the fullscreen
+  view). Text that does not fit scrolls — the artist and album through the same
+  `ScrollingText` the title uses, never a second marquee. The lyric offset and
+  zoom steps (`LyricZoom`, `LyricOffset`) and the lyrics editor's speed step are
+  one square box per step (`h-7 w-7 inline-flex items-center justify-center`)
+  with the glyph centred by flex, never by its own metrics, and both sides of a
+  pair take the same box: a padded text `+` sits wherever its font puts it, which
+  is what made the pair read lopsided beside the value it steps.
+
+### 7.39 A music video YouTube does not have comes from the network
+
+- **R241 — YouTube first, Soulseek second, and the answer names both.** A
+  music video is a single FILE, not a folder, so it is not looked for with the
+  album machinery (`find_candidates` scores candidate FOLDERS against a release
+  tracklist): one query of the track's own artist + title, ended early by
+  slskd's response limit, and a response file is this track's video when
+  `mlo.paths.is_video_file` accepts its container (the library's ONE container
+  vocabulary — never a second extension list) and its NAME carries both the
+  artist and the title (a response that states a length is held to the track's,
+  ±15 s, the slack `find_candidates` matches a track by). Candidates are
+  peer+folder groups ordered by the app's own `_rank`; a video ties on that
+  ranking's lossless/score fields, so the peer's speed, its queue and the names
+  decide — deterministically. `server.soulseek_auto.fetch_video_on_soulseek` is
+  the ONE call BOTH sites make: it searches, queues the best copy with
+  `soulseek.enqueue_download`, and — given a `dest` — waits the transfer out
+  with `_wait_for_files` (`_est_timeout` / `_queue_budget`, `_cancelled`) and
+  moves the arrived file into it. `None` is the answer for "the network has
+  nothing" (or a transfer that never landed), never an exception; only slskd's
+  refusal to QUEUE the file raises, and each caller reports that in its own
+  words. The auto-import's YouTube branch
+  (`_youtube_fetch` / `_run_youtube`) tries it per track after a YouTube miss or
+  a failed download, and reports a track NEITHER source served with both names
+  ("no usable YouTube upload found; no Soulseek copy either" — or "Soulseek is
+  not running", the same slskd gate `_run` searches behind, where the network
+  was never asked). Its dead end for "nothing from either source" keeps the
+  app's wish vocabulary ("Nothing usable found for … on YouTube or Soulseek")
+  so `wishes.outcome_of` still classifies the attempt `not_found`.
+  `POST /api/videos/download-youtube` does NOT hold a request open for a
+  transfer that takes minutes: it searches briefly and QUEUES the file as the
+  app's own download (the Downloads page shows it from then on), answering
+  `{ok: true, source: "soulseek", queued: true, candidate: {...}}` — and
+  `{ok: false, candidate: null, error}` naming both sources when neither has
+  it. The two halves stay gated by their OWN switches: `youtube_enabled` /
+  yt-dlp missing leaves the network as the source it always was (reported as
+  that reason, not as "not on YouTube"), and an unreachable slskd is reported
+  as "Soulseek is not running" rather than as "no copy". Pinned by
+  `tools/test_video_release_routing.py`: a YouTube miss the network serves (per
+  track, queued from the peer the search named, staged under the track's own
+  name), peer copies that are NOT the track (still a miss), the route's queued
+  answer, and an unreachable slskd reported as such.
 
 ## 8. Recommended runbook
 

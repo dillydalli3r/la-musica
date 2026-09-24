@@ -2739,12 +2739,26 @@ class YoutubeDownloadRequest(BaseModel):
 
 @app.post("/api/videos/download-youtube")
 def videos_download_youtube(req: YoutubeDownloadRequest):
-    """Search YouTube for this artist+title and download the best match.
+    """Grab this artist+title's music video: YouTube first, Soulseek second.
 
-    The candidate is picked by server/youtube.py (duration window, lyric /
-    cover / tribute filtering); with youtube_enabled off, yt-dlp missing or
-    no acceptable candidate, the answer is {ok: false, candidate: null} with
-    a reason rather than a half-download. Returns {ok, file, candidate}."""
+    The YouTube candidate is picked by server/youtube.py (duration window,
+    lyric / cover / tribute filtering) and downloaded here. When that half is
+    not available — youtube_enabled off, yt-dlp missing, no acceptable
+    candidate, or a download it could not deliver — the track is looked for on
+    the NETWORK before the answer is "no": a music video nobody put on YouTube
+    is often a plain file on a peer's share.
+
+    A Soulseek download takes minutes, so this route does NOT wait for one: it
+    searches briefly and QUEUES the transfer as the app's own download (the
+    Downloads page shows it from then on) by the same helper the release path
+    downloads with (server.soulseek_auto.fetch_video_on_soulseek).
+
+    Returns {ok, file, candidate} for a YouTube download,
+    {ok, source: "soulseek", queued, candidate} for a queued one, and
+    {ok: false, candidate: null, error} naming BOTH sources when neither has
+    this video."""
+    from server import soulseek
+    from server import soulseek_auto
     from server import youtube
 
     cfg = load_config()
@@ -2752,9 +2766,16 @@ def videos_download_youtube(req: YoutubeDownloadRequest):
     title = str(req.title or "").strip()
     if not artist or not title:
         raise HTTPException(400, "artist and title are required")
+    # YouTube's own gates, and they are only YouTube's: a switch that is off —
+    # or a yt-dlp that is not installed — leaves the network as the source it
+    # always was, so neither of them ends the request. What they say is kept
+    # for the error below, which must not report "not on YouTube" about a
+    # lookup the app was never allowed (or able) to make.
+    yt_why = ""
     if not youtube.ytdlp_available(cfg):
-        return {"ok": False, "candidate": None,
-                "error": "yt-dlp is not available — install it under Dependencies"}
+        yt_why = "yt-dlp is not available — install it under Dependencies"
+    elif not youtube.enabled(cfg):
+        yt_why = "YouTube downloads are disabled in Settings → Videos"
 
     dest = ""
     if req.path:
@@ -2771,19 +2792,55 @@ def videos_download_youtube(req: YoutubeDownloadRequest):
             raise HTTPException(400, "music folder is not configured")
         os.makedirs(dest, exist_ok=True)
 
-    candidate = youtube.best_candidate(artist, title, want_seconds=req.duration,
-                                       config=cfg)
-    if not candidate:
-        return {"ok": False, "candidate": None,
-                "error": "no acceptable YouTube match found"}
-    try:
-        got = youtube.download(candidate["url"], dest, cfg)
-    except Exception as e:
-        raise HTTPException(502, f"YouTube download failed: {e}")
-    tagcache.invalidate_all()
-    return {"ok": True, "file": str(got.get("path") or "").replace("\\", "/"),
-            "candidate": candidate, "container": got.get("container"),
-            "height": got.get("height"), "abr": got.get("abr")}
+    candidate = None
+    if not yt_why:
+        candidate = youtube.best_candidate(artist, title,
+                                           want_seconds=req.duration,
+                                           config=cfg)
+        if not candidate:
+            yt_why = "no acceptable YouTube match found"
+    if candidate:
+        try:
+            got = youtube.download(candidate["url"], dest, cfg)
+        except Exception as e:
+            # The upload is there and could not be delivered: that is the same
+            # "YouTube cannot serve this one" the network is asked about
+            # below, so it does not end the request here.
+            yt_why = f"YouTube download failed: {e}"
+        else:
+            tagcache.invalidate_all()
+            return {"ok": True, "file": str(got.get("path") or "").replace("\\", "/"),
+                    "candidate": candidate, "container": got.get("container"),
+                    "height": got.get("height"), "abr": got.get("abr")}
+
+    # Nothing from YouTube: ask the network for the plain video file and hand
+    # the transfer to the app's own download queue. `dest` is deliberately not
+    # passed — slskd decides where a transfer lands (under the download dir,
+    # where the Downloads page and the importer already look), and waiting for
+    # it here would hold this request open for the whole download.
+    if not (soulseek.is_running() or soulseek.web_up(cfg)):
+        slsk_why = "Soulseek is not running — start slskd to search the network too"
+    elif not (soulseek.server_state(cfg) or {}).get("isLoggedIn"):
+        # Signed out is not "the network has nothing": slskd is running and
+        # cannot search, and saying otherwise would read as "not out there".
+        slsk_why = ("Soulseek is not logged in — set your username and password "
+                    "in Settings → Soulseek, then restart slskd")
+    else:
+        try:
+            queued = soulseek_auto.fetch_video_on_soulseek(
+                artist, title, dest=None, cfg=cfg, seconds=req.duration)
+        except Exception as e:
+            # slskd's own refusal (an offline peer, a file it will not take)
+            # is the user's answer to "why did nothing queue" — the same
+            # reading _queue_downloads gives the page's own download routes.
+            raise HTTPException(502, f"slskd did not queue the download: {e}")
+        if queued:
+            return {"ok": True, "source": "soulseek", "queued": True,
+                    "candidate": {"user": queued["user"],
+                                  "filename": queued["filename"],
+                                  "size": queued["size"]}}
+        slsk_why = "no Soulseek copy either"
+    return {"ok": False, "candidate": None, "error": f"{yt_why}; {slsk_why}"}
 
 
 class VideoMatchAssignment(BaseModel):

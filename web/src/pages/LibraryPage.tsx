@@ -25,6 +25,7 @@ import { invalidateLibrary } from "../lib/invalidate";
 import { albumRef, trackRef, artistRef, entityLinkClick } from "../lib/refs";
 import { fmtTech, fmtDuration, fmtDateCell, originalYear, GRID_SIZE_MIN } from "../lib/fmt";
 import { EmptyState, GradeBadge, MediaChip, AdvisoryMark, CachedMark, PageLoading, PendingMark } from "../components/Badges";
+import ArtistAvatar from "../components/ArtistAvatar";
 import LockedChip from "../components/LockedChip";
 import { forceDict, loadForceSel } from "../lib/force";
 import Segmented from "../components/Segmented";
@@ -111,7 +112,11 @@ const ARTIST_COL_W: Record<string, string> = {
 };
 
 const ARTIST_COLS: Col[] = [
-  { id: "albums", label: "Albums", sortKey: "aggregate.album_count" },
+  // "Releases" is the word the owner uses for what this counts, and it is what
+  // the column IS: the albums of this artist that are in the library (a
+  // pending one counts — it has a folder). The id stays `albums` so an
+  // existing column choice keeps working.
+  { id: "albums", label: "Releases", sortKey: "aggregate.album_count" },
   { id: "tracks", label: "Tracks", sortKey: "aggregate.track_count" },
   // The pass COUNT, not the grade percentage: the cell reads
   // "pass_count/total_checks", and sharing Grade's key lit both headers at
@@ -275,7 +280,12 @@ export default function LibraryPage() {
   // Organize / Scripts on a selection run server-side batches — one at a time.
   const [busy, setBusy] = useState(false);
   const [expanded, setExpanded] = useState<Set<string>>(new Set());
-  const [groupByArtist, setGroupByArtist] = useState(false);
+  // Grouped by artist by DEFAULT — the owner browses by artist, and a flat run
+  // of every album in the library is the exception, not the opening state. Kept
+  // as a remembered preference (the same `useLocalPref` the full-date switch
+  // beside it uses, so storage is one mechanism): untick it once and the Library
+  // opens flat from then on.
+  const [groupByArtist, setGroupByArtist] = useLocalPref("group-by-artist", true);
   const [gridSize, pickGridSize] = useGridSize();
   const [statsOpen, setStatsOpen] = useState(false);
   const [detailTrack, setDetailTrack] = useState<{ track: Track; albumPath: string } | null>(null);
@@ -1524,14 +1534,31 @@ export default function LibraryPage() {
                         </td>
                       )}
                       <td className="td">
-                        {/* the row click already opens the artist, so the link
-                            must not push the same route a second time. The
-                            NAME is the folder's display name: the folder is
-                            named "Radiohead [a74b1b7f-…]", and the raw basename
-                            was what this table used to print. */}
-                        <Link to={artistRef(a)} onClick={(e) => e.stopPropagation()} className="font-medium hover:text-accent-soft">
-                          {a.display_name || a.name}
-                        </Link>
+                        {/* The face beside the name: the artist's own picture
+                            when the folder holds one (`has_image` — the server
+                            reads it from the same helper Home's shelf asks, so
+                            the request is only made when the endpoint would
+                            answer), falling back to a representative album
+                            cover. A row here then names an artist the way a
+                            card on Home does. */}
+                        <div className="flex items-center gap-2.5 min-w-0">
+                          <ArtistAvatar
+                            path={a.path}
+                            hasImage={a.has_image}
+                            coverPath={a.albums?.[0]?.path}
+                            coverFile={a.albums?.[0]?.cover_file}
+                            className="h-8 w-8 rounded-full overflow-hidden shrink-0"
+                            title={a.display_name || a.name}
+                          />
+                          {/* the row click already opens the artist, so the link
+                              must not push the same route a second time. The
+                              NAME is the folder's display name: the folder is
+                              named "Radiohead [a74b1b7f-…]", and the raw basename
+                              was what this table used to print. */}
+                          <Link to={artistRef(a)} onClick={(e) => e.stopPropagation()} className="font-medium hover:text-accent-soft truncate">
+                            {a.display_name || a.name}
+                          </Link>
+                        </div>
                       </td>
                       {artistCols.includes("albums") && (
                         <td className={`td text-zinc-500${phoneHide(ARTIST_PHONE_CLS, "albums")}`}>{a.aggregate.album_count}</td>
@@ -2186,7 +2213,12 @@ function useLocalPref(key: string, initial: boolean): [boolean, (v: boolean) => 
   const storageKey = `mlo-pref-${key}`;
   const [value, setValue] = useState<boolean>(() => {
     try {
-      return localStorage.getItem(storageKey) === "1";
+      // A key that was never written is not a stored `false`: the caller's
+      // default is the answer. Reading `getItem(...) === "1"` alone made
+      // `initial` dead, so a switch whose default is ON (Group by artist)
+      // opened OFF for everyone who had never touched it.
+      const raw = localStorage.getItem(storageKey);
+      return raw === null ? initial : raw === "1";
     } catch {
       return initial;
     }

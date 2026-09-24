@@ -13,6 +13,9 @@ import random
 import threading
 import time
 
+from mlo.grader import printed_pct
+from server import job_locks
+
 _lock = threading.Lock()
 _cache = {"t": 0.0, "key": None, "data": None}
 _TTL = 900.0
@@ -295,15 +298,34 @@ def grade_warning(lib):
     checks == 0, server.library.build_album) applied to the whole library, so
     the strip can never contradict the percentage printed beside it.
 
-    Two albums are not a finding, and both would be the loudest row on the
-    page:
+    Three albums are not a finding, and every one of them would be the loudest
+    row on the page:
     - a PENDING framework album (the release the user added whose audio has
       not arrived): nothing was graded, because there was nothing to grade,
       and its row's failed check is the empty-folder placeholder — listing it
       would report a wish as a broken album;
     - an album with NO checks (`total_checks` 0): it PASSES by the rule above
       (0 == 0), which is how an album whose checks are all switched off stops
-      disagreeing with the Grade script.
+      disagreeing with the Grade script;
+    - an album a LIVE JOB holds (`job_locks.busy`): a chain writes an album
+      across its steps, so an album mid-run is deliberately half-written — the
+      tag the Auto tagging step is about to write is missing right up until
+      that step runs — and a strip that reported it would be describing the
+      process, not the library. The album's own row already says "Script run"
+      for the same reason; when the claim goes the album is a finding again.
+
+    `albums_failing`, `tracks_failing` and the `items` (with their `more`) are
+    the findings that are LISTED, and a busy album is in none of them. The
+    TOTALS are not: `pass_count`/`total_checks`/`grade_pct` keep counting the
+    library's checks exactly as the Home header prints them, busy album
+    included — a strip that quietly dropped a running album's checks from the
+    sum would contradict the percentage printed beside it.
+
+    `grade_pct` is the one number here the pair of pages prints as a claim, so
+    it is kept honest: rounded to one decimal a library failing one check in
+    ten thousand read `100.0` beside the album that failed it, and it now
+    reads `99.9` — exactly 100 is printed only when `pass_count` equals
+    `total_checks`, i.e. by a library with no failed check at all.
 
     The owner's rule for what a finding is: ONE failing track in an album is
     shown AS THAT TRACK — the album is only the frame around it, and the file
@@ -322,6 +344,11 @@ def grade_warning(lib):
     for alb in albums:
         # See the docstring: neither of these was graded, so neither is wrong.
         if alb.get("pending") or not (alb.get("total_checks") or 0) or alb.get("pass"):
+            continue
+        # …and a busy album is mid-write rather than wrong. Asked absolutely
+        # (job_locks.busy, not holder): the answer is a fact about the album,
+        # not about whatever this request happens to be running inside.
+        if job_locks.busy(alb.get("path")):
             continue
         bad = [tr for tr in (alb.get("tracks") or []) if tr.get("issues")]
         issues = alb.get("issues") or {}
@@ -366,11 +393,17 @@ def grade_warning(lib):
     items.sort(key=lambda it: (it["grade_pct"] if it["grade_pct"] is not None else 0.0,
                                -(it.get("failing_tracks") or 1)))
     more = max(0, len(items) - _GRADE_WARNING_MAX)
+    # Printed BESIDE the findings above, so it obeys the one rule for a printed
+    # percentage (mlo.grader.printed_pct): 100 belongs to a library with no
+    # failed check at all, and a strip that names a failing album while the
+    # line next to it reads "100% of checks pass" contradicts itself in one
+    # sentence.
+    grade_pct = printed_pct(pass_count, total_checks)
     return {
         "ok": not items,
         "pass_count": pass_count,
         "total_checks": total_checks,
-        "grade_pct": round(100.0 * pass_count / total_checks, 1) if total_checks else None,
+        "grade_pct": grade_pct,
         "albums_failing": len(items),
         "tracks_failing": tracks_failing,
         "items": items[:_GRADE_WARNING_MAX],

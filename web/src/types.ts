@@ -454,6 +454,10 @@ export interface Artist {
   display_name?: string | null;
   albums: Album[];
   aggregate: Aggregate;
+  /** Whether an `artist.*` image is stored in the artist folder — read from
+   *  the same helper Home's shelf and the artist page ask (`mlo.artistdata`),
+   *  so `api.artistImageUrl(path)` is only requested when it can answer. */
+  has_image?: boolean;
   /** Artist image + description stored in the artist folder. */
   artwork?: ArtistArtworkFields;
   /** Artist-level grading: only the checks that apply to an artist folder. */

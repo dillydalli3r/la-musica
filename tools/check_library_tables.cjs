@@ -64,6 +64,16 @@ const check = (name, ok, detail) => {
   const ctx = await browser.newContext({ viewport: { width: 1440, height: 900 } });
   const page = await ctx.newPage();
   page.on("pageerror", (e) => console.log("  PAGE_ERR:", e.message));
+  // The regression the owner hit: a prefs list written under the PREVIOUS key
+  // (`mlo-cols3-*`, an older column vocabulary) that keeps only some of the ids
+  // this build has. Trusting it drew an Albums view with its chevron and
+  // nothing else — so the check starts from exactly that state.
+  await ctx.addInitScript(() => {
+    localStorage.setItem("mlo-cols3-tracks", JSON.stringify(["num", "dur"]));
+    localStorage.setItem("mlo-cols3-artists", JSON.stringify([]));
+    localStorage.removeItem("mlo-cols4-tracks");
+    localStorage.removeItem("mlo-cols4-artists");
+  });
   await page.goto(BASE + "/library", { waitUntil: "networkidle", timeout: 60000 });
   await page.waitForTimeout(1500);
 
@@ -84,6 +94,7 @@ const check = (name, ok, detail) => {
     const overflowing = [];
     const shortColumns = [];
     const ths = [...table.querySelectorAll("thead th")];
+    const shown = ths.filter((th) => getComputedStyle(th).display !== "none");
     ths.forEach((th, i) => {
       const label = (th.textContent || "").trim().slice(0, 14);
       if (th.scrollWidth > th.clientWidth + 1)
@@ -104,12 +115,25 @@ const check = (name, ok, detail) => {
     });
     return {
       rowCount: rows.length,
+      visibleColumns: shown.length,
       rowHeights: rows.slice(0, 4).map((tr) => Math.round(tr.getBoundingClientRect().height)),
       squeezed,
       overflowing,
       shortColumns,
     };
   });
+
+  // A stale list is migrated, not obeyed: the ids it kept survive and this
+  // build's default columns come back with them.
+  const migrated = await page.evaluate(() => ({
+    tracks: JSON.parse(localStorage.getItem("mlo-cols4-tracks") || "[]"),
+    legacy: localStorage.getItem("mlo-cols3-tracks"),
+  }));
+  console.log("\n[column prefs]");
+  check("a stale prefs list migrates instead of gutting the table",
+        migrated.tracks.includes("num") && migrated.tracks.includes("title") && migrated.tracks.includes("album"),
+        migrated.tracks.join(","));
+  check("the migrated list replaces the old key", migrated.legacy === null, String(migrated.legacy));
 
   for (const view of VIEWS) {
     await page.getByRole("tab", { name: view, exact: true }).click();
@@ -118,6 +142,11 @@ const check = (name, ok, detail) => {
     if (process.env.OUT) await page.screenshot({ path: `${OUT}/${view.toLowerCase()}.png` });
     console.log(`\n[${view}]`);
     check("rows rendered", g.rowCount > 0, `${g.rowCount} rows`);
+    // The floor, not the exact set: the reported failure drew ONE column, and
+    // a table is not allowed to lose its data to a preference list again.
+    const floor = view === "Artists" ? 4 : 6;
+    check("the table kept its columns", g.visibleColumns >= floor,
+          `${g.visibleColumns} column(s)`);
     check("no squeezed names", g.squeezed.length === 0, g.squeezed.join(", "));
     check("every header label fits its column", g.overflowing.length === 0, g.overflowing.join(", "));
     check("every column holds its widest value", g.shortColumns.length === 0, g.shortColumns.join(", "));

@@ -1,9 +1,10 @@
-import { useState } from "react";
-import { useQuery } from "@tanstack/react-query";
+import { useEffect, useRef, useState } from "react";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { AlertTriangle, CheckCircle2, ChevronDown, ChevronUp } from "lucide-react";
 import { Link } from "react-router-dom";
 import { api } from "../api";
 import { albumRef, trackRef } from "../lib/refs";
+import { useLocks } from "../lib/locks";
 import type { GradeWarning as GradeSummary, GradeWarningItem } from "../types";
 
 /** The grader's BARE codes (mlo.grader's per-track `issues`) read as words.
@@ -21,6 +22,12 @@ const CODE_WORDS: Record<string, string> = {
   CD_FORMAT: "CD format",
   UNREADABLE: "unreadable file",
   TAGS: "tags",
+  // The one code whose bare form says what is missing and not what to do about
+  // it ("acoustid id"). A half pair is completed by a step this app already
+  // has, named the way the grader's own messages name their actions ("run
+  // Audit Library") so the words here are words the reader can find again.
+  ACOUSTID_ID: "AcoustID id missing (run Fix AcoustID pairs)",
+  ACOUSTID_FINGERPRINT: "AcoustID fingerprint missing (run Fix AcoustID pairs)",
 };
 
 /** Where "+N more" lands: the Library page's own Failing quick filter, which
@@ -79,9 +86,39 @@ const COLLAPSED_ITEMS = 3;
  *
  *  `staleTime` matches Home's own payload cache: both describe a library whose
  *  grades only change when something runs, and re-asking per view would spend
- *  a library build to paint the same strip. */
+ *  a library build to paint the same strip. What that leaves out is the run
+ *  itself: the server drops the albums a live job holds from the findings
+ *  (server.recommendations.grade_warning), so the answer changes when the
+ *  client's own lock list does — see the effect below. */
 export default function GradeWarning({ initial }: { initial?: GradeSummary }) {
   const [open, setOpen] = useState(false);
+  const qc = useQueryClient();
+  // The strip's answer depends on which albums a job holds RIGHT NOW, and the
+  // 5-minute `staleTime` above was chosen for a library that only changes when
+  // something runs — which is exactly when it is wrong: a run's first step
+  // leaves an album half-written, so the strip would name the album being
+  // worked on, and would keep naming it long after the run ended.
+  //
+  // The signal is the lock list the app already polls (lib/locks, behind the
+  // "Script run" chip), reduced to ONE string so a poll that changes nothing
+  // re-runs nothing: the effect below fires only when the held paths actually
+  // change — a claim taken, followed (move) or given back — never per tick, and
+  // invalidating the summary does not feed the lock list back, so it cannot
+  // loop. It is coarser than the server's rule (only an album's own folder
+  // matters there); a claim change is a step boundary in a run, not a tick.
+  const busy = useLocks((s) =>
+    s.index.entries.map((e) => e.held.key).sort().join("|")
+  );
+  const seen = useRef<string | null>(null);
+  useEffect(() => {
+    const first = seen.current === null;
+    if (!first && seen.current === busy) return;
+    seen.current = busy;
+    // A first paint with nothing held already agrees with an idle library:
+    // refetching there would undo `initialData`'s whole point for nothing.
+    if (first && !busy) return;
+    qc.invalidateQueries({ queryKey: ["gradesSummary"] });
+  }, [busy, qc]);
   const { data } = useQuery({
     queryKey: ["gradesSummary"],
     queryFn: api.gradesSummary,
@@ -97,12 +134,14 @@ export default function GradeWarning({ initial }: { initial?: GradeSummary }) {
     return (
       <div className="text-xs text-emerald-300 bg-emerald-950/30 border border-emerald-900/60 rounded-lg px-3 py-2 flex items-center gap-2">
         <CheckCircle2 className="h-3.5 w-3.5 shrink-0" />
-        {/* "All 0 checks pass" is not a sentence: an install with every check
-            switched off has nothing to report, and says so. */}
+        {/* "All 10281 checks pass" is a number the reader cannot use: the count
+            is a fact about the checks, not about the library, and a library
+            that passes says so in four words. The ZERO case still says
+            something else on purpose — an install with every check switched
+            off has nothing to report, and "All checks pass" would be a claim
+            about a library nothing looked at. */}
         <span>
-          {data.total_checks > 0
-            ? `All ${data.total_checks} checks pass`
-            : "No grading checks to report yet"}
+          {data.total_checks > 0 ? "All checks pass" : "No grading checks to report yet"}
         </span>
       </div>
     );
@@ -122,8 +161,13 @@ export default function GradeWarning({ initial }: { initial?: GradeSummary }) {
         <AlertTriangle className="h-3.5 w-3.5 shrink-0 mt-0.5" />
         <span>
           <span className="font-mono">{data.albums_failing}</span>{" "}
-          {data.albums_failing === 1 ? "album fails" : "albums fail"} the library's grading
-          checks
+          {/* "falls short of" / "fall short of", not "falls/fail": the album is
+              short of the grade, and "album falls the library's grading checks"
+              has no complement — the verb needs the phrase to make a sentence.
+              Both numbers read as sentences: one album falls short of them,
+              two albums fall short of them. */}
+          {data.albums_failing === 1 ? "album falls short of" : "albums fall short of"} the
+          library's grading checks
           {data.tracks_failing > 0 && (
             <>
               {" · "}

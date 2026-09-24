@@ -10,9 +10,10 @@ import re
 from concurrent.futures import ThreadPoolExecutor
 
 from mlo.stats import _find_albums, worker_count, WALK_FILES
-from mlo.grader import _empty_folder_result, _find_empty_folders, _grade_album
+from mlo.grader import (_empty_folder_result, _find_empty_folders, _grade_album,
+                        printed_pct)
 from mlo.audio import AudioFile
-from mlo.artistdata import strip_mbid_suffix
+from mlo.artistdata import has_image, strip_mbid_suffix
 from mlo.paths import (LIB_VIDEO_EXTS, load_expected_tracks, load_pending,
                        load_track_covers, _album_file, SIDECAR_COVER_EXTS)
 from server import tagcache
@@ -230,13 +231,14 @@ def _aggregate_albums(albums_data):
         "track_count": track_count,
         "pass_count": pass_count,
         "total_checks": total_checks,
-        "grade_pct": round(100.0 * pass_count / total_checks, 1) if total_checks else None,
+        "grade_pct": printed_pct(pass_count, total_checks),
         # The artist's own verdict, by the same rule the albums use (failed ==
         # 0) and requiring at least one graded check, so an artist with no
         # albums at all is not handed a pass for nothing. It is a field rather
-        # than something the UI derives from grade_pct because grade_pct is
-        # ROUNDED: at a few thousand checks one failure is 99.98 %, which
-        # rounds to 100.0 and drew a green artist dot over a failed album.
+        # than something the UI derives from grade_pct because a percentage is
+        # a summary: "this artist has a failed album" is a fact, and reading it
+        # off arithmetic on a rounded number is how a green dot once sat over a
+        # failed album.
         "pass": bool(total_checks) and pass_count == total_checks,
         "audit_summary": audit,
     }
@@ -413,7 +415,9 @@ def build_album(album_dir, cfg, light=False):
     res["pending"] = not res.get("tracks")
     res["artwork"] = _album_artwork(album_dir, light=light)
     tc = res.get("total_checks", 0)
-    res["grade_pct"] = round(100.0 * res.get("pass_count", 0) / tc, 1) if tc else None
+    # Printed, so it obeys the one rule (mlo.grader.printed_pct): a Fail badge
+    # can never read "100% of checks passed".
+    res["grade_pct"] = printed_pct(res.get("pass_count", 0), tc)
     # Same rule as the grader's own PASS — failed == 0 (run_grade_library) — so
     # an album whose checks are all switched off is a PASS here too instead of
     # disagreeing with the Grade script. grade_pct stays null for it: there is
@@ -764,12 +768,24 @@ def build_library(cfg, progress=None):
                                for d in empty_rows.get(artist_dir, []))
             albums_data.sort(key=lambda a: str(a.get("path", "")).lower())
             agg = _aggregate_albums(albums_data)
+            try:
+                artist_image = has_image(artist_dir)
+            except Exception:
+                # A folder this cannot read holds no picture the app can serve,
+                # and a row that draws its initial is the honest rendering of
+                # that — not a broken-image glyph from a URL that would 404.
+                artist_image = False
             result.append({
                 "path": artist_dir.replace("\\", "/"),
                 "name": os.path.basename(artist_dir),
                 "display_name": _artist_display_name(artist_dir, albums_data),
                 "albums": albums_data,
                 "aggregate": agg,
+                # Whether `GET /api/artist/image` would answer for this folder:
+                # a listing, not a walk, and the same question Home's shelf asks
+                # (`mlo.artistdata.has_image`), so the Artists view draws an
+                # artist's own picture and every other row an initial.
+                "has_image": artist_image,
             })
         _drop_filled_placeholders(result)
         return {"folder": folder.replace("\\", "/"),

@@ -635,28 +635,29 @@ table td {
    instead. The field itself is darkened for every cover by the player's
    full-bleed wash (NowPlayingView), and the ink — always the light table now —
    carries its own shadow.
-   The shadow is ALL halo, no core: a stack of wide, low-opacity offsets that
-   sink the line into the field. The old shape paired a tight 3px blur at 0.92
-   with the halo, and on a bright field (a red cover reads bright to the eye,
-   though WCAG luminance calls it dark, so the light ink table is picked) that
-   near-opaque ring merged between glyphs into a slab of uniform dark pixels
-   under the line — the owner's "block … beneath it". Each layer here is at
-   most 0.42 and none of them is tight, so what crosses a bright cover is
-   depth, not a plate. Legibility comes from the wash and from the ink's own
-   contrast; the shadow only has to stop a glyph from dissolving into a busy
-   mid-tone. */
+   The shadow is ALL halo, no core, and it has now been let go of twice: a
+   tight 3px blur at 0.92 once merged between glyphs into a slab of uniform
+   dark pixels under the line (the owner's "block … beneath it"), and the
+   stack that replaced it — four layers at 0.3–0.42 — still drew a visible
+   ring around every glyph, which is the "ghost border" report. What is left
+   is a wide, soft drop: the tightest layer is a 3px smoke rather than a 2px
+   edge, every opacity is halved, and the densest point of the stack is about
+   a third of what it was, so a bright cover gets depth under the line
+   instead of a stroke around it. Legibility comes from the wash and from the
+   ink's own contrast; the shadow only has to stop a glyph from dissolving
+   into a busy mid-tone. */
 /* The same stack mirrored for the DARK ink a bright cover asks for
    (the polarity is decided once, in `npInk`): a light halo is what separates a
    near-black glyph from a bright field, exactly as the dark one does for white
    glyphs. Both stacks are the ink's opposite, so a cover that flips the table
    flips its shadow with it. */
 .np-shade-light {
-  text-shadow: 0 1px 2px rgb(255 255 255 / 0.35), 0 2px 6px rgb(255 255 255 / 0.32),
-    0 4px 16px rgb(255 255 255 / 0.3), 0 8px 30px rgb(255 255 255 / 0.22);
+  text-shadow: 0 1px 3px rgb(255 255 255 / 0.2), 0 4px 14px rgb(255 255 255 / 0.16),
+    0 10px 34px rgb(255 255 255 / 0.1);
 }
 .np-shade {
-  text-shadow: 0 1px 2px rgb(0 0 0 / 0.42), 0 2px 6px rgb(0 0 0 / 0.4),
-    0 4px 16px rgb(0 0 0 / 0.38), 0 8px 30px rgb(0 0 0 / 0.3);
+  text-shadow: 0 1px 3px rgb(0 0 0 / 0.2), 0 4px 14px rgb(0 0 0 / 0.16),
+    0 10px 34px rgb(0 0 0 / 0.1);
 }
 /* ------------------------------------------------------------------ */
 /* The player's frosted menus                                          */

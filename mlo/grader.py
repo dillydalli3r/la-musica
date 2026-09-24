@@ -1896,7 +1896,13 @@ def _grade_album(album_dir, lyrics_format, cfg=None):
                     _missing = ("ACOUSTID_FINGERPRINT" if _a_id
                                 else "ACOUSTID_ID")
                     failed_checks += 1
-                    add_issue(f"Missing {_missing} (incomplete AcoustID pair)",
+                    # The half pair is the one thing here no other check can
+                    # fix, and the pass that completes it is a step of the
+                    # chain — named the way the neighbours name their actions
+                    # ("run Audit Library", "run organize"). The tag that is
+                    # missing is still named, which is what a reader searches
+                    # the tags for.
+                    add_issue(f"Missing {_missing} (run Fix AcoustID pairs)",
                               basename)
                     track["issues"].append(_missing)
 
@@ -4396,6 +4402,25 @@ def _empty_folder_result(folder, folder_root):
         # treat "absent" as a case of its own.
         "notes": [],
     }
+
+
+def printed_pct(pass_count, total_checks):
+    """The percentage a surface may PRINT for one score. None with no checks.
+
+    ONE rule for every surface that prints one (the library header, an album
+    row, the grading strip), because they sit beside each other: a library of
+    10 281 checks with one failed is 99.99 %, which `round(..., 1)` turns into
+    `100.0` — a row that says Fail beside a number that says everything passed,
+    and the strip that names the failing album calls the same library 100 %
+    perfect. 100 is printed only by a library with nothing failed; a shortfall
+    prints 99.9, which is all the precision a percentage is read at.
+    """
+    total = int(total_checks or 0)
+    if not total:
+        return None
+    passed = int(pass_count or 0)
+    pct = round(100.0 * passed / total, 1)
+    return 99.9 if passed < total and pct >= 100.0 else pct
 
 
 def run_grade_library(config):

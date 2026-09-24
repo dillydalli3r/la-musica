@@ -1146,6 +1146,71 @@ check("...and the walk's own record says which edition it is on",
       and [t["mbid"] for t in wishes.candidate_state(moved, CFG)["tried"]] == MOVE_IDS[:1],
       json.dumps(wishes.candidate_state(moved, CFG)))
 
+# (c) THE STORED LIST IS A SNAPSHOT, NEVER AN AUTHORITY (R150). A wish records
+#     the editions an add resolved, each with its own facts — and the WALK
+#     re-derives their order from those facts every time it reads the list, so a
+#     release queued before a rule changed is searched by the rule in force now.
+#     The two rows below are stored the way the OLD policy ordered them (the
+#     later, commented pressing first); the walk must ask the earlier clean one
+#     first, and the row's own position must agree with what it asks.
+QUEUED_ROWS = [
+    {"mbid": "7b7b7b7b-0000-0000-0000-000000000016", "title": "Queued Album",
+     "score": 0.9, "date": "2016-01-08", "status": "Official", "country": "US",
+     "disambiguation": "BMG Club edition", "medium_formats": ["CD"],
+     "track_count": 12, "catalog_numbers": ["QUEUE-16"]},
+    {"mbid": "7b7b7b7b-0000-0000-0000-000000000011", "title": "Queued Album",
+     "score": 0.8, "date": "2011-09-26", "status": "Official", "country": "US",
+     "medium_formats": ["CD"], "track_count": 12, "catalog_numbers": ["QUEUE-11"]},
+]
+QUEUED_ID = wishes.add_wish(QUEUED_ROWS[0]["mbid"], title="Queued Album",
+                            artist="An Artist", source="soulseek")["id"]
+wishes.set_candidates(QUEUED_ID, QUEUED_ROWS)
+_queued = wishes.get_wish(QUEUED_ID)
+check("a wish's stored order is not the order it walks",
+      [r["mbid"] for r in _queued["candidates"]] == [r["mbid"] for r in QUEUED_ROWS]
+      and [r["mbid"] for r in wishes.walked_rows(_queued, CFG)] ==
+      [QUEUED_ROWS[1]["mbid"], QUEUED_ROWS[0]["mbid"]],
+      json.dumps({"stored": [r["mbid"] for r in _queued["candidates"]],
+                  "walked": [r["mbid"] for r in wishes.walked_rows(_queued, CFG)]}))
+check("...the row's own position agrees with the order the walk reads",
+      (wishes.candidate_state(_queued, CFG) or {}).get("mbid") == QUEUED_ROWS[1]["mbid"],
+      json.dumps(wishes.candidate_state(_queued, CFG)))
+check("...and it advances in THAT order, not the stored one",
+      (wishes.advance_candidate(QUEUED_ID, CFG) or {}).get("mbid") == QUEUED_ROWS[0]["mbid"],
+      json.dumps(wishes.candidate_state(wishes.get_wish(QUEUED_ID), CFG)))
+
+_queued_asked = []
+
+
+def queued_start_job(**kw):
+    _queued_asked.append(kw["release_mbid"])
+    jid = 490200 + len(_queued_asked)
+    _queued_states[jid] = {"state": "error", "stage": "",
+                           "result": {"error": REFUSAL}}
+    return {"ok": True, "job": {"id": jid}}
+
+
+def queued_job_state(job_id=None):
+    return dict(_queued_states.get(job_id) or {"state": "error", "result": {"error": REFUSAL}})
+
+
+_queued_states = {}
+wishes.restart_walk(QUEUED_ID)
+
+
+def queued_resolve(mbid):
+    rel = dict(REL, id=str(mbid or ""), release_group_id=str(mbid or ""),
+               title="Queued Album", catalog_number="", catalog_numbers=[])
+    return (rel, rel["id"]) if str(mbid or "").startswith("7b7b7b7b") else walk_resolve(mbid)
+
+
+with SLSK, Patch(intg, resolve_release=queued_resolve), \
+     Patch(auto, start_job=queued_start_job, job_state=queued_job_state):
+    worker._run_one(wishes.get_wish(QUEUED_ID), dict(CFG))
+
+check("a release queued under the OLD order is searched in the NEW one",
+      _queued_asked[:1] == [QUEUED_ROWS[1]["mbid"]], json.dumps(_queued_asked))
+
 shutil.rmtree(REDIRECT, ignore_errors=True)
 print(f"\n{len(FAILED)} failure(s)")
 sys.exit(1 if FAILED else 0)

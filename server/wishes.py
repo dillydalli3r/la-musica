@@ -724,11 +724,16 @@ def mark_wanted(wid, error="", attempts=None, retry_at=None, not_found=None,
 # the network does not have is no longer given up on while four other pressings
 # of it sit in the same ranking (spec R150-R152).
 #
-# The list is computed ONCE, when the add is recorded, from the editions the
-# provider already returned (`integrations.group_targets`): the walk never spends
-# a fresh search deciding what to try next. It is walked FORWARD only, one entry
-# per exhausted candidate, so the walk terminates by construction — and its end
-# is the ordinary not-found outcome, reported with every edition it asked for.
+# The stored list is written ONCE, when the add is recorded, from the editions
+# the provider already returned (`integrations.group_targets`) — but what is
+# stored is the EDITIONS AND THEIR FACTS, never the order they were ranked in:
+# every read re-derives the order from those facts with the policy in force then
+# (`walked_rows` → `mlo.release_choice.rank_stored`), so a release queued before
+# a rule changed is searched by the rule in force now. No read spends a
+# MusicBrainz request, and no read writes back. The walk itself is FORWARD only,
+# one entry per exhausted candidate, so it terminates by construction — and its
+# end is the ordinary not-found outcome, reported with every edition it asked
+# for.
 #
 # `release_mbid` stays the wish's KEY (the release the add was for; `UNIQUE`, and
 # what a re-add matches on), so the index — not the key — is what moves.
@@ -744,13 +749,36 @@ def fallback_limit(cfg=None):
     return max(1, _int(cfg, "soulseek_fallback_candidates", 3))
 
 
+def walked_rows(wish, cfg=None):
+    """The wish's stored candidates in the order the CURRENT policy puts them.
+
+    The stored list is a snapshot of the editions an add resolved — never an
+    authority on their order. It is re-ranked here from the facts each row
+    carries (`mlo.release_choice.rank_stored`: the same rules the release-group
+    page shows, no MusicBrainz request), so a release queued before a rule
+    changed is searched by the rule in force now. EVERY reader of the walk goes
+    through this function — the order the worker asks in, the row's "Release 2
+    of 5", and the `tried` list behind it — because one pure, deterministic
+    order over one stored list is what keeps those three from disagreeing.
+
+    A list whose rows state no facts comes back exactly as stored (there is
+    nothing to re-rank by), and no row is ever dropped.
+    """
+    rows = [r for r in ((wish or {}).get("candidates") or []) if isinstance(r, dict)]
+    if len(rows) < 2:
+        return rows
+    from mlo import release_choice
+
+    return release_choice.rank_stored(rows, cfg)
+
+
 def walk_length(wish, cfg=None):
     """How many candidates this wish's walk really has, capped by the setting.
 
     Len < 2 is not a walk: the wish's own key is its one candidate, and the row
     shows nothing about positions (see `candidate_state`).
     """
-    rows = list((wish or {}).get("candidates") or [])
+    rows = walked_rows(wish, cfg)
     return min(len(rows), fallback_limit(cfg)) if rows else 0
 
 
@@ -773,7 +801,7 @@ def candidate_state(wish, cfg=None):
     total = walk_length(wish, cfg)
     if total < 2:
         return None
-    rows = list((wish or {}).get("candidates") or [])
+    rows = walked_rows(wish, cfg)
     try:
         index = max(0, int((wish or {}).get("candidate") or 0))
     except (TypeError, ValueError):
@@ -810,9 +838,11 @@ def candidate_of(wish):
 def set_candidates(wid, rows):
     """Record the ranked candidate list of a wish that has none yet.
 
-    Only ever FILLS an empty list. A wish already walking its own editions keeps
-    the order it was recorded with, so a second add cannot reorder a search that
-    is in flight — `rearm` is what starts a fresh walk.
+    Only ever FILLS an empty list. A wish already walking keeps the ROWS it was
+    recorded with — a second add cannot replace the editions behind a search
+    that is in flight — but their ORDER is not stored state: every read derives
+    it afresh with the policy in force then (`walked_rows`), so nothing about a
+    queued release is frozen at add time. `rearm` is what starts a fresh walk.
 
     ONE entry is stored as readily as three: a list is what tells the store this
     wish carries the ranked editions of an album request, and that is what keeps
@@ -839,6 +869,27 @@ def set_candidates(wid, rows):
         catalogs = [str(n) for n in ((r or {}).get("catalog_numbers") or []) if str(n).strip()]
         if catalogs:
             row["catalog_numbers"] = catalogs
+        # …and the edition's OWN facts, kept for the same reason the number is:
+        # the WALK ranks this list every time it reads it
+        # (`mlo.release_choice.rank_stored`), so the facts the policy decides on
+        # have to travel with the row. The stored list is a snapshot of the
+        # editions; the ORDER is the reader's, and never the snapshot's. Only
+        # what a row supplies is kept — a fact nobody stated is absent, and the
+        # ranking then answers with the rules that row CAN answer.
+        for key in ("date", "status", "country", "disambiguation"):
+            value = str((r or {}).get(key) or "").strip()
+            if value:
+                row[key] = value
+        formats = [str(f).strip() for f in ((r or {}).get("medium_formats") or [])
+                   if str(f).strip()]
+        if formats:
+            row["medium_formats"] = formats
+        try:
+            tracks = int((r or {}).get("track_count") or 0)
+        except (TypeError, ValueError):
+            tracks = 0
+        if tracks > 0:
+            row["track_count"] = tracks
         kept.append(row)
     if not kept:
         return None
@@ -878,7 +929,7 @@ def advance_candidate(wid, cfg=None):
     so instead of sitting in `searching` while the walk moves on.
     """
     before = get_wish(int(wid)) or {}
-    rows = list(before.get("candidates") or [])
+    rows = walked_rows(before, cfg)
     total = walk_length(before, cfg)
     try:
         index = max(0, int(before.get("candidate") or 0))
@@ -960,7 +1011,7 @@ def walk_report(wish, err, cfg=None):
     — and its classification (`outcome_of`) — survives.
     """
     state = candidate_state(wish, cfg)
-    rows = list((wish or {}).get("candidates") or [])
+    rows = walked_rows(wish, cfg)
     total = walk_length(wish, cfg) or len(rows)
     if state:
         asked = state["tried"] + [{"mbid": state["mbid"], "title": state["title"]}]

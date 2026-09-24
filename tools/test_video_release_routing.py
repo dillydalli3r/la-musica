@@ -20,6 +20,20 @@ What this pins, in the order the acquisition pipeline takes the decision:
   * the disc and audio cases keep today's path: the search IS run, YouTube is
     never consulted, and a search that finds nothing still ends on the
     Soulseek dead end rather than in silence.
+  * a track YouTube has no usable upload for falls back to the NETWORK
+    (`soulseek_auto.fetch_video_on_soulseek`): one search of the track's own
+    artist + title, the best of the peer copies that are really that track
+    (video container + artist + title in the file name, fastest peer first),
+    queued and waited out, then staged under the track's own name so the same
+    import stamps it. A peer copy that is NOT the track (another artist,
+    another song, an audio container) is not a fallback, and a track NEITHER
+    source serves is reported naming both.
+  * the grab route (`POST /api/videos/download-youtube`) does not wait for a
+    transfer: it searches briefly, queues the file as the app's own download
+    and answers `{ok, source: "soulseek", queued: true, candidate}`; a request
+    where neither source has the video answers `ok: false` with a reason that
+    names both, and an unreachable slskd is reported as that (not as "no
+    copy").
   * a track that cannot be found or downloaded is that TRACK's failure — it is
     counted (`error_count`), named in the log and in the job's note, and the
     rest of the album is still imported; a release with NOTHING found ends the
@@ -190,6 +204,12 @@ CANDIDATES = []          # every best_candidate call
 DOWNLOADS = []           # every download call
 UNFINDABLE = set()       # titles YouTube has nothing for
 SEARCHES = []            # every _search_queries call
+# What the fake Soulseek search answers with, in slskd's response shape (see
+# soulseek.search_results). Empty is "the network has nothing", which is what
+# every test above this one wants; the fallback sections below fill it.
+SLSK_FILES = []          # [{user, file, size, duration, speed}]
+ENQUEUED = []            # every enqueue_download call
+ARRIVED = []             # every _wait_for_files call
 
 
 def fake_candidate(artist, title, want_seconds=None, config=None):
@@ -218,7 +238,45 @@ def fake_download(url, dest_dir, config=None):
 
 def fake_search(slsk_mod, queries, wait_s, usable=None, response_limit=0):
     SEARCHES.append(list(queries))
-    return [], [], 0
+    if not SLSK_FILES:
+        return [], [], 0
+    made = [{"username": f["user"], "file": f["file"], "size": int(f["size"]),
+             "duration": f.get("duration"), "slot": True,
+             "ext": os.path.splitext(f["file"])[1].lstrip("."),
+             "speed": int(f.get("speed") or 2 * 1024 * 1024), "queue": 0}
+            for f in SLSK_FILES]
+    return [(queries[0], {"state": "Completed", "isComplete": True,
+                          "responses": made})], [], 0
+
+
+def slsk_video(title, artist="Test Artist", ext=".mkv", size=16384,
+               duration=200.0, user="peer1", speed=2 * 1024 * 1024):
+    """One peer's copy of a music video, as a search response describes it."""
+    return {"user": user, "size": size, "duration": duration, "speed": speed,
+            "file": f"@@{user}\\Music Videos\\{artist} - {title}{ext}"}
+
+
+def fake_enqueue_download(username, files, cfg=None):
+    ENQUEUED.append({"username": username, "files": list(files)})
+    return True
+
+
+def fake_wait_for_files(slsk_mod, ddir, username, wanted, timeout_s,
+                        cancel_check=None, phase="download",
+                        queue_budget_s=None, on_start=None):
+    """slskd having delivered the transfer: the file lands where it would,
+    under the download dir, and the wait returns `{remote: local}`."""
+    ARRIVED.append({"username": username,
+                    "files": [w["filename"] for w in wanted]})
+    got = {}
+    for w in wanted:
+        leaf = str(w["filename"]).replace("\\", "/").rsplit("/", 1)[-1]
+        path = os.path.join(ddir, str(username), leaf)
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path, "wb") as f:
+            f.write(b"\0" * int(w.get("size") or 0))
+        got[w["filename"]] = path
+    return got
 
 
 ORGANIZED = []
@@ -239,6 +297,12 @@ def fake_finish_album(album_dir, cfg=None, progress=None, force=None, release=No
 
 def install_stubs():
     auto._search_queries = fake_search
+    # The fallback's own two seams: enqueueing the transfer, and waiting for
+    # it. The real ones are httpx against slskd and a poll of the download
+    # tree — neither is this suite's subject (see
+    # tools/test_soulseek_candidates.py for those).
+    soulseek.enqueue_download = fake_enqueue_download
+    auto._wait_for_files = fake_wait_for_files
     youtube.best_candidate = fake_candidate
     youtube.download = fake_download
     youtube.ytdlp_available = lambda config=None: True
@@ -559,6 +623,171 @@ for label, rel in (("a DVD music video", release("DVD")),
     ok("No candidate folder" in err, f"{label}: with the Soulseek reason", err)
     auto.forget(jid)
     clear_registry()
+
+# --------------------------------------------------------------------------- #
+print("\n(8) a track YouTube does not have comes from Soulseek")
+# --------------------------------------------------------------------------- #
+# One track YouTube has nothing for, and TWO peers offering exactly that video
+# — named after the track, in a container the library supports. The album still
+# imports (two tracks from YouTube, one from the network), the fastest peer is
+# the one asked, and the job says where the third track came from.
+install_stubs()
+set_slskd(True)
+UNFINDABLE.clear()
+UNFINDABLE.add("Second Video")
+CANDIDATES.clear()
+DOWNLOADS.clear()
+SEARCHES.clear()
+ENQUEUED.clear()
+ARRIVED.clear()
+ORGANIZED.clear()
+FINISHED.clear()
+SLSK_FILES[:] = [slsk_video("Second Video", user="peer1", speed=512 * 1024),
+                 slsk_video("Second Video", user="peer0", speed=4 * 1024 * 1024)]
+jid, state = run_job(release("Digital Media"))
+join_chain()
+UNFINDABLE.clear()
+SLSK_FILES[:] = []
+eq(SEARCHES, [["Test Artist Second Video"]],
+   "the network was searched ONCE, for the track YouTube missed, by its own "
+   "artist and title")
+eq(len(DOWNLOADS), 2, "YouTube served the other two")
+eq(len(ENQUEUED), 1, "ONE transfer was queued")
+eq(ENQUEUED[0]["username"], "peer0",
+   "from the FASTEST peer that has it, not the first the search listed")
+eq([f["filename"] for f in ENQUEUED[0]["files"]],
+   ["@@peer0\\Music Videos\\Test Artist - Second Video.mkv"],
+   "the remote FILE itself — a music video is one file, not a folder")
+eq(len(ARRIVED), 1, "and the transfer was waited out")
+ok(state["state"] == "done", "the job finished", str(state.get("error") or ""))
+result = state.get("result") or {}
+eq(int(result.get("error_count") or 0), 0, "with every track present")
+album = str(result.get("album_path") or "")
+eq(sorted(os.listdir(album)) if os.path.isdir(album) else [],
+   ["1-01 First Video.mkv", "1-02 Second Video.mkv", "1-03 Third Video.mkv"],
+   "the network's file is named like the tracks YouTube delivered")
+eq(tags_of(os.path.join(album, "1-02 Second Video.mkv")).get("TITLE"),
+   "Second Video", "and stamped as that track")
+log = " · ".join(str(l.get("msg")) for l in state.get("log") or [])
+ok("1-02 Second Video.mkv — from peer0" in log,
+   "the job log says which peer it came from", log[-400:])
+auto.forget(jid)
+clear_registry()
+
+# A peer copy that is NOT this track (another artist, another song) is not a
+# fallback: the album's tracks are its own recordings, so the miss stands.
+UNFINDABLE.add("Second Video")
+SLSK_FILES[:] = [slsk_video("Second Video", artist="Some Cover Band"),
+                 slsk_video("Another Song", user="peer3"),
+                 slsk_video("Second Video", ext=".txt")]
+SEARCHES.clear()
+ENQUEUED.clear()
+ARRIVED.clear()
+CANDIDATES.clear()
+jid, state = run_job(release("Digital Media"))
+UNFINDABLE.clear()
+SLSK_FILES[:] = []
+eq(SEARCHES, [["Test Artist Second Video"]], "the search ran")
+eq(ENQUEUED, [], "and NOTHING was queued for it")
+eq(ARRIVED, [], "nothing was waited for either")
+result = state.get("result") or {}
+eq(int(result.get("error_count") or 0), 1, "the track is still missing")
+ok("Second Video" in str(result.get("note") or "")
+   and "no usable YouTube upload found" in str(result.get("note") or "")
+   and "no Soulseek copy either" in str(result.get("note") or ""),
+   "and the line names BOTH sources", result.get("note"))
+auto.forget(jid)
+clear_registry()
+
+# --------------------------------------------------------------------------- #
+print("\n(9) neither source has it: the dead end names both")
+# --------------------------------------------------------------------------- #
+# Every track missing from YouTube AND nothing usable on the network (slskd is
+# UP here, so the searches really run): the job ends on the app's dead end,
+# which now names both sources and still reads as `not_found` to the wish
+# policy — a release nobody has is not a transient outage.
+install_stubs()
+set_slskd(True)
+UNFINDABLE.update(TITLES)
+SLSK_FILES[:] = [slsk_video("First Video", artist="Some Cover Band")]
+SEARCHES.clear()
+ENQUEUED.clear()
+ARRIVED.clear()
+ORGANIZED.clear()
+FINISHED.clear()
+jid, state = run_job(release("Digital Media"))
+UNFINDABLE.clear()
+SLSK_FILES[:] = []
+eq(state["state"], "error", "the job failed rather than reporting success")
+err = str((state.get("result") or {}).get("error") or "")
+ok("on YouTube or Soulseek" in err, "the dead end names BOTH sources", err)
+eq(wishes.outcome_of(err), "not_found",
+   "and still classifies as not_found, not as a transient outage")
+eq(len(SEARCHES), 3, "every track was looked for on the network")
+eq(ENQUEUED, [], "nothing was queued")
+eq(ARRIVED, [], "and nothing was waited for")
+eq(ORGANIZED, [], "nothing was imported")
+log = " · ".join(str(l.get("msg")) for l in state.get("log") or [])
+eq(log.count("no Soulseek copy either"), 3,
+   "each track's line says what the network did not have either")
+auto.forget(jid)
+clear_registry()
+
+# --------------------------------------------------------------------------- #
+print("\n(10) the grab route queues what YouTube does not have")
+# --------------------------------------------------------------------------- #
+# The route must not hold a request open for a transfer that takes minutes: it
+# searches briefly, queues the file as the app's own download and answers with
+# what it queued.
+install_stubs()
+set_slskd(True)
+FOLDER = os.path.join(LIB, "Video Grab Album")
+os.makedirs(FOLDER, exist_ok=True)
+UNFINDABLE.clear()
+UNFINDABLE.add("Third Video")
+SLSK_FILES[:] = [slsk_video("Third Video", user="peer2")]
+ENQUEUED.clear()
+ARRIVED.clear()
+SEARCHES.clear()
+DOWNLOADS.clear()
+r = mlo_main.videos_download_youtube(mlo_main.YoutubeDownloadRequest(
+    path=FOLDER, artist="Test Artist", title="Third Video", duration=200))
+ok(r.get("ok") is True, "the route answered ok", r)
+eq(r.get("source"), "soulseek", "naming the network as the source")
+eq(r.get("queued"), True, "with a QUEUED transfer")
+ok(not r.get("file"), "and no local file — the bytes are still coming", r)
+eq((r.get("candidate") or {}).get("filename"), "Test Artist - Third Video.mkv",
+   "the answer names the file it queued")
+eq(len(ENQUEUED), 1, "one transfer was queued")
+eq(ENQUEUED[0]["username"], "peer2", "from the peer the search named")
+eq(ARRIVED, [], "and the ROUTE did not wait for it")
+eq(SEARCHES, [["Test Artist Third Video"]], "the search was the track's own")
+
+# Neither source has it: the reason names BOTH.
+ENQUEUED.clear()
+SEARCHES.clear()
+SLSK_FILES[:] = []
+r = mlo_main.videos_download_youtube(mlo_main.YoutubeDownloadRequest(
+    path=FOLDER, artist="Test Artist", title="Third Video", duration=200))
+eq(r.get("ok"), False, "nothing anywhere is not ok")
+eq(r.get("candidate"), None, "with no candidate")
+err = str(r.get("error") or "")
+ok("YouTube" in err and "Soulseek" in err,
+   "and a reason that names both sources", err)
+eq(SEARCHES, [["Test Artist Third Video"]], "the network was asked")
+
+# An unreachable slskd is SAID, not hidden behind "no copy" — and nothing is
+# searched for on a network the app cannot reach.
+set_slskd(False)
+SEARCHES.clear()
+r = mlo_main.videos_download_youtube(mlo_main.YoutubeDownloadRequest(
+    path=FOLDER, artist="Test Artist", title="Third Video", duration=200))
+eq(r.get("ok"), False, "the answer is still a failure")
+ok("Soulseek is not running" in str(r.get("error") or ""),
+   "with the REAL reason (slskd is not running)", r)
+eq(SEARCHES, [], "and no search was sent to a network that is not there")
+set_slskd(True)
+UNFINDABLE.clear()
 
 # --------------------------------------------------------------------------- #
 print()

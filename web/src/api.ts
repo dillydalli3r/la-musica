@@ -3743,11 +3743,15 @@ export const api = {
    *  music folder, which the caller swallows. */
   videoThumbUrl: (path: string, t: number, w = 160) =>
     media(`${API}/videos/thumb?path=${encodeURIComponent(path)}&t=${Math.max(0, Math.floor(t))}&w=${Math.round(w)}`),
-  /** Download a music video from YouTube for one track (web/digital media).
+  /** Download a music video for one track: YouTube, else Soulseek.
+   *  A YouTube match is downloaded and answers with `file`. A track YouTube
+   *  does not have is QUEUED from Soulseek instead — `queued: true` with the
+   *  server's `candidate`, no `file` yet, because the transfer lands in the
+   *  app's downloads and takes minutes (the Downloads page shows it).
    *  `ok: false` carries the server's reason in `error` (YouTube off, yt-dlp
-   *  missing, nothing acceptable found) rather than a bare failure. */
+   *  missing, neither source has it) rather than a bare failure. */
   videosDownloadYoutube: (body: { path?: string; artist: string; title: string; duration?: number }) =>
-    json<{ ok: boolean; file?: string; candidate?: Record<string, unknown>; error?: string }>(`${API}/videos/download-youtube`, {
+    json<{ ok: boolean; file?: string; source?: string; queued?: boolean; candidate?: Record<string, unknown>; error?: string }>(`${API}/videos/download-youtube`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(body),

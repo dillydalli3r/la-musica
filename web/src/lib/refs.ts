@@ -9,6 +9,8 @@
 
 import type { MouseEvent } from "react";
 
+import type { Album, Artist, Library } from "../types";
+
 /** Shared click behavior for entity-title links on play rows: a plain mouse
  * click falls through to the row's play handler (preventDefault stops the
  * router), while Ctrl/Shift/cmd-click — and a keyboard activation, which
@@ -51,6 +53,22 @@ export function artistRef(a: ArtistLike): string {
   const id = a.albums?.find((al) => al.meta?.MUSICBRAINZ_ALBUMARTISTID)?.meta
     ?.MUSICBRAINZ_ALBUMARTISTID;
   return id ? `/artist/mb:${id}` : `/artist/${encodeURIComponent(a.path)}`;
+}
+
+/** The library rows a playing track's folder belongs to. A queue row carries
+ *  only `albumPath`, but the routes above prefer MusicBrainz IDs — albumRef
+ *  wants the album's meta, artistRef the artist's album list — and those live
+ *  in the `/api/library` payload the surfaces already hold. An exact path
+ *  match is the whole lookup: an album folder IS an entry of the artist folder
+ *  that contains it. `null` means the library does not list this folder (a
+ *  download being previewed), i.e. there is no page to open for it. */
+export function libraryRow(
+  lib: Library | undefined,
+  albumPath: string
+): { album: Album; artist: Artist } | null {
+  for (const artist of lib?.artists ?? [])
+    for (const album of artist.albums) if (album.path === albumPath) return { album, artist };
+  return null;
 }
 
 /** The artist's MusicBrainz album-artist ID, if any album carries one. */

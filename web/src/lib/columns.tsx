@@ -209,25 +209,47 @@ export function phoneHide(cls: Record<string, string>, id: string): string {
   return cls[id] ?? (id.startsWith("tag:") ? PHONE_HIDE : "");
 }
 
-/** Visible-column ids per view, persisted in localStorage; toggle flips one id. */
+/** Visible-column ids per view, persisted in localStorage; toggle flips one id.
+ *
+ *  The key is VERSIONED because the ids are (`mlo-cols4-*`): a list written by
+ *  an older build holds ids this one no longer has, and the reader that only
+ *  kept the ids it recognised turned that into a half-empty table — the owner's
+ *  Albums view drew its expand chevron and nothing else, the Tracks view its
+ *  row number, and no column chooser entry looked wrong, because the columns
+ *  the old build never offered were never unticked. So a list from the previous
+ *  key is MIGRATED, not trusted: the ids it still has are kept (a deliberate
+ *  choice survives), and every column this build ships visible by default is
+ *  added, because a prefs entry cannot be evidence about a column that did not
+ *  exist when it was written. Unticking anything after that is stored under the
+ *  new key and honoured for good. */
 export function useColumnPrefs(key: string, defs: Col[]): [string[], (id: string) => void] {
-  // v3: type/INST columns joined the default sets and credit columns became
-  // toggleable opt-ins — bumping the key lets the new defaults apply once
-  // for everyone (older prefs lived under mlo-cols-* / mlo-cols2-*).
-  const storageKey = `mlo-cols3-${key}`;
+  // v4: ids are versioned (the key moves when they change), and a v3 list is
+  // migrated rather than filtered — see the block comment above.
+  const storageKey = `mlo-cols4-${key}`;
+  const legacyKey = `mlo-cols3-${key}`;
   const [visible, setVisible] = useState<string[]>(() => {
+    const ids = new Set(defs.map((d) => d.id));
+    const allVisible = defs.filter((c) => !c.defHidden).map((c) => c.id);
     try {
       const raw = localStorage.getItem(storageKey);
       if (raw) {
         const arr = JSON.parse(raw) as string[];
-        const ids = new Set(defs.map((d) => d.id));
         const kept = arr.filter((x) => ids.has(x));
         if (kept.length) return kept;
+      }
+      const old = localStorage.getItem(legacyKey);
+      if (old) {
+        const arr = JSON.parse(old) as string[];
+        const kept = arr.filter((x) => ids.has(x));
+        const next = [...new Set([...kept, ...allVisible])];
+        localStorage.setItem(storageKey, JSON.stringify(next));
+        localStorage.removeItem(legacyKey);
+        return next;
       }
     } catch {
       /* fall through to defaults */
     }
-    return defs.filter((d) => !d.defHidden).map((d) => d.id);
+    return allVisible;
   });
   const toggle = (id: string) =>
     setVisible((v) => {

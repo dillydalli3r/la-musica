@@ -54,7 +54,14 @@ export default function LyricZoom({ pct, onChange, className }: {
   // the artwork, where a zinc-500 glyph is the grey-on-grey failure of R52c.
   // `text-current` inside the caller's own ink class is what makes one control
   // read right on all three.
-  const btn = "p-0.5 rounded-md text-current opacity-70 hover:opacity-100 hover:bg-white/10 disabled:opacity-30 disabled:hover:bg-transparent transition-colors";
+  //
+  // Each step is one SQUARE box with the glyph centred in it by flex, never by
+  // its own metrics: a padded glyph sits wherever the icon's box puts it,
+  // which is what left the `+` reading low and heavy beside the `−` and the
+  // value between them. Both sides use the same lucide icon at the same size,
+  // and the box is the size of the buttons beside it on every surface (`h-7
+  // w-7` is the sidebar header's own `p-1.5` + `h-4 w-4`).
+  const btn = "h-7 w-7 inline-flex items-center justify-center rounded-md text-current opacity-70 hover:opacity-100 hover:bg-white/10 disabled:opacity-30 disabled:hover:bg-transparent transition-colors";
 
   return (
     <span className={`inline-flex items-center gap-0.5 shrink-0 ${className ?? ""}`}>

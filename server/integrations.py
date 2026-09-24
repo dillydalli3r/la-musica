@@ -5912,8 +5912,19 @@ def group_targets(rg_mbid, mode, *, types=None, primary_type="", secondary_type=
     # one album folder (R142). Every entry names the same fields a row does
     # (`mbid`/`title`/`score`), and the FIRST entry is always the row's own
     # `mbid`.
+    #
+    # Each entry also carries the edition's OWN facts (date, status, medium,
+    # track count, disambiguation comment, country). They are what the walk
+    # ranks by when it reads the stored list (`mlo.release_choice.rank_stored`):
+    # the ORDER this list is written in is a snapshot of the policy at add time,
+    # and the walk re-derives it from these facts with the policy in force then
+    # — so a release queued before a rule changed is searched by the new rule.
     fallback = [{"mbid": c.release_mbid, "title": c.title, "score": c.score,
-                 "catalog_numbers": list(c.catalog_numbers)} for c in eligible]
+                 "catalog_numbers": list(c.catalog_numbers),
+                 "date": c.date, "status": c.status, "country": c.country,
+                 "disambiguation": c.disambiguation,
+                 "medium_formats": list(c.media),
+                 "track_count": int(c.track_count or 0)} for c in eligible]
     # …and the same number twice is the same SEARCH: the editions behind the
     # best one are only worth asking for when they are a DIFFERENT pressing
     # (`distinct_pressings` — the rule and its reasoning live there).

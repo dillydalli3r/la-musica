@@ -2,8 +2,10 @@
 
 One policy decides which MusicBrainz edition every acquisition path takes —
 "Add to library", the bulk auto-import, the wish worker and the artist watch —
-so the rules are pinned here once: status, medium, completeness, the original
-edition, the plain title and the country tie-breaker, plus determinism, the
+so the rules are pinned here once: status, medium, completeness, the EARLIEST
+date, the date's precision, the original edition, the plain title and the
+country tie-breaker, plus the order a stored candidate list is re-ranked into
+(the walk's own entry point), determinism, the
 caller's release-group type filter, and the strict rules the unattended paths
 apply. Fixtures only: no network, no config file, no downloads.
 
@@ -223,8 +225,10 @@ whole = [c for c in rc.rank_releases(group(), [rel("full", tracks=12),
 assert any("short of the fullest edition offered" in r
            for c in whole for r in c.reasons), whole
 
-# 4. The ORIGINAL edition beats a later reissue/deluxe — the group's first
-#    release date is the reference, not the earliest edition in the list.
+# 4. The EARLIEST edition beats a later reissue/deluxe — the reference is the
+#    earliest edition the group OFFERS (not its stated first-release-date; see
+#    the block below), and among editions of the same year the one stating its
+#    date in full wins.
 original, deluxe = rel("orig", date="1997-01-20"), rel("deluxe", date="2011-05-01")
 assert pick([deluxe, original], cfg=cfg()) == "orig"
 # … unless the later one is materially more complete.
@@ -268,6 +272,34 @@ assert pick([rel("undated", date=""), rel("dated", date="1997-01-20")], cfg=cfg(
 # A pressing that predates the group's stated first date is still the original.
 assert pick([rel("early", date="1996-12-01"), rel("later", date="1997-01-20")],
             cfg=cfg()) == "early"
+
+# The EARLIEST edition wins — and the reference is the editions this group
+# OFFERS, never the group's own first-release-date. The group's 1973 first
+# release is not on offer here, so 2011 beats 2016 on its own merits rather
+# than by how close either sits to 1973, in either listing order.
+assert pick([rel("cd16", date="2016-01-08"), rel("cd11", date="2011-09-26")],
+            group(first_release_date="1973-03-24"), cfg=cfg()) == "cd11"
+assert pick([rel("cd11", date="2011-09-26"), rel("cd16", date="2016-01-08")],
+            group(first_release_date="1973-03-24"), cfg=cfg()) == "cd11"
+# A group no payload states a date for is decided by the editions that do.
+assert pick([rel("new", date="2016-01-08"), rel("old", date="2011-09-26")],
+            {}, cfg=cfg()) == "old"
+# Earlier WITHIN one year counts too: two month-precision editions are one
+# date rule apart, not a tie to be settled by MusicBrainz's listing order.
+assert pick([rel("dec", date="1983-12"), rel("jun", date="1983-06")],
+            group(first_release_date="1983"), cfg=cfg()) == "jun"
+# The pick says WHY it won, so "earliest" is a reason and not a quiet tiebreak.
+_earliest = rc.choose_release(group(first_release_date="1973-03-24"),
+                              [rel("cd16", title="Homework", date="2016-01-08"),
+                               rel("cd11", title="Homework", date="2011-09-26")], cfg())
+assert _earliest.release_mbid == "cd11"
+assert any("earliest release date offered wins" in r for r in _earliest.reasons), \
+    _earliest.reasons
+assert any("reissued 2016-01-08" in r for c in rc.rank_releases(
+    group(first_release_date="1973-03-24"),
+    [rel("cd16", title="Homework", date="2016-01-08"),
+     rel("cd11", title="Homework", date="2011-09-26")], cfg())
+    if c.release_mbid == "cd16" for r in c.reasons)
 
 # 5. prefer_release_country is a TIE-BREAKER and nothing else: with everything
 #    else equal it decides …
@@ -319,6 +351,68 @@ assert pick([rel("annotated", disambiguation="1997 US pressing"),
 assert any('disambiguation "1997 US pressing"' in r
            for c in rc.rank_releases(group(), [rel("a", disambiguation="1997 US pressing")], cfg())
            for r in c.reasons)
+
+# The comment is not READ: whatever MusicBrainz wrote, a title carrying one
+# loses the tie to a title carrying none — "(BMG Club edition)", "(CB 811)",
+# "promo", "remastered" are one case, not five rules.
+for _comment in ("BMG Club edition", "CB 811", "club edition", "promo", "remastered"):
+    assert pick([rel("commented", title="Homework", disambiguation=_comment),
+                 rel("plain", title="Homework")], cfg=cfg()) == "plain", _comment
+# …and it loses ONLY the tie: an earlier commented pressing still wins on the
+# date rule above it, which is the difference between a tie-break and a veto.
+assert pick([rel("commented-early", title="Homework",
+                 disambiguation="BMG Club edition", date="1983-06-01"),
+             rel("plain-late", title="Homework", date="1983-07-01")],
+            group(first_release_date="1983"), cfg=cfg()) == "commented-early"
+# The tie-break is VISIBLE: the winner's summary names the rule and its
+# substance, and the commented edition's own reasons say why it lost.
+_clean_tie = [rel("plain", title="Homework"),
+              rel("club", title="Homework", disambiguation="BMG Club edition")]
+assert pick(_clean_tie, cfg=cfg()) == "plain"
+assert any("no MusicBrainz disambiguation comment" in r
+           for r in rc.choose_release(group(), _clean_tie, cfg()).reasons), \
+    rc.choose_release(group(), _clean_tie, cfg()).reasons
+assert any("a title with no comment ranks above it" in r
+           for c in rc.rank_releases(group(), _clean_tie, cfg())
+           if c.release_mbid == "club" for r in c.reasons)
+
+# --------------------------------------------------------------------------- #
+# 8. A STORED candidate list is re-ranked by the policy in FORCE, from each
+#    row's own facts — `rank_stored` is what the walk reads a queued release
+#    back through (R150), so a release queued before a rule changed is searched
+#    by the new rule instead of by the order captured at add time.
+# --------------------------------------------------------------------------- #
+_stored = [
+    {"mbid": "club16", "title": "Homework", "score": 0.9, "date": "2016-01-08",
+     "status": "Official", "medium_formats": ["CD"], "track_count": 12,
+     "disambiguation": "BMG Club edition", "catalog_numbers": ["A"]},
+    {"mbid": "clean11", "title": "Homework", "score": 0.8, "date": "2011-09-26",
+     "status": "Official", "medium_formats": ["CD"], "track_count": 12,
+     "catalog_numbers": ["B"]},
+]
+assert [r["mbid"] for r in rc.rank_stored(_stored, cfg())] == ["clean11", "club16"], \
+    [r["mbid"] for r in rc.rank_stored(_stored, cfg())]
+# Pure and idempotent: every reader of the same stored list derives the same
+# order, which is what keeps the row's position and the walk from disagreeing.
+_once = rc.rank_stored(_stored, cfg())
+assert [r["mbid"] for r in rc.rank_stored(_once, cfg())] == [r["mbid"] for r in _once]
+# Nothing is dropped, ever — a fallback that loses a ranked edition is the
+# silent shortcut the walk exists to avoid.
+assert sorted(r["mbid"] for r in _once) == ["clean11", "club16"]
+# A row that states no facts has nothing to be re-ranked BY: it keeps the place
+# it was stored in (a list written before the facts travelled with the rows).
+_thin = [{"mbid": "x", "title": "Homework"}, {"mbid": "y", "title": "Homework", "score": 0.9}]
+assert [r["mbid"] for r in rc.rank_stored(_thin, cfg())] == ["x", "y"]
+assert rc.rank_stored([], cfg()) == []
+assert [r["mbid"] for r in rc.rank_stored(_thin[:1], cfg())] == ["x"]
+# The same comment rule decides a stored tie as a fresh ranking does.
+_stored_tie = [
+    {"mbid": "club", "title": "Homework", "disambiguation": "BMG Club edition",
+     "date": "1997-01-20", "medium_formats": ["CD"], "track_count": 12},
+    {"mbid": "plain", "title": "Homework", "date": "1997-01-20",
+     "medium_formats": ["CD"], "track_count": 12},
+]
+assert [r["mbid"] for r in rc.rank_stored(_stored_tie, cfg())] == ["plain", "club"]
 
 # --------------------------------------------------------------------------- #
 # Determinism

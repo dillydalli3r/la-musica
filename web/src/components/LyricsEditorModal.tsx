@@ -540,10 +540,15 @@ export default function LyricsEditorModal({
               </button>
             ))}
             <span className="w-px h-5 bg-white/10 mx-1" />
-            <button className="btn-ghost !px-2 !py-1 text-xs font-mono" onClick={() => stepSpeed(-1)} title={`Slower (${keys.speedSlower})`}>−</button>
+            {/* The step buttons and the reset between them share ONE box size
+                and centre their glyph by flex (the rule LyricZoom/LyricOffset
+                keep): a text `−` and `+` sit wherever their font's metrics put
+                them inside a padded button, so the pair reads unevenly beside
+                the value it steps. */}
+            <button className="btn-ghost !p-0 h-7 w-7 inline-flex items-center justify-center text-xs font-mono" onClick={() => stepSpeed(-1)} title={`Slower (${keys.speedSlower})`}>−</button>
             <span className="text-xs font-mono text-zinc-300 min-w-[38px] text-center" title="Playback speed — timestamps always land in song time">{fmtSpeed(speed)}</span>
-            <button className="btn-ghost !px-2 !py-1 text-xs font-mono" onClick={() => { setSpeed(1); }} title="Reset speed to 1×">1×</button>
-            <button className="btn-ghost !px-2 !py-1 text-xs font-mono" onClick={() => stepSpeed(1)} title={`Faster (${keys.speedFaster})`}>+</button>
+            <button className="btn-ghost !p-0 h-7 w-7 inline-flex items-center justify-center text-xs font-mono" onClick={() => { setSpeed(1); }} title="Reset speed to 1×">1×</button>
+            <button className="btn-ghost !p-0 h-7 w-7 inline-flex items-center justify-center text-xs font-mono" onClick={() => stepSpeed(1)} title={`Faster (${keys.speedFaster})`}>+</button>
             <span className="w-px h-5 bg-white/10 mx-1" />
             <button className="btn-ghost !px-1.5 !py-0.5 text-[10px]" onClick={() => shiftAll(-0.1)} title="Shift ALL timestamps 0.1s earlier">−0.1s all</button>
             <button className="btn-ghost !px-1.5 !py-0.5 text-[10px]" onClick={() => shiftAll(0.1)} title="Shift ALL timestamps 0.1s later">+0.1s all</button>

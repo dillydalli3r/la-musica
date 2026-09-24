@@ -378,6 +378,14 @@ def _walk_candidates(wish, cfg):
     without a ranked list falls back to the single candidate its own key names,
     exactly as every wish worked before the walk existed.
 
+    The order is the CURRENT policy's, not the one an add happened to store:
+    the list is ranked again here, at the top of every attempt
+    (`wishes.walked_rows` → `mlo.release_choice.rank_stored`, from the facts
+    each stored row carries and without a MusicBrainz request), so a release
+    queued before a rule changed is searched by the rule in force now. The
+    cap is applied AFTER that ranking, so it takes the best editions rather
+    than whichever the add stored first.
+
     The list is then narrowed to DISTINCT PRESSINGS
     (`mlo.release_choice.distinct_pressings`): two editions that state the same
     catalog number are one search — the number is what a CD search is keyed on,
@@ -389,13 +397,9 @@ def _walk_candidates(wish, cfg):
     where the list is written) also fixes a list stored before the rule
     existed: an older wish's walk is deduplicated on its next attempt.
     """
-    out = []
-    for row in (wish.get("candidates") or [])[:wishes.fallback_limit(cfg)]:
-        mbid = str((row or {}).get("mbid") or "").strip()
-        if mbid:
-            out.append({"mbid": mbid, "title": str((row or {}).get("title") or ""),
-                        "catalog_numbers": [str(n) for n in
-                                            ((row or {}).get("catalog_numbers") or [])]})
+    out = [dict(r) for r in
+           wishes.walked_rows(wish, cfg)[:wishes.fallback_limit(cfg)]
+           if str(r.get("mbid") or "").strip()]
     if not out:
         here = wishes.candidate_of(wish) or {}
         if here.get("mbid"):

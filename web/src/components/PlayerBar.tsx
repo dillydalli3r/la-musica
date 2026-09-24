@@ -24,7 +24,7 @@ import LyricsSidebar from "./LyricsSidebar";
 import TrackDownloadExport from "./TrackDownloadExport";
 import { DetailsDialog } from "./AlbumDetails";
 import Popover, { MenuItem } from "./Popover";
-import { trackRef } from "../lib/refs";
+import { albumRef, artistRef, libraryRow, trackRef } from "../lib/refs";
 import useSubtitleTracks from "./SubtitledVideo";
 import { ASPECT_FIT, readAspect, writeAspect, type VideoAspect } from "../lib/video";
 
@@ -287,7 +287,8 @@ export default function PlayerBar() {
   const preferTranscode = isVideo && videoMetaQ.data?.native === false;
   // Per-track cover resolution: queue-carried filenames first, then the
   // library payload (covers playlists/.m3u8 queues whose entries lack them).
-  const { data: libForCover } = useQuery({
+  // The album and artist lines read their rows from the same payload below.
+  const { data: lib } = useQuery({
     queryKey: ["library"],
     queryFn: () => api.library(),
     staleTime: 5 * 60 * 1000,
@@ -295,14 +296,27 @@ export default function PlayerBar() {
   // One Map per payload; track changes are O(1) lookups.
   const coverByPath = useMemo(() => {
     const m = new Map<string, { track: string | null; album: string | null }>();
-    for (const a of libForCover?.artists ?? [])
+    for (const a of lib?.artists ?? [])
       for (const al of a.albums)
         for (const t of al.tracks) m.set(t.path, { track: t.cover_file ?? null, album: al.cover_file ?? null });
     return m;
-  }, [libForCover]);
+  }, [lib]);
   const libCover = current && !current.coverFile && !current.albumCover ? (coverByPath.get(current.path) ?? null) : null;
   const coverFile = current?.coverFile ?? libCover?.track ?? current?.albumCover ?? libCover?.album ?? null;
   const coverAlbumPath = current?.albumPath ?? "";
+
+  // The album and artist lines open their own pages, and a queue row carries
+  // only the folder it came from — while the routes prefer a MusicBrainz ID
+  // (lib/refs). So their library rows come from the SAME payload the covers
+  // above are read from: one exact path match per track change, no request of
+  // its own. A folder the library does not list (a download being previewed)
+  // has no row, and a line with no page to open stays plain text.
+  const libRow = useMemo(
+    () => libraryRow(lib, current?.albumPath ?? ""),
+    [lib, current?.albumPath]
+  );
+  const albumHref = libRow ? albumRef(libRow.album) : null;
+  const artistHref = libRow ? artistRef(libRow.artist) : null;
 
   // Queue entries built outside the library pages (e.g. .m3u8 playlist rows)
   // carry no title — fetch the tag lazily so the bar shows the song title,
@@ -322,6 +336,11 @@ export default function PlayerBar() {
   });
   const displayTitle =
     current?.title || currentTags?.tags?.TITLE || (current ? current.file.replace(/\.[^.]+$/, "") : "");
+  // The bar's two sub-lines, shared by both layouts so they cannot drift: the
+  // album's own line falls back to a dash, while the phone's joined row drops
+  // the half it does not have.
+  const albumText = current?.album ?? "—";
+  const artistText = current?.artist ?? current?.albumPath.split("/").pop() ?? "";
   // A job claiming the file that is PLAYING never stops it: the stream already
   // has its handle, and cutting the listener off mid-track would be a worse bug
   // than the lock. The state is said out loud instead — once per track — so
@@ -1259,8 +1278,10 @@ export default function PlayerBar() {
                   </span>
                 )}
               </div>
-              <div className="text-[11px] text-zinc-500 truncate">{current.album ?? "—"}</div>
-              <div className="text-[11px] text-zinc-500 truncate">{current.artist ?? current.albumPath.split("/").pop()}</div>
+              {/* the album and the artist open their own pages, and each drifts
+                  like the title when it does not fit (see MetaLine) */}
+              <MetaLine href={albumHref} text={albumText} className="text-[11px] text-zinc-500" title="Open the album page" />
+              <MetaLine href={artistHref} text={artistText} className="text-[11px] text-zinc-500" title="Open the artist page" />
             </>
           ) : (
             <>
@@ -1695,8 +1716,14 @@ export default function PlayerBar() {
                   </Link>
                   <AdvisoryMark value={currentTags?.tags?.ITUNESADVISORY ?? current.advisory} />
                 </div>
-                <div className="text-[11px] text-zinc-500 truncate">
-                  {[current.artist ?? current.albumPath.split("/").pop(), current.album].filter(Boolean).join(" · ") || "—"}
+                {/* artist · album, the same pair the block above shows — each
+                    half opens its own page (see MetaLine). A missing tag drops
+                    its half, so only a row with neither keeps the dash. */}
+                <div className="flex items-baseline gap-1.5 min-w-0 text-[11px] text-zinc-500">
+                  {artistText ? <MetaLine href={artistHref} text={artistText} title="Open the artist page" /> : null}
+                  {artistText && current.album ? <span className="shrink-0">·</span> : null}
+                  {current.album ? <MetaLine href={albumHref} text={current.album} title="Open the album page" /> : null}
+                  {!artistText && !current.album ? <span>—</span> : null}
                 </div>
               </>
             ) : (
@@ -1885,6 +1912,38 @@ export default function PlayerBar() {
         )}
       </div>
     </div>
+  );
+}
+
+/** One metadata line of the playing track: the drifting text the title uses
+ *  (components/ScrollingText), wrapped in that entity's own page when the
+ *  library lists the folder the queue row came from. A click stops at the
+ *  link, so opening a page never also fires whatever the block around it
+ *  does; a null href has no page to open at all (see `libraryRow`), and the
+ *  line is then the plain text it always was — never a route that cannot
+ *  resolve. */
+function MetaLine({
+  href,
+  text,
+  className,
+  title,
+}: {
+  href: string | null;
+  text: string;
+  className?: string;
+  title?: string;
+}) {
+  const line = <ScrollingText text={text} className={className} />;
+  if (!href) return line;
+  return (
+    <Link
+      to={href}
+      className="block min-w-0 hover:[&>span]:text-accent-soft transition-colors"
+      onClick={(e) => e.stopPropagation()}
+      title={title}
+    >
+      {line}
+    </Link>
   );
 }
 

@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from "react";
+import { Link } from "react-router-dom";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import {
   AudioLines, Captions, ChevronDown, Heart, Info, ListMusic, ListPlus, Maximize2, Mic2, Minimize2, Pause, Play,
@@ -11,6 +12,7 @@ import LyricOffset from "./LyricOffset";
 import { DetailsDialog } from "./AlbumDetails";
 import { toast, useStore } from "../store";
 import { fmtTech, fmtPair, isVideoFile } from "../lib/fmt";
+import { albumRef, artistRef, libraryRow, trackRef } from "../lib/refs";
 import { AdvisoryMark } from "./Badges";
 import StarRating from "./StarRating";
 import ScrollingText from "./ScrollingText";
@@ -182,9 +184,10 @@ interface LyricInk {
    *  line keeps full ink instead of two tones of grey. */
   plain: string;
   /** The glyph shadow. text-shadow inherits, so the pane sets it once for
-   *  the whole reading surface: a tight near-opaque core (the glyph's own
-   *  edge) plus a wide soft halo (the surround a line sits in). Its POLARITY
-   *  is the ink's: dark under light glyphs, light under dark ones. */
+   *  the whole reading surface: a wide soft drop under the line, with no
+   *  tight layer — an edge hugging the glyph is what reads as a border around
+   *  the text instead of depth under it (see `.np-shade` in index.css). Its
+   *  POLARITY is the ink's: dark under light glyphs, light under dark ones. */
   shade: string;
   /** Karaoke syllables: under the playhead, already sung, still to come. The
    *  emphasis is the scale + glow; the colour follows the ink, because the
@@ -201,6 +204,24 @@ interface LyricInk {
   chromeStrong: string;
   chromeButton: string;
   chromeText: string;
+  /** A chrome icon TOGGLE's two states — the visualizer and the lyrics pane,
+   *  the two controls in the top bar that are ON or OFF rather than buttons.
+   *
+   *  ON is what the app lights a pressed control with: `text-accent` on the
+   *  player bar's own lyrics button and on the sidebar's visualizer button,
+   *  and the accent here as well. NOT on the LIGHT table: the default theme's
+   *  `--accent` IS white, and a white glyph on a bright cover is nothing at
+   *  all — there the table's full-strength ink carries the state instead,
+   *  which is the same substitution `wordNow` makes.
+   *
+   *  OFF is this table's muted chrome ink DIMMED. That dim is the whole
+   *  point: the bar's own grey (zinc-300 on the dark table) sits a hair under
+   *  the white accent, so a toggle that swapped one for the other read as
+   *  neither on nor off — the state was in the class list and nowhere on the
+   *  screen. The same gesture mutes the queue readout and the lyric controls,
+   *  and hover takes it back, so the row still answers the pointer. */
+  chromeOn: string;
+  chromeOff: string;
   /** The frequency strip's ink, when the visualizer is shown over the artwork.
    *  Same rule as the chrome above, and the same table: a canvas cannot wear a
    *  Tailwind class, so it takes the polarity itself and picks its own
@@ -223,6 +244,8 @@ const INK_ON_DARK: LyricInk = {
   chromeStrong: "text-white",
   chromeButton: "text-zinc-300 hover:text-white hover:bg-white/10",
   chromeText: "text-zinc-300",
+  chromeOn: "text-accent hover:bg-white/10",
+  chromeOff: "text-zinc-300 hover:text-white hover:bg-white/10 opacity-60 hover:opacity-100",
   viz: "light",
   scrim: "",
 };
@@ -238,6 +261,8 @@ const INK_ON_LIGHT: LyricInk = {
   chromeStrong: "text-zinc-950",
   chromeButton: "text-zinc-950/75 hover:text-zinc-950 hover:bg-black/5",
   chromeText: "text-zinc-950/75",
+  chromeOn: "text-zinc-950 hover:bg-black/5",
+  chromeOff: "text-zinc-950/75 hover:text-zinc-950 hover:bg-black/5 opacity-60 hover:opacity-100",
   viz: "dark",
   scrim: "",
 };
@@ -395,6 +420,58 @@ function useMdUp() {
     return () => mq.removeEventListener("change", on);
   }, []);
   return up;
+}
+
+/** One metadata line of the fullscreen player — the title, and either half of
+ *  the album · artist pair: a link to that entity's own page when the library
+ *  lists the folder the track came from, plain text when it does not (a
+ *  download being previewed has no page to open, and a route that cannot
+ *  resolve is worse than none). A click STOPS there and closes the viewer:
+ *  this pane covers the whole app, so navigating behind it would look like
+ *  nothing happened.
+ *
+ *  `scroll` is the drifting line the block layout uses (components/
+ *  ScrollingText), the same component the title beside it uses — one marquee,
+ *  not a second. The phone's compact header passes `scroll={false}`: its title
+ *  has always been a truncating span, so these lines keep that layout's own
+ *  form and only gain the link.
+ *
+ *  The hover affordance is an underline rather than the bar's
+ *  `text-accent-soft`: this surface draws its ink from the polarity table
+ *  above, and `--accent-soft` is a near-white grey that would erase a line on
+ *  the LIGHT table's near-black ink. An underline is the same affordance on
+ *  both, and the two surfaces keep their own idiom. */
+function MetaLink({
+  href,
+  text,
+  className,
+  scroll = true,
+  onOpen,
+}: {
+  href: string | null;
+  text: string;
+  className?: string;
+  scroll?: boolean;
+  onOpen: () => void;
+}) {
+  const inner = scroll ? (
+    <ScrollingText text={text} className={className} />
+  ) : (
+    <span className={`block min-w-0 truncate ${className ?? ""}`}>{text}</span>
+  );
+  if (!href) return inner;
+  return (
+    <Link
+      to={href}
+      className="min-w-0 hover:underline underline-offset-2"
+      onClick={(e) => {
+        e.stopPropagation();
+        onOpen();
+      }}
+    >
+      {inner}
+    </Link>
+  );
 }
 
 export default function NowPlayingView(p: Props) {
@@ -563,6 +640,14 @@ export default function NowPlayingView(p: Props) {
     queryFn: () => api.album(p.current.albumPath),
     staleTime: 5 * 60 * 1000,
   });
+  // The title/album/artist lines open the library's own pages, but a queue row
+  // carries only the folder it came from while the routes prefer a
+  // MusicBrainz ID (lib/refs) — so the rows come from the `/api/library`
+  // payload the player bar already holds under this key: the same cache entry,
+  // never a second fetch. A folder the library does not list has no page to
+  // open, and that line stays plain text.
+  const { data: lib } = useQuery({ queryKey: ["library"], queryFn: () => api.library(), staleTime: 5 * 60 * 1000 });
+  const libRow = useMemo(() => libraryRow(lib, p.current.albumPath), [lib, p.current.albumPath]);
   // Per-track sidecar art wins; the album cover is the fallback — the
   // now-playing art must match the track, not just the album.
   const coverFile = p.current.coverFile ?? album?.cover_file ?? p.current.albumCover ?? null;
@@ -1035,6 +1120,16 @@ export default function NowPlayingView(p: Props) {
   // title, then ALBUM, then ARTIST — the two sub-lines render identically.
   const albumLine = p.current.album || freshTags?.ALBUM || album?.meta?.ALBUM || "—";
   const artistLine = p.current.artist || freshTags?.ARTIST || p.current.albumPath.split("/").pop() || "";
+  // The three lines' own pages. The track route always resolves (the path form
+  // is the fallback), while album/artist come from the library row above — no
+  // row, no link, which is what keeps a previewed download's lines from
+  // pointing at a page that cannot exist.
+  const trackHref = trackRef({
+    path: p.current.path,
+    tags: { MUSICBRAINZ_TRACKID: freshTags?.MUSICBRAINZ_TRACKID },
+  });
+  const albumHref = libRow ? albumRef(libRow.album) : null;
+  const artistHref = libRow ? artistRef(libRow.artist) : null;
   const upNext = !p.shuffle ? queue[index + 1] as
     | { title?: string; artist?: string; file: string }
     | undefined : undefined;
@@ -1095,8 +1190,9 @@ export default function NowPlayingView(p: Props) {
         {/* The title DRIFTS when it does not fit — the same marquee the player
             bar's own title uses (components/ScrollingText), so a long track
             name is READ here instead of cut at "…" (reported). A short one
-            never moves: the shift is measured, not guessed. */}
-        <ScrollingText text={title} className={`text-2xl font-bold ${ink.active}`} />
+            never moves: the shift is measured, not guessed. It also opens the
+            track's own page (see MetaLink). */}
+        <MetaLink href={trackHref} text={title} className={`text-2xl font-bold ${ink.active}`} onOpen={p.onClose} />
         <AdvisoryMark value={freshTags?.ITUNESADVISORY ?? p.current.advisory} />
         {/* bit depth/sample rate rides beside the title, same as the
             player bar; tooltip carries the full codec/bitrate detail */}
@@ -1108,16 +1204,16 @@ export default function NowPlayingView(p: Props) {
       </div>
       {/* Album and artist on ONE row — "Hail to the Thief · Radiohead" is one
           fact pair, and the two stacked rows read as two unrelated lines
-          (reported). It marquees for the same reason the title does, and keeps
-          a fixed height so the block still never jumps on next/previous. */}
+          (reported). Each half marquees for the same reason the title does
+          (its own box, so only the half that does not fit drifts) and opens
+          its own page; the row keeps its fixed height either way. */}
       <div
         className="h-5 mt-1 flex items-center justify-center gap-2 min-w-0"
         title={[albumLine, artistLine].filter(Boolean).join(" · ")}
       >
-        <ScrollingText
-          text={[albumLine, artistLine].filter(Boolean).join(" · ")}
-          className={`text-sm ${ink.dim}`}
-        />
+        <MetaLink href={albumHref} text={albumLine} className={`text-sm ${ink.dim}`} onOpen={p.onClose} />
+        {albumLine && artistLine ? <span className={`shrink-0 text-sm ${ink.dim}`}>·</span> : null}
+        {artistLine ? <MetaLink href={artistHref} text={artistLine} className={`text-sm ${ink.dim}`} onOpen={p.onClose} /> : null}
       </div>
       {/* Fixed height and always rendered, like the rows above, so the block
           never jumps on next/previous. The control's own tooltip carries the
@@ -1497,10 +1593,13 @@ export default function NowPlayingView(p: Props) {
               <ListMusic className="h-5 w-5" />
             </button>
             {/* inert over a music video: <Visualizer> only renders in the
-                audio layout, so the toggle is hidden rather than a no-op */}
+                audio layout, so the toggle is hidden rather than a no-op.
+                Its two states come from the ink table (`chromeOn` /
+                `chromeOff`) — a bare `text-accent` on/off pair is what made
+                both of these read as neither (the table says why). */}
             {!videoPath && (
               <button
-                className={`p-2 rounded-lg transition-colors hover:bg-white/10 ${viz ? "text-accent" : "text-current hover:text-white"}`}
+                className={`p-2 rounded-lg transition-colors ${viz ? ink.chromeOn : ink.chromeOff}`}
                 onClick={() => {
                   const v = !viz;
                   setViz(v);
@@ -1542,7 +1641,7 @@ export default function NowPlayingView(p: Props) {
                 lyrics, no button. */}
             {!videoPath && (layoutHasLyrics || !mdUp) && (
               <button
-                className={`p-2 rounded-lg transition-colors hover:bg-white/10 ${lyricsOn ? "text-accent" : "text-current hover:text-white"}`}
+                className={`p-2 rounded-lg transition-colors ${lyricsOn ? ink.chromeOn : ink.chromeOff}`}
                 onClick={() => {
                   if (!mdUp) {
                     setCompact(!compact);
@@ -1817,7 +1916,11 @@ export default function NowPlayingView(p: Props) {
                     report this surface already has a history of. */}
                 <div className="flex-1 min-w-0">
                   <div className={`h-6 flex items-center gap-2 min-w-0 ${ink.shade}`} title={title}>
-                    <span className={`truncate text-base font-bold ${ink.active}`}>{title}</span>
+                    {/* This header keeps the truncating spans it has always
+                        used — the drifting line belongs to the block layout,
+                        where the title has one — so the three lines become
+                        links over those same spans (see MetaLink). */}
+                    <MetaLink href={trackHref} text={title} className={`text-base font-bold ${ink.active}`} scroll={false} onOpen={p.onClose} />
                     {techStr && (
                       <span className={`shrink-0 text-[11px] font-mono ${ink.dim}`} title={techTip || undefined}>
                         {techStr}
@@ -1825,12 +1928,12 @@ export default function NowPlayingView(p: Props) {
                     )}
                   </div>
                   <div
-                    className={`h-5 flex items-center min-w-0 ${ink.shade}`}
+                    className={`h-5 flex items-center gap-1 min-w-0 ${ink.shade}`}
                     title={[albumLine, artistLine].filter(Boolean).join(" · ")}
                   >
-                    <span className={`truncate text-xs ${ink.dim}`}>
-                      {[albumLine, artistLine].filter(Boolean).join(" · ")}
-                    </span>
+                    <MetaLink href={albumHref} text={albumLine} className={`text-xs ${ink.dim}`} scroll={false} onOpen={p.onClose} />
+                    {albumLine && artistLine ? <span className={`shrink-0 text-xs ${ink.dim}`}>·</span> : null}
+                    {artistLine ? <MetaLink href={artistHref} text={artistLine} className={`text-xs ${ink.dim}`} scroll={false} onOpen={p.onClose} /> : null}
                   </div>
                 </div>
               </div>

@@ -294,8 +294,9 @@ export default function AlbumPage() {
     }
   };
 
-  /** Download the music video for one track from YouTube (web/digital
-   *  releases only — see `digitalMedia`), then tag it as THAT track's video.
+  /** Download the music video for one track: YouTube, else Soulseek (web/
+   *  digital releases only — see `digitalMedia`), then tag it as THAT track's
+   *  video.
    *
    *  The download lands in the album folder named after the YouTube upload,
    *  so nothing about the file says which release track it is: the tag write
@@ -303,7 +304,11 @@ export default function AlbumPage() {
    *  with the album from then on). It is the same /api/videos/match the
    *  matching panel posts — one tag path, not a second one — and here the
    *  assignment is certain, because the video was searched for by this
-   *  track's own artist and title. Returns whether a video was saved. */
+   *  track's own artist and title. Returns whether the video was fetched.
+   *
+   *  A track YouTube does not have comes back QUEUED from Soulseek instead:
+   *  the transfer runs in the app's own downloads for minutes, so there is no
+   *  file to tag yet and the answer says so — nothing here can wait for it. */
   const downloadVideo = async (tr: Track): Promise<boolean> => {
     const title = tr.tags.TITLE;
     if (!title) return false;
@@ -314,6 +319,12 @@ export default function AlbumPage() {
         title,
         duration: tr.tech.length || undefined,
       });
+      if (r.ok && r.queued) {
+        const what = String(r.candidate?.filename ?? title);
+        toast(`Queued from Soulseek: ${what} — it downloads into Downloads`);
+        qc.invalidateQueries({ queryKey: ["soulseekDownloads"] });
+        return true;
+      }
       if (!r.ok || !r.file) {
         toast(r.error ? `No music video: ${r.error}` : "No matching music video found");
         return false;
