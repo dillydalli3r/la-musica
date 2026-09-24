@@ -643,6 +643,7 @@ export const CONFIG_GROUPS: CfgGroup[] = [
         { k: "grade_check_filename_case", label: "Filename capitalization (exact case)", type: "bool" },
         { k: "grade_check_ext_case", label: "Lowercase file extensions", type: "bool" },
         { k: "grade_check_excess_tags", label: "Excess tags (non-canonical)", type: "bool" },
+        { k: "grade_check_flac_md5", label: "FLAC stream MD5 (STREAMINFO)", type: "bool" },
         { k: "grade_check_key_bpm", label: "Key & BPM tags", type: "bool" },
         { k: "grade_check_lyrics_lang_tags", label: "Transform tags carry language (TRANSLATION-EN)", type: "bool" },
         { k: "grade_check_mood", label: "Mood tag present", type: "bool" },
