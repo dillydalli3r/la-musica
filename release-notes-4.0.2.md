@@ -49,12 +49,14 @@ read again.
 
 ## A 69th check: the FLAC header's own MD5
 
-A lossless file carries a checksum of its own audio in the header. Nothing in
-the app had ever compared it, so a file that had been damaged *after* ripping
-graded clean. **FLAC MD5** is now a grading check (on in the factory defaults,
-like the rest): the stored checksum is verified against the decoded audio, the
-verdict is filed with the album's audit, and the optimization scripts re-derive
-it — so grading, auditing, tagging and optimizing all read the same fact.
+A lossless file carries a checksum of its own audio in the header — STREAMINFO's
+MD5, written when the file was encoded — and nothing in the app had ever
+compared it, so a file damaged *after* ripping graded clean. **FLAC stream MD5
+(STREAMINFO)** is now a grading check (on in the factory defaults, like the
+rest): the stored checksum is verified against the decoded audio, the same
+verification runs in the audit and in the AccurateRip handling, and the check
+sits in the Grading page's Integrity group beside the other tag checks
+(`mlo/flac.py`, `tools/test_flac_md5.py`).
 
 ## The Storage card adds up
 
