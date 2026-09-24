@@ -219,7 +219,11 @@ TAG_INFO = {
     "TRANSLITERATION": ("Transliteration", "Romanised lyrics; the language lives in the tag name (TRANSLITERATION-JA-Latn)."),
     "AUDIT": ("Audit verdict", "AudioAuditor's REAL / FAKE verdict on the file's audio."),
     "AUDIOAUDITOR_OVERRIDE": ("Audit override", "A hand-set REAL / FAKE that wins over every derived verdict."),
-    "INTEGRITY": ("Integrity verdict", "OK / FAIL from the audio integrity test."),
+    "INTEGRITY": ("Integrity verdict", "OK / FAIL / UNKNOWN from the audio integrity test. For a "
+                                       "FLAC this is the verdict on the MD5 its STREAMINFO states "
+                                       "about its own decoded audio: OK when the audio hashes to "
+                                       "it, FAIL when it does not, UNKNOWN when the stream states "
+                                       "none (all-zero = unverified, never a pass)."),
     "AUDIO_MD5": ("Audio MD5", "Legacy integrity checksum; nothing writes it any more."),
     "LOG_CRC": ("Log CRC", "OK / MISMATCH against the rip log's own per-track CRC."),
     "LOG_GRADE": ("Log score", "0-100 score the rip log earned."),
@@ -325,7 +329,7 @@ _TAG_ENUM = {
     # set for the write path.
     "AUDIT": ("REAL", "FAKE", "MIX"),
     "AUDIOAUDITOR_OVERRIDE": ("REAL", "FAKE"),
-    "INTEGRITY": ("OK", "FAIL"),
+    "INTEGRITY": ("OK", "FAIL", "UNKNOWN"),
     "LOG_CRC": ("OK", "MISMATCH"),
 }
 
@@ -410,7 +414,7 @@ TAG_CHECKS = {
     "RELEASECOUNTRY": ("grade_check_tag_case",),
     "SCRIPT": ("grade_check_tag_case",),
     "AUDIO_MD5": ("grade_check_excess_tags",),
-    "INTEGRITY": ("grade_check_excess_tags",),
+    "INTEGRITY": ("grade_check_excess_tags", "grade_check_flac_md5"),
     "LOG_CRC": ("grade_check_excess_tags",),
     "ENCODER_PROGRAM": ("grade_check_encoder",),
     "ENCODER_QUALITY": ("grade_check_encoder",),
@@ -431,6 +435,7 @@ TAG_ISSUE_CODES = {
     "ACOUSTID_ID": ("ACOUSTID_ID",),
     "ACOUSTID_FINGERPRINT": ("ACOUSTID_FINGERPRINT",),
     "AUDIT": ("AUDIT",),
+    "INTEGRITY": ("FLAC_MD5", "FLAC_MD5_ABSENT", "FLAC_MD5_UNKNOWN"),
     "LOG_GRADE": ("LOG_GRADE",),
     "MEDIA": ("MEDIA",),
     "SOURCE": ("SOURCE",),
@@ -475,6 +480,7 @@ CHECK_LABELS = {
     "grade_check_artist_image": "Artist image stored",
     "grade_check_artist_description": "Artist description stored",
     "grade_check_audit": "Require audit tag",
+    "grade_check_flac_md5": "FLAC stream MD5 (STREAMINFO)",
     "grade_check_log_checksum": "Log checksum valid",
     "grade_check_accuraterip": "AccurateRip verified (audit only)",
     "grade_check_log_grade": "Log grade present & in range",

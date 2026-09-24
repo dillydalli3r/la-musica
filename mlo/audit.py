@@ -14,6 +14,14 @@ Outputs written to tags:
   AUDIT      REAL / FAKE - on every audited file. Files that already
              carry a REAL or FAKE verdict are skipped (force audit
              overrides this), like the ENCODER markers for optimization.
+  INTEGRITY  OK / FAIL / UNKNOWN - on every FLAC whose stream the integrity
+             test decoded. The verdict of the container's OWN statement about
+             its audio (STREAMINFO's MD5): OK when the audio hashes to the
+             digest the stream states, FAIL when it does not (corrupt or
+             dishonestly written — the AUDIT verdict is FAKE for those too),
+             UNKNOWN when the stream states none (all-zero = unknown: the
+             audio decoded, nothing verifies it). Written only when it says
+             something other than what the file already carries.
   LOG_GRADE  0-100 rip-log score (AudioAuditor/cambia) - written to the
              tracks of MEDIA=CD releases only, one score per disc, with
              logs/cues deterministically named CD-N.log / CD-N.cue
@@ -86,7 +94,14 @@ DETECTOR_NO_FLAGS = {
 def verify_integrity(filepath, ffmpeg_exe=None, flac_exe=None):
     """Verify audio file integrity like foobar2000's Verify Integrity.
 
-    For FLAC: runs `flac -t` (test) which checks frame CRCs and stream integrity.
+    For FLAC: runs `flac -t` (test) which checks frame CRCs and stream integrity
+    — and answers the question only this container can ask: whether the audio
+    is what its STREAMINFO MD5 says it is. The three answers are kept apart
+    (see mlo.flac.stream_md5_state): a MISMATCH is a failure ("the digest the
+    stream states is not the digest of its audio" — a corrupt or dishonestly
+    written file), a stream that states NO MD5 is not (it decoded, nothing
+    compares it — recorded as "unknown" and reported as a warning, never read
+    as "verified"), and everything else is the plain decode/CRC check.
     For all types: runs `ffmpeg -v error -i file -f null -` to catch decoding errors,
     truncated files, and sync errors (similar to foobar2000's decoder check).
 
@@ -94,23 +109,28 @@ def verify_integrity(filepath, ffmpeg_exe=None, flac_exe=None):
     """
     ext = os.path.splitext(filepath)[1].lower()
     # Try flac -t for FLAC files (most thorough for FLAC)
-    if ext == ".flac" and flac_exe and os.path.isfile(flac_exe):
-        try:
-            proc = run_tool([flac_exe, "-t", filepath],
-                            stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-                            text=True, encoding="utf-8", errors="replace", timeout=60)
-            # flac -t already reads the whole stream, verifies every frame CRC
-            # and the MD5 in the STREAMINFO — a second full `ffmpeg -f null`
-            # decode of the same file is a whole extra pass for nothing.
-            if proc.returncode == 0:
+    if ext == ".flac" and (flac_exe or ffmpeg_exe):
+        from .flac import (MD5_ABSENT, MD5_FAILED, MD5_MISMATCH, MD5_OK,
+                          MD5_UNKNOWN, md5_finding, stream_md5_state)
+        state, detail, _digest = stream_md5_state(filepath, flac_exe,
+                                                 ffmpeg_exe)
+        if state != MD5_UNKNOWN:
+            _INTEGRITY_STATE[_ev_key(filepath)] = state
+            if state in (MD5_OK, MD5_ABSENT):
+                # ABSENT is a clean decode with nothing to compare (all-zero
+                # STREAMINFO MD5): not a failure, and not a verification
+                # either — the INTEGRITY tag says UNKNOWN and the run log
+                # names it.
                 return True, None
-            err = (proc.stderr or proc.stdout or "").strip().splitlines()
-            err = err[-1] if err else f"flac -t rc={proc.returncode}"
-            return False, err[:200]
-        except subprocess.TimeoutExpired:
-            return False, "flac -t timeout"
-        except Exception as e:
-            return False, str(e)[:200]
+            if state == MD5_MISMATCH:
+                return False, md5_finding(MD5_MISMATCH, detail)
+            if state == MD5_FAILED:
+                return False, str(detail)[:200]
+            return False, f"flac -t: {detail or 'could not verify'}"[:200]
+        # UNKNOWN: nothing could establish it (a bit depth with no comparable
+        # representation, or no flac.exe and no ffmpeg) — the plain decode
+        # below is all that is left, and it catches a corrupt stream, not a
+        # header that lies about it.
 
     # ffmpeg check for all audio types (including FLAC as second check)
     if ffmpeg_exe and os.path.isfile(ffmpeg_exe):
@@ -374,6 +394,13 @@ _EVIDENCE = {}
 # Which files THIS run verified as intact (canonical path -> bool). It rides
 # in the evidence record's third element (see _record_evidence).
 _INTEGRITY_PASSED = {}
+# The stream-MD5 answer THIS run got for each file it decoded (canonical path
+# -> the state mlo.flac.stream_md5_state names: "ok" / "md5-mismatch" /
+# "md5-absent" / "error"). It rides in the record's fifth element, so a later
+# run — and the grader, which must not pay for the same decode — can tell a
+# verified digest from an absent one from a mismatched one, and the INTEGRITY
+# tag is written from it.
+_INTEGRITY_STATE = {}
 # "the caller did not say": distinguishes "keep what the record has" from a
 # remembered None.
 _UNSET = object()
@@ -396,8 +423,9 @@ def _file_stamp(path):
         return None
 
 
-def _record_evidence(path, verified=_UNSET, identity=None):
-    """Store the evidence record for *path*: [size, mtime_ns, verified, identity].
+def _record_evidence(path, verified=_UNSET, identity=None, state=None):
+    """Store the evidence record for *path*:
+    [size, mtime_ns, verified, identity, state].
 
     *verified* is the integrity test's own answer for these bytes (True/False)
     when this run ran it over the file, and None when it did not — the config
@@ -410,6 +438,12 @@ def _record_evidence(path, verified=_UNSET, identity=None):
     The fourth element is the AUDIO identity (see :func:`_audio_identity`):
     the half of the record that a tag write cannot move. A caller that has
     just read it passes it in rather than paying for the same header twice.
+
+    The fifth is WHAT the test found (mlo.flac's stream-MD5 vocabulary), so a
+    later reader — the grader, or a run that only has to write the INTEGRITY
+    tag — learns "verified" apart from "the stream states no MD5 at all"
+    without decoding the file again. Absent from an older record, and "" for a
+    file whose container states no digest (every non-FLAC).
     """
     stamp = _file_stamp(path)
     if stamp is None:
@@ -428,7 +462,14 @@ def _record_evidence(path, verified=_UNSET, identity=None):
                 verified = rec[2]
     if identity is None:
         identity = _audio_identity(path)
-    _EVIDENCE[key] = [stamp[0], stamp[1], verified, identity]
+    if state is None:
+        state = _INTEGRITY_STATE.get(key, "")
+        if not state:
+            rec = _EVIDENCE.get(key)
+            if (isinstance(rec, (list, tuple)) and len(rec) >= 5
+                    and _record_stamp(rec) == stamp):
+                state = str(rec[4] or "")
+    _EVIDENCE[key] = [stamp[0], stamp[1], verified, identity, state]
 
 
 def _record_stamp(rec):
@@ -459,7 +500,7 @@ def _audio_identity(path):
 
 
 def _evidence_state(path):
-    """(current, verified) for one file's stored evidence.
+    """(current, verified, state) for one file's stored evidence.
 
     *current* — the record describes THIS file's audio: either the size/mtime
     stamp matches, or the record's audio identity does. The stamp is the cheap
@@ -474,23 +515,30 @@ def _evidence_state(path):
     bytes, and it was True. A container that states no identity (an mp3's tags
     move its stamp and nothing else) is trusted on its stamp alone, which is
     what it was before this element existed.
+
+    *state* — WHAT the test found (mlo.flac's stream-MD5 vocabulary: "ok" /
+    "md5-mismatch" / "md5-absent" / "error"), "" when the record predates that
+    element or the file states no digest. It is what the INTEGRITY tag and the
+    grader's finding are written from, so neither has to decode the file the
+    audit already decoded.
     """
     key = _ev_key(path)
     rec = _EVIDENCE.get(key)
     stamp = _file_stamp(path)
     if stamp is None or not isinstance(rec, (list, tuple)) or len(rec) < 2:
-        return False, False
+        return False, False, ""
     verified = bool(len(rec) >= 3 and rec[2])
+    state = str(rec[4] or "") if len(rec) >= 5 else ""
     if _record_stamp(rec) == stamp:
-        return True, verified
+        return True, verified, state
     identity = str(rec[3]) if len(rec) >= 4 else ""
     if identity and identity == _audio_identity(path):
         # The same audio under a new stamp: the tags were rewritten, the
         # samples were not. Re-filed under the current stamp so the rest of
         # this run asks the cheap question.
-        _record_evidence(path, verified, identity)
-        return True, verified
-    return False, False
+        _record_evidence(path, verified, identity, state)
+        return True, verified, state
+    return False, False, ""
 
 
 def _evidence_path(config):
@@ -503,8 +551,8 @@ def _evidence_path(config):
 
 
 def _load_evidence(config):
-    """The stored {path: [size, mtime_ns, verified, identity]} map; unreadable
-    reads as empty.
+    """The stored {path: [size, mtime_ns, verified, identity, state]} map;
+    unreadable reads as empty.
 
     Entries whose file is gone are dropped here: the map is per library, and a
     deleted album must not leave its stamps behind forever."""
@@ -549,9 +597,67 @@ def _save_evidence(config, evidence):
                 pass
 
 
+# The INTEGRITY tag's vocabulary: the FLAC stream MD5's verdict, in the three
+# states a stream can be in. Unknown is NOT a pass — it is the all-zero field
+# saying "no digest here", which is why it is written rather than left off.
+INTEGRITY_TAG_VALUES = {"ok": "OK", "md5-mismatch": "FAIL", "error": "FAIL",
+                        "md5-absent": "UNKNOWN"}
+
+
+def _write_integrity_value(path, state, config):
+    """Write the FLAC stream identity's verdict when the file does not say it.
+
+    OK / FAIL / UNKNOWN from mlo.flac's own vocabulary (see
+    INTEGRITY_TAG_VALUES). FLAC only: no other container states an MD5 of its
+    audio, so there is nothing for the tag to be about. Gated exactly like the
+    AUDIT verdict it belongs to (write_audit_tag, and the per-filetype AUDIT
+    family, which mlo.config maps INTEGRITY into) and a no-op when the file
+    already carries the verdict — a re-audit of a settled library must not
+    rewrite a byte. Used for the files no AUDIT-write phase opened; a file that
+    DOES get a verdict has both tags written in one rewrite (_write_audit_tag).
+    """
+    value = INTEGRITY_TAG_VALUES.get(state or "")
+    if not value:
+        return False
+    if (not config.get("audit_integrity", True)
+            or not config.get("write_audit_tag", True)
+            or not should_write_audio_tag(config, "INTEGRITY", filepath=path)):
+        return False
+    try:
+        af = AudioFile(path)
+        if af.audio is None:
+            return False
+        cur = str(af.get_tag("INTEGRITY") or "").strip().upper()
+        _INTEGRITY_WRITTEN.add(_ev_key(path))
+        if cur == value:
+            return False
+        if not af.set_tag("INTEGRITY", value):
+            return False
+        # The tag write moved the stamp: re-file the record under it, so the
+        # next phase of THIS run (and the next run) still sees the verdict the
+        # integrity test just established for these bytes.
+        _record_evidence(path)
+        return True
+    except Exception:
+        return False
+
+
+def _pending_integrity(path):
+    """The INTEGRITY value THIS run established for *path*, "" when none."""
+    return INTEGRITY_TAG_VALUES.get(_INTEGRITY_STATE.get(_ev_key(path), "") or "",
+                                    "")
+
+
 def _write_audit_tag(path, value):
-    """Write the AUDIT tag when it differs. Returns
-    (changed: bool, b_rem: int, b_add: int, error: str | None)."""
+    """Write the AUDIT tag — and, through the same container rewrite, the
+    INTEGRITY verdict this run established for the file. Returns
+    (changed: bool, b_rem: int, b_add: int, error: str | None).
+
+    Both tags are this app's own verdicts about the same audio, and a second
+    open to add the second one was a whole extra file rewrite per audited file
+    (mlo.audio saves per call, and with flac_no_padding a save rewrites the
+    whole stream) — so the two go out together, in one deferred save.
+    """
     try:
         before = os.path.getsize(path)
     except OSError as e:
@@ -564,14 +670,31 @@ def _write_audit_tag(path, value):
 
         cur = af.get_tag("AUDIT")
         cur_clean = str(cur).strip() if cur is not None else ""
-        if cur_clean.lower() == value.lower():
+        need_audit = cur_clean.lower() != value.lower()
+        wanted = _pending_integrity(path)
+        writable = bool(wanted) and _verdict_write_allowed(path)
+        need_integrity = writable and (
+            str(af.get_tag("INTEGRITY") or "").strip().upper() != wanted)
+        if writable:
+            # Whatever this open decides, the INTEGRITY tag is settled for
+            # this file: the fill pass at the end of the run must not open it
+            # again to find that out.
+            _INTEGRITY_WRITTEN.add(_ev_key(path))
+        if not need_audit and not need_integrity:
             # The file already carries this verdict and this run just re-read
             # it against these bytes: renew the evidence so the next run may
             # skip it (a stale stamp was the reason this file was audited).
             _record_evidence(path)
             return False, 0, 0, None
 
-        if not af.set_tag("AUDIT", value):
+        af.defer_save(True)
+        ok = True
+        if need_audit:
+            ok = bool(af.set_tag("AUDIT", value)) and ok
+        if need_integrity:
+            ok = bool(af.set_tag("INTEGRITY", wanted)) and ok
+        af.defer_save(False)
+        if not ok:
             return False, 0, 0, f"write: {af.error}"
 
         after = os.path.getsize(path)
@@ -580,6 +703,126 @@ def _write_audit_tag(path, value):
         return True, b_rem, b_add, None
     except Exception as e:
         return False, 0, 0, str(e)
+
+
+def _verdict_write_allowed(path):
+    """Whether this run may write the file's verdict tags at all.
+
+    The gates every verdict write shares: `write_audit_tag` and the integrity
+    test's own switch, plus the per-filetype AUDIT family (which mlo.config
+    maps INTEGRITY into). One function, so a tag can never go out through a
+    gate the other write path ignores.
+
+    Read from _RUN_CONFIG — the config of the run in progress. The AUDIT write
+    path is reached from the verdict phases (the CD legs, the spectral loop),
+    none of which carries the config down to :func:`_write_audit_tag`.
+    """
+    return bool(_RUN_CONFIG.get("write_audit_tag", True)
+                and _RUN_CONFIG.get("audit_integrity", True)
+                and should_write_audio_tag(_RUN_CONFIG, "INTEGRITY",
+                                           filepath=path))
+
+
+# The config of the run in progress (see _verdict_write_allowed), and the set
+# of files whose INTEGRITY tag this run has already settled — a file opened for
+# its AUDIT verdict carries it out in the same rewrite, and the fill pass at
+# the end of the run must not open it again to find that out.
+_RUN_CONFIG: dict = {}
+_INTEGRITY_WRITTEN: set = set()
+
+
+# ----------------------------------------------------------------------
+# What an earlier audit already established about a file's audio
+# ----------------------------------------------------------------------
+# The grader (script 4) asks the same question the audit does — does this
+# stream's audio hash to the MD5 its STREAMINFO states — and must not pay for
+# a decode the audit has already paid for. These two functions are the whole
+# contract: `recorded_integrity` reads the answer (and only when the record
+# still describes THESE bytes, the same rule the audit skips a file on), and
+# `note_integrity` files back what the grader itself decoded, so the next
+# reader gets the same answer for free.
+_EVIDENCE_LOCK = __import__("threading").Lock()
+_EVIDENCE_LOADED = False
+_EVIDENCE_DIRTY = False
+
+
+def _ensure_evidence(config):
+    """Load the map once per process (the audit's own run also does this)."""
+    global _EVIDENCE_LOADED
+    with _EVIDENCE_LOCK:
+        if _EVIDENCE_LOADED:
+            return
+        _EVIDENCE.clear()
+        if (config or {}).get("music_folder"):
+            _EVIDENCE.update(_load_evidence(config))
+        _EVIDENCE_LOADED = True
+
+
+def recorded_integrity(path, config=None, stated=""):
+    """(state, "") for *path* when an audit's answer still describes its audio.
+
+    *state* is mlo.flac's stream-MD5 vocabulary; ("", "") means nothing on
+    record describes these bytes (never audited, replaced, or re-encoded) and
+    the caller has to verify them itself. A record whose stamp has moved is
+    matched on the stream identity, which is what survives a tag write — the
+    same test the audit's own skip uses, so the two can never disagree about
+    whether a stored answer is still this file's.
+
+    *stated* (the digest the file states NOW, hex) makes the claim explicit:
+    a record filed under a different digest is not an answer about this
+    header, whatever its stamp says.
+    """
+    try:
+        _ensure_evidence(config or {})
+        current, _verified, state = _evidence_state(path)
+        if not current:
+            return "", ""
+        if stated:
+            rec = _EVIDENCE.get(_ev_key(path)) or []
+            identity = str(rec[3]) if len(rec) >= 4 else ""
+            if identity and identity != f"flac:{int(stated, 16)}":
+                return "", ""
+        return state, ""
+    except Exception:
+        return "", ""
+
+
+def note_integrity(path, state, config=None):
+    """File what THIS caller (the grader) decoded, for the next reader.
+
+    Recorded exactly like the audit records its own answer — the stamp, the
+    audio identity and the state — so a later audit or grade over the same
+    audio does not decode the file again, and a tag write in between does not
+    lose the answer. Saved on the way out of the caller's pass (see
+    save_evidence), never per file.
+    """
+    global _EVIDENCE_DIRTY
+    try:
+        _ensure_evidence(config or {})
+        key = _ev_key(path)
+        _INTEGRITY_STATE[key] = state
+        from .flac import MD5_ABSENT, MD5_OK
+        _INTEGRITY_PASSED[key] = state in (MD5_OK, MD5_ABSENT)
+        _record_evidence(path)
+        with _EVIDENCE_LOCK:
+            _EVIDENCE_DIRTY = True
+    except Exception:
+        pass
+
+
+def save_evidence(config=None):
+    """Write the evidence map if anything recorded since the last save."""
+    global _EVIDENCE_DIRTY
+    if not (config or {}).get("music_folder"):
+        return
+    with _EVIDENCE_LOCK:
+        if not _EVIDENCE_DIRTY:
+            return
+        _EVIDENCE_DIRTY = False
+    try:
+        _save_evidence(config or {}, _EVIDENCE)
+    except Exception:
+        pass
 
 
 def run_audit_library(config):
@@ -630,9 +873,17 @@ def run_audit_library(config):
 
     # The verdict-evidence map for this run, loaded BEFORE anything writes a
     # verdict (the CD phases below write some) and saved once at the end.
+    global _EVIDENCE_LOADED, _EVIDENCE_DIRTY
     _EVIDENCE.clear()
     _EVIDENCE.update(_load_evidence(config))
+    with _EVIDENCE_LOCK:
+        _EVIDENCE_LOADED = True
+        _EVIDENCE_DIRTY = False
     _INTEGRITY_PASSED.clear()
+    _INTEGRITY_STATE.clear()
+    _INTEGRITY_WRITTEN.clear()
+    _RUN_CONFIG.clear()
+    _RUN_CONFIG.update(config)
 
     # ------------------------------------------------------------------
     # One MEDIA=CD pass for the whole run. Four separate phases (CD checksum
@@ -921,10 +1172,18 @@ def run_audit_library(config):
                 # that never ran that test (the setting was off, or the
                 # version that wrote it had no such element) is re-established
                 # here, once, and settles from then on.
-                current, verified = _evidence_state(path)
+                current, verified, rec_state = _evidence_state(path)
                 if current and (not integrity_on or verified):
                     skipped += 1
                     if changed:
+                        stats["modified_count"] += 1
+                    # The decode was not paid for again, but its VERDICT is
+                    # still this file's — the INTEGRITY tag is filled from the
+                    # record for a library audited before that tag existed, so
+                    # the file carries what the audit knows without a rewrite
+                    # per run (a no-op once it already says it).
+                    if (integrity_on and rec_state
+                            and _write_integrity_value(path, rec_state, config)):
                         stats["modified_count"] += 1
                     continue
                 stale += 1
@@ -970,8 +1229,9 @@ def run_audit_library(config):
             # the whole file — re-decoding it proved nothing and cost a full
             # decode per file on every re-audit of an unchanged library.
             to_verify = []
+            from .flac import MD5_ABSENT
             for p in todo:
-                current, verified = _evidence_state(p)
+                current, verified, _state = _evidence_state(p)
                 if not (current and verified):
                     to_verify.append(p)
             untouched = len(todo) - len(to_verify)
@@ -998,6 +1258,11 @@ def run_audit_library(config):
                     _record_evidence(p)
                     if not ok:
                         integrity_failed[p] = err or "integrity check failed"
+                    # The container's own verdict on its stream MD5 (FLAC
+                    # only) is written with the file's AUDIT tag — one
+                    # container rewrite for both verdicts (_write_audit_tag);
+                    # files no verdict phase opens get theirs from the fill
+                    # pass at the end of the run.
 
             if integrity_failed:
                 n_fail = len(integrity_failed)
@@ -1017,6 +1282,27 @@ def run_audit_library(config):
                 # were.
                 log(f"Integrity: all {len(todo)} file(s) to be audited passed "
                     f"verification")
+
+            # A stream that states NO MD5 decoded, but nothing verified it:
+            # all-zero STREAMINFO MD5 means "unknown", not "fine", and reading
+            # flac -t's rc=0 as a pass is exactly the silent acceptance this
+            # report exists to end. Named per file, counted apart from the
+            # failures (they are not failures) and apart from the passes.
+            md5_absent = [p for p in to_verify
+                          if _INTEGRITY_STATE.get(_ev_key(p)) == MD5_ABSENT]
+            if md5_absent:
+                log(c(f"Integrity: {len(md5_absent)} FLAC(s) state NO MD5 "
+                      f"(STREAMINFO all zero) — decoded without error, but "
+                      f"their audio is UNVERIFIED (INTEGRITY=UNKNOWN):",
+                      Color.YELLOW))
+                for p in sorted(md5_absent)[:10]:
+                    try:
+                        rel = os.path.relpath(p, folder)
+                    except ValueError:
+                        rel = os.path.basename(p)
+                    log(f"  {c('?', Color.YELLOW)} {rel}")
+                if len(md5_absent) > 10:
+                    log(f"  … and {len(md5_absent) - 10} more")
 
     # A CD rip's verdict comes from its OWN verification, never from the
     # spectrogram detectors: the .log CRC (written above, as soon as it is
@@ -2011,10 +2297,29 @@ def run_audit_library(config):
                 status_counts["Fake"] += 1
                 stats["grade_dist"]["FAIL"] = stats["grade_dist"].get("FAIL", 0) + 1
 
+    # ---- the INTEGRITY tag for everything no verdict phase opened --------
+    # A file whose AUDIT verdict this run wrote already carries its INTEGRITY
+    # value out of that same rewrite, and a file no phase opened (a library
+    # with no spectral tool, a file AudioAuditor could not decide, a CD whose
+    # verdict its own evidence gave) gets it here: the verdict the integrity
+    # test established for these bytes, OK / FAIL / UNKNOWN, one open per file
+    # that still needs it and none for the ones that have it.
+    filled = 0
+    for p in files:
+        key = _ev_key(p)
+        if not _INTEGRITY_STATE.get(key) or key in _INTEGRITY_WRITTEN:
+            continue
+        if _write_integrity_value(p, _INTEGRITY_STATE[key], config):
+            filled += 1
+    if filled:
+        stats["modified_count"] += filled
+        log(f"Integrity: wrote an INTEGRITY verdict into {filled} file(s)")
+
     # Every AUDIT verdict this run wrote is bound to the file's size/mtime,
     # so the next run may skip a file without trusting a tag written for
     # different bytes.
     _save_evidence(config, _EVIDENCE)
+    _EVIDENCE_DIRTY = False
 
     stats["grade_dist"]["PASS"] = status_counts["Real"]
     # The pass rate is REAL out of everything examined. It used to be

@@ -6,6 +6,17 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 
 from .audio import AudioFile, TAG_MAP
 from .config import DEFAULT_CONFIG, should_write_audio_tag
+# The stream-MD5 vocabulary and its reference check (mlo.flac), and the record
+# an audit already made of it (mlo.audit) — the grade_check_flac_md5 check
+# reads both and pays for a decode only when neither has an answer for these
+# bytes. Imported at module scope: no cycle (mlo.flac imports containers/
+# config/subproc, mlo.audit imports audio/config/paths/stats/tools).
+from .flac import (
+    MD5_ABSENT, MD5_FAILED, MD5_MISMATCH, MD5_OK, MD5_UNKNOWN,
+    md5_finding, stream_md5_state,
+)
+from .audit import note_integrity, recorded_integrity, save_evidence
+from .tools import detect_all_tools
 from .lyrics import (
     _lrc_for, _canonical_lyrics, format_lyrics_text, has_lyrics_text,
     stored_lyrics_kind, text_meets_sync_level,
@@ -1433,6 +1444,66 @@ def _audio_format_info(af):
     return (bits, getattr(info, "sample_rate", None))
 
 
+# The stream-MD5 answer, memoised for THIS process: one album grade asks once
+# per file, and the same album can be graded twice in a run (the album page and
+# the artist page). Keyed on the path AND the file's stamp AND the digest the
+# stream states, so a rewritten file (or one whose header was rewritten under
+# it) is never served the previous file's answer. Bounded like the other
+# memos: a long session over a churning library drops the map rather than
+# growing forever.
+_MD5_MEMO = {}
+_MD5_MEMO_MAX = 20000
+
+
+def _flac_md5_state(ap, cfg, af=None):
+    """(state, detail) for one file's stream MD5: mlo.flac's vocabulary.
+
+    "" for a file this question does not apply to (no container here states
+    an MD5 of its audio except FLAC, and an unreadable one has nothing to
+    ask). "md5-absent" when the stream states none — that IS the finding: an
+    all-zero STREAMINFO MD5 is "unknown", and a grade that read it as verified
+    would be claiming a check nobody made.
+
+    The answer comes from an audit's own record when one still describes these
+    bytes (the rule script 6 itself skips a settled file on, so grading pays
+    for no decode script 6 already paid for). Otherwise the reference check
+    runs here — `flac -t`, one decode — because a grade must be a statement
+    about the audio, not a reading of a tag about it; what it establishes is
+    filed back (mlo.audit.note_integrity) so the next reader does not repeat
+    the decode. *af* is the AudioFile the caller already has open.
+    """
+    if os.path.splitext(str(ap))[1].lower() != ".flac":
+        return "", ""
+    from .accurip import stream_md5 as _stated
+    stated = _stated(ap, af)
+    if not stated:
+        return MD5_ABSENT, "the stream states no MD5 (all zero)"
+    try:
+        st = os.stat(ap)
+        key = (os.path.normcase(os.path.abspath(ap)), st.st_size,
+               st.st_mtime_ns, stated)
+    except OSError:
+        return "", ""
+    hit = _MD5_MEMO.get(key)
+    if hit is not None:
+        return hit
+    state, detail = recorded_integrity(ap, cfg, stated=stated)
+    if not state:
+        tools = detect_all_tools()
+        flac_exe = (tools.get("flac") or {}).get("flac_exe")
+        ffmpeg_exe = (tools.get("ffmpeg") or {}).get("ffmpeg_exe")
+        if not flac_exe and not ffmpeg_exe:
+            # Nothing to test the audio with: an honest "not established",
+            # never a pass (the same rule mlo.audit's integrity pass keeps).
+            return MD5_UNKNOWN, "no flac/ffmpeg to verify the stream with"
+        state, detail, _digest = stream_md5_state(ap, flac_exe, ffmpeg_exe, af)
+        note_integrity(ap, state, cfg)
+    if len(_MD5_MEMO) >= _MD5_MEMO_MAX:
+        _MD5_MEMO.clear()
+    _MD5_MEMO[key] = (state, detail)
+    return state, detail
+
+
 def _ambiguous_lrc_stems(filenames):
     """Stems shared by more than one graded file in one album folder.
 
@@ -2236,6 +2307,39 @@ def _grade_album(album_dir, lyrics_format, cfg=None):
                               basename)
                     track["issues"].append("AUDIT")
 
+        # ---- the stream's own identity: the FLAC STREAMINFO MD5 ---------
+        # A FLAC states the MD5 of its decoded audio. That is a CLAIM, and
+        # this is where a grade says whether it is TRUE: a stream whose audio
+        # does not hash to the digest it states is corrupt or dishonestly
+        # written — a failure, named, whatever its tags say (no tag write can
+        # move that digest, so the verdict is about the audio itself). A
+        # stream that states NO MD5 is not a failure but is NOT verified
+        # either: all-zero means "unknown", and the finding says so instead of
+        # counting the file as checked. The digest is read from the container
+        # the loop already has open, so a good file costs one header read.
+        if cfg.get("grade_check_flac_md5", True) and not is_video_track:
+            try:
+                md5_state, md5_detail = _flac_md5_state(ap, cfg, af)
+            except Exception as e:
+                md5_state, md5_detail = "", str(e)
+            if md5_state == MD5_MISMATCH:
+                total_checks += 1
+                failed_checks += 1
+                add_issue(md5_finding(md5_state, md5_detail), basename)
+                track["issues"].append("FLAC_MD5")
+            elif md5_state in (MD5_ABSENT, MD5_FAILED, MD5_UNKNOWN):
+                # Not a failed check — nothing established that this file is
+                # wrong — but never a silent pass either: the finding is in
+                # the album's report and the track's own issue list, and the
+                # words say UNVERIFIED rather than OK.
+                add_issue(md5_finding(md5_state, md5_detail)
+                          if md5_state == MD5_ABSENT
+                          else f"FLAC MD5 not verified: {md5_detail}",
+                          basename)
+                track["issues"].append("FLAC_MD5_ABSENT"
+                                       if md5_state == MD5_ABSENT
+                                       else "FLAC_MD5_UNKNOWN")
+
         # MusicBrainz / RateYourMusic identity links — required for a PASS.
         # Exactly two links are graded: the MusicBrainz RELEASE (falling
         # back to its release group) and the RateYourMusic release-group
@@ -2293,7 +2397,7 @@ def _grade_album(album_dir, lyrics_format, cfg=None):
         # that is only metadata or bare timestamps is no better. A sidecar
         # shared with a same-stem sibling is credited to nobody.
         lyr = af.get_lyrics()
-        embedded = bool(lyr and str(lyr).strip())
+        embedded = has_lyrics_text(lyr)
         lrc = False
         lrc_text = None
         if os.path.normcase(os.path.splitext(basename)[0]) not in ambiguous_lrc_stems:
@@ -4039,6 +4143,15 @@ def _grade_album(album_dir, lyrics_format, cfg=None):
         return tag_summary
 
     audit_summary = _realtime_audit_for_album()
+
+    # Whatever grade_check_flac_md5 verified about this album's audio is filed
+    # back into the audit's own evidence (a no-op when an audit had already
+    # answered, or when nothing was recorded), so a later audit or grade over
+    # the same audio does not decode it again. Only a scope that HAS a music
+    # folder owns evidence — a bare cfg (a helper call) must not write one
+    # into the legacy data folder.
+    if cfg.get("music_folder"):
+        save_evidence(cfg)
 
     return {
         "path": album_dir,

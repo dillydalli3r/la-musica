@@ -232,7 +232,7 @@ assert lp._match_score(["Slowdive"], "Alison (Remastered)", 0, "Slowdive", "Alis
 
 
 # --------------------------------------------------------------------------- #
-# allow_plain: a plain-only hit is skipped and the chain keeps walking
+# The plain fallback: synced always wins, plain is what is left when none does
 # --------------------------------------------------------------------------- #
 PLAIN_ONLY = "listen close and dont be stoned\ni'll be here in the morning\n"
 SYNCED = "[00:19.92]listen close and don't be stoned\n"
@@ -244,32 +244,100 @@ LRCLIB_PLAIN_ONLY = ("lrclib.net/api/get", {"syncedLyrics": None,
                                             "instrumental": False,
                                             "duration": 230.0})
 with Patch(lp, _get_json=fake_api([LRCLIB_PLAIN_ONLY])):
-    # synced-only is the default: refused, and never replaced by an invention
+    # an untimed answer IS an answer: the track has lyrics, they just are not
+    # timed, and reporting it as "nothing" is what used to mark it
+    # INSTRUMENTAL=1 (mlo.lyrics_fetch._mark_lyrics_absent)
     hit = lp.fetch_lyrics(CFG, "Slowdive", "Alison")
-    assert hit is None, hit
-    assert lp.fetch_lyrics(dict(CFG, lyrics_allow_plain=False),
-                           "Slowdive", "Alison") is None
-    # the opt-in lets it through, and the param beats the config both ways
-    hit = lp.fetch_lyrics(dict(CFG, lyrics_allow_plain=True), "Slowdive", "Alison")
+    assert hit is not None, "a plain candidate must not be reported as no lyrics"
     assert hit["provider"] == "lrclib" and hit["synced"] is None, hit
+    assert hit["kind"] == "plain", hit
     assert hit["plain"] == PLAIN_ONLY.strip(), hit["plain"]
-    assert lp.fetch_lyrics(CFG, "Slowdive", "Alison",
-                           allow_plain=True)["provider"] == "lrclib"
-    assert lp.fetch_lyrics(dict(CFG, lyrics_allow_plain=True), "Slowdive", "Alison",
-                           allow_plain=False) is None
+    assert hit["score"] >= lp._MIN_SCORE, hit
+    # `lyrics_allow_plain` is the install's switch over STORING untimed lyrics
+    # (the grader and the import settle pass read it) — it no longer decides
+    # whether the chain may return one at all
+    assert lp.fetch_lyrics(dict(CFG, lyrics_allow_plain=False),
+                           "Slowdive", "Alison")["kind"] == "plain"
+    assert lp.fetch_lyrics(dict(CFG, lyrics_allow_plain=True),
+                           "Slowdive", "Alison")["kind"] == "plain"
 
-# ...and the chain FALLS THROUGH to the next provider instead of stopping
+# ...and a LATER provider's synced answer beats the earlier plain one
 with Patch(lp, _get_json=fake_api([
         LRCLIB_PLAIN_ONLY,
-        ("lrclib.net/api/search", {"syncedLyrics": SYNCED, "plainLyrics": None,
-                                   "instrumental": False, "duration": 230.0}),
         ("krcs.kugou.com/search", KUGOU_SEARCH),
         ("lyrics.kugou.com/download", KUGOU_DOWNLOAD)])):
-    order = {"lyrics_sources": ["lrclib", "kugou"], "lyrics_allow_plain": True}
-    assert lp.fetch_lyrics(order, "Slowdive", "Alison")["provider"] == "lrclib"
-    fell = lp.fetch_lyrics(dict(order, lyrics_allow_plain=False),
+    fell = lp.fetch_lyrics({"lyrics_sources": ["lrclib", "kugou"]},
                            "Slowdive", "Alison")
-    assert fell["provider"] == "kugou" and fell["synced"] == KUGOU_LRC.strip(), fell
+    assert fell["provider"] == "kugou" and fell["kind"] == "synced", fell
+    assert fell["synced"] == KUGOU_LRC.strip(), fell
+# the same walk with no synced source at all: the plain answer is the answer
+with Patch(lp, _get_json=fake_api([LRCLIB_PLAIN_ONLY])):
+    plain = lp.fetch_lyrics({"lyrics_sources": ["lrclib"]}, "Slowdive", "Alison")
+    assert plain["provider"] == "lrclib" and plain["kind"] == "plain", plain
+
+
+# --------------------------------------------------------------------------- #
+# The alias pass: a second walk, and only when the first found nothing
+# --------------------------------------------------------------------------- #
+def fixed_hit(artist, title, sync=True):
+    """A provider stub answering one name pair, counting its calls."""
+    def provider(_artist, _title, album=None, duration=None, cfg=None,
+                 youtube_id=None):
+        calls.append((_artist, _title))
+        if _artist != artist or _title != title:
+            return None
+        text = SYNCED if sync else None
+        return lp._hit(text, None if sync else PLAIN_ONLY, artist, title)
+    return provider
+
+
+ALIASES = {"artist": ["Hikaru Utada"], "title": ["Hikari"]}
+# nothing under the stored names, the alias does answer -> the alias pass runs
+calls = []
+with Patch(lp, _PROVIDERS={"lrclib": fixed_hit("Hikaru Utada", "Hikari")}):
+    hit = lp.fetch_lyrics({"lyrics_sources": ["lrclib"]}, "宇多田ヒカル", "光",
+                          None, 230.0,
+                          aliases={"artist": ["Hikaru Utada"],
+                                   "title": ["Hikari"]})
+assert hit is not None and hit["provider"] == "lrclib", hit
+assert hit["alias_pass"] == {"used": True, "entity": "artist+title",
+                             "query": "Hikaru Utada · Hikari"}, hit["alias_pass"]
+assert calls == [("宇多田ヒカル", "光"), ("Hikaru Utada", "Hikari")], calls
+
+# the stored names answer -> exactly one query per provider, no second walk
+calls = []
+with Patch(lp, _PROVIDERS={"lrclib": fixed_hit("宇多田ヒカル", "光")}):
+    hit = lp.fetch_lyrics({"lyrics_sources": ["lrclib"]}, "宇多田ヒカル", "光",
+                          None, 230.0, aliases=ALIASES)
+assert "alias_pass" not in hit, hit
+assert calls == [("宇多田ヒカル", "光")], calls
+
+# `lyrics_search_aliases` off -> one pass, and nothing found
+calls = []
+with Patch(lp, _PROVIDERS={"lrclib": fixed_hit("Hikaru Utada", "Hikari")}):
+    hit = lp.fetch_lyrics({"lyrics_sources": ["lrclib"],
+                           "lyrics_search_aliases": False},
+                          "宇多田ヒカル", "光", None, 230.0, aliases=ALIASES)
+assert hit is None, hit
+assert calls == [("宇多田ヒカル", "光")], calls
+
+# a lazy alias source is only asked for when the ordinary pass found nothing
+asked = []
+
+
+def aliases():
+    asked.append(True)
+    return ALIASES
+
+
+with Patch(lp, _PROVIDERS={"lrclib": fixed_hit("宇多田ヒカル", "光")}):
+    assert lp.fetch_lyrics({"lyrics_sources": ["lrclib"]}, "宇多田ヒカル", "光",
+                           None, 230.0, aliases=aliases) is not None
+assert asked == [], "an answered track must not cost a MusicBrainz lookup"
+with Patch(lp, _PROVIDERS={"lrclib": fixed_hit("Hikaru Utada", "Hikari")}):
+    assert lp.fetch_lyrics({"lyrics_sources": ["lrclib"]}, "宇多田ヒカル", "光",
+                           None, 230.0, aliases=aliases) is not None
+assert asked == [True], asked
 
 
 # --------------------------------------------------------------------------- #
@@ -296,11 +364,12 @@ with Patch(lp, _get_json=fake_api([], asked)):
 # The shared hit shape (every provider returns all of these)
 # --------------------------------------------------------------------------- #
 with Patch(lp, _get_json=fake_api([LRCLIB_PLAIN_ONLY])):
-    hit = lp.fetch_lyrics(dict(CFG, lyrics_allow_plain=True),
-                          "Slowdive", "Alison", "Souvlaki", 230.295)
+    hit = lp.fetch_lyrics(CFG, "Slowdive", "Alison", "Souvlaki", 230.295)
 assert set(hit) == {"provider", "provider_label", "synced", "plain", "instrumental",
                     "duration", "matched_artist", "matched_title", "matched_album",
-                    "score"}, hit
+                    "score", "kind"}, hit
+assert hit["kind"] in ("synced", "plain"), hit
+assert (hit["kind"] == "synced") == bool(hit["synced"]), hit
 # the score is the match confidence the caller gates automatic writes on
 assert 0.0 <= hit["score"] <= 1.2, hit["score"]
 assert isinstance(hit["instrumental"], bool), hit

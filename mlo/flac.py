@@ -186,6 +186,177 @@ _LOSSLESS_VERDICT_TAGS = frozenset({"AUDIT", "INTEGRITY", "LOG_CRC",
                                     "AUDIO_MD5"})
 
 
+# ----------------------------------------------------------------------
+# The audio's own identity: the stream MD5, and whether it is TRUE
+# ----------------------------------------------------------------------
+# A FLAC's STREAMINFO carries the MD5 of its DECODED audio — the one identity
+# a tag write cannot move (that is what mlo.discs' CRC memo, mlo.accurip's
+# evidence and mlo.audit's verdict evidence are all filed under). It is a
+# CLAIM about the audio, not proof of it: only a decode says whether it is
+# true, and a file that states none (the all-zero field: "unknown", not
+# "fine") has nothing to compare at all. The states below are that answer,
+# named once so the audit (script 6), the grader (script 4) and this
+# module's own conversions all report the same thing about the same bytes.
+MD5_OK = "ok"                 # states a digest; its audio hashes to it
+MD5_MISMATCH = "md5-mismatch"  # states a digest; the audio hashes elsewhere
+MD5_ABSENT = "md5-absent"     # states none (all zeros) — unknown, not verified
+MD5_FAILED = "error"          # could not be decoded/verified (corrupt stream)
+MD5_UNKNOWN = "unknown"       # nothing could be established (no decoder)
+MD5_NOT_FLAC = ""             # this container states no stream MD5 at all
+
+# The words every report uses for the two findings that matter, so the audit
+# log, the grader's issue line and a conversion's failure all name the same
+# problem the same way.
+MD5_FINDINGS = {
+    MD5_MISMATCH: ("FLAC MD5 mismatch",
+                   "the digest its STREAMINFO states is not the digest of its "
+                   "own audio"),
+    MD5_ABSENT: ("FLAC MD5 absent",
+                 "the stream states no MD5 (all zero), so nothing verifies "
+                 "its audio"),
+}
+
+# Bits per sample -> the ffmpeg codec that reproduces FLAC's own digest
+# representation: signed, little-endian, ceil(bits/8) bytes a sample (24-bit
+# as THREE bytes, not padded to four).
+_PCM_CODECS = {8: "pcm_s8", 16: "pcm_s16le", 24: "pcm_s24le", 32: "pcm_s32le"}
+
+
+def md5_finding(state, detail=""):
+    """The one-line finding for a state, or "" when there is nothing to
+    report: "FLAC MD5 mismatch" / "FLAC MD5 absent" plus what was seen."""
+    named = MD5_FINDINGS.get(state)
+    if not named:
+        return ""
+    return f"{named[0]}: {named[1]}" + (f" ({detail})" if detail else "")
+
+
+def pcm_format(path):
+    """(bits, sample_rate, channels) mutagen reports for *path*.
+
+    Best effort on purpose: a container that cannot report one of them (an
+    APE, an unheard-of extension) answers None for it, and a caller that
+    cannot compare two files' sample formats must not claim an identity it
+    cannot establish."""
+    try:
+        from .audio import AudioFile
+        info = getattr(getattr(AudioFile(path), "audio", None), "info", None)
+        if info is None:
+            return (None, None, None)
+        bits = getattr(info, "bits_per_sample", None)
+        if bits is None:
+            bits = getattr(info, "bits", None)
+        rate = getattr(info, "sample_rate", None)
+        channels = getattr(info, "channels", None)
+        return (int(bits) if bits else None,
+                int(rate) if rate else None,
+                int(channels) if channels else None)
+    except Exception:
+        return (None, None, None)
+
+
+def decoded_md5(path, ffmpeg_exe, bits=None):
+    """(digest, error): the MD5 of *path*'s decoded PCM, as ffmpeg decodes it.
+
+    *digest* is in the representation FLAC's STREAMINFO hashes (see
+    _PCM_CODECS) when *bits* is one this can express, so a FLAC's digest
+    compares directly with the digest it states; for any other width the
+    decoded stream is 32-bit, which is exact for every source up to 32 bits
+    and therefore still comparable with ITSELF (a source against its own
+    conversion). None + a reason when the file cannot be decoded.
+    """
+    if not ffmpeg_exe or not os.path.isfile(ffmpeg_exe):
+        return None, "no ffmpeg to decode with"
+    codec = _PCM_CODECS.get(bits, "pcm_s32le")
+    try:
+        proc = run_tool(
+            [ffmpeg_exe, "-v", "error", "-nostdin", "-i", path,
+             "-map", "0:a:0", "-c:a", codec, "-f", "md5", "-"],
+            capture_output=True, text=True, encoding="utf-8",
+            errors="replace", timeout=600,
+        )
+    except Exception as e:
+        return None, f"decode failed: {e}"
+    if proc.returncode != 0:
+        err = "; ".join((proc.stderr or "").strip().splitlines()[-2:])
+        return None, f"decode failed: {err or proc.returncode}"
+    match = re.search(r"MD5=([0-9a-fA-F]{32})", proc.stdout or "")
+    if not match:
+        return None, "no digest in ffmpeg's output"
+    return match.group(1).lower(), None
+
+
+def stream_md5_state(path, flac_exe=None, ffmpeg_exe=None, af=None):
+    """(state, detail, digest) for one file's stated stream MD5.
+
+    The reference check decides it: `flac -t` decodes the whole stream, and
+    flac 1.5's own output tells the three cases apart — "ok" (the stated
+    digest matched), "ERROR, MD5 signature mismatch", and "WARNING, cannot
+    check MD5 signature since it was unset in the STREAMINFO" (the all-zero
+    field, which flac accepts: an unverifiable stream is not an INVALID one,
+    which is exactly why the app must report it rather than read rc=0 as
+    "fine"). Without flac.exe the same question is answered by decoding the
+    file with ffmpeg and hashing the samples against the digest the header
+    states — a decode either way; nothing here trusts a header on its own.
+
+    *digest* is the digest the file states ("" when it states none), and *af*
+    an already-open AudioFile the caller holds (the same one-field read).
+    """
+    ext = os.path.splitext(str(path))[1].lower()
+    stated = ""
+    if ext == ".flac":
+        from .accurip import stream_md5 as _stated
+        stated = _stated(path, af)
+
+    if ext == ".flac" and flac_exe and os.path.isfile(flac_exe):
+        try:
+            proc = run_tool([flac_exe, "-t", path], stdout=subprocess.PIPE,
+                            stderr=subprocess.PIPE, text=True, encoding="utf-8",
+                            errors="replace", timeout=600)
+        except subprocess.TimeoutExpired:
+            return MD5_FAILED, "flac -t timeout", stated
+        except Exception as e:
+            return MD5_FAILED, str(e)[:200], stated
+        out = f"{proc.stdout or ''}\n{proc.stderr or ''}"
+        last = next((ln.strip() for ln in reversed(out.splitlines())
+                     if ln.strip()), "")
+        if "MD5 signature mismatch" in out:
+            return (MD5_MISMATCH,
+                    last or f"flac -t rc={proc.returncode}", stated)
+        if "cannot check MD5 signature" in out:
+            # flac accepts it (rc=0): it decoded and hashed the audio itself
+            # and had nothing to compare against.
+            return MD5_ABSENT, last, ""
+        if proc.returncode == 0:
+            return MD5_OK, last, stated
+        return MD5_FAILED, last or f"flac -t rc={proc.returncode}", stated
+
+    if ext != ".flac":
+        return MD5_NOT_FLAC, "", ""
+    if not stated:
+        return MD5_ABSENT, "the stream states no MD5 (all zero)", ""
+    if not (ffmpeg_exe and os.path.isfile(ffmpeg_exe)):
+        return (MD5_UNKNOWN,
+                "no flac.exe or ffmpeg to verify the digest with", stated)
+    bits = pcm_format(path)[0]
+    if bits not in _PCM_CODECS:
+        # Without the stream's own bit depth there is no representation the
+        # stated digest can be compared against (32-bit would not be the
+        # digest FLAC hashes), and guessing would read as a mismatch on a file
+        # nothing is wrong with.
+        return (MD5_UNKNOWN,
+                f"the stream's bit depth ({bits or 'unknown'}) could not be "
+                f"read", stated)
+    digest, err = decoded_md5(path, ffmpeg_exe, bits)
+    if digest is None:
+        return MD5_FAILED, err or "decode failed", stated
+    if digest != stated:
+        return (MD5_MISMATCH,
+                f"the audio hashes to {digest}, the header states {stated}",
+                stated)
+    return MD5_OK, f"decoded MD5 {digest}", stated
+
+
 def convert_command(ffmpeg_exe, filepath, dest, cfg):
     """The ffmpeg command that converts *filepath* to the configured target.
 
@@ -331,6 +502,76 @@ def _trash_converted(path, cfg):
                       user=(cfg or {}).get("auth_username") or "")
 
 
+def _lossless_identity(src, dst, spec, ffmpeg_exe, src_stream):
+    """(ok, message, note) for a conversion whose target is lossless.
+
+    The identity across a conversion is the decoded MD5 (requirement: the
+    converted file's MD5 must equal the MD5 of what the source decoded to).
+    *ok* is False when it does not — the caller keeps the original — and
+    *note* carries what could not be established (a target sample format that
+    differs from the source's, so the conversion is not sample-identical by
+    construction, or a bit depth with no comparable PCM representation). A
+    note is NOT a failure: it says the pass has no proof either way, and the
+    run says so instead of claiming one.
+    """
+    src_bits, src_rate, src_ch = src_stream
+    out_bits, out_rate, out_ch = pcm_format(dst)
+
+    if (src_bits and out_bits and out_rate and out_ch
+            and (src_bits, src_rate, src_ch) != (out_bits, out_rate, out_ch)):
+        # The target's own sample format (the PCM codecs force 16-bit) or the
+        # user's `library_codec_args` changed the samples: there is no
+        # identity to compare, and calling it a mismatch would fail a
+        # conversion the app itself configured.
+        return (True,
+                "",
+                f"sample format changed ({src_bits}-bit {src_rate} Hz {src_ch}ch"
+                f" -> {out_bits}-bit {out_rate} Hz {out_ch}ch) — no audio "
+                f"identity to compare")
+
+    if not src_bits or src_bits not in _PCM_CODECS:
+        return (True, "",
+                f"the source's bit depth ({src_bits or 'unknown'}) has no "
+                f"comparable PCM representation — the conversion was not "
+                f"verified by digest")
+
+    digest, err = decoded_md5(src, ffmpeg_exe, src_bits)
+    if digest is None:
+        # Nothing decoded the source, so nothing proved the conversion: an
+        # unverifiable conversion must not replace the file it came from.
+        return (False, f"could not decode the source to verify the "
+                       f"conversion: {err}", "")
+
+    if spec["codec"] == "flac":
+        from .accurip import stream_md5 as _stated
+        flac_exe = (detect_all_tools().get("flac") or {}).get("flac_exe")
+        stated = _stated(dst)
+        if stated and stated != digest:
+            detail = (f"the converted file states {stated}, the source "
+                      f"decodes to {digest}")
+            return (False,
+                    f"{md5_finding(MD5_MISMATCH, detail)} — the conversion "
+                    f"changed the audio, so the original was kept", "")
+        state, detail, _ = stream_md5_state(dst, flac_exe, ffmpeg_exe)
+        if state != MD5_OK:
+            return (False,
+                    md5_finding(state, detail) if state in MD5_FINDINGS else
+                    f"the converted file could not be verified ({detail})",
+                    "")
+        return (True, "", "")
+
+    out_digest, out_err = decoded_md5(dst, ffmpeg_exe, out_bits)
+    if out_digest is None:
+        return (False, f"could not decode the converted file to verify it: "
+                       f"{out_err}", "")
+    if out_digest != digest:
+        return (False,
+                f"the converted audio hashes to {out_digest}, the source "
+                f"decodes to {digest} — the conversion changed the audio, so "
+                f"the original was kept", "")
+    return (True, "", "")
+
+
 def _convert_lossless_source(args):
     """Convert one source file to the configured target codec.
 
@@ -365,11 +606,12 @@ def _convert_lossless_source(args):
         return (filename, False, f"skipped (same-stem {out_ext} exists)", 0, 0)
 
     src_dur = 0.0
+    src_stream = (None, None, None)
     raw_tags = {}
     try:
         src_probe = run_tool(
             [ffprobe_exe, "-v", "error", "-print_format", "json",
-             "-show_format", filepath],
+             "-show_format", "-show_streams", filepath],
             capture_output=True, text=True, encoding="utf-8",
             errors="replace", timeout=30,
         )
@@ -380,6 +622,24 @@ def _convert_lossless_source(args):
         # for the same JSON a second time was one extra process spawn per
         # converted file.
         raw_tags = src_format.get("tags") or {}
+        # …and -show_streams rides the same spawn for the lossless identity
+        # check at the end of this function, which needs the SOURCE's sample
+        # format to know whether the converted file can be sample-identical
+        # at all (the PCM targets force 16-bit, so a 24-bit source against
+        # them is a change by construction, not a lost audio).
+        for stream in (json.loads(src_probe.stdout or "{}").get("streams") or []):
+            if stream.get("codec_type") == "audio":
+                bits = (stream.get("bits_per_raw_sample")
+                        or stream.get("bits_per_sample"))
+                try:
+                    src_stream = (
+                        int(bits) if bits else None,
+                        int(stream["sample_rate"]) if stream.get("sample_rate") else None,
+                        int(stream["channels"]) if stream.get("channels") else None,
+                    )
+                except (TypeError, ValueError):
+                    src_stream = (None, None, None)
+                break
     except Exception:
         src_dur = 0.0
 
@@ -514,6 +774,25 @@ def _convert_lossless_source(args):
         if out_size == 0:
             return (filename, False, "empty output", 0, 0)
 
+        # ---- the audio identity across the conversion -------------------
+        # The whole point of the pass is a file that IS the audio the source
+        # held, so the conversion is proved, not assumed: the source is
+        # decoded and hashed, and the converted file must state that same
+        # digest — with the reference decoder (flac -t) confirming that its
+        # stated digest is the digest of ITS audio, so "the encoder hashed
+        # what it encoded" is verified rather than trusted. A mismatch is a
+        # FAILED conversion: nothing is replaced, the original stays put, and
+        # the run reports it (see run_optimize_flacs' conversion loop).
+        audio_note = ""
+        if spec["lossless"]:
+            identity_ok, identity_msg, audio_note = _lossless_identity(
+                filepath, tmp, spec, ffmpeg_exe, src_stream)
+            if not identity_ok:
+                return (filename, False, identity_msg, 0, 0)
+            if audio_note:
+                log(c(f"  [audio identity] {filename}: {audio_note}",
+                      Color.YELLOW))
+
         try:
             src_size = os.path.getsize(filepath)
         except OSError:
@@ -548,9 +827,11 @@ def _convert_lossless_source(args):
         b_add = out_size
         src_label = os.path.splitext(filepath)[1].lstrip(".").upper()
         dst_label = out_ext.lstrip(".").upper()
+        verified = " · audio identity verified" if spec["lossless"] else ""
         return (filename, True,
                 f"{src_size // 1024} KB {src_label} -> {out_size // 1024} KB "
-                f"{dst_label}" + (" (original moved to trash)" if moved else ""),
+                f"{dst_label}" + (" (original moved to trash)" if moved else "")
+                + verified,
                 b_rem, b_add)
     except Exception as e:
         return (filename, False, f"exception: {e}", 0, 0)
@@ -747,7 +1028,25 @@ def _optimize_flac(args):
 
         if result.returncode != 0:
             err = (result.stderr or "").strip()
-            return (filename, False, f"flac.exe failed: {err}", 0, 0)
+            last = next((ln.strip() for ln in reversed(err.splitlines())
+                         if ln.strip()), "") or f"rc={result.returncode}"
+            # `-V` has flac decode its own output and compare it with what it
+            # read, so this branch is the encode failing to reproduce the
+            # source — and, one case sharper, the source's stated STREAMINFO
+            # MD5 not being the MD5 of its own audio. That file is corrupt or
+            # dishonestly written, so its audio is not a master anything
+            # should be re-encoded from: the temp output is dropped and the
+            # original stays exactly where it was. Named, because
+            # "flac.exe failed" alone made the two look alike.
+            if "MD5sum of input is different" in err:
+                return (filename, False,
+                        f"{md5_finding(MD5_MISMATCH, 'flac -V: ' + last)} — "
+                        f"the original was kept and NOT re-encoded", 0, 0)
+            if "Verify failed" in err or "verify failed" in err:
+                return (filename, False,
+                        f"the re-encode does not reproduce the source's audio "
+                        f"({last}) — the original was kept", 0, 0)
+            return (filename, False, f"flac.exe failed: {last}", 0, 0)
 
         if not os.path.exists(temp_path):
             return (filename, False, "flac.exe produced no output", 0, 0)
@@ -1054,9 +1353,28 @@ def run_optimize_flacs(config):
                             stats["total_bytes_removed"] += b_rem
                             stats["total_bytes_added"] += b_add
                             _pbar_update(pbar2, conv_counts, kind="ok")
-                        else:
+                        elif info.startswith("skipped"):
+                            # A skip is by design, not a failure: the file is
+                            # exactly as it was (the target container IS the
+                            # file's own, so there is no original to keep).
                             stats["skipped_count"] += 1
                             _pbar_skip(pbar2, conv_counts)
+                        else:
+                            # A conversion that did not happen and was not a
+                            # by-design skip — a failed encode, a duration
+                            # that changed, or (the identity check) a
+                            # converted file whose audio is not the audio the
+                            # source decoded. The original is still exactly
+                            # where it was, and the run's own error surface
+                            # says which file and why: this used to be
+                            # counted as a SKIP and logged nowhere, so a
+                            # conversion that quietly did not happen looked
+                            # like one that had.
+                            stats["total_scanned"] += 1
+                            stats["error_count"] += 1
+                            stats["errors"].append((filename, info))
+                            log(c(f"  ✕ {filename}: {info}", Color.RED))
+                            _pbar_update(pbar2, conv_counts, kind="fail")
                     if pbar2:
                         pbar2.close()
 

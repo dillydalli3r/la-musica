@@ -1,0 +1,38 @@
+{
+  "mount": "/mnt/music",
+  "label": null,
+  "type": "nfs",
+  "total_bytes": null,
+  "free_bytes": null,
+  "used_bytes": null,
+  "percent_used": null,
+  "library": {
+    "path": "/mnt/music/Library",
+    "bytes": 800000000,
+    "files": 1200,
+    "audio_bytes": 780000000,
+    "sidecar_bytes": 20000000
+  },
+  "app_data": { "path": "/home/ml/.local/share/la-musica", "bytes": 120000000, "files": 400 },
+  "trash": { "path": "/home/ml/.local/share/la-musica/trash", "bytes": 50000000, "files": 66 },
+  "dependencies": { "path": "/home/ml/.local/share/la-musica/tools", "bytes": 130000000, "files": 2400 },
+  "app_total": { "bytes": 400000000, "files": 3200, "measured": true },
+  "downloads": {
+    "bytes": 100000000,
+    "files": 334,
+    "staging_bytes": 0,
+    "staging_files": 0,
+    "roots": [{ "path": "/mnt/music/.soulseek", "bytes": 100000000, "files": 334 }]
+  },
+  "skipped": [
+    { "path": "/mnt/music/Library/ffmpeg", "reason": "symbolic link", "kind": "link" },
+    { "path": "/mnt/music/Library/ffprobe", "reason": "symbolic link", "kind": "link" },
+    { "path": "/mnt/music/Library/slskd", "reason": "symbolic link", "kind": "link" },
+    { "path": "/mnt/music/Library/Artists/Beta", "reason": "Permission denied", "kind": "unreadable" }
+  ],
+  "skipped_count": 4,
+  "skipped_links": 3,
+  "skipped_unreadable": 1,
+  "scanned_at": 1758600000,
+  "took_ms": 903
+}

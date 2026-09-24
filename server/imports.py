@@ -845,20 +845,38 @@ def _with_families(text, skipped):
     return f"{text} — {extra}" if text else extra
 
 
-def _with_settled(text, settled):
+def _with_settled(text, settled, dropped=None):
     """*text* plus what the digital settle had to do (see `chain_summary`).
 
-    Only the lyric half is named here: a SOURCE the pipeline could not state is
-    a `source` GAP, and the report's own prompt is what asks for it — telling
-    the user twice would read as two problems. Removing lyrics is not a gap (a
-    gap would be lyrics that are MISSING): it is something this import DID, and
-    the user has to hear it from the import rather than discover it later.
+    The lyric half is named in the SETTLE's own words
+    (`lyrics_removed_sentence`, i.e. the two sentences above), and the half the
+    import's FIRST pass did — `drop_arrived_values` clears the arrived lyrics
+    so script 13 can fetch this import's own — is named too: an unattended
+    import whose arrived lyrics were just thrown away must not be reported as
+    "every lyric is timed" (see `LYRICS_ARRIVED_CLEARED`). The two sets of
+    files are disjoint (the drop runs first), so each clause speaks only for
+    its own.
+
+    A SOURCE the pipeline could not state is NOT named here: that is a `source`
+    GAP, and the report's own prompt is what asks for it — telling the user
+    twice would read as two problems. Removing lyrics is not a gap (a gap would
+    be lyrics that are MISSING): it is something this import DID.
     """
     lyr = (settled or {}).get("lyrics") or {}
+    clauses = []
     if lyr.get("state") == "cleaned" and lyr.get("dropped"):
-        return (f"{text} — untimed lyrics removed on {lyr['dropped']} file(s) "
-                "(synced lyrics are required here; see Settings → Lyrics)")
-    return text
+        said = lyrics_removed_sentence(lyr.get("unformatted"),
+                                       lyr.get("dropped"))
+        if said:
+            clauses.append(said)
+    formatted = int(lyr.get("formatted") or 0)
+    if formatted > 0:
+        clauses.append(LYRICS_ARRIVED_FORMATTED.format(n=formatted))
+    cleared = int((dropped or {}).get("lyrics") or 0)
+    if cleared > 0:
+        clauses.append(LYRICS_ARRIVED_CLEARED.format(n=cleared))
+    said = " ".join(clauses)
+    return f"{text} — {said}" if (said and text) else (said or text)
 
 
 def chain_summary(result):
@@ -894,20 +912,20 @@ def chain_summary(result):
         if res.get("chain_off") or not res.get("chain"):
             return _with_settled(_with_families(
                 "no script chain was run (import_auto_scripts is off)",
-                skipped), settled)
+                skipped), settled, res.get("dropped"))
         return _with_settled(_with_families(
             "the script chain did not run"
-            + (f": {errors[0]}" if errors else ""), skipped), settled)
+            + (f": {errors[0]}" if errors else ""), skipped), settled, res.get("dropped"))
     failed = [s for s in scripts if isinstance(s, dict) and s.get("error")]
     total = len(scripts)
     if not failed:
         return _with_settled(_with_families(
             f"the script chain ran {total} script" + ("" if total == 1 else "s"),
-            skipped), settled)
+            skipped), settled, res.get("dropped"))
     names = ", ".join(str(s.get("label") or s.get("id")) for s in failed[:3])
     return _with_settled(_with_families(
         f"the script chain ran {total - len(failed)} of {total} scripts — "
-        f"{len(failed)} failed ({names})", skipped), settled)
+        f"{len(failed)} failed ({names})", skipped), settled, res.get("dropped"))
 
 
 def _chain_off_note(cfg):
@@ -2817,14 +2835,31 @@ def drop_arrived_values(album_dir, cfg=None, chain=None):
             gone = []
             if drop["lyrics"] and should_write_audio_tag(cfg, "LYRICS",
                                                          filepath=path):
+                from mlo.lyrics import has_lyrics_text
                 lrc = _lrc_for(path)
                 if not (keep_synced and _arrived_lyric_is_synced(af, lrc)):
-                    if str(af.get_lyrics() or "").strip():
+                    # Counted only when the source held LYRICS: a tag or a
+                    # sidecar carrying nothing but metadata or whitespace is
+                    # not a lyric (`has_lyrics_text`, the app's one judgement,
+                    # and the one the grader's own flags use), so clearing a
+                    # stub is hygiene — and claiming "1 file of arrived lyrics
+                    # cleared" over it would be a count that lies.
+                    if has_lyrics_text(af.get_lyrics()):
                         af.delete_lyrics()
                         gone.append("lyrics")
+                    elif str(af.get_lyrics() or "").strip():
+                        af.delete_lyrics()
+                    held = False
+                    try:
+                        with open(lrc, "r", encoding="utf-8",
+                                  errors="replace") as _f:
+                            held = has_lyrics_text(_f.read())
+                    except OSError:
+                        held = False
                     if os.path.isfile(lrc):
                         os.remove(lrc)
-                        gone.append("lyrics")
+                        if held:
+                            gone.append("lyrics")
                     # A transliteration / translation is a transform OF the
                     # lyric: once the import replaces that lyric the stored
                     # ones describe words that are no longer in the file, and
@@ -3076,10 +3111,10 @@ def _album_lyric_verdict(album_dir, cfg):
 
 
 LYRICS_UNTIMED_DROPPED = (
-    "untimed lyrics were removed: this install requires synced lyrics "
-    "(lyrics_allow_plain is off) and no script can time a lyric that arrived "
-    "without timestamps — the fetch replaced them where a source had the "
-    "track, otherwise fetch lyrics for it or allow plain lyrics in "
+    "{n} file(s) of untimed lyrics were removed: this install requires synced "
+    "lyrics (lyrics_allow_plain is off) and no script can time a lyric that "
+    "arrived without timestamps — the fetch replaced them where a source had "
+    "the track, otherwise fetch lyrics for it or allow plain lyrics in "
     "Settings → Lyrics")
 
 # The same sentence for the OTHER way a lyric is unusable: it is timed, but the
@@ -3088,9 +3123,59 @@ LYRICS_UNTIMED_DROPPED = (
 # script)") names a script that cannot help, so the import removes it and says
 # what it did rather than hand the user a dead end.
 LYRICS_UNFORMATTABLE_DROPPED = (
-    "lyrics were removed: they are not in the form this install's grading "
-    "check asks for and the Lyrics script cannot make them so — fetch lyrics "
-    "for those tracks instead")
+    "{n} file(s) of lyrics were removed: they are not in the form this "
+    "install's grading check asks for and the Lyrics script cannot make them "
+    "so — fetch lyrics for those tracks instead")
+
+
+def lyrics_removed_sentence(unformatted=0, dropped=0):
+    """The ONE sentence for the lyrics an import removed, with its counts.
+
+    The two sentences above are the SETTLE's own (``settle_digital_lyrics``);
+    this is where they meet the numbers, so the settle's report and the import
+    summary (:func:`chain_summary`, the line every unattended surface prints)
+    cannot word the same removal in two ways. *unformatted* is how many of
+    *dropped* were timed but not in the form the grade asks for — the mixed
+    case names both counts, because they call for different follow-ups.
+
+    "" when nothing was removed: an import that removed no lyrics has no
+    sentence to make about them.
+    """
+    try:
+        unformatted = int(unformatted or 0)
+        dropped = int(dropped or 0)
+    except (TypeError, ValueError):
+        return ""
+    if dropped <= 0:
+        return ""
+    if unformatted >= dropped:
+        return LYRICS_UNFORMATTABLE_DROPPED.format(n=dropped)
+    if unformatted > 0:
+        return (LYRICS_UNTIMED_DROPPED.format(n=dropped - unformatted) + " "
+                + LYRICS_UNFORMATTABLE_DROPPED.format(n=unformatted))
+    return LYRICS_UNTIMED_DROPPED.format(n=dropped)
+
+
+# The other half of the arrival story: an arrived lyric that WAS canonical or
+# one the formatter could repair is kept and repaired rather than thrown away
+# (`settle_digital_lyrics`'s format pass, i.e. script 1's own per-file pass),
+# and the import says so with script 1's own count. A user who wonders why a
+# downloaded album's lyrics differ from the peer's now has the answer.
+LYRICS_ARRIVED_FORMATTED = (
+    "{n} file(s) of arrived lyrics were canonicalised by the Lyrics script's "
+    "own pass")
+
+
+# What an import's OWN first pass (`drop_arrived_values`) did to the lyrics it
+# arrived holding, when it cleared them to fetch its own: the same family, the
+# other half of the story, and the half a user has to hear — "Every lyric is
+# timed" over a folder whose arrived lyrics were just thrown away is the kind
+# of silence this line exists to end. `import_review_families` and
+# `import_keep_synced_lyrics` are the two ways to keep what arrived.
+LYRICS_ARRIVED_CLEARED = (
+    "{n} file(s) had arrived lyrics cleared (this import fetches its own — "
+    "keep the lyrics family for review to keep what arrived)")
+
 
 def settle_digital_lyrics(album_dir, cfg=None, *, chain=None, dry=False):
     """Drop the lyrics an import cannot use, and say how many went.
@@ -3105,7 +3190,8 @@ def settle_digital_lyrics(album_dir, cfg=None, *, chain=None, dry=False):
       way an album ends up with one is that it ARRIVED carrying it — which is
       exactly what a download does, and what a manual import used to keep.
     * a lyric that is TIMED but still fails the grader's own formatting check
-      (`_lyrics_are_formatted`, i.e. `mlo.grader._lyrics_formatted`) after the
+      (`mlo.grader._lyrics_formatted`, reached through the app's own grade —
+      `_album_lyric_verdict`) after the
       formatter's own per-file pass has run over it — a stacked "[a][b]text"
       line is the usual one. Script 1 cannot repair it either, so it is the
       same dead end under the same message; `unformatted` counts these files
@@ -3123,9 +3209,17 @@ def settle_digital_lyrics(album_dir, cfg=None, *, chain=None, dry=False):
     (the same three `drop_arrived_values` clears, by the same helper).
 
     Returns ``{"state", "checked", "dropped", "unformatted", "kept", "failed",
-    "tracks", "allow_plain", "fetch"}`` — *unformatted* is how many of
-    *dropped* were timed but not in the form the grade asks for. *state* is one
-    of:
+    "empty", "formatted", "tracks", "message", "allow_plain", "fetch"}`` —
+    *unformatted* is how many of *dropped* were timed but not in the form the
+    grade asks for, *empty* is how many files hold NO lyric at all (neither
+    kind — the absence, counted apart from `kept` so a caller can tell an album
+    whose lyrics are all timed from one whose tracks carry none), *formatted*
+    is how many files an ARRIVED
+    lyric was canonicalized on (script 1's own per-file pass, its ``modified``
+    status — what "the pipeline canonicalized it" counts), and *message* is
+    this pass's own sentence about what it removed
+    (`lyrics_removed_sentence`, "" when it removed nothing) so a caller prints
+    the import's words rather than composing its own. *state* is one of:
 
         cleaned      the unusable lyrics were removed (*dropped* files)
         would-clean  a *dry* call: that many WOULD go (nothing was touched)
@@ -3139,15 +3233,15 @@ def settle_digital_lyrics(album_dir, cfg=None, *, chain=None, dry=False):
     from mlo import import_policy
     from mlo.audio import AudioFile
     from mlo.config import should_write_audio_tag
-    from mlo.lyrics import _lrc_for, stored_lyrics_kind
+    from mlo.lyrics import _lrc_for, has_lyrics_text, stored_lyrics_kind
 
     cfg = cfg or {}
     chain = chain_for(cfg) if chain is None else list(chain)
     allow_plain = bool(cfg.get("lyrics_allow_plain", False))
     fetch = 13 in chain and "lyrics" not in import_policy.review_families(cfg)
     out = {"state": "", "checked": 0, "dropped": 0, "unformatted": 0,
-           "kept": 0, "failed": 0, "tracks": [], "allow_plain": allow_plain,
-           "fetch": bool(fetch)}
+           "kept": 0, "failed": 0, "empty": 0, "formatted": 0, "tracks": [],
+           "message": "", "allow_plain": allow_plain, "fetch": bool(fetch)}
     files = _audio_files(album_dir)
     if not files:
         out["state"] = "no-tracks"
@@ -3162,16 +3256,23 @@ def settle_digital_lyrics(album_dir, cfg=None, *, chain=None, dry=False):
         return out
 
     def _one(path):
-        """One file: "dropped", "kept", "none" or "failed".
+        """One file: "dropped", "kept", "none", "empty" or "failed".
 
         *drop* ("dropped") is only ever returned when the file's own lyric was
         really removed — a dry call reports "would" instead, so a count can
-        never claim a write that did not happen.
+        never claim a write that did not happen. "empty" is a file that holds
+        no lyric at all (neither kind): nothing was unusable and nothing was
+        removed, and it is counted apart so a report can tell an album whose
+        lyrics are all timed from one whose lyrics are all gone.
+
+        Returns ``(row, formatted)``: *formatted* is True when script 1's own
+        per-file pass rewrote this file's lyrics (its ``modified`` status), so
+        the import can say how many arrived lyrics it had to canonicalize.
         """
         try:
             af = AudioFile(path)
             if af.audio is None:
-                return "failed"
+                return ("failed", False)
             lrc_path = _lrc_for(path)
             try:
                 with open(lrc_path, "r", encoding="utf-8", errors="replace") as fh:
@@ -3179,32 +3280,52 @@ def settle_digital_lyrics(album_dir, cfg=None, *, chain=None, dry=False):
             except OSError:
                 lrc_text = None
             embedded = af.get_lyrics() or None
+            if not (has_lyrics_text(embedded) or has_lyrics_text(lrc_text)):
+                # Nothing of this family is here: a tag or a sidecar holding
+                # only metadata, whitespace or bare timestamps is not a lyric
+                # (`has_lyrics_text` — the one judgement the grader's own flags
+                # and the wizard use), so there is nothing for this pass to
+                # remove and nothing to claim it removed. Counted as "empty"
+                # rather than as a kept lyric, and left alone: clearing a stub
+                # is the family pass's job (`drop_arrived_values`), not a
+                # removal this report would have to word.
+                return ("empty", False)
             kind = stored_lyrics_kind(embedded, lrc_text)
             if kind is None:
-                return "none"
+                return ("empty", False)
             if not should_write_audio_tag(cfg, "LYRICS", filepath=path):
-                return "none"
+                return ("none", False)
+            unusable = kind == "plain"
+            reason = "untimed" if unusable else ""
             if dry:
-                return "would"
+                # The decision a real call makes, minus the writes: a timed
+                # lyric is KEPT (canonicalized by the pass below), an untimed
+                # one would go. Reporting every file that holds lyrics as
+                # "would drop" claimed removals a real call would not perform —
+                # a preview that overstates is not a preview.
+                return ("would", False) if unusable else ("kept", False)
             if not all(hasattr(af, m) for m in ("has_tag", "delete_tag",
                                                 "delete_lyrics")):
                 # A stand-in AudioFile (a test double) has no container to
                 # clear: nothing was removed, and the caller hears "kept".
-                return "none"
-            unusable = kind == "plain"
-            reason = "untimed" if unusable else ""
+                return ("none", False)
             if not unusable:
                 # FORMAT FIRST, with the very script the grader names: the
                 # Lyrics formatter's own per-file pass — what "run Lyrics
                 # script" means. Whether that was ENOUGH is not decided here:
                 # pass two asks the app's own grade (`_album_lyric_verdict`),
                 # so this import keeps exactly the lyrics the grade accepts.
+                # Its own answer is captured: a lyric script 1's pass just
+                # rewrote is a fact this import reports (see `formatted`), the
+                # same per-file status the Lyrics script books.
                 try:
                     from mlo.lyrics import _process_lyrics_for_audio
-                    _process_lyrics_for_audio(path, cfg)
+                    status = _process_lyrics_for_audio(path, cfg)
+                    if str((status or ("",))[0]) == "modified":
+                        return ("kept", True)
                 except Exception:
                     traceback.print_exc()
-                return "none"
+                return ("kept", False)
             removed = bool(str(embedded or "").strip())
             if removed:
                 af.delete_lyrics()
@@ -3212,7 +3333,7 @@ def settle_digital_lyrics(album_dir, cfg=None, *, chain=None, dry=False):
                 os.remove(lrc_path)
                 removed = True
             if not removed:
-                return "none"
+                return ("none", False)
             try:
                 from mlo import lyrics_xlit
                 for kind in ("TRANSLITERATION", "TRANSLATION"):
@@ -3220,17 +3341,26 @@ def settle_digital_lyrics(album_dir, cfg=None, *, chain=None, dry=False):
             except Exception:
                 traceback.print_exc()
             if dry:
-                return "would-unformatted" if reason == "unformatted" else "would"
-            return "dropped-unformatted" if reason == "unformatted" else "dropped"
+                # Pass one no longer classifies a removal as timed-vs-unformatted
+                # (the settle's SECOND pass owns the `unformatted` count, from
+                # script 1's own verdict): a row here is simply "would"/"dropped".
+                return ("would", False)
+            return ("dropped", False)
         except Exception:
             traceback.print_exc()
-            return "failed"
+            return ("failed", False)
 
     workers = worker_count(cfg, default=8, maximum=8, items=len(files))
     with ThreadPoolExecutor(max_workers=workers) as ex:
         outcomes = list(ex.map(_one, files))
-    for path, row in zip(files, outcomes):
+    for path, (row, formatted) in zip(files, outcomes):
         out["checked"] += 1
+        if formatted:
+            # Script 1's own per-file pass rewrote this file's lyrics into the
+            # canonical form — the count the import reports for "canonicalized
+            # it" (``formatted``), the same ``modified`` status the Lyrics
+            # script books for itself.
+            out["formatted"] += 1
         if row in ("dropped", "would", "dropped-unformatted", "would-unformatted"):
             out["dropped"] += 1
             if "unformatted" in row:
@@ -3238,10 +3368,17 @@ def settle_digital_lyrics(album_dir, cfg=None, *, chain=None, dry=False):
             out["tracks"].append(path)
         elif row == "failed":
             out["failed"] += 1
+        elif row == "empty":
+            # Walked, holds nothing of this family: kept (nothing was theirs to
+            # remove) and counted apart so the report can say so.
+            out["empty"] += 1
+            out["kept"] += 1
         else:
             out["kept"] += 1
     if out["dropped"]:
         out["state"] = "would-clean" if dry else "cleaned"
+        out["message"] = lyrics_removed_sentence(out["unformatted"],
+                                                 out["dropped"])
     elif out["failed"]:
         out["state"] = "failed"
     else:
@@ -3288,7 +3425,15 @@ def settle_digital_lyrics(album_dir, cfg=None, *, chain=None, dry=False):
             except Exception:
                 traceback.print_exc()
                 out["failed"] += 1
+        # The counts pass two just changed — the sentence is derived from them,
+        # so it is refreshed here rather than left at pass one's wording (a
+        # report that names "untimed" for a lyric the formatter could not fix
+        # is the kind of detail a person acts on).
+        if out["dropped"]:
+            out["message"] = lyrics_removed_sentence(out["unformatted"],
+                                                     out["dropped"])
     return out
+
 
 def settle_digital_import(album_dir, cfg=None, *, release=None, provider="",
                           value="", chain=None, metadata=False, dry=False):

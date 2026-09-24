@@ -87,6 +87,26 @@ const results = [];
 const check = (name, pass, detail) => results.push({ name, pass: !!pass, detail: String(detail) });
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
+/** The digits a stamp is SUPPOSED to read at `decimals` — `mm:ss.xx`, the same
+ *  integer arithmetic the app's one formatter uses (LyricsViewer's `fmtStamp`,
+ *  which `serializeLrc` writes saved lines with). Comparing the maker's readout
+ *  against this is what makes "the decimals are on screen" measurable: the
+ *  whole-second readout the owner reported ("0:12") cannot equal it. */
+const stampDigits = (t, decimals) => {
+  const total = Math.max(0, Math.round(t * 10 ** decimals));
+  const perMin = 60 * 10 ** decimals;
+  const mm = Math.floor(total / perMin);
+  const ss = Math.floor((total % perMin) / 10 ** decimals);
+  return `${String(mm).padStart(2, "0")}:${String(ss).padStart(2, "0")}.`
+    + String(total % 10 ** decimals).padStart(decimals, "0");
+};
+
+/** The DURATION-style readout the maker used for a stamp (`0:12`): floored
+ *  seconds, no decimals at all. Kept here as the negative control — a stamp
+ *  that still reads like this is the bug the owner reported. */
+const wholeSeconds = (t) =>
+  `${Math.floor(t / 60)}:${String(Math.floor(t % 60)).padStart(2, "0")}`;
+
 /** Everything this check asserts on, read from the live DOM.
  *
  *  `ring` separates a Tailwind `ring-*` from a real elevation shadow: a ring
@@ -765,6 +785,138 @@ const phoneLyricsPass = async (browser, albumPath, lyricText, w, h) => {
   }
 };
 
+/** The lyrics MAKER's stamp readout, from the FIRST line of a sync.
+ *
+ *  The owner's report: while initially syncing lines the maker showed whole
+ *  seconds — `0:12` in the line's own field and beside the slider — instead of
+ *  the stamp the Save button was about to write (`00:12.34`). The rows fell
+ *  back to a duration-style formatter (minutes:seconds, floored) whenever a
+ *  line had no stamp TEXT of its own, which is every line the moment it is
+ *  stamped; the readout beside the slider used the same one.
+ *
+ *  So this drives the real thing: a track whose lyrics the maker starts from
+ *  nothing (plain text typed into the draft, the true first pass), Play, one
+ *  Space, and then the two places a stamp is shown are compared against the
+ *  digits the app's own formatter produces for the time that was stamped. The
+ *  old rounding cannot pass either comparison, and the precision setting is
+ *  exercised both ways (3 decimals as configured, then 2) so the display is
+ *  pinned to the SETTING, not to a hard-coded pair of decimals. */
+const stampDecimalsPass = async (page, album) => {
+  // A track with NO stored lyrics comes first — the editor then opens on its
+  // draft box and the sync starts from the first line, which is the case
+  // reported. Any album's will do; failing that, the album this run is about,
+  // whose lines are stamped the same way.
+  let target = null;
+  let fromScratch = false;
+  const lib = await (await page.request.get(`${BASE}/api/library`)).json();
+  const candidates = (lib.artists ?? []).flatMap((ar) => ar.albums ?? [])
+    .flatMap((al) => (al.tracks ?? []).filter((t) => !t.is_video));
+  for (const t of candidates.slice(0, 8)) {
+    const tags = await (await page.request.get(`${BASE}/api/tags?path=${encodeURIComponent(t.path)}`)).json().catch(() => null);
+    if (typeof tags?.lyrics === "string" && tags.lyrics.trim()) continue;
+    target = t;
+    fromScratch = true;
+    break;
+  }
+  if (!target) target = (album.tracks ?? []).find((t) => !t.is_video) ?? null;
+  if (!target) {
+    check("the maker pass has a track to sync", false, `no music track in ${album.path}`);
+    return;
+  }
+
+  // 3 decimals: the display must follow the SETTING, and the old whole-second
+  // readout is then unmistakably wrong.
+  await page.evaluate(() => localStorage.setItem("mlo.lyricsDecimals", "3"));
+  await page.goto(`${BASE}/track/${encodeURIComponent(target.path)}`, { waitUntil: "networkidle", timeout: 60000 });
+  await sleep(1200);
+  await page.locator('button[title^="Full-screen enhanced editor"]').first().click();
+  await sleep(700);
+  const opened = await page.locator('[role="dialog"]').count();
+  check("the maker opens on the track being synced" + (fromScratch ? " (from scratch)" : ""),
+    opened === 1, `dialogs ${opened}`);
+
+  // The draft box is what a lyric-less track opens on; type the first pass in.
+  const draft = page.locator('[role="dialog"] textarea').first();
+  if (await draft.count()) {
+    await draft.fill("First line of the song\nSecond line of the song\nThird line of the song");
+    await page.locator('[role="dialog"] button', { hasText: "Use these lyrics" }).first().click();
+    await sleep(400);
+  }
+  const rows = await page.locator('[role="dialog"] input[data-lyrictime]').count();
+  check("the maker holds the lines to stamp", rows >= 3, `${rows} line stamp fields`);
+
+  /** What the maker shows right now: the FIRST line's stamp field, the readout
+   *  beside the slider (the pending next stamp) and every row's field. */
+  const read = () => page.evaluate(() => {
+    const dlg = document.querySelector('[role="dialog"]');
+    const range = dlg?.querySelector('input[title="Seek within the track"]');
+    return {
+      stamp: dlg?.querySelector("input[data-lyrictime]")?.value ?? "",
+      readout: range?.previousElementSibling?.textContent?.trim() ?? "",
+      rows: [...dlg.querySelectorAll("input[data-lyrictime]")].map((i) => i.value),
+    };
+  });
+
+  // Before any stamp a from-scratch line reads the line's own time —
+  // 00:00.000 here, i.e. the configured precision and not a hard-coded
+  // placeholder. (A track whose lyrics were already stamped keeps its own
+  // text; that is the parse, not this fix.)
+  const pre = await read();
+  if (fromScratch) {
+    check("an unstamped line already reads at the configured precision",
+      pre.stamp === stampDigits(0, 3), `field "${pre.stamp}" vs "${stampDigits(0, 3)}"`);
+  } else {
+    console.log(`  note: the sync target carries stored lyrics — its first field reads "${pre.stamp}" before stamping`);
+  }
+
+  // Play, seek a little way in so the stamp is a real time rather than 0, then
+  // stamp line 1 with the maker's own hotkey. The audio element is stubbed to
+  // report that time: the stamp is taken from it, and a headless run must not
+  // depend on a decoder having a codec for the fixture.
+  await page.locator('[role="dialog"] button[title^="Play / pause"]').first().click();
+  await sleep(500);
+  const stubbed = await page.evaluate(() => {
+    const a = document.querySelector('[role="dialog"] audio');
+    if (!a) return null;
+    Object.defineProperty(a, "currentTime", { configurable: true, get: () => 12.34, set: () => {} });
+    return a.currentTime;
+  });
+  check("the maker's own decoder is the clock the stamp is taken from",
+    stubbed === 12.34, `audio.currentTime reads ${stubbed}`);
+  await page.evaluate(() => document.activeElement instanceof HTMLElement && document.activeElement.blur());
+  await page.keyboard.press("Space");
+  await sleep(500);
+  await page.screenshot({ path: `${SHOTS}/lyrics-maker-first-stamp.png` });
+
+  const whole = wholeSeconds(12.29); // 12.34 - the 0.05 the stamp backs off
+  const at3 = await read();
+  check("the FIRST stamped line shows the stamp's decimals",
+    at3.stamp === stampDigits(12.29, 3),
+    `field "${at3.stamp}" vs "${stampDigits(12.29, 3)}"`);
+  check("and not the whole-second form the report was about",
+    at3.stamp !== whole, `field "${at3.stamp}" (rounded form "${whole}")`);
+  check("the pending readout beside the slider carries the same digits",
+    at3.readout === stampDigits(12.34, 3),
+    `readout "${at3.readout}" vs "${stampDigits(12.34, 3)}"`);
+  check("the second line is untouched (one stamp, one line)",
+    at3.rows[1] === pre.rows[1], `second field "${at3.rows[1]}" (was "${pre.rows[1]}")`);
+
+  // The precision setting drives the display: 2 decimals, same line, same time.
+  await page.locator('[role="dialog"] select[title="Timestamp precision"]').selectOption("2");
+  await sleep(300);
+  const at2 = await read();
+  check("switching the precision re-reads the stamped line at 2 decimals",
+    at2.stamp === stampDigits(12.29, 2),
+    `field "${at2.stamp}" vs "${stampDigits(12.29, 2)}"`);
+  await page.screenshot({ path: `${SHOTS}/lyrics-maker-stamp-2dec.png` });
+
+  // Nothing was typed into the field and no save ran: the stamp the SAVE would
+  // write is the same digits the row shows (the field is the display of it).
+  await page.keyboard.press("Escape");
+  await sleep(300);
+  check("Escape closes the maker", (await page.locator('[role="dialog"]').count()) === 0);
+};
+
 (async () => {
   fs.mkdirSync(SHOTS, { recursive: true });
   const browser = await chromium.launch({ headless: true });
@@ -1205,6 +1357,15 @@ const phoneLyricsPass = async (browser, albumPath, lyricText, w, h) => {
       false, `could not complete the pass: ${String(e.message || e).split("\n")[0].slice(0, 120)}`);
   } finally {
     await touchCtx.close();
+  }
+
+  // ---- the lyrics maker's stamp readout carries its decimals --------------
+  // Back on the desktop page (the coarse-pointer context above had its own).
+  try {
+    await stampDecimalsPass(page, album);
+  } catch (e) {
+    check("the lyrics maker could be driven",
+      false, `could not complete the pass: ${String(e.message || e).split("\n")[0].slice(0, 140)}`);
   }
 
   for (const r of results) console.log(`${r.pass ? "ok  " : "FAIL"} ${r.name} :: ${r.detail}`);

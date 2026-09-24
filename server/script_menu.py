@@ -47,7 +47,8 @@ from fastapi import APIRouter
 
 from mlo.cli import SCRIPTS
 from mlo.config import DEFAULT_RUN_ALL_ORDER, load_config
-from server.script_runners import RUNNERS, _DISABLED, _FORCE_ALIASES, _FORCE_KEYS
+from server.script_runners import (OPT_IN_SCRIPTS, RUNNERS, _DISABLED,
+                                   _FORCE_ALIASES, _FORCE_KEYS)
 
 router = APIRouter()
 
@@ -160,6 +161,15 @@ _MENU = {sid: (name, desc) for sid, name, desc in SCRIPTS}
 # one place that mapping is stated; force.ts sends the short spelling).
 _ALIAS_OF = {cfg: alias for alias, cfg in _FORCE_ALIASES.items()}
 
+# The canonical owner of each force flag: the first script whose _FORCE_KEYS
+# names it. A flag two scripts share (force_lyrics is 1's formatter and 13's
+# fetcher) is labelled for the PASS it re-runs, so an option on any script says
+# what pressing it does.
+_OWNER_OF: Dict[str, int] = {}
+for _owner_sid in sorted(_FORCE_KEYS):
+    for _owner_key in _FORCE_KEYS[_owner_sid]:
+        _OWNER_OF.setdefault(_owner_key, _owner_sid)
+
 
 def _apply_kinds(sid: int, scopes: Optional[Dict[int, str]] = None) -> List[str]:
     """The kinds that may offer *sid*, from its scope."""
@@ -174,19 +184,55 @@ def _apply_kinds(sid: int, scopes: Optional[Dict[int, str]] = None) -> List[str]
 
 
 def _force(sid: int) -> dict:
-    """The force flag a forced re-run of *sid* sends.
+    """The force options a forced re-run of *sid* may send through /api/run.
 
-    ``key`` is set only when the script owns exactly ONE flag: a script whose
-    flag is a composite (10 re-runs what the flags above it force) has no single
-    forced spelling, so it gets no forced entry — the same set the Optimization
-    page's Force switch lists."""
-    cfg_keys = [k for k in _FORCE_KEYS.get(sid, ()) if k in _ALIAS_OF]
-    aliases: List[str] = []
-    for key in cfg_keys:
-        alias = _ALIAS_OF[key]
-        if alias not in aliases:
-            aliases.append(alias)
-    return {"keys": aliases, "key": aliases[0] if len(aliases) == 1 else None}
+    ONE OPTION PER FLAG, always: a script whose flag is a composite (10 re-runs
+    what the flags above it force) exposes each of them, labelled with the pass
+    it re-runs, so a force option the registry knows is never unreachable from
+    the menu — and never silently offered only for the scripts that happen to
+    own exactly one.""" 
+    options: List[dict] = []
+    for key in _FORCE_KEYS.get(sid, ()):
+        alias = _ALIAS_OF.get(key)
+        if alias is None:
+            # A flag with no short spelling /api/run accepts: reported, so a
+            # caller can see it exists rather than finding it missing.
+            options.append({"key": None, "config": key, "owner": None,
+                            "owner_label": key})
+            continue
+        owner = _OWNER_OF.get(key)
+        name = _MENU.get(owner, ("", ""))[0] if owner is not None else ""
+        options.append({
+            "key": alias,
+            "config": key,
+            "owner": owner,
+            "owner_label": f"{owner} · {name}" if owner is not None and name else alias,
+        })
+    return {"keys": [o["key"] for o in options if o["key"]], "options": options}
+
+
+def _run_all(order: List[int], scripts: List[dict]) -> dict:
+    """The ids a "run all of these" press posts, ONE LIST PER ENTITY KIND.
+
+    The chain's own order (`run_all_order`), scoped to what the entity's menu
+    offers, minus the opt-in scripts — whose work is outward-facing
+    (``script_runners.OPT_IN_SCRIPTS``: 22 publishes a fingerprint and a
+    recording id to AcoustID's public database), so no menu button ever sweeps
+    one up, not even for a user who ticked it into their own order. The count a
+    client prints is ``len(list)``, so a label and the request it stands for
+    cannot disagree."""
+    applies = {s["id"]: s["applies_to"] for s in scripts}
+    labels = {s["id"]: s["label"] for s in scripts}
+    chain = [sid for sid in order
+             if sid in applies and sid not in OPT_IN_SCRIPTS]
+    return {
+        "order": chain,
+        "by_kind": {kind: [sid for sid in chain if kind in applies[sid]]
+                    for kind in KINDS},
+        "excluded": [{"id": sid, "label": labels.get(sid, str(sid)),
+                      "why": "opt-in: its work is outward-facing"}
+                     for sid in sorted(OPT_IN_SCRIPTS) if sid in applies],
+    }
 
 
 def _gate(sid: int, cfg: dict) -> dict:
@@ -269,6 +315,9 @@ def script_menu(cfg: Optional[dict] = None, runners=None,
         # group of their own: the client renders them as one more section after
         # the groups, so the menu never offers two entries for one plain run.
         "forced_group": {"id": FORCE_GROUP[0], "title": FORCE_GROUP[1]},
+        # What a "run everything that applies" press posts, per entity kind —
+        # the chain's order, scoped to the entity, without the opt-in scripts.
+        "run_all": _run_all(order, scripts),
         "scripts": scripts,
         # Loud, for a client and for a reader of the API: these ids have no
         # applicability entry and are offered everywhere until one is written.

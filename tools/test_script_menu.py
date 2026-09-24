@@ -90,7 +90,8 @@ from mlo.cli import SCRIPTS, SCRIPT_GATES  # noqa: E402
 from mlo.config import DEFAULT_RUN_ALL_ORDER  # noqa: E402
 from server import script_menu, script_runners  # noqa: E402
 from server.script_menu import BECAUSE, KINDS, SCOPES  # noqa: E402
-from server.script_runners import RUNNERS, _DISABLED  # noqa: E402
+from server.script_runners import (OPT_IN_SCRIPTS, RUNNERS, _DISABLED,  # noqa: E402
+                                   _FORCE_ALIASES, _FORCE_KEYS)
 
 # --------------------------------------------------------------------------- #
 # The frozen expectations. They live HERE, not in the module under test: a gate
@@ -117,9 +118,10 @@ EXPECTED_FOLDER_SCOPED = {
 # Kinds whose menu holds folders; the other two hold files.
 EXPECTED_FOLDER_KINDS = {"album", "artist", "library"}
 EXPECTED_FILE_KINDS = {"track", "playlist"}
-# Ids whose one force flag makes a forced re-run entry; the composite (10)
-# is deliberately absent, exactly as web/src/lib/force.ts has no such switch.
-EXPECTED_FORCED = {1, 2, 3, 5, 6, 7, 8, 9, 12, 13, 15, 16, 17, 18, 20}
+# Every script whose own _FORCE_KEYS is non-empty, frozen. 10 is here because
+# it owns a COMPOSITE flag set (the four passes it re-runs) — and each of those
+# four must be reachable from the menu, one entry per flag.
+EXPECTED_FORCED = {1, 2, 3, 5, 6, 7, 8, 9, 10, 12, 13, 15, 16, 17, 18, 20}
 
 FAILED: list = []
 
@@ -237,12 +239,71 @@ check("the menu can run every force switch the app defines",
       force_keys <= emitted, f"unreachable: {sorted(force_keys - emitted)}")
 check("...and emits no force switch the app does not define",
       emitted <= force_keys, f"invented: {sorted(emitted - force_keys)}")
-check("a forced re-run is offered exactly for the scripts with ONE force flag",
-      {row["id"] for row in data["scripts"] if row["force"]["key"]} == EXPECTED_FORCED,
-      str(sorted({row["id"] for row in data["scripts"] if row["force"]["key"]})))
-check("a forced entry names the key /api/run accepts",
-      all(row["force"]["key"] in row["force"]["keys"]
-          for row in data["scripts"] if row["force"]["key"]))
+check("a forced re-run is offered exactly for the scripts that own a flag",
+      {row["id"] for row in data["scripts"] if row["force"]["options"]} == EXPECTED_FORCED,
+      str(sorted({row["id"] for row in data["scripts"] if row["force"]["options"]})))
+# ONE ENTRY PER FLAG: a script with a composite flag (10 re-runs what the flags
+# above it force) must expose each of them, or the registry knows a force option
+# the menu cannot reach.
+check("every flag a script owns has its own option",
+      all(len(row["force"]["options"]) == len(_FORCE_KEYS.get(row["id"], ()))
+          for row in data["scripts"]),
+      str([(row["id"], len(row["force"]["options"]), len(_FORCE_KEYS.get(row["id"], ())))
+           for row in data["scripts"] if len(row["force"]["options"]) != len(_FORCE_KEYS.get(row["id"], ()))]))
+check("...naming the config key and the short key /api/run accepts",
+      all(o["config"] in _FORCE_KEYS.get(row["id"], ())
+          and _FORCE_ALIASES.get(o["key"]) == o["config"]
+          for row in data["scripts"] for o in row["force"]["options"]),
+      str([(row["id"], o) for row in data["scripts"] for o in row["force"]["options"]
+           if o["config"] not in _FORCE_KEYS.get(row["id"], ())
+           or _FORCE_ALIASES.get(o["key"]) != o["config"]]))
+check("...and saying which pass it re-runs, in the registry's own words",
+      all(o["owner"] in RUNNERS and str(o["owner_label"]).strip()
+          for row in data["scripts"] for o in row["force"]["options"]),
+      str([(row["id"], o) for row in data["scripts"] for o in row["force"]["options"]
+           if o["owner"] not in RUNNERS or not str(o["owner_label"]).strip()]))
+check("a flag two scripts share is labelled with the pass it re-runs, not the presser",
+      next(o for o in next(r for r in data["scripts"] if r["id"] == 13)["force"]["options"])["owner"] == 1,
+      str(next(r for r in data["scripts"] if r["id"] == 13)["force"]))
+check("a composite script's options are all of its flags, in the registry's order",
+      [o["config"] for o in next(r for r in data["scripts"] if r["id"] == 10)["force"]["options"]]
+      == list(_FORCE_KEYS[10]), str(next(r for r in data["scripts"] if r["id"] == 10)["force"]))
+
+# --------------------------------------------------------------------------- #
+# Run all — the chain, once, over this entity
+# --------------------------------------------------------------------------- #
+print("== run all ==")
+# The chain this scratch config runs: the configured order, opt-ins aside.
+chain = [sid for sid in DEFAULT_RUN_ALL_ORDER
+         if sid in RUNNERS and sid not in OPT_IN_SCRIPTS]
+check("run_all.order is the chain without the opt-in scripts",
+      data["run_all"]["order"] == chain, str(data["run_all"]["order"]))
+check("the opt-in scripts are NAMED, not merely missing",
+      [e["id"] for e in data["run_all"]["excluded"]] == sorted(OPT_IN_SCRIPTS & set(RUNNERS))
+      and all(str(e["why"]).strip() and str(e["label"]).strip() for e in data["run_all"]["excluded"]),
+      str(data["run_all"]["excluded"]))
+check("NO run-all list sweeps an opt-in script up",
+      not (set(data["run_all"]["order"]) & OPT_IN_SCRIPTS)
+      and not any(set(v) & OPT_IN_SCRIPTS for v in data["run_all"]["by_kind"].values()),
+      str(data["run_all"]["by_kind"]))
+check("one list per entity kind",
+      sorted(data["run_all"]["by_kind"]) == sorted(KINDS), str(sorted(data["run_all"]["by_kind"])))
+for kind in KINDS:
+    want = [sid for sid in chain if kind in next(r for r in data["scripts"] if r["id"] == sid)["applies_to"]]
+    got = data["run_all"]["by_kind"][kind]
+    check(f"the {kind} list is the chain scoped to what that menu offers",
+          got == want, f"{got} != {want}")
+    check(f"the {kind} list holds each script once, in the chain's order",
+          len(got) == len(set(got))
+          and got == sorted(got, key=lambda s: chain.index(s)), str(got))
+check("an album runs every chain script, a track row only the file-scoped ones",
+      data["run_all"]["by_kind"]["album"] == chain
+      and set(data["run_all"]["by_kind"]["track"]) < set(data["run_all"]["by_kind"]["album"])
+      and data["run_all"]["by_kind"]["track"] == [s for s in chain if s in set(RUNNERS) - EXPECTED_FOLDER_SCOPED],
+      str(data["run_all"]["by_kind"]["track"]))
+check("a script out of the chain is not swept up by a run-all press",
+      not (set(payload(runners={**RUNNERS, 99: ("A brand new script", None)},
+                       scopes=SCOPES)["run_all"]["order"]) & {99}))
 
 # --------------------------------------------------------------------------- #
 # Feature switches — the runner's rule, not a second opinion about it

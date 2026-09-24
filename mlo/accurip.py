@@ -67,17 +67,47 @@ _IDENTITY_NAME = "accurip_evidence.json"
 _IDENTITIES: dict = {}
 
 
+def stated_md5(path, af=None):
+    """The STREAMINFO MD5 *path* states, as an int.
+
+    0 means the file states NONE (FLAC's all-zero field: "unknown", never a
+    hash that matches nothing but a *valid* stream), and None means this
+    container cannot answer at all (not a FLAC, unreadable).
+
+    The ONE reader of that field: `_audio_identity` (the key the .accurip
+    evidence and mlo.discs' CRC memo are filed under) and
+    `mlo.flac.stream_md5` (the hex digest the audit and the grader compare
+    against the decoded audio) both ask this, so the two can never disagree
+    about what a file says about itself. *af* is an already-open AudioFile a
+    caller holds (the grader's own tag read) — asking a second time would
+    parse the same container twice for one field.
+    """
+    try:
+        if af is None:
+            af = AudioFile(path)
+        info = getattr(getattr(af, "audio", None), "info", None)
+        sig = getattr(info, "md5_signature", None)
+        return int(sig) if sig else 0
+    except Exception:
+        return None
+
+
+def stream_md5(path, af=None):
+    """The STREAMINFO MD5 *path* states, as 32 lowercase hex digits.
+
+    "" when the file states none (all-zero STREAMINFO MD5) or cannot be read
+    — the two cases a caller must tell apart from a digest it can verify with
+    :func:`mlo.flac.stream_md5_state` / `flac -t`, which is what actually
+    proves the stated digest describes the audio.
+    """
+    sig = stated_md5(path, af)
+    return format(sig, "032x") if sig else ""
+
+
 def _audio_identity(path):
     """*path*'s audio identity — "" when this container cannot answer."""
-    try:
-        af = AudioFile(path)
-        sig = getattr(getattr(af, "audio", None), "info", None)
-        sig = getattr(sig, "md5_signature", 0)
-        if sig:
-            return f"flac:{sig}"
-    except Exception:
-        pass
-    return ""
+    sig = stated_md5(path)
+    return f"flac:{sig}" if sig else ""
 
 
 def _identity_path(config):

@@ -1638,14 +1638,23 @@ export interface ImportSourceResult {
 
 /** The lyrics half: `state` "cleaned" (with `dropped` files), "ok",
  *  "allow-plain" (untimed lyrics are this install's own answer), "no-fetch"
- *  (script 13 is not in the chain — nothing was touched) or "failed". */
+ *  (script 13 is not in the chain — nothing was touched) or "failed".
+ *  `unformatted` is how many of `dropped` were timed but not in the form the
+ *  grade asks for, `empty` is how many files hold no lyric at all, `formatted`
+ *  is how many arrived lyrics script 1's own pass had to canonicalize, and
+ *  `message` is the import's own sentence about what it removed ("" when it
+ *  removed nothing — a caller shows it rather than composing its own). */
 export interface ImportLyricsSettle {
   state: string;
   checked: number;
   dropped: number;
+  unformatted: number;
+  empty: number;
+  formatted: number;
   kept: number;
   failed: number;
   tracks: string[];
+  message: string;
   allow_plain: boolean;
   fetch: boolean;
 }
@@ -1765,10 +1774,14 @@ export interface ScriptMenuScript {
   in_order: boolean;
   scope: "file" | "folder" | null;
   applies_to: EntityKind[];
-  /** The force flag a forced re-run of this script sends through /api/run.
-   *  `key` is absent for a script with no single flag (10 re-runs what the
-   *  flags above it force), which is why it gets no forced entry. */
-  force: { keys: string[]; key: string | null };
+  /** The force options a forced re-run of this script may send through
+   *  /api/run — ONE PER FLAG it owns (10 re-runs what the flags above it force,
+   *  so it carries four). `owner`/`owner_label` name the pass a flag re-runs,
+   *  which is what makes "10 · Format all — 9 · AccurateRip" mean something. */
+  force: {
+    keys: string[];
+    options: { key: string | null; config: string; owner: number | null; owner_label: string }[];
+  };
   /** The feature switch that makes the run skip it — `reason` is the run's own
    *  sentence, so the menu and the report say the same thing. */
   gate: { keys: string[]; enabled: boolean; reason: string };
@@ -1784,6 +1797,15 @@ export interface ScriptMenu {
   /** The section the forced re-runs go in — a variant of the entries above,
    *  not a script group of its own. */
   forced_group: { id: string; title: string };
+  /** What a "run everything that applies" press posts, per entity kind: the
+   *  chain's own order, scoped to the entity, WITHOUT the opt-in scripts
+   *  (`excluded`) — one is a public, outward-facing submission and must never
+   *  be swept up by a menu button. */
+  run_all: {
+    order: number[];
+    by_kind: Record<string, number[]>;
+    excluded: { id: number; label: string; why: string }[];
+  };
   /** In the stack's order. */
   scripts: ScriptMenuScript[];
   /** Registry ids with no applicability entry: offered everywhere and named

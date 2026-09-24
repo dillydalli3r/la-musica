@@ -75,6 +75,7 @@ def lyrics_providers():
         "order": provider_order(cfg),
         "saved": cfg.get("lyrics_sources") or [],
         "allow_plain": bool(cfg.get("lyrics_allow_plain", False)),
+        "search_aliases": bool(cfg.get("lyrics_search_aliases", True)),
         "labels": dict(SOURCE_LABELS),
         "notes": dict(SOURCE_NOTES),
     }
@@ -100,8 +101,10 @@ def lyrics_auto(req: LyricsPathsRequest):
     """Auto-import lyrics for one or more tracks through the provider chain.
 
     Falls back provider by provider (LRCLIB → NetEase → Kugou → QQ Music →
-    Kuwo → YouTube captions by default, all of them synced), then writes
-    per `lyrics_format` exactly like script 13. A track
+    Kuwo → YouTube captions by default), then writes
+    per `lyrics_format` exactly like script 13. A source's answer WITH
+    timestamps wins; untimed text is written only when no source states any,
+    and the track's result says which happened (`kind`). A track
     that already has lyrics is left alone unless *force* is set, and an
     INSTRUMENTAL track is never touched.
 
@@ -286,12 +289,45 @@ def lyrics_publish_batch(req: LyricsPathsRequest):
 def lyrics_find(artist: str = Query(""), title: str = Query(""),
                 album: str = Query(""), duration: float = Query(0.0)):
     """Look lyrics up in the chain without writing anything (the lyrics
-    manager's "search online" box)."""
+    manager's "search online" box).
+
+    The box carries no MusicBrainz ids (the file's own are not in the query),
+    so the alias pass asks MusicBrainz by NAME — the same names the chain
+    searches with, tried only when the typed ones find nothing and only while
+    `lyrics_search_aliases` is on. The hit says which kind it is (`synced` or
+    `plain`: untimed text is an answer, the weaker one) and, when the second
+    pass is what answered, which name and entity found it (`alias_pass`).
+    Nothing is ever written here."""
     from mlo.lyrics_providers import fetch_lyrics
+
     cfg = load_config()
     if not title:
         raise HTTPException(400, "title is required")
-    hit = fetch_lyrics(cfg, artist, title, album or None, duration or None)
+    search_aliases = None
+    if cfg.get("lyrics_search_aliases", True):
+        try:
+            from server.integrations import search_aliases
+        except Exception:
+            search_aliases = None
+
+    def _aliases():
+        """The names the chain's second pass searches with.
+
+        Asked for only when the typed names found nothing (the chain calls
+        this lazily), so an ordinary search costs no MusicBrainz lookup. The
+        slots are the ones a lyrics query is built from; the entities are the
+        MusicBrainz ones their aliases come from."""
+        out = {}
+        for slot, entity, value in (("artist", "artist", artist),
+                                    ("title", "recording", title),
+                                    ("album", "release-group", album)):
+            found = search_aliases(entity, "", cfg, value) if value else []
+            if found:
+                out[slot] = found
+        return out
+
+    hit = fetch_lyrics(cfg, artist, title, album or None, duration or None,
+                       aliases=_aliases if search_aliases else None)
     if not hit:
         return {"found": False, "order": provider_order(cfg)}
     return {"found": True, "order": provider_order(cfg), **hit}

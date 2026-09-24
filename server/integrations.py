@@ -445,6 +445,146 @@ def _alias_ladder(rows, want, name):
     return ""
 
 
+# The three entities a lyrics query is built from, and what MusicBrainz needs
+# to answer for each: the path the lookup and the search both live under, the
+# key the search results sit in, the field that index calls the name, and the
+# key a result states its OWN name under — an artist search answers `name`,
+# while recordings and release-groups answer `title` (verified live).
+# `inc=aliases` is the whole point of the lookups below.
+_ALIAS_ENTITIES = {
+    "artist": ("artist", "artists", "artist", "name"),
+    "recording": ("recording", "recordings", "recording", "title"),
+    "release-group": ("release-group", "release-groups", "releasegroup",
+                      "title"),
+}
+
+# How many alternative names one lookup may hand back. The lyrics chain walks
+# every provider per name, so this is a cost bound, not a completeness one: the
+# reader's own locale and a Latin reading are first by construction.
+_ALIAS_LIMIT = 6
+
+
+def _alias_key(value):
+    """Comparison key for "is this the same name?": case and spacing ignored.
+
+    MusicBrainz states the same name with its own spacing ("Hikaru  Utada",
+    "宇多田 ヒカル"), and a query that only repeats the stored name is a wasted
+    provider request — never a different search.
+    """
+    return " ".join(str(value or "").split()).casefold()
+
+
+def _alias_by_name(path, results_key, field, name_key, name):
+    """The MBID MusicBrainz calls *name* by, or "" — exact and unambiguous.
+
+    A fuzzy result would hand the lyrics chain another song's aliases to search
+    with, and so would a same-named DIFFERENT entity (MusicBrainz holds many
+    recordings called `光`). Only a result whose own name IS *name* (case and
+    spacing ignored) counts, and only when it is the ONLY such result — two
+    entities with the name mean there is no honest single answer, and no alias
+    pass beats a guessed one.
+    """
+    if not name:
+        return ""
+    try:
+        data = mb_get_cached(path, {"query": f'{field}:"{_mb_query(name)}"',
+                                    "limit": 10, "fmt": "json"})
+    except Exception:
+        return ""
+    key = _alias_key(name)
+    found = {str(r.get("id") or "").strip()
+             for r in ((data or {}).get(results_key) or [])
+             if isinstance(r, dict) and _alias_key(r.get(name_key)) == key}
+    found.discard("")
+    return found.pop() if len(found) == 1 else ""
+
+
+def _mb_alias_rows(entity, mbid, name=""):
+    """MusicBrainz's alias rows for one entity — [] when it cannot answer.
+
+    An MBID is the honest way to ask: `inc=aliases` on the entity path answers
+    with exactly that entity's aliases. Without one the name is searched first
+    (the import does not always write MusicBrainz tags) and the entity called
+    by that exact name supplies them. Never raises: MusicBrainz being busy or
+    unreachable leaves the caller with no aliases, never with an error.
+    """
+    table = _ALIAS_ENTITIES.get(str(entity or "").strip().lower())
+    if table is None:
+        return []
+    path, results_key, field, name_key = table
+    if not mbid:
+        mbid = _alias_by_name(path, results_key, field, name_key, name)
+        if not mbid:
+            return []
+    try:
+        data = mb_get_cached(f"{path}/{mbid}", {"inc": "aliases", "fmt": "json"})
+    except Exception:
+        return []
+    return [a for a in ((data or {}).get("aliases") or []) if isinstance(a, dict)]
+
+
+def search_aliases(entity, mbid, cfg=None, name="", limit=_ALIAS_LIMIT):
+    """Alternative NAMES to search a lyrics source with, best first.
+
+    The lyrics chain's second pass reads this: the names a source may know a
+    track by when the stored one finds nothing — `宇多田ヒカル` is `Hikaru
+    Utada`, `光` is `Hikari`, and the reverse for a file tagged the other way
+    round. *entity* is "artist", "recording" or "release-group"; *mbid* is that
+    entity's MusicBrainz id when the file carries one (an exact-name search
+    supplies it otherwise), and *name* is the stored name.
+
+    Ordering is the reader's own preference first — the SAME ladder the pages
+    and their parentheses use (`_alias_ladder`: the `locale` setting's name,
+    then a Latin reading) — and then whatever else MusicBrainz states, aliases
+    in the other script first, which is the reverse direction (`光` for a
+    file called "Hikari"). `search hint` aliases are search-index spellings and
+    are never query names (`_ALIAS_SKIP_TYPES`), and a name equal to the stored
+    one (case and spacing ignored) is dropped.
+
+    Returns a list, [] when MusicBrainz has nothing for the entity or cannot be
+    reached. Never raises, never writes, and it costs nothing at all when the
+    entity is unknown or neither *mbid* nor *name* is given.
+    """
+    rows = []
+    for row in _mb_alias_rows(entity, mbid, name):
+        if str(row.get("type") or "").strip().lower() in _ALIAS_SKIP_TYPES:
+            continue
+        if str(row.get("name") or "").strip():
+            rows.append(row)
+    if not rows:
+        return []
+    want = _locale_preference(cfg)
+    seen = {_alias_key(name)}
+    out = []
+
+    def add(value):
+        value = " ".join(str(value or "").split())
+        key = _alias_key(value)
+        if not value or key in seen:
+            return
+        seen.add(key)
+        out.append(value)
+
+    # 1. what the reader wants names in — the ladder's own answer, so a page
+    #    and the search that follows it call the track the same thing.
+    add(_alias_ladder(rows, want, name))
+    # 2. a Latin reading of a name that has none (`ロストアンブレラ` ->
+    #    "Lost Umbrella"); the ladder's tail, asked on its own so a locale that
+    #    did answer does not hide it.
+    add(_alias_ladder(rows, "", name))
+    # 3. everything else MusicBrainz states, the OTHER script first: a Latin
+    #    name whose aliases are Japanese is the reverse of the case above and
+    #    is exactly what this list exists for.
+    latin_name = _has_latin(name)
+    tail = [a for a in rows if _has_latin(a.get("name")) != latin_name]
+    tail += [a for a in rows if _has_latin(a.get("name")) == latin_name]
+    for row in tail:
+        if len(out) >= limit:
+            break
+        add(row.get("name"))
+    return out[:limit]
+
+
 def _browse_collect(endpoint, extra_params, list_key, count_key, limit=300, offset=0):
     """Browse rows across MusicBrainz's 100-per-request pages.
 

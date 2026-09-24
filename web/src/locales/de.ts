@@ -69,6 +69,13 @@ export default {
   "menu.scripts": "Skripte",
   "menu.forced": "Erzwungener Lauf",
   "menu.forceEntry": "Erzwingen: {script}",
+  "menu.runAll": "Alle {count} Skripte ausführen",
+  "menu.runAllTitle": "Alle {count} Skripte ausführen?",
+  "menu.runAllHint": "Sie laufen über die aktuelle Auswahl, in dieser Reihenfolge:",
+  "menu.openTrackPage": "Titelseite öffnen",
+  "menu.openTrackPageHint": "Die eigene Seite dieses Titels öffnen — Tags, technische Daten und Liedtext",
+  "menu.downloadVideo": "Musikvideo herunterladen",
+  "menu.downloadVideoHint": "Das Musikvideo dieses Titels auf YouTube suchen (Soulseek, wenn YouTube keines hat) und neben dem Album speichern",
   "player.locked_playing": "„{name}“ wird gerade von {label} verwendet — die Wiedergabe läuft weiter, ein erneutes Starten kann aber fehlschlagen.",
 
   "favorites.kind.tracks": "Gemerkte Titel",
@@ -267,6 +274,8 @@ export default {
   "home.stat.playlists": "Wiedergabelisten",
   "home.stat.checks": "Prüfungen bestanden",
 
+  // —— Speicherkarte: die drei Zahlen, die sie zeigt ————————————————————
+  "storage.total": "Gesamt (App + Bibliothek)",
 
   "charts.subtitle": "Was du wirklich gehört hast — und was die Welt hört, jeweils in einem Zeitraum. Die Bibliothekshälfte zählt deine eigenen Wiedergaben; die Online-Hälfte zeigt die Chartliste jedes Anbieters, auf jeder Zeile benannt.",
   "charts.scope.library": "Deine Bibliothek",
@@ -317,6 +326,8 @@ export default {
 
   "settings.language": "Sprache",
   "settings.language_help": "Gilt für diesen Browser — für die Beschriftungen der App, nie für deine Dateinamen oder Tags.",
+  "settings.lyrics_search_aliases": "Songtexte auch unter Alternativnamen suchen",
+  "settings.lyrics_search_aliases_help": "Wenn die erste Suche nach dem Songtext eines Titels nichts findet, wird erneut unter den anderen Namen von Interpret, Album und Titel aus MusicBrainz (Aliase) gesucht — z. B. Hikaru Utada für 宇多田ヒカル. Standardmäßig an.",
   // —— Akzentfarbe (#53): die Namen der Farbfelder und die eigene Farbe ——
   "settings.accent": "Akzentfarbe",
   "settings.accent_red": "Rot",
@@ -453,6 +464,7 @@ export default {
   "import.settle.title": "Von diesem Import geklärt",
   "import.settle.lyrics": "Liedtexte",
   "import.settle.lyrics_removed": "{n} Datei(en): Liedtexte ohne Zeitstempel entfernt (hier sind synchronisierte Liedtexte erforderlich)",
+  "import.settle.lyrics_unformatted": "{n} Datei(en): Liedtexte entfernt — sie sind mit Zeitstempeln versehen, entsprechen aber nicht der Form, die die Prüfung dieser Installation verlangt, und das Liedtext-Skript kann das nicht ändern",
   "import.settle.lyrics_no_fetch": "Unberührt: der Abruf (Skript 13) ist nicht in der Kette dieses Laufs",
   "import.settle.lyrics_allow_plain": "Liedtexte ohne Zeitstempel sind hier erlaubt — behalten",
   "import.settle.lyrics_ok": "Alle Liedtexte haben Zeitstempel",

@@ -4963,7 +4963,10 @@ const finish = async () => {
                 <span className="w-28 shrink-0 text-zinc-400">{t("import.settle.lyrics")}</span>
                 <span className={settleResult.lyrics.state === "cleaned" ? "text-amber-300" : "text-zinc-400"}>
                   {settleResult.lyrics.state === "cleaned"
-                    ? t("import.settle.lyrics_removed", { n: settleResult.lyrics.dropped })
+                    ? t(settleResult.lyrics.unformatted >= settleResult.lyrics.dropped
+                        ? "import.settle.lyrics_unformatted"
+                        : "import.settle.lyrics_removed",
+                      { n: settleResult.lyrics.dropped })
                     : settleResult.lyrics.state === "no-fetch"
                       ? t("import.settle.lyrics_no_fetch")
                       : settleResult.lyrics.state === "allow-plain"

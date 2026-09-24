@@ -1,0 +1,33 @@
+{
+  "mount": "F:\\",
+  "label": "Data",
+  "type": "fixed",
+  "total_bytes": 1000000000000,
+  "free_bytes": 300000000000,
+  "used_bytes": 700000000000,
+  "percent_used": 70,
+  "library": {
+    "path": "F:\\Music",
+    "bytes": 2650000000,
+    "files": 5000,
+    "audio_bytes": 2640000000,
+    "sidecar_bytes": 10000000
+  },
+  "app_data": { "path": "F:\\Music\\.mlo", "bytes": 200000000, "files": 900 },
+  "trash": { "path": "F:\\Music\\.mlo-trash", "bytes": 100000000, "files": 300 },
+  "dependencies": { "path": "C:\\mlo-tools", "bytes": 860000000, "files": 6866 },
+  "app_total": { "bytes": 1460000000, "files": 8106, "measured": true },
+  "downloads": {
+    "bytes": 300000000,
+    "files": 40,
+    "staging_bytes": 20000000,
+    "staging_files": 5,
+    "roots": [{ "path": "F:\\Music\\.soulseek", "bytes": 300000000, "files": 40 }]
+  },
+  "skipped": [],
+  "skipped_count": 0,
+  "skipped_links": 0,
+  "skipped_unreadable": 0,
+  "scanned_at": 1758600000,
+  "took_ms": 412
+}

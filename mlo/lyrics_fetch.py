@@ -16,6 +16,18 @@ what keeps a whole library's instrumentals out of the import's "needs you"
 prompt without inventing a single tag: the alternative was a LYRICS grading
 failure for every instrumental a source had no lyrics for, which is exactly
 what an unattended import must not hand to a person.
+
+"Nothing" means nothing, though: the chain's own two fallbacks run first, and
+both are the runner's business because the summary reports them.
+
+* UNTIMED lyrics are written when no source states timestamps — the owner's
+  rule, and the reason a plain hit is `kind: "plain"` with status "ok" instead
+  of the "no confident match" that used to end in INSTRUMENTAL=1 on a track a
+  source had the words for.
+* The ALIAS pass is the chain's second walk, under the names MusicBrainz
+  states for the artist, the recording and the release-group
+  (`lyrics_search_aliases`, on by default): the Japanese/Latin pair in both
+  directions, and any other name a source knows the track by.
 """
 import os
 
@@ -42,6 +54,75 @@ from .ui import print_header, log, c, Color
 # when the title is an exact match and the duration agrees, and rejects it as
 # soon as the duration is off or the title is fuzzy.
 _AUTO_MIN_SCORE = 0.85
+
+# The MusicBrainz identity a lyrics search can be re-asked in another name: the
+# slot a lyrics query is built from, the MusicBrainz entity its aliases come
+# from, and the tag this app's own import writes that entity's MBID into (see
+# mlo.autotag). The track artist's id is preferred, the album artist's is the
+# fallback — a compilation or a featured credit often has only the latter.
+_ALIAS_ENTITIES = (
+    ("artist", "artist",
+     ("MUSICBRAINZ_ARTISTID", "MUSICBRAINZ_ALBUMARTISTID")),
+    ("title", "recording", ("MUSICBRAINZ_TRACKID",)),
+    ("album", "release-group", ("MUSICBRAINZ_RELEASEGROUPID",)),
+)
+
+
+def _search_aliases(get_tag, config, artist, title, album):
+    """Alternative NAMES for this track's artist, title and album, or {}.
+
+    The whole input of the chain's second pass (``fetch_lyrics``'s *aliases*):
+    ``{"artist": [...], "title": [...], "album": [...]}``, each list as
+    ``server.integrations.search_aliases`` orders it — the reader's own locale
+    first, then a Latin reading, then whatever else MusicBrainz states, and
+    never a `search hint` or the stored name itself. This is where the file's
+    MusicBrainz tags are read: `宇多田ヒカル` is `Hikaru Utada` for a source that
+    never saw the Japanese name.
+
+    An MBID is required, one per entity, from the tags this app's own import
+    wrote (`MUSICBRAINZ_ARTISTID` — or the album artist's — `..._TRACKID`,
+    `..._RELEASEGROUPID`). It is the only thing that makes an alias THIS
+    track's: MusicBrainz searched by name alone cannot tell one `光` from
+    another, and an unattended run must not spend a name search per entity on
+    every track it could not fill either. The manual search box, which is one
+    track and one person, still asks by name (see `server.api_lyrics`).
+
+    Switched off entirely by `lyrics_search_aliases` (on by default) before any
+    lookup happens, and a lookup that cannot answer (no tag, a host that is
+    busy) simply leaves that entity out — no alias is better than a guessed
+    query. Never raises and never writes.
+    """
+    if not bool((config or {}).get("lyrics_search_aliases", True)):
+        return {}
+    try:
+        from server.integrations import search_aliases
+    except Exception:
+        return {}
+    names = {"artist": artist, "title": title, "album": album}
+    out = {}
+    for slot, entity, id_tags in _ALIAS_ENTITIES:
+        name = str(names.get(slot) or "").strip()
+        if not name:
+            continue
+        mbid = ""
+        for tag in id_tags:
+            try:
+                mbid = str(get_tag(tag) or "").strip()
+            except Exception:
+                mbid = ""
+            if mbid:
+                break
+        if not mbid:
+            continue
+        try:
+            found = search_aliases(entity, mbid, config, name)
+        except Exception:
+            continue
+        found = [str(n).strip() for n in (found or []) if str(n or "").strip()]
+        if found:
+            out[slot] = found
+    return out
+
 
 
 def _mark_lyrics_absent(path, config, result):
@@ -85,16 +166,21 @@ def fetch_one(path, config, force=False):
     the API's "auto-import lyrics" button.
 
     Returns `{path, status: "ok"|"skipped"|"failed", provider,
-    provider_label, synced, wrote: {embedded, lrc}, reason, error}`, plus
-    `marked_instrumental` / `instrumental` / `instrumental_note` on a track
-    whose search found nothing (`_mark_lyrics_absent`). The skip
+    provider_label, kind: "synced"|"plain", synced, alias_pass, wrote:
+    {embedded, lrc}, reason, error}`, plus `marked_instrumental` /
+    `instrumental` / `instrumental_note` on a track whose search found nothing
+    (`_mark_lyrics_absent`). *kind* is what was WRITTEN — a plain fallback is
+    status "ok" with `kind: "plain"`, never "no lyrics found", because a source
+    had the words and only the timestamps were missing. *alias_pass* is present
+    (and names the entity and the name that found the track) when the chain's
+    second pass is what answered. The skip
     rules (INSTRUMENTAL, existing embedded/sidecar lyrics unless *force*),
     the `lyrics_format` write mode and the canonicalization pass are the same
     ones the batch runner uses, so a lyrics run from the UI and a lyrics run
     from the Optimization page produce identical files.
     """
     result = {"path": path, "status": "skipped", "provider": None,
-              "provider_label": None, "synced": False,
+              "provider_label": None, "kind": None, "synced": False,
               "wrote": {"embedded": False, "lrc": None},
               "reason": "", "error": ""}
     fmt = str(config.get("lyrics_format") or "EMBEDDED").upper()
@@ -143,8 +229,17 @@ def fetch_one(path, config, force=False):
         # different-artist answer cannot (that is the usual false positive:
         # the lyrics of a namesake cover). The manual search endpoints keep
         # the loose floor and never write on their own.
-        hit = fetch_lyrics(config, artist, title, af.get_tag("ALBUM"), duration,
-                           youtube_id=youtube_id, min_score=_AUTO_MIN_SCORE)
+        # `aliases` is the chain's SECOND pass: the names MusicBrainz states
+        # for this artist/recording/release-group, tried only when the stored
+        # names found nothing (and only while lyrics_search_aliases is on). It
+        # is passed as a CALLABLE so an answered track never pays for the
+        # MusicBrainz lookups the names come from.
+        album = af.get_tag("ALBUM")
+        hit = fetch_lyrics(
+            config, artist, title, album, duration, youtube_id=youtube_id,
+            min_score=_AUTO_MIN_SCORE,
+            aliases=lambda: _search_aliases(af.get_tag, config, artist, title,
+                                            album))
         if hit is None:
             # Either no provider had it, or every answer was a weak match —
             # both mean "nothing safe to write", and both are retried by the
@@ -164,7 +259,18 @@ def fetch_one(path, config, force=False):
             return result
         result["provider"] = hit["provider"]
         result["provider_label"] = hit.get("provider_label") or hit["provider"]
+        # The KIND is what was written: timestamps, or the untimed fallback.
         result["synced"] = bool((hit.get("synced") or "").strip())
+        result["kind"] = "synced" if result["synced"] else "plain"
+        if hit.get("alias_pass"):
+            # The second pass is what answered — say so, and name the name.
+            result["alias_pass"] = dict(hit["alias_pass"])
+        if not result["synced"]:
+            # Honest, not apologetic: a source had the words, no source had
+            # the timing. `lyrics_allow_plain` is the install's own switch over
+            # STORING untimed lyrics (the grader and the import's settle pass
+            # read it) — the chain does not invent timestamps either way.
+            result["reason"] = "plain lyrics — no source had the timestamps"
 
         if write_sidecar:
             final = _format_for_storage(text, config, optimize=True, is_for_lrc=True)
@@ -190,6 +296,14 @@ def run_fetch_lyrics(config):
     folder = config.get("music_folder") or ""
     stats = new_stats()
     stats["by_provider"] = {}
+    # What was actually WRITTEN: timestamps, or the untimed fallback. The owner
+    # asked for the split to be visible — "2 fetched" hides that one of them
+    # may have no timing at all, which is a weaker answer, not a failure.
+    stats["by_kind"] = {"synced": 0, "plain": 0}
+    stats["by_provider_kind"] = {}      # pid -> {"synced": n, "plain": n}
+    # Tracks answered by the chain's SECOND pass (the alias names) — counted
+    # apart, because "which name found it" is the whole point of that pass.
+    stats["alias_count"] = 0
     # Tracks this run's empty searches settled as instrumental (R162) — booked
     # apart from the provider counts, since no provider answered for them.
     stats["instrumental_count"] = 0
@@ -233,7 +347,13 @@ def run_fetch_lyrics(config):
             stats["instrumental_count"] += 1
         if res["status"] == "ok":
             pid = res["provider"]
+            kind = "synced" if res.get("synced") else "plain"
             stats["by_provider"][pid] = stats["by_provider"].get(pid, 0) + 1
+            stats["by_kind"][kind] = stats["by_kind"].get(kind, 0) + 1
+            row = stats["by_provider_kind"].setdefault(pid, {"synced": 0, "plain": 0})
+            row[kind] += 1
+            if res.get("alias_pass"):
+                stats["alias_count"] += 1
             stats["modified_count"] += 1
             _pbar_update(pbar, counts, "ok")
         elif res["status"] == "failed":
@@ -274,16 +394,35 @@ def run_fetch_lyrics(config):
         except Exception:
             pass
 
+    # The kind split rides on the same line as the counters: "2 fetched" says
+    # nothing about whether either of them has timestamps.
+    kinds = stats["by_kind"]
     log(c(
-        f"lyrics fetched: {counts['ok']} · skipped: {counts['skip']} · failed: {counts['fail']}",
+        f"lyrics fetched: {counts['ok']} · skipped: {counts['skip']} · failed: {counts['fail']}"
+        + (f" · synced: {kinds['synced']} · plain: {kinds['plain']}"
+           if counts["ok"] else ""),
         Color.GREEN if counts["fail"] == 0 else Color.YELLOW,
     ))
     if stats["by_provider"]:
+        def _kinds(pid):
+            """How that provider's answers split — the kind is not implied."""
+            row = stats["by_provider_kind"].get(pid) or {}
+            parts = [f"{row[k]} {k}" for k in ("synced", "plain") if row.get(k)]
+            if not parts:
+                return ""
+            if len(parts) == 1:
+                return f" {parts[0].split(' ', 1)[1]}"
+            return " (" + " · ".join(parts) + ")"
+
         summary = " · ".join(
-            f"{SOURCE_LABELS.get(p, p)}: {n}"
+            f"{SOURCE_LABELS.get(p, p)}: {n}{_kinds(p)}"
             for p, n in sorted(stats["by_provider"].items(), key=lambda kv: -kv[1])
         )
         log(f"sources: {summary}")
+    if stats["alias_count"]:
+        # The second pass answered: the stored names found nothing, the names
+        # MusicBrainz states for them did.
+        log(f"alias pass hit: {stats['alias_count']} track(s)")
     if stats["instrumental_count"]:
         # The decision, out loud: these tracks are why the album is not
         # reported as missing lyrics (see the module docstring).

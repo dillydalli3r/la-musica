@@ -123,14 +123,14 @@ def ts_groups():
     out = {}
     for m in re.finditer(r'\{\s*id:\s*"(\w+)",\s*title:\s*"([^"]+)",(.*?)\n  \},',
                          block, re.S):
-        out[m.group(1)] = (m.group(2), re.findall(r'"(grade_[a-z_]+)"', m.group(3)))
+        out[m.group(1)] = (m.group(2), re.findall(r'"(grade_[a-z0-9_]+)"', m.group(3)))
     return out
 
 
 def ts_relaxed_off():
     src = read("web/src/pages/GradingPage.tsx")
     m = re.search(r"const relaxedOff = \[(.*?)\];", src, re.S)
-    return set(re.findall(r'"(grade_[a-z_]+)"', m.group(1))) if m else set()
+    return set(re.findall(r'"(grade_[a-z0-9_]+)"', m.group(1))) if m else set()
 
 
 def ts_balanced_off():
@@ -138,7 +138,7 @@ def ts_balanced_off():
     puts back, which the server must agree are exactly `BALANCED_OFF`."""
     src = read("web/src/pages/GradingPage.tsx")
     m = re.search(r"const balancedOff = \[(.*?)\];", src, re.S)
-    return set(re.findall(r'"(grade_[a-z_]+)"', m.group(1))) if m else set()
+    return set(re.findall(r'"(grade_[a-z0-9_]+)"', m.group(1))) if m else set()
 
 
 def put(payload):

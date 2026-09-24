@@ -61,7 +61,15 @@ const KINDS = ["album", "track", "artist", "playlist", "library"];
 const ALL = payload.scripts.map((s) => s.id).sort((a, b) => a - b);
 const FOLDER = payload.scripts.filter((s) => s.scope === "folder").map((s) => s.id);
 const FILE = payload.scripts.filter((s) => s.scope === "file").map((s) => s.id);
-const FORCED = payload.scripts.filter((s) => s.force && s.force.key).map((s) => s.id).sort((a, b) => a - b);
+const FORCED = payload.scripts.filter((s) => s.force.options.length).map((s) => s.id).sort((a, b) => a - b);
+// One entry per FLAG, so a composite script contributes several.
+const FORCE_OPTIONS = payload.scripts.reduce((n, s) => n + s.force.options.length, 0);
+const flagsFor = (kind) => payload.scripts.filter((s) => s.applies_to.includes(kind))
+  .reduce((n, s) => n + s.force.options.length, 0);
+const albumFlags = flagsFor("album");
+const trackFlags = flagsFor("track");
+const RUN_ALL = payload.run_all.by_kind;
+const OPT_IN = payload.run_all.excluded.map((e) => e.id);
 
 console.log("== the payload ==");
 check("the payload names the five entity kinds", JSON.stringify(payload.kinds) === JSON.stringify(KINDS),
@@ -78,6 +86,31 @@ check("no script is both file- and folder-scoped",
 check("the payload's groups name the section the menu renders",
   payload.groups.length === 1 && payload.scripts.every((s) => s.group === payload.groups[0].id)
   && !!payload.forced_group?.title);
+check("every force flag a script owns has its own option",
+  payload.scripts.every((s) => s.force.options.length === s.force.keys.length
+    && s.force.options.every((o) => s.force.keys.includes(o.key))),
+  JSON.stringify(payload.scripts.filter((s) => s.force.options.length !== s.force.keys.length).map((s) => [s.id, s.force])));
+check("the menus can reach more than one force option in total",
+  FORCE_OPTIONS > FORCED.length, `options=${FORCE_OPTIONS} scripts=${FORCED.length}`);
+check("an opt-in script is NAMED in the payload, and the run-all lists exclude it",
+  OPT_IN.length > 0
+  && OPT_IN.every((id) => payload.run_all.excluded.find((e) => e.id === id)?.why)
+  && !Object.values(RUN_ALL).some((list) => list.some((id) => OPT_IN.includes(id)))
+  && !payload.run_all.order.some((id) => OPT_IN.includes(id)),
+  JSON.stringify(payload.run_all.excluded));
+check("every ordered run-all list is in the chain's own order, without repeats",
+  Object.entries(RUN_ALL).every(([, list]) =>
+    list.length === new Set(list).size
+    && list.every((id) => payload.run_all.order.includes(id))
+    && JSON.stringify(list) === JSON.stringify(payload.run_all.order.filter((id) => list.includes(id)))),
+  JSON.stringify(RUN_ALL));
+check("an album runs the whole chain, a track row only what a row can run",
+  RUN_ALL.album.length === payload.run_all.order.length
+  && RUN_ALL.track.length < RUN_ALL.album.length
+  && RUN_ALL.track.every((id) => FILE.includes(id)),
+  `album=${RUN_ALL.album.length} track=${RUN_ALL.track.length}`);
+check("the count a menu prints is the list it posts — no separate tally to drift",
+  Object.values(RUN_ALL).every((list) => list.length > 0));
 
 /* ---- the module under test --------------------------------------------- */
 const { createServer } = await import(
@@ -112,15 +145,50 @@ try {
     new Set(albumEntries.map((e) => e.id)).size === albumEntries.length);
   check("...and every entry names its script the way the stack page does",
     albumEntries.every((e) => e.label.startsWith(`${e.id} · `)), albumEntries[0]?.label);
-  check("the album's forced section is the scripts with one force flag",
+  check("the album's forced section has ONE entry per force flag its scripts own",
     album.forced !== null
-    && JSON.stringify(album.forced.entries.map((e) => e.id).sort((a, b) => a - b)) === JSON.stringify(FORCED),
-    JSON.stringify(album.forced?.entries.map((e) => e.id)));
+    && JSON.stringify([...new Set(album.forced.entries.map((e) => e.id))].sort((a, b) => a - b)) === JSON.stringify(FORCED)
+    && album.forced.entries.length === albumFlags,
+    `${album.forced?.entries.length} entries for ${albumFlags} flags`);
+  check("the Run-all entry is not listed among the scripts themselves",
+    albumEntries.every((e) => e.runAll === false));
   check("...and each forced entry sends that script's own force key",
     album.forced.entries.every((e) => {
       const s = payload.scripts.find((x) => x.id === e.id);
-      return e.force === s.force.key && s.force.keys.includes(e.force);
+      return e.force && s.force.options.some((o) => o.key === e.force);
     }), JSON.stringify(album.forced.entries.map((e) => [e.id, e.force])));
+  // A flag that re-runs ANOTHER pass says so, or four entries of one script
+  // would read as four identical lines.
+  const tenForced = album.forced.entries.filter((e) => e.id === 10);
+  check("a composite script's forced entries name the pass each flag re-runs",
+    tenForced.length === 4
+    && tenForced.every((e, i) => e.label.includes(payload.scripts.find((s) => s.id === 10).force.options[i].owner_label))
+    && tenForced.map((e) => e.force).join(",") === "accurip,cue,lyrics,autotag",
+    JSON.stringify(tenForced.map((e) => [e.force, e.label])));
+  check("a single-flag script's forced entry is labelled with the script its press runs",
+    album.forced.entries.find((e) => e.id === 13)?.label === "13 · Fetch lyrics",
+    album.forced.entries.find((e) => e.id === 13)?.label);
+
+  console.log("\n== Run all ==");
+  check("the Run-all entry exists, over the chain scoped to the entity",
+    album.runAll !== null
+    && JSON.stringify(album.runAll.ids) === JSON.stringify(RUN_ALL.album)
+    && album.runAll.runAll === true,
+    JSON.stringify(album.runAll?.ids));
+  check("...it is ONE entry that posts its whole list", album.runAll.ids.length > 1
+    && album.runAll.id === 0);
+  check("...it sweeps in no opt-in script",
+    !album.runAll.ids.some((id) => OPT_IN.includes(id)),
+    JSON.stringify({ ids: album.runAll.ids, optIn: OPT_IN }));
+  check("...and it runs over the whole entity, not just its files",
+    JSON.stringify(album.runAll.targets) === JSON.stringify(["F:/Music/Artist/Album"]),
+    JSON.stringify(album.runAll.targets));
+  const emptyAlbum = menu.scriptSections(payload, "album", { paths: [], albumPath: "" });
+  check("a Run-all press with nothing to run on is disabled",
+    emptyAlbum.runAll !== null && emptyAlbum.runAll.disabled === true);
+  const noRunAll = menu.scriptSections({ ...payload, run_all: { order: [], by_kind: {}, excluded: [] } },
+    "album", { paths: ["a.flac"] });
+  check("a payload with no chain offers no Run-all entry", noRunAll.runAll === null);
   check("a plain entry forces nothing (it keeps the saved force selection)",
     albumEntries.every((e) => e.force === undefined));
 
@@ -153,6 +221,27 @@ try {
   check("a track row's forced section holds only file-scoped scripts",
     track.forced.entries.every((e) => FILE.includes(e.id)) && track.forced.entries.length > 0,
     JSON.stringify(track.forced.entries.map((e) => e.id)));
+  check("...one entry per flag those scripts own, and no more",
+    track.forced.entries.length === trackFlags, `${track.forced.entries.length} != ${trackFlags}`);
+  check("a track row's Run-all posts the FILE-scoped chain, not the album's",
+    track.runAll !== null
+    && JSON.stringify(track.runAll.ids) === JSON.stringify(RUN_ALL.track)
+    && JSON.stringify(track.runAll.ids) !== JSON.stringify(RUN_ALL.album)
+    && track.runAll.ids.every((id) => FILE.includes(id))
+    && !track.runAll.ids.some((id) => FOLDER.includes(id)),
+    JSON.stringify(track.runAll?.ids));
+  check("...and it really is shorter than the album's, so the negative is provable",
+    track.runAll.ids.length < album.runAll.ids.length,
+    `${track.runAll.ids.length} vs ${album.runAll.ids.length}`);
+  check("a track row's Run-all runs over the row itself, not a folder it does not have",
+    JSON.stringify(track.runAll.targets) === JSON.stringify(["F:/Music/Artist/Album/01 One.flac"]),
+    JSON.stringify(track.runAll.targets));
+  check("no Run-all list anywhere contains an opt-in script",
+    KINDS.every((kind) => {
+      const s = menu.scriptSections(payload, kind, { paths: ["F:/Music/A/1.flac"], albumPath: "F:/Music/A", artistPath: "F:/Music" });
+      return !s.runAll || !s.runAll.ids.some((id) => OPT_IN.includes(id));
+    }),
+    JSON.stringify(OPT_IN));
 
   console.log("\n== an artist page ==");
   const artist = menu.scriptSections(payload, "artist", {
@@ -239,6 +328,31 @@ try {
   check("the generated sections' titles come from the locale bundle, with the payload's as fallback",
     /t\("menu\.scripts"\)/.test(code) && /scriptGroupTitle\(g\.id, g\.title\)/.test(code));
 
+  console.log("\n== one press, one request ==");
+  // Every entry hands /api/run its OWN ids: [id] for a script, the whole list
+  // for Run all. A literal `[e.id]` here would post one script for the Run-all
+  // entry, and a second runner would be the drift the payload exists to stop.
+  // TWO call sites, one per kind of entry: the script line and the confirmed
+  // Run-all press (which is the same list, one request).
+  const runCalls = code.match(/api\.run\([^)]*/g) || [];
+  check("every entry posts the ids it carries, through the one /api/run",
+    runCalls.length === 2
+    && runCalls.every((c) => c.includes("e.ids, e.targets"))
+    && !/api\.run\(\[e\.id\]/.test(code),
+    JSON.stringify(runCalls));
+  check("the Run-all line asks before it posts",
+    /onClick: \(\) => setConfirmRunAll\(e\)/.test(code) && /confirmRunAll\.ids\.map/.test(code));
+  check("...and its confirmation is the app's Modal, reachable only through a button",
+    /confirmRunAll && \(/.test(code) && /void run\(\(\) => api\.run\(e\.ids, e\.targets\), ran\)/.test(code)
+    && /setConfirmRunAll\(null\)/.test(code));
+  check("...listing exactly the ids it will post, in order",
+    /confirmRunAll\.ids\.map\(\(id, i\)/.test(code) && /scriptNames\.get\(id\)/.test(code));
+  check("...with the count printed coming from that same list",
+    /t\("menu\.runAll", \{ count: e\.ids\.length \}\)/.test(code)
+    && /t\("menu\.runAll", \{ count: confirmRunAll\.ids\.length \}\)/.test(code));
+  check("the Run-all line is the section's own head entry",
+    /i === 0 && generated\.runAll \? \[scriptItem\(generated\.runAll\)\]/.test(code));
+
   if (failures.length) {
     console.error(`\n${failures.length} failure(s):`);
     for (const f of failures) console.error(`  - ${f}`);
@@ -246,8 +360,10 @@ try {
     process.exit(1);
   }
   console.log(`\nok  the generated script menu: ${checks} checks — the album menu offers all ${ALL.length} ` +
-    `scripts (${FORCED.length} of them with a forced twin), a track row offers only the ${FILE.length} ` +
-    `file-scoped ones, each entry is handed the folder or the files its scope needs, and the menu types no id`);
+    `scripts (${FORCE_OPTIONS} force entries, one per flag), a track row offers only the ${FILE.length} ` +
+    `file-scoped ones, Run all posts the entity's own ordered chain ` +
+    `(${RUN_ALL.album.length} ids for an album, ${RUN_ALL.track.length} for a row, opt-in ${OPT_IN.join(",")} never), ` +
+    `and the menu types no id`);
 } finally {
   await server.close();
 }

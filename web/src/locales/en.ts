@@ -81,6 +81,13 @@ export default {
   "menu.scripts": "Scripts",
   "menu.forced": "Forced re-run",
   "menu.forceEntry": "Force: {script}",
+  "menu.runAll": "Run all {count} scripts",
+  "menu.runAllTitle": "Run all {count} scripts?",
+  "menu.runAllHint": "These run over the current selection, in this order:",
+  "menu.openTrackPage": "Open track page",
+  "menu.openTrackPageHint": "Open this track's own page — its tags, technical readout and lyrics",
+  "menu.downloadVideo": "Download music video",
+  "menu.downloadVideoHint": "Search YouTube for this track's music video (Soulseek when YouTube has none) and save it next to the album",
 
   // —— Playback: the file a library job is using right now ——————————————
   "player.locked_playing": "“{name}” is in use by {label} — it keeps playing; starting it again may fail.",
@@ -290,6 +297,11 @@ export default {
   "home.stat.playlists": "playlists",
   "home.stat.checks": "checks passed",
 
+  // —— Storage card: the three figures it shows ——————————————————————
+  // The label of the row that adds the Library and App rows up, so it names
+  // both sides of the sum it shows.
+  "storage.total": "Total (App + Library)",
+
   // —— Charts page: this user's play history beside the online charts ————
   "charts.subtitle": "What you have actually played, and what the world is playing — one window at a time. The library half counts your own plays here; the online half shows each provider's own chart, named on every row.",
   "charts.scope.library": "Your library",
@@ -344,6 +356,12 @@ export default {
   // —— Settings ———————————————————————————————————————————————————————
   "settings.language": "Language",
   "settings.language_help": "Applies to this browser — the app's own labels, never your file names or tags.",
+  // The alias fallback search (mlo/config.py's `lyrics_search_aliases`) is the
+  // one Lyrics-tab row whose label and help are translated: it is about the
+  // NAMES a track can be looked up under, so a reader whose music is filed
+  // under a non-Latin script reads its sentence in their own language.
+  "settings.lyrics_search_aliases": "Search lyrics under alias names",
+  "settings.lyrics_search_aliases_help": "When the first search for a track's lyrics finds nothing, search again under the artist/album/title's other names from MusicBrainz (aliases) — e.g. Hikaru Utada for 宇多田ヒカル. On by default.",
   // —— Accent colour (issue #53): the swatches' names and the custom row ——
   // One key per preset id, looked up through a typed Record in SettingsPage, so
   // a preset whose name is missing here fails the build instead of showing a
@@ -489,6 +507,7 @@ export default {
   "import.settle.title": "Settled by this import",
   "import.settle.lyrics": "Lyrics",
   "import.settle.lyrics_removed": "{n} file(s) had untimed lyrics removed (synced lyrics are required here)",
+  "import.settle.lyrics_unformatted": "{n} file(s) had lyrics removed: they are timed but not in the form this install's grading check asks for, and the Lyrics script cannot make them so",
   "import.settle.lyrics_no_fetch": "Left alone: the fetch (script 13) is not in this run's chain",
   "import.settle.lyrics_allow_plain": "Untimed lyrics are allowed here — kept",
   "import.settle.lyrics_ok": "Every lyric is timed",

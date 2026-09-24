@@ -10,8 +10,11 @@ touches the network. The variant marker list is the shipped one out of
 Pinned here:
 
   * every provider in the catalogue is synced, free and needs no config key,
-  * an untimed answer is rejected outright — `_accept`, the single gate — unless
-    `lyrics_allow_plain` is explicitly on (off by default in config),
+  * the gate every hit passes (`_accept`) admits lyrics we can store — timed or
+    untimed; which of the two WINS is the chain's own rule (`fetch_lyrics`:
+    synced first, untimed as the fallback), and `lyrics_allow_plain` (off by
+    default) is the install's switch over STORING untimed lyrics, not the
+    chain's preference,
   * QQ's and Kuwo's real payload shapes: the right candidate wins, a namesake
     or a karaoke row loses, a translation is never written over the original,
   * a provider that raises, an empty answer and a dead host are all just misses,
@@ -187,24 +190,25 @@ assert mlo_config.DEFAULT_CONFIG["lyrics_youtube_captions"] is True, \
 
 
 # --------------------------------------------------------------------------- #
-# `_accept`: the one gate — synced, or nothing
+# `_accept`: the one gate — lyrics we can store, synced or untimed
 # --------------------------------------------------------------------------- #
-assert lp._accept({"synced": "[00:01.00]x"}, False) is True
-assert lp._accept({"synced": "[00:01.00]x", "plain": "x"}, False) is True
-assert lp._accept({"plain": "x", "synced": None}, False) is False
-assert lp._accept({"plain": "x", "synced": None}, True) is True
-assert lp._accept({"synced": "  ", "plain": None}, True) is False
-assert lp._accept(None, True) is False
-assert lp._accept({}, True) is False
-# no config at all means the strict default, and the parameter wins both ways
+assert lp._accept({"synced": "[00:01.00]x"}) is True
+assert lp._accept({"synced": "[00:01.00]x", "plain": "x"}) is True
+# an untimed answer IS an answer (which kind WINS is `fetch_lyrics`'s rule,
+# not the gate's), and a hit with no text at all is not
+assert lp._accept({"plain": "x", "synced": None}) is True
+assert lp._accept({"synced": "  ", "plain": None}) is False
+assert lp._accept(None) is False
+assert lp._accept({}) is False
+# the chain returns it, and `lyrics_allow_plain` (the install's switch over
+# STORING untimed lyrics) does not change that either way
 with Patch(lp, _get_json=fake_api([("lrclib.net/api/get", {
         "syncedLyrics": None, "plainLyrics": "untimed text\n",
         "instrumental": False, "duration": 238.0})])):
-    assert lp.fetch_lyrics(CFG, "Radiohead", "Creep") is None
-    assert lp.fetch_lyrics(CFG, "Radiohead", "Creep", allow_plain=True)["plain"] == \
-        "untimed text"
-    assert lp.fetch_lyrics({"lyrics_allow_plain": True}, "Radiohead", "Creep",
-                           allow_plain=False) is None
+    assert lp.fetch_lyrics(CFG, "Radiohead", "Creep")["plain"] == "untimed text"
+    assert lp.fetch_lyrics(CFG, "Radiohead", "Creep")["kind"] == "plain"
+    assert lp.fetch_lyrics({"lyrics_allow_plain": True},
+                           "Radiohead", "Creep")["kind"] == "plain"
 
 
 # --------------------------------------------------------------------------- #
@@ -471,6 +475,15 @@ with Patch(lp, _get_json=fake_api([("client_search_cp", QQ_SEARCH),
                                    ("lyric", QQ_LYRIC)])):
     probe = lp.probe_source("qq", CFG)
 assert probe["status"] == "ok" and "lines" in probe["detail"], probe
+
+# an untimed answer is a usable one — the chain writes it when nothing synced
+# is found — so the probe reports it as ok and says which kind it is, instead
+# of calling it a rejection
+with Patch(lp, _PROVIDERS=dict(lp._PROVIDERS,
+                               qq=lambda *a, **k: {"synced": None,
+                                                   "plain": "x\n"})):
+    probe = lp.probe_source("qq", CFG)
+assert probe["status"] == "ok" and "plain only" in probe["detail"], probe
 
 with Patch(lp, _get_json=fake_api([("client_search_cp", QQ_SEARCH)])):
     probe = lp.probe_source("qq", CFG)

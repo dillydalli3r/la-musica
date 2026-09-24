@@ -5,6 +5,7 @@ import { api, isOffline } from "../api";
 import { toast, useStore } from "../store";
 import { LyricsKindChip } from "./Badges";
 import { playbackSource } from "../lib/mediaCache";
+import { fmtDuration } from "../lib/fmt";
 import LrclibPublishPanel from "./LrclibPublish";
 import Popover from "./Popover";
 import { nextSpeed, fmtSpeed } from "../lib/playback";
@@ -21,7 +22,11 @@ export interface LrcWord {
 }
 
 export interface LrcLine {
-  ts: string; // [mm:ss.xx]
+  /** The stamp TEXT as typed / parsed (`[mm:ss.xx]`, or bare digits in the
+   *  editors' fields). Empty means "no text of its own" — an editor shows the
+   *  line's own `time` through `fmtStamp` then, and a save always writes the
+   *  formatted `time` regardless. */
+  ts: string;
   time: number; // seconds
   text: string;
   words?: LrcWord[]; // ELRC inline word/syllable timestamps <mm:ss.xx>
@@ -41,14 +46,24 @@ function tsToTime(mm: string, ss: string, frac?: string): number {
   return parseInt(mm, 10) * 60 + parseInt(ss, 10) + parseInt(f, 10) / 1000;
 }
 
-export function fmtTs(t: number, decimals = 2): string {
+/** The DIGITS of a stamp at `decimals` — `mm:ss.xx`, the very text a saved
+ *  line carries between its brackets. Every surface that SHOWS a time
+ *  (the editor's own rows, its transport and the pending-stamp readout beside
+ *  the slider) renders THIS, so what a reader sees while syncing is exactly
+ *  what Save writes, decimals included, from the first stamped line on. */
+export function fmtStamp(t: number, decimals = 2): string {
   // ponytail: integer total avoids 59.999->00:59.99 clamp; overflow carries
   const total = Math.max(0, Math.round(t * 10 ** decimals));
   const perMin = 60 * 10 ** decimals;
   const mm = Math.floor(total / perMin);
   const ss = Math.floor((total % perMin) / 10 ** decimals);
   const frac = total % 10 ** decimals;
-  return `[${String(mm).padStart(2, "0")}:${String(ss).padStart(2, "0")}.${String(frac).padStart(decimals, "0")}]`;
+  return `${String(mm).padStart(2, "0")}:${String(ss).padStart(2, "0")}.${String(frac).padStart(decimals, "0")}`;
+}
+
+/** An LRC line / syllable stamp: those same digits in their brackets. */
+export function fmtTs(t: number, decimals = 2): string {
+  return `[${fmtStamp(t, decimals)}]`;
 }
 
 /** True when `text` really holds lyrics (mirrors backend has_lyrics_text):
@@ -740,12 +755,6 @@ export default function LyricsViewer({
     }
   };
 
-  const fmtDur = (t: number) => {
-    const m = Math.floor(t / 60);
-    const s = Math.floor(t % 60);
-    return `${m}:${String(s).padStart(2, "0")}`;
-  };
-
   return (
     <div data-lrc-editor className="bg-card rounded-lg border border-border p-4 flex flex-col">
       <div className="flex items-center justify-between mb-3 flex-wrap gap-1.5">
@@ -1023,7 +1032,11 @@ export default function LyricsViewer({
         </div>
       )}
       <div className="mt-2 flex items-center gap-2">
-        <span className="text-[10px] font-mono text-zinc-500 w-10 text-right shrink-0">{fmtDur(playTime)}</span>
+        {/* The readout beside the slider is the stamp the NEXT press writes, so
+            it carries the same digits the saved line will (`fmtStamp`, the one
+            formatter `serializeLrc` writes with) — a whole-second readout left
+            the reader guessing what "0:12" would become. */}
+        <span className="text-[10px] font-mono text-zinc-500 w-16 text-right shrink-0">{fmtStamp(playTime, dec)}</span>
         <input
           type="range"
           min={0}
@@ -1034,7 +1047,7 @@ export default function LyricsViewer({
           className="flex-1 "
           title="Seek within the track"
         />
-        <span className="text-[10px] font-mono text-zinc-500 w-10 shrink-0">{fmtDur(dur || 0)}</span>
+        <span className="text-[10px] font-mono text-zinc-500 w-10 shrink-0">{fmtDuration(dur || 0)}</span>
         <div className="flex gap-1 shrink-0">
           <button className="btn-ghost !px-1.5 !py-0.5 text-[10px]" onClick={() => shiftAll(-0.1)} title="Shift all timestamps 0.1s earlier">−0.1s</button>
           <button className="btn-ghost !px-1.5 !py-0.5 text-[10px]" onClick={() => shiftAll(0.1)} title="Shift all timestamps 0.1s later">+0.1s</button>

@@ -14,7 +14,11 @@
  *   flyout   — a flyout taller than the window (the Force menu) is clamped to
  *              it and scrolls, so its last row is reachable
  *   lyrics   — the lyrics pane's safe-area geometry between the top bar and
- *              the player bar */
+ *              the player bar
+ *   trackmenu — the track-only entries of the details ("…") menu: "Open track
+ *              page" lands on that track's own page, "Download music video"
+ *              makes the request the album row's removed film button made, and
+ *              a menu that is NOT on one track offers neither */
 let chromium;
 try {
   // Plain require resolves from this file's folder up to the repo root's
@@ -786,6 +790,147 @@ const settledRect = async (el) => {
   return s;
 };
 
+/* ---- the details ("…") menu's TRACK entries ----------------------------
+ * Two owner-reported moves, measured on the real album page:
+ *
+ *   * "Open track page": the "…" a listed track wears opens that track's own
+ *     page. The row's title link is the other way in (a plain click PLAYS the
+ *     track — lib/refs' entityLinkClick), so the menu is the deliberate one;
+ *   * the per-row FILM button is gone from the album tracklist. It was a
+ *     flyout holding a single entry ("Download music video"), which read as a
+ *     mark of the FILE beside the title's advisory badges. The action lives in
+ *     that same "…" now, and what it asks the server for must still be what
+ *     the row's button asked: this pass CATCHES the request rather than
+ *     watching a download.
+ *
+ * The negative is here too: the album header's own tag menu is on the whole
+ * release, so neither entry may appear there — a menu on several paths must
+ * not pick one track out of them. */
+
+/** `/album/<path>` — the page for an album the library payload gave us. */
+function albumRoute(al) {
+  const id = al.meta && al.meta.MUSICBRAINZ_ALBUMID;
+  return id ? `/album/mb:${id}` : `/album/${encodeURIComponent(al.path)}`;
+}
+
+async function trackMenuChecks(page, check) {
+  await page.setViewportSize({ width: 1440, height: 900 });
+  const lib = await (await fetch(`${BASE}/api/library`)).json();
+  let any = null;
+  let digital = null;
+  for (const ar of lib.artists ?? []) {
+    for (const al of ar.albums ?? []) {
+      if (!(al.tracks ?? []).length) continue;
+      if (!any) any = al;
+      if (/digital|web|download/i.test(`${al.media ?? ""} ${al.meta?.MEDIA ?? ""}`)) { digital = al; break; }
+    }
+    if (digital) break;
+  }
+  const album = digital ?? any;
+  if (!album) {
+    console.log("  note: no album with tracks in this library — the track menu cannot be measured");
+    return;
+  }
+  // The track the pass works on, and the ROW that carries it: a music file (a
+  // video row's own "…" would search for the video's own title) found by the
+  // title its row shows, so the read of the DOM and the payload cannot point
+  // at two different rows.
+  const track = album.tracks.find((t) => !t.is_video) ?? album.tracks[0];
+  const url = BASE + albumRoute(album);
+  const open = async () => {
+    await page.goto(url, { waitUntil: "networkidle", timeout: 60000 });
+    await page.waitForTimeout(1200);
+  };
+  // The album's own tag menu (the header's) — the whole release, not a track.
+  const albumMenu = () => page.locator('button[title="Tag actions"]').first();
+
+  await open();
+  const rows = page.locator("table tbody tr");
+  const rowCount = await rows.count();
+  check(`the tracklist rendered (${album.path.split("/").pop()})`, rowCount > 0, `${rowCount} rows`);
+  const rowMatches = rows.filter({ hasText: track.tags.TITLE ?? track.file });
+  check(`the row for "${track.tags.TITLE}" is on the page`, (await rowMatches.count()) === 1,
+    `${await rowMatches.count()} of ${rowCount} rows match`);
+  const row = rowMatches.first();
+
+  // ---- the row's film button is gone --------------------------------------
+  const filmInRows = await page.locator("table tbody tr svg.lucide-film").count();
+  check("no track row carries a film-download button any more",
+    filmInRows === 0, `${filmInRows} film glyph(s) inside the tracklist`);
+  if (digital) {
+    // The control: the glyph IS found where it belongs, so the zero above is
+    // the ROW's and not a page that failed to draw its video actions at all.
+    const headerFilm = await page.locator('button[aria-label="Download missing music videos"] svg.lucide-film').count();
+    check("the release-wide film button is still there (so the zero above is the row's)",
+      headerFilm === 1, `${headerFilm} in the album header`);
+  }
+  // The trigger is the row's own "…" (TrackActionsMenu): `^=` because its
+  // title carries the longer sentence the page-level tag menu does not.
+  const triggers = await row.locator('button[title^="Track actions"]').count();
+  check("a row carries exactly ONE actions trigger, the \"…\"",
+    triggers === 1, `${triggers} triggers in the row`);
+
+  // ---- the "…" opens that track's page and offers the video download ------
+  await row.hover(); // the row's own controls are revealed on hover
+  await row.locator('button[title^="Track actions"]').first().click();
+  await page.waitForTimeout(350);
+  const items = await page.locator('[role="menu"] [role="menuitem"]').allInnerTexts();
+  const labels = items.map((s) => s.trim());
+  check("the row's \"…\" offers \"Open track page\"",
+    labels.includes("Open track page"), JSON.stringify(labels.slice(0, 14)));
+  check("the row's \"…\" offers the video download",
+    labels.includes("Download music video"), JSON.stringify(labels.slice(0, 14)));
+  await page.locator('[role="menu"] [role="menuitem"]', { hasText: /^Open track page$/ }).first().click();
+  await page.waitForTimeout(1500);
+  const landed = decodeURIComponent(new URL(page.url()).pathname);
+  const heading = (await page.locator("h1").first().innerText({ timeout: 8000 }).catch(() => "")).trim();
+  check("pressing \"Open track page\" lands on THAT track's own page",
+    landed === `/track/${track.path}` && heading.includes(track.tags.TITLE ?? track.file),
+    `${page.url()} h1 ${JSON.stringify(heading)} vs ${JSON.stringify(track.tags.TITLE)}`);
+
+  // ---- the video download asks for what the row's button asked ------------
+  await open();
+  let asked = null;
+  await page.route("**/api/videos/download-youtube", async (route) => {
+    asked = route.request().postDataJSON();
+    // Answered, not performed: this check pins the REQUEST. The server's own
+    // answer is what the toast must carry, so it says so.
+    await route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({ ok: false, error: "stubbed by tools/check_menus.cjs" }),
+    });
+  });
+  await row.hover();
+  await row.locator('button[title^="Track actions"]').first().click();
+  await page.waitForTimeout(350);
+  await page.locator('[role="menu"] [role="menuitem"]', { hasText: /^Download music video$/ }).first().click();
+  await page.waitForTimeout(2000);
+  check("the video entry asks for THIS track's video (path, artist, title)",
+    !!asked && asked.path === track.path && asked.title === track.tags.TITLE &&
+      asked.artist === (track.tags.ARTIST ?? track.tags.ALBUMARTIST ?? album.album_artist),
+    JSON.stringify(asked));
+  check("the search gets the track's length (the candidate window)",
+    !!asked && asked.duration === Math.round(track.tech?.length ?? 0),
+    `duration ${asked?.duration} vs ${track.tech?.length}`);
+  const toasted = await page.locator("text=No music video: stubbed by tools/check_menus.cjs").count();
+  check("the server's answer reaches the user (the row's button's own feedback)",
+    toasted > 0, `${toasted} toast(s) with the server's reason`);
+  await page.unroute("**/api/videos/download-youtube");
+
+  // ---- a menu on the whole release offers neither -------------------------
+  await open();
+  await albumMenu().click();
+  await page.waitForTimeout(350);
+  const albumItems = (await page.locator('[role="menu"] [role="menuitem"]').allInnerTexts())
+    .map((s) => s.trim());
+  check("a menu on the whole album offers no track-only entry",
+    !albumItems.some((t) => t === "Open track page" || t === "Download music video"),
+    `${albumItems.length} entries, ${JSON.stringify(albumItems.slice(0, 8))}`);
+  await page.keyboard.press("Escape");
+  await page.waitForTimeout(250);
+}
+
 (async () => {
   const browser = await chromium.launch({ executablePath: process.env.CHROME, headless: true });
   const page = await browser.newContext({ viewport: { width: 1440, height: 900 } }).then((c) => c.newPage());
@@ -808,6 +953,7 @@ const settledRect = async (el) => {
   if (want("lyrics")) await lyricsChecks(page, check);
   if (want("sheet")) await sheetChecks(browser, page, check, errs);
   if (want("pagemenu")) await pageMenuChecks(page, check);
+  if (want("trackmenu")) { await trackMenuChecks(page, check); return finish(); }
   if (!want("nav")) return finish();
 
   await page.goto(BASE + "/", { waitUntil: "networkidle" });

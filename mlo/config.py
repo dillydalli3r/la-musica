@@ -562,6 +562,18 @@ DEFAULT_CONFIG = {
     # verified itself, only one nothing verified. Turn off 'Require audit tag'
     # to grade an unaudited library (that is the Balanced preset's answer).
     "grade_check_audit": True,
+    # The FLAC STREAMINFO MD5 (the MD5 of the file's DECODED audio, which no
+    # tag write can move) must be TRUE of the audio: a stream whose audio
+    # does not hash to the digest it states is corrupt or dishonestly
+    # written, and that fails the track (issue code FLAC_MD5). A stream that
+    # states NO MD5 (all zero) is not a failure but is not verified either —
+    # it is reported as "FLAC MD5 absent" / UNVERIFIED (issue code
+    # FLAC_MD5_ABSENT), because reading an all-zero field as "fine" is how a
+    # file nobody checked passes as one that was. The answer comes from the
+    # audit's own record when script 6 already decoded these bytes, and
+    # otherwise from the reference check itself (`flac -t`), so a good file
+    # costs one header read and, at most, one decode per audio.
+    "grade_check_flac_md5": True,
     "grade_check_instrumental": True,
     "grade_check_lyrics": True,
     "grade_check_lyrics_format": True,
@@ -881,6 +893,15 @@ DEFAULT_CONFIG = {
     # Off (the default) means synced or nothing: the chain ships timestamps
     # only, and a provider answer without them is treated as no answer.
     "lyrics_allow_plain": False,
+    # A track nothing answers for under its own name is searched again under
+    # the OTHER names MusicBrainz knows for its artist/album/title — the
+    # aliases, in this app's `locale` and in Latin script (Hikaru Utada for
+    # 宇多田ヒカル, so a provider that only indexes the romanization is still
+    # reachable). On (the default): the alias names are tried only AFTER the
+    # plain search came back empty, so a track the providers already answer
+    # for never pays for an extra lookup. Off, the search runs once under the
+    # tags as they are.
+    "lyrics_search_aliases": True,
     # YouTube captions through yt-dlp, for tracks that carry a video id (tag or
     # the "[<id>]" the video download leaves in the file name). Never searches
     # YouTube on its own. Off = that provider is simply not in the chain.

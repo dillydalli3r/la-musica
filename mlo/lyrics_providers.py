@@ -15,10 +15,22 @@ The built-in order below is a ranking, and each step of it is a reason:
 The first provider that answers wins, so this order IS the policy; a saved
 ``lyrics_sources`` list replaces it wholesale (see ``provider_order``).
 
-SYNCED LYRICS ONLY. Every provider here answers with timestamps, and an answer
-without them is no answer at all — see ``_accept``, the one gate every hit
-passes before it is returned. ``lyrics_allow_plain`` (off by default) is the
-explicit opt-in that lets LRCLIB's untimed text through.
+SYNCED FIRST, PLAIN AS THE FALLBACK. Every provider here answers with
+timestamps when it can, and an answer WITH them always wins — see ``_accept``,
+the one gate every hit passes, and ``fetch_lyrics``, the one walk of the chain.
+An answer with only untimed text is not thrown away any more: the track is
+remembered (the best match score wins) while the rest of the chain is asked for
+timestamps, and it is returned when no source states any. "No synced answer" is
+not "no lyrics" — reporting it as one is what used to end as INSTRUMENTAL=1 on
+a track whose words a source had. ``lyrics_allow_plain`` (off by default) is
+the install's own switch over STORING untimed lyrics, read by the grader and
+the import's settle pass; it is not what decides the chain's preference.
+
+The chain ALSO runs a second pass when the first finds nothing at all: the
+names MusicBrainz states for the artist, the recording and the release-group
+(``server.integrations.search_aliases``, ``lyrics_search_aliases``, on by
+default), because a source that knows `宇多田ヒカル / 光` as `Hikaru Utada /
+Hikari` — or the other way round — is a source the stored names cannot reach.
 
 Every source is free — no key, no paid tier anywhere — and stdlib urllib is all
 they need; the captions one additionally needs yt-dlp and a video id the file
@@ -143,9 +155,9 @@ SOURCE_LABELS = {
 # stated rather than hidden.
 SOURCE_NOTES = {
     "lrclib": "Synced lyrics (timestamps) from the open, community-maintained "
-              "database; no key needed, best global coverage of the six. An "
-              "untimed record counts as no answer unless plain lyrics are "
-              "switched on.",
+              "database; no key needed, best global coverage of the six. Its "
+              "untimed records are used too, when no source has timestamps "
+              "for the track.",
     "netease": "Synced LRC (timestamps) with translations; a very large "
                "catalogue and the strongest of the six for CJK releases. "
                "Unofficial API.",
@@ -885,7 +897,9 @@ PROBE_SAMPLE = ("Radiohead", "Creep", "Pablo Honey", 238.0)
 def probe_source(pid, cfg=None):
     """One cheap lookup of the sample track → ``{id, kind, status, detail, ms}``.
 
-    ``status``: "ok" when synced lyrics came back, "skipped" when this machine
+    ``status``: "ok" when lyrics came back — with timestamps, or untimed text
+    the chain writes when nothing better is found (which *detail* says, so a
+    "plain only" source is not read as a full one), "skipped" when this machine
     cannot run the provider at all (yt-dlp missing, no video id to probe, the
     host refusing us), "fail" when it ran and had nothing. Never raises and
     never writes anything — the wizard calls it once per provider.
@@ -922,7 +936,11 @@ def probe_source(pid, cfg=None):
                       detail="synced lyrics, %d lines"
                              % len(hit["synced"].splitlines()))
     elif isinstance(hit, dict) and hit.get("plain"):
-        result.update(detail="plain only — rejected (synced lyrics only)")
+        # An untimed answer IS an answer here: the chain writes it when no
+        # source states timestamps, so the probe reports it honestly (usable,
+        # but the weaker of the two) instead of calling it a rejection.
+        result.update(status="ok",
+                      detail="plain only — written when nothing synced is found")
     elif last_http_error:
         result.update(status="skipped", detail=f"host refused ({last_http_error})")
     elif not result["detail"]:
@@ -930,20 +948,21 @@ def probe_source(pid, cfg=None):
     return result
 
 
-def _accept(hit, allow_plain):
-    """THE gate every provider answer passes: is this a usable hit?
+def _accept(hit):
+    """THE gate every provider answer passes: is this a usable hit at all?
 
-    Synced lyrics only, by policy: an answer without timestamps is no answer at
-    all — not a lower-priority answer — unless ``lyrics_allow_plain`` is
-    explicitly on, which is the one opt-in that lets untimed text through.
+    Lyrics we can store and re-read — synced text, or untimed text when no
+    source states timestamps. WHICH kind wins is not decided here (that is
+    ``fetch_lyrics``: synced first, plain as the fallback), so a plain answer is
+    never thrown away at the gate; nothing but a hit carrying no text at all is
+    not an answer. ``lyrics_allow_plain`` no longer appears: it is the install's
+    switch over storing untimed lyrics (the grader and the import's settle pass
+    read it), never the chain's preference between two answers.
     """
     if not isinstance(hit, dict):
         return False
-    synced = str(hit.get("synced") or "").strip()
-    plain = str(hit.get("plain") or "").strip()
-    if not (synced or plain):
-        return False
-    return bool(synced) or bool(allow_plain)
+    return bool(str(hit.get("synced") or "").strip()
+                or str(hit.get("plain") or "").strip())
 
 
 def hit_score(hit, artist, title, duration):
@@ -959,32 +978,76 @@ def hit_score(hit, artist, title, duration):
         return 0.0
 
 
-def fetch_lyrics(cfg, artist, title, album=None, duration=None, allow_plain=None,
-                 youtube_id=None, min_score=None):
-    """First provider hit for a track, or None when none of them has it.
+# How many name substitutions the alias pass may try in one lookup. Each one is
+# a FULL walk of the provider chain (every provider, one throttled request or
+# more each), so the guess is capped rather than exhaustive; the ordering below
+# is what makes the cap harmless — the whole-name localisation and the two most
+# likely single entities are always inside it.
+_MAX_ALIAS_QUERIES = 4
 
-    ``allow_plain`` (default from ``cfg["lyrics_allow_plain"]``, False) is the
-    opt-in for untimed lyrics: off — the default — a plain-only answer is
-    rejected outright and the chain walks on to the next synced source.
-    ``min_score`` raises the bar above the search floor (_MIN_SCORE): a hit
-    below it is skipped and the next provider is tried, which is how the
-    automatic write path only accepts lyrics it is confident about.
-    ``youtube_id`` (optional) is the video the file came from — the only thing
-    that lets the YouTube provider answer, since it never searches. Providers
-    never raise — a failure, a timeout or a parse error is just a miss."""
-    cfg = cfg or {}
-    if allow_plain is None:
-        allow_plain = bool(cfg.get("lyrics_allow_plain", False))
-    if not (artist and title):
-        return None
-    floor = _MIN_SCORE if min_score is None else max(_MIN_SCORE, float(min_score))
-    for pid in provider_order(cfg):
+
+def _alias_queries(artist, title, album, aliases):
+    """Ordered ``(artist, title, album, entity, query)`` substitutions to try.
+
+    *aliases* is ``{"artist": [...], "title": [...], "album": [...]}`` —
+    alternative NAMES per entity, best first (see
+    ``server.integrations.search_aliases``). Each entity is substituted on its
+    own (a source that knows the artist's Latin name usually knows the stored
+    title too), and the localisation of the WHOLE name comes first, because a
+    translated name travels as a unit: `宇多田ヒカル / 光` is `Hikaru Utada /
+    Hikari`, and a source keyed on the romanized pair answers neither half
+    alone. ``entity`` and ``query`` are what the hit reports as its alias pass.
+
+    Returns a tuple of at most ``_MAX_ALIAS_QUERIES`` triples — () when there
+    is nothing to substitute, which is also "no second pass".
+    """
+    aliases = aliases or {}
+    a = [str(n).strip() for n in (aliases.get("artist") or []) if str(n or "").strip()]
+    t = [str(n).strip() for n in (aliases.get("title") or []) if str(n or "").strip()]
+    al = [str(n).strip() for n in (aliases.get("album") or []) if str(n or "").strip()]
+    out, seen = [], set()
+
+    def add(a_name, t_name, al_name, entity, query):
+        key = (a_name or "", t_name or "", al_name or "")
+        if key in seen:
+            return
+        seen.add(key)
+        out.append((a_name, t_name, al_name, entity, query))
+
+    if a and t:
+        add(a[0], t[0], album, "artist+title", f"{a[0]} · {t[0]}")
+    for i in range(max(len(a), len(t))):
+        if i < len(a):
+            add(a[i], title, album, "artist", a[i])
+        if i < len(t):
+            add(artist, t[i], album, "title", t[i])
+    for name in al:
+        add(artist, title, name, "album", name)
+    return tuple(out[:_MAX_ALIAS_QUERIES])
+
+
+def _search_chain(cfg, order, artist, title, album, duration, youtube_id, floor):
+    """ONE walk of the provider chain, under the names it is given.
+
+    Returns ``(synced_hit, plain_hit)``: the FIRST synced answer — the walk
+    stops there, as it always has — and the best untimed answer seen on the way
+    past it, which is the fallback when no source states timestamps (ties keep
+    the first provider). Both carry ``provider`` / ``provider_label`` /
+    ``score`` and their ``kind``; either may be None.
+
+    *floor* is the acceptance bar (``_MIN_SCORE`` or the caller's ``min_score``)
+    and applies to both kinds, and the variant guard runs before it, so a
+    karaoke/instrumental/cover hit is another recording for a plain answer
+    exactly as it is for a synced one.
+    """
+    synced = plain = None
+    for pid in order:
         try:
             hit = _PROVIDERS[pid](artist, title, album, duration, cfg,
                                   youtube_id)
         except Exception:
             hit = None
-        if not _accept(hit, allow_plain):
+        if not _accept(hit):
             continue
         # A karaoke/instrumental/cover hit is another recording: reject it and
         # let the next provider answer (the query may be a variant itself).
@@ -998,5 +1061,77 @@ def fetch_lyrics(cfg, artist, title, album=None, duration=None, allow_plain=None
         hit["provider"] = pid
         hit["provider_label"] = SOURCE_LABELS[pid]
         hit["score"] = round(score, 3)
-        return hit
-    return None
+        hit["kind"] = "synced" if (hit.get("synced") or "").strip() else "plain"
+        if hit["kind"] == "synced":
+            return hit, plain
+        if plain is None or hit["score"] > plain["score"]:
+            plain = hit
+    return None, plain
+
+
+def fetch_lyrics(cfg, artist, title, album=None, duration=None,
+                 youtube_id=None, min_score=None, aliases=None):
+    """The chain's answer for a track, or None when none of them has it.
+
+    SYNCED first, PLAIN as the fallback — the app's own rule: a track whose
+    synced lyrics no source has, but whose plain lyrics one does, is a track
+    WITH lyrics. The providers are walked in ``provider_order(cfg)``; the first
+    synced hit that clears the variant guard and the score floor is returned
+    immediately, and an untimed-only answer is REMEMBERED (best ``hit_score``
+    wins, ties keep the first provider) and walked PAST, so a later provider's
+    timestamps still win. When the walk ends with no synced answer the
+    remembered plain hit is returned with ``provider`` / ``provider_label`` /
+    ``score`` filled exactly as a synced one, and ``kind`` saying which it is.
+
+    ``min_score`` raises the bar above the search floor (_MIN_SCORE) for both
+    kinds: a hit below it is skipped and the next provider is tried, which is
+    how the automatic write path only accepts lyrics it is confident about.
+
+    ``aliases`` — ``{"artist": [...], "title": [...], "album": [...]}`` of
+    alternative names (``server.integrations.search_aliases``, built by the
+    caller that knows the file's MusicBrainz tags) — unlocks the SECOND pass.
+    It may be that mapping, or a zero-argument callable returning one: the
+    chain asks for it ONLY once the ordinary pass has found nothing (and only
+    while ``lyrics_search_aliases`` is on, the default), so a track the sources
+    already answered costs neither a second walk nor the MusicBrainz lookups
+    the names come from. The hit the pass finds carries
+    ``alias_pass = {"used": True, "entity": ..., "query": ...}`` naming the
+    entity and the name that found it; acceptance is unchanged — the same
+    variant guard, the same score floor, the same synced-before-plain rule.
+
+    ``youtube_id`` (optional) is the video the file came from — the only thing
+    that lets the YouTube provider answer, since it never searches. Providers
+    never raise — a failure, a timeout or a parse error is just a miss."""
+    cfg = cfg or {}
+    if not (artist and title):
+        return None
+    floor = _MIN_SCORE if min_score is None else max(_MIN_SCORE, float(min_score))
+    order = provider_order(cfg)
+    synced, plain = _search_chain(cfg, order, artist, title, album, duration,
+                                  youtube_id, floor)
+    if synced is not None:
+        return synced
+    if plain is not None:
+        return plain
+    if aliases is None or not cfg.get("lyrics_search_aliases", True):
+        return None
+    try:
+        aliases = aliases() if callable(aliases) else aliases
+    except Exception:
+        return None
+    if not aliases:
+        return None
+    plain = None
+    for a_name, t_name, al_name, entity, query in _alias_queries(
+            artist, title, album, aliases):
+        synced, found = _search_chain(cfg, order, a_name, t_name, al_name,
+                                      duration, youtube_id, floor)
+        if synced is not None:
+            synced["alias_pass"] = {"used": True, "entity": entity,
+                                    "query": query}
+            return synced
+        if found is not None and (plain is None or found["score"] > plain["score"]):
+            found["alias_pass"] = {"used": True, "entity": entity,
+                                   "query": query}
+            plain = found
+    return plain

@@ -69,6 +69,13 @@ export default {
   "menu.scripts": "Scripts",
   "menu.forced": "Réexécution forcée",
   "menu.forceEntry": "Forcer : {script}",
+  "menu.runAll": "Exécuter les {count} scripts",
+  "menu.runAllTitle": "Exécuter les {count} scripts ?",
+  "menu.runAllHint": "Ils s’exécutent sur la sélection actuelle, dans cet ordre :",
+  "menu.openTrackPage": "Ouvrir la page du titre",
+  "menu.openTrackPageHint": "Ouvre la page propre à ce titre — métadonnées, données techniques et paroles",
+  "menu.downloadVideo": "Télécharger le clip",
+  "menu.downloadVideoHint": "Cherche le clip de ce titre sur YouTube (Soulseek si YouTube n’en a pas) et l’enregistre à côté de l’album",
   "player.locked_playing": "« {name} » est utilisé par {label} — la lecture continue, mais la relancer peut échouer.",
 
   "favorites.kind.tracks": "Pistes aimées",
@@ -267,6 +274,8 @@ export default {
   "home.stat.playlists": "listes",
   "home.stat.checks": "contrôles réussis",
 
+  // —— Carte de stockage : les trois chiffres qu’elle affiche ————————————
+  "storage.total": "Total (App + Bibliothèque)",
 
   "charts.subtitle": "Ce que vous avez vraiment écouté, et ce que le monde écoute — une période à la fois. La moitié bibliothèque compte vos propres écoutes sur cette période ; la moitié en ligne affiche le classement de chaque fournisseur, nommé sur chaque ligne.",
   "charts.scope.library": "Votre bibliothèque",
@@ -317,6 +326,8 @@ export default {
 
   "settings.language": "Langue",
   "settings.language_help": "S'applique à ce navigateur — aux libellés de l'application, jamais à vos noms de fichiers ni à vos étiquettes audio.",
+  "settings.lyrics_search_aliases": "Chercher les paroles aussi sous les noms alternatifs",
+  "settings.lyrics_search_aliases_help": "Quand la première recherche des paroles d'un titre ne donne rien, la recherche reprend avec les autres noms de l'artiste, de l'album ou du titre connus de MusicBrainz (alias) — par exemple Hikaru Utada pour 宇多田ヒカル. Activé par défaut.",
   // —— Couleur d'accent (#53) : les noms des pastilles et la couleur libre ——
   "settings.accent": "Couleur d'accent",
   "settings.accent_red": "Rouge",
@@ -453,6 +464,7 @@ export default {
   "import.settle.title": "Réglé par cet import",
   "import.settle.lyrics": "Paroles",
   "import.settle.lyrics_removed": "{n} fichier(s) : paroles sans horodatage supprimées (des paroles synchronisées sont exigées ici)",
+  "import.settle.lyrics_unformatted": "{n} fichier(s) : paroles supprimées — elles sont horodatées mais pas dans la forme exigée par la vérification de cette installation, et le script Paroles ne peut pas y remédier",
   "import.settle.lyrics_no_fetch": "Laissées telles quelles : la récupération (script 13) n'est pas dans la chaîne de cette exécution",
   "import.settle.lyrics_allow_plain": "Les paroles sans horodatage sont autorisées ici — conservées",
   "import.settle.lyrics_ok": "Toutes les paroles sont horodatées",

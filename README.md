@@ -1,8 +1,8 @@
 # la musica
 
-**v4.0.1** — a self-hosted app that *manages, optimizes, audits, grades and plays* your music library, from a browser, a desktop window or a phone.
+**v4.0.2** — a self-hosted app that *manages, optimizes, audits, grades and plays* your music library, from a browser, a desktop window or a phone.
 
-**la musica** (formerly Music Library Optimizer) is a FastAPI backend plus a React UI over the `mlo` engine: music and music videos (karaoke-synced lyrics), playlists, likes and favourites, artist artwork and biographies, a multi-source lyrics chain, MusicBrainz/Discogs/AcoustID identity, and a managed Soulseek client whose auto-importer verifies what it downloads. It grades the library (68 checks), audits it, and runs an installable toolchain — all local.
+**la musica** (formerly Music Library Optimizer) is a FastAPI backend plus a React UI over the `mlo` engine: music and music videos (karaoke-synced lyrics), playlists, likes and favourites, artist artwork and biographies, a multi-source lyrics chain, MusicBrainz/Discogs/AcoustID identity, and a managed Soulseek client whose auto-importer verifies what it downloads. It grades the library (69 checks), audits it, and runs an installable toolchain — all local.
 
 State — config, playlists, the beets library, Soulseek config, caches, runtime-installed tools — lives in one hidden `.mlo` folder beside your music.
 
@@ -199,7 +199,7 @@ By default the optimizer does **not** embed cover art — it removes it, and cov
 
 ### Grading
 
-**68 checks** across tracks, albums, artist folders and folders, each toggleable on the **Grading** page with a live filter and the **Strict / Balanced / Relaxed** presets. Every check is on in the factory defaults; an album passes only when every enabled check passes, and the summary counts checks (`summary_pass` / `summary_total`) plus `albums_passed` / `albums_failed`.
+**69 checks** across tracks, albums, artist folders and folders, each toggleable on the **Grading** page with a live filter and the **Strict / Balanced / Relaxed** presets. Every check is on in the factory defaults; an album passes only when every enabled check passes, and the summary counts checks (`summary_pass` / `summary_total`) plus `albums_passed` / `albums_failed`.
 
 - A check that raises counts as *could not be evaluated* and fails.
 - Two checks follow the codec target: `grade_check_lossless_source` stands down when `library_codec` is uncompressed (`wav`/`aiff`) or `keep`, and `grade_check_cd_format` applies where a CD is expected.
@@ -336,7 +336,7 @@ Where the app stores what it fetches (all under `<music>/.mlo/`):
 | `GET /api/health` `GET /api/version` | liveness; `{version, latest, update_available, release_url, checked_at, source}` cached 6 h, `latest: null` when GitHub is unreachable |
 | `GET /api/auth/status`, `POST /api/auth/setup` `…/login` `…/logout` `…/password` `…/revoke-all`, `GET …/sessions`, `GET/POST /api/auth/users`, `DELETE …/{name}` | the gate's state (`required`, `has_password`, `username`, `host`, `public_url`, `session_days`), sign-in and out, sessions, users |
 | `GET /api/library/layout`, `GET /api/library/layout/report` | read-only layout scan (misplaced audio, stray and duplicate sidecars, empty albums, `wrong_case`); the same scan as script 20, plus the stored report |
-| `GET /api/storage` | one disk snapshot for the Home card: the volume, the library, the app's own footprint, the bin and the transfer folders |
+| `GET /api/storage` | one disk snapshot for the Home card: the volume, the library, the app's own footprint, the bin and the transfer folders — the card reads **three metrics** from it (Library, App, and their total), and every byte count is an int |
 | `GET /api/album` `GET /api/artist` `GET /api/artist/artwork`, `GET /api/stream` `GET /api/videos/stream` `…/meta` `…/thumb` | entity details, stored artist image/description and the artist's own grade; audio and video streaming |
 | `GET /api/podcasts?series=…` | one podcast series (from the files' own `PODCASTSERIES` tags) and every episode the library holds, newest first — 404 for a series it holds none of |
 | `GET /api/script-menu` | every optimization script with the entity kinds it applies from, its Run All slot, its feature switch and its force flag — the details menu's one source (an album's menu = all 22, a track row or playlist = the 11 file-scoped ones) |

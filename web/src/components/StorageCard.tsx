@@ -2,6 +2,7 @@ import { useQuery } from "@tanstack/react-query";
 import { HardDrive } from "lucide-react";
 import { getToken, serverUrl } from "../api";
 import { fmtBytes, fmtPercent } from "../lib/fmt";
+import { useI18n } from "../lib/i18n";
 
 /** One sized folder in the answer: the library, the app's own state, the bin,
  *  a single downloads root. `audio_bytes` / `sidecar_bytes` exist only for the
@@ -91,8 +92,9 @@ function Row({ label, value, hint, title }: {
 const files = (n: number) => `${n} file${n === 1 ? "" : "s"}`;
 
 /** The app's storage readout: one bar of used/free on the library's volume,
- * then the library, the app's own state, the bin, the transfer folders and the
- * volume's own total/used/free.
+ * then three figures — the library, the app itself (with its state/bin/
+ * transfers/tools breakdown on the line under it) and the two of them added
+ * up — over the volume's own total/used/free.
  *
  * Polled once a minute — the server walks the tree to answer, so this is a
  * report that refreshes on a schedule, not a live meter. A figure the OS
@@ -102,6 +104,7 @@ const files = (n: number) => `${n} file${n === 1 ? "" : "s"}`;
  * instead of looking complete.
  */
 export default function StorageCard() {
+  const { t } = useI18n();
   const { data, isLoading, error, dataUpdatedAt } = useQuery({
     queryKey: ["storage"],
     queryFn: fetchStorage,
@@ -141,6 +144,19 @@ export default function StorageCard() {
   const tight = pct !== null && pct >= 90;
   const updated = dataUpdatedAt ? new Date(dataUpdatedAt).toLocaleTimeString() : "—";
   const dl = data.downloads;
+  // The Total row adds the two rows ABOVE it from the very figures they show —
+  // their byte totals, never the library's audio subtotal or a file count,
+  // which are different quantities wearing the same units. It is arithmetic
+  // done here, so it cannot disagree with them the way a third number of the
+  // server's own could. A row with no reading (no music folder yet, or app
+  // folders none of which could be read) leaves the sum unknown: adding to an
+  // unknown would be inventing a number.
+  const libBytes = data.library ? data.library.bytes : null;
+  const appBytes = data.app_total?.measured ? data.app_total.bytes : null;
+  const sumBytes = libBytes !== null && appBytes !== null ? libBytes + appBytes : null;
+  const sumFiles = sumBytes === null
+    ? null
+    : (data.library?.files ?? 0) + (data.app_total?.files ?? 0);
 
   return (
     <div className="panel space-y-2.5">
@@ -207,10 +223,12 @@ export default function StorageCard() {
             the transfers and its own tools. The library above is the user's
             music and deliberately not part of it — "how much is la musica
             using" is the question the per-folder rows answered only by
-            addition. Its parts follow on their own line, so the total and the
-            breakdown are one glance instead of five rows. */}
+            addition. Its parts follow on their own line, so this figure and
+            its breakdown are one glance instead of five rows. Called "App"
+            rather than "App total" because the row BELOW it is the total of
+            the two: two rows both named "total" read as the same figure. */}
         <Row
-          label="App total"
+          label="App"
           value={data.app_total?.measured ? fmtBytes(data.app_total.bytes) : "—"}
           hint={data.app_total?.measured ? `(${files(data.app_total.files)})` : undefined}
           title={[
@@ -232,6 +250,19 @@ export default function StorageCard() {
               .join(" · ")}
           </div>
         )}
+        {/* The two rows above, added up HERE rather than asked for a third
+            time: the figure on screen is the sum of the two figures on screen,
+            so the three rows can never drift apart. The library's `(… audio)`
+            subtotal and the App row's file count are not summed — they are not
+            the totals. No reading on either side leaves this unknown. */}
+        <Row
+          label={t("storage.total")}
+          value={sumBytes === null ? "—" : fmtBytes(sumBytes)}
+          hint={sumFiles === null ? undefined : `(${files(sumFiles)})`}
+          title={sumBytes === null
+            ? "one of the two rows above has no reading — a total over an unknown would be a guess"
+            : `Library ${fmtBytes(libBytes)} + App ${fmtBytes(appBytes)}`}
+        />
       </div>
 
       {data.skipped_unreadable > 0 && (

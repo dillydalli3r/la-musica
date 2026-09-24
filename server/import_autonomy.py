@@ -276,11 +276,13 @@ _verified = {}      # (album key, mode, review families) -> (signature, ids, at)
 # code (`mlo.import_policy.FAMILIES` is the family vocabulary, and `gaps` folds
 # nothing else into a family), so they cannot change the answer — and they are
 # the expensive half of a grade: decoding a CD to verify its rip-log CRCs, an
-# external audio audit, the library index an expected-track list needs. A route
-# the UI polls must not pay for them.
+# external audio audit, the library index an expected-track list needs, and
+# the FLAC stream MD5's own reference check (one decode per audio no audit has
+# already verified). A route the UI polls must not pay for them.
 _VERIFY_OFF = ("grade_check_crc", "grade_check_audit", "grade_check_log_checksum",
                "grade_check_cd_log", "grade_check_cd_cue", "grade_check_cd_format",
-               "grade_check_log_grade", "grade_check_expected_tracks")
+               "grade_check_log_grade", "grade_check_expected_tracks",
+               "grade_check_flac_md5")
 
 
 def _signature(album_dir):

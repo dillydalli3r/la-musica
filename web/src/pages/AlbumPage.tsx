@@ -18,6 +18,7 @@ import { invalidateLibrary } from "../lib/invalidate";
 import { auditFails } from "../lib/status";
 import { useAcquisitions } from "../lib/acquisition";
 import { isVideoFile } from "../lib/fmt";
+import { downloadTrackVideo } from "../lib/videoDownload";
 import { SCRIPT_LABEL } from "../lib/scripts";
 import BulkTagsDialog from "../components/BulkTagsDialog";
 import Modal from "../components/Modal";
@@ -298,61 +299,33 @@ export default function AlbumPage() {
    *  digital releases only — see `digitalMedia`), then tag it as THAT track's
    *  video.
    *
-   *  The download lands in the album folder named after the YouTube upload,
-   *  so nothing about the file says which release track it is: the tag write
-   *  is what makes it this track's music video (it sorts, plays and grades
-   *  with the album from then on). It is the same /api/videos/match the
-   *  matching panel posts — one tag path, not a second one — and here the
-   *  assignment is certain, because the video was searched for by this
-   *  track's own artist and title. Returns whether the video was fetched.
+   *  The whole flow lives in lib/videoDownload (`downloadTrackVideo`): the
+   *  details menu's own entry on a single track runs the SAME one, so the two
+   *  entry points cannot drift in what they ask for or in what they report.
+   *  This wrapper is only the album page's own refreshing — its payloads are
+   *  the ones that went stale — and it answers whether a video was fetched.
    *
    *  A track YouTube does not have comes back QUEUED from Soulseek instead:
    *  the transfer runs in the app's own downloads for minutes, so there is no
    *  file to tag yet and the answer says so — nothing here can wait for it. */
-  const downloadVideo = async (tr: Track): Promise<boolean> => {
-    const title = tr.tags.TITLE;
-    if (!title) return false;
-    try {
-      const r = await api.videosDownloadYoutube({
+  const downloadVideo = async (tr: Track): Promise<boolean> =>
+    downloadTrackVideo(
+      {
         path: tr.path,
-        artist: tr.tags.ARTIST || albumArtist,
-        title,
+        artist: tr.tags.ARTIST || albumArtist || undefined,
+        title: tr.tags.TITLE || undefined,
         duration: tr.tech.length || undefined,
-      });
-      if (r.ok && r.queued) {
-        const what = String(r.candidate?.filename ?? title);
-        toast(`Queued from Soulseek: ${what} — it downloads into Downloads`);
-        qc.invalidateQueries({ queryKey: ["soulseekDownloads"] });
-        return true;
+        tracknumber: tr.tracknumber,
+        discnumber: tr.discnumber,
+      },
+      {
+        onQueued: () => qc.invalidateQueries({ queryKey: ["soulseekDownloads"] }),
+        onSaved: () => {
+          qc.invalidateQueries({ queryKey: ["videos", decoded] });
+          qc.invalidateQueries({ queryKey: ["album", decoded] });
+        },
       }
-      if (!r.ok || !r.file) {
-        toast(r.error ? `No music video: ${r.error}` : "No matching music video found");
-        return false;
-      }
-      toast(`Music video saved: ${r.file.split(/[\\/]/).pop()}`);
-      try {
-        await api.videosMatch(data.path, [
-          {
-            path: r.file,
-            title,
-            tracknumber: tr.tracknumber ?? undefined,
-            discnumber: tr.discnumber ?? undefined,
-          },
-        ]);
-      } catch (e) {
-        // The file IS downloaded; only the tag write failed, and the matching
-        // panel can still record the assignment by hand — so say that rather
-        // than reporting the whole download as failed.
-        toast.error(`Downloaded, but tagging it as "${title}" failed: ${e}`);
-      }
-      qc.invalidateQueries({ queryKey: ["videos", decoded] });
-      qc.invalidateQueries({ queryKey: ["album", decoded] });
-      return true;
-    } catch (e) {
-      toast.error(String(e));
-      return false;
-    }
-  };
+    );
 
   /** Tracks of this album that have no music video yet.
    *
@@ -368,8 +341,9 @@ export default function AlbumPage() {
 
   /** Fetch this album's missing music videos, one at a time.
    *
-   *  The SAME per-track call the row menu and the video overlay make, so
-   *  there is one download path and one definition of "this track's video".
+   *  The SAME per-track call the details menu's video entry and the video
+   *  overlay make (lib/videoDownload), so there is one download path and one
+   *  definition of "this track's video".
    *  Sequential on purpose: each video is a multi-hundred-megabyte download
    *  plus a tag remux, and firing the whole album at once would put every one
    *  of them on the same connection. */
@@ -1014,11 +988,12 @@ export default function AlbumPage() {
                       iconOnly
                     />
                     {/* One album-level entry to the video download, for the
-                        whole release: the row menu and the video overlay both
-                        fetch a single track's video, and a digital album is
-                        missing every one of them at once. Same per-track call
-                        underneath (see downloadMissingVideos), so nothing here
-                        is a second download path. */}
+                        whole release: a row's "…" menu and the video overlay
+                        each fetch a SINGLE track's video, and a digital album
+                        is missing every one of them at once. Same per-track
+                        call underneath — one shared implementation, see
+                        lib/videoDownload and downloadMissingVideos — so
+                        nothing here is a second download path. */}
                     {digitalMedia && (
                       <button
                         className="btn-icon"
@@ -1608,28 +1583,13 @@ export default function AlbumPage() {
                           <FileVideo className="h-3.5 w-3.5" />
                         </button>
                       )}
-                      {digitalMedia && (
-                        <span className="row-hover shrink-0" onClick={(e) => e.stopPropagation()}>
-                          <OverflowMenu
-                            buttonClass="!p-1 text-zinc-500 hover:text-white"
-                            buttonTitle="Track actions"
-                            icon={Film}
-                            sections={[
-                              {
-                                items: [
-                                  {
-                                    label: "Download music video",
-                                    icon: Film,
-                                    title: "Search YouTube for this track's music video and save it next to the album",
-                                    disabled: !tr.tags.TITLE,
-                                    onClick: () => downloadVideo(tr),
-                                  },
-                                ],
-                              },
-                            ]}
-                          />
-                        </span>
-                      )}
+                      {/* The per-row film flyout is GONE: downloading this
+                          track's music video lives in the row's own "…" menu
+                          (TrackActionsMenu → Files → "Download music video"),
+                          so the title cell keeps only what DESCRIBES the file
+                          and one actions menu. The album header's film button
+                          (the whole release's missing videos) and the video
+                          overlay's own button while a video plays both stay. */}
                     </TrackTitleCell>
                   </td>
                 )}

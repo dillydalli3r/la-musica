@@ -8,8 +8,9 @@ import { api, isOffline } from "../api";
 import { toast, useStore } from "../store";
 import { playbackSource } from "../lib/mediaCache";
 import {
-  parseLrc, serializeLrc, KaraokeWords, type LrcLine, type LrcWord,
+  parseLrc, serializeLrc, fmtStamp, KaraokeWords, type LrcLine, type LrcWord,
 } from "./LyricsViewer";
+import { fmtDuration } from "../lib/fmt";
 import {
   loadLyricsKeys, saveLyricsKeys, resetLyricsKeys,
   keyLabel, matchKey, LYRICS_ACTIONS, LYRICS_KEY_DEFAULTS,
@@ -22,21 +23,18 @@ import Popover from "./Popover";
 
 type StampMode = "line" | "word" | "syllable";
 
-const fmtDur = (t: number) => {
-  const m = Math.floor(t / 60);
-  const s = Math.floor(t % 60);
-  return `${m}:${String(s).padStart(2, "0")}`;
-};
-
 /** Parse stored lyrics into editor lines; plain text becomes untimed
- * lines ready for stamping. */
+ * lines ready for stamping. An untimed line carries NO stamp text: its row
+ * shows the line's own time through the shared formatter (see `fmtStamp`), at
+ * whatever precision the editor is set to, instead of a hard-coded two-decimal
+ * placeholder that disagrees with the 3-decimal setting. */
 function toLines(text: string): LrcLine[] {
   const trimmed = (text ?? "").trim();
   if (!trimmed) return [];
   const parsed = parseLrc(trimmed);
   if (parsed.length) return parsed;
   return trimmed.split(/\r?\n/).map((ln) => ln.trim()).filter(Boolean)
-    .map((text) => ({ ts: "[00:00.00]", time: 0, text }));
+    .map((text) => ({ ts: "", time: 0, text }));
 }
 
 /** The next syllable/word pending-stamp state: pieces + collected times,
@@ -288,9 +286,12 @@ export default function LyricsEditorModal({
   };
 
   const shiftAll = (delta: number) => {
+    // A shifted line's `ts` — text typed before the shift — is stale by the
+    // very delta just applied, so it is dropped: the row then shows the
+    // formatter's own digits for the new time (the same ones a save writes).
     commit(lines.map((l) => {
       const time = Math.max(0, l.time + delta);
-      const out: LrcLine = { ...l, time };
+      const out: LrcLine = { ...l, time, ts: "" };
       if (out.words?.length) out.words = out.words.map((w) => ({ ...w, time: Math.max(0, w.time + delta) }));
       return out;
     }));
@@ -298,7 +299,7 @@ export default function LyricsEditorModal({
 
   const nudgeLine = (delta: number) => {
     const idx = Math.min(Math.max(selIdx, 0), lines.length - 1);
-    commit(lines.map((l, j) => (j === idx ? { ...l, time: Math.max(0, l.time + delta) } : l)));
+    commit(lines.map((l, j) => (j === idx ? { ...l, time: Math.max(0, l.time + delta), ts: "" } : l)));
   };
 
   const updateLine = (i: number, patch: Partial<LrcLine>) => {
@@ -311,7 +312,7 @@ export default function LyricsEditorModal({
   const addLine = (i: number) => {
     const base = lines[i]?.time ?? lines[lines.length - 1]?.time ?? 0;
     const next = [...lines];
-    next.splice(i + 1, 0, { ts: "[00:00.00]", time: base, text: "" });
+    next.splice(i + 1, 0, { ts: "", time: base, text: "" });
     commit(next);
     setSelIdx(i + 1);
   };
@@ -582,8 +583,10 @@ export default function LyricsEditorModal({
                 const pending = pendingRef.current && pendingRef.current.idx === i ? pendingRef.current : null;
                 // The field shows the stamp TEXT that was typed (or
                 // parsed); an empty one — freshly stamped — falls back to
-                // the line's time.
-                const tsText = l.ts ? (l.ts.startsWith("[") ? l.ts.slice(1, -1) : l.ts) : fmtDur(l.time);
+                // the line's time, at the SAME precision a save writes
+                // (`fmtStamp`), so the decimals are on screen from the first
+                // line of a sync on.
+                const tsText = l.ts ? (l.ts.startsWith("[") ? l.ts.slice(1, -1) : l.ts) : fmtStamp(l.time, dec);
                 return (
                   <div
                     key={i}
@@ -600,7 +603,7 @@ export default function LyricsEditorModal({
                     <div className="flex items-center gap-2">
                       <button
                         className="p-0.5 text-zinc-600 hover:text-accent-soft shrink-0"
-                        title={`Play from ${fmtDur(l.time)}`}
+                        title={`Play from ${fmtStamp(l.time, dec)}`}
                         onClick={(e) => { e.stopPropagation(); seekTo(l.time); }}
                       >
                         <Play className="h-3 w-3" />
@@ -673,7 +676,7 @@ export default function LyricsEditorModal({
                             key={wi}
                             className={`chip text-[9px] border ${w.time <= playTime ? "bg-accent/10 border-accent/25 text-accent-soft" : "bg-white/5 border-white/10 text-zinc-400"} hover:border-accent`}
                             onClick={(e) => { e.stopPropagation(); seekTo(w.time); }}
-                            title={`Seek to ${fmtDur(w.time)}`}
+                            title={`Seek to ${fmtStamp(w.time, dec)}`}
                           >
                             {w.text.trim() || "·"}
                           </button>
@@ -717,7 +720,10 @@ export default function LyricsEditorModal({
             <button className={`p-2 rounded-lg ${playing ? "bg-accent on-accent" : "bg-white/10 hover:bg-white/20 text-white"}`} onClick={togglePlay} title={`Play / pause (${keys.playPause})`}>
               {playing ? <Pause className="h-4 w-4" /> : <Play className="h-4 w-4 ml-0.5" />}
             </button>
-            <span className="text-[10px] font-mono text-zinc-500 w-10 text-right tabular-nums">{fmtDur(playTime)}</span>
+            {/* The readout is the stamp the next press writes — the same digits
+                `serializeLrc` saves (`fmtStamp`), not a whole-second rounding
+                of them. */}
+            <span className="text-[10px] font-mono text-zinc-500 w-16 text-right tabular-nums">{fmtStamp(playTime, dec)}</span>
             <input
               type="range"
               min={0}
@@ -728,7 +734,7 @@ export default function LyricsEditorModal({
               className="flex-1 min-w-0"
               title="Seek within the track"
             />
-            <span className="text-[10px] font-mono text-zinc-500 w-10 tabular-nums">{fmtDur(dur || 0)}</span>
+            <span className="text-[10px] font-mono text-zinc-500 w-10 tabular-nums">{fmtDuration(dur || 0)}</span>
           </div>
         </div>
 

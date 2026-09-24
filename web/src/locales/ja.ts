@@ -69,6 +69,13 @@ export default {
   "menu.scripts": "スクリプト",
   "menu.forced": "強制再実行",
   "menu.forceEntry": "{script} を強制実行",
+  "menu.runAll": "{count} 個のスクリプトをすべて実行",
+  "menu.runAllTitle": "{count} 個のスクリプトをすべて実行しますか？",
+  "menu.runAllHint": "現在の選択範囲に対して、この順で実行します:",
+  "menu.openTrackPage": "トラックページを開く",
+  "menu.openTrackPageHint": "このトラック自身のページを開きます — タグ、技術情報、歌詞",
+  "menu.downloadVideo": "ミュージックビデオをダウンロード",
+  "menu.downloadVideoHint": "このトラックのミュージックビデオを YouTube で検索し（YouTube に無ければ Soulseek）、アルバムの隣に保存します",
   "player.locked_playing": "「{name}」は {label} が使用中です。再生は続きますが、再生し直すと失敗することがあります。",
 
   "favorites.kind.tracks": "お気に入りの曲",
@@ -266,6 +273,8 @@ export default {
   "home.stat.playlists": "プレイリスト",
   "home.stat.checks": "チェック合格",
 
+  // —— ストレージカード: 表示する3つの数値 ————————————————————————————
+  "storage.total": "合計 (アプリ + ライブラリ)",
 
   "charts.subtitle": "実際に聴いたものと、世界が聴いているもの。期間ごとに表示します。ライブラリ側はこの期間のあなた自身の再生回数、オンライン側は各プロバイダーのチャートを、行ごとに出典を明示して表示します。",
   "charts.scope.library": "ライブラリ",
@@ -316,6 +325,8 @@ export default {
 
   "settings.language": "言語",
   "settings.language_help": "このブラウザに適用されます — アプリの表示だけが変わり、ファイル名やタグには影響しません。",
+  "settings.lyrics_search_aliases": "別名でも歌詞を検索する",
+  "settings.lyrics_search_aliases_help": "ある曲の歌詞を最初の検索で見つけられなかったとき、MusicBrainz が持つアーティスト・アルバム・曲名の別名（エイリアス）でもう一度検索します — 例: 宇多田ヒカル を Hikaru Utada として検索。既定でオン。",
   // —— アクセントカラー (#53): プリセット名とカスタム入力 ——
   "settings.accent": "アクセントカラー",
   "settings.accent_red": "レッド",
@@ -452,6 +463,7 @@ export default {
   "import.settle.title": "このインポートで確定した内容",
   "import.settle.lyrics": "歌詞",
   "import.settle.lyrics_removed": "{n} ファイルからタイムスタンプの無い歌詞を削除しました（ここでは同期歌詞が必要です）",
+  "import.settle.lyrics_unformatted": "{n} ファイルの歌詞を削除しました — タイムスタンプはありますが、この環境のグレード検査が求める形式ではなく、歌詞スクリプトでは直せません",
   "import.settle.lyrics_no_fetch": "そのままにしました: この実行のチェーンに歌詞取得（スクリプト 13）がありません",
   "import.settle.lyrics_allow_plain": "ここではタイムスタンプの無い歌詞が許可されているため保持しました",
   "import.settle.lyrics_ok": "すべての歌詞にタイムスタンプがあります",

@@ -582,7 +582,11 @@ export default function SettingsPage() {
         },
         {
           k: "lyrics_allow_plain", label: "Accept plain (unsynced) lyrics", type: "bool",
-          help: "Off by default: every provider in the chain answers with timestamps, and an answer without them is thrown away as if it had none. Turn this on only to let untimed text (LRCLIB's plain records) through when nothing synced exists.",
+          help: "Off by default: the chain prefers synced lyrics and writes an untimed one only when no source states timestamps, and this install then fails that track's lyrics check (“Plain” on the track's own surfaces). Turn this on to accept untimed text — LRCLIB's plain records — as a good answer here.",
+        },
+        {
+          k: "lyrics_search_aliases", label: t("settings.lyrics_search_aliases"), type: "bool",
+          help: t("settings.lyrics_search_aliases_help"),
         },
         {
           k: "lrclib_auto_publish", label: "Auto-publish missing lyrics to LRCLIB", type: "bool",

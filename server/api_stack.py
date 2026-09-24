@@ -168,7 +168,8 @@ GROUPS = (
 
 _GROUP_KEYS = {
     "artist": ("grade_check_artist_image", "grade_check_artist_description"),
-    "auditing": ("grade_check_audit", "grade_check_log_checksum",
+    "auditing": ("grade_check_audit", "grade_check_flac_md5",
+                 "grade_check_log_checksum",
                  "grade_check_accuraterip", "grade_check_log_grade"),
     "links": ("grade_check_mb_links", "grade_check_rym_links"),
     "covers": ("grade_check_cover", "grade_check_cover_crop",

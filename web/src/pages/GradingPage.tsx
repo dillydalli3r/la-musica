@@ -79,6 +79,7 @@ const GROUPS: Group[] = [
     desc: "Audio verification (script 6) and the log scores it produces. With 'Require audit tag' on, AUDIT must read REAL — a FAKE or MIX verdict fails the track; off, the verdict does not change the grade. AccurateRip is AUDIT-ONLY: a .accurip that mismatches the reference database (or is missing) never fails grading on its own — it turns the AUDIT column FAKE, which is what fails the album once 'Require audit tag' is on.",
     keys: [
       "grade_check_audit",
+      "grade_check_flac_md5",
       "grade_check_log_checksum",
       "grade_check_accuraterip",
       "grade_check_log_grade",
@@ -195,6 +196,7 @@ const CHECK_DESC: Record<string, string> = {
   grade_check_artist_image: "The artist folder must hold an artist.jpg / artist.png that decodes, matches the configured artist_image_aspect (±2%) and stays under the artist_image_target_size ceiling (issue codes ARTIST_IMAGE_MISSING / _CORRUPT / _FORMAT / _OVERSIZED / _ASPECT / _UPSCALED). An image below the target is reported as a note and passes — nothing here upscales. Script 19 (Optimize artist images) fixes every one of them.",
   grade_check_artist_description: "The artist folder must hold a non-blank description.txt (issue code ARTIST_DESCRIPTION_MISSING).",
   grade_check_audit: "Tracks must carry an AUDIT tag (run Audit Library). ON by default — the verdict is the rip's OWN evidence (the .log's per-track CRC against the decoded audio, then AccurateRip), never a spectral guess, so it fails only a disc nothing verified. Off, an unaudited library is never failed for the tag.",
+  grade_check_flac_md5: "A FLAC states the MD5 of its own DECODED audio (STREAMINFO), and this check asks whether it is true. A stream whose audio does not hash to the digest it states is corrupt or dishonestly written and fails the track (issue code FLAC_MD5) — no tag write can move that digest, so the verdict is about the audio, not the tags. A stream that states NO MD5 (all zero) is reported as 'FLAC MD5 absent' / UNVERIFIED (issue code FLAC_MD5_ABSENT) and does not fail the track: unknown is not the same as wrong, and it is never counted as verified. The answer comes from Audit Library (script 6) when it already decoded the file, and otherwise from the reference check (`flac -t`) run during grading.",
   grade_check_log_checksum: "A log checksum that IS PRESENT must verify. One that is absent is not required and costs nothing: XLD, EAC before v1.0 and a 1.0+ log whose 'Log checksum' line is gone are all judged by their per-track CRCs (issue code LOG_CHECKSUM fires only on a checksum that was there and did not verify).",
   grade_check_accuraterip: "A .accurip whose verdict is not REAL marks the album's AUDIT FAKE (and each affected track red) — grading itself is reserved to tagging, so this key never costs a grade point. Turn on 'Require audit tag' for that verdict to fail the album.",
   grade_check_log_grade: "LOG_GRADE tag must exist and be 0–100.",

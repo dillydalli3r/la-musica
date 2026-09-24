@@ -2,8 +2,8 @@ import { useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import {
-  ArrowDownToLine, BadgeInfo, Disc3, Ellipsis, FileOutput, ImagePlus, Info, Music2, RefreshCw, Sparkles,
-  Tags, Users, Wand2,
+  ArrowDownToLine, BadgeInfo, Disc3, Ellipsis, ExternalLink, FileOutput, Film, ImagePlus, Info, Music2, Play,
+  RefreshCw, Sparkles, Tags, Users, Wand2,
 } from "lucide-react";
 import type { LucideIcon } from "lucide-react";
 import { api } from "../api";
@@ -19,6 +19,8 @@ import { entityKind, scriptSections, type ScriptEntry } from "../lib/scriptMenu"
 import { useI18n } from "../lib/i18n";
 import { CACHED_PATHS_KEY, CACHED_SIZES_KEY } from "../lib/mediaCache";
 import { downloadForOffline } from "../lib/offline";
+import { trackRef } from "../lib/refs";
+import { downloadTrackVideo } from "../lib/videoDownload";
 import { toast } from "../store";
 import type { EntityKind, ScriptRunResult } from "../types";
 
@@ -75,6 +77,12 @@ export default function TagActionsMenu({
   // album folder (the whole release) or exactly one file (that recording);
   // a multi-track selection without an album has nothing to show.
   const [view, setView] = useState<null | "credits" | "details">(null);
+  // The Run-all entry waits here while the user confirms it: a multi-script
+  // pass over the selection is not a press to fire behind their back.
+  const [confirmRunAll, setConfirmRunAll] = useState<ScriptEntry | null>(null);
+  // The video download asks the track's own tags for its title/artist/length
+  // before searching, so a press has a moment of work behind it.
+  const [videoBusy, setVideoBusy] = useState(false);
   const viewable = !!albumPath || paths.length === 1;
   const singleTrack = albumPath ? undefined : paths[0];
   const navigate = useNavigate();
@@ -83,6 +91,12 @@ export default function TagActionsMenu({
   // What this menu is ON decides which scripts it may offer (server/script_menu.py
   // derives the kinds each script applies to from the runner's own code).
   const entity = entityKind({ kind, albumPath, artist, paths });
+  // The ONE track this menu is ON — the only selection that may be opened as a
+  // page or searched for a music video. An album's folder menu and a multi-row
+  // selection have no single track, and guessing one of several is exactly what
+  // must not happen; `singleTrack` above is the FIRST of a list and is only
+  // used where `viewable` has already excluded the multi-selection.
+  const menuTrack = entity === "track" && paths.length === 1 ? paths[0] : undefined;
   // The registry, asked once per session: ids, labels, groups, the stack's
   // order, each script's force flag and its feature switch. A menu that cannot
   // reach the server (or is still loading) simply shows no script entries —
@@ -93,6 +107,49 @@ export default function TagActionsMenu({
     staleTime: 5 * 60 * 1000,
   });
   const generated = scriptSections(scripts, entity, { paths, albumPath, artistPath });
+
+  /** Download the music video of the ONE track this menu is on.
+   *
+   *  The menu holds one fact about a listed track — its path — so the title,
+   *  artist and length the search needs are read off the file's own tags at
+   *  the press (the same read the track page makes), not guessed from the list
+   *  the row came from. The download itself is the album page's own
+   *  implementation (lib/videoDownload), so what this asks the server for is
+   *  what the film button beside a row used to. */
+  const downloadVideoHere = async () => {
+    if (!menuTrack || videoBusy) return;
+    setVideoBusy(true);
+    try {
+      const res = await api.tags(menuTrack);
+      const tags = (res?.tags ?? {}) as Record<string, string | null>;
+      const seconds = Number(res?.tech?.length ?? 0);
+      await downloadTrackVideo(
+        {
+          path: menuTrack,
+          artist: tags.ARTIST ?? tags.ALBUMARTIST ?? artist,
+          title: tags.TITLE ?? undefined,
+          duration: seconds > 0 ? Math.round(seconds) : undefined,
+          tracknumber: Number(tags.TRACKNUMBER) || null,
+          discnumber: Number(tags.DISCNUMBER) || null,
+        },
+        {
+          // The queue lives on the Downloads page; a saved video changes the
+          // album's own tracklist and its video shelf. Prefix keys: this menu
+          // reaches the current page's queries without holding their album.
+          onQueued: () => qc.invalidateQueries({ queryKey: ["soulseekDownloads"] }),
+          onSaved: () => {
+            qc.invalidateQueries({ queryKey: ["videos"] });
+            qc.invalidateQueries({ queryKey: ["album"] });
+          },
+        }
+      );
+      onDone?.();
+    } catch (e) {
+      toast.error(String(e));
+    } finally {
+      setVideoBusy(false);
+    }
+  };
 
   // Generic over the reply: each action reports from its OWN payload, so the
   // handler type is the real response shape, not a lowest common denominator.
@@ -142,28 +199,49 @@ export default function TagActionsMenu({
     );
     return `${touched} file(s) updated`;
   };
-  /** One generated line: the script's own id, run over the paths THIS entity
-   *  gives it, through the same /api/run the Optimization page uses — plain, or
-   *  with the script's force key when the line is its forced twin. The force
-   *  dict names exactly the one key the run needs (a supplied dict is
-   *  authoritative server-side), so a forced entry can never force anything
-   *  else on the way. */
-  const scriptItem = (e: ScriptEntry) => ({
+  /** One generated line: the ids the payload named, run over the paths THIS
+   *  entity gives them, through the same /api/run the Optimization page uses —
+   *  plain, or with the script's force key when the line is one of its forced
+   *  twins. The force dict names exactly the one key the run needs (a supplied
+   *  dict is authoritative server-side), so a forced entry can never force
+   *  anything else on the way. */
+  const scriptItem = (e: ScriptEntry) => {
+    // The Run-all line: the whole applicable chain, in the stack's own order,
+    // as ONE request. It asks first — it is a multi-script pass over the
+    // selection, not one script the user named — and the confirmation lists
+    // the scripts it will run, in order, from this same entry's ids.
+    if (e.runAll) {
+      return {
+        // The count comes from the very list the request posts, so the label
+        // and the request cannot disagree.
+        label: t("menu.runAll", { count: e.ids.length }),
+        icon: Play,
+        disabled: e.disabled || !e.targets.length,
+        title: t("menu.runAllHint"),
+        onClick: () => setConfirmRunAll(e),
+      };
+    }
     // A forced twin reads as one ("Force: 6 · Audit library"): the two sections
     // hold the same scripts, and a bare repeated label would leave a reader
     // scrolling the panel unable to tell which one insists.
-    label: e.force ? t("menu.forceEntry", { script: e.label }) : e.label,
-    icon: Wand2,
-    disabled: e.disabled || !e.targets.length,
-    title: e.title,
-    onClick: () =>
-      run(() => api.run([e.id], e.targets, e.force ? { [e.force]: true } : undefined), ran),
-  });
+    return {
+      label: e.force ? t("menu.forceEntry", { script: e.label }) : e.label,
+      icon: Wand2,
+      disabled: e.disabled || !e.targets.length,
+      title: e.title,
+      onClick: () =>
+        run(() => api.run(e.ids, e.targets, e.force ? { [e.force]: true } : undefined), ran),
+    };
+  };
   /** The section a group of generated entries is shown under: the bundle's own
    *  name for the group the payload named (the payload's title is the fallback
    *  for a group a bundle does not know yet). */
   const scriptGroupTitle = (id: string, fallback: string): string =>
     id === "scripts" ? t("menu.scripts") : id === "force" ? t("menu.forced") : fallback;
+  /** The menu's own name for a script id, for the confirmation's ordered list
+   *  (the payload's labels, so the list names what the request names). */
+  const scriptNames = new Map<number, string>();
+  for (const g of generated.groups) for (const e of g.entries) if (!e.runAll) scriptNames.set(e.id, e.label);
 
   return (
     <>
@@ -175,9 +253,25 @@ export default function TagActionsMenu({
         sections={[
           {
             // What the selection IS, before what can be done to it: the
-            // release's credits (or the single track's) and the stored readout.
+            // track's own PAGE, the release's credits (or the single track's)
+            // and the stored readout.
             title: "View",
             items: [
+              {
+                // The track's page, from the row that names it: the same
+                // `trackRef` route the row's own title links to, so a listed
+                // track no longer has to be found in its album page first.
+                // Only ever offered for ONE track (`menuTrack`): a menu on
+                // several paths has no single page to open, and the album
+                // folder's own menu has its album page.
+                label: t("menu.openTrackPage"),
+                icon: ExternalLink,
+                hidden: !menuTrack,
+                title: t("menu.openTrackPageHint"),
+                onClick: () => {
+                  if (menuTrack) navigate(trackRef({ path: menuTrack }));
+                },
+              },
               {
                 label: albumPath ? "Credits (this album)…" : "Credits (this track)…",
                 icon: Users,
@@ -226,6 +320,20 @@ export default function TagActionsMenu({
                 disabled: !paths.length,
                 title: "Transcode and save the selection to a drive",
                 onClick: () => setExportOpen(true),
+              },
+              {
+                // The music video of the one track this menu is on. It used to
+                // be a film button beside that track's own row (the album page's
+                // title cell), which read as a file mark rather than an action;
+                // the release-wide version stays the album header's film button,
+                // and the video overlay keeps its own while a video plays. All
+                // three run the ONE implementation in lib/videoDownload.
+                label: t("menu.downloadVideo"),
+                icon: Film,
+                hidden: !menuTrack,
+                disabled: videoBusy,
+                title: t("menu.downloadVideoHint"),
+                onClick: () => void downloadVideoHere(),
               },
             ],
           },
@@ -310,9 +418,14 @@ export default function TagActionsMenu({
           // registry appears in this menu by itself, and one that does not
           // apply (an album-shaped script on a single track row) is not
           // offered. The group titles and the order are the server's.
-          ...generated.groups.map((g) => ({
+          ...generated.groups.map((g, i) => ({
             title: scriptGroupTitle(g.id, g.title),
-            items: g.entries.map(scriptItem),
+            // The applicable chain, as ONE entry at the head of the section —
+            // the same place the Library page's script picker puts "Run all".
+            items: [
+              ...(i === 0 && generated.runAll ? [scriptItem(generated.runAll)] : []),
+              ...g.entries.map(scriptItem),
+            ],
           })),
           // The same scripts again, as the FORCED variant: the flag each one
           // owns, so work that was already done can be asked for again. Shown
@@ -349,6 +462,46 @@ export default function TagActionsMenu({
           },
         ]}
       />
+      {confirmRunAll && (
+        // The app's confirmation idiom, the one `Apply fixes` uses: a Modal
+        // that names what will happen, where Cancel, Escape and an outside
+        // click all close it without a request, and only the confirm button
+        // reaches /api/run. The list IS the request's ids, in the order it
+        // posts them.
+        <Modal
+          onClose={() => setConfirmRunAll(null)}
+          icon={Play}
+          title={t("menu.runAllTitle", { count: confirmRunAll.ids.length })}
+          width="max-w-[560px]"
+          bodyClass="px-5 py-4 space-y-3"
+          footer={
+            <div className="flex justify-end gap-2">
+              <button className="btn-ghost" onClick={() => setConfirmRunAll(null)}>
+                {t("action.cancel")}
+              </button>
+              <button
+                className="btn-primary"
+                onClick={() => {
+                  const e = confirmRunAll;
+                  setConfirmRunAll(null);
+                  void run(() => api.run(e.ids, e.targets), ran);
+                }}
+              >
+                <Play className="h-3.5 w-3.5" /> {t("menu.runAll", { count: confirmRunAll.ids.length })}
+              </button>
+            </div>
+          }
+        >
+          <p className="text-sm text-zinc-300 leading-relaxed">{t("menu.runAllHint")}</p>
+          <ol className="text-[11px] font-mono text-zinc-400 max-h-56 overflow-y-auto space-y-0.5">
+            {confirmRunAll.ids.map((id, i) => (
+              <li key={id}>
+                {i + 1}. {scriptNames.get(id) ?? `#${id}`}
+              </li>
+            ))}
+          </ol>
+        </Modal>
+      )}
       {review && (
         <MetadataReviewModal
           artist={review === "artist" ? artist : undefined}

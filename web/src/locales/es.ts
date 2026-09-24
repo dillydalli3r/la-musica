@@ -69,6 +69,13 @@ export default {
   "menu.scripts": "Scripts",
   "menu.forced": "Reejecución forzada",
   "menu.forceEntry": "Forzar: {script}",
+  "menu.runAll": "Ejecutar los {count} scripts",
+  "menu.runAllTitle": "¿Ejecutar los {count} scripts?",
+  "menu.runAllHint": "Se ejecutan sobre la selección actual, en este orden:",
+  "menu.openTrackPage": "Abrir página de la pista",
+  "menu.openTrackPageHint": "Abre la página propia de esta pista — etiquetas, datos técnicos y letra",
+  "menu.downloadVideo": "Descargar videoclip",
+  "menu.downloadVideoHint": "Busca el videoclip de esta pista en YouTube (Soulseek si YouTube no lo tiene) y lo guarda junto al álbum",
   "player.locked_playing": "«{name}» está en uso por {label}: sigue sonando, pero volver a reproducirla puede fallar.",
 
   "favorites.kind.tracks": "Pistas que te gustan",
@@ -267,6 +274,8 @@ export default {
   "home.stat.playlists": "listas",
   "home.stat.checks": "comprobaciones superadas",
 
+  // —— Tarjeta de almacenamiento: las tres cifras que muestra ————————————
+  "storage.total": "Total (App + Biblioteca)",
 
   "charts.subtitle": "Lo que de verdad has escuchado y lo que escucha el mundo, una ventana cada vez. La mitad de la biblioteca cuenta tus propias reproducciones; la mitad en línea muestra la lista de cada proveedor, indicado en cada fila.",
   "charts.scope.library": "Tu biblioteca",
@@ -317,6 +326,8 @@ export default {
 
   "settings.language": "Idioma",
   "settings.language_help": "Se aplica a este navegador — a las etiquetas de la aplicación, nunca a tus nombres de archivo ni a tus etiquetas de audio.",
+  "settings.lyrics_search_aliases": "Buscar letras también con los nombres alternativos",
+  "settings.lyrics_search_aliases_help": "Cuando la primera búsqueda de la letra de un tema no encuentra nada, se busca otra vez con los otros nombres del artista, el álbum o el título que conoce MusicBrainz (alias) — por ejemplo, Hikaru Utada para 宇多田ヒカル. Activado de forma predeterminada.",
   // —— Color de acento (#53): los nombres de las muestras y el color libre ——
   "settings.accent": "Color de acento",
   "settings.accent_red": "Rojo",
@@ -453,6 +464,7 @@ export default {
   "import.settle.title": "Resuelto por esta importación",
   "import.settle.lyrics": "Letras",
   "import.settle.lyrics_removed": "{n} archivo(s) tenían letras sin marcas de tiempo y se eliminaron (aquí se exigen letras sincronizadas)",
+  "import.settle.lyrics_unformatted": "{n} archivo(s): se eliminaron las letras — llevan marcas de tiempo pero no tienen la forma que exige la comprobación de esta instalación, y el script de letras no puede arreglarlas",
   "import.settle.lyrics_no_fetch": "Sin tocar: la descarga (script 13) no está en la cadena de esta ejecución",
   "import.settle.lyrics_allow_plain": "Las letras sin marcas de tiempo están permitidas aquí — conservadas",
   "import.settle.lyrics_ok": "Todas las letras tienen marcas de tiempo",

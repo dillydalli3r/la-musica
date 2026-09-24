@@ -69,6 +69,13 @@ export default {
   "menu.scripts": "Scripts",
   "menu.forced": "Reexecução forçada",
   "menu.forceEntry": "Forçar: {script}",
+  "menu.runAll": "Executar todos os {count} scripts",
+  "menu.runAllTitle": "Executar todos os {count} scripts?",
+  "menu.runAllHint": "Eles rodam sobre a seleção atual, nesta ordem:",
+  "menu.openTrackPage": "Abrir página da faixa",
+  "menu.openTrackPageHint": "Abre a página própria desta faixa — tags, dados técnicos e letra",
+  "menu.downloadVideo": "Baixar videoclipe",
+  "menu.downloadVideoHint": "Procura o videoclipe desta faixa no YouTube (Soulseek se o YouTube não tiver) e salva ao lado do álbum",
   "player.locked_playing": "“{name}” está em uso por {label} — continua tocando, mas iniciar de novo pode falhar.",
 
   "favorites.kind.tracks": "Faixas curtidas",
@@ -267,6 +274,8 @@ export default {
   "home.stat.playlists": "playlists",
   "home.stat.checks": "verificações aprovadas",
 
+  // —— Cartão de armazenamento: as três cifras que ele mostra ————————————
+  "storage.total": "Total (App + Biblioteca)",
 
   "charts.subtitle": "O que você realmente ouviu e o que o mundo está ouvindo — uma janela por vez. A metade da biblioteca conta suas próprias reproduções nessa janela; a metade online mostra a parada de cada provedor, nomeado em cada linha.",
   "charts.scope.library": "Sua biblioteca",
@@ -317,6 +326,8 @@ export default {
 
   "settings.language": "Idioma",
   "settings.language_help": "Vale para este navegador — para os rótulos do aplicativo, nunca para seus nomes de arquivo ou tags.",
+  "settings.lyrics_search_aliases": "Buscar letras também pelos nomes alternativos",
+  "settings.lyrics_search_aliases_help": "Quando a primeira busca pelas letras de uma faixa não encontra nada, a busca é refeita com os outros nomes do artista, do álbum ou do título que o MusicBrainz conhece (aliases) — por exemplo, Hikaru Utada para 宇多田ヒカル. Ativado por padrão.",
   // —— Cor de destaque (#53): os nomes das amostras e a cor livre ——
   "settings.accent": "Cor do destaque",
   "settings.accent_red": "Vermelho",
@@ -453,6 +464,7 @@ export default {
   "import.settle.title": "Definido por esta importação",
   "import.settle.lyrics": "Letras",
   "import.settle.lyrics_removed": "{n} arquivo(s) tiveram letras sem sincronia removidas (aqui são exigidas letras sincronizadas)",
+  "import.settle.lyrics_unformatted": "{n} arquivo(s) tiveram as letras removidas — elas têm marcação de tempo, mas não estão na forma exigida pela verificação desta instalação, e o script de Letras não consegue corrigi-las",
   "import.settle.lyrics_no_fetch": "Mantidas: a busca de letras (script 13) não está na cadeia desta execução",
   "import.settle.lyrics_allow_plain": "Letras sem sincronia são permitidas aqui — mantidas",
   "import.settle.lyrics_ok": "Todas as letras têm sincronia",
