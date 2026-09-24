@@ -102,6 +102,27 @@ fn set_now_playing_liked(liked: bool) {
     let _ = liked;
 }
 
+/// Tell the shell whether the player is producing sound right now.
+///
+/// This is the iOS audio session's input (`src/ios_audio.rs`): the session is
+/// activated when playback starts and handed back — with
+/// `NotifyOthersOnDeactivation` — when it stops, which is Apple's own guidance
+/// ("defer this call until your app begins audio playback… to ensure that you
+/// won't prematurely interrupt any other background audio"). The web UI calls
+/// it as the player's `playing` state changes (`web/src/lib/iosAudio.ts`).
+///
+/// Registered on EVERY target, with an empty body off iOS, for the same reason
+/// as the star's command above: the web UI calls it unconditionally, and the
+/// desktop and Android shells have no such session, so the call is a no-op
+/// rather than an error.
+#[tauri::command]
+fn set_playback_active(active: bool) {
+    #[cfg(target_os = "ios")]
+    ios_audio::set_playing(active);
+    #[cfg(not(target_os = "ios"))]
+    let _ = active;
+}
+
 /// Show and focus the main window (tray click / tray menu "Open").
 #[cfg(desktop)]
 fn show_main_window(app: &tauri::AppHandle) {
@@ -223,7 +244,11 @@ pub fn run() {
             MacosLauncher::LaunchAgent,
             None,
         ))
-        .invoke_handler(tauri::generate_handler![pick_folder, set_now_playing_liked])
+        .invoke_handler(tauri::generate_handler![
+            pick_folder,
+            set_now_playing_liked,
+            set_playback_active
+        ])
         .manage(AutostartItem(Mutex::new(None)))
         .setup(|app| {
             // The window opens visible (tauri.conf.json `visible: true`): its
@@ -248,24 +273,36 @@ pub fn run() {
     // rebuilt is exactly the "the app keeps refreshing" a user sees as the app
     // restarting.
     //
-    // The phone shells also register `set_now_playing_liked` — the same command
-    // the desktop shell does — because that is the ONE command a phone needs:
-    // the favourite state the web UI pushes for the OS's now-playing UI. On
-    // Android the body is empty (its media notification follows the webview's
-    // own Media Session); on iOS it drives the star registered just below.
+    // The phone shells also register `set_now_playing_liked` and
+    // `set_playback_active` — the same two commands the desktop shell does —
+    // because those are the ones a phone needs: the favourite state the web UI
+    // pushes for the OS's now-playing UI, and the player's play/pause the iOS
+    // audio session follows. On Android both bodies are empty (its media
+    // notification follows the webview's own Media Session, and it has no
+    // AVAudioSession); on iOS they drive the star and the session registered
+    // just below.
     #[cfg(mobile)]
     let builder = builder
-        .invoke_handler(tauri::generate_handler![set_now_playing_liked])
+        .invoke_handler(tauri::generate_handler![
+            set_now_playing_liked,
+            set_playback_active
+        ])
         .setup(|app| {
             if let Some(window) = app.get_webview_window("main") {
                 let _ = window.show();
             }
             // The audio session comes FIRST: a playback category is what keeps
             // playback alive once the app is not in front, and what makes the
-            // Now Playing card — the star's home — exist at all (see
-            // src/ios_audio.rs). Logged, never fatal, exactly as the star is.
+            // Now Playing card — the star's home — exist at all. `configure`
+            // only sets the category; the session itself is activated when the
+            // web player says it is playing (`set_playback_active`), and
+            // `register` keeps it that way across backgrounding, interruptions
+            // and a restart of the audio server (see src/ios_audio.rs).
+            // Logged, never fatal, exactly as the star is.
             #[cfg(target_os = "ios")]
-            ios_audio::activate();
+            ios_audio::configure();
+            #[cfg(target_os = "ios")]
+            ios_audio::register();
             // iOS additionally owns the OS's Now Playing star. Setup is the one
             // place the runtime hands us the app handle before any track can
             // play, which is what the star's handler needs to reach the webview

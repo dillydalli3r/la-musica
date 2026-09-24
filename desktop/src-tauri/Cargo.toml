@@ -1,6 +1,6 @@
 [package]
 name = "mlo-desktop"
-version = "4.0.2"
+version = "4.0.3"
 description = "la musica desktop shell (Tauri v2)"
 authors = ["dillydalli3r"]
 edition = "2021"

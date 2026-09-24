@@ -270,3 +270,32 @@ export function activeAnalyser(): AnalyserNode | null {
   }
   return current;
 }
+
+/** How far BEHIND the media element's own clock the sound is, in seconds.
+ *
+ *  Every element this module attaches is routed through an `AudioContext`
+ *  (`createMediaElementSource` → gain → analyser → speakers), and that graph
+ *  has a real output delay: the element's `currentTime` says where the decoder
+ *  is, while the buffer the speakers are playing was handed to the device
+ *  `baseLatency + outputLatency` ago. A lyric pane driven straight off
+ *  `currentTime` is therefore ahead of what the listener actually hears — the
+ *  owner's "audio in general is de-synced from what the app displays for
+ *  synced lyrics" — so the panes read the clock through this correction
+ *  (`PlayerBar`'s `getAudioTime`).
+ *
+ *  Zero for an element with no graph (nothing attached, a browser without
+ *  WebAudio): its output goes straight out of the media pipeline, where this
+ *  module has no measurement and no business guessing one. Capped at half a
+ *  second so a nonsense reading can never throw a lyric pane a whole verse
+ *  off; the app's own offset control is the fine adjustment on top. */
+export function audibleLatencySec(el?: HTMLMediaElement | null): number {
+  const ctxOf = (el as Attached | null | undefined)?.__mloAnalyser?.ctx;
+  if (!ctxOf) return 0;
+  // `outputLatency` is newer than `baseLatency` and missing on some Safari
+  // builds; the sum of what exists is still the right shape of the number.
+  const secs =
+    (ctxOf.baseLatency || 0) +
+    ((ctxOf as AudioContext & { outputLatency?: number }).outputLatency || 0);
+  if (!Number.isFinite(secs) || secs <= 0) return 0;
+  return Math.min(secs, 0.5);
+}

@@ -122,7 +122,27 @@ pub fn set_liked(liked: bool) {
     // SAFETY: `like` is a live `MPFeedbackCommand` (a `Retained`, so non-nil),
     // and `setActive:` takes the BOOL the feedback state is expressed with.
     unsafe {
+        // `enabled` is re-asserted with every push rather than only at setup:
+        // the same bit is written by the system's now-playing plumbing (WebKit
+        // publishes the webview's now-playing info and refreshes the command
+        // set that goes with it), and a star a state push cannot turn back on
+        // is a star that vanishes mid-album.
+        let _: () = msg_send![&*like, setEnabled: true];
         let _: () = msg_send![&*like, setActive: liked];
+    }
+}
+
+/// Re-assert that the star is pressable, without touching its state. Called by
+/// the audio-session module at the transitions that rebuild the system's
+/// now-playing furniture — becoming active again, and the media server
+/// restarting (`src/ios_audio.rs`).
+pub fn refresh() {
+    let Some(like) = like_command() else {
+        return;
+    };
+    // SAFETY: as `set_liked`.
+    unsafe {
+        let _: () = msg_send![&*like, setEnabled: true];
     }
 }
 

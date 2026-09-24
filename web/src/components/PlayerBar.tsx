@@ -13,12 +13,13 @@ import { heldBy, useJobLocks, useLockLabel, useLockWhy } from "../lib/locks";
 import { useI18n } from "../lib/i18n";
 import { likeToasts } from "../lib/favs";
 import { useIosFavBridge } from "../lib/iosFavs";
+import { useIosPlaybackBridge } from "../lib/iosAudio";
 import LockedChip from "./LockedChip";
 import { AdvisoryMark } from "./Badges";
 import StarRating from "./StarRating";
 import { ratingOf, useRatings, useSetRating } from "../lib/ratings";
 import VolumePct from "./VolumePct";
-import { applyEq, applyReplayGain, attachAnalyser, resumeAnalyser } from "../lib/analyser";
+import { applyEq, applyReplayGain, attachAnalyser, audibleLatencySec, resumeAnalyser } from "../lib/analyser";
 import { eqApplyRefusal } from "../lib/eqNodes";
 import FavHeart from "./FavHeart";
 import NowPlayingView from "./NowPlayingView";
@@ -274,7 +275,15 @@ export default function PlayerBar() {
   useEffect(() => {
     mediaRef.current = media;
   });
-  const getAudioTime = useCallback(() => mediaRef.current()?.currentTime ?? 0, []);
+  // The lyric panes' clock. `currentTime` says where the DECODER is; what the
+  // listener hears is that much older whenever the element is routed through
+  // the WebAudio graph, so the panes follow the audible instant instead (see
+  // `audibleLatencySec`). Clamped at zero for the first frames of a track.
+  const getAudioTime = useCallback(() => {
+    const el = mediaRef.current();
+    if (!el) return 0;
+    return Math.max(0, el.currentTime - audibleLatencySec(el));
+  }, []);
   // Codec probe for the current video: `native === false` means the browser
   // cannot decode this file (container or codecs) and the player must start
   // on the live transcode instead of waiting for a playback error — this is
@@ -453,6 +462,9 @@ export default function PlayerBar() {
   // inert (lib/iosFavs), which is the whole reason it is safe to call it on
   // every platform.
   useIosFavBridge(current?.path, currentTags?.tags?.MUSICBRAINZ_TRACKID);
+  // The iOS audio session follows the player's playing state: activated when
+  // sound starts, handed back when it stops (see lib/iosAudio.ts).
+  useIosPlaybackBridge(playing);
 
   // ---- ReplayGain: decided BEFORE a track makes a sound ------------------
   // The gain has to be in the WebAudio stage by the time the first sample is

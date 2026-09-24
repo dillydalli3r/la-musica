@@ -94,8 +94,48 @@ the reason, instead of offering an Install button that cannot succeed.
   app never configured an `AVAudioSession` category, and the default
   (`soloAmbient`) is muted the moment the app stops being frontmost — the
   owner's own 4.0.0 report, "audio is muted when app is unfocused". That module
-  puts the session in `AVAudioSessionCategoryPlayback` (default mode, no options)
-  and activates it at setup; with the plist key it is what makes the mode true.
+  puts the session in `AVAudioSessionCategoryPlayback` (default mode, no
+  options) and owns its whole lifecycle — see the next section; with the plist
+  key it is what makes the mode true.
+
+### The audio session on iOS
+
+The star above needs a now-playing session to be drawn on, and the audio itself
+needs the session to keep playing once the app is not in front — one module,
+`src-tauri/src/ios_audio.rs`, owns both, and it is compiled for **iOS only** for
+the same reason the star is (Android plays through its own audio path; the
+desktop targets have no `AVAudioSession`).
+
+1. **Setup** (`ios_audio::configure`, from the mobile shell's setup): put the
+   session in `AVAudioSessionCategoryPlayback` with the default mode and no
+   options — the framework's own exported constant, not a copied string, and
+   AVFAudio is linked explicitly because a framework that is not loaded has no
+   classes to look up. The category is set here; the session is deliberately NOT
+   activated here, because Apple's guidance is to activate when playback begins
+   ("to ensure that you won't prematurely interrupt any other background
+   audio") — an activation at launch does exactly that to whatever the user was
+   listening to.
+2. **Play and stop** (`set_playback_active`, driven by
+   `web/src/lib/iosAudio.ts` from the player's own `playing` state): playback
+   activates the session; a stop deactivates it with
+   `NotifyOthersOnDeactivation`, so the app this one interrupted is free to
+   resume. A session this module did not activate is never deactivated — WebKit
+   activates one for its own playback, and that is not ours to take away.
+3. **The transitions** (`ios_audio::register`): four OS notifications re-assert
+   the session where iOS takes it from a backgrounded app — going to the
+   background and becoming active again (both only while playing),
+   `AVAudioSessionInterruption` ending with `ShouldResume` (without that option
+   the session belongs to whatever took it, and the wish to play is dropped
+   rather than fought over), and `AVAudioSessionMediaServicesWereReset`
+   (everything is set again from scratch, and the star's command with it).
+4. **The backgrounded webview** (`tauri.conf.json`): the category and
+   `UIBackgroundModes: [audio]` are the app's half of the promise; the web
+   content process that decodes the audio is WebKit's, and WebKit stops a page
+   it can no longer justify keeping. The window therefore carries
+   `"backgroundThrottling": "disabled"`, which wry maps onto WebKit's
+   `WKPreferences.inactiveSchedulingPolicy = .none` (public API, iOS 17+ /
+   macOS 14+) — long-running audio in a backgrounded hybrid app is the case that
+   setting exists for. Older systems keep WebKit's default.
 
 ### The Now Playing star on iOS
 
@@ -118,7 +158,11 @@ does not have. The wiring is four steps:
    `active` to NO (nothing is liked yet), pin `dislikeCommand` inactive (this app
    has no dislike concept) and attach one handler with
    `addTargetWithHandler:`. MediaPlayer is linked explicitly, because a framework
-   that is not loaded has no classes to look up.
+   that is not loaded has no classes to look up. Its `enabled` bit is re-asserted
+   on every state push and again whenever the app becomes active
+   (`ios_like::refresh`, called by the audio-session module): the same bit is
+   written by the system's now-playing plumbing, and a star a state push cannot
+   turn back on is a star that vanishes mid-album.
 2. **The star is pressed**: the handler emits the `mlo-ios-like` event to the
    webview and answers `MPRemoteCommandHandlerStatusSuccess`. The shell writes
    no like itself.
@@ -160,11 +204,18 @@ like `NSError**` is passed, since raw pointers are not `Encode`, which is also
 why the audio category is read from AVFAudio's exported `NSString *const` rather
 than built) — but compiling for iOS and watching the star on a device both need
 Xcode, which is not installed on this machine, so neither has been run locally.
-`mobile.yml` (macOS) is the first build that type-checks these files.
+`mobile.yml` (macOS) is the first build that type-checks these files, and the ARTIFACT is checked too: `tools/check_ios_ipa.py <ipa-or-url>` opens a
+built `.ipa`, reads `UIBackgroundModes` and the ATS key back out of its
+`Info.plist`, and looks for the Objective-C names the modules use at runtime
+(`AVAudioSession`, the playback category and mode, `NSNotificationCenter`,
+`MPRemoteCommandCenter`, `mlo-ios-like`) in the app binary — so "the mobile job
+went green" and "the IPA the owner installs carries the fix" are two separate
+facts, both checked. A device is still the only thing that can show the star
+filling on a press.
 
 ## Bundle config
 
-`bundle.iOS.minimumSystemVersion` 14.0, `bundle.iOS.bundleVersion` 4.0.2,
+`bundle.iOS.minimumSystemVersion` 14.0, `bundle.iOS.bundleVersion` 4.0.3,
 `bundle.iOS.infoPlist` and `bundle.android.minSdkVersion` 24 in
 `tauri.conf.json`. The Android package name and the iOS bundle id both come from
 the top-level `identifier` (`com.musiclibraryoptimizer.lamusica` — the old

@@ -1166,6 +1166,23 @@ rating.
     halves take the ink at full strength — the polarity of R52c applied to a
     control.
 
+- **R266 — a lyric pane follows the SOUND, not the decoder.** Every element the
+  app plays is routed through the WebAudio graph (`createMediaElementSource` →
+  the ReplayGain gain → the analyser → the speakers; `web/src/lib/analyser.ts`),
+  and that graph has a real output delay: the element's `currentTime` says where
+  the decoder is, while the buffer the speakers are playing was handed to the
+  device `baseLatency + outputLatency` ago. A pane driven straight off
+  `currentTime` is therefore ahead of what the listener hears — "audio in
+  general is de-synced from what the app displays for synced lyrics" — so the
+  one clock the panes read (`PlayerBar`'s `getAudioTime`, the prop both
+  `LyricsSidebar` and the fullscreen player take) subtracts
+  `audibleLatencySec(element)`: `baseLatency + outputLatency` of the context the
+  element is attached to, ZERO for an element with no graph (a direct element
+  has no context of its own to be late in, and guessing a latency is worse than
+  none) and capped at 0.5 s so a nonsense reading can never throw a pane a verse
+  off. The per-track offset control is unchanged: the reader's own fine
+  adjustment on top, written into the track's lyrics when saved.
+
 ### 7.5 Covers
 
 - **R53** — the canonical cover names are `cover.jpg`, `cover.jpeg`,
@@ -3739,7 +3756,12 @@ screen; above `lg` the pane sits beside the artwork.
   `register` enables `likeCommand` (pressable BEFORE anything is known about the
   track, or the first press — liking an unliked track — has nothing to hit),
   pins `active` NO, pins `dislikeCommand` inactive (this app has no dislike
-  state to store) and attaches ONE handler; the handler emits the
+  state to store) and attaches ONE handler; the `enabled` bit is re-asserted on
+  every state push and again whenever the app becomes active again (`refresh`,
+  called by the audio-session module on the transitions that rebuild the
+  system's now-playing furniture), because that same bit is also written by the
+  system's now-playing plumbing — a star a state push cannot turn back on is a
+  star that vanishes mid-album; the handler emits the
   `mlo-ios-like` event and answers success, writing no like itself. The web
   bridge `web/src/lib/iosFavs.ts` (mounted by the player bar) listens for it and
   calls the app's ONE like writer — `useFav` / `api.likeToggle`, the same
@@ -3766,16 +3788,44 @@ screen; above `lg` the pane sits beside the artwork.
   report standing ("audio is muted when app is unfocused").
   `desktop/src-tauri/src/ios_audio.rs` sets `AVAudioSessionCategoryPlayback`
   (the framework's own exported constant, not a copied string) with the default
-  mode and NO options — this app mixes with nothing — then activates the
-  session, once, at setup; AVFAudio is linked explicitly because the dynamic
-  class lookup finds nothing until it is loaded. It is also R251's prerequisite:
-  the Now Playing module draws a card only for an app whose session is a
-  playback session, so with no category there was no card for the star to be
-  drawn on — "the like button still isn't on ios" and the muted audio were ONE
-  bug, settled in one place. A session that will not take the category, or will
-  not activate, is logged and never fatal (the same rule as the star), and the
-  module is compiled for iOS alone (`#[cfg(target_os = "ios")]`; Android plays
-  through its own audio path and the desktop targets have no `AVAudioSession`).
+  mode and NO options — this app mixes with nothing — and then manages the
+  session's LIFECYCLE rather than activating it once at launch: `configure` only
+  sets the category at setup (Apple's own guidance is to activate when playback
+  BEGINS, "to ensure that you won't prematurely interrupt any other background
+  audio"), the web player drives `set_playback_active` through
+  `web/src/lib/iosAudio.ts` so that playback activates the session and a stop
+  hands it back with `NotifyOthersOnDeactivation`, and four OS notifications
+  re-assert it where iOS takes a backgrounded app's session away: going to the
+  background and becoming active again, an interruption ending with
+  `ShouldResume` (without that option the session belongs to whatever took it,
+  and the wish to play is dropped rather than fought over), and the media server
+  restarting. AVFAudio is linked explicitly because the dynamic class lookup
+  finds nothing until it is loaded. It is also R251's prerequisite: the Now
+  Playing module draws a card only for an app whose session is a playback
+  session, so with no category there was no card for the star to be drawn on —
+  "the like button still isn't on ios" and the muted audio were ONE bug, settled
+  in one place. A session that will not take the category, or will not activate,
+  is logged and never fatal (the same rule as the star), and the module is
+  compiled for iOS alone (`#[cfg(target_os = "ios")]`; Android plays through its
+  own audio path and the desktop targets have no `AVAudioSession`).
+
+- **R265a — a backgrounded webview is not suspended for being invisible.** The
+  category and `UIBackgroundModes: [audio]` are the app's own half of the
+  promise; the web content process that decodes the audio is WebKit's, and
+  WebKit stops a page it can no longer justify keeping alive. The owner's 4.0.2
+  report — "audio still stops playing from the app when it tabs out… if I pause
+  / play again the audio works, then doesn't work after entering and exiting the
+  app again" — is that suspension: the session was activated at launch and lost
+  again on the next backgrounding, and a fresh `play()` in the foreground was
+  what started the clock (and re-armed WebKit) again. The window therefore
+  carries `"backgroundThrottling": "disabled"` in
+  `desktop/src-tauri/tauri.conf.json`, which wry maps onto WebKit's
+  `WKPreferences.inactiveSchedulingPolicy = .none` (public API, iOS 17+ /
+  macOS 14+): long-running audio in a backgrounded hybrid app is the case that
+  setting exists for, so the page keeps running while the app is not in front —
+  a music player's audio must also survive a hidden window on the desktop.
+  Older systems keep WebKit's default, which is why this is stated as what the
+  app configures, not as a claim about the OS.
 
 ### 7.23 The export archive, and the offline shell that must not become it
 
