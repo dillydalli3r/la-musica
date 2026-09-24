@@ -445,8 +445,6 @@ def album_expected_state(album_dir, audio_paths=None):
     (mlo.paths.expected_tracks_state).
     """
     from .paths import expected_tracks_state, load_expected_tracks
-    from .paths import expected_tracks_state, load_expected_tracks
-    from .paths import expected_tracks_state, load_expected_tracks
     tracks = load_expected_tracks(album_dir)["tracks"]
     if not tracks:
         return None

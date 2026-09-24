@@ -174,6 +174,14 @@ def tar_with(entries, path):
                 tf.addfile(info)
 
 
+def _pathish(s):
+    """One spelling of a path in TEXT: a repr'd name ("C:\\\\Windows\\\\evil")
+    and a plain one ("C:/Windows/evil") both read the same, so an assertion
+    about *which* member a message names does not depend on the platform's
+    separator or on how repr escaped it."""
+    return str(s).replace("\\\\", "/").replace("\\", "/")
+
+
 def extract_into(path, label, dest=None):
     """Run the extractor the way the route does; answer (dest, error, kept)."""
     dest = dest or tempfile.mkdtemp(prefix="extract-", dir=WORK)
@@ -205,7 +213,10 @@ for label, name in BAD_NAMES:
         fh.write(zip_bytes([(name, b"nope")]))
     dest, error, outside = extract_into(crafted, label)
     check(isinstance(error, archives.UnsafeArchiveError), label, f"got {error!r}")
-    check(bool(error) and name.replace("\\", "/") in str(error).replace("\\", "/"),
+    # The refusal names the member the way it was WRITTEN (a repr, so a
+    # backslash arrives doubled). Normalise both sides to one path spelling:
+    # the assertion is "the refusal names the member", not how repr renders it.
+    check(bool(error) and _pathish(name) in _pathish(str(error)),
           f"{label} — the refusal names the member", str(error))
     eq(os.listdir(dest), [], f"{label} — nothing was extracted")
     eq(outside, [], f"{label} — nothing was written beside the staging folder")
