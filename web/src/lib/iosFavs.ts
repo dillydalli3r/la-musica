@@ -53,8 +53,16 @@ export function useIosFavBridge(path: string | null | undefined, mbid?: string |
   // The listener is registered once, but the track under the star changes every
   // few minutes: the ref is what keeps a press toggling whatever is playing
   // NOW rather than whatever was playing when the event was wired up.
+  //
+  // Written in an effect, never during render: a render React discards (a
+  // concurrent interruption, StrictMode's double render) would otherwise leave
+  // the ref holding a `toggle` for a track that never came on screen — the one
+  // wrong-track press this ref exists to prevent (oxlint's "cannot access refs
+  // during render" is this exact rule).
   const toggleRef = useRef(toggle);
-  toggleRef.current = toggle;
+  useEffect(() => {
+    toggleRef.current = toggle;
+  }, [toggle]);
 
   useEffect(() => {
     if (!IN_TAURI) return;
