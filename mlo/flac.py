@@ -1051,6 +1051,40 @@ def _optimize_flac(args):
         if not os.path.exists(temp_path):
             return (filename, False, "flac.exe produced no output", 0, 0)
 
+        # The SOURCE's honesty, from the two headers rather than from what any
+        # tool printed: the temp output's STREAMINFO digest IS the digest of
+        # the audio the encode just wrote (that is what flac computes it from,
+        # and -V above verified the encode reproduced the source), so a source
+        # that STATED a different digest stated something untrue about its own
+        # audio. Replacing it would launder that: the file would come out with
+        # a header that matches its damaged audio, i.e. a file that passes
+        # every check. So the temp output is dropped and the original kept
+        # exactly as it is.
+        #
+        # This is deliberately NOT left to the tool's own message: CI's flac
+        # reported nothing and exited 0 on this very file (this machine's flac
+        # says "MD5sum of input is different from MD5sum of output" and fails),
+        # and a refusal that depends on a build's wording is a refusal that
+        # disappears on someone else's machine — which is exactly how a
+        # tampered file got rewritten in CI while the suite was green here. A
+        # source that states NO digest (all zero) has said nothing to
+        # contradict: it is re-encoded, and the output states the digest of the
+        # audio it really holds (see the nomd5 case in tools/test_flac_md5.py).
+        try:
+            from .accurip import stream_md5 as _stated_md5
+            claimed = _stated_md5(filepath)
+            written = _stated_md5(temp_path)
+        except Exception:
+            claimed = written = ""
+        if claimed and written and claimed != written:
+            try:
+                os.remove(temp_path)
+            except OSError:
+                pass
+            return (filename, False,
+                    f"{md5_finding(MD5_MISMATCH, f'it states {claimed}, its audio hashes to {written}')}"
+                    f" — the original was kept and NOT re-encoded", 0, 0)
+
         # Clean FLAC tags on temp output (not original) - conservative
         try:
             from .containers import _clean_flac_tags

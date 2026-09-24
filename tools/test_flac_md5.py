@@ -169,6 +169,45 @@ def run_metaflac(*args):
     return subprocess.run([METAFLAC_EXE, *args], capture_output=True, text=True)
 
 
+def unjudging_flac(root, real):
+    """A path to a flac that encodes WITHOUT judging the input's header.
+
+    Which is what CI's build did: it encoded a file whose STREAMINFO MD5 was
+    not the digest of its own audio and exited 0, where this machine's flac
+    says "MD5sum of input is different from MD5sum of output" and fails. That
+    difference is what let a tampered file be rewritten in CI while every
+    suite was green here, so the guard is exercised against both: this shim
+    forwards every argument but `-V` to the real tool, hides its output and
+    exits 0.
+
+    A `.cmd` on Windows, a shebang script elsewhere — the same two shapes the
+    app itself has to run on. None when there is no flac to wrap.
+    """
+    if not real or not os.path.isfile(real):
+        return None
+    body = ("import subprocess, sys\n"
+            f"REAL = {real!r}\n"
+            "args = [a for a in sys.argv[1:] if a != '-V']\n"
+            "subprocess.run([REAL] + args, stdout=subprocess.DEVNULL,\n"
+            "               stderr=subprocess.DEVNULL)\n"
+            "sys.exit(0)\n")
+    if os.name == "nt":
+        script = os.path.join(root, "flac-unjudging.py")
+        with open(script, "w", newline="\n") as fh:
+            fh.write(body)
+        path = os.path.join(root, "flac-unjudging.cmd")
+        with open(path, "w", newline="\r\n") as fh:
+            fh.write("@echo off\r\n"
+                     f"\"{sys.executable}\" \"{script}\" %*\r\n"
+                     "exit /b %ERRORLEVEL%\r\n")
+        return path
+    path = os.path.join(root, "flac-unjudging")
+    with open(path, "w", newline="\n") as fh:
+        fh.write("#!" + sys.executable + "\n" + body)
+    os.chmod(path, 0o755)
+    return path
+
+
 def reference_test(path):
     """`flac -t` — the reference check, verbatim: (rc, the tool's whole
     output). The whole output, because the tool says two things at once for a
@@ -466,6 +505,33 @@ def check_optimize(fx, root):
           "other two files (the failure is not a modification)",
           stats.get("error_count") == 1 and stats.get("modified_count") == 2,
           f"errors={stats.get('error_count')} modified={stats.get('modified_count')}")
+
+    # The refusal must not rest on the TOOL's own wording. A flac build that
+    # encodes without judging the input's header — CI's did exactly that —
+    # rewrote this file and reported success: the damage laundered into a file
+    # whose header finally matched its audio. So the worker runs again,
+    # directly, against a shim of that build (no -V, no complaint, exit 0),
+    # and what is under test is the app's own header comparison.
+    shim = unjudging_flac(root, FLAC_EXE)
+    if not shim:
+        skip("no flac.exe to shim: the header guard cannot be exercised")
+    else:
+        p = os.path.join(lib, "tampered_unjudged.flac")
+        shutil.copyfile(fx["tampered"], p)
+        before_shim = (stated(p), file_sha(p))
+        _name, ok, info, _b_rem, _b_add = mlo_flac._optimize_flac(
+            (shim, METAFLAC_EXE, p, 5, False, "", True, True, opt_cfg(lib)))
+        check("tampered, against a tool that does not judge the header (no -V): "
+              "the original is STILL kept byte-for-byte",
+              file_sha(p) == before_shim[1],
+              f"the file changed: {before_shim[1]} -> {file_sha(p)}")
+        check("tampered, that tool: the file still states the wrong digest "
+              "(nothing was quietly 'fixed')", stated(p) == TAMPER_HEX,
+              stated(p))
+        check("tampered, that tool: the refusal comes from the HEADER "
+              "comparison and names it, and the run is not a success",
+              (not ok) and "FLAC MD5 mismatch" in str(info),
+              f"ok={ok} info={info!r}")
 
     # nomd5: an unknown source digest is not a licence to skip the check — the
     # re-encode decodes both sides (flac -V), and the file it writes states the
