@@ -32,6 +32,10 @@ scope opens on the setup wizard — flip `first_run_done` through
   failure. Run the ones your change touches, and add a case there rather than a
   new suite.
 - Every version copy must agree: `python tools/check_versions.py [vX.Y.Z]`.
+- Release notes go in **`docs/release-notes/`** (as
+  `release-notes-<version>.md`), never in the repo root — nothing reads them at
+  build time, they are the record of what a release changed. `git mv` keeps the
+  history when one moves.
 - Web: `cd web && npm run build` (typecheck: `npx tsc -b`).
 - UI checks: `node tools/check_*.mjs <payload.json>` are payload-driven (no server);
   `tools/check_*.cjs` drive a running scratch server.
