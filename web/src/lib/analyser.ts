@@ -13,6 +13,7 @@
  */
 
 import { buildEqChain, type EqChain } from "./eqNodes";
+import { note } from "./pbDiag";
 import type { EqBand } from "../api";
 
 let ctx: AudioContext | null = null;
@@ -90,6 +91,10 @@ function ensureCtx(): AudioContext | null {
       return null;
     }
     ctx = new AC();
+    // The creation row matters as much as a transition: WebKit parks a fresh
+    // context before any gesture ever reaches it, and "suspended at created"
+    // (with no later statechange) is a graph whose sound was never heard.
+    note("audio-context", { state: ctx.state, why: "created" });
     armContext(ctx);
   } catch {
     brokenUntil = Date.now() + BROKEN_RETRY_MS;
@@ -116,6 +121,13 @@ function ensureCtx(): AudioContext | null {
 function armContext(c: AudioContext) {
   try {
     c.addEventListener("statechange", () => {
+      // A row for the playback report (lib/pbDiag): every element we attach
+      // routes its sound THROUGH this graph, so iOS parking the context is one
+      // of the two candidate causes of the owner's report — and "interrupted"
+      // versus "suspended" versus a `running` that came back on its own is
+      // exactly the distinction the report has to make. Recorded before the
+      // resume below, so the row shows the state the platform chose.
+      note("audio-context", { state: c.state, why: "statechange" });
       // Resume when the page is on screen — and ALSO when it is hidden but one
       // of our own elements is still playing. The second half is the owner's
       // report ("audio just cuts out after tabbing out of the app"): iOS parks

@@ -500,4 +500,18 @@ export default {
   "library.az.clear": "すべて表示",
   "library.az.letterHint": "{letter} — この表示に {n} 件",
   "library.az.empty": "一致するものがありません — 検索ボックス、名前欄、A–Z の頭文字、フィルターメニューを解除してください。",
+
+  // —— 端末上の再生レポート（設定 → ダウンロード） ——
+  "settings.playback_diag": "再生レポート ({n})",
+  "settings.playback_diag_help": "スマートフォンでしか起きない再生不具合のためのブラックボックスです。プレーヤー・OS・シェルがそれぞれ何をしたかを新しい順に記録します。曲を再生し、アプリを離れて戻ってから、これをコピーしてください。",
+  "settings.playback_diag_shell": "iOS シェル",
+  "settings.playback_diag_no_shell": "シェルなし (ブラウザ)",
+  "settings.playback_diag_asking": "シェルに問い合わせ中…",
+  "settings.playback_diag_events": "イベント ({n})",
+  "settings.playback_diag_empty": "まだ記録がありません — 曲を再生してから戻ってください。",
+  "settings.playback_diag_copy": "レポートをコピー",
+  "settings.playback_diag_clear": "消去",
+  "settings.playback_diag_copied": "{n} 件のイベントをコピーしました。",
+  "settings.playback_diag_copy_failed": "クリップボードを利用できません — レポートをこのメッセージに添えます:",
+  "settings.playback_diag_cleared": "再生レポートを消去しました。",
 } as const;

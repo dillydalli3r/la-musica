@@ -1,7 +1,7 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useRef, useState, useSyncExternalStore } from "react";
 import { useNavigate, useSearchParams } from "react-router-dom";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
-import { Bell, Save, RotateCcw, LayoutGrid, Settings as SettingsIcon, Check, Eye, EyeOff, ChevronDown, ChevronUp, Wand2, X, FolderOpen, Loader2 } from "lucide-react";
+import { Bell, Save, RotateCcw, LayoutGrid, Settings as SettingsIcon, Check, Eye, EyeOff, ChevronDown, ChevronUp, Wand2, X, FolderOpen, Loader2, Copy, Trash2 } from "lucide-react";
 import { api, deviceUnavailable, unavailableFeatures } from "../api";
 import ConfirmButton from "../components/ConfirmButton";
 import CookieJarPanel from "../components/CookieJarPanel";
@@ -17,6 +17,8 @@ import { DEFAULT_RUN_ALL, OPT_IN_SCRIPTS, SCRIPT_LABEL, isScriptId } from "../li
 import { LOCALES, applyConfigLocale, setLocale, useI18n, type MessageKey } from "../lib/i18n";
 import { CODEC_CHOICES } from "../lib/codecMeta";
 import { notificationState, requestNotifications, type NotifyState } from "../lib/notify";
+import { pbDiagClear, pbDiagEvents, pbDiagVersion, subscribe, type DiagEvent } from "../lib/pbDiag";
+import { iosShellState } from "../lib/iosState";
 
 /** The accent swatches, each with the ink its own colour needs for the tick —
  *  derived (lib/accent), not a hardcoded `text-black`, which was invisible on
@@ -363,6 +365,154 @@ function YoutubeCookieJar() {
  */
 function RymCookieJar({ onStored }: { onStored: (value: string) => void }) {
   return <CookieJarPanel source="rym" onStored={onStored} />;
+}
+
+/** HH:MM:SS on the reader's own clock. The report is read next to the moment
+ *  the owner heard the sound stop, so local time is the only useful clock —
+ *  an ISO string with a timezone in it would be one more thing to translate on
+ *  a phone screenshot. */
+function clockOf(t: number): string {
+  const d = new Date(t);
+  const p = (n: number) => String(n).padStart(2, "0");
+  return `${p(d.getHours())}:${p(d.getMinutes())}:${p(d.getSeconds())}`;
+}
+
+/** One event's detail as `key=value …`, in the order the recorder wrote it —
+ *  the same text the panel draws and the Copy button puts on the clipboard, so
+ *  what is read and what is sent can never disagree. */
+function diagDetailText(detail: DiagEvent["detail"]): string {
+  if (!detail) return "";
+  return Object.entries(detail)
+    .map(([k, v]) => `${k}=${v === null ? "null" : v}`)
+    .join(" ");
+}
+
+/** The on-device playback report (lib/pbDiag) — the black box for the iOS
+ *  reports that cannot be reproduced anywhere else: "audio stops when I tab
+ *  out", "the lock-screen controls do nothing".
+ *
+ *  Everything here is built to be READ ON A PHONE and then handed over: the
+ *  groups stack, every value sits under its own key, nothing scrolls sideways,
+ *  and Copy writes the whole report as tab-separated lines so it survives being
+ *  pasted into a chat. Live by subscription: a row the player appends while
+ *  this block is open appears here without a refresh (the point is to watch it
+ *  happen, on the device that misbehaves).
+ *
+ *  The shell group is asked for ONCE, when the block is first opened — the IPC
+ *  is only reachable inside the Tauri shell (lib/iosState), and a Settings page
+ *  nobody opened the report on must not pay for it. No shell answering is a
+ *  fact worth stating ("no shell (browser)"), never a spinner. */
+function PlaybackDiag() {
+  const { t } = useI18n();
+  // Subscribed rather than polled: `subscribe` + the version counter is what
+  // useSyncExternalStore wants, and it re-renders only when a row is added.
+  useSyncExternalStore(subscribe, pbDiagVersion);
+  const events = pbDiagEvents();
+  // undefined = not asked yet, null = no shell answered (or no shell at all).
+  const [shell, setShell] = useState<[string, string][] | null | undefined>(undefined);
+  const shellAsked = useRef(false);
+
+  const reportLines = () => {
+    const lines = [`la musica playback report — ${new Date().toISOString()}`];
+    if (shell === undefined || shell === null) {
+      lines.push(`shell\t${shell === null ? t("settings.playback_diag_no_shell") : t("settings.playback_diag_asking")}`);
+    } else {
+      for (const [k, v] of shell) lines.push(`shell\t${k}\t${v}`);
+    }
+    for (const ev of events) lines.push(`${clockOf(ev.t)}\t${ev.kind}\t${diagDetailText(ev.detail)}`);
+    return lines;
+  };
+
+  const copyReport = async () => {
+    const text = reportLines().join("\n");
+    try {
+      await navigator.clipboard.writeText(text);
+      toast.success(t("settings.playback_diag_copied", { n: String(events.length) }));
+    } catch {
+      // The Clipboard API needs a secure context, and this app is normally
+      // served over plain http on the LAN, where `navigator.clipboard` is
+      // undefined — so the report goes in the message instead of being lost
+      // (the same fallback DependenciesPage's `copyCommand` uses for its
+      // upgrade command).
+      toast.error(`${t("settings.playback_diag_copy_failed")}\n${text}`);
+    }
+  };
+
+  return (
+    <details
+      className="mt-3 bg-zinc-950/40 rounded-lg border border-border px-3 py-2"
+      onToggle={(e) => {
+        if (!e.currentTarget.open || shellAsked.current) return;
+        shellAsked.current = true;
+        void iosShellState().then(setShell);
+      }}
+    >
+      <summary className="text-xs font-medium cursor-pointer text-zinc-300 select-none">
+        {t("settings.playback_diag", { n: String(events.length) })}
+      </summary>
+      <div className="mt-2 space-y-2">
+        <div className="text-[10px] text-zinc-600">{t("settings.playback_diag_help")}</div>
+
+        {/* Shell first: it is the half of the report the page cannot see for
+            itself, and its absence is itself an answer. */}
+        <div className="min-w-0">
+          <div className="text-[10px] uppercase tracking-wide text-zinc-500">
+            {t("settings.playback_diag_shell")}
+          </div>
+          {shell === undefined ? (
+            <div className="text-[11px] text-zinc-600">{t("settings.playback_diag_asking")}</div>
+          ) : shell === null ? (
+            <div className="text-[11px] text-zinc-600">{t("settings.playback_diag_no_shell")}</div>
+          ) : (
+            <div className="space-y-1">
+              {shell.map(([k, v]) => (
+                <div key={k} className="min-w-0">
+                  <div className="text-[10px] text-zinc-600 break-all">{k}</div>
+                  <div className="font-mono text-xs text-zinc-200 break-all">{v || "—"}</div>
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+
+        <div className="min-w-0">
+          <div className="text-[10px] uppercase tracking-wide text-zinc-500">
+            {t("settings.playback_diag_events", { n: String(events.length) })}
+          </div>
+          {events.length === 0 ? (
+            <div className="text-[11px] text-zinc-600">{t("settings.playback_diag_empty")}</div>
+          ) : (
+            <div className="font-mono text-[11px] leading-relaxed">
+              {events.map((ev, i) => (
+                <div key={`${ev.t}-${i}`} className="border-t border-border/50 pt-0.5 mt-0.5 first:border-0 first:pt-0 first:mt-0">
+                  <span className="text-zinc-500">{clockOf(ev.t)}</span>{" "}
+                  <span className="text-zinc-300">{ev.kind}</span>
+                  {ev.detail && (
+                    <div className="text-zinc-400 break-words">{diagDetailText(ev.detail)}</div>
+                  )}
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+
+        <div className="flex items-center gap-2 flex-wrap pt-1">
+          <button className="btn-ghost !py-0.5 text-[11px] tap" onClick={copyReport}>
+            <Copy className="h-3 w-3" /> {t("settings.playback_diag_copy")}
+          </button>
+          <button
+            className="btn-ghost !py-0.5 text-[11px] tap"
+            onClick={() => {
+              pbDiagClear();
+              toast(t("settings.playback_diag_cleared"));
+            }}
+          >
+            <Trash2 className="h-3 w-3" /> {t("settings.playback_diag_clear")}
+          </button>
+        </div>
+      </div>
+    </details>
+  );
 }
 
 export default function SettingsPage() {
@@ -2447,6 +2597,12 @@ export default function SettingsPage() {
               <div className="text-xs font-bold text-zinc-300">{GROUP_BY_TAB[tab].title}</div>
               {GROUP_BY_TAB[tab].blurb && <div className="text-[10px] text-zinc-600">{GROUP_BY_TAB[tab].blurb}</div>}
               {renderFields(GROUP_BY_TAB[tab].fields)}
+              {/* The on-device playback report belongs beside the playback
+                  settings it explains: this is the block the owner opens on the
+                  phone that misbehaves (lib/pbDiag holds the black box, and the
+                  panel is deliberately collapsible so Settings stays readable
+                  for everyone else). */}
+              {tab === "downloads" && <PlaybackDiag />}
               {tab === "ai" && (
                 <div className="pt-2 border-t border-border space-y-1">
                   <AiTestButton value={scriptCfg} />

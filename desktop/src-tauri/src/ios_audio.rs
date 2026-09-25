@@ -88,11 +88,13 @@
 //!
 //! So this module renders something of its OWN while it matters:
 //!
-//! * [`start_keep_alive`] plays half a second of 16-bit silence — generated in
-//!   `silence_wav`, not shipped as an asset — through an `AVAudioPlayer`
+//! * [`start_keep_alive`] plays half a second of 16-bit DITHER — generated in
+//!   `keepalive_wav`, not shipped as an asset — through an `AVAudioPlayer`
 //!   looping it at unity volume, on the same playback session the music uses.
-//!   Inaudible by construction (the samples are zeros) and real output as far
-//!   as the session is concerned, which is the whole point.
+//!   Inaudible by construction (about −90 dBFS) and real output as far as the
+//!   session is concerned, which is the whole point: pure digital silence is
+//!   the one signal a platform can discount as "no audio", which would leave
+//!   this process exactly as suspendable as it was before the buffer existed.
 //! * [`sync_keep_alive`] is the condition, and it is the narrowest one that
 //!   works: **the web player says it is playing AND the app is in the
 //!   background**. Started at `DidEnterBackground` (the last moment before iOS
@@ -236,9 +238,9 @@ static IN_BACKGROUND: AtomicBool = AtomicBool::new(false);
 const KEEP_ALIVE_FRAMES: usize = 22_050;
 
 thread_local! {
-    /// The keep-alive player while it is running — `AVAudioPlayer` over one
-    /// looping half-second of silence, through the same playback session the
-    /// webview's music uses. `None` whenever there is nothing to keep alive.
+    /// The keep-alive's whole state: the player while it is running, and why
+    /// the last attempt to start one failed (the in-app readout shows both —
+    /// see `state`).
     ///
     /// A thread-local rather than a static: `Retained<AnyObject>` is neither
     /// `Send` nor `Sync` (objc2 says so on purpose — thread affinity is a
@@ -246,7 +248,74 @@ thread_local! {
     /// thread anyway: setup, the two app-state notifications, and the
     /// `set_playback_active` Tauri command, which the mobile runtime delivers
     /// on the main thread like every other sync command.
-    static KEEP_ALIVE: RefCell<Option<Retained<AnyObject>>> = const { RefCell::new(None) };
+    static KEEP_ALIVE: RefCell<KeepAlive> = const { RefCell::new(KeepAlive { player: None, error: None }) };
+}
+
+/// See `KEEP_ALIVE`.
+struct KeepAlive {
+    player: Option<Retained<AnyObject>>,
+    error: Option<String>,
+}
+
+thread_local! {
+    /// The APP PROCESS's own heartbeat: when the last tick was, and the worst
+    /// gap between two of them.
+    ///
+    /// The web player's own heartbeat (web/src/lib/pbDiag.ts) measures the web
+    /// content process; this one measures the process iOS would suspend — and
+    /// the owner's reports cannot tell them apart from the outside. A
+    /// multi-second gap here means THIS process was frozen (iOS suspended the
+    /// app while the webview's process survived), which is a different bug from
+    /// the webview being frozen, and a different one again from the platform
+    /// pausing the element in a live process. Same thread-local reason as
+    /// `KEEP_ALIVE`: read and written on the main thread only.
+    static APP_HEARTBEAT: RefCell<Heartbeat> = const { RefCell::new(Heartbeat { last: None, worst_gap_ms: 0 }) };
+}
+
+/// See `APP_HEARTBEAT`.
+struct Heartbeat {
+    last: Option<std::time::Instant>,
+    worst_gap_ms: u64,
+}
+
+/// Start the app process's heartbeat: one `NSTimer` tick a second, recording
+/// the worst gap of three seconds or more (a suspended process resumes with
+/// exactly one gap covering the frozen window, which is what makes this a
+/// measurement rather than a guess).
+///
+/// Never fatal and never noisy: no `NSTimer` class (a stripped runtime), a
+/// refused schedule — the readout simply has no heartbeat rows.
+fn start_heartbeat() {
+    let Some(class) = AnyClass::get(c"NSTimer") else {
+        return;
+    };
+    let block = RcBlock::new(|_timer: NonNull<AnyObject>| {
+        APP_HEARTBEAT.with(|slot| {
+            let mut beat = slot.borrow_mut();
+            let now = std::time::Instant::now();
+            if let Some(last) = beat.last {
+                let gap = now.duration_since(last).as_millis() as u64;
+                if gap > 3_000 {
+                    beat.worst_gap_ms = beat.worst_gap_ms.max(gap);
+                }
+            }
+            beat.last = Some(now);
+        });
+    });
+    // The `&DynBlock<…>` binding is the shape `msg_send!` accepts for a block
+    // argument (the same one the session's observers use below); the run loop
+    // retains the scheduled timer, so the token is deliberately dropped.
+    let block: &DynBlock<dyn Fn(NonNull<AnyObject>) + 'static> = &block;
+    // SAFETY: a live NSTimer class, and `scheduledTimerWithTimeInterval:repeats:
+    // block:` is the documented factory; 1.0 s, repeating, with the block above.
+    let _timer: Option<Retained<AnyObject>> = unsafe {
+        msg_send![class, scheduledTimerWithTimeInterval: 1.0f64, repeats: true, block: block]
+    };
+}
+
+/// "yes"/"no" for the readout below (`state`).
+fn yesno(value: bool) -> String {
+    if value { "yes".to_string() } else { "no".to_string() }
 }
 
 /// The process-wide `AVAudioSession`, or `None` when this process has none at
@@ -343,12 +412,73 @@ pub fn configure() {
     take_category(&session);
 }
 
-/// A 0.5 s WAV of 16-bit silence, mono at 44.1 kHz — the keep-alive player's
-/// whole input. Built by hand rather than shipped as an asset: a 44-byte
-/// canonical header plus zeroed samples is the entire file, and an app whose
-/// audio is streamed from a server has no business carrying an audio file in
-/// its bundle.
-fn silence_wav(frames: usize) -> Vec<u8> {
+/// What the shell's iOS audio and keep-alive state actually IS, as a flat
+/// key/value list for the app's own readout (Settings → Downloads & playback →
+/// Playback diagnostics, fed by the `ios_audio_state` Tauri command).
+///
+/// Why a readout and not a log: the owner's reports about this module — "audio
+/// stops", "the controls don't work" — describe a phone, and nothing on a
+/// development box can observe it. Every claim this module makes is one of a
+/// handful of booleans, and this is those booleans: whether the category was
+/// taken at all, whether the app thinks it is in the background, whether the
+/// web player says it is playing, and whether a keep-alive is actually
+/// rendering (with the reason it is not, when that is the answer). A
+/// `keep_alive_error` of "none" beside `keep_alive_running: no` while
+/// `app_in_background: yes` is a different bug from `keep_alive_running: yes`
+/// and the music still stopping, and the difference is worth one round trip.
+pub fn state() -> Vec<(String, String)> {
+    let (running, error) = KEEP_ALIVE.with(|slot| {
+        let slot = slot.borrow();
+        (slot.player.is_some(), slot.error.clone())
+    });
+    let mut out: Vec<(String, String)> = vec![
+        ("platform".into(), "ios".into()),
+        ("web_player_says_playing".into(), yesno(PLAYING.load(Ordering::SeqCst))),
+        ("app_in_background".into(), yesno(IN_BACKGROUND.load(Ordering::SeqCst))),
+        ("keep_alive_running".into(), yesno(running)),
+        ("keep_alive_error".into(), error.unwrap_or_else(|| "none".into())),
+        // This process's own worst freeze. "0.0" means it was never away long
+        // enough to matter; anything in the seconds is iOS having suspended the
+        // app — the exact claim no development box can check for us.
+        ("app_process_worst_gap_s".into(), APP_HEARTBEAT.with(|slot| {
+            format!("{:.1}", slot.borrow().worst_gap_ms as f64 / 1000.0)
+        })),
+    ];
+    match session() {
+        Some(session) => {
+            // `category` is the session's own getter — reading it back is what
+            // makes "configure() ran" a fact rather than an assumption.
+            let category: Option<Retained<NSString>> =
+                unsafe { msg_send![&*session, category] };
+            out.push((
+                "session_category".into(),
+                category.map(|c| c.to_string()).unwrap_or_else(|| "unknown".into()),
+            ));
+            let other: bool = unsafe { msg_send![&*session, isOtherAudioPlaying] };
+            out.push(("other_audio_playing".into(), yesno(other)));
+            let volume: f32 = unsafe { msg_send![&*session, outputVolume] };
+            out.push(("output_volume".into(), format!("{volume:.2}")));
+        }
+        None => out.push(("session_category".into(), "AVAudioSession unavailable".into())),
+    }
+    out
+}
+
+/// A 0.5 s WAV at 16-bit, mono, 44.1 kHz — the keep-alive player's whole input.
+/// Built by hand rather than shipped as an asset: a 44-byte canonical header
+/// plus the samples is the entire file, and an app whose audio is streamed from
+/// a server has no business carrying an audio file in its bundle.
+///
+/// The samples are DITHER, not zeros: ±1 LSB of a cheap deterministic
+/// generator, i.e. about −90 dBFS — inaudible under any master, and not digital
+/// silence. That distinction is the whole point of the buffer. A stream of
+/// zeros can be discounted as "no audio" by the platform's own accounting (the
+/// same reason every shipping keep-alive of this shape emits a low-level
+/// signal rather than silence), and a discounted render is exactly the failure
+/// this exists to prevent: iOS suspending a backgrounded app it does not
+/// believe is playing anything. It is also why the loop is generated rather
+/// than replayed from a file: the level has to be provably tiny.
+fn keepalive_wav(frames: usize) -> Vec<u8> {
     const RATE: u32 = 44_100;
     const CHANNELS: u16 = 1;
     const BITS: u16 = 16;
@@ -367,7 +497,16 @@ fn silence_wav(frames: usize) -> Vec<u8> {
     wav.extend_from_slice(&BITS.to_le_bytes());
     wav.extend_from_slice(b"data");
     wav.extend_from_slice(&data_len.to_le_bytes());
-    wav.resize(44 + data_len as usize, 0); // the samples: silence
+    // xorshift32 — deterministic, no dependency, and its ±1 LSB toggles are
+    // indistinguishable from a real dither floor.
+    let mut state: u32 = 0x9E37_79B9;
+    for _ in 0..frames {
+        state ^= state << 13;
+        state ^= state >> 17;
+        state ^= state << 5;
+        let sample: i16 = if state & 1 == 0 { 1 } else { -1 };
+        wav.extend_from_slice(&sample.to_le_bytes());
+    }
     wav
 }
 
@@ -382,18 +521,19 @@ fn silence_wav(frames: usize) -> Vec<u8> {
 fn start_keep_alive() {
     KEEP_ALIVE.with(|slot| {
         let mut slot = slot.borrow_mut();
-        if slot.is_some() {
+        if slot.player.is_some() {
             return;
         }
+        slot.error = None;
         let Some(class) = AnyClass::get(c"AVAudioPlayer") else {
-            eprintln!(
-                "[mlo-desktop] AVAudioPlayer is unavailable — this app process \
-                 renders nothing of its own, so iOS may suspend it (and the \
-                 playback with it) while it is in the background"
-            );
+            let why = "AVAudioPlayer is unavailable — this app process renders \
+                       nothing of its own, so iOS may suspend it (and the \
+                       playback with it) while it is in the background";
+            eprintln!("[mlo-desktop] {why}");
+            slot.error = Some(why.split_whitespace().collect::<Vec<_>>().join(" "));
             return;
         };
-        let data = NSData::with_bytes(&silence_wav(KEEP_ALIVE_FRAMES));
+        let data = NSData::with_bytes(&keepalive_wav(KEEP_ALIVE_FRAMES));
         // SAFETY: `alloc` then the designated initializer, in that order, with
         // the NSData above and a null error out-parameter (nothing here reads
         // the reason a player could not be built; a refusal is the `None`).
@@ -426,7 +566,9 @@ fn start_keep_alive() {
             }
         };
         let Some(player) = player else {
-            eprintln!("[mlo-desktop] the iOS keep-alive player would not start");
+            let why = "the iOS keep-alive player would not start".to_string();
+            eprintln!("[mlo-desktop] {why}");
+            slot.error = Some(why);
             return;
         };
         // SAFETY: a live AVAudioPlayer, and each call is the documented setter
@@ -441,10 +583,12 @@ fn start_keep_alive() {
             msg_send![&*player, play]
         };
         if !playing {
-            eprintln!("[mlo-desktop] the iOS keep-alive player would not play");
+            let why = "the iOS keep-alive player would not play".to_string();
+            eprintln!("[mlo-desktop] {why}");
+            slot.error = Some(why);
             return;
         }
-        *slot = Some(player);
+        slot.player = Some(player);
     });
 }
 
@@ -453,7 +597,7 @@ fn start_keep_alive() {
 /// stop is explicit rather than a side effect of the release.
 fn stop_keep_alive() {
     KEEP_ALIVE.with(|slot| {
-        if let Some(player) = slot.borrow_mut().take() {
+        if let Some(player) = slot.borrow_mut().player.take() {
             // SAFETY: a live AVAudioPlayer; `stop` is the documented call.
             unsafe {
                 let _: () = msg_send![&*player, stop];
@@ -661,6 +805,7 @@ fn observe(name: &'static NSString, handler: fn(&AnyObject)) {
 /// interruption pair, and a media-server restart. See the module docs for what
 /// each one is for.
 pub fn register() {
+    start_heartbeat();
     observe(
         unsafe { UIApplicationDidEnterBackgroundNotification },
         |_: &AnyObject| on_background(),

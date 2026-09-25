@@ -123,6 +123,23 @@ fn set_playback_active(active: bool) {
     let _ = active;
 }
 
+/// What the shell's iOS audio state IS — the readout behind Settings →
+/// Downloads & playback → Playback diagnostics.
+///
+/// Registered on EVERY target, exactly like the other two iOS commands: the
+/// web UI calls it unconditionally whenever it is inside a Tauri shell, and
+/// off iOS the list comes back empty (nothing about `AVAudioSession` exists
+/// there). See `ios_audio::state` for what each row means and why a readout
+/// exists at all.
+#[tauri::command]
+fn ios_audio_state() -> Vec<(String, String)> {
+    #[cfg(target_os = "ios")]
+    let state = ios_audio::state();
+    #[cfg(not(target_os = "ios"))]
+    let state = Vec::new();
+    state
+}
+
 /// Show and focus the main window (tray click / tray menu "Open").
 #[cfg(desktop)]
 fn show_main_window(app: &tauri::AppHandle) {
@@ -247,7 +264,8 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             pick_folder,
             set_now_playing_liked,
-            set_playback_active
+            set_playback_active,
+            ios_audio_state
         ])
         .manage(AutostartItem(Mutex::new(None)))
         .setup(|app| {
@@ -285,7 +303,8 @@ pub fn run() {
     let builder = builder
         .invoke_handler(tauri::generate_handler![
             set_now_playing_liked,
-            set_playback_active
+            set_playback_active,
+            ios_audio_state
         ])
         .setup(|app| {
             if let Some(window) = app.get_webview_window("main") {

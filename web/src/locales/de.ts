@@ -502,4 +502,18 @@ export default {
   "library.az.clear": "Alle anzeigen",
   "library.az.letterHint": "{letter} — {n} in dieser Ansicht",
   "library.az.empty": "Hier passt nichts – Suche, Namensfeld, A–Z-Buchstabe oder Filtermenü leeren.",
+
+  // —— Wiedergabebericht auf dem Gerät (Einstellungen → Downloads) ——
+  "settings.playback_diag": "Wiedergabebericht ({n})",
+  "settings.playback_diag_help": "Eine Blackbox für Wiedergabefehler, die nur auf dem Telefon auftreten: was Player, System und Shell getan haben, Neuestes zuletzt. Starte einen Titel, verlasse die App, komm zurück und kopiere das hier.",
+  "settings.playback_diag_shell": "iOS-Shell",
+  "settings.playback_diag_no_shell": "keine Shell (Browser)",
+  "settings.playback_diag_asking": "Shell wird gefragt…",
+  "settings.playback_diag_events": "Ereignisse ({n})",
+  "settings.playback_diag_empty": "Noch nichts aufgezeichnet – starte einen Titel und komm zurück.",
+  "settings.playback_diag_copy": "Bericht kopieren",
+  "settings.playback_diag_clear": "Leeren",
+  "settings.playback_diag_copied": "{n} Ereignisse kopiert.",
+  "settings.playback_diag_copy_failed": "Zwischenablage nicht erreichbar – der Bericht folgt in dieser Meldung:",
+  "settings.playback_diag_cleared": "Wiedergabebericht geleert.",
 } as const;

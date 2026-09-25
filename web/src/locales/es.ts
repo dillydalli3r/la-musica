@@ -501,4 +501,18 @@ export default {
   "library.az.clear": "Mostrar todo",
   "library.az.letterHint": "{letter} — {n} en esta vista",
   "library.az.empty": "Aquí no coincide nada: borra la búsqueda, el campo de nombre, la letra A–Z o el menú Filtro.",
+
+  // —— Informe de reproducción en el dispositivo (Ajustes → Descargas) ——
+  "settings.playback_diag": "Informe de reproducción ({n})",
+  "settings.playback_diag_help": "Una caja negra para los fallos de reproducción que solo ocurren en el teléfono: lo que hicieron el reproductor, el sistema y el shell, lo más reciente al final. Reproduce un tema, sal de la app, vuelve y luego copia esto.",
+  "settings.playback_diag_shell": "Shell de iOS",
+  "settings.playback_diag_no_shell": "sin shell (navegador)",
+  "settings.playback_diag_asking": "preguntando al shell…",
+  "settings.playback_diag_events": "Eventos ({n})",
+  "settings.playback_diag_empty": "Nada registrado todavía: reproduce un tema y vuelve.",
+  "settings.playback_diag_copy": "Copiar informe",
+  "settings.playback_diag_clear": "Borrar",
+  "settings.playback_diag_copied": "Se copiaron {n} eventos.",
+  "settings.playback_diag_copy_failed": "No se pudo usar el portapapeles: el informe va en este mensaje:",
+  "settings.playback_diag_cleared": "Informe de reproducción borrado.",
 } as const;

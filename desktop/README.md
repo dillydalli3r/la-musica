@@ -153,9 +153,14 @@ desktop targets have no `AVAudioSession`).
    playback of its own is suspended like any other, taking the music, the star's
    command handler and the star's press handling with it. While the web player
    says it is playing AND the app is in the background, this process therefore
-   plays half a second of generated 16-bit silence (`silence_wav`) on a looping
-   `AVAudioPlayer` at unity volume, on that same playback session: inaudible by
-   construction, real output as far as the session is concerned. It starts at
+   plays half a second of generated 16-bit dither (`keepalive_wav`, ±1 LSB,
+   about −90 dBFS) on a looping `AVAudioPlayer` at unity volume, on that same
+   playback session: inaudible under any master, and deliberately not digital
+   silence, which a platform may discount as "no audio". The state this whole
+   module is in — category, background, playing, keep-alive running or not, and
+   why — is readable from inside the app through `ios_audio_state` (Settings →
+   Downloads & playback → Playback diagnostics), because none of it is
+   observable from a development box. It starts at
    `DidEnterBackground` and when playback starts while already backgrounded
    (the lock-screen play button has no app-state notification to ride on), and
    stops the moment either half goes away. `MPNowPlayingInfoCenter` is still
@@ -247,7 +252,7 @@ filling on a press.
 
 ## Bundle config
 
-`bundle.iOS.minimumSystemVersion` 14.0, `bundle.iOS.bundleVersion` 4.1.1,
+`bundle.iOS.minimumSystemVersion` 14.0, `bundle.iOS.bundleVersion` 4.1.2,
 `bundle.iOS.infoPlist` and `bundle.android.minSdkVersion` 24 in
 `tauri.conf.json`. The Android package name and the iOS bundle id both come from
 the top-level `identifier` (`com.musiclibraryoptimizer.lamusica` — the old

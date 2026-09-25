@@ -544,4 +544,20 @@ export default {
   "library.az.clear": "Show all",
   "library.az.letterHint": "{letter} — {n} in this view",
   "library.az.empty": "Nothing here matches — clear the search box, the name field, the A–Z letter or the Filter menu.",
+
+  // —— The on-device playback report (Settings → Downloads & playback) ——
+  // The block reads back lib/pbDiag's black box: the iOS playback reports are
+  // unobservable from a dev box, so the owner photographs or copies this.
+  "settings.playback_diag": "Playback report ({n})",
+  "settings.playback_diag_help": "A black box for playback bugs that only happen on a phone: what the player, the OS and the shell each did, newest last. Play a track, tab out, come back — then copy this.",
+  "settings.playback_diag_shell": "iOS shell",
+  "settings.playback_diag_no_shell": "no shell (browser)",
+  "settings.playback_diag_asking": "asking the shell…",
+  "settings.playback_diag_events": "Events ({n})",
+  "settings.playback_diag_empty": "Nothing recorded yet — play a track and come back.",
+  "settings.playback_diag_copy": "Copy report",
+  "settings.playback_diag_clear": "Clear",
+  "settings.playback_diag_copied": "Copied {n} events.",
+  "settings.playback_diag_copy_failed": "Could not reach the clipboard — the report follows in this message:",
+  "settings.playback_diag_cleared": "Playback report cleared.",
 } as const;

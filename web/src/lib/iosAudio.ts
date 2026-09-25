@@ -1,5 +1,6 @@
 import { useEffect } from "react";
 import { IN_TAURI } from "../api";
+import { note } from "./pbDiag";
 
 /** The iOS shell's audio session, told when the player is making sound.
  *
@@ -41,6 +42,11 @@ export function useIosPlaybackBridge(playing: string | null) {
   const active = playing != null;
   useEffect(() => {
     if (!IN_TAURI) return;
+    // The push itself goes in the report: the heartbeat's `playing` and the
+    // element's own events say what the app believed, and this row says what
+    // the app then TOLD the shell — the pair is what separates "the shell was
+    // never told" from "the shell was told and did not act".
+    note("iosAudio", { active });
     void (async () => {
       try {
         // Dynamic on purpose, exactly like the star's bridge: a static import

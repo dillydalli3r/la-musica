@@ -5004,10 +5004,14 @@ composition instead (R267). Above `lg` the pane sits beside the artwork.
   bugs — *"audio just cuts out after tabbing out of the app"* and an OS star that
   behaved as if nothing were wired to it (R251). While the web player says it is
   PLAYING and the app is in the BACKGROUND, `desktop/src-tauri/src/ios_audio.rs`
-  therefore renders half a second of generated 16-bit silence (`silence_wav`)
-  through a looping `AVAudioPlayer` at unity volume, on that same playback
-  session — inaudible by construction, real output as far as the session is
-  concerned. It starts at `DidEnterBackground` and when playback starts while
+  therefore renders half a second of generated 16-bit DITHER (`keepalive_wav` —
+  ±1 LSB of a deterministic generator, about −90 dBFS, measured) through a
+  looping `AVAudioPlayer` at unity volume, on that same playback session.
+  Inaudible under any master, and deliberately NOT digital silence: a stream of
+  zeros is the one signal a platform can discount as "no audio", which would
+  leave this process exactly as suspendable as it was before the buffer existed
+  (the 4.1.1 build shipped zeros, and the owner's next report was that the audio
+  still stops). It starts at `DidEnterBackground` and when playback starts while
   already backgrounded (the lock-screen play button has no app-state
   notification to ride on), and stops the moment either half of the condition
   goes away: nothing renders in the foreground, and the cost is bounded to the
@@ -5022,6 +5026,29 @@ composition instead (R267). Above `lg` the pane sits beside the artwork.
   `AVAudioPlayer` class name in the shipped binary, because a module that
   silently stopped being compiled into the iOS build is exactly the failure this
   rule cannot see from a test suite.
+
+- **R289 — the shell's iOS audio state is readable from inside the app.** Every
+  claim `ios_audio.rs` makes is one of a handful of facts — the session's
+  category as the framework's own getter reports it, whether the app believes it
+  is in the background, whether the web player says it is playing, whether a
+  keep-alive is actually rendering, and why it is not when that is the answer —
+  and none of them is observable from a development box. They are therefore
+  published: the `ios_audio_state` Tauri command (registered on every target,
+  empty off iOS, like the star's and the session's) returns them as a flat
+  key/value list, and Settings → Downloads & playback → *Playback diagnostics*
+  draws them beside the web player's own event black box — the element's
+  `play`/`pause`/`error`/`stalled` events with the visibility state and
+  readyState at that moment, every Media Session action the OS sent, seeks with
+  their source, and the AudioContext's state transitions
+  (`web/src/lib/pbDiag.ts`). Two heartbeats sit beside those rows, because
+  "which process froze" is the question the reports cannot answer from the
+  outside: the page's own 1 s tick (a gap of 3 s or more is a frozen or
+  suspended web content process) and the shell's (`app_process_worst_gap_s` — a
+  multi-second gap there is iOS having suspended the APP while the webview's
+  process survived). The owner's iOS reports ("audio stops", "the
+  controls don't work") cost a release each while they were unobservable; the
+  rule is that the state behind them is a screen the owner can read back, not a
+  question they have to answer from memory.
 
 - **R272 — the playing state follows the ELEMENT, both ways.** `pause` already
   cleared the player's state; `play` now sets it, for the track the queue is

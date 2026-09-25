@@ -501,4 +501,18 @@ export default {
   "library.az.clear": "Tout afficher",
   "library.az.letterHint": "{letter} — {n} dans cette vue",
   "library.az.empty": "Rien ne correspond ici — effacez la recherche, le champ de nom, la lettre A–Z ou le menu Filtre.",
+
+  // —— Rapport de lecture sur l'appareil (Réglages → Téléchargements) ——
+  "settings.playback_diag": "Rapport de lecture ({n})",
+  "settings.playback_diag_help": "Une boîte noire pour les bugs de lecture qui n'arrivent que sur téléphone : ce que le lecteur, le système et le shell ont fait, le plus récent en dernier. Lancez un morceau, quittez l'app, revenez, puis copiez ceci.",
+  "settings.playback_diag_shell": "Shell iOS",
+  "settings.playback_diag_no_shell": "pas de shell (navigateur)",
+  "settings.playback_diag_asking": "interrogation du shell…",
+  "settings.playback_diag_events": "Événements ({n})",
+  "settings.playback_diag_empty": "Rien d'enregistré pour l'instant — lancez un morceau et revenez.",
+  "settings.playback_diag_copy": "Copier le rapport",
+  "settings.playback_diag_clear": "Effacer",
+  "settings.playback_diag_copied": "{n} événements copiés.",
+  "settings.playback_diag_copy_failed": "Presse-papiers injoignable — le rapport suit dans ce message :",
+  "settings.playback_diag_cleared": "Rapport de lecture effacé.",
 } as const;

@@ -1,6 +1,7 @@
 import { useEffect, useRef } from "react";
 import { IN_TAURI } from "../api";
 import { useFav } from "./favs";
+import { note, shortPath } from "./pbDiag";
 
 /** The iOS shell's Now Playing star, wired to the app's own like store.
  *
@@ -74,7 +75,14 @@ export function useIosFavBridge(path: string | null | undefined, mbid?: string |
         // static import would put a Tauri-only module in the browser bundle
         // too, where there is no shell behind it.
         const { listen } = await import("@tauri-apps/api/event");
-        const un = await listen(LIKE_EVENT, () => toggleRef.current());
+        const un = await listen(LIKE_EVENT, () => {
+          // An OS star press that reached the page — the same proof the
+          // mediaSession rows carry for the transport buttons, and the only
+          // way to tell "the shell never sent it" from "the app got it and
+          // the heart did not move".
+          note("iosFavs", { event: "like-press" });
+          toggleRef.current();
+        });
         // The component can unmount (or StrictMode can remount) while the
         // import resolves; unsubscribing here keeps exactly one listener.
         if (cancelled) un();
@@ -97,6 +105,7 @@ export function useIosFavBridge(path: string | null | undefined, mbid?: string |
         // Dynamic for the same reason as the listener above: this module is
         // reachable from the browser build, where no shell exists.
         const { invoke } = await import("@tauri-apps/api/core");
+        note("iosFavs", { event: "push-liked", liked: !!path && fav, path: shortPath(path) });
         await invoke(SET_LIKED_COMMAND, { liked: !!path && fav });
       } catch {
         /* A shell too old to know the command (or any other refusal): silence.

@@ -45,6 +45,7 @@ NEEDLES = [
     (b"AVAudioSessionCategoryPlayback", "the playback category (ios_audio.rs)"),
     (b"AVAudioSessionModeDefault", "the default mode (ios_audio.rs)"),
     (b"AVAudioPlayer", "the background keep-alive player (ios_audio.rs)"),
+    (b"NSTimer", "the app-process heartbeat behind the readout (ios_audio.rs)"),
     (b"NSNotificationCenter", "the session's lifecycle observers (ios_audio.rs)"),
     (b"MPRemoteCommandCenter", "the Now Playing command centre (ios_like.rs)"),
     (b"mlo-ios-like", "the star-press event (ios_like.rs / iosFavs.ts)"),

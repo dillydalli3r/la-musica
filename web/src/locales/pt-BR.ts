@@ -501,4 +501,18 @@ export default {
   "library.az.clear": "Mostrar tudo",
   "library.az.letterHint": "{letter} — {n} nesta visão",
   "library.az.empty": "Nada corresponde aqui — limpe a busca, o campo de nome, a letra A–Z ou o menu Filtro.",
+
+  // —— Relatório de reprodução no aparelho (Ajustes → Downloads) ——
+  "settings.playback_diag": "Relatório de reprodução ({n})",
+  "settings.playback_diag_help": "Uma caixa-preta para bugs de reprodução que só acontecem no celular: o que o player, o sistema e o shell fizeram, o mais recente por último. Toque uma faixa, saia do app, volte e copie isto.",
+  "settings.playback_diag_shell": "Shell do iOS",
+  "settings.playback_diag_no_shell": "sem shell (navegador)",
+  "settings.playback_diag_asking": "consultando o shell…",
+  "settings.playback_diag_events": "Eventos ({n})",
+  "settings.playback_diag_empty": "Nada registrado ainda — toque uma faixa e volte.",
+  "settings.playback_diag_copy": "Copiar relatório",
+  "settings.playback_diag_clear": "Limpar",
+  "settings.playback_diag_copied": "{n} eventos copiados.",
+  "settings.playback_diag_copy_failed": "Não foi possível acessar a área de transferência — o relatório segue nesta mensagem:",
+  "settings.playback_diag_cleared": "Relatório de reprodução limpo.",
 } as const;

@@ -14,6 +14,7 @@ import { useI18n } from "../lib/i18n";
 import { likeToasts } from "../lib/favs";
 import { useIosFavBridge } from "../lib/iosFavs";
 import { useIosPlaybackBridge } from "../lib/iosAudio";
+import { note, shortPath } from "../lib/pbDiag";
 import LockedChip from "./LockedChip";
 import { AdvisoryMark } from "./Badges";
 import StarRating from "./StarRating";
@@ -66,6 +67,55 @@ const PLAY_START_SECONDS = 1;
  *  must not be asked for forever. Each retry costs one tag read once the
  *  decode has finished. */
 const RG_RETRY_MS = [1500, 3000, 5000, 8000, 12000, 18000];
+
+// ---- The playback report (lib/pbDiag) -------------------------------------
+// The owner's iOS reports — "audio stops when I tab out", "the lock-screen
+// controls do nothing" — cannot be reproduced from a dev box, so the player
+// records the few facts that DISCRIMINATE between the candidate causes and the
+// Settings panel reads them back on the device that misbehaved. These three
+// helpers are the whole vocabulary of that report, and they live at module
+// level so the video popout's element — which renders outside this component's
+// closure — reports the same shape as the audio pair's.
+
+/** What the element was doing when the event fired: the decoder's own state
+ *  (`readyState`), whether the platform left an error behind (`error.code`),
+ *  the page's visibility, and which track the element holds (basename only —
+ *  see `shortPath`). `paused` is read here rather than assumed from the event
+ *  kind: a `play` event on an element that is already paused again (a refused
+ *  start) is exactly the row worth having. */
+function elFacts(el: HTMLMediaElement | null, path: string | null) {
+  return {
+    path: shortPath(path),
+    readyState: el?.readyState ?? -1,
+    paused: el?.paused ?? null,
+    err: el?.error?.code ?? null,
+    vis: typeof document !== "undefined" ? document.visibilityState : null,
+  };
+}
+
+/** `stalled` / `waiting`, for the element that is really making sound.
+ *
+ *  The idle preload slot buffers ahead by design — it is paused, and reporting
+ *  its ordinary churn would bury the row that matters (a stream that stopped
+ *  arriving mid-track) under one event per track. `paused`/`ended` is the
+ *  discriminator, so no path bookkeeping is needed here. */
+function noteBuffering(kind: "stalled" | "waiting", el: HTMLMediaElement, path: string | null) {
+  if (el.paused || el.ended) return;
+  note(kind, elFacts(el, path));
+}
+
+/** A seek, and who asked for it. `from` is captured from the element HERE, so
+ *  this must be called BEFORE `currentTime` is written. `source` is the point
+ *  of the row: an app seek is a tap the owner remembers, a `mediaSession` seek
+ *  is the OS delivering a lock-screen or car-stereo scrub (which is itself
+ *  proof the OS reached the page at all), and `ios-shell` is reserved for a
+ *  seek that arrives through the Tauri bridge rather than the webview — no such
+ *  path exists in this build, and the label is here so a future one cannot be
+ *  mistaken for the app's own. */
+function noteSeek(source: "app" | "mediaSession" | "ios-shell", el: HTMLMediaElement | null, to: number) {
+  const round1 = (n: number) => Math.round(n * 10) / 10;
+  note("seek", { source, from: el ? round1(el.currentTime) : null, to: round1(to) });
+}
 
 
 export default function PlayerBar() {
@@ -182,6 +232,34 @@ export default function PlayerBar() {
       return (el === aRef.current ? pathOnA.current : pathOnB.current) === path;
     }) ?? null;
 
+  /** Which track an element holds, or null when it holds nothing of ours.
+   *  The single read of the three refs — `handlePlay`, `handlePause` and the
+   *  media error handler all name the track the same way, and the playback
+   *  report (lib/pbDiag) needs that name on every row. */
+  const pathOf = (el: HTMLMediaElement | null): string | null =>
+    el === videoRef.current
+      ? pathOnVideo.current
+      : el === aRef.current ? pathOnA.current : el === bRef.current ? pathOnB.current : null;
+
+  /** The pauses the APP asked for, and why — the only thing that can tell the
+   *  element's own `pause` event apart from a stop nobody requested.
+   *
+   *  THAT distinction is the whole point of the playback report: the owner's
+   *  "audio stops when I tab out" is either the app pausing on purpose (a
+   *  track change, the sleep timer, a lock-screen press that reached the page)
+   *  or the platform stopping the decoder with the app's back turned — and the
+   *  element's `pause` event looks identical either way. Keyed by element and
+   *  stamped, because the event arrives asynchronously and one load pauses
+   *  several elements in a row: a bare boolean would blame the wrong one.
+   *
+   *  Every app-initiated pause goes through this, so nothing in this component
+   *  may call an element's `.pause()` directly any more. */
+  const appPaused = useRef<{ el: HTMLMediaElement | null; at: number; why: string }>({ el: null, at: 0, why: "" });
+  const pauseApp = (el: HTMLMediaElement | null | undefined, why: string) => {
+    if (el) appPaused.current = { el, at: Date.now(), why };
+    try { el?.pause(); } catch { /* a refused pause is the element's own business */ }
+  };
+
   /** The media element's OWN pause — the event the app never used to hear.
    *
    *  `playing` is the store's word for "sound is coming out right now", and
@@ -199,8 +277,16 @@ export default function PlayerBar() {
    *  its src is replaced — neither says anything about what is playing, and
    *  a stale event must not stop the new track. */
   const handlePause = (e: SyntheticEvent<HTMLMediaElement>) => {
+    const el = e.currentTarget;
+    // Recorded BEFORE the guard below, and for every element: the idle
+    // preload slot pausing as its src is replaced is ordinary churn, but a
+    // pause on ANY element the app did not ask for while the page is hidden
+    // is the owner's report itself — `asked: false` beside `vis: hidden` is
+    // the smoking gun this whole black box exists for.
+    const asked = appPaused.current.el === el && Date.now() - appPaused.current.at < 2000;
+    note("pause", { ...elFacts(el, pathOf(el)), asked, why: asked ? appPaused.current.why : null });
     const p = useStore.getState().playing;
-    if (p && elementFor(p) !== e.currentTarget) return;
+    if (p && elementFor(p) !== el) return;
     setPlaying(null);
   };
 
@@ -220,9 +306,11 @@ export default function PlayerBar() {
    *  Only the track the queue is ON may claim the state: a press that moved on
    *  while this element was still loading must not drag the bar back to it. */
   const handlePlay = (el: HTMLMediaElement) => {
-    const p = el === videoRef.current
-      ? pathOnVideo.current
-      : el === aRef.current ? pathOnA.current : pathOnB.current;
+    const p = pathOf(el);
+    // The element says sound started; the row says on which track, with what
+    // decoder state, and whether the page could see the screen (a `play` while
+    // hidden is iOS restarting the track the owner never touched).
+    note("play", elFacts(el, p));
     if (!p) return;
     const st = useStore.getState();
     if (st.queue[st.index]?.path !== p) return;
@@ -240,6 +328,9 @@ export default function PlayerBar() {
   const startElement = (el: HTMLMediaElement, path?: string | null) => {
     void el.play().catch((e: unknown) => {
       const err = e as { name?: string } | null;
+      // The report keeps the refusals too — this is the row that separates
+      // "iOS would not let us start" from "iOS stopped us afterwards".
+      note("play-refused", { ...elFacts(el, path ?? null), name: err?.name ?? null });
       // AbortError is a play superseded by another load or a pause — the
       // element events tell that story, and it is not a failure.
       if (err?.name === "AbortError") return;
@@ -261,10 +352,14 @@ export default function PlayerBar() {
    *  once, for the track the queue is really on. */
   const handleMediaError = (e: SyntheticEvent<HTMLMediaElement>) => {
     const el = e.currentTarget;
-    const p = el === videoRef.current
-      ? pathOnVideo.current
-      : el === aRef.current ? pathOnA.current : pathOnB.current;
+    const p = pathOf(el);
     const err = el.error;
+    // Every error the element reports is recorded, including the aborted one
+    // the guard below discards: a src change the app made leaves code 1
+    // behind, and a code 1 the app did NOT make (WebKit resetting the source
+    // under a backgrounded page) is a different story with the same number.
+    // The code itself is `err=` in the row — `elFacts` already carries it.
+    note("error", elFacts(el, p));
     // MEDIA_ERR_ABORTED is what a deliberate src change leaves behind — the
     // video branch clears the pair's src on purpose — and it says nothing
     // happened.
@@ -301,6 +396,17 @@ export default function PlayerBar() {
       if (!el || (el.paused && el.readyState > 1) || el.ended) setPlaying(null);
     };
     document.addEventListener("visibilitychange", reconcile);
+    // The report's timeline is anchored on these three: `hidden` is the moment
+    // iOS is allowed to take the audio session away, and the row AFTER it (the
+    // element's own pause, a heartbeat gap, a mediaSession press) is what says
+    // which of the candidate causes actually happened.
+    const onVis = () => note("visibilitychange", { vis: document.visibilityState });
+    const onShow = (e: PageTransitionEvent) =>
+      note("pageshow", { vis: document.visibilityState, persisted: !!e.persisted });
+    const onHide = () => note("pagehide", { vis: document.visibilityState });
+    document.addEventListener("visibilitychange", onVis);
+    window.addEventListener("pageshow", onShow);
+    window.addEventListener("pagehide", onHide);
     // Some shells restore a page from the back/forward cache without a
     // visibility change; `pageshow` is the event that always fires on the way
     // back in. Both are cheap, and both are the same question.
@@ -308,6 +414,9 @@ export default function PlayerBar() {
     return () => {
       document.removeEventListener("visibilitychange", reconcile);
       window.removeEventListener("pageshow", reconcile);
+      document.removeEventListener("visibilitychange", onVis);
+      window.removeEventListener("pageshow", onShow);
+      window.removeEventListener("pagehide", onHide);
     };
     // `elementFor` reads refs only, so this listener installed once is never
     // stale — and re-installing it per queue change would be churn.
@@ -492,6 +601,12 @@ export default function PlayerBar() {
         });
       }
       ms.setActionHandler("play", () => {
+        // The row that proves the OS press REACHED the page at all: if the
+        // lock screen was pressed and no `mediaSession` row appears, the
+        // problem is upstream of the app (the session was never claimed, or
+        // iOS muted the command) — which is exactly what the owner's "the
+        // controls do nothing" leaves undecided.
+        note("mediaSession", { action: "play", vis: document.visibilityState });
         // A lock-screen / CarPlay press: the OS asked, so the request is the
         // user's, but the element still gets the final word (a refusal clears
         // the state instead of leaving the widget claiming sound).
@@ -500,17 +615,27 @@ export default function PlayerBar() {
         else setPlaying(current.path);
       });
       ms.setActionHandler("pause", () => {
-        media()?.pause();
+        note("mediaSession", { action: "pause", vis: document.visibilityState });
+        pauseApp(media(), "mediaSession");
         setPlaying(null);
       });
-      ms.setActionHandler("previoustrack", () => stepRef.current(-1));
-      ms.setActionHandler("nexttrack", () => stepRef.current(1));
+      ms.setActionHandler("previoustrack", () => {
+        note("mediaSession", { action: "previoustrack" });
+        stepRef.current(-1);
+      });
+      ms.setActionHandler("nexttrack", () => {
+        note("mediaSession", { action: "nexttrack" });
+        stepRef.current(1);
+      });
       // Scrubbing from the lock screen / Control Center / a car stereo. Without
       // a handler the OS draws a scrubber that springs back to where the app
       // thinks it is, which reads as "seeking is broken in the background".
       ms.setActionHandler("seekto", (d: { seekTime?: number }) => {
         const el = media();
         if (!el || typeof d?.seekTime !== "number") return;
+        // `from` before `to`, so the row shows which way and how far — an OS
+        // scrub that lands somewhere else than it asked for is its own clue.
+        noteSeek("mediaSession", el, d.seekTime);
         el.currentTime = d.seekTime;
         setTime(d.seekTime);
       });
@@ -726,14 +851,14 @@ export default function PlayerBar() {
     // ready, which reads as "nothing happened". Skipped when a gapless swap has
     // already started the next track on the other element — pausing there would
     // cut the song that just began.
-    if (!swapped.current) media()?.pause();
+    if (!swapped.current) pauseApp(media(), "track-change");
     // A job is rewriting this file right now, so there is no stream to load:
     // the server answers 409 with the sentence below, and handing that to an
     // <audio> element would only be silence. `loadedPath` is deliberately NOT
     // advanced — the moment the job finishes, the same track loads normally.
     const held = heldBy(track.path);
     if (held) {
-      media()?.pause();
+      pauseApp(media(), "track-locked");
       setPlaying(null);
       toast(held.held.why);
       return;
@@ -761,7 +886,7 @@ export default function PlayerBar() {
       for (const a of [aRef.current, bRef.current]) {
         try {
           if (a) {
-            a.pause();
+            pauseApp(a, "video-took-over");
             a.src = "";
           }
         } catch { /* ignore */ }
@@ -785,6 +910,7 @@ export default function PlayerBar() {
       // again from the element's own play/metadata events, which is where a
       // pending value lands.
       pathOnVideo.current = track.path;
+      note("load", { path: shortPath(track.path), via: "video" });
       const v = videoRef.current;
       if (v) {
         v.playbackRate = speed;
@@ -826,7 +952,7 @@ export default function PlayerBar() {
     // Usually it is just the idle preload slot — but when the skip lands on a
     // preloaded track (the last 10s of a song), the OLD element is the one
     // still making sound, and leaving it running played both tracks at once.
-    (el === aRef.current ? bRef.current : aRef.current)?.pause();
+    pauseApp(el === aRef.current ? bRef.current : aRef.current, "other-element");
     // The active element is whichever one the current track was just loaded
     // into — derived here (the single load point) instead of the old boolean
     // that only flipped on a gapless handover. That flag drifting is what let
@@ -837,7 +963,7 @@ export default function PlayerBar() {
     // handover), and a track change must re-point `current` at this element
     // rather than leaving the paused one of the pair as the meter source.
     attachAnalyser(el);
-    try { videoRef.current?.pause(); } catch { /* ignore */ }
+    pauseApp(videoRef.current, "audio-took-over");
     // Which bytes play is `playbackSource`'s decision: the downloaded copy
     // when `playback_source` says so — and always when the server is away,
     // because in a shell (no service worker) nothing else can hand those bytes
@@ -857,6 +983,7 @@ export default function PlayerBar() {
         toast.error(`“${displayTitle}” isn’t downloaded — it needs the server to play.`);
       }
       el.src = source.src;
+      note("load", { path: shortPath(track.path), via: source.cached ? "downloaded" : "stream" });
       setElPath(el, track.path);
       el.playbackRate = speed; // fresh <src> resets the rate
       // The element is reused from the previous track, so its `paused` is not
@@ -913,6 +1040,10 @@ export default function PlayerBar() {
         toast.error(`“${t.title || t.file.replace(/\.[^.]+$/, "")}” isn’t downloaded — it needs the server to play.`);
       }
       idle.src = source.src;
+      // A preload is worth one row: on iOS the gapless handover plays this
+      // element without a load step of its own, so "what was waiting in the
+      // idle slot" is part of the timeline when the next track starts.
+      note("preload", { path: shortPath(nextPath), via: source.cached ? "downloaded" : "stream" });
       setElPath(idle, nextPath);
       // The handover swaps this element in with no further load step, so the
       // next track's gain is fetched NOW — seconds of slack before it plays —
@@ -1095,11 +1226,17 @@ export default function PlayerBar() {
       } else if (code === "ArrowLeft") {
         if (document.querySelector("[data-lrc-editor]")) return; // lyrics editor owns seeking
         const a = media();
-        if (a) a.currentTime = Math.max(0, a.currentTime - 5);
+        if (a) {
+          noteSeek("app", a, Math.max(0, a.currentTime - 5));
+          a.currentTime = Math.max(0, a.currentTime - 5);
+        }
       } else if (code === "ArrowRight") {
         if (document.querySelector("[data-lrc-editor]")) return;
         const a = media();
-        if (a && a.duration) a.currentTime = Math.min(a.duration, a.currentTime + 5);
+        if (a && a.duration) {
+          noteSeek("app", a, Math.min(a.duration, a.currentTime + 5));
+          a.currentTime = Math.min(a.duration, a.currentTime + 5);
+        }
       }
     };
     window.addEventListener("keydown", onKey);
@@ -1190,7 +1327,7 @@ export default function PlayerBar() {
     if (sleepAt === null) return;
     const iv = setInterval(() => {
       if (Date.now() >= sleepAt) {
-        media()?.pause();
+        pauseApp(media(), "sleep-timer");
         useStore.getState().setPlaying(null);
         setSleepAt(null);
         toast("Sleep timer — playback paused");
@@ -1205,12 +1342,18 @@ export default function PlayerBar() {
   // path swaps the preloaded idle element in and starts it immediately —
   // no network fetch, no decode pause.
   const handleEnded = (e?: SyntheticEvent<HTMLMediaElement>) => {
+    // The end of a track is the row that tells a gapless handover apart from
+    // iOS stopping the element: an `ended` with no `load`/`play` after it is
+    // the queue failing to advance, an `ended` alone followed by silence is
+    // the platform.
+    const endEl = e?.currentTarget ?? media();
+    note("ended", elFacts(endEl, pathOf(endEl)));
     // Only the ACTIVE decoder may advance the queue: one of the audio pair,
     // or the music-video popout (which never matches audio(), so it needs
     // its own check — without it videos would end and play nothing next).
     if (e && e.currentTarget !== audio() && e.currentTarget !== videoRef.current) return;
     if (sleepStopNext) {
-      media()?.pause();
+      pauseApp(media(), "sleep-timer-track-end");
       useStore.getState().setPlaying(null);
       setSleepStopNext(false);
       toast("Sleep timer — playback paused");
@@ -1222,6 +1365,10 @@ export default function PlayerBar() {
         // A repeat is a NEW play: forget the count so the element's own `play`
         // event (currentTime back at 0) records this one too.
         counted.current = { el: null, path: null };
+        // A repeat is a seek to 0 the app asked for, by the same vocabulary as
+        // every other seek — otherwise the timeline shows the position jump
+        // with no author.
+        noteSeek("app", m, 0);
         m.currentTime = 0;
         startElement(m, current?.path);
       }
@@ -1232,7 +1379,7 @@ export default function PlayerBar() {
     // "it ends after this track", so it ends — pausing instead of silently
     // wrapping to track 1. The explicit Next button still wraps (step()).
     if (!shuffle && next >= queue.length) {
-      media()?.pause();
+      pauseApp(media(), "queue-end");
       setPlaying(null);
       return;
     }
@@ -1293,7 +1440,7 @@ export default function PlayerBar() {
     if (!a || !current) return;
     resumeAnalyser();
     if (playing) {
-      a.pause();
+      pauseApp(a, "user-transport");
       setPlaying(null);
     } else {
       // The state is optimistic (the button must answer the press), and the
@@ -1314,8 +1461,12 @@ export default function PlayerBar() {
             can read them; attachAnalyser resumes the context it opens, so the
             very first play is not read from a suspended (all-zero) graph */}
         <audio ref={aRef} hidden crossOrigin="anonymous" onTimeUpdate={onTime} onLoadedMetadata={onMeta} onEnded={handleEnded} onPause={handlePause} onError={handleMediaError}
+          onStalled={(e) => noteBuffering("stalled", e.currentTarget, pathOf(e.currentTarget))}
+          onWaiting={(e) => noteBuffering("waiting", e.currentTarget, pathOf(e.currentTarget))}
           onPlay={(e) => { attachAnalyser(e.currentTarget); applyElGain(e.currentTarget); countPlay(e.currentTarget); handlePlay(e.currentTarget); }} />
         <audio ref={bRef} hidden crossOrigin="anonymous" onTimeUpdate={onTime} onLoadedMetadata={onMeta} onEnded={handleEnded} onPause={handlePause} onError={handleMediaError}
+          onStalled={(e) => noteBuffering("stalled", e.currentTarget, pathOf(e.currentTarget))}
+          onWaiting={(e) => noteBuffering("waiting", e.currentTarget, pathOf(e.currentTarget))}
           onPlay={(e) => { attachAnalyser(e.currentTarget); applyElGain(e.currentTarget); countPlay(e.currentTarget); handlePlay(e.currentTarget); }} />
 
         {/* full layout from tablet width up: cover+title / centered seek /
@@ -1406,6 +1557,7 @@ export default function PlayerBar() {
               onChange={(e) => {
                 const a = media();
                 if (!a) return;
+                noteSeek("app", a, Number(e.target.value));
                 a.currentTime = Number(e.target.value);
                 setTime(Number(e.target.value));
               }}
@@ -1927,6 +2079,9 @@ export default function PlayerBar() {
                 attachAnalyser(e.currentTarget);
                 applyElGain(e.currentTarget);
                 countPlay(e.currentTarget);
+                // The video's own play row, same shape as the pair's (this
+                // element never calls handlePlay, so nothing else records it).
+                note("play", elFacts(e.currentTarget, pathOf(e.currentTarget)));
               }}
             />
           </div>,
@@ -1963,6 +2118,7 @@ export default function PlayerBar() {
               onSeek={(t) => {
                 const a = media();
                 if (!a) return;
+                noteSeek("app", a, t);
                 a.currentTime = t;
                 setTime(t);
               }}
@@ -2155,7 +2311,14 @@ function VideoPopout({
       onEnded={onEnded}
       onPlay={onPlay}
       onPause={onPause}
-      onError={() => {
+      // The same two buffering rows as the audio pair, reported from this
+      // element's side: a music video whose stream stops arriving and one the
+      // platform suspended look alike in the player's state, and only these
+      // separate them.
+      onStalled={(e) => noteBuffering("stalled", e.currentTarget, path)}
+      onWaiting={(e) => noteBuffering("waiting", e.currentTarget, path)}
+      onError={(e) => {
+        note("error", elFacts(e.currentTarget, path));
         // Direct bytes failed (MPEG-2/VC-1/etc.) — retry via live transcode.
         if (!live) setErrorFallback(true);
         else setFailed(true);
