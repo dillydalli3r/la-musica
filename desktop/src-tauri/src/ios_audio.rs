@@ -39,11 +39,31 @@
 //!   (public API, iOS 17+/macOS 14+), so the web content process is not
 //!   suspended for being invisible. Long-running audio in a backgrounded
 //!   hybrid app is the documented reason that setting exists.
-//! * This module's session lifecycle below: the session is ACTIVATED when
-//!   playback starts and DEACTIVATED when it stops, and re-asserted on the
-//!   transitions where iOS takes a backgrounded app's session away
-//!   (backgrounding, becoming active again, an interruption ending, the media
-//!   server restarting).
+//! * This module's session lifecycle below.
+//!
+//! ## 4.0.4: the lifecycle itself was the bug
+//!
+//! 4.0.3 gave the session a lifecycle — the category re-applied and the session
+//! activated on every start of playback, deactivated with
+//! `NotifyOthersOnDeactivation` on every stop. The owner's next report was
+//! blunter than the ones before it: *"Audio isn't playing in the app (pressing
+//! play on tracks just makes them pause immediately)."*
+//!
+//! The two calls were the bug. `setCategory:mode:options:` on a session that is
+//! already ACTIVE is Apple's documented "may interrupt audio playback", and the
+//! app is always in exactly that state when the call arrives — the web player
+//! writes `playing` the moment a row is pressed, so the shell's call lands while
+//! the webview's own element is starting (or already playing) into that same
+//! session. The interruption stops the element, the element fires `pause`, and
+//! the player reads that as "the track ended by itself" — press play, get a
+//! pause. The deactivate half is the same fault from the other side: a pause
+//! that arrives in the same second as a start (a track change, a refused load,
+//! the OS pausing the element) handed the session back mid-startup, and the
+//! play that followed began in a session that had just been taken away.
+//!
+//! What replaced it, in one sentence: **the category is taken once (at setup,
+//! while the session is inactive) and the session is activated when playback
+//! begins and never handed back while the app lives.**
 //!
 //! ## What it does
 //!
@@ -54,17 +74,22 @@
 //!   playing" — and a launch-time activation is exactly that, on every launch.
 //! * [`set_playing`] is called by the web UI (through the
 //!   `set_playback_active` Tauri command) as the player starts and stops:
-//!   activate on the way in, deactivate on the way out with
-//!   `NotifyOthersOnDeactivation` so whatever the user was listening to before
-//!   comes back.
+//!   **activate on the way in, do nothing on the way out**. Activating an
+//!   already-active session is a no-op, so a play that arrives while the
+//!   session is up cannot interrupt anything; the OS ends the session when the
+//!   app does. The audible cost is the documented one — another player paused
+//!   by this app does not resume by itself when this app pauses — and it is the
+//!   price of a session that cannot be yanked out from under a starting track.
 //! * [`register`] attaches the OS notifications that re-assert the session at
-//!   the four moments it is taken away: `UIApplicationDidEnterBackground` and
-//!   `UIApplicationDidBecomeActive` (re-assert while playing, in both
-//!   directions), `AVAudioSessionInterruption` (an interruption is iOS taking
-//!   the session; when it ends with `ShouldResume` the session is re-asserted,
-//!   and when it does not, the wish to play is dropped rather than stolen back
-//!   from whatever took it), and `AVAudioSessionMediaServicesWereReset` (the
-//!   audio server restarted: everything must be set again from scratch).
+//!   the moments it is taken away: `UIApplicationDidEnterBackground` and
+//!   `UIApplicationDidBecomeActive` (activate again while playing, in both
+//!   directions — a session that is already active is untouched), and
+//!   `AVAudioSessionInterruption` (when an interruption ends with
+//!   `ShouldResume` the session is re-asserted; when it does not, the next press
+//!   of play is what takes it back). `AVAudioSessionMediaServicesWereReset` is
+//!   the one transition that also re-takes the CATEGORY — the audio server
+//!   restarted, everything must be configured from scratch, and nothing is
+//!   playing into the session at that moment (the reset is what stopped it).
 //! * The category comes from the framework's own exported constant rather than
 //!   a copied string, and AVFAudio is linked explicitly: `objc_getClass` only
 //!   finds a class whose framework is LOADED.
@@ -92,8 +117,8 @@
 //! registers the `set_playback_active` command on every target (empty body
 //! elsewhere) so the web UI can call it unconditionally.
 
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::ptr::NonNull;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use block2::{DynBlock, RcBlock};
 use objc2::msg_send;
@@ -146,19 +171,16 @@ const INTERRUPTION_BEGAN: usize = 1;
 const SHOULD_RESUME: usize = 1;
 
 /// `AVAudioSessionSetActiveOptionNotifyOthersOnDeactivation` — on the way out,
-/// tell any app this one interrupted that it may start again. Deactivating
-/// silently is what leaves another player paused for no reason.
-const NOTIFY_OTHERS_ON_DEACTIVATION: usize = 1;
+/// tell any app this one interrupted that it may start again. The session is
+/// NEVER deactivated while this app lives (see the module docs: handing it back
+/// on every pause is what made the session flap under the webview's own
+/// playback), so the option is documented here and deliberately unused.
+const _NOTIFY_OTHERS_ON_DEACTIVATION: usize = 1;
 
 /// What the web player last said about itself. Plain atomics rather than a
 /// mutex: the writers are the main thread (the Tauri command, the notification
 /// handlers) and a torn read is impossible for a bool.
 static PLAYING: AtomicBool = AtomicBool::new(false);
-
-/// Whether the session is active because THIS module activated it, so a stop
-/// only deactivates a session we are the ones holding — WebKit activates the
-/// session for its own playback, and taking that away is not ours to do.
-static ACTIVE_BY_US: AtomicBool = AtomicBool::new(false);
 
 /// The process-wide `AVAudioSession`, or `None` when this process has none at
 /// all (a class that did not load, a stripped runtime): the caller logs rather
@@ -195,18 +217,18 @@ fn take_category(session: &AnyObject) -> bool {
     categorised
 }
 
-/// Activate or deactivate. Deactivating carries `NotifyOthersOnDeactivation`,
-/// so an app this one interrupted is free to resume.
-fn set_active(session: &AnyObject, active: bool) -> bool {
-    let options = if active { 0usize } else { NOTIFY_OTHERS_ON_DEACTIVATION };
+/// Activate the session. There is deliberately no deactivate: see the module
+/// docs on why the session is held for the life of the app.
+fn activate(session: &AnyObject) -> bool {
     // SAFETY: as `take_category`; `setActive:withOptions:error:` is the
     // documented activation call, `active` is the BOOL it takes and `options`
-    // is an `AVAudioSessionSetActiveOptions` bitset.
+    // is an `AVAudioSessionSetActiveOptions` bitset — none of them, since this
+    // app never hands the session back.
     unsafe {
         msg_send![
             session,
-            setActive: active,
-            withOptions: options,
+            setActive: true,
+            withOptions: 0usize,
             error: None::<&mut AnyObject>
         ]
     }
@@ -219,24 +241,29 @@ fn set_active(session: &AnyObject, active: bool) -> bool {
 /// A no-op while nothing is playing: the category is still set, but a session
 /// is not activated for a player that is sitting still — that would interrupt
 /// whatever the user is actually listening to.
+///
+/// The category is deliberately NOT re-applied here. `setCategory:mode:options:`
+/// on a session that is already ACTIVE — which is exactly this app's state
+/// while the webview is playing — is Apple's documented "this may interrupt
+/// audio playback": measured against the owner's report, the interruption is
+/// the webview's own element pausing the moment the category call lands, which
+/// is "pressing play just pauses it immediately". Only the media-server reset
+/// re-takes the category, because there the whole session is gone and Apple's
+/// own recovery rule is to configure it from scratch.
 fn reassert() {
     let Some(session) = session() else {
         return;
     };
-    if !take_category(&session) {
-        return;
-    }
     if !PLAYING.load(Ordering::SeqCst) {
         return;
     }
-    if set_active(&session, true) {
-        ACTIVE_BY_US.store(true, Ordering::SeqCst);
-    } else {
+    if !activate(&session) {
         eprintln!("[mlo-desktop] the iOS audio session would not activate");
     }
 }
 
-/// Put this app's audio in the playback category — once, at setup. See the
+/// Put this app's audio in the playback category — once, at setup, while the
+/// session is INACTIVE (the one moment a category change is free). See the
 /// module docs for why activation itself is NOT here.
 pub fn configure() {
     let Some(session) = session() else {
@@ -249,31 +276,30 @@ pub fn configure() {
     take_category(&session);
 }
 
-/// The web player's play/pause, as the shell's own record of it: activate the
-/// session when playback starts (Apple's guidance: activate when playback
-/// begins, never before, so other audio is not interrupted by a launch), and
-/// hand it back — with `NotifyOthersOnDeactivation` — when playback stops.
+/// The web player's play/pause, as the shell's own record of it.
+///
+/// Playback STARTING is what activates the session (Apple's guidance: never
+/// before, so other audio is not interrupted by a launch). Playback stopping
+/// does NOT deactivate it, and that is the 4.0.4 correction: the web says
+/// "playing" the moment a row is pressed — before the element has really
+/// started — so a pause that follows within the same second (a track change,
+/// a refused load, the OS pausing the element) used to hand the session back
+/// mid-startup, and the play that came right after it started into a session
+/// that had just been taken away. Activating an already-active session is a
+/// no-op, so holding it costs nothing; the OS ends it when the app does.
 ///
 /// Called from the `set_playback_active` Tauri command, i.e. by
 /// `web/src/lib/iosAudio.ts` as the player's `playing` state changes.
 pub fn set_playing(playing: bool) {
     PLAYING.store(playing, Ordering::SeqCst);
+    if !playing {
+        return;
+    }
     let Some(session) = session() else {
         return;
     };
-    if playing {
-        if !take_category(&session) {
-            return;
-        }
-        if set_active(&session, true) {
-            ACTIVE_BY_US.store(true, Ordering::SeqCst);
-        } else {
-            eprintln!("[mlo-desktop] the iOS audio session would not activate");
-        }
-    } else if ACTIVE_BY_US.swap(false, Ordering::SeqCst) {
-        // Only a session this module activated: WebKit's own activation for
-        // its playback is not ours to take away.
-        set_active(&session, false);
+    if !activate(&session) {
+        eprintln!("[mlo-desktop] the iOS audio session would not activate");
     }
 }
 
@@ -303,33 +329,40 @@ fn user_info_usize(notification: &AnyObject, key: &NSString) -> Option<usize> {
 
 /// An interruption: iOS taking the session (a call, an alarm, another app).
 ///
-/// `Began` means the sound has already stopped — the app only forgets that it
-/// was the one holding the session. `Ended` re-asserts only when iOS says
-/// `ShouldResume`: without that option the session belongs to whatever took it,
-/// and the wish to play is dropped instead of fought over.
+/// `Began` needs nothing done — iOS has already stopped the sound, and the
+/// webview's own element fires `pause`, which is what clears the player's state
+/// through the store (and, over the bridge, this module's `PLAYING`). That is
+/// deliberately not duplicated here: the shell's record of what the WEB wanted
+/// is only ever written by the web.
+///
+/// `Ended` re-asserts only when iOS says `ShouldResume`. Without that option
+/// the session belongs to whatever took it, and the next press of play is what
+/// takes it back (see `set_playing`).
 fn on_interruption(notification: &AnyObject) {
     let began = user_info_usize(notification, unsafe { AVAudioSessionInterruptionTypeKey })
         .is_some_and(|kind| kind == INTERRUPTION_BEGAN);
     if began {
-        ACTIVE_BY_US.store(false, Ordering::SeqCst);
         return;
     }
-    let may_resume =
-        user_info_usize(notification, unsafe { AVAudioSessionInterruptionOptionKey })
-            .is_some_and(|options| options & SHOULD_RESUME != 0);
+    let may_resume = user_info_usize(notification, unsafe { AVAudioSessionInterruptionOptionKey })
+        .is_some_and(|options| options & SHOULD_RESUME != 0);
     if may_resume {
         reassert();
-    } else {
-        PLAYING.store(false, Ordering::SeqCst);
     }
 }
 
 /// The audio server restarted. Apple's rule is to reconfigure everything from
 /// scratch, and (when the app wants to keep playing) to start the audio again —
-/// the session object survives, its configuration does not. The star's command
-/// is re-asserted in the same breath for the same reason: what the system knew
-/// about this app's now-playing furniture is gone.
+/// the session object survives, its configuration does not. This is the ONE
+/// place besides setup where the category is taken: nothing is playing into it
+/// at this moment (the reset is what killed the audio), so the call cannot
+/// interrupt anybody's playback. The star's command is re-asserted in the same
+/// breath for the same reason: what the system knew about this app's
+/// now-playing furniture is gone.
 fn on_media_services_reset() {
+    if let Some(session) = session() {
+        take_category(&session);
+    }
     reassert();
     crate::ios_like::refresh();
 }
@@ -400,11 +433,18 @@ fn observe(name: &'static NSString, handler: fn(&AnyObject)) {
 /// interruption pair, and a media-server restart. See the module docs for what
 /// each one is for.
 pub fn register() {
-    observe(unsafe { UIApplicationDidEnterBackgroundNotification }, |_: &AnyObject| {
-        on_background()
-    });
-    observe(unsafe { UIApplicationDidBecomeActiveNotification }, |_: &AnyObject| on_active());
-    observe(unsafe { AVAudioSessionInterruptionNotification }, on_interruption);
+    observe(
+        unsafe { UIApplicationDidEnterBackgroundNotification },
+        |_: &AnyObject| on_background(),
+    );
+    observe(
+        unsafe { UIApplicationDidBecomeActiveNotification },
+        |_: &AnyObject| on_active(),
+    );
+    observe(
+        unsafe { AVAudioSessionInterruptionNotification },
+        on_interruption,
+    );
     observe(
         unsafe { AVAudioSessionMediaServicesWereResetNotification },
         |_: &AnyObject| on_media_services_reset(),

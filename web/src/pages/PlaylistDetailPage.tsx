@@ -271,7 +271,7 @@ export default function PlaylistDetailPage() {
         <div className="w-full h-full blur-[90px] opacity-25 scale-125" style={{ background: coverGradient(playlist) }} />
         <div className="absolute inset-0 bg-bg/50" />
       </div>
-      <div className="relative z-10 p-6 space-y-5 mx-auto max-w-6xl">
+      <div className="relative z-10 p-6 space-y-5 mx-auto max-w-[1600px]">
         <div
           className="hero-flat relative"
           style={{ background: `linear-gradient(135deg, hsl(${Math.round((pid * 137.5) % 360)} 42% 32% / 0.15) 0%, transparent 60%)` }}

@@ -1112,7 +1112,7 @@ function AutoPanel({ initialMbid, running, onShowQueue }: {
           {queueRows(sections, "background").length > 0 && (
             <QueueSection
               title="Background"
-              hint="asked every ranked edition it may, none answered — still searched on the worker's own ticks"
+              hint="nothing has landed yet — a failed attempt is retried, and every ranked edition of the release is asked — still searched on the worker's own ticks"
               rows={queueRows(sections, "background")}
               tone="border-violet-800 text-violet-300"
               empty="" busyId={busyId}
@@ -2791,7 +2791,7 @@ function QueuePanel({ running }: { running: boolean }) {
           {queueRows(sections, "background").length > 0 && (
             <QueueSection
               title="Background"
-              hint="every ranked edition this release may ask was asked and none answered — it keeps its place and is searched again on the worker's own ticks, until one lands"
+              hint="still being searched: nothing has landed yet — an attempt that failed is retried, and a release whose ranked editions were all asked keeps its place — on the worker's own ticks, until one lands"
               rows={queueRows(sections, "background")}
               tone="border-violet-800 text-violet-300"
               empty="" busyId={busyId}
@@ -2825,7 +2825,7 @@ function QueuePanel({ running }: { running: boolean }) {
             onClearSection={() => clear({ scope: "completed" })}
           />
           <QueueSection
-            title="Failed" hint="gave up, with the reason"
+            title="Failed" hint="gave up, with the reason — nothing searches these again by itself"
             rows={queueRows(sections, "failed")} tone="border-red-900 text-red-300"
             empty="nothing failed"
             busyId={busyId}
@@ -3403,6 +3403,14 @@ function SharingCard({ running }: { running: boolean }) {
  *  after the last peer response by default, which lands well inside this. */
 const SEARCH_POLL_LIMIT_S = 180;
 
+/** A pasted MusicBrainz id (the same shape the server's `is_mbid` accepts).
+ *  The search box takes free text, and a UUID is never a text query: it names
+ *  ONE track (a recording id, what the library stores per track) or a release,
+ *  and the server resolves it into that track's own parallel searches. Detected
+ *  here so the box can say so before the press — and so a press does the right
+ *  thing without a mode to set. */
+const MBID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
 /* ------------------------------------------------------------------------- *
  * Frames into caches
  *
@@ -3504,6 +3512,7 @@ function timeAgo(t: number | null | undefined): string {
 }
 
 export default function SoulseekPage() {
+  const { t } = useI18n();
   const [params] = useSearchParams();
   const qc = useQueryClient();
   const live = useLiveTransfers();
@@ -3646,6 +3655,9 @@ export default function SoulseekPage() {
   const [recent, setRecent] = useState<string[]>(loadRecentSearches);
   const [browseUser, setBrowseUser] = useState<string | null>(null);
   const [searchId, setSearchId] = useState<string | null>(null);
+  /** What an id search resolved to (the server's label), shown above the
+   *  results: the user asked by id, so the page says which track/album it was. */
+  const [mbidLabel, setMbidLabel] = useState("");
   const [results, setResults] = useState<SlskFile[]>([]);
   const [searching, setSearching] = useState(false);
   const [searchMeta, setSearchMeta] = useState<{ fileCount: number; responseCount: number } | null>(null);
@@ -3686,7 +3698,9 @@ export default function SoulseekPage() {
     // notifications link back to the queue.
     const want = params.get("tab") ?? "";
     if (TAB_LIST.some((t) => t.id === want)) return want as TabId;
-    return releaseParam ? "auto" : "queue";
+    // A link names the tab it wants: `?release=` is the auto-import paste box,
+    // `?mbid=` is a track to search for (see the effect below).
+    return releaseParam ? "auto" : params.get("mbid") ? "search" : "queue";
   });
   const { data: queue } = useQuery({
     queryKey: QUEUE_KEY,
@@ -3756,19 +3770,30 @@ export default function SoulseekPage() {
     }
   };
 
-  const runSearch = async (q?: string) => {
+  const runSearch = async (q?: string, mbid?: string) => {
     const text = (q ?? query).trim();
-    if (!text) return;
+    // A UUID in the box IS an id search, not a text query (MBID_RE above): the
+    // press and a pasted id do the same thing, and the chip beside the box
+    // exists to say so before it happens.
+    const id = (mbid ?? (MBID_RE.test(text) ? text : "")).trim();
+    if (!text && !id) return;
     if (q) setQuery(q);
-    setRecent((r) => saveRecentSearch(r, text));
+    if (text) setRecent((r) => saveRecentSearch(r, text));
+    setMbidLabel("");
     setSearching(true);
     setSearchId(null); // a stale id would make Cancel search drop the wrong query
     setResults([]);
     setSearchMeta(null);
     setVisibleLimit(60);
     try {
-      const r = await api.soulseekSearch(text);
+      const r = await api.soulseekSearch(id ? "" : text, id || undefined);
       setSearchId(r.id);
+      if (id) {
+        // What the id RESOLVED to — the user asked by id and deserves to see
+        // which track/album it was (the server's own label).
+        setMbidLabel(r.label || id);
+        if (r.queries?.length) toast(t("soulseek.mbid.label", { label: r.label || id }));
+      }
       let elapsed = 0;
       if (pollRef.current) clearInterval(pollRef.current);
       pollRef.current = setInterval(async () => {
@@ -3817,6 +3842,22 @@ export default function SoulseekPage() {
       setSearching(false);
     }
   };
+
+  // A link can name the ID it wants searched — a library track's own "Search
+  // Soulseek for this track" sends that track's recording id as `?mbid=`
+  // (web/src/components/TagActionsMenu). The Search tab is opened and the
+  // search runs ONCE, so the press lands on results instead of on a box the
+  // user has to paste into. `ranParam` is what keeps a re-render (or a second
+  // effect run) from searching again — the user's own presses are the only
+  // other way a search starts from here.
+  const mbidParam = params.get("mbid") ?? undefined;
+  const ranParam = useRef("");
+  useEffect(() => {
+    if (!mbidParam || tab !== "search" || ranParam.current === mbidParam) return;
+    ranParam.current = mbidParam;
+    void runSearch(mbidParam, mbidParam);
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- one run per id
+  }, [mbidParam, tab]);
 
   /** Stop waiting on a running search: drop it server-side and kill the poll.
    *  Before slskd hands back an id there is nothing to cancel, so the poll is
@@ -3906,7 +3947,7 @@ export default function SoulseekPage() {
 
   if (status && !status.installed) {
     return (
-      <div className="p-6 space-y-5 mx-auto max-w-6xl">
+      <div className="p-6 space-y-5 mx-auto max-w-[1600px]">
         <PageHeader icon={ArrowDownUp} title="Soulseek" subtitle="Managed slskd" />
         <EmptyState title="slskd is not installed" hint="Install it from Settings → Dependencies (key: slskd), then reload this page." />
       </div>
@@ -3914,7 +3955,7 @@ export default function SoulseekPage() {
   }
 
   return (
-    <div className="p-6 space-y-5 mx-auto max-w-6xl">
+    <div className="p-6 space-y-5 mx-auto max-w-[1600px]">
       <PageHeader
         icon={ArrowDownUp}
         title="Soulseek"
@@ -4081,12 +4122,34 @@ export default function SoulseekPage() {
           <button className="btn-primary tap" onClick={() => runSearch()} disabled={searching || !running}>
             <Search className="h-4 w-4" /> {searching ? "Searching…" : "Search"}
           </button>
+          {/* A pasted UUID is an ID search, not a text query (MBID_RE): the
+              chip offers it in so many words, and the plain Search button does
+              the same thing — a mode to set would just be one more thing to
+              forget. */}
+          {!searching && MBID_RE.test(query.trim()) && (
+            <button
+              className="btn-secondary tap"
+              disabled={!running}
+              onClick={() => runSearch(undefined, query.trim())}
+              title={t("soulseek.mbid.hint")}
+            >
+              <Tag className="h-4 w-4" /> {t("soulseek.mbid.chip")}
+            </button>
+          )}
           {searching && (
             <button className="btn-ghost tap" onClick={cancelSearch} title="Stop this search — slskd drops it and the results stop polling">
               <Square className="h-4 w-4" /> Cancel search
             </button>
           )}
         </div>
+        {!searching && MBID_RE.test(query.trim()) && (
+          <p className="text-[11px] text-zinc-400 mt-2">{t("soulseek.mbid.hint")}</p>
+        )}
+        {mbidLabel && (
+          <p className="text-[11px] text-zinc-400 mt-2">
+            {t("soulseek.mbid.label", { label: mbidLabel })}
+          </p>
+        )}
         {!query.trim() && recent.length > 0 && (
           <div className="flex flex-wrap items-center gap-1.5 mt-2">
             <span className="text-[10px] uppercase tracking-widest text-zinc-600">Recent</span>

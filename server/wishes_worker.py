@@ -68,7 +68,7 @@ def status():
     with _lock:
         st = dict(_state)
     st["active"] = [dict(a) for a in _state["active"]]
-    st["interval_hours"] = int(load_config().get("wishes_interval_hours", 6) or 6)
+    st["interval_hours"] = int(load_config().get("wishes_interval_hours", 1) or 1)
     st["enabled"] = bool(load_config().get("wishes_enabled", True))
     st["concurrency"] = _width()
     return st
@@ -159,7 +159,11 @@ def _wait_job(job_id, cancel_check, timeout_s=3 * 3600 + 600):
     Addressed BY ID: several wishes are in flight at once and job_state() with
     no id answers for whichever job the caller means, not for this wish's."""
     from server import soulseek_auto
-    time.sleep(0.5)  # let the job transition to running first
+    # No settle sleep before the first look: `start_job` registers the job as
+    # "running" under its own lock BEFORE it returns (and the id is passed in,
+    # so this cannot read a different job). The half-second that used to be
+    # spent here was paid by every candidate of every walk for a transition
+    # that had already happened — a settled job now answers on the first poll.
     deadline = time.time() + timeout_s
     while True:
         st = soulseek_auto.job_state(job_id)
@@ -646,6 +650,30 @@ def _settle_attempt(wish, cfg, err):
     return "pending"
 
 
+def _clear_settled():
+    """Take the queue's SETTLED rows off the list when a pass really has work.
+
+    The same clear the per-section buttons run (`server.api_queue`
+    .clear_settled_queue, which reuses the clear route's own path): the owner's
+    ask is that the queue's finished sections do not pile up across runs, and a
+    pass that searches something IS a new run — its own tick included. Called
+    only when `open_wishes` is non-empty, so an idle timer does not touch the
+    list, and a job that finishes AFTER the clear stays visible.
+
+    ON ITS OWN THREAD (the pass must not wait on the queue payload's own slskd
+    read) and never raising: `api_queue` reads this module's registries, and
+    bookkeeping about the LIST must not stop a search."""
+    def work():
+        try:
+            from server import api_queue
+            api_queue.clear_settled_queue()
+        except Exception:
+            traceback.print_exc()
+    try:
+        threading.Thread(target=work, name="mlo-queue-autoclear", daemon=True).start()
+    except Exception:
+        traceback.print_exc()
+
 def _due(wish, cfg):
     """Is this wish due for its own next search? (Interval + any backoff.)"""
     return time.time() >= wishes.due_at(wish, cfg)
@@ -800,6 +828,15 @@ def _cycle(wid=None):
             if w["status"] == "searching" and w["id"] not in live:
                 wishes.mark_wanted(w["id"])
 
+        if open_wishes:
+            # A NEW RUN (this tick, an add-to-library's kick, a Search now, a
+            # retry): the queue's FINISHED rows come off the list, exactly as
+            # the per-section Clear buttons take them — the owner's ask that
+            # the finished sections do not survive into the next run. Live
+            # rows, background wishes and retryable failures are not
+            # clearable and stay; a job that settles LATER still shows.
+            _clear_settled()
+
         by_id = _run_pass(open_wishes, cfg) if open_wishes else {}
         imported = sum(1 for v in by_id.values() if v == "imported")
         pending = sum(1 for v in by_id.values() if v == "pending")
@@ -834,7 +871,7 @@ def _cycle(wid=None):
         if skipped:
             summary += f" ({skipped} not started)"
         _set(last_result=summary, last_cycle=time.time(),
-             next_run=time.time() + int(cfg.get("wishes_interval_hours", 6) or 6) * 3600)
+             next_run=time.time() + int(cfg.get("wishes_interval_hours", 1) or 1) * 3600)
         if open_wishes:
             wishes.log("info", "Wishes cycle done — " + summary)
         return {"ok": True, "imported": imported, "pending": pending,

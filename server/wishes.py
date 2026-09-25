@@ -1125,8 +1125,8 @@ def due_at(wish, cfg):
 
     Both used to be `max(interval, retry_at)`, which read as "retrying at 12:10"
     five hours after a download started: a 30-minute backoff was swallowed whole
-    by the 6-hour interval, so a failure waited the interval anyway and the
-    number the row showed had nothing to do with the failure it followed.
+    by the interval, so a failure waited the interval anyway and the number the
+    row showed had nothing to do with the failure it followed.
     `retry_at` is only ever set by that failure path, so its presence IS "the
     last attempt failed" — and with the backoff turned off (0 minutes) nothing
     sets it, which is what keeps the interval as the floor in that case."""
@@ -1135,7 +1135,10 @@ def due_at(wish, cfg):
     retry = float(wish.get("retry_at") or 0)
     if retry:
         return retry
-    interval = max(1, _int(cfg, "wishes_interval_hours", 6)) * 3600.0
+    # The fallback matches `mlo.config`'s shipped default (an hour) so a config
+    # written before the key existed paces a wish the way the Settings page
+    # shows it.
+    interval = max(1, _int(cfg, "wishes_interval_hours", 1)) * 3600.0
     return float(wish.get("last_search") or 0) + interval
 
 

@@ -1051,19 +1051,27 @@ const stampDecimalsPass = async (page, album) => {
   // The card is found by the album it LINKS to, not by its title text: the
   // folder carries the year ("2020 - First Album") while the card shows the
   // ALBUM tag, and the two are not required to match.
-  const played = await page.evaluate((albumPath) => {
+  //
+  // A card links to `albumRef(album)`, which prefers the album's MusicBrainz id
+  // (`/album/mb:<id>`) and only falls back to the encoded folder path — so a
+  // library whose albums carry ids (any tagged library) had NO card this lookup
+  // could match, and the check died on a disabled fullscreen button before
+  // measuring anything. Both keys are passed and either one matching is the
+  // card: this is the check reaching the album the same way a reader does.
+  const played = await page.evaluate((keys) => {
     const norm = (s) => String(s).replace(/\\/g, "/").toLowerCase();
     const card = [...document.querySelectorAll("div.group.relative.rounded-xl")].find((c) => {
       const a = c.querySelector("a[href]");
       let href = a ? a.getAttribute("href") || "" : "";
       try { href = decodeURIComponent(href); } catch { /* leave it raw */ }
-      return norm(href).includes(norm(albumPath));
+      const h = norm(href);
+      return keys.some((k) => k && h.includes(norm(k)));
     });
     const btn = card?.querySelector('button[title="Play album"]');
     if (!btn) return false;
     btn.click();
     return true;
-  }, album.path);
+  }, [album.path, album.meta?.MUSICBRAINZ_ALBUMID ? `mb:${album.meta.MUSICBRAINZ_ALBUMID}` : ""]);
   check("the library grid plays the album that carries lyrics", played, `album ${album.path}`);
   await sleep(1200);
   await page.locator('button[title="Fullscreen player with lyrics"]').first().click();
@@ -1416,19 +1424,22 @@ const stampDecimalsPass = async (page, album) => {
   // Same path as the desktop run, driven from the page: the grid card's and the
   // bar's buttons are reachable by script at any width even where the phone
   // layout reveals them differently.
-  const phoneOpened = await tPage.evaluate((albumPath) => {
+  const phoneOpened = await tPage.evaluate((keys) => {
     const norm = (s) => String(s).replace(/\\/g, "/").toLowerCase();
     const card = [...document.querySelectorAll("div.group.relative.rounded-xl")].find((c) => {
       const a = c.querySelector("a[href]");
       let href = a ? a.getAttribute("href") || "" : "";
       try { href = decodeURIComponent(href); } catch { /* leave it raw */ }
-      return norm(href).includes(norm(albumPath));
+      const h = norm(href);
+      // Either key finds the card — the desktop run above explains why
+      // (`albumRef` prefers `/album/mb:<id>`).
+      return keys.some((k) => k && h.includes(norm(k)));
     });
     const play = card?.querySelector('button[title="Play album"]');
     if (!play) return "no Play album on the card";
     play.click();
     return "";
-  }, album.path);
+  }, [album.path, album.meta?.MUSICBRAINZ_ALBUMID ? `mb:${album.meta.MUSICBRAINZ_ALBUMID}` : ""]);
   await sleep(1500);
   const fsPressed = await tPage.evaluate(() => {
     const b = [...document.querySelectorAll('button[title^="Fullscreen player"]')].find((n) => n.offsetParent !== null);

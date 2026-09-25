@@ -440,13 +440,12 @@ export default function ExportPage() {
     </div>
   );
 
-  /* `max-w-6xl` is the app's READING width (the list pages), and it is wrong
-   * for this one: the picker panels and the preview below them are tables, and
-   * a 1152 px cap stranded ~400 px of a 1568 px window — the two panels then
-   * grew nothing and the picker's prose columns sat at their floors. Browse is
-   * the app's other content-heavy page (a query builder over the same tables)
-   * and it caps at 1600, so this page follows it: the same scale, one step
-   * wider. */
+  /* `max-w-[1600px]` is the app's page width now, for every page: the picker
+   * panels and the preview below them are tables, and the old 1152 px reading
+   * cap stranded ~400 px of a 1568 px window — the two panels then grew nothing
+   * and the picker's prose columns sat at their floors. Browse and Export took
+   * the wider scale first; the owner's "UI doesn't cover most of the screen"
+   * was the same complaint about every other page, so they all follow now. */
   return (
     <div className="p-6 space-y-5 mx-auto max-w-[1600px]">
       <PageHeader

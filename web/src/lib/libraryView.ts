@@ -178,9 +178,108 @@ export function useSelectMode(): { selectMode: boolean; toggleSelectMode: () => 
   return { selectMode, toggleSelectMode };
 }
 
+/* ---- the alphabet filter: the toolbar's name field and its A–Z rail -------
+ *
+ *  Two controls over ONE pair of values (the typed words and the picked
+ *  letter), so they live here with the rest of the browse state rather than in
+ *  the page's own head: whichever of the two the reader uses, the list is cut
+ *  by the one predicate below, and a later page that offers the same pair gets
+ *  the same answer instead of a second opinion about what "B" means.
+ *
+ *  NOT persisted and never in the URL: this is a pass over the list in front of
+ *  you ("where is that album again"), not a place the page can be linked back
+ *  to. A fresh visit opens on the whole library, and a reload is a fresh visit.
+ */
+
+/** The rail's letters, in the order it draws them: A–Z and then `#`, which
+ *  holds everything with no A–Z initial of its own — a digit ("1989"), a
+ *  symbol ("…And Justice for All"), a script this rail has no letter for. */
+export const AZ_LETTERS: readonly string[] = [
+  "A", "B", "C", "D", "E", "F", "G", "H", "I", "J", "K", "L", "M",
+  "N", "O", "P", "Q", "R", "S", "T", "U", "V", "W", "X", "Y", "Z", "#",
+];
+
+/** Fold a display name down to what the alphabet controls compare: lower case
+ *  with the accents taken off (NFKD, then the combining marks it left behind).
+ *  "Ásgeir" is therefore found by "asgeir" — a name box that demanded the
+ *  accent would be a box most keyboards cannot answer. */
+export function foldName(name: string): string {
+  return name.normalize("NFKD").replace(/[\u0300-\u036f]/g, "").toLowerCase();
+}
+
+/** The rail's letter for an ALREADY folded name — the inner half of
+ *  `azLetterOf`, for callers (the menu's counts) that fold a row once and then
+ *  ask it both questions. */
+export function letterOfFolded(folded: string): string {
+  const first = folded.charAt(0);
+  return first >= "a" && first <= "z" ? first.toUpperCase() : "#";
+}
+
+/** The rail's letter for a display name: its own FIRST character when that is
+ *  one of the 26, `#` otherwise. Read from the folded name, so "Émile" is E.
+ *
+ *  The first character, not the first letter anywhere in it: an index that
+ *  files "The Beatles" under B has guessed which word is the name, and a click
+ *  on T answered with nothing would be the list arguing with its own rail. */
+export function azLetterOf(name: string): string {
+  return letterOfFolded(foldName(name.trim()));
+}
+
+/** The one predicate both alphabet controls make. `needle` is the field's
+ *  words ALREADY folded with `foldName` (the caller folds them once per list,
+ *  not once per row); `letter` is the rail's pick, or null for all of them.
+ *  The two COMPOSE — a row has to satisfy both — and a row nobody is looking
+ *  for is every row. */
+export function azKeep(name: string, needle: string, letter: string | null): boolean {
+  const folded = foldName(name.trim());
+  if (letter && letterOfFolded(folded) !== letter) return false;
+  return !needle || folded.includes(needle);
+}
+
+/** The rows of one list the alphabet controls keep, in the order they arrived:
+ *  the sort above decides the order, this only removes rows — which is why it
+ *  returns the same array when neither control is set. */
+export function azFilter<T>(
+  rows: T[],
+  nameOf: (row: T) => string,
+  needle: string,
+  letter: string | null
+): T[] {
+  if (!needle && !letter) return rows;
+  return rows.filter((row) => azKeep(nameOf(row), needle, letter));
+}
+
+/** How many of `names` sit under each rail letter — the count the menu prints
+ *  beside a letter, taken over the rows the rest of the page's controls (and
+ *  the name field) would leave, but never over the letter itself. That is what
+ *  makes the number worth printing: it says what a click would leave. */
+export function azCounts(names: readonly string[], needle: string): Record<string, number> {
+  const out: Record<string, number> = {};
+  for (const name of names) {
+    if (!azKeep(name, needle, null)) continue;
+    const letter = azLetterOf(name);
+    out[letter] = (out[letter] ?? 0) + 1;
+  }
+  return out;
+}
+
+/** The alphabet toolbar's own state. One hook for both controls because they
+ *  are one filter (see `azKeep`), and `letter: null` is the rail switched off
+ *  — not "the `#` letter", which is a bucket of its own. */
+export function useLibraryAlphabet(): {
+  name: string;
+  setName: (v: string) => void;
+  letter: string | null;
+  setLetter: (v: string | null) => void;
+} {
+  const [name, setName] = useState("");
+  const [letter, setLetter] = useState<string | null>(null);
+  return { name, setName, letter, setLetter };
+}
+
 /** Sort state per table view, persisted like the column prefs (each view —
- * albums / artists / tracks — keeps its own key, so switching tabs or
- * reloading no longer resets the other tables). */
+ *  albums / artists / tracks — keeps its own key, so switching tabs or
+ *  reloading no longer resets the other tables). */
 export function useLocalSort(key: string): [SortState | null, (key: string) => void] {
   const storageKey = `mlo-sort-${key}`;
   const [sort, setSort] = useState<SortState | null>(() => {

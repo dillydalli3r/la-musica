@@ -1085,7 +1085,7 @@ export function MBSearchPage() {
   };
 
   return (
-    <div className="p-6 space-y-5 max-w-6xl mx-auto">
+    <div className="p-6 space-y-5 max-w-[1600px] mx-auto">
       {/* Sticky, but through the shared primitive: its `top-12` clears the
           floating top bar (a `top-0` header hides underneath it and loses its
           clicks to the bar's search input). */}
@@ -1372,10 +1372,29 @@ export function MBSearchPage() {
 /* Artist                                                              */
 /* ------------------------------------------------------------------ */
 
-/** The artist's release groups grouped by TYPE, in the order MusicBrainz served
- *  them ("Album + Compilation" — primary type first, then every secondary
- *  type) — the page's sections and its action rows are one and the same
- *  categorisation, so a row can never offer a type the sections do not show. */
+/** The artist's release groups grouped by TYPE, in the order a reader looks for
+ *  them.
+ *
+ *  The label is MusicBrainz's own compound spelling ("Album + Compilation" —
+ *  primary type first, then every secondary type) and the page's sections and
+ *  its action rows are one and the same categorisation, so a row can never
+ *  offer a type the sections do not show.
+ *
+ *  The ORDER is Album, EP, Single first — the three types that make up almost
+ *  every artist's real discography — and everything else after them. It used to
+ *  be the order MusicBrainz happened to serve, which made an artist with 49
+ *  live albums and 10 studio ones open on "Album + Live": a discography that
+ *  reads as live records. A compound label is ranked by its PRIMARY type
+ *  ("Album + Live" sorts with Albums, "EP + Compilation" with EPs), which is
+ *  also the part of the type a listener means when they say "the albums". */
+const RG_TYPE_FIRST = ["album", "ep", "single"];
+
+function rgTypeRank(label: string): number {
+  const primary = label.split(" + ")[0].trim().toLowerCase();
+  const i = RG_TYPE_FIRST.indexOf(primary);
+  return i === -1 ? RG_TYPE_FIRST.length : i;
+}
+
 function byReleaseGroupType(groups: RGRow[]): { label: string; list: RGRow[] }[] {
   const order: string[] = [];
   const byLabel = new Map<string, RGRow[]>();
@@ -1388,7 +1407,14 @@ function byReleaseGroupType(groups: RGRow[]): { label: string; list: RGRow[] }[]
       order.push(label);
     }
   }
-  return order.map((label) => ({ label, list: byLabel.get(label) as RGRow[] }));
+  return order
+    .map((label) => ({ label, list: byLabel.get(label) as RGRow[] }))
+    // Relevance first, then the types carrying the most rows, then the label —
+    // so the order is total and does not depend on which page of MusicBrainz
+    // the rows happened to arrive in.
+    .sort((a, b) => rgTypeRank(a.label) - rgTypeRank(b.label)
+      || b.list.length - a.list.length
+      || a.label.localeCompare(b.label));
 }
 
 /** One action row: the type it acts on (as MusicBrainz spells it, a compound
@@ -1416,11 +1442,13 @@ interface TypeActionRow { label: string; types: string[]; count: number | null }
  *  The queue's own view is refetched on success, so the albums these buttons
  *  created show up there.
  *
- *  One row per release-group TYPE, most-populated first — and deliberately no
- *  "Whole artist" row: the page header's own Add to library button IS that
- *  action (with "All" selected it hands over the whole discography), so a row
- *  beside it would be a second control for one meaning. The per-type rows are
- *  the part the header cannot express. */
+ *  One row per release-group TYPE, in the SAME order as the chips and sections
+ *  above it (Album, EP, Single first — see `byReleaseGroupType`; it is one
+ *  derivation, so a row and a chip cannot disagree about what leads) — and
+ *  deliberately no "Whole artist" row: the page header's own Add to library
+ *  button IS that action (with "All" selected it hands over the whole
+ *  discography), so a row beside it would be a second control for one meaning.
+ *  The per-type rows are the part the header cannot express. */
 function ArtistTypeActions({ artistId, mode, groups }: {
   artistId: string; mode: ImportMode; groups: RGRow[];
 }) {
@@ -1430,8 +1458,7 @@ function ArtistTypeActions({ artistId, mode, groups }: {
   const [said, setSaid] = useState<Record<string, { text: string; ok: boolean }>>({});
   const rows: TypeActionRow[] = useMemo(
     () => byReleaseGroupType(groups)
-      .map(({ label, list }) => ({ label, types: [label.toLowerCase()], count: list.length }))
-      .sort((a, b) => b.count - a.count || a.label.localeCompare(b.label)),
+      .map(({ label, list }) => ({ label, types: [label.toLowerCase()], count: list.length })),
     [groups]);
 
   const run = async (row: TypeActionRow) => {
@@ -1577,7 +1604,7 @@ export function MBArtistPage() {
   const life = (a.life_span ?? []).filter(Boolean).join(" – ");
 
   return (
-    <div className="p-6 space-y-5 mx-auto max-w-6xl">
+    <div className="p-6 space-y-5 mx-auto max-w-[1600px]">
       <PageHeader
         back={{ to: "/mb/search", label: "MusicBrainz search" }}
         overline="MusicBrainz artist"
@@ -1886,7 +1913,7 @@ export function MBReleaseGroupPage() {
   const typeLabel = [rg.primary_type, ...(rg.secondary_types ?? [])].filter(Boolean).join(" + ");
 
   return (
-    <div className="p-6 space-y-5 mx-auto max-w-6xl">
+    <div className="p-6 space-y-5 mx-auto max-w-[1600px]">
       <PageHeader
         back={{ to: "/mb/search", label: "MusicBrainz search" }}
         overline="MusicBrainz release group"
@@ -2163,7 +2190,7 @@ export function MBReleasePage() {
   }
 
   return (
-    <div className="p-6 space-y-5 mx-auto max-w-6xl">
+    <div className="p-6 space-y-5 mx-auto max-w-[1600px]">
       <PageHeader
         back={{ to: "/mb/search", label: "MusicBrainz search" }}
         overline="MusicBrainz release"
@@ -2338,7 +2365,7 @@ export function MBRecordingPage() {
   if (!r) return null;
 
   return (
-    <div className="p-6 space-y-5 mx-auto max-w-6xl">
+    <div className="p-6 space-y-5 mx-auto max-w-[1600px]">
       <PageHeader
         back={{ to: "/mb/search", label: "MusicBrainz search" }}
         overline="MusicBrainz recording"

@@ -73,6 +73,18 @@ for name in ("shoegaze", "post-punk", "trip hop", "jazz rap", "folk metal",
 check(V.parent_of("shoegaze") == "rock", "shoegaze is rock")
 check(V.parent_of("post-punk") == "punk", "post-punk is punk, not rock")
 check(V.parent_of("folk metal") == "metal", "the more specific family wins")
+# The "wave" names are NOT one family. The keyword rule carries "wave" as an
+# ELECTRONIC word, which is right for the genre called "wave" and for the
+# synth-driven ones — and wrong for new wave (a pop/rock movement named for the
+# thing it was new AGAINST) and no wave (an avant-garde scene, not electronic at
+# all). The owner's report was a new wave track whose genre read
+# "Electronic; New Wave": the family was the first genre in the tag AND the
+# wrong one.
+check(V.parent_of("new wave") == "rock", "new wave is rock, not electronic")
+check(V.parent_of("no wave") == "experimental", "no wave is experimental, not electronic")
+check(V.parent_of("new romantic") == "pop", "new romantic is pop")
+check(V.parent_of("dark wave") == "electronic", "the synth-driven waves stay electronic")
+check(V.parent_of("wave") == "electronic", "the genre called wave is electronic")
 check(V.parent_of("rock") == "rock", "a family is its own parent")
 check(V.parent_of("qawwali") is None, "no family beats a wrong family")
 

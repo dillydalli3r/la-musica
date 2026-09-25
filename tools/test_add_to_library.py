@@ -303,6 +303,22 @@ eq(album_row["cover_file"], cover_name, "the placeholder cover is the album's co
 eq(album_row["meta"]["ALBUM"], "Test Album", "title from the release")
 eq(album_row["meta"]["ALBUMARTIST"], "Test Artist", "artist from the release")
 eq(album_row["meta"]["DATE"], "1997-05-06", "date from the release")
+# THE PRESSING, while the audio is still on its way (the owner's ask: an album
+# being imported must not read as a blank cell). The identity the ADD resolved
+# is on the wish, so the tile's medium/country/catalogue readout is filled from
+# what the framework album already stores — and these are the same values the
+# import then writes into the files (`server.imports._stamp_release_identity`),
+# so the tile does not change its mind when the download lands.
+eq(album_row["meta"]["MEDIA"], "CD", "the medium the release is pressed on")
+eq(album_row["media"], "CD", "and the row's own medium field carries it")
+eq(album_row["meta"]["RELEASECOUNTRY"], "GB", "the country the release came out in")
+eq(album_row["meta"]["CATALOGNUMBER"], "CAT-1", "the release's catalogue number")
+eq(album_row["meta"]["LABEL"], "Test Label", "and the label that put it out")
+eq(album_row["meta"]["RELEASESTATUS"], "Official", "with its MusicBrainz status")
+# the facts the RELEASE does not state stay empty rather than being guessed
+eq(album_row["meta"]["ITUNESADVISORY"], None, "nothing invents a rating")
+ok((wish.get("release") or {}).get("media") == ["CD"],
+   "the wish carries the identity block the row read", wish.get("release"))
 eq(album_row["issues"], {}, "a placeholder is not reported as a broken album")
 eq(artist_row["aggregate"]["track_count"], 0, "the artist rollup counts no phantom track")
 eq(artist_row["aggregate"]["album_count"], 1, "the artist rollup does count the pending album")

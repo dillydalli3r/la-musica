@@ -96,7 +96,15 @@ try {
     ["in-progress section with its count", "In progress · 3"],
     ["needs-attention section", "Needs you · 2"],
     ["completed section with its count", "Completed · 3"],
-    ["failed section with its count", "Failed · 2"],
+    // A wish whose ATTEMPT failed while the store still owns its next attempt
+    // is in the Background with the releases still being searched (tools/
+    // test_queue_view.py fixture wish 3) — so Failed holds only the job with no
+    // wish behind it (a settled job whose wish is GONE keeps its row too, see
+    // §8 of that suite).
+    ["background section with its count", "Background · 1"],
+    ["a failed attempt says the failure and the next search",
+     "failed this attempt — searched again automatically at"],
+    ["failed section with its count", "Failed · 1"],
     ["pipeline header counts", "3/3 running"],
     ["the per-release candidate ceiling named", "3 candidate(s) each"],
     // The walk (spec R150-R153): one wish working through the group's ranked

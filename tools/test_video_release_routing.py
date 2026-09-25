@@ -250,7 +250,8 @@ def fake_download(url, dest_dir, config=None):
             "format_id": "137+140"}
 
 
-def fake_search(slsk_mod, queries, wait_s, usable=None, response_limit=0):
+def fake_search(slsk_mod, queries, wait_s, usable=None, response_limit=0,
+cancel_check=None):
     SEARCHES.append(list(queries))
     if not SLSK_FILES:
         return [], [], 0
@@ -861,7 +862,8 @@ def traced_candidate(artist, title, want_seconds=None, config=None):
     return _real_candidate(artist, title, want_seconds, config)
 
 
-def traced_search(slsk_mod, queries, wait_s, usable=None, response_limit=0):
+def traced_search(slsk_mod, queries, wait_s, usable=None, response_limit=0,
+cancel_check=None):
     TRACE.append("soulseek")
     return _real_search(slsk_mod, queries, wait_s, usable, response_limit)
 

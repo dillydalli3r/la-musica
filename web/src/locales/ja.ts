@@ -72,6 +72,12 @@ export default {
   "menu.runAll": "{count} 個のスクリプトをすべて実行",
   "menu.runAllTitle": "{count} 個のスクリプトをすべて実行しますか？",
   "menu.runAllHint": "現在の選択範囲に対して、この順で実行します:",
+  "menu.searchTrackSoulseek": "このトラックを Soulseek で検索",
+  "menu.searchTrackSoulseekHint": "MusicBrainz のレコーディング ID でこの 1 曲だけをネットワークで探します — ファイルをダウンロードしない限り何も予約されません",
+  "menu.searchTrackNoMbid": "このトラックには MusicBrainz のレコーディング ID がありません — 先にタグを付けるか、Soulseek ページでテキスト検索してください",
+  "soulseek.mbid.chip": "MBID で検索",
+  "soulseek.mbid.hint": "MusicBrainz の ID のようです — 検索を押すとその 1 曲だけを探します：アーティストとタイトル、アルバム、ID 自体を同時に検索します。",
+  "soulseek.mbid.label": "MBID 検索：{label}",
   "menu.openTrackPage": "トラックページを開く",
   "menu.openTrackPageHint": "このトラック自身のページを開きます — タグ、技術情報、歌詞",
   "menu.downloadVideo": "ミュージックビデオをダウンロード",
@@ -479,4 +485,19 @@ export default {
   "cookies.keptHosts": "{hosts} の Cookie のみ保持します — エクスポートの残りは保存されません。",
 
   "cookies.sectionTitle": "Cookie ログイン — cookies.txt を取り込む",
+
+  // —— ライブラリページ: ツールバーのアルファベット・ペア — 名前欄と A–Z
+  // レール。ひとつのフィルターに対する 2 つの操作（入力した語と選んだ文字）
+  // で、表示タブが描くリストに適用されます。
+  "library.az.namePlaceholder": "名前で絞り込む",
+  "library.az.nameAria": "リストを名前で絞り込む",
+  "library.az.nameHint": "アルバム名・アーティスト名・曲名で絞り込みます。アクセント記号は無視され、「asgeir」で「Ásgeir」が見つかります。表示タブが描いているリストをさらに絞るだけです。",
+  "library.az.nameClear": "名前フィルターを解除",
+  "library.az.button": "A–Z",
+  "library.az.railAria": "リストを頭文字で絞り込む",
+  "library.az.railTitle": "頭文字へジャンプ — 各文字の数字は、この表示でその文字から始まる件数です",
+  "library.az.menuTitle": "この文字で始まる",
+  "library.az.clear": "すべて表示",
+  "library.az.letterHint": "{letter} — この表示に {n} 件",
+  "library.az.empty": "一致するものがありません — 検索ボックス、名前欄、A–Z の頭文字、フィルターメニューを解除してください。",
 } as const;

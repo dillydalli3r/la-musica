@@ -66,11 +66,14 @@ services:
       # publishing it means your library is searchable but downloads from it
       # fail, which is the one thing a share is for.
       #
-      # The two numbers must be the SAME port: slskd listens on the one in its
-      # own config, so change both together — set MLO_SOULSEEK_LISTEN_PORT in
-      # the environment to whatever you configured (or change the setting to
-      # 50000, the app's default) and restart compose. On the host, forward
-      # that port to this machine as well if a router sits in front of it.
+      # The two numbers must be the SAME port. The variable is the source of
+      # truth for BOTH sides: the app reads MLO_SOULSEEK_LISTEN_PORT at startup
+      # and writes it into its own config (server/main.py), which is what slskd
+      # is then told to listen on — so changing it here is enough, and a
+      # mismatch cannot be introduced from Settings (the app refuses a port
+      # that the environment pins, and says where the pin lives). On the host,
+      # forward that port to this machine as well if a router sits in front of
+      # it — that is the half no publish line can do.
       - "${MLO_SOULSEEK_LISTEN_PORT:-50000}:${MLO_SOULSEEK_LISTEN_PORT:-50000}"
     environment:
       # Folder inside the container to treat as the music library.
@@ -84,6 +87,11 @@ services:
       # password until a phone or another computer connects — set one under
       # Settings -> Security when it does.
       - MLO_SERVER_HOST=0.0.0.0
+      # The Soulseek listen port, when you need a different one. Set it here
+      # (or in a .env beside this file) and the publish line above follows the
+      # same value, while the app seeds its own `soulseek_listen_port` from it —
+      # one number on both sides. Uncomment and change both places in one move:
+      #   - MLO_SOULSEEK_LISTEN_PORT=50000
     volumes:
       # ALL app state (config.json, playlists.db + wishes.db, slskd.yaml,
       # the beets config + beets-library.db, and the ReplayGain / RYM /

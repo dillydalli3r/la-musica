@@ -402,6 +402,13 @@ def _wish_state_of(w, cfg):
         # from the SAME block the queue row reads, so the tile and the queue row
         # can never disagree about it. None for a wish with one candidate.
         "walk": walk,
+        # The release identity the wish was recorded with (its own
+        # `release_json` column, read once by `wishes._row`): the pressing's
+        # medium, countries, catalogue number and label. A FRAMEWORK album has
+        # no tags to carry them yet, so `_pending_album_row` takes the facts it
+        # shows from HERE — one block already in the row, no second query and
+        # no MusicBrainz request for a payload the app itself wrote down.
+        "release": dict(w.get("release") or {}),
     }
 
 
@@ -526,6 +533,49 @@ def pending_album_dirs(artist_dir, dir_scan=None):
                   if os.path.dirname(d).lower() == low)
 
 
+def _pending_release_identity(info, wish):
+    """The release identity tags a FRAMEWORK album's own record already states.
+
+    The marker (`server.pending_albums`) names the release, its artist and its
+    date; the WISH the folder was created with carries the identity block the
+    add resolved (`server.wishes.RELEASE_KEYS`: medium, countries, catalogue
+    number, label, status…). Between the two, a folder whose audio has not
+    arrived can say which pressing it is getting — the same facts the import
+    then writes into the files, so the tile does not change its mind once the
+    download lands.
+
+    A value nobody resolved is ABSENT, never guessed: an identity that states
+    no country contributes no country, and the slot stays empty for a reader to
+    show as empty. The tag spellings are the app's own — RELEASECOUNTRY is the
+    ";"-joined list every writer stores (`mlo.tagtext._LIST_SEP`, the value
+    `mlo.autotag._release_country_codes` builds) — so the tile's badge and the
+    file's tag can never read differently.
+    """
+    out = {}
+    rel = (wish or {}).get("release") if isinstance(wish, dict) else None
+    if not isinstance(rel, dict):
+        rel = {}
+    codes = [str(c).strip() for c in (rel.get("countries") or []) if str(c).strip()]
+    if not codes:
+        codes = [str(rel.get("country") or "").strip()]
+    countries = "; ".join(c for c in codes if c)
+    media = [str(m).strip() for m in (rel.get("media") or []) if str(m).strip()]
+    for tag, value in (("MEDIA", media[0] if media else ""),
+                       ("RELEASECOUNTRY", countries),
+                       ("CATALOGNUMBER", rel.get("catalog_number")),
+                       ("LABEL", rel.get("label")),
+                       ("RELEASESTATUS", rel.get("status")),
+                       # The marker's own date wins over the identity's (it is
+                       # the date the folder was created with, and the naming
+                       # script has already named the folder after it).
+                       ("DATE", (str(info.get("date") or info.get("year") or "")
+                                 or rel.get("date")))):
+        value = str(value or "").strip()
+        if value:
+            out[tag] = value
+    return out
+
+
 def _pending_album_row(folder, root, wish_state=None):
     """Library row for a FRAMEWORK album (see ``server.pending_albums``): the
     folder "Add to library" created before any audio arrived.
@@ -586,6 +636,27 @@ def _pending_album_row(folder, root, wish_state=None):
         "RATEYOURMUSIC_ALBUM": links.get("album") or None,
         "RATEYOURMUSIC_ARTIST": links.get("artist") or None,
     })
+    # THE RELEASE'S OWN FACTS, while it is still arriving (the owner's ask:
+    # an album being imported must not read as a blank cell). The pressing's
+    # medium, its release countries, its catalogue number and label are facts
+    # the ADD already resolved — the wish row the framework album was created
+    # with carries the release identity (`server.wishes.release_identity`),
+    # and the SAME values are what the import then writes into the files
+    # (`server.imports._stamp_release_identity`), so the tile shows the
+    # pressing it is getting and keeps showing it after the audio lands.
+    #
+    # Nothing here is invented: an identity nobody resolved states nothing and
+    # the slots stay empty, exactly like the technical readout — no file is on
+    # disk to probe, so the codec/bitrate half of the card cannot be known and
+    # is left for the audio (`albumTech` reads the tracks' own tech).
+    identity = _pending_release_identity(info, row.get("wish"))
+    for tag, value in identity.items():
+        if not meta.get(tag):
+            meta[tag] = value
+    if identity.get("MEDIA"):
+        # The row's own medium field: the album page's readout reads it beside
+        # the media tag, and the card prefers it over the meta value.
+        row["media"] = identity["MEDIA"]
     row["meta"] = meta
     for key, val in (("ALBUM", info.get("title")), ("ALBUMARTIST", info.get("artist")),
                      ("ARTIST", info.get("artist")), ("DATE", info.get("year")),

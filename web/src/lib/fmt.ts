@@ -24,6 +24,24 @@ const VIDEO_EXTS = new Set([
 
 const VIDEO_CODEC_RE = /^(h ?264|h ?265|hevc|av1|vp[89]|mpeg|vc-?1|theora|prores|divx|xvid|wmv|flv|rawvideo|png|mjpeg)/i;
 
+/** A genre name as a READER writes it: "progressive rock" → "Progressive Rock".
+ *
+ *  Genres are stored and filtered in lower case — MusicBrainz, the providers
+ *  and the tag vocabulary all disagree about case, so the app's own filter
+ *  buckets (`GENRE_FAMILIES`, `genre:"…"` queries) are lower-case by
+ *  convention and must stay that way. This is the DISPLAY form only: it is what
+ *  a chip prints, never what a query sends.
+ *
+ *  Every word is capitalized, including the one after an ampersand or a slash
+ *  ("r&b" → "R&B", "k-pop" → "K-Pop"), because those are two words to a
+ *  reader. Anything the genre vocabulary spells with its own case (an acronym
+ *  already in the list) passes through: `\b\w` only touches a word's first
+ *  letter, so "r&b" gains its capital and "IDM" keeps its own. */
+export function titleCaseGenre(name: string | null | undefined): string {
+  return String(name ?? "").replace(/(^|[^\p{L}\p{N}'])(\p{L})/gu, (_m, sep: string, ch: string) =>
+    sep + ch.toUpperCase());
+}
+
 /** True when this tech payload describes a VIDEO stream (its bitrate is
  * the container's total, its codec a video one) — bitrate readouts must
  * only ever speak about the AUDIO stream, so callers skip these. */

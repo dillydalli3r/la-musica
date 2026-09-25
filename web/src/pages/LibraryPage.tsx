@@ -2,7 +2,7 @@ import { Fragment, useEffect, useMemo, useRef, useState, type ReactNode } from "
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { Link, useNavigate, useSearchParams } from "react-router-dom";
 import {
-  ArrowDownUp, BarChart3, ChevronDown, ChevronRight, CloudDownload,
+  ArrowDownAZ, ArrowDownUp, BarChart3, ChevronDown, ChevronRight, CloudDownload,
   FileVideo, FolderSync, FolderTree, Info as InfoIcon, Layers, Library, ListChecks,
   ListFilter, ListPlus, Play, RefreshCw, Search, Tag, Trash2, Wand2, X,
 } from "lucide-react";
@@ -30,7 +30,7 @@ import LockedChip from "../components/LockedChip";
 import { forceDict, loadForceSel } from "../lib/force";
 import Segmented from "../components/Segmented";
 import PageHeader from "../components/PageHeader";
-import GradeWarning from "../components/GradeWarning";
+import GradeWarning, { GradeDot } from "../components/GradeWarning";
 import StarRating from "../components/StarRating";
 import { ratingOf, useRatings, useSetRating, FOLDER_RATING_NOTE } from "../lib/ratings";
 import CoverImg, { TrackCover } from "../components/CoverImg";
@@ -48,10 +48,12 @@ import type { Album, Artist, Track } from "../types";
 // The Library's browse state and option lists live in lib/libraryView.ts —
 // Home's shelves offer the same cover size and read the same settings.
 import {
-  ALBUM_SORTS, GRID_SIZES, PRESETS, RATING_FILTERS, ADVISORY_FILTERS, RATED_NOTE, VIEW_TABS,
-  useGridSize, useLibraryView, useLocalSort, useSelectMode,
+  ALBUM_SORTS, AZ_LETTERS, GRID_SIZES, PRESETS, RATING_FILTERS, ADVISORY_FILTERS, RATED_NOTE, VIEW_TABS,
+  azCounts, azFilter, foldName, useGridSize, useLibraryAlphabet, useLibraryView, useLocalSort, useSelectMode,
   type Preset, type RatingFilter, type AdvisoryFilter,
 } from "../lib/libraryView";
+import { useI18n } from "../lib/i18n";
+import Popover from "../components/Popover";
 
 /** One floor per column, in px: the narrowest that column can be before its
  *  content starts wrapping a character per line. They also are the table's
@@ -164,6 +166,21 @@ interface FlatTrack extends Track {
   hay: string; // lowercase search blob, built once per payload
 }
 
+/** The name an album row answers to in the toolbar's alphabet filter — ONE
+ *  definition, read both by the filter that keeps the row and by the count the
+ *  rail prints beside its letter, so a row cannot be found by the name box and
+ *  counted under some other name.
+ *
+ *  It is the album's TITLE, except while the grid and the album table are
+ *  grouped under artist headers: the header is then the name on screen, so the
+ *  artist leads (the rail's letter comes off it, so a click reaches the section
+ *  the reader is looking at) and the title rides along so a typed word still
+ *  finds the album sitting under it. */
+function azAlbumName(al: FlatAlbum, grouped: boolean): string {
+  const title = al.meta?.ALBUM || al.path.split("/").pop() || al.path;
+  return grouped ? `${al.artist} ${title}` : title;
+}
+
 // ---- search: plain words + tag-scoped terms -------------------------------
 /** Tags matched by the "person:" alias — everyone credited on the song. */
 const PERSON_TAG_KEYS = ["ARTIST", "ALBUMARTIST", "COMPOSER", "LYRICIST", "REMIXER"];
@@ -207,6 +224,9 @@ function parseQueryTerms(raw: string): QueryTerms {
 }
 
 export default function LibraryPage() {
+  // The page's own strings: the toolbar's alphabet pair, and the one line a
+  // list emptied by those controls says.
+  const { t } = useI18n();
   // Refresh means "look at the music folder AGAIN", not "ask again": the
   // server caches this payload (tagcache's library entry) and every album's
   // tech/grade reads under it, so a plain refetch redrew the same tree — the
@@ -284,6 +304,10 @@ export default function LibraryPage() {
   const [advisoryFilter, setAdvisoryFilter] = useState<AdvisoryFilter>("any");
   const [filterOpen, setFilterOpen] = useState(false);
   const [sortOpen, setSortOpen] = useState(false);
+  // The A–Z menu's own open/closed. The filter itself is in
+  // `useLibraryAlphabet` (lib/libraryView.ts), which the page cannot own alone:
+  // the toolbar draws two controls over it.
+  const [azOpen, setAzOpen] = useState(false);
   const [albumSort, setAlbumSort] = useLocalSort("albums");
   const [artistSort, setArtistSort] = useLocalSort("artists");
   const [trackSort, setTrackSort] = useLocalSort("tracks");
@@ -772,9 +796,63 @@ export default function LibraryPage() {
 
   // Sorting is memoized so typing in the search box / toggling selection
   // doesn't re-sort the whole library on every keystroke.
-  const sortedAlbums = useMemo(() => sortRows(ratedAlbums, albumSort), [ratedAlbums, albumSort]);
-  const sortedArtists = useMemo(() => sortRows(filtered.artists, artistSort), [filtered.artists, artistSort]);
-  const sortedTracks = useMemo(() => sortRows(ratedTracks, trackSort), [ratedTracks, trackSort]);
+  const albumsSorted = useMemo(() => sortRows(ratedAlbums, albumSort), [ratedAlbums, albumSort]);
+  const artistsSorted = useMemo(() => sortRows(filtered.artists, artistSort), [filtered.artists, artistSort]);
+  const tracksSorted = useMemo(() => sortRows(ratedTracks, trackSort), [ratedTracks, trackSort]);
+
+  /* ---- the toolbar's alphabet filter (lib/libraryView.ts) ----
+   *
+   * Two controls over one pair of values, applied where each list is BUILT
+   * rather than inside the `filtered` memo above: that one answers "which rows
+   * are in this library view at all" (the presets, the facets, the tag terms),
+   * these two answer "which of the rows on screen the reader asked for" — and
+   * the count beside each letter has to be taken AFTER everything else but
+   * BEFORE the letter itself, which is what makes it a promise about the click.
+   *
+   * They run after the sort on purpose: the order a table shows is the sort's
+   * business, and a filter that re-ordered anything would be a second order
+   * fighting the column headers. */
+  const alphabet = useLibraryAlphabet();
+  const azNeedle = useMemo(() => foldName(alphabet.name.trim()), [alphabet.name]);
+  // "Group by artist" is the grid's and the album table's own toggle, and it
+  // leads the name only where those two actually DRAW the headers: in the
+  // compact, artist and track views there is no header on screen, so a name
+  // filed under its artist there would be a letter the reader cannot see the
+  // reason for.
+  const azGroupedAlbums = groupByArtist && (view === "grid" || view === "albums");
+
+  // The rows each view actually draws. Everything downstream — the tables, the
+  // grid sections, the counts, Select-all — reads these, so a filter cannot
+  // narrow the drawing while the counting still speaks for the whole library.
+  const sortedAlbums = useMemo(
+    () => azFilter(albumsSorted, (al) => azAlbumName(al, azGroupedAlbums), azNeedle, alphabet.letter),
+    [albumsSorted, azNeedle, alphabet.letter, azGroupedAlbums]
+  );
+  const sortedArtists = useMemo(
+    () => azFilter(artistsSorted, (a) => a.display_name || a.name, azNeedle, alphabet.letter),
+    [artistsSorted, azNeedle, alphabet.letter]
+  );
+  const sortedTracks = useMemo(
+    () => azFilter(tracksSorted, (t) => t.tags.TITLE || t.file, azNeedle, alphabet.letter),
+    [tracksSorted, azNeedle, alphabet.letter]
+  );
+
+  /** The rail's own numbers: counted off the list the VIEW on screen draws
+   *  (the artist table counts artists, the track table tracks, the three album
+   *  views albums), with the name field applied and the letter not. */
+  const azLetterCounts = useMemo(
+    () =>
+      azCounts(
+        view === "artists"
+          ? artistsSorted.map((a) => a.display_name || a.name)
+          : view === "tracks"
+            ? tracksSorted.map((t) => t.tags.TITLE || t.file)
+            : albumsSorted.map((al) => azAlbumName(al, azGroupedAlbums)),
+        azNeedle
+      ),
+    [view, albumsSorted, artistsSorted, tracksSorted, azGroupedAlbums, azNeedle]
+  );
+
   // Where everything still being acquired is, from the queue's own rows and
   // the pushed job frames (lib/acquisition) — the SAME cache entry and the
   // same frames the Soulseek page draws, so one album cannot read as two
@@ -846,16 +924,27 @@ export default function LibraryPage() {
   const allTracksSelected = sortedTracks.length > 0 && sortedTracks.every((t) => selection.tracks.includes(t.path));
 
   return (
-    <div className="p-6 space-y-5 mx-auto max-w-6xl">
+    <div className="p-6 space-y-5 mx-auto max-w-[1600px]">
       {/* toolbar rides in the header: controls left, stats/select/counts right */}
-      <PageHeader icon={Library} title="Library">
-      {/* The library's own grading verdict, first thing on the page: whether
-          every album passed its checks and, when one did not, which albums and
-          tracks failed — each row linking to the thing it names. It is the
-          same strip Home draws at its top, off the same server object
+      <PageHeader
+        icon={Library}
+        title={
+          // The grading verdict as a dot beside the title (the same one Home
+          // wears): a library that passes says so with colour, and the strip
+          // below exists only to write a problem out. The owner's ask, and the
+          // reason the sentence is gone from both pages.
+          <span className="inline-flex items-center gap-2">
+            Library
+            <GradeDot />
+          </span>
+        }
+      >
+      {/* The library's own grading verdict, first thing on the page — the
+          WARNINGS only: which albums and tracks failed, each row linking to
+          the thing it names. It is the same object Home draws from
           (`/api/grades/summary`, components/GradeWarning), so the two pages
           can never count the library differently. */}
-      <GradeWarning />
+      <GradeWarning mode="notice" />
       {/* The layout finding is the one condition that is about the whole
           library rather than an album: it says part of the music folder is
           not a graded album at all, which no per-album badge can show. The
@@ -890,6 +979,102 @@ export default function LibraryPage() {
             phone target height. */}
         <Segmented value={view} onChange={setView} options={VIEW_TABS}
           className="max-w-full flex-wrap" />
+
+        {/* The alphabet pair, right beside the view tabs it filters: a name
+            box and the A–Z rail, one after the other because that is how they
+            are used ("…rig" → type it, or jump to the R's). Compact on
+            purpose — the two share ONE row at every width, so a phone gets a
+            96 px field and a letter button, not a stack — and they filter the
+            list the tabs draw rather than the whole library the way the
+            toolbar's other box (its `artist:`/`genre:` terms, the same value
+            the top bar edits) does. */}
+        <div className="flex items-center gap-1.5 min-w-0">
+          <div className="search-field relative w-24 sm:w-40 min-w-0">
+            <Search className="absolute left-2.5 top-1/2 -translate-y-1/2 h-3.5 w-3.5 text-zinc-500" />
+            <input
+              className="input !py-1.5 !pl-8 text-xs"
+              placeholder={t("library.az.namePlaceholder")}
+              aria-label={t("library.az.nameAria")}
+              title={t("library.az.nameHint")}
+              value={alphabet.name}
+              onChange={(e) => alphabet.setName(e.target.value)}
+              onKeyDown={(e) => {
+                // The row is no form: Enter must not submit anything, and the
+                // caret stays in the box so a name is typed in one pass.
+                if (e.key === "Enter") e.preventDefault();
+                else if (e.key === "Escape" && alphabet.name) alphabet.setName("");
+              }}
+            />
+            {alphabet.name && (
+              <button
+                className="absolute right-1.5 top-1/2 -translate-y-1/2 p-1 rounded text-zinc-500 hover:text-white tap"
+                onClick={() => alphabet.setName("")}
+                title={t("library.az.nameClear")}
+                aria-label={t("library.az.nameClear")}
+              >
+                <X className="h-3.5 w-3.5" />
+              </button>
+            )}
+          </div>
+          <div className="relative">
+            <button
+              className={`btn-ghost !py-1.5 text-xs tap whitespace-nowrap ${alphabet.letter ? "!text-accent !border-accent/50" : ""}`}
+              onClick={() => setAzOpen(!azOpen)}
+              title={t("library.az.railTitle")}
+              aria-label={t("library.az.railAria")}
+            >
+              <ArrowDownAZ className="h-3.5 w-3.5" />
+              <span className="font-mono">{alphabet.letter ?? t("library.az.button")}</span>
+            </button>
+            {/* The rail. Picking the letter that is already on keeps it open
+                and clears it — the same toggle as the ✕ in the heading — so a
+                reader who jumped to the wrong bundle of names is one click
+                from the whole list again. */}
+            <Popover open={azOpen} onClose={() => setAzOpen(false)} align="left" panelClass="w-64 p-2">
+              <div className="flex items-center justify-between gap-2 px-1 pb-1.5">
+                <span className="text-[11px] font-semibold uppercase tracking-wider text-zinc-500">
+                  {t("library.az.menuTitle")}
+                </span>
+                <button
+                  className={`inline-flex items-center gap-1 text-[11px] ${alphabet.letter ? "text-zinc-400 hover:text-white" : "text-zinc-600 cursor-default"}`}
+                  onClick={() => alphabet.setLetter(null)}
+                  disabled={!alphabet.letter}
+                  title={t("library.az.clear")}
+                >
+                  <X className="h-3 w-3" /> {t("library.az.clear")}
+                </button>
+              </div>
+              <div className="grid grid-cols-6 gap-1">
+                {AZ_LETTERS.map((letter) => {
+                  const n = azLetterCounts[letter] ?? 0;
+                  const active = alphabet.letter === letter;
+                  return (
+                    <button
+                      key={letter}
+                      onClick={() => alphabet.setLetter(active ? null : letter)}
+                      /* A letter this view has nothing under is dead weight
+                         in a menu whose whole point is to say where the rows
+                         are; the one that is ON stays clickable, because
+                         clicking it is how it is turned off. */
+                      disabled={n === 0 && !active}
+                      title={t("library.az.letterHint", { letter, n })}
+                      className={`rounded-md py-1 font-mono text-xs leading-tight ${
+                        active
+                          ? "bg-accent text-black"
+                          : n
+                            ? "text-zinc-300 hover:bg-raise hover:text-white"
+                            : "text-zinc-700 cursor-not-allowed"
+                      }`}
+                    >
+                      {letter}
+                      <span className={`block text-[10px] ${active ? "text-black/70" : "text-zinc-500"}`}>{n}</span>
+                    </button>
+                  );
+                })}
+              </div>
+            </Popover>
+          </div>
+        </div>
 
         {(view === "albums" || view === "compact" || view === "grid") && (
           <div className="relative">
@@ -1166,7 +1351,12 @@ export default function LibraryPage() {
         </div>
       )}
 
-      {sortedAlbums.length === 0 && (
+      {/* The page-level answer, for the one condition a list-area line cannot
+          state: a music folder with nothing in it. A list emptied by the
+          filters says so where the rows would have been instead (the alphabet
+          pair's own line below), because "set the music folder" is the wrong
+          sentence for a search that simply found nothing. */}
+      {flat.albums.length === 0 && (
         <EmptyState title="Nothing matches" hint="Set the music folder in Settings, import an album, or clear the search/filters." />
       )}
 
@@ -1216,6 +1406,12 @@ export default function LibraryPage() {
       {/* ---------------- Grid browse view (Apple Music style, default) ---------------- */}
       {view === "grid" && (
         <div>
+          {/* Where the rows would have been, not a panel: an album list the
+              toolbar emptied is a list with a reason, and the reason belongs in
+              the list area (see `library.az.empty`). */}
+          {sortedAlbums.length === 0 && flat.albums.length > 0 && (
+            <p className="text-xs text-zinc-500 py-1">{t("library.az.empty")}</p>
+          )}
           <div
             className="grid gap-x-4 gap-y-5 stagger"
             style={{ gridTemplateColumns: `repeat(auto-fill, minmax(${GRID_SIZE_MIN[gridSize]}px, 1fr))` }}
@@ -1255,6 +1451,9 @@ export default function LibraryPage() {
             <span className="inline-flex items-center gap-1.5"><span className="h-1.5 w-1.5 rounded-full bg-emerald-600/60 inline-block" /> PASS — graded clean, audit OK</span>
             <span className="inline-flex items-center gap-1.5"><span className="h-1.5 w-1.5 rounded-full bg-red-500/70 inline-block" /> FAIL — grading / audit problems (hover a row for details)</span>
           </div>
+          {sortedAlbums.length === 0 && flat.albums.length > 0 && (
+            <p className="text-xs text-zinc-500 py-1">{t("library.az.empty")}</p>
+          )}
           {sortedAlbums.map((al) => {
             const st = statusFor(!!al.pass, al.audit_summary);
             const sel = selection.albums.includes(al.path);
@@ -1447,14 +1646,17 @@ export default function LibraryPage() {
                 </tr>
               </thead>
               <tbody className="stagger">
-                {albumTableRows.length === 0 && (
+                {albumTableRows.length === 0 && flat.albums.length > 0 && (
                   /* A filtered-to-nothing table used to render as a header row
                      over blank space, which reads as a broken view rather than
-                     as an answer — this is the answer, and it says where the
-                     filters are. */
+                     as an answer — this is the answer, and it names every
+                     control that can be holding rows back (the top bar's search
+                     box included: the table is the same filter's downstream).
+                     An EMPTY library is not this case — the page-level panel
+                     above is the one that asks for a music folder. */
                   <tr>
                     <td colSpan={albumColSpan} className="td text-zinc-500">
-                      No albums match these filters — clear them in the Filter menu.
+                      {t("library.az.empty")}
                     </td>
                   </tr>
                 )}
@@ -1526,10 +1728,10 @@ export default function LibraryPage() {
                 </tr>
               </thead>
               <tbody className="stagger">
-                {sortedArtists.length === 0 && (
+                {sortedArtists.length === 0 && flat.albums.length > 0 && (
                   <tr>
                     <td colSpan={artistColSpan} className="td text-zinc-500">
-                      No artists match these filters — clear them in the Filter menu.
+                      {t("library.az.empty")}
                     </td>
                   </tr>
                 )}
@@ -1639,10 +1841,10 @@ export default function LibraryPage() {
                 </tr>
               </thead>
               <tbody className="stagger">
-                {sortedTracks.length === 0 && (
+                {sortedTracks.length === 0 && flat.albums.length > 0 && (
                   <tr>
                     <td colSpan={trackColSpan} className="td text-zinc-500">
-                      No tracks match these filters — clear them in the Filter menu.
+                      {t("library.az.empty")}
                     </td>
                   </tr>
                 )}

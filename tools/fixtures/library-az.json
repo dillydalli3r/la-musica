@@ -1,0 +1,4234 @@
+{
+ "note": "captured from a scratch server (MLO_MUSIC_FOLDER=F:/tmp/mlo-lib-az) over the synthetic library",
+ "album_path": "F:/tmp/mlo-lib-az/Artist Alpha/2020 - First Album",
+ "library": {
+  "folder": "F:/tmp/mlo-lib-az",
+  "artists": [
+   {
+    "path": "F:/tmp/mlo-lib-az/Artist Alpha",
+    "name": "Artist Alpha",
+    "display_name": "Artist Alpha",
+    "albums": [
+     {
+      "path": "F:/tmp/mlo-lib-az/Artist Alpha/2020 - First Album",
+      "album_artist": "Artist Alpha",
+      "audit_summary": "REAL",
+      "media": "Digital Media",
+      "source_summary": "Digital",
+      "track_count": 3,
+      "partial": false,
+      "partial_reason": null,
+      "expected_total": null,
+      "expected_present": null,
+      "pass_count": 61,
+      "total_checks": 106,
+      "cover_file": "cover.jpg",
+      "cover_detail": "cover.jpg (100x100, below the 1200px target (never upscaled))",
+      "cover_ok": false,
+      "has_log": true,
+      "has_cue": true,
+      "checksum_status": "NONE",
+      "accuraterip_status": "NONE",
+      "lyrics_present": 1,
+      "lyrics_expected": 1,
+      "instrumental_count": 0,
+      "tracks": [
+       {
+        "file": "01 - Intro.flac",
+        "issues": [
+         "MOOD_MISSING",
+         "ENERGY_MISSING",
+         "INITIALKEY",
+         "BPM",
+         "PATH",
+         "ENCODER_QUALITY",
+         "ENCODER_VERSION",
+         "AUDIT",
+         "MB_LINK",
+         "RYM_LINK",
+         "LYRICS",
+         "ALBUMITUNESADVISORY",
+         "ALBUM DYNAMIC RANGE",
+         "COVER"
+        ],
+        "values": {
+         "TITLE": "01 - Intro",
+         "ARTIST": "Artist Alpha",
+         "ALBUM": "First Album",
+         "ALBUMARTIST": "Artist Alpha",
+         "DATE": "2020",
+         "TRACKNUMBER": "01",
+         "DISCNUMBER": null,
+         "GENRE": "Rock",
+         "MOOD": null,
+         "ENERGY": null,
+         "ITUNESADVISORY": "0",
+         "REPLAYGAIN_TRACK_GAIN": "-3.00 dB",
+         "REPLAYGAIN_TRACK_PEAK": "0.5",
+         "REPLAYGAIN_ALBUM_GAIN": "-3.00 dB",
+         "REPLAYGAIN_ALBUM_PEAK": "0.5",
+         "DYNAMIC RANGE": "8",
+         "INSTRUMENTAL": "0",
+         "INITIALKEY": null,
+         "BPM": null,
+         "MEDIA": "Digital Media",
+         "SOURCE": "Digital",
+         "AUDIOAUDITOR_OVERRIDE": null,
+         "ALBUMITUNESADVISORY": "0",
+         "ALBUM DYNAMIC RANGE": "8"
+        },
+        "lyrics_embedded": true,
+        "lyrics_lrc": false,
+        "lyrics_kind": "synced",
+        "unreadable": false,
+        "audit": null,
+        "log_grade": null,
+        "sidecar_cover": null,
+        "sidecar_cover_file": null,
+        "checksum_status": "NONE",
+        "accuraterip_status": "NONE",
+        "path": "F:/tmp/mlo-lib-az/Artist Alpha/2020 - First Album/01 - Intro.flac",
+        "tags": {
+         "TITLE": "01 - Intro",
+         "ARTIST": "Artist Alpha",
+         "ALBUMARTIST": "Artist Alpha",
+         "ALBUM": "First Album",
+         "DATE": "2020",
+         "GENRE": "Rock",
+         "ITUNESADVISORY": "0",
+         "INSTRUMENTAL": "0",
+         "MEDIA": "Digital Media",
+         "SOURCE": "Digital",
+         "TRACKNUMBER": "01",
+         "DISCNUMBER": null,
+         "MUSICBRAINZ_ALBUMID": null,
+         "MUSICBRAINZ_ALBUMARTISTID": null,
+         "MUSICBRAINZ_ARTISTID": null,
+         "MUSICBRAINZ_TRACKID": null,
+         "MUSICBRAINZ_RELEASEGROUPID": null,
+         "MUSICBRAINZ_RELEASETRACKID": null,
+         "MUSICBRAINZ_WORKID": null,
+         "RATEYOURMUSIC_ALBUM": null,
+         "RATEYOURMUSIC_TRACK": null,
+         "RATEYOURMUSIC_ARTIST": null,
+         "ALBUMARTISTSORT": null,
+         "ORIGINALDATE": null,
+         "RELEASETYPE": null,
+         "RELEASESTATUS": null,
+         "RELEASECOUNTRY": null,
+         "CATALOGNUMBER": null,
+         "LABEL": null,
+         "BARCODE": null,
+         "SCRIPT": null,
+         "PODCASTSERIES": null,
+         "PODCASTSERIESMBID": null,
+         "PODCASTEPISODE": null,
+         "TRACKTOTAL": null,
+         "DISCTOTAL": null,
+         "COMPOSER": null,
+         "COPYRIGHT": null,
+         "ISRC": null,
+         "LYRICIST": null,
+         "REMIXER": null,
+         "DYNAMIC RANGE": "8",
+         "MOOD": null,
+         "ENERGY": null,
+         "RATING": null,
+         "BPM": null,
+         "INITIALKEY": null,
+         "ALBUM DYNAMIC RANGE": "8"
+        },
+        "tech": {
+         "length": 2.0,
+         "bitrate": 104068.0,
+         "sample_rate": 44100.0,
+         "bits_per_sample": 16.0,
+         "channels": 2.0,
+         "codec": "FLAC"
+        },
+        "cover_file": null,
+        "discnumber": null,
+        "tracknumber": 1,
+        "is_video": false,
+        "grade_pass": false,
+        "lyrics_present": true
+       },
+       {
+        "file": "02 - Second.flac",
+        "issues": [
+         "GENRE_MISSING",
+         "MOOD_MISSING",
+         "ENERGY_MISSING",
+         "DYNAMIC RANGE",
+         "INSTRUMENTAL",
+         "INITIALKEY",
+         "BPM",
+         "PATH",
+         "ENCODER_QUALITY",
+         "ENCODER_VERSION",
+         "AUDIT",
+         "MB_LINK",
+         "RYM_LINK",
+         "SOURCE",
+         "ALBUMITUNESADVISORY",
+         "ALBUM DYNAMIC RANGE",
+         "COVER"
+        ],
+        "values": {
+         "TITLE": "02 - Second",
+         "ARTIST": "Artist Alpha",
+         "ALBUM": "First Album",
+         "ALBUMARTIST": "Artist Alpha",
+         "DATE": "2020",
+         "TRACKNUMBER": "02",
+         "DISCNUMBER": null,
+         "GENRE": null,
+         "MOOD": null,
+         "ENERGY": null,
+         "ITUNESADVISORY": null,
+         "REPLAYGAIN_TRACK_GAIN": null,
+         "REPLAYGAIN_TRACK_PEAK": null,
+         "REPLAYGAIN_ALBUM_GAIN": null,
+         "REPLAYGAIN_ALBUM_PEAK": null,
+         "DYNAMIC RANGE": null,
+         "INSTRUMENTAL": null,
+         "INITIALKEY": null,
+         "BPM": null,
+         "MEDIA": null,
+         "SOURCE": null,
+         "AUDIOAUDITOR_OVERRIDE": null,
+         "ALBUMITUNESADVISORY": "0",
+         "ALBUM DYNAMIC RANGE": "8"
+        },
+        "lyrics_embedded": false,
+        "lyrics_lrc": false,
+        "lyrics_kind": null,
+        "unreadable": false,
+        "audit": null,
+        "log_grade": null,
+        "sidecar_cover": null,
+        "sidecar_cover_file": null,
+        "checksum_status": "NONE",
+        "accuraterip_status": "NONE",
+        "path": "F:/tmp/mlo-lib-az/Artist Alpha/2020 - First Album/02 - Second.flac",
+        "tags": {
+         "TITLE": "02 - Second",
+         "ARTIST": "Artist Alpha",
+         "ALBUMARTIST": "Artist Alpha",
+         "ALBUM": "First Album",
+         "DATE": "2020",
+         "GENRE": null,
+         "ITUNESADVISORY": null,
+         "INSTRUMENTAL": null,
+         "MEDIA": null,
+         "SOURCE": null,
+         "TRACKNUMBER": "02",
+         "DISCNUMBER": null,
+         "MUSICBRAINZ_ALBUMID": null,
+         "MUSICBRAINZ_ALBUMARTISTID": null,
+         "MUSICBRAINZ_ARTISTID": null,
+         "MUSICBRAINZ_TRACKID": null,
+         "MUSICBRAINZ_RELEASEGROUPID": null,
+         "MUSICBRAINZ_RELEASETRACKID": null,
+         "MUSICBRAINZ_WORKID": null,
+         "RATEYOURMUSIC_ALBUM": null,
+         "RATEYOURMUSIC_TRACK": null,
+         "RATEYOURMUSIC_ARTIST": null,
+         "ALBUMARTISTSORT": null,
+         "ORIGINALDATE": null,
+         "RELEASETYPE": null,
+         "RELEASESTATUS": null,
+         "RELEASECOUNTRY": null,
+         "CATALOGNUMBER": null,
+         "LABEL": null,
+         "BARCODE": null,
+         "SCRIPT": null,
+         "PODCASTSERIES": null,
+         "PODCASTSERIESMBID": null,
+         "PODCASTEPISODE": null,
+         "TRACKTOTAL": null,
+         "DISCTOTAL": null,
+         "COMPOSER": null,
+         "COPYRIGHT": null,
+         "ISRC": null,
+         "LYRICIST": null,
+         "REMIXER": null,
+         "DYNAMIC RANGE": null,
+         "MOOD": null,
+         "ENERGY": null,
+         "RATING": null,
+         "BPM": null,
+         "INITIALKEY": null,
+         "ALBUM DYNAMIC RANGE": null
+        },
+        "tech": {
+         "length": 2.0,
+         "bitrate": 104068.0,
+         "sample_rate": 44100.0,
+         "bits_per_sample": 16.0,
+         "channels": 2.0,
+         "codec": "FLAC"
+        },
+        "cover_file": null,
+        "discnumber": null,
+        "tracknumber": 2,
+        "is_video": false,
+        "grade_pass": false,
+        "lyrics_present": false
+       },
+       {
+        "file": "03 - Bonus.mp3",
+        "issues": [
+         "GENRE_MISSING",
+         "MOOD_MISSING",
+         "ENERGY_MISSING",
+         "DYNAMIC RANGE",
+         "INSTRUMENTAL",
+         "INITIALKEY",
+         "BPM",
+         "PATH",
+         "AUDIT",
+         "MB_LINK",
+         "RYM_LINK",
+         "SOURCE",
+         "ALBUMITUNESADVISORY",
+         "ALBUM DYNAMIC RANGE",
+         "COVER"
+        ],
+        "values": {
+         "TITLE": "03 - Bonus",
+         "ARTIST": "Artist Alpha",
+         "ALBUM": "First Album",
+         "ALBUMARTIST": "Artist Alpha",
+         "DATE": "2020",
+         "TRACKNUMBER": "03",
+         "DISCNUMBER": null,
+         "GENRE": null,
+         "MOOD": null,
+         "ENERGY": null,
+         "ITUNESADVISORY": null,
+         "REPLAYGAIN_TRACK_GAIN": null,
+         "REPLAYGAIN_TRACK_PEAK": null,
+         "REPLAYGAIN_ALBUM_GAIN": null,
+         "REPLAYGAIN_ALBUM_PEAK": null,
+         "DYNAMIC RANGE": null,
+         "INSTRUMENTAL": null,
+         "INITIALKEY": null,
+         "BPM": null,
+         "MEDIA": null,
+         "SOURCE": null,
+         "AUDIOAUDITOR_OVERRIDE": null,
+         "ALBUMITUNESADVISORY": "0",
+         "ALBUM DYNAMIC RANGE": "8"
+        },
+        "lyrics_embedded": false,
+        "lyrics_lrc": false,
+        "lyrics_kind": null,
+        "unreadable": false,
+        "audit": null,
+        "log_grade": null,
+        "sidecar_cover": null,
+        "sidecar_cover_file": null,
+        "checksum_status": "NONE",
+        "accuraterip_status": "NONE",
+        "path": "F:/tmp/mlo-lib-az/Artist Alpha/2020 - First Album/03 - Bonus.mp3",
+        "tags": {
+         "TITLE": "03 - Bonus",
+         "ARTIST": "Artist Alpha",
+         "ALBUMARTIST": "Artist Alpha",
+         "ALBUM": "First Album",
+         "DATE": "2020",
+         "GENRE": null,
+         "ITUNESADVISORY": null,
+         "INSTRUMENTAL": null,
+         "MEDIA": null,
+         "SOURCE": null,
+         "TRACKNUMBER": "03",
+         "DISCNUMBER": null,
+         "MUSICBRAINZ_ALBUMID": null,
+         "MUSICBRAINZ_ALBUMARTISTID": null,
+         "MUSICBRAINZ_ARTISTID": null,
+         "MUSICBRAINZ_TRACKID": null,
+         "MUSICBRAINZ_RELEASEGROUPID": null,
+         "MUSICBRAINZ_RELEASETRACKID": null,
+         "MUSICBRAINZ_WORKID": null,
+         "RATEYOURMUSIC_ALBUM": null,
+         "RATEYOURMUSIC_TRACK": null,
+         "RATEYOURMUSIC_ARTIST": null,
+         "ALBUMARTISTSORT": null,
+         "ORIGINALDATE": null,
+         "RELEASETYPE": null,
+         "RELEASESTATUS": null,
+         "RELEASECOUNTRY": null,
+         "CATALOGNUMBER": null,
+         "LABEL": null,
+         "BARCODE": null,
+         "SCRIPT": null,
+         "PODCASTSERIES": null,
+         "PODCASTSERIESMBID": null,
+         "PODCASTEPISODE": null,
+         "TRACKTOTAL": null,
+         "DISCTOTAL": null,
+         "COMPOSER": null,
+         "COPYRIGHT": null,
+         "ISRC": null,
+         "LYRICIST": null,
+         "REMIXER": null,
+         "DYNAMIC RANGE": null,
+         "MOOD": null,
+         "ENERGY": null,
+         "RATING": null,
+         "BPM": null,
+         "INITIALKEY": null,
+         "ALBUM DYNAMIC RANGE": null
+        },
+        "tech": {
+         "length": 1.014,
+         "bitrate": 32000.0,
+         "sample_rate": 44100.0,
+         "channels": 2.0,
+         "codec": "MP3"
+        },
+        "cover_file": null,
+        "discnumber": null,
+        "tracknumber": 3,
+        "is_video": false,
+        "grade_pass": false,
+        "lyrics_present": false
+       }
+      ],
+      "sidecars": [],
+      "album_values": {
+       "ALBUMITUNESADVISORY": "0",
+       "ALBUM DYNAMIC RANGE": "8"
+      },
+      "issues": {
+       "Missing MOOD": [
+        "01 - Intro.flac",
+        "02 - Second.flac",
+        "03 - Bonus.mp3"
+       ],
+       "Missing ENERGY": [
+        "01 - Intro.flac",
+        "02 - Second.flac",
+        "03 - Bonus.mp3"
+       ],
+       "Missing INITIALKEY": [
+        "01 - Intro.flac",
+        "02 - Second.flac",
+        "03 - Bonus.mp3"
+       ],
+       "Missing BPM": [
+        "01 - Intro.flac",
+        "02 - Second.flac",
+        "03 - Bonus.mp3"
+       ],
+       "Missing RELEASETYPE tag (the naming script writes it into the path)": [
+        "01 - Intro.flac"
+       ],
+       "PATH: expected 'Artist Alpha/[?] 2020 - First Album {Digital Media}/1-01 01 - Intro.flac' (run organize)": [
+        "01 - Intro.flac"
+       ],
+       "Missing ENCODER_QUALITY (re-optimize)": [
+        "01 - Intro.flac",
+        "02 - Second.flac"
+       ],
+       "Missing ENCODER_VERSION (re-optimize)": [
+        "01 - Intro.flac",
+        "02 - Second.flac"
+       ],
+       "Missing AUDIT tag (run Audit Library)": [
+        "01 - Intro.flac",
+        "02 - Second.flac",
+        "03 - Bonus.mp3"
+       ],
+       "Missing MusicBrainz release link (import from MusicBrainz)": [
+        "01 - Intro.flac",
+        "02 - Second.flac",
+        "03 - Bonus.mp3"
+       ],
+       "Missing RateYourMusic release link": [
+        "01 - Intro.flac",
+        "02 - Second.flac",
+        "03 - Bonus.mp3"
+       ],
+       "Lyrics not optimally formatted (run Lyrics script)": [
+        "01 - Intro.flac"
+       ],
+       "Missing GENRE": [
+        "02 - Second.flac",
+        "03 - Bonus.mp3"
+       ],
+       "Missing DYNAMIC RANGE": [
+        "02 - Second.flac",
+        "03 - Bonus.mp3"
+       ],
+       "Missing INSTRUMENTAL": [
+        "02 - Second.flac",
+        "03 - Bonus.mp3"
+       ],
+       "PATH: expected 'Artist Alpha/[?] 2020 - First Album/1-02 02 - Second.flac' (run organize)": [
+        "02 - Second.flac"
+       ],
+       "PATH: expected 'Artist Alpha/[?] 2020 - First Album/1-03 03 - Bonus.mp3' (run organize)": [
+        "03 - Bonus.mp3"
+       ],
+       "Missing SOURCE (required for Digital Media)": [
+        "02 - Second.flac",
+        "03 - Bonus.mp3"
+       ],
+       "Album tag ALBUMITUNESADVISORY missing on some tracks": [
+        "album-wide"
+       ],
+       "Album tag ALBUM DYNAMIC RANGE missing on some tracks": [
+        "album-wide"
+       ],
+       "Cover missing ENCODER_QUALITY (re-optimize)": [
+        "album"
+       ],
+       "Cover missing ENCODER_VERSION (re-optimize)": [
+        "album"
+       ],
+       "CUE sheet not optimally formatted (run CUE Sheets script)": [
+        "album"
+       ],
+       "CUE references a file the album does not have (2020 - First Album.cue: 01 - Side A.flac) — run CUE Sheets": [
+        "album"
+       ],
+       "Album description missing — fetch one on the album page": [
+        "album"
+       ]
+      },
+      "notes": [],
+      "meta": {
+       "ALBUM": "First Album",
+       "ALBUMARTIST": "Artist Alpha",
+       "ARTIST": "Artist Alpha",
+       "DATE": "2020",
+       "ORIGINALDATE": null,
+       "ORIGINALYEAR": null,
+       "ITUNESADVISORY": "0",
+       "ALBUMITUNESADVISORY": null,
+       "MUSICBRAINZ_ALBUMID": null,
+       "MUSICBRAINZ_ALBUMARTISTID": null,
+       "MUSICBRAINZ_RELEASEGROUPID": null,
+       "RATEYOURMUSIC_ALBUM": null,
+       "MEDIA": "Digital Media",
+       "CATALOGNUMBER": null,
+       "LABEL": null,
+       "BARCODE": null,
+       "RELEASETYPE": null,
+       "RELEASESTATUS": null,
+       "RELEASECOUNTRY": null,
+       "SCRIPT": null,
+       "PODCASTSERIES": null,
+       "PODCASTSERIESMBID": null,
+       "PODCASTEPISODE": null,
+       "ALBUM DYNAMIC RANGE": "8"
+      },
+      "podcast": null,
+      "expected_tracks": [],
+      "pending": false,
+      "artwork": {
+       "description": false,
+       "description_text": null,
+       "description_source": null,
+       "description_url": null
+      },
+      "grade_pct": 57.5,
+      "pass": false
+     }
+    ],
+    "aggregate": {
+     "album_count": 1,
+     "track_count": 3,
+     "pass_count": 61,
+     "total_checks": 106,
+     "grade_pct": 57.5,
+     "pass": false,
+     "audit_summary": "REAL"
+    },
+    "has_image": false
+   },
+   {
+    "path": "F:/tmp/mlo-lib-az/Artist Beta",
+    "name": "Artist Beta",
+    "display_name": "Artist Beta",
+    "albums": [
+     {
+      "path": "F:/tmp/mlo-lib-az/Artist Beta/2021 - Vinyl Rip",
+      "album_artist": "Artist Beta",
+      "audit_summary": "FAKE",
+      "media": "CD",
+      "source_summary": null,
+      "track_count": 1,
+      "partial": false,
+      "partial_reason": null,
+      "expected_total": null,
+      "expected_present": null,
+      "pass_count": 44,
+      "total_checks": 63,
+      "cover_file": "cover.jpg",
+      "cover_detail": "cover.jpg (100x100, below the 1200px target (never upscaled))",
+      "cover_ok": false,
+      "has_log": true,
+      "has_cue": true,
+      "checksum_status": "NONE",
+      "accuraterip_status": "NONE",
+      "lyrics_present": 1,
+      "lyrics_expected": 1,
+      "instrumental_count": 0,
+      "tracks": [
+       {
+        "file": "01 - Side A.flac",
+        "issues": [
+         "MOOD_MISSING",
+         "ENERGY_MISSING",
+         "INITIALKEY",
+         "BPM",
+         "PATH",
+         "ENCODER_QUALITY",
+         "ENCODER_VERSION",
+         "MB_LINK",
+         "RYM_LINK",
+         "LOG_GRADE",
+         "AUDIT",
+         "COVER"
+        ],
+        "values": {
+         "TITLE": "01 - Side A",
+         "ARTIST": "Artist Beta",
+         "ALBUM": "Vinyl Rip",
+         "ALBUMARTIST": "Artist Beta",
+         "DATE": "2021",
+         "TRACKNUMBER": "01",
+         "DISCNUMBER": null,
+         "GENRE": "Jazz",
+         "MOOD": null,
+         "ENERGY": null,
+         "ITUNESADVISORY": "1",
+         "REPLAYGAIN_TRACK_GAIN": "-1.00 dB",
+         "REPLAYGAIN_TRACK_PEAK": "0.9",
+         "REPLAYGAIN_ALBUM_GAIN": "-1.00 dB",
+         "REPLAYGAIN_ALBUM_PEAK": "0.9",
+         "DYNAMIC RANGE": "12",
+         "INSTRUMENTAL": "0",
+         "INITIALKEY": null,
+         "BPM": null,
+         "MEDIA": "CD",
+         "SOURCE": null,
+         "AUDIOAUDITOR_OVERRIDE": null,
+         "ALBUMITUNESADVISORY": "1",
+         "ALBUM DYNAMIC RANGE": "12"
+        },
+        "lyrics_embedded": true,
+        "lyrics_lrc": false,
+        "lyrics_kind": "synced",
+        "unreadable": false,
+        "audit": null,
+        "log_grade": null,
+        "sidecar_cover": null,
+        "sidecar_cover_file": null,
+        "checksum_status": "NONE",
+        "accuraterip_status": "NONE",
+        "audit_legs": {
+         "log-score": "missing",
+         "checksums": "ok",
+         "accuraterip": "missing"
+        },
+        "audit_legs_missing": [
+         "accuraterip",
+         "log-score"
+        ],
+        "path": "F:/tmp/mlo-lib-az/Artist Beta/2021 - Vinyl Rip/01 - Side A.flac",
+        "tags": {
+         "TITLE": "01 - Side A",
+         "ARTIST": "Artist Beta",
+         "ALBUMARTIST": "Artist Beta",
+         "ALBUM": "Vinyl Rip",
+         "DATE": "2021",
+         "GENRE": "Jazz",
+         "ITUNESADVISORY": "1",
+         "INSTRUMENTAL": "0",
+         "MEDIA": "CD",
+         "SOURCE": "",
+         "TRACKNUMBER": "01",
+         "DISCNUMBER": null,
+         "MUSICBRAINZ_ALBUMID": null,
+         "MUSICBRAINZ_ALBUMARTISTID": null,
+         "MUSICBRAINZ_ARTISTID": null,
+         "MUSICBRAINZ_TRACKID": null,
+         "MUSICBRAINZ_RELEASEGROUPID": null,
+         "MUSICBRAINZ_RELEASETRACKID": null,
+         "MUSICBRAINZ_WORKID": null,
+         "RATEYOURMUSIC_ALBUM": null,
+         "RATEYOURMUSIC_TRACK": null,
+         "RATEYOURMUSIC_ARTIST": null,
+         "ALBUMARTISTSORT": null,
+         "ORIGINALDATE": null,
+         "RELEASETYPE": null,
+         "RELEASESTATUS": null,
+         "RELEASECOUNTRY": null,
+         "CATALOGNUMBER": null,
+         "LABEL": null,
+         "BARCODE": null,
+         "SCRIPT": null,
+         "PODCASTSERIES": null,
+         "PODCASTSERIESMBID": null,
+         "PODCASTEPISODE": null,
+         "TRACKTOTAL": null,
+         "DISCTOTAL": null,
+         "COMPOSER": null,
+         "COPYRIGHT": null,
+         "ISRC": null,
+         "LYRICIST": null,
+         "REMIXER": null,
+         "DYNAMIC RANGE": "12",
+         "MOOD": null,
+         "ENERGY": null,
+         "RATING": null,
+         "BPM": null,
+         "INITIALKEY": null,
+         "ALBUM DYNAMIC RANGE": "12"
+        },
+        "tech": {
+         "length": 2.0,
+         "bitrate": 104068.0,
+         "sample_rate": 44100.0,
+         "bits_per_sample": 16.0,
+         "channels": 2.0,
+         "codec": "FLAC"
+        },
+        "cover_file": null,
+        "discnumber": null,
+        "tracknumber": 1,
+        "is_video": false,
+        "grade_pass": false,
+        "lyrics_present": true
+       }
+      ],
+      "sidecars": [],
+      "album_values": {
+       "ALBUMITUNESADVISORY": "1",
+       "ALBUM DYNAMIC RANGE": "12"
+      },
+      "issues": {
+       "Missing MOOD": [
+        "01 - Side A.flac"
+       ],
+       "Missing ENERGY": [
+        "01 - Side A.flac"
+       ],
+       "Missing INITIALKEY": [
+        "01 - Side A.flac"
+       ],
+       "Missing BPM": [
+        "01 - Side A.flac"
+       ],
+       "Missing RELEASETYPE tag (the naming script writes it into the path)": [
+        "01 - Side A.flac"
+       ],
+       "PATH: expected 'Artist Beta/[?] 2021 - Vinyl Rip {CD}/1-01 01 - Side A.flac' (run organize)": [
+        "01 - Side A.flac"
+       ],
+       "Missing ENCODER_QUALITY (re-optimize)": [
+        "01 - Side A.flac"
+       ],
+       "Missing ENCODER_VERSION (re-optimize)": [
+        "01 - Side A.flac"
+       ],
+       "Missing MusicBrainz release link (import from MusicBrainz)": [
+        "01 - Side A.flac"
+       ],
+       "Missing RateYourMusic release link": [
+        "01 - Side A.flac"
+       ],
+       "CD rip sheets not named CD-{n} (found: rip.log, 2021 - Vinyl Rip.cue) — enable Settings → CD Rips → Auto-Rename or rename manually to CD-1.log": [
+        "album"
+       ],
+       "Missing LOG_GRADE tag (run Audit Library)": [
+        "01 - Side A.flac"
+       ],
+       "Rip .log has no per-track CRC checksums (cannot verify CD integrity)": [
+        "album"
+       ],
+       "AUDIT readout: nothing established the CD verdict's 'log-score' evidence for 1 track(s): no LOG_GRADE tag scores the rip log — the stored verdict is shown as it is, not guessed (we could not check, which is not the same as a bad rip)": [
+        "album"
+       ],
+       "Missing AUDIT tag (run Audit Library) — the CD verdict needs: accuraterip, log-score": [
+        "01 - Side A.flac"
+       ],
+       "Cover missing ENCODER_QUALITY (re-optimize)": [
+        "album"
+       ],
+       "Cover missing ENCODER_VERSION (re-optimize)": [
+        "album"
+       ],
+       "CUE sheet not optimally formatted (run CUE Sheets script)": [
+        "album"
+       ],
+       "Album description missing — fetch one on the album page": [
+        "album"
+       ]
+      },
+      "notes": [
+       "AUDIT not checked: nothing established the CD verdict's 'accuraterip' evidence for 1 track(s): no .accurip verdict verifies this disc — a pressing that is not in the AccurateRip database reads the same as a disc with no .accurip — the database simply may not know this pressing, and a disc that could not be checked is not a bad rip"
+      ],
+      "meta": {
+       "ALBUM": "Vinyl Rip",
+       "ALBUMARTIST": "Artist Beta",
+       "ARTIST": "Artist Beta",
+       "DATE": "2021",
+       "ORIGINALDATE": null,
+       "ORIGINALYEAR": null,
+       "ITUNESADVISORY": "1",
+       "ALBUMITUNESADVISORY": null,
+       "MUSICBRAINZ_ALBUMID": null,
+       "MUSICBRAINZ_ALBUMARTISTID": null,
+       "MUSICBRAINZ_RELEASEGROUPID": null,
+       "RATEYOURMUSIC_ALBUM": null,
+       "MEDIA": "CD",
+       "CATALOGNUMBER": null,
+       "LABEL": null,
+       "BARCODE": null,
+       "RELEASETYPE": null,
+       "RELEASESTATUS": null,
+       "RELEASECOUNTRY": null,
+       "SCRIPT": null,
+       "PODCASTSERIES": null,
+       "PODCASTSERIESMBID": null,
+       "PODCASTEPISODE": null,
+       "ALBUM DYNAMIC RANGE": "12"
+      },
+      "podcast": null,
+      "expected_tracks": [],
+      "pending": false,
+      "artwork": {
+       "description": false,
+       "description_text": null,
+       "description_source": null,
+       "description_url": null
+      },
+      "grade_pct": 69.8,
+      "pass": false
+     }
+    ],
+    "aggregate": {
+     "album_count": 1,
+     "track_count": 1,
+     "pass_count": 44,
+     "total_checks": 63,
+     "grade_pct": 69.8,
+     "pass": false,
+     "audit_summary": "FAKE"
+    },
+    "has_image": false
+   },
+   {
+    "path": "F:/tmp/mlo-lib-az/Artist Gamma",
+    "name": "Artist Gamma",
+    "display_name": "Artist Gamma",
+    "albums": [
+     {
+      "path": "F:/tmp/mlo-lib-az/Artist Gamma/2022 - Singles",
+      "album_artist": "Artist Gamma",
+      "audit_summary": "REAL",
+      "media": "Digital Media",
+      "source_summary": "Web",
+      "track_count": 1,
+      "partial": false,
+      "partial_reason": null,
+      "expected_total": null,
+      "expected_present": null,
+      "pass_count": 37,
+      "total_checks": 51,
+      "cover_file": "cover.jpg",
+      "cover_detail": "cover.jpg (100x100, below the 1200px target (never upscaled))",
+      "cover_ok": false,
+      "has_log": false,
+      "has_cue": false,
+      "checksum_status": "NONE",
+      "accuraterip_status": "NONE",
+      "lyrics_present": 0,
+      "lyrics_expected": 0,
+      "instrumental_count": 1,
+      "tracks": [
+       {
+        "file": "01 - Hit.flac",
+        "issues": [
+         "MOOD_MISSING",
+         "ENERGY_MISSING",
+         "INITIALKEY",
+         "BPM",
+         "PATH",
+         "ENCODER_QUALITY",
+         "ENCODER_VERSION",
+         "AUDIT",
+         "MB_LINK",
+         "RYM_LINK",
+         "COVER"
+        ],
+        "values": {
+         "TITLE": "01 - Hit",
+         "ARTIST": "Artist Gamma",
+         "ALBUM": "Singles",
+         "ALBUMARTIST": "Artist Gamma",
+         "DATE": "2022",
+         "TRACKNUMBER": "01",
+         "DISCNUMBER": null,
+         "GENRE": "Pop",
+         "MOOD": null,
+         "ENERGY": null,
+         "ITUNESADVISORY": "0",
+         "REPLAYGAIN_TRACK_GAIN": "-2.00 dB",
+         "REPLAYGAIN_TRACK_PEAK": "0.7",
+         "REPLAYGAIN_ALBUM_GAIN": "-2.00 dB",
+         "REPLAYGAIN_ALBUM_PEAK": "0.7",
+         "DYNAMIC RANGE": "9",
+         "INSTRUMENTAL": "1",
+         "INITIALKEY": null,
+         "BPM": null,
+         "MEDIA": "Digital Media",
+         "SOURCE": "Web",
+         "AUDIOAUDITOR_OVERRIDE": null,
+         "ALBUMITUNESADVISORY": "0",
+         "ALBUM DYNAMIC RANGE": "9"
+        },
+        "lyrics_embedded": false,
+        "lyrics_lrc": false,
+        "lyrics_kind": null,
+        "unreadable": false,
+        "audit": null,
+        "log_grade": null,
+        "sidecar_cover": null,
+        "sidecar_cover_file": null,
+        "checksum_status": "NONE",
+        "accuraterip_status": "NONE",
+        "path": "F:/tmp/mlo-lib-az/Artist Gamma/2022 - Singles/01 - Hit.flac",
+        "tags": {
+         "TITLE": "01 - Hit",
+         "ARTIST": "Artist Gamma",
+         "ALBUMARTIST": "Artist Gamma",
+         "ALBUM": "Singles",
+         "DATE": "2022",
+         "GENRE": "Pop",
+         "ITUNESADVISORY": "0",
+         "INSTRUMENTAL": "1",
+         "MEDIA": "Digital Media",
+         "SOURCE": "Web",
+         "TRACKNUMBER": "01",
+         "DISCNUMBER": null,
+         "MUSICBRAINZ_ALBUMID": null,
+         "MUSICBRAINZ_ALBUMARTISTID": null,
+         "MUSICBRAINZ_ARTISTID": null,
+         "MUSICBRAINZ_TRACKID": null,
+         "MUSICBRAINZ_RELEASEGROUPID": null,
+         "MUSICBRAINZ_RELEASETRACKID": null,
+         "MUSICBRAINZ_WORKID": null,
+         "RATEYOURMUSIC_ALBUM": null,
+         "RATEYOURMUSIC_TRACK": null,
+         "RATEYOURMUSIC_ARTIST": null,
+         "ALBUMARTISTSORT": null,
+         "ORIGINALDATE": null,
+         "RELEASETYPE": null,
+         "RELEASESTATUS": null,
+         "RELEASECOUNTRY": null,
+         "CATALOGNUMBER": null,
+         "LABEL": null,
+         "BARCODE": null,
+         "SCRIPT": null,
+         "PODCASTSERIES": null,
+         "PODCASTSERIESMBID": null,
+         "PODCASTEPISODE": null,
+         "TRACKTOTAL": null,
+         "DISCTOTAL": null,
+         "COMPOSER": null,
+         "COPYRIGHT": null,
+         "ISRC": null,
+         "LYRICIST": null,
+         "REMIXER": null,
+         "DYNAMIC RANGE": "9",
+         "MOOD": null,
+         "ENERGY": null,
+         "RATING": null,
+         "BPM": null,
+         "INITIALKEY": null,
+         "ALBUM DYNAMIC RANGE": "9"
+        },
+        "tech": {
+         "length": 2.0,
+         "bitrate": 104068.0,
+         "sample_rate": 44100.0,
+         "bits_per_sample": 16.0,
+         "channels": 2.0,
+         "codec": "FLAC"
+        },
+        "cover_file": null,
+        "discnumber": null,
+        "tracknumber": 1,
+        "is_video": false,
+        "grade_pass": false,
+        "lyrics_present": false
+       }
+      ],
+      "sidecars": [],
+      "album_values": {
+       "ALBUMITUNESADVISORY": "0",
+       "ALBUM DYNAMIC RANGE": "9"
+      },
+      "issues": {
+       "Missing MOOD": [
+        "01 - Hit.flac"
+       ],
+       "Missing ENERGY": [
+        "01 - Hit.flac"
+       ],
+       "Missing INITIALKEY": [
+        "01 - Hit.flac"
+       ],
+       "Missing BPM": [
+        "01 - Hit.flac"
+       ],
+       "Missing RELEASETYPE tag (the naming script writes it into the path)": [
+        "01 - Hit.flac"
+       ],
+       "PATH: expected 'Artist Gamma/[?] 2022 - Singles {Digital Media}/1-01 01 - Hit.flac' (run organize)": [
+        "01 - Hit.flac"
+       ],
+       "Missing ENCODER_QUALITY (re-optimize)": [
+        "01 - Hit.flac"
+       ],
+       "Missing ENCODER_VERSION (re-optimize)": [
+        "01 - Hit.flac"
+       ],
+       "Missing AUDIT tag (run Audit Library)": [
+        "01 - Hit.flac"
+       ],
+       "Missing MusicBrainz release link (import from MusicBrainz)": [
+        "01 - Hit.flac"
+       ],
+       "Missing RateYourMusic release link": [
+        "01 - Hit.flac"
+       ],
+       "Cover missing ENCODER_QUALITY (re-optimize)": [
+        "album"
+       ],
+       "Cover missing ENCODER_VERSION (re-optimize)": [
+        "album"
+       ],
+       "Album description missing — fetch one on the album page": [
+        "album"
+       ]
+      },
+      "notes": [],
+      "meta": {
+       "ALBUM": "Singles",
+       "ALBUMARTIST": "Artist Gamma",
+       "ARTIST": "Artist Gamma",
+       "DATE": "2022",
+       "ORIGINALDATE": null,
+       "ORIGINALYEAR": null,
+       "ITUNESADVISORY": "0",
+       "ALBUMITUNESADVISORY": null,
+       "MUSICBRAINZ_ALBUMID": null,
+       "MUSICBRAINZ_ALBUMARTISTID": null,
+       "MUSICBRAINZ_RELEASEGROUPID": null,
+       "RATEYOURMUSIC_ALBUM": null,
+       "MEDIA": "Digital Media",
+       "CATALOGNUMBER": null,
+       "LABEL": null,
+       "BARCODE": null,
+       "RELEASETYPE": null,
+       "RELEASESTATUS": null,
+       "RELEASECOUNTRY": null,
+       "SCRIPT": null,
+       "PODCASTSERIES": null,
+       "PODCASTSERIESMBID": null,
+       "PODCASTEPISODE": null,
+       "ALBUM DYNAMIC RANGE": "9"
+      },
+      "podcast": null,
+      "expected_tracks": [],
+      "pending": false,
+      "artwork": {
+       "description": false,
+       "description_text": null,
+       "description_source": null,
+       "description_url": null
+      },
+      "grade_pct": 72.5,
+      "pass": false
+     }
+    ],
+    "aggregate": {
+     "album_count": 1,
+     "track_count": 1,
+     "pass_count": 37,
+     "total_checks": 51,
+     "grade_pct": 72.5,
+     "pass": false,
+     "audit_summary": "REAL"
+    },
+    "has_image": false
+   },
+   {
+    "path": "F:/tmp/mlo-lib-az/Belle and Sebastian",
+    "name": "Belle and Sebastian",
+    "display_name": "Belle and Sebastian",
+    "albums": [
+     {
+      "path": "F:/tmp/mlo-lib-az/Belle and Sebastian/If You Are Feeling Sinister",
+      "album_artist": "Belle and Sebastian",
+      "audit_summary": "REAL",
+      "media": "Digital Media",
+      "source_summary": "Digital",
+      "track_count": 2,
+      "partial": false,
+      "partial_reason": null,
+      "expected_total": null,
+      "expected_present": null,
+      "pass_count": 49,
+      "total_checks": 82,
+      "cover_file": "cover.jpg",
+      "cover_detail": "cover.jpg (100x100, below the 1200px target (never upscaled))",
+      "cover_ok": false,
+      "has_log": true,
+      "has_cue": true,
+      "checksum_status": "NONE",
+      "accuraterip_status": "NONE",
+      "lyrics_present": 1,
+      "lyrics_expected": 1,
+      "instrumental_count": 0,
+      "tracks": [
+       {
+        "file": "01 - The Stars of Track and Field.flac",
+        "issues": [
+         "MOOD_MISSING",
+         "ENERGY_MISSING",
+         "INITIALKEY",
+         "BPM",
+         "PATH",
+         "ENCODER_QUALITY",
+         "ENCODER_VERSION",
+         "AUDIT",
+         "MB_LINK",
+         "RYM_LINK",
+         "LYRICS",
+         "ALBUMITUNESADVISORY",
+         "ALBUM DYNAMIC RANGE",
+         "COVER"
+        ],
+        "values": {
+         "TITLE": "The Stars of Track and Field",
+         "ARTIST": "Belle and Sebastian",
+         "ALBUM": "If You Are Feeling Sinister",
+         "ALBUMARTIST": "Belle and Sebastian",
+         "DATE": "1996",
+         "TRACKNUMBER": "01",
+         "DISCNUMBER": null,
+         "GENRE": "Rock",
+         "MOOD": null,
+         "ENERGY": null,
+         "ITUNESADVISORY": "0",
+         "REPLAYGAIN_TRACK_GAIN": "-3.00 dB",
+         "REPLAYGAIN_TRACK_PEAK": "0.5",
+         "REPLAYGAIN_ALBUM_GAIN": "-3.00 dB",
+         "REPLAYGAIN_ALBUM_PEAK": "0.5",
+         "DYNAMIC RANGE": "8",
+         "INSTRUMENTAL": "0",
+         "INITIALKEY": null,
+         "BPM": null,
+         "MEDIA": "Digital Media",
+         "SOURCE": "Digital",
+         "AUDIOAUDITOR_OVERRIDE": null,
+         "ALBUMITUNESADVISORY": "0",
+         "ALBUM DYNAMIC RANGE": "8"
+        },
+        "lyrics_embedded": true,
+        "lyrics_lrc": false,
+        "lyrics_kind": "synced",
+        "unreadable": false,
+        "audit": null,
+        "log_grade": null,
+        "sidecar_cover": null,
+        "sidecar_cover_file": null,
+        "checksum_status": "NONE",
+        "accuraterip_status": "NONE",
+        "path": "F:/tmp/mlo-lib-az/Belle and Sebastian/If You Are Feeling Sinister/01 - The Stars of Track and Field.flac",
+        "tags": {
+         "TITLE": "The Stars of Track and Field",
+         "ARTIST": "Belle and Sebastian",
+         "ALBUMARTIST": "Belle and Sebastian",
+         "ALBUM": "If You Are Feeling Sinister",
+         "DATE": "1996",
+         "GENRE": "Rock",
+         "ITUNESADVISORY": "0",
+         "INSTRUMENTAL": "0",
+         "MEDIA": "Digital Media",
+         "SOURCE": "Digital",
+         "TRACKNUMBER": "01",
+         "DISCNUMBER": null,
+         "MUSICBRAINZ_ALBUMID": null,
+         "MUSICBRAINZ_ALBUMARTISTID": null,
+         "MUSICBRAINZ_ARTISTID": null,
+         "MUSICBRAINZ_TRACKID": null,
+         "MUSICBRAINZ_RELEASEGROUPID": null,
+         "MUSICBRAINZ_RELEASETRACKID": null,
+         "MUSICBRAINZ_WORKID": null,
+         "RATEYOURMUSIC_ALBUM": null,
+         "RATEYOURMUSIC_TRACK": null,
+         "RATEYOURMUSIC_ARTIST": null,
+         "ALBUMARTISTSORT": null,
+         "ORIGINALDATE": null,
+         "RELEASETYPE": null,
+         "RELEASESTATUS": null,
+         "RELEASECOUNTRY": null,
+         "CATALOGNUMBER": null,
+         "LABEL": null,
+         "BARCODE": null,
+         "SCRIPT": null,
+         "PODCASTSERIES": null,
+         "PODCASTSERIESMBID": null,
+         "PODCASTEPISODE": null,
+         "TRACKTOTAL": null,
+         "DISCTOTAL": null,
+         "COMPOSER": null,
+         "COPYRIGHT": null,
+         "ISRC": null,
+         "LYRICIST": null,
+         "REMIXER": null,
+         "DYNAMIC RANGE": "8",
+         "MOOD": null,
+         "ENERGY": null,
+         "RATING": null,
+         "BPM": null,
+         "INITIALKEY": null,
+         "ALBUM DYNAMIC RANGE": "8"
+        },
+        "tech": {
+         "length": 2.0,
+         "bitrate": 104068.0,
+         "sample_rate": 44100.0,
+         "bits_per_sample": 16.0,
+         "channels": 2.0,
+         "codec": "FLAC"
+        },
+        "cover_file": null,
+        "discnumber": null,
+        "tracknumber": 1,
+        "is_video": false,
+        "grade_pass": false,
+        "lyrics_present": true
+       },
+       {
+        "file": "02 - Seeing Other People.flac",
+        "issues": [
+         "GENRE_MISSING",
+         "MOOD_MISSING",
+         "ENERGY_MISSING",
+         "DYNAMIC RANGE",
+         "INSTRUMENTAL",
+         "INITIALKEY",
+         "BPM",
+         "PATH",
+         "ENCODER_QUALITY",
+         "ENCODER_VERSION",
+         "AUDIT",
+         "MB_LINK",
+         "RYM_LINK",
+         "SOURCE",
+         "ALBUMITUNESADVISORY",
+         "ALBUM DYNAMIC RANGE",
+         "COVER"
+        ],
+        "values": {
+         "TITLE": "Seeing Other People",
+         "ARTIST": "Belle and Sebastian",
+         "ALBUM": "If You Are Feeling Sinister",
+         "ALBUMARTIST": "Belle and Sebastian",
+         "DATE": "1996",
+         "TRACKNUMBER": "02",
+         "DISCNUMBER": null,
+         "GENRE": null,
+         "MOOD": null,
+         "ENERGY": null,
+         "ITUNESADVISORY": null,
+         "REPLAYGAIN_TRACK_GAIN": null,
+         "REPLAYGAIN_TRACK_PEAK": null,
+         "REPLAYGAIN_ALBUM_GAIN": null,
+         "REPLAYGAIN_ALBUM_PEAK": null,
+         "DYNAMIC RANGE": null,
+         "INSTRUMENTAL": null,
+         "INITIALKEY": null,
+         "BPM": null,
+         "MEDIA": null,
+         "SOURCE": null,
+         "AUDIOAUDITOR_OVERRIDE": null,
+         "ALBUMITUNESADVISORY": "0",
+         "ALBUM DYNAMIC RANGE": "8"
+        },
+        "lyrics_embedded": false,
+        "lyrics_lrc": false,
+        "lyrics_kind": null,
+        "unreadable": false,
+        "audit": null,
+        "log_grade": null,
+        "sidecar_cover": null,
+        "sidecar_cover_file": null,
+        "checksum_status": "NONE",
+        "accuraterip_status": "NONE",
+        "path": "F:/tmp/mlo-lib-az/Belle and Sebastian/If You Are Feeling Sinister/02 - Seeing Other People.flac",
+        "tags": {
+         "TITLE": "Seeing Other People",
+         "ARTIST": "Belle and Sebastian",
+         "ALBUMARTIST": "Belle and Sebastian",
+         "ALBUM": "If You Are Feeling Sinister",
+         "DATE": "1996",
+         "GENRE": null,
+         "ITUNESADVISORY": null,
+         "INSTRUMENTAL": null,
+         "MEDIA": null,
+         "SOURCE": null,
+         "TRACKNUMBER": "02",
+         "DISCNUMBER": null,
+         "MUSICBRAINZ_ALBUMID": null,
+         "MUSICBRAINZ_ALBUMARTISTID": null,
+         "MUSICBRAINZ_ARTISTID": null,
+         "MUSICBRAINZ_TRACKID": null,
+         "MUSICBRAINZ_RELEASEGROUPID": null,
+         "MUSICBRAINZ_RELEASETRACKID": null,
+         "MUSICBRAINZ_WORKID": null,
+         "RATEYOURMUSIC_ALBUM": null,
+         "RATEYOURMUSIC_TRACK": null,
+         "RATEYOURMUSIC_ARTIST": null,
+         "ALBUMARTISTSORT": null,
+         "ORIGINALDATE": null,
+         "RELEASETYPE": null,
+         "RELEASESTATUS": null,
+         "RELEASECOUNTRY": null,
+         "CATALOGNUMBER": null,
+         "LABEL": null,
+         "BARCODE": null,
+         "SCRIPT": null,
+         "PODCASTSERIES": null,
+         "PODCASTSERIESMBID": null,
+         "PODCASTEPISODE": null,
+         "TRACKTOTAL": null,
+         "DISCTOTAL": null,
+         "COMPOSER": null,
+         "COPYRIGHT": null,
+         "ISRC": null,
+         "LYRICIST": null,
+         "REMIXER": null,
+         "DYNAMIC RANGE": null,
+         "MOOD": null,
+         "ENERGY": null,
+         "RATING": null,
+         "BPM": null,
+         "INITIALKEY": null,
+         "ALBUM DYNAMIC RANGE": null
+        },
+        "tech": {
+         "length": 2.0,
+         "bitrate": 104068.0,
+         "sample_rate": 44100.0,
+         "bits_per_sample": 16.0,
+         "channels": 2.0,
+         "codec": "FLAC"
+        },
+        "cover_file": null,
+        "discnumber": null,
+        "tracknumber": 2,
+        "is_video": false,
+        "grade_pass": false,
+        "lyrics_present": false
+       }
+      ],
+      "sidecars": [],
+      "album_values": {
+       "ALBUMITUNESADVISORY": "0",
+       "ALBUM DYNAMIC RANGE": "8"
+      },
+      "issues": {
+       "Missing MOOD": [
+        "01 - The Stars of Track and Field.flac",
+        "02 - Seeing Other People.flac"
+       ],
+       "Missing ENERGY": [
+        "01 - The Stars of Track and Field.flac",
+        "02 - Seeing Other People.flac"
+       ],
+       "Missing INITIALKEY": [
+        "01 - The Stars of Track and Field.flac",
+        "02 - Seeing Other People.flac"
+       ],
+       "Missing BPM": [
+        "01 - The Stars of Track and Field.flac",
+        "02 - Seeing Other People.flac"
+       ],
+       "Missing RELEASETYPE tag (the naming script writes it into the path)": [
+        "01 - The Stars of Track and Field.flac"
+       ],
+       "PATH: expected 'Belle and Sebastian/[?] 1996 - If You Are Feeling Sinister {Digital Media}/1-01 The Stars of Track and Field.flac' (run organize)": [
+        "01 - The Stars of Track and Field.flac"
+       ],
+       "Missing ENCODER_QUALITY (re-optimize)": [
+        "01 - The Stars of Track and Field.flac",
+        "02 - Seeing Other People.flac"
+       ],
+       "Missing ENCODER_VERSION (re-optimize)": [
+        "01 - The Stars of Track and Field.flac",
+        "02 - Seeing Other People.flac"
+       ],
+       "Missing AUDIT tag (run Audit Library)": [
+        "01 - The Stars of Track and Field.flac",
+        "02 - Seeing Other People.flac"
+       ],
+       "Missing MusicBrainz release link (import from MusicBrainz)": [
+        "01 - The Stars of Track and Field.flac",
+        "02 - Seeing Other People.flac"
+       ],
+       "Missing RateYourMusic release link": [
+        "01 - The Stars of Track and Field.flac",
+        "02 - Seeing Other People.flac"
+       ],
+       "Lyrics not optimally formatted (run Lyrics script)": [
+        "01 - The Stars of Track and Field.flac"
+       ],
+       "Missing GENRE": [
+        "02 - Seeing Other People.flac"
+       ],
+       "Missing DYNAMIC RANGE": [
+        "02 - Seeing Other People.flac"
+       ],
+       "Missing INSTRUMENTAL": [
+        "02 - Seeing Other People.flac"
+       ],
+       "PATH: expected 'Belle and Sebastian/[?] 1996 - If You Are Feeling Sinister/1-02 Seeing Other People.flac' (run organize)": [
+        "02 - Seeing Other People.flac"
+       ],
+       "Missing SOURCE (required for Digital Media)": [
+        "02 - Seeing Other People.flac"
+       ],
+       "Album tag ALBUMITUNESADVISORY missing on some tracks": [
+        "album-wide"
+       ],
+       "Album tag ALBUM DYNAMIC RANGE missing on some tracks": [
+        "album-wide"
+       ],
+       "Cover missing ENCODER_QUALITY (re-optimize)": [
+        "album"
+       ],
+       "Cover missing ENCODER_VERSION (re-optimize)": [
+        "album"
+       ],
+       "CUE sheet not optimally formatted (run CUE Sheets script)": [
+        "album"
+       ],
+       "CUE references a file the album does not have (2020 - First Album.cue: 01 - Side A.flac) — run CUE Sheets": [
+        "album"
+       ],
+       "Album description missing — fetch one on the album page": [
+        "album"
+       ]
+      },
+      "notes": [],
+      "meta": {
+       "ALBUM": "If You Are Feeling Sinister",
+       "ALBUMARTIST": "Belle and Sebastian",
+       "ARTIST": "Belle and Sebastian",
+       "DATE": "1996",
+       "ORIGINALDATE": null,
+       "ORIGINALYEAR": null,
+       "ITUNESADVISORY": "0",
+       "ALBUMITUNESADVISORY": null,
+       "MUSICBRAINZ_ALBUMID": null,
+       "MUSICBRAINZ_ALBUMARTISTID": null,
+       "MUSICBRAINZ_RELEASEGROUPID": null,
+       "RATEYOURMUSIC_ALBUM": null,
+       "MEDIA": "Digital Media",
+       "CATALOGNUMBER": null,
+       "LABEL": null,
+       "BARCODE": null,
+       "RELEASETYPE": null,
+       "RELEASESTATUS": null,
+       "RELEASECOUNTRY": null,
+       "SCRIPT": null,
+       "PODCASTSERIES": null,
+       "PODCASTSERIESMBID": null,
+       "PODCASTEPISODE": null,
+       "ALBUM DYNAMIC RANGE": "8"
+      },
+      "podcast": null,
+      "expected_tracks": [],
+      "pending": false,
+      "artwork": {
+       "description": false,
+       "description_text": null,
+       "description_source": null,
+       "description_url": null
+      },
+      "grade_pct": 59.8,
+      "pass": false
+     }
+    ],
+    "aggregate": {
+     "album_count": 1,
+     "track_count": 2,
+     "pass_count": 49,
+     "total_checks": 82,
+     "grade_pct": 59.8,
+     "pass": false,
+     "audit_summary": "REAL"
+    },
+    "has_image": false
+   },
+   {
+    "path": "F:/tmp/mlo-lib-az/Nina Simone",
+    "name": "Nina Simone",
+    "display_name": "Nina Simone",
+    "albums": [
+     {
+      "path": "F:/tmp/mlo-lib-az/Nina Simone/I Put a Spell on You",
+      "album_artist": "Nina Simone",
+      "audit_summary": "REAL",
+      "media": "Digital Media",
+      "source_summary": "Digital",
+      "track_count": 2,
+      "partial": false,
+      "partial_reason": null,
+      "expected_total": null,
+      "expected_present": null,
+      "pass_count": 49,
+      "total_checks": 82,
+      "cover_file": "cover.jpg",
+      "cover_detail": "cover.jpg (100x100, below the 1200px target (never upscaled))",
+      "cover_ok": false,
+      "has_log": true,
+      "has_cue": true,
+      "checksum_status": "NONE",
+      "accuraterip_status": "NONE",
+      "lyrics_present": 1,
+      "lyrics_expected": 1,
+      "instrumental_count": 0,
+      "tracks": [
+       {
+        "file": "01 - Feeling Good.flac",
+        "issues": [
+         "MOOD_MISSING",
+         "ENERGY_MISSING",
+         "INITIALKEY",
+         "BPM",
+         "PATH",
+         "ENCODER_QUALITY",
+         "ENCODER_VERSION",
+         "AUDIT",
+         "MB_LINK",
+         "RYM_LINK",
+         "LYRICS",
+         "ALBUMITUNESADVISORY",
+         "ALBUM DYNAMIC RANGE",
+         "COVER"
+        ],
+        "values": {
+         "TITLE": "Feeling Good",
+         "ARTIST": "Nina Simone",
+         "ALBUM": "I Put a Spell on You",
+         "ALBUMARTIST": "Nina Simone",
+         "DATE": "1965",
+         "TRACKNUMBER": "01",
+         "DISCNUMBER": null,
+         "GENRE": "Rock",
+         "MOOD": null,
+         "ENERGY": null,
+         "ITUNESADVISORY": "0",
+         "REPLAYGAIN_TRACK_GAIN": "-3.00 dB",
+         "REPLAYGAIN_TRACK_PEAK": "0.5",
+         "REPLAYGAIN_ALBUM_GAIN": "-3.00 dB",
+         "REPLAYGAIN_ALBUM_PEAK": "0.5",
+         "DYNAMIC RANGE": "8",
+         "INSTRUMENTAL": "0",
+         "INITIALKEY": null,
+         "BPM": null,
+         "MEDIA": "Digital Media",
+         "SOURCE": "Digital",
+         "AUDIOAUDITOR_OVERRIDE": null,
+         "ALBUMITUNESADVISORY": "0",
+         "ALBUM DYNAMIC RANGE": "8"
+        },
+        "lyrics_embedded": true,
+        "lyrics_lrc": false,
+        "lyrics_kind": "synced",
+        "unreadable": false,
+        "audit": null,
+        "log_grade": null,
+        "sidecar_cover": null,
+        "sidecar_cover_file": null,
+        "checksum_status": "NONE",
+        "accuraterip_status": "NONE",
+        "path": "F:/tmp/mlo-lib-az/Nina Simone/I Put a Spell on You/01 - Feeling Good.flac",
+        "tags": {
+         "TITLE": "Feeling Good",
+         "ARTIST": "Nina Simone",
+         "ALBUMARTIST": "Nina Simone",
+         "ALBUM": "I Put a Spell on You",
+         "DATE": "1965",
+         "GENRE": "Rock",
+         "ITUNESADVISORY": "0",
+         "INSTRUMENTAL": "0",
+         "MEDIA": "Digital Media",
+         "SOURCE": "Digital",
+         "TRACKNUMBER": "01",
+         "DISCNUMBER": null,
+         "MUSICBRAINZ_ALBUMID": null,
+         "MUSICBRAINZ_ALBUMARTISTID": null,
+         "MUSICBRAINZ_ARTISTID": null,
+         "MUSICBRAINZ_TRACKID": null,
+         "MUSICBRAINZ_RELEASEGROUPID": null,
+         "MUSICBRAINZ_RELEASETRACKID": null,
+         "MUSICBRAINZ_WORKID": null,
+         "RATEYOURMUSIC_ALBUM": null,
+         "RATEYOURMUSIC_TRACK": null,
+         "RATEYOURMUSIC_ARTIST": null,
+         "ALBUMARTISTSORT": null,
+         "ORIGINALDATE": null,
+         "RELEASETYPE": null,
+         "RELEASESTATUS": null,
+         "RELEASECOUNTRY": null,
+         "CATALOGNUMBER": null,
+         "LABEL": null,
+         "BARCODE": null,
+         "SCRIPT": null,
+         "PODCASTSERIES": null,
+         "PODCASTSERIESMBID": null,
+         "PODCASTEPISODE": null,
+         "TRACKTOTAL": null,
+         "DISCTOTAL": null,
+         "COMPOSER": null,
+         "COPYRIGHT": null,
+         "ISRC": null,
+         "LYRICIST": null,
+         "REMIXER": null,
+         "DYNAMIC RANGE": "8",
+         "MOOD": null,
+         "ENERGY": null,
+         "RATING": null,
+         "BPM": null,
+         "INITIALKEY": null,
+         "ALBUM DYNAMIC RANGE": "8"
+        },
+        "tech": {
+         "length": 2.0,
+         "bitrate": 104068.0,
+         "sample_rate": 44100.0,
+         "bits_per_sample": 16.0,
+         "channels": 2.0,
+         "codec": "FLAC"
+        },
+        "cover_file": null,
+        "discnumber": null,
+        "tracknumber": 1,
+        "is_video": false,
+        "grade_pass": false,
+        "lyrics_present": true
+       },
+       {
+        "file": "02 - I Put a Spell on You.flac",
+        "issues": [
+         "GENRE_MISSING",
+         "MOOD_MISSING",
+         "ENERGY_MISSING",
+         "DYNAMIC RANGE",
+         "INSTRUMENTAL",
+         "INITIALKEY",
+         "BPM",
+         "PATH",
+         "ENCODER_QUALITY",
+         "ENCODER_VERSION",
+         "AUDIT",
+         "MB_LINK",
+         "RYM_LINK",
+         "SOURCE",
+         "ALBUMITUNESADVISORY",
+         "ALBUM DYNAMIC RANGE",
+         "COVER"
+        ],
+        "values": {
+         "TITLE": "I Put a Spell on You",
+         "ARTIST": "Nina Simone",
+         "ALBUM": "I Put a Spell on You",
+         "ALBUMARTIST": "Nina Simone",
+         "DATE": "1965",
+         "TRACKNUMBER": "02",
+         "DISCNUMBER": null,
+         "GENRE": null,
+         "MOOD": null,
+         "ENERGY": null,
+         "ITUNESADVISORY": null,
+         "REPLAYGAIN_TRACK_GAIN": null,
+         "REPLAYGAIN_TRACK_PEAK": null,
+         "REPLAYGAIN_ALBUM_GAIN": null,
+         "REPLAYGAIN_ALBUM_PEAK": null,
+         "DYNAMIC RANGE": null,
+         "INSTRUMENTAL": null,
+         "INITIALKEY": null,
+         "BPM": null,
+         "MEDIA": null,
+         "SOURCE": null,
+         "AUDIOAUDITOR_OVERRIDE": null,
+         "ALBUMITUNESADVISORY": "0",
+         "ALBUM DYNAMIC RANGE": "8"
+        },
+        "lyrics_embedded": false,
+        "lyrics_lrc": false,
+        "lyrics_kind": null,
+        "unreadable": false,
+        "audit": null,
+        "log_grade": null,
+        "sidecar_cover": null,
+        "sidecar_cover_file": null,
+        "checksum_status": "NONE",
+        "accuraterip_status": "NONE",
+        "path": "F:/tmp/mlo-lib-az/Nina Simone/I Put a Spell on You/02 - I Put a Spell on You.flac",
+        "tags": {
+         "TITLE": "I Put a Spell on You",
+         "ARTIST": "Nina Simone",
+         "ALBUMARTIST": "Nina Simone",
+         "ALBUM": "I Put a Spell on You",
+         "DATE": "1965",
+         "GENRE": null,
+         "ITUNESADVISORY": null,
+         "INSTRUMENTAL": null,
+         "MEDIA": null,
+         "SOURCE": null,
+         "TRACKNUMBER": "02",
+         "DISCNUMBER": null,
+         "MUSICBRAINZ_ALBUMID": null,
+         "MUSICBRAINZ_ALBUMARTISTID": null,
+         "MUSICBRAINZ_ARTISTID": null,
+         "MUSICBRAINZ_TRACKID": null,
+         "MUSICBRAINZ_RELEASEGROUPID": null,
+         "MUSICBRAINZ_RELEASETRACKID": null,
+         "MUSICBRAINZ_WORKID": null,
+         "RATEYOURMUSIC_ALBUM": null,
+         "RATEYOURMUSIC_TRACK": null,
+         "RATEYOURMUSIC_ARTIST": null,
+         "ALBUMARTISTSORT": null,
+         "ORIGINALDATE": null,
+         "RELEASETYPE": null,
+         "RELEASESTATUS": null,
+         "RELEASECOUNTRY": null,
+         "CATALOGNUMBER": null,
+         "LABEL": null,
+         "BARCODE": null,
+         "SCRIPT": null,
+         "PODCASTSERIES": null,
+         "PODCASTSERIESMBID": null,
+         "PODCASTEPISODE": null,
+         "TRACKTOTAL": null,
+         "DISCTOTAL": null,
+         "COMPOSER": null,
+         "COPYRIGHT": null,
+         "ISRC": null,
+         "LYRICIST": null,
+         "REMIXER": null,
+         "DYNAMIC RANGE": null,
+         "MOOD": null,
+         "ENERGY": null,
+         "RATING": null,
+         "BPM": null,
+         "INITIALKEY": null,
+         "ALBUM DYNAMIC RANGE": null
+        },
+        "tech": {
+         "length": 2.0,
+         "bitrate": 104068.0,
+         "sample_rate": 44100.0,
+         "bits_per_sample": 16.0,
+         "channels": 2.0,
+         "codec": "FLAC"
+        },
+        "cover_file": null,
+        "discnumber": null,
+        "tracknumber": 2,
+        "is_video": false,
+        "grade_pass": false,
+        "lyrics_present": false
+       }
+      ],
+      "sidecars": [],
+      "album_values": {
+       "ALBUMITUNESADVISORY": "0",
+       "ALBUM DYNAMIC RANGE": "8"
+      },
+      "issues": {
+       "Missing MOOD": [
+        "01 - Feeling Good.flac",
+        "02 - I Put a Spell on You.flac"
+       ],
+       "Missing ENERGY": [
+        "01 - Feeling Good.flac",
+        "02 - I Put a Spell on You.flac"
+       ],
+       "Missing INITIALKEY": [
+        "01 - Feeling Good.flac",
+        "02 - I Put a Spell on You.flac"
+       ],
+       "Missing BPM": [
+        "01 - Feeling Good.flac",
+        "02 - I Put a Spell on You.flac"
+       ],
+       "Missing RELEASETYPE tag (the naming script writes it into the path)": [
+        "01 - Feeling Good.flac"
+       ],
+       "PATH: expected 'Nina Simone/[?] 1965 - I Put a Spell on You {Digital Media}/1-01 Feeling Good.flac' (run organize)": [
+        "01 - Feeling Good.flac"
+       ],
+       "Missing ENCODER_QUALITY (re-optimize)": [
+        "01 - Feeling Good.flac",
+        "02 - I Put a Spell on You.flac"
+       ],
+       "Missing ENCODER_VERSION (re-optimize)": [
+        "01 - Feeling Good.flac",
+        "02 - I Put a Spell on You.flac"
+       ],
+       "Missing AUDIT tag (run Audit Library)": [
+        "01 - Feeling Good.flac",
+        "02 - I Put a Spell on You.flac"
+       ],
+       "Missing MusicBrainz release link (import from MusicBrainz)": [
+        "01 - Feeling Good.flac",
+        "02 - I Put a Spell on You.flac"
+       ],
+       "Missing RateYourMusic release link": [
+        "01 - Feeling Good.flac",
+        "02 - I Put a Spell on You.flac"
+       ],
+       "Lyrics not optimally formatted (run Lyrics script)": [
+        "01 - Feeling Good.flac"
+       ],
+       "Missing GENRE": [
+        "02 - I Put a Spell on You.flac"
+       ],
+       "Missing DYNAMIC RANGE": [
+        "02 - I Put a Spell on You.flac"
+       ],
+       "Missing INSTRUMENTAL": [
+        "02 - I Put a Spell on You.flac"
+       ],
+       "PATH: expected 'Nina Simone/[?] 1965 - I Put a Spell on You/1-02 I Put a Spell on You.flac' (run organize)": [
+        "02 - I Put a Spell on You.flac"
+       ],
+       "Missing SOURCE (required for Digital Media)": [
+        "02 - I Put a Spell on You.flac"
+       ],
+       "Album tag ALBUMITUNESADVISORY missing on some tracks": [
+        "album-wide"
+       ],
+       "Album tag ALBUM DYNAMIC RANGE missing on some tracks": [
+        "album-wide"
+       ],
+       "Cover missing ENCODER_QUALITY (re-optimize)": [
+        "album"
+       ],
+       "Cover missing ENCODER_VERSION (re-optimize)": [
+        "album"
+       ],
+       "CUE sheet not optimally formatted (run CUE Sheets script)": [
+        "album"
+       ],
+       "CUE references a file the album does not have (2020 - First Album.cue: 01 - Side A.flac) — run CUE Sheets": [
+        "album"
+       ],
+       "Album description missing — fetch one on the album page": [
+        "album"
+       ]
+      },
+      "notes": [],
+      "meta": {
+       "ALBUM": "I Put a Spell on You",
+       "ALBUMARTIST": "Nina Simone",
+       "ARTIST": "Nina Simone",
+       "DATE": "1965",
+       "ORIGINALDATE": null,
+       "ORIGINALYEAR": null,
+       "ITUNESADVISORY": "0",
+       "ALBUMITUNESADVISORY": null,
+       "MUSICBRAINZ_ALBUMID": null,
+       "MUSICBRAINZ_ALBUMARTISTID": null,
+       "MUSICBRAINZ_RELEASEGROUPID": null,
+       "RATEYOURMUSIC_ALBUM": null,
+       "MEDIA": "Digital Media",
+       "CATALOGNUMBER": null,
+       "LABEL": null,
+       "BARCODE": null,
+       "RELEASETYPE": null,
+       "RELEASESTATUS": null,
+       "RELEASECOUNTRY": null,
+       "SCRIPT": null,
+       "PODCASTSERIES": null,
+       "PODCASTSERIESMBID": null,
+       "PODCASTEPISODE": null,
+       "ALBUM DYNAMIC RANGE": "8"
+      },
+      "podcast": null,
+      "expected_tracks": [],
+      "pending": false,
+      "artwork": {
+       "description": false,
+       "description_text": null,
+       "description_source": null,
+       "description_url": null
+      },
+      "grade_pct": 59.8,
+      "pass": false
+     }
+    ],
+    "aggregate": {
+     "album_count": 1,
+     "track_count": 2,
+     "pass_count": 49,
+     "total_checks": 82,
+     "grade_pct": 59.8,
+     "pass": false,
+     "audit_summary": "REAL"
+    },
+    "has_image": false
+   },
+   {
+    "path": "F:/tmp/mlo-lib-az/Taylor Swift",
+    "name": "Taylor Swift",
+    "display_name": "Taylor Swift",
+    "albums": [
+     {
+      "path": "F:/tmp/mlo-lib-az/Taylor Swift/1989",
+      "album_artist": "Taylor Swift",
+      "audit_summary": "REAL",
+      "media": "Digital Media",
+      "source_summary": "Digital",
+      "track_count": 2,
+      "partial": false,
+      "partial_reason": null,
+      "expected_total": null,
+      "expected_present": null,
+      "pass_count": 49,
+      "total_checks": 82,
+      "cover_file": "cover.jpg",
+      "cover_detail": "cover.jpg (100x100, below the 1200px target (never upscaled))",
+      "cover_ok": false,
+      "has_log": true,
+      "has_cue": true,
+      "checksum_status": "NONE",
+      "accuraterip_status": "NONE",
+      "lyrics_present": 1,
+      "lyrics_expected": 1,
+      "instrumental_count": 0,
+      "tracks": [
+       {
+        "file": "01 - Welcome to New York.flac",
+        "issues": [
+         "MOOD_MISSING",
+         "ENERGY_MISSING",
+         "INITIALKEY",
+         "BPM",
+         "PATH",
+         "ENCODER_QUALITY",
+         "ENCODER_VERSION",
+         "AUDIT",
+         "MB_LINK",
+         "RYM_LINK",
+         "LYRICS",
+         "ALBUMITUNESADVISORY",
+         "ALBUM DYNAMIC RANGE",
+         "COVER"
+        ],
+        "values": {
+         "TITLE": "Welcome to New York",
+         "ARTIST": "Taylor Swift",
+         "ALBUM": "1989",
+         "ALBUMARTIST": "Taylor Swift",
+         "DATE": "2014",
+         "TRACKNUMBER": "01",
+         "DISCNUMBER": null,
+         "GENRE": "Rock",
+         "MOOD": null,
+         "ENERGY": null,
+         "ITUNESADVISORY": "0",
+         "REPLAYGAIN_TRACK_GAIN": "-3.00 dB",
+         "REPLAYGAIN_TRACK_PEAK": "0.5",
+         "REPLAYGAIN_ALBUM_GAIN": "-3.00 dB",
+         "REPLAYGAIN_ALBUM_PEAK": "0.5",
+         "DYNAMIC RANGE": "8",
+         "INSTRUMENTAL": "0",
+         "INITIALKEY": null,
+         "BPM": null,
+         "MEDIA": "Digital Media",
+         "SOURCE": "Digital",
+         "AUDIOAUDITOR_OVERRIDE": null,
+         "ALBUMITUNESADVISORY": "0",
+         "ALBUM DYNAMIC RANGE": "8"
+        },
+        "lyrics_embedded": true,
+        "lyrics_lrc": false,
+        "lyrics_kind": "synced",
+        "unreadable": false,
+        "audit": null,
+        "log_grade": null,
+        "sidecar_cover": null,
+        "sidecar_cover_file": null,
+        "checksum_status": "NONE",
+        "accuraterip_status": "NONE",
+        "path": "F:/tmp/mlo-lib-az/Taylor Swift/1989/01 - Welcome to New York.flac",
+        "tags": {
+         "TITLE": "Welcome to New York",
+         "ARTIST": "Taylor Swift",
+         "ALBUMARTIST": "Taylor Swift",
+         "ALBUM": "1989",
+         "DATE": "2014",
+         "GENRE": "Rock",
+         "ITUNESADVISORY": "0",
+         "INSTRUMENTAL": "0",
+         "MEDIA": "Digital Media",
+         "SOURCE": "Digital",
+         "TRACKNUMBER": "01",
+         "DISCNUMBER": null,
+         "MUSICBRAINZ_ALBUMID": null,
+         "MUSICBRAINZ_ALBUMARTISTID": null,
+         "MUSICBRAINZ_ARTISTID": null,
+         "MUSICBRAINZ_TRACKID": null,
+         "MUSICBRAINZ_RELEASEGROUPID": null,
+         "MUSICBRAINZ_RELEASETRACKID": null,
+         "MUSICBRAINZ_WORKID": null,
+         "RATEYOURMUSIC_ALBUM": null,
+         "RATEYOURMUSIC_TRACK": null,
+         "RATEYOURMUSIC_ARTIST": null,
+         "ALBUMARTISTSORT": null,
+         "ORIGINALDATE": null,
+         "RELEASETYPE": null,
+         "RELEASESTATUS": null,
+         "RELEASECOUNTRY": null,
+         "CATALOGNUMBER": null,
+         "LABEL": null,
+         "BARCODE": null,
+         "SCRIPT": null,
+         "PODCASTSERIES": null,
+         "PODCASTSERIESMBID": null,
+         "PODCASTEPISODE": null,
+         "TRACKTOTAL": null,
+         "DISCTOTAL": null,
+         "COMPOSER": null,
+         "COPYRIGHT": null,
+         "ISRC": null,
+         "LYRICIST": null,
+         "REMIXER": null,
+         "DYNAMIC RANGE": "8",
+         "MOOD": null,
+         "ENERGY": null,
+         "RATING": null,
+         "BPM": null,
+         "INITIALKEY": null,
+         "ALBUM DYNAMIC RANGE": "8"
+        },
+        "tech": {
+         "length": 2.0,
+         "bitrate": 104068.0,
+         "sample_rate": 44100.0,
+         "bits_per_sample": 16.0,
+         "channels": 2.0,
+         "codec": "FLAC"
+        },
+        "cover_file": null,
+        "discnumber": null,
+        "tracknumber": 1,
+        "is_video": false,
+        "grade_pass": false,
+        "lyrics_present": true
+       },
+       {
+        "file": "02 - Blank Space.flac",
+        "issues": [
+         "GENRE_MISSING",
+         "MOOD_MISSING",
+         "ENERGY_MISSING",
+         "DYNAMIC RANGE",
+         "INSTRUMENTAL",
+         "INITIALKEY",
+         "BPM",
+         "PATH",
+         "ENCODER_QUALITY",
+         "ENCODER_VERSION",
+         "AUDIT",
+         "MB_LINK",
+         "RYM_LINK",
+         "SOURCE",
+         "ALBUMITUNESADVISORY",
+         "ALBUM DYNAMIC RANGE",
+         "COVER"
+        ],
+        "values": {
+         "TITLE": "Blank Space",
+         "ARTIST": "Taylor Swift",
+         "ALBUM": "1989",
+         "ALBUMARTIST": "Taylor Swift",
+         "DATE": "2014",
+         "TRACKNUMBER": "02",
+         "DISCNUMBER": null,
+         "GENRE": null,
+         "MOOD": null,
+         "ENERGY": null,
+         "ITUNESADVISORY": null,
+         "REPLAYGAIN_TRACK_GAIN": null,
+         "REPLAYGAIN_TRACK_PEAK": null,
+         "REPLAYGAIN_ALBUM_GAIN": null,
+         "REPLAYGAIN_ALBUM_PEAK": null,
+         "DYNAMIC RANGE": null,
+         "INSTRUMENTAL": null,
+         "INITIALKEY": null,
+         "BPM": null,
+         "MEDIA": null,
+         "SOURCE": null,
+         "AUDIOAUDITOR_OVERRIDE": null,
+         "ALBUMITUNESADVISORY": "0",
+         "ALBUM DYNAMIC RANGE": "8"
+        },
+        "lyrics_embedded": false,
+        "lyrics_lrc": false,
+        "lyrics_kind": null,
+        "unreadable": false,
+        "audit": null,
+        "log_grade": null,
+        "sidecar_cover": null,
+        "sidecar_cover_file": null,
+        "checksum_status": "NONE",
+        "accuraterip_status": "NONE",
+        "path": "F:/tmp/mlo-lib-az/Taylor Swift/1989/02 - Blank Space.flac",
+        "tags": {
+         "TITLE": "Blank Space",
+         "ARTIST": "Taylor Swift",
+         "ALBUMARTIST": "Taylor Swift",
+         "ALBUM": "1989",
+         "DATE": "2014",
+         "GENRE": null,
+         "ITUNESADVISORY": null,
+         "INSTRUMENTAL": null,
+         "MEDIA": null,
+         "SOURCE": null,
+         "TRACKNUMBER": "02",
+         "DISCNUMBER": null,
+         "MUSICBRAINZ_ALBUMID": null,
+         "MUSICBRAINZ_ALBUMARTISTID": null,
+         "MUSICBRAINZ_ARTISTID": null,
+         "MUSICBRAINZ_TRACKID": null,
+         "MUSICBRAINZ_RELEASEGROUPID": null,
+         "MUSICBRAINZ_RELEASETRACKID": null,
+         "MUSICBRAINZ_WORKID": null,
+         "RATEYOURMUSIC_ALBUM": null,
+         "RATEYOURMUSIC_TRACK": null,
+         "RATEYOURMUSIC_ARTIST": null,
+         "ALBUMARTISTSORT": null,
+         "ORIGINALDATE": null,
+         "RELEASETYPE": null,
+         "RELEASESTATUS": null,
+         "RELEASECOUNTRY": null,
+         "CATALOGNUMBER": null,
+         "LABEL": null,
+         "BARCODE": null,
+         "SCRIPT": null,
+         "PODCASTSERIES": null,
+         "PODCASTSERIESMBID": null,
+         "PODCASTEPISODE": null,
+         "TRACKTOTAL": null,
+         "DISCTOTAL": null,
+         "COMPOSER": null,
+         "COPYRIGHT": null,
+         "ISRC": null,
+         "LYRICIST": null,
+         "REMIXER": null,
+         "DYNAMIC RANGE": null,
+         "MOOD": null,
+         "ENERGY": null,
+         "RATING": null,
+         "BPM": null,
+         "INITIALKEY": null,
+         "ALBUM DYNAMIC RANGE": null
+        },
+        "tech": {
+         "length": 2.0,
+         "bitrate": 104068.0,
+         "sample_rate": 44100.0,
+         "bits_per_sample": 16.0,
+         "channels": 2.0,
+         "codec": "FLAC"
+        },
+        "cover_file": null,
+        "discnumber": null,
+        "tracknumber": 2,
+        "is_video": false,
+        "grade_pass": false,
+        "lyrics_present": false
+       }
+      ],
+      "sidecars": [],
+      "album_values": {
+       "ALBUMITUNESADVISORY": "0",
+       "ALBUM DYNAMIC RANGE": "8"
+      },
+      "issues": {
+       "Missing MOOD": [
+        "01 - Welcome to New York.flac",
+        "02 - Blank Space.flac"
+       ],
+       "Missing ENERGY": [
+        "01 - Welcome to New York.flac",
+        "02 - Blank Space.flac"
+       ],
+       "Missing INITIALKEY": [
+        "01 - Welcome to New York.flac",
+        "02 - Blank Space.flac"
+       ],
+       "Missing BPM": [
+        "01 - Welcome to New York.flac",
+        "02 - Blank Space.flac"
+       ],
+       "Missing RELEASETYPE tag (the naming script writes it into the path)": [
+        "01 - Welcome to New York.flac"
+       ],
+       "PATH: expected 'Taylor Swift/[?] 2014 - 1989 {Digital Media}/1-01 Welcome to New York.flac' (run organize)": [
+        "01 - Welcome to New York.flac"
+       ],
+       "Missing ENCODER_QUALITY (re-optimize)": [
+        "01 - Welcome to New York.flac",
+        "02 - Blank Space.flac"
+       ],
+       "Missing ENCODER_VERSION (re-optimize)": [
+        "01 - Welcome to New York.flac",
+        "02 - Blank Space.flac"
+       ],
+       "Missing AUDIT tag (run Audit Library)": [
+        "01 - Welcome to New York.flac",
+        "02 - Blank Space.flac"
+       ],
+       "Missing MusicBrainz release link (import from MusicBrainz)": [
+        "01 - Welcome to New York.flac",
+        "02 - Blank Space.flac"
+       ],
+       "Missing RateYourMusic release link": [
+        "01 - Welcome to New York.flac",
+        "02 - Blank Space.flac"
+       ],
+       "Lyrics not optimally formatted (run Lyrics script)": [
+        "01 - Welcome to New York.flac"
+       ],
+       "Missing GENRE": [
+        "02 - Blank Space.flac"
+       ],
+       "Missing DYNAMIC RANGE": [
+        "02 - Blank Space.flac"
+       ],
+       "Missing INSTRUMENTAL": [
+        "02 - Blank Space.flac"
+       ],
+       "PATH: expected 'Taylor Swift/[?] 2014 - 1989/1-02 Blank Space.flac' (run organize)": [
+        "02 - Blank Space.flac"
+       ],
+       "Missing SOURCE (required for Digital Media)": [
+        "02 - Blank Space.flac"
+       ],
+       "Album tag ALBUMITUNESADVISORY missing on some tracks": [
+        "album-wide"
+       ],
+       "Album tag ALBUM DYNAMIC RANGE missing on some tracks": [
+        "album-wide"
+       ],
+       "Cover missing ENCODER_QUALITY (re-optimize)": [
+        "album"
+       ],
+       "Cover missing ENCODER_VERSION (re-optimize)": [
+        "album"
+       ],
+       "CUE sheet not optimally formatted (run CUE Sheets script)": [
+        "album"
+       ],
+       "CUE references a file the album does not have (2020 - First Album.cue: 01 - Side A.flac) — run CUE Sheets": [
+        "album"
+       ],
+       "Album description missing — fetch one on the album page": [
+        "album"
+       ]
+      },
+      "notes": [],
+      "meta": {
+       "ALBUM": "1989",
+       "ALBUMARTIST": "Taylor Swift",
+       "ARTIST": "Taylor Swift",
+       "DATE": "2014",
+       "ORIGINALDATE": null,
+       "ORIGINALYEAR": null,
+       "ITUNESADVISORY": "0",
+       "ALBUMITUNESADVISORY": null,
+       "MUSICBRAINZ_ALBUMID": null,
+       "MUSICBRAINZ_ALBUMARTISTID": null,
+       "MUSICBRAINZ_RELEASEGROUPID": null,
+       "RATEYOURMUSIC_ALBUM": null,
+       "MEDIA": "Digital Media",
+       "CATALOGNUMBER": null,
+       "LABEL": null,
+       "BARCODE": null,
+       "RELEASETYPE": null,
+       "RELEASESTATUS": null,
+       "RELEASECOUNTRY": null,
+       "SCRIPT": null,
+       "PODCASTSERIES": null,
+       "PODCASTSERIESMBID": null,
+       "PODCASTEPISODE": null,
+       "ALBUM DYNAMIC RANGE": "8"
+      },
+      "podcast": null,
+      "expected_tracks": [],
+      "pending": false,
+      "artwork": {
+       "description": false,
+       "description_text": null,
+       "description_source": null,
+       "description_url": null
+      },
+      "grade_pct": 59.8,
+      "pass": false
+     }
+    ],
+    "aggregate": {
+     "album_count": 1,
+     "track_count": 2,
+     "pass_count": 49,
+     "total_checks": 82,
+     "grade_pct": 59.8,
+     "pass": false,
+     "audit_summary": "REAL"
+    },
+    "has_image": false
+   },
+   {
+    "path": "F:/tmp/mlo-lib-az/Zappa",
+    "name": "Zappa",
+    "display_name": "Zappa",
+    "albums": [
+     {
+      "path": "F:/tmp/mlo-lib-az/Zappa/Hot Rats",
+      "album_artist": "Zappa",
+      "audit_summary": "REAL",
+      "media": "Digital Media",
+      "source_summary": "Digital",
+      "track_count": 2,
+      "partial": false,
+      "partial_reason": null,
+      "expected_total": null,
+      "expected_present": null,
+      "pass_count": 49,
+      "total_checks": 82,
+      "cover_file": "cover.jpg",
+      "cover_detail": "cover.jpg (100x100, below the 1200px target (never upscaled))",
+      "cover_ok": false,
+      "has_log": true,
+      "has_cue": true,
+      "checksum_status": "NONE",
+      "accuraterip_status": "NONE",
+      "lyrics_present": 1,
+      "lyrics_expected": 1,
+      "instrumental_count": 0,
+      "tracks": [
+       {
+        "file": "01 - Peaches en Regalia.flac",
+        "issues": [
+         "MOOD_MISSING",
+         "ENERGY_MISSING",
+         "INITIALKEY",
+         "BPM",
+         "PATH",
+         "ENCODER_QUALITY",
+         "ENCODER_VERSION",
+         "AUDIT",
+         "MB_LINK",
+         "RYM_LINK",
+         "LYRICS",
+         "ALBUMITUNESADVISORY",
+         "ALBUM DYNAMIC RANGE",
+         "COVER"
+        ],
+        "values": {
+         "TITLE": "Peaches en Regalia",
+         "ARTIST": "Zappa",
+         "ALBUM": "Hot Rats",
+         "ALBUMARTIST": "Zappa",
+         "DATE": "1969",
+         "TRACKNUMBER": "01",
+         "DISCNUMBER": null,
+         "GENRE": "Rock",
+         "MOOD": null,
+         "ENERGY": null,
+         "ITUNESADVISORY": "0",
+         "REPLAYGAIN_TRACK_GAIN": "-3.00 dB",
+         "REPLAYGAIN_TRACK_PEAK": "0.5",
+         "REPLAYGAIN_ALBUM_GAIN": "-3.00 dB",
+         "REPLAYGAIN_ALBUM_PEAK": "0.5",
+         "DYNAMIC RANGE": "8",
+         "INSTRUMENTAL": "0",
+         "INITIALKEY": null,
+         "BPM": null,
+         "MEDIA": "Digital Media",
+         "SOURCE": "Digital",
+         "AUDIOAUDITOR_OVERRIDE": null,
+         "ALBUMITUNESADVISORY": "0",
+         "ALBUM DYNAMIC RANGE": "8"
+        },
+        "lyrics_embedded": true,
+        "lyrics_lrc": false,
+        "lyrics_kind": "synced",
+        "unreadable": false,
+        "audit": null,
+        "log_grade": null,
+        "sidecar_cover": null,
+        "sidecar_cover_file": null,
+        "checksum_status": "NONE",
+        "accuraterip_status": "NONE",
+        "path": "F:/tmp/mlo-lib-az/Zappa/Hot Rats/01 - Peaches en Regalia.flac",
+        "tags": {
+         "TITLE": "Peaches en Regalia",
+         "ARTIST": "Zappa",
+         "ALBUMARTIST": "Zappa",
+         "ALBUM": "Hot Rats",
+         "DATE": "1969",
+         "GENRE": "Rock",
+         "ITUNESADVISORY": "0",
+         "INSTRUMENTAL": "0",
+         "MEDIA": "Digital Media",
+         "SOURCE": "Digital",
+         "TRACKNUMBER": "01",
+         "DISCNUMBER": null,
+         "MUSICBRAINZ_ALBUMID": null,
+         "MUSICBRAINZ_ALBUMARTISTID": null,
+         "MUSICBRAINZ_ARTISTID": null,
+         "MUSICBRAINZ_TRACKID": null,
+         "MUSICBRAINZ_RELEASEGROUPID": null,
+         "MUSICBRAINZ_RELEASETRACKID": null,
+         "MUSICBRAINZ_WORKID": null,
+         "RATEYOURMUSIC_ALBUM": null,
+         "RATEYOURMUSIC_TRACK": null,
+         "RATEYOURMUSIC_ARTIST": null,
+         "ALBUMARTISTSORT": null,
+         "ORIGINALDATE": null,
+         "RELEASETYPE": null,
+         "RELEASESTATUS": null,
+         "RELEASECOUNTRY": null,
+         "CATALOGNUMBER": null,
+         "LABEL": null,
+         "BARCODE": null,
+         "SCRIPT": null,
+         "PODCASTSERIES": null,
+         "PODCASTSERIESMBID": null,
+         "PODCASTEPISODE": null,
+         "TRACKTOTAL": null,
+         "DISCTOTAL": null,
+         "COMPOSER": null,
+         "COPYRIGHT": null,
+         "ISRC": null,
+         "LYRICIST": null,
+         "REMIXER": null,
+         "DYNAMIC RANGE": "8",
+         "MOOD": null,
+         "ENERGY": null,
+         "RATING": null,
+         "BPM": null,
+         "INITIALKEY": null,
+         "ALBUM DYNAMIC RANGE": "8"
+        },
+        "tech": {
+         "length": 2.0,
+         "bitrate": 104068.0,
+         "sample_rate": 44100.0,
+         "bits_per_sample": 16.0,
+         "channels": 2.0,
+         "codec": "FLAC"
+        },
+        "cover_file": null,
+        "discnumber": null,
+        "tracknumber": 1,
+        "is_video": false,
+        "grade_pass": false,
+        "lyrics_present": true
+       },
+       {
+        "file": "02 - Willie the Pimp.flac",
+        "issues": [
+         "GENRE_MISSING",
+         "MOOD_MISSING",
+         "ENERGY_MISSING",
+         "DYNAMIC RANGE",
+         "INSTRUMENTAL",
+         "INITIALKEY",
+         "BPM",
+         "PATH",
+         "ENCODER_QUALITY",
+         "ENCODER_VERSION",
+         "AUDIT",
+         "MB_LINK",
+         "RYM_LINK",
+         "SOURCE",
+         "ALBUMITUNESADVISORY",
+         "ALBUM DYNAMIC RANGE",
+         "COVER"
+        ],
+        "values": {
+         "TITLE": "Willie the Pimp",
+         "ARTIST": "Zappa",
+         "ALBUM": "Hot Rats",
+         "ALBUMARTIST": "Zappa",
+         "DATE": "1969",
+         "TRACKNUMBER": "02",
+         "DISCNUMBER": null,
+         "GENRE": null,
+         "MOOD": null,
+         "ENERGY": null,
+         "ITUNESADVISORY": null,
+         "REPLAYGAIN_TRACK_GAIN": null,
+         "REPLAYGAIN_TRACK_PEAK": null,
+         "REPLAYGAIN_ALBUM_GAIN": null,
+         "REPLAYGAIN_ALBUM_PEAK": null,
+         "DYNAMIC RANGE": null,
+         "INSTRUMENTAL": null,
+         "INITIALKEY": null,
+         "BPM": null,
+         "MEDIA": null,
+         "SOURCE": null,
+         "AUDIOAUDITOR_OVERRIDE": null,
+         "ALBUMITUNESADVISORY": "0",
+         "ALBUM DYNAMIC RANGE": "8"
+        },
+        "lyrics_embedded": false,
+        "lyrics_lrc": false,
+        "lyrics_kind": null,
+        "unreadable": false,
+        "audit": null,
+        "log_grade": null,
+        "sidecar_cover": null,
+        "sidecar_cover_file": null,
+        "checksum_status": "NONE",
+        "accuraterip_status": "NONE",
+        "path": "F:/tmp/mlo-lib-az/Zappa/Hot Rats/02 - Willie the Pimp.flac",
+        "tags": {
+         "TITLE": "Willie the Pimp",
+         "ARTIST": "Zappa",
+         "ALBUMARTIST": "Zappa",
+         "ALBUM": "Hot Rats",
+         "DATE": "1969",
+         "GENRE": null,
+         "ITUNESADVISORY": null,
+         "INSTRUMENTAL": null,
+         "MEDIA": null,
+         "SOURCE": null,
+         "TRACKNUMBER": "02",
+         "DISCNUMBER": null,
+         "MUSICBRAINZ_ALBUMID": null,
+         "MUSICBRAINZ_ALBUMARTISTID": null,
+         "MUSICBRAINZ_ARTISTID": null,
+         "MUSICBRAINZ_TRACKID": null,
+         "MUSICBRAINZ_RELEASEGROUPID": null,
+         "MUSICBRAINZ_RELEASETRACKID": null,
+         "MUSICBRAINZ_WORKID": null,
+         "RATEYOURMUSIC_ALBUM": null,
+         "RATEYOURMUSIC_TRACK": null,
+         "RATEYOURMUSIC_ARTIST": null,
+         "ALBUMARTISTSORT": null,
+         "ORIGINALDATE": null,
+         "RELEASETYPE": null,
+         "RELEASESTATUS": null,
+         "RELEASECOUNTRY": null,
+         "CATALOGNUMBER": null,
+         "LABEL": null,
+         "BARCODE": null,
+         "SCRIPT": null,
+         "PODCASTSERIES": null,
+         "PODCASTSERIESMBID": null,
+         "PODCASTEPISODE": null,
+         "TRACKTOTAL": null,
+         "DISCTOTAL": null,
+         "COMPOSER": null,
+         "COPYRIGHT": null,
+         "ISRC": null,
+         "LYRICIST": null,
+         "REMIXER": null,
+         "DYNAMIC RANGE": null,
+         "MOOD": null,
+         "ENERGY": null,
+         "RATING": null,
+         "BPM": null,
+         "INITIALKEY": null,
+         "ALBUM DYNAMIC RANGE": null
+        },
+        "tech": {
+         "length": 2.0,
+         "bitrate": 104068.0,
+         "sample_rate": 44100.0,
+         "bits_per_sample": 16.0,
+         "channels": 2.0,
+         "codec": "FLAC"
+        },
+        "cover_file": null,
+        "discnumber": null,
+        "tracknumber": 2,
+        "is_video": false,
+        "grade_pass": false,
+        "lyrics_present": false
+       }
+      ],
+      "sidecars": [],
+      "album_values": {
+       "ALBUMITUNESADVISORY": "0",
+       "ALBUM DYNAMIC RANGE": "8"
+      },
+      "issues": {
+       "Missing MOOD": [
+        "01 - Peaches en Regalia.flac",
+        "02 - Willie the Pimp.flac"
+       ],
+       "Missing ENERGY": [
+        "01 - Peaches en Regalia.flac",
+        "02 - Willie the Pimp.flac"
+       ],
+       "Missing INITIALKEY": [
+        "01 - Peaches en Regalia.flac",
+        "02 - Willie the Pimp.flac"
+       ],
+       "Missing BPM": [
+        "01 - Peaches en Regalia.flac",
+        "02 - Willie the Pimp.flac"
+       ],
+       "Missing RELEASETYPE tag (the naming script writes it into the path)": [
+        "01 - Peaches en Regalia.flac"
+       ],
+       "PATH: expected 'Zappa/[?] 1969 - Hot Rats {Digital Media}/1-01 Peaches en Regalia.flac' (run organize)": [
+        "01 - Peaches en Regalia.flac"
+       ],
+       "Missing ENCODER_QUALITY (re-optimize)": [
+        "01 - Peaches en Regalia.flac",
+        "02 - Willie the Pimp.flac"
+       ],
+       "Missing ENCODER_VERSION (re-optimize)": [
+        "01 - Peaches en Regalia.flac",
+        "02 - Willie the Pimp.flac"
+       ],
+       "Missing AUDIT tag (run Audit Library)": [
+        "01 - Peaches en Regalia.flac",
+        "02 - Willie the Pimp.flac"
+       ],
+       "Missing MusicBrainz release link (import from MusicBrainz)": [
+        "01 - Peaches en Regalia.flac",
+        "02 - Willie the Pimp.flac"
+       ],
+       "Missing RateYourMusic release link": [
+        "01 - Peaches en Regalia.flac",
+        "02 - Willie the Pimp.flac"
+       ],
+       "Lyrics not optimally formatted (run Lyrics script)": [
+        "01 - Peaches en Regalia.flac"
+       ],
+       "Missing GENRE": [
+        "02 - Willie the Pimp.flac"
+       ],
+       "Missing DYNAMIC RANGE": [
+        "02 - Willie the Pimp.flac"
+       ],
+       "Missing INSTRUMENTAL": [
+        "02 - Willie the Pimp.flac"
+       ],
+       "PATH: expected 'Zappa/[?] 1969 - Hot Rats/1-02 Willie the Pimp.flac' (run organize)": [
+        "02 - Willie the Pimp.flac"
+       ],
+       "Missing SOURCE (required for Digital Media)": [
+        "02 - Willie the Pimp.flac"
+       ],
+       "Album tag ALBUMITUNESADVISORY missing on some tracks": [
+        "album-wide"
+       ],
+       "Album tag ALBUM DYNAMIC RANGE missing on some tracks": [
+        "album-wide"
+       ],
+       "Cover missing ENCODER_QUALITY (re-optimize)": [
+        "album"
+       ],
+       "Cover missing ENCODER_VERSION (re-optimize)": [
+        "album"
+       ],
+       "CUE sheet not optimally formatted (run CUE Sheets script)": [
+        "album"
+       ],
+       "CUE references a file the album does not have (2020 - First Album.cue: 01 - Side A.flac) — run CUE Sheets": [
+        "album"
+       ],
+       "Album description missing — fetch one on the album page": [
+        "album"
+       ]
+      },
+      "notes": [],
+      "meta": {
+       "ALBUM": "Hot Rats",
+       "ALBUMARTIST": "Zappa",
+       "ARTIST": "Zappa",
+       "DATE": "1969",
+       "ORIGINALDATE": null,
+       "ORIGINALYEAR": null,
+       "ITUNESADVISORY": "0",
+       "ALBUMITUNESADVISORY": null,
+       "MUSICBRAINZ_ALBUMID": null,
+       "MUSICBRAINZ_ALBUMARTISTID": null,
+       "MUSICBRAINZ_RELEASEGROUPID": null,
+       "RATEYOURMUSIC_ALBUM": null,
+       "MEDIA": "Digital Media",
+       "CATALOGNUMBER": null,
+       "LABEL": null,
+       "BARCODE": null,
+       "RELEASETYPE": null,
+       "RELEASESTATUS": null,
+       "RELEASECOUNTRY": null,
+       "SCRIPT": null,
+       "PODCASTSERIES": null,
+       "PODCASTSERIESMBID": null,
+       "PODCASTEPISODE": null,
+       "ALBUM DYNAMIC RANGE": "8"
+      },
+      "podcast": null,
+      "expected_tracks": [],
+      "pending": false,
+      "artwork": {
+       "description": false,
+       "description_text": null,
+       "description_source": null,
+       "description_url": null
+      },
+      "grade_pct": 59.8,
+      "pass": false
+     }
+    ],
+    "aggregate": {
+     "album_count": 1,
+     "track_count": 2,
+     "pass_count": 49,
+     "total_checks": 82,
+     "grade_pct": 59.8,
+     "pass": false,
+     "audit_summary": "REAL"
+    },
+    "has_image": false
+   },
+   {
+    "path": "F:/tmp/mlo-lib-az/Ásgeir",
+    "name": "Ásgeir",
+    "display_name": "Ásgeir",
+    "albums": [
+     {
+      "path": "F:/tmp/mlo-lib-az/Ásgeir/Hljóð",
+      "album_artist": "Ásgeir",
+      "audit_summary": "REAL",
+      "media": "Digital Media",
+      "source_summary": "Digital",
+      "track_count": 2,
+      "partial": false,
+      "partial_reason": null,
+      "expected_total": null,
+      "expected_present": null,
+      "pass_count": 49,
+      "total_checks": 82,
+      "cover_file": "cover.jpg",
+      "cover_detail": "cover.jpg (100x100, below the 1200px target (never upscaled))",
+      "cover_ok": false,
+      "has_log": true,
+      "has_cue": true,
+      "checksum_status": "NONE",
+      "accuraterip_status": "NONE",
+      "lyrics_present": 1,
+      "lyrics_expected": 1,
+      "instrumental_count": 0,
+      "tracks": [
+       {
+        "file": "01 - Kvöld.flac",
+        "issues": [
+         "MOOD_MISSING",
+         "ENERGY_MISSING",
+         "INITIALKEY",
+         "BPM",
+         "PATH",
+         "ENCODER_QUALITY",
+         "ENCODER_VERSION",
+         "AUDIT",
+         "MB_LINK",
+         "RYM_LINK",
+         "LYRICS",
+         "ALBUMITUNESADVISORY",
+         "ALBUM DYNAMIC RANGE",
+         "COVER"
+        ],
+        "values": {
+         "TITLE": "Kvöld",
+         "ARTIST": "Ásgeir",
+         "ALBUM": "Hljóð",
+         "ALBUMARTIST": "Ásgeir",
+         "DATE": "2019",
+         "TRACKNUMBER": "01",
+         "DISCNUMBER": null,
+         "GENRE": "Rock",
+         "MOOD": null,
+         "ENERGY": null,
+         "ITUNESADVISORY": "0",
+         "REPLAYGAIN_TRACK_GAIN": "-3.00 dB",
+         "REPLAYGAIN_TRACK_PEAK": "0.5",
+         "REPLAYGAIN_ALBUM_GAIN": "-3.00 dB",
+         "REPLAYGAIN_ALBUM_PEAK": "0.5",
+         "DYNAMIC RANGE": "8",
+         "INSTRUMENTAL": "0",
+         "INITIALKEY": null,
+         "BPM": null,
+         "MEDIA": "Digital Media",
+         "SOURCE": "Digital",
+         "AUDIOAUDITOR_OVERRIDE": null,
+         "ALBUMITUNESADVISORY": "0",
+         "ALBUM DYNAMIC RANGE": "8"
+        },
+        "lyrics_embedded": true,
+        "lyrics_lrc": false,
+        "lyrics_kind": "synced",
+        "unreadable": false,
+        "audit": null,
+        "log_grade": null,
+        "sidecar_cover": null,
+        "sidecar_cover_file": null,
+        "checksum_status": "NONE",
+        "accuraterip_status": "NONE",
+        "path": "F:/tmp/mlo-lib-az/Ásgeir/Hljóð/01 - Kvöld.flac",
+        "tags": {
+         "TITLE": "Kvöld",
+         "ARTIST": "Ásgeir",
+         "ALBUMARTIST": "Ásgeir",
+         "ALBUM": "Hljóð",
+         "DATE": "2019",
+         "GENRE": "Rock",
+         "ITUNESADVISORY": "0",
+         "INSTRUMENTAL": "0",
+         "MEDIA": "Digital Media",
+         "SOURCE": "Digital",
+         "TRACKNUMBER": "01",
+         "DISCNUMBER": null,
+         "MUSICBRAINZ_ALBUMID": null,
+         "MUSICBRAINZ_ALBUMARTISTID": null,
+         "MUSICBRAINZ_ARTISTID": null,
+         "MUSICBRAINZ_TRACKID": null,
+         "MUSICBRAINZ_RELEASEGROUPID": null,
+         "MUSICBRAINZ_RELEASETRACKID": null,
+         "MUSICBRAINZ_WORKID": null,
+         "RATEYOURMUSIC_ALBUM": null,
+         "RATEYOURMUSIC_TRACK": null,
+         "RATEYOURMUSIC_ARTIST": null,
+         "ALBUMARTISTSORT": null,
+         "ORIGINALDATE": null,
+         "RELEASETYPE": null,
+         "RELEASESTATUS": null,
+         "RELEASECOUNTRY": null,
+         "CATALOGNUMBER": null,
+         "LABEL": null,
+         "BARCODE": null,
+         "SCRIPT": null,
+         "PODCASTSERIES": null,
+         "PODCASTSERIESMBID": null,
+         "PODCASTEPISODE": null,
+         "TRACKTOTAL": null,
+         "DISCTOTAL": null,
+         "COMPOSER": null,
+         "COPYRIGHT": null,
+         "ISRC": null,
+         "LYRICIST": null,
+         "REMIXER": null,
+         "DYNAMIC RANGE": "8",
+         "MOOD": null,
+         "ENERGY": null,
+         "RATING": null,
+         "BPM": null,
+         "INITIALKEY": null,
+         "ALBUM DYNAMIC RANGE": "8"
+        },
+        "tech": {
+         "length": 2.0,
+         "bitrate": 104068.0,
+         "sample_rate": 44100.0,
+         "bits_per_sample": 16.0,
+         "channels": 2.0,
+         "codec": "FLAC"
+        },
+        "cover_file": null,
+        "discnumber": null,
+        "tracknumber": 1,
+        "is_video": false,
+        "grade_pass": false,
+        "lyrics_present": true
+       },
+       {
+        "file": "02 - Í Vetur.flac",
+        "issues": [
+         "GENRE_MISSING",
+         "MOOD_MISSING",
+         "ENERGY_MISSING",
+         "DYNAMIC RANGE",
+         "INSTRUMENTAL",
+         "INITIALKEY",
+         "BPM",
+         "PATH",
+         "ENCODER_QUALITY",
+         "ENCODER_VERSION",
+         "AUDIT",
+         "MB_LINK",
+         "RYM_LINK",
+         "SOURCE",
+         "ALBUMITUNESADVISORY",
+         "ALBUM DYNAMIC RANGE",
+         "COVER"
+        ],
+        "values": {
+         "TITLE": "Í Vetur",
+         "ARTIST": "Ásgeir",
+         "ALBUM": "Hljóð",
+         "ALBUMARTIST": "Ásgeir",
+         "DATE": "2019",
+         "TRACKNUMBER": "02",
+         "DISCNUMBER": null,
+         "GENRE": null,
+         "MOOD": null,
+         "ENERGY": null,
+         "ITUNESADVISORY": null,
+         "REPLAYGAIN_TRACK_GAIN": null,
+         "REPLAYGAIN_TRACK_PEAK": null,
+         "REPLAYGAIN_ALBUM_GAIN": null,
+         "REPLAYGAIN_ALBUM_PEAK": null,
+         "DYNAMIC RANGE": null,
+         "INSTRUMENTAL": null,
+         "INITIALKEY": null,
+         "BPM": null,
+         "MEDIA": null,
+         "SOURCE": null,
+         "AUDIOAUDITOR_OVERRIDE": null,
+         "ALBUMITUNESADVISORY": "0",
+         "ALBUM DYNAMIC RANGE": "8"
+        },
+        "lyrics_embedded": false,
+        "lyrics_lrc": false,
+        "lyrics_kind": null,
+        "unreadable": false,
+        "audit": null,
+        "log_grade": null,
+        "sidecar_cover": null,
+        "sidecar_cover_file": null,
+        "checksum_status": "NONE",
+        "accuraterip_status": "NONE",
+        "path": "F:/tmp/mlo-lib-az/Ásgeir/Hljóð/02 - Í Vetur.flac",
+        "tags": {
+         "TITLE": "Í Vetur",
+         "ARTIST": "Ásgeir",
+         "ALBUMARTIST": "Ásgeir",
+         "ALBUM": "Hljóð",
+         "DATE": "2019",
+         "GENRE": null,
+         "ITUNESADVISORY": null,
+         "INSTRUMENTAL": null,
+         "MEDIA": null,
+         "SOURCE": null,
+         "TRACKNUMBER": "02",
+         "DISCNUMBER": null,
+         "MUSICBRAINZ_ALBUMID": null,
+         "MUSICBRAINZ_ALBUMARTISTID": null,
+         "MUSICBRAINZ_ARTISTID": null,
+         "MUSICBRAINZ_TRACKID": null,
+         "MUSICBRAINZ_RELEASEGROUPID": null,
+         "MUSICBRAINZ_RELEASETRACKID": null,
+         "MUSICBRAINZ_WORKID": null,
+         "RATEYOURMUSIC_ALBUM": null,
+         "RATEYOURMUSIC_TRACK": null,
+         "RATEYOURMUSIC_ARTIST": null,
+         "ALBUMARTISTSORT": null,
+         "ORIGINALDATE": null,
+         "RELEASETYPE": null,
+         "RELEASESTATUS": null,
+         "RELEASECOUNTRY": null,
+         "CATALOGNUMBER": null,
+         "LABEL": null,
+         "BARCODE": null,
+         "SCRIPT": null,
+         "PODCASTSERIES": null,
+         "PODCASTSERIESMBID": null,
+         "PODCASTEPISODE": null,
+         "TRACKTOTAL": null,
+         "DISCTOTAL": null,
+         "COMPOSER": null,
+         "COPYRIGHT": null,
+         "ISRC": null,
+         "LYRICIST": null,
+         "REMIXER": null,
+         "DYNAMIC RANGE": null,
+         "MOOD": null,
+         "ENERGY": null,
+         "RATING": null,
+         "BPM": null,
+         "INITIALKEY": null,
+         "ALBUM DYNAMIC RANGE": null
+        },
+        "tech": {
+         "length": 2.0,
+         "bitrate": 104068.0,
+         "sample_rate": 44100.0,
+         "bits_per_sample": 16.0,
+         "channels": 2.0,
+         "codec": "FLAC"
+        },
+        "cover_file": null,
+        "discnumber": null,
+        "tracknumber": 2,
+        "is_video": false,
+        "grade_pass": false,
+        "lyrics_present": false
+       }
+      ],
+      "sidecars": [],
+      "album_values": {
+       "ALBUMITUNESADVISORY": "0",
+       "ALBUM DYNAMIC RANGE": "8"
+      },
+      "issues": {
+       "Missing MOOD": [
+        "01 - Kvöld.flac",
+        "02 - Í Vetur.flac"
+       ],
+       "Missing ENERGY": [
+        "01 - Kvöld.flac",
+        "02 - Í Vetur.flac"
+       ],
+       "Missing INITIALKEY": [
+        "01 - Kvöld.flac",
+        "02 - Í Vetur.flac"
+       ],
+       "Missing BPM": [
+        "01 - Kvöld.flac",
+        "02 - Í Vetur.flac"
+       ],
+       "Missing RELEASETYPE tag (the naming script writes it into the path)": [
+        "01 - Kvöld.flac"
+       ],
+       "PATH: expected 'Ásgeir/[?] 2019 - Hljóð {Digital Media}/1-01 Kvöld.flac' (run organize)": [
+        "01 - Kvöld.flac"
+       ],
+       "Missing ENCODER_QUALITY (re-optimize)": [
+        "01 - Kvöld.flac",
+        "02 - Í Vetur.flac"
+       ],
+       "Missing ENCODER_VERSION (re-optimize)": [
+        "01 - Kvöld.flac",
+        "02 - Í Vetur.flac"
+       ],
+       "Missing AUDIT tag (run Audit Library)": [
+        "01 - Kvöld.flac",
+        "02 - Í Vetur.flac"
+       ],
+       "Missing MusicBrainz release link (import from MusicBrainz)": [
+        "01 - Kvöld.flac",
+        "02 - Í Vetur.flac"
+       ],
+       "Missing RateYourMusic release link": [
+        "01 - Kvöld.flac",
+        "02 - Í Vetur.flac"
+       ],
+       "Lyrics not optimally formatted (run Lyrics script)": [
+        "01 - Kvöld.flac"
+       ],
+       "Missing GENRE": [
+        "02 - Í Vetur.flac"
+       ],
+       "Missing DYNAMIC RANGE": [
+        "02 - Í Vetur.flac"
+       ],
+       "Missing INSTRUMENTAL": [
+        "02 - Í Vetur.flac"
+       ],
+       "PATH: expected 'Ásgeir/[?] 2019 - Hljóð/1-02 Í Vetur.flac' (run organize)": [
+        "02 - Í Vetur.flac"
+       ],
+       "Missing SOURCE (required for Digital Media)": [
+        "02 - Í Vetur.flac"
+       ],
+       "Album tag ALBUMITUNESADVISORY missing on some tracks": [
+        "album-wide"
+       ],
+       "Album tag ALBUM DYNAMIC RANGE missing on some tracks": [
+        "album-wide"
+       ],
+       "Cover missing ENCODER_QUALITY (re-optimize)": [
+        "album"
+       ],
+       "Cover missing ENCODER_VERSION (re-optimize)": [
+        "album"
+       ],
+       "CUE sheet not optimally formatted (run CUE Sheets script)": [
+        "album"
+       ],
+       "CUE references a file the album does not have (2020 - First Album.cue: 01 - Side A.flac) — run CUE Sheets": [
+        "album"
+       ],
+       "Album description missing — fetch one on the album page": [
+        "album"
+       ]
+      },
+      "notes": [],
+      "meta": {
+       "ALBUM": "Hljóð",
+       "ALBUMARTIST": "Ásgeir",
+       "ARTIST": "Ásgeir",
+       "DATE": "2019",
+       "ORIGINALDATE": null,
+       "ORIGINALYEAR": null,
+       "ITUNESADVISORY": "0",
+       "ALBUMITUNESADVISORY": null,
+       "MUSICBRAINZ_ALBUMID": null,
+       "MUSICBRAINZ_ALBUMARTISTID": null,
+       "MUSICBRAINZ_RELEASEGROUPID": null,
+       "RATEYOURMUSIC_ALBUM": null,
+       "MEDIA": "Digital Media",
+       "CATALOGNUMBER": null,
+       "LABEL": null,
+       "BARCODE": null,
+       "RELEASETYPE": null,
+       "RELEASESTATUS": null,
+       "RELEASECOUNTRY": null,
+       "SCRIPT": null,
+       "PODCASTSERIES": null,
+       "PODCASTSERIESMBID": null,
+       "PODCASTEPISODE": null,
+       "ALBUM DYNAMIC RANGE": "8"
+      },
+      "podcast": null,
+      "expected_tracks": [],
+      "pending": false,
+      "artwork": {
+       "description": false,
+       "description_text": null,
+       "description_source": null,
+       "description_url": null
+      },
+      "grade_pct": 59.8,
+      "pass": false
+     }
+    ],
+    "aggregate": {
+     "album_count": 1,
+     "track_count": 2,
+     "pass_count": 49,
+     "total_checks": 82,
+     "grade_pct": 59.8,
+     "pass": false,
+     "audit_summary": "REAL"
+    },
+    "has_image": false
+   },
+   {
+    "path": "F:/tmp/mlo-lib-az/東京事変",
+    "name": "東京事変",
+    "display_name": "東京事変",
+    "albums": [
+     {
+      "path": "F:/tmp/mlo-lib-az/東京事変/教育",
+      "album_artist": "東京事変",
+      "audit_summary": "REAL",
+      "media": "Digital Media",
+      "source_summary": "Digital",
+      "track_count": 2,
+      "partial": false,
+      "partial_reason": null,
+      "expected_total": null,
+      "expected_present": null,
+      "pass_count": 49,
+      "total_checks": 82,
+      "cover_file": "cover.jpg",
+      "cover_detail": "cover.jpg (100x100, below the 1200px target (never upscaled))",
+      "cover_ok": false,
+      "has_log": true,
+      "has_cue": true,
+      "checksum_status": "NONE",
+      "accuraterip_status": "NONE",
+      "lyrics_present": 1,
+      "lyrics_expected": 1,
+      "instrumental_count": 0,
+      "tracks": [
+       {
+        "file": "01 - 群青日和.flac",
+        "issues": [
+         "MOOD_MISSING",
+         "ENERGY_MISSING",
+         "INITIALKEY",
+         "BPM",
+         "PATH",
+         "ENCODER_QUALITY",
+         "ENCODER_VERSION",
+         "AUDIT",
+         "MB_LINK",
+         "RYM_LINK",
+         "LYRICS",
+         "ALBUMITUNESADVISORY",
+         "ALBUM DYNAMIC RANGE",
+         "COVER"
+        ],
+        "values": {
+         "TITLE": "群青日和",
+         "ARTIST": "東京事変",
+         "ALBUM": "教育",
+         "ALBUMARTIST": "東京事変",
+         "DATE": "2004",
+         "TRACKNUMBER": "01",
+         "DISCNUMBER": null,
+         "GENRE": "Rock",
+         "MOOD": null,
+         "ENERGY": null,
+         "ITUNESADVISORY": "0",
+         "REPLAYGAIN_TRACK_GAIN": "-3.00 dB",
+         "REPLAYGAIN_TRACK_PEAK": "0.5",
+         "REPLAYGAIN_ALBUM_GAIN": "-3.00 dB",
+         "REPLAYGAIN_ALBUM_PEAK": "0.5",
+         "DYNAMIC RANGE": "8",
+         "INSTRUMENTAL": "0",
+         "INITIALKEY": null,
+         "BPM": null,
+         "MEDIA": "Digital Media",
+         "SOURCE": "Digital",
+         "AUDIOAUDITOR_OVERRIDE": null,
+         "ALBUMITUNESADVISORY": "0",
+         "ALBUM DYNAMIC RANGE": "8"
+        },
+        "lyrics_embedded": true,
+        "lyrics_lrc": false,
+        "lyrics_kind": "synced",
+        "unreadable": false,
+        "audit": null,
+        "log_grade": null,
+        "sidecar_cover": null,
+        "sidecar_cover_file": null,
+        "checksum_status": "NONE",
+        "accuraterip_status": "NONE",
+        "path": "F:/tmp/mlo-lib-az/東京事変/教育/01 - 群青日和.flac",
+        "tags": {
+         "TITLE": "群青日和",
+         "ARTIST": "東京事変",
+         "ALBUMARTIST": "東京事変",
+         "ALBUM": "教育",
+         "DATE": "2004",
+         "GENRE": "Rock",
+         "ITUNESADVISORY": "0",
+         "INSTRUMENTAL": "0",
+         "MEDIA": "Digital Media",
+         "SOURCE": "Digital",
+         "TRACKNUMBER": "01",
+         "DISCNUMBER": null,
+         "MUSICBRAINZ_ALBUMID": null,
+         "MUSICBRAINZ_ALBUMARTISTID": null,
+         "MUSICBRAINZ_ARTISTID": null,
+         "MUSICBRAINZ_TRACKID": null,
+         "MUSICBRAINZ_RELEASEGROUPID": null,
+         "MUSICBRAINZ_RELEASETRACKID": null,
+         "MUSICBRAINZ_WORKID": null,
+         "RATEYOURMUSIC_ALBUM": null,
+         "RATEYOURMUSIC_TRACK": null,
+         "RATEYOURMUSIC_ARTIST": null,
+         "ALBUMARTISTSORT": null,
+         "ORIGINALDATE": null,
+         "RELEASETYPE": null,
+         "RELEASESTATUS": null,
+         "RELEASECOUNTRY": null,
+         "CATALOGNUMBER": null,
+         "LABEL": null,
+         "BARCODE": null,
+         "SCRIPT": null,
+         "PODCASTSERIES": null,
+         "PODCASTSERIESMBID": null,
+         "PODCASTEPISODE": null,
+         "TRACKTOTAL": null,
+         "DISCTOTAL": null,
+         "COMPOSER": null,
+         "COPYRIGHT": null,
+         "ISRC": null,
+         "LYRICIST": null,
+         "REMIXER": null,
+         "DYNAMIC RANGE": "8",
+         "MOOD": null,
+         "ENERGY": null,
+         "RATING": null,
+         "BPM": null,
+         "INITIALKEY": null,
+         "ALBUM DYNAMIC RANGE": "8"
+        },
+        "tech": {
+         "length": 2.0,
+         "bitrate": 104068.0,
+         "sample_rate": 44100.0,
+         "bits_per_sample": 16.0,
+         "channels": 2.0,
+         "codec": "FLAC"
+        },
+        "cover_file": null,
+        "discnumber": null,
+        "tracknumber": 1,
+        "is_video": false,
+        "grade_pass": false,
+        "lyrics_present": true
+       },
+       {
+        "file": "02 - 遭難.flac",
+        "issues": [
+         "GENRE_MISSING",
+         "MOOD_MISSING",
+         "ENERGY_MISSING",
+         "DYNAMIC RANGE",
+         "INSTRUMENTAL",
+         "INITIALKEY",
+         "BPM",
+         "PATH",
+         "ENCODER_QUALITY",
+         "ENCODER_VERSION",
+         "AUDIT",
+         "MB_LINK",
+         "RYM_LINK",
+         "SOURCE",
+         "ALBUMITUNESADVISORY",
+         "ALBUM DYNAMIC RANGE",
+         "COVER"
+        ],
+        "values": {
+         "TITLE": "遭難",
+         "ARTIST": "東京事変",
+         "ALBUM": "教育",
+         "ALBUMARTIST": "東京事変",
+         "DATE": "2004",
+         "TRACKNUMBER": "02",
+         "DISCNUMBER": null,
+         "GENRE": null,
+         "MOOD": null,
+         "ENERGY": null,
+         "ITUNESADVISORY": null,
+         "REPLAYGAIN_TRACK_GAIN": null,
+         "REPLAYGAIN_TRACK_PEAK": null,
+         "REPLAYGAIN_ALBUM_GAIN": null,
+         "REPLAYGAIN_ALBUM_PEAK": null,
+         "DYNAMIC RANGE": null,
+         "INSTRUMENTAL": null,
+         "INITIALKEY": null,
+         "BPM": null,
+         "MEDIA": null,
+         "SOURCE": null,
+         "AUDIOAUDITOR_OVERRIDE": null,
+         "ALBUMITUNESADVISORY": "0",
+         "ALBUM DYNAMIC RANGE": "8"
+        },
+        "lyrics_embedded": false,
+        "lyrics_lrc": false,
+        "lyrics_kind": null,
+        "unreadable": false,
+        "audit": null,
+        "log_grade": null,
+        "sidecar_cover": null,
+        "sidecar_cover_file": null,
+        "checksum_status": "NONE",
+        "accuraterip_status": "NONE",
+        "path": "F:/tmp/mlo-lib-az/東京事変/教育/02 - 遭難.flac",
+        "tags": {
+         "TITLE": "遭難",
+         "ARTIST": "東京事変",
+         "ALBUMARTIST": "東京事変",
+         "ALBUM": "教育",
+         "DATE": "2004",
+         "GENRE": null,
+         "ITUNESADVISORY": null,
+         "INSTRUMENTAL": null,
+         "MEDIA": null,
+         "SOURCE": null,
+         "TRACKNUMBER": "02",
+         "DISCNUMBER": null,
+         "MUSICBRAINZ_ALBUMID": null,
+         "MUSICBRAINZ_ALBUMARTISTID": null,
+         "MUSICBRAINZ_ARTISTID": null,
+         "MUSICBRAINZ_TRACKID": null,
+         "MUSICBRAINZ_RELEASEGROUPID": null,
+         "MUSICBRAINZ_RELEASETRACKID": null,
+         "MUSICBRAINZ_WORKID": null,
+         "RATEYOURMUSIC_ALBUM": null,
+         "RATEYOURMUSIC_TRACK": null,
+         "RATEYOURMUSIC_ARTIST": null,
+         "ALBUMARTISTSORT": null,
+         "ORIGINALDATE": null,
+         "RELEASETYPE": null,
+         "RELEASESTATUS": null,
+         "RELEASECOUNTRY": null,
+         "CATALOGNUMBER": null,
+         "LABEL": null,
+         "BARCODE": null,
+         "SCRIPT": null,
+         "PODCASTSERIES": null,
+         "PODCASTSERIESMBID": null,
+         "PODCASTEPISODE": null,
+         "TRACKTOTAL": null,
+         "DISCTOTAL": null,
+         "COMPOSER": null,
+         "COPYRIGHT": null,
+         "ISRC": null,
+         "LYRICIST": null,
+         "REMIXER": null,
+         "DYNAMIC RANGE": null,
+         "MOOD": null,
+         "ENERGY": null,
+         "RATING": null,
+         "BPM": null,
+         "INITIALKEY": null,
+         "ALBUM DYNAMIC RANGE": null
+        },
+        "tech": {
+         "length": 2.0,
+         "bitrate": 104068.0,
+         "sample_rate": 44100.0,
+         "bits_per_sample": 16.0,
+         "channels": 2.0,
+         "codec": "FLAC"
+        },
+        "cover_file": null,
+        "discnumber": null,
+        "tracknumber": 2,
+        "is_video": false,
+        "grade_pass": false,
+        "lyrics_present": false
+       }
+      ],
+      "sidecars": [],
+      "album_values": {
+       "ALBUMITUNESADVISORY": "0",
+       "ALBUM DYNAMIC RANGE": "8"
+      },
+      "issues": {
+       "Missing MOOD": [
+        "01 - 群青日和.flac",
+        "02 - 遭難.flac"
+       ],
+       "Missing ENERGY": [
+        "01 - 群青日和.flac",
+        "02 - 遭難.flac"
+       ],
+       "Missing INITIALKEY": [
+        "01 - 群青日和.flac",
+        "02 - 遭難.flac"
+       ],
+       "Missing BPM": [
+        "01 - 群青日和.flac",
+        "02 - 遭難.flac"
+       ],
+       "Missing RELEASETYPE tag (the naming script writes it into the path)": [
+        "01 - 群青日和.flac"
+       ],
+       "PATH: expected '東京事変/[?] 2004 - 教育 {Digital Media}/1-01 群青日和.flac' (run organize)": [
+        "01 - 群青日和.flac"
+       ],
+       "Missing ENCODER_QUALITY (re-optimize)": [
+        "01 - 群青日和.flac",
+        "02 - 遭難.flac"
+       ],
+       "Missing ENCODER_VERSION (re-optimize)": [
+        "01 - 群青日和.flac",
+        "02 - 遭難.flac"
+       ],
+       "Missing AUDIT tag (run Audit Library)": [
+        "01 - 群青日和.flac",
+        "02 - 遭難.flac"
+       ],
+       "Missing MusicBrainz release link (import from MusicBrainz)": [
+        "01 - 群青日和.flac",
+        "02 - 遭難.flac"
+       ],
+       "Missing RateYourMusic release link": [
+        "01 - 群青日和.flac",
+        "02 - 遭難.flac"
+       ],
+       "Lyrics not optimally formatted (run Lyrics script)": [
+        "01 - 群青日和.flac"
+       ],
+       "Missing GENRE": [
+        "02 - 遭難.flac"
+       ],
+       "Missing DYNAMIC RANGE": [
+        "02 - 遭難.flac"
+       ],
+       "Missing INSTRUMENTAL": [
+        "02 - 遭難.flac"
+       ],
+       "PATH: expected '東京事変/[?] 2004 - 教育/1-02 遭難.flac' (run organize)": [
+        "02 - 遭難.flac"
+       ],
+       "Missing SOURCE (required for Digital Media)": [
+        "02 - 遭難.flac"
+       ],
+       "Album tag ALBUMITUNESADVISORY missing on some tracks": [
+        "album-wide"
+       ],
+       "Album tag ALBUM DYNAMIC RANGE missing on some tracks": [
+        "album-wide"
+       ],
+       "Cover missing ENCODER_QUALITY (re-optimize)": [
+        "album"
+       ],
+       "Cover missing ENCODER_VERSION (re-optimize)": [
+        "album"
+       ],
+       "CUE sheet not optimally formatted (run CUE Sheets script)": [
+        "album"
+       ],
+       "CUE references a file the album does not have (2020 - First Album.cue: 01 - Side A.flac) — run CUE Sheets": [
+        "album"
+       ],
+       "Album description missing — fetch one on the album page": [
+        "album"
+       ]
+      },
+      "notes": [],
+      "meta": {
+       "ALBUM": "教育",
+       "ALBUMARTIST": "東京事変",
+       "ARTIST": "東京事変",
+       "DATE": "2004",
+       "ORIGINALDATE": null,
+       "ORIGINALYEAR": null,
+       "ITUNESADVISORY": "0",
+       "ALBUMITUNESADVISORY": null,
+       "MUSICBRAINZ_ALBUMID": null,
+       "MUSICBRAINZ_ALBUMARTISTID": null,
+       "MUSICBRAINZ_RELEASEGROUPID": null,
+       "RATEYOURMUSIC_ALBUM": null,
+       "MEDIA": "Digital Media",
+       "CATALOGNUMBER": null,
+       "LABEL": null,
+       "BARCODE": null,
+       "RELEASETYPE": null,
+       "RELEASESTATUS": null,
+       "RELEASECOUNTRY": null,
+       "SCRIPT": null,
+       "PODCASTSERIES": null,
+       "PODCASTSERIESMBID": null,
+       "PODCASTEPISODE": null,
+       "ALBUM DYNAMIC RANGE": "8"
+      },
+      "podcast": null,
+      "expected_tracks": [],
+      "pending": false,
+      "artwork": {
+       "description": false,
+       "description_text": null,
+       "description_source": null,
+       "description_url": null
+      },
+      "grade_pct": 59.8,
+      "pass": false
+     }
+    ],
+    "aggregate": {
+     "album_count": 1,
+     "track_count": 2,
+     "pass_count": 49,
+     "total_checks": 82,
+     "grade_pct": 59.8,
+     "pass": false,
+     "audit_summary": "REAL"
+    },
+    "has_image": false
+   }
+  ]
+ },
+ "album": {
+  "path": "F:/tmp/mlo-lib-az/Artist Alpha/2020 - First Album",
+  "album_artist": "Artist Alpha",
+  "audit_summary": "REAL",
+  "media": "Digital Media",
+  "source_summary": "Digital",
+  "track_count": 3,
+  "partial": false,
+  "partial_reason": null,
+  "expected_total": null,
+  "expected_present": null,
+  "pass_count": 61,
+  "total_checks": 106,
+  "cover_file": "cover.jpg",
+  "cover_detail": "cover.jpg (100x100, below the 1200px target (never upscaled))",
+  "cover_ok": false,
+  "has_log": true,
+  "has_cue": true,
+  "checksum_status": "NONE",
+  "accuraterip_status": "NONE",
+  "lyrics_present": 1,
+  "lyrics_expected": 1,
+  "instrumental_count": 0,
+  "tracks": [
+   {
+    "file": "01 - Intro.flac",
+    "issues": [
+     "MOOD_MISSING",
+     "ENERGY_MISSING",
+     "INITIALKEY",
+     "BPM",
+     "PATH",
+     "ENCODER_QUALITY",
+     "ENCODER_VERSION",
+     "AUDIT",
+     "MB_LINK",
+     "RYM_LINK",
+     "LYRICS",
+     "ALBUMITUNESADVISORY",
+     "ALBUM DYNAMIC RANGE",
+     "COVER"
+    ],
+    "values": {
+     "TITLE": "01 - Intro",
+     "ARTIST": "Artist Alpha",
+     "ALBUM": "First Album",
+     "ALBUMARTIST": "Artist Alpha",
+     "DATE": "2020",
+     "TRACKNUMBER": "01",
+     "DISCNUMBER": null,
+     "GENRE": "Rock",
+     "MOOD": null,
+     "ENERGY": null,
+     "ITUNESADVISORY": "0",
+     "REPLAYGAIN_TRACK_GAIN": "-3.00 dB",
+     "REPLAYGAIN_TRACK_PEAK": "0.5",
+     "REPLAYGAIN_ALBUM_GAIN": "-3.00 dB",
+     "REPLAYGAIN_ALBUM_PEAK": "0.5",
+     "DYNAMIC RANGE": "8",
+     "INSTRUMENTAL": "0",
+     "INITIALKEY": null,
+     "BPM": null,
+     "MEDIA": "Digital Media",
+     "SOURCE": "Digital",
+     "AUDIOAUDITOR_OVERRIDE": null,
+     "ALBUMITUNESADVISORY": "0",
+     "ALBUM DYNAMIC RANGE": "8"
+    },
+    "lyrics_embedded": true,
+    "lyrics_lrc": false,
+    "lyrics_kind": "synced",
+    "unreadable": false,
+    "audit": null,
+    "log_grade": null,
+    "sidecar_cover": null,
+    "sidecar_cover_file": null,
+    "checksum_status": "NONE",
+    "accuraterip_status": "NONE",
+    "path": "F:/tmp/mlo-lib-az/Artist Alpha/2020 - First Album/01 - Intro.flac",
+    "tags": {
+     "TITLE": "01 - Intro",
+     "ARTIST": "Artist Alpha",
+     "ALBUMARTIST": "Artist Alpha",
+     "ALBUM": "First Album",
+     "DATE": "2020",
+     "GENRE": "Rock",
+     "ITUNESADVISORY": "0",
+     "INSTRUMENTAL": "0",
+     "MEDIA": "Digital Media",
+     "SOURCE": "Digital",
+     "TRACKNUMBER": "01",
+     "DISCNUMBER": null,
+     "MUSICBRAINZ_ALBUMID": null,
+     "MUSICBRAINZ_ALBUMARTISTID": null,
+     "MUSICBRAINZ_ARTISTID": null,
+     "MUSICBRAINZ_TRACKID": null,
+     "MUSICBRAINZ_RELEASEGROUPID": null,
+     "MUSICBRAINZ_RELEASETRACKID": null,
+     "MUSICBRAINZ_WORKID": null,
+     "RATEYOURMUSIC_ALBUM": null,
+     "RATEYOURMUSIC_TRACK": null,
+     "RATEYOURMUSIC_ARTIST": null,
+     "ALBUMARTISTSORT": null,
+     "ORIGINALDATE": null,
+     "RELEASETYPE": null,
+     "RELEASESTATUS": null,
+     "RELEASECOUNTRY": null,
+     "CATALOGNUMBER": null,
+     "LABEL": null,
+     "BARCODE": null,
+     "SCRIPT": null,
+     "PODCASTSERIES": null,
+     "PODCASTSERIESMBID": null,
+     "PODCASTEPISODE": null,
+     "TRACKTOTAL": null,
+     "DISCTOTAL": null,
+     "COMPOSER": null,
+     "COPYRIGHT": null,
+     "ISRC": null,
+     "LYRICIST": null,
+     "REMIXER": null,
+     "DYNAMIC RANGE": "8",
+     "MOOD": null,
+     "ENERGY": null,
+     "RATING": null,
+     "BPM": null,
+     "INITIALKEY": null,
+     "ALBUM DYNAMIC RANGE": "8"
+    },
+    "tech": {
+     "length": 2.0,
+     "bitrate": 104068.0,
+     "sample_rate": 44100.0,
+     "bits_per_sample": 16.0,
+     "channels": 2.0,
+     "codec": "FLAC"
+    },
+    "cover_file": null,
+    "discnumber": null,
+    "tracknumber": 1,
+    "is_video": false,
+    "grade_pass": false,
+    "lyrics_present": true
+   },
+   {
+    "file": "02 - Second.flac",
+    "issues": [
+     "GENRE_MISSING",
+     "MOOD_MISSING",
+     "ENERGY_MISSING",
+     "DYNAMIC RANGE",
+     "INSTRUMENTAL",
+     "INITIALKEY",
+     "BPM",
+     "PATH",
+     "ENCODER_QUALITY",
+     "ENCODER_VERSION",
+     "AUDIT",
+     "MB_LINK",
+     "RYM_LINK",
+     "SOURCE",
+     "ALBUMITUNESADVISORY",
+     "ALBUM DYNAMIC RANGE",
+     "COVER"
+    ],
+    "values": {
+     "TITLE": "02 - Second",
+     "ARTIST": "Artist Alpha",
+     "ALBUM": "First Album",
+     "ALBUMARTIST": "Artist Alpha",
+     "DATE": "2020",
+     "TRACKNUMBER": "02",
+     "DISCNUMBER": null,
+     "GENRE": null,
+     "MOOD": null,
+     "ENERGY": null,
+     "ITUNESADVISORY": null,
+     "REPLAYGAIN_TRACK_GAIN": null,
+     "REPLAYGAIN_TRACK_PEAK": null,
+     "REPLAYGAIN_ALBUM_GAIN": null,
+     "REPLAYGAIN_ALBUM_PEAK": null,
+     "DYNAMIC RANGE": null,
+     "INSTRUMENTAL": null,
+     "INITIALKEY": null,
+     "BPM": null,
+     "MEDIA": null,
+     "SOURCE": null,
+     "AUDIOAUDITOR_OVERRIDE": null,
+     "ALBUMITUNESADVISORY": "0",
+     "ALBUM DYNAMIC RANGE": "8"
+    },
+    "lyrics_embedded": false,
+    "lyrics_lrc": false,
+    "lyrics_kind": null,
+    "unreadable": false,
+    "audit": null,
+    "log_grade": null,
+    "sidecar_cover": null,
+    "sidecar_cover_file": null,
+    "checksum_status": "NONE",
+    "accuraterip_status": "NONE",
+    "path": "F:/tmp/mlo-lib-az/Artist Alpha/2020 - First Album/02 - Second.flac",
+    "tags": {
+     "TITLE": "02 - Second",
+     "ARTIST": "Artist Alpha",
+     "ALBUMARTIST": "Artist Alpha",
+     "ALBUM": "First Album",
+     "DATE": "2020",
+     "GENRE": null,
+     "ITUNESADVISORY": null,
+     "INSTRUMENTAL": null,
+     "MEDIA": null,
+     "SOURCE": null,
+     "TRACKNUMBER": "02",
+     "DISCNUMBER": null,
+     "MUSICBRAINZ_ALBUMID": null,
+     "MUSICBRAINZ_ALBUMARTISTID": null,
+     "MUSICBRAINZ_ARTISTID": null,
+     "MUSICBRAINZ_TRACKID": null,
+     "MUSICBRAINZ_RELEASEGROUPID": null,
+     "MUSICBRAINZ_RELEASETRACKID": null,
+     "MUSICBRAINZ_WORKID": null,
+     "RATEYOURMUSIC_ALBUM": null,
+     "RATEYOURMUSIC_TRACK": null,
+     "RATEYOURMUSIC_ARTIST": null,
+     "ALBUMARTISTSORT": null,
+     "ORIGINALDATE": null,
+     "RELEASETYPE": null,
+     "RELEASESTATUS": null,
+     "RELEASECOUNTRY": null,
+     "CATALOGNUMBER": null,
+     "LABEL": null,
+     "BARCODE": null,
+     "SCRIPT": null,
+     "PODCASTSERIES": null,
+     "PODCASTSERIESMBID": null,
+     "PODCASTEPISODE": null,
+     "TRACKTOTAL": null,
+     "DISCTOTAL": null,
+     "COMPOSER": null,
+     "COPYRIGHT": null,
+     "ISRC": null,
+     "LYRICIST": null,
+     "REMIXER": null,
+     "DYNAMIC RANGE": null,
+     "MOOD": null,
+     "ENERGY": null,
+     "RATING": null,
+     "BPM": null,
+     "INITIALKEY": null,
+     "ALBUM DYNAMIC RANGE": null
+    },
+    "tech": {
+     "length": 2.0,
+     "bitrate": 104068.0,
+     "sample_rate": 44100.0,
+     "bits_per_sample": 16.0,
+     "channels": 2.0,
+     "codec": "FLAC"
+    },
+    "cover_file": null,
+    "discnumber": null,
+    "tracknumber": 2,
+    "is_video": false,
+    "grade_pass": false,
+    "lyrics_present": false
+   },
+   {
+    "file": "03 - Bonus.mp3",
+    "issues": [
+     "GENRE_MISSING",
+     "MOOD_MISSING",
+     "ENERGY_MISSING",
+     "DYNAMIC RANGE",
+     "INSTRUMENTAL",
+     "INITIALKEY",
+     "BPM",
+     "PATH",
+     "AUDIT",
+     "MB_LINK",
+     "RYM_LINK",
+     "SOURCE",
+     "ALBUMITUNESADVISORY",
+     "ALBUM DYNAMIC RANGE",
+     "COVER"
+    ],
+    "values": {
+     "TITLE": "03 - Bonus",
+     "ARTIST": "Artist Alpha",
+     "ALBUM": "First Album",
+     "ALBUMARTIST": "Artist Alpha",
+     "DATE": "2020",
+     "TRACKNUMBER": "03",
+     "DISCNUMBER": null,
+     "GENRE": null,
+     "MOOD": null,
+     "ENERGY": null,
+     "ITUNESADVISORY": null,
+     "REPLAYGAIN_TRACK_GAIN": null,
+     "REPLAYGAIN_TRACK_PEAK": null,
+     "REPLAYGAIN_ALBUM_GAIN": null,
+     "REPLAYGAIN_ALBUM_PEAK": null,
+     "DYNAMIC RANGE": null,
+     "INSTRUMENTAL": null,
+     "INITIALKEY": null,
+     "BPM": null,
+     "MEDIA": null,
+     "SOURCE": null,
+     "AUDIOAUDITOR_OVERRIDE": null,
+     "ALBUMITUNESADVISORY": "0",
+     "ALBUM DYNAMIC RANGE": "8"
+    },
+    "lyrics_embedded": false,
+    "lyrics_lrc": false,
+    "lyrics_kind": null,
+    "unreadable": false,
+    "audit": null,
+    "log_grade": null,
+    "sidecar_cover": null,
+    "sidecar_cover_file": null,
+    "checksum_status": "NONE",
+    "accuraterip_status": "NONE",
+    "path": "F:/tmp/mlo-lib-az/Artist Alpha/2020 - First Album/03 - Bonus.mp3",
+    "tags": {
+     "TITLE": "03 - Bonus",
+     "ARTIST": "Artist Alpha",
+     "ALBUMARTIST": "Artist Alpha",
+     "ALBUM": "First Album",
+     "DATE": "2020",
+     "GENRE": null,
+     "ITUNESADVISORY": null,
+     "INSTRUMENTAL": null,
+     "MEDIA": null,
+     "SOURCE": null,
+     "TRACKNUMBER": "03",
+     "DISCNUMBER": null,
+     "MUSICBRAINZ_ALBUMID": null,
+     "MUSICBRAINZ_ALBUMARTISTID": null,
+     "MUSICBRAINZ_ARTISTID": null,
+     "MUSICBRAINZ_TRACKID": null,
+     "MUSICBRAINZ_RELEASEGROUPID": null,
+     "MUSICBRAINZ_RELEASETRACKID": null,
+     "MUSICBRAINZ_WORKID": null,
+     "RATEYOURMUSIC_ALBUM": null,
+     "RATEYOURMUSIC_TRACK": null,
+     "RATEYOURMUSIC_ARTIST": null,
+     "ALBUMARTISTSORT": null,
+     "ORIGINALDATE": null,
+     "RELEASETYPE": null,
+     "RELEASESTATUS": null,
+     "RELEASECOUNTRY": null,
+     "CATALOGNUMBER": null,
+     "LABEL": null,
+     "BARCODE": null,
+     "SCRIPT": null,
+     "PODCASTSERIES": null,
+     "PODCASTSERIESMBID": null,
+     "PODCASTEPISODE": null,
+     "TRACKTOTAL": null,
+     "DISCTOTAL": null,
+     "COMPOSER": null,
+     "COPYRIGHT": null,
+     "ISRC": null,
+     "LYRICIST": null,
+     "REMIXER": null,
+     "DYNAMIC RANGE": null,
+     "MOOD": null,
+     "ENERGY": null,
+     "RATING": null,
+     "BPM": null,
+     "INITIALKEY": null,
+     "ALBUM DYNAMIC RANGE": null
+    },
+    "tech": {
+     "length": 1.014,
+     "bitrate": 32000.0,
+     "sample_rate": 44100.0,
+     "channels": 2.0,
+     "codec": "MP3"
+    },
+    "cover_file": null,
+    "discnumber": null,
+    "tracknumber": 3,
+    "is_video": false,
+    "grade_pass": false,
+    "lyrics_present": false
+   }
+  ],
+  "sidecars": [],
+  "album_values": {
+   "ALBUMITUNESADVISORY": "0",
+   "ALBUM DYNAMIC RANGE": "8"
+  },
+  "issues": {
+   "Missing MOOD": [
+    "01 - Intro.flac",
+    "02 - Second.flac",
+    "03 - Bonus.mp3"
+   ],
+   "Missing ENERGY": [
+    "01 - Intro.flac",
+    "02 - Second.flac",
+    "03 - Bonus.mp3"
+   ],
+   "Missing INITIALKEY": [
+    "01 - Intro.flac",
+    "02 - Second.flac",
+    "03 - Bonus.mp3"
+   ],
+   "Missing BPM": [
+    "01 - Intro.flac",
+    "02 - Second.flac",
+    "03 - Bonus.mp3"
+   ],
+   "Missing RELEASETYPE tag (the naming script writes it into the path)": [
+    "01 - Intro.flac"
+   ],
+   "PATH: expected 'Artist Alpha/[?] 2020 - First Album {Digital Media}/1-01 01 - Intro.flac' (run organize)": [
+    "01 - Intro.flac"
+   ],
+   "Missing ENCODER_QUALITY (re-optimize)": [
+    "01 - Intro.flac",
+    "02 - Second.flac"
+   ],
+   "Missing ENCODER_VERSION (re-optimize)": [
+    "01 - Intro.flac",
+    "02 - Second.flac"
+   ],
+   "Missing AUDIT tag (run Audit Library)": [
+    "01 - Intro.flac",
+    "02 - Second.flac",
+    "03 - Bonus.mp3"
+   ],
+   "Missing MusicBrainz release link (import from MusicBrainz)": [
+    "01 - Intro.flac",
+    "02 - Second.flac",
+    "03 - Bonus.mp3"
+   ],
+   "Missing RateYourMusic release link": [
+    "01 - Intro.flac",
+    "02 - Second.flac",
+    "03 - Bonus.mp3"
+   ],
+   "Lyrics not optimally formatted (run Lyrics script)": [
+    "01 - Intro.flac"
+   ],
+   "Missing GENRE": [
+    "02 - Second.flac",
+    "03 - Bonus.mp3"
+   ],
+   "Missing DYNAMIC RANGE": [
+    "02 - Second.flac",
+    "03 - Bonus.mp3"
+   ],
+   "Missing INSTRUMENTAL": [
+    "02 - Second.flac",
+    "03 - Bonus.mp3"
+   ],
+   "PATH: expected 'Artist Alpha/[?] 2020 - First Album/1-02 02 - Second.flac' (run organize)": [
+    "02 - Second.flac"
+   ],
+   "PATH: expected 'Artist Alpha/[?] 2020 - First Album/1-03 03 - Bonus.mp3' (run organize)": [
+    "03 - Bonus.mp3"
+   ],
+   "Missing SOURCE (required for Digital Media)": [
+    "02 - Second.flac",
+    "03 - Bonus.mp3"
+   ],
+   "Album tag ALBUMITUNESADVISORY missing on some tracks": [
+    "album-wide"
+   ],
+   "Album tag ALBUM DYNAMIC RANGE missing on some tracks": [
+    "album-wide"
+   ],
+   "Cover missing ENCODER_QUALITY (re-optimize)": [
+    "album"
+   ],
+   "Cover missing ENCODER_VERSION (re-optimize)": [
+    "album"
+   ],
+   "CUE sheet not optimally formatted (run CUE Sheets script)": [
+    "album"
+   ],
+   "CUE references a file the album does not have (2020 - First Album.cue: 01 - Side A.flac) — run CUE Sheets": [
+    "album"
+   ],
+   "Album description missing — fetch one on the album page": [
+    "album"
+   ]
+  },
+  "notes": [],
+  "meta": {
+   "ALBUM": "First Album",
+   "ALBUMARTIST": "Artist Alpha",
+   "ARTIST": "Artist Alpha",
+   "DATE": "2020",
+   "ORIGINALDATE": null,
+   "ORIGINALYEAR": null,
+   "ITUNESADVISORY": "0",
+   "ALBUMITUNESADVISORY": null,
+   "MUSICBRAINZ_ALBUMID": null,
+   "MUSICBRAINZ_ALBUMARTISTID": null,
+   "MUSICBRAINZ_RELEASEGROUPID": null,
+   "RATEYOURMUSIC_ALBUM": null,
+   "MEDIA": "Digital Media",
+   "CATALOGNUMBER": null,
+   "LABEL": null,
+   "BARCODE": null,
+   "RELEASETYPE": null,
+   "RELEASESTATUS": null,
+   "RELEASECOUNTRY": null,
+   "SCRIPT": null,
+   "PODCASTSERIES": null,
+   "PODCASTSERIESMBID": null,
+   "PODCASTEPISODE": null,
+   "ALBUM DYNAMIC RANGE": "8"
+  },
+  "podcast": null,
+  "expected_tracks": [],
+  "pending": false,
+  "artwork": {
+   "description": false,
+   "description_text": null,
+   "description_source": null,
+   "description_url": null
+  },
+  "grade_pct": 57.5,
+  "pass": false
+ },
+ "recommend": {
+  "kind": "album",
+  "id": "F:/tmp/mlo-lib-az/Artist Alpha/2020 - First Album",
+  "target": "",
+  "items": [
+   {
+    "kind": "album",
+    "id": "F:/tmp/mlo-lib-az/Ásgeir/Hljóð",
+    "path": "F:/tmp/mlo-lib-az/Ásgeir/Hljóð",
+    "mbid": null,
+    "title": "Hljóð",
+    "subtitle": "Ásgeir",
+    "score": 0.84,
+    "reasons": [
+     "Same family: Rock",
+     "2020 near 2019"
+    ],
+    "cover_path": "F:/tmp/mlo-lib-az/Ásgeir/Hljóð",
+    "cover": "cover.jpg",
+    "file": null,
+    "album_path": "F:/tmp/mlo-lib-az/Ásgeir/Hljóð",
+    "album": "Hljóð",
+    "artist": "Ásgeir"
+   },
+   {
+    "kind": "album",
+    "id": "F:/tmp/mlo-lib-az/Taylor Swift/1989",
+    "path": "F:/tmp/mlo-lib-az/Taylor Swift/1989",
+    "mbid": null,
+    "title": "1989",
+    "subtitle": "Taylor Swift",
+    "score": 0.8092,
+    "reasons": [
+     "Same family: Rock",
+     "2020 near 2014"
+    ],
+    "cover_path": "F:/tmp/mlo-lib-az/Taylor Swift/1989",
+    "cover": "cover.jpg",
+    "file": null,
+    "album_path": "F:/tmp/mlo-lib-az/Taylor Swift/1989",
+    "album": "1989",
+    "artist": "Taylor Swift"
+   },
+   {
+    "kind": "album",
+    "id": "F:/tmp/mlo-lib-az/東京事変/教育",
+    "path": "F:/tmp/mlo-lib-az/東京事変/教育",
+    "mbid": null,
+    "title": "教育",
+    "subtitle": "東京事変",
+    "score": 0.7477,
+    "reasons": [
+     "Same family: Rock",
+     "2020 near 2004"
+    ],
+    "cover_path": "F:/tmp/mlo-lib-az/東京事変/教育",
+    "cover": "cover.jpg",
+    "file": null,
+    "album_path": "F:/tmp/mlo-lib-az/東京事変/教育",
+    "album": "教育",
+    "artist": "東京事変"
+   },
+   {
+    "kind": "album",
+    "id": "F:/tmp/mlo-lib-az/Belle and Sebastian/If You Are Feeling Sinister",
+    "path": "F:/tmp/mlo-lib-az/Belle and Sebastian/If You Are Feeling Sinister",
+    "mbid": null,
+    "title": "If You Are Feeling Sinister",
+    "subtitle": "Belle and Sebastian",
+    "score": 0.6985,
+    "reasons": [
+     "Same family: Rock",
+     "2020 near 1996"
+    ],
+    "cover_path": "F:/tmp/mlo-lib-az/Belle and Sebastian/If You Are Feeling Sinister",
+    "cover": "cover.jpg",
+    "file": null,
+    "album_path": "F:/tmp/mlo-lib-az/Belle and Sebastian/If You Are Feeling Sinister",
+    "album": "If You Are Feeling Sinister",
+    "artist": "Belle and Sebastian"
+   },
+   {
+    "kind": "album",
+    "id": "F:/tmp/mlo-lib-az/Nina Simone/I Put a Spell on You",
+    "path": "F:/tmp/mlo-lib-az/Nina Simone/I Put a Spell on You",
+    "mbid": null,
+    "title": "I Put a Spell on You",
+    "subtitle": "Nina Simone",
+    "score": 0.6923,
+    "reasons": [
+     "Same family: Rock",
+     "2020 near 1965"
+    ],
+    "cover_path": "F:/tmp/mlo-lib-az/Nina Simone/I Put a Spell on You",
+    "cover": "cover.jpg",
+    "file": null,
+    "album_path": "F:/tmp/mlo-lib-az/Nina Simone/I Put a Spell on You",
+    "album": "I Put a Spell on You",
+    "artist": "Nina Simone"
+   },
+   {
+    "kind": "album",
+    "id": "F:/tmp/mlo-lib-az/Zappa/Hot Rats",
+    "path": "F:/tmp/mlo-lib-az/Zappa/Hot Rats",
+    "mbid": null,
+    "title": "Hot Rats",
+    "subtitle": "Zappa",
+    "score": 0.6923,
+    "reasons": [
+     "Same family: Rock",
+     "2020 near 1969"
+    ],
+    "cover_path": "F:/tmp/mlo-lib-az/Zappa/Hot Rats",
+    "cover": "cover.jpg",
+    "file": null,
+    "album_path": "F:/tmp/mlo-lib-az/Zappa/Hot Rats",
+    "album": "Hot Rats",
+    "artist": "Zappa"
+   },
+   {
+    "kind": "album",
+    "id": "F:/tmp/mlo-lib-az/Artist Beta/2021 - Vinyl Rip",
+    "path": "F:/tmp/mlo-lib-az/Artist Beta/2021 - Vinyl Rip",
+    "mbid": null,
+    "title": "Vinyl Rip",
+    "subtitle": "Artist Beta",
+    "score": 0.1477,
+    "reasons": [
+     "2020 near 2021"
+    ],
+    "cover_path": "F:/tmp/mlo-lib-az/Artist Beta/2021 - Vinyl Rip",
+    "cover": "cover.jpg",
+    "file": null,
+    "album_path": "F:/tmp/mlo-lib-az/Artist Beta/2021 - Vinyl Rip",
+    "album": "Vinyl Rip",
+    "artist": "Artist Beta"
+   },
+   {
+    "kind": "album",
+    "id": "F:/tmp/mlo-lib-az/Artist Gamma/2022 - Singles",
+    "path": "F:/tmp/mlo-lib-az/Artist Gamma/2022 - Singles",
+    "mbid": null,
+    "title": "Singles",
+    "subtitle": "Artist Gamma",
+    "score": 0.1415,
+    "reasons": [
+     "2020 near 2022"
+    ],
+    "cover_path": "F:/tmp/mlo-lib-az/Artist Gamma/2022 - Singles",
+    "cover": "cover.jpg",
+    "file": null,
+    "album_path": "F:/tmp/mlo-lib-az/Artist Gamma/2022 - Singles",
+    "album": "Singles",
+    "artist": "Artist Gamma"
+   }
+  ]
+ }
+}

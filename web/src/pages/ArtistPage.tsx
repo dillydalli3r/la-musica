@@ -311,7 +311,7 @@ export default function ArtistPage() {
   };
 
   return (
-    <div className="p-6 space-y-5 mx-auto max-w-6xl">
+    <div className="p-6 space-y-5 mx-auto max-w-[1600px]">
       <div className="hero-flat relative overflow-hidden">
         {/* the stored image doubles as the hero backdrop, blurred behind the
             identity block so the name stays readable */}

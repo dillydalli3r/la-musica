@@ -576,7 +576,22 @@ def create(release, cfg=None, *, source=SOURCE, queries=None, title="",
     if not wish:
         wish = wishes.add_wish(rid or rgid, title=title, artist=artist, year=year,
                                note="Added to the library from MusicBrainz.",
-                               target_dir=folder, queries=queries, source=source)
+                               target_dir=folder, queries=queries, source=source,
+                               # The release payload the add ALREADY resolved:
+                               # `add_wish` records its identity block (medium,
+                               # countries, catalogue number, label, status,
+                               # track count) on the wish, which is the only
+                               # place a framework album's facts can live until
+                               # its audio arrives — the marker carries the
+                               # naming-script fields and nothing to show a
+                               # pressing with. Without it the album's own tile
+                               # reads as a blank cell until the worker's
+                               # identity pass happens to look the release up
+                               # (a tick that can be minutes away, and a second
+                               # MusicBrainz request for a payload this call is
+                               # already holding) — see `server.library
+                               # ._pending_release_identity`.
+                               release=release)
     if wish and candidates:
         # The ranked fallback (spec R150) the caller resolved from the release
         # GROUP — every eligible edition with its own facts. It is the same list

@@ -2836,11 +2836,20 @@ export const api = {
   soulseekPortCheck: () => json<SlskPortCheck>(`${API}/soulseek/port-check`, undefined, 60000),
   soulseekStop: () =>
     json<{ ok: boolean; message: string }>(`${API}/soulseek/stop`, { method: "POST" }, 15000),
-  soulseekSearch: (query: string) =>
-    json<{ id: string }>(`${API}/soulseek/search`, {
+  /** Start a manual search: free text, or a MusicBrainz id.
+   *
+   *  `mbid` (a recording id — what the library stores per track — or a
+   *  release/release-group id) is resolved on the server into the queries for
+   *  that ONE track, every one of them POSTed to slskd at once; the answer's
+   *  `id` names them all, so one poll key serves the lot and the poll's payload
+   *  is the merged, deduped result. Nothing is added to the wishes or the queue
+   *  — a search is a search; the user downloads what they pick. */
+  soulseekSearch: (query: string, mbid?: string) =>
+    json<{ id: string; ids?: string[]; queries?: string[]; label?: string; kind?: string }>(
+      `${API}/soulseek/search`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ query }),
+      body: JSON.stringify(mbid ? { query, mbid } : { query }),
     }, 60000),
   soulseekSearchResults: (id: string) =>
     json<{

@@ -2833,9 +2833,12 @@ user asked for, in the order they asked for it. `server/exporter.py` owns both.
   - **the cadence.** `wishes.due_at` was `max(last_search + interval, retry_at)`,
     so a transient failure's backoff (`wishes_retry_backoff_minutes`, shipped 30,
     doubling to a day) was swallowed whole by the periodic interval
-    (`wishes_interval_hours`, shipped 6): a peer that was simply down was
-    re-asked six hours later, and the time the row showed had nothing to do
-    with the failure it followed. Now the two clocks are separate and each
+    (`wishes_interval_hours`, shipped 6 then and an HOUR now — the owner's own
+    cadence for "add to library" / best-pick release groups, and the gap is
+    between two ATTEMPTS while one attempt still walks every ranked edition):
+    a peer that was simply down was re-asked at the periodic interval, and the
+    time the row showed had nothing to do with the failure it followed. Now the
+    two clocks are separate and each
     governs its own case — a wish whose last attempt FAILED is due at
     `retry_at` (the backoff), and a wish that merely found nothing is due at the
     interval. `retry_at` is only ever stamped by that failure path, so its
@@ -3221,6 +3224,68 @@ user asked for, in the order they asked for it. `server/exporter.py` owns both.
     `expected_total` and `expected_present` ride the album result, and the
     report's first line says "Partial album: …" rather than letting a slice read
     as a small album.
+
+- **R287 — a release-driven import writes the album's OWN identity, and the
+  album entry reads it while the audio is still arriving.** The owner's report:
+  an album card sitting at "Verifying" showed a title and nothing else, and an
+  import that knew exactly which pressing it was fetching left the medium, the
+  country and the catalogue number blank until somebody noticed weeks later.
+  The three cells the readout shows have three different sources, and only two
+  of them are tags:
+
+  * **medium → `MEDIA`, country → `RELEASECOUNTRY`** are *release* facts, and
+    `server.imports._stamp_release_identity` writes them (plus the rest of the
+    album-level identity MusicBrainz states: `LABEL`, `CATALOGNUMBER`,
+    `BARCODE`, `RELEASESTATUS`, `ASIN`, `SCRIPT`, `LICENSE`, the podcast series,
+    each disc's `DISCSUBTITLE`) during `finish_album`, before the chain runs, so
+    script 1's MEDIA/SOURCE normalization and the digital settle see the
+    release's own medium rather than a guess. The writer is
+    `mlo.autotag.fill_release_identity` — the Auto Tagging stage's album-level
+    pass (`mlo.autotag.album_release_tags`) fed the release the import ALREADY
+    holds, so an import and script 8 can never spell a value differently.
+  * **the source is the pressing that LANDED.** The payload handed to
+    `finish_album` is the edition the wizard's user picked or the release the
+    job downloaded and verified — never the release a wish was saved for, and
+    never the album's manifest or framework marker (which can name the edition
+    the fallback walk moved past). No lookup is made when the payload is in
+    hand; with none handed in, the one `integrations.resolve_release(album_mbid)`
+    the genres step already makes is reused — one cached request for the album,
+    never one per track.
+  * **fill-only, like every writer here.** A `MEDIA`/`RELEASECOUNTRY`/
+    `CATALOGNUMBER` the user typed survives an import, and so does the coarse
+    `CD`/`Digital Media` the Soulseek importer's own detection wrote
+    (`soulseek_auto._stamp_media` is fill-only too) — so an album the app
+    mis-detected keeps the wrong word until that step states the release's
+    medium itself. The only two values an import may change without them being
+    empty are the ones the app already sharpens:
+    `DATE`/`ORIGINALDATE` (a year gains its day) and `RELEASECOUNTRY` (a strict
+    subset of the release's country list gains the rest) — both by
+    `mlo.autotag._mb_replace`, the same rule as the Auto Tagging stage. The
+    import's result carries `release_identity: {written, skipped, failed}`.
+  * **bitrate / format is NOT a tag and is never guessed.** The card's third
+    chip and the album page's Format row come from `server.tagcache`'s read of
+    the audio itself (codec, bitrate, depth, rate — mutagen/ffprobe), so they
+    appear the moment a file is readable and no writer has anything to store;
+    `ENCODER_PROGRAM`/`_QUALITY`/`_VERSION` stay Optimize FLACs (3)'s for the
+    same reason. A value nobody measured is empty rather than invented.
+  * **the album ENTRY reads the pressing while it is pending.** A framework
+    album has no tags to carry anything, so `server.library._pending_album_row`
+    fills `meta.MEDIA`, `RELEASECOUNTRY`, `CATALOGNUMBER`, `LABEL` and
+    `RELEASESTATUS` (and the row's own `media`) from the identity block the ADD
+    recorded — `server.pending_albums.create` now hands the release payload it
+    resolved to `wishes.add_wish(release=…)`, which writes the wish's own
+    `release_json` column with no extra request, and the worker's identity pass
+    remains the fallback for wishes that predate it. `track_count` stays 0 and
+    the tracklist stays `expected_tracks` (the release's own, every row
+    missing): a placeholder never claims a file it does not have, and the
+    format/bitrate cell stays empty until audio exists.
+  * **pinned by**: `tools/test_import_pipeline.py` (a specific release writes
+    country + medium + the release's identity; a value already there is kept; a
+    landing of a different pressing writes the LANDED pressing's facts and the
+    asked-for one appears nowhere; the readout then shows the pressing and the
+    measured format), `tools/test_chain_after_acquire.py` (the verified
+    auto-import's album carries the downloaded release's medium/country/catalogue)
+    and `tools/test_add_to_library.py` (the pending tile's readout).
 
 ### 7.15 Notifications and the player's own immediacy
 
@@ -3843,16 +3908,21 @@ composition instead (R267). Above `lg` the pane sits beside the artwork.
   (the framework's own exported constant, not a copied string) with the default
   mode and NO options — this app mixes with nothing — and then manages the
   session's LIFECYCLE rather than activating it once at launch: `configure` only
-  sets the category at setup (Apple's own guidance is to activate when playback
-  BEGINS, "to ensure that you won't prematurely interrupt any other background
-  audio"), the web player drives `set_playback_active` through
-  `web/src/lib/iosAudio.ts` so that playback activates the session and a stop
-  hands it back with `NotifyOthersOnDeactivation`, and four OS notifications
+  sets the category at setup, while the session is INACTIVE (the one moment a
+  category change costs nothing — see R268 for what re-applying it mid-playback
+  cost), the web player drives `set_playback_active` through
+  `web/src/lib/iosAudio.ts` so that playback activates the session (Apple's own
+  guidance is to activate when playback BEGINS, "to ensure that you won't
+  prematurely interrupt any other background audio"), and the OS notifications
   re-assert it where iOS takes a backgrounded app's session away: going to the
   background and becoming active again, an interruption ending with
   `ShouldResume` (without that option the session belongs to whatever took it,
-  and the wish to play is dropped rather than fought over), and the media server
-  restarting. AVFAudio is linked explicitly because the dynamic class lookup
+  and the next press of play is what takes it back), and the media server
+  restarting — the one runtime path that also re-takes the CATEGORY, because
+  the audio server is gone and nothing is playing into the session when it
+  arrives. R265 shipped in 4.0.2-4.0.3 with a per-play category write and a
+  `NotifyOthersOnDeactivation` hand-back on every stop; R268 is that decision
+  reversed, with the owner's report as the evidence. AVFAudio is linked explicitly because the dynamic class lookup
   finds nothing until it is loaded. It is also R251's prerequisite: the Now
   Playing module draws a card only for an app whose session is a playback
   session, so with no category there was no card for the star to be drawn on —
@@ -4842,6 +4912,240 @@ composition instead (R267). Above `lg` the pane sits beside the artwork.
 ### 7.47 A verdict is only drawn from a payload that loaded, and a whole-library action asks first
 
 - **R264 — states do not lie.** A page's verdict is computed only from a payload that actually loaded: loading and failure are their own states, a failure says so (with the way to retry) and never accuses the user's data — the offline-downloads page's "your cache is orphaned" and its **Clear all** are reachable only when the comparison is real. An action that rewrites or moves the whole library (**Apply fixes** → the layout script) confirms first, naming what it will do and how many rows it covers, and only the confirm reaches the endpoint. A hero that has a phone layout folds at that width (the playlist page now folds like the album and artist pages), and a table column is laid out to hold its own header and the widest value it actually renders — where a value genuinely cannot fit, the cell clips with the whole value in its `title`, checked by `tools/check_library_tables.cjs`.
+
+### 7.48 The phone's playback, the app's width, and the vocabularies in between
+
+- **R268 — an active session is not re-configured, and never handed back.** The
+  4.0.3 lifecycle (R265) re-applied the category and deactivated the session on
+  every stop. Both halves stop a webview's playback: `setCategory:mode:options:`
+  on a session that is already ACTIVE is Apple's documented "may interrupt audio
+  playback", and the app is always in that state when the call arrives — the web
+  player writes `playing` the moment a row is pressed, before the element has
+  started — while a deactivate that lands in the same second as a start (a track
+  change, a refused load, the OS pausing the element) hands the session back
+  mid-startup. The owner's report names the symptom exactly: "pressing play on
+  tracks just makes them pause immediately". The rule is now one sentence: the
+  category is taken once, at setup, while the session is inactive, and the
+  session is activated when playback begins and NEVER handed back while the app
+  lives. Activating an already-active session is a no-op, so a start can no
+  longer interrupt a start, and the OS ends the session when the app does. The
+  cost is stated rather than hidden: another player this app interrupted does
+  not resume by itself the moment the user pauses la musica.
+
+- **R269 — cleartext media needs the blanket ATS key, and the LAN needs a
+  reason.** `NSAllowsArbitraryLoadsInWebContent` covers what the web content
+  PROCESS fetches; the bytes of an `<audio>`/`<video>` element are loaded by
+  WebKit's media stack, which reads `NSAllowsArbitraryLoads`. Both are set in
+  `desktop/src-tauri/Info.plist`, and `NSLocalNetworkUsageDescription` gives
+  iOS 14+ something to show when it asks for local-network access — without it
+  the permission cannot be requested at all, so a LAN server is unreachable
+  while a VPN address still works (the worst shape of bug to diagnose from a
+  report). `tools/check_ios_ipa.py` and the mobile CI job both read all three
+  back out of the built app/IPA, because a plist that stopped merging would
+  take every one of them down with no other symptom.
+
+- **R270 — a lock-screen star press is remembered until the app answers.** The
+  star exists for the lock screen, which is exactly where a parked webview
+  drops a Tauri event on the floor: the shell answers the OS with "handled" and
+  the like never happens. `desktop/src-tauri/src/ios_like.rs` remembers the
+  press and re-sends it the next time the app is active (`refresh`, called by
+  the session module), and forgets it the moment the web pushes a state of its
+  own through `set_now_playing_liked` — so the press lands once, and only when
+  nothing answered it.
+
+- **R271 — the WebAudio graph owns the volume, and a gesture unlocks it.**
+  `HTMLMediaElement.volume` is read-only on iOS: assigning it is dropped without
+  an error, so a slider that only wrote that property did nothing at all on a
+  phone. Every element the player routes into the graph carries a volume stage
+  of its own (`source → volume → replaygain → [eq] → analyser → destination`)
+  and `applyVolume` writes the level there, pinning `el.volume` to unity so the
+  two stages never multiply; an element with no graph keeps the plain property.
+  The context itself is armed for the platform's two ways of parking it: the
+  first pointer/key gesture anywhere in the app resumes it (iOS starts a context
+  created outside a gesture suspended, and a track routed into a suspended graph
+  is a track playing silently), and a state change or the app coming back
+  re-asks.
+
+- **R272 — the playing state follows the ELEMENT, both ways.** `pause` already
+  cleared the player's state; `play` now sets it, for the track the queue is
+  actually on. Without the other half, a track change — which pauses the
+  outgoing element on the way in — could leave the bar (and the iOS session
+  bridge, which reads the same state) claiming "paused" about a track that was
+  playing. A REFUSED `play()` and a stream that fails to load are reported
+  instead of swallowed (`play().catch(() => {})` was every call site, which is
+  how "it just pauses" arrived with no reason attached), and the
+  visibility/focus reconcile only clears an element that is really paused
+  mid-track (`readyState > 1`), so a slow start is not declared dead.
+
+- **R273 — the ambience follows the beat, and the grain is the dither.** The
+  background's music-driven value is two numbers now: `--amb` (the smoothed
+  level, over a 12 dB window) and `--amb-pulse` (what each tick has that a
+  ~1.5 s follower has not caught up to — the analyser's own smoothing means a
+  kick's remainder is the gap to a SLOW average, not to a fast one). The pulse
+  lands on the colour-field layer with its own ~0.1 s transition, so a hit
+  reads as light moving through the field instead of one layer fading. The
+  faint horizontal lines the owner saw were 8-bit banding in a stack of huge
+  soft gradients, and the existing `overlay` grain could not fix them (50 % grey
+  leaves black black): the same turbulence tile is drawn twice, `overlay` at
+  160 px and `screen` at 131 px, which dithers both ends of the field and
+  cannot beat into a pattern of its own.
+
+- **R274 — a page uses the window it is given.** Every page shell caps at
+  1600 px (`max-w-[1600px]`), the width Browse and Export already used: the old
+  1152 px reading cap stranded ~400 px of a 1568 px window, which is the
+  owner's "UI doesn't cover most of the screen". Caps that are not page shells
+  (labels, inputs, dialogs) keep their own widths, and the phone layouts are
+  unaffected — the cap only ever binds above ~1600 px.
+
+- **R275 — an artist's discography opens on Album, EP, Single.** The types a
+  listener means by "the discography" come first, then everything else
+  (most-populated first, then by label). `byReleaseGroupType` in
+  `web/src/pages/MusicBrainzPage.tsx` is the ONE derivation behind the type
+  chips, the sections under them and the "Add or download by release type"
+  panel, so a row and a chip cannot disagree about what leads; a compound label
+  is ranked by its PRIMARY type ("Album + Live" sorts with the albums). It used
+  to be the order MusicBrainz happened to serve, which made an artist with 49
+  live albums and 10 studio ones open on "Album + Live" — a discography that
+  reads as live records.
+
+- **R276 — genres are stored lower-case and PRINTED as a reader writes them.**
+  The library's filter buckets (`GENRE_FAMILIES`), the tag vocabulary and the
+  `genre:"…"` query are lower-case by convention — MusicBrainz, the providers
+  and the tags all disagree about case, and the app's own matching is
+  case-insensitive — so the display is a separate step: `titleCaseGenre`
+  (`web/src/lib/fmt.ts`) is what a chip prints ("progressive rock" →
+  "Progressive Rock", "r&b" → "R&B"), and never what a query sends. The same
+  pass fixes the FAMILY the app derives, which is the part that has to be right
+  before any of it is worth printing: the keyword rule carried "wave" as an
+  electronic word, so `parent_of("new wave")` answered "electronic" for a
+  pop/rock movement — the owner's track read "Electronic; New Wave". New wave is
+  rock, no wave is experimental and new romantic is pop, spelled out in
+  `mlo/genre_vocab.py` and pinned by `tools/test_genre_vocab.py`; the
+  synth-driven waves (synthwave, vaporwave, dark wave, chillwave, coldwave,
+  minimal wave) stay electronic, and the genre called "wave" is electronic too.
+
+- **R277 — Home keeps itself current.** The Home payload is a dashboard over a
+  library that changes while the reader is looking at it (a run, an import, a
+  wish landing), and the only way to see that was to press Refresh or navigate
+  away and back: the query now refetches on a 60 s interval with a matching
+  `staleTime`, and the direction it polls is what makes that cheap — a plain
+  poll reads the server's CACHED payload, and the `force` flag (the Refresh
+  button) is the only thing that asks for a rebuild. `refetchIntervalInBackground`
+  stays at its default (false): a hidden tab stops asking, and react-query's own
+  refetch on focus covers the moment the reader comes back.
+
+- **R278 — the media routes answer CORS for any origin, and only they do.**
+  A phone's `<audio>` is fetched with `crossorigin="anonymous"` (the
+  visualizer, the equalizer and ReplayGain read that stream through a WebAudio
+  graph, which a tainted element would silently zero out), so the response must
+  carry `Access-Control-Allow-Origin` for whatever origin the MEDIA loader
+  states — and that origin is WebKit's business, not something this server can
+  enumerate: the page's own origin in a shell, or nothing at all (`Origin:
+  null`) when the bytes are pulled by the media process. When it does not match
+  the allow-list, the load is refused and the element errors: the app is
+  completely reachable, every API call works, and pressing play does nothing.
+  `server/main.py` therefore adds `Access-Control-Allow-Origin: *` on
+  `/api/stream` and `/api/videos/stream` when the CORS middleware has not
+  already stated one — read-only routes authenticated by the session TOKEN in
+  the URL, and `*` (rather than echoing the caller) means no browser can pair
+  that response with credentials. Both facts that make it safe are asserted in
+  `tools/test_auth.py`'s media block and exercised against a live server.
+
+- **R279 — one port, one number: the container's Soulseek listen port.** 
+  docker-compose.yml publishes
+  `${MLO_SOULSEEK_LISTEN_PORT:-50000}` while slskd listens on whatever
+  `soulseek_listen_port` says, and a share peers can see the SIZE of and never
+  connect to is a forward pointing at a closed port — the owner's "clients can
+  detect the number of shared files" with "Requesting file list…" forever.
+  The variable therefore SEEDS the config key at startup (`server/main.py`, the
+  same way `MLO_MUSIC_FOLDER` and `MLO_SERVER_PORT` do), a save that
+  contradicts it is refused with the pin named (`POST /api/config`), a change
+  that gets through restarts the daemon, the image `EXPOSE`s both ports, and a
+  runtime port change reaches a RUNNING slskd at once — a stale daemon keeps
+  serving the old port while every surface in the app names the new one.
+
+### 7.49 The acquisition pipeline: Failed means given up, and searches get faster
+
+- **R280 — a failed ATTEMPT is a Background row, and a settled job is never a
+  second row for a wish that still exists.** Two halves of one report (a failed
+  auto-import download showing up in the queue's *Failed* section while the app
+  was still searching the release): `api_queue._wish_rows` stages a wish whose
+  status is `failed` but which `wishes.is_terminal` says is NOT terminal
+  (`wishes_max_attempts` unspent, or no cap — the shipped policy) in the
+  **background** section, keeping the failure's own sentence ("failed this
+  attempt — searched again automatically at …", plus the walk's "tried N of M");
+  a TERMINAL failure keeps its *Failed* row. `api_queue.build_queue` also drops
+  every settled FAILED job row whose `wish_id` names a wish that exists — those
+  jobs are that wish's history, and `jobs_by_wish` claims only the last one, so
+  older settled jobs used to leak as standalone Failed rows. A job with NO wish
+  (an interactive run) and one whose wish is really gone keep their row, and
+  clearing a wish now forgets every settled job of it (`api_queue.queue_clear`).
+  Pinned by `tools/test_queue_view.py` §8 (both rules, and the two Fail cases).
+- **R281 — an hour between the searches of one release.** `wishes_interval_hours`
+  ships as **1** (was 6): the gap is between two ATTEMPTS, and one attempt
+  still walks every ranked candidate of the release (R150–R152), each with its
+  own bounded window — so the number is the pace of the RELEASE, not of one
+  edition. The clamp stays `(1, 168)`; `wishes.due_at`, `wishes_worker.status`
+  and the cycle's `next_run` carry the same fallback, and Settings shows the
+  same story (`web/src/lib/configMeta.ts`, `web/src/pages/SettingsPage.tsx`).
+- **R282 — the background only after EVERY ranked candidate was asked.** One
+  attempt asks the whole walk in ranking order and only its LAST candidate
+  settles the release: `tools/test_wishes_pipeline.py` reads the wish's status at
+  every poll of every candidate (it is never resting before the end), and pins
+  the two early ends that must NOT background anything — a TRANSIENT failure
+  (settled on its backoff, the rest of the walk never asked) and pipeline
+  CONTENTION (`skipped`, no attempt spent). The one dead wait on that path — a
+  fixed half-second "let the job transition to running" sleep in
+  `wishes_worker._wait_job`, paid per candidate although `start_job` registers
+  the job as running before it returns — is gone.
+- **R283 — a release is also searched by its MBIDs, ON by default.** With
+  `soulseek_auto_mbid_queries` (shipped true) the default query set of a release
+  also carries its own MusicBrainz id, the recording ids of its first
+  `soulseek_auto_mbid_tracks` tracks (shipped 4, clamped 1..10, disc/position
+  order) and each of those tracks' own "artist title" — deduped against
+  everything already rendered, and posted in the SAME parallel batch (one
+  window, never a second wait). The tracklist comes from the release payload the
+  app already holds (`integrations.resolve_release` asks for
+  `inc=recordings+artist-credits`), so no extra MusicBrainz request is made, and
+  an explicit template set a caller decided (a job's stored queries, its broad
+  second pass) is rendered exactly as given. Pinned by
+  `tools/test_soulseek_candidates.py`'s "MBID-driven queries" block.
+- **R284 — one track can be searched for by its MBID, from the Soulseek page and
+  from a library track.** `POST /api/soulseek/search` takes `mbid` (a recording
+  id — what the library stores per track — or a release/release-group id) and
+  resolves it with the cached MusicBrainz client into that track's queries
+  (`soulseek_auto.mbid_search_queries`: artist + title, its album, and the id
+  itself; a release id gets the release's own query set). Every query is POSTed
+  as its OWN slskd search at once (`soulseek.search_many`), the answer's `id`
+  names them all (comma-joined) so ONE poll key returns the MERGED, deduped
+  result (`soulseek.search_results_many`), and stop cancels every one of them.
+  The page offers it for a pasted UUID (auto-detected, with a chip and a
+  translated hint) and `?mbid=` runs it on arrival; a library track's own menu
+  sends its `MUSICBRAINZ_TRACKID` there ("Search Soulseek for this track").
+  Nothing is added to the wishes or the queue: the user downloads what the
+  results show. Pinned by `tools/test_soulseek_page_downloads.py`.
+- **R285 — the queue's finished sections do not survive into a new run.**
+  `api_queue.clear_settled_queue` takes the SETTLED rows of the two HISTORY
+  sections (completed, failed) off the list, through the per-section clear's own
+  path (`queue_clear`), and it is called where work is CREATED — a job start and
+  a bulk enqueue (`soulseek_auto`), a page download and an accepted confirm
+  prompt (`server/main.py`), and the wishes worker's own pass — on its own
+  thread, so a job start never waits on the queue payload's read of slskd. What
+  it leaves alone is the rule: `queued`/`in_progress`/`background`, a wish the
+  worker still searches, a retryable failure, and the whole `needs_attention`
+  section (a wish nothing was found for, a job parked on a question — those wait
+  for the USER, and only that section's own Clear may answer them). A job that
+  finishes AFTER the clear stays visible. Pinned by `tools/test_queue_view.py` §9.
+- **R286 — a cancel during the SEARCH stops the network work at once.** The
+  job's own cancel (`soulseek_auto.cancel`, the queue row's Cancel and the
+  Auto-import Stop) is now passed to the search batch as `cancel_check`:
+  `_search_queries` asks it before every poll and, on a cancel, drops every
+  outstanding search AT slskd (`DELETE /searches/{id}`, the teardown's own
+  route) and returns immediately with what it already read — instead of leaving
+  the network answering for up to the whole window plus the grace tail. Measured
+  on the suite's clock: one 0.75 s poll interval (pinned by
+  `tools/test_soulseek_candidates.py`'s "Cancelling DURING the search" block).
+  A cancelled search is also not reported as one that "did not finish".
 
 ## 8. Recommended runbook
 

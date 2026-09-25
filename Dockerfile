@@ -99,7 +99,7 @@ ENV HOME=/home/mlo
 # leaves it empty, and the server then reports its own code version instead of
 # claiming to be a release it is not. `tools/check_versions.py` keeps the
 # ARG default in step with mlo/__init__.py.
-ARG MLO_VERSION=4.0.3
+ARG MLO_VERSION=4.1.0
 ENV MLO_VERSION=${MLO_VERSION}
 # The commit the image was built from, and when. The release workflow passes
 # both; a plain `docker build` leaves them empty and the server then reports
@@ -122,7 +122,15 @@ LABEL org.opencontainers.image.version="${MLO_VERSION}" \
 # A pre-move install's /app/.dependencies is still READ when it is mounted (see
 # mlo.paths.legacy_tools_dir); nothing writes there any more.
 VOLUME ["/music"]
-EXPOSE 8000
+# 8000 is the web UI. 50000 is the SOULSEEK LISTEN PORT — the one peers
+# connect to in order to browse and download from this share, and the one
+# docker-compose.yml publishes beside 8000. EXPOSE is documentation (it
+# publishes nothing by itself), and it is here so `docker inspect`, a
+# port-mapping UI and anyone reading this file all name the port that has to
+# be reachable for sharing to work at all. If MLO_SOULSEEK_LISTEN_PORT moves
+# it, the compose file's publish line moves with it — the variable seeds the
+# app's own setting for exactly that reason.
+EXPOSE 8000 50000
 
 # No curl/wget in the slim image - probe with the Python that is already there.
 HEALTHCHECK --interval=30s --timeout=5s --start-period=30s --retries=3 \

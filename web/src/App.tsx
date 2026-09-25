@@ -314,7 +314,7 @@ function LiveProgress() {
 function PageLoading() {
   const { t } = useI18n();
   return (
-    <div className="p-6 max-w-6xl mx-auto animate-pulse" aria-busy="true" aria-live="polite">
+    <div className="p-6 max-w-[1600px] mx-auto animate-pulse" aria-busy="true" aria-live="polite">
       <div className="h-7 w-52 rounded bg-raise" />
       <div className="mt-4 grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
         {Array.from({ length: 6 }).map((_, i) => (

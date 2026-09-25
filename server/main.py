@@ -222,6 +222,34 @@ if _MLO_ENV_HOST or _MLO_ENV_PORT:
     if changed:
         save_config(_cfg)
 
+# The Soulseek listen port, from the same place and for a harder reason:
+# docker-compose.yml PUBLISHES this port, and the publish is written as
+# `${MLO_SOULSEEK_LISTEN_PORT:-50000}:${MLO_SOULSEEK_LISTEN_PORT:-50000}` —
+# one number on both sides, which only stays true if the daemon inside the
+# container listens on the number the host publishes. slskd takes its port
+# from the config the app writes (`soulseek_listen_port`), so an environment
+# that published 51000 while the app still said 50000 gave a share that peers
+# could see the size of and never connect to — the exact "it just doesn't
+# work" shape of a forward pointing at a closed port. The variable therefore
+# SEEDS the config key, like MLO_MUSIC_FOLDER and MLO_SERVER_PORT above it: an
+# install in a container cannot be made to disagree with its own publish line.
+# (Setting the key in the UI is refused while the pin is present — see
+# `/api/config`'s pin check.)
+_MLO_ENV_SLSK_PORT = os.environ.get("MLO_SOULSEEK_LISTEN_PORT")
+if _MLO_ENV_SLSK_PORT:
+    try:
+        _slsk_port = int(_MLO_ENV_SLSK_PORT)
+    except ValueError:
+        _slsk_port = None
+    if _slsk_port and 1024 <= _slsk_port <= 65535:
+        _cfg = load_config()
+        if int(_cfg.get("soulseek_listen_port") or 0) != _slsk_port:
+            _cfg["soulseek_listen_port"] = _slsk_port
+            save_config(_cfg)
+    else:
+        print("[mlo] MLO_SOULSEEK_LISTEN_PORT is not a usable port number "
+              "(1024-65535) — ignoring it")
+
 # The login gate (v3). Registered BEFORE the CORS middleware on purpose:
 # Starlette applies the most recently added middleware outermost, and CORS
 # must be the outer one — a 401 has to carry Access-Control-Allow-Origin or
@@ -282,6 +310,50 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+# The media routes answer CORS for ANY origin, and it has to be here rather than
+# in the allow-list above.
+#
+# A phone's <audio> element is fetched with `crossorigin="anonymous"` (the
+# playback visualizer, the equalizer and ReplayGain all read that stream through
+# a WebAudio graph, which a tainted element would silently zero out), so the
+# response MUST carry Access-Control-Allow-Origin for the origin the media
+# loader states. Which origin that is, is WebKit's business and not something
+# this server can enumerate: the page's own origin for the desktop shell, the
+# custom-scheme origin on iOS, and — because the bytes are pulled by the media
+# process rather than the page's fetch stack — possibly nothing at all, which
+# arrives as `Origin: null` and matches no allow-list entry. When it does not
+# match, WebKit refuses the load and the element errors: the app is completely
+# reachable, every API call works, and pressing play still does nothing.
+#
+# `*` is the safe answer for exactly these two paths and no others:
+#   * they are read-only and authenticated by the session TOKEN in the URL
+#     (`?token=`), not by the cookie — a cross-origin caller without the token
+#     gets a 401 whatever the CORS headers say, and one WITH the token does not
+#     need a browser to fetch the bytes;
+#   * `*` (as opposed to echoing the caller's origin) means a browser cannot
+#     pair the response with credentials, so nothing here can be turned into a
+#     credentialed read of a user's library by a page the user happens to visit.
+#
+# It only ever ADDS the header when the middleware above did not already state
+# one, so an allow-listed origin keeps its exact echo and no response ever
+# carries two Access-Control-Allow-Origin values (which is itself a CORS
+# failure). Registered after CORSMiddleware on purpose: Starlette applies the
+# most recently added middleware outermost, so this one sees the finished
+# response, headers included.
+_MEDIA_CORS_PATHS = ("/api/stream", "/api/videos/stream")
+
+
+@app.middleware("http")
+async def _media_cors(request: Request, call_next):
+    response = await call_next(request)
+    if (request.url.path in _MEDIA_CORS_PATHS
+            and request.headers.get("origin")
+            and "access-control-allow-origin" not in response.headers):
+        response.headers["access-control-allow-origin"] = "*"
+    return response
+
+
 # The /api/library payload is large (every track's tags + grading details);
 # gzip cuts it ~10x for a cheap first-paint win on big libraries.
 app.add_middleware(GZipMiddleware, minimum_size=1024)
@@ -804,6 +876,33 @@ def set_config(cfg: dict):
         folder_before = _music_folder()
     except HTTPException:
         folder_before = ""
+    # The Soulseek listen port is pinned the same way, and the failure it
+    # prevents is worse than a reverted setting: docker-compose.yml publishes
+    # `${MLO_SOULSEEK_LISTEN_PORT:-50000}` in the host's port list while slskd
+    # listens on whatever `soulseek_listen_port` says. A port changed HERE while
+    # the compose line still names the old one is a forward pointing at a closed
+    # port — a share peers can see the size of and never connect to, which is
+    # the owner's "clients can detect the number of shared files" report. The
+    # environment wins when it is set; say so instead of storing a number that
+    # will not survive the next start.
+    pinned_port = (os.environ.get("MLO_SOULSEEK_LISTEN_PORT") or "").strip()
+    port_before = 0
+    try:
+        port_before = int(load_config().get("soulseek_listen_port") or 0)
+    except (TypeError, ValueError):
+        port_before = 0
+    if pinned_port and cfg.get("soulseek_listen_port") not in (None, ""):
+        try:
+            same_port = int(cfg.get("soulseek_listen_port")) == int(pinned_port)
+        except (TypeError, ValueError):
+            same_port = False
+        if not same_port:
+            raise HTTPException(
+                400,
+                f"the Soulseek listen port is pinned to {pinned_port} by "
+                f"MLO_SOULSEEK_LISTEN_PORT (docker-compose.yml or the "
+                f"environment this server runs in) — change it there and "
+                f"restart, or remove the variable to set one here")
     ok = save_config(cfg)
     if not ok:
         reason = getattr(save_config, "last_error", "") or ""
@@ -818,6 +917,18 @@ def set_config(cfg: dict):
             if _soulseek.is_running():
                 _soulseek.restart()
                 tagcache.invalidate_all()
+    except Exception:
+        pass
+    # The listen port is baked into slskd's generated config too, and it is the
+    # one setting whose staleness is invisible: the daemon keeps serving the old
+    # port while every surface in the app says the new one, and peers simply
+    # fail to connect. A change therefore reaches a running daemon at once.
+    try:
+        port_after = int(load_config().get("soulseek_listen_port") or 0)
+        if port_before and port_after and port_after != port_before:
+            from server import soulseek as _soulseek
+            if _soulseek.is_running():
+                _soulseek.restart()
     except Exception:
         pass
     # A settings change can alter what the recommendation shelf and the
@@ -5050,7 +5161,14 @@ def beets_import(req: BeetsImportRequest):
 
 
 class SoulseekSearchRequest(BaseModel):
-    query: str
+    """A manual search: free text, or a MusicBrainz id.
+
+    `query` is what the search box carries; `mbid` (a recording id — what the
+    library stores per track — or a release/release-group id) asks for ONE
+    track (or release) by identity instead, which is what a user who is missing
+    a single song has. Either may be given; `mbid` wins when it is set."""
+    query: str = ""
+    mbid: str = ""
 
 
 class SoulseekDownloadRequest(BaseModel):
@@ -5162,9 +5280,19 @@ def soulseek_shares(probe: int = 0):
 
     `audit` says what other users can actually see right now, and `probe=1`
     additionally pulls slskd's own share index (a large library's index is tens
-    of megabytes) and looks for a file that is on disk."""
+    of megabytes) and looks for a file that is on disk.
+
+    503 when slskd is down, exactly like the transfer routes below: the daemon's
+    own state is part of this answer (`shares_state`, the audit's scan rows), and
+    asking a port nothing listens on used to escape as a 500 — `httpx`'s
+    ConnectError out of the route, which reads as a broken app rather than as
+    "start slskd". The app's own share SETTINGS are not lost by that refusal:
+    they live in the config (`dirs`/`exclude` above are read from it, not from
+    the daemon), and Settings → Soulseek is where they are edited."""
     from server import soulseek
     cfg = load_config()
+    if not (soulseek.is_running() or soulseek.web_up(cfg)):
+        raise HTTPException(503, "slskd is not running — start it first")
     return {
         "dirs": soulseek.share_dirs(cfg),
         "exclude": [x.strip("'") for x in soulseek.share_exclude(cfg)],
@@ -5234,13 +5362,35 @@ def soulseek_stop():
 
 @app.post("/api/soulseek/search")
 def soulseek_search(req: SoulseekSearchRequest):
-    """Start a Soulseek search; returns an id to poll for results."""
-    from server import soulseek
+    """Start a Soulseek search; returns an id to poll for results.
+
+    An MBID (`req.mbid`) is resolved to the queries for ONE track — its artist
+    and title, its album, and its own id (`soulseek_auto.mbid_search_queries`)
+    — and every one of them is POSTed as its OWN slskd search AT ONCE, the same
+    "all at once, poll them in one loop" shape the auto-importer uses: the wall
+    time is one window, not one per query. The answer's `id` is those ids
+    comma-joined, and `GET /api/soulseek/search/{id}` merges their results, so a
+    caller polls ONE key either way. Nothing is added to the wishes or the
+    queue: this is a search, and the user downloads what they choose from it."""
+    from server import soulseek, soulseek_auto
     if not (soulseek.is_running() or soulseek.web_up(load_config())):
         raise HTTPException(400, "slskd is not running — start it first")
-    if not req.query.strip():
+    mbid = str(req.mbid or "").strip()
+    if mbid:
+        found = soulseek_auto.mbid_search_queries(mbid, load_config())
+        if not found.get("ok"):
+            raise HTTPException(404, str(found.get("error") or "unknown MusicBrainz id"))
+        queries = list(found["queries"])
+        ids, errors = soulseek.search_many(queries)
+        if not ids:
+            raise HTTPException(502, errors[0] if errors else "the search could not start")
+        return {"id": ",".join(ids), "ids": ids, "queries": queries,
+                "label": found.get("label") or "", "kind": found.get("kind") or "",
+                "errors": errors}
+    full = req.query.strip()
+    if not full:
         raise HTTPException(400, "empty query")
-    return {"id": soulseek.search(req.query.strip())}
+    return {"id": soulseek.search(full), "queries": [full]}
 
 
 @app.get("/api/soulseek/search/{search_id}")
@@ -5250,7 +5400,14 @@ def soulseek_search_results(search_id: str):
     # though no child handle exists — it must keep serving searches
     if not (soulseek.is_running() or soulseek.web_up(load_config())):
         raise HTTPException(400, "slskd is not running")
-    return soulseek.search_results(search_id)
+    ids = soulseek.search_ids(search_id)
+    if not ids:
+        raise HTTPException(400, "search id is required")
+    if len(ids) > 1:
+        # ONE track asked several ways: the results of every search, merged
+        # (deduped by peer + file) and complete only when they all are.
+        return soulseek.search_results_many(ids)
+    return soulseek.search_results(ids[0])
 
 
 class SoulseekSearchCancelRequest(BaseModel):
@@ -5262,18 +5419,46 @@ def soulseek_search_cancel(req: SoulseekSearchCancelRequest):
     """Cancel a running search (slskd DELETE /searches/{id}).
 
     Without this the app is committed to the whole search window plus the
-    grace tail; the UI's "stop" only stopped polling."""
+    grace tail; the UI's "stop" only stopped polling. An id that names SEVERAL
+    searches (the manual MBID search's comma-joined key) cancels every one of
+    them — the user pressed stop on the search, not on one of its queries."""
     from server import soulseek
     if not (soulseek.is_running() or soulseek.web_up(load_config())):
         raise HTTPException(503, "slskd is not running")
-    sid = str(req.id or "").strip()
-    if not sid:
+    ids = soulseek.search_ids(req.id)
+    if not ids:
         raise HTTPException(400, "search id is required")
-    try:
-        soulseek.cancel_search(sid)
-    except Exception as e:
-        raise HTTPException(502, f"search cancel failed: {e}")
-    return {"ok": True}
+    cancelled, failed = 0, []
+    for sid in ids:
+        try:
+            soulseek.cancel_search(sid)
+            cancelled += 1
+        except Exception as e:
+            failed.append(f"{sid}: {e}")
+    if not cancelled:
+        raise HTTPException(502, f"search cancel failed: {'; '.join(failed)}")
+    return {"ok": True, "cancelled": cancelled, "ids": ids}
+
+
+def _clear_settled_in_background():
+    """Take the queue's finished rows off the LIST when new work starts — on its
+    own thread (see api_queue.clear_settled_queue for what it takes and why),
+    because the queue payload asks slskd for its finished downloads and a
+    request the user is waiting on must not wait for that.
+
+    The CUT is stamped before the thread starts: only rows that were already
+    settled when the request arrived are cleared, so a job that fails while the
+    clear is still on its way to the registry is not swallowed by it."""
+    import threading
+    before = time.time()
+
+    def work():
+        try:
+            from server import api_queue
+            api_queue.clear_settled_queue(before=before)
+        except Exception:
+            pass
+    threading.Thread(target=work, name="mlo-queue-autoclear", daemon=True).start()
 
 
 def _queue_downloads(soulseek, username, files):
@@ -5286,13 +5471,23 @@ def _queue_downloads(soulseek, username, files):
     from this app.
     """
     try:
-        return soulseek.enqueue_download(username, files)
+        out = soulseek.enqueue_download(username, files)
     except soulseek.SlskdError as e:
         raise HTTPException(502, f"slskd did not queue the download: {e}")
     except Exception as e:
         # SlskdHTTPError is an httpx.HTTPStatusError; its str() now carries
         # slskd's own message (see soulseek._error_text).
         raise HTTPException(502, f"slskd did not queue the download: {e}")
+    # A download the user just asked for IS a new run: the queue's FINISHED
+    # rows come off the list the way the per-section Clear buttons take them
+    # (`api_queue.clear_settled_queue`), so the page's own search→download does
+    # not push the previous run's Completed/Failed history in front of the work
+    # it just started. Live rows stay, and a download that finishes later still
+    # shows. After the enqueue, never before: a refused press must not clear
+    # anything. Only reached when files were really queued (the callers filter
+    # to non-empty lists).
+    _clear_settled_in_background()
+    return out
 
 
 def _active_downloads(soulseek, username):
@@ -6925,6 +7120,12 @@ def soulseek_auto_confirm(req: SoulseekAutoConfirmRequest):
     ok = soulseek_auto.confirm(req.accept)
     if not ok:
         raise HTTPException(409, "no confirmation is pending")
+    if req.accept:
+        # Answering "yes" RESUMES the job on the lossy copy it found: that is
+        # new work starting, so the queue's finished rows come off the list
+        # (the same clear the per-section buttons run). A "no" ends the job and
+        # clears nothing.
+        _clear_settled_in_background()
     return {"ok": True, "accepted": bool(req.accept)}
 
 

@@ -110,24 +110,32 @@ desktop targets have no `AVAudioSession`).
    session in `AVAudioSessionCategoryPlayback` with the default mode and no
    options — the framework's own exported constant, not a copied string, and
    AVFAudio is linked explicitly because a framework that is not loaded has no
-   classes to look up. The category is set here; the session is deliberately NOT
-   activated here, because Apple's guidance is to activate when playback begins
-   ("to ensure that you won't prematurely interrupt any other background
+   classes to look up. The category is set here, while the session is inactive —
+   the one moment a category change is free — and the session is deliberately
+   NOT activated here, because Apple's guidance is to activate when playback
+   begins ("to ensure that you won't prematurely interrupt any other background
    audio") — an activation at launch does exactly that to whatever the user was
    listening to.
-2. **Play and stop** (`set_playback_active`, driven by
-   `web/src/lib/iosAudio.ts` from the player's own `playing` state): playback
-   activates the session; a stop deactivates it with
-   `NotifyOthersOnDeactivation`, so the app this one interrupted is free to
-   resume. A session this module did not activate is never deactivated — WebKit
-   activates one for its own playback, and that is not ours to take away.
-3. **The transitions** (`ios_audio::register`): four OS notifications re-assert
+2. **Play** (`set_playback_active`, driven by `web/src/lib/iosAudio.ts` from the
+   player's own `playing` state): playback activates the session, and that is
+   ALL that happens. Activating an already-active session is a no-op, so a start
+   can never interrupt a start — which is the 4.0.4 correction. 4.0.3 also
+   re-applied the category and deactivated the session on every stop, and both
+   halves broke playback on a real phone: `setCategory:` on an ACTIVE session is
+   Apple's documented "may interrupt audio playback" (and the web player writes
+   `playing` before the element has started, so the call landed exactly there),
+   while a pause arriving in the same second as a start handed the session back
+   mid-startup. The owner's report was the shape of it — "pressing play on
+   tracks just makes them pause immediately".
+3. **The transitions** (`ios_audio::register`): the OS notifications re-assert
    the session where iOS takes it from a backgrounded app — going to the
-   background and becoming active again (both only while playing),
-   `AVAudioSessionInterruption` ending with `ShouldResume` (without that option
-   the session belongs to whatever took it, and the wish to play is dropped
-   rather than fought over), and `AVAudioSessionMediaServicesWereReset`
-   (everything is set again from scratch, and the star's command with it).
+   background and becoming active again (both only while playing, and both a
+   no-op when the session is already up), `AVAudioSessionInterruption` ending
+   with `ShouldResume` (without that option the session belongs to whatever took
+   it, and the next press of play is what takes it back), and
+   `AVAudioSessionMediaServicesWereReset` — the ONE transition besides setup
+   that re-takes the category, because the audio server restarted and nothing is
+   playing into the session at that moment.
 4. **The backgrounded webview** (`tauri.conf.json`): the category and
    `UIBackgroundModes: [audio]` are the app's half of the promise; the web
    content process that decodes the audio is WebKit's, and WebKit stops a page
@@ -165,7 +173,12 @@ does not have. The wiring is four steps:
    turn back on is a star that vanishes mid-album.
 2. **The star is pressed**: the handler emits the `mlo-ios-like` event to the
    webview and answers `MPRemoteCommandHandlerStatusSuccess`. The shell writes
-   no like itself.
+   no like itself — and because it cannot tell a delivered event from a dropped
+   one, it REMEMBERS the press until the web answers with a state push of its
+   own (that is what `set_now_playing_liked` means), re-sending it the next time
+   the app is active (`ios_like::refresh`). A webview parked behind the lock
+   screen is exactly where a Tauri event goes missing, and that is where this
+   star is used.
 3. **The web toggles**: `web/src/lib/iosFavs.ts`, mounted by the player bar,
    listens for that event and calls the app's one like writer —
    `useFav`/`api.likeToggle`, i.e. the same optimistic update, the same query
@@ -215,7 +228,7 @@ filling on a press.
 
 ## Bundle config
 
-`bundle.iOS.minimumSystemVersion` 14.0, `bundle.iOS.bundleVersion` 4.0.3,
+`bundle.iOS.minimumSystemVersion` 14.0, `bundle.iOS.bundleVersion` 4.1.0,
 `bundle.iOS.infoPlist` and `bundle.android.minSdkVersion` 24 in
 `tauri.conf.json`. The Android package name and the iOS bundle id both come from
 the top-level `identifier` (`com.musiclibraryoptimizer.lamusica` — the old
@@ -287,15 +300,23 @@ so both Apple platforms have to be told to allow cleartext, or the app cannot
 reach *any* server:
 
 - **iOS and macOS** — `src-tauri/Info.plist` sets
-  `NSAppTransportSecurity > NSAllowsArbitraryLoadsInWebContent`. Tauri merges
-  that file into the generated iOS `Info.plist` at `tauri ios build` time —
-  `bundle.iOS.infoPlist` names it, and it is the last plist merged, so what it
-  says wins — and into the macOS `.app`; without it App Transport Security
-  blocks every `http://` and `ws://` request the webview makes — fetch,
-  WebSocket, audio and
-  video playback alike. The exemption covers web content only, so the shell's
-  own native calls would still be held to full ATS (there are none: `lib.rs`
-  carries no HTTP client).
+  `NSAppTransportSecurity > NSAllowsArbitraryLoadsInWebContent` **and** the
+  blanket `NSAllowsArbitraryLoads`. Tauri merges that file into the generated
+  iOS `Info.plist` at `tauri ios build` time — `bundle.iOS.infoPlist` names it,
+  and it is the last plist merged, so what it says wins — and into the macOS
+  `.app`; without it App Transport Security blocks every `http://` and `ws://`
+  request the webview makes — fetch, WebSocket, audio and
+  video playback alike. The web-content key alone is not enough for the MEDIA:
+  an `<audio>`/`<video>` element's bytes are loaded by WebKit's media stack,
+  which reads the blanket key, so a build with only the first could open the
+  whole app and then fail every single track ("pressing play just pauses it
+  immediately"). The same file carries
+  `NSLocalNetworkUsageDescription` — iOS 14+ asks before an app may talk to
+  devices on the local network and cannot even prompt without a reason to show,
+  so a server on the LAN would be unreachable while a Tailscale address worked.
+  The shell's own native calls are still held to full ATS (there are none:
+  `lib.rs` carries no HTTP client). The mobile CI job reads all three keys back
+  out of the built `.app`, and `tools/check_ios_ipa.py` out of the shipped IPA.
 - **Android** — there is no config key for the manifest's cleartext flag and
   the generated project is not committed, so the allowance is applied in CI
   right after `tauri android init` (`.github/workflows/mobile.yml`). The

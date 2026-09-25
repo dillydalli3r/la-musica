@@ -8,7 +8,13 @@ import type { ReactNode } from "react";
  *
  *  `meta` is the slot for what is true of THIS answer (how many rows, what the
  *  basis was); it rides the title line rather than opening a box, because the
- *  rows are what the reader came for. */
+ *  rows are what the reader came for.
+ *
+ *  The CHILDREN's own layout is the caller's: an album shelf hands in cards and
+ *  wraps them in the Library grid's own `repeat(auto-fill, minmax(…, 1fr))`
+ *  (components/MoreLikeThis.tsx — the wide row that used to scroll sideways is
+ *  what became a grid), while the online shelf hands in rows and keeps them a
+ *  list. Both wear this chrome, and neither is a layout the other should have. */
 export default function RecommendShelf({
   icon: Icon,
   title,

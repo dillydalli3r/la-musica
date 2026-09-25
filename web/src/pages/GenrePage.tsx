@@ -8,6 +8,7 @@ import Segmented from "../components/Segmented";
 import { EmptyState, PageLoading } from "../components/Badges";
 import { NotesChips } from "../components/DiscoverRow";
 import { GENRE_FAMILIES } from "../lib/genres";
+import { titleCaseGenre } from "../lib/fmt";
 import { useStore } from "../store";
 
 /** The two halves of genre browsing this page offers: the library's own
@@ -84,24 +85,28 @@ export default function GenrePage() {
     // genre sitting under this card's head — the hierarchy the old
     // parent/main/sub model implied is gone.
     const family = GENRE_FAMILIES[name.toLowerCase()];
+    // The CHIP prints the reader's form; `open()` and the filter match keep the
+    // stored lower-case name (see `titleCaseGenre` — the app's genre buckets
+    // and the `genre:"…"` query are lower-case by convention).
+    const shown = titleCaseGenre(name);
     return (
       <button
         key={name}
         className={`chip border ${family ? "bg-panel border-dashed border-border text-zinc-400" : "bg-raise border-border text-zinc-300"} hover:text-white hover:border-accent transition-colors tap`}
         onClick={() => open(name)}
         title={family
-          ? `${name} is a family — the app derives it from a track's specific genre and writes it first. Open the library filtered to ${name}`
-          : `Open the library filtered to ${name}`}
+          ? `${shown} is a family — the app derives it from a track's specific genre and writes it first. Open the library filtered to ${shown}`
+          : `Open the library filtered to ${shown}`}
       >
         {family && <span className="text-[9px] uppercase tracking-wider text-zinc-600">family</span>}
-        {name}
+        {shown}
         {count != null && <span className="text-zinc-600 font-mono text-[10px]">{count}</span>}
       </button>
     );
   };
 
   return (
-    <div className="p-6 space-y-5 mx-auto max-w-6xl">
+    <div className="p-6 space-y-5 mx-auto max-w-[1600px]">
       <PageHeader
         icon={Tags}
         title="Genres"
@@ -154,9 +159,9 @@ export default function GenrePage() {
                   key={g.name}
                   to={`/discover?genre=${encodeURIComponent(g.name)}`}
                   className="chip bg-raise border border-border text-zinc-300 hover:text-white hover:border-accent transition-colors tap"
-                  title={`Browse ${g.name} in Discover — albums, artists and tracks, from the library and every online source. Named by ${g.sources.join(", ") || "no source"}.`}
+                  title={`Browse ${titleCaseGenre(g.name)} in Discover — albums, artists and tracks, from the library and every online source. Named by ${g.sources.join(", ") || "no source"}.`}
                 >
-                  {g.name}
+                  {titleCaseGenre(g.name)}
                   <span className="text-zinc-600 font-mono text-[10px]">
                     {g.album_count} alb · {g.artist_count} art
                   </span>

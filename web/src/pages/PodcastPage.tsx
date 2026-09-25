@@ -61,14 +61,14 @@ export default function PodcastPage() {
 
   if (isLoading) {
     return (
-      <div className="p-6 mx-auto max-w-6xl">
+      <div className="p-6 mx-auto max-w-[1600px]">
         <PageLoading />
       </div>
     );
   }
   if (error || !data) {
     return (
-      <div className="p-6 mx-auto max-w-6xl">
+      <div className="p-6 mx-auto max-w-[1600px]">
         <EmptyState
           title={t("page.not_found")}
           hint={t("podcast.missing_hint", { series: decoded })}
@@ -82,7 +82,7 @@ export default function PodcastPage() {
   const newest = episodes[0];
   const newestDate = newest?.meta?.DATE || newest?.meta?.ORIGINALDATE || "";
   return (
-    <div className="p-6 space-y-5 mx-auto max-w-6xl">
+    <div className="p-6 space-y-5 mx-auto max-w-[1600px]">
       <PageHeader
         icon={Radio}
         overline={t("page.podcast")}

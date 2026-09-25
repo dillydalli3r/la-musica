@@ -240,7 +240,7 @@ def finish_album(album_dir, cfg=None, progress=None, force=None, release=None,
     artist-watch pipeline behind it, so what an album ends up as cannot depend
     on which button was pressed. Returns ``{"path", "chain", "scripts",
     "errors", "chained", "chain_off", "note", "autonomy", "dropped",
-    "skipped_families", "settled"}``:
+    "skipped_families", "settled", "release_identity"}``:
     ``scripts`` is one
     result per chain id (``server.script_runners`` shape), ``errors`` a flat
     list for a caller that only wants to know what went wrong, and ``path`` the
@@ -248,6 +248,10 @@ def finish_album(album_dir, cfg=None, progress=None, force=None, release=None,
     (script 14 imports the album into the library and renames it, so the path
     handed in is a staging folder by then), and :func:`_resolve_moved_album` is
     the fallback for an album a script moved without the chain following it.
+    ``release_identity`` is what the release's OWN facts did to the album's tags
+    (``{"written", "skipped", "failed"}`` files — the medium, the country list
+    and the rest of the album-level release identity, filled from the release
+    this import holds; see :func:`_stamp_release_identity` and rule R287).
     The three chain keys say what happened to
     the chain itself, which is what an unattended path has to report instead
     of a bare "imported":
@@ -514,6 +518,60 @@ def _finish_album(path, cfg, progress=None, force=None, release=None,
     except Exception:
         traceback.print_exc()
 
+    # THE RELEASE'S OWN IDENTITY, at the moment it is known: MEDIA (the
+    # medium the release is pressed on), RELEASECOUNTRY and the rest of what
+    # MusicBrainz states about this release — label, catalogue number,
+    # barcode, status, ASIN, script, licence, podcast series, each disc's
+    # title. This is the owner's ask, in his words: "IF a specific release is
+    # being imported … the app should auto fill relevant info on it (like the
+    # bitrate, country and mediatype like how other albums have)".
+    #
+    # WHERE the values come from is the whole point: the release payload the
+    # acquisition ALREADY resolved — the edition the user picked in the
+    # wizard, or the pressing the job downloaded and verified (never the
+    # release the wish was saved for: `_import` hands `finish_album` the
+    # release it actually fetched). Nothing is looked up when it is in hand,
+    # and when the caller handed none the one cached resolution below is the
+    # same one the genres step would make.
+    #
+    # The medium (MEDIA) has no other writer on this path: script 1 only
+    # normalizes SOURCE, `server.main._tag_media_for_albums` GUESSES the
+    # medium from the folder's own files (log+cue -> CD, else Digital Media,
+    # nothing at all when it cannot classify the rip) and the Soulseek
+    # importer writes the coarse "CD"/"Digital Media" of its candidate — so a
+    # pressing MusicBrainz states as Vinyl, SACD, Cassette or Web read as a
+    # blank cell or the wrong word until somebody typed it in. WRITE, DON'T
+    # OVERWRITE: `fill_release_identity` keeps every value that is already
+    # there (the user's own medium/country/ids win) and honours the
+    # MEDIA/SOURCE family's switch — see that function for the two tags the
+    # app widens rather than fills (the two dates and the country list).
+    #
+    # BEFORE the chain on purpose: script 1's MEDIA/SOURCE normalization and
+    # `settle_digital_import`'s SOURCE decision both read MEDIA, so they see
+    # the release's own medium rather than a guess. Never fatal: an album
+    # whose tags cannot be written reports it in this import's own result.
+    _phase("Stamping the release's identity…")
+    # The release this import is for, resolved once for EVERY step below that
+    # reads it (this stamp, the genres step): the payload the caller handed in,
+    # else the one CACHED MusicBrainz lookup the genres step would otherwise
+    # make by itself.
+    rel = release
+    try:
+        if not rel and album_mbid:
+            try:
+                from server import integrations as intg
+                rel, _rid = intg.resolve_release(album_mbid)
+            except Exception:
+                rel = None
+        if rel:
+            out["release_identity"] = _stamp_release_identity(path, rel, run_cfg)
+            if out["release_identity"]["failed"]:
+                out["errors"].append(
+                    f"{out['release_identity']['failed']} track(s) took no "
+                    "release identity (MEDIA/country — see the tag writer)")
+    except Exception:
+        traceback.print_exc()
+
     # GENRES: the family's own automatic action — the same writer the wizard's
     # Genres step and the bulk release stamp call (`_stamp_release`), and the
     # ONLY thing that FETCHES a genre (script 8 trims and caps what is already
@@ -527,7 +585,6 @@ def _finish_album(path, cfg, progress=None, force=None, release=None,
     # fatal: a genre that cannot be resolved is a gap the report names.
     _phase("Fetching genres…")
     if run_cfg.get("genre_autofill", True):
-        rel = release
         if not rel and album_mbid:
             # The identity the import just stamped is enough to ask for the
             # release the genres belong to — a release-GROUP id resolves to its
@@ -3493,6 +3550,36 @@ def _release_for_stamping(release):
     if not rel.get("id"):
         rel["id"] = rel.get("release_mbid") or ""
     return rel
+
+
+def _stamp_release_identity(album_dir, release, cfg):
+    """Fill the album's own release identity from the release the import holds.
+
+    MEDIA (the medium the release is pressed on — CD, Vinyl, SACD, Cassette,
+    Web…), RELEASECOUNTRY and the rest of what MusicBrainz states about this
+    release: label, catalogue number, barcode, status, ASIN, script, licence,
+    the podcast series and each disc's own title. This is the ONE import-time
+    writer of those slots, and it works from the payload the acquisition
+    already resolved — no MusicBrainz request of its own, ever.
+
+    WRITE, DON'T OVERWRITE, like every other writer in this module: a medium,
+    a country or an id the file already carries is left exactly as it is (a
+    value the user typed, or another tagger's), and only a release that
+    states nothing for a slot writes nothing. The writer itself is
+    `mlo.autotag.fill_release_identity` — the Auto Tagging stage's own
+    album-level pass, fed the release the import has in hand instead of a
+    lookup — so an album the import stamps and an album script 8 stamps land
+    the same values with the same two exceptions the app already sharpens
+    (the two dates, and RELEASECOUNTRY's list).
+
+    Returns that writer's counts: ``{"written", "skipped", "failed"}``.
+    """
+    from mlo.autotag import fill_release_identity
+
+    files = _audio_files(album_dir)
+    if not files:
+        return {"written": 0, "skipped": 0, "failed": 0}
+    return fill_release_identity(files, release, cfg)
 
 
 def _stamp_release(album_dir, release, cfg):

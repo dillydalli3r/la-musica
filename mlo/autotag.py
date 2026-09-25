@@ -732,32 +732,28 @@ def _podcast_slot_open(af):
     return not str(af.get_tag("PODCASTSERIES") or "").strip()
 
 
-def mb_track_tags(release, slot, disc=1, album_artist_mbid=""):
-    """EVERY MusicBrainz value ONE track's file should carry, as (tag, value).
+def album_release_tags(release, disc=1):
+    """EVERY album-level value of *release* ONE file of it should carry.
 
-    The album-level values every file of the release repeats (its identity:
-    label, catalog number, barcode, country list, type, status, medium, both
-    dates, ids — plus the facts no naming script reads: ASIN, language, script,
-    licence and this disc's own title), and the per-track ones: the two track
-    ids, the artist, EVERY ISRC the recording states, and the credit table —
-    each shared role as a LIST, so several performers or producers survive as
-    repeated fields rather than one joined blob. Values the release does not
-    state are absent, never empty: a release that credits no producer must not
-    produce a blank PRODUCER.
+    The values the whole release repeats on each of its files — its identity
+    (label, catalog number, barcode, country list, type, status, MEDIUM, both
+    dates, ids) plus the facts no naming script reads (ASIN, language, script,
+    licence, podcast series) and this disc's own title. Split out of
+    `mb_track_tags` because it is the half that belongs to the RELEASE and not
+    to a track: the Auto Tagging stage writes it beside the per-track half, and
+    an IMPORT writes exactly it, from the release payload it already holds
+    (`server.imports._stamp_release_identity`), without a tracklist match.
 
-    *slot* is the release payload's entry for this file's (disc, position), or
-    {} for a track MusicBrainz does not list — the credits then belong to
-    nobody and only the album-level values are written. This is the one reader
-    of the payload both MusicBrainz paths use (the Auto Tagging stage and the
-    beets import plugin), so a field means the same thing on either.
+    A value the release does not state is absent, never empty — a release that
+    states no barcode must not produce a blank BARCODE. RELEASECOUNTRY is the
+    one LIST answer (every country the release states, its own first event
+    first, see `_release_country_codes`).
     """
     values = []
     for tag, key in _RELEASE_TAGS:
-        # RELEASECOUNTRY is the one tag whose value is a LIST — every country
-        # the release states, its own first event first. set_tag writes a list
-        # as repeated fields (Vorbis comments, an ID3 text list, one MP4 atom
-        # per value) and get_tag reads them back "; "-joined, which is the
-        # same value the importer's own stamper writes.
+        # set_tag writes a list as repeated fields (Vorbis comments, an ID3
+        # text list, one MP4 atom per value) and get_tag reads them back
+        # "; "-joined, which is the same value the importer's stamper writes.
         value = (_release_country_codes(release) if tag == "RELEASECOUNTRY"
                  else str(release.get(key) or "").strip())
         if value:
@@ -781,9 +777,36 @@ def mb_track_tags(release, slot, disc=1, album_artist_mbid=""):
         value = str((pod or {}).get(key) or "").strip()
         if value:
             values.append((tag, value))
+    # DISCSUBTITLE is a per-DISC tag, so the caller hands in the file's own
+    # disc and gets that medium's title rather than disc 1's repeated.
     title = str((release.get("medium_titles") or {}).get(int(disc or 1)) or "")
     if title:
         values.append(("DISCSUBTITLE", title))
+    return values
+
+
+def mb_track_tags(release, slot, disc=1, album_artist_mbid=""):
+    """EVERY MusicBrainz value ONE track's file should carry, as (tag, value).
+
+    The album-level values every file of the release repeats (its identity:
+    label, catalog number, barcode, country list, type, status, medium, both
+    dates, ids — plus the facts no naming script reads: ASIN, language, script,
+    licence and this disc's own title), and the per-track ones: the two track
+    ids, the artist, EVERY ISRC the recording states, and the credit table —
+    each shared role as a LIST, so several performers or producers survive as
+    repeated fields rather than one joined blob. Values the release does not
+    state are absent, never empty: a release that credits no producer must not
+    produce a blank PRODUCER.
+
+    *slot* is the release payload's entry for this file's (disc, position), or
+    {} for a track MusicBrainz does not list — the credits then belong to
+    nobody and only the album-level values are written. This is the one reader
+    of the payload both MusicBrainz paths use (the Auto Tagging stage and the
+    beets import plugin), so a field means the same thing on either.
+    """
+    # The album-level half first — ONE definition of it, shared with an
+    # import's own stamp (`album_release_tags`).
+    values = album_release_tags(release, disc)
 
     slot = slot or {}
     values.append(("MUSICBRAINZ_TRACKID", slot.get("recording_mbid") or ""))
@@ -859,6 +882,85 @@ def write_mb_tags(af, values, config=None, replace=None):
         except Exception as e:  # noqa: BLE001 — one tag never stops the rest
             refused.append((tag, f"{type(e).__name__}: {e}"))
     return written, refused
+
+
+def fill_release_identity(files, release, config=None):
+    """Fill the album-level RELEASE IDENTITY of *files* from *release*.
+
+    THE one writer an import uses to make a release carry its own facts. The
+    Auto Tagging stage reaches the same values through `_fill_release_tags`,
+    but only as a SCRIPT: it needs the album to state a release id, it looks the
+    release up (cached, one request per album) and it runs only while script 8
+    is in the chain. An import holds the release ALREADY — the wizard's chosen
+    edition, or the pressing the job downloaded and verified — so the facts the
+    album's readout shows (MEDIA, RELEASECOUNTRY, and the rest of what
+    MusicBrainz states about the release: label, catalogue number, barcode,
+    type, status, ASIN, script, licence, podcast series, each disc's title) can
+    land the moment the album is on disk, from the payload in hand and with no
+    request of its own.
+
+    WRITE, NOT OVERWRITE — every value goes through `write_mb_tags`, so a tag
+    that already holds something is KEPT (a medium, a country or an id the user
+    typed is the user's), a value the release does not state is not written at
+    all, and each write honours `should_write_audio_tag` (the MEDIA/SOURCE
+    family's own switch included). The two exceptions are the two the app
+    already treats as its own to sharpen: DATE/ORIGINALDATE and RELEASECOUNTRY
+    (see `_mb_replace` — the same rule the Auto Tagging stage applies, so an
+    album can never be sharpened one way by an import and another by a script).
+
+    ONLY the album-level half is written: the per-track ids and credits are the
+    Auto Tagging stage's, which matches a tracklist to the files. One container
+    rewrite per file (the deferral `write_mb_tags` callers use), files written
+    side by side.
+
+    Returns ``{"written", "skipped", "failed"}`` — files that gained at least
+    one tag, files this release had nothing to add to, and files whose tags
+    could not be read or written (counted, never swallowed: an import that
+    stamped nothing has to be able to say so).
+    """
+    paths = [p for p in (files or []) if p]
+    rel = dict(release or {})
+    if not paths or not str(rel.get("id") or "").strip():
+        return {"written": 0, "skipped": 0, "failed": 0}
+    album_artist_mbid = str(rel.get("album_artist_mbid") or "").strip()
+    if not album_artist_mbid:
+        artists = rel.get("artists") or []
+        if artists and isinstance(artists[0], dict):
+            album_artist_mbid = str(artists[0].get("mbid") or "").strip()
+
+    def _one(path):
+        """One file: "written" / "skipped" / "failed"."""
+        try:
+            af = AudioFile(path)
+            if af.audio is None:
+                return "failed"
+            values = album_release_tags(rel, disc=_track_position(af, path)[0])
+            if not values:
+                return "skipped"
+            defer = hasattr(af, "defer_save")
+            if defer:
+                af.defer_save(True)
+            written = 0
+            try:
+                # `replace` is the pass's own rule for a tag it may change
+                # without it being empty — the same one the Auto Tagging stage
+                # passes, so the two can never disagree about a DATE or a
+                # country (and the fill-only rule above is the rest of it).
+                written, _refused = write_mb_tags(af, values, config,
+                                                  replace=_mb_replace)
+            finally:
+                if defer and af.defer_save(False) is False:
+                    return "failed"
+            return "written" if written else "skipped"
+        except Exception:
+            return "failed"
+
+    workers = worker_count(config, default=8, maximum=8, items=len(paths))
+    with ThreadPoolExecutor(max_workers=workers) as ex:
+        outcomes = list(ex.map(_one, paths))
+    return {"written": sum(1 for o in outcomes if o == "written"),
+            "skipped": sum(1 for o in outcomes if o == "skipped"),
+            "failed": sum(1 for o in outcomes if o == "failed")}
 
 
 def _clean_value(value):

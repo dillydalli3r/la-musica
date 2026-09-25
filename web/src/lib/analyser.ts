@@ -53,7 +53,18 @@ let eqProfile: { filters: EqBand[]; preampDb: number } | null = null;
 export const MIN_DB = -90;
 export const MAX_DB = -10;
 
-type Chain = { analyser: AnalyserNode; gain: GainNode; eq?: EqChain | null };
+type Chain = {
+  analyser: AnalyserNode;
+  /** ReplayGain loudness. */
+  gain: GainNode;
+  /** The app's own volume slider. A second stage on purpose: iOS IGNORES
+   *  `HTMLMediaElement.volume` (the property is read-only there, so assigning
+   *  it is silently dropped), and the level the user sets is only heard when
+   *  it is applied inside the graph the element is routed through. On every
+   *  other platform both stages work and `applyVolume` keeps them in step. */
+  volume: GainNode;
+  eq?: EqChain | null;
+};
 
 /** The graph is stored ON the element. A media element can be attached to
  *  exactly one MediaElementSourceNode ever, so keeping the reference here
@@ -79,11 +90,63 @@ function ensureCtx(): AudioContext | null {
       return null;
     }
     ctx = new AC();
+    armContext(ctx);
   } catch {
     brokenUntil = Date.now() + BROKEN_RETRY_MS;
     ctx = null;
   }
   return ctx;
+}
+
+/** Keep the shared context RUNNING where the platform parks it.
+ *
+ *  Every element this module attaches routes its audio through the graph, so a
+ *  context that is not running is a track that is not heard — and iOS parks a
+ *  context for reasons that have nothing to do with the page: it starts
+ *  "suspended" until a user gesture unlocks it, and a call, an alarm or another
+ *  app taking the audio session parks it as "interrupted". `activeAnalyser`
+ *  already re-asks on every meter frame, but a suspended context also stops the
+ *  element's own clock from advancing — the meter is not the point, the sound
+ *  is — so the two events that can bring it back are wired here as well: the
+ *  context telling us it changed state, and the app coming back to the
+ *  foreground.
+ *
+ *  `resumeAnalyser` is the only writer and it is a no-op unless something is
+ *  really parked, so this cannot fight a healthy context. */
+function armContext(c: AudioContext) {
+  try {
+    c.addEventListener("statechange", () => {
+      // Resuming is only worth asking for while the page is on screen: a
+      // backgrounded page that reopens the audio graph is exactly what iOS
+      // suspends it for.
+      if (document.visibilityState === "visible") resumeAnalyser();
+    });
+  } catch {
+    /* no event API on this context: the gesture unlock below still runs */
+  }
+}
+
+// The FIRST user gesture is what unlocks WebAudio on iOS: a context created
+// outside one (the load path attaches the graph before the element is played)
+// starts suspended, and only a `resume()` issued FROM a gesture — or a later
+// one — gets it running. One listener per event kind, capture phase, passive:
+// this must never intercept or delay anything the app does with the gesture.
+// They stay armed for the life of the page: a context that is parked again
+// (an interruption) is unlocked again by the next touch.
+//
+// `addEventListener` is checked for being a FUNCTION, not just for `document`
+// existing: the repo's own SSR checks (`tools/check_lyrics_kind.mjs` and its
+// siblings) import these modules through Vite's Node module runner, where a
+// `document` stub exists and arming a listener would throw on load — a check
+// harness is not a browser, and this module must load in one.
+if (typeof document !== "undefined" && typeof document.addEventListener === "function") {
+  const unlock = () => resumeAnalyser();
+  for (const ev of ["pointerdown", "touchend", "keydown"] as const) {
+    document.addEventListener(ev, unlock, { capture: true, passive: true });
+  }
+  document.addEventListener("visibilitychange", () => {
+    if (document.visibilityState === "visible") resumeAnalyser();
+  });
 }
 
 /** Attach the source → ReplayGain gain → analyser → speakers chain to an
@@ -119,6 +182,10 @@ export function attachAnalyser(el: HTMLMediaElement): AnalyserNode | null {
   if (!c) return null;
   try {
     const source = c.createMediaElementSource(el);
+    // The volume stage sits FIRST, before the ReplayGain gain: it is the
+    // listener's own level, and it must multiply whatever loudness matching
+    // installed rather than be replaced by it.
+    const volume = c.createGain();
     const gain = c.createGain();
     const analyser = c.createAnalyser();
     analyser.fftSize = 1024;
@@ -129,10 +196,11 @@ export function attachAnalyser(el: HTMLMediaElement): AnalyserNode | null {
     analyser.smoothingTimeConstant = 0.68;
     analyser.minDecibels = MIN_DB;
     analyser.maxDecibels = MAX_DB;
-    source.connect(gain);
+    source.connect(volume);
+    volume.connect(gain);
     gain.connect(analyser);
     analyser.connect(c.destination);
-    const chain: Chain = { analyser, gain, eq: null };
+    const chain: Chain = { analyser, gain, volume, eq: null };
     tagged.__mloAnalyser = { ctx: c, chain };
     // An element attached AFTER a profile was installed (the gapless pair's
     // other half, a video popout) must start with the same curve the playing
@@ -182,6 +250,36 @@ export function applyReplayGain(el: HTMLMediaElement, db?: number | null,
     }
   } catch {
     /* never let loudness matching break playback */
+  }
+}
+
+/** The app's own volume, applied where the platform will actually hear it.
+ *
+ *  `HTMLMediaElement.volume` is READ-ONLY on iOS: assigning it is dropped
+ *  without an error, so a slider that only wrote that property did nothing at
+ *  all on a phone (and a set element still played at full scale). The element
+ *  is routed through this module's graph whenever a graph exists, so the level
+ *  goes on the graph's own volume stage and `el.volume` is pinned to unity —
+ *  the two must never multiply, or 50 % would be heard as 25 %.
+ *
+ *  An element with no graph (the lyrics previews, a browser without WebAudio)
+ *  keeps the plain property, which is correct everywhere it works. */
+export function applyVolume(el: HTMLMediaElement, vol: number) {
+  const v = Number.isFinite(vol) ? Math.max(0, Math.min(1, vol)) : 1;
+  const tag: Attached = el;
+  const graph = tag.__mloAnalyser;
+  if (!graph) {
+    try { el.volume = v; } catch { /* never let a level break playback */ }
+    return;
+  }
+  try {
+    el.volume = 1;
+    // A short ramp rather than a step: the same slider that clicks in the
+    // graph would click at the speakers, and a drag sends one of these per
+    // pixel.
+    graph.chain.volume.gain.setTargetAtTime(v, graph.ctx.currentTime, 0.02);
+  } catch {
+    /* never let a level break playback */
   }
 }
 

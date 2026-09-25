@@ -1432,6 +1432,66 @@ def search_results(search_id, cfg=None):
     }
 
 
+def search_many(queries, cfg=None, timeout_ms=None, response_limit=None):
+    """Start ONE slskd search per query, ALL AT ONCE. Returns (ids, errors).
+
+    slskd has no notion of a multi-query search, and the manual search by MBID
+    asks several questions about ONE track (its artist + title, its album, its
+    own MusicBrainz id), so each question is its own search — the same "post
+    them all, poll them in one loop" shape the auto-import batch uses, which is
+    what makes the wall time one window instead of one per query. A query slskd
+    refuses is reported beside the ids that DID start rather than dropped."""
+    ids, errors = [], []
+    for q in queries:
+        try:
+            ids.append(search(q, cfg, timeout_ms=timeout_ms,
+                              response_limit=response_limit))
+        except Exception as e:          # one bad query, not a failed search
+            errors.append(f"{q}: {e}")
+    return ids, errors
+
+
+def search_ids(search_id):
+    """The slskd ids ONE poll key names.
+
+    A single search answers with its own id; the manual MBID search answers
+    with the ids of every query it started, comma-joined, so one poll key stays
+    one key (see `search_results_many`)."""
+    return [part.strip() for part in str(search_id or "").split(",") if part.strip()]
+
+
+def search_results_many(search_ids_):
+    """The MERGED result of several searches, in `search_results`' own shape.
+
+    The responses of every search in the list, deduped by (peer, file) — one
+    peer is one peer however many queries saw it, the same rule the job's own
+    multi-query poll applies — with the two counters recomputed from the list
+    and `isComplete` true only once EVERY search has reached a terminal state.
+    A search slskd no longer knows (the app restarted, it was cancelled) counts
+    as one that answered nothing: it must not fail the whole poll."""
+    merged, seen_any, complete, state = {}, False, True, None
+    for sid in search_ids_:
+        try:
+            res = search_results(sid)
+        except Exception:
+            continue
+        seen_any = True
+        if state is None:
+            state = res.get("state")
+        if not res.get("isComplete"):
+            complete = False
+        for r in res.get("responses") or []:
+            merged[(r.get("username") or "", r.get("file") or "")] = r
+    responses = list(merged.values())
+    return {
+        "state": state,
+        "isComplete": bool(seen_any and complete),
+        "responseCount": len({u for u, _f in merged if u}),
+        "fileCount": len(responses),
+        "responses": responses,
+    }
+
+
 def cancel_search(search_id, cfg=None):
     """Cancel a running search (slskd DELETE /searches/{id}).
 

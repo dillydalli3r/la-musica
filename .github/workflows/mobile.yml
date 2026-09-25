@@ -382,6 +382,27 @@ jobs:
             echo "::error::the ATS web-content exemption is missing — the app could not reach a self-hosted http server"
             fail=1
           fi
+          # The blanket ATS key as well, from 4.0.4: the page itself was always
+          # covered by the web-content key above, but the MEDIA loader WebKit
+          # runs outside the web content process reads this one — a build that
+          # lost it could open the whole app and then fail every single track,
+          # which reads as "pressing play just pauses it immediately".
+          atsall="$(plutil -extract NSAppTransportSecurity.NSAllowsArbitraryLoads raw -o - "$PLIST" 2>/dev/null || true)"
+          echo "NSAllowsArbitraryLoads: $atsall"
+          if [ "$atsall" != "true" ]; then
+            echo "::error::NSAllowsArbitraryLoads is missing — audio/video fetched outside the web content process would be blocked by ATS"
+            fail=1
+          fi
+          # iOS 14+ asks the user before an app may talk to the local network,
+          # and without this string the permission cannot even be requested: a
+          # server on the LAN is then unreachable while a VPN address works,
+          # which is the worst kind of bug to diagnose from a bug report.
+          lan="$(plutil -extract NSLocalNetworkUsageDescription raw -o - "$PLIST" 2>/dev/null || true)"
+          echo "NSLocalNetworkUsageDescription: $lan"
+          if [ -z "$lan" ]; then
+            echo "::error::NSLocalNetworkUsageDescription is empty — a LAN server could never be granted local-network access"
+            fail=1
+          fi
           name="$(plutil -extract CFBundleDisplayName raw -o - "$PLIST" 2>/dev/null || true)"
           echo "CFBundleDisplayName: $name"
           if [ "$name" != "la musica" ]; then

@@ -543,6 +543,41 @@ def _queued_keys():
                 for i in _queue} - {""}
 
 
+def _clear_settled():
+    """Take the queue's SETTLED rows off the list — the same clear the
+    per-section buttons run, called when NEW WORK starts in the pipeline (a job
+    start, a bulk enqueue).
+
+    ON ITS OWN THREAD, deliberately: the clear reads the other registries (the
+    queue payload asks slskd for its finished downloads), and a job start must
+    never wait on that — a slow daemon would otherwise delay the download the
+    user just asked for. It is bookkeeping about the LIST, never about the
+    library or the transfers.
+
+    Deferred import: `server/api_queue` imports THIS module, so the call has to
+    go the other way at call time. Never raises — a queue that cannot be read
+    must not stop a download from starting.
+
+    The CUT is stamped here, before the thread is spawned: only rows that were
+    already settled when the new work started are cleared. Without it the clear
+    is a race — the thread lands a moment later, and a job that failed in
+    between (a peer that is down fails in milliseconds) was wiped by the very
+    clear the new job spawned, which is how `tools/test_outcomes.py` caught it:
+    a failure the user has not been shown yet is THIS run's news, not history."""
+    before = time.time()
+
+    def work():
+        try:
+            from server import api_queue
+            api_queue.clear_settled_queue(before=before)
+        except Exception:
+            traceback.print_exc()
+    try:
+        threading.Thread(target=work, name="mlo-queue-autoclear", daemon=True).start()
+    except Exception:
+        traceback.print_exc()
+
+
 def enqueue(release_mbid=None, release=None, queries=None, kind=None, mode=None):
     """Queue one release for auto-import; starts it immediately when there is
     capacity.
@@ -566,6 +601,12 @@ def enqueue(release_mbid=None, release=None, queries=None, kind=None, mode=None)
         _log(f"{release_mbid or _queue_key(item)}: {dup} — not queued again.")
         with _queue_lock:
             return len(_queue)
+    # A NEW RUN starts here: the queue's finished rows are taken off the list
+    # the way the per-section Clear buttons do it (`api_queue.clear_settled_queue`),
+    # so a bulk add — the paste box, "download all" — does not open onto the
+    # last run's Completed and Failed history. Live rows, background wishes and
+    # retryable failures are not clearable and stay.
+    _clear_settled()
     _start_next()
     with _queue_lock:
         # our item is gone once it started → depth 0
@@ -1585,10 +1626,18 @@ def release_queries(release, cfg, templates=None):
     at `_MAX_CATALOG_QUERIES` — the same cap the MusicBrainz alias queries
     (`_alias_queries`) stop at.
 
+    MBID-DRIVEN QUERIES are appended to that default set (`_mbid_queries`): the
+    release's own MusicBrainz id, its tracks' recording ids and each of those
+    tracks' own "artist title", so a peer folder that names the ids (or holds
+    exactly the album's tracks under a name the traits never match) is
+    reachable — ON by default, off with `soulseek_auto_mbid_queries`. The caller
+    hands the whole list to ONE parallel batch (`_search_queries`), so these
+    cost the same single search window as the traits.
+
     `templates` renders an explicit set instead of the configured one: the job's
     own stored queries, and its broad second pass. Those are queries a caller
-    already decided, so they are rendered exactly as given and expand no
-    aliases.
+    already decided, so they are rendered exactly as given — and expand no
+    aliases and no MBID queries.
     """
     formats = [str(f).strip() for f in media_formats(release)]
     digital = _is_digital(release)
@@ -1622,8 +1671,187 @@ def release_queries(release, cfg, templates=None):
     if not queries:
         queries.extend(_pressing_fallback(fields, digital))
     if not explicit:
+        queries.extend(_mbid_queries(release, cfg, queries, fields))
         queries.extend(_alias_queries(release, cfg, templates, fields, catalogs, queries))
     return queries
+
+
+def _release_tracks(release):
+    """The release's tracks, in disc/position order, as the payload states them.
+
+    `integrations.resolve_release` publishes the tracklist TWICE — the flat
+    `tracks` list and `media[].tracks` — and every row carries the recording's
+    MBID, its title and its artist credit (`inc=recordings+artist-credits`), so
+    asking for them here costs NO MusicBrainz request. A row MusicBrainz states
+    no ordering for keeps the place it came in at."""
+    rows = [t for t in (release.get("tracks") or []) if isinstance(t, dict)]
+    if not rows:
+        for medium in (release.get("media") or []):
+            if not isinstance(medium, dict):
+                continue
+            for t in (medium.get("tracks") or []):
+                if isinstance(t, dict):
+                    rows.append(dict(t, disc=t.get("disc") or medium.get("position")))
+    order = []
+    for i, row in enumerate(rows):
+        order.append((_position_of(row.get("disc"), 1),
+                      _position_of(row.get("position"), i + 1), i, row))
+    order.sort(key=lambda item: item[:3])
+    return [item[3] for item in order]
+
+
+def _position_of(value, default):
+    """One track's disc/position as an integer, `default` when it states none."""
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return default
+
+
+def _mbid_queries(release, cfg, queries, fields):
+    """The MBID-driven queries appended to a release's default search set.
+
+    The owner's ask: search a release by the ids and the tracklist a peer's
+    folder can literally carry, in the SAME parallel batch as the configured
+    traits (one search window — never a second wait):
+
+    * the release's own MusicBrainz id, as a literal query;
+    * the recording MBID of its first `soulseek_auto_mbid_tracks` tracks;
+    * each of those tracks' own "artist title" from the tracklist — the MBID is
+      what puts the tracklist in hand, and a folder named nothing like the
+      release but holding exactly its tracks is otherwise unreachable from a
+      catalog-number query.
+
+    The track-derived queries stop after the first N tracks in disc/position
+    order (clamped 1..10), and everything is deduped against the queries already
+    built — a release whose traits already render the same words must not ask
+    the network twice.
+
+    Empty when the switch is off (`soulseek_auto_mbid_queries`, ON by default)
+    or when there is nothing to add."""
+    if not bool((cfg or {}).get("soulseek_auto_mbid_queries", True)):
+        return []
+    out = []
+
+    def add(q):
+        if q and q not in queries and q not in out:
+            out.append(q)
+
+    add(_search_text(str(release.get("id") or release.get("release_mbid") or "")))
+    # The clamp matches `mlo.config`'s range for the key (1..10), so a hand-set
+    # 0 reads the same here as it does after a save: one track, never none.
+    try:
+        limit = int((cfg or {}).get("soulseek_auto_mbid_tracks", 4))
+    except (TypeError, ValueError):
+        limit = 4
+    limit = max(1, min(10, limit))
+    artist = fields.get("artist") or ""
+    for track in _release_tracks(release)[:limit]:
+        # `resolve_release` states a flat `recording_mbid`; a raw MusicBrainz
+        # payload (the route's own JSON, a queue item's release) nests it.
+        recording = track.get("recording") if isinstance(track.get("recording"), dict) else {}
+        add(str(track.get("recording_mbid") or recording.get("id") or "").strip())
+        credit = str(track.get("artist_credit") or "").strip() or artist
+        title = str(track.get("title") or "").strip()
+        add(_search_text(f"{credit} {title}"))
+    return out
+
+
+
+# --------------------------------------------------------------------------- #
+# A user's own search, by MusicBrainz id (the manual surface)
+# --------------------------------------------------------------------------- #
+# One UUID, whatever case it was pasted in. MusicBrainz ids are lower-case
+# hex; a share folder that names one names it as MusicBrainz publishes it.
+MBID_RE = re.compile(r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$",
+                     re.IGNORECASE)
+
+
+def is_mbid(value):
+    """Does this look like a MusicBrainz id? (The UI's own "search by MBID"
+    affordance asks the same question of what the user pasted.)"""
+    return bool(MBID_RE.match(str(value or "").strip()))
+
+
+def _recording_queries(data, recording_mbid):
+    """The three questions that find ONE recording on the network.
+
+    Its artist + title (what a peer's FILE name carries), its album (what the
+    FOLDER carries) and its own id, literally (for a peer whose paths name
+    ids). Deduped, and the id is always last: the two text queries are the ones
+    a peer folder is likely to answer."""
+    credit = "".join((ac.get("name") or "") + (ac.get("joinphrase") or "")
+                     for ac in (data.get("artist-credit") or [])
+                     if isinstance(ac, dict))
+    out = []
+    song = _search_text(f"{credit} {data.get('title') or ''}")
+    if song:
+        out.append(song)
+    releases = [r for r in (data.get("releases") or []) if isinstance(r, dict)]
+    album = _search_text(str((releases[0] if releases else {}).get("title") or ""))
+    if album and album not in out:
+        out.append(album)
+    if recording_mbid not in out:
+        out.append(recording_mbid)
+    return out
+
+
+def mbid_search_queries(mbid, cfg=None):
+    """The queries for ONE track — or ONE release — a user pasted as an MBID.
+
+    The manual search takes free text or an ID (`POST /api/soulseek/search`),
+    and an ID is resolved with the SAME cached MusicBrainz client the rest of
+    the app uses, so a track this app has already looked at costs no request at
+    all:
+
+    * a RECORDING id — what the library stores per track (`MUSICBRAINZ_TRACKID`)
+      — answers with the queries for that one song: artist + title, its album,
+      and the id itself (`_recording_queries`);
+    * a release or release-group id is the RELEASE case instead — the release's
+      own query set, MBID-driven queries included (`release_queries`) — because
+      there is no single track to name;
+    * anything MusicBrainz does not know, and any id that is not a UUID at all,
+      answers with the reason.
+
+    Nothing here adds a wish or starts an auto-import: the user presses
+    download on what the results show, exactly as for a typed query. Returns
+    ``{"ok", "kind", "mbid", "label", "queries"}`` or ``{"ok": False, "error"}``.
+    """
+    rid = str(mbid or "").strip().lower()
+    if not is_mbid(rid):
+        return {"ok": False, "error": "that is not a MusicBrainz id (a UUID)"}
+    from server import integrations as intg
+
+    try:
+        data = intg.mb_get_cached(
+            f"recording/{rid}",
+            {"inc": "artist-credits+releases+release-groups", "fmt": "json"})
+    except Exception:
+        data = None
+    if isinstance(data, dict) and data.get("title"):
+        queries = _recording_queries(data, rid)
+        if queries:
+            artist = "".join((ac.get("name") or "") + (ac.get("joinphrase") or "")
+                             for ac in (data.get("artist-credit") or [])
+                             if isinstance(ac, dict))
+            return {"ok": True, "kind": "track", "mbid": rid,
+                    "label": " — ".join(x for x in (artist.strip(),
+                                                    str(data.get("title") or "").strip()) if x),
+                    "queries": queries}
+    try:
+        release, release_mbid = intg.resolve_release(rid)
+    except Exception as e:              # a MusicBrainz outage is its own answer
+        return {"ok": False, "error": f"MusicBrainz could not be asked: {e}"}
+    if not release or not release_mbid:
+        return {"ok": False,
+                "error": "MusicBrainz has no recording or release with this id"}
+    queries = release_queries(release, cfg or {})
+    if not queries:
+        return {"ok": False, "error": "this release states nothing to search by"}
+    artist = str((release.get("artists") or [{}])[0].get("name") or "").strip()
+    return {"ok": True, "kind": "release", "mbid": str(release_mbid),
+            "label": " — ".join(x for x in (artist, str(release.get("title") or "").strip()) if x),
+            "queries": queries}
 
 
 # --------------------------------------------------------------------------- #
@@ -2094,7 +2322,8 @@ _SEARCH_POLL_S = 0.75      # one loop polls EVERY outstanding search this often
 _TRANSFER_POLL_S = 1.0     # download poll cadence
 
 
-def _search_queries(slsk, queries, wait_s, usable=None, response_limit=0):
+def _search_queries(slsk, queries, wait_s, usable=None, response_limit=0,
+                    cancel_check=None):
     """Run every query template AT ONCE and poll them in one loop.
 
     All templates are POSTed up front, so the wall time is one window
@@ -2115,6 +2344,12 @@ def _search_queries(slsk, queries, wait_s, usable=None, response_limit=0):
     that failed or never terminated, skipped = how many queries were still
     running when a usable candidate ended the wait.
 
+    `cancel_check`, when given, is asked before every poll: true means the
+    caller's job was cancelled, so every search still outstanding is dropped at
+    slskd (the same `DELETE /searches/{id}` the reader of the window runs) and
+    the wait ends at once — a cancel during the search phase stops the NETWORK
+    work, not just the polling (see `server.soulseek_auto.cancel`).
+
     How long the wait REALLY was is kept for the caller on this thread
     (`_search_seconds`) — this function is the one place that knows when the
     wait ended, and the number it measures is what the job reports, instead of
@@ -2130,7 +2365,17 @@ def _search_queries(slsk, queries, wait_s, usable=None, response_limit=0):
         except Exception as e:
             errors.append(f"Soulseek search could not be started for “{q}”: {e}")
     early = False
+    cancelled = False
     while watch and time.time() < deadline:
+        if cancel_check is not None and cancel_check():
+            # The user's own Cancel (a queue row, the Auto-import Stop): the
+            # searches are dropped AT slskd (DELETE /searches/{id}) instead of
+            # left running out their window, and the loop leaves with whatever
+            # has already been read. Without this the cancel only took effect
+            # after the search window — up to `wait_s + grace` of the network
+            # still answering a job nobody wants.
+            cancelled = True
+            break
         for e in watch:              # probe first: no dead sleep before it
             try:
                 e[2] = slsk.search_results(e[0])
@@ -2176,7 +2421,10 @@ def _search_queries(slsk, queries, wait_s, usable=None, response_limit=0):
                 pass
             if early:
                 skipped += 1     # in hand already — never waited out
-            else:
+            elif not cancelled:
+                # A search the USER cancelled is not one that failed to finish:
+                # the reason line would accuse the network of a stop the user
+                # asked for.
                 errors.append(f"Soulseek search did not finish within "
                               f"{int(wait_s + _SEARCH_GRACE_S)}s for “{q}”")
             continue
@@ -3905,6 +4153,13 @@ def start_job(release_mbid=None, release=None, queries=None, username=None,
                 "error": "this release is already being imported",
                 "job": job_state()}
     if jid:
+        # A NEW RUN: the queue's finished rows come off the list the way the
+        # per-section Clear buttons do (`_clear_settled` → the same route), so
+        # an auto-import or a manual grab opens onto its own work instead of the
+        # last run's Completed/Failed history. Called BEFORE the job thread
+        # starts, and outside `_lock` (the clear reads the registries, which
+        # takes the job lock — never take it while holding this one).
+        _clear_settled()
         threading.Thread(target=_run, name=f"mlo-soulseek-auto-{jid}",
                          kwargs=dict(release_mbid=release_mbid, release=release,
                                      queries=queries, username=username,
@@ -5134,7 +5389,11 @@ def _run(release_mbid=None, release=None, queries=None, username=None,
                  f"{int(search_wait + _SEARCH_GRACE_S)}s)")
             results, search_failed, skipped = _search_queries(
                 slsk, queries_built, search_wait, usable=_usable,
-                response_limit=response_limit)
+                response_limit=response_limit,
+                # The job's own cancel: a Cancel press during the SEARCH phase
+                # drops the slskd searches and ends the wait at once, instead of
+                # leaving the network answering for up to the whole window.
+                cancel_check=_cancelled)
             searched_s += _search_seconds()
             _job_search_done()
             for line in search_failed:
@@ -5180,7 +5439,8 @@ def _run(release_mbid=None, release=None, queries=None, username=None,
                 _log(f"No usable folder from the configured template(s) — one broader "
                      f"search: “{'” · “'.join(broad)}”")
                 fb_results, fb_failed, _fb_skipped = _search_queries(
-                    slsk, broad, search_wait, response_limit=response_limit)
+                    slsk, broad, search_wait, response_limit=response_limit,
+                    cancel_check=_cancelled)
                 fb_s = _search_seconds()
                 searched_s += fb_s
                 _job_search_done()

@@ -12,9 +12,13 @@ therefore two different facts, and the second one is what this checks — from t
 IPA alone, with no Xcode and no device:
 
   * `Info.plist` — `UIBackgroundModes` containing `audio` (the app's permission
-    to play in the background) and the ATS exemption the in-app browser needs.
-    Both are read back out of the built `.app`, because the merge in
-    `tauri-build` is what decides them, not the source file.
+    to play in the background), the ATS exemptions the in-app browser AND the
+    media loader need (`NSAllowsArbitraryLoadsInWebContent` plus the blanket
+    `NSAllowsArbitraryLoads`), and the local-network prompt's reason
+    (`NSLocalNetworkUsageDescription`, without which a server on the LAN can
+    never be granted access on iOS 14+). All of them are read back out of the
+    built `.app`, because the merge in `tauri-build` is what decides them, not
+    the source file.
   * the app binary — the Objective-C names the modules use at runtime
     (`AVAudioSession`, the playback category and mode constants from AVFAudio,
     `NSNotificationCenter` for the session's lifecycle observers,
@@ -97,6 +101,20 @@ def main() -> None:
     if not (plist.get("NSAppTransportSecurity") or {}).get("NSAllowsArbitraryLoadsInWebContent"):
         fail("NSAppTransportSecurity.NSAllowsArbitraryLoadsInWebContent is missing")
     print("ok   the webview's ATS exemption is declared")
+    # The blanket ATS key too: the page was always covered by the web-content
+    # exemption above, but the MEDIA loader WebKit runs outside the web content
+    # process reads this one — a build that lost it can open the whole app and
+    # then fail every track ("pressing play just pauses it immediately").
+    if not (plist.get("NSAppTransportSecurity") or {}).get("NSAllowsArbitraryLoads"):
+        fail("NSAppTransportSecurity.NSAllowsArbitraryLoads is missing — media fetched "
+             "outside the web content process would be blocked by ATS")
+    print("ok   the blanket ATS exemption is declared (audio/video loads)")
+    # iOS 14+ needs a declared reason before the local-network permission can be
+    # requested at all; without it a server on the LAN is unreachable.
+    if not str(plist.get("NSLocalNetworkUsageDescription") or "").strip():
+        fail("NSLocalNetworkUsageDescription is empty — a LAN server could never be "
+             "granted local-network access")
+    print("ok   the local-network prompt has a reason to show")
 
     binaries = [n for n in archive.namelist()
                 if re.fullmatch(rf"{re.escape(app)}/[^/]+", n) and archive.getinfo(n).file_size > BUILD_MIN_BYTES]

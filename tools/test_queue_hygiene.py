@@ -502,9 +502,13 @@ with Patch(auto, jobs=REG.list, forget=REG.forget), \
           body["cleared"] == len(failed_job_only)
           and set(body["ids"]) == failed_job_only, r.text)
     after = rows_by_id()
-    check("...leaving the failed row that is still being retried",
+    # The wish that failed an ATTEMPT is still being retried by the worker, so
+    # its row is NOT in `failed` to be cleared at all: it is a BACKGROUND row
+    # (part 1's rule — Failed is for the releases nobody will look for again),
+    # which is also why clearing this section could never have taken it.
+    check("...leaving the row that is still being retried (it is not a Failed row)",
           f"wish:{FAILED['id']}" in after
-          and after[f"wish:{FAILED['id']}"][0] == "failed", json.dumps(sorted(after)))
+          and after[f"wish:{FAILED['id']}"][0] == "background", json.dumps(sorted(after)))
     check("...and leaving every running or waiting row alone",
           "job:41" in after and f"wish:{WANTED['id']}" in after
           and "job:42" in after, json.dumps(sorted(after)))

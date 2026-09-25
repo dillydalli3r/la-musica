@@ -366,6 +366,25 @@ def check_auto_download():
            done[0])
         ok(done[0]["note"].startswith("the script chain ran"),
            "with one honest line about it", done[0]["note"])
+        # AND THE RELEASE'S OWN FACTS ARE ON THE ALBUM, filled by that import:
+        # "if a best downloader / auto-import download finishes and verifies a
+        # download of a good release, right after that it should also auto-fill
+        # this info". The job's own release is the pressing that landed (never
+        # the release the wish was saved for), so MEDIA/country/catalogue here
+        # are ITS. `_stamp_media` is stubbed to write NOTHING above and the
+        # chain's scripts are stubbed too, so a MEDIA tag on these files can
+        # only have come from the import's identity step — which is what runs
+        # before the queue can announce the album as done.
+        from mlo.audio import AudioFile
+        landed = AudioFile(os.path.join(final, "01 - one.wav"))
+        eq(str(landed.get_tag("MEDIA") or ""), rel["medium"],
+           "the album carries the medium of the release it verified")
+        eq(str(landed.get_tag("RELEASECOUNTRY") or ""), rel["country"],
+           "and the country that pressing came out in")
+        eq(str(landed.get_tag("CATALOGNUMBER") or ""), rel["catalog_number"],
+           "and the catalogue number that identifies it")
+        eq(str(landed.get_tag("MUSICBRAINZ_ALBUMID") or ""), rel["id"],
+           "with the release id the job downloaded")
 
 
 check_auto_download()

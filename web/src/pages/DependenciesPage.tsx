@@ -178,7 +178,7 @@ export default function DependenciesPage() {
   };
 
   return (
-    <div className="p-6 space-y-5 mx-auto max-w-6xl">
+    <div className="p-6 space-y-5 mx-auto max-w-[1600px]">
       {/* `sticky`: the page scrolls through fifteen rows and the action that
           fixes them all must not scroll away with the first ones. The primary
           action lives in this header's actions row, so the whole bar pins

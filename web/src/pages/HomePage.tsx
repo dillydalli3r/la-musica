@@ -5,7 +5,7 @@ import { AlertTriangle, ArrowDownUp, BarChart3, Clock, Disc3, Heart, ListChecks,
 import { api } from "../api";
 import { EmptyState, PageLoading } from "../components/Badges";
 import StorageCard from "../components/StorageCard";
-import GradeWarning from "../components/GradeWarning";
+import GradeWarning, { GradeDot } from "../components/GradeWarning";
 import PageHeader from "../components/PageHeader";
 import AlbumCard from "../components/AlbumCard";
 import CoverImg from "../components/CoverImg";
@@ -211,7 +211,20 @@ export default function HomePage() {
       forceRefresh.current = false;
       return api.home(force);
     },
-    staleTime: 5 * 60_000,
+    // Home is a dashboard and it keeps itself current on its own: the shelves
+    // (recently added, pending, wanted, needs-attention) and the storage panel
+    // all describe a library that changes underneath the reader while a run or
+    // an import is going, and the only way to see that was to press Refresh or
+    // navigate away and back.
+    //
+    // The interval is cheap BECAUSE of the direction this goes: a plain poll
+    // reads the server's cached payload (the `force` flag above is what asks
+    // for a rebuild, and only the button sets it), so a minute of polling costs
+    // one small GET. `refetchIntervalInBackground` is left at its default
+    // (false): a hidden tab stops asking, and react-query's own refetch on
+    // focus covers the moment the reader comes back.
+    staleTime: 60_000,
+    refetchInterval: 60_000,
   });
   const refresh = () => {
     forceRefresh.current = true;
@@ -248,7 +261,7 @@ export default function HomePage() {
 
   if (isLoading) {
     return (
-      <div className="p-6 mx-auto max-w-6xl">
+      <div className="p-6 mx-auto max-w-[1600px]">
         <PageLoading label={t("home.loading")} />
       </div>
     );
@@ -261,7 +274,7 @@ export default function HomePage() {
   // narrows `data` for the render below.
   if (isError || !data) {
     return (
-      <div className="p-6 mx-auto max-w-6xl">
+      <div className="p-6 mx-auto max-w-[1600px]">
         <EmptyState
           title={t("home.error_title")}
           hint={t("home.error_hint")}
@@ -289,7 +302,7 @@ export default function HomePage() {
     onSelect: toggleAlbum,
   };
   return (
-    <div className="p-6 space-y-5 mx-auto max-w-6xl">
+    <div className="p-6 space-y-5 mx-auto max-w-[1600px]">
       {/* hero — the gradient and its glow stay; the title block is the shared
           PageHeader so every page announces itself the same way */}
       <div className="panel-hero relative overflow-hidden bg-gradient-to-br from-panel to-bg">
@@ -297,7 +310,16 @@ export default function HomePage() {
         <div className="relative">
           <PageHeader
             overline={t("home.welcome")}
-            title={t("home.title")}
+            title={
+              // The library's grading verdict, as a dot beside the title: the
+              // passing state is colour, and anything that needs saying is
+              // written out by the strip below (the owner's ask — no "all
+              // checks pass" sentence on Home or the Library).
+              <span className="inline-flex items-center gap-2">
+                {t("home.title")}
+                <GradeDot initial={data.grade_warning} />
+              </span>
+            }
             subtitle={
               <div className="flex flex-wrap items-center gap-x-4 gap-y-1 text-sm text-zinc-400">
                 {/* the counts stay bold, the unit is the part that is translated */}
@@ -361,13 +383,14 @@ export default function HomePage() {
         </div>
       </div>
 
-      {/* The library's own grading verdict, above the shelves: whether every
-          album passed its checks, and — when one did not — the tracks and
-          albums that failed, each linking to the thing it names. It paints
-          from Home's own copy of the summary (the payload's `grade_warning`,
-          the same object `/api/grades/summary` serves), so the strip costs no
-          second walk of the library. */}
-      <GradeWarning initial={data.grade_warning} />
+      {/* The library's own grading verdict, above the shelves — the WARNINGS
+          only: a library that passes says so with the dot beside the title
+          above, and this strip exists for the albums and tracks that failed,
+          each linking to the thing it names. It paints from Home's own copy of
+          the summary (the payload's `grade_warning`, the same object
+          `/api/grades/summary` serves), so the strip costs no second walk of
+          the library. */}
+      <GradeWarning initial={data.grade_warning} mode="notice" />
 
       {/* Home ticks the same albums the Library's batch toolbar acts on (the
           selection is global), but the actions themselves — play, playlist,

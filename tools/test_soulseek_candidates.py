@@ -43,6 +43,20 @@ from mlo import discs as mlo_discs, tools as mlo_tools
 from server import soulseek, soulseek_auto
 
 
+def q(release, cfg=None, *args, **over):
+    """`release_queries` with the MBID-driven queries turned OFF.
+
+    Most assertions in this file read the TEMPLATE machinery (which template,
+    which trait, in which order, and the alias expansion): one query list, one
+    reason per entry. The MBID-driven set (the release's own id, its tracks'
+    recording ids and their artist+title) is ON by default and has its own block
+    below ("MBID-driven queries"), so everywhere else it is explicitly off —
+    an OFF switch is a config the app really accepts, and the assertions then
+    stay readable as "what the templates render"."""
+    return soulseek_auto.release_queries(
+        release, dict(cfg or {}, soulseek_auto_mbid_queries=False, **over), *args)
+
+
 # --------------------------------------------------------------------------- #
 # Synthetic slskd search results / MusicBrainz release
 # --------------------------------------------------------------------------- #
@@ -1984,31 +1998,31 @@ assert any("search(es) in 3s" in e["msg"] for e in run.job["log"]), \
 # to, the response limit reaches slskd, and a search still running when the
 # window closes is cancelled instead of left occupying slskd's search slots.
 # --------------------------------------------------------------------------- #
-assert soulseek_auto.release_queries(JOB_RELEASE, {}) == ["CAT-1"], \
-    soulseek_auto.release_queries(JOB_RELEASE, {})
+assert q(JOB_RELEASE, {}) == ["CAT-1"], \
+    q(JOB_RELEASE, {})
 # A pressing states its BARCODE too, and that is the other trait unique to it:
 # the two go out as two queries, in template order.
-assert soulseek_auto.release_queries(
+assert q(
     dict(JOB_RELEASE, barcode="4571694676537"), {}) == \
     ["CAT-1", "4571694676537"]
 # A physical release MusicBrainz states NO catalog number and no barcode for
 # falls back to its label and country — never to the artist/title wording,
 # which is the query that asks the network for every other pressing of the same
 # album (and made a CD job take a WEB rip).
-assert soulseek_auto.release_queries(
+assert q(
     dict(JOB_RELEASE, catalog_number="", label="Nippon Columbia", country="JP"), {}) == \
     ["Nippon Columbia JP 1996"]
 # …and a pressing stating neither label nor country has nothing left to
 # identify it by: no query at all (the job reports "nothing to search by")
 # rather than one that searches for a different release.
-assert soulseek_auto.release_queries(
+assert q(
     dict(JOB_RELEASE, catalog_number="", country=""), {}) == []
-assert soulseek_auto.release_queries(
+assert q(
     dict(JOB_RELEASE, catalog_number="", barcode="", label="EMI", country="GB"), {}) == \
     ["EMI GB 1996"]
 # DIGITAL media is the one kind that keeps the broad wording: it has no
 # pressing trait to be identified by.
-assert soulseek_auto.release_queries(
+assert q(
     dict(JOB_RELEASE, medium_formats=["Digital Media"], catalog_number=""), {}) == \
     ["Job Artist Job Album 1996"]
 # The physical/digital split reads the medium through mlo.release_choice
@@ -2022,35 +2036,35 @@ assert soulseek_auto._is_digital({}) is False
 assert soulseek_auto._is_digital({"medium": "Digital Media"}) is True
 for _medium in ("Vinyl", "Cassette", "SACD", "CD-R", "SHM-CD", "Blu-spec CD",
                 "12\" Vinyl", "DVD-Audio"):
-    assert soulseek_auto.release_queries(
+    assert q(
         dict(JOB_RELEASE, medium_formats=[_medium], catalog_number="", barcode=""),
         {}) == ["GB 1996"], _medium      # a pressing: label + country, no title
-    assert soulseek_auto.release_queries(
+    assert q(
         dict(JOB_RELEASE, medium_formats=[_medium]), {}) == ["CAT-1"], _medium
 # A configured template list still wins over the default.
-assert soulseek_auto.release_queries(
+assert q(
     JOB_RELEASE, {"soulseek_auto_cd_queries": ["artist album"]}) == ["Job Artist Job Album"]
 # …and the physical key does the same for EVERY pressing, so a widened vinyl
 # search is one setting, not a code change.
-assert soulseek_auto.release_queries(
+assert q(
     dict(JOB_RELEASE, medium_formats=["Vinyl"]),
     {"soulseek_auto_physical_queries": ["artist album catalognumber"]}) == \
     ["Job Artist Job Album CAT-1"]
-assert soulseek_auto.release_queries(
+assert q(
     dict(JOB_RELEASE, medium_formats=["Vinyl"]),
     {"soulseek_auto_physical_queries": "catalognumber; barcode"}) == ["CAT-1"]
 # The legacy CD key only wins when a config really SET it: its shipped default
 # (the catalog number alone) is not a decision, so an untouched install follows
 # the physical default — which adds the barcode — instead.
-assert soulseek_auto.release_queries(
+assert q(
     dict(JOB_RELEASE, barcode="4571694676537"),
     {"soulseek_auto_cd_queries": ["catalognumber"]}) == ["CAT-1", "4571694676537"]
-assert soulseek_auto.release_queries(
+assert q(
     dict(JOB_RELEASE, barcode="4571694676537"),
     {"soulseek_auto_cd_queries": ["catalognumber", "barcode"]}) == \
     ["CAT-1", "4571694676537"]
 # …and it is the CD's key alone: a vinyl ignores it.
-assert soulseek_auto.release_queries(
+assert q(
     dict(JOB_RELEASE, medium_formats=["Vinyl"], catalog_number="", barcode=""),
     {"soulseek_auto_cd_queries": ["artist album"]}) == ["GB 1996"]
 
@@ -2089,39 +2103,139 @@ assert mlo_config.normalize_config({})["soulseek_auto_digital_queries"] == \
 # for EACH number as its own query, in MusicBrainz order — searching only the
 # first lost every other pressing.
 TWO_CAT = dict(JOB_RELEASE, catalog_numbers=["CAT-1", "CAT-2"])
-assert soulseek_auto.release_queries(TWO_CAT, {}) == ["CAT-1", "CAT-2"], \
-    soulseek_auto.release_queries(TWO_CAT, {})
+assert q(TWO_CAT, {}) == ["CAT-1", "CAT-2"], \
+    q(TWO_CAT, {})
 # a blank and a repeated number are dropped, never searched twice
-assert soulseek_auto.release_queries(
+assert q(
     dict(JOB_RELEASE, catalog_numbers=["CAT-1", "  ", "CAT-2", "CAT-1"]), {}) == \
     ["CAT-1", "CAT-2"]
 # a template naming the field inside longer wording expands the same way
-assert soulseek_auto.release_queries(
+assert q(
     TWO_CAT, {"soulseek_auto_cd_queries": ["artist album catalognumber"]}) == \
     ["Job Artist Job Album CAT-1", "Job Artist Job Album CAT-2"]
 # ...and a template that does NOT name it still yields exactly one query
-assert soulseek_auto.release_queries(
+assert q(
     TWO_CAT, {"soulseek_auto_cd_queries": ["artist album"]}) == ["Job Artist Job Album"]
-assert soulseek_auto.release_queries(
+assert q(
     TWO_CAT, {"soulseek_auto_cd_queries": ["artist album", "catalognumber"]}) == \
     ["Job Artist Job Album", "CAT-1", "CAT-2"]
 # a release with a dozen numbers must not flood the network: four, at most
-assert soulseek_auto.release_queries(
+assert q(
     dict(JOB_RELEASE, catalog_numbers=[f"C{i}" for i in range(1, 8)]), {}) == \
     ["C1", "C2", "C3", "C4"]
 # an EMPTY plural key still means "no catalog number or barcode" -> the
 # pressing fallback (its label and country), never the artist/title wording
-assert soulseek_auto.release_queries(
+assert q(
     dict(JOB_RELEASE, catalog_numbers=[], catalog_number=""), {}) == ["GB 1996"]
 # the plural key wins over the singular; a singular-only payload still works
-assert soulseek_auto.release_queries(
+assert q(
     dict(JOB_RELEASE, catalog_numbers=["NEW"], catalog_number="OLD"), {}) == ["NEW"]
-assert soulseek_auto.release_queries(
+assert q(
     dict(JOB_RELEASE, catalog_numbers=None), {}) == ["CAT-1"]
 # the job's own template seam agrees with release_queries on the same inputs
 for _tpl in (["catalognumber"], ["artist album catalognumber"], ["artist album"]):
     assert soulseek_auto._build_from_templates(_tpl, TWO_CAT) == \
-        soulseek_auto.release_queries(TWO_CAT, {"soulseek_auto_cd_queries": _tpl}), _tpl
+        q(TWO_CAT, {"soulseek_auto_cd_queries": _tpl}), _tpl
+
+
+# --------------------------------------------------------------------------- #
+# MBID-driven queries: ON by default (the owner's ask)
+# --------------------------------------------------------------------------- #
+# A release is also searched by what a PEER's folder can literally carry — its
+# own MusicBrainz id, its tracks' recording ids and each track's own
+# "artist title" — so a peer that names the ids, or that holds exactly the
+# album's tracks under a title the pressing traits never match, is reachable at
+# all. They ride the SAME parallel batch as the templates (one search window),
+# are deduped against it, and stop after `soulseek_auto_mbid_tracks` tracks in
+# disc/position order.
+MBID_RELEASE = {
+    "id": "11111111-2222-3333-4444-555555555555",
+    "title": "Mbid Album", "date": "1999", "medium_formats": ["CD"],
+    "country": "GB", "catalog_number": "MB-1",
+    "artists": [{"name": "Mbid Artist", "mbid": "66666666-7777-8888-9999-000000000000"}],
+    "tracks": [
+        {"disc": 1, "position": 1, "title": "First Song",
+         "recording_mbid": "aaaaaaaa-0000-0000-0000-00000000000a",
+         "artist_credit": "Mbid Artist"},
+        {"disc": 1, "position": 2, "title": "Second Song",
+         "recording_mbid": "aaaaaaaa-0000-0000-0000-00000000000b"},
+        {"disc": 1, "position": 3, "title": "Third Song",
+         "recording_mbid": "aaaaaaaa-0000-0000-0000-00000000000c"},
+        {"disc": 1, "position": 4, "title": "Fourth Song",
+         "recording_mbid": "aaaaaaaa-0000-0000-0000-00000000000d"},
+        {"disc": 1, "position": 5, "title": "Fifth Song",
+         "recording_mbid": "aaaaaaaa-0000-0000-0000-00000000000e"},
+    ],
+}
+_mbid_q = soulseek_auto.release_queries(MBID_RELEASE, {})
+# the pressing traits first — the queries that name the exact pressing are not
+# displaced by the broad ones — then the release id, then the first four tracks
+# (recording id, then artist+title), each exactly once.
+assert _mbid_q == [
+    "MB-1",
+    MBID_RELEASE["id"],
+    "aaaaaaaa-0000-0000-0000-00000000000a", "Mbid Artist First Song",
+    "aaaaaaaa-0000-0000-0000-00000000000b", "Mbid Artist Second Song",
+    "aaaaaaaa-0000-0000-0000-00000000000c", "Mbid Artist Third Song",
+    "aaaaaaaa-0000-0000-0000-00000000000d", "Mbid Artist Fourth Song",
+], _mbid_q
+assert len(set(_mbid_q)) == len(_mbid_q), _mbid_q       # nothing asked twice
+# the cap is a NUMBER OF TRACKS, in disc/position order: the fifth is not asked
+assert "Fifth Song" not in " ".join(_mbid_q), _mbid_q
+assert "aaaaaaaa-0000-0000-0000-00000000000e" not in _mbid_q, _mbid_q
+# …and it is configurable, clamped to 1..10 like every other pipeline ceiling
+assert soulseek_auto.release_queries(
+    MBID_RELEASE, {"soulseek_auto_mbid_tracks": 1}) == \
+    ["MB-1", MBID_RELEASE["id"], "aaaaaaaa-0000-0000-0000-00000000000a",
+     "Mbid Artist First Song"], "one track"
+assert soulseek_auto.release_queries(
+    MBID_RELEASE, {"soulseek_auto_mbid_tracks": 0}) == \
+    soulseek_auto.release_queries(MBID_RELEASE, {"soulseek_auto_mbid_tracks": 1}), \
+    "0 is clamped up to one track, never to none"
+assert soulseek_auto.release_queries(
+    MBID_RELEASE, {"soulseek_auto_mbid_tracks": 50}) == \
+    _mbid_q + ["aaaaaaaa-0000-0000-0000-00000000000e", "Mbid Artist Fifth Song"], \
+    "a cap above the track count (and above the clamp) asks for what there is"
+assert mlo_config.DEFAULT_CONFIG["soulseek_auto_mbid_queries"] is True, \
+    "the owner's ask: MBID-driven queries ship ON"
+assert mlo_config.DEFAULT_CONFIG["soulseek_auto_mbid_tracks"] == 4
+assert mlo_config.normalize_config({})["soulseek_auto_mbid_tracks"] == 4
+assert mlo_config.normalize_config({"soulseek_auto_mbid_tracks": 99})[
+    "soulseek_auto_mbid_tracks"] == 10
+assert mlo_config.normalize_config({"soulseek_auto_mbid_tracks": 0})[
+    "soulseek_auto_mbid_tracks"] == 1
+# OFF is one setting, and then the list is exactly the trait templates again
+assert soulseek_auto.release_queries(
+    MBID_RELEASE, {"soulseek_auto_mbid_queries": False}) == ["MB-1"]
+# The release's tracks are the FLAT `tracks` list `integrations.resolve_release`
+# publishes; a release that states none (an old payload, a folder grab) adds the
+# id only, and one with no MusicBrainz id at all adds nothing.
+assert soulseek_auto.release_queries(
+    {k: v for k, v in MBID_RELEASE.items() if k != "tracks"}, {}) == \
+    ["MB-1", MBID_RELEASE["id"]]
+assert soulseek_auto.release_queries(
+    {k: v for k, v in MBID_RELEASE.items() if k not in ("id", "tracks")}, {}) == ["MB-1"]
+# …and an explicit template set a caller decided (the job's own stored queries,
+# its broad second pass) renders EXACTLY as given: no aliases, no MBID set.
+assert soulseek_auto.release_queries(MBID_RELEASE, {}, ["artist album"]) == \
+    ["Mbid Artist Mbid Album"]
+# a per-track query that repeats what a template already rendered is not asked
+# twice — the dedupe is against the whole list built so far, and it covers the
+# ids too
+_dupe = soulseek_auto.release_queries(
+    dict(MBID_RELEASE, medium_formats=["Digital Media"],
+         tracks=[dict(MBID_RELEASE["tracks"][0], title="Mbid Album")]),
+    {"soulseek_auto_digital_queries": ["artist album"]})
+assert _dupe == ["Mbid Artist Mbid Album", MBID_RELEASE["id"],
+                 "aaaaaaaa-0000-0000-0000-00000000000a"], _dupe
+assert soulseek_auto.release_queries(
+    dict(MBID_RELEASE,
+         tracks=[dict(MBID_RELEASE["tracks"][0], recording_mbid=MBID_RELEASE["id"])]),
+    {}).count(MBID_RELEASE["id"]) == 1, "the id is asked for once, not once per row"
+# the queries are what the JOB searches with: every one of them reaches slskd as
+# its own POSTED search, and a track query that finds the whole album wins like
+# any other — the SAME single window, never a second wait (see the parallel
+# batch proofs above: one POST per query, all of them polled in one loop).
 
 # --------------------------------------------------------------------------- #
 # Search text: what reaches slskd is what a SHARE FOLDER NAME can carry. slskd
@@ -2165,9 +2279,9 @@ CJK_RELEASE = {
     "release_group_id": "b4c0b0f2-0000-4000-8000-000000000000",
     "artists": [{"name": "ぴーなた", "mbid": "aaaaaaaa-0000-4000-8000-000000000001"}],
 }
-assert soulseek_auto.release_queries(CJK_RELEASE, {}) == \
+assert q(CJK_RELEASE, {}) == \
     ["ぴーなた アンタに言ってんの 2026"], \
-    soulseek_auto.release_queries(CJK_RELEASE, {})
+    q(CJK_RELEASE, {})
 
 # --------------------------------------------------------------------------- #
 # MusicBrainz aliases: a release MusicBrainz files under a translated name is
@@ -2200,7 +2314,7 @@ def _fake_mb_cached(endpoint, params=None, timeout=30.0, retries=5):
 try:
     _intg.mb_get_cached = _fake_mb_cached
     _mb_calls.clear()
-    _q = soulseek_auto.release_queries(CJK_RELEASE, {"locale": "en"})
+    _q = q(CJK_RELEASE, {"locale": "en"})
     # the alias-artist query is the template with `pinata` in the artist slot,
     # and the alias TITLE replaces the album: MusicBrainz' own English name for
     # the release group is what an English share folder carries.
@@ -2215,18 +2329,18 @@ try:
     # spelling of the artist (a different one — katakana against hiragana), and
     # the ja alias TITLE is the title itself, so no second query is added for it
     _mb_calls.clear()
-    _ja = soulseek_auto.release_queries(CJK_RELEASE, {"locale": "ja"})
+    _ja = q(CJK_RELEASE, {"locale": "ja"})
     assert _ja == ["ぴーなた アンタに言ってんの 2026",
                    "ピナタ アンタに言ってんの 2026"], _ja
     # A NAME ALREADY IN THE READER'S SCRIPT COSTS NO REQUEST AT ALL: "Job
     # Artist" has nothing to translate, so a Latin-script library asks
     # MusicBrainz nothing (this is the beets plugin's own rule).
     _mb_calls.clear()
-    assert soulseek_auto.release_queries(JOB_RELEASE, {}) == ["CAT-1"], _mb_calls
+    assert q(JOB_RELEASE, {}) == ["CAT-1"], _mb_calls
     assert _mb_calls == [], _mb_calls
     # A release with no MusicBrainz ids has nothing to ask about either.
     _mb_calls.clear()
-    assert soulseek_auto.release_queries(
+    assert q(
         dict(CJK_RELEASE, release_group_id=None,
              artists=[{"name": "ぴーなた", "mbid": ""}]), {}) == \
         ["ぴーなた アンタに言ってんの 2026"], _mb_calls
@@ -2236,7 +2350,7 @@ try:
     def _boom(endpoint, params=None, timeout=30.0, retries=5):
         raise RuntimeError("MusicBrainz is busy")
     _intg.mb_get_cached = _boom
-    assert soulseek_auto.release_queries(CJK_RELEASE, {}) == \
+    assert q(CJK_RELEASE, {}) == \
         ["ぴーなた アンタに言ってんの 2026"], "a failed alias lookup lost the search"
     # …and the alias queries are CAPPED like the catalog expansion, so a
     # release with many aliases (or many templates) cannot flood the network.
@@ -2246,7 +2360,7 @@ try:
                                 for i in range(9)]}
         return {"aliases": [{"name": f"title{i}", "locale": "en"} for i in range(9)]}
     _intg.mb_get_cached = _many
-    _capped = soulseek_auto.release_queries(
+    _capped = q(
         CJK_RELEASE,
         {"locale": "en",
          "soulseek_auto_digital_queries": ["artist album year", "album", "artist",
@@ -2270,6 +2384,7 @@ try:
     assert run.imported, run.job["result"]
     assert [q for q, _t, _l in run.stub.searches] == [
         "ぴーなた アンタに言ってんの 2026",
+        CJK_RELEASE["id"],
         "pinata What I'm Telling You 2026"], run.stub.searches
 finally:
     _intg.mb_get_cached = _real_mb_cached
@@ -2429,7 +2544,11 @@ assert _sj_calls[1]["queries"] == ["pinned query"], _sj_calls[1]
 # searches every catalog number, in order.
 run = run_job(TWO_CAT, ONE_DISC_ROWS, queries=[])
 assert run.imported, run.job["result"]
-assert [q for q, _t, _l in run.stub.searches] == ["CAT-1", "CAT-2"], run.stub.searches
+assert [q for q, _t, _l in run.stub.searches] == [
+    "CAT-1", "CAT-2", TWO_CAT["id"]], run.stub.searches
+# …and the release's own MBID rides the SAME batch (the MBID-driven queries,
+# on by default): it is POSTed as its own slskd search beside the templates,
+# in the one window — never a second wait.
 
 clock = FakeClock()
 _real_time = soulseek_auto.time
@@ -2851,6 +2970,77 @@ finally:
     soulseek_auto.time = _p3_saved
     shutil.rmtree(_p3_dir, ignore_errors=True)
 
+
+# --------------------------------------------------------------------------- #
+# Cancelling DURING the search: the network work stops now, not at the window
+# --------------------------------------------------------------------------- #
+# The owner's ask ("cancelled more immediately"): a Cancel press must not leave
+# the search running out its window. `_search_queries` now asks the job's own
+# cancel before every poll, and on a cancel it drops the outstanding searches AT
+# slskd (the same DELETE the teardown runs) and returns at once. Measured on the
+# suite's own clock: ONE poll interval, not the window plus the grace tail.
+class NeverQuietSlsk(AutoSlsk):
+    search_error = staticmethod(soulseek.search_error)
+    """A stub whose searches never end on their own (a popular album: peers keep
+    replying, so slskd never goes quiet) and reports counts while running."""
+
+    # The real terminal-state rule (`server.soulseek.is_search_done`), not a
+    # second opinion about what "done" means.
+    is_search_done = staticmethod(soulseek.is_search_done)
+
+    def search_results(self, sid):
+        return {"state": "InProgress", "isComplete": False,
+                "responseCount": 3, "fileCount": 42, "responses": []}
+
+
+_cancel_clock = FakeClock()
+_real_time = soulseek_auto.time
+soulseek_auto.time = _cancel_clock
+try:
+    _stub = NeverQuietSlsk(tempfile.mkdtemp(prefix="mlo-cancel-"), [])
+    _asked = {"n": 0}
+
+    def _cancel_after_first_poll():
+        # The user's press lands while the job is polling: flip it after the
+        # first poll has happened, which is what a 2 s-old search feels like.
+        _asked["n"] += 1
+        return _asked["n"] > 1
+
+    _started = real_time.time()
+    _results, _errors, _skipped = soulseek_auto._search_queries(
+        _stub, ["query one", "query two"], 60,
+        response_limit=25, cancel_check=_cancel_after_first_poll)
+    _elapsed = _cancel_clock.now
+    _wall = real_time.time() - _started
+finally:
+    soulseek_auto.time = _real_time
+
+assert _stub.cancelled_searches == ["sid-1", "sid-2"], _stub.cancelled_searches
+assert _results == [], _results            # nothing was readable yet
+assert not any("did not finish within" in e for e in _errors), _errors
+# One 0.75 s poll interval — NOT the 60 s window it would have waited out, and
+# nowhere near the 105 s ceiling (60 + the 45 s grace tail).
+assert _elapsed <= soulseek_auto._SEARCH_POLL_S, _elapsed
+assert _elapsed < 60, _elapsed
+assert _wall < 1.5, _wall                   # real seconds, and still instant
+
+# A cancel that arrives with searches ALREADY readable hands them back instead
+# of throwing the answers away: the job then finishes on what the network said.
+class QuietNowSlsk(AutoSlsk):
+    search_error = staticmethod(soulseek.search_error)
+    is_search_done = staticmethod(soulseek.is_search_done)
+
+    def search_results(self, sid):
+        return {"state": "Completed", "isComplete": True,
+                "responseCount": 1, "fileCount": 2,
+                "responses": [{"username": "peer", "file": "Music/Album/01 - Alpha.flac"}]}
+
+
+_quiet_rows = [{"username": "peer", "file": "Music/Album/01 - Alpha.flac"}]
+_quiet = QuietNowSlsk(tempfile.mkdtemp(prefix="mlo-cancel2-"), _quiet_rows)
+_hits, _errs, _skip = soulseek_auto._search_queries(
+    _quiet, ["q"], 60, cancel_check=lambda: False)
+assert len(_hits) == 1 and _hits[0][1]["responses"] == _quiet_rows, _hits
 
 # --------------------------------------------------------------------------- #
 # 5. The sequential fallback query, and the `no_logs` prompt a CD release whose

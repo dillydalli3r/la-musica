@@ -1502,3 +1502,211 @@ _res = imports.finish_album(DIG_ALBUM, DIG_CFG)
 assert _res["settled"]["source"]["state"] in ("present", "written", "asked"), _res["settled"]
 assert _res["settled"]["lyrics"]["state"] == "no-fetch", _res["settled"]
 shutil.rmtree(DIG_MF, ignore_errors=True)
+
+# --------------------------------------------------------------------------- #
+# A release-driven import fills the album's OWN identity (the owner's ask)
+# --------------------------------------------------------------------------- #
+# "IF a specific release is being imported (not just download best behavior),
+# the app should auto fill relevant info on it (like the bitrate, country and
+# mediatype like how other albums have). If a best downloader behavior /
+# auto-import download finishes and verifies a download of a good release,
+# right after that it should also auto-fill this info."
+#
+# The three fields an album's readout shows, and where each one comes from:
+#
+#   country      RELEASECOUNTRY — MusicBrainz's own release events;
+#   mediatype    MEDIA          — the medium MusicBrainz states for the release
+#                                 (a pressing can be Vinyl, SACD, SHM-CD, Web…);
+#   bitrate      NOT a tag at all: the format/bitrate half of the card and of
+#                the album page is the audio's own tech (`server.tagcache` reads
+#                mutage/ffprobe: codec, bitrate, depth, rate), which every
+#                reader has the moment a file is readable — so the import has
+#                nothing to write for it and this suite asserts the READOUT.
+#
+# What an import must therefore do is write the RELEASE's identity, from the
+# release payload it already holds (the edition the user picked, or the pressing
+# the job downloaded and verified) — no MusicBrainz request of its own — and
+# fill only: a medium, a country or an id the file already carries is the user's.
+print("== a release's own identity, at import time ==")
+
+import json  # noqa: E402
+
+from server import library as _lib  # noqa: E402
+
+IDENT_MF = os.path.join(ROOT, "identity_music")
+os.makedirs(IDENT_MF, exist_ok=True)
+IDENT_CFG = {"music_folder": IDENT_MF, "import_auto_scripts": False,
+             "import_scripts": [], "advisory_auto_fetch": False,
+             "metadata_auto_fetch": False, "cover_auto_fetch": False,
+             "rym_links_auto": False, "instrumental_auto_fetch": False,
+             "genre_autofill": False}
+
+
+def ident_release(n, media, country, catalog="", label="Sire",
+                  countries=None, date="1980-10-08"):
+    """A MusicBrainz release payload in the shape `release_lookup` returns."""
+    return {
+        "id": f"{n:08d}-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+        "title": "Remain in Light",
+        "date": date,
+        "originaldate": "1980",
+        "country": country,
+        "countries": countries if countries is not None
+                     else [{"code": country, "date": date}],
+        "status": "Official",
+        "medium": media,
+        "medium_formats": [media],
+        "label": label,
+        "catalog_number": catalog or f"CAT-{n}",
+        "barcode": f"00000000000{n}",
+        "release_group_id": f"{n:08d}-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
+        "release_type": "album",
+        "primary_type": "Album",
+        "secondary_types": [],
+        "artists": [{"name": "Talking Heads",
+                     "mbid": "a94a7155-c79d-4409-9fcf-220cb0e4dc3a"}],
+        "medium_count": 1,
+        "media": [{"disc": 1, "position": i, "title": f"Track {i}",
+                   "recording_mbid": f"{n:08d}-cccc-4ccc-8ccc-cccccccccc{i:02d}"}
+                  for i in (1, 2)],
+    }
+
+
+def ident_album(name, track_tags=()):
+    """A real two-track FLAC album (the app's own tag layer reads it back)."""
+    folder = os.path.join(IDENT_MF, "Artists", "Talking Heads", name)
+    os.makedirs(folder, exist_ok=True)
+    paths = []
+    for i in (1, 2):
+        path = os.path.join(folder, f"1-0{i} - Track {i}.flac")
+        wav = path + ".wav"
+        with wave.open(wav, "w") as w:
+            w.setnchannels(2)
+            w.setsampwidth(2)
+            w.setframerate(44100)
+            w.writeframes(b"\x00\x00\x00\x00" * (44100 * 2))
+        subprocess.run([FLAC_EXE, "-s", "-f", "-8", "-o", path, wav],
+                       check=True, capture_output=True)
+        os.remove(wav)
+        from mutagen.flac import FLAC
+        f = FLAC(path)
+        for k, v in (("TITLE", f"Track {i}"), ("ARTIST", "Talking Heads"),
+                     ("ALBUMARTIST", "Talking Heads"), ("ALBUM", "Remain in Light"),
+                     ("TRACKNUMBER", str(i)), ("DISCNUMBER", "1")):
+            f[k] = [v]
+        for tag, value in (track_tags if i == 1 else ()):
+            f[tag] = [value]
+        f.save()
+        paths.append(path)
+    return folder, paths
+
+
+def ident_tags(path):
+    from mlo.audio import AudioFile
+    af = AudioFile(path)
+    assert af.audio is not None, f"unreadable fixture {path}"
+    return {t: str(af.get_tag(t) or "") for t in
+            ("MEDIA", "RELEASECOUNTRY", "CATALOGNUMBER", "LABEL", "RELEASESTATUS",
+             "DATE", "MUSICBRAINZ_ALBUMID")}
+
+
+# ---- (1) the specific release the import is FOR ------------------------------
+# The edition the user picked: the medium, the country and the release's own
+# catalogue number land while the album is still the folder that arrived.
+LATEST = ident_release(3, "SHM-CD", "JP", catalog="WPCR-13292")
+album_dir, album_files = ident_album("Remain in Light (2009)")
+res = imports.finish_album(album_dir, IDENT_CFG, release=LATEST)
+assert res["release_identity"] == {"written": 2, "skipped": 0, "failed": 0}, \
+    res["release_identity"]
+got = ident_tags(album_files[0])
+assert got["MEDIA"] == "SHM-CD", got
+assert got["RELEASECOUNTRY"] == "JP", got
+assert got["CATALOGNUMBER"] == "WPCR-13292" and got["LABEL"] == "Sire", got
+assert got["RELEASESTATUS"] == "Official" and got["DATE"] == "1980-10-08", got
+assert got["MUSICBRAINZ_ALBUMID"] == LATEST["id"], got
+assert ident_tags(album_files[1]) == got, "every track of the album, not just one"
+# …and the album READOUT is what the reader sees: the pressing, then the audio's
+# own format/bitrate (the encoding half is measured, never written).
+row = _lib.build_album(album_dir, dict(IDENT_CFG, music_folder=IDENT_MF))
+assert row["media"] == "SHM-CD", row["media"]
+assert row["meta"]["RELEASECOUNTRY"] == "JP" and row["meta"]["MEDIA"] == "SHM-CD", row["meta"]
+tech = row["tracks"][0]["tech"]
+assert tech.get("codec") == "FLAC" and tech.get("bitrate") and \
+    tech.get("bits_per_sample") == 16 and tech.get("sample_rate") == 44100, tech
+
+# A SECOND import of the same album writes nothing at all: every slot is filled
+# (the fill is not a rewrite), and it costs no MusicBrainz request either —
+# the release is in hand.
+again = imports.finish_album(album_dir, IDENT_CFG, release=LATEST)
+assert again["release_identity"] == {"written": 0, "skipped": 2, "failed": 0}, \
+    again["release_identity"]
+
+# ---- (2) a value that is already there is the USER's -------------------------
+# The shipped MEDIA default and a catalogue number the user typed are kept, the
+# release fills only what is empty — the app's writer rule, which is what makes
+# an import safe on an album somebody has already edited.
+KEPT = ident_release(4, "Vinyl", "DE", catalog="SHOULD-NOT-LAND")
+kept_dir, kept_files = ident_album("Remain in Light (kept)",
+                                   track_tags=(("MEDIA", "CD"),
+                                               ("CATALOGNUMBER", "MINE"),
+                                               ("RELEASECOUNTRY", "FR"),
+                                               ("LABEL", "My Label")))
+kept = imports.finish_album(kept_dir, IDENT_CFG, release=KEPT)
+kept_tags = ident_tags(kept_files[0])
+# BOTH files gain a slot (the status, the date and the release id), while every
+# value already there is untouched — "written" counts files, as the genre stamp
+# beside it does.
+assert kept["release_identity"]["written"] == 2, kept["release_identity"]
+assert kept_tags["MEDIA"] == "CD", kept_tags
+assert kept_tags["CATALOGNUMBER"] == "MINE", kept_tags
+assert kept_tags["LABEL"] == "My Label", kept_tags
+# RELEASECOUNTRY is the one release tag the app WIDENS rather than fills — a
+# country the release does not state keeps its value, and nothing here may
+# replace one country with another (see mlo.autotag._country_upgrade).
+assert kept_tags["RELEASECOUNTRY"] == "FR", kept_tags
+# the slots nobody had still land, so "kept" is not "left alone entirely"
+assert kept_tags["RELEASESTATUS"] == "Official" and kept_tags["DATE"] == "1980-10-08", kept_tags
+
+# …and the SAME rule holds for the country the release DOES state, as the
+# server writes it: widening, never replacing (mlo.autotag's own rule).
+WIDE = ident_release(5, "CD", "US", countries=[{"code": "US"}, {"code": "CA"}])
+wide_dir, wide_files = ident_album("Remain in Light (wide)",
+                                   track_tags=(("RELEASECOUNTRY", "US"),))
+imports.finish_album(wide_dir, IDENT_CFG, release=WIDE)
+assert ident_tags(wide_files[0])["RELEASECOUNTRY"] == "US; CA", \
+    ident_tags(wide_files[0])
+
+# ---- (3) the pressing that LANDED, not the one that was asked for ------------
+# The add recorded a framework album for the US CD ("Add to library"), the walk
+# landed a different pressing, and the import is handed THE RELEASE IT FETCHED
+# (`server.soulseek_auto._import` → `finish_album(release=…)`). The album's own
+# record still names the asked-for edition — the framework marker and the
+# release manifest — so a writer reading those instead of the payload in hand
+# would stamp the wrong pressing.
+ASKED = ident_release(6, "CD", "US", catalog="ASKED-CAT")
+LANDED = ident_release(7, "12\" Vinyl", "GB", catalog="LANDED-CAT")
+landed_dir, landed_files = ident_album("Remain in Light (landed)")
+mlo_paths.save_pending(landed_dir, {
+    "pending": True, "release_id": ASKED["id"], "release_group_id": ASKED["release_group_id"],
+    "title": ASKED["title"], "artist": "Talking Heads", "year": "1980",
+    "date": ASKED["date"], "release_type": "Album", "wish_id": 11,
+    "waiting_for": "a verified Soulseek download"})
+mlo_paths.save_expected_tracks(landed_dir, ASKED["id"], [
+    {"disc": 1, "position": i, "title": f"Track {i}",
+     "recording_mbid": f"asked-rec-{i}"} for i in (1, 2)])
+landed = imports.finish_album(landed_dir, IDENT_CFG, release=LANDED)
+landed_tags = ident_tags(landed_files[0])
+assert landed["release_identity"] == {"written": 2, "skipped": 0, "failed": 0}, \
+    landed["release_identity"]
+assert landed_tags["MEDIA"] == "12\" Vinyl", landed_tags
+assert landed_tags["RELEASECOUNTRY"] == "GB", landed_tags
+assert landed_tags["CATALOGNUMBER"] == "LANDED-CAT", landed_tags
+assert landed_tags["MUSICBRAINZ_ALBUMID"] == LANDED["id"], landed_tags
+assert ASKED["id"] not in json.dumps(landed_tags), \
+    f"the asked-for pressing must not appear anywhere: {landed_tags}"
+# the marker is the framework album's, and the import clears it as it does on
+# every path — the point here is only that it was never the SOURCE of the facts
+assert not mlo_paths.load_pending(landed_dir), \
+    "the framework marker is cleared by the import that filled the album"
+shutil.rmtree(IDENT_MF, ignore_errors=True)
+print("release identity: all assertions passed")

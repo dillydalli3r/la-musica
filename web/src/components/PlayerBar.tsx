@@ -19,7 +19,7 @@ import { AdvisoryMark } from "./Badges";
 import StarRating from "./StarRating";
 import { ratingOf, useRatings, useSetRating } from "../lib/ratings";
 import VolumePct from "./VolumePct";
-import { applyEq, applyReplayGain, attachAnalyser, audibleLatencySec, resumeAnalyser } from "../lib/analyser";
+import { applyEq, applyReplayGain, applyVolume, attachAnalyser, audibleLatencySec, resumeAnalyser } from "../lib/analyser";
 import { eqApplyRefusal } from "../lib/eqNodes";
 import FavHeart from "./FavHeart";
 import NowPlayingView from "./NowPlayingView";
@@ -204,6 +204,83 @@ export default function PlayerBar() {
     setPlaying(null);
   };
 
+  /** The element's own `play` — the half `handlePause` was missing.
+   *
+   *  `playing` is written optimistically when a row or the transport is
+   *  pressed, and a track change pauses the outgoing element on the way in, so
+   *  the pause event alone can leave the store saying "paused" about a track
+   *  that is playing (the same-track replay: press play on the song already
+   *  loaded, and the load's own pause clears the state the element then
+   *  immediately makes true again). The element is the only thing that knows
+   *  when sound really starts, so its event settles the store — in BOTH
+   *  directions. The iOS session bridge follows the same state, so a store
+   *  stuck at `null` is not a cosmetic bug there: it is the app telling the
+   *  shell to hand the audio session back while the song plays.
+   *
+   *  Only the track the queue is ON may claim the state: a press that moved on
+   *  while this element was still loading must not drag the bar back to it. */
+  const handlePlay = (el: HTMLMediaElement) => {
+    const p = el === videoRef.current
+      ? pathOnVideo.current
+      : el === aRef.current ? pathOnA.current : pathOnB.current;
+    if (!p) return;
+    const st = useStore.getState();
+    if (st.queue[st.index]?.path !== p) return;
+    setPlaying(p);
+  };
+
+  /** Start an element, and let a REFUSAL be visible.
+   *
+   *  Every play() in this file used to be `play().catch(() => {})`. A refused
+   *  play — iOS refusing the app's audio session, a decoder that cannot open
+   *  the stream, a policy — then produced silence with the bar still claiming
+   *  the track was playing, which is the report "pressing play just pauses
+   *  immediately" with no reason attached. The rejection IS the report, so it
+   *  clears the claim it could not honour and says why. */
+  const startElement = (el: HTMLMediaElement, path?: string | null) => {
+    void el.play().catch((e: unknown) => {
+      const err = e as { name?: string } | null;
+      // AbortError is a play superseded by another load or a pause — the
+      // element events tell that story, and it is not a failure.
+      if (err?.name === "AbortError") return;
+      const st = useStore.getState();
+      if (path && st.playing === path) setPlaying(null);
+      toast.error(
+        `Playback was refused${path ? ` for “${st.queue.find((q) => q.path === path)?.title || "this track"}”` : ""}` +
+        ` — ${err?.name || "the browser said no"}. It usually means the app has no audio session to play into.`
+      );
+    });
+  };
+
+  /** The element's own `error` — the only witness that a stream never loaded.
+   *
+   *  None of the player's elements listened for this, so a refused stream (a
+   *  401 from an expired session, a 409 while an import holds the file, a
+   *  container iOS cannot decode) was silence with no explanation anywhere:
+   *  `play()` rejects and the bar keeps its optimistic "playing". Reported
+   *  once, for the track the queue is really on. */
+  const handleMediaError = (e: SyntheticEvent<HTMLMediaElement>) => {
+    const el = e.currentTarget;
+    const p = el === videoRef.current
+      ? pathOnVideo.current
+      : el === aRef.current ? pathOnA.current : pathOnB.current;
+    const err = el.error;
+    // MEDIA_ERR_ABORTED is what a deliberate src change leaves behind — the
+    // video branch clears the pair's src on purpose — and it says nothing
+    // happened.
+    if (!p || !err || err.code === 1) return;
+    const st = useStore.getState();
+    if (st.queue[st.index]?.path !== p) return;
+    if (st.playing === p) setPlaying(null);
+    const why = err.code === 2 ? "the stream could not be fetched"
+      : err.code === 3 ? "the audio could not be decoded"
+      : err.code === 4 ? "this format cannot be played here"
+      : "the stream failed";
+    toast.error(
+      `Could not play “${st.queue.find((q) => q.path === p)?.title || "this track"}” — ${why}.`
+    );
+  };
+
   // Coming back from a lock screen, a call, or another app: the OS may have
   // stopped the element while the page was not running to hear it — a frozen
   // webview receives no events of its own, so the handler above never fires and
@@ -216,7 +293,12 @@ export default function PlayerBar() {
       const p = useStore.getState().playing;
       if (!p) return;
       const el = elementFor(p);
-      if (!el || el.paused || el.ended) setPlaying(null);
+      // `readyState > 1` is what makes "paused" mean "it stopped" rather than
+      // "it has not started yet": a track whose bytes are still being fetched
+      // (0 = nothing, 1 = metadata only) is paused by definition, and the
+      // optimistic state a press just wrote is the honest one until the
+      // element says otherwise.
+      if (!el || (el.paused && el.readyState > 1) || el.ended) setPlaying(null);
     };
     document.addEventListener("visibilitychange", reconcile);
     // Some shells restore a page from the back/forward cache without a
@@ -410,8 +492,12 @@ export default function PlayerBar() {
         });
       }
       ms.setActionHandler("play", () => {
-        media()?.play();
-        setPlaying(current.path);
+        // A lock-screen / CarPlay press: the OS asked, so the request is the
+        // user's, but the element still gets the final word (a refusal clears
+        // the state instead of leaving the widget claiming sound).
+        const el = media();
+        if (el) startElement(el, current.path);
+        else setPlaying(current.path);
       });
       ms.setActionHandler("pause", () => {
         media()?.pause();
@@ -702,9 +788,9 @@ export default function PlayerBar() {
       const v = videoRef.current;
       if (v) {
         v.playbackRate = speed;
-        v.volume = vol;
+        applyVolume(v, vol);
         applyElGain(v, true);
-        v.play().catch(() => {});
+        startElement(v, track.path);
       }
       const gen = rgGen.current;
       void rgFor(track.path).then((r) => {
@@ -721,7 +807,7 @@ export default function PlayerBar() {
       const el = audio();
       if (el) {
         el.playbackRate = speed;
-        el.volume = vol;
+        applyVolume(el, vol);
         // The preloaded element fired loadedmetadata while IDLE (ignored by
         // onMeta) and won't fire again — read its duration here or the seek
         // bar stays at 0:00 for the whole track.
@@ -785,7 +871,7 @@ export default function PlayerBar() {
       // installed is temporary: keep asking, and land the value on this
       // element while it plays rather than leaving the track unnormalised.
       if (rgGen.current === gen && r?.pending) watchRgPending(track.path);
-      el.play().catch(() => {});
+      startElement(el, track.path);
     })();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [index, queueId, playToken]);
@@ -856,9 +942,11 @@ export default function PlayerBar() {
 
   // Global volume: the stored value is re-applied to the ACTIVE element
   // (<video> for music videos, <audio> otherwise) whenever it changes.
+  // `applyVolume` puts it on the WebAudio graph when the element has one — the
+  // only place iOS hears it at all (HTMLMediaElement.volume is read-only there).
   useEffect(() => {
     const el = media();
-    if (el) el.volume = vol;
+    if (el) applyVolume(el, vol);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [vol, current?.path, isVideo]);
 
@@ -995,15 +1083,7 @@ export default function PlayerBar() {
       if (code === "Space") {
         if (document.querySelector("[data-lrc-editor]")) return;
         e.preventDefault();
-        const a = media();
-        if (!a || !current) return;
-        if (playing) {
-          a.pause();
-          setPlaying(null);
-        } else {
-          a.play().catch(() => {});
-          setPlaying(current.path);
-        }
+        togglePlay();
       } else if (code === "BracketLeft") {
         if (document.querySelector("[data-lrc-editor]")) return; // the lyrics editor owns its own speed bindings
         setSpeed((s) => Math.max(0.5, Math.round((s - 0.25) * 100) / 100));
@@ -1143,7 +1223,7 @@ export default function PlayerBar() {
         // event (currentTime back at 0) records this one too.
         counted.current = { el: null, path: null };
         m.currentTime = 0;
-        m.play().catch(() => {});
+        startElement(m, current?.path);
       }
       return;
     }
@@ -1175,13 +1255,13 @@ export default function PlayerBar() {
       setDuration(d !== undefined && Number.isFinite(d) ? d : 0);
       if (el) {
         el.playbackRate = speed;
-        el.volume = vol;
+        applyVolume(el, vol);
         // This element was loaded by the preload, which installed the next
         // track's gain on it — re-assert it from the cache first anyway: the
         // handover is the one place a track starts with no load step in
         // between, so a cold cache entry here would be an audible burst.
         applyElGain(el, true);
-        el.play().catch(() => {});
+        startElement(el, queue[next]?.path);
       }
       return;
     }
@@ -1216,8 +1296,12 @@ export default function PlayerBar() {
       a.pause();
       setPlaying(null);
     } else {
-      a.play().catch(() => {});
+      // The state is optimistic (the button must answer the press), and the
+      // element's own events are what settle it: `play` for a start, and a
+      // REFUSED play() clears it again with the reason instead of leaving a
+      // bar that claims a track that never began.
       setPlaying(current.path);
+      startElement(a, current.path);
     }
   };
 
@@ -1229,10 +1313,10 @@ export default function PlayerBar() {
         {/* crossOrigin keeps the streams CORS-clean so the WebAudio visualizer
             can read them; attachAnalyser resumes the context it opens, so the
             very first play is not read from a suspended (all-zero) graph */}
-        <audio ref={aRef} hidden crossOrigin="anonymous" onTimeUpdate={onTime} onLoadedMetadata={onMeta} onEnded={handleEnded} onPause={handlePause}
-          onPlay={(e) => { attachAnalyser(e.currentTarget); applyElGain(e.currentTarget); countPlay(e.currentTarget); }} />
-        <audio ref={bRef} hidden crossOrigin="anonymous" onTimeUpdate={onTime} onLoadedMetadata={onMeta} onEnded={handleEnded} onPause={handlePause}
-          onPlay={(e) => { attachAnalyser(e.currentTarget); applyElGain(e.currentTarget); countPlay(e.currentTarget); }} />
+        <audio ref={aRef} hidden crossOrigin="anonymous" onTimeUpdate={onTime} onLoadedMetadata={onMeta} onEnded={handleEnded} onPause={handlePause} onError={handleMediaError}
+          onPlay={(e) => { attachAnalyser(e.currentTarget); applyElGain(e.currentTarget); countPlay(e.currentTarget); handlePlay(e.currentTarget); }} />
+        <audio ref={bRef} hidden crossOrigin="anonymous" onTimeUpdate={onTime} onLoadedMetadata={onMeta} onEnded={handleEnded} onPause={handlePause} onError={handleMediaError}
+          onPlay={(e) => { attachAnalyser(e.currentTarget); applyElGain(e.currentTarget); countPlay(e.currentTarget); handlePlay(e.currentTarget); }} />
 
         {/* full layout from tablet width up: cover+title / centered seek /
             actions+volume, balanced 1fr-auto-1fr so the seek bar sits dead
@@ -1824,7 +1908,7 @@ export default function PlayerBar() {
                 // A transcode-fallback remount creates a fresh element with
                 // default volume/rate — re-apply the stored ones, and attach
                 // it to the analyser (the visible meter is the video's).
-                e.currentTarget.volume = vol;
+                applyVolume(e.currentTarget, vol);
                 e.currentTarget.playbackRate = speed;
                 attachAnalyser(e.currentTarget);
                 // ... and install this video's ReplayGain before its first

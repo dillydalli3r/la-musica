@@ -1143,6 +1143,23 @@ DEFAULT_CONFIG = {
     "soulseek_auto_physical_queries": ["catalognumber", "barcode"],
     "soulseek_auto_cd_queries": ["catalognumber"],
     "soulseek_auto_digital_queries": ["artist album year"],
+    # MBID-DRIVEN QUERIES — ON by default (the owner's ask): a release is
+    # searched by what a PEER's folder can literally carry, not only by its
+    # pressing traits — the release's own MusicBrainz id, the recording ids
+    # MusicBrainz states for its tracks, and each of those tracks' own
+    # "artist title". A peer that names the ids, or that holds exactly the
+    # album's tracks under a title the traits never match, is otherwise
+    # unreachable from a catalog-number query. They go out in the SAME parallel
+    # batch as the configured templates (one search window, never a second
+    # wait), and the scoring is unchanged: a query that turns up a folder with
+    # the whole album wins like any other.
+    "soulseek_auto_mbid_queries": True,
+    # How many of the release's tracks are chased that way — each one by its
+    # recording MBID and by its own artist + title, in disc/position order.
+    # Four covers what this exists for (the top of the tracklist, which is what
+    # a folder named after the album's own track order will hold) without
+    # asking the network one question per track of a thirty-track box set.
+    "soulseek_auto_mbid_tracks": 4,
     # Every disc's .log must score at least this (Logchecker 0-100) before
     # the full album is downloaded.
     "soulseek_auto_log_min_score": 100,
@@ -1290,7 +1307,15 @@ DEFAULT_CONFIG = {
     # A background worker re-searches Soulseek for each wish on an interval
     # and auto-imports the release the moment a verified match appears.
     "wishes_enabled": True,
-    "wishes_interval_hours": 6,
+    # ONE HOUR between the searches of ONE release (the owner's own cadence for
+    # "add to library" / best-pick release groups): often enough that a copy
+    # that shows up today is taken today, quiet enough that a release the
+    # network has nothing for is not hammered. The interval is the gap between
+    # two ATTEMPTS, not between two searches of the network: one attempt walks
+    # EVERY ranked candidate of the release (spec R150-R152), each with its own
+    # bounded search window, so an hour between attempts is not an hour between
+    # editions.
+    "wishes_interval_hours": 1,
     # The retry policy (one place: server/wishes' "Retry policy" section).
     # TRANSIENT failures — a refused/absent slskd, a MusicBrainz outage, a
     # failed verification — are retried with backoff: the wait doubles per
@@ -1751,6 +1776,9 @@ _INT_RANGES = {
     "soulseek_fallback_candidates": (1, 10),
     "soulseek_search_timeout_seconds": (5, 300),
     "soulseek_auto_response_limit": (5, 500),
+    # How many of a release's tracks the MBID-driven queries chase (see the key
+    # in DEFAULT_CONFIG): at least one, and never one per track of a box set.
+    "soulseek_auto_mbid_tracks": (1, 10),
     "soulseek_search_concurrency": (1, 8),
     "soulseek_candidate_slots": (1, 20),
     "wishes_interval_hours": (1, 168),

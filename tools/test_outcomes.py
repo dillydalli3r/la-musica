@@ -220,7 +220,8 @@ def _candidate():
     }]
 
 
-def stub_search(slsk_, queries, wait_s, usable=None, response_limit=0):
+def stub_search(slsk_, queries, wait_s, usable=None, response_limit=0,
+cancel_check=None):
     PIPE.search_calls += 1
     return ([("q", {"responses": list(PIPE.responses)})], [], 0)
 

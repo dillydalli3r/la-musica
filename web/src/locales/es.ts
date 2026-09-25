@@ -72,6 +72,12 @@ export default {
   "menu.runAll": "Ejecutar los {count} scripts",
   "menu.runAllTitle": "¿Ejecutar los {count} scripts?",
   "menu.runAllHint": "Se ejecutan sobre la selección actual, en este orden:",
+  "menu.searchTrackSoulseek": "Buscar esta pista en Soulseek",
+  "menu.searchTrackSoulseekHint": "Busca esta única canción en la red por su id de grabación de MusicBrainz — no se encola nada salvo que descargues un archivo",
+  "menu.searchTrackNoMbid": "Esta pista no lleva id de grabación de MusicBrainz — etiquétala antes, o busca por texto en la página Soulseek",
+  "soulseek.mbid.chip": "Buscar por MBID",
+  "soulseek.mbid.hint": "Eso parece un id de MusicBrainz — al pulsar Buscar se busca esa única pista: su artista y título, su álbum y el propio id, todo a la vez.",
+  "soulseek.mbid.label": "Búsqueda por MBID: {label}",
   "menu.openTrackPage": "Abrir página de la pista",
   "menu.openTrackPageHint": "Abre la página propia de esta pista — etiquetas, datos técnicos y letra",
   "menu.downloadVideo": "Descargar videoclip",
@@ -480,4 +486,19 @@ export default {
   "cookies.keptHosts": "Solo se conservan las cookies de {hosts}: todo lo demás del export se descarta.",
 
   "cookies.sectionTitle": "Inicios de sesión con cookies — importar un cookies.txt",
+
+  // —— Página Biblioteca: el par alfabético de la barra — un campo de nombre
+  // y el índice A–Z. Dos controles sobre un filtro (las palabras escritas y
+  // la letra elegida), aplicado a la lista que dibujan las pestañas de vista.
+  "library.az.namePlaceholder": "Filtrar por nombre",
+  "library.az.nameAria": "Filtrar la lista por nombre",
+  "library.az.nameHint": "Título del álbum, nombre del artista o título de la pista: los acentos no cuentan, así que «asgeir» encuentra «Ásgeir». Esto acota la lista que ya dibujan las pestañas de vista.",
+  "library.az.nameClear": "Borrar el filtro por nombre",
+  "library.az.button": "A–Z",
+  "library.az.railAria": "Filtrar la lista por letra",
+  "library.az.railTitle": "Salta a una letra: cada una indica cuántos elementos de esta vista empiezan por ella",
+  "library.az.menuTitle": "Empieza por",
+  "library.az.clear": "Mostrar todo",
+  "library.az.letterHint": "{letter} — {n} en esta vista",
+  "library.az.empty": "Aquí no coincide nada: borra la búsqueda, el campo de nombre, la letra A–Z o el menú Filtro.",
 } as const;

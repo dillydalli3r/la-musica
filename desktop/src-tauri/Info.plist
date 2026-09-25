@@ -45,6 +45,32 @@
 	<dict>
 		<key>NSAllowsArbitraryLoadsInWebContent</key>
 		<true/>
+		<!--
+		  The blanket key as well, and the reason is MEDIA. `…InWebContent`
+		  covers what the web content process fetches — the page, its scripts,
+		  its XHRs — but an <audio>/<video> element's bytes are loaded by the
+		  media stack, which WebKit runs outside that process on modern iOS, and
+		  ATS decisions there read this key. With only the web-content key set,
+		  a phone could load the whole app and then fail every single track with
+		  no error the page can see: "pressing play just pauses it immediately"
+		  is the shape that report takes. This build is a sideloaded client for
+		  a server the user runs themselves over plain http on an address only
+		  they know; there is no certificate to validate and no App Store review
+		  to answer to.
+		-->
+		<key>NSAllowsArbitraryLoads</key>
+		<true/>
+		<!--
+		  iOS 14+ asks the user before an app may talk to devices on the local
+		  network, and the prompt only exists if the app declares why it wants
+		  to. Without this key the permission cannot even be requested, so a
+		  server on the LAN (the normal case) is unreachable — while a Tailscale
+		  address, which is not "local network" traffic, still works, which is
+		  what makes the failure look like a bug in the app rather than a
+		  missing prompt.
+		-->
+		<key>NSLocalNetworkUsageDescription</key>
+		<string>la musica connects to the la musica server you run on your own network — on this device, on your LAN, or through a VPN.</string>
 	</dict>
 
 	<!--

@@ -156,7 +156,8 @@ class Pipeline:
         with self._lock:
             self.starved.append(stage)
 
-    def search(self, slsk_, queries, wait_s, usable=None, response_limit=0):
+    def search(self, slsk_, queries, wait_s, usable=None, response_limit=0,
+    cancel_check=None):
         job_id, label, t0 = self._enter("searching")
         try:
             self._gate("searching")
@@ -566,7 +567,8 @@ with Patch(auto, load_config=lambda: dict(CFG),
     hold = threading.Event()
     PIPE.expect_two = None
 
-    def _blocking_search(slsk_, queries, wait_s, usable=None, response_limit=0):
+    def _blocking_search(slsk_, queries, wait_s, usable=None, response_limit=0,
+    cancel_check=None):
         hold.wait(10)
         return ([("q", {"responses": []})], [], 0)
 
@@ -610,7 +612,8 @@ with Patch(auto, load_config=lambda: dict(CFG),
     # the state the old code walked into.
     hold2 = threading.Event()
 
-    def _blocking_search2(slsk_, queries, wait_s, usable=None, response_limit=0):
+    def _blocking_search2(slsk_, queries, wait_s, usable=None, response_limit=0,
+    cancel_check=None):
         hold2.wait(10)
         return ([("q", {"responses": []})], [], 0)
 
@@ -846,6 +849,14 @@ FIXTURE_WISHES = [
      "queries": [], "attempts": 0, "added_at": 10.0, "updated_at": 10.0,
      "last_search": 0.0, "last_error": "", "album_path": "",
      "source": "musicbrainz", "pending": True},
+    # A wish whose ATTEMPT failed while the store still owns its next attempt
+    # (`wishes_max_attempts` 0 = never give up, the shipped policy, so
+    # `wishes.is_terminal` is false): the release is still being searched by the
+    # worker, so it belongs in the BACKGROUND with the others that are still
+    # searched — Failed is for a release nobody will look for again. The row
+    # keeps the attempt's own sentence ("failed this attempt — searched again
+    # automatically at …"). Before this it was staged `failed` and read as a
+    # give-up (the owner's report).
     {"id": 3, "release_mbid": "33333333", "title": "Gone", "artist": "Solo",
      "year": "1999", "status": "failed", "note": "", "target_dir": "",
      "queries": [], "attempts": 4, "added_at": 11.0, "updated_at": 12.0,
@@ -1024,6 +1035,19 @@ with Patch(auto, jobs=lambda: [dict(j) for j in FIXTURE_JOBS],
     assert ended and ended["stage"] == "completed", ended
     assert "Imported into the library" in ended["note"], ended
 
+    # A wish whose ATTEMPT failed while the store still owns its next attempt
+    # belongs where every other release still being searched belongs — the
+    # Background — and never in Failed, where a release nobody will search again
+    # goes. The row still says the attempt failed, and when the next search is.
+    failed_attempt = wish_row(3)
+    assert failed_attempt, "the wish whose attempt failed is still listed"
+    assert failed_attempt["stage"] == "background", failed_attempt
+    assert "failed this attempt — searched again automatically at" in failed_attempt["note"], \
+        failed_attempt["note"]
+    assert not [r for r in fixture["sections"]["failed"] if r.get("wish_id") == 3], \
+        [r["id"] for r in fixture["sections"]["failed"]]
+    assert failed_attempt["cancelable"] and not failed_attempt["clearable"], failed_attempt
+
     # ...and a release whose album an IMPORT is holding right now is IN
     # PROGRESS, whatever the settling stage says: the download is done, the
     # release is not, and the row used to flicker through Completed for the
@@ -1063,6 +1087,245 @@ elif ui.returncode == 2:
           + (ui.stderr.strip().splitlines() or [""])[0])
 else:
     raise AssertionError("the page render check failed:\n" + ui.stdout + ui.stderr)
+
+# --------------------------------------------------------------------------- #
+# 8. a failed ATTEMPT is not a give-up, and a settled failed JOB is not a row
+#    when its wish is still there
+# --------------------------------------------------------------------------- #
+# The owner's report, both halves of it: an auto-import download failed INSIDE
+# the pipeline (screenshot: "Evil Empire — Rage Against the Machine", note
+# "Gave up — retry it by hand once the cause is fixed", reason "Every candidate
+# was rejected (1 attempt(s)): MisterSeen: download incomplete: 11 file(s)
+# missing/timed out.") and the release appeared in the queue's FAILED section
+# although the app was still searching it. Two rows put it there:
+#
+#   * the WISH's own row — a `failed` wish the store still owns the next
+#     attempt of (`wishes.is_terminal` false) was staged "failed" like a spent
+#     cap, so a release being searched right now read as a give-up;
+#   * the JOB's row — `build_queue` claims ONE job per wish (`jobs_by_wish`
+#     keeps the LAST registered), so every older settled job of the same wish
+#     leaked as a standalone Failed row beside it.
+#
+# The wishes and jobs below are the two cases that must keep their Failed row
+# (a spent cap, and a job with no wish at all), the two that must not (a
+# failed attempt, and the wish's own history), and a job whose wish is really
+# GONE — which nobody else is naming any more, so it keeps its row too.
+FAIL_CFG = dict(CFG, wishes_max_attempts=2)
+FAIL_ERR = ("Every candidate was rejected (1 attempt(s)): MisterSeen: "
+            "download incomplete: 11 file(s) missing/timed out.")
+FAIL_WISHES = [
+    {"id": 21, "release_mbid": "21212121", "title": "Evil Empire",
+     "artist": "Rage Against the Machine", "year": "1996", "status": "failed",
+     "note": "", "target_dir": "", "queries": [], "attempts": 1,
+     "added_at": 20.0, "updated_at": 21.0, "last_search": real_time.time(),
+     "last_error": FAIL_ERR, "album_path": "", "source": "musicbrainz",
+     "candidates": [
+         {"mbid": "21212121", "title": "Evil Empire", "score": 900,
+          "catalog_numbers": ["EPC 481026"]},
+         {"mbid": "21212122", "title": "Evil Empire (Japan)", "score": 800,
+          "catalog_numbers": ["ESCA 6500"]},
+     ],
+     "candidate": 0},
+    # The CAP is spent: nothing searches this again, so it stays a Failed row.
+    {"id": 22, "release_mbid": "22222222", "title": "Given Up",
+     "artist": "An Artist", "year": "1998", "status": "failed", "note": "",
+     "target_dir": "", "queries": [], "attempts": 2, "added_at": 22.0,
+     "updated_at": 23.0, "last_search": 22.0, "last_error": "it kept failing",
+     "album_path": "", "source": "soulseek"},
+]
+
+
+def _failed_job(jid, title, wish_id, started):
+    return {"id": jid, "state": "error", "stage": "Every candidate was rejected",
+            "stage_key": "failed",
+            "release": {"id": f"dead{jid}", "artist": "An Artist", "title": title},
+            "log": [], "attempts": [], "result": {"error": FAIL_ERR},
+            "confirm": None, "search": None, "progress": None,
+            "wish_id": wish_id, "source": "musicbrainz",
+            "label": f"An Artist — {title}",
+            "started_at": started, "ended_at": started + 1}
+
+
+# Registered OLDEST FIRST, so the LAST one for wish 21 (job 101) is the one
+# `jobs_by_wish` claims — exactly the shape the leak appeared in.
+FAIL_JOBS = [
+    _failed_job(100, "Evil Empire", 21, 30.0),      # the wish's own history
+    _failed_job(101, "Evil Empire", 21, 31.0),      # the claimed one (same wish)
+    _failed_job(102, "Orphan", 999, 32.0),          # a wish that is really gone
+    _failed_job(103, "Interactive", None, 33.0),    # no wish at all
+]
+
+with Patch(wishes, list_wishes=lambda: [dict(w) for w in FAIL_WISHES]), \
+     Patch(auto, jobs=lambda: [dict(j) for j in FAIL_JOBS], queued=lambda: []), \
+     Patch(slsk, ready_albums=lambda *a, **k: []):
+    payload = api_queue.build_queue(FAIL_CFG)
+    fail_sections = payload["sections"]
+
+    def place(rid):
+        return next((name for name, rows in fail_sections.items()
+                     for r in rows if r["id"] == rid), None)
+
+    def row(rid):
+        return next((r for rows in fail_sections.values() for r in rows
+                     if r["id"] == rid), None)
+
+    attempt = row("wish:21")
+    assert place("wish:21") == "background", (place("wish:21"), attempt)
+    assert attempt["stage"] == "background", attempt
+    # …and the row still says the attempt failed, with the next search's stamp.
+    assert attempt["note"].startswith("tried 1 of 2 · "), attempt["note"]
+    assert "failed this attempt — searched again automatically at" in attempt["note"], \
+        attempt["note"]
+    assert "searched again automatically around" not in attempt["note"], \
+        ("the next-search clock is said once, not twice", attempt["note"])
+    assert attempt["reason"] == FAIL_ERR, attempt["reason"]
+    # It is the SAME release: not a second row anywhere else.
+    assert [name for name, rows in fail_sections.items() for r in rows
+            if r["id"] == "wish:21"] == ["background"], \
+        [name for name, rows in fail_sections.items() for r in rows
+         if r["id"] == "wish:21"]
+
+    # The claimed job (101) lends its id to the wish's row and draws none of its
+    # own; the older settled job of the SAME wish (100) — the leak — is gone
+    # too, in every section.
+    assert attempt["job_id"] == 101, attempt
+    assert place("job:101") is None and place("job:100") is None, \
+        {rid: place(rid) for rid in ("job:100", "job:101")}
+
+    # A spent cap is a give-up: it stays in Failed.
+    assert place("wish:22") == "failed", place("wish:22")
+    assert row("wish:22")["clearable"] is True, row("wish:22")
+
+    # A job whose wish is gone, and one that never had a wish (the user's own
+    # interactive run): both keep their Failed row, with the reason.
+    for jid, title in ((102, "Orphan"), (103, "Interactive")):
+        kept = row(f"job:{jid}")
+        assert place(f"job:{jid}") == "failed", (place(f"job:{jid}"), kept)
+        assert title in kept["title"], kept
+        assert "Gave up — retry it by hand once the cause is fixed" in kept["note"], kept
+        assert FAIL_ERR in kept["reason"], kept["reason"]
+    failed_ids = {r["id"] for r in fail_sections["failed"]}
+    assert {"wish:22", "job:102", "job:103"} <= failed_ids, failed_ids
+    assert failed_ids.isdisjoint({"wish:21", "job:100", "job:101"}), failed_ids
+
+print("ok  a failed ATTEMPT stays in Background (with its own sentence) while a "
+      "spent cap stays in Failed, and no settled failed job draws a row for a "
+      "wish that is still there")
+
+# --------------------------------------------------------------------------- #
+# 9. a NEW RUN clears the queue's SETTLED rows — and nothing else
+# --------------------------------------------------------------------------- #
+# The owner's ask ("Ensure sections here are auto-cleared when new jobs /
+# searches / auto-importing / add to library runs"): the finished sections must
+# not survive into the next run. `api_queue.clear_settled_queue` is the same
+# clear the per-section buttons run (scope "finished" — it reuses `queue_clear`),
+# called where work is CREATED: `soulseek_auto.start_job` / `enqueue`, the
+# page-download route, and the wishes worker's pass. What it may take is
+# therefore exactly what `clearable` says, and this pins that from both sides:
+# the settled rows GO, and the live ones — including the BACKGROUND wish and the
+# failure the worker will search again — stay.
+CLEAR_CFG = dict(CFG, wishes_max_attempts=2)
+SETTLED_ID = wishes.add_wish("c0c0c0c0-1111-2222-3333-444444444444",
+                             title="Already In", artist="An Artist",
+                             source="soulseek")["id"]
+wishes.mark_imported(SETTLED_ID, os.path.join(REDIRECT, "Artists", "Already In"))
+GONE_ID = wishes.add_wish("c0c0c0c0-5555-6666-7777-888888888888",
+                          title="Nothing Anywhere", artist="An Artist",
+                          source="soulseek")["id"]
+wishes.mark_not_found(GONE_ID, "nothing out there", 1)
+# …and a wish whose ATTEMPT failed while the store still owns the next one:
+# a Background row, which no clear may take (part 1's rule).
+RETRY_ID = wishes.add_wish("c0c0c0c0-9999-aaaa-bbbb-cccccccccccc",
+                           title="Still Tried", artist="An Artist",
+                           source="soulseek")["id"]
+wishes.mark_failed(RETRY_ID, "peer went offline mid-transfer", 1)
+# …plus a settled JOB of the imported wish: the settled half of the queue.
+_SETTLED_JOBS = [dict(_failed_job(201, "Settled Album", None, 40.0),
+                      state="done", stage="Done", stage_key="completed",
+                      result={"album_path": os.path.join(REDIRECT, "Artists", "Settled"),
+                              "imported": True})]
+
+# The job registry is modelled, not stubbed flat: `queue_clear` takes a
+# settled JOB row away with `soulseek_auto.forget`, so a fixture that kept
+# returning the row would prove nothing. `_forget` is the registry's own answer
+# — the row is gone from the next read.
+_JOBS = {"rows": [dict(j) for j in _SETTLED_JOBS], "forgotten": []}
+
+
+def _forget(jid):
+    _JOBS["forgotten"].append(jid)
+    _JOBS["rows"] = [j for j in _JOBS["rows"] if j.get("id") != jid]
+    return True
+
+
+with Patch(auto, jobs=lambda: [dict(j) for j in _JOBS["rows"]], queued=lambda: [],
+           forget=_forget), \
+     Patch(slsk, ready_albums=lambda *a, **k: []):
+    before_clear = {r["id"]: r for rows in api_queue.build_queue(CLEAR_CFG)["sections"].values()
+                    for r in rows}
+    assert f"wish:{SETTLED_ID}" in before_clear, sorted(before_clear)
+    assert f"wish:{GONE_ID}" in before_clear, sorted(before_clear)
+    assert before_clear[f"wish:{SETTLED_ID}"]["clearable"] is True, before_clear
+    assert before_clear[f"wish:{GONE_ID}"]["clearable"] is True, before_clear
+    assert before_clear[f"wish:{RETRY_ID}"]["clearable"] is False, before_clear
+    cleared = api_queue.clear_settled_queue(CLEAR_CFG)
+    after_clear = {r["id"]: r for rows in api_queue.build_queue(CLEAR_CFG)["sections"].values()
+                   for r in rows}
+    assert cleared >= 2, (cleared, sorted(after_clear))
+    assert f"wish:{SETTLED_ID}" not in after_clear, sorted(after_clear)
+    # The wish NOTHING was found for is NOT taken: it sits in Needs you waiting
+    # for the user's own decision (the section's own Clear is the only thing
+    # that answers it) — the auto-clear is about the two HISTORY sections.
+    gone_row = after_clear.get(f"wish:{GONE_ID}")
+    assert gone_row is not None and gone_row["stage"] == "needs_attention", gone_row
+    assert "job:201" not in after_clear, sorted(after_clear)
+    assert _JOBS["forgotten"] == [201], _JOBS["forgotten"]
+    # The wish the worker still searches is STILL there, still a Background row.
+    retry_row = after_clear.get(f"wish:{RETRY_ID}")
+    assert retry_row is not None and retry_row["stage"] == "background", retry_row
+
+# …and the hook is wired where work is CREATED, not in a page: starting a JOB
+# or queueing a release runs the same clear ITSELF (the auto-import start, a
+# manual grab, the paste box's bulk add, a wish's own candidate), so an add from
+# ANY surface clears them. It runs on its own thread — a job start must not wait
+# on the queue payload's read of slskd — so what is asserted here is the CALL
+# (the rule it runs is the block above, pinned synchronously).
+_CALLS = []
+
+
+def _recorded_clear(cfg=None, before=0.0):
+    # The signature is the real one: the callers pass the cut (`before`) the
+    # clear must honour — only rows already settled when the new run started are
+    # theirs to drop — so a stub without it would swallow the call.
+    _CALLS.append(before)
+    return 0
+
+
+with Patch(api_queue, clear_settled_queue=_recorded_clear), \
+     Patch(auto, jobs=lambda: [], queued=lambda: [], _start_next=lambda: None), \
+     Patch(slsk, ready_albums=lambda *a, **k: []):
+    # `enqueue` is the bulk "Add to queue" path (the paste box, "download all").
+    auto.enqueue(release={"id": "dddddddd-1111-2222-3333-444444444444",
+                          "title": "Fresh Run", "artists": [{"name": "An Artist"}]})
+    # …and `start_job` is every other start: an auto-import, a manual grab, a
+    # wish's own candidate job. Both clear; neither waits for the clear (it runs
+    # on its own thread), which is why a stub that records the call is what this
+    # asserts.
+    auto.start_job(release=_release("dddddddd-2222-3333-4444-555555555555",
+                                   "An Artist", "Fresh Album"),
+                   source="soulseek")
+    wait_until_calls = 40
+    while len(_CALLS) < 2 and wait_until_calls:
+        wait_until_calls -= 1
+        real_time.sleep(0.05)
+    assert len(_CALLS) >= 2, ("a job start and a bulk enqueue each run the "
+                              "queue's own clear", _CALLS)
+    # ...and each of them stamps the moment it asked: a clear with no cut would
+    # wipe a job that failed in the heartbeat after the new one started.
+    assert all(isinstance(b, (int, float)) and b > 0 for b in _CALLS), _CALLS
+
+print("ok  a new run clears the queue's settled rows (and only those) — from the "
+      "job-start and bulk-enqueue paths, not from a page")
 
 PIPE.expect_two = None
 auto.cancel()

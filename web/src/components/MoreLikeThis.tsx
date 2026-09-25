@@ -4,6 +4,9 @@ import { Link } from "react-router-dom";
 import { ListPlus, Play, Sparkles } from "lucide-react";
 import { api, getToken, serverUrl } from "../api";
 import { albumRef, trackRef } from "../lib/refs";
+// The Library grid's own cover floors: the shelf's cards wrap at the size the
+// Library's default grid draws them, so the two grids read as one grid.
+import { GRID_SIZE_MIN } from "../lib/fmt";
 import { toast, useStore, type QueueTrack } from "../store";
 import AlbumCard from "./AlbumCard";
 import CoverImg, { TrackCover } from "./CoverImg";
@@ -250,11 +253,22 @@ export default function MoreLikeThis({
   return (
     <RecommendShelf icon={Sparkles} title="Recommended (Local)" hint={HINT}>
       {albumShelf ? (
-        <div className="flex gap-3 overflow-x-auto pb-1 -mx-1 px-1">
+        /* A wrapped GRID, not a scroller. The scroller this replaces laid the
+           cards out on one row that ran off the shelf's own width and cut the
+           card at the edge (the owner's screenshot: six cards, the sixth in
+           halves) — the reader had to scroll sideways to learn what the shelf
+           was even recommending. The cards now wrap onto as many rows as the
+           items need, at the Library grid's own floors and gaps
+           (`LibraryPage`'s `repeat(auto-fill, minmax(…, 1fr))`), so the shelf
+           reads as one full-width block and grows DOWN instead of sideways. */
+        <div
+          className="grid gap-x-4 gap-y-5 stagger"
+          style={{ gridTemplateColumns: `repeat(auto-fill, minmax(${GRID_SIZE_MIN.m}px, 1fr))` }}
+        >
           {albums.map((item) => {
             const al = albumByPath.get(item.path);
             return (
-              <div key={item.id} className="w-36 sm:w-40 shrink-0">
+              <div key={item.id} className="min-w-0">
                 {al ? (
                   <AlbumCard al={al} extraMeta={<Reason reasons={item.reasons} className="max-w-[7rem]" />} />
                 ) : (

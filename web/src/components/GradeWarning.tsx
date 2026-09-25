@@ -95,8 +95,15 @@ const COLLAPSED_ITEMS = 3;
  *  itself: the server drops the albums a live job holds from the findings
  *  (server.recommendations.grade_warning), so the answer changes when the
  *  client's own lock list does — see the effect below. */
-export default function GradeWarning({ initial }: { initial?: GradeSummary }) {
-  const [open, setOpen] = useState(false);
+/** The summary both presentations below read: one query, one lock-driven
+ *  invalidation, one cache entry — so a dot and a strip on the same page can
+ *  never disagree, and neither pays for a second walk of the library.
+ *
+ *  Extracted from the strip when the two pages started drawing the OK state as
+ *  a dot in their own header instead of a full-width banner: the dot lives in
+ *  the title, the warning stays where the strip was, and both need the same
+ *  answer. */
+export function useGradesSummary(initial?: GradeSummary): GradeSummary | undefined {
   const qc = useQueryClient();
   // The strip's answer depends on which albums a job holds RIGHT NOW, and the
   // 5-minute `staleTime` above was chosen for a library that only changes when
@@ -130,12 +137,53 @@ export default function GradeWarning({ initial }: { initial?: GradeSummary }) {
     staleTime: 5 * 60_000,
     initialData: initial,
   });
+  return data;
+}
+
+/** The OK state as a dot for a page's own title — no sentence, no banner.
+ *
+ *  The owner's ask, verbatim: "no 'all checks pass' text in the library / home
+ *  menus. It should only display a small green dot next to the library / home
+ *  text. Thats all. If theres a warning it should be written out though." So
+ *  the passing state is carried by colour and a tooltip, and everything else
+ *  goes on being written out by <GradeWarning/> below the header.
+ *
+ *  `null` while the answer is unknown — a green dot nobody has verified would
+ *  be the exact claim this component is not allowed to make. */
+export function GradeDot({ initial }: { initial?: GradeSummary }) {
+  const data = useGradesSummary(initial);
+  if (!data?.ok) return null;
+  const label = data.total_checks > 0
+    ? "All checks pass"
+    : "No grading checks to report yet";
+  return (
+    <span
+      role="status"
+      aria-label={label}
+      title={label}
+      data-testid="grade-dot"
+      className="inline-block h-2 w-2 shrink-0 rounded-full bg-emerald-400 align-middle"
+    />
+  );
+}
+
+export default function GradeWarning({ initial, mode = "strip" }: {
+  initial?: GradeSummary;
+  /** `"strip"` draws both states (the green pill / the amber block).
+   *  `"notice"` draws ONLY a problem: the passing state is the page title's
+   *  dot (`GradeDot`) now, and a page that drew both would say "all checks
+   *  pass" twice on a page whose owner asked for a dot and nothing else. */
+  mode?: "strip" | "notice";
+}) {
+  const [open, setOpen] = useState(false);
+  const data = useGradesSummary(initial);
   // No answer yet (or none came back): a strip that guessed would be worse
   // than the page's own loading/error state saying it, and this banner is
   // decoration on top of a page that stands on its own.
   if (!data) return null;
 
   if (data.ok) {
+    if (mode === "notice") return null;
     return (
       <div className="text-xs text-emerald-300 bg-emerald-950/30 border border-emerald-900/60 rounded-lg px-3 py-2 flex items-center gap-2">
         <CheckCircle2 className="h-3.5 w-3.5 shrink-0" />

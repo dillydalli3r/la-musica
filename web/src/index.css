@@ -687,10 +687,11 @@ table td {
 .amb-orb-b { opacity: 0.74; animation: amb-drift-b 30s ease-in-out infinite alternate; }
 .amb-orb-c { opacity: 0.68; animation: amb-drift-c 37s ease-in-out infinite alternate; }
 /* The beat moves the whole colour field, not just the glow: --amb is written
-   ~14x/s and this scales the field with it (transform only). */
+   ~14x/s and this scales the field with it (transform only), with a little of
+   the pulse on top so a kick pushes the colour outward too. */
 .amb-orbs {
-  transform: scale(calc(0.96 + 0.1 * var(--amb, 0.45)));
-  transition: transform 0.22s ease-out;
+  transform: scale(calc(0.94 + 0.16 * var(--amb, 0.45) + 0.06 * var(--amb-pulse, 0)));
+  transition: transform 0.18s ease-out;
   will-change: transform;
 }
 @keyframes amb-drift-a {
@@ -727,28 +728,56 @@ table td {
   pointer-events: none;
 }
 
-/* The second music-driven layer: the same beat value on a hue-shifted tint,
-   so a kick reads as light moving THROUGH the colour field instead of one
-   layer fading in place. Screen-blended like the colour fields it sits over. */
+/* The second music-driven layer, and the FAST one: the same two values on a
+   hue-shifted tint, so a kick reads as light moving THROUGH the colour field
+   instead of one layer fading in place, and it reads on the BEAT rather than
+   on the swell. That is why the transitions here are half of `.amb-glow`'s:
+   `--amb-pulse` (the part of each tick that arrived above the smoothed
+   level — see NowPlayingView's ambience tick) lands in ~0.1 s, which is the
+   difference between a background that follows the music and one that pulses
+   with it. Screen-blended like the colour fields it sits over. */
 .amb-bloom {
   mix-blend-mode: screen;
   filter: hue-rotate(38deg) saturate(1.35);
-  opacity: calc(0.05 + 0.62 * var(--amb, 0.45));
-  transform: scale(calc(0.86 + 0.42 * var(--amb, 0.45)));
-  transition: opacity 0.18s ease-out, transform 0.34s ease-out;
+  opacity: calc(0.05 + 0.5 * var(--amb, 0.45) + 0.42 * var(--amb-pulse, 0));
+  transform: scale(calc(0.86 + 0.34 * var(--amb, 0.45) + 0.22 * var(--amb-pulse, 0)));
+  transition: opacity 0.1s ease-out, transform 0.16s ease-out;
   will-change: opacity, transform;
   pointer-events: none;
 }
 
 /* 5) grain + vignette: a static film grain (SVG turbulence, no animation)
    and an edge darkening, so the color field settles into the corners
-   instead of looking like a flat wash. */
+   instead of looking like a flat wash.
+   The grain is also the DITHER, and that is not decoration: every layer here
+   is a huge soft gradient, an 8-bit screen renders those in bands, and the
+   owner's report ("you can kinda see lines") is exactly that — faint
+   horizontal edges across the colour field. Noise is the only cure; blur at
+   these radii cannot remove a band it created.
+   TWO blends, because one cannot cover both ends of the field: `overlay`
+   barely registers over the dark half (50 % grey leaves black black) and
+   `screen` barely registers over the bright half. The same tile is therefore
+   drawn twice — this element and its ::after — with a slightly different tile
+   size, so the two copies cannot beat against each other into a pattern of
+   their own. */
 .amb-grain {
-  opacity: 0.045;
+  opacity: 0.055;
   mix-blend-mode: overlay;
   pointer-events: none;
   background-image: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='160' height='160'><filter id='g'><feTurbulence type='fractalNoise' baseFrequency='0.9' numOctaves='2' stitchTiles='stitch'/></filter><rect width='160' height='160' filter='url(%23g)'/></svg>");
   background-size: 160px 160px;
+}
+.amb-grain::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  /* `inherit` on a pseudo-element takes the PARENT's computed value, which is
+     the point: one tile, two sizes, no second data URI to keep in step. */
+  background-image: inherit;
+  background-size: 131px 131px;
+  opacity: 0.55;
+  mix-blend-mode: screen;
+  pointer-events: none;
 }
 .amb-vignette {
   pointer-events: none;

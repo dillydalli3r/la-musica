@@ -405,7 +405,7 @@ export default function GradingPage() {
   ];
 
   return (
-    <div className="p-6 space-y-5 mx-auto max-w-6xl">
+    <div className="p-6 space-y-5 mx-auto max-w-[1600px]">
       <PageHeader
         sticky
         icon={ClipboardCheck}

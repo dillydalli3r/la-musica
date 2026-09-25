@@ -72,6 +72,12 @@ export default {
   "menu.runAll": "Alle {count} Skripte ausführen",
   "menu.runAllTitle": "Alle {count} Skripte ausführen?",
   "menu.runAllHint": "Sie laufen über die aktuelle Auswahl, in dieser Reihenfolge:",
+  "menu.searchTrackSoulseek": "Diesen Titel auf Soulseek suchen",
+  "menu.searchTrackSoulseekHint": "Sucht diesen einen Song im Netzwerk über seine MusicBrainz-Aufnahme-ID — nichts wird eingereiht, solange du keine Datei herunterlädst",
+  "menu.searchTrackNoMbid": "Dieser Titel trägt keine MusicBrainz-Aufnahme-ID — erst taggen, oder auf der Soulseek-Seite per Text suchen",
+  "soulseek.mbid.chip": "Nach MBID suchen",
+  "soulseek.mbid.hint": "Das sieht nach einer MusicBrainz-ID aus — „Suchen“ sucht diesen einen Titel: Interpret und Titel, sein Album und die ID selbst, alles auf einmal.",
+  "soulseek.mbid.label": "MBID-Suche: {label}",
   "menu.openTrackPage": "Titelseite öffnen",
   "menu.openTrackPageHint": "Die eigene Seite dieses Titels öffnen — Tags, technische Daten und Liedtext",
   "menu.downloadVideo": "Musikvideo herunterladen",
@@ -480,4 +486,20 @@ export default {
   "cookies.keptHosts": "Nur Cookies für {hosts} werden behalten — alles andere aus dem Export wird weggelassen.",
 
   "cookies.sectionTitle": "Cookie-Logins — ein cookies.txt importieren",
+
+  // —— Seite „Bibliothek“: das Alphabet-Paar der Werkzeugleiste — ein
+  // Namensfeld und die A–Z-Leiste. Zwei Bedienelemente für einen Filter (die
+  // getippten Wörter und der gewählte Buchstabe), angewandt auf die Liste, die
+  // die Ansichts-Tabs zeichnen.
+  "library.az.namePlaceholder": "Nach Namen filtern",
+  "library.az.nameAria": "Die Liste nach Namen filtern",
+  "library.az.nameHint": "Albumtitel, Künstlername oder Tracktitel – Akzente werden ignoriert, „asgeir“ findet also „Ásgeir“. Das grenzt die Liste ein, die die Ansichts-Tabs ohnehin zeichnen.",
+  "library.az.nameClear": "Namensfilter löschen",
+  "library.az.button": "A–Z",
+  "library.az.railAria": "Die Liste nach Buchstaben filtern",
+  "library.az.railTitle": "Zu einem Buchstaben springen – jeder zeigt, wie viele Einträge dieser Ansicht damit beginnen",
+  "library.az.menuTitle": "Beginnt mit",
+  "library.az.clear": "Alle anzeigen",
+  "library.az.letterHint": "{letter} — {n} in dieser Ansicht",
+  "library.az.empty": "Hier passt nichts – Suche, Namensfeld, A–Z-Buchstabe oder Filtermenü leeren.",
 } as const;

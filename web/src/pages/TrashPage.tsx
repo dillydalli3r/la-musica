@@ -447,7 +447,7 @@ export default function TrashPage() {
   };
 
   return (
-    <div className="p-6 space-y-5 mx-auto max-w-6xl">
+    <div className="p-6 space-y-5 mx-auto max-w-[1600px]">
       <PageHeader icon={Trash2} title="Trash">
       {/* toolbar — the library's line-up: view tabs, sort, columns, filter —
           then Empty trash, the trash folder, select mode and the counts on

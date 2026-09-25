@@ -232,6 +232,58 @@ check("the query token opens it too (websocket/shell case)", r.status_code == 20
 r = client.get("/api/config", headers={"Authorization": "Bearer forged-token"})
 check("a forged token does not", r.status_code == 401)
 
+print("== HTTP: the media routes state CORS for any origin (R278) ==")
+# A phone's <audio> is fetched with crossorigin="anonymous", and the origin the
+# MEDIA loader states is WebKit's business — it can be the page's own origin or
+# nothing at all (`Origin: null`) when the bytes are pulled by the media
+# process. No match, no load, and the app is fully reachable while pressing play
+# does nothing. So the two media routes answer `*` when the CORS middleware has
+# not already stated an origin, and only those two do.
+_nope = "/api/stream?path=" + "nope"
+r = client.get(_nope, headers={"Origin": "null", "Authorization": f"Bearer {token}"})
+check("a null-origin media request still gets a CORS answer",
+      r.headers.get("access-control-allow-origin") == "*",
+      f"got {r.headers.get('access-control-allow-origin')!r} ({r.status_code})")
+r = client.get(_nope, headers={"Origin": "https://somewhere.example",
+                              "Authorization": f"Bearer {token}"})
+check("so does a browser on a domain this server has never heard of",
+      r.headers.get("access-control-allow-origin") == "*")
+_r = client.get("/api/videos/stream?path=" + "nope",
+                headers={"Origin": "null", "Authorization": f"Bearer {token}"})
+check("the video route is in the same rule",
+      _r.headers.get("access-control-allow-origin") == "*")
+r = client.get(_nope, headers={"Origin": "tauri://localhost",
+                              "Authorization": f"Bearer {token}"})
+check("an allow-listed origin keeps its exact echo",
+      r.headers.get("access-control-allow-origin") == "tauri://localhost")
+check("...and carries exactly ONE such header (two is a CORS failure)",
+      len(r.headers.get_list("access-control-allow-origin")) == 1)
+r = client.get("/api/health", headers={"Origin": "https://somewhere.example"})
+check("no other route was widened",
+      r.headers.get("access-control-allow-origin") is None,
+      f"got {r.headers.get('access-control-allow-origin')!r}")
+
+print("== HTTP: the Soulseek listen port is pinned by the environment (R279) ==")
+# docker-compose.yml publishes `${MLO_SOULSEEK_LISTEN_PORT:-50000}` while slskd
+# listens on whatever `soulseek_listen_port` says, so a port changed in the UI
+# while the compose line still names the old one is a forward pointing at a
+# closed port — a share peers can see the size of and never connect to. The
+# environment wins and the refusal names the pin.
+os.environ["MLO_SOULSEEK_LISTEN_PORT"] = "51023"
+try:
+    r = client.post("/api/config", json={"soulseek_listen_port": 50000},
+                    headers={"Authorization": f"Bearer {token}"})
+    check("a port that contradicts the pin is refused", r.status_code == 400,
+          f"got {r.status_code}")
+    check("...and the refusal names the variable",
+          "MLO_SOULSEEK_LISTEN_PORT" in r.text, r.text[:200])
+    r = client.post("/api/config", json={"soulseek_listen_port": 51023},
+                    headers={"Authorization": f"Bearer {token}"})
+    check("the pinned value itself saves cleanly", r.status_code == 200,
+          r.text[:200])
+finally:
+    os.environ.pop("MLO_SOULSEEK_LISTEN_PORT", None)
+
 r = client.post("/api/auth/logout", headers={"Authorization": f"Bearer {token}"})
 check("logout answers", r.status_code == 200)
 r = client.get("/api/config", headers={"Authorization": f"Bearer {token}"})

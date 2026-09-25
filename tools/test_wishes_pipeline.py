@@ -39,7 +39,10 @@ FAILED = []
 
 
 def check(name, ok, detail=""):
-    print(f"  {'ok  ' if ok else 'FAIL'} {name}{('  — ' + detail) if detail and not ok else ''}")
+    # `str(detail)` on purpose: a check whose detail is a list or a dict is
+    # still a check whose MESSAGE must print — the run that first tripped this
+    # crashed on the way to saying which row was missing.
+    print(f"  {'ok  ' if ok else 'FAIL'} {name}{('  — ' + str(detail)) if detail and not ok else ''}")
     if not ok:
         FAILED.append(name)
 
@@ -149,7 +152,8 @@ class Pipeline:
         self.found = False
         self.searches = 0
 
-    def search(self, slsk_, queries, wait_s, usable=None, response_limit=0):
+    def search(self, slsk_, queries, wait_s, usable=None, response_limit=0,
+    cancel_check=None):
         self.searches += 1
         responses = [("peer", {"fileCount": 4})] if self.found else []
         return ([("q", {"responses": responses})], [], 0)
@@ -513,6 +517,21 @@ SHIPPED["music_folder"] = MUSIC
 check("the shipped not-found budget is 0 — a request is never given up on",
       wishes.not_found_attempts(SHIPPED) == 0,
       json.dumps({"wishes_not_found_attempts": SHIPPED.get("wishes_not_found_attempts")}))
+# …and the shipped cadence is an HOUR, not the six it used to be: the owner's
+# own "add to library" / best-pick behaviour waits about an hour between the
+# searches of one release. The interval is the gap between two ATTEMPTS — one
+# attempt still asks every ranked edition of the release (the walk proofs
+# below) — so the number is the pace of the release, not of one candidate.
+check("the shipped search interval is one hour",
+      int(SHIPPED.get("wishes_interval_hours") or 0) == 1,
+      json.dumps({"wishes_interval_hours": SHIPPED.get("wishes_interval_hours")}))
+_now = time.time()
+check("...so a wish is due an hour after its last search, and no later",
+      _now + 3600 <= wishes.due_at(dict(still=1, last_search=_now, status="wanted",
+                                        attempts=0, retry_at=0), SHIPPED) <= _now + 3601,
+      json.dumps({"due_at": wishes.due_at(
+          dict(last_search=_now, status="wanted", attempts=0, retry_at=0), SHIPPED),
+          "now": _now}))
 
 STILL_ID = "66666666-1111-1111-1111-111111111111"
 still = dict(REL, id=STILL_ID, release_group_id=STILL_ID, title="Still Looking")
@@ -575,7 +594,7 @@ check("an empty search clears the spent backoff",
       json.dumps({"status": after["status"], "retry_at": after["retry_at"]}))
 _due = wishes.due_at(after, dict(SHIPPED))
 check("...so it is due on its interval, not on the stamp of a failure that is over",
-      _due > time.time() + 5 * 3600, json.dumps({"due_at": _due, "now": time.time()}))
+      _due > time.time() + 0.5 * 3600, json.dumps({"due_at": _due, "now": time.time()}))
 
 # ...and a spent WALK that moves to the background is the same kind of settle:
 # nothing about an empty walk is a failure, so it is re-walked at the interval.
@@ -592,7 +611,7 @@ check("a spent walk moves to the background with its backoff cleared",
       json.dumps({"status": bg["status"], "retry_at": bg["retry_at"]}))
 _bg_due = wishes.due_at(bg, BG_CFG)
 check("...and it is re-walked at the interval, not on every tick",
-      _bg_due > time.time() + 5 * 3600, json.dumps({"due_at": _bg_due}))
+      _bg_due > time.time() + 0.5 * 3600, json.dumps({"due_at": _bg_due}))
 
 # --------------------------------------------------------------------------- #
 # 4. a wish whose release cannot be resolved still renders
@@ -636,8 +655,24 @@ print("\n== clearing finished rows ==")
 PIPE.found = False
 with pipeline_patches(), SLSK, Patch(intg, resolve_release=_resolve), \
      Patch(worker, load_config=lambda: dict(CFG)):
+    # A real job parked on a question and a real FAILED job — started BEFORE
+    # the wishes below, because every job start clears the queue's settled rows
+    # (R285) and a wish settled before that start would be swept away before the
+    # checks could read it. Nothing here is a race: the parked job is live
+    # (never clearable), and the failing job settles after its own clear ran.
+    parked = auto.start_job(release=dict(RARE_REL), confirm_lossy=True,
+                            source="musicbrainz")
+    parked_id = parked["job"]["id"]
+    wait_until(lambda: auto.job_state(parked_id).get("state") == "confirm",
+               what="the job to park on its question")
+    failed = auto.start_job(release=dict(REL), confirm_lossy=False,
+                            source="soulseek")
+    wait_until(lambda: auto.job_state(failed["job"]["id"]).get("state") in ("done", "error"),
+               what="the nothing-found job to settle")
+
     # Fresh releases: `add_wish` is idempotent by release id, and the ones
-    # above have already been through their own outcomes.
+    # above have already been through their own outcomes. Creating a wish runs
+    # no clear, so the settled ones stay for the read below.
     wanted = wishes.add_wish("77777777-1111-1111-1111-111111111111",
                              title="Still Wanted", artist="An Artist",
                              source="soulseek")
@@ -648,18 +683,6 @@ with pipeline_patches(), SLSK, Patch(intg, resolve_release=_resolve), \
                                title="Nothing Anywhere", artist="An Artist",
                                source="soulseek")
     wishes.mark_not_found(terminal["id"], "No candidate folder contained every track", 3)
-
-    # A real FAILED job (its own row) and a real job parked on a question — the
-    # second one is still live and must survive the clear.
-    failed = auto.start_job(release=dict(REL), confirm_lossy=False,
-                            source="soulseek")
-    parked = auto.start_job(release=dict(RARE_REL), confirm_lossy=True,
-                            source="musicbrainz")
-    parked_id = parked["job"]["id"]
-    wait_until(lambda: auto.job_state(parked_id).get("state") == "confirm",
-               what="the job to park on its question")
-    wait_until(lambda: auto.job_state(failed["job"]["id"]).get("state") in ("done", "error"),
-               what="the nothing-found job to settle")
 
     before = {r["id"]: r for r in
               [x for rows in queue()["sections"].values() for x in rows]}
@@ -1145,6 +1168,120 @@ check("...and the walk's own record says which edition it is on",
       (wishes.candidate_state(moved, CFG) or {}).get("index") == 1
       and [t["mbid"] for t in wishes.candidate_state(moved, CFG)["tried"]] == MOVE_IDS[:1],
       json.dumps(wishes.candidate_state(moved, CFG)))
+
+# (d) NOTHING found and nothing refused: every ranked edition answered with
+#     nothing usable. Only after the LAST one was asked does the release rest in
+#     the BACKGROUND (spec R153) — the wish's status is read at EVERY poll of
+#     EVERY candidate, so a settle after the first edition (or a settle that
+#     skipped an edition) is visible rather than inferred, and the asked ids are
+#     the ranking's own order.
+EMPTY_IDS = walk_ids("3")
+TRANSIENT_IDS = walk_ids("4")
+CONTENTION_IDS = walk_ids("5")
+WALK_RELS.update({m: walk_rel(m) for m in EMPTY_IDS + TRANSIENT_IDS + CONTENTION_IDS})
+EMPTY_ID, EMPTY_FOLDER = walked_wish(EMPTY_IDS, "Empty Album")
+_asked3, _states3, _seen3 = [], {}, []
+
+
+def empty_start_job(**kw):
+    _asked3.append(kw["release_mbid"])
+    jid = 490300 + len(_asked3)
+    _states3[jid] = {"state": "error", "stage": "",
+                     "result": {"error": EMPTY_ERR}}
+    return {"ok": True, "job": {"id": jid}}
+
+
+def empty_job_state(job_id=None):
+    w = wishes.get_wish(EMPTY_ID) or {}
+    _seen3.append((w.get("status"), len(_asked3)))
+    return dict(_states3.get(job_id) or {"state": "error",
+                                         "result": {"error": EMPTY_ERR}})
+
+
+with SLSK, Patch(intg, resolve_release=walk_resolve), \
+     Patch(auto, start_job=empty_start_job, job_state=empty_job_state):
+    empty_outcome = worker._run_one(wishes.get_wish(EMPTY_ID), dict(CFG))
+
+empty = wishes.get_wish(EMPTY_ID)
+check("an empty walk asks EVERY ranked edition before it rests",
+      _asked3 == EMPTY_IDS,
+      json.dumps(_asked3))
+check("...and only the LAST of them moves the release to the background",
+      empty_outcome == "background" and empty["status"] == "background",
+      json.dumps({"outcome": empty_outcome, "status": empty["status"]}))
+check("...it was never resting before that — working at every poll of every edition",
+      all(s in ("searching", "wanted") for s, _ in _seen3)
+      and [n for _, n in _seen3] == [1, 2, 3],
+      json.dumps(_seen3))
+check("...and the spend of that one attempt is recorded once",
+      empty["not_found"] == 1 and not wishes.is_terminal(empty, CFG),
+      json.dumps({"not_found": empty["not_found"], "status": empty["status"]}))
+check("...with its framework album kept: something IS still searching",
+      os.path.isdir(EMPTY_FOLDER), EMPTY_FOLDER)
+
+# (e) A TRANSIENT failure is NOT a spent walk: the first edition failing to
+#     reach the network stops the walk there (the retry policy settles it with
+#     its backoff), the next edition is NOT asked, and nothing goes to the
+#     background. Asking the rest would answer the same way, and charging the
+#     release a not-found attempt for it would be a lie about the network.
+TRANSIENT_ID, _ = walked_wish(TRANSIENT_IDS[:2], "Transient Album")
+_asked4 = []
+
+
+def transient_start_job(**kw):
+    _asked4.append(kw["release_mbid"])
+    jid = 490400 + len(_asked4)
+    return {"ok": True, "job": {"id": jid}}
+
+
+def transient_job_state(job_id=None):
+    return {"state": "error", "stage": "",
+            "result": {"error": "slskd refused the search — connection refused"}}
+
+
+with SLSK, Patch(intg, resolve_release=walk_resolve), \
+     Patch(auto, start_job=transient_start_job, job_state=transient_job_state):
+    transient_outcome = worker._run_one(wishes.get_wish(TRANSIENT_ID), dict(CFG))
+
+transient = wishes.get_wish(TRANSIENT_ID)
+check("a transient failure is settled where it is, never walked on",
+      transient_outcome == "pending" and len(_asked4) == 1
+      and _asked4[0] == TRANSIENT_IDS[0],
+      json.dumps({"outcome": transient_outcome, "asked": _asked4}))
+check("...so the release is NOT in the background: it is wanted, on its backoff",
+      transient["status"] == "wanted" and not wishes.is_terminal(transient, CFG)
+      and float(transient["retry_at"] or 0) > time.time(),
+      json.dumps({"status": transient["status"], "retry_at": transient["retry_at"]}))
+check("...and the WALK is back at its best edition for the next attempt",
+      int(transient["candidate"] or 0) == 0, json.dumps({"candidate": transient["candidate"]}))
+
+# (f) …and neither is pipeline CONTENTION: the release the pipeline is already
+#     importing costs no attempt and settles nothing either. `skipped` is how
+#     `_run_one` reports it, and that too comes back before the next edition.
+CONTENTION_ID, _ = walked_wish(CONTENTION_IDS[:2], "Contended Album")
+_asked5 = []
+
+
+def contended_start_job(**kw):
+    _asked5.append(kw["release_mbid"])
+    return {"ok": False, "transient": True,
+            "error": "this release is already being imported"}
+
+
+with SLSK, Patch(intg, resolve_release=walk_resolve), \
+     Patch(auto, start_job=contended_start_job):
+    contended_outcome = worker._run_one(wishes.get_wish(CONTENTION_ID), dict(CFG))
+
+contended = wishes.get_wish(CONTENTION_ID)
+check("pipeline contention stops the walk without spending an attempt",
+      contended_outcome == "skipped" and len(_asked5) == 1
+      and int(contended["attempts"] or 0) == 0,
+      json.dumps({"outcome": contended_outcome, "asked": _asked5,
+                  "attempts": contended["attempts"]}))
+check("...and leaves the release WANTED, not in the background and not given up",
+      contended["status"] == "wanted" and not wishes.is_terminal(contended, CFG)
+      and not float(contended["retry_at"] or 0),
+      json.dumps({"status": contended["status"], "retry_at": contended["retry_at"]}))
 
 # (c) THE STORED LIST IS A SNAPSHOT, NEVER AN AUTHORITY (R150). A wish records
 #     the editions an add resolved, each with its own facts — and the WALK

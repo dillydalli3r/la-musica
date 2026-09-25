@@ -3179,7 +3179,7 @@ const finish = async () => {
   // mlo/import_policy.MANUAL_OFF_NOTE, which is what the API answers with.
   if (cfg && cfg.manual_import_enabled === false) {
     return (
-      <div className="p-6 space-y-5 mx-auto max-w-6xl">
+      <div className="p-6 space-y-5 mx-auto max-w-[1600px]">
         <PageHeader
           icon={UploadCloud}
           title="Import"
@@ -3209,7 +3209,7 @@ const finish = async () => {
   }
 
   return (
-    <div className="p-6 space-y-5 mx-auto max-w-6xl">
+    <div className="p-6 space-y-5 mx-auto max-w-[1600px]">
       <PageHeader
         icon={UploadCloud}
         title="Import"

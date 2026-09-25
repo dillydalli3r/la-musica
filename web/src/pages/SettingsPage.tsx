@@ -882,6 +882,14 @@ export default function SettingsPage() {
           k: "soulseek_auto_digital_queries", label: "Digital query templates (; separated)", type: "text",
           help: "Digital Media is searched by these — artist, album and year by default — because it carries no pressing trait to be identified by.",
         },
+        {
+          k: "soulseek_auto_mbid_queries", label: "Also search by MBIDs", type: "bool",
+          help: "On by default. Adds the release's own MusicBrainz id, its tracks' recording ids and each of those tracks' own artist + title to the SAME parallel batch as the templates above, so a peer folder that names the ids — or holds exactly the album's tracks under a name the templates never match — is found too. One search window either way.",
+        },
+        {
+          k: "soulseek_auto_mbid_tracks", label: "Tracks chased by MBID / name (1–10)", type: "number", min: 1, max: 10,
+          help: "How many of the release's tracks are chased that way, first track first (disc/position order). Each one is asked for by its recording MBID and by its own artist + title.",
+        },
         { k: "soulseek_auto_log_min_score", label: "Min .log score (0–100)", type: "number", min: 0, max: 100 },
         { k: "soulseek_auto_complete_ratio", label: "Required track completeness (0.5–1)", type: "number", min: 0.5, max: 1, step: 0.05 },
         { k: "soulseek_auto_search_wait", label: "Fallback search window (seconds of quiet on a rare album)", type: "number", min: 5, max: 300 },
@@ -930,7 +938,10 @@ export default function SettingsPage() {
           k: "soulseek_search_concurrency", label: "Releases searched / downloaded at once", type: "number", min: 1, max: 8,
           help: "Over this ceiling a release is NOT refused: it takes its place in the queue (Queue → Waiting, with its position) and starts by itself the moment one of the running releases finishes. The wishes worker fills up to this many wishes per pass, and a bulk auto-import run keeps this many jobs in flight. What it does not do on its own is open more connections: that is what `Candidate downloads per release` (per release) and slskd's own download slots add up to.",
         },
-        { k: "wishes_interval_hours", label: "Search interval (hours)", type: "number", min: 1, max: 168 },
+        {
+          k: "wishes_interval_hours", label: "Search interval (hours)", type: "number", min: 1, max: 168,
+          help: "How long to wait between two searches of ONE release — an hour by default. The gap is between two ATTEMPTS: one attempt already asks every ranked edition of the release, each with its own bounded search window, and stops at the first that lands.",
+        },
         { k: "wishes_max_attempts", label: "Max attempts per wish (0 = forever)", type: "number", min: 0, max: 1000 },
         {
           k: "wishes_not_found_attempts", label: "Empty searches before a wish is 'not found' (0 = never give up)", type: "number", min: 0, max: 1000,
@@ -1893,7 +1904,7 @@ export default function SettingsPage() {
   );
 
   return (
-    <div className="p-6 space-y-5 mx-auto max-w-6xl">
+    <div className="p-6 space-y-5 mx-auto max-w-[1600px]">
       <PageHeader icon={SettingsIcon} title="Settings">
         <div className="relative w-full max-w-md">
           <input

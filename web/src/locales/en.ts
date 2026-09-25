@@ -84,6 +84,12 @@ export default {
   "menu.runAll": "Run all {count} scripts",
   "menu.runAllTitle": "Run all {count} scripts?",
   "menu.runAllHint": "These run over the current selection, in this order:",
+  "menu.searchTrackSoulseek": "Search Soulseek for this track",
+  "menu.searchTrackSoulseekHint": "Look for this one song on the network by its MusicBrainz recording id — nothing is queued unless you download a file",
+  "menu.searchTrackNoMbid": "This track carries no MusicBrainz recording id — tag it first, or search by text on the Soulseek page",
+  "soulseek.mbid.chip": "Search by MBID",
+  "soulseek.mbid.hint": "That looks like a MusicBrainz id — pressing Search looks for that one track: its artist and title, its album and the id itself are all searched at once.",
+  "soulseek.mbid.label": "MBID search: {label}",
   "menu.openTrackPage": "Open track page",
   "menu.openTrackPageHint": "Open this track's own page — its tags, technical readout and lyrics",
   "menu.downloadVideo": "Download music video",
@@ -523,4 +529,19 @@ export default {
   "cookies.keptHosts": "Only cookies for {hosts} are kept — everything else in the export is left out.",
 
   "cookies.sectionTitle": "Cookie logins — import a cookies.txt",
+
+  // —— Library page: the toolbar's alphabet pair — a name field and the A–Z
+  // rail. Two controls over one filter (the typed words and the picked
+  // letter), applied to the list the view tabs draw.
+  "library.az.namePlaceholder": "Filter by name",
+  "library.az.nameAria": "Filter the list by name",
+  "library.az.nameHint": "Album title, artist name or track title — accents are ignored, so “asgeir” finds “Ásgeir”. This narrows the list the view tabs are already drawing.",
+  "library.az.nameClear": "Clear the name filter",
+  "library.az.button": "A–Z",
+  "library.az.railAria": "Filter the list by letter",
+  "library.az.railTitle": "Jump to a letter — each one shows how many items in this view start with it",
+  "library.az.menuTitle": "Starts with",
+  "library.az.clear": "Show all",
+  "library.az.letterHint": "{letter} — {n} in this view",
+  "library.az.empty": "Nothing here matches — clear the search box, the name field, the A–Z letter or the Filter menu.",
 } as const;

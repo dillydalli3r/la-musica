@@ -81,9 +81,24 @@ const OPEN_OVER_PANE = '[aria-modal="true"], [role="menu"], dialog[open]';
  * that maps to closed → open: quiet passages close the glow, the loud ones
  * open it, whatever the master's own level happens to be.
  * See the ambience tick for why the level is taken in dB, not raw bytes. */
-const AMB_DYN_DB = 8;
+const AMB_DYN_DB = 12;
 const AMB_REF_FALL_DB = 0.07; // per tick (~0.9 dB/s at AMB_TICK_MS)
 const AMB_REF_START_DB = -60;
+
+/** The beat, as its own number. `--amb` is the SMOOTHED level (a swell that
+ *  follows the music's dynamics); this is the part of a tick that arrives
+ *  ABOVE that swell — a kick, a snare, a hit — so the backdrop can punch on
+ *  the beat while the swell underneath keeps breathing. It is written as
+ *  `--amb-pulse`, and the CSS layers that use it transition in ~0.1 s instead
+ *  of ~0.3 s, which is the difference between "the background follows the
+ *  music" and "the background pulses with it".
+ *
+ *  Decay rather than a second smoother: a hit has to be gone by the next tick
+ *  it is not re-armed on, or a busy passage turns the whole layer into a
+ *  flicker (the strobe the smoothing below exists to prevent). */
+const AMB_PULSE_GAIN = 2.4;
+const AMB_PULSE_MIN = 0.05;   // below this the pulse is simply not written
+const AMB_PULSE_FALL = 0.78;  // per tick (~0.25 s to nothing)
 
 /** How often the ambience reads the analyser and updates --amb, in ms. This
  * has to keep up with `.amb-glow`'s own transitions in index.css: with the
@@ -823,7 +838,7 @@ export default function NowPlayingView(p: Props) {
   // the next took it back. The layers themselves are described at the markup
   // below.
   const ambRef = useRef<HTMLDivElement>(null);
-  const eased = useRef({ energy: 0 });
+  const eased = useRef({ energy: 0, pulse: 0, slow: 0 });
   // Read through a ref, exactly like the bars do: the ambience loop already
   // handles silence internally (energy eases to 0), so `p.playing` must not be
   // an effect dependency. It was, and the teardown/rebuild on every pause
@@ -841,6 +856,7 @@ export default function NowPlayingView(p: Props) {
       // One steady value: the layers keep their colors and composition, and
       // nothing moves on its own.
       el.style.setProperty("--amb", "0.45");
+      el.style.setProperty("--amb-pulse", "0");
       return;
     }
     let timer = 0;
@@ -848,6 +864,7 @@ export default function NowPlayingView(p: Props) {
     // Starts at the CSS fallback, so the first tick only writes if the
     // audio actually asks for something else.
     let written = 0.45;
+    let writtenPulse = 0;
     let refDb = AMB_REF_START_DB;
     const read = () => {
       let energy = 0;
@@ -896,6 +913,24 @@ export default function NowPlayingView(p: Props) {
         written = next;
         el.style.setProperty("--amb", next.toFixed(3));
       }
+      // The beat: whatever this tick has that the SLOW follower below has not
+      // caught up to. The follower is deliberately slow (~1.5 s at 70 ms) and
+      // deliberately not the swell above: a fast chase eats a transient inside
+      // a tick or two, which is exactly why the first version of this barely
+      // moved — the analyser's own `smoothingTimeConstant` means the level
+      // arriving here is already softened, so what is left of a kick is the gap
+      // to a SLOW average, not to a fast one.
+      const slow = eased.current.slow;
+      const nextSlow = slow + (energy - slow) * 0.05;
+      eased.current.slow = nextSlow;
+      const rise = Math.max(0, energy - nextSlow) * AMB_PULSE_GAIN;
+      const pulse = Math.max(Math.min(1, rise), eased.current.pulse * AMB_PULSE_FALL);
+      const shown = pulse < AMB_PULSE_MIN ? 0 : pulse;
+      if (Math.abs(shown - writtenPulse) > 0.001) {
+        writtenPulse = shown;
+        el.style.setProperty("--amb-pulse", shown.toFixed(3));
+      }
+      eased.current.pulse = shown;
       timer = window.setTimeout(read, AMB_TICK_MS);
     };
     read();

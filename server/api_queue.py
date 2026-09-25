@@ -397,7 +397,13 @@ def _wish_rows(wishes_list, jobs_by_wish, cfg=None):
     section as if the album had been given up on, and a wish that was already
     re-armed for its next attempt read as still failing — the row contradicted
     the store it was built from. The settled job still CLAIMS its id (so it
-    does not draw a second row of its own) and still lends its log tail."""
+    does not draw a second row of its own) and still lends its log tail.
+
+    A wish whose status is `failed` while the store still owns its next attempt
+    (`wishes.is_terminal` false: the worker searches it again by itself) is the
+    same kind of fact and is filed the same way: its row sits in the BACKGROUND
+    section saying the attempt failed and when the next search is — Failed is
+    for the releases nobody will look for again."""
     rows = []
     for w in wishes_list:
         status = str(w.get("status") or "")
@@ -463,6 +469,18 @@ def _wish_rows(wishes_list, jobs_by_wish, cfg=None):
         # background wish is still searched — so it is read before the row is
         # assembled and used by both the wording below and `clearable`.
         terminal = bool(wishes.is_terminal(w, cfg or {}))
+        # A FAILED ATTEMPT is not a give-up: with attempts left in its budget
+        # (or with no cap configured at all, which is the shipped policy) the
+        # worker searches this wish again by itself, so the release belongs
+        # where every other release still being searched on the worker's own
+        # ticks belongs — the BACKGROUND — and NOT in Failed, which is the
+        # section for a release nobody will look for again (a spent cap, a
+        # `not_found`, or a person's own interactive run). The row keeps the
+        # attempt's own sentence (appended below) so the failure is filed where
+        # the work still is, not swallowed.
+        retry_failed = stage == "failed" and not terminal
+        if retry_failed:
+            stage = "background"
         # WHICH ranked candidate this row is asking for (spec R150-R154): the
         # walk's own block out of the store, so the page re-derives no position
         # and the row says where a long search is instead of looking stuck. ONE
@@ -477,11 +495,15 @@ def _wish_rows(wishes_list, jobs_by_wish, cfg=None):
                 # The owner's own wording for the resting phase — the position,
                 # the fact that nothing landed yet, and when the next pass looks
                 # again. The section it sits in says the rest ("Background").
+                # A row resting here because an ATTEMPT failed says so in the
+                # failure sentence appended below instead of this "nothing yet"
+                # line — and that sentence carries the next-search clock, so
+                # the third part would only repeat it.
                 note = " · ".join(x for x in (
                     f"tried {walk['index'] + 1} of {walk['total']}",
-                    note or "no usable copy yet",
-                    "searched again automatically around "
-                    + _clock(wishes.due_at(w, cfg or {}))) if x)
+                    note or ("" if retry_failed else "no usable copy yet"),
+                    "" if retry_failed else ("searched again automatically around "
+                                             + _clock(wishes.due_at(w, cfg or {})))) if x)
             else:
                 # A live job is asking for THIS candidate right now; a row
                 # between attempts is about to ask the BEST one (the walk
@@ -503,12 +525,11 @@ def _wish_rows(wishes_list, jobs_by_wish, cfg=None):
             stage = pending_albums.STAGE_RESOLVING
             note = "Asking MusicBrainz what this release is — the search " \
                    "starts as it answers"
-        if stage == "failed" and not terminal:
-            # A failed ATTEMPT is not a given-up wish — with attempts left in
-            # its budget the worker searches it again by itself — and the row
-            # says so instead of reading as a dead end nobody can act on. It is
-            # cancelled (the standing request goes), never "cleared": clearing
-            # is for rows whose work is over.
+        if retry_failed:
+            # The failed ATTEMPT's own sentence, word for word as it read while
+            # these rows were filed in Failed — the SECTION changed, the reason
+            # did not. It is cancelled (the standing request goes), never
+            # "cleared": clearing is for rows whose work is over.
             note = (note + " · " if note else "") + (
                 "failed this attempt — searched again automatically at "
                 + _clock(wishes.due_at(w, cfg or {})))
@@ -830,18 +851,37 @@ def build_queue(cfg=None):
             continue
         job_rows.append(row)
     # A job filling a wish is that wish's row, not a second one.
+    wish_list = wishes.list_wishes()
+    wish_ids = {int(w["id"]) for w in wish_list if w.get("id") is not None}
     jobs_by_wish = {}
     for row in job_rows:
         wid = row.get("wish_id")
         if wid:
             jobs_by_wish[int(wid)] = row
-    rows = _wish_rows(wishes.list_wishes(), jobs_by_wish, cfg)
+    rows = _wish_rows(wish_list, jobs_by_wish, cfg)
     # A job whose wish is no longer in the list (deleted mid-download, or a
     # wish_id nothing matches) keeps its OWN row: it is still downloading, and
     # hiding real work because the row it belonged to went away is exactly the
     # dishonesty this view exists to remove.
+    #
+    # A SETTLED FAILED job whose wish DOES exist is that wish's history, though,
+    # and never a row of its own. `jobs_by_wish` keeps ONE job per wish (the
+    # last registered), so every EARLIER settled job of the same wish used to
+    # draw a standalone Failed row beside the wish's own row — the owner's
+    # report was exactly that: a release being searched again showed the
+    # previous attempt's give-up as a second, contradicting row. The wish's row
+    # already says where the release stands (and searches it again by itself),
+    # so these are dropped from the standalone list.
+    def _wish_history(row):
+        if row.get("stage") != "failed" or not row.get("wish_id"):
+            return False
+        try:
+            return int(row["wish_id"]) in wish_ids
+        except (TypeError, ValueError):
+            return False
     shown = {r["job_id"] for r in rows if r.get("job_id")}
-    rows += [r for r in job_rows if r.get("job_id") not in shown]
+    rows += [r for r in job_rows
+             if r.get("job_id") not in shown and not _wish_history(r)]
     # A release parked in the pipeline that already has a row of its OWN is
     # that row, not a second one. A wish from MusicBrainz is queued in the
     # pipeline while it waits for a slot, so both builders describe it — one
@@ -1034,7 +1074,7 @@ def queue_retry(req: QueueRetryRequest):
 
 
 @router.post("/api/queue/clear")
-def queue_clear(req: QueueClearRequest):
+def queue_clear(req: QueueClearRequest, before: float = 0.0):
     """Take FINISHED rows off the queue — one row, or every finished one.
 
     The queue accumulates history: a download that imported, a job that gave up,
@@ -1095,6 +1135,17 @@ def queue_clear(req: QueueClearRequest):
                   if r.get("clearable")
                   and (scope != "wishes" or r["kind"] == "wish")]
 
+    if before:
+        # The cut `clear_settled_queue` asks for: only rows that were ALREADY
+        # settled when the new run was requested. `updated_at` is when a row
+        # finished (a job's `ended_at`, a wish's own stamp), so a job that fails
+        # while the clear is still on its way to the registry is left alone —
+        # the rule is "the PREVIOUS run's history goes", and a failure the user
+        # has not seen yet is this run's news, not history. Without the cut the
+        # clear is a race: a job that fails a heartbeat after a new one starts
+        # is wiped by the clear that new start spawned, which is exactly how
+        # `tools/test_outcomes.py` caught it.
+        wanted = [r for r in wanted if float(r.get("updated_at") or 0) <= before]
     cleared, ids = 0, []
     for row in wanted:
         if row["kind"] == "wish":
@@ -1105,6 +1156,14 @@ def queue_clear(req: QueueClearRequest):
             # make it pop up as a row of its own the moment the wish goes.
             if row.get("job_id"):
                 soulseek_auto.forget(row["job_id"])
+            # …and so is EVERY OTHER settled job of this wish: `build_queue`
+            # hides those while the wish exists (they are its history, see the
+            # drop there), so they would surface as standalone Failed rows the
+            # instant the wish is deleted. A running one is left alone
+            # (`forget` refuses it — that job is cancelled, not cleared).
+            for job in soulseek_auto.jobs():
+                if job.get("wish_id") == wid and job.get("id") != row.get("job_id"):
+                    soulseek_auto.forget(job.get("id"))
             if wishes.delete_wish(wid):
                 cleared += 1
                 ids.append(row["id"])
@@ -1113,6 +1172,63 @@ def queue_clear(req: QueueClearRequest):
                 cleared += 1
                 ids.append(row["id"])
     return {"ok": True, "cleared": cleared, "ids": ids}
+
+
+def clear_settled_queue(cfg=None, before: float = 0.0):
+    """Take the SETTLED rows off the queue's FINISHED sections — the same clear
+    the per-section buttons run, called when NEW WORK starts.
+
+    The owner's ask: the queue's finished sections must not pile up across
+    runs ("Ensure sections here are auto-cleared when new jobs / searches /
+    auto-importing / add to library runs"). It is called where the work is
+    CREATED — a job start, a bulk enqueue, a page download, the wishes worker's
+    own pass — never by a page, so an add from any surface clears them and the
+    UI has nothing to know.
+
+    It reuses `queue_clear`'s own path, section by section, and only over the
+    two sections that are HISTORY: **completed** and **failed**. What that
+    leaves alone is the point:
+
+    * `queued` / `in_progress` / `background` — work that is still going, and a
+      wish the worker searches again (background), are not finished;
+    * `needs_attention` — a wish nothing was found for, or a job parked on a
+      question, is waiting for the USER, not finished. The queue's own clear
+      button for that section stays the only thing that takes those rows:
+      dropping them automatically would answer a question nobody asked (and
+      would delete a `not_found` wish nobody decided to stop wanting);
+    * a failure the worker will search again is `background`, so it is not in
+      `failed` to begin with (see `_wish_rows`).
+
+    A job that FINISHES after this call is untouched — it settles later, into a
+    section that is read as it is.
+
+    Returns how many rows went, and never raises: a queue that cannot be read
+    must not block the work that just asked for it."""
+    cleared = 0
+    for section in ("completed", "failed"):
+        try:
+            out = queue_clear(QueueClearRequest(scope=section), before=before)
+            cleared += int((out or {}).get("cleared") or 0)
+        except Exception:
+            continue
+    return cleared
+
+
+def _clear_settled_for_new_run():
+    """`clear_settled_queue` for the pipeline's own callers (a deferred import:
+    `server.soulseek_auto` is imported BY this module, so it cannot import this
+    one at module level). Kept here so the callers read the same one line.
+
+    The cut is stamped HERE, on the caller's thread, before any work is done:
+    the callers run the clear on a daemon thread so a job start never waits on
+    the queue payload's read of slskd, and the moment that matters is the one
+    the new run STARTED at — not the moment the thread got around to it."""
+    before = time.time()
+    try:
+        from server import api_queue
+        return api_queue.clear_settled_queue(before=before)
+    except Exception:
+        return 0
 
 
 def _clear_refusal(row):

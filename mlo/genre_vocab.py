@@ -57,6 +57,7 @@ _FAMILY_OF = {
     "bossa nova": "latin", "breakbeat": "electronic", "breakcore": "electronic",
     "bubblegum pop": "pop", "canterbury scene": "rock", "chamber pop": "pop",
     "chicago blues": "blues", "chicha": "latin", "chillout": "electronic",
+    "chillwave": "electronic", "coldwave": "electronic",
     "christian rock": "gospel", "city pop": "pop", "classic rock": "rock",
     "cloud rap": "hip hop", "comedy rock": "comedy", "conscious hip hop": "hip hop",
     "contemporary christian": "gospel", "contemporary classical": "classical", "contemporary folk": "folk",
@@ -98,7 +99,15 @@ _FAMILY_OF = {
     "memphis rap": "hip hop", "merengue": "latin", "metalcore": "metal",
     "microhouse": "electronic", "midwest emo": "rock", "minimal techno": "electronic",
     "minimalism": "classical", "modal jazz": "jazz", "modern classical": "classical",
-    "musique concrète": "experimental", "neo soul": "soul", "neofolk": "folk",
+    "minimal wave": "electronic", "musique concrète": "experimental",
+    "neo soul": "soul", "neofolk": "folk",
+    # The "wave" names, spelled out. The keyword rule below has "wave" as an
+    # ELECTRONIC word, which is true of the genre called "wave" and of the
+    # synth-driven ones — and flatly wrong for new wave (a pop/rock movement
+    # named for the thing it was new AGAINST) and for no wave (an avant-garde
+    # scene that was not electronic at all). The owner's report is exactly
+    # that: a new wave track reading "Electronic; New Wave".
+    "new romantic": "pop", "new wave": "rock", "no wave": "experimental",
     "noise": "experimental", "noise pop": "pop", "noise rock": "rock",
     "northern soul": "soul", "nu jazz": "jazz", "nu metal": "metal",
     "oi": "punk", "old school hip hop": "hip hop", "opera": "classical",

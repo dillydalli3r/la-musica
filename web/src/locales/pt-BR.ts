@@ -72,6 +72,12 @@ export default {
   "menu.runAll": "Executar todos os {count} scripts",
   "menu.runAllTitle": "Executar todos os {count} scripts?",
   "menu.runAllHint": "Eles rodam sobre a seleção atual, nesta ordem:",
+  "menu.searchTrackSoulseek": "Buscar esta faixa no Soulseek",
+  "menu.searchTrackSoulseekHint": "Procura só esta música na rede pelo id de gravação do MusicBrainz — nada é enfileirado a menos que você baixe um arquivo",
+  "menu.searchTrackNoMbid": "Esta faixa não tem id de gravação do MusicBrainz — marque as tags primeiro, ou busque por texto na página Soulseek",
+  "soulseek.mbid.chip": "Buscar por MBID",
+  "soulseek.mbid.hint": "Isso parece um id do MusicBrainz — ao pressionar Buscar, procura só essa faixa: artista e título, o álbum e o próprio id, tudo de uma vez.",
+  "soulseek.mbid.label": "Busca por MBID: {label}",
   "menu.openTrackPage": "Abrir página da faixa",
   "menu.openTrackPageHint": "Abre a página própria desta faixa — tags, dados técnicos e letra",
   "menu.downloadVideo": "Baixar videoclipe",
@@ -480,4 +486,19 @@ export default {
   "cookies.keptHosts": "Somente cookies de {hosts} são mantidos — todo o resto do export é descartado.",
 
   "cookies.sectionTitle": "Logins por cookie — importar um cookies.txt",
+
+  // —— Página Biblioteca: o par alfabético da barra — um campo de nome e o
+  // índice A–Z. Dois controles sobre um filtro (as palavras digitadas e a
+  // letra escolhida), aplicado à lista que as abas de visualização desenham.
+  "library.az.namePlaceholder": "Filtrar por nome",
+  "library.az.nameAria": "Filtrar a lista por nome",
+  "library.az.nameHint": "Título do álbum, nome do artista ou título da faixa — acentos são ignorados, então «asgeir» encontra «Ásgeir». Isso restringe a lista que as abas de visualização já desenham.",
+  "library.az.nameClear": "Limpar o filtro por nome",
+  "library.az.button": "A–Z",
+  "library.az.railAria": "Filtrar a lista por letra",
+  "library.az.railTitle": "Ir para uma letra — cada uma mostra quantos itens desta visão começam com ela",
+  "library.az.menuTitle": "Começa com",
+  "library.az.clear": "Mostrar tudo",
+  "library.az.letterHint": "{letter} — {n} nesta visão",
+  "library.az.empty": "Nada corresponde aqui — limpe a busca, o campo de nome, a letra A–Z ou o menu Filtro.",
 } as const;

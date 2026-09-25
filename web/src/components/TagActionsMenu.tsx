@@ -3,7 +3,7 @@ import { useNavigate } from "react-router-dom";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import {
   ArrowDownToLine, BadgeInfo, Disc3, Ellipsis, ExternalLink, FileOutput, Film, ImagePlus, Info, Music2, Play,
-  RefreshCw, Sparkles, Tags, Users, Wand2,
+  RefreshCw, Search, Sparkles, Tags, Users, Wand2,
 } from "lucide-react";
 import type { LucideIcon } from "lucide-react";
 import { api } from "../api";
@@ -148,6 +148,35 @@ export default function TagActionsMenu({
       toast.error(String(e));
     } finally {
       setVideoBusy(false);
+    }
+  };
+
+  /** Look for the ONE song this menu is on, on the network.
+   *
+   *  The menu holds one fact about a listed track — its path — so the id the
+   *  search needs is read off the file's own tags at the press (the same read
+   *  `downloadVideoHere` makes for its title and length), never guessed from
+   *  the list the row came from: `MUSICBRAINZ_TRACKID` IS this app's recording
+   *  id. A track that carries none says so instead of searching for a title the
+   *  user did not ask about. The search itself happens on the Soulseek page's
+   *  own Search tab, which resolves the id into that track's queries and starts
+   *  them in parallel — one navigation, no second implementation, and nothing
+   *  queued unless the user downloads a file from the results.
+   */
+  const searchTrackOnSoulseek = async () => {
+    if (!menuTrack) return;
+    try {
+      const res = await api.tags(menuTrack);
+      const tags = (res?.tags ?? {}) as Record<string, string | null>;
+      const mbid = String(tags.MUSICBRAINZ_TRACKID ?? "").trim();
+      if (!mbid) {
+        toast(t("menu.searchTrackNoMbid"));
+        return;
+      }
+      navigate(`/soulseek?tab=search&mbid=${encodeURIComponent(mbid)}`);
+      onDone?.();
+    } catch (e) {
+      toast.error(String(e));
     }
   };
 
@@ -334,6 +363,22 @@ export default function TagActionsMenu({
                 disabled: videoBusy,
                 title: t("menu.downloadVideoHint"),
                 onClick: () => void downloadVideoHere(),
+              },
+              {
+                // The ONE song this menu is on, on the network: the user is
+                // missing a single track and has no query worth typing. Its
+                // MusicBrainz recording id (the tag this app writes,
+                // MUSICBRAINZ_TRACKID) is read from the file's own tags at the
+                // press, exactly as the video entry above reads its facts, and
+                // handed to the Soulseek page's own search — which resolves the
+                // id into that track's queries and starts them in parallel.
+                // Nothing is queued: it is a search, and the user downloads what
+                // the results show.
+                label: t("menu.searchTrackSoulseek"),
+                icon: Search,
+                hidden: !menuTrack,
+                title: t("menu.searchTrackSoulseekHint"),
+                onClick: () => void searchTrackOnSoulseek(),
               },
             ],
           },

@@ -263,7 +263,7 @@ export default function CheckStackPage() {
 
   if (!draft || !stack || !baseline) {
     return (
-      <div className="p-6 max-w-6xl mx-auto">
+      <div className="p-6 max-w-[1600px] mx-auto">
         <PageHeader sticky icon={Layers} title="Checks & scripts" subtitle="Every script, every grading check and the audit pass, in one place." />
         <div className="panel text-sm text-zinc-400 space-y-2">
           {isError ? (
@@ -292,7 +292,7 @@ export default function CheckStackPage() {
     && gateOn(draft.gates, s)).length;
 
   return (
-    <div className="p-6 space-y-5 mx-auto max-w-6xl">
+    <div className="p-6 space-y-5 mx-auto max-w-[1600px]">
       <PageHeader
         // NOT sticky, unlike most pages: this header carries the whole stack
         // description, the counts, the Discard/Save pair AND the filter row —

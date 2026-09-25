@@ -85,7 +85,7 @@ export default function FavoritesPage() {
     : "Nothing to export — this favorites tab is empty";
 
   return (
-    <div className="p-6 space-y-5 mx-auto max-w-6xl">
+    <div className="p-6 space-y-5 mx-auto max-w-[1600px]">
       <PageHeader
         icon={Heart}
         title="Favorites"

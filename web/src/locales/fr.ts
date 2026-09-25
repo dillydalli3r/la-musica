@@ -72,6 +72,12 @@ export default {
   "menu.runAll": "Exécuter les {count} scripts",
   "menu.runAllTitle": "Exécuter les {count} scripts ?",
   "menu.runAllHint": "Ils s’exécutent sur la sélection actuelle, dans cet ordre :",
+  "menu.searchTrackSoulseek": "Chercher ce titre sur Soulseek",
+  "menu.searchTrackSoulseekHint": "Cherche ce seul morceau sur le réseau par son id d’enregistrement MusicBrainz — rien n’est mis en file sauf si vous téléchargez un fichier",
+  "menu.searchTrackNoMbid": "Ce titre ne porte pas d’id d’enregistrement MusicBrainz — taguez-le d’abord, ou cherchez par texte sur la page Soulseek",
+  "soulseek.mbid.chip": "Chercher par MBID",
+  "soulseek.mbid.hint": "Cela ressemble à un id MusicBrainz — Chercher cherche ce seul titre : son artiste et son titre, son album et l’id lui-même, tout à la fois.",
+  "soulseek.mbid.label": "Recherche par MBID : {label}",
   "menu.openTrackPage": "Ouvrir la page du titre",
   "menu.openTrackPageHint": "Ouvre la page propre à ce titre — métadonnées, données techniques et paroles",
   "menu.downloadVideo": "Télécharger le clip",
@@ -480,4 +486,19 @@ export default {
   "cookies.keptHosts": "Seuls les cookies de {hosts} sont conservés — tout le reste de l’export est ignoré.",
 
   "cookies.sectionTitle": "Connexions par cookies — importer un cookies.txt",
+
+  // —— Page Bibliothèque : le couple alphabétique de la barre — un champ de
+  // nom et l’index A–Z. Deux commandes pour un seul filtre (les mots saisis et
+  // la lettre choisie), appliqué à la liste que dessinent les onglets de vue.
+  "library.az.namePlaceholder": "Filtrer par nom",
+  "library.az.nameAria": "Filtrer la liste par nom",
+  "library.az.nameHint": "Titre de l’album, nom de l’artiste ou titre du morceau — les accents sont ignorés, donc « asgeir » trouve « Ásgeir ». Cela restreint la liste que les onglets de vue dessinent déjà.",
+  "library.az.nameClear": "Effacer le filtre par nom",
+  "library.az.button": "A–Z",
+  "library.az.railAria": "Filtrer la liste par lettre",
+  "library.az.railTitle": "Aller à une lettre — chacune indique combien d’éléments de cette vue commencent par elle",
+  "library.az.menuTitle": "Commence par",
+  "library.az.clear": "Tout afficher",
+  "library.az.letterHint": "{letter} — {n} dans cette vue",
+  "library.az.empty": "Rien ne correspond ici — effacez la recherche, le champ de nom, la lettre A–Z ou le menu Filtre.",
 } as const;

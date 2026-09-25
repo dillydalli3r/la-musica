@@ -34,6 +34,12 @@
 //!   than relying on a default: the command has to be pressable BEFORE the web
 //!   has said anything about the current track, or the very first press — the
 //!   one that likes an unliked track — would have nothing to hit.
+//! * A press the webview was not awake to receive is REMEMBERED and re-sent
+//!   when the app is next active (`refresh`), and forgotten the moment the web
+//!   pushes a state of its own. The star's whole point is that it is used from
+//!   the lock screen, which is exactly when a parked webview drops a Tauri
+//!   event on the floor; without this the press is answered at the OS level and
+//!   then silently lost.
 //!
 //! ## What it deliberately does not do
 //!
@@ -55,6 +61,8 @@
 //! unconditionally.
 
 use std::ptr::NonNull;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::OnceLock;
 
 use block2::{DynBlock, RcBlock};
 use objc2::msg_send;
@@ -66,6 +74,23 @@ use tauri::{AppHandle, Emitter};
 /// `LIKE_EVENT` in `web/src/lib/iosFavs.ts` — the two are one wire, and the
 /// web side ignores an event name it does not know.
 pub const LIKE_EVENT: &str = "mlo-ios-like";
+
+/// The app handle, kept from `register` so the star can be re-asserted from the
+/// notification handlers in `src/ios_audio.rs`, which have no handle of their
+/// own. Written once, at setup, before any press can happen.
+static APP: OnceLock<AppHandle> = OnceLock::new();
+
+/// A press the web UI has not answered yet.
+///
+/// The star is pressed while the phone is LOCKED, which is precisely when the
+/// webview's JavaScript may be parked: the event is handed to the webview the
+/// moment it arrives, and if nothing was running to receive it the press is
+/// gone — the OS got its "handled", and the user's like never happened. So the
+/// press is remembered here and re-sent when the app is next active (see
+/// `refresh`), and the memory is cleared by the APP answering: every state push
+/// from the web (`set_liked`, i.e. the `set_now_playing_liked` command) means
+/// the webview is alive and has the like of its own.
+static PENDING_PRESS: AtomicBool = AtomicBool::new(false);
 
 /// `MPRemoteCommandHandlerStatusSuccess`, the value the OS wants back once the
 /// press has been acted on (MediaPlayer's `MPRemoteCommand.h`; the failure
@@ -116,6 +141,9 @@ fn dislike_command() -> Option<Retained<AnyObject>> {
 /// `set_now_playing_liked` Tauri command, i.e. whenever the web UI's own like
 /// state for the track changes — see `web/src/lib/iosFavs.ts`.
 pub fn set_liked(liked: bool) {
+    // The web UI is alive and has spoken: whatever press was still waiting for
+    // it has been answered, and re-sending it would toggle the like twice.
+    PENDING_PRESS.store(false, Ordering::SeqCst);
     let Some(like) = like_command() else {
         return;
     };
@@ -132,11 +160,24 @@ pub fn set_liked(liked: bool) {
     }
 }
 
-/// Re-assert that the star is pressable, without touching its state. Called by
-/// the audio-session module at the transitions that rebuild the system's
-/// now-playing furniture — becoming active again, and the media server
-/// restarting (`src/ios_audio.rs`).
+/// Re-assert that the star is pressable, without touching its state — and hand
+/// the webview any press it was never awake to receive.
+///
+/// Called by the audio-session module at the transitions that rebuild the
+/// system's now-playing furniture — becoming active again, and the media server
+/// restarting (`src/ios_audio.rs`) — which is also the first moment a parked
+/// webview can be expected to be running again: see `PENDING_PRESS`.
 pub fn refresh() {
+    if PENDING_PRESS.swap(false, Ordering::SeqCst) {
+        if let Some(app) = APP.get() {
+            if let Err(e) = app.emit(LIKE_EVENT, ()) {
+                // Still not deliverable: keep it for the next transition rather
+                // than losing the user's press.
+                PENDING_PRESS.store(true, Ordering::SeqCst);
+                eprintln!("[mlo-desktop] could not re-deliver the iOS star press: {e}");
+            }
+        }
+    }
     let Some(like) = like_command() else {
         return;
     };
@@ -150,6 +191,9 @@ pub fn refresh() {
 /// dislike command out of the UI, and attach the handler that hands every press
 /// to the web UI.
 pub fn register(app: &AppHandle) {
+    // Kept for `refresh`: the notification handlers have no handle, and a press
+    // that arrived while the webview was parked has to be re-sent from one.
+    let _ = APP.set(app.clone());
     let Some(like) = like_command() else {
         eprintln!(
             "[mlo-desktop] MediaPlayer's command centre is unavailable — \
@@ -184,6 +228,13 @@ pub fn register(app: &AppHandle) {
             // hearts. A webview that cannot be reached is not a reason to
             // fail the press: the same audio session is what the user is
             // looking at, and the OS has no useful "failed" rendering here.
+            //
+            // Remembered BEFORE the send, because the send is exactly what
+            // fails when the phone is locked and the webview is parked: the
+            // press is re-delivered the next time the app is active (see
+            // `refresh`), and dropped the moment the web answers with a state
+            // of its own.
+            PENDING_PRESS.store(true, Ordering::SeqCst);
             if let Err(e) = app.emit(LIKE_EVENT, ()) {
                 eprintln!("[mlo-desktop] could not tell the UI about the iOS star press: {e}");
             }
