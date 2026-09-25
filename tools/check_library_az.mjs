@@ -653,11 +653,19 @@ try {
     if (!table) return null;
     const head = [...table.querySelectorAll("thead th")].map((th) => (th.textContent || "").trim());
     const cells = [...(table.querySelectorAll("tbody tr")[0]?.querySelectorAll("td") ?? [])].length;
-    return { head, cells };
+    // The stored list is repaired, not just ignored: the Columns menu draws
+    // what this hook returns, so a list left as `["num"]` would make the next
+    // tick collapse the table to the one column clicked.
+    const stored = JSON.parse(localStorage.getItem("mlo-cols4-tracks") || "[]");
+    return { head, cells, stored: stored.length, storedHasNum: stored.includes("num") };
   });
   check(`a stored list holding only the row number still draws the Tracks columns `
         + `(${(seededCols?.head ?? []).filter(Boolean).length} headers, ${seededCols?.cells ?? 0} cells in row 1)`,
         !!seededCols && seededCols.head.filter(Boolean).length >= 8 && seededCols.cells >= 8,
+        JSON.stringify(seededCols));
+  check(`…and the stored list is repaired, so the next toggle works from what is on screen `
+        + `(${seededCols?.stored ?? 0} ids stored, # kept: ${seededCols?.storedHasNum})`,
+        !!seededCols && seededCols.stored >= 8 && seededCols.storedHasNum === true,
         JSON.stringify(seededCols));
 } finally {
   await browser.close();

@@ -249,6 +249,14 @@ export function useColumnPrefs(key: string, defs: Col[]): [string[], (id: string
         const arr = JSON.parse(raw) as string[];
         const kept = arr.filter((x) => ids.has(x));
         if (kept.length && drawsData(kept)) return kept;
+        // Ignoring a list is not enough: the Columns menu draws the list this
+        // hook RETURNS, so the reader sees the defaults ticked while the stored
+        // one is still `["num"]` — and the next tick in that menu would write
+        // from the broken list and collapse the table to the one column they
+        // clicked. So the defaults are STORED as well as drawn, once, and the
+        // menu, the table and the next toggle all agree from here on.
+        localStorage.setItem(storageKey, JSON.stringify(allVisible));
+        return allVisible;
       }
       const old = localStorage.getItem(legacyKey);
       if (old) {

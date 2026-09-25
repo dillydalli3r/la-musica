@@ -1,6 +1,6 @@
 # la musica
 
-**v4.1.5** — a self-hosted app that *manages, optimizes, audits, grades and plays* your music library, from a browser, a desktop window or a phone.
+**v4.1.6** — a self-hosted app that *manages, optimizes, audits, grades and plays* your music library, from a browser, a desktop window or a phone.
 
 **la musica** (formerly Music Library Optimizer) is a FastAPI backend plus a React UI over the `mlo` engine: music and music videos (karaoke-synced lyrics), playlists, likes and favourites, artist artwork and biographies, a multi-source lyrics chain, MusicBrainz/Discogs/AcoustID identity, and a managed Soulseek client whose auto-importer verifies what it downloads. It grades the library (69 checks), audits it, and runs an installable toolchain — all local.
 
