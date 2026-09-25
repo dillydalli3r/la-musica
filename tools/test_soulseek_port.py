@@ -361,7 +361,7 @@ reads["value"] = read("mapped", port=live_port, ip=LAN, external=WAN, verified=T
 good = sp.port_check(cfg)
 ok(good["verdict"] == "ok" and good["ok"] is True,
    "a listener and a router mapping together read ok")
-ok([c["id"] for c in good["checks"]] == ["listen", "mapping", "address",
+ok([c["id"] for c in good["checks"]] == ["listen", "publish", "mapping", "address",
                                          "self-connect", "network"],
    "every row is reported, in a stable order")
 ok(all({"id", "label", "state", "detail", "proves", "cannot"} <= set(c)
@@ -382,6 +382,89 @@ reads["value"] = read("refused", port=live_port, external=WAN, verified=False,
 broken_chain = sp.port_check(cfg)
 ok(broken_chain["verdict"] == "fail" and broken_chain["ok"] is False,
    "a failure anywhere is the verdict")
+
+# --------------------------------------------------------------------------- #
+# 6) the host's publish line: measured from inside a container, not assumed
+# --------------------------------------------------------------------------- #
+print("== the publish row (the host's own port list, read from in here) ==")
+# The app's own served port, which compose publishes beside the listen port: the
+# control that says whether THIS Docker hands published ports back at all.
+free2 = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+free2.bind(("", 0))
+web_port = free2.getsockname()[1]
+free2.close()
+container_cfg = {"soulseek_listen_port": live_port, "soulseek_upnp": True,
+                 "server_port": web_port}
+real_container = sp._container
+sp._container = lambda: True          # read as a container WITHOUT one
+
+
+def gateway(accepts):
+    """A gateway that accepts exactly the ports in *accepts* (the other ports of
+    this machine are never dialled: the seam is the same one the suite already
+    replaced to keep the probe off the network)."""
+    def connect(host, port, timeout):
+        return (port in accepts, "" if port in accepts else "connection refused")
+    return connect
+
+
+reads["value"] = read("no_gateway", port=live_port,
+                      detail="no device answered the UPnP search")
+sp._connect = gateway({live_port})
+published = sp.port_check(container_cfg)
+ok(row(published, "publish")["state"] == "ok",
+   f"a port the host hands back reads ok ({row(published, 'publish')['detail']})")
+ok(str(live_port) in row(published, "publish")["label"],
+   "…and the row names the port it is about")
+ok(row(published, "publish")["detail"].find("no UDP port") > 0
+   and "obfuscated" in row(published, "publish")["detail"],
+   "…and states which ports have to be reachable from the internet: TCP only, "
+   "no second obfuscated port")
+
+# The R279 class the numbers alone cannot rule out: the host publishes SOMETHING
+# (its own web port answers on the gateway) but not the port slskd listens on —
+# so the compose file is wrong and the router is not the first thing to fix.
+sp._connect = gateway({web_port})
+unpublished = sp.port_check(container_cfg)
+pub_row = row(unpublished, "publish")
+ok(pub_row["state"] == "fail",
+   f"a port the host does not publish is a fail, not a warning ({pub_row['detail']})")
+ok(f"ports: \"{live_port}:{live_port}\"" in pub_row["detail"]
+   and "MLO_SOULSEEK_LISTEN_PORT" in pub_row["detail"],
+   "…and the fail carries the exact compose line and the pin that seeds it")
+ok(unpublished["verdict"] == "fail" and unpublished["ok"] is False,
+   "…and it is the verdict: peers cannot reach a port nobody publishes")
+
+# A Docker that does not hand published ports back into the container (the
+# control refused too) cannot be read from in here — so the row says that instead
+# of accusing the compose file of a mistake it cannot see.
+sp._connect = gateway(set())
+unreadable = sp.port_check(container_cfg)
+ok(row(unreadable, "publish")["state"] == "warn"
+   and "docker port <container>" in row(unreadable, "publish")["detail"],
+   "a host that reflects no published port leaves the publish row unread, never fail")
+
+# Nothing accepts on the port inside the container: a refusal on the gateway
+# would say nothing about the publish line, and the listener row is the one that
+# already failed.
+sp._connect = gateway({live_port})
+sp._container = lambda: False
+not_a_container = sp.port_check({"soulseek_listen_port": live_port,
+                                 "soulseek_upnp": True})
+ok(row(not_a_container, "publish")["state"] == "unknown"
+   and "not a container" in row(not_a_container, "publish")["detail"],
+   "a direct install has no publish line to read, and says so instead of passing")
+sp._container = lambda: True
+sp._connect = gateway({live_port})
+nothing_inside = sp.port_check({"soulseek_listen_port": free_port,
+                                "soulseek_upnp": True, "server_port": web_port})
+ok(nothing_inside["port"] == free_port
+   and row(nothing_inside, "publish")["state"] == "unknown"
+   and "nothing accepts on TCP" in row(nothing_inside, "publish")["detail"],
+   "with nothing listening inside, the publish row stays unknown (a published "
+   "port reads refused there too)")
+sp._container = real_container
+sp._connect = lambda host, port, timeout: (False, "connection refused")
 
 listener.close()
 held.close()

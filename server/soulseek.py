@@ -2263,22 +2263,53 @@ def _served_uploads(cfg=None):
         return 0
 
 
-def _listen_hint(port_state):
+def _listen_hint(port_state, publish=""):
     """What to do about an unconfirmed listen port, in THIS install's terms.
 
     A container cannot forward its own port: the gateway this process can see is
     Docker's bridge (172.18.x.1), so the automatic opening the switch asks for
     never reaches the home router, and the router can only forward to the
     HOST's address on the LAN. Saying "forward the port" without that is the
-    advice that was already on screen while the share stayed unreachable."""
+    advice that was already on screen while the share stayed unreachable.
+
+    `publish` is `soulseek_port._publish_check`'s row state — the app's own
+    measurement of whether the host publishes the port the daemon listens on. It
+    splits the two halves of the remedy, which are different jobs for different
+    machines: a publish line the host does not have (R279's "one port, one
+    number" failing in the one way agreeing numbers cannot rule out) is the
+    compose file's, and a publish line that IS there leaves only the router. An
+    unread one is named as unread rather than guessed at."""
     port = int(port_state.get("listen_port") or 0)
     if port_state.get("container"):
+        if publish == "fail":
+            return (f"Running in a container: the host does NOT publish TCP {port} "
+                    f"to it — this app measured a connection to the container's "
+                    f"gateway that is accepted for the app's own port but not for "
+                    f"this one. The publish line is the problem, not the router: "
+                    f"docker-compose.yml needs ports: \"{port}:{port}\" (with "
+                    f"MLO_SOULSEEK_LISTEN_PORT naming that same number when it is "
+                    f"set), and after that TCP {port} still has to be forwarded on "
+                    f"the ROUTER to the HOST's LAN address — a router cannot "
+                    f"forward to a container address. Then press Test port on this "
+                    f"page.")
+        if publish == "ok":
+            return (f"Running in a container: the host publishes TCP {port} — this "
+                    f"app measured it from inside — so the compose line is not the "
+                    f"problem, and what is left is in front of the host: forward "
+                    f"TCP {port} on the ROUTER to the HOST's LAN address, at the "
+                    f"address the internet actually sees for this host (a VPN, a "
+                    f"tunnel or a second router in front changes which address "
+                    f"peers dial). Automatic opening cannot reach the router from "
+                    f"in here: the gateway this process sees is Docker's bridge. "
+                    f"Then press Test port on this page.")
         return (f"Running in a container: publish the port in docker-compose.yml "
                 f"(ports: \"{port}:{port}\") and forward TCP {port} on the ROUTER "
                 f"to the HOST's LAN address — a router cannot forward to a "
                 f"container address, and automatic opening cannot reach the "
                 f"router from in here (the gateway this process sees is Docker's "
-                f"bridge). Then press Test port on this page.")
+                f"bridge). Which number the host publishes could not be read from "
+                f"inside this container — `docker port <container-name>` on the "
+                f"host says it. Then press Test port on this page.")
     return (f"Forward TCP {port} on the router to this machine's LAN address, or "
             f"turn on automatic port opening if the router speaks UPnP. Test "
             f"port on this page says what can be seen from here.")
@@ -2503,10 +2534,14 @@ def share_audit(cfg=None, probe=False):
     except Exception:
         pass
     if audit["port"]["container"]:
-        note("This app runs in a container: other users download from this share "
-             "over the Soulseek listen port, which has to be published by "
-             "docker-compose.yml (ports: \"<port>:<port>\") to the same port "
-             "configured here.")
+        _port = int(audit["port"].get("listen_port") or 0)
+        note(f"This app runs in a container: other users download from this share "
+             f"over the Soulseek listen port, which has to be published by "
+             f"docker-compose.yml (ports: \"{_port}:{_port}\") to the same port "
+             f"configured here, and then forwarded on the router at the address "
+             f"the internet sees for this host. TCP {_port} is the only port "
+             f"involved — nothing UDP, and no second (obfuscated) port: slskd has "
+             f"no obfuscated route.")
     # Every case below is a fact read off this machine or off the router —
     # nothing is inferred from intent, and a mapping nobody confirmed is never
     # reported as one.
@@ -2524,11 +2559,19 @@ def share_audit(cfg=None, probe=False):
     # is now.
     from server import soulseek_port
     listen_row = soulseek_port._listen_check(port_state)
+    # ...and the host's own publish line, read from in here. R279 keeps the compose
+    # file and the daemon from disagreeing about the NUMBER; this is whether the
+    # number is actually PUBLISHED to the container, which agreeing numbers cannot
+    # show (no container can read the host's port list, and a publish line that is
+    # missing looks exactly like a router that does not answer). The two are
+    # different machines with different remedies, so the audit names which one it
+    # is instead of sending the owner to fix both.
+    publish_row = soulseek_port._publish_check(port_state, cfg)
     if listen_row["state"] == "fail":
         listen_why = ("another program is listening on" if port_state["conflict"]
                       else "nothing accepts a connection on")
         add("listen_unconfirmed", "listen_unreachable", listen_row["detail"],
-            _listen_hint(port_state))
+            _listen_hint(port_state, publish_row["state"]))
     # A gateway verdict that is not a mapping is the other case where a green
     # share lies: search, login and the index all work, so the audit used to say
     # "other users can search, browse and download them" — while a peer reaches
@@ -2557,10 +2600,20 @@ def share_audit(cfg=None, probe=False):
                  f"what is carrying them.")
         else:
             listen_why = "no forward was confirmed for"
-            add("listen_unconfirmed", "listen_unreachable",
-                f"Nothing confirmed a forward for the listen port "
-                f"{mapping['listen_port']}: {mapping['detail']}",
-                _listen_hint(port_state))
+            if publish_row["state"] == "fail":
+                # The host has no publish line for this port: proven from in here
+                # (another published port of this container IS handed back), so a
+                # router forward is downstream of a mistake the compose file can
+                # fix — and naming it is the difference between one errand and two.
+                listen_why = "the container's host does not publish"
+                add("listen_unconfirmed", "listen_unpublished",
+                    publish_row["detail"],
+                    _listen_hint(port_state, publish_row["state"]))
+            else:
+                add("listen_unconfirmed", "listen_unreachable",
+                    f"Nothing confirmed a forward for the listen port "
+                    f"{mapping['listen_port']}: {mapping['detail']}",
+                    _listen_hint(port_state, publish_row["state"]))
     elif mapping["enabled"] and mapping["state"] == "mapped":
         note(mapping["detail"] + f" (automatic port opening, port "
                                  f"{mapping['listen_port']}).")

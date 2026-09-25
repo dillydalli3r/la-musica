@@ -99,7 +99,7 @@ ENV HOME=/home/mlo
 # leaves it empty, and the server then reports its own code version instead of
 # claiming to be a release it is not. `tools/check_versions.py` keeps the
 # ARG default in step with mlo/__init__.py.
-ARG MLO_VERSION=4.1.2
+ARG MLO_VERSION=4.1.3
 ENV MLO_VERSION=${MLO_VERSION}
 # The commit the image was built from, and when. The release workflow passes
 # both; a plain `docker build` leaves them empty and the server then reports

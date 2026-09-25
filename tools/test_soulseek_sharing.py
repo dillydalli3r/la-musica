@@ -372,13 +372,69 @@ assert audit["browse"]["ok"] is True, "the index is still served, and is still p
 # can see is Docker's bridge, so the forward the app asks for by itself can
 # never be made, and the router cannot forward to a container address
 import server.auth as srv_auth
+from server import soulseek_port
+
 real_in_container = srv_auth.in_container
+real_connect = soulseek_port._connect
 srv_auth.in_container = lambda: True
+# The suite stays offline: the publish row's connects are answered from a table
+# (what a real published port looks like on a gateway is proven in
+# tools/test_soulseek_port.py, against real sockets).
+published = {"accepts": set()}
+
+
+def _gateway(host, port, timeout):
+    return (port in published["accepts"],
+            "" if port in published["accepts"] else "connection refused")
+
+
+soulseek_port._connect = _gateway
+
 audit = soulseek.share_audit(CFG)
-srv_auth.in_container = real_in_container
 hint = next(p for p in audit["problems"] if p["code"] == "listen_unreachable")["hint"]
 assert "Running in a container" in hint and "HOST's LAN address" in hint, hint
 assert "50000:50000" in hint, hint
+# ...and where the host's own port list could not be read (the control refused
+# too), the hint says that instead of pretending to know
+assert "docker port <container-name>" in hint, hint
+
+# The half of the remedy the numbers cannot pick: R279 keeps the compose file and
+# the daemon from disagreeing about the NUMBER, and the publish line is whether
+# that number is published to the container at all. The app measures it from in
+# here — the gateway hands back the app's OWN published port (8000) but not the
+# listen port, so the compose file is what is wrong and the router is downstream
+# of it. Before this, the audit told the owner to fix both.
+published["accepts"] = {8000}
+audit = soulseek.share_audit(CFG)
+codes = [p["code"] for p in audit["problems"]]
+assert "listen_unpublished" in codes, codes
+unpub = next(p for p in audit["problems"] if p["code"] == "listen_unpublished")
+assert "does not publish TCP 50000" in unpub["message"], unpub
+assert "ports: \"50000:50000\"" in unpub["hint"], unpub
+assert "MLO_SOULSEEK_LISTEN_PORT" in unpub["hint"], unpub
+assert "the container's host does not publish the listen port" in audit["summary"], \
+    audit["summary"]
+assert audit["status"] == "listen_unconfirmed" and audit["ok"] is False, audit["status"]
+# the port readout names every port that has to be reachable, which is one
+assert any("TCP 50000 is the only port involved" in n for n in audit["notes"]), \
+    audit["notes"]
+
+# ...and when the host DOES publish it, the compose file is cleared by
+# measurement and what is left is in front of the host — named as the router, at
+# the address the internet sees (a tunnel or a second NAT changes that address)
+published["accepts"] = {50000}
+audit = soulseek.share_audit(CFG)
+codes = [p["code"] for p in audit["problems"]]
+assert "listen_unpublished" not in codes, codes
+hint = next(p for p in audit["problems"] if p["code"] == "listen_unreachable")["hint"]
+assert "the host publishes TCP 50000" in hint, hint
+assert "the compose line is not the problem" in hint, hint
+assert "address the internet actually sees" in hint, hint
+assert audit["status"] == "listen_unconfirmed", audit["status"]
+
+soulseek_port._connect = real_connect
+published["accepts"] = set()
+srv_auth.in_container = real_in_container
 
 # ...and the state CLEARS once peers have actually reached the port: a served
 # upload is a connection THEY opened, which is stronger evidence than a missing

@@ -4437,10 +4437,14 @@ composition instead (R267). Above `lg` the pane sits beside the artwork.
   not that anything accepts on it now.
   The live failure it was written from: the owner's container served 104 files
   in 7 folders (slskd's own `/shares`, `uploads: []`, and no inbound connection
-  line in `slskd.log`) while the card read green and the summary promised
+  line in `sklsd.log`) while the card read green and the summary promised
   browsing. Pinned by `tools/test_soulseek_sharing.py`: the state and its
   severity, the hint in both installs, both boundaries above, and the
-  dead-listener and held-port cases the verdict is now shared with.
+  dead-listener and held-port cases the verdict is now shared with. **R290 splits
+  that hint by measurement in a container**: a publish line the host demonstrably
+  does not have is its own problem code (`listen_unpublished`, naming the compose
+  line and the pin), and a measured pass clears the compose file and leaves only
+  the router.
 
 ### 7.34 The Browse sheet reads the payload's names and the store's ratings
 
@@ -5147,6 +5151,52 @@ composition instead (R267). Above `lg` the pane sits beside the artwork.
   that gets through restarts the daemon, the image `EXPOSE`s both ports, and a
   runtime port change reaches a RUNNING slskd at once — a stale daemon keeps
   serving the old port while every surface in the app names the new one.
+
+- **R290 — the publish line is MEASURED, not assumed: the container's listen
+  port is the number the host actually publishes, and the two halves of the
+  remedy are told apart.** R279 keeps the compose file and the daemon from
+  disagreeing about the NUMBER; nothing measured the other half. No container can
+  read the host's port list, so a publish line that is missing — or on another
+  number — read exactly like "your router has no UPnP": the sharing card told the
+  owner to publish the port AND forward it, one of which was already done, and a
+  regression of the R279 class could not be told apart from a router that answers
+  nothing. The owner's report came back as that class once more, and the live
+  install was the witness: `docker port la-musica` printed `8000/tcp -> 0.0.0.0:8000`
+  and `50000/tcp -> 0.0.0.0:50000`, the generated `/music/.mlo/data/slskd.yaml`
+  says `listen_port: 50000`, slskd's own log line is `Listening for incoming
+  connections on 0.0.0.0:50000`, and `/proc/net/tcp` inside the container shows
+  `0.0.0.0:50000` — all three numbers agreed, and a browse still hung, because the
+  port was unreachable from OUTSIDE (four external nodes, check-host.net, timed out
+  on `187.14.57.175:50000`, the address slskd's egress presented, while their
+  control port answered). `server.soulseek_port._publish_check` is the measurement
+  the app can make of that half from in here: this container's gateway ACCEPTS a
+  port the host publishes (the host's proxy/DNAT hands it back) and refuses one it
+  does not, and the app's own served port (`_served_port`: `MLO_SERVER_PORT` →
+  `server_port`) is the CONTROL, so a refusal is only called a missing publish line
+  when the same gateway accepted another published port of this container —
+  otherwise the row says it could not be read from here and names
+  `docker port <container>` as the place that can. It is the sixth row of
+  `GET /api/soulseek/port-check`: `ok` published, `fail` demonstrably not published
+  (carrying the exact `ports: "<port>:<port>"` line and the pin), `warn` not
+  readable from here, `unknown` for a direct install (no publish line is involved)
+  or when nothing accepts inside the container, where a refusal on the gateway says
+  nothing. Its detail is the whole inbound requirement as a readout: **TCP `<port>`
+  only — no UDP port, and no second (obfuscated) port**, because slskd implements
+  no obfuscated route (its own config schema has no such key, and the app never
+  writes one), so a peer that tries one falls back to this port.
+  `server.soulseek.share_audit` consumes that row: a measured `fail` raises its own
+  problem code `listen_unpublished` (same `listen_unconfirmed` status, ranked with
+  it) whose hint names the compose line and the pin, and the summary says "the
+  container's host does not publish" instead of "no forward was confirmed"; a
+  measured `ok` clears the compose file by evidence and leaves the router, named at
+  the address the internet actually sees for this host — a VPN, a tunnel or a second
+  router in front changes which address peers dial, which is exactly the outside
+  half no row here can prove. Pinned by `tools/test_soulseek_port.py` §6 (all four
+  states, the control rule, and the port readout) and `tools/test_soulseek_sharing.py`
+  (the two hint/code cases): both fail against the pre-fix modules restored from
+  `git show HEAD:` and pass after. What the app still cannot do is ship the probe
+  from outside; the payload's note says so, and the row's `cannot` says the gateway
+  a container sees is Docker's bridge, never the owner's router.
 
 ### 7.49 The acquisition pipeline: Failed means given up, and searches get faster
 

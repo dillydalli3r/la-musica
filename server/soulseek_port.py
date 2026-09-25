@@ -9,6 +9,13 @@ of it that row is:
   * listen        a real TCP connection to 127.0.0.1:<port> plus — when nothing
                   answers — the bind test that separates "slskd is not listening"
                   from "another process holds the port";
+  * publish       in a container, the host's OWN port list as the container can
+                  see it: a published port is accepted on Docker's gateway from
+                  in here and an unpublished one is not, so "the compose file
+                  publishes the number slskd listens on" is measured instead of
+                  assumed (and the app's own served port is the control, so a
+                  refusal is only called a missing publish line when this Docker
+                  really does hand published ports back);
   * mapping       what the gateway holds for that port right now
                   (`mlo.portmap.read_port`), with this app's own stored verdict as
                   the fallback a NAT-PMP gateway leaves (it has no request that
@@ -30,6 +37,7 @@ removed, and no lock is taken, so a download in flight is no reason to refuse a
 look at the port.
 """
 import ipaddress
+import os
 import socket
 import time
 from datetime import datetime, timezone
@@ -43,6 +51,21 @@ LOCAL_TIMEOUT = 0.4    # loopback answers at once; this only bounds a black hole
 PUBLIC_TIMEOUT = 2.0   # an unanswered WAN connect is a router that will not hairpin
 GATEWAY_TIMEOUT = 1.5  # one UPnP discovery, per search target
 DEFAULT_PORT = 50000   # the app's own default listen port (soulseek_listen_port)
+
+# The port this app is served on when nothing says otherwise — the compose file's
+# OTHER published port, and therefore the control the publish row is read against.
+DEFAULT_WEB_PORT = 8000
+
+# What a peer in front of this host has to be able to reach, as the readout puts
+# it: the listen port and NOTHING ELSE. slskd's inbound side is one TCP listener
+# ("Listening for incoming connections on 0.0.0.0:<port>" is its own log line),
+# UDP is only ever outbound (discovery, the Soulseek server connection), and there
+# is no second "obfuscated" port to publish: an obfuscated route is a SoulseekQt
+# feature slskd does not implement, so a peer that tries one falls back to this
+# port rather than needing another.
+REACHABLE_NOTE = ("From the internet, TCP {port} is the one port that has to "
+                  "reach this host: no UDP port, and no second (obfuscated) "
+                  "port — slskd has no obfuscated route.")
 
 NOTE = ("A definite answer about the internet needs a probe from OUTSIDE this "
         "network, which this app does not ship — nothing here contacts a "
@@ -169,6 +192,134 @@ def _listen_check(state):
                          f"the port cannot be bound here either, so another process "
                          f"holds it (or a socket from an earlier run is still "
                          f"there).", own]), proves, cannot)
+
+
+# --------------------------------------------------------------------------- #
+# The host's own publish line
+# --------------------------------------------------------------------------- #
+def _container():
+    """Whether this process runs in a container.
+
+    Its own seam, so the suite can put a probe in a container without one: the
+    payload's `container` flag, the port check and the sharing audit all have to
+    answer this the same way for the same process."""
+    try:
+        from server.auth import in_container
+        return bool(in_container())
+    except Exception:
+        return False
+
+
+def _served_port(cfg=None):
+    """The port this app is served on — the control the publish row is read against.
+
+    `MLO_SERVER_PORT` seeds `server_port` at startup (server/main.py), and the
+    compose file publishes THAT number to the host, so a connection to the
+    container's gateway on it proves this Docker does hand published ports back
+    into the container. A host that maps the web port to some other number makes
+    the control read as unpublished too — which is exactly why a refusal on the
+    listen port is only ever called a missing publish line when the control was
+    ACCEPTED (see `_publish_check`)."""
+    candidates = [(os.environ.get("MLO_SERVER_PORT") or "").strip(),
+                  (cfg or {}).get("server_port"), DEFAULT_WEB_PORT]
+    for value in candidates:
+        try:
+            port = int(value)
+        except (TypeError, ValueError):
+            continue
+        if 1 <= port <= 65535:
+            return port
+    return DEFAULT_WEB_PORT
+
+
+def _publish_check(state, cfg=None, container=None, gateway=""):
+    """Whether the HOST publishes the very port the daemon listens on.
+
+    The R279 rule ("one port, one number") is what keeps the compose file and the
+    daemon from disagreeing by construction, but until now nothing MEASURED it: no
+    container can read the host's port list, so a publish line that was missing
+    (or on another number) looked exactly like "your router has no UPnP" — the
+    owner was sent to the router for a mistake in the compose file, or to the
+    compose file while the publish was right. One measurement IS available from in
+    here: this container's gateway. A port the host publishes is accepted there
+    (the host's proxy/DNAT hands the connection back to the container); one it does
+    not publish is refused. The app's own served port is the control, so that
+    refusal is only read as a missing publish line on a Docker that demonstrably
+    does hand published ports back — otherwise the row says so instead of guessing.
+
+    `state` is `soulseek.port_status_payload()`'s, so this row and the listen row
+    describe the same port at the same moment; `container`/`gateway` default to
+    this install's own (the sharing audit passes the state it already carries)."""
+    port = int(state.get("listen_port") or 0)
+    proves = ("that the number slskd holds and the number the host publishes are "
+              "the same one: from inside a container a published port is accepted "
+              "on the container's gateway, while an unpublished one is refused.")
+    cannot = ("whether anything in front of this host forwards it to the internet "
+              "— the gateway a container can see is Docker's bridge, never the "
+              "owner's router, and this app ships no probe from outside.")
+    label = f"Published by the host: TCP {port}"
+    reachable = REACHABLE_NOTE.format(port=port)
+    if container is None:
+        container = bool(state.get("container", _container()))
+    if not container:
+        return _row("publish", label, "unknown",
+                    _joined(["not a container, so no publish line is involved: "
+                             "the daemon holds this port on this machine "
+                             "itself.", reachable]), proves, cannot)
+    if not gateway:
+        from mlo import portmap
+        try:
+            gateway = portmap.default_gateway()
+        except Exception:
+            gateway = ""
+    if not gateway:
+        return _row("publish", label, "warn",
+                    _joined(["the container's gateway address could not be read "
+                             "from here, so the host's own port list could not be "
+                             "read either — `docker port <container>` on the host "
+                             "says which number it publishes.", reachable]),
+                    proves, cannot)
+    if not state.get("listening"):
+        # A refusal here would say nothing: nothing accepts on the port inside the
+        # container either, so a published port reads refused on the gateway too.
+        return _row("publish", label, "unknown",
+                    _joined([f"nothing accepts on TCP {port} inside the container, "
+                             f"so what the host publishes cannot be told apart "
+                             f"from a closed listener — the listener row above is "
+                             f"the one that matters.", reachable]), proves, cannot)
+    accepted, why = _connect(gateway, port, LOCAL_TIMEOUT)
+    if accepted:
+        return _row("publish", label, "ok",
+                    _joined([f"the host publishes TCP {port} to this container: a "
+                             f"connection to the container's gateway "
+                             f"({gateway}:{port}) was accepted, which is what a "
+                             f"published port looks like from in here — so the "
+                             f"compose line is not the problem, and whatever is "
+                             f"left is in front of the host.", reachable]),
+                    proves, cannot)
+    control = _served_port(cfg)
+    control_ok, control_why = _connect(gateway, control, LOCAL_TIMEOUT)
+    if control_ok:
+        return _row("publish", label, "fail",
+                    _joined([f"the host does not publish TCP {port}: a connection "
+                             f"to the container's gateway ({gateway}:{port}) was "
+                             f"not accepted ({why}) while the same gateway "
+                             f"accepted the app's own port {control} — this "
+                             f"Docker does hand published ports back into the "
+                             f"container, and this number is missing from its "
+                             f"publish list or published as another number.",
+                             f"docker-compose.yml has to publish the number slskd "
+                             f"listens on: ports: \"{port}:{port}\", with "
+                             f"MLO_SOULSEEK_LISTEN_PORT (when it is set) naming "
+                             f"that same number.", reachable]), proves, cannot)
+    return _row("publish", label, "warn",
+                _joined([f"the container's gateway ({gateway}) accepted neither "
+                         f"TCP {port} ({why}) nor the app's own port {control} "
+                         f"({control_why}), so this host does not hand published "
+                         f"ports back into the container and its publish list "
+                         f"cannot be read from here — `docker port <container>` on "
+                         f"the host says which number it publishes.",
+                         reachable]), proves, cannot)
 
 
 # --------------------------------------------------------------------------- #
@@ -421,21 +572,22 @@ def port_check(cfg=None):
     lan = portmap.local_ip(gateway)
     read = portmap.read_port(port, ip=lan, gateway=gateway, timeout=GATEWAY_TIMEOUT)
     wan = str(read.get("external_ip") or stored.get("external_ip") or "").strip()
+    container = _container()
     checks = [
         _listen_check(state),
+        # The host's own publish line, read from in here (a container only): the
+        # half of R279 that no number in the config can prove by agreeing.
+        _publish_check(state, cfg, container=container, gateway=gateway),
         _mapping_check(port, read, stored),
         _address_check(read, stored, lan),
         _self_connect_check(port, wan),
         _network_check(running, cfg),
     ]
-    try:
-        from server.auth import in_container
-        container = bool(in_container())
-    except Exception:
-        container = False
     if container:
         # On the row whose silence is otherwise read as "my router has no UPnP":
         # in a container that verdict is about Docker's bridge, not the router.
+        # (The publish row above is the one that DOES read the host's side, and it
+        # says so itself — it is not a second place to repeat this.)
         for row in checks:
             if row["id"] == "mapping":
                 row["detail"] = _joined([row["detail"], CONTAINER_NOTE.format(port=port)])

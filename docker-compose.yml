@@ -74,6 +74,18 @@ services:
       # that the environment pins, and says where the pin lives). On the host,
       # forward that port to this machine as well if a router sits in front of
       # it — that is the half no publish line can do.
+      #
+      # ONE TCP PORT IS ALL OF IT. slskd's inbound side is a single TCP listener,
+      # UDP is only ever outbound, and there is no second "obfuscated" port to
+      # publish — an obfuscated route is a SoulseekQt feature slskd does not
+      # implement, so a peer that tries one falls back to this port rather than
+      # needing another. The app does not have to be trusted about this line
+      # either: on a container it MEASURES it (a published port is accepted on
+      # Docker's gateway from inside, an unpublished one is not, with the app's
+      # own published port as the control) and says so as the *Published by the
+      # host* row of Test port and, when it is wrong, as `listen_unpublished` on
+      # the sharing card — so a missing or renumbered publish line is reported as
+      # itself instead of as a router that will not answer.
       - "${MLO_SOULSEEK_LISTEN_PORT:-50000}:${MLO_SOULSEEK_LISTEN_PORT:-50000}"
     environment:
       # Folder inside the container to treat as the music library.
