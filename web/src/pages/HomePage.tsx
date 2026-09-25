@@ -10,14 +10,12 @@ import PageHeader from "../components/PageHeader";
 import AlbumCard from "../components/AlbumCard";
 import CoverImg from "../components/CoverImg";
 import Segmented from "../components/Segmented";
-import StarRating from "../components/StarRating";
 import StatsPanel from "../components/StatsPanel";
 import { useI18n } from "../lib/i18n";
 import ArtistAvatar from "../components/ArtistAvatar";
 import { GRID_SIZE_MIN } from "../lib/fmt";
 import { albumRef } from "../lib/refs";
 import { GRID_SIZES, useGridSize, useSelectMode } from "../lib/libraryView";
-import { toUi } from "../lib/ratings";
 import { useStore } from "../store";
 import type { ReactNode } from "react";
 import type { HomeAlbum, HomeArtist, HomePodcast, Track } from "../types";
@@ -438,16 +436,15 @@ export default function HomePage() {
       />
       <Shelf title={t("home.shelf.best")} icon={Star} items={data.top_rated} {...shelfProps} />
       {/* The one shelf that is the READER's verdict rather than the library's:
-          the releases they gave stars to, best first, each card carrying the
-          stars it was ranked by. Releases with NO star are not a shelf —
-          "unrated" says nothing about why a row is here and cannot be ordered
-          (Rediscover already draws a random slice of what has not been
-          looked at). */}
+          the releases they gave stars to, best first. Releases with NO star are
+          not a shelf — "unrated" says nothing about why a row is here and
+          cannot be ordered (Rediscover already draws a random slice of what has
+          not been looked at). No `extraOf`: the card draws the rating, stars
+          AND value, so a row added here would be the same rating twice. */}
       <Shelf
         title={t("home.shelf.rated")}
         icon={Star}
         items={data.rated ?? []}
-        extraOf={(row) => <StarRating readOnly size="sm" showValue value={toUi(row.rating)} />}
         {...shelfProps}
       />
       <Shelf

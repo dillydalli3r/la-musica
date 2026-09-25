@@ -65,6 +65,25 @@ if (!library?.artists?.length || !album || !recommend?.items?.length || !albumPa
   process.exit(2);
 }
 
+/* The advisory a card draws is read off the FILES, not off one tag: the
+ * album-level `ITUNESADVISORY` can lag the tracks inside it — measured on the
+ * owner's Evil Empire, whose album tag says 0 while ten of its eleven tracks
+ * say 1 — which is why a grid of covers said nothing about albums whose titles
+ * plainly belong to explicit releases. The stub serves a copy adjusted to
+ * exactly that pair of shapes: one album explicit only through its tracks, one
+ * clean all the way down. */
+const served = JSON.parse(JSON.stringify(library));
+const albumAt = (n) => served.artists.flatMap((a) => a.albums)[n];
+const explicitByTracks = albumAt(0);
+const cleanEverywhere = albumAt(1);
+explicitByTracks.meta = { ...(explicitByTracks.meta || {}), ITUNESADVISORY: "0" };
+delete explicitByTracks.meta.ALBUMITUNESADVISORY;
+for (const t of explicitByTracks.tracks ?? []) t.tags = { ...(t.tags || {}), ITUNESADVISORY: "0" };
+if (explicitByTracks.tracks?.[0]) explicitByTracks.tracks[0].tags.ITUNESADVISORY = "1";
+cleanEverywhere.meta = { ...(cleanEverywhere.meta || {}), ITUNESADVISORY: "0", ALBUMITUNESADVISORY: "0" };
+for (const t of cleanEverywhere.tracks ?? []) t.tags = { ...(t.tags || {}), ITUNESADVISORY: "0" };
+const titleOf = (al) => al.meta?.ALBUM || al.path.split("/").pop();
+
 let chromium;
 const webRequire = createRequire(path.join(webDir, "package.json"));
 try {
@@ -175,7 +194,7 @@ const apiStub = createHttpServer((req, res) => {
   if (url.startsWith("/api/config")) {
     return json({ first_run_done: true, music_folder: "F:/tmp/mlo-lib-az", ui_locale: "en" });
   }
-  if (url.startsWith("/api/library")) return json(library);
+  if (url.startsWith("/api/library")) return json(served);
   if (url.startsWith("/api/album?")) return json(album);
   if (url.startsWith("/api/recommend")) {
     // The shelf asks with a POST body (a playlist or a favourites set is a seed
@@ -592,6 +611,54 @@ try {
     console.log(`\n[library-az] shelf: ${shelf.cards.length} cards, ${shelf.rows} rows x ${shelf.columns} columns, `
       + `card widths ${Math.min(...widths)}–${Math.max(...widths)} px, heading "${shelf.heading}"`);
   }
+  // ------------------------- 5. the album's advisory mark
+  // Every card reads the album's advisory through the same rule
+  // (`albumAdvisory`), so the check walks both shapes it must get right: one
+  // album that is explicit only through its tracks, and one that says clean
+  // everywhere. The mark is the boxed letter the reader sees next to the title.
+  await page.goto(`${base}/library`);
+  await viewTab("Grid").click();
+  await page.waitForSelector(`a[title="${titleOf(explicitByTracks)}"]`, { timeout: 30000 });
+  const marks = await page.evaluate(([explicit, clean]) => {
+    const read = (title) => {
+      const link = document.querySelector(`a[title="${CSS.escape(title)}"]`);
+      const block = link ? link.closest("div.mt-2") : null;
+      if (!block) return null;
+      return [...block.querySelectorAll("span")]
+        .filter((s) => s.title === "Explicit" || s.title === "Clean")
+        .map((s) => `${s.title}:${s.textContent}`);
+    };
+    return { explicit: read(explicit), clean: read(clean) };
+  }, [titleOf(explicitByTracks), titleOf(cleanEverywhere)]);
+  check(`a card whose tracks say explicit wears the mark (${titleOf(explicitByTracks)})`,
+        Array.isArray(marks.explicit) && marks.explicit.includes("Explicit:E"),
+        JSON.stringify(marks));
+  check(`…and an album that says clean everywhere wears none (${titleOf(cleanEverywhere)})`,
+        Array.isArray(marks.clean) && marks.clean.length === 0, JSON.stringify(marks));
+  // ------------------------- 6. a stored column list that would draw nothing
+  // The owner's Tracks view rendered a header of `#` and a column of row
+  // numbers with nothing in it ("NOTHING SHOWS UP"). The view is seeded with
+  // exactly that stored list — only the row-number column — and must still draw
+  // its data columns, because a list that leaves nothing but furniture is not a
+  // choice anyone made about which columns to read.
+  await page.addInitScript(() => {
+    localStorage.setItem("mlo-cols4-tracks", JSON.stringify(["num"]));
+  });
+  await page.goto(`${base}/library`);
+  await page.waitForSelector("text=Tracks", { timeout: 30000 });
+  await viewTab("Tracks").click();
+  await page.waitForTimeout(900);
+  const seededCols = await page.evaluate(() => {
+    const table = document.querySelector("table");
+    if (!table) return null;
+    const head = [...table.querySelectorAll("thead th")].map((th) => (th.textContent || "").trim());
+    const cells = [...(table.querySelectorAll("tbody tr")[0]?.querySelectorAll("td") ?? [])].length;
+    return { head, cells };
+  });
+  check(`a stored list holding only the row number still draws the Tracks columns `
+        + `(${(seededCols?.head ?? []).filter(Boolean).length} headers, ${seededCols?.cells ?? 0} cells in row 1)`,
+        !!seededCols && seededCols.head.filter(Boolean).length >= 8 && seededCols.cells >= 8,
+        JSON.stringify(seededCols));
 } finally {
   await browser.close();
   await vite.close();

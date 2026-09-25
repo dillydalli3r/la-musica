@@ -5,7 +5,7 @@ import { ChevronDown, ChevronRight, CircleAlert, Play, Wand2, Trash2, FolderSync
 import { api } from "../api";
 import { LinkChips, LinkEditorButton } from "../components/Links";
 import { SubtitledVideo } from "../components/SubtitledVideo";
-import { EmptyState, AdvisoryMark, CachedMark, GradeBadge, PageLoading, PendingMark, pendingSummary, mediaCountryLabel } from "../components/Badges";
+import { EmptyState, AdvisoryMark, albumAdvisory, CachedMark, GradeBadge, PageLoading, PendingMark, pendingSummary, mediaCountryLabel } from "../components/Badges";
 import CoverImg, { TrackCover } from "../components/CoverImg";
 import CoverSearchModal from "../components/CoverSearchModal";
 import Description from "../components/Description";
@@ -718,7 +718,7 @@ export default function AlbumPage() {
                   // on the name they are reading, not in a chip two lines down.
                   <span className="inline-flex items-center gap-2 min-w-0">
                     <span className="truncate">{data.meta?.ALBUM ?? data.path.split("/").pop() ?? ""}</span>
-                    <AdvisoryMark value={data.meta?.ITUNESADVISORY ?? data.meta?.ALBUMITUNESADVISORY} />
+                    <AdvisoryMark value={albumAdvisory(data)} />
                     {/* held right now (a run, an import, an organize) */}
                     <LockedChip path={data.path} />
                     {/* added, not downloaded yet — the same mark the library

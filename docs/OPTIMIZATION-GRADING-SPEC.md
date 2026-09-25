@@ -1953,7 +1953,10 @@ user asked for, in the order they asked for it. `server/exporter.py` owns both.
   with the app's own served port as the control — R290), `mapping` (what the
   router itself lists, with its own words
   and the lease), `address` (the LAN address the mapping points at vs the WAN
-  address the gateway states, so CGNAT is named as CGNAT), `self-connect`
+  address the gateway states, so CGNAT is named as CGNAT; inside a container
+  the two addresses are SUPPOSED to differ — the mapping must point at the HOST
+  — so that shape is judged by whether the address answers on the port and never
+  reported as another device holding it, R292), `self-connect`
   (refused ⇒ `unknown`, never `fail`: a router without hairpinning refuses it
   while the port may still be open) and `network` (slskd's signed-in state) —
   each carrying `proves` and `cannot`. A definitive "open to the internet"
@@ -5357,6 +5360,32 @@ composition instead (R267). Above `lg` the pane sits beside the artwork.
   through to NAT-PMP) and the bridged read-back verdicts both ways.
 
 
+
+### 7.51 An album title wears the advisory its FILES state
+
+- **R293 — the boxed E/C mark is read from the strongest statement in the
+  album, and the grid cards draw it too.** `AdvisoryMark` (the boxed letter
+  beside a title) was drawn on the album page, the player bar, the now-playing
+  pane and the favourites rows, but NOT on `AlbumCard` — the surface a reader
+  scans a library by — and the value the page gave it came from the album-level
+  tag alone, which lags the tracks inside it. Measured on the owner's library:
+  Evil Empire carries `ITUNESADVISORY 0` on the album while TEN OF ITS ELEVEN
+  tracks state 1, and Hail to the Thief carries 0 with three of fourteen at 1,
+  so covers for plainly explicit records said nothing. `albumAdvisory`
+  (`web/src/components/Badges.tsx`) is the one rule now, shared by the card and
+  the album page: any track at "1" makes the album explicit (what every store
+  does with a compilation), a "2" is read as clean only when nothing in the
+  album says otherwise, and "0", a blank or no tag at all draws NOTHING —
+  `AdvisoryMark` renders only the two states it has a symbol for. On that
+  library it marks four albums (Evil Empire, Hail to the Thief, Nonagon
+  Infinity, Rage Against the Machine) and leaves the six clean ones bare.
+  Proven by `tools/check_library_az.mjs`, which serves a library carrying both
+  shapes — one album explicit only through its tracks, one clean all the way
+  down — and asserts the mark on the card in a real browser (54/54 checks).
+
+---
+
+## 8. Recommended runbook
 
 Nothing here is a substitute for the app's own Dependencies page: run it first
 and install what the platform supports.

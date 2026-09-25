@@ -19,6 +19,10 @@ export interface Col {
   sortKey: string;
   defHidden?: boolean;
   tag?: string;
+  /** Furniture rather than data: the row number and the cover. What a table
+   *  draws when every DATA column is gone — which is why a stored visible list
+   *  holding nothing else is not obeyed (`useColumnPrefs`). */
+  chrome?: boolean;
 }
 
 /** A user-added column: one file tag shown as its own table column. */
@@ -75,8 +79,8 @@ export const TAG_COL_W = "w-[96px]";
 
 /** Default album-tracklist columns (num/cover/title/genre/dur/bitrate/DR). */
 export const ALBUM_TRACK_COLS: Col[] = [
-  { id: "num", label: "#", sortKey: "tracknumber" },
-  { id: "cover", label: "", sortKey: "" },
+  { id: "num", label: "#", sortKey: "tracknumber", chrome: true },
+  { id: "cover", label: "", sortKey: "", chrome: true },
   { id: "title", label: "Title", sortKey: "tags.TITLE" },
   { id: "genre", label: "Genre", sortKey: "tags.GENRE" },
   { id: "dur", label: "Dur", sortKey: "tech.length" },
@@ -159,8 +163,8 @@ export const TRACK_COL_W: Record<string, string> = {
 
 /** The track table's columns, in render order. */
 export const TRACK_COLS: Col[] = [
-  { id: "num", label: "#", sortKey: "tracknumber" },
-  { id: "cover", label: "", sortKey: "" },
+  { id: "num", label: "#", sortKey: "tracknumber", chrome: true },
+  { id: "cover", label: "", sortKey: "", chrome: true },
   { id: "title", label: "Title", sortKey: "tags.TITLE" },
   { id: "artist", label: "Artist", sortKey: "artist" },
   { id: "album", label: "Album", sortKey: "album" },
@@ -230,12 +234,21 @@ export function useColumnPrefs(key: string, defs: Col[]): [string[], (id: string
   const [visible, setVisible] = useState<string[]>(() => {
     const ids = new Set(defs.map((d) => d.id));
     const allVisible = defs.filter((c) => !c.defHidden).map((c) => c.id);
+    // A stored list that would leave the table nothing but furniture (the row
+    // number, the cover) is not a choice anyone made about which columns to
+    // READ: the owner's Tracks view drew a `#` header and a column of row
+    // numbers with nothing in it (their words: "NOTHING SHOWS UP"), and the
+    // Columns menu looked right, because the columns this build never drew were
+    // never offered to be unticked. The view's own defaults are used instead —
+    // the same rule as the v3 note above, one step further on.
+    const chromeIds = new Set(defs.filter((d) => d.chrome).map((d) => d.id));
+    const drawsData = (list: string[]) => list.some((id) => !chromeIds.has(id));
     try {
       const raw = localStorage.getItem(storageKey);
       if (raw) {
         const arr = JSON.parse(raw) as string[];
         const kept = arr.filter((x) => ids.has(x));
-        if (kept.length) return kept;
+        if (kept.length && drawsData(kept)) return kept;
       }
       const old = localStorage.getItem(legacyKey);
       if (old) {

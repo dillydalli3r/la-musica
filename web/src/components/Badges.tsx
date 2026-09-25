@@ -264,6 +264,32 @@ export function AdvisoryMark({ value, size = "sm" }: { value: string | null | un
   return null;
 }
 
+/** The advisory an ALBUM reads as, out of what its own files state.
+ *
+ *  The album-level tag is what the album page has always shown, and it can
+ *  disagree with the tracks inside it — measured on the owner's library: Evil
+ *  Empire carries `ITUNESADVISORY 0` on the album while TEN OF ITS ELEVEN
+ *  tracks state 1, and Nonagon Infinity carries 1 while eight of its nine say
+ *  0. A grid of covers therefore said nothing about albums whose titles plainly
+ *  belong to explicit releases. The strongest statement wins: any explicit
+ *  track makes the album explicit (what every store does with a compilation),
+ *  and a clean tag is only read as clean when nothing in the album says
+ *  otherwise. Anything else — no tag, or a bare "0" — draws nothing, which is
+ *  what `AdvisoryMark` does with a value it cannot place. */
+export function albumAdvisory(al: {
+  meta?: { ALBUMITUNESADVISORY?: unknown; ITUNESADVISORY?: unknown } | null;
+  tracks?: { tags?: { ITUNESADVISORY?: unknown } | null }[] | null;
+}): "1" | "2" | null {
+  const text = (v: unknown) => String(v ?? "").trim();
+  const album = text(al.meta?.ALBUMITUNESADVISORY);
+  const own = text(al.meta?.ITUNESADVISORY);
+  const tracks = (al.tracks ?? []).map((t) => text(t?.tags?.ITUNESADVISORY));
+  if (own === "1" || album === "1" || tracks.includes("1")) return "1";
+  if (album === "2" || own === "2" || tracks.includes("2")) return "2";
+  // "0", a blank, or no tag at all: nothing is drawn, because nothing was said.
+  return null;
+}
+
 export function InstrumentalBadge({ value }: { value: string | null | undefined }) {
   if (value === "1")
     return <span className="chip bg-zinc-800 text-zinc-400 border border-border">INSTRUMENTAL</span>;

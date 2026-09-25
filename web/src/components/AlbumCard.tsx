@@ -2,7 +2,7 @@ import { Link } from "react-router-dom";
 import { Play } from "lucide-react";
 import { useStore } from "../store";
 import { statusFor } from "../lib/status";
-import { mediaShort, releaseCountries } from "./Badges";
+import { AdvisoryMark, albumAdvisory, mediaShort, releaseCountries } from "./Badges";
 import { albumTech } from "../lib/fmt";
 import CoverImg from "./CoverImg";
 import FavHeart from "./FavHeart";
@@ -222,6 +222,12 @@ export default function AlbumCard({ al, artistName, selectable, selected, onSele
             {al.meta?.ALBUM ?? al.path.split("/").pop()}
           </span>
         )}
+          {/* The album's advisory, RIGHT beside the title: the card showed the
+              pressing, the countries, the bitrate and the rating while the one
+              thing a reader looks for next to a name — whether the album is
+              explicit — was missing, even for albums whose own tracks say so
+              (see `albumAdvisory`: the album tag can lag its tracks). */}
+          <AdvisoryMark value={albumAdvisory(al)} />
           {/* the folder is held by a job right now: its files cannot be played
               until that job finishes (the chip's tooltip is the server's own
               refusal sentence) */}
@@ -261,7 +267,14 @@ export default function AlbumCard({ al, artistName, selectable, selected, onSele
             have a verdict about. */}
         {inLibrary && (
           <div className="mt-0.5">
-            <StarRating size="sm" readOnly label="Album rating" value={rating} />
+            {/* The value rides WITH the stars. It used to be missing here and
+                added by one shelf on top (the Home page's "Your ratings" drew
+                its own row under this one), which is how a card ended up with
+                two rows of stars under it — the same rating twice, and the
+                reader left to work out which one was theirs. One row, on the
+                card, with the number in it: every surface that draws a card
+                gets the same thing. */}
+            <StarRating size="sm" readOnly showValue label="Album rating" value={rating} />
           </div>
         )}
         {/* The caller's own bits sit on a line of their OWN: sharing this one

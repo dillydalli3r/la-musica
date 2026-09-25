@@ -463,6 +463,64 @@ ok(nothing_inside["port"] == free_port
    and "nothing accepts on TCP" in row(nothing_inside, "publish")["detail"],
    "with nothing listening inside, the publish row stays unknown (a published "
    "port reads refused there too)")
+# The router a user NAMES for the mapping is a different machine from the host
+# this container runs on, and the publish line must keep asking the container's
+# own gateway. Seen live: with soulseek_router_ip set, this probe was sent to the
+# router, which answered nothing about a port list it does not keep — turning a
+# measured `ok` into a `warn` about the host's publish line.
+dialled = []
+
+
+def dials(accepts):
+    def connect(host, port, timeout):
+        dialled.append(host)
+        return (port in accepts, "" if port in accepts else "connection refused")
+    return connect
+
+
+sp._connect = dials({live_port})
+reads["value"] = read("no_gateway", port=live_port,
+                      detail="no device answered the UPnP search")
+named = sp.port_check({"soulseek_listen_port": live_port, "soulseek_upnp": True,
+                       "server_port": web_port, "soulseek_router_ip": "192.168.40.1"})
+ok(row(named, "publish")["state"] == "ok",
+   f"a named router does not move the publish probe off the container's gateway "
+   f"({row(named, 'publish')['detail']})")
+ok(set(dialled) == {GATEWAY},
+   f"…the address dialled is this container's own gateway ({sorted(set(dialled))})")
+
+# Inside a container the mapping MUST point at the HOST's address on the router's
+# network, never at this process's own: the host publishes the port straight back
+# into this container, so reading that difference as "peers would reach another
+# device" is the opposite of the truth once that address answers on the port.
+reads["value"] = read("mapped", port=live_port, ip="192.168.40.62",
+                      external=WAN, gateway="192.168.40.1", verified=True,
+                      detail=f"the gateway lists external port {live_port} -> "
+                             f"192.168.40.62:{live_port}, and 192.168.40.62 "
+                             f"accepts a connection there")
+bridged_cfg = {"soulseek_listen_port": live_port, "soulseek_upnp": True,
+               "server_port": web_port, "soulseek_router_ip": "192.168.40.1"}
+real_local_ip = portmap.local_ip
+portmap.local_ip = lambda gateway="": "172.18.0.3"   # the container's own view
+sp._connect = dials({live_port})
+bridged = sp.port_check(bridged_cfg)
+addr = row(bridged, "address")
+ok(addr["state"] == "ok",
+   f"a mapping that points at the HOST reads ok inside a container ({addr['detail']})")
+ok("HOST's address" in addr["detail"] and "another device" not in addr["detail"],
+   "…and it says whose address that is instead of accusing the mapping")
+ok(bridged["verdict"] != "fail",
+   f"…and the verdict is not the fail it used to be ({bridged['verdict']})")
+
+# The same numbers on a DIRECT install are still the real failure they are.
+portmap.local_ip = real_local_ip
+sp._container = lambda: False
+direct = sp.port_check(bridged_cfg)
+ok(row(direct, "address")["state"] == "fail",
+   "the same mismatch on a direct install is still a fail")
+sp._container = lambda: True
+sp._connect = dials({live_port})
+
 sp._container = real_container
 sp._connect = lambda host, port, timeout: (False, "connection refused")
 

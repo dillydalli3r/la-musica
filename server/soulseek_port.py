@@ -394,14 +394,24 @@ def _mapping_check(port, read, stored):
 # --------------------------------------------------------------------------- #
 # The addresses
 # --------------------------------------------------------------------------- #
-def _address_check(read, stored, lan):
+def _address_check(read, stored, lan, container=False):
     """The addresses the port's reachability depends on.
 
     Two shapes decide whether ANY mapping can work: where the mapping points (a
     forward to another host forwards nothing here), and what address the gateway
     states for itself — a carrier-grade NAT, or a router that is itself behind
     another router, is the one situation a port mapping can never fix, and it is
-    named as that instead of being blamed on a firewall."""
+    named as that instead of being blamed on a firewall.
+
+    `container` is the shape this check has to be told about, because inside one
+    the two addresses are SUPPOSED to differ: the router must forward the port to
+    the HOST's address on its own network, while the address this process can see
+    for itself is Docker's bridge (measured: the router lists 50000 ->
+    192.168.40.62:50000 while the process answers on 172.18.0.3). Reading that as
+    "peers would reach another device" is the opposite of the truth — the host
+    publishes the port back to this very container — so a mapping that names some
+    other address is judged by what the app could measure about it: a read that
+    reached that address on the port is a forward that lands on a listener."""
     proves = ("that the addresses this app can read line up: the mapping points "
               "at this machine, and the router states a public address for itself.")
     cannot = ("whether the carrier really routes that address to this router, and "
@@ -409,9 +419,30 @@ def _address_check(read, stored, lan):
               "other place to look.")
     mapping_ip = str(read.get("internal_ip") or stored.get("internal_ip") or "").strip()
     wan = str(read.get("external_ip") or stored.get("external_ip") or "").strip()
+    bridged = bool(container) and bool(mapping_ip) and bool(lan) and mapping_ip != lan
     facts = []
     if mapping_ip:
-        if not lan:
+        if bridged:
+            # Behind a bridge the app cannot state its own address on the
+            # router's network at all, so the comparison above is meaningless —
+            # only what answered at that address means anything.
+            if read.get("state") == "mapped" and read.get("verified"):
+                facts.append(("ok",
+                              f"the mapping points at {mapping_ip} — the HOST's "
+                              f"address on the router's network, which this "
+                              f"container cannot see for itself (it answers on "
+                              f"{lan}). A connection to {mapping_ip} on the port "
+                              f"was accepted, so the forward lands on a listener, "
+                              f"and the publish row above that lands on this "
+                              f"container carries the port the rest of the way."))
+            else:
+                facts.append(("unknown",
+                              f"the mapping points at {mapping_ip}, and this "
+                              f"process answers on {lan} — it runs behind "
+                              f"Docker's bridge, so the two cannot be compared "
+                              f"from in here. What can be said is what the router "
+                              f"lists, and the mapping row above reports that."))
+        elif not lan:
             facts.append(("unknown",
                           f"the mapping points at {mapping_ip}, and this machine's "
                           f"own address on that network could not be read, so the "
@@ -585,10 +616,13 @@ def port_check(cfg=None):
     checks = [
         _listen_check(state),
         # The host's own publish line, read from in here (a container only): the
-        # half of R279 that no number in the config can prove by agreeing.
-        _publish_check(state, cfg, container=container, gateway=gateway),
+        # half of R279 that no number in the config can prove by agreeing. It is
+        # asked about THIS container's gateway (Docker's bridge), always — the
+        # router a user named for the mapping is a different machine, and a
+        # probe sent there measures the router, not the host's port list.
+        _publish_check(state, cfg, container=container, gateway=""),
         _mapping_check(port, read, stored),
-        _address_check(read, stored, lan),
+        _address_check(read, stored, lan, container=container),
         _self_connect_check(port, wan),
         _network_check(running, cfg),
     ]
