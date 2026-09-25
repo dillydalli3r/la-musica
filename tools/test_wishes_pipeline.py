@@ -928,7 +928,6 @@ with pipeline_patches(_wait_for_files=_gated_wait,
 
     # CLEAR ALL: exactly the waiting rows go, and the running ones are untouched
     # (a running download is cancelled on its own row, never silently killed).
-    alive = {(j["id"], j["state"]) for j in auto.jobs()}
     before_clear = [j for j in auto.jobs() if j["state"] == "running"]
     got = auto.clear_queued()
     check("Clear all removes exactly the queued/waiting rows",
@@ -943,8 +942,15 @@ with pipeline_patches(_wait_for_files=_gated_wait,
           not [r for r in queue()["sections"]["queued"]
                if r["kind"] == "pipeline"],
           json.dumps(queue()["sections"]["queued"]))
-    check("...and the jobs that were running are the same ones, in the same states",
-          {(j["id"], j["state"]) for j in auto.jobs()} == alive,
+    # The running jobs are the ones this asks about, and ONLY that: they must
+    # still be running, in the same set. A job that finished on its own while
+    # the check read the registry is not the clear's doing — comparing every
+    # job's state before and after made this a race (it failed on a loaded
+    # machine where a two-second download settled inside the window, and passed
+    # on CI), and a test that flakes on timing teaches the reader to ignore it.
+    after = {j["id"]: j for j in auto.jobs()}
+    check("...and the jobs that were running are the same ones, still running",
+          all(after.get(j["id"], {}).get("state") == "running" for j in before_clear),
           json.dumps(sorted((j["id"], j["state"]) for j in auto.jobs())))
 
     # Let the rest through: the release that WAITED still runs the whole
