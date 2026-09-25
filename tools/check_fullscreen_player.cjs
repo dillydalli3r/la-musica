@@ -37,9 +37,16 @@
  * header, it scrolls without pushing the transport off the viewport, both
  * controls sit under the last line and really move the display (one zoom press
  * = the scroller's inline `zoom` 1.5 → 1.575; a +2.0 s offset takes the
- * emphasis off every line of a two-second track and puts it back), turning
- * lyrics off leaves the plain compact block, and a track with no lyrics draws
- * no pane and no inert control. The one-state rule is taken the long way round
+ * emphasis off every line of a two-second track and puts it back), a track with
+ * no lyrics draws no pane and no inert control, the transport row stands on
+ * ONE line at every one of those widths with the favourite on it (it used to
+ * wrap, and the heart used to live alone at the bottom-left — R267), and —
+ * whichever way a track ends up without a pane (no lyrics at all, the
+ * reader's own OFF press) — the
+ * phone is left with its FULL composition: the compact header is the lyrics
+ * composition and goes with the pane, so the cover, the metadata block and the
+ * transport are what the phone shows instead of a bare header strip (R267). The
+ * one-state rule is taken the long way round
  * there too: the OFF press is what a re-opened player comes back to AND what the
  * same window reads after it is widened to 1440×900, and the wide layout's
  * right-hand column is re-measured at 1440×900 / 1920×1080 while it is at it.
@@ -528,16 +535,49 @@ const phoneState = (page) => page.evaluate(() => {
   const offsetRow = offPlus ? offPlus.parentElement : null;
   const offsetLabel = offsetRow ? offsetRow.querySelector("span[title^='Lyric offset']") : null;
   const transport = root.querySelector('button[aria-label="Play"], button[aria-label="Pause"]');
-  // The phone's favourite sits in the row pinned under the scrolling body —
-  // found through that row, not by its own label: the transport row draws a
-  // second heart above `lg` (hidden here, and a zero-size box is not "on
-  // screen").
-  const heartRow = root.querySelector("div.cursor-auto.lg\\:hidden");
-  const heart = heartRow ? heartRow.querySelector("button") : null;
+  // The transport row itself (the play button's own parent) and the controls
+  // standing on it. `lineCount` is the point of R267's row rule: while the row
+  // was `flex-wrap`, its last control — add-to-playlist — was pushed onto a
+  // line of its own at phone widths, which is the owner's "the playlist button
+  // seems placed weirdly". Every visible child of the row must therefore share
+  // ONE `top`.
+  const transportRow = transport ? transport.parentElement : null;
+  const rowChildren = transportRow
+    ? [...transportRow.children].filter((c) => c.getBoundingClientRect().width > 0)
+    : [];
+  // The row is centred (`items-center`), so the controls' TOPS differ by a few
+  // pixels even on one line — their centres are what says "one line", and their
+  // widths are what says "nothing wrapped": a wrapped row also carries a
+  // second control height, so the row box is a whole control taller than its
+  // tallest child.
+  const lineCount = new Set(rowChildren.map((c) => {
+    const r = rectOf(c);
+    return Math.round(r.top + r.height / 2);
+  })).size;
+  const rowH = transportRow ? Math.round(rectOf(transportRow).height) : 0;
+  const rowKidH = rowChildren.length
+    ? Math.round(Math.max(...rowChildren.map((c) => rectOf(c).height)))
+    : 0;
+  // The favourite has ONE home at every width now — that same row — found by
+  // the label `FavHeart` gives a player heart ("Like this track" / "Unlike").
+  const heart = root.querySelector('button[aria-label="Like this track"], button[aria-label="Unlike"]');
   // The phone's own header row (thumbnail, title, album · artist) and the track
-  // title it carries — the one readable name for "which track is this".
+  // title it carries — the one readable name for "which track is this". Drawn
+  // only while the pane is up (it exists to make room for the words).
   const compactRow = root.querySelector("div.md\\:hidden.w-\\[26rem\\]");
   const headerTitle = compactRow ? compactRow.querySelector("div[title]")?.getAttribute("title") ?? null : null;
+  // The FULL phone composition — the cover and the metadata block that header
+  // stands in for, which is what a phone draws when no pane is up (no lyrics,
+  // an instrumental, refused plain lyrics, or the reader's own OFF press). The
+  // cover is the layout's own image, never the header's thumbnail (that one
+  // lives inside the header row) and never the ambience layer's blurred copy.
+  const coverImg = [...root.querySelectorAll("img")].find((i) =>
+    !i.closest(".amb-cover") && !i.closest("div.md\\:hidden.w-\\[26rem\\]") && i.offsetParent !== null);
+  const block = root.querySelector("div.text-center.w-\\[26rem\\]");
+  const blockTitle = block ? block.querySelector("div[title]")?.getAttribute("title") ?? null : null;
+  // The refused-plain mark: this install does not accept untimed lyrics, so the
+  // player offers no pane for them and says so in the app's failing vocabulary.
+  const refused = root.querySelector("[data-lyrics-kind][data-lyrics-fail]");
   // The lines the pane is actually showing, and how many of them are on screen
   // (the pane renders every line; the ones past the fold are only in the DOM).
   const rows = scroller
@@ -574,8 +614,14 @@ const phoneState = (page) => page.evaluate(() => {
     zoom: zoomIn ? { box: box(zoomIn), inViewport: inViewport(zoomIn), hit: reachable(zoomIn), value: zoomBox ? zoomBox.value : null } : null,
     offset: offPlus ? { box: box(offPlus), inViewport: inViewport(offPlus), hit: reachable(offPlus), minusHit: offMinus ? reachable(offMinus) : false, label: offsetLabel ? offsetLabel.textContent.trim() : null, save: !!(offsetRow && offsetRow.querySelector('button[title^="Save"], button[aria-label^="Save"]')) } : null,
     compactRow: compactRow ? { box: box(compactRow), visible: compactRow.offsetParent !== null, title: headerTitle } : null,
+    cover: coverImg ? { ...box(coverImg), inViewport: inViewport(coverImg) } : null,
+    block: block ? { box: box(block), visible: block.offsetParent !== null, title: blockTitle } : null,
+    refused: refused ? refused.textContent.trim() : null,
     transport: transport ? { label: transport.getAttribute("aria-label"), inViewport: inViewport(transport) } : null,
-    heart: heart ? { inViewport: inViewport(heart) } : null,
+    heart: heart ? { inViewport: inViewport(heart), hit: reachable(heart), inRow: !!(transportRow && transportRow.contains(heart)) } : null,
+    transportRow: transportRow
+      ? { box: box(transportRow), lineCount, rowH, rowKidH, children: rowChildren.length, inViewport: inViewport(transportRow) }
+      : null,
   };
 });
 
@@ -597,10 +643,17 @@ const stepOffset = async (page, n, which) => {
  *  and wrote nothing — so this pass measures the fix where a reader notices it:
  *  the lines are on screen under the phone's own header, the pane scrolls
  *  without shoving the transport off the viewport, both controls sit under the
- *  last line and really change the display, the OFF press leaves the plain
- *  compact block (and is what a reload comes back to on a DESKTOP too — one
- *  state, both layouts), and a track with no lyrics shows no pane at all. */
-const phoneLyricsPass = async (browser, albumPath, lyricText, w, h) => {
+ *  last line and really change the display, the OFF press puts the pane away and
+ *  gives the phone its full composition back (and is what a reload comes back to
+ *  on a DESKTOP too — one state, both layouts), and a track with no lyrics shows
+ *  no pane at all AND the full composition rather than an empty header row
+ *  (R267 — that row exists to make room for the pane). The transport row is
+ *  measured as ONE line at each size, with the favourite standing on it and
+ *  reachable, in both pane states. */
+const phoneLyricsPass = async (browser, albumPath, albumLyricText, w, h) => {
+  // The album-wide text is the FALLBACK; the pass re-reads the text of the
+  // track it actually opened (see the resolution right after `start`).
+  let lyricText = albumLyricText;
   const tag = `${w}×${h}`;
   const ctx = await browser.newContext({ viewport: { width: w, height: h } });
   try {
@@ -614,6 +667,29 @@ const phoneLyricsPass = async (browser, albumPath, lyricText, w, h) => {
       opened && !start.error && !!start.scroller && !!start.toggle,
       start.error || `fullscreen button ${opened ? "pressed" : "not found"}, pane ${!!start.scroller}, control ${!!start.toggle} (${start.compactRow?.title ?? "—"})`);
     if (!start.scroller || !start.toggle) return;
+
+    // The text the pane must be showing belongs to the track the PLAYER opened
+    // — resolved from the title the header shows, not from "the first track of
+    // this album that carries lyrics": an album may hold more than one lyric
+    // track (a fixture can carry `.lrc` sidecars for two of them), and this
+    // pass lands on whichever one it finds. Reading the wrong track's text is
+    // the only way the comparison below can fail on a player that is showing
+    // exactly the right lines.
+    {
+      const lib = await (await page.request.get(BASE + "/api/library")).json().catch(() => null);
+      const want = start.compactRow?.title ?? null;
+      for (const ar of lib?.artists ?? []) {
+        for (const al of ar.albums ?? []) {
+          for (const t of al.tracks ?? []) {
+            const stem = String(t.file || "").replace(/\.[^.]+$/, "");
+            const label = t.values?.TITLE ?? stem;
+            if (!want || (label !== want && stem !== want)) continue;
+            const tags = await (await page.request.get(`${BASE}/api/tags?path=${encodeURIComponent(t.path)}`)).json().catch(() => null);
+            if (typeof tags?.lyrics === "string" && tags.lyrics.trim()) lyricText = tags.lyrics;
+          }
+        }
+      }
+    }
 
     // ---- the persisted pick is honoured below `md` --------------------------
     // Default ON, and the pane is a REAL reading surface: present, in front of
@@ -658,6 +734,19 @@ const phoneLyricsPass = async (browser, albumPath, lyricText, w, h) => {
       !!scrolled.transport && scrolled.transport.inViewport && !!scrolled.heart && scrolled.heart.inViewport &&
         !!scrolled.compactRow && scrolled.compactRow.visible,
       `transport ${scrolled.transport?.label} inViewport=${scrolled.transport?.inViewport}, heart ${scrolled.heart?.inViewport}, compact header ${scrolled.compactRow?.visible}`);
+    // ---- the row is ONE line, favourite included (R267) --------------------
+    // Measured, not eyeballed: every visible child of the transport row shares
+    // one `top`, the row itself is one control tall, and the heart is a
+    // reachable control ON it — not a stray icon under the transport and not a
+    // row of its own at the bottom of the screen.
+    check(`${tag}: the transport row is ONE line, favourite and add-to-playlist included`,
+      !!scrolled.transportRow && scrolled.transportRow.lineCount === 1 &&
+        scrolled.transportRow.rowH <= scrolled.transportRow.rowKidH + 2 &&
+        scrolled.transportRow.children >= 8 && scrolled.transportRow.inViewport &&
+        !!scrolled.heart && scrolled.heart.inRow && scrolled.heart.hit && scrolled.heart.inViewport,
+      scrolled.transportRow
+        ? `row ${scrolled.transportRow.children} controls on ${scrolled.transportRow.lineCount} line(s), h=${scrolled.transportRow.rowH} vs tallest control ${scrolled.transportRow.rowKidH} @y=${scrolled.transportRow.box.y} inViewport=${scrolled.transportRow.inViewport}; heart inRow=${scrolled.heart?.inRow} hit=${scrolled.heart?.hit} inViewport=${scrolled.heart?.inViewport}`
+        : "the transport row was not found");
 
     // ---- the two controls, at the BOTTOM of the words ----------------------
     const bottomEdge = scrolled.pane.y + scrolled.pane.h / 2;
@@ -701,17 +790,20 @@ const phoneLyricsPass = async (browser, albumPath, lyricText, w, h) => {
         !restored.offset.save && restored.scroller.emphasised === 1,
       `emphasised ${preOffset} → ${shifted.scroller.emphasised} (${shifted.offset.label}, save=${shifted.offset.save}) → ${restored.scroller.emphasised} (${restored.offset.label})`);
 
-    // ---- OFF leaves the plain compact block, and it STICKS ----------------
+    // ---- OFF leaves the reader the FULL phone composition, and it STICKS ---
     await page.locator('div.fixed.inset-0.z-50 button[aria-label="Toggle the lyrics pane"]').first().click();
     await settledPane(page);
     const off = await phoneState(page);
     await page.screenshot({ path: `${SHOTS}/phone-${w}x${h}-lyrics-off.png` });
     const persisted = await page.evaluate(() => localStorage.getItem("mlo.np.lyrics"));
-    check(`${tag}: turning the lyrics off puts the pane away and brings the compact block back`,
+    check(`${tag}: turning the lyrics off puts the pane away and gives the phone its full composition back`,
       off.pane.w === 0 && off.pane.hidden === "true" && off.pane.opacity === 0 &&
         !off.zoom && !off.offset && off.toggle.pressed === "false" &&
-        !!off.compactRow && off.compactRow.visible && !!off.transport && off.transport.inViewport,
-      `pane ${off.pane.w}×${off.pane.h} hidden=${off.pane.hidden} controls ${!!off.zoom}/${!!off.offset} pressed=${off.toggle.pressed} compact header ${off.compactRow?.visible}`);
+        !off.compactRow?.visible && !!off.cover && off.cover.inViewport && off.cover.w >= 200 &&
+        !!off.block?.visible && !!off.transport && off.transport.inViewport &&
+        off.transportRow?.lineCount === 1 && off.transportRow.inViewport &&
+        !!off.heart && off.heart.inRow && off.heart.hit,
+      `pane ${off.pane.w}×${off.pane.h} hidden=${off.pane.hidden} controls ${!!off.zoom}/${!!off.offset} pressed=${off.toggle.pressed} header ${off.compactRow?.visible} cover ${off.cover?.w}px @y=${off.cover?.y} block ${off.block?.visible} transport ${off.transport?.inViewport}`);
     check(`${tag}: that press is the persisted pick (the same key every width reads)`,
       persisted === "0", `localStorage mlo.np.lyrics = ${JSON.stringify(persisted)}`);
 
@@ -752,10 +844,14 @@ const phoneLyricsPass = async (browser, albumPath, lyricText, w, h) => {
     await page.screenshot({ path: `${SHOTS}/phone-${w}x${h}-lyrics-back.png` });
 
     // ---- a track with NO lyrics says so honestly ---------------------------
-    // The scratch album's next track carries none. Nothing is drawn for it: no
-    // pane (not an empty one), no control that could not do anything — the
-    // phone's compact header with the track's own name is the whole screen.
-    const lyricTrackTitle = after.compactRow?.title ?? start.compactRow?.title ?? null;
+    // The scratch album's next track carries none. Nothing is drawn FOR it: no
+    // pane (not an empty one), no control that could not do anything — and the
+    // phone gets its full composition (cover, metadata, transport, seek) rather
+    // than the header row that exists to make room for words. The pass is a
+    // loop because the album's order is the library's business, not this
+    // check's: it steps until it finds a track with neither lyrics nor a
+    // toggle, and it cannot silently pass by never finding one.
+    const lyricTrackTitle = after.block?.title ?? start.block?.title ?? null;
     let plain = null;
     for (let i = 0; i < 4; i++) {
       await page.locator('div.fixed.inset-0.z-50 button[aria-label="Next track"]').first().click();
@@ -766,14 +862,17 @@ const phoneLyricsPass = async (browser, albumPath, lyricText, w, h) => {
       await settledPane(page);
       const s = await phoneState(page);
       if (s.error) { plain = s; break; }
-      if (s.compactRow?.title && s.compactRow.title !== lyricTrackTitle && !s.scroller && !s.toggle) { plain = s; break; }
       plain = s;
+      if (!s.scroller && !s.toggle && (s.block?.title ?? s.compactRow?.title) !== lyricTrackTitle) break;
     }
     check(`${tag}: a track with no lyrics draws no pane and no inert control`,
       !!plain && !plain.error && !plain.scroller && !plain.toggle && plain.pane === null &&
-        !!plain.compactRow && plain.compactRow.visible && plain.compactRow.title !== lyricTrackTitle &&
-        plain.transport?.inViewport === true,
-      plain?.error || `track "${plain?.compactRow?.title}" (was "${lyricTrackTitle}"): pane ${!!plain?.scroller} control ${!!plain?.toggle} header ${plain?.compactRow?.visible} transport ${plain?.transport?.inViewport}`);
+        (plain.block?.title ?? plain.compactRow?.title) !== lyricTrackTitle &&
+        !plain.compactRow?.visible && !!plain.cover && plain.cover.w >= 200 &&
+        !!plain.block?.visible && plain.transport?.inViewport === true &&
+        plain.transportRow?.lineCount === 1 && plain.transportRow.inViewport &&
+        !!plain.heart && plain.heart.inRow && plain.heart.hit,
+      plain?.error || `track "${plain?.block?.title ?? plain?.compactRow?.title}" (was "${lyricTrackTitle}"): pane ${!!plain?.scroller} control ${!!plain?.toggle} header ${plain?.compactRow?.visible} cover ${plain?.cover?.w}px block ${plain?.block?.visible} transport ${plain?.transport?.inViewport}`);
     await page.screenshot({ path: `${SHOTS}/phone-${w}x${h}-no-lyrics.png` });
   } catch (e) {
     // A context that cannot be driven is a FAILED check, not a lost run: the

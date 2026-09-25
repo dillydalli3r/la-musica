@@ -922,8 +922,10 @@ rating.
   album art. The sidebar pane keeps the same concept: the player bar's
   microphone button, same icon, same pressed state
   (`web/src/components/PlayerBar.tsx`). The toggle is drawn only while the
-  current TRACK carries lyrics (a control that cannot do anything is hidden,
-  not rendered inert) and the choice is remembered per device
+  current track carries lyrics this install SHOWS — timed, or untimed and
+  accepted, never an instrumental and never a refused plain text (R267): a
+  control that cannot do anything is hidden, not rendered inert, and the choice
+  is remembered per device
   (`mlo.np.lyrics`, like the other display picks). Show and hide are seamless:
   the pane stays MOUNTED and only its box animates (the app's 300 ms base
   motion step, as the player's other transitions use), so the reader's scroll
@@ -3696,8 +3698,10 @@ different answers.
 
 The fullscreen player is ONE component on every client, so "the phone" is a set
 of decisions inside it rather than a second player: below `lg` the cover, titles
-and controls collapse into a header and the lyrics pane takes the rest of the
-screen; above `lg` the pane sits beside the artwork.
+and controls collapse into a header WHILE THE LYRICS PANE IS UP, and that pane
+takes the rest of the screen; with no pane to fill — no lyrics, an instrumental,
+refused plain lyrics, or the reader's own switch — the phone draws the full
+composition instead (R267). Above `lg` the pane sits beside the artwork.
 
 - **R188 — the element is the truth about what is playing.** `playing` is
   written by the media element's OWN `play`/`pause` events, not only by the
@@ -3716,31 +3720,80 @@ screen; above `lg` the pane sits beside the artwork.
   body behind a scrolling pane are what made the view read as broken. In a
   viewport too short for the header (a phone in landscape) the body scrolls
   instead, so nothing is clipped away.
-- **R190 — the favourite has exactly one home per width.** Below `lg` it is the
-  bottom-left of the player (where Apple Music keeps its own); above `lg` it is
-  the transport row's control — never both at once. It is the app's own
-  favourite, a heart: a STAR in this app means a rating, which is a different
-  store (`lib/ratings`).
+- **R190 — the favourite has exactly ONE home, on the main control line.** It
+  is one control in the fullscreen player's transport row, at every width — the
+  row that already carries shuffle, previous, play, next, repeat, the speed
+  button and add-to-playlist, with the divider separating the transport from
+  those track actions (R267). Below `lg` it used to be drawn alone in a row
+  pinned to the bottom-left of the player, outside the scrolling body; the
+  owner went looking for the favourite and asked *"where is the like button?"*,
+  which is what a control in a row of its own at the far corner of a phone
+  screen earns. Never two buttons for one flag, at any width. It is the app's
+  own favourite, a heart: a STAR in this app means a rating, which is a
+  different store (`lib/ratings`).
 
 - **R258 — the lyrics pane has ONE owner at every width, and on a phone it is
   the reader's own switch.** `web/src/components/NowPlayingView.tsx` keeps one
   piece of state (`showLyrics`, default on, persisted as `mlo.np.lyrics` — the
   display picks' own store) and ONE derivation both layouts read:
-  `paneOpen = layoutHasLyrics && showLyrics`. It used to branch on the width
-  (`mdUp ? showLyrics : !compactMode`), which gave the phone a second, HIDDEN
-  owner of the same pane: the persistent pick was ignored below `md`, so a
-  phone that asked for lyrics got the compact header instead, and the offset and
-  zoom controls the pane carries never mounted there at all (the owner's
-  report) — the same button meant "show the lyrics" on one side of `md` and
-  "unfold the whole block" on the other. Now ONE press, ONE thing, at every
-  width: it writes the pick and the pane follows in both layouts, a phone's pane
-  renders with the zoom and offset controls at its own bottom edge, turning them
-  off leaves the compact block exactly as it was, and the button itself is drawn
-  only where it can act — no lyrics, no button, and no pane, the desktop rule
-  the phone used to be the exception to. The compact header is the WIDTH's own
-  layout (`compactMode = !mdUp`, no state feeding it), which is what keeps it
-  from competing for the pane. `tools/check_fullscreen_player.cjs` measures it
-  at 390×844 and 566×1040.
+  `paneOpen = drawable && showLyrics`, where `drawable` comes from the same
+  `npLyricsMode` call that decides everything else about the pane (R267). It used
+  to branch on the width (`mdUp ? showLyrics : !compactMode`), which gave the
+  phone a second, HIDDEN owner of the same pane: the persistent pick was ignored
+  below `md`, so a phone that asked for lyrics got the compact header instead,
+  and the offset and zoom controls the pane carries never mounted there at all
+  (the owner's report) — the same button meant "show the lyrics" on one side of
+  `md` and "unfold the whole block" on the other. Now ONE press, ONE thing, at
+  every width: it writes the pick and the pane follows in both layouts, a phone's
+  pane renders with the zoom and offset controls at its own bottom edge, and the
+  button itself is drawn only where it can act — where the track really has words
+  this install shows, and nowhere else (R267), the desktop rule the phone used to
+  be the exception to. `tools/check_fullscreen_player.cjs` measures it at 390×844
+  and 566×1040.
+
+- **R267 — the pane is drawn where the track can fill it, and a phone without
+  lyrics gets the full composition.** The player's whole layout decision is one
+  exported function, `npLyricsMode` (`web/src/components/NowPlayingView.tsx`),
+  asked of the lyrics ON SCREEN (deliberately the stale ones while the next
+  track's payload is in flight, so next/previous never reflows) together with
+  that track's own `INSTRUMENTAL` and the user's `lyrics_allow_plain`. It answers
+  one of five states: `synced` (timed text), `plain` (untimed text this install
+  accepts), `plain-refused` (untimed text while `lyrics_allow_plain` — off by
+  default — says untimed lyrics are not acceptable: the app's FAILING state, not
+  a reading state, which the player now says with the same red-crossed mark every
+  other surface wears, `Badges.LyricsKindChip`, reason on hover), `instrumental`
+  (`INSTRUMENTAL=1`: stored lyrics, if any, stay hidden) and `none`. The pane may
+  be drawn — and the toggle may be OFFERED — only for the two states with words
+  this install shows (`drawable`: `synced` | `plain`), so no state of that
+  control promises a pane the track cannot fill, and a config that has not
+  arrived yet (`allowPlain === undefined`) never claims a refusal. The phone's
+  compact header row is the LYRICS composition and nothing else
+  (`compactHeader = !mdUp && paneOpen`): while the words are up it is what the
+  phone spends its cover and metadata rows on, and with no pane — no lyrics, an
+  instrumental, refused plain lyrics, or the reader's own OFF press — the phone
+  draws the FULL composition instead (cover, title, album · artist, transport,
+  progress, visualizer, centred by the left column's own auto margins so that a
+  viewport shorter than the composition scrolls from its own top rather than
+  hiding the cover above the scrollport). Before this the header row was the
+  phone's layout whatever the track held, so a lyric-less track drew a bare strip
+  on a whole screen — the owner's "it doesn't change with no lyrics and looks
+  awful". The transport row is ONE line at EVERY width and never wraps: its
+  gaps and hit boxes tighten below `sm` (`gap-1` / `p-1.5` / `p-2` against
+  `sm:gap-2.5` / `sm:p-2` / `sm:p-2.5`, the speed button's floor `min-w-[38px]`
+  against `sm:min-w-[46px]`) so shuffle, previous, play, next, repeat, speed,
+  the divider, the FAVOURITE (R190 — it is on this line, not in a row of its
+  own at the bottom-left) and add-to-playlist all fit inside a 360 px phone
+  with room to spare; with `flex-wrap` the last of them — add-to-playlist — was
+  pushed onto a line of its own at 390 px and read as a stray icon under the
+  transport (the owner's "the playlist button seems placed weirdly").
+  `tools/check_fullscreen_player.cjs` measures that: every visible child of the
+  row shares one `top`, and the heart is reachable ON it, at each phone size
+  and in both pane states. Desktop is untouched: at `md` and up
+  `compactHeader` is never true, the row keeps its `sm:` spacing, and the pane
+  is the same right-hand column it always was. The decision table is
+  pinned by `tools/check_lyrics_kind.mjs` (five states × the reader's pick × both
+  widths, plus the refused-plain and instrumental cases) and the live DOM by
+  `tools/check_fullscreen_player.cjs` at 390×844 and 566×1040.
 
 - **R251 — the OS's own star is the app's favourite, and the shell writes
   nothing itself.** iOS draws the Now Playing module (Control Center, the lock

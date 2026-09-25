@@ -473,6 +473,89 @@ check("lyrics manager (setting on): …and the neutral chip instead",
 check("lyrics manager: a track with no text wears no kind chip",
       kindCount(mgrNone.html) === 0, String(kindCount(mgrNone.html)));
 
+// --------------------------------------------------------------------------- #
+// 7. the FULLSCREEN player's MODE — which pane is drawn for which lyrics state
+// --------------------------------------------------------------------------- #
+// The player's whole layout decision is `npLyricsMode` (NowPlayingView.tsx),
+// taken from the module the view itself calls — not a copy of the rule. It is
+// asked here in the same table the live DOM is held to by
+// tools/check_fullscreen_player.cjs (the toggle and the pane follow THIS), and
+// the five states are the five facts a track can present:
+//
+//   synced · plain · plain-refused · instrumental · none
+//
+// `allowPlain` is the user's `lyrics_allow_plain` (off by default); `undefined`
+// is the config not yet read, which must not claim a refusal.
+const np = await server.ssrLoadModule("/src/components/NowPlayingView.tsx");
+const mode = (lyrics, instrumental, allowPlain, showLyrics, mdUp = false) =>
+  np.npLyricsMode({ lyrics, instrumental, allowPlain, showLyrics, mdUp });
+const SYNCED_TEXT = "[00:04.00]The first light\n[00:13.00]A kettle ticking";
+
+// one state, one row: what it is, whether the pane may be drawn, and whether
+// the phone's compact header (the LYRICS composition) is what a phone wears
+const row = (label, m, state, drawable, paneOpen, phoneHeader) => {
+  check(`player mode (${label}): the state is ${state}`, m.state === state, m.state);
+  check(`player mode (${label}): the pane ${drawable ? "may" : "may NOT"} be drawn`,
+    m.drawable === drawable, String(m.drawable));
+  check(`player mode (${label}): the pane is ${paneOpen ? "open" : "closed"}`,
+    m.paneOpen === paneOpen, String(m.paneOpen));
+  check(`player mode (${label}): the phone ${phoneHeader ? "wears the compact header" : "gets the full composition"}`,
+    m.compactHeader === phoneHeader, String(m.compactHeader));
+};
+
+row("timed lyrics, reader's pick on", mode(SYNCED_TEXT, false, false, true), "synced", true, true, true);
+row("timed lyrics, reader's pick off", mode(SYNCED_TEXT, false, false, false), "synced", true, false, false);
+row("untimed lyrics the install accepts", mode(PLAIN_TEXT, false, true, true), "plain", true, true, true);
+row("untimed lyrics while lyrics_allow_plain is OFF",
+  mode(PLAIN_TEXT, false, false, true), "plain-refused", false, false, false);
+row("untimed lyrics before the config has been read",
+  mode(PLAIN_TEXT, false, undefined, true), "plain", true, true, true);
+row("instrumental, stored timed lyrics and all",
+  mode(SYNCED_TEXT, true, false, true), "instrumental", false, false, false);
+row("no lyrics at all", mode(null, false, false, true), "none", false, false, false);
+row("a lyric-less text (a stamp and nothing else)",
+  mode("[00:00.00]", false, false, true), "none", false, false, false);
+
+// The pane follows the TRACK, not a remembered mode: one reader pick, five
+// tracks one after another, in the order the fixture album plays them. This is
+// the owner's report stated as a sequence — the pane used to stay drawn (and
+// the phone kept the header row it makes room for) when the next track had
+// nothing to fill it with.
+const sweep = [
+  [SYNCED_TEXT, false, false, true],
+  [PLAIN_TEXT, false, false, false],
+  [SYNCED_TEXT, true, false, false],
+  [null, false, false, false],
+  [SYNCED_TEXT, false, false, true],
+].map(([lyrics, instrumental, allowPlain, want]) => {
+  const m = mode(lyrics, instrumental, allowPlain, true);
+  return m.paneOpen === want && m.drawable === want && m.compactHeader === want;
+});
+check("player mode: one reader pick, five tracks in a row — the pane (and the phone's header) follow each track's own lyrics",
+  sweep.every(Boolean), sweep.join(","));
+
+// The desktop half: the pane is the right-hand column at every drawable state,
+// and the compact header — a PHONE composition — never appears at md and up.
+const wide = [
+  mode(SYNCED_TEXT, false, false, true, true),
+  mode(PLAIN_TEXT, false, true, true, true),
+  mode(PLAIN_TEXT, false, false, true, true),
+  mode(SYNCED_TEXT, true, false, true, true),
+  mode(null, false, false, true, true),
+];
+check("player mode: no compact header at md and up, whatever the track holds",
+  wide.every((m) => !m.compactHeader), wide.map((m) => m.compactHeader).join(","));
+check("player mode: the desktop pane is the same pane — open for timed and accepted-untimed lyrics only",
+  wide[0].paneOpen && wide[1].paneOpen && !wide[2].paneOpen && !wide[3].paneOpen && !wide[4].paneOpen,
+  wide.map((m) => m.paneOpen).join(","));
+// The toggle is drawn exactly where the pane can be filled: one flag, so a
+// control can never promise a pane the track cannot fill (the red-crossed
+// plain text is the state that used to get both).
+check("player mode: the toggle is offered exactly where the pane is drawable",
+  mode(SYNCED_TEXT, false, false, true).drawable
+  && !mode(PLAIN_TEXT, false, false, true).drawable
+  && !mode(null, false, false, true).drawable);
+
 await server.close();
 
 if (failures.length) {
@@ -484,4 +567,8 @@ console.log(`ok  the lyrics kind is said on ONE track's own surfaces only — th
   `Lyrics step, the track page, its readout and its lyrics pane/manager say ` +
   `Synced / Plain (the plain one failing exactly while lyrics_allow_plain is off, ` +
   `nothing at all without lyrics) — and no album LIST does: the album page's ` +
-  `tracklist and the album readout carry no kind at all (${checks} checks)`);
+  `tracklist and the album readout carry no kind at all. The FULLSCREEN player's ` +
+  `mode is the same rule asked of a track's own lyrics: the pane (and the phone's ` +
+  `header row, which exists to make room for it) is drawn only where there are ` +
+  `words this install shows — timed, or untimed and accepted — and a refused ` +
+  `plain text, an instrumental and a lyric-less track each draw neither (${checks} checks)`);

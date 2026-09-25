@@ -16,7 +16,7 @@ import { parseHexColor } from "../lib/accent";
 import { toast, useStore } from "../store";
 import { fmtTech, fmtPair, isVideoFile } from "../lib/fmt";
 import { albumRef, artistRef, libraryRow, trackRef } from "../lib/refs";
-import { AdvisoryMark } from "./Badges";
+import { AdvisoryMark, LyricsKindChip, allowPlainOf } from "./Badges";
 import StarRating from "./StarRating";
 import ScrollingText from "./ScrollingText";
 import { ratingOf, useRatings, useSetRating } from "../lib/ratings";
@@ -25,7 +25,7 @@ import Popover, { MenuItem } from "./Popover";
 import ScrubSeek from "./ScrubSeek";
 import { MAX_DB, MIN_DB, activeAnalyser } from "../lib/analyser";
 import Visualizer from "./Visualizer";
-import { parsePlayerLrc, parseLrc, splitStoredLines, hasLyricsText, activeLineRange, KaraokeWords, type LrcLine } from "./LyricsViewer";
+import { parsePlayerLrc, parseLrc, splitStoredLines, lyricsKindOf, activeLineRange, KaraokeWords, type LrcLine } from "./LyricsViewer";
 import type { Playlist } from "../types";
 import { useLyricsFollow, LYRICS_PAD_BOTTOM, LYRICS_PAD_TOP } from "../lib/lyrScroll";
 import { nextSpeed, fmtSpeed } from "../lib/playback";
@@ -465,16 +465,17 @@ function VolumeControl() {
  *  line and the `md:` classes the layout switches on cannot drift apart. */
 const MD_UP = "(min-width: 48rem)";
 
-/** True at `md` and up, live. The compact phone header (see `compactMode`) is
- *  the one piece of this player that asks JavaScript for the width instead of
- *  letting a breakpoint class do the switching: the block below `md` is not a
- *  narrower version of the desktop one but a different composition of it (the
- *  thumbnail row, the block it stands in for), and which of the two the
- *  VOICE-OVER reads — and whether the pane is a sibling of the phone's header
- *  or the desktop's right-hand column — cannot be expressed as a `md:` utility
- *  on one subtree. Read on mount so the first paint already knows, and on
- *  `change` so a rotation or a dragged window re-decides instead of leaving the
- *  phone's layout on a desktop-width screen. */
+/** True at `md` and up, live. The compact phone header (see `npLyricsMode`'s
+ *  `compactHeader`) is the one piece of this player that asks JavaScript for
+ *  the width instead of letting a breakpoint class do the switching: the block
+ *  below `md` is not a narrower version of the desktop one but a different
+ *  composition of it (the thumbnail row, the block it stands in for), and
+ *  which of the two the VOICE-OVER reads — and whether the pane is a sibling
+ *  of the phone's header or the desktop's right-hand column — cannot be
+ *  expressed as a `md:` utility on one subtree. Read on mount so the first
+ *  paint already knows, and on `change` so a rotation or a dragged window
+ *  re-decides instead of leaving the phone's layout on a desktop-width
+ *  screen. */
 function useMdUp() {
   const [up, setUp] = useState(() => window.matchMedia?.(MD_UP).matches ?? true);
   useEffect(() => {
@@ -486,6 +487,72 @@ function useMdUp() {
     return () => mq.removeEventListener("change", on);
   }, []);
   return up;
+}
+
+/** What the lyrics ON SCREEN are, as the player must draw them. Five states,
+ *  because the pane and its control answer to five different facts:
+ *
+ *  * `"synced"` — timed text: the pane follows the sung line;
+ *  * `"plain"` — untimed text the reader's own `lyrics_allow_plain` accepts;
+ *  * `"plain-refused"` — untimed text while that setting is OFF, which is
+ *    this app's failing state, not a reading state: the same red cross every
+ *    other surface wears for it (`components/Badges`, `LyricsKindChip`);
+ *  * `"instrumental"` — `INSTRUMENTAL=1`: stored lyrics, if any, stay hidden
+ *    (the rule the docked sidebar states in words);
+ *  * `"none"` — no lyrics at all.
+ *
+ *  `"plain-refused"` and `"none"` are exactly why this is one function instead
+ *  of the `hasLyricsText(...) && !instrumental` it replaces: the pane may only
+ *  be drawn or OFFERED where there are words this install will show, so a
+ *  control cannot promise a pane that cannot be filled. */
+export type NpLyricsState = "synced" | "plain" | "plain-refused" | "instrumental" | "none";
+
+/** The fullscreen player's ONE layout decision, taken in one place (and
+ *  pinned by tools/check_lyrics_kind.mjs): what the lyrics on screen ARE,
+ *  whether the pane is offered at all, whether it is open, and whether the
+ *  phone wears its compact header.
+ *
+ *  `lyrics` is the text the view is HOLDING — deliberately the stale one while
+ *  the next track's payload is in flight, so next/previous never reflows the
+ *  whole view (see `staleLyrics`); `instrumental` comes from that track's own
+ *  tags; `allowPlain` is the user's setting, and `undefined` (config not read
+ *  yet) must NOT claim a refusal the app has not verified.
+ *
+ *  The phone's header row is the LYRICS composition, not the phone's mode: the
+ *  thumbnail-and-one-line header only stands in for the cover and the metadata
+ *  block while the words they make room for are actually on screen. With no
+ *  pane (no lyrics, an instrumental, refused plain lyrics, or the reader's own
+ *  "lyrics off") a phone gets the full composition instead — cover, title,
+ *  album · artist, transport, seek — centred, which is what the owner's report
+ *  was about: the compact row was the phone's layout whatever the track held,
+ *  so a track with no lyrics drew a bare strip on a whole screen. */
+export function npLyricsMode({
+  lyrics, instrumental, allowPlain, showLyrics, mdUp,
+}: {
+  lyrics: string | null | undefined;
+  instrumental: boolean;
+  allowPlain: boolean | undefined;
+  showLyrics: boolean;
+  mdUp: boolean;
+}): {
+  state: NpLyricsState;
+  drawable: boolean;
+  paneOpen: boolean;
+  compactHeader: boolean;
+} {
+  const kind = instrumental ? null : lyricsKindOf(lyrics);
+  const state: NpLyricsState = instrumental
+    ? "instrumental"
+    : kind === null
+      ? "none"
+      : kind === "plain" && allowPlain === false
+        ? "plain-refused"
+        : kind;
+  // The two states with words to put in the pane: timed text, and untimed text
+  // this install accepts.
+  const drawable = state === "synced" || state === "plain";
+  const paneOpen = drawable && showLyrics;
+  return { state, drawable, paneOpen, compactHeader: !mdUp && paneOpen };
 }
 
 /** One metadata line of the fullscreen player — the title, and either half of
@@ -578,19 +645,28 @@ export default function NowPlayingView(p: Props) {
   // Lyrics pane, default on; the toggle sits beside the visualizer's in the
   // top bar (LYRICS_KEY carries the why).
   const [showLyrics, setShowLyrics] = useState(() => localStorage.getItem(LYRICS_KEY) !== "0");
+  // The reader's own `lyrics_allow_plain` (mlo/config.py, OFF by default) —
+  // the same ["config"] cache every settings surface reads and the Settings
+  // page invalidates on save, so flipping that switch re-decides this player's
+  // mode without a reload. `undefined` while it is in flight: an unread
+  // setting must not claim a refusal the app has not verified (`allowPlainOf`).
+  const { data: cfg } = useQuery({ queryKey: ["config"], queryFn: api.config, staleTime: 5 * 60 * 1000 });
+  const allowPlain = allowPlainOf(cfg);
   // ---- the phone's compact header ------------------------------------------
   // Reported on a phone: the cover art, the title + format readout, the
   // album · artist row and the star row together took the whole screen before
-  // the first control, so below `md` this overlay opens COMPACT — ONE header
-  // row (thumbnail, title, artist · album) with the transport and the seek bar
-  // under it. It was a MODE the lyrics button flipped, which is what broke the
-  // phone: below `md` that press moved the block and the pane together, so the
-  // reader's own "lyrics on" pick meant the pane at `md` and up and the whole
-  // block below it — the same control, two different things, and a phone came
-  // up showing no lyrics at all (the owner's report) with the zoom / offset
-  // controls the pane carries nowhere on screen. The header is now just the
-  // phone's LAYOUT — one button, one meaning, every width (see the toggle) —
-  // and the pane sits under it with the lyrics off it always did.
+  // the first control, so below `md` the overlay wears the header row (thumbnail,
+  // title, artist · album) with the transport and the seek bar under it while
+  // the lyrics are up. It was a MODE the lyrics button flipped, which is what
+  // broke the phone: below `md` that press moved the block and the pane
+  // together, so the reader's own "lyrics on" pick meant the pane at `md` and
+  // up and the whole block below it — the same control, two different things,
+  // and a phone came up showing no lyrics at all (the owner's report) with the
+  // zoom / offset controls the pane carries nowhere on screen. It is now the
+  // LYRICS composition alone (`npLyricsMode`'s `compactHeader`): the header
+  // stands in for the block while words are on screen, and a track without any
+  // gets the full composition back, cover and all. One button, one meaning,
+  // every width (see the toggle).
   const mdUp = useMdUp();
   // ReplayGain preamp: the slider drags locally and commits to the config on a
   // short debounce, so one drag is one config write (and one re-fetch of the
@@ -1023,24 +1099,28 @@ export default function NowPlayingView(p: Props) {
     () => (lyricsText && !instrumental ? parsePlayerLrc(lyricsText, offsetMs) : []),
     [lyricsText, instrumental, offsetMs]
   );
-  // Layout (cover sizing, pane presence) follows the on-screen lyrics even
-  // while stale so next/previous never reflows the whole view.
-  const layoutHasLyrics = hasLyricsText(lyricsText) && !instrumental;
-  // The compact header is a PHONE layout: at `md` and up this is false whatever
-  // happened at a narrower width, so a window dragged wide cannot leave the
-  // desktop layout without its block. No state feeds it — it is a function of
-  // the width alone, which is what keeps it from competing with the lyrics
-  // button for ownership of the pane (see the toggle and the state above).
-  const compactMode = !mdUp;
-  // Whether the pane is on screen, in ONE derivation for both layouts: the
-  // track has lyrics AND the reader has not put them away. It used to branch on
-  // the width (`mdUp ? showLyrics : !compactMode`), which gave the phone a
-  // second, hidden owner of the same pane — the reason the persisted pick was
-  // ignored below `md` and the offset / zoom controls never mounted there. The
-  // track's lyrics decide the toggle's presence (below): a button that cannot
-  // do anything is hidden, not rendered inert.
-  const paneOpen = layoutHasLyrics && showLyrics;
-  const hasLyrics = layoutHasLyrics && !staleLyrics;
+  // The ONE derivation both layouts read: what those lyrics ARE (five states,
+  // refused plain ones and instrumentals included), whether the pane may be
+  // drawn or offered at all, whether it is open, and whether the phone wears
+  // its compact header. It follows the text on screen — stale included — so
+  // next/previous never reflows the view, and it reads the reader's
+  // `lyrics_allow_plain` so a pane is never offered for words this install
+  // refuses (`npLyricsMode` above carries the whole rule). It replaced a
+  // `hasLyricsText(...) && !instrumental` here plus a width branch in the
+  // pane and toggle conditions below, which gave the phone a second, hidden
+  // owner of the same pane — the reason the persisted pick was ignored below
+  // `md` and the offset / zoom controls never mounted there.
+  //
+  // Memoized like `lines` beside it, and for the same reason: the clock ticks
+  // this component 20 times a second while a track plays, and asking the
+  // question parses the whole lyric text (`lyricsKindOf`). The answer only
+  // moves when the lyrics, the track's own INSTRUMENTAL, the setting, the
+  // reader's pick or the width does.
+  const { state: lyricsState, drawable: lyricsDrawable, paneOpen, compactHeader } = useMemo(
+    () => npLyricsMode({ lyrics: lyricsText, instrumental, allowPlain, showLyrics, mdUp }),
+    [lyricsText, instrumental, allowPlain, showLyrics, mdUp]
+  );
+  const hasLyrics = lyricsDrawable && !staleLyrics;
   const plainLines = useMemo(() => {
     if (!hasLyrics) return [];
     if (lines.length) return lines.map((l) => l.text);
@@ -1361,6 +1441,19 @@ export default function NowPlayingView(p: Props) {
             {techStr}
           </span>
         )}
+        {/* The refused-plain mark. This install does not accept untimed lyrics
+            (`lyrics_allow_plain` off), so the player offers no pane for them —
+            and this is where that is SAID, on the row that already carries the
+            track's other marks, in the same vocabulary every other surface
+            uses (Badges' `LyricsKindChip`: the red cross, the reason on hover,
+            which names the setting). One mark, one meaning, no second kind of
+            notice invented for the player. Nothing is reserved for it: the
+            state is a property of the TRACK, so a track change can take the
+            mark away — but the row is the player's fixed-height title row
+            either way, so nothing the block is made of moves when it does. */}
+        {lyricsState === "plain-refused" && (
+          <LyricsKindChip kind="plain" allowPlain={false} size="sm" />
+        )}
       </div>
       {/* Album and artist on ONE row — "Hail to the Thief · Radiohead" is one
           fact pair, and the two stacked rows read as two unrelated lines
@@ -1400,10 +1493,11 @@ export default function NowPlayingView(p: Props) {
   );
   /** The like toggle, in the one shape both layouts draw.
    *
-   *  `className` carries the size and the PLACEMENT, because the two homes are
-   *  different rooms: above lg it is one control in the transport row, and on a
-   *  phone the same control sits alone at the player's bottom-left — the spot
-   *  Apple Music keeps its favourite in, which is what the owner asked for.
+   *  `className` carries the size: one home now (the transport row, R267), so
+   *  only the box tightens below `sm` with the controls around it. It used to
+   *  be drawn twice, with the phone copy alone in a row of its own at the
+   *  bottom-left — the owner asked "where is the like button?" about exactly
+   *  that row.
    *
    *  The button itself is the shared `components/FavHeart`, bound to the track
    *  this view is showing: the same writer, the same optimistic update and the
@@ -1428,31 +1522,41 @@ export default function NowPlayingView(p: Props) {
 
   const transportRow = (
     /* `cursor-auto`: the transport row keeps the arrow while the pane is
-       idling — see the idle-cursor effect. */
-    <div className={`cursor-auto flex items-center justify-center gap-2.5 flex-wrap ${ink.shade}`}>
-      <button aria-label="Shuffle" aria-pressed={p.shuffle} className={`p-2 rounded-lg transition-colors ${p.shuffle ? "text-accent" : ink.chromeButton}`} onClick={p.onToggleShuffle} title="Shuffle">
+       idling — see the idle-cursor effect.
+
+       ONE line at EVERY width (R267). The row used to be `flex-wrap`, and at
+       390 px its last control — the add-to-playlist button — was pushed onto a
+       line of its own, so it read as a stray icon under the transport (the
+       owner's report: "the playlist button seems placed weirdly"). Nothing
+       wraps now: the gaps and the hit boxes tighten below `sm`
+       (`gap-1` / `p-1.5` against `sm:gap-2.5` / `sm:p-2`) so the whole row —
+       shuffle, previous, play, next, repeat, the speed button, the divider,
+       the favourite and add-to-playlist — fits a 360 px phone with room to
+       spare, and every control on it keeps its own full-height hit box. */
+    <div className={`cursor-auto flex items-center justify-center gap-1 sm:gap-2.5 ${ink.shade}`}>
+      <button aria-label="Shuffle" aria-pressed={p.shuffle} className={`p-1.5 sm:p-2 rounded-lg transition-colors ${p.shuffle ? "text-accent" : ink.chromeButton}`} onClick={p.onToggleShuffle} title="Shuffle">
         <Shuffle className="h-4 w-4" />
       </button>
-      <button aria-label="Previous track" className={`p-2.5 rounded-lg transition-colors ${ink.chromeStrong} hover:bg-black/5`} onClick={() => p.onStep(-1)} title="Previous track">
+      <button aria-label="Previous track" className={`p-2 sm:p-2.5 rounded-lg transition-colors ${ink.chromeStrong} hover:bg-black/5`} onClick={() => p.onStep(-1)} title="Previous track">
         <SkipBack className="h-5 w-5" />
       </button>
       <button
         aria-label={p.playing ? "Pause" : "Play"}
         aria-pressed={p.playing}
-        className="p-4 rounded-lg bg-accent on-accent hover:bg-accent-soft shadow-lg transition-colors"
+        className="p-3.5 sm:p-4 rounded-lg bg-accent on-accent hover:bg-accent-soft shadow-lg transition-colors"
         onClick={p.onTogglePlay}
         title="Play / pause (Space)"
       >
         {p.playing ? <Pause className="h-6 w-6" /> : <Play className="h-6 w-6 ml-0.5" />}
       </button>
-      <button aria-label="Next track" className={`p-2.5 rounded-lg transition-colors ${ink.chromeStrong} hover:bg-black/5`} onClick={() => p.onStep(1)} title="Next track">
+      <button aria-label="Next track" className={`p-2 sm:p-2.5 rounded-lg transition-colors ${ink.chromeStrong} hover:bg-black/5`} onClick={() => p.onStep(1)} title="Next track">
         <SkipForward className="h-5 w-5" />
       </button>
-      <button aria-label="Repeat one" aria-pressed={p.loop} className={`p-2 rounded-lg transition-colors ${p.loop ? "text-accent" : ink.chromeButton}`} onClick={p.onToggleLoop} title="Repeat one">
+      <button aria-label="Repeat one" aria-pressed={p.loop} className={`p-1.5 sm:p-2 rounded-lg transition-colors ${p.loop ? "text-accent" : ink.chromeButton}`} onClick={p.onToggleLoop} title="Repeat one">
         <Repeat className="h-4 w-4" />
       </button>
       <button
-        className={`p-2 rounded-lg transition-colors text-xs font-mono min-w-[46px] ${ink.chromeButton}`}
+        className={`p-1.5 sm:p-2 rounded-lg transition-colors text-xs font-mono min-w-[38px] sm:min-w-[46px] ${ink.chromeButton}`}
         onClick={() => p.onSpeedChange(nextSpeed(p.speed, 1))}
         title="Playback speed — [ slower · ] faster · 0 reset to 1×"
       >
@@ -1461,16 +1565,23 @@ export default function NowPlayingView(p: Props) {
       {/* the divider belongs to the row's CONTROL line, not the row box:
           self-center + a fixed height keep it on the same axis as the icons
           either side of it, whatever heights they have */}
-      <span className="w-px h-6 bg-white/15 mx-1 self-center shrink-0" />
-      {/* Desktop's home for the favourite. On a phone this control lives at the
-          player's bottom-left instead (`likeButton`'s other call site) — one
-          home per width, never two buttons for one flag. */}
-      {likeButton("p-2 hidden lg:inline-flex items-center justify-center")}
+      <span className="w-px h-6 bg-white/15 mx-0.5 sm:mx-1 self-center shrink-0" />
+      {/* The favourite's ONE home now, at every width (R267): it used to be a
+          lone row pinned to the bottom-left of the player below `lg`, drawn
+          outside the scrolling body — which is where a reader had to go
+          looking for it, and where the owner could not find it ("also where is
+          the like button?"). It sits on the MAIN control line instead, beside
+          add-to-playlist and the divider that separates the transport from the
+          track actions, so the one place the controls live is the place the
+          favourite lives. `FavHeart` is untouched: same key, same writer, same
+          `aria-pressed`; the app's star stays what it always was — a rating,
+          not a favourite (see lib/ratings). */}
+      {likeButton("p-1.5 sm:p-2 inline-flex items-center justify-center")}
       <div className="relative">
         <button
           aria-label="Add this track to a playlist"
           aria-expanded={plOpen}
-          className={`p-2 rounded-lg transition-colors ${plOpen ? "text-accent" : ink.chromeButton}`}
+          className={`p-1.5 sm:p-2 rounded-lg transition-colors ${plOpen ? "text-accent" : ink.chromeButton}`}
           onClick={() => setPlOpen(!plOpen)}
           title="Add this track to a playlist"
         >
@@ -1859,12 +1970,21 @@ export default function NowPlayingView(p: Props) {
                 persisted pick was ignored there, and the offset / zoom
                 controls the pane carries never mounted on a phone at all
                 (the owner's report). The phone's compact header is now the
-                width's own layout (see `compactMode`), never a second owner of
-                this pane, so the press does the same thing in both layouts and
-                the pick follows the reader between them. Below `md` the button
-                is drawn only where it can act too: no lyrics, no button, the
-                same as the desktop rule it used to be the exception to. */}
-            {!videoPath && layoutHasLyrics && (
+                LYRICS composition alone (`npLyricsMode`), never a second owner
+                of this pane, so the press does the same thing in both layouts
+                and the pick follows the reader between them.
+
+                Drawn exactly where the pane CAN be filled — timed lyrics, or
+                untimed ones this install accepts (`npLyricsMode.drawable`) —
+                which is the same rule the pane below is drawn under, and the
+                one the desktop always used. An instrumental, a lyric-less
+                track and a plain text under `lyrics_allow_plain` off wear no
+                button at all (the refused text wears the red-cross mark in
+                the metadata block instead), so no state of this control ever
+                promises words the pane cannot show. It also keeps its OWN
+                state: the pick is the reader's, persisted across tracks, and
+                what follows the track is the pane. */}
+            {!videoPath && lyricsDrawable && (
               <button
                 className={`p-2 rounded-lg transition-colors ${lyricsOn ? barOn : barOff}`}
                 onClick={() => {
@@ -2110,21 +2230,30 @@ export default function NowPlayingView(p: Props) {
               always visible when enabled.
               ponytail: `justify-center` in a scroll container leaves the TOP
               overflow unreachable on very short windows; move to a safe-center
-              layout if anyone ever uses the player that small. */}
+              layout if anyone ever uses the player that small.
+              `my-auto` while the pane is away: with no words this column IS
+              the composition (cover, metadata, transport, seek), so it takes
+              the free space as margins instead of hugging the top of a phone
+              screen. Auto margins and not `justify-center` on the body on
+              purpose — they resolve to zero when there is no free space, so a
+              window shorter than the composition (a landscape phone) scrolls
+              from its own top instead of hiding the cover above the
+              scrollport. */}
           <div
             className={`w-full flex flex-col items-center justify-center gap-4 shrink-0 min-w-0 transition-[width] duration-300 ease-out ${
               paneOpen
                 ? "lg:w-[42%] lg:h-full lg:max-h-full lg:min-h-0 lg:overflow-y-auto"
-                : "max-h-full min-h-0 overflow-x-clip overflow-y-auto"
+                : "my-auto max-h-full min-h-0 overflow-x-clip overflow-y-auto"
             }`}
           >
-            {/* the phone's compact header — the whole top block as ONE row
-                (the note on `compactMode` above carries the report). `md:hidden`
+            {/* the phone's compact header — the whole top block as ONE row,
+                drawn only while the lyrics are up (the note on `npLyricsMode`'s
+                `compactHeader` carries the report and the rule). `md:hidden`
                 as well as the flag: this must never render at md and up, and
                 the block below must never show below md while it does. Fixed
                 row heights like the block's own rows, so a track change cannot
                 make the header jump. */}
-            {compactMode && (
+            {compactHeader && (
               <div className="md:hidden w-[26rem] max-w-full min-w-0 flex items-center gap-3 px-1">
                 <CoverImg
                   albumPath={p.current.albumPath}
@@ -2159,7 +2288,7 @@ export default function NowPlayingView(p: Props) {
                 </div>
               </div>
             )}
-            <div className={`relative ${compactMode ? "hidden md:block" : ""}`}>
+            <div className={`relative ${compactHeader ? "hidden md:block" : ""}`}>
               {orbs && (
                 <div
                   className="artwork-glow absolute -inset-6 rounded-[2rem] blur-2xl"
@@ -2171,11 +2300,11 @@ export default function NowPlayingView(p: Props) {
                 coverFile={coverFile}
                 // One size per breakpoint per LAYOUT: the art never jumps when a
                 // track's lyrics load or finish, and above lg the pane sits
-                // beside it so the size is the same either way. On a phone the
-                // compact header replaces the art outright, so the small size
-                // is what the expanded view wears there — the cover, title and
-                // controls collapse to the header and the lyrics take the rest
-                // of the screen.
+                // beside it so the size is the same either way. Below `md` the
+                // art is drawn ONLY when no pane is up — with lyrics the
+                // compact header takes its place, and without them (`w-72`,
+                // 288 px) the cover is the phone composition's centrepiece, so
+                // a track with no lyrics is not a bare strip on a whole screen.
                 wrapperClass={`relative rounded-2xl shadow-2xl bg-raise overflow-hidden lg:w-[min(28rem,48vh)] lg:h-[min(28rem,48vh)] ${
                   paneOpen ? "w-32 h-32" : "w-72 h-72"
                 }`}
@@ -2184,7 +2313,7 @@ export default function NowPlayingView(p: Props) {
             {/* the block the compact header stands in for; `hidden md:block`
                 keeps the desktop copy on screen even if the width state is a
                 beat behind a resize */}
-            {compactMode ? <div className="hidden md:block">{textBlock}</div> : textBlock}
+            {compactHeader ? <div className="hidden md:block">{textBlock}</div> : textBlock}
             {transportRow}
             {/* seek + volume — a single line under the transport */}
             {seekRow}
@@ -2212,18 +2341,24 @@ export default function NowPlayingView(p: Props) {
               short (zoomed) window, which left this column 60 px tall at the
               very bottom of a clipped body — lyrics that were rendered and
               unreachable. With the floor the body scrolls (overflow-y-auto
-              below lg) and the pane is a real reading surface.
-
+          {/* lyrics column — plain, no panel, hugging the right edge; flex-1
+…
               Below `md` this column is the PHONE's reading surface: the
-              compact header (`compactMode`) is a 48 px row plus the transport,
-              the seek line and the visualizer, and everything left under it
-              belongs to the pane — `flex-1` with `min-h-0`, so it scrolls
-              inside the body rather than pushing the chrome off the screen,
-              and it stays inside `safe-np-body` so the notch / home-indicator
-              insets below `lg` apply to it exactly as they do to the desktop
-              column. The offset / zoom controls ride its bottom edge there,
-              which is the pair the owner's report asked for and the reason the
-              pane has to exist on a phone at all.
+              compact header (`compactHeader`) is a 48 px row plus the
+              transport, the seek line and the visualizer, and everything left
+              under it belongs to the pane — `flex-1` with `min-h-0`, so it
+              scrolls inside the body rather than pushing the chrome off the
+              screen, and it stays inside `safe-np-body` so the notch /
+              home-indicator insets below `lg` apply to it exactly as they do
+              to the desktop column. The offset / zoom controls ride its bottom
+              edge there, which is the pair the owner's report asked for and the
+              reason the pane has to exist on a phone at all.
+
+              Drawn only where there are words this install will show
+              (`npLyricsMode.drawable` — timed, or untimed and accepted): an
+              instrumental, a lyric-less track or a refused plain text draws no
+              column at all, in either layout, and the phone falls back to its
+              full composition instead of a header row with nothing under it.
 
               Shown and hidden by the toggle in the top bar, and the BOX is the
               same one in both states — only its size changes. Collapsing
@@ -2234,7 +2369,7 @@ export default function NowPlayingView(p: Props) {
               position, the zoom and the auto-follow refs all survive a toggle.
               The lyric lines are divs, not controls, so hiding the subtree
               from assistive tech costs no tab stop. */}
-          {!videoPath && layoutHasLyrics && (
+          {!videoPath && lyricsDrawable && (
             <div
               className={`relative flex flex-col max-w-3xl overflow-clip transition-[width,max-height,opacity,transform] duration-300 ease-out ${
                 paneOpen
@@ -2342,18 +2477,6 @@ export default function NowPlayingView(p: Props) {
           )}
         </div>
 
-        <div className="cursor-auto lg:hidden w-full shrink-0 flex items-center px-1 sm:px-2 pb-1">
-          {/* The phone's favourite: bottom-left of the player, where a thumb
-              looks for it and where Apple Music keeps its own. Outside the
-              scrolling body on purpose — a control that can scroll off a
-              phone's screen is not the control the owner asked for. The heart
-              is the app's own favourite (a STAR in this app means a rating, a
-              different store — see lib/ratings), and this row draws it only
-              below lg, where the transport row does not.
-              `cursor-auto`: this row is a control too — see the idle-cursor
-              effect (inert on a phone, which has no arrow to drop). */}
-          {likeButton("p-2.5 flex items-center justify-center")}
-        </div>
         </>
         )}
       </div>
