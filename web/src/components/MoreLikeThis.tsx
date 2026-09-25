@@ -10,7 +10,7 @@ import { GRID_SIZE_MIN } from "../lib/fmt";
 import { toast, useStore, type QueueTrack } from "../store";
 import AlbumCard from "./AlbumCard";
 import CoverImg, { TrackCover } from "./CoverImg";
-import RecommendShelf from "./RecommendShelf";
+import RecommendShelf, { SHELF_LIMIT } from "./RecommendShelf";
 import type { Album } from "../types";
 
 /** What this shelf is, in one line — the LOCAL half of the pair of shelves an
@@ -204,7 +204,7 @@ export default function MoreLikeThis({
   id = "",
   seeds,
   target,
-  limit,
+  limit = SHELF_LIMIT,
 }: {
   kind: RecommendKind;
   /** Library path or `mb:<uuid>` — the server resolves either. Required for
@@ -213,6 +213,9 @@ export default function MoreLikeThis({
   /** Seed references for `kind="tracks"` / `kind="albums"`. */
   seeds?: string[];
   target?: RecommendTarget;
+  /** How many rows to ask for. Defaults to `SHELF_LIMIT` — the same number the
+   *  online shelf beside this one asks for — and is stated in the request, so
+   *  the pair cannot come back as two different counts. */
   limit?: number;
 }) {
   // Seeds are the same request whichever way they are spelled; a joined key
@@ -250,8 +253,19 @@ export default function MoreLikeThis({
 
   if (!enabled || items.length === 0) return null;
   const albumShelf = items[0].kind === "album";
+  // What this answer IS, in the same slot and the same shape as the online
+  // shelf's "12 suggestions" beside it. Both shelves print their own count, so
+  // a reader comparing the pair sees two true numbers — 9 local albums beside
+  // 12 online suggestions is the library having 9, not a shelf hiding three.
+  const noun = albumShelf ? "album" : "track";
+  const count = (
+    <span className="text-[11px] text-zinc-500">
+      {items.length} {noun}
+      {items.length === 1 ? "" : "s"}
+    </span>
+  );
   return (
-    <RecommendShelf icon={Sparkles} title="Recommended (Local)" hint={HINT}>
+    <RecommendShelf icon={Sparkles} title="Recommended (Local)" hint={HINT} meta={count}>
       {albumShelf ? (
         /* A wrapped GRID, not a scroller. The scroller this replaces laid the
            cards out on one row that ran off the shelf's own width and cut the

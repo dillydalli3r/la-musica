@@ -80,11 +80,14 @@ NOTE = ("A definite answer about the internet needs a probe from OUTSIDE this "
 # not do UPnP. The router can only forward to the HOST, so the port has to be
 # published by compose AND forwarded there by hand.
 CONTAINER_NOTE = ("This app runs in a container: the gateway a probe can see "
-                  "from here is Docker's bridge, not the home router, so "
-                  "automatic opening cannot reach it. Publish the port "
+                  "from here is Docker's bridge, not the home router, so the "
+                  "search cannot reach the router by itself. Publish the port "
                   "(docker-compose.yml: ports: \"{port}:{port}\") and forward "
                   "TCP {port} on the ROUTER to the HOST's LAN address — a router "
-                  "cannot forward to a container address.")
+                  "cannot forward to a container address. Name the router's LAN "
+                  "address in the Soulseek settings and the app asks it directly "
+                  "instead: both the unicast search and NAT-PMP work from in here "
+                  "once the router is named.")
 
 # What each gateway verdict means for the port, whichever side reported it (the
 # live read, or `soulseek.portmap_state`, which uses `mlo.portmap`'s own state
@@ -568,7 +571,13 @@ def port_check(cfg=None):
     port = int(state.get("listen_port") or DEFAULT_PORT)
     running = soulseek.client_running(cfg)
     stored = state.get("mapping") or {}
-    gateway = str(stored.get("gateway") or "") or portmap.default_gateway()
+    # The router the user named wins over everything else: a container's own
+    # gateway is Docker's bridge, and this app's search AND its NAT-PMP both work
+    # against the real router the moment it is named (measured on an OpenWRT IGD
+    # that ignores multicast and answers unicast).
+    gateway = (str(cfg.get("soulseek_router_ip") or "").strip()
+               or str(stored.get("gateway") or "")
+               or portmap.default_gateway())
     lan = portmap.local_ip(gateway)
     read = portmap.read_port(port, ip=lan, gateway=gateway, timeout=GATEWAY_TIMEOUT)
     wan = str(read.get("external_ip") or stored.get("external_ip") or "").strip()

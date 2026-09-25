@@ -6,11 +6,14 @@ router does not forward the listen port looks offline to the Soulseek network
 while everything else about it is fine. This module asks the gateway itself, in
 the two ways residential routers actually answer:
 
-* UPnP IGD: an SSDP M-SEARCH for the InternetGatewayDevice (and, for the
-  routers that only answer a service search, for the WANIPConnection/
+* UPnP IGD: an SSDP M-SEARCH for the InternetGatewayDevice (v1 and v2, and, for
+  the routers that only answer a service search, for the WANIPConnection/
   WANPPPConnection service types), the device description behind the reply, then
   SOAP ``AddPortMapping`` / ``DeletePortMapping`` / ``GetExternalIPAddress`` /
   ``GetSpecificPortMappingEntry`` on the control URL that description names.
+  The multicast group is only half of a search: a router that drops it still
+  answers an M-SEARCH sent straight at its own LAN address, so a gateway named
+  by the caller is searched by unicast as well (see `discover_igd`).
 * NAT-PMP (RFC 6886): UDP to the gateway's port 5351 — external-address request,
   then a TCP map request (opcode 2) with a lifetime, or the same request with a
   zero lifetime to remove the mapping.
@@ -21,6 +24,12 @@ OWN error text when it refused (a SOAP fault's description/code, or NAT-PMP's
 result code spelled out). A mapping is only ever reported as made when the
 gateway answered the request that makes it — and, wherever the gateway supports
 reading the entry back, when the entry it lists is the one that was asked for.
+Two things this code refuses to do, both of them lies a bridged container
+invites: send an ``AddPortMapping`` naming an address the router cannot dial —
+this process would name its own side of Docker's bridge, and NAT-PMP, which maps
+"whoever asked", is the method that applies there — and read an entry pointing at
+another address as "another device holds it" when the process is behind that
+bridge and cannot say which address on the router's network is its own.
 
 Stdlib only: socket/struct/ctypes for the wire and the routing tables,
 urllib.request for the device description and the SOAP posts, xml.etree for the
@@ -44,9 +53,13 @@ NATPMP_PORT = 5351
 PMP_VERSION = 0
 # The device search first: a router answering it sends its ROOT description,
 # which names the WAN connection service. The two service searches are the
-# fallback for the IGDs that only reply to a service-type M-SEARCH.
+# fallback for the IGDs that only reply to a service-type M-SEARCH. Both device
+# versions are searched: an IGD v2 (the routers that also speak NAT-PMP) answers
+# only its own target on some firmware, and it was measured to answer the v2
+# device M-SEARCH while never answering the v1 one.
 SEARCH_TARGETS = (
     "urn:schemas-upnp-org:device:InternetGatewayDevice:1",
+    "urn:schemas-upnp-org:device:InternetGatewayDevice:2",
     "urn:schemas-upnp-org:service:WANIPConnection:1",
     "urn:schemas-upnp-org:service:WANPPPConnection:1",
 )
@@ -147,6 +160,54 @@ def local_ip(gateway=""):
         return sock.getsockname()[0]
     except OSError:
         return ""
+    finally:
+        sock.close()
+
+
+def _network24(addr):
+    """An IPv4 address as its /24 network ("a.b.c", "" when it is not one).
+
+    /24 is the coarsest test that is still useful: a host and the router that
+    serves it differ only in the last octet, while the address a bridged
+    container sees itself on (Docker's 172.18.0.0/16) never shares three octets
+    with the router's LAN. Comparing all four octets would call every other host
+    a different network; comparing fewer would call 172.16.x and 172.17.x one."""
+    try:
+        octets = [int(part) for part in str(addr or "").split(".")]
+    except ValueError:
+        return ""
+    if len(octets) != 4 or any(o < 0 or o > 255 for o in octets):
+        return ""
+    return ".".join(str(o) for o in octets[:3])
+
+
+def _behind_another_nat(igd, address):
+    """Whether *address* is on a different /24 than the IGD's own address.
+
+    True means this process is behind another NAT, and Docker's bridge is the
+    everyday case: the router that answered is on 192.168.40.0/24 while this
+    process would name 172.18.0.3 as its internal client. The router cannot dial
+    that address, so nothing this process sends naming it can be true. ONE helper
+    for both the add path and the read-back path, so the two can never disagree
+    about whether the bridge is there."""
+    router, host = _network24(igd.get("from", "")), _network24(address)
+    return bool(router and host and router != host)
+
+
+def _tcp_answers(address, port, timeout=1.0):
+    """Whether something accepts a TCP connection at *address*:*port*.
+
+    The one fact available about an address this process cannot claim: a port the
+    gateway forwards is only forwarded somewhere if the far end accepts a
+    connection. A short timeout, because a user waits on this answer and an
+    address that is not there refuses faster than it accepts."""
+    sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    sock.settimeout(timeout)
+    try:
+        sock.connect((str(address or ""), int(port)))
+        return True
+    except (OSError, ValueError):
+        return False
     finally:
         sock.close()
 
@@ -357,31 +418,84 @@ def fetch_description(location, timeout=3.0):
                              f"({len(services)} service(s) listed)")
 
 
-def discover_igd(timeout=2.0, ssdp_addr=SSDP_ADDR, ssdp_port=SSDP_PORT):
+def _gateway_targets(gateways):
+    """The named gateway addresses to search, cleaned: stripped, blanks dropped,
+    repeats collapsed, the caller's order kept.
+
+    A caller builds this list from config plus what it read off the routing table,
+    so the same address twice — or a blank left by a setting that is off — must
+    not become two searches: each one costs a wait with the user watching."""
+    seen, out = set(), []
+    for gw in gateways or ():
+        text = str(gw or "").strip()
+        if text and text not in seen:
+            seen.add(text)
+            out.append(text)
+    return out
+
+
+def _no_answer_text(ssdp_addr, ssdp_port, gateways):
+    """What to tell the reader when nothing answered: every address searched.
+
+    The multicast address alone hides the interesting half of the answer — a
+    router that was NAMED and stayed silent — which is exactly what the panel
+    reported for a router that answers a unicast M-SEARCH perfectly well."""
+    named = _gateway_targets(gateways)
+    text = f"no device answered the UPnP search on {ssdp_addr}:{ssdp_port}"
+    if named:
+        text += (", nor the M-SEARCH sent straight to "
+                 + ", ".join(f"{gw}:{ssdp_port}" for gw in named))
+    return text
+
+
+def discover_igd(timeout=2.0, ssdp_addr=SSDP_ADDR, ssdp_port=SSDP_PORT,
+                 gateways=()):
     """Find the IGD's WAN control endpoint -> (igd, errors).
 
     `igd` is None when nothing usable answered, and `errors` holds what each
-    device that DID answer failed on, in the order it was tried."""
+    device that DID answer failed on, in the order it was tried — so an address
+    in `gateways` whose answers could not be used is reported against that
+    address. An address that answered NOTHING is not an error: silence is what
+    the `no_gateway` state is for.
+
+    The addresses in `gateways` are searched FIRST, by unicast on the same port,
+    and the multicast group after them. A named address is an instruction, not a
+    guess: it is what a native install read off its own routing table and what a
+    container's owner typed in, and on a router that drops the multicast group
+    (measured: an OpenWRT IGD that answers an M-SEARCH sent straight at its own
+    LAN address and nothing on 239.255.255.250) the multicast pass can only
+    burn its whole timeout before the search that works even starts — seven
+    seconds per check on the install this was measured on, with a mapping
+    watcher asking every twenty. The multicast group still follows, for whatever
+    IGD is on this LAN with nobody being told an address, and it is the only
+    search when no gateway is named."""
     errors, seen = [], set()
-    for target in SEARCH_TARGETS:
-        try:
-            replies = ssdp_search(target, timeout=timeout, addr=ssdp_addr,
-                                  port=ssdp_port)
-        except GatewayUnreachable as e:
-            errors.append(str(e))
-            continue
-        for reply in replies:
-            location = reply["location"]
-            if location in seen:
-                continue
-            seen.add(location)
+    # Named gateways first (each wait capped at a second: a router that stays
+    # silent must not stack its silence on top of the multicast pass), then the
+    # multicast coordinates.
+    searches = [(gw, ssdp_port, min(timeout, 1.0), f"{gw}: ")
+                for gw in _gateway_targets(gateways)]
+    searches.append((ssdp_addr, ssdp_port, timeout, ""))
+    for addr, port, wait, prefix in searches:
+        for target in SEARCH_TARGETS:
             try:
-                service, control, device = fetch_description(location)
+                replies = ssdp_search(target, timeout=wait, addr=addr, port=port)
             except GatewayUnreachable as e:
-                errors.append(str(e))
+                errors.append(f"{prefix}{e}")
                 continue
-            return {"service": service, "control_url": control, "location": location,
-                    "device": device, "from": reply["from"]}, errors
+            for reply in replies:
+                location = reply["location"]
+                if location in seen:
+                    continue
+                seen.add(location)
+                try:
+                    service, control, device = fetch_description(location)
+                except GatewayUnreachable as e:
+                    errors.append(f"{prefix}{e}")
+                    continue
+                return {"service": service, "control_url": control,
+                        "location": location, "device": device,
+                        "from": reply["from"]}, errors
     return None, errors
 
 
@@ -492,31 +606,50 @@ def _upnp_external_ip(igd, timeout=3.0):
     return args.get("NewExternalIPAddress", "").strip()
 
 
-def _entry_verdict(args, port, ip):
+def _entry_verdict(args, port, ip, bridged=False):
     """One listed port-mapping entry as a verdict -> (state, verified, detail).
 
     The entry is judged against the request it answers: a mapping to another
     host, to another internal port or a disabled one is a real refusal, and only
     an entry that matches is ever reported as `mapped`. Shared by the add path
-    below and by `read_port`, so both call the same listing `mapped`."""
+    below and by `read_port`, so both call the same listing `mapped`.
+
+    `bridged` says this process is behind another NAT (see `_behind_another_nat`):
+    then an internal client it never named is NOT "another device holds it". A
+    container behind Docker's bridge cannot state which address on the router's
+    network is its own, and the entry the router really holds points at the HOST
+    — whose address may well be the one at the end of a working forward. So the
+    entry is accepted as a mapping and judged by the one fact available: whether
+    that address answers on the port."""
     client = args.get("NewInternalClient", "").strip()
     internal = args.get("NewInternalPort", "").strip()
     enabled = args.get("NewEnabled", "").strip()
+    if enabled not in ("", "1"):
+        return "refused", False, (f"the gateway lists the mapping as disabled "
+                                  f"(NewEnabled={enabled})")
+    if internal and internal != str(port):
+        return "refused", False, (f"external port {port} is mapped to internal "
+                                  f"port {internal} instead")
+    if bridged and client:
+        where = f"{client}:{internal or port}"
+        if _tcp_answers(client, internal or port):
+            return "mapped", True, (f"the gateway lists external port {port} -> "
+                                    f"{where}, and {client} accepts a connection "
+                                    f"there; this process is behind Docker's "
+                                    f"bridge, so it cannot confirm that address "
+                                    f"is its own")
+        return "refused", False, (f"the gateway forwards external port {port} to "
+                                  f"{where}, and nothing there accepts a "
+                                  f"connection — the forward leads nowhere")
     if client and ip and client != ip:
         return "refused", False, (f"external port {port} is mapped to {client}, "
                                   f"not to this machine ({ip}) — another device "
                                   f"holds it")
-    if internal and internal != str(port):
-        return "refused", False, (f"external port {port} is mapped to internal "
-                                  f"port {internal} instead")
-    if enabled not in ("", "1"):
-        return "refused", False, (f"the gateway lists the mapping as disabled "
-                                  f"(NewEnabled={enabled})")
     return "mapped", True, (f"the gateway lists external port {port} -> "
                             f"{client or ip}:{internal or port}")
 
 
-def _upnp_verify(igd, port, ip, timeout=3.0):
+def _upnp_verify(igd, port, ip, timeout=3.0, bridged=False):
     """Was the mapping really made? -> (state, verified, detail).
 
     `GetSpecificPortMappingEntry` is the only way to ask the router what it
@@ -524,7 +657,9 @@ def _upnp_verify(igd, port, ip, timeout=3.0):
     means "cannot verify" — the accepted add still stands — while an entry
     pointing at another host, a disabled entry or a 714 "no such entry in array"
     is a real refusal. Reporting either of those as a success is exactly the lie
-    this module exists to prevent."""
+    this module exists to prevent. `bridged` goes straight to the verdict: behind
+    another NAT an entry pointing elsewhere is judged by what answers there, not
+    by the address this process cannot state."""
     try:
         args = soap(igd, "GetSpecificPortMappingEntry",
                     {"NewRemoteHost": "", "NewExternalPort": str(port),
@@ -539,23 +674,29 @@ def _upnp_verify(igd, port, ip, timeout=3.0):
     except GatewayUnreachable as e:
         return "mapped", False, (f"the gateway accepted the mapping; the check "
                                  f"could not be made ({e})")
-    return _entry_verdict(args, port, ip)
+    return _entry_verdict(args, port, ip, bridged=bridged)
 
 
 def upnp_open(port, *, ip="", gateway="", description=DEFAULT_DESCRIPTION,
               timeout=3.0, ssdp_addr=SSDP_ADDR, ssdp_port=SSDP_PORT):
-    """Add a UPnP IGD mapping for TCP *port* -> the structured result."""
+    """Add a UPnP IGD mapping for TCP *port* -> the structured result.
+
+    `gateway` is the router's LAN address when the caller knows it (the config's
+    `soulseek_router_ip`): the multicast search is made first, and a router that
+    drops the multicast group is then asked by UNICAST at that address before
+    anything is reported as unanswered. `ip` is the internal client to name; when
+    it is empty this process works it out and refuses to name an address the
+    router cannot dial (see the bridge guard below)."""
     port = int(port)
     try:
         igd, errors = discover_igd(timeout=timeout, ssdp_addr=ssdp_addr,
-                                   ssdp_port=ssdp_port)
+                                   ssdp_port=ssdp_port, gateways=(gateway,))
     except GatewayUnreachable as e:
         return _out("no_gateway", method="upnp", port=port,
                     attempts=[_attempt("upnp", False, False, str(e))],
                     detail=f"UPnP: {e}")
     if igd is None:
-        why = _joined(errors) or (f"no device answered the UPnP search on "
-                                  f"{ssdp_addr}:{ssdp_port}")
+        why = _joined(errors) or _no_answer_text(ssdp_addr, ssdp_port, (gateway,))
         return _out("unsupported" if errors else "no_gateway", method="upnp",
                     port=port,
                     attempts=[_attempt("upnp", bool(errors), False, why)],
@@ -569,6 +710,28 @@ def upnp_open(port, *, ip="", gateway="", description=DEFAULT_DESCRIPTION,
                                        f"address on its network could not be read")],
                     detail="this machine's address could not be determined, so "
                            "there is nothing to forward the port to")
+    # The hazard a bridged container lives in: a UPnP mapping names the internal
+    # client, and this process would name an address on ITS side of the bridge
+    # (Docker's 172.18.0.x) while the router is on its own LAN. The router cannot
+    # dial that address, so the mapping would be a forward to nowhere that still
+    # reads as success. An `ip` the CALLER named is trusted — it may know a route
+    # this process cannot see — but an address worked out here is not sent.
+    bridged = not ip and _behind_another_nat(igd, internal)
+    if bridged:
+        return _out("unsupported", method="upnp", port=port, ip=internal,
+                    gateway=igd.get("from", ""),
+                    attempts=[_attempt("upnp", True, False,
+                                       f"{device}: no AddPortMapping was sent — "
+                                       f"{internal} is not on the router's network "
+                                       f"({igd.get('from', '')})")],
+                    detail=(f"{device} answered, but a UPnP mapping has to name "
+                            f"the internal client, and this process would name "
+                            f"{internal} — an address on its own side of a bridge, "
+                            f"not on {igd.get('from', '')}'s network, so the "
+                            f"router cannot dial it. AddPortMapping was not sent. "
+                            f"NAT-PMP is the method that applies here: it carries "
+                            f"no internal address at all (the gateway maps the "
+                            f"port to whoever asked), so it survives the bridge"))
     external = _upnp_external_ip(igd, timeout=timeout)
     try:
         soap(igd, "AddPortMapping",
@@ -589,7 +752,8 @@ def upnp_open(port, *, ip="", gateway="", description=DEFAULT_DESCRIPTION,
                     external=external, gateway=igd.get("from", ""),
                     attempts=[_attempt("upnp", True, False, f"{device}: {e}")],
                     detail=f"{device} stopped answering: {e}")
-    state, verified, detail = _upnp_verify(igd, port, internal, timeout=timeout)
+    state, verified, detail = _upnp_verify(igd, port, internal, timeout=timeout,
+                                           bridged=bridged)
     return _out(state, ok=state == "mapped", method="upnp", port=port, ip=internal,
                 external=external, gateway=igd.get("from", ""), verified=verified,
                 attempts=[_attempt("upnp", True, state == "mapped",
@@ -599,17 +763,21 @@ def upnp_open(port, *, ip="", gateway="", description=DEFAULT_DESCRIPTION,
 
 def upnp_close(port, *, gateway="", timeout=3.0, ssdp_addr=SSDP_ADDR,
                ssdp_port=SSDP_PORT):
-    """Remove the UPnP mapping of TCP *port* -> the structured result."""
+    """Remove the UPnP mapping of TCP *port* -> the structured result.
+
+    `gateway` is searched by unicast when the multicast group goes unanswered,
+    exactly as in `upnp_open`: a router this process could not discover is
+    usually one this process cannot clean up after either."""
     port = int(port)
     try:
         igd, errors = discover_igd(timeout=timeout, ssdp_addr=ssdp_addr,
-                                   ssdp_port=ssdp_port)
+                                   ssdp_port=ssdp_port, gateways=(gateway,))
     except GatewayUnreachable as e:
         return _out("no_gateway", method="upnp", port=port,
                     attempts=[_attempt("upnp", False, False, str(e))],
                     detail=f"UPnP: {e}")
     if igd is None:
-        why = _joined(errors) or "no device answered the UPnP search"
+        why = _joined(errors) or _no_answer_text(ssdp_addr, ssdp_port, (gateway,))
         return _out("unsupported" if errors else "no_gateway", method="upnp",
                     port=port,
                     attempts=[_attempt("upnp", bool(errors), False, why)],
@@ -834,19 +1002,25 @@ def read_port(port, *, ip="", gateway="", timeout=1.5, ssdp_addr=SSDP_ADDR,
     stated one, and `expires_at` only when it stated a lease (0 = it stated
     none, so the entry does not expire).
 
-    A read never changes anything: nothing here adds or removes a mapping."""
+    A read never changes anything: nothing here adds or removes a mapping.
+
+    Behind another NAT (Docker's bridge) this process cannot state which address
+    on the router's network is its own, so an entry that points at a different
+    address is not read as another device holding the port: it is judged by
+    whether that address answers on the port, which is what makes the entry
+    either a forward the world can use or a refusal. `gateway`, when the caller
+    names it, is also where the unicast half of discovery goes."""
     port = int(port)
     try:
         igd, errors = discover_igd(timeout=timeout, ssdp_addr=ssdp_addr,
-                                   ssdp_port=ssdp_port)
+                                   ssdp_port=ssdp_port, gateways=(gateway,))
     except GatewayUnreachable as e:
         igd, errors = None, [str(e)]
     if igd is None:
         gw = gateway or default_gateway()
         wan = pmp_external_address(gw, timeout=min(timeout, 1.0),
                                    port=pmp_port) if gw else ""
-        why = _joined(errors) or (f"no device answered the UPnP search on "
-                                  f"{ssdp_addr}:{ssdp_port}")
+        why = _joined(errors) or _no_answer_text(ssdp_addr, ssdp_port, (gateway,))
         # A gateway that answers NAT-PMP can state its WAN address but still
         # cannot be ASKED what it holds, so this is "cannot read back", never
         # "no mapping" — reporting the second would tell the user their forward
@@ -863,6 +1037,13 @@ def read_port(port, *, ip="", gateway="", timeout=1.5, ssdp_addr=SSDP_ADDR,
                             f"mapping it granted can only be seen in the answer "
                             f"that made it."))
     internal = ip or local_ip(igd.get("from") or gateway)
+    # The address this process would state as its own is what the verdict is
+    # judged against, so the bridge fact is computed from THAT address rather
+    # than from whether a caller passed one in: a caller passing on what
+    # `local_ip` would say is the same address, and reading an entry from behind
+    # the bridge must not turn into "another device holds it" (see
+    # `_entry_verdict`).
+    bridged = _behind_another_nat(igd, internal)
     device = igd.get("device") or igd["location"]
     external = _upnp_external_ip(igd, timeout=timeout)
     attempts = ([_attempt("upnp", True, True,
@@ -891,7 +1072,7 @@ def read_port(port, *, ip="", gateway="", timeout=1.5, ssdp_addr=SSDP_ADDR,
                     attempts=attempts + [_attempt("upnp", True, False,
                                                   f"{device}: {e}")],
                     detail=f"{device} stopped answering: {e}")
-    state, verified, detail = _entry_verdict(args, port, internal)
+    state, verified, detail = _entry_verdict(args, port, internal, bridged=bridged)
     # The entry states what is LEFT of its lease, as a duration — not when it
     # runs out — and 0 for an entry the gateway does not expire.
     try:
@@ -955,7 +1136,10 @@ def open_port(port, *, ip="", gateway="", description=DEFAULT_DESCRIPTION,
     gateway stated one, and a refusal carries the gateway's own words. NAT-PMP
     runs whenever UPnP did not produce a mapping — a gateway that cannot be
     discovered and one that answers and then refuses both leave the other method
-    to try."""
+    to try, and so does a bridged container, where UPnP is refused outright
+    rather than forwarding the port to an address its router cannot dial.
+    `gateway` is the router's LAN address when the caller knows it; it is where
+    the unicast half of the UPnP search goes."""
     port = int(port)
     attempts, results = [], []
     if "upnp" in methods:

@@ -3,11 +3,7 @@ import { useQuery } from "@tanstack/react-query";
 import { Globe, Loader2 } from "lucide-react";
 import { api, type DiscoverKind, type DiscoverSeedKind } from "../api";
 import DiscoverRow, { NotesChips } from "./DiscoverRow";
-import RecommendShelf from "./RecommendShelf";
-
-/** How many rows the shelf asks for: a starting point beside the page's own
- *  list, not a second library. */
-const LIMIT = 12;
+import RecommendShelf, { SHELF_LIMIT } from "./RecommendShelf";
 
 /** What the shelf is, in one line — the ONLINE half of the pair of shelves an
  *  artist/album/track page shows, and the half whose rows came off the
@@ -37,7 +33,7 @@ export default function OnlineRecommendations({
   seedMbid = "",
   seedName,
   seedArtist = "",
-  limit = LIMIT,
+  limit = SHELF_LIMIT,
 }: {
   /** The rows the shelf shows — the page's own kind (an artist page: artists). */
   kind: DiscoverKind;

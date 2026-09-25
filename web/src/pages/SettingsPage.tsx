@@ -977,6 +977,10 @@ export default function SettingsPage() {
           k: "soulseek_upnp", label: "Open the listen port on the router automatically", type: "bool",
           help: "Asks the router to forward the listen port to this machine whenever slskd starts, replaces the mapping when the port changes, and removes it when this is turned off. Without a router that answers UPnP or NAT-PMP it does nothing at all — the Soulseek page's port state names which it was: mapped, refused (with the router's own reason), or no gateway answered. Turn it off when you forward the port yourself.",
         },
+        {
+          k: "soulseek_router_ip", label: "Router IP for port mapping (blank = auto-detect)", type: "text",
+          help: "UPnP finds its gateway by multicast and NAT-PMP by the machine's default gateway — inside a container that address is Docker's bridge, not the router, so neither method reaches the box that forwards the port. Naming the router here makes the app send the UPnP search and the NAT-PMP requests straight to it. Blank keeps auto-detect.",
+        },
         { k: "soulseek_web_port", label: "Web/API port", type: "number", min: 1024, max: 65535 },
         { k: "soulseek_up_limit", label: "Upload speed limit (kB/s, 0 = unlimited)", type: "number", min: 0, max: 100000 },
         { k: "soulseek_down_limit", label: "Download speed limit (kB/s, 0 = unlimited)", type: "number", min: 0, max: 100000 },

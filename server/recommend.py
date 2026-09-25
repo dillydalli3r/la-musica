@@ -49,9 +49,12 @@ ENERGY_SPAN = 100.0
 NEAR_ENERGY = 20
 
 DEFAULT_LIMIT = 12
-# A track shelf is read row by row rather than scanned like covers, so it
-# carries a few more rows than an album shelf carries covers.
-DEFAULT_TRACK_LIMIT = 20
+# ONE default for both targets, and the web asks for the same 12 (the
+# `SHELF_LIMIT` every "Recommended" shelf renders with). A page shows the local
+# shelf and the online shelf side by side: two lists of the same thing, and the
+# reader counts them, so a track shelf carrying 20 rows beside an album shelf
+# bearing 12 read as a bug in the shelf that happened to be shorter. A caller
+# may still ask for more than the default; `MAX_LIMIT` is the only ceiling.
 MAX_LIMIT = 50
 
 KINDS = ("artist", "album", "track", "playlist", "tracks", "albums", "favorites")
@@ -530,7 +533,8 @@ def recommend(cfg, kind, ref="", limit=None, user="", seeds=None, target=None):
     `mb:<uuid>` refs, each a track file, album folder or artist folder), and
     `favorites` reads the caller's own favourites and likes. `target` says
     whether the shelf is made of albums or tracks and defaults per kind;
-    `limit` defaults to 12 album covers or 20 track rows.
+    `limit` defaults to 12 rows of EITHER kind — the local shelf and the online
+    shelf beside it are read as a pair, so they carry one number.
 
     `ref` is a library path or a `mb:<uuid>` reference — `server/mbresolve.py`
     resolves either against the same payload this index is built from. An
@@ -544,7 +548,7 @@ def recommend(cfg, kind, ref="", limit=None, user="", seeds=None, target=None):
         raise ValueError(f"unknown kind: {kind}")
     target = _target(kind, target)
     if limit is None:
-        limit = DEFAULT_LIMIT if target == "albums" else DEFAULT_TRACK_LIMIT
+        limit = DEFAULT_LIMIT
     limit = max(1, min(int(limit), MAX_LIMIT))
     from server import library as lib_mod
     lib = lib_mod.build_library(cfg)

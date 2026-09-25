@@ -117,7 +117,7 @@ assert SEED not in paths(tracks) and "C:/lib/Alpha/Black/Two.flac" not in paths(
 assert not any(p.startswith("C:/lib/Alpha/Black/") for p in paths(tracks))
 assert paths(tracks) == [SIBLING, FAMILY, LOUD], paths(tracks)
 assert UNRELATED not in paths(tracks)
-assert len(tracks) <= recommend.DEFAULT_TRACK_LIMIT
+assert len(tracks) <= recommend.DEFAULT_LIMIT
 assert all(r["reasons"] for r in tracks)
 assert all(tracks[i]["score"] >= tracks[i + 1]["score"] for i in range(len(tracks) - 1))
 # The row carries everything a player row needs, without a second lookup.
@@ -145,10 +145,12 @@ assert albums[0]["cover_path"] == "C:/lib/Alpha/Black2"
 # The record with no term in common (a different family, a different mood, no
 # ENERGY, an era outside ERA_SPAN) scores zero and is dropped, not ranked last.
 assert "C:/lib/Gamma/Quiet" not in paths(albums)
-# Bounds: the caller's limit is honoured and the default is an album shelf's.
+# Bounds: the caller's limit is honoured, and the default is ONE cap for either
+# target (the wide-library case at the end of this file is the proof that the
+# cap binds; these two make the small-library answers agree with it).
 assert len(recommend.recommend(CONFIG, "album", "C:/lib/Alpha/Black", limit=1)) == 1
 assert len(albums) <= recommend.DEFAULT_LIMIT
-assert len(tracks) <= recommend.DEFAULT_TRACK_LIMIT
+assert len(tracks) <= recommend.DEFAULT_LIMIT
 
 # An artist page suggests other artists' records, never the artist's own.
 artist = recommend.recommend(CONFIG, "artist", "C:/lib/Alpha")
@@ -286,5 +288,51 @@ recommend.invalidate()
 assert recommend.recommend(CONFIG, "track", SEED) == []
 assert recommend.recommend(CONFIG, "tracks", seeds=[SEED]) == []
 assert recommend.recommend(CONFIG, "favorites", target="albums") == []
+
+# --------------------------------------------------------------------------- #
+# One default for BOTH shelves (issue #54: "make sure the number of album
+# recommendations from both local / online sources are consistent, limit to 12
+# on each"). A page renders the local shelf beside the online one — same
+# heading shape, same chrome, two lists of the same thing — and the reader
+# counts them, so a track shelf carrying 20 rows beside an album shelf carrying
+# 12 read as a fault in whichever shelf came back shorter. The web states the
+# number it renders with (SHELF_LIMIT, components/RecommendShelf.tsx) and it is
+# this same 12; tools/check_library_az.mjs holds the other end of that pair.
+# --------------------------------------------------------------------------- #
+def wide_library(count=30):
+    """`count` records sharing one genre, mood, energy and era — enough that the
+    cap, not the library, decides how many rows come back."""
+    return {"folder": "C:/wide", "artists": [{
+        "path": "C:/wide/Wide", "name": "Wide",
+        "albums": [album(f"C:/wide/Wide/{i:02d}", "Wide", f"Record {i:02d}", "2003",
+                         "black metal", "aggressive", "85", ["One", "Two"], f"wide-{i}")
+                   for i in range(count)]}]}
+
+
+WIDE_SEED = "C:/wide/Wide/00"
+lib_mod.build_library = lambda cfg, progress=None: wide_library()
+recommend.invalidate()
+assert len(wide_library()["artists"][0]["albums"]) > recommend.DEFAULT_LIMIT, \
+    "this case only proves the cap if the library is wider than it"
+assert recommend.DEFAULT_LIMIT == 12, \
+    f"the shelf default is {recommend.DEFAULT_LIMIT}, and issue #54 asked for 12 on each"
+wide_albums = recommend.recommend(CONFIG, "album", WIDE_SEED)
+wide_tracks = recommend.recommend(CONFIG, "album", WIDE_SEED, target="tracks")
+assert len(wide_albums) == recommend.DEFAULT_LIMIT, len(wide_albums)
+assert len(wide_tracks) == recommend.DEFAULT_LIMIT, len(wide_tracks)
+assert len(wide_albums) == len(wide_tracks), \
+    f"{len(wide_albums)} albums beside {len(wide_tracks)} tracks — the pair carries one number"
+# The default is a default, not a ceiling: a caller that asks for more gets more.
+assert len(recommend.recommend(CONFIG, "album", WIDE_SEED, limit=20)) == 20
+
+# And over the route the shelves actually call — the body the web sends carries
+# the 12 it renders with, and a body that states no limit answers 12.
+asked = _http.post("/api/recommend", json={"kind": "album", "id": WIDE_SEED, "limit": 12})
+assert len(asked.json()["items"]) == 12, asked.text
+unstated = _http.post("/api/recommend", json={"kind": "album", "id": WIDE_SEED})
+assert len(unstated.json()["items"]) == 12, unstated.text
+assert len(_http.post("/api/recommend",
+                      json={"kind": "tracks", "seeds": [f"{WIDE_SEED}/One.flac"]})
+           .json()["items"]) == 12
 
 print("ok")

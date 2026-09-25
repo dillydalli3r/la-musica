@@ -1947,8 +1947,11 @@ user asked for, in the order they asked for it. `server/exporter.py` owns both.
   `soulseek_auto._batch_width`), so the app never asks slskd for more than it
   will serve. The Queue tab reads all three numbers back in its header.
 - **R77 — the Soulseek port check states what it proves.** `GET
-  /api/soulseek/port-check` returns five rows — `listen` (a real TCP connect
-  plus a bind test), `mapping` (what the router itself lists, with its own words
+  /api/soulseek/port-check` returns six rows — `listen` (a real TCP connect
+  plus a bind test), `publish` (whether the HOST publishes the very port the
+  daemon holds, read from inside a container against the container's gateway
+  with the app's own served port as the control — R290), `mapping` (what the
+  router itself lists, with its own words
   and the lease), `address` (the LAN address the mapping points at vs the WAN
   address the gateway states, so CGNAT is named as CGNAT), `self-connect`
   (refused ⇒ `unknown`, never `fail`: a router without hairpinning refuses it
@@ -5281,7 +5284,79 @@ composition instead (R267). Above `lg` the pane sits beside the artwork.
   `tools/test_soulseek_candidates.py`'s "Cancelling DURING the search" block).
   A cancelled search is also not reported as one that "did not finish".
 
-## 8. Recommended runbook
+### 7.50 Two shelves carry one number, and a mapping reaches the router
+
+- **R291 — the two recommendation shelves on a page carry the SAME number, and
+  both print it (issue #54).** An album page drew 9 "Recommended (Local)"
+  covers beside 12 "Recommended (Online)" suggestions and a track page drew 20
+  local rows beside those same 12 — same headings, same chrome, two lists of the
+  same thing, and the reader counts them, so the pair read as a fault in
+  whichever shelf came back shorter. One number now: `mlo`'s scorer has a
+  single `DEFAULT_LIMIT = 12` for either target (the separate 20-row track
+  default is gone) and `web/src/components/RecommendShelf.tsx` exports
+  `SHELF_LIMIT = 12`, which the local shelf sends in its request, the online
+  shelf uses, and the standalone Recommended page uses (it carried its own
+  `LIMIT = 20` under the same title). A page may still pass its own `limit` —
+  this is a default, not a ceiling. BOTH shelves print the count they got, in
+  one slot and one shape, so "9 local albums beside 12 online suggestions" reads
+  as a small library rather than as a shelf hiding three rows. Proven by
+  `tools/test_recommendations.py`'s wide-library case (30 records sharing one
+  genre, mood, energy and era: both targets come back with exactly the default,
+  an explicit `limit=20` still gets 20, and it fails against the pre-change
+  module with `AssertionError: 20` on the track shelf) and by
+  `tools/check_library_az.mjs`, which keeps the request body the page sent
+  (`limit: 12`) and reads the printed count off the shelf's heading line.
+
+- **R292 — the port mapping is aimed at the ROUTER, and a forward that already
+  holds the port is read, never replaced.** The Sharing card's
+  `port unconfirmed` came from a search that only ever spoke to
+  `239.255.255.250:1900` while the router in front of that install ignores
+  multicast searches entirely. Measured on it: multicast M-SEARCH from the host
+  AND from inside the container, both the IGD and the service target, 6-second
+  windows — 0 replies; the same search sent by UNICAST to `192.168.40.1:1900`
+  answered with its description ("OpenWRT router", UPnP **IGD v2**:
+  `InternetGatewayDevice:2` and service `WANIPConnection:2`); its
+  `GetExternalIPAddress` stated `216.212.53.255`, from inside the container; and
+  NAT-PMP (RFC 6886) answered an external-address request and GRANTED a mapping.
+  So: `mlo/portmap.py`'s `discover_igd(gateways=…)` searches each named gateway
+  by unicast after the multicast pass, the `gateway` argument that `upnp_open`,
+  `upnp_close`, `read_port`, `open_port` and `close_port` already took is now
+  actually searched, and `SEARCH_TARGETS` carries the v2 device target. The
+  setting `soulseek_router_ip` (Settings → Soulseek, "Router IP for port mapping
+  (blank = auto-detect)") names the router for the install that cannot see it —
+  inside a container the only gateway that process can reach is Docker's bridge
+  — and it wins over the stored gateway and over auto-detection in
+  `port_check`/`portmap_sync`. Two rules follow from the measurement, and both
+  are load-bearing:
+  - **Never tell the router to forward to an address it cannot dial.** Before
+    `AddPortMapping`, the address this process would name is compared with the
+    gateway's own network (/24); when they differ the app does NOT map, says so,
+    and lets NAT-PMP do the work — NAT-PMP carries no internal address at all,
+    the gateway maps the port to the requester's own source, which after Docker's
+    NAT is the HOST: the mapping that install wants. Reading an entry back
+    follows the same rule, so an entry naming the HOST is judged by whether that
+    address answers on the port instead of being dismissed as "another device
+    holds it".
+  - **Read before writing.** `portmap_sync` asks the router what it holds and
+    only requests a mapping when nothing holds the port. This is not caution for
+    its own sake: on that OpenWRT IGD a NAT-PMP map for the same external port
+    took over the standing forward and handed back a two-hour lease, and dropping
+    that lease closed a port that had been open — a re-map is a REPLACEMENT, not
+    an addition.
+  Verified with the app's own code against the live router from inside the
+  container (`natpmp_open` → `state: mapped, ok: True, verified: True`,
+  "external port 50000 is forwarded here for 7200s"; `natpmp_close` → released),
+  and the router's listing read back with `GetSpecificPortMappingEntry` before
+  and after (`50000 → 192.168.40.62:50000`, description "la musica Soulseek",
+  lease the router's own 7-day maximum). Reachability was proved from OUTSIDE
+  the network rather than inferred: `check-host.net` TCP checks against
+  `216.212.53.255:50000` answered from Tel Aviv and Tokyo before the work and
+  from Spain, Iran and Turkey after it. `tools/test_portmap.py` carries the new
+  cases: a multicast-silent router found only when named, the v2 target, the
+  behind-a-bridge refusal (no `AddPortMapping` is sent, `open_port` falls
+  through to NAT-PMP) and the bridged read-back verdicts both ways.
+
+
 
 Nothing here is a substitute for the app's own Dependencies page: run it first
 and install what the platform supports.

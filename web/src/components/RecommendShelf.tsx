@@ -1,6 +1,21 @@
 import type { LucideIcon } from "lucide-react";
 import type { ReactNode } from "react";
 
+/** How many rows EVERY "Recommended" shelf is asked for — the local scorer's
+ *  and the online providers' alike, on an album, artist, track, playlist or
+ *  favourites page and on the Recommended page itself.
+ *
+ *  A page shows its two shelves side by side: same headings, same chrome, two
+ *  lists of the same thing. The reader counts them, so ONE number keeps them
+ *  honest together — a local track shelf carrying 20 rows beside an online
+ *  shelf carrying 12 read as a fault in whichever shelf happened to be shorter
+ *  (the owner's report). `server/recommend.py`'s `DEFAULT_LIMIT` is the same
+ *  12, and the local shelf sends this number rather than leaning on that
+ *  default, so the pair cannot drift apart silently.
+ *
+ *  A page may still pass its own `limit` — this is a default, not a ceiling. */
+export const SHELF_LIMIT = 12;
+
 /** The ONE chrome every recommendation shelf wears: the local scorer's shelf,
  *  the online providers' shelf and the Recommended page's list are the same
  *  object with different sources, so the heading, the hint line and the

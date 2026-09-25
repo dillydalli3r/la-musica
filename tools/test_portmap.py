@@ -342,6 +342,15 @@ def closed_udp_port():
     return port
 
 
+def closed_tcp_port():
+    """A loopback TCP port that nothing accepts on (bind, learn it, release it)."""
+    sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    sock.bind(("127.0.0.1", 0))
+    port = sock.getsockname()[1]
+    sock.close()
+    return port
+
+
 def igd_with(targets=(DEVICE_ST,), **over):
     """A fake IGD plus the SSDP responder that points at its description."""
     igd = FakeIGD(**over)
@@ -426,6 +435,109 @@ ssdp3.close()
 
 print("ok  the SSDP search carries the device/service search targets and the "
       "device description resolves to the WAN control URL")
+
+
+# --------------------------------------------------------------------------- #
+# 1b) the router that ignores the multicast group: found by UNICAST
+# --------------------------------------------------------------------------- #
+# Measured on the OpenWRT IGD this was built against: four patient M-SEARCHes to
+# 239.255.255.250:1900 (both device targets, both service types) got ZERO replies,
+# while the same search sent straight at 192.168.40.1:1900 answered at once. A
+# process behind Docker's bridge can never reach that address by discovery — it
+# has to be NAMED — so a named gateway is searched by unicast after the multicast
+# pass. The doubles stand in for both halves: the address the multicast pass uses
+# (127.0.0.2, where nothing answers) and the same port reached by unicast at
+# 127.0.0.1, where the device does answer.
+
+# an IGD v2 answers the v2 DEVICE target, and it is searched: this shape of
+# router answered only that one target
+V2_DEVICE_ST = "urn:schemas-upnp-org:device:InternetGatewayDevice:2"
+assert V2_DEVICE_ST in portmap.SEARCH_TARGETS, portmap.SEARCH_TARGETS
+assert (portmap.SEARCH_TARGETS.index(DEVICE_ST)
+        < portmap.SEARCH_TARGETS.index(V2_DEVICE_ST)), portmap.SEARCH_TARGETS
+v2_igd = FakeIGD()
+v2_ssdp = FakeSSDP(v2_igd.url(), answer=(V2_DEVICE_ST,))
+found_v2, errors_v2 = portmap.discover_igd(timeout=0.2, ssdp_addr="127.0.0.1",
+                                           ssdp_port=v2_ssdp.port)
+assert found_v2 and found_v2["service"] == SERVICE, (found_v2, errors_v2)
+assert found_v2["device"] == "Fake IGD", found_v2
+targets_v2 = [line.split("ST: ")[1] for q in v2_ssdp.queries
+              for line in q.split("\r\n") if line.startswith("ST: ")]
+# the v1 target first (which this device does not answer), then the v2 one — the
+# search stops at the first target that yields a usable device
+assert targets_v2 == [DEVICE_ST, V2_DEVICE_ST], targets_v2
+v2_igd.close()
+v2_ssdp.close()
+
+# the unicast-only router: named -> found; the very same search without the
+# address -> nothing, which is the report the panel used to give
+unicast_igd = FakeIGD()
+unicast_ssdp = FakeSSDP(unicast_igd.url())
+found_u, errors_u = portmap.discover_igd(timeout=0.2, ssdp_addr="127.0.0.2",
+                                         ssdp_port=unicast_ssdp.port,
+                                         gateways=["127.0.0.1"])
+assert found_u and found_u["service"] == SERVICE, (found_u, errors_u)
+assert found_u["from"] == "127.0.0.1", found_u
+assert errors_u == [], errors_u
+# the search that found it went to the NAMED address, not to the multicast group
+assert len(unicast_ssdp.queries) == 1, unicast_ssdp.queries
+assert f"HOST: 127.0.0.1:{unicast_ssdp.port}" in unicast_ssdp.queries[0], \
+    unicast_ssdp.queries[0]
+silent_u, errors_none = portmap.discover_igd(timeout=0.2, ssdp_addr="127.0.0.2",
+                                             ssdp_port=unicast_ssdp.port)
+assert silent_u is None and errors_none == [], (silent_u, errors_none)
+assert len(unicast_ssdp.queries) == 1, unicast_ssdp.queries
+
+# ...and through the public entry points, where `gateway=` is the only difference
+named = portmap.upnp_open(PORT, gateway="127.0.0.1", timeout=0.25,
+                          ssdp_addr="127.0.0.2", ssdp_port=unicast_ssdp.port)
+assert named["state"] == "mapped" and named["ok"] is True, named
+assert named["internal_ip"] == "127.0.0.1", named
+unnamed = portmap.upnp_open(PORT, timeout=0.25, ssdp_addr="127.0.0.2",
+                            ssdp_port=unicast_ssdp.port)
+assert unnamed["state"] == "no_gateway" and unnamed["ok"] is False, unnamed
+assert "no device answered the UPnP search" in unnamed["detail"], unnamed
+# the close path searches the named router the same way, or a mapping this app
+# made could never be removed again
+closed = portmap.close_port(PORT, gateway="127.0.0.1", timeout=0.25,
+                            ssdp_addr="127.0.0.2", ssdp_port=unicast_ssdp.port,
+                            pmp_port=closed_udp_port())
+assert closed["state"] == "released" and closed["method"] == "upnp", closed
+assert unicast_igd.mapping is None, unicast_igd.mapping
+unicast_igd.close()
+unicast_ssdp.close()
+
+# a named router whose answers cannot be USED is reported against that address,
+# so a reader can act on it (and not against the multicast address it never was)
+dead_ssdp = FakeSSDP(f"http://127.0.0.1:{closed_udp_port()}/rootDesc.xml")
+found_d, errors_d = portmap.discover_igd(timeout=0.2, ssdp_addr="127.0.0.2",
+                                         ssdp_port=dead_ssdp.port,
+                                         gateways=[" 127.0.0.1 ", "127.0.0.1", ""])
+assert found_d is None, found_d
+assert any(e.startswith("127.0.0.1: ") and "could not be read" in e
+           for e in errors_d), errors_d
+dead_ssdp.close()
+
+# a named router that stays silent is NOT an error — nobody answered, so the
+# verdict is `no_gateway` — but the detail names every address that was asked
+quiet_ssdp = FakeSSDP("http://127.0.0.1:1/rootDesc.xml", silent=True)
+quiet = portmap.upnp_open(PORT, gateway="127.0.0.1", timeout=0.2,
+                          ssdp_addr="127.0.0.2", ssdp_port=quiet_ssdp.port)
+assert quiet["state"] == "no_gateway" and quiet["ok"] is False, quiet
+assert "no device answered the UPnP search" in quiet["detail"], quiet
+assert f"127.0.0.1:{quiet_ssdp.port}" in quiet["detail"], quiet
+quiet_ssdp.close()
+
+# the addresses a caller passes are cleaned before anything is sent: a blank, a
+# padded repeat and the same address twice are ONE address, four searches
+counting = FakeSSDP("http://127.0.0.1:1/rootDesc.xml", silent=True)
+portmap.discover_igd(timeout=0.1, ssdp_addr="127.0.0.2", ssdp_port=counting.port,
+                     gateways=["127.0.0.1", " 127.0.0.1", "", "127.0.0.1"])
+assert len(counting.queries) == len(portmap.SEARCH_TARGETS), counting.queries
+counting.close()
+
+print("ok  a router that ignores the multicast group is found through the "
+      "UNICAST search of its named address, and the v2 device target is searched")
 
 
 # --------------------------------------------------------------------------- #
@@ -549,6 +661,71 @@ silent.close()
 
 print("ok  UPnP AddPortMapping carries every argument the IGD schema declares, "
       "and every refusal path reports the gateway's own reason as refused")
+
+
+# --------------------------------------------------------------------------- #
+# 2b) the container hazard: never name an address the router cannot dial
+# --------------------------------------------------------------------------- #
+# A UPnP mapping names the internal client, and this process would name the
+# address its own side of Docker's bridge holds (172.18.0.3 while the router is
+# on 192.168.40.0/24). The router cannot dial that, so the mapping would be a
+# forward to nowhere that still reads as success. `local_ip` is the one call that
+# decides which address this process would name for itself, so it is the call
+# these cases replace — the doubles' `from` is loopback, and the bridge is the
+# address the process would name, never the address the router answers from.
+real_local_ip = portmap.local_ip
+portmap.local_ip = lambda gateway="": "172.18.0.3"
+try:
+    igd, ssdp = igd_with()
+    upnp_only = upnp_open(igd, ssdp)
+    assert upnp_only["state"] == "unsupported", upnp_only
+    assert upnp_only["ok"] is False, upnp_only
+    assert upnp_only["internal_ip"] == "172.18.0.3", upnp_only
+    # NO AddPortMapping was sent — nothing was forwarded to nowhere
+    assert not [c for c in igd.calls if c["action"] == "AddPortMapping"], igd.calls
+    assert igd.mapping is None, igd.mapping
+    assert "AddPortMapping was not sent" in upnp_only["detail"], upnp_only
+    assert "NAT-PMP" in upnp_only["detail"], upnp_only
+    assert "172.18.0.3" in upnp_only["detail"], upnp_only
+
+    # ...and the entry point maps the port the way that works from a bridge:
+    # NAT-PMP carries no internal address at all (the gateway maps to whoever
+    # asked), so it is the method that survives Docker's NAT
+    pmp = FakePMP()
+    result = portmap.open_port(PORT, gateway="127.0.0.1", timeout=0.25,
+                               ssdp_addr="127.0.0.1", ssdp_port=ssdp.port,
+                               pmp_port=pmp.port)
+    assert result["state"] == "mapped" and result["ok"] is True, result
+    assert result["method"] == "natpmp" and result["verified"] is True, result
+    assert not [c for c in igd.calls if c["action"] == "AddPortMapping"], igd.calls
+    assert [t["method"] for t in result["tried"]] == ["upnp", "natpmp"], \
+        result["tried"]
+    assert result["tried"][0]["state"] == "unsupported", result["tried"]
+    assert "172.18.0.3" in result["tried"][0]["detail"], result["tried"]
+    # the NAT-PMP request itself names no internal address, which is why it can
+    # be honoured where the UPnP one could not
+    assert [r["opcode"] for r in pmp.requests] == [0, 2], pmp.requests
+    pmp.close()
+
+    # an ip the CALLER names is trusted: the guard is about the address this
+    # process works out for itself, never about overriding a caller that knows a
+    # route this process cannot see
+    igd2, ssdp2 = igd_with()
+    trusted = upnp_open(igd2, ssdp2, ip="172.18.0.3")
+    assert trusted["state"] == "mapped" and trusted["ok"] is True, trusted
+    assert trusted["internal_ip"] == "172.18.0.3", trusted
+    add = [c for c in igd2.calls if c["action"] == "AddPortMapping"]
+    assert len(add) == 1, igd2.calls
+    assert add[0]["args"]["NewInternalClient"] == "172.18.0.3", add[0]["args"]
+    igd2.close()
+    ssdp2.close()
+    igd.close()
+    ssdp.close()
+finally:
+    portmap.local_ip = real_local_ip
+
+print("ok  a bridged process never sends the AddPortMapping its router could not "
+      "use, and NAT-PMP is the method that maps the port instead")
 
 
 # --------------------------------------------------------------------------- #
@@ -787,6 +964,18 @@ def fake_close(port, **kw):
 
 
 real_open, real_close = portmap.open_port, portmap.close_port
+# The reconciler READS the router before it asks it to map (soulseek.portmap_sync
+# reads the entry back first, so a mapping already in place is not replaced), so
+# the read is stubbed with the rest of the router: this section is about the
+# mapping following the client, and a real read would spend the whole multicast
+# timeout on every pass. `unsupported` is a gateway that ANSWERED and cannot be
+# read back — the verdict the read-before-ask order falls through to `open_port`
+# from. (`no_gateway` is the other half, and it does NOT fall through: see the
+# two cases at the end of this section.)
+real_read = portmap.read_port
+portmap.read_port = lambda port, **kw: portmap._out(
+    "unsupported", method="upnp", port=port,
+    detail="the gateway accepted the mapping; it does not support reading it back")
 portmap.open_port, portmap.close_port = fake_open, fake_close
 real_running, real_exe, real_write = (soulseek.client_running, soulseek.slskd_exe,
                                       soulseek.write_config)
@@ -905,6 +1094,46 @@ try:
 finally:
     portmap.open_port = fake_open
 
+# the read finds the port ALREADY forwarded: the router is not asked to map it
+# again. This is the whole point of asking first — a re-map REPLACES the entry,
+# and on the router this was measured on, replacing a standing forward with a
+# two-hour NAT-PMP lease and then dropping that lease closed a port that had
+# been open all along.
+portmap.read_port = lambda port, **kw: portmap._out(
+    "mapped", ok=True, method="upnp", port=port, ip="203.0.113.9",
+    external="198.51.100.7", verified=True,
+    detail=f"the gateway lists external port {port} -> 203.0.113.9:{port}")
+try:
+    reset()
+    state = soulseek.portmap_sync(CFG_UP, reason="test")
+    assert events == [], events
+    assert state["state"] == "mapped" and state["verified"] is True, state
+    assert state["external_ip"] == "198.51.100.7", state
+    assert state["gateway"] == "", state  # the read stated none; nothing invented
+finally:
+    portmap.read_port = lambda port, **kw: portmap._out(
+        "unsupported", method="upnp", port=port,
+        detail="the gateway accepted the mapping; it does not support reading it back")
+
+# and when NOTHING answers — neither the UPnP search nor NAT-PMP — the read's own
+# verdict is what is stored: `open_port` would put the same two questions to the
+# same silence and pay a second wait for the answer, on every pass of a watcher
+# that runs every 20 seconds.
+portmap.read_port = lambda port, **kw: portmap._out(
+    "no_gateway", method="upnp", port=port,
+    detail="no device answered the UPnP search on 239.255.255.250:1900, nor the "
+           "M-SEARCH sent straight to 192.168.40.1:1900")
+try:
+    reset()
+    state = soulseek.portmap_sync(CFG_UP, reason="test")
+    assert events == [], events
+    assert state["state"] == "no_gateway" and state["enabled"] is True, state
+    assert "192.168.40.1:1900" in state["detail"], state
+finally:
+    portmap.read_port = lambda port, **kw: portmap._out(
+        "unsupported", method="upnp", port=port,
+        detail="the gateway accepted the mapping; it does not support reading it back")
+
 # nothing is mapped while the client is down: there is no listener to forward to
 reset()
 soulseek.client_running = lambda cfg=None: False
@@ -980,6 +1209,7 @@ try:
     assert soulseek.portmap_state(CFG_OFF)["state"] == "off"
 finally:
     portmap.open_port, portmap.close_port = real_open, real_close
+    portmap.read_port = real_read
     (soulseek.client_running, soulseek.slskd_exe,
      soulseek.write_config) = (real_running, real_exe, real_write)
     soulseek.instance_owner, soulseek._uses_our_downloads = real_owner, real_dirs
@@ -1009,5 +1239,94 @@ assert no_gateway["state"] in ("no_gateway", "unsupported"), no_gateway
 assert any("no device answered" in " ".join(map(str, row.values()))
            for row in no_gateway["attempts"]), no_gateway
 print(" ok  a read with no UPnP device answers a report instead of raising")
+
+# --------------------------------------------------------------------------- #
+# Reading an entry back from behind a bridge
+# --------------------------------------------------------------------------- #
+# The entry a router holds names the address it forwards to, and from behind
+# Docker's bridge that is the HOST — an address this process cannot claim to be
+# its own (it sees 172.18.0.3). So an entry pointing elsewhere is not "another
+# device holds it": it is judged by the one fact available, whether that address
+# answers on the port.
+listener = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+listener.bind(("127.0.0.1", 0))
+listener.listen(8)
+live_port = listener.getsockname()[1]
+
+
+def drain():
+    """Accept and drop connections, so the accept queue never fills: a full
+    backlog stops completing connects, which would read as "nothing listening"
+    and turn the accept below into a spurious refusal."""
+    while True:
+        try:
+            conn, _peer = listener.accept()
+        except OSError:
+            return
+        conn.close()
+
+
+threading.Thread(target=drain, daemon=True).start()
+
+bridge_igd = FakeIGD()
+bridge_ssdp = FakeSSDP(bridge_igd.url())
+bridge_igd.mapping = {"NewInternalClient": "127.0.0.1",
+                      "NewInternalPort": str(live_port), "NewEnabled": "1",
+                      "NewPortMappingDescription": "the host's forward"}
+bridged = portmap.read_port(live_port, ip="172.18.0.3", gateway="127.0.0.1",
+                            timeout=0.25, ssdp_addr="127.0.0.1",
+                            ssdp_port=bridge_ssdp.port, pmp_port=closed_udp_port())
+assert bridged["state"] == "mapped" and bridged["ok"] is True, bridged
+assert bridged["verified"] is True, bridged
+assert "another device" not in bridged["detail"], bridged
+assert f"127.0.0.1:{live_port}" in bridged["detail"], bridged
+assert "accepts a connection" in bridged["detail"], bridged
+assert "behind Docker's bridge" in bridged["detail"], bridged
+
+# ...and `read_port` hands the caller's `gateway` to its own search: the same
+# read, with the multicast coordinates pointing where nothing answers, is found
+# only because the router was named
+read_named = portmap.read_port(live_port, ip="172.18.0.3", gateway="127.0.0.1",
+                               timeout=0.25, ssdp_addr="127.0.0.2",
+                               ssdp_port=bridge_ssdp.port,
+                               pmp_port=closed_udp_port())
+assert read_named["state"] == "mapped", read_named
+
+# the same entry with nothing answering at that address: the gateway forwards the
+# port to a place that does not accept, which is a refusal and not a mapping
+dead_port = closed_tcp_port()
+bridge_igd.mapping = {"NewInternalClient": "127.0.0.1",
+                      "NewInternalPort": str(dead_port), "NewEnabled": "1",
+                      "NewPortMappingDescription": "gone"}
+bridged_dead = portmap.read_port(dead_port, ip="172.18.0.3",
+                                 gateway="127.0.0.1", timeout=0.25,
+                                 ssdp_addr="127.0.0.2",
+                                 ssdp_port=bridge_ssdp.port,
+                                 pmp_port=closed_udp_port())
+assert bridged_dead["state"] == "refused" and bridged_dead["ok"] is False, \
+    bridged_dead
+assert bridged_dead["verified"] is False, bridged_dead
+assert f"127.0.0.1:{dead_port}" in bridged_dead["detail"], bridged_dead
+assert "nothing there accepts" in bridged_dead["detail"], bridged_dead
+
+# ...and the same entry read with NO bridge is what it always was: the entry
+# names an address other than this machine's, so another device holds the port
+bridge_igd.mapping = {"NewInternalClient": "192.168.40.5",
+                      "NewInternalPort": str(live_port), "NewEnabled": "1",
+                      "NewPortMappingDescription": "another host"}
+plain = portmap.read_port(live_port, ip="127.0.0.9", gateway="127.0.0.1",
+                          timeout=0.25, ssdp_addr="127.0.0.2",
+                          ssdp_port=bridge_ssdp.port,
+                          pmp_port=closed_udp_port())
+assert plain["state"] == "refused" and plain["ok"] is False, plain
+assert "192.168.40.5" in plain["detail"], plain
+assert "another device" in plain["detail"], plain
+listener.close()
+bridge_igd.close()
+bridge_ssdp.close()
+
+print(" ok  an entry read from behind a bridge is judged by what answers at its "
+      "address; on this machine's own network it is still another device holding "
+      "the port")
 
 print("ok")

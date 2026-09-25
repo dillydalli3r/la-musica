@@ -6,10 +6,7 @@ import PageHeader from "../components/PageHeader";
 import Segmented from "../components/Segmented";
 import { EmptyState, PageLoading } from "../components/Badges";
 import DiscoverRow, { NotesChips } from "../components/DiscoverRow";
-
-/** How many rows a recommendation answer carries — the shelf is a starting
- *  point, and the genre browser is where a chosen row is followed up. */
-const LIMIT = 20;
+import { SHELF_LIMIT } from "../components/RecommendShelf";
 
 const KINDS: { id: DiscoverKind; label: string }[] = [
   { id: "albums", label: "Albums" },
@@ -46,7 +43,7 @@ export default function RecommendedPage() {
 
   const recQ = useQuery({
     queryKey: ["discoverRecommended", seed, kind],
-    queryFn: () => api.discoverRecommended({ seed, kind, limit: LIMIT }),
+    queryFn: () => api.discoverRecommended({ seed, kind, limit: SHELF_LIMIT }),
     staleTime: 5 * 60_000,
     retry: false,
   });

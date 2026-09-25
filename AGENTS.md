@@ -24,7 +24,10 @@ MLO_MUSIC_FOLDER=F:/tmp/mlo-<what-you-are-testing> \
 
 When you are done: stop the process and delete the scratch folder. A scratch
 scope opens on the setup wizard — flip `first_run_done` through
-`POST /api/config` (`{"first_run_done": true}`) rather than clicking through it.
+`POST /api/config` with the folder it belongs to
+(`{"music_folder": "F:/tmp/mlo-<what-you-are-testing>", "first_run_done": true}`;
+the flag alone is not saved, and `tools/check_*.cjs` refuses a server still on
+the wizard) rather than clicking through it.
 
 ## Commands worth knowing
 

@@ -22,6 +22,10 @@
  *     owner's screenshot: six cards, the sixth in halves). It is a wrapped grid
  *     now, and the check measures that: one grid, more than one row, every
  *     card's right edge inside the shelf's, and no horizontal overflow in it.
+ *   * The two shelves on that page are read as a PAIR and the reader counts
+ *     them, so the local shelf must ask for the same 12 rows the online shelf
+ *     asks for and print the count it got (issue #54) — the request body is
+ *     kept by the stub and the printed count is read off the heading line.
  *   * At 390 px the name box and the letter button must still share ONE row and
  *     stay inside the screen: the phone is where a toolbar turns into a stack.
  *
@@ -152,6 +156,11 @@ const VERSION = {
   checked_at: 0,
   source: "unavailable",
 };
+/* Every body the shelf POSTs to `/api/recommend`, kept for the check at the
+ * bottom of this file: how many rows the local shelf ASKS for is half of the
+ * pair the server suite proves (tools/test_recommendations.py asserts the
+ * server's own default is the same number). */
+const recommendAsked = [];
 const apiStub = createHttpServer((req, res) => {
   const url = req.url || "";
   const json = (body) => {
@@ -168,7 +177,20 @@ const apiStub = createHttpServer((req, res) => {
   }
   if (url.startsWith("/api/library")) return json(library);
   if (url.startsWith("/api/album?")) return json(album);
-  if (url.startsWith("/api/recommend")) return json(recommend);
+  if (url.startsWith("/api/recommend")) {
+    // The shelf asks with a POST body (a playlist or a favourites set is a seed
+    // LIST); the older GET form has none. Either way the answer is the
+    // fixture's, and the body is kept for the check below.
+    let raw = "";
+    req.on("data", (chunk) => { raw += chunk; });
+    req.on("end", () => {
+      let body = {};
+      try { body = JSON.parse(raw || "{}"); } catch { body = {}; }
+      recommendAsked.push(body);
+      json(recommend);
+    });
+    return;
+  }
   if (url.startsWith("/api/ratings")) return json({ ratings: {} });
   if (url.startsWith("/api/auth/users")) return json({ users: [] });
   // Everything else — the grade summary, the favorites, the lock list — is a
@@ -518,6 +540,10 @@ try {
     return {
       display: style.display,
       overflowX: style.overflowX,
+      // The heading line: the title AND the count this shelf prints beside it.
+      // `h.parentElement` is the flex row holding the icon, the title and the
+      // meta slot.
+      heading: (h.parentElement?.textContent || "").replace(/\s+/g, " ").trim(),
       // The RESOLVED layout, not the template string: how many columns the
       // browser actually drew is how many distinct left edges the cards have.
       columns: new Set(cards.map((c) => c.col)).size,
@@ -551,8 +577,20 @@ try {
     const widths = shelf.cards.map((c) => c.width);
     check("every card clears the Library grid's own floor (164 px)",
           Math.min(...widths) >= 164, `narrowest card ${Math.min(...widths)} px`);
+    // The pair's NUMBERS — issue #54. The page's two shelves are read side by
+    // side and the reader counts them, so the local shelf asks for the same 12
+    // the online shelf asks for (the server suite proves the server's own
+    // default is that same number) and prints the count it got, which is what
+    // makes "9 local albums beside 12 online suggestions" read as the library
+    // rather than as a shelf that lost three rows.
+    check("the local shelf asks for 12 rows — the same number the online shelf asks for",
+          recommendAsked.length > 0 && recommendAsked.every((b) => b.limit === 12),
+          JSON.stringify(recommendAsked));
+    const counted = `${items} album${items === 1 ? "" : "s"}`;
+    check(`the shelf prints its own count (${counted}), like the online shelf beside it`,
+          shelf.heading.includes(counted), JSON.stringify(shelf.heading));
     console.log(`\n[library-az] shelf: ${shelf.cards.length} cards, ${shelf.rows} rows x ${shelf.columns} columns, `
-      + `card widths ${Math.min(...widths)}–${Math.max(...widths)} px`);
+      + `card widths ${Math.min(...widths)}–${Math.max(...widths)} px, heading "${shelf.heading}"`);
   }
 } finally {
   await browser.close();

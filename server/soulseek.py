@@ -830,10 +830,18 @@ def _portmap_store(result=None, port=0, reason="", in_flight=False):
 
 
 def _portmap_cfg(cfg=None):
-    """(enabled, listen_port) from the config, defensively read."""
+    """(enabled, listen_port, router) from the config, defensively read.
+
+    `router` is `soulseek_router_ip`: the LAN address of the home router, for
+    the install that cannot see it — inside a container the only gateway this
+    process can reach is Docker's bridge, so neither a multicast SSDP search nor
+    NAT-PMP can find the router unaided, while both work perfectly when the
+    router is named (measured against an OpenWRT IGD that ignores multicast and
+    answers unicast). Empty means auto-detect."""
     cfg = cfg or load_config()
     return (bool(cfg.get("soulseek_upnp", True)),
-            _int_setting(cfg, "soulseek_listen_port", 50000))
+            _int_setting(cfg, "soulseek_listen_port", 50000),
+            str(cfg.get("soulseek_router_ip") or "").strip())
 
 
 def _portmap_expired(result, checked_at):
@@ -849,11 +857,11 @@ def _portmap_expired(result, checked_at):
     return time.time() >= expires - lifetime * (1.0 - _PORTMAP_REFRESH_AT)
 
 
-def _portmap_release(port, reason):
+def _portmap_release(port, reason, router=""):
     """Ask the router to drop a mapping this app made (best effort)."""
     from mlo import portmap
     try:
-        return portmap.close_port(port, timeout=3.0)
+        return portmap.close_port(port, gateway=router, timeout=3.0)
     except Exception as e:  # never let a router take the client down with it
         traceback.print_exc()
         return {"state": "error", "ok": False, "method": "", "listen_port": port,
@@ -871,7 +879,7 @@ def portmap_sync(cfg=None, reason="", force=False):
     changed (a forward to a port nothing listens on any more is worse than
     none). Returns the state `portmap_state` reports."""
     cfg = cfg or load_config()
-    enabled, port = _portmap_cfg(cfg)
+    enabled, port, router = _portmap_cfg(cfg)
     with _PORTMAP_LOCK:
         previous = dict(_PORTMAP["result"] or {})
         previous_port = int(_PORTMAP["port"] or 0)
@@ -881,7 +889,7 @@ def portmap_sync(cfg=None, reason="", force=False):
     try:
         if not enabled:
             if previous_port and previous.get("state") == "mapped":
-                _portmap_store(_portmap_release(previous_port, reason), 0, reason)
+                _portmap_store(_portmap_release(previous_port, reason, router), 0, reason)
             else:
                 # Nothing of ours to remove: say the FEATURE is off, and do not
                 # invent a router answer for a request that was never sent.
@@ -894,7 +902,7 @@ def portmap_sync(cfg=None, reason="", force=False):
                                 "expires_at": 0.0}, 0, reason)
             return portmap_state(cfg)
         if previous_port and previous.get("state") == "mapped" and previous_port != port:
-            _portmap_release(previous_port, reason)
+            _portmap_release(previous_port, reason, router)
         if (not force and previous.get("state") == "mapped"
                 and previous_port == port
                 and not _portmap_expired(previous, asked_at)):
@@ -906,7 +914,33 @@ def portmap_sync(cfg=None, reason="", force=False):
             _portmap_store(None, 0, reason)
             return portmap_state(cfg)
         from mlo import portmap
-        result = portmap.open_port(port)
+        # Ask the router BEFORE telling it. A forward it already holds for this
+        # port — the owner's own rule, or one an earlier install made — is what
+        # the user wants, and re-adding it REPLACES it: measured on an OpenWRT
+        # IGD, a NAT-PMP map for the same external port took over the standing
+        # rule and handed back a two-hour lease, and dropping that lease then
+        # closed a port that had been open. So: read first, and only ask for a
+        # mapping when nothing holds the port. A gateway that cannot be read
+        # back (NAT-PMP alone) answers `unsupported`, which still maps.
+        try:
+            ip = portmap.local_ip(router or portmap.default_gateway())
+        except Exception:
+            # A machine that can name no gateway has no local address to state
+            # either; the read below says what it could and could not see.
+            ip = ""
+        read = portmap.read_port(port, ip=ip, gateway=router)
+        if read.get("state") == "mapped":
+            _portmap_store(read, port, reason)
+            return portmap_state(cfg)
+        if read.get("state") == "no_gateway":
+            # Nothing answered the UPnP search AND nothing answered NAT-PMP (a
+            # gateway that states even a WAN address comes back as
+            # `unsupported`), so `open_port` would put the same two questions to
+            # the same silence and pay a second wait for the answer. The read's
+            # own verdict is the measurement; it is stored and reported.
+            _portmap_store(read, port, reason)
+            return portmap_state(cfg)
+        result = portmap.open_port(port, gateway=router)
         _portmap_store(result, port, reason)
         if not result.get("ok"):
             # The router's own words (or the network's silence) go to the app
@@ -932,7 +966,7 @@ def portmap_state(cfg=None):
     (an attempt is running now), `client_down` (nothing to map for). Nothing
     here is guessed: a mapping is only `mapped` when a router confirmed it."""
     cfg = cfg or load_config()
-    enabled, port = _portmap_cfg(cfg)
+    enabled, port, _router = _portmap_cfg(cfg)
     with _PORTMAP_LOCK:
         result = dict(_PORTMAP["result"] or {})
         checked_at = float(_PORTMAP["checked_at"] or 0.0)

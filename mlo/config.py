@@ -1097,6 +1097,17 @@ DEFAULT_CONFIG = {
     # unreachable listen port is what makes a client look offline to the
     # network; it is a no-op when no gateway answers, and the status says so.
     "soulseek_upnp": True,
+    # Which address to ask for that mapping. Both methods need the ROUTER:
+    # UPnP's IGD search is multicast (routers routinely drop it, and multicast
+    # never leaves Docker's bridge) and NAT-PMP has no discovery at all, so
+    # each one falls back to whatever the machine calls its default gateway.
+    # In a container that is Docker's bridge — a peer, not the router — so
+    # auto-detection finds the bridge and never the box that forwards the
+    # port, and the panel reports "no device answered". Naming the router here
+    # makes the app ask IT, by unicast, from inside the container. Empty keeps
+    # auto-detection; it is up to the user, who is the only one who knows the
+    # router's LAN address.
+    "soulseek_router_ip": "",
     # After a downloaded release imports successfully, delete the copy that was
     # downloaded — the library now holds the album and the download folder is
     # only a staging area. ON by default: the alternative is a second full copy
