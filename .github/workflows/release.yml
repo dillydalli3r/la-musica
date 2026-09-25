@@ -227,6 +227,20 @@ jobs:
           check iOS '*.ipa'
           exit "$missing"
 
+      - name: The IPA users install carries the iOS pieces
+        # The mobile job verifies the `.app` it just built; this verifies the
+        # ARTIFACT — the uploaded IPA, unpacked fresh from the release's own
+        # assets directory. The two are different facts ("the mobile job went
+        # green" vs "the file the owner sideloads carries the fix"), and this is
+        # the second one: the audio session, the Now Playing star, the
+        # background-audio declaration, both ATS exemptions and the
+        # local-network reason, read straight out of the bundle
+        # (`tools/check_ios_ipa.py` explains why an IPA alone can answer it).
+        run: |
+          IPA="$(find clients -type f -name '*.ipa' -print -quit)"
+          test -n "$IPA" || { echo "::error::no IPA to check"; exit 1; }
+          python tools/check_ios_ipa.py "$IPA"
+
       - name: SideStore / AltStore source for the iOS build
         # The sideloading tools show a name, version, bundle id, icon and size
         # for each app they offer; without a source file the user hunts for the
