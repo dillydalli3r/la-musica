@@ -13,6 +13,7 @@ misconfiguration, which must NOT silently publish an open library).
 Runs with no network and no server: the HTTP checks drive the real FastAPI app
 through TestClient with the gate forced on, over a temp auth database.
 """
+import json
 import os
 import sys
 import tempfile
@@ -193,11 +194,31 @@ auth_mod.cached_state = lambda: dict(_gate)
 auth_mod.current_state = lambda refresh=False: dict(_gate)
 
 import mlo.config as config_mod  # noqa: E402
+import mlo.paths as path_mod  # noqa: E402
 _real_load = config_mod.load_config
 password = "a-very-good-password"
 config_mod.load_config = lambda *a, **k: {"auth_password_hash": auth_mod.hash_password(password),
                                          "server_host": "0.0.0.0", "auth_mode": "auto",
                                          "auth_session_days": 30}
+# The stub above answers every READ. A WRITE still goes through `save_config`,
+# which uses the real `CONFIG_FILE` — and this suite now posts to /api/config
+# (the Soulseek listen-port pin below), so without this redirect the run wrote
+# `server_host: 0.0.0.0` and a password hash into whatever config the machine
+# happened to own. That is not a hypothetical: it turned the login gate ON for
+# every LATER suite in the same CI shard (they drive the app through TestClient,
+# which is not a local address), and the release run failed on
+# `test_lyrics_publish.py`'s 401s because of it. A test may not write outside
+# its own sandbox — one temp file, redirected before the app is built.
+_STUB_CFG = os.path.join(tmp, "config.json")
+config_mod.CONFIG_FILE = _STUB_CFG
+path_mod.CONFIG_FILE = _STUB_CFG
+# ...and the app's OWN data directory, which is where a scoped config is
+# written (`<music folder>/.mlo/data/config.json`): `CONFIG_FILE` alone only
+# redirects the pointer file, so a write still landed in the real scope. Same
+# pair the queue suite redirects for its own stub config.
+path_mod.app_data_dir = lambda *a, **k: tmp
+with open(_STUB_CFG, "w", encoding="utf-8") as fh:
+    json.dump({"music_folder": tmp, "server_host": "127.0.0.1"}, fh)
 
 # Not a `with` block: the lifespan would start the wishes worker and the
 # slskd watcher, neither of which this suite is about.
