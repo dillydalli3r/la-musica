@@ -21,7 +21,8 @@ IPA alone, with no Xcode and no device:
     the source file.
   * the app binary — the Objective-C names the modules use at runtime
     (`AVAudioSession`, the playback category and mode constants from AVFAudio,
-    `NSNotificationCenter` for the session's lifecycle observers,
+    `AVAudioPlayer` for the background keep-alive, `NSNotificationCenter` for
+    the session's lifecycle observers,
     `MPRemoteCommandCenter` for the star, and `mlo-ios-like`, the event a
     star press is handed to the webview with). These are string literals in the
     binary, so a `strip`ped release build still carries them; a module that
@@ -43,6 +44,7 @@ NEEDLES = [
     (b"AVAudioSession", "the audio session class (ios_audio.rs)"),
     (b"AVAudioSessionCategoryPlayback", "the playback category (ios_audio.rs)"),
     (b"AVAudioSessionModeDefault", "the default mode (ios_audio.rs)"),
+    (b"AVAudioPlayer", "the background keep-alive player (ios_audio.rs)"),
     (b"NSNotificationCenter", "the session's lifecycle observers (ios_audio.rs)"),
     (b"MPRemoteCommandCenter", "the Now Playing command centre (ios_like.rs)"),
     (b"mlo-ios-like", "the star-press event (ios_like.rs / iosFavs.ts)"),
@@ -129,7 +131,8 @@ def main() -> None:
             fail(f"{needle.decode()} is not in the app binary — {what} did not ship")
         print(f"ok   {needle.decode()} — {what}")
 
-    print(f"\nall good: this IPA carries the iOS audio session, the Now Playing star")
+    print(f"\nall good: this IPA carries the iOS audio session (and its background "
+          f"keep-alive) and the Now Playing star")
 
 
 if __name__ == "__main__":

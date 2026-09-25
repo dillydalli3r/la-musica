@@ -65,6 +65,46 @@
 //! while the session is inactive) and the session is activated when playback
 //! begins and never handed back while the app lives.**
 //!
+//! ## 4.1.0's own report: the app process renders nothing of its own
+//!
+//! The owner, on the build that shipped the lifecycle above: *"Audio just cuts
+//! out after tabbing out of the app"* — and the like button on iOS's own Now
+//! Playing surfaces still behaving as if nothing had been wired to it. Both
+//! reports have one subject, and it is this process.
+//!
+//! iOS's audio background mode is a promise about the APP: "With this category,
+//! your app can also play background audio if you're using the Audio, AirPlay,
+//! and Picture in Picture background mode" (Apple, *Configuring Audio Settings
+//! for iOS and tvOS*) — and what the runtime keeps alive is an app that IS
+//! producing audio. This app's audio is decoded by WebKit's web content
+//! process: the session configured here belongs to this process, which renders
+//! silence into it and nothing else. So at the one moment iOS asks "is this app
+//! playing?", the only truthful answer this process can give is no — the audio
+//! that justifies the grant lives in another process, and a backgrounded app
+//! with no playback of its own is suspended like any other. The music stops
+//! with it, and a suspended app also stops answering the Now Playing module's
+//! remote commands, which is why the star reads as unwired rather than as
+//! broken (R251, R288).
+//!
+//! So this module renders something of its OWN while it matters:
+//!
+//! * [`start_keep_alive`] plays half a second of 16-bit silence — generated in
+//!   `silence_wav`, not shipped as an asset — through an `AVAudioPlayer`
+//!   looping it at unity volume, on the same playback session the music uses.
+//!   Inaudible by construction (the samples are zeros) and real output as far
+//!   as the session is concerned, which is the whole point.
+//! * [`sync_keep_alive`] is the condition, and it is the narrowest one that
+//!   works: **the web player says it is playing AND the app is in the
+//!   background**. Started at `DidEnterBackground` (the last moment before iOS
+//!   asks the question) and when playback starts while already backgrounded
+//!   (the lock screen's play button has no app-state notification to ride on),
+//!   stopped the moment either half goes away — coming back to the app, or the
+//!   music stopping. Nothing renders in the foreground, so the cost is bounded
+//!   to the time the app is out of sight and the user is listening.
+//! * It is still not a now-playing writer. `MPNowPlayingInfoCenter` is left
+//!   alone: the webview's Media Session publishes title, artist, album and
+//!   artwork, and it stays the one source of what the lock screen shows.
+//!
 //! ## What it does
 //!
 //! * [`configure`] runs once at setup: category `AVAudioSessionCategoryPlayback`,
@@ -108,8 +148,11 @@
 //! playing", no now-playing metadata and no remote commands: the webview's
 //! Media Session publishes title/artist/artwork and answers the card's
 //! play/pause/next buttons, and WebKit activates the session for its own
-//! playback as well. This module's job is that the app's session is the one a
-//! music client needs, at the moments iOS asks the question.
+//! playback as well. The one thing this process does render is the keep-alive
+//! above, and only while the app is in the background — silence, for a grant
+//! that is otherwise this process's to lose. This module's job is that the
+//! app's session is the one a music client needs, at the moments iOS asks the
+//! question.
 //!
 //! None of this compiles off iOS: `lib.rs` declares the module behind
 //! `#[cfg(target_os = "ios")]`, Android plays through its own audio path, and
@@ -117,6 +160,7 @@
 //! registers the `set_playback_active` command on every target (empty body
 //! elsewhere) so the web UI can call it unconditionally.
 
+use std::cell::RefCell;
 use std::ptr::NonNull;
 use std::sync::atomic::{AtomicBool, Ordering};
 
@@ -124,7 +168,7 @@ use block2::{DynBlock, RcBlock};
 use objc2::msg_send;
 use objc2::rc::Retained;
 use objc2::runtime::{AnyClass, AnyObject};
-use objc2_foundation::NSString;
+use objc2_foundation::{NSData, NSString};
 
 /// AVFAudio is where `AVAudioSession` lives (it was AVFoundation before iOS 14;
 /// this app's floor is 14.0 — `bundle.iOS.minimumSystemVersion`). Linking it is
@@ -181,6 +225,29 @@ const _NOTIFY_OTHERS_ON_DEACTIVATION: usize = 1;
 /// mutex: the writers are the main thread (the Tauri command, the notification
 /// handlers) and a torn read is impossible for a bool.
 static PLAYING: AtomicBool = AtomicBool::new(false);
+
+/// Whether the app is in the background. Written by the two app-state
+/// notifications, read by the keep-alive below.
+static IN_BACKGROUND: AtomicBool = AtomicBool::new(false);
+
+/// Frames of silence the keep-alive loops: 0.5 s of 16-bit mono at 44.1 kHz.
+/// The player loops it (`numberOfLoops = -1`), so the buffer only has to be
+/// long enough not to be re-created constantly.
+const KEEP_ALIVE_FRAMES: usize = 22_050;
+
+thread_local! {
+    /// The keep-alive player while it is running — `AVAudioPlayer` over one
+    /// looping half-second of silence, through the same playback session the
+    /// webview's music uses. `None` whenever there is nothing to keep alive.
+    ///
+    /// A thread-local rather than a static: `Retained<AnyObject>` is neither
+    /// `Send` nor `Sync` (objc2 says so on purpose — thread affinity is a
+    /// property of the concrete class), and every writer here is the main
+    /// thread anyway: setup, the two app-state notifications, and the
+    /// `set_playback_active` Tauri command, which the mobile runtime delivers
+    /// on the main thread like every other sync command.
+    static KEEP_ALIVE: RefCell<Option<Retained<AnyObject>>> = const { RefCell::new(None) };
+}
 
 /// The process-wide `AVAudioSession`, or `None` when this process has none at
 /// all (a class that did not load, a stripped runtime): the caller logs rather
@@ -276,6 +343,141 @@ pub fn configure() {
     take_category(&session);
 }
 
+/// A 0.5 s WAV of 16-bit silence, mono at 44.1 kHz — the keep-alive player's
+/// whole input. Built by hand rather than shipped as an asset: a 44-byte
+/// canonical header plus zeroed samples is the entire file, and an app whose
+/// audio is streamed from a server has no business carrying an audio file in
+/// its bundle.
+fn silence_wav(frames: usize) -> Vec<u8> {
+    const RATE: u32 = 44_100;
+    const CHANNELS: u16 = 1;
+    const BITS: u16 = 16;
+    let block_align = CHANNELS * BITS / 8;
+    let data_len = frames as u32 * u32::from(block_align);
+    let mut wav = Vec::with_capacity(44 + data_len as usize);
+    wav.extend_from_slice(b"RIFF");
+    wav.extend_from_slice(&(36 + data_len).to_le_bytes());
+    wav.extend_from_slice(b"WAVEfmt ");
+    wav.extend_from_slice(&16u32.to_le_bytes()); // PCM header size
+    wav.extend_from_slice(&1u16.to_le_bytes()); // format 1 = PCM
+    wav.extend_from_slice(&CHANNELS.to_le_bytes());
+    wav.extend_from_slice(&RATE.to_le_bytes());
+    wav.extend_from_slice(&(RATE * u32::from(block_align)).to_le_bytes());
+    wav.extend_from_slice(&block_align.to_le_bytes());
+    wav.extend_from_slice(&BITS.to_le_bytes());
+    wav.extend_from_slice(b"data");
+    wav.extend_from_slice(&data_len.to_le_bytes());
+    wav.resize(44 + data_len as usize, 0); // the samples: silence
+    wav
+}
+
+/// Start rendering the keep-alive, if it is not already running.
+///
+/// Never fatal and never noisy: a device with no `AVAudioPlayer` class, a
+/// refused `play` — the app keeps playing while it is in front, which is what
+/// it did before this existed. Nothing here touches the session's category: it
+/// is already `playback` and already active (see `configure` and `reassert`),
+/// and re-taking it mid-playback is the documented interruption this module
+/// exists to avoid (R268).
+fn start_keep_alive() {
+    KEEP_ALIVE.with(|slot| {
+        let mut slot = slot.borrow_mut();
+        if slot.is_some() {
+            return;
+        }
+        let Some(class) = AnyClass::get(c"AVAudioPlayer") else {
+            eprintln!(
+                "[mlo-desktop] AVAudioPlayer is unavailable — this app process \
+                 renders nothing of its own, so iOS may suspend it (and the \
+                 playback with it) while it is in the background"
+            );
+            return;
+        };
+        let data = NSData::with_bytes(&silence_wav(KEEP_ALIVE_FRAMES));
+        // SAFETY: `alloc` then the designated initializer, in that order, with
+        // the NSData above and a null error out-parameter (nothing here reads
+        // the reason a player could not be built; a refusal is the `None`).
+        //
+        // Both sends are declared with a RAW pointer return rather than
+        // `Retained`: objc2's `msg_send!` only accepts `Retained`/`Option<…>`
+        // for a return it can map to an object of a known class, and this
+        // class is looked up by name (there is no objc2 binding crate for
+        // AVFAudio here). The +1 the initializer hands back is taken over by
+        // `Retained::from_raw` below, which is what makes the ownership the
+        // same as if it had been typed.
+        let player: Option<Retained<AnyObject>> = unsafe {
+            let allocated: *mut AnyObject = msg_send![class, alloc];
+            if allocated.is_null() {
+                None
+            } else {
+                let made: *mut AnyObject = msg_send![
+                    &*allocated,
+                    initWithData: &*data,
+                    error: None::<&mut AnyObject>
+                ];
+                if made.is_null() {
+                    // A refused initializer: the allocation is nobody's, so it
+                    // is given to a Retained and dropped (its +1 released).
+                    drop(Retained::from_raw(allocated));
+                    None
+                } else {
+                    Retained::from_raw(made)
+                }
+            }
+        };
+        let Some(player) = player else {
+            eprintln!("[mlo-desktop] the iOS keep-alive player would not start");
+            return;
+        };
+        // SAFETY: a live AVAudioPlayer, and each call is the documented setter
+        // for one of its properties; `numberOfLoops` is an NSInteger (−1 =
+        // loop for ever), `volume` a float at unity so the render is real
+        // output rather than a muted one, and both `prepareToPlay` and `play`
+        // return the BOOL they are declared with.
+        let playing: bool = unsafe {
+            let _: () = msg_send![&*player, setNumberOfLoops: -1isize];
+            let _: () = msg_send![&*player, setVolume: 1.0f32];
+            let _: bool = msg_send![&*player, prepareToPlay];
+            msg_send![&*player, play]
+        };
+        if !playing {
+            eprintln!("[mlo-desktop] the iOS keep-alive player would not play");
+            return;
+        }
+        *slot = Some(player);
+    });
+}
+
+/// Stop the keep-alive. Idempotent, and the only place the player is released —
+/// dropping the last reference stops it, and `stop` is called first so the
+/// stop is explicit rather than a side effect of the release.
+fn stop_keep_alive() {
+    KEEP_ALIVE.with(|slot| {
+        if let Some(player) = slot.borrow_mut().take() {
+            // SAFETY: a live AVAudioPlayer; `stop` is the documented call.
+            unsafe {
+                let _: () = msg_send![&*player, stop];
+            }
+        }
+    });
+}
+
+/// Render silence of this process's own exactly while both halves of the
+/// condition hold: the WEB PLAYER IS PLAYING and THE APP IS IN THE BACKGROUND.
+///
+/// The foreground case is deliberately excluded — the webview's own playback is
+/// the only sound the user should hear while they are looking at the app — so
+/// the keep-alive costs nothing during normal use, and starts at the last
+/// moment iOS can still be told (see the module docs on why the app process has
+/// to say it at all).
+fn sync_keep_alive() {
+    if PLAYING.load(Ordering::SeqCst) && IN_BACKGROUND.load(Ordering::SeqCst) {
+        start_keep_alive();
+    } else {
+        stop_keep_alive();
+    }
+}
+
 /// The web player's play/pause, as the shell's own record of it.
 ///
 /// Playback STARTING is what activates the session (Apple's guidance: never
@@ -290,17 +492,29 @@ pub fn configure() {
 ///
 /// Called from the `set_playback_active` Tauri command, i.e. by
 /// `web/src/lib/iosAudio.ts` as the player's `playing` state changes.
+///
+/// It also drives the keep-alive (`sync_keep_alive`), which is the half of
+/// background playback this process can supply itself — a playback that starts
+/// while the app is ALREADY in the background (the lock screen's play button)
+/// has no app-state notification to ride on.
+///
+/// And it re-arms the OS star: a playback that begins is exactly the moment
+/// WebKit publishes its own remote-command set for the now-playing module from
+/// the web content process (`RemoteCommandListenerCocoa::updateSupportedCommands`
+/// → `MRMediaRemoteSetSupportedCommands`, whose list is transport-only), so the
+/// like command is re-asserted on the way in as well as on every state push
+/// (R288).
 pub fn set_playing(playing: bool) {
     PLAYING.store(playing, Ordering::SeqCst);
-    if !playing {
-        return;
+    if playing {
+        if let Some(session) = session() {
+            if !activate(&session) {
+                eprintln!("[mlo-desktop] the iOS audio session would not activate");
+            }
+        }
+        crate::ios_like::refresh();
     }
-    let Some(session) = session() else {
-        return;
-    };
-    if !activate(&session) {
-        eprintln!("[mlo-desktop] the iOS audio session would not activate");
-    }
+    sync_keep_alive();
 }
 
 /// The value at `key` in a notification's `userInfo`, when it is a number.
@@ -370,16 +584,30 @@ fn on_media_services_reset() {
 /// Going to the background while playing is THE transition this module exists
 /// for: without an active playback session at that moment, iOS is entitled to
 /// treat the app as idle and stop its audio.
+///
+/// The session is one half of that answer and the keep-alive is the other: a
+/// backgrounded app is kept running because it is PLAYING AUDIO, and the audio
+/// the user hears is decoded by WebKit's process, not this one. Rendering the
+/// keep-alive here — the last moment before the app is treated as idle — is
+/// what puts this process on the right side of that question (see the module
+/// docs).
 fn on_background() {
+    IN_BACKGROUND.store(true, Ordering::SeqCst);
     reassert();
+    sync_keep_alive();
 }
 
 /// Coming back: the session was suspended or handed out while the app was away,
 /// so the moment the app is active again it is put back. (`DidBecomeActive`
 /// rather than `WillEnterForeground`: it fires once the app really is frontmost,
 /// which is also when the star's command must be pressable again.)
+///
+/// The keep-alive stops in the same breath: the webview is audible again by
+/// itself, and a second renderer for the same music is battery for nothing.
 fn on_active() {
+    IN_BACKGROUND.store(false, Ordering::SeqCst);
     reassert();
+    sync_keep_alive();
     crate::ios_like::refresh();
 }
 

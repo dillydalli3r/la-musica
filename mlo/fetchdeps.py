@@ -69,8 +69,8 @@ from .archives import archive_suffix, extract_installer
 from .paths import tools_dir, tools_dirs
 from .subproc import run_tool
 from .tools import (
-    PIP_IMPORT_NAMES,
     detect_all_tools,
+    pip_import_present,
     python_pkg_path,
     python_pkg_version,
 )
@@ -1693,6 +1693,12 @@ def _install_pip_package(key, log=print, progress=None):
     returned "already installed" whenever a folder existed at all, so a pip
     tool could never update: the row said Update, the press said nothing to do,
     and the version never moved.
+
+    What the install is VERIFIED against is written below the pip call, and it
+    is the app's own detector — never pip's exit status and never a guess at
+    the import name. "Also dependency installs work, but yt-dlp succeeds with
+    an 'error'" (the owner's report, on the Docker image, where yt-dlp IS this
+    pip path) is exactly that class: a working install reported as a failure.
     """
     name = PIP_PACKAGES[key]
     display = DISPLAY_NAMES[key]
@@ -1719,16 +1725,49 @@ def _install_pip_package(key, log=print, progress=None):
     ]
     proc = run_tool(cmd, capture_output=True, text=True,
                     encoding="utf-8", errors="replace", timeout=1800)
-    top = PIP_IMPORT_NAMES.get(key, key)
-    # The folder this install wrote, not "some folder for this package": an
-    # older install still on disk would answer a lookup the wrong way round.
-    landed = os.path.isfile(os.path.join(dest_dir, top, "__init__.py"))
-    if proc.returncode != 0 or not landed:
+    # What decides the install is what the DETECTOR will report, not pip's exit
+    # status and not a guess at the import name:
+    #
+    #   * `python_pkg_version(key)` is the app's own answer to "is this vendored
+    #     package there, at which version" (pip's `.dist-info`, falling back to
+    #     the folder name — see mlo.tools), so a folder that landed is a folder
+    #     whose ROW shows it. Demanding `<import name>/__init__.py` by hand said
+    #     "not installed" about a package whose code is a module, and said
+    #     nothing at all about the version pip actually wrote.
+    #   * pip's returncode is NOT the contract. pip's last steps are the console
+    #     script and its PATH warning, and a run that wrote the package and then
+    #     fell over on them (a mount that refuses chmod, a killed pip, a script
+    #     path it cannot write) left the app a complete, importable package —
+    #     this app imports the module and never runs that script — while the old
+    #     `if proc.returncode != 0 or not landed:` reported a failure AND
+    #     `shutil.rmtree`'d the install it had just made. pip's output is kept
+    #     for the failure TEXT below, where it explains a run that landed
+    #     nothing at all (an unresolvable version, an unwritable folder, no
+    #     network) — that is the case a user has to hear about, and it still
+    #     raises.
+    landed = (pip_import_present(dest_dir, key)
+              and same_version(python_pkg_version(key), target))
+    if not landed:
         shutil.rmtree(dest_dir, ignore_errors=True)
         tail = (proc.stderr or proc.stdout or "").strip().splitlines()
         raise RuntimeError(
             f"pip install failed for {display}: {tail[-1] if tail else 'unknown error'}")
-    _remove_older_versions(key, os.path.basename(dest_dir))
+    if proc.returncode != 0:
+        # Installed, but pip's own run did not finish clean: worth saying out
+        # loud, and never worth undoing a package the app can use.
+        tail = (proc.stderr or proc.stdout or "").strip().splitlines()
+        log(f"pip exited {proc.returncode} after installing {display} v{target} "
+            f"({tail[-1] if tail else 'no output'}) — the package itself is in "
+            f"{dest_dir}")
+    try:
+        _remove_older_versions(key, os.path.basename(dest_dir))
+    except OSError as e:
+        # Housekeeping, not the install: the folder just verified above IS the
+        # install, and a tools folder this process could not LIST (a bind mount
+        # answering EIO — the same mount just took 9 MB of wheels) is no reason
+        # to tell the user their update failed. The stale folder stays and the
+        # next install prunes it.
+        log(f"  could not prune older copies of {display}: {e}")
     log(f"Installed {display} v{target} -> {dest_dir}")
     return target
 

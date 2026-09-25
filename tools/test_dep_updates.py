@@ -976,6 +976,134 @@ with tempfile.TemporaryDirectory() as tmp:
         tools_mod._TOOLS_CACHE = None
 
 
+# --------------------------------------------------------------------------- #
+# 14. A landed package is an install, whatever pip's exit status says
+# --------------------------------------------------------------------------- #
+# "Also dependency installs work, but yt-dlp succeeds with an 'error'" (the
+# owner's report, on the Docker image, where yt-dlp IS installed by this pip
+# path). Two checks in the pip installer could say "failed" about an install
+# that worked, and the first of them also DELETED it:
+#
+#   * `if proc.returncode != 0 or not landed:` — pip's exit status is not the
+#     app's contract. pip writes the package first and its console script (with
+#     the PATH warning) last, so a run that fell over on the script — a bind
+#     mount that refuses chmod, a killed pip — left a complete, importable
+#     package the app never uses the script of, reported as a failure and
+#     `shutil.rmtree`'d.
+#   * `landed = os.path.isfile(dest_dir/<import name>/__init__.py)` — a guess at
+#     the import name and at the package being a DIRECTORY. Pip installs
+#     `eac_logchecker.py` for eac-logchecker, so a finished install read as
+#     "nothing landed" for a package whose code is a module. The check now asks
+#     the app's own detector (python_pkg_version — pip's `.dist-info`) through
+#     ONE shared rule (tools.pip_import_present), so the installer and the row
+#     agree about what "installed" is.
+with tempfile.TemporaryDirectory() as tmp:
+    import shutil  # noqa: E402  (this section's own import, like the others)
+    real = (sandbox_deps(tmp), fetchdeps._api_json, fetchdeps.run_tool)
+    release_tag = "2026.08.19"
+    seen = {}
+
+    def _api(url, headers=None):
+        if url == "https://api.github.com/repos/yt-dlp/yt-dlp/releases/latest":
+            return {"tag_name": release_tag}
+        raise AssertionError(f"unexpected URL {url}")
+
+    def _pip_landed_then_failed(cmd, **kw):
+        """pip's real order: the package and its dist-info, then the script —
+        and a non-zero exit after all of it, which is the shape of the owner's
+        error on a host where the last step (the script) is what fails."""
+        seen["cmd"] = list(cmd)
+        vendor_pip_pkg(tmp, "yt-dlp", list(cmd)[-1].split("==")[-1])
+        return SimpleNamespace(
+            returncode=1, stdout="",
+            stderr=("WARNING: The script yt-dlp is installed in '...' which is "
+                    "not on PATH.\nERROR: Could not install packages due to an "
+                    "OSError: [Errno 5] Input/output error: '.../bin/yt-dlp'"))
+
+    def _pip_landed_nothing(cmd, **kw):
+        return SimpleNamespace(
+            returncode=1, stdout="",
+            stderr="ERROR: No matching distribution found for yt-dlp==2026.8.19")
+
+    def _unreadable_tools_folder(prefix, keep_dir):
+        raise OSError(5, "Input/output error", tmp)
+
+    fetchdeps._api_json = _api
+    fetchdeps.run_tool = _pip_landed_then_failed
+    try:
+        landed_err = None
+        try:
+            with linux_host(), upstream_cache({}):
+                got = fetchdeps.install_dependency("yt-dlp", log=lambda m: None)
+        except Exception as e:              # noqa: BLE001 — reported, not raised
+            landed_err, got = e, None
+        dest = os.path.join(tmp, "yt-dlp v2026.8.19")
+        check(f"a pip run that wrote the package then exited 1 is an install "
+              f"(got {got!r}"
+              + (f", raised {landed_err}" if landed_err else "") + ")",
+              got == "2026.8.19")
+        check("...its install is kept, not deleted as a failure",
+              os.path.isfile(os.path.join(dest, "yt_dlp", "__init__.py")))
+        check(f"...and the app reads the version pip wrote "
+              f"({tools_mod.python_pkg_version('yt-dlp')!r})",
+              tools_mod.python_pkg_version("yt-dlp") == "2026.8.19")
+        row = next(r for r in fetchdeps.dependency_rows() if r["key"] == "yt-dlp")
+        check(f"...so the row is Ready at it (state {row['state']}, "
+              f"installed {row['installed_version']})",
+              row["state"] == "ok" and row["installed_version"] == "2026.8.19")
+
+        # A prune that cannot read the tools folder is housekeeping failing, not
+        # the install: the folder verified above IS the install.
+        real_prune = fetchdeps._remove_older_versions
+        fetchdeps._remove_older_versions = _unreadable_tools_folder
+        shutil.rmtree(dest, ignore_errors=True)
+        try:
+            prune_err = None
+            try:
+                with linux_host(), upstream_cache({}):
+                    got = fetchdeps.install_dependency("yt-dlp", log=lambda m: None)
+            except Exception as e:          # noqa: BLE001 — reported, not raised
+                prune_err, got = e, None
+            check(f"a prune that cannot read the tools folder does not fail the "
+                  f"install (got {got!r}"
+                  + (f", raised {prune_err}" if prune_err else "") + ")",
+                  got == "2026.8.19")
+            check("...and the install is still there",
+                  os.path.isfile(os.path.join(dest, "yt_dlp", "__init__.py")))
+        finally:
+            fetchdeps._remove_older_versions = real_prune
+
+        # The other half, deliberately kept: a run that landed nothing still
+        # fails loudly, with pip's own last words as the reason.
+        shutil.rmtree(dest, ignore_errors=True)
+        fetchdeps.run_tool = _pip_landed_nothing
+        try:
+            with linux_host(), upstream_cache({}):
+                fetchdeps.install_dependency("yt-dlp", log=lambda m: None)
+            check("a pip run that landed nothing is refused", False)
+        except RuntimeError as e:
+            check(f"a pip run that landed nothing is refused ({e})",
+                  "No matching distribution" in str(e))
+        check("...and its empty folder is not left behind", not os.path.isdir(dest))
+
+        # One rule for "is it installed here", the module-shaped package
+        # included: pip installs eac_logchecker.py, not an `eac-logchecker/`
+        # package, and the detector and the installer have to agree on that.
+        mod = os.path.join(tmp, "eac-logchecker v0.8.1")
+        os.makedirs(os.path.join(mod, "eac_logchecker-0.8.1.dist-info"))
+        open(os.path.join(mod, "eac_logchecker.py"), "w").close()
+        check(f"a pip package whose code is a module is detected "
+              f"({tools_mod.python_pkg_version('eac-logchecker')!r})",
+              tools_mod.python_pkg_version("eac-logchecker") == "0.8.1"
+              and tools_mod.pip_import_present(mod, "eac-logchecker"))
+        check("...and a folder that is not there is not 'landed'",
+              not tools_mod.pip_import_present(dest, "yt-dlp"))
+    finally:
+        fetchdeps._api_json, fetchdeps.run_tool = real[1], real[2]
+        restore_deps(real[0])
+
+
+
 if FAILURES:
     print(f"{len(FAILURES)} failure(s)")
     sys.exit(1)

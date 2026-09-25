@@ -1535,6 +1535,26 @@ table and the auto-update worker cannot disagree.
   `_exe` field map, native Linux builds included), or an update the installer
   performed would be invisible, the row would keep reading the PATH copy, and
   its amber chip could never clear.
+- **R69a — a pip install is judged by what the DETECTOR finds in the folder it
+  wrote, and by nothing else about pip's run.** `_install_pip_package` asks the
+  app's own detector (`tools.python_pkg_version` — pip's `.dist-info` beside
+  the package, falling back to the folder name) for the version it asked pip
+  for, through the ONE rule detection uses as well (`tools.pip_import_present`:
+  the `<import name>/` package, or the `<import name>.py` module a package of
+  that shape ships — `eac-logchecker` installs the latter), so a folder that
+  landed is a folder whose row shows it. pip's exit status is not that verdict:
+  pip writes the package first and its console script, with the "not on PATH"
+  warning, last, so a run that fell over on the script — a bind mount that
+  refuses chmod, a killed pip — left a complete, importable package this app
+  never runs the script of, and calling that a failure also DELETED it
+  ("Also dependency installs work, but yt-dlp succeeds with an 'error'" — the
+  owner's report, on the Docker image, where yt-dlp IS this pip path). A run
+  that landed nothing still fails loudly with pip's own last line as the
+  reason, which is what covers a genuine pip failure, an unreachable release
+  and an unwritable tools folder: all three leave nothing to find. Pruning the
+  versions an update replaced is housekeeping and never fails a landed install
+  either (a tools folder the process could not list is logged, and the stale
+  folder is pruned by the next install).
 
 ---
 
@@ -3948,7 +3968,9 @@ composition instead (R267). Above `lg` the pane sits beside the artwork.
   setting exists for, so the page keeps running while the app is not in front —
   a music player's audio must also survive a hidden window on the desktop.
   Older systems keep WebKit's default, which is why this is stated as what the
-  app configures, not as a claim about the OS.
+  app configures, not as a claim about the OS. The owner's next report showed
+  this was necessary and not sufficient — the page surviving is one half, and
+  the app process producing audio of its own is the other (R288).
 
 ### 7.23 The export archive, and the offline shell that must not become it
 
@@ -4963,8 +4985,43 @@ composition instead (R267). Above `lg` the pane sits beside the artwork.
   The context itself is armed for the platform's two ways of parking it: the
   first pointer/key gesture anywhere in the app resumes it (iOS starts a context
   created outside a gesture suspended, and a track routed into a suspended graph
-  is a track playing silently), and a state change or the app coming back
-  re-asks.
+  is a track playing silently), and a state change resumes it — while the page
+  is on screen, and ALSO while it is hidden if one of the app's own elements is
+  still playing, because a backgrounded app whose graph iOS parks mid-track is
+  the owner's *"audio just cuts out after tabbing out of the app"* and the old
+  visibility-only rule refused to undo exactly that. The app coming back
+  re-asks as well.
+
+- **R288 — the app process has to be producing audio itself.** iOS's audio
+  background mode is a grant to the APP, and what the runtime keeps alive is a
+  process that IS playing something. This app's audio is decoded by WebKit's web
+  content process (R265a keeps that page running), while the shell's own process
+  configures a playback session and then renders silence into it — so at the one
+  moment iOS asks "is this app playing?", the only answer this process can give
+  is no, and a backgrounded app with no playback of its own is suspended like
+  any other. The music stops with it, and so does the star: a suspended app runs
+  no remote-command handler, which is why the owner's 4.1.0 report read as two
+  bugs — *"audio just cuts out after tabbing out of the app"* and an OS star that
+  behaved as if nothing were wired to it (R251). While the web player says it is
+  PLAYING and the app is in the BACKGROUND, `desktop/src-tauri/src/ios_audio.rs`
+  therefore renders half a second of generated 16-bit silence (`silence_wav`)
+  through a looping `AVAudioPlayer` at unity volume, on that same playback
+  session — inaudible by construction, real output as far as the session is
+  concerned. It starts at `DidEnterBackground` and when playback starts while
+  already backgrounded (the lock-screen play button has no app-state
+  notification to ride on), and stops the moment either half of the condition
+  goes away: nothing renders in the foreground, and the cost is bounded to the
+  time the app is out of sight AND the user is listening. The star's `enabled`
+  bit is re-asserted on playback start in the same breath, because that is the
+  moment WebKit publishes its own remote-command set from the web content
+  process (`RemoteCommandListenerCocoa::updateSupportedCommands` →
+  `MRMediaRemoteSetSupportedCommands`, transport commands only). What the
+  keep-alive deliberately is NOT: a now-playing writer — `MPNowPlayingInfoCenter`
+  is still untouched, and the webview's Media Session remains the only source of
+  what the lock screen shows. `tools/check_ios_ipa.py` requires the
+  `AVAudioPlayer` class name in the shipped binary, because a module that
+  silently stopped being compiled into the iOS build is exactly the failure this
+  rule cannot see from a test suite.
 
 - **R272 — the playing state follows the ELEMENT, both ways.** `pause` already
   cleared the player's state; `play` now sets it, for the track the queue is

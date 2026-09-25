@@ -37,6 +37,13 @@ from mlo.genres import display_name as _genre_display
 # fact MusicBrainz states beside the release-group type — "podcast", read from
 # the series relation below — rather than one MusicBrainz publishes.
 from mlo.naming import is_derived_type
+# The FAMILY a genre name belongs to (mlo.genre_vocab.parent_of), which is what
+# genre_category() below buckets by: the fixed filter buckets and the genre
+# vocabulary are two different taxonomies, and a name can be spelled one way and
+# mean another ("new wave" — a rock movement the keyword table's "wave" rule
+# read as electronic). mlo.genre_vocab imports nothing from server/, so this is
+# no cycle, and it is the same vocabulary the writers and the grader use.
+from mlo.genre_vocab import parent_of as _genre_family
 
 MB_BASE = "https://musicbrainz.org/ws/2"
 LRCLIB_BASE = "https://lrclib.net/api"
@@ -5194,9 +5201,19 @@ def genre_chain(artist="", album="", release=None, limit=None, sources=None,
 
 
 # Fixed genre buckets for GET /api/genres/facets. Every library genre lands in
-# exactly one bucket (the first keyword match wins, "Other" for the rest) so
-# the UI can offer coarse filters without carrying a full taxonomy. Order
-# matters: "folk metal" must count as Metal before Folk sees it.
+# exactly one bucket so the UI can offer coarse filters without carrying a full
+# taxonomy. Order matters: "folk metal" must count as Metal before Folk sees it.
+#
+# WHAT the keywords read is the genre's FAMILY first (mlo.genre_vocab.parent_of)
+# and the name as spelled only when the vocabulary has no family for it or that
+# family matches no bucket here — the two tables are deliberately not the same
+# taxonomy, so a name that means one thing and is spelled like another must be
+# bucketed by what it IS. The owner's report was a card OTHER holding the chip
+# `New Wave 8` while METAL and ROCK bucketed right: the vocabulary knows new wave
+# is a rock movement, this keyword list only sees the word "wave", and only the
+# spelling was ever consulted. A family with no bucket of its own (latin,
+# reggae, blues, industrial — the vocabulary is finer than these nine buckets)
+# keeps the Other fallback rather than getting a bucket invented for it.
 GENRE_CATEGORIES = [
     ("Metal", ("metal", "doom", "sludge", "djent", "thrash", "grindcore",
                "deathcore", "metalcore", "blackgaze")),
@@ -5219,13 +5236,24 @@ OTHER_CATEGORY = "Other"
 
 
 def genre_category(name):
-    """The fixed bucket a genre name belongs to (never None)."""
+    """The fixed bucket a genre name belongs to (never None).
+
+    The name's FAMILY is bucketed first (mlo.genre_vocab.parent_of), so a genre
+    is filed by what it is rather than by how its spelling happens to read; a
+    name the vocabulary cannot place, or a family this table has no keyword for,
+    falls back to the keyword match on the name itself. No I/O and nothing
+    allocated: one family lookup plus at most two passes over these nine keyword
+    tuples per call, and it runs once per distinct library genre.
+    """
     text = str(name or "").strip().lower()
     if not text:
         return OTHER_CATEGORY
-    for category, keys in GENRE_CATEGORIES:
-        if any(k in text for k in keys):
-            return category
+    for candidate in (_genre_family(name), text):
+        if not candidate:
+            continue
+        for category, keys in GENRE_CATEGORIES:
+            if any(k in candidate for k in keys):
+                return category
     return OTHER_CATEGORY
 
 

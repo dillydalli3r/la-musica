@@ -116,14 +116,31 @@ function ensureCtx(): AudioContext | null {
 function armContext(c: AudioContext) {
   try {
     c.addEventListener("statechange", () => {
-      // Resuming is only worth asking for while the page is on screen: a
-      // backgrounded page that reopens the audio graph is exactly what iOS
-      // suspends it for.
-      if (document.visibilityState === "visible") resumeAnalyser();
+      // Resume when the page is on screen — and ALSO when it is hidden but one
+      // of our own elements is still playing. The second half is the owner's
+      // report ("audio just cuts out after tabbing out of the app"): iOS parks
+      // a context when the app is backgrounded, the parked state arrives as
+      // `statechange` exactly like a phone call's interruption does, and the
+      // old rule — resume only while visible — therefore refused to undo the
+      // one suspension the user can hear. A backgrounded page that reopens a
+      // graph it is playing INTO is not the abuse the old comment feared: the
+      // audio was already coming out of this graph a moment ago.
+      if (document.visibilityState === "visible" || graphIsPlaying()) resumeAnalyser();
     });
   } catch {
     /* no event API on this context: the gesture unlock below still runs */
   }
+}
+
+/** Is any element carrying one of our graphs really making sound right now?
+ *
+ *  The elements are the truth here for the same reason the player's own state
+ *  comes from the element's `play`/`pause` events (R188): a context that was
+ *  parked while a track is playing has audio waiting to come out, and nothing
+ *  else on the page can say so as directly. */
+function graphIsPlaying() {
+  for (const el of graphs) if (!el.paused && !el.ended) return true;
+  return false;
 }
 
 // The FIRST user gesture is what unlocks WebAudio on iOS: a context created

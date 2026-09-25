@@ -179,14 +179,14 @@ export default function DependenciesPage() {
 
   return (
     <div className="p-6 space-y-5 mx-auto max-w-[1600px]">
-      {/* `sticky`: the page scrolls through fifteen rows and the action that
-          fixes them all must not scroll away with the first ones. The primary
-          action lives in this header's actions row, so the whole bar pins
-          below the top bar while the table scrolls under it. */}
+      {/* Deliberately NOT `sticky`: the owner read the pinned bar as a broken
+          page — it sat over the fifteen scrolling rows and drew the counts line
+          ("4 links not followed…") behind its blurred strip — and Grading is the
+          only page whose header has to stay put. Here the header, Refresh and
+          Install all included, scrolls away with the table. */}
       <PageHeader
         icon={Wrench}
         title="Dependencies"
-        sticky
         subtitle="External tools the scripts rely on. Missing ones are downloaded into the music folder's .mlo/tools — nothing is installed system-wide."
         actions={
           <>
@@ -209,8 +209,8 @@ export default function DependenciesPage() {
                 is not about it: the header can say "4 update(s) available"
                 while this button is off (all four are the package manager's),
                 and the title says which case that is instead of leaving a
-                button that looks broken. The header it lives in is `sticky`,
-                so it stays on screen while the fifteen rows scroll. */}
+                button that looks broken. The header it lives in is not
+                `sticky`, so the button scrolls away with the table. */}
             <button
               className="btn-primary !py-1 text-xs tap"
               onClick={() => install()}

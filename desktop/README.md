@@ -144,6 +144,23 @@ desktop targets have no `AVAudioSession`).
    `WKPreferences.inactiveSchedulingPolicy = .none` (public API, iOS 17+ /
    macOS 14+) — long-running audio in a backgrounded hybrid app is the case that
    setting exists for. Older systems keep WebKit's default.
+5. **The keep-alive** (`ios_audio::sync_keep_alive`, the owner's 4.1.0 report —
+   *"audio just cuts out after tabbing out of the app"*, with the OS star
+   behaving as if unwired): the background-audio mode is a grant for the APP,
+   and what iOS keeps running is a process that is PRODUCING audio. This app's
+   audio is decoded by WebKit's web content process, so this one configures a
+   session and then renders silence into it — and a backgrounded app with no
+   playback of its own is suspended like any other, taking the music, the star's
+   command handler and the star's press handling with it. While the web player
+   says it is playing AND the app is in the background, this process therefore
+   plays half a second of generated 16-bit silence (`silence_wav`) on a looping
+   `AVAudioPlayer` at unity volume, on that same playback session: inaudible by
+   construction, real output as far as the session is concerned. It starts at
+   `DidEnterBackground` and when playback starts while already backgrounded
+   (the lock-screen play button has no app-state notification to ride on), and
+   stops the moment either half goes away. `MPNowPlayingInfoCenter` is still
+   left alone — the webview's Media Session remains the only writer of what the
+   lock screen shows.
 
 ### The Now Playing star on iOS
 
@@ -167,7 +184,9 @@ does not have. The wiring is four steps:
    has no dislike concept) and attach one handler with
    `addTargetWithHandler:`. MediaPlayer is linked explicitly, because a framework
    that is not loaded has no classes to look up. Its `enabled` bit is re-asserted
-   on every state push and again whenever the app becomes active
+   on every state push, whenever playback begins (`set_playing` — the moment
+   WebKit publishes its OWN remote-command set from the web content process,
+   which is transport-only), and again whenever the app becomes active
    (`ios_like::refresh`, called by the audio-session module): the same bit is
    written by the system's now-playing plumbing, and a star a state push cannot
    turn back on is a star that vanishes mid-album.
@@ -228,7 +247,7 @@ filling on a press.
 
 ## Bundle config
 
-`bundle.iOS.minimumSystemVersion` 14.0, `bundle.iOS.bundleVersion` 4.1.0,
+`bundle.iOS.minimumSystemVersion` 14.0, `bundle.iOS.bundleVersion` 4.1.1,
 `bundle.iOS.infoPlist` and `bundle.android.minSdkVersion` 24 in
 `tauri.conf.json`. The Android package name and the iOS bundle id both come from
 the top-level `identifier` (`com.musiclibraryoptimizer.lamusica` — the old

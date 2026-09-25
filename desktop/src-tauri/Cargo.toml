@@ -1,6 +1,6 @@
 [package]
 name = "mlo-desktop"
-version = "4.1.0"
+version = "4.1.1"
 description = "la musica desktop shell (Tauri v2)"
 authors = ["dillydalli3r"]
 edition = "2021"
@@ -39,7 +39,10 @@ parking_lot = "0.12"
 [target.'cfg(target_os = "ios")'.dependencies]
 objc2 = "0.6.4"
 block2 = "0.6.2"
-objc2-foundation = { version = "0.3", features = ["NSString"] }
+# `NSData` is the keep-alive player's input (the generated silence in
+# ios_audio.rs — `AVAudioPlayer initWithData:`); `NSString` is the audio
+# session's category/mode constants and the star's event name.
+objc2-foundation = { version = "0.3", features = ["NSData", "NSString"] }
 
 [profile.release]
 codegen-units = 1

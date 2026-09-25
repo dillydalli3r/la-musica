@@ -5,7 +5,13 @@ import re
 from .paths import tools_dirs
 
 # Vendored pip packages whose import name differs from the pip name.
-PIP_IMPORT_NAMES = {"yt-dlp": "yt_dlp"}
+#
+# `eac-logchecker` is the one whose code is a MODULE, not a package: pip installs
+# `eac_logchecker.py` beside the folder's `.dist-info`. Reading it off the pip
+# name (or demanding `<name>/__init__.py`) made a finished install invisible to
+# the detector AND, in the installer's own landed check, a failure that DELETED
+# it — see tools.pip_import_present.
+PIP_IMPORT_NAMES = {"yt-dlp": "yt_dlp", "eac-logchecker": "eac_logchecker"}
 
 
 def _parse_version(s):
@@ -615,9 +621,27 @@ def _version_sort_key(version):
     return tuple(int(p) if p.isdigit() else 0 for p in re.split(r"[._\-+]", version))
 
 
+def pip_import_present(folder, pkg):
+    """Whether *folder* — a `<pkg> vX` tools folder — holds *pkg*'s importable
+    code: the `<import name>/` package pip's wheel installs, or the single
+    `<import name>.py` module a package of that shape ships instead.
+
+    ONE answer to "is this pip package installed here", used by BOTH callers
+    that have to ask it — the detector (_pip_pkg_dirs) and the installer's own
+    landed check (fetchdeps._install_pip_package). They used to give different
+    answers to the same question, which is how an install the app can import
+    came to be reported as a failure AND deleted: the installer demanded
+    `<top>/__init__.py` for every package, and eac-logchecker installs
+    `eac_logchecker.py`, a module. A folder the two disagree about is a folder
+    whose row says "Missing" right after the install filled it.
+    """
+    top = PIP_IMPORT_NAMES.get(pkg, pkg)
+    return (os.path.isfile(os.path.join(folder, top, "__init__.py"))
+            or os.path.isfile(os.path.join(folder, top + ".py")))
+
+
 def _pip_pkg_dirs(pkg):
     """[(version, dir)] for every vendored install of *pkg* in a tools folder."""
-    top = PIP_IMPORT_NAMES.get(pkg, pkg)
     out = []
     for root in tools_dirs():
         if not os.path.isdir(root):
@@ -630,7 +654,7 @@ def _pip_pkg_dirs(pkg):
             full = os.path.join(root, entry)
             if not (os.path.isdir(full) and entry.lower().startswith(pkg.lower())):
                 continue
-            if not os.path.isfile(os.path.join(full, top, "__init__.py")):
+            if not pip_import_present(full, pkg):
                 continue
             out.append((_pkg_dist_version(full, pkg) or _pkg_folder_version(entry, pkg),
                         full))
