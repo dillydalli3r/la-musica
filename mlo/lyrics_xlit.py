@@ -821,7 +821,7 @@ def run_lyrics_xlit(config):
     # reason to be serial too. worker_limit bounds how many run at once, and
     # the AI layer's per-chunk disk cache is lock-protected, so two tracks
     # asking for the same transform still pay for it once.
-    workers = worker_count(config, default=4, maximum=8, items=len(files))
+    workers = worker_count(config, maximum=8, items=len(files))
     try:
         if len(files) == 1 or workers == 1:
             for path in files:

@@ -496,7 +496,8 @@ def check_flac_convert_seektable(tmp):
                 os.remove(os.path.join(tmp, f))
         args = (FFMPEG_EXE, FFPROBE_EXE, METAFLAC_EXE, src, 8, "", {},
                 cfg(library_codec="flac", lossless_remove_original=False,
-                    **cfg_over))
+                    **cfg_over),
+                1)          # the lane's share of the thread budget (script 3)
         name, good, msg, _r, _a = flac._convert_lossless_source(args)
         assert good, f"conversion failed: {msg}"
         return os.path.join(tmp, "convert_source.flac")
@@ -642,6 +643,40 @@ def _lyric_album(tmp, name, count):
             {"TITLE": f"Song {i + 1}", "ARTIST": "A", "ALBUM": "Album",
              "TRACKNUMBER": str(i + 1)}))
     return lib, album, out
+
+
+def check_worker_budget_semantics(tmp):
+    """The one knob: 0 = the machine, ceilings cap only the automatic width.
+
+    ``worker_limit`` is what every script's lanes come from, so its precedence
+    is the setting's own contract: an explicit number is the user's size (never
+    clamped), 0/unset means every core this process may use, a script's own
+    ceiling may only lower THAT automatic number, and the pool never starts
+    more lanes than it has items. `thread_budget`/`tool_threads` report the
+    same machine so lanes × threads-per-lane stays within it (R79, R323).
+    """
+    from mlo import stats as stats_mod
+
+    cores = stats_mod.usable_cores()
+    ok(stats_mod.worker_count({}) == cores,
+       f"0 lanes nothing: the automatic width is the machine's ({cores})")
+    ok(stats_mod.worker_count({"worker_limit": 0}, maximum=4, items=100)
+       == min(4, cores),
+       "a script's own ceiling lowers only the automatic width")
+    ok(stats_mod.worker_count({"worker_limit": 9}, maximum=4, items=100) == 9,
+       "an explicit Worker threads value is the user's size, not a ceiling's")
+    ok(stats_mod.worker_count({}, items=2) == min(2, cores),
+       "the pool never starts more lanes than it has items")
+    ok(stats_mod.worker_count({"worker_limit": "junk"}) == cores,
+       "a junk value falls back to automatic instead of raising")
+    budget = stats_mod.thread_budget({})
+    for lanes in (1, 2, 4):
+        if lanes > budget:
+            continue
+        share = stats_mod.tool_threads({}, lanes)
+        ok(lanes * share <= budget,
+           f"{lanes} lane(s) of {share} thread(s) stay within the budget of "
+           f"{budget}")
 
 
 def check_lyrics_fetch_concurrency(tmp):
@@ -1370,7 +1405,8 @@ def check_ffprobe_asked_only_when_needed(tmp):
     try:
         name, converted, info, _rem, _add = mlo_flac._convert_lossless_source((
             FFMPEG_EXE, FFPROBE_EXE, METAFLAC_EXE, src, 5, "1.5.0", {},
-            cfg(music_folder=tmp, lossless_remove_original=False)))
+            cfg(music_folder=tmp, lossless_remove_original=False),
+            1))         # the lane's share of the thread budget (script 3)
     finally:
         mlo_flac.run_tool = real_run
 
@@ -1420,6 +1456,7 @@ def main():
         ("script 10 Format all (cover cache)", check_format_all_cover_prepared_once),
         ("script 7/3 ffprobe spawns", check_ffprobe_asked_only_when_needed),
         ("all       atomic sidecar writes", check_fsync_dir),
+        ("all       the worker budget knob", check_worker_budget_semantics),
     ]
     bad = 0
     for label, fn in checks:

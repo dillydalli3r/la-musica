@@ -349,7 +349,7 @@ def _convert_to_wavs(ffmpeg_exe, track_paths, tmp_dir, config, transport=None):
         # used ("AC/DC") where the file this app wrote says "AC_DC".
         name_map[name_key(base).lower()] = wav_base
 
-    workers = (worker_count(config, default=4, maximum=8, items=len(tasks))
+    workers = (worker_count(config, maximum=8, items=len(tasks))
                if transport is None
                else max(1, min(int(transport), len(tasks))))
     errors = []
@@ -1127,9 +1127,9 @@ def run_generate_accurip(config):
     # one disc gets is the SAME budget divided among the lanes (never one
     # width per lane): a Run All on a CD library used to run one album at a
     # time with N ffmpeg processes, and it must not turn into lanes x N.
-    workers = worker_count(config, default=min(4, os.cpu_count() or 1),
+    workers = worker_count(config,
                            maximum=8, items=len(cd_albums))
-    transport_width = worker_count(config, default=4, maximum=8)
+    transport_width = worker_count(config, maximum=8)
     per_disc = max(1, transport_width // max(1, workers))
 
     counts = {"ok": 0, "skip": 0, "fail": 0}

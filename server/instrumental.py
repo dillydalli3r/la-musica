@@ -61,6 +61,7 @@ person to answer for every instrumental track in the library.
 import os
 from concurrent.futures import ThreadPoolExecutor
 
+from mlo.stats import worker_count
 from server import integrations as intg
 
 # Every key `answers` may carry.
@@ -461,8 +462,11 @@ def detect_instrumental(paths, cfg=None):
     # A few tracks at a time: LRCLIB spaces its own lookups, so one track's
     # latency overlaps the next track's throttled wait. A single track needs no
     # pool, and a list is FULLY collected here — nothing outlives this call.
-    if len(tracks) > 1:
-        with ThreadPoolExecutor(max_workers=min(4, len(tracks))) as pool:
+    # The width is the shared setting's, not a constant: 8 is this pass's own
+    # politeness ceiling and the run's budget still bounds it (R79, R323).
+    net_workers = worker_count(cfg, maximum=8, items=len(tracks))
+    if len(tracks) > 1 and net_workers > 1:
+        with ThreadPoolExecutor(max_workers=net_workers) as pool:
             nets = list(pool.map(_network, tracks))
     else:
         nets = [_network(track) for track in tracks]
@@ -500,8 +504,9 @@ def detect_instrumental(paths, cfg=None):
     def _ai(job):
         return _ai_answer(cfg, job[1], job[2], job[3])
 
-    if len(pending) > 1:
-        with ThreadPoolExecutor(max_workers=min(4, len(pending))) as pool:
+    ai_workers = worker_count(cfg, maximum=8, items=len(pending))
+    if len(pending) > 1 and ai_workers > 1:
+        with ThreadPoolExecutor(max_workers=ai_workers) as pool:
             ai_answers = list(pool.map(_ai, pending))
     else:
         ai_answers = [_ai(job) for job in pending]

@@ -2031,7 +2031,7 @@ def export_tracks(cfg, paths, dest, subfolder="Music", codec="copy",
     verify = bool(option(cfg, opts, "verify"))
     prune = bool(option(cfg, opts, "prune")) and not zip_target
     workers = option_int(cfg, opts, "workers", 0, 64) or worker_count(
-        cfg, default=max(2, (os.cpu_count() or 4) // 2), maximum=8, items=len(paths))
+        cfg, maximum=8, items=len(paths))
     workers = min(workers, max(1, len(paths)))
 
     # The equalizer profile is resolved once: the chain is the same for every

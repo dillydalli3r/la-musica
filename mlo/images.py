@@ -2452,7 +2452,7 @@ def run_process_images(config):
         return stats
 
     cpu_count = os.cpu_count() or 1
-    est_workers = worker_count(config, default=cpu_count, items=len(files))
+    est_workers = worker_count(config, maximum=cpu_count, items=len(files))
     # Each cjxl lane's own thread count. The pool above runs *est_workers*
     # files at once, so this must be the worker budget divided among them —
     # NOT cpu_count, which made the pass occupy every core however low the
@@ -2704,7 +2704,7 @@ def run_process_images(config):
     log(f"prepared {len(tasks)} task(s) from {len(files)} file(s) (mode: {mode})")
 
     if tasks:
-        workers = worker_count(config, default=cpu_count, items=len(tasks))
+        workers = worker_count(config, maximum=cpu_count, items=len(tasks))
         counts = {"ok": 0, "skip": 0, "fail": 0}
 
         with ThreadPoolExecutor(max_workers=workers) as executor:

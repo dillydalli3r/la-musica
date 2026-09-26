@@ -600,7 +600,7 @@ def run_format_all(config):
     }
 
     # Use thread pool for I/O-bound formatting
-    workers = worker_count(config, default=8, maximum=16, items=total_tasks)
+    workers = worker_count(config, maximum=16, items=total_tasks)
     counts = {"ok": 0, "skip": 0, "fail": 0}
     pbar = _make_pbar(total_tasks, "Formatting", unit="file")
 

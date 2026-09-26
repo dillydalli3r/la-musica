@@ -85,20 +85,23 @@ def have_numpy():
 
 
 def measure_track(path, ffmpeg_exe, *, block_seconds=BLOCK_SECONDS,
-                  sample_rate=MEASURE_SAMPLE_RATE, channels=0):
+                  sample_rate=MEASURE_SAMPLE_RATE, channels=0, threads=0):
     """The track's DR (the loudness-war value), or None.
 
     None means the meter has no value for the file at all — silent, shorter
     than two blocks, undecodable, or no numpy. measure_track_detailed() says
-    which, which is what the caller logs.
+    which, which is what the caller logs. *threads* is the ffmpeg decoder's
+    own thread count (0 = ffmpeg's default): a caller decoding several tracks
+    at once passes ONE lane's share, so N lanes do not claim N × cores (R79).
     """
     return measure_track_detailed(path, ffmpeg_exe, block_seconds=block_seconds,
                                   sample_rate=sample_rate,
-                                  channels=channels).dr
+                                  channels=channels, threads=threads).dr
 
 
 def measure_track_detailed(path, ffmpeg_exe, *, block_seconds=BLOCK_SECONDS,
-                           sample_rate=MEASURE_SAMPLE_RATE, channels=0):
+                           sample_rate=MEASURE_SAMPLE_RATE, channels=0,
+                           threads=0):
     """measure_track(), plus why there is no value when there is none.
 
     *channels* is the channel count the caller already knows (an open handle's
@@ -118,7 +121,7 @@ def measure_track_detailed(path, ffmpeg_exe, *, block_seconds=BLOCK_SECONDS,
 
     samples_per_block = max(1, int(block_seconds * sample_rate))
     block_bytes = samples_per_block * _SAMPLE_BYTES * channels
-    argv = _decode_argv(path, ffmpeg_exe, sample_rate)
+    argv = _decode_argv(path, ffmpeg_exe, sample_rate, threads=threads)
 
     peaks = []
     rms_values = []
@@ -263,11 +266,19 @@ def _ffprobe_for(ffmpeg_exe):
     return "ffprobe"
 
 
-def _decode_argv(path, ffmpeg_exe, sample_rate):
-    """The meter's own decode: first audio stream, float32, resampled, stdout."""
-    return [ffmpeg_exe, "-loglevel", "fatal", "-nostdin", "-i", path,
-            "-map", "0:a:0", "-c:a", "pcm_f32le", "-ar", str(sample_rate),
-            "-f", "f32le", "-"]
+def _decode_argv(path, ffmpeg_exe, sample_rate, threads=0):
+    """The meter's own decode: first audio stream, float32, resampled, stdout.
+
+    *threads* > 0 caps the decoder's own threads before ``-i`` (where ffmpeg
+    options describe the INPUT). Zero leaves ffmpeg's default alone, which is
+    what a single-track measurement wants.
+    """
+    argv = [ffmpeg_exe, "-loglevel", "fatal", "-nostdin"]
+    if int(threads or 0) > 0:
+        argv += ["-threads", str(int(threads))]
+    return argv + ["-i", path,
+                   "-map", "0:a:0", "-c:a", "pcm_f32le", "-ar", str(sample_rate),
+                   "-f", "f32le", "-"]
 
 
 def _block_peak(block, channels):

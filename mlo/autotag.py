@@ -1114,7 +1114,7 @@ def fill_release_identity(files, release, config=None):
         except Exception:
             return "failed"
 
-    workers = worker_count(config, default=8, maximum=8, items=len(paths))
+    workers = worker_count(config, maximum=8, items=len(paths))
     with ThreadPoolExecutor(max_workers=workers) as ex:
         outcomes = list(ex.map(_one, paths))
     return {"written": sum(1 for o in outcomes if o == "written"),
@@ -1733,7 +1733,7 @@ def run_auto_tagging(config):
 
     counts = {"ok": 0, "skip": 0, "fail": 0}
     pbar = _make_pbar(len(album_dirs), "AutoTag", unit="album")
-    workers = worker_count(config, default=8, maximum=8, items=len(album_dirs))
+    workers = worker_count(config, maximum=8, items=len(album_dirs))
     # Stage 1: the album-level work (release identity, instrumental, advisory).
     album_results = {}
     with ThreadPoolExecutor(max_workers=workers) as ex:
@@ -1754,7 +1754,7 @@ def run_auto_tagging(config):
         # Sized by TRACKS, not albums: the work waiting here is one decode per
         # track, and an album count of 1 would otherwise pin a 15-track album
         # to a single lane (the import case, exactly).
-        track_workers = worker_count(config, default=8, maximum=8,
+        track_workers = worker_count(config, maximum=8,
                                      items=len(track_work))
         with ThreadPoolExecutor(max_workers=track_workers) as ex:
             futures = {ex.submit(mood_genre_for_track, item): item[0]

@@ -673,7 +673,7 @@ def verify_album_checksums(ffmpeg_exe, album_dir, paths, config=None, workers=No
         # caller's per-album share) wins when given.
         if workers is None:
             from .stats import worker_count
-            workers = worker_count(config, default=4, maximum=4,
+            workers = worker_count(config, maximum=4,
                                    items=len(to_decode))
         workers = max(1, min(int(workers), len(to_decode)))
         with ThreadPoolExecutor(max_workers=workers) as ex:

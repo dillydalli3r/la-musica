@@ -1274,7 +1274,7 @@ def submit_files(cfg, files, progress=None):
     # runs in the same bounded lanes every other multi-file runner uses; the
     # dedupe questions and the batch below stay in order, because the service
     # layer's shared throttle — not the CPU — decides how fast they go.
-    workers = worker_count(cfg, default=4, maximum=8, items=len(files))
+    workers = worker_count(cfg, maximum=8, items=len(files))
     if len(files) == 1 or workers == 1:
         prepared = [prepare_submission(cfg, path) for path in files]
     else:
@@ -1930,7 +1930,7 @@ def run_fix_pairs(cfg=None):
     # fpcalc/lookup, and both layers serialise what must be serialised
     # (fpcalc runs as its own process, the service calls through the shared
     # throttle), so lanes overlap the wait instead of paying it once per file.
-    workers = worker_count(cfg, default=4, maximum=8, items=len(files))
+    workers = worker_count(cfg, maximum=8, items=len(files))
     try:
         if len(files) == 1 or workers == 1:
             for path in files:

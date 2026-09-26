@@ -1131,6 +1131,7 @@ try {
     heads.forEach((th, i) => { if (names[i]) widths[names[i]] = Math.round(th.getBoundingClientRect().width); });
     const coverCell = row && coverAt >= 0 ? row.querySelectorAll("td")[coverAt] : null;
     return {
+      tableW: Math.round(table.getBoundingClientRect().width),
       wrapClient: wrap.clientWidth, wrapScroll: wrap.scrollWidth,
       headers: names.filter(Boolean).length,
       cells: row ? row.querySelectorAll("td").length : 0,
@@ -1172,43 +1173,85 @@ try {
         + `(${zeroAlbums?.headers ?? 0} headers, ${zeroAlbums?.cells ?? 0} cells, cover ${zeroAlbums?.cover ?? 0} px)`,
         !!zeroAlbums && zeroAlbums.headers >= 8 && zeroAlbums.cells >= 8 && zeroAlbums.cover >= 20,
         JSON.stringify(zeroAlbums?.widths));
-  const sane = await widthCase({ "mlo-colw-tracks": JSON.stringify({ title: 300 }) }, "Tracks", "Title");
-  check(`a sane stored width is still honoured — the reader's own 300 px title column `
-        + `(${sane?.widths?.Title ?? 0} px)`,
-        (sane?.widths?.Title ?? 0) === 300, JSON.stringify(sane?.widths));
+  /* A stored width is a PREFERENCE about how the table's width is spent, never
+   * a floor the table has to be that wide. `table-layout: fixed` makes the sum
+   * of a table's columns its own floor, so a stored map — every value inside
+   * the handle's own 40-900 clamp, i.e. nothing the sanitizer may drop — used
+   * to draw a 1420 px Artists table in a 1200 px box and an album tracklist of
+   * 3848 px: the owner's "columns are VERY long ... rows seem really wide".
+   * useFittedWidths gives each column its own floor first and shares what is
+   * left over among the columns the reader sized, so a table comes out exactly
+   * as wide as it would with no stored widths at all, and the sideways scroll
+   * stays for the one case it is the design for: a table whose own floors
+   * cannot fit (the Tracks view's 1532 px of floors in a 1200 px box). */
+  const cleanTracks = await widthCase({ "mlo-colw-tracks": null, "mlo-colw-albums": null }, "Tracks", "Title");
+  await page.setViewportSize({ width: 801, height: 900 });
+  const trackFloors = await widthCase({ "mlo-colw-tracks": null }, "Tracks", "Title");
+  await page.setViewportSize({ width: 1440, height: 900 });
+  const mappedTracks = await widthCase(
+    { "mlo-colw-tracks": JSON.stringify({ title: 900, artist: 900, album: 900, bitrate: 900 }) }, "Tracks", "Title");
+  const shrunkTracks = Object.keys(trackFloors?.widths ?? {}).filter(
+    (label) => (mappedTracks?.widths?.[label] ?? 0) + 1 < (trackFloors?.widths?.[label] ?? 0));
+  check(`Tracks: a stored map cannot widen the table — ${mappedTracks?.tableW ?? 0} px with the map, `
+        + `${cleanTracks?.tableW ?? 0} px without it (wrapper ${mappedTracks?.wrapClient ?? 0} px)`,
+        !!cleanTracks && !!mappedTracks && mappedTracks.tableW === cleanTracks.tableW
+          && mappedTracks.wrapScroll === cleanTracks.wrapScroll && shrunkTracks.length === 0,
+        shrunkTracks.join(",") || JSON.stringify(mappedTracks?.widths));
+  const cleanAlbums = await widthCase({ "mlo-colw-albums": null }, "Albums", "Album");
+  await page.setViewportSize({ width: 801, height: 900 });
+  const albumFloors = await widthCase({ "mlo-colw-albums": null }, "Albums", "Album");
+  await page.setViewportSize({ width: 1440, height: 900 });
+  const mappedAlbums = await widthCase(
+    { "mlo-colw-albums": JSON.stringify({ album: 900, artist: 900, media: 900 }) }, "Albums", "Album");
+  const shrunkAlbums = Object.keys(albumFloors?.widths ?? {}).filter(
+    (label) => (mappedAlbums?.widths?.[label] ?? 0) + 1 < (albumFloors?.widths?.[label] ?? 0));
+  check(`Albums: the same — ${mappedAlbums?.tableW ?? 0} px with the map, ${cleanAlbums?.tableW ?? 0} px without it `
+        + `(wrapper ${mappedAlbums?.wrapClient ?? 0} px)`,
+        !!cleanAlbums && !!mappedAlbums && mappedAlbums.tableW === cleanAlbums.tableW
+          && mappedAlbums.wrapScroll === cleanAlbums.wrapScroll && shrunkAlbums.length === 0,
+        shrunkAlbums.join(",") || JSON.stringify(mappedAlbums?.widths));
+  /* And where the columns DO fit, the reader's width is honoured in the room
+   * there is: a 300 px grade on the Artists tab at 1440 (its columns' floors
+   * leave 604 px of 1200). The Tracks view has no such room to demonstrate —
+   * its 1532 px of floors nearly fill its own box (the library's content area
+   * caps at ~1552 px), which is the case R313 keeps the sideways scroll for. */
+  const artistsSane = await widthCase(
+    { "mlo-colw-artists": JSON.stringify({ grade: 300 }) }, "Artists", "Artist");
+  check(`a stored width is honoured where the table has room for it `
+        + `(Artists grade 300 px -> ${artistsSane?.widths?.Grade ?? 0} px, its floor is 112 px)`,
+        (artistsSane?.widths?.Grade ?? 0) >= 300, JSON.stringify(artistsSane?.widths));
 
   /* ---- 10. the Artists tab must not scroll while its columns fit --------
    * The owner's screenshot: a short artist list with a scrollbar along the
-   * bottom. `table-layout: fixed` makes the sum of the columns' own widths the
-   * table's floor, so four stored drag widths — every one of them well inside
-   * the handle's own 40-900 range — drew a 1420 px table in a 1200 px wrapper
-   * although the artists columns' own floors sum to 596 px. useFittedWidths
-   * brings the stored map inside what the table can show (the columns' floors
-   * plus the box's free room), which keeps the reader's proportions and leaves
-   * the sideways scroll to the case it is the design for: a table whose own
-   * floors genuinely exceed its box (the Albums and Tracks views at 1440,
-   * measured below). */
-  await viewTab("Artists").click();
-  await page.waitForTimeout(400);
-  const artistsClean = await tableView("Artist");
+   * bottom. Its four columns' own floors sum to 596 px, so the box has room
+   * for them; the floor of the check is the FLOOR of each column, measured
+   * here at 801 px (where the artists table is exactly its own floors), and
+   * then the same table at 1440 with four legal 900 px drag widths stored. */
+  await page.setViewportSize({ width: 801, height: 900 });
+  const artistFloors = await widthCase({ "mlo-colw-artists": null }, "Artists", "Artist");
+  await page.setViewportSize({ width: 1440, height: 900 });
+  const artistsClean = await widthCase({ "mlo-colw-artists": null }, "Artists", "Artist");
   const overWide = await widthCase(
-    { "mlo-colw-artists": JSON.stringify({ albums: 300, tracks: 300, checks: 300, grade: 300 }) },
+    { "mlo-colw-artists": JSON.stringify({ albums: 900, tracks: 900, checks: 900, grade: 900 }) },
     "Artists", "Artist");
-  check(`Artists: the columns' own floors fit the box, so no stored map may scroll it `
-        + `(${overWide?.wrapScroll ?? 0} vs ${overWide?.wrapClient ?? 0} px with four stored 300 px columns; `
-        + `clean ${artistsClean?.wrapScroll ?? 0} vs ${artistsClean?.wrapClient ?? 0} px)`,
-        !!overWide && overWide.wrapScroll <= overWide.wrapClient + 1
-          && (overWide.widths.Grade ?? 0) > 0 && (overWide.widths.Checks ?? 0) > 0,
+  check(`Artists: the map cannot widen or scroll the table while its columns fit `
+        + `(${overWide?.tableW ?? 0} px / wrapper ${overWide?.wrapScroll ?? 0} of ${overWide?.wrapClient ?? 0} px; `
+        + `clean ${artistsClean?.tableW ?? 0} px)`,
+        !!overWide && overWide.tableW === artistsClean?.tableW
+          && overWide.wrapScroll <= overWide.wrapClient + 1,
         JSON.stringify(overWide?.widths));
-  const albumsOver = await widthCase({ "mlo-colw-albums": null, "mlo-colw-tracks": null }, "Albums", "Album");
-  const tracksOver = await widthCase({ "mlo-colw-tracks": null }, "Tracks", "Title");
+  const shrunk = Object.keys(artistFloors?.widths ?? {}).filter(
+    (label) => (overWide?.widths?.[label] ?? 0) < (artistFloors?.widths?.[label] ?? 0));
+  check(`…and every column keeps at least its own floor `
+        + `(${["Releases", "Tracks", "Checks", "Grade"].map((l) => `${l} ${artistFloors?.widths?.[l]}->${overWide?.widths?.[l]}`).join(", ")})`,
+        shrunk.length === 0, shrunk.join(","));
   console.log(`\n[stored widths] hostile Tracks maps draw `
     + hostileTracks.map(({ what, t }) => `${t?.headers ?? 0}h/${t?.cells ?? 0}c/cover ${t?.cover ?? 0}px (${what})`).join(", ")
-    + ` | hostile Albums map ${zeroAlbums?.headers ?? 0}h/${zeroAlbums?.cells ?? 0}c/cover ${zeroAlbums?.cover ?? 0}px`
-    + ` | sane 300 px title -> ${sane?.widths?.Title ?? 0} px (its own floor: ${tracksOver?.widths?.Title ?? 0} px)`);
-  console.log(`[library-az tables @1440] Artists ${artistsClean?.wrapScroll}/${artistsClean?.wrapClient} px `
-    + `(with four stored 300 px columns: ${overWide?.wrapScroll}/${overWide?.wrapClient} px), `
-    + `Albums ${albumsOver?.wrapScroll}/${albumsOver?.wrapClient} px, Tracks ${tracksOver?.wrapScroll}/${tracksOver?.wrapClient} px`);
+    + ` | hostile Albums map ${zeroAlbums?.headers ?? 0}h/${zeroAlbums?.cells ?? 0}c/cover ${zeroAlbums?.cover ?? 0}px`);
+  console.log(`[library-az tables @1440] Artists ${cleanTracks ? "clean" : ""} `
+    + `${artistsClean?.tableW ?? 0} px (hostile ${overWide?.tableW ?? 0} px, wrapper ${overWide?.wrapScroll ?? 0}/${overWide?.wrapClient ?? 0}), `
+    + `Albums ${cleanAlbums?.tableW ?? 0} px (hostile ${mappedAlbums?.tableW ?? 0} px, scroll ${mappedAlbums?.wrapScroll ?? 0}/${mappedAlbums?.wrapClient ?? 0}), `
+    + `Tracks ${cleanTracks?.tableW ?? 0} px (hostile ${mappedTracks?.tableW ?? 0} px, scroll ${mappedTracks?.wrapScroll ?? 0}/${mappedTracks?.wrapClient ?? 0})`);
   await page.evaluate(() => localStorage.removeItem("mlo-test-width-seed"));
 } finally {
   await browser.close();

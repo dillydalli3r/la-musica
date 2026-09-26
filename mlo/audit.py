@@ -222,7 +222,7 @@ def _audit_batch(cli, paths, config):
                 return {"filePath": p, "fileName": os.path.basename(p), "status": "Unknown",
                         "errorMessage": str(e)[:200], "statusOnly": True}
 
-        workers = worker_count(config, default=8, maximum=16, items=len(paths))
+        workers = worker_count(config, maximum=16, items=len(paths))
         with ThreadPoolExecutor(max_workers=workers) as ex:
             return list(ex.map(_info_one, paths))
 
@@ -909,7 +909,7 @@ def run_audit_library(config):
     # already carries an AUDIT verdict (the pass further down, which also
     # normalizes a legacy mixed-case value). Keyed by path:
     # {path: (is_cd, verdict, changed)}.
-    read_workers = worker_count(config, default=8, maximum=16, items=len(files))
+    read_workers = worker_count(config, maximum=16, items=len(files))
     with ThreadPoolExecutor(max_workers=read_workers) as pool:
         file_reads = dict(zip(files, pool.map(
             lambda p: _read_audit_tags(p, config.get("write_audit_tag", True),
@@ -1047,7 +1047,7 @@ def run_audit_library(config):
 
             cd_albums = {a: ps for a, ps in by_album_files.items()
                          if cd_album_map.get(a)}
-            cw = worker_count(config, default=4, maximum=8,
+            cw = worker_count(config, maximum=8,
                               items=len(cd_albums))
             # One album's share of that budget: the pool below runs *cw*
             # albums at once, and each of them may start this many decoders —
@@ -1243,7 +1243,7 @@ def run_audit_library(config):
                 ok, err = verify_integrity(p, ffmpeg_exe, flac_exe)
                 return p, ok, err
 
-            cw = worker_count(config, default=8, maximum=16,
+            cw = worker_count(config, maximum=16,
                               items=len(to_verify))
             with ThreadPoolExecutor(max_workers=cw) as ex:
                 futs = {ex.submit(_check_one, p): p for p in to_verify}
@@ -1568,7 +1568,7 @@ def run_audit_library(config):
         return album_dir, scores, notes, unscorable
 
     if cd_candidate_dirs:
-        workers = worker_count(config, default=8, maximum=8, items=len(cd_candidate_dirs))
+        workers = worker_count(config, maximum=8, items=len(cd_candidate_dirs))
         # One tick per album: scoring spawns a PHP process per disc, and the UI
         # header follows this bar.
         log_counts = {"ok": 0, "skip": 0, "fail": 0}

@@ -252,10 +252,7 @@ def run_format_cues(config):
         log("No .cue files found.")
         return stats
 
-    threads = worker_count(
-        config, default=(os.cpu_count() or 4) * 4,
-        maximum=64, items=len(cues)
-    )
+    threads = worker_count(config, maximum=64, items=len(cues))
     counts = {"ok": 0, "skip": 0, "fail": 0}
 
     with ThreadPoolExecutor(max_workers=threads) as ex:

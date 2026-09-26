@@ -370,6 +370,10 @@ def main():
     ap.add_argument("--build", default="auto", choices=("auto", "yes", "no"),
                     help="build the scratch library first (auto = when missing)")
     ap.add_argument("--json", default="")
+    ap.add_argument("--worker-limit", type=int, default=None,
+                    help="the Settings -> Performance 'Worker threads' value the "
+                         "chain runs with; omitted = the shipped default (0 = "
+                         "the machine's cores)")
     ap.add_argument("--import-phase", action="store_true", default=True)
     args = ap.parse_args()
 
@@ -391,6 +395,10 @@ def main():
         "targets": None,
     })
     cfg.pop("targets", None)
+    if args.worker_limit is not None:
+        # Set on the normalized dict, exactly as a saved Settings row reaches a
+        # real run — the chain must see one value, not a second mechanism.
+        cfg["worker_limit"] = args.worker_limit
 
     ids = [int(x) for x in args.only.split(",") if x.strip()] or list(DEFAULT_RUN_ALL_ORDER)
     skip = {int(x) for x in args.skip.split(",") if x.strip()}
@@ -399,6 +407,7 @@ def main():
 
     report = {"music": music, "albums": args.albums, "tracks": args.tracks,
               "seconds": args.seconds, "skipped": sorted(skip),
+              "worker_limit": cfg.get("worker_limit", 0),
               "scripts": [], "import_steps": [],
               "started": time.strftime("%Y-%m-%dT%H:%M:%S")}
 

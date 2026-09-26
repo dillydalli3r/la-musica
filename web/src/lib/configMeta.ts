@@ -606,7 +606,8 @@ export const CONFIG_GROUPS: CfgGroup[] = [
         { k: "short_folder_names", label: "Shorten folder names where the full one is too long", type: "bool" },
         { k: "layout_apply", label: "Optimize the library layout when it is scanned (script 20)", type: "bool", help: "On: a layout scan also settles what it can prove — an artist, album or file name spelled in the wrong letter case is renamed to the naming script's spelling, audio sitting outside any album folder is moved into the album its own tags name, and what is excess goes to the Trash: a stray file (an nfo, a db, a stray text file), a foreign folder holding no audio, an album folder with no audio in it, an artist folder with no album under it. Nothing is ever deleted — every removal sits in the Trash until you empty it, and the Trash page can put it back — and a file whose album cannot be read from its tags is reported instead. Off: the scan only reports." },
         { k: "lyrics_format", label: "Where lyrics are stored", type: "select", options: [["EMBEDDED", "Embedded in the audio file"], ["LRC", "LRC sidecar"], ["BOTH", "Both"]] },
-        { k: "worker_limit", label: "Worker threads (0 = count them from the CPU)", type: "number", min: 0, max: 64 },
+        { k: "worker_limit", label: "Worker threads (0 = every core)", type: "number", min: 0, max: 64,
+          help: "How many files a script works on at once, and how many CPU threads each of those gets. 0 uses every core this machine has (a script may keep a lower safe ceiling of its own, e.g. its native tool already saturates the disk); 1 makes every script work on one file at a time." },
       ],
     },
     {
@@ -741,6 +742,7 @@ export const CONFIG_GROUPS: CfgGroup[] = [
         { k: "download_bitrate", label: "Download bitrate (kbps) / Vorbis quality", type: "number", min: 0, max: 512, help: "The re-encode's rate: kbps for MP3/AAC/Opus, Vorbis' own 0-10 quality scale for Ogg. 0 uses the codec's own default (MP3 320, AAC 256, Ogg 6, Opus 128). Ignored while the codec above is Copy, and by a lossless target." },
         { k: "playback_source", label: "Play tracks from", type: "select", options: [["stream", "Streaming from the server — default"], ["downloaded", "The downloaded copy"]], help: "`Streaming` asks the server for the library file even when a copy is downloaded; `the downloaded copy` plays what is cached, saving bandwidth and working with the server away. Either way a copy plays when the server cannot be reached, because it is the only thing left." },
         { k: "gapless_playback", label: "Play albums without a gap between tracks", type: "bool", help: "On, the player keeps the next track preloaded and hands the sound over at a natural track end, so an album plays as the CD did. Off, every track is loaded and started on its own — pick it for a device that dislikes the handover, or if a track's trailing silence is being swallowed." },
+        { k: "infinite_playback", label: "Keep playing past the end of the queue", type: "bool", help: "On, the queue's last track gets a few SIMILAR tracks appended as ordinary queue rows before it ends, so the play never stops — reorder or remove them like any other row. They are scored from this library's own tags (nothing is fetched online, so it works offline), nothing already in the queue is added twice, and Repeat one still ends nothing. Off, the queue ends after its last track." },
       ],
     },
     {

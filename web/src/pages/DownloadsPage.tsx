@@ -14,7 +14,7 @@ import {
   useCachedPaths,
 } from "../lib/mediaCache";
 import { sortRows, SortHeader } from "../lib/sort";
-import { ColumnResizer, ColumnsMenu, useColumnPrefs, useColumnWidths, type Col } from "../lib/columns";
+import { ColumnResizer, ColumnsMenu, useColumnPrefs, useColumnWidths, useFittedWidths, type Col } from "../lib/columns";
 import { fmtDuration, fmtTech, GRID_SIZE_MIN, originalYear } from "../lib/fmt";
 import { albumRef } from "../lib/refs";
 import { GRID_SIZES, useGridSize, useLocalSort } from "../lib/libraryView";
@@ -175,6 +175,10 @@ function CachedAlbumRow({
   onResetTrackWidths: () => void;
 }) {
   const showAlbumCol = cols.includes("album");
+  // The nested cached-track table's own columns, in the order it draws them,
+  // and its stored widths fitted to its box (see useFittedWidths).
+  const trackDefs = TRACK_COLS.filter((c) => trackCols.includes(c.id));
+  const [drawnTrackWidths, trackBox] = useFittedWidths(trackWidths, trackDefs.map((c) => c.id));
   const cells: AlbumRowCell[] = [];
   if (cols.includes("artist"))
     cells.push({ id: "artist", cls: `td text-zinc-400 break-words${PHONE_HIDE}`, node: row.artist });
@@ -224,15 +228,15 @@ function CachedAlbumRow({
       onToggle={onToggle}
       colSpan={cols.length + 3}
       expandedContent={
-        <div className="overflow-x-auto">
+        <div className="overflow-x-auto" ref={trackBox}>
           <table className={`w-full ${CACHE_TRACK_MIN_W}`}>
           <thead className="border-b border-border">
             <tr>
-              {TRACK_COLS.filter((c) => trackCols.includes(c.id)).map((c) => (
+              {trackDefs.map((c) => (
                 <th
                   key={c.id}
                   className={`th relative ${TRACK_COL_W[c.id] ?? ""}${c.id === "num" || c.id === "bitrate" ? PHONE_HIDE : ""}`}
-                  style={trackWidths[c.id] ? { width: trackWidths[c.id] } : undefined}
+                  style={drawnTrackWidths[c.id] ? { width: drawnTrackWidths[c.id] } : undefined}
                 >
                   {c.label}
                   <ColumnResizer
@@ -371,6 +375,8 @@ export default function DownloadsPage() {
   const [widths, setWidth, resetWidths] = useColumnWidths("cached");
   const [trackCols, toggleTrackCol] = useColumnPrefs("cached-tracks", TRACK_COLS);
   const [trackW, setTrackW, resetTrackW] = useColumnWidths("cached-tracks");
+  // Both tables' stored widths fitted to their own boxes (see useFittedWidths).
+  const [drawnWidths, cachedBox] = useFittedWidths(widths, COLS.filter((c) => cols.includes(c.id)).map((c) => c.id));
 
   const {
     data: lib,
@@ -683,7 +689,7 @@ export default function DownloadsPage() {
               ))}
             </div>
           ) : (
-            <div className="overflow-x-auto">
+            <div className="overflow-x-auto" ref={cachedBox}>
               <table className={`w-full text-sm ${CACHE_MIN_W}`}>
                 <thead className="border-b border-border">
                   <tr>
@@ -697,7 +703,7 @@ export default function DownloadsPage() {
                         sortKey={c.sortKey}
                         onSort={setSort}
                         className={`relative ${COL_W[c.id] ?? ""}${c.id === "album" ? "" : PHONE_HIDE}`}
-                        style={widths[c.id] ? { width: widths[c.id] } : undefined}
+                        style={drawnWidths[c.id] ? { width: drawnWidths[c.id] } : undefined}
                       >
                         <ColumnResizer
                           width={widths[c.id]}

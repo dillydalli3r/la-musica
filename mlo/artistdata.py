@@ -145,6 +145,15 @@ def _provenance_path(cfg, folder=None):
 # mtime and invalidates the entry.
 _MAP_CACHE = {"key": None, "data": {}}
 _MAP_LOCK = threading.Lock()
+# One lock for the LOAD → merge → SAVE of that shared file. Every writer
+# (an artist's image pass, a description fetch, an import) merges its own
+# folder's entry into the same document, so two lanes doing it at once would
+# each write a document without the other's entry — a lost update in the file
+# the artist page reads. It is also what keeps `_save_map`'s json.dump out of
+# a dict another writer is growing (that raises "dictionary changed size").
+# The lock is held for a parse and a small atomic write, never for a fetch or
+# an image encode, so it cannot serialise the pools themselves.
+_MAP_WRITE_LOCK = threading.Lock()
 
 
 def _load_map(cfg, folder=None):
@@ -167,6 +176,22 @@ def _load_map(cfg, folder=None):
     with _MAP_LOCK:
         _MAP_CACHE.update(key=key, data=data)
     return data
+
+
+def _read_map_fresh(cfg, folder=None):
+    """The provenance map as it is ON DISK, never the memoised copy.
+
+    Writers use this under :data:`_MAP_WRITE_LOCK`: a merge must start from the
+    latest file, or it would write a document that drops an entry another lane
+    saved a moment ago.
+    """
+    path = _provenance_path(cfg, folder)
+    try:
+        with open(path, "r", encoding="utf-8") as fh:
+            data = json.load(fh)
+    except Exception:
+        return {}
+    return data if isinstance(data, dict) else {}
 
 
 def _save_map(cfg, data, folder=None):
@@ -213,26 +238,33 @@ def write_provenance(folder, patch, kind="artist", cfg=None) -> dict:
     is distinguishable from the original fetch.
     """
     key = _norm_key(folder)
-    data = _load_map(cfg, folder)
-    entry = data.get(key) if isinstance(data.get(key), dict) else {}
-    patch = {k: v for k, v in dict(patch or {}).items() if v is not None}
-    if patch.get("source") and patch["source"] != entry.get("source"):
-        patch.setdefault("fetched", _now())
-    entry.update(patch)
-    entry.setdefault("fetched", _now())
-    entry["kind"] = kind or entry.get("kind") or "artist"
-    entry["updated"] = _now()
-    data[key] = entry
-    _save_map(cfg, data, folder)
+    with _MAP_WRITE_LOCK:
+        # The map on DISK under the lock, not the memoised copy: another lane
+        # may have saved its own entry since this one was read, and merging
+        # into the copy from before that write would drop it.
+        data = _read_map_fresh(cfg, folder)
+        entry = data.get(key) if isinstance(data.get(key), dict) else {}
+        patch = {k: v for k, v in dict(patch or {}).items() if v is not None}
+        if patch.get("source") and patch["source"] != entry.get("source"):
+            patch.setdefault("fetched", _now())
+        entry.update(patch)
+        entry.setdefault("fetched", _now())
+        entry["kind"] = kind or entry.get("kind") or "artist"
+        entry["updated"] = _now()
+        data[key] = entry
+        _save_map(cfg, data, folder)
+        _MAP_CACHE["key"] = None
     return dict(entry)
 
 
 def _drop_provenance(folder, cfg=None):
     key = _norm_key(folder)
-    data = _load_map(cfg, folder)
-    if key in data:
-        del data[key]
-        _save_map(cfg, data, folder)
+    with _MAP_WRITE_LOCK:
+        data = _read_map_fresh(cfg, folder)
+        if key in data:
+            del data[key]
+            _save_map(cfg, data, folder)
+        _MAP_CACHE["key"] = None
 
 
 def strip_mbid_suffix(name):
@@ -821,7 +853,7 @@ def run_optimize_artist_images(config):
             stats["unchanged_count"] += 1
             _pbar_update(pbar, counts)
 
-    workers = worker_count(config, default=4, maximum=8, items=len(folders))
+    workers = worker_count(config, maximum=8, items=len(folders))
     if len(folders) == 1 or workers == 1:
         for folder in folders:
             _tally(folder, _one(folder))

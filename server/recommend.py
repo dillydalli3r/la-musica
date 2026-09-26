@@ -57,6 +57,15 @@ DEFAULT_LIMIT = 12
 # may still ask for more than the default; `MAX_LIMIT` is the only ceiling.
 MAX_LIMIT = 50
 
+# Infinite playback's own batch: what ONE extension of a PLAYING queue adds
+# (`recommend_for_queue` / GET+POST /api/recommend/queue). A queue a listener is
+# listening to is not a shelf — a handful of rows keeps the music going without
+# dumping the library into it — so the route clamps to these whatever the caller
+# asks, and the web asks for the default by name (web/src/lib/recommend.ts'
+# QUEUE_BATCH, pinned equal by tools/test_recommendations.py).
+QUEUE_DEFAULT_LIMIT = 5
+QUEUE_MAX_LIMIT = 10
+
 KINDS = ("artist", "album", "track", "playlist", "tracks", "albums", "favorites")
 TARGETS = ("albums", "tracks")
 
@@ -563,3 +572,27 @@ def recommend(cfg, kind, ref="", limit=None, user="", seeds=None, target=None):
     # order — the shelf must not reshuffle between two identical requests.
     scored.sort(key=lambda pair: (-pair[0], pair[1]["path"]))
     return [_item(profile, cand, score) for score, cand in scored[:limit]]
+
+
+def recommend_for_queue(cfg, paths, limit=None):
+    """Rows to KEEP A PLAYING QUEUE GOING: tracks similar to the queue's own
+    set, and never a track it already holds.
+
+    `paths` is the queue itself — the seed set AND the exclusion set. Each entry
+    is a track file, or an album / artist folder, which `_seed_entries` resolves
+    the same way it does for a shelf: a queue seeded by a folder seeds from
+    every track of it. A queue is a seed LIST built by playing, so a duplicate
+    entry is one seed (never two rows), and a path the library no longer holds
+    is skipped rather than fatal — a queue holding a file that was since deleted
+    still gets its extension.
+
+    The answer is BOUNDED by `QUEUE_MAX_LIMIT` whatever the caller asks, and
+    defaults to `QUEUE_DEFAULT_LIMIT`: this extends a queue someone is
+    listening to, it is not a shelf, and nothing about it is worth a stall. An
+    empty or unmatched queue, or a library with nothing similar in it, is an
+    empty list — the play then simply ends as it did before the switch existed.
+    """
+    if limit is None:
+        limit = QUEUE_DEFAULT_LIMIT
+    limit = max(1, min(int(limit), QUEUE_MAX_LIMIT))
+    return recommend(cfg, "tracks", seeds=list(paths or []), limit=limit)

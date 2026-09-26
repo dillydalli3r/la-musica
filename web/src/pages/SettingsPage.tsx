@@ -1166,6 +1166,12 @@ export default function SettingsPage() {
           help: "On, the player keeps the next track preloaded and hands the sound over at a natural track end, so an album plays as the CD did. "
                 + "Off, every track is loaded and started on its own — pick it for a device that dislikes the handover, or when a track's trailing silence is being swallowed.",
         },
+        {
+          k: "infinite_playback", label: "Keep playing past the end of the queue", type: "bool",
+          help: "On, the queue's last track gets a few SIMILAR tracks appended as ORDINARY queue rows before it ends, so the play never stops — they reorder, "
+                + "remove and count like any other row, and nothing already in the queue is added twice. They are scored from this library's own tags, so no "
+                + "provider is asked and playback cannot hang on one; Repeat one still appends nothing. Off, the queue ends after its last track.",
+        },
       ],
     },
     {
@@ -2155,8 +2161,13 @@ export default function SettingsPage() {
                 </select>
               </label>
               <label className="block">
-                <span className="text-xs text-zinc-500 uppercase">Worker limit (0 = auto)</span>
-                <input className="input mt-1" type="number" min={0} value={workerLimit} onChange={(e) => setWorkerLimit(Number(e.target.value))} />
+                <span className="text-xs text-zinc-500 uppercase">Worker threads (0 = every core)</span>
+                <input className="input mt-1" type="number" min={0} max={64} value={workerLimit} onChange={(e) => setWorkerLimit(Number(e.target.value))} />
+                <span className="text-[11px] text-zinc-600 mt-1 block">
+                  How many files the scripts work on at once, and how many CPU threads each of those gets. 0 uses
+                  every core this machine has (each script may keep a lower safe ceiling of its own); 1 runs each
+                  script one file at a time.
+                </span>
               </label>
               <label className="block">
                 <span className="text-xs text-zinc-500 uppercase">{t("settings.language")}</span>

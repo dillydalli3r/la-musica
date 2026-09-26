@@ -82,6 +82,7 @@ from .stats import (
     _make_pbar,
     _walk_files,
     new_stats,
+    tool_threads,
     worker_count,
 )
 from .subproc import run_tool
@@ -260,7 +261,7 @@ def _unique_dest(src, out_ext=".mkv"):
 _DEST_LOCK = threading.Lock()
 
 
-def _ffmpeg_args(mode, cfg, acodecs=None):
+def _ffmpeg_args(mode, cfg, acodecs=None, threads=0):
     """Encoder arguments for a remux pass. Mode "2" = copied video + FLAC
     audio + copied captions; "2s" = copied video + FLAC audio + captions
     converted to SRT (rescue for text caption codecs the MKV muxer refuses);
@@ -302,10 +303,18 @@ def _ffmpeg_args(mode, cfg, acodecs=None):
     # captions to SubRip (content preserved) when the container refuses
     # the source codec. Bitmap captions (DVD/PGS/DVB) can only be copied.
     cmd += ["-c:s", "copy" if mode != "2s" else "srt"]
+    # An OUTPUT option (the caller appends this after the input and maps), so
+    # it caps the encoders a remux lane may use: several lanes run at once, so
+    # each takes one lane's share of the thread budget instead of every core
+    # per lane (R79). A copied stream ignores it; the FLAC audio encode and
+    # the "3" pass's libx264 obey it.
+    if int(threads or 0) > 0:
+        cmd += ["-threads", str(int(threads))]
     return cmd
 
 
-def remux_video(src, dest, ffmpeg_exe, ffprobe_exe, cfg, concat=False):
+def remux_video(src, dest, ffmpeg_exe, ffprobe_exe, cfg, concat=False,
+                threads=0):
     """Remux one video file to MKV. Returns (ok, message).
 
     ``dest`` must not exist (callers pass a temp path); on success the
@@ -322,6 +331,8 @@ def remux_video(src, dest, ffmpeg_exe, ffprobe_exe, cfg, concat=False):
     for a disc structure's chosen streams): the files it names reach ffmpeg as
     ONE input, in order, with every stream still copied — a disc title is
     remuxed by this same machinery, never by a second ffmpeg call beside it.
+    *threads* > 0 caps the output encoders' own threads (the caller passes one
+    lane's share of the run's budget, R79).
     """
     # Forward slashes: with backslash paths ffmpeg's VOB/VOB-VR demuxer can
     # expose phantom audio substreams (unknown codec parameters) that kill
@@ -363,7 +374,7 @@ def remux_video(src, dest, ffmpeg_exe, ffprobe_exe, cfg, concat=False):
     for mode in ("2", "2s", "3") if allow_reencode else ("2", "2s"):
         cmd = ([ffmpeg_exe, "-y", "-v", "error", "-nostdin"]
                + _input_args(src, concat) + stream_maps)
-        cmd += _ffmpeg_args(mode, cfg, acodecs)
+        cmd += _ffmpeg_args(mode, cfg, acodecs, threads=threads)
         # Chapters are copied from the source explicitly (ffmpeg's default,
         # spelled out so a future option change can't silently drop them).
         cmd += ["-map_chapters", "0", "-f", "matroska", dest]
@@ -516,10 +527,18 @@ def _split_discs(files, probe, explicit=()):
     return {k: (v[0], tuple(v[1])) for k, v in found.items()}, derivatives, plain
 
 
-def _remove_streams(streams, stats):
-    """Remove the streams a verified disc remux consumed. Returns the count
-    that could NOT be removed — the same failure the single-file path reports."""
+def _remove_streams(streams):
+    """Remove the streams a verified disc remux consumed.
+
+    Returns ``(failed, removed_count, removed_bytes)``: what could NOT be
+    removed — the same failure the single-file path reports — and the
+    accounting for what was. The counters are the RUNNER's to book, not a
+    lane's: this runs inside the pool, and two lanes incrementing
+    ``stats["total_bytes_removed"]`` would lose updates (R323).
+    """
     failed = 0
+    removed = 0
+    removed_bytes = 0
     for s in streams:
         try:
             before = os.path.getsize(s)
@@ -528,9 +547,9 @@ def _remove_streams(streams, stats):
         except OSError:
             failed += 1
             continue
-        stats["removed_originals"] += 1
-        stats["total_bytes_removed"] += before
-    return failed
+        removed += 1
+        removed_bytes += before
+    return failed, removed, removed_bytes
 
 
 def _ask_about_disc(disc, reason, config):
@@ -632,23 +651,30 @@ def run_remux_videos(config):
             "compressed derivative, or was left in place).")
         return stats
 
-    workers = worker_count(config, default=min(4, os.cpu_count() or 1),
-                           items=total)
+    # The setting's width, not a constant four: a lane is one ffmpeg PROCESS
+    # (video copied, lossless audio encoded to FLAC), and each lane's encoder
+    # takes one lane's share of the thread budget instead of every core per
+    # lane (R79, R323).
+    workers = worker_count(config, items=total)
+    lane_threads = tool_threads(config, workers)
     pbar = _make_pbar(total=total, desc="Remuxing videos")
 
     from concurrent.futures import ThreadPoolExecutor, as_completed
 
     def _job(path):
-        """(path, dest, message, bytes_added, skipped).
+        """(path, dest, message, bytes_added, removed, skipped).
 
         ``skipped`` is explicit: "already remuxed … remove failed" is a real
         failure that happens to start with the same words as the skip case,
-        so it must never be classified by its message text.
+        so it must never be classified by its message text. ``removed`` is
+        ``(count, bytes)`` this lane deleted, or ``None`` — the lane does not
+        touch ``stats``; the booking loop books what it returns, because two
+        lanes incrementing the same counter lose updates (R323).
         """
         ext = os.path.splitext(path)[1].lower()
         if ext == ".mkv":
             # Already the target container — nothing to normalize.
-            return path, None, "already MKV", 0, True
+            return path, None, "already MKV", 0, None, True
         if os.path.exists(os.path.splitext(path)[0] + ".mkv"):
             # A verified remux from an earlier run is already in place —
             # keep re-runs idempotent instead of piling up "(2).mkv" copies.
@@ -660,23 +686,23 @@ def run_remux_videos(config):
                     before = os.path.getsize(path)
                     with _DEST_LOCK:
                         os.remove(path)
-                    stats["removed_originals"] += 1
-                    stats["total_bytes_removed"] += before
-                    return path, None, "already remuxed — stray original removed", 0, True
+                    return (path, None, "already remuxed — stray original removed",
+                            0, (1, before), True)
                 except OSError as e:
                     return path, None, (
                         f"already remuxed (same-stem MKV exists); remove failed: {e}"
-                    ), 0, False
-            return path, None, "already remuxed (same-stem MKV exists)", 0, True
+                    ), 0, None, False
+            return path, None, "already remuxed (same-stem MKV exists)", 0, None, True
         # Unique temp file in the same directory (same volume => the final
         # os.replace is atomic). mkstemp guarantees no two jobs share one.
         fd, tmp = tempfile.mkstemp(
             prefix=".remux_", suffix=".mkv", dir=os.path.dirname(path) or ".")
         os.close(fd)
         try:
-            ok, msg = remux_video(path, tmp, ffmpeg, ffprobe, config)
+            ok, msg = remux_video(path, tmp, ffmpeg, ffprobe, config,
+                                  threads=lane_threads)
             if not ok:
-                return path, None, msg, 0, False
+                return path, None, msg, 0, None, False
             with _DEST_LOCK:
                 dest = _unique_dest(path)
                 os.replace(tmp, dest)
@@ -684,7 +710,7 @@ def run_remux_videos(config):
                 added = os.path.getsize(dest)
             except OSError:
                 added = 0
-            return path, dest, msg, added, False
+            return path, dest, msg, added, None, False
         finally:
             try:
                 if os.path.exists(tmp):
@@ -704,11 +730,13 @@ def run_remux_videos(config):
     def _disc_job(disc, disc_files):
         """One disc structure: pick its main feature, remux it as ONE input.
 
-        Returns ``(kind, path, dest, msg, added, skipped, consumed, refused)``
-        — ``consumed`` is how many of the run's files this job accounts for
-        (the progress bar counts files), and ``refused`` is ``(disc, reason)``
-        when mlo.videodisc would not choose, so the caller logs the reason and
-        raises the app's prompt for the folder.
+        Returns ``(kind, path, dest, msg, added, removed, skipped, consumed,
+        refused)`` — ``consumed`` is how many of the run's files this job
+        accounts for (the progress bar counts files), ``removed`` is the
+        ``(count, bytes)`` the job deleted or ``None`` (booked by the caller,
+        never here — see :func:`_remove_streams`), and ``refused`` is
+        ``(disc, reason)`` when mlo.videodisc would not choose, so the caller
+        logs the reason and raises the app's prompt for the folder.
 
         The remux itself is ``remux_video`` over a concat-demuxer list, so the
         verification, caption and chapter rules are the single-file ones; the
@@ -718,19 +746,20 @@ def run_remux_videos(config):
         count = len(disc_files)
         title, reason = videodisc.pick(disc, probe)
         if title is None:
-            return "disc", first, None, reason, 0, False, count, (disc, reason)
+            return "disc", first, None, reason, 0, None, False, count, (disc, reason)
         existing = videodisc.output_stem(disc) + ".mkv"
         if os.path.isfile(existing):
             if remove_original and title.duration and _measures(existing, title.duration, ffprobe):
-                failed = _remove_streams(title.streams, stats)
+                failed, rm_count, rm_bytes = _remove_streams(title.streams)
+                removed = (rm_count, rm_bytes) if rm_count else None
                 if not failed:
                     return ("disc", first, None, "already remuxed — stray original removed",
-                            0, True, count, None)
+                            0, removed, True, count, None)
                 return ("disc", first, None,
                         f"already remuxed (the disc's MKV exists); {failed} stream(s) "
-                        f"could not be removed", 0, False, count, None)
+                        f"could not be removed", 0, removed, False, count, None)
             return ("disc", first, None, "already remuxed (the disc's MKV exists)",
-                    0, True, count, None)
+                    0, None, True, count, None)
         list_path = None
         fd, tmp = tempfile.mkstemp(
             prefix=".remux_", suffix=".mkv", dir=os.path.dirname(first) or ".")
@@ -741,11 +770,12 @@ def run_remux_videos(config):
             fd, list_path = tempfile.mkstemp(prefix="mlo_disc_", suffix=".ffconcat")
             os.close(fd)
             videodisc.write_concat_list(title.streams, list_path)
-            ok, msg = remux_video(list_path, tmp, ffmpeg, ffprobe, config, concat=True)
+            ok, msg = remux_video(list_path, tmp, ffmpeg, ffprobe, config,
+                                  concat=True, threads=lane_threads)
             if not ok:
                 return ("disc", first, None,
                         f"disc title {title.key} ({title.parts} part(s)): {msg}",
-                        0, False, count, None)
+                        0, None, False, count, None)
             with _DEST_LOCK:
                 dest = _unique_dest(videodisc.output_stem(disc))
                 os.replace(tmp, dest)
@@ -761,13 +791,15 @@ def run_remux_videos(config):
                 except OSError:
                     pass
         label = f"{msg} [disc title {title.key}, {title.parts} part(s)]"
+        removed = None
         if remove_original:
-            failed = _remove_streams(title.streams, stats)
+            failed, rm_count, rm_bytes = _remove_streams(title.streams)
+            removed = (rm_count, rm_bytes) if rm_count else None
             if failed:
                 return ("disc", first, dest,
                         f"{label}; {failed} stream(s) could not be removed",
-                        added, False, count, None)
-        return "disc", first, dest, label, added, False, count, None
+                        added, removed, False, count, None)
+        return "disc", first, dest, label, added, removed, False, count, None
 
     with ThreadPoolExecutor(max_workers=workers) as pool:
         futures = [pool.submit(_plain_job, f) for f in files]
@@ -775,12 +807,18 @@ def run_remux_videos(config):
             futures.append(pool.submit(_disc_job, disc, disc_files))
         for fut in as_completed(futures):
             try:
-                kind, path, dest, msg, added, skipped, consumed, refused = fut.result()
+                kind, path, dest, msg, added, removed, skipped, consumed, refused = fut.result()
             except Exception as e:
                 stats["error_count"] += 1
                 stats["errors"].append(str(e))
                 pbar.update(1)
                 continue
+            if removed:
+                # What a lane deleted (a stray original, or a disc's consumed
+                # streams) is accounted here, on the one thread that owns
+                # `stats`, so no two lanes can lose each other's increments.
+                stats["removed_originals"] += removed[0]
+                stats["total_bytes_removed"] += removed[1]
             name = os.path.basename(path)
             if refused:
                 # Nothing was picked, so nothing was touched: the app asks

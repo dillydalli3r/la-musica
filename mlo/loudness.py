@@ -35,7 +35,7 @@ from .config import should_write_audio_tag
 from .paths import AUDIO_EXTS, app_data_dir
 from .stats import (
     new_stats, _make_pbar, _pbar_skip, _pbar_update, _walk_files,
-    _collect_targets, _find_albums, is_audio_file, worker_count,
+    _collect_targets, _find_albums, is_audio_file, worker_count, thread_budget,
 )
 from .subproc import run_tool
 from .tools import detect_all_tools
@@ -191,13 +191,22 @@ def _album_needs_dr(opened):
     return [p for p, af in opened.items() if _dr_missing_on(af)]
 
 
-def _dr_album(album, ffmpeg_exe, force, write_tags=True, config=None, rg=None):
+def _dr_album(album, ffmpeg_exe, force, write_tags=True, config=None, rg=None,
+              lanes=1):
     """Measure the album's tracks in process; write the DR tags.
 
     *rg* is ``{path: {tag: value}}`` from _scan_replaygain, already filtered by
     the per-type write gates. The two tag families ride in the same container
     pass, so a file that needs only ReplayGain is written here too and an
     album is never rewritten twice for tags that fit in one write.
+
+    *lanes* is how many ALBUM lanes are running (the caller's pool width): the
+    tracks' decodes are independent work units of their own, so they get a
+    share of the same budget instead of one album lane measuring its 15 tracks
+    strictly one after another — the shape R79 asks for, and what a one-album
+    import (chain script 7 with `targets`) spends most of its time in. Each
+    decode is handed ONE lane's thread share, so *lanes* × width decoders
+    still add up to the run's budget.
 
     Returns (files_modified, [(name, reason)] for the files that could not be
     measured at all). A track the meter has no value for — silent, shorter than
@@ -214,23 +223,45 @@ def _dr_album(album, ffmpeg_exe, force, write_tags=True, config=None, rg=None):
     failures = []
     album_value = None
     if measure:
-        for path, af in opened.items():
+        items = list(opened.items())
+        budget = thread_budget(config)
+        width = max(1, budget // max(1, int(lanes or 1)))
+        # Every decoder in this album lane's share gets `decoder_threads`, and
+        # lanes × width decoders at most are alive at once.
+        decoder_threads = max(1, budget // (max(1, int(lanes or 1)) * width))
+
+        def _measure(item):
+            path, af = item
             if af is None:
                 # The container would not open, so it cannot be decoded either.
+                return None, "", False
+            result = dr.measure_track_detailed(
+                path, ffmpeg_exe, channels=dr.handle_channels(af),
+                threads=decoder_threads)
+            return result.dr, result.reason, result.failed
+
+        if width > 1 and len(items) > 1:
+            with ThreadPoolExecutor(max_workers=min(width, len(items))) as ex:
+                results = list(ex.map(_measure, items))
+        else:
+            results = [_measure(item) for item in items]
+
+        # The album aggregate is computed HERE, after every track's lane has
+        # finished, and the per-track log stays in album order.
+        for (path, af), (value, reason, failed) in zip(items, results):
+            if af is None:
                 failures.append((os.path.basename(path),
                                  "the file could not be opened"))
                 continue
-            result = dr.measure_track_detailed(
-                path, ffmpeg_exe, channels=dr.handle_channels(af))
-            if result.dr is None:
+            if value is None:
                 name = os.path.basename(path)
-                if result.failed:
-                    failures.append((name, result.reason))
-                    log(c(f"      {name}: {result.reason}", Color.YELLOW))
+                if failed:
+                    failures.append((name, reason))
+                    log(c(f"      {name}: {reason}", Color.YELLOW))
                 else:
-                    log(f"      {name}: {result.reason}")
+                    log(f"      {name}: {reason}")
                 continue
-            values[path] = result.dr
+            values[path] = value
 
         album_value = dr.album_dr(list(values.values()))
         if album_value is None:
@@ -390,7 +421,7 @@ def run_calc_dr_replaygain(config):
     pbar = _make_pbar(len(albums), "DR/ReplayGain", unit="album")
 
     # Respect worker_limit for the per-album DR/ReplayGain loop (CPU-heavy)
-    workers = worker_count(config, default=4, maximum=8, items=len(albums))
+    workers = worker_count(config, maximum=8, items=len(albums))
 
     def _album_task(album_path):
         """One album: scan ReplayGain, measure the DR, write both in one pass.
@@ -427,7 +458,7 @@ def run_calc_dr_replaygain(config):
         if dr_usable and afail is None:
             dr_modified, dr_failures = _dr_album(
                 album_path, ffmpeg["ffmpeg_exe"], force,
-                write_tags=write_dr, config=config, rg=rg)
+                write_tags=write_dr, config=config, rg=rg, lanes=workers)
             amod += dr_modified
             failures = dr_failures
         elif rg:

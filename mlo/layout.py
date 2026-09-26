@@ -853,7 +853,7 @@ def scan_library(cfg=None, stats=None):
     # Sized by the shared worker setting; one lane (a scoped run's single
     # album, or worker_limit=1) visits in-line, which is also the order every
     # report was written in before there was a pool.
-    lanes = mlo_stats.worker_count(cfg, default=min(8, os.cpu_count() or 1),
+    lanes = mlo_stats.worker_count(cfg,
                                    maximum=16, items=len(plan))
     if lanes > 1 and len(plan) > 1:
         from concurrent.futures import ThreadPoolExecutor

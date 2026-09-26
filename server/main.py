@@ -9245,7 +9245,7 @@ def import_commit(req: ImportCommit):
     errors = []
     items = [(p, t) for p, t in changes.items() if t]
     if items:
-        workers = worker_count(cfg, default=8, maximum=8, items=len(items))
+        workers = worker_count(cfg, maximum=8, items=len(items))
         with ThreadPoolExecutor(max_workers=workers) as ex:
             errors = [e for e in ex.map(lambda a: write_one(*a), items) if e]
     if errors:

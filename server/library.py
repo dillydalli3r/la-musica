@@ -747,7 +747,7 @@ def build_albums_parallel(album_dirs, cfg, light=False):
     through to `build_album` (the library payload only needs to know whether
     a description exists, not its text).
     """
-    workers = worker_count(cfg, default=min(8, os.cpu_count() or 1),
+    workers = worker_count(cfg, maximum=min(8, os.cpu_count() or 1),
                            items=len(album_dirs))
     if workers <= 1 or len(album_dirs) <= 1:
         results = []

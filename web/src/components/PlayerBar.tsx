@@ -4,7 +4,8 @@ import { Link } from "react-router-dom";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { Disc3, Info, ListMusic, ListPlus, Maximize2, Mic2, Play, Pause, SkipBack, SkipForward, Shuffle, Repeat, Timer, Volume2, X } from "lucide-react";
 import { api, isOffline } from "../api";
-import { notePlayerPosition, startPlayerPersistence, toast, useStore } from "../store";
+import { notePlayerPosition, startPlayerPersistence, toast, useStore, type QueueTrack } from "../store";
+import { fetchQueueRecommend, queueTrackOf } from "../lib/recommend";
 import { fmtDuration } from "../lib/fmt";
 import { fmtPair, fmtTech, isVideoFile, originalYear } from "../lib/fmt";
 import { nextSpeed, fmtSpeed } from "../lib/playback";
@@ -150,6 +151,7 @@ export default function PlayerBar() {
   const setQueue = useStore((s) => s.setQueue);
   const queueRemoveAt = useStore((s) => s.queueRemoveAt);
   const queueMove = useStore((s) => s.queueMove);
+  const queueAdd = useStore((s) => s.queueAdd);
   const playing = useStore((s) => s.playing);
   const setPlaying = useStore((s) => s.setPlaying);
   const queueId = useStore((s) => s.queueId);
@@ -1034,6 +1036,13 @@ export default function PlayerBar() {
   // server too old to ship the key reads as ON, which is the shipped default
   // and the behaviour every track already had.
   const gapless = cfg?.gapless_playback !== false;
+  // `infinite_playback` (Downloads & playback, shipped OFF): the queue does not
+  // stop at its own last row — a bounded batch of the library's SIMILAR tracks
+  // is appended to it as ordinary rows, scored locally so the play needs no
+  // network to continue. Read strictly: a server too old to ship the key (or a
+  // missing value) is OFF, which is the shipped default and exactly the
+  // behaviour every install had before this existed.
+  const infinite = cfg?.infinite_playback === true;
   // The equalizer the config names (`playback_eq_profile`, owned by the
   // Equalizer page): its bands go onto the SAME WebAudio graph as the gain —
   // installed once per profile change, and inherited by any element attached
@@ -1473,6 +1482,53 @@ export default function PlayerBar() {
     });
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [time, duration, index, queue, shuffle, gapless]);
+
+  // ---- Infinite playback ---------------------------------------------------
+  // With `infinite_playback` on, the queue does not stop at its own last row:
+  // the row that is playing has nothing after it, so the queue's OWN set is
+  // handed to the server's local scorer and a bounded batch of similar tracks
+  // is APPENDED — ordinary queue rows, so the queue pane, its count,
+  // drag-reorder and remove all treat them like any other row. It runs as that
+  // row starts, which is what puts the batch in place BEFORE the gapless
+  // preload arms for its successor: the handover into the recommended set is
+  // then the same handover any album advance gets, instead of the queue
+  // running dry and stopping. Repeat one is the one mode that appends nothing
+  // (that row's successor is itself), and nothing here can interrupt the
+  // music: an empty answer, a library with nothing similar or an unreachable
+  // server leaves the queue ending exactly where it did before the switch
+  // existed.
+  const infiniteFor = useRef<string | null>(null);
+  useEffect(() => {
+    if (!infinite || loop || !current) return;
+    if (index + 1 < queue.length) return;           // a row is already up next
+    // Only while that row actually PLAYS: a restored session sitting paused on
+    // the last row of a queue must not grow behind the reader's back.
+    if (playing !== current.path) return;
+    // One ask per row per queue. A queue REPLACEMENT (`queueId`) is a new
+    // queue, so replaying an album asks again; without this, every store update
+    // while that row plays would re-ask.
+    const key = `${queueId}:${current.path}`;
+    if (infiniteFor.current === key) return;
+    infiniteFor.current = key;
+    void fetchQueueRecommend(queue.map((t) => t.path))
+      .then((items) => {
+        if (!items.length) return;
+        // The queue may have moved on while the answer was in flight (a row
+        // added by hand, a reorder, an earlier batch): read it live, so nothing
+        // already in it is ever added twice and a track recommended twice in
+        // one answer is one row.
+        const have = new Set(useStore.getState().queue.map((t) => t.path));
+        const rows: QueueTrack[] = [];
+        for (const item of items) {
+          if (!item.path || have.has(item.path)) continue;
+          have.add(item.path);
+          rows.push(queueTrackOf(item));
+        }
+        if (rows.length) queueAdd(rows, "end");
+      })
+      .catch(() => { /* nothing similar, or no server: the queue ends as always */ });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [infinite, loop, current, index, queue, playing, queueId, queueAdd]);
 
   useEffect(() => {
     const el = media();

@@ -17,7 +17,7 @@ from .paths import AUDIO_EXTS, tools_dir, trash_file
 from .tools import detect_all_tools, _version_is_older
 from .stats import (
     new_stats, _make_pbar, _pbar_skip, _pbar_update, _diff_bytes, _walk_files,
-    _collect_targets, worker_count,
+    _collect_targets, worker_count, tool_threads,
 )
 from .ui import print_header, log, c, Color
 
@@ -357,15 +357,19 @@ def stream_md5_state(path, flac_exe=None, ffmpeg_exe=None, af=None):
     return MD5_OK, f"decoded MD5 {digest}", stated
 
 
-def convert_command(ffmpeg_exe, filepath, dest, cfg):
+def convert_command(ffmpeg_exe, filepath, dest, cfg, threads=0):
     """The ffmpeg command that converts *filepath* to the configured target.
 
     The ONE place the codec table, the quality/rate settings and
     `library_codec_args` meet, and pure enough that a test can assert the
-    exact command line without encoding anything.
+    exact command line without encoding anything. *threads* > 0 caps what the
+    conversion may use: the pool runs several conversions at once, so each one
+    takes ONE lane's share of the run's budget (R79) instead of every core.
     """
-    cmd = [ffmpeg_exe, "-y", "-v", "error", "-nostdin", "-i", filepath,
-           "-map", "0:a:0"]
+    cmd = [ffmpeg_exe, "-y", "-v", "error", "-nostdin"]
+    if int(threads or 0) > 0:
+        cmd += ["-threads", str(int(threads))]
+    cmd += ["-i", filepath, "-map", "0:a:0"]
     # Embedded art is an attached_pic VIDEO stream, so mapping audio alone
     # dropped it before the original — the only copy of that artwork — left
     # the library. Copied only when the library is set to keep covers: the "?"
@@ -587,7 +591,7 @@ def _convert_lossless_source(args):
     """
     (
         ffmpeg_exe, ffprobe_exe, metaflac_exe, filepath,
-        quality, target_version, enabled, config,
+        quality, target_version, enabled, config, threads,
     ) = args
     filename = os.path.basename(filepath)
     codec = target_codec(config)
@@ -647,7 +651,7 @@ def _convert_lossless_source(args):
         prefix=".conv_", suffix=out_ext, dir=os.path.dirname(filepath) or ".")
     os.close(fd)
     try:
-        cmd = convert_command(ffmpeg_exe, filepath, tmp, config)
+        cmd = convert_command(ffmpeg_exe, filepath, tmp, config, threads=threads)
         try:
             proc = run_tool(cmd, capture_output=True, text=True,
                             encoding="utf-8", errors="replace", timeout=60 * 60)
@@ -1273,8 +1277,7 @@ def run_optimize_flacs(config):
                 log("No FLAC files found.")
         conv_scan = walked if convert else None
 
-    workers = worker_count(config, default=os.cpu_count() or 1,
-                          items=len(flac_files))
+    workers = worker_count(config, items=len(flac_files))
     counts = {"ok": 0, "skip": 0, "fail": 0}
 
     args_list = [
@@ -1354,6 +1357,12 @@ def run_optimize_flacs(config):
             else:
                 log(f"Converting {len(conv_files)} file(s) to {target_label} "
                     f"(policy: {policy})…")
+                # The machine's cores, not a constant four: a conversion is
+                # one ffmpeg PROCESS per file, and each takes its lane's share
+                # of the thread budget (R79, R323). Four lanes was the number
+                # this pass was written with; the setting decides now.
+                conv_workers = worker_count(config, items=len(conv_files))
+                conv_threads = tool_threads(config, conv_workers)
                 conv_args = [
                     (
                         ffmpeg_exe,
@@ -1364,11 +1373,10 @@ def run_optimize_flacs(config):
                         target_version,
                         (config.get("encoder_tags") or {}).get("flac") or {},
                         config,
+                        conv_threads,
                     )
                     for fp in conv_files
                 ]
-                conv_workers = worker_count(config, default=min(4, os.cpu_count() or 1),
-                                            items=len(conv_files))
                 conv_counts = {"ok": 0, "skip": 0, "fail": 0}
                 with ThreadPoolExecutor(max_workers=conv_workers) as ex:
                     futures = [ex.submit(_convert_lossless_source, a) for a in conv_args]

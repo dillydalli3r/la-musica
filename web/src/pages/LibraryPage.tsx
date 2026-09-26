@@ -134,19 +134,6 @@ const ARTIST_COL_W: Record<string, string> = {
   grade: "w-[112px]",
 };
 
-/** The same four floors as NUMBERS, for the one thing on this page that has to
- *  do arithmetic with them: `useFittedWidths` needs a stored column's own floor
- *  in px to know what the reader's widths may spend (see LIBRARY_ARTIST_WIDTHS
- *  below). They cannot be derived from the class strings above without parsing
- *  Tailwind, so the pair is kept in lockstep by hand — the check that measures
- *  the Artists table's floor at a narrow window fails if they drift apart. */
-const ARTIST_COL_FLOOR: Record<string, number> = {
-  albums: 88,
-  tracks: 88,
-  checks: 88,
-  grade: 112,
-};
-
 const ARTIST_COLS: Col[] = [
   // "Releases" is the word the owner uses for what this counts, and it is what
   // the column IS: the albums of this artist that are in the library (a
@@ -400,12 +387,14 @@ export default function LibraryPage() {
   const [albumW, setAlbumW, resetAlbumW] = useColumnWidths("albums");
   const [artistW, setArtistW, resetArtistW] = useColumnWidths("artists");
   const [trackW, setTrackW, resetTrackW] = useColumnWidths("tracks");
-  /* The Artists table's stored widths as the table can show them, and the ref
-   * its scroll wrapper takes: the artists columns' own floors are 596 px, and
-   * the owner's tab drew a scrollbar under a short artist list because four
-   * stored drag widths (each well inside the handle's own range) summed past
-   * the table's box. See useFittedWidths. */
-  const [artistWidths, artistBox] = useFittedWidths(artistW, ARTIST_COL_FLOOR);
+  /* The stored widths fitted to each table's own box (useFittedWidths): the
+   * reader's widths decide how the table's width is SPENT, never how wide it
+   * is. Three tables, one rule, one hook — the artists' four stored 300 px
+   * columns used to draw a 1420 px table in a 1200 px box, and the albums and
+   * tracks tables are the same shape at 1264 and 1532 px of their own floors. */
+  const [albumWidths, albumBox] = useFittedWidths(albumW, albumDefs.filter((c) => albumCols.includes(c.id)).map((c) => c.id));
+  const [artistWidths, artistBox] = useFittedWidths(artistW, ARTIST_COLS.filter((c) => artistCols.includes(c.id)).map((c) => c.id));
+  const [trackWidths, trackBox] = useFittedWidths(trackW, trackDefs.filter((c) => trackCols.includes(c.id)).map((c) => c.id));
 
   // One GET /api/ratings per scope for the whole page (react-query dedupes it
   // across every row, and the star controls share the cache). Declared HERE,
@@ -1671,7 +1660,7 @@ export default function LibraryPage() {
       {/* ---------------- Albums table ---------------- */}
       {view === "albums" && (
         <div>
-          <div className="overflow-x-auto">
+          <div className="overflow-x-auto" ref={albumBox}>
             <table className={`${TABLE_FIT} text-sm`}>
               <thead className="border-b border-border">
                 <tr>
@@ -1690,7 +1679,7 @@ export default function LibraryPage() {
                   {albumDefs.filter((c) => albumCols.includes(c.id)).map((c) => (
                     <SortHeader key={c.id} label={c.label} sort={albumSort} sortKey={c.sortKey} onSort={setAlbumSort}
                       className={`relative ${ALBUM_COL_W[c.id] ?? (c.tag ? TAG_COL_W : "")}${phoneHide(ALBUM_PHONE_CLS, c.id)}`}
-                      style={albumW[c.id] ? { width: albumW[c.id] } : undefined} >
+                      style={albumWidths[c.id] ? { width: albumWidths[c.id] } : undefined} >
                       <ColumnResizer width={albumW[c.id]} onDrag={(w) => setAlbumW(c.id, w)} onReset={() => resetAlbumW()} />
                     </SortHeader>
                   ))}
@@ -1873,7 +1862,7 @@ export default function LibraryPage() {
       {/* ---------------- Tracks table ---------------- */}
       {view === "tracks" && (
         <div>
-          <div className="overflow-x-auto">
+          <div className="overflow-x-auto" ref={trackBox}>
             <table className={`${TABLE_FIT} text-sm`}>
               <thead className="border-b border-border">
                 <tr>
@@ -1891,7 +1880,7 @@ export default function LibraryPage() {
                     ) : (
                     <SortHeader key={c.id} label={c.label} sort={trackSort} sortKey={c.sortKey} onSort={setTrackSort}
                       className={`relative ${TRACK_COL_W[c.id] ?? (c.tag ? TAG_COL_W : "")}${phoneHide(TRACK_PHONE_CLS, c.id)}`}
-                      style={trackW[c.id] ? { width: trackW[c.id] } : undefined}>
+                      style={trackWidths[c.id] ? { width: trackWidths[c.id] } : undefined}>
                       {c.id === "title" && <ColFloorHolder className={TRACK_TITLE_FLOOR} />}
                       <ColumnResizer width={trackW[c.id]} onDrag={(w) => setTrackW(c.id, w)} onReset={() => resetTrackW()} />
                     </SortHeader>
@@ -2195,6 +2184,13 @@ function AlbumRowGroup({
   const albumRatings = albumRatingsData?.ratings;
   const navigate = useNavigate();
   const tracks = useMemo(() => [...(album.tracks ?? [])].sort(byDiscThenTrack), [album.tracks]);
+  // The nested tracklist's own columns, in the order it draws them: the shared
+  // album-tracklist spec plus the reader's tag columns — and the widths it
+  // takes with them, fitted to this table's box (see useFittedWidths), the
+  // SAME stored map the album page's tracklist reads under `album-tracks`.
+  const trackDefs = [...ALBUM_TRACK_COLS, ...customCols(trackCustom, "tags")]
+    .filter((c) => trackCols.includes(c.id));
+  const [drawnTrackWidths, trackBox] = useFittedWidths(trackWidths, trackDefs.map((c) => c.id));
   // The album-name cell IS the row title (AlbumRow renders it, with the link
   // and select-mode handling); the rest of the visible columns become cells.
   const showAlbumCol = visibleCols.includes("album");
@@ -2313,18 +2309,18 @@ function AlbumRowGroup({
           /* Its own scroll wrapper: this nested table is what overflows first
              on a phone, and the outer wrapper cannot scroll for it. Its floor
              is the album tracklist's own (shared columns, shared floor). */
-          <div className="overflow-x-auto">
+          <div className="overflow-x-auto" ref={trackBox}>
             <table className={`w-full ${ALBUM_TRACK_MIN_W}`}>
               <thead className="border-b border-border">
                 <tr>
                   {selectMode && <th className="th w-8"></th>}
-                  {[...ALBUM_TRACK_COLS, ...customCols(trackCustom, "tags")].filter((c) => trackCols.includes(c.id)).map((c) =>
+                  {trackDefs.map((c) =>
                     c.id === "cover" ? (
                       <th key={c.id} className={`th relative ${ALBUM_TRACK_COL_W[c.id] ?? TAG_COL_W}${phoneHide(TRACK_PHONE_CLS, c.id)}`} title="Cover art">
                         <span className="sr-only">Cover</span>
                       </th>
                     ) : (
-                      <th key={c.id} className={`th relative ${ALBUM_TRACK_COL_W[c.id] ?? TAG_COL_W}${phoneHide(TRACK_PHONE_CLS, c.id)}`} style={trackWidths[c.id] ? { width: trackWidths[c.id] } : undefined}>
+                      <th key={c.id} className={`th relative ${ALBUM_TRACK_COL_W[c.id] ?? TAG_COL_W}${phoneHide(TRACK_PHONE_CLS, c.id)}`} style={drawnTrackWidths[c.id] ? { width: drawnTrackWidths[c.id] } : undefined}>
                         {c.label}
                         {c.id === "title" && <ColFloorHolder className={ALBUM_TRACK_TITLE_FLOOR} />}
                         <ColumnResizer width={trackWidths[c.id]} onDrag={(w) => onTrackWidth(c.id, w)} onReset={onResetTrackWidths} />

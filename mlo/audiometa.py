@@ -380,7 +380,7 @@ def run_analyze_audiometa(config):
     # question is about its own file, so it is the same pool, one phase
     # earlier; the handle it hands back is what the write pass reuses.
     tracks = _track_paths(config)
-    scan_workers = worker_count(config, default=4, maximum=8, items=len(tracks))
+    scan_workers = worker_count(config, maximum=8, items=len(tracks))
     pending = {}
     if tracks:
         with ThreadPoolExecutor(max_workers=scan_workers) as ex:
@@ -395,7 +395,7 @@ def run_analyze_audiometa(config):
 
     notation = config.get("audiometa_key_notation", "musical")
     paths = sorted(pending)
-    workers = worker_count(config, default=4, maximum=8, items=len(paths))
+    workers = worker_count(config, maximum=8, items=len(paths))
     # Whole-file librosa decodes run in *workers* lanes, and each one's numpy
     # is a multi-threaded pool of its own: uncapped, the step occupied
     # workers × cores and the Worker threads setting bounded nothing (R79).

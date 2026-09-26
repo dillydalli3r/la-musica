@@ -531,7 +531,7 @@ def run_detect_mood_energy(config):
     # earlier. The handle it read through travels with the track and the
     # analysis writes through it instead of opening the file again.
     tracks = _track_paths(config)
-    scan_workers = worker_count(config, default=4, maximum=8, items=len(tracks))
+    scan_workers = worker_count(config, maximum=8, items=len(tracks))
     pending = {}
     if tracks:
         from concurrent.futures import ThreadPoolExecutor as _TPE
@@ -546,7 +546,7 @@ def run_detect_mood_energy(config):
         return stats
     paths = sorted(pending)
 
-    workers = worker_count(config, default=4, maximum=8, items=len(paths))
+    workers = worker_count(config, maximum=8, items=len(paths))
     # Each lane decodes a whole track through librosa, whose numpy is a
     # multi-threaded pool of its own: uncapped, the step occupied
     # workers × cores and the Worker threads setting bounded nothing (R79).

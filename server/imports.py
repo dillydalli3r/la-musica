@@ -1731,7 +1731,7 @@ def fetch_instrumentals(paths, cfg=None):
             return path, row
         return path, row
 
-    workers = worker_count(cfg, default=8, maximum=8, items=len(targets))
+    workers = worker_count(cfg, maximum=8, items=len(targets))
     with ThreadPoolExecutor(max_workers=workers) as ex:
         rows = list(ex.map(_one, targets))
     for path, row in rows:
@@ -3129,7 +3129,7 @@ def drop_arrived_values(album_dir, cfg=None, chain=None):
     # of its own file (mlo.audio, one flush per file), so an album's tracks go
     # side by side instead of one after another — the same fan-out
     # `_stamp_release` and the chain's own passes use.
-    workers = worker_count(cfg, default=8, maximum=8, items=len(files))
+    workers = worker_count(cfg, maximum=8, items=len(files))
     with ThreadPoolExecutor(max_workers=workers) as ex:
         outcomes = list(ex.map(_one, files))
     for row in outcomes:
@@ -3582,7 +3582,7 @@ def settle_digital_lyrics(album_dir, cfg=None, *, chain=None, dry=False):
             traceback.print_exc()
             return ("failed", False)
 
-    workers = worker_count(cfg, default=8, maximum=8, items=len(files))
+    workers = worker_count(cfg, maximum=8, items=len(files))
     with ThreadPoolExecutor(max_workers=workers) as ex:
         outcomes = list(ex.map(_one, files))
     for path, (row, formatted) in zip(files, outcomes):
@@ -3881,7 +3881,7 @@ def _stamp_release(album_dir, release, cfg):
     # Distinct FILES share nothing: every rewrite_via copies beside its OWN
     # target and swaps it in with os.replace (mlo.atomic), so an album's
     # tracks write side by side instead of one after another.
-    workers = worker_count(cfg, default=8, maximum=8, items=len(files))
+    workers = worker_count(cfg, maximum=8, items=len(files))
     with ThreadPoolExecutor(max_workers=workers) as ex:
         outcomes = list(ex.map(_stamp_one, files))
     return (sum(1 for o in outcomes if o == "written"),
@@ -4040,7 +4040,7 @@ def stamp_rym_links(album_dir, cfg=None):
     # Distinct FILES share nothing: every rewrite_via copies beside its OWN
     # target and swaps it in with os.replace (mlo.atomic), so the album's
     # tracks write side by side instead of one after another.
-    workers = worker_count(cfg, default=8, maximum=8, items=len(files))
+    workers = worker_count(cfg, maximum=8, items=len(files))
     with ThreadPoolExecutor(max_workers=workers) as ex:
         out["written"] = sum(1 for ok in ex.map(_write_links, files) if ok)
     if out["written"]:

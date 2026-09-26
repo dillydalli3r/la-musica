@@ -5,7 +5,9 @@ determinism and the empty-seed / empty-library answers. Synthetic library data
 
 Run:  python tools/test_recommendations.py
 """
+import io
 import os
+import re
 import sys
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -334,5 +336,79 @@ assert len(unstated.json()["items"]) == 12, unstated.text
 assert len(_http.post("/api/recommend",
                       json={"kind": "tracks", "seeds": [f"{WIDE_SEED}/One.flac"]})
            .json()["items"]) == 12
+
+# --------------------------------------------------------------------------- #
+# Infinite playback's own batch (GET/POST /api/recommend/queue): the queue's
+# paths seed the profile AND are the exclusion set, a duplicate path is one
+# seed, and the batch is BOUNDED — a queue someone is listening to is not a
+# shelf. Driven through the real route.
+# --------------------------------------------------------------------------- #
+lib_mod.build_library = lambda cfg, progress=None: LIB
+recommend.invalidate()
+
+queue = _http.get("/api/recommend/queue",
+                  params={"paths": [SEED, SIBLING], "limit": 5})
+assert queue.status_code == 200, queue.text
+queued = queue.json()["items"]
+# Similarity comes from the seeds: the two records that share a genre (or only
+# a family) with them, and never the record that shares nothing.
+assert paths(queued) == [FAMILY, LOUD], paths(queued)
+assert all(r["kind"] == "track" for r in queued), queued
+# The excluded paths are honoured — the queue's own tracks are not suggestions.
+assert SEED not in paths(queued) and SIBLING not in paths(queued)
+assert not any(p.startswith("C:/lib/Alpha/") for p in paths(queued))
+assert all(r["reasons"] for r in queued), queued
+# A queue is a seed LIST built by playing: a duplicate entry is the same seed
+# once, so it cannot duplicate the answer.
+dup = _http.get("/api/recommend/queue",
+                params={"paths": [SEED, SEED, SIBLING, SIBLING], "limit": 5})
+assert dup.json()["items"] == queued, dup.json()["items"]
+# POST is the same answer, for a queue too long to fit in a URL.
+assert _http.post("/api/recommend/queue",
+                  json={"paths": [SEED, SIBLING], "limit": 5}).json()["items"] == queued
+# Rows carry what a queue row needs without a second lookup.
+assert queued[0]["file"] == "One.flac" and queued[0]["album_path"] == "C:/lib/Beta/Metal"
+assert queued[0]["album"] == "Metal One" and queued[0]["artist"] == "Beta"
+# The limit is honoured under the cap, and the DEFAULT is the handful the web
+# asks for by name — one number on both ends.
+assert len(_http.get("/api/recommend/queue",
+                     params={"paths": [SEED, SIBLING], "limit": 1}).json()["items"]) == 1
+assert recommend.QUEUE_DEFAULT_LIMIT == 5 and recommend.QUEUE_MAX_LIMIT == 10
+# An empty queue and a queue the library no longer holds are never errors:
+# nothing similar simply means the play ends as it did before. A malformed
+# `limit` is the one rejected REQUEST (FastAPI's own 422, the same contract
+# `/api/recommend` states) — the player's fetch fails into the same "queue ends
+# as always", never into a broken one.
+assert _http.get("/api/recommend/queue").json()["items"] == []
+assert _http.get("/api/recommend/queue", params={"paths": ["C:/nope"]}).json()["items"] == []
+assert _http.get("/api/recommend/queue",
+                 params={"paths": [SEED, SIBLING], "limit": "not-a-number"}).status_code == 422
+
+# The cap BINDS, which only a library wider than it can prove: over the ceiling
+# comes the ceiling, and the library's own width is not the answer's width.
+lib_mod.build_library = lambda cfg, progress=None: wide_library()
+recommend.invalidate()
+assert len(wide_library()["artists"][0]["albums"]) * 2 > recommend.QUEUE_MAX_LIMIT, \
+    "this case only proves the cap if the library is wider than it"
+wide_queue = _http.get("/api/recommend/queue",
+                       params={"paths": [WIDE_SEED + "/One.flac"], "limit": 50}).json()["items"]
+assert len(wide_queue) == recommend.QUEUE_MAX_LIMIT, len(wide_queue)
+# No limit stated: the DEFAULT batch, which is the number the web asks for.
+assert len(_http.get("/api/recommend/queue",
+                     params={"paths": [WIDE_SEED + "/One.flac"]}).json()["items"]) \
+    == recommend.QUEUE_DEFAULT_LIMIT
+assert len(_http.post("/api/recommend/queue",
+                      json={"paths": [WIDE_SEED + "/One.flac"], "limit": 50}).json()["items"]) \
+    == recommend.QUEUE_MAX_LIMIT
+
+# The web states the batch it appends (QUEUE_BATCH) and the server's default is
+# that number: pinned here so one end cannot drift from the other.
+_q_src = io.open(os.path.join(
+    os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+    "web", "src", "lib", "recommend.ts"), encoding="utf-8").read()
+_q_batch = re.search(r"QUEUE_BATCH\s*=\s*(\d+)", _q_src)
+assert _q_batch, "web/src/lib/recommend.ts no longer states QUEUE_BATCH"
+assert int(_q_batch.group(1)) == recommend.QUEUE_DEFAULT_LIMIT, \
+    f"the web asks for {_q_batch.group(1)}, the server defaults to {recommend.QUEUE_DEFAULT_LIMIT}"
 
 print("ok")

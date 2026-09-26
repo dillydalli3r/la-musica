@@ -67,6 +67,15 @@ TOOLS_DIR_NAME = "tools"
 LEGACY_MLO_DATA_DIR_NAME = ".mlo_data"
 
 
+def _is_temp_dir(path):
+    """Is *path* inside the OS temp directory? (The warning's own test.)"""
+    try:
+        temp = os.path.realpath(tempfile.gettempdir())
+        return os.path.commonpath([temp, os.path.realpath(path)]) == temp
+    except (OSError, ValueError):
+        return False
+
+
 def _warn_if_temp_folder(mf):
     """A music folder inside the OS temp dir is never a real library.
 
@@ -100,7 +109,16 @@ def read_music_folder_guess():
             mf = (json.load(f) or {}).get("music_folder")
         if mf:
             _warn_if_temp_folder(mf)
-            return str(mf)
+            # A memory of a folder that is GONE decides nothing: this file is
+            # the legacy stub recording where the state lives (inside that
+            # folder), so if the folder does not exist there is no state to
+            # read and the app falls back to its defaults — the same place a
+            # first run starts from. Believing it instead made every process
+            # in this checkout resolve its config (and its login gate) through
+            # a scratch folder some tool had removed: a stray `F:/tmp/...`
+            # stub turned "sign in required" on for a dozen suites at once.
+            if os.path.isdir(str(mf)):
+                return str(mf)
     except Exception:
         pass
     return None

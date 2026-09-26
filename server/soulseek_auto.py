@@ -3749,7 +3749,7 @@ def _stamp_mb_tags(album_dir, release):
     # tracks stamp side by side instead of one after another; nothing here is
     # shared but the read-only identity above. Inside one file the writes stay
     # strictly ordered.
-    workers = worker_count(load_config(), default=8, maximum=8,
+    workers = worker_count(load_config(), maximum=8,
                            items=len(audio))
     with ThreadPoolExecutor(max_workers=workers) as ex:
         return sum(1 for ok in ex.map(_stamp_one, audio) if ok)
@@ -5072,7 +5072,7 @@ def _youtube_fetch(release, dest, cfg):
                  f"{source}{quality}")
             _job["progress"] = _youtube_progress(done[0], total, label)
 
-    workers = worker_count(cfg, default=3, maximum=4, items=total)
+    workers = worker_count(cfg, maximum=4, items=total)
     with ThreadPoolExecutor(max_workers=workers) as ex:
         list(ex.map(one, range(total)))
     return [g for g in got if g], problems

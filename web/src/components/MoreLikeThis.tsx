@@ -7,7 +7,8 @@ import { albumRef, trackRef } from "../lib/refs";
 // The Library grid's own cover floors: the shelf's cards wrap at the size the
 // Library's default grid draws them, so the two grids read as one grid.
 import { GRID_SIZE_MIN } from "../lib/fmt";
-import { toast, useStore, type QueueTrack } from "../store";
+import { toast, useStore } from "../store";
+import { queueTrackOf, type RecommendItem } from "../lib/recommend";
 import AlbumCard from "./AlbumCard";
 import CoverImg, { TrackCover } from "./CoverImg";
 import RecommendShelf, { SHELF_LIMIT } from "./RecommendShelf";
@@ -18,30 +19,6 @@ import type { Album } from "../types";
  *  tags with nothing fetched. The online shelf beside it says the opposite, so
  *  the pair is never read as a single list. */
 const HINT = "Scored from this library's own tags — nothing is fetched from the internet.";
-
-/** One row of GET/POST /api/recommend (server/recommend.py). `kind` is what
- *  the row IS, not what was asked for — an artist page is served albums, a
- *  playlist page is served tracks. */
-export interface RecommendItem {
-  kind: "album" | "track";
-  id: string;
-  path: string;
-  mbid: string | null;
-  title: string;
-  subtitle: string;
-  score: number;
-  /** Why the row is here, strongest signal first (shown on hover). */
-  reasons: string[];
-  /** Album folder the cover belongs to, plus the cover file inside it. */
-  cover_path: string;
-  cover: string | null;
-  /** Track rows only: the file inside its folder, the folder, the release and
-   *  the artist — enough to queue the row without a second lookup. */
-  file: string | null;
-  album_path: string;
-  album: string;
-  artist: string;
-}
 
 /** Which library items a request is asking back. */
 export type RecommendTarget = "albums" | "tracks";
@@ -86,22 +63,6 @@ function refFor(item: RecommendItem): string {
   return item.kind === "track"
     ? trackRef({ path: item.path, tags: { MUSICBRAINZ_TRACKID: item.mbid ?? undefined } })
     : albumRef({ path: item.path, meta: { MUSICBRAINZ_ALBUMID: item.mbid } });
-}
-
-/** The queue entry a recommended track plays as. `coverFile` is the row's own
- *  cover (a track's sidecar, else its album's) — the same pair the player bar
- *  reads from every other queue site. */
-function queueTrackOf(item: RecommendItem): QueueTrack {
-  return {
-    path: item.path,
-    file: item.file ?? item.path.split("/").pop() ?? item.path,
-    albumPath: item.album_path || item.path.split("/").slice(0, -1).join("/"),
-    artist: item.artist || undefined,
-    album: item.album || undefined,
-    title: item.title || undefined,
-    coverFile: item.cover,
-    albumCover: item.cover,
-  };
 }
 
 /** Why-row chip: the strongest signal, the rest of them on hover. */

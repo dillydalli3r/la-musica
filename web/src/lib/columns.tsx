@@ -514,44 +514,49 @@ export function useColumnWidths(key: string): [Record<string, number>, (id: stri
 /** The stored widths as the table can actually SHOW them, plus the ref the
  *  table's `overflow-x-auto` wrapper takes.
  *
- *  A fixed layout makes the sum of its columns' own widths the table's floor
- *  (CSS 2.1 §17.5.2.1: the used width is the greater of the table's width and
- *  that sum — measured: the Artists view's four counter columns stored at 300
- *  px each drew a 1420 px table inside a 1200 px wrapper, though the columns'
- *  own floors sum to 596). So a stored map the drag handle itself could have
- *  produced — every value inside its own 40–900 clamp — can put a sideways
- *  scrollbar under a table whose columns fit the space with room to spare.
- *  That is the owner's Artists tab: a short artist list with a scrollbar it
- *  did not need.
+ *  The rule — the columns auto-fit the screen, and a stored width may only eat
+ *  space that exists: a fixed layout makes the sum of its columns' own widths
+ *  the table's floor (CSS 2.1 §17.5.2.1: the used width is the greater of the
+ *  table's width and that sum), so a stored map the drag handle itself could
+ *  have produced — every value inside its own 40-900 clamp — can draw a table
+ *  wider than the screen and push every column after the widened one off the
+ *  right edge. Measured: the owner's Artists view with four stored 300 px
+ *  columns drew 1420 px in a 1200 px box although the columns' own floors sum
+ *  to 596, and `mlo-colw-album-tracks` = {title:900, genre:900, bitrate:900,
+ *  dur:900} drew 3848 px of album tracklist in the same 1200 px box.
  *
- *  A stored width is a preference, so its columns are the ones that give way:
- *  when the columns' OWN floors fit the table's box, what the reader's columns
- *  may spend in total is their own floors plus the box's free room, and a map
- *  asking for more is scaled to that (`floors` is the px floor of every column
- *  that can be stored, i.e. the entries whose ids the view's `_COL_W` map has
- *  — 40/900 in, image out). The relation between the reader's columns is
- *  exactly what a drag means, and it survives the scaling. When the columns'
- *  own floors do NOT fit (the library's Albums and Tracks views at 1440: 1264
- *  and 1532 px of floors in 1200 px), nothing is capped at all: a scrollbar
- *  there is what the floors asked for, and the reader's widths are honoured
- *  as stored.
+ *  So the widths a reader stored are a PREFERENCE about how the width is
+ *  SPENT, never a floor the table has to be that wide. The floors come first
+ *  (each column keeps at least its own `_COL_W` width), then what is left over
+ *  is shared among the columns the reader sized, in proportion to how much
+ *  MORE than its floor each one asked for:
  *
- *  Both numbers come from the table itself rather than from a second copy of
- *  the floors: every reading is taken inside one layout pass, with the stored
- *  widths switched off and the table pinned to no width of its own (so a fixed
- *  layout's used width IS the sum of the floors) — nothing paints in between. */
+ *      shown(i) = floor(i) + (stored(i) - floor(i)) * room / Σ excess
+ *
+ *  which leaves the table exactly as wide as it would be with no stored widths
+ *  at all: `w-full` when the floors fit, and the floors' own sum when they do
+ *  not (the sideways scroll R313 keeps for a table whose floors genuinely
+ *  cannot fit — never a preference value).
+ *
+ *  Nothing here needs a second copy of the floors: `drawn` is the columns the
+ *  table draws, in the order it draws them (`defs.filter(visible).map(id)`), so
+ *  each stored id pairs with its own header cell, and every reading is taken
+ *  from the table itself inside one layout pass — the stored widths switched
+ *  off and the table pinned to no width of its own, which makes a fixed
+ *  layout's used width exactly the sum of the columns' floors. Nothing paints
+ *  in between. */
 export function useFittedWidths(
   widths: Record<string, number>,
-  floors: Record<string, number>
+  drawn: string[]
 ): [Record<string, number>, (el: HTMLDivElement | null) => void] {
   const box = useRef<HTMLDivElement | null>(null);
   // Whether the wrapper is MOUNTED — the tables live behind a view switch, so
   // the effect's first run has the ref empty and its dependencies unchanged
   // when the reader opens the view. A callback ref says when to look again.
   const [mounted, setMounted] = useState(false);
-  // What the stored widths may spend in total, or null when the columns' own
-  // floors already overflow the box (then there is nothing to cap).
-  const [budget, setBudget] = useState<number | null>(null);
+  const [fitted, setFitted] = useState<Record<string, number> | null>(null);
+  // The drawn ids as one string: an array prop is a new object every render.
+  const drawnKey = drawn.join(",");
   useLayoutEffect(() => {
     const el = box.current;
     if (!el) return;
@@ -561,15 +566,40 @@ export function useFittedWidths(
       const ths = [...table.querySelectorAll<HTMLElement>("thead th")];
       const shown = ths.map((th) => th.style.width);
       const own = table.style.width;
+      // The columns the reader sized, in the order the table draws them.
+      const sized = drawnKey ? drawnKey.split(",").filter((id) => (widths[id] ?? 0) > 0) : [];
+      const drawnThs = ths.filter((th) => th.style.width !== "");
+      if (sized.length !== drawnThs.length || sized.length === 0) {
+        // Nothing to fit, or a header the widths do not account for (a column
+        // drawn by something else): leave the map exactly as stored.
+        if (fitted) setFitted(null);
+        return;
+      }
       // The floors: the stored widths off, the table pinned to nothing.
       ths.forEach((th) => { th.style.width = ""; });
       table.style.width = "0px";
+      const floors = ths.map((th) => Math.round(th.getBoundingClientRect().width));
       const floorsW = table.scrollWidth;
+      // The table the reader asked for, at full size, and what it wants above
+      // the floors — measured per column, not summed, because a column cannot
+      // be shown narrower than its own floor.
+      const asked = sized.map((id, i) => {
+        const floor = floors[ths.indexOf(drawnThs[i])] ?? 0;
+        return { id, floor, excess: Math.max(0, widths[id] - floor) };
+      });
       table.style.width = own;
       ths.forEach((th, i) => { th.style.width = shown[i]; });
-      const stored = Object.keys(widths).filter((id) => floors[id] !== undefined);
-      const mine = stored.reduce((n, id) => n + floors[id], 0);
-      setBudget(floorsW <= el.clientWidth + 1 ? mine + (el.clientWidth - floorsW) : null);
+      const excess = asked.reduce((n, c) => n + c.excess, 0);
+      const room = Math.max(0, el.clientWidth - floorsW);
+      const scale = excess > room && excess > 0 ? room / excess : 1;
+      const next: Record<string, number> = {};
+      for (const c of asked) next[c.id] = c.floor + Math.round(c.excess * scale);
+      // Only when something actually changed: the ResizeObserver fires on every
+      // step of a resize, and a new object identity would re-render the page's
+      // whole table each time.
+      const before = Object.entries(fitted ?? {}).map(([id, w]) => `${id}:${w}`).join(",");
+      const after = Object.entries(next).map(([id, w]) => `${id}:${w}`).join(",");
+      if (before !== after) setFitted(scale === 1 ? null : next);
     };
     read();
     // The box changes without this hook re-rendering: a window resize, the
@@ -577,22 +607,15 @@ export function useFittedWidths(
     const ro = new ResizeObserver(read);
     ro.observe(el);
     return () => ro.disconnect();
-  }, [widths, floors, mounted]);
+  }, [widths, drawnKey, mounted]);
 
-  const asked = Object.keys(widths).reduce((n, id) => n + (floors[id] !== undefined ? widths[id] : 0), 0);
-  const scale = budget !== null && asked > budget && asked > 0 ? budget / asked : 1;
   // Stable identity: a ref callback that changes every render makes React call
   // it with null and the element again on every render.
   const attach = useCallback((el: HTMLDivElement | null) => {
     box.current = el;
     setMounted(!!el);
   }, []);
-  return [
-    scale === 1
-      ? widths
-      : Object.fromEntries(Object.entries(widths).map(([id, w]) => [id, Math.max(40, Math.round(w * scale))])),
-    attach,
-  ];
+  return [fitted ? { ...widths, ...fitted } : widths, attach];
 }
 
 /** Per-view "which columns are visible" menu with a width reset. An optional

@@ -17,6 +17,16 @@
  * repeat play of the same album must not touch the network at all (see
  * server/artcache.py's `cover_thumb` and `api.coverUrl`'s `w`).
  *
+ * Section 10 measures infinite playback (`infinite_playback`, shipped OFF):
+ * on the library's smallest queue (two rows) the last row has to gain the
+ * batch of similar rows the server's local scorer answers for it — appended as
+ * ordinary rows, preloaded before its own end, and handed over to gaplessly —
+ * while the switch off, or Repeat one armed, appends nothing and ends the queue
+ * exactly as it did before (and Shuffle, which is not exempt, still gets the
+ * seeds' similar set). It needs a two-track album and at least two similar
+ * tracks elsewhere in the library, and says so instead of failing when there
+ * is none.
+ *
  * Needs a live backend serving the built app (`web/dist`):
  *   npm --prefix web run build
  *   python -m uvicorn server.main:app --host 127.0.0.1 --port 8010
@@ -475,6 +485,279 @@ function assertConsistent(label, p, expectedFile) {
       freshForBar.length === 0,
       `fresh entries for the bar's cover: ${JSON.stringify(freshForBar)}`);
     await cdp.detach().catch(() => {});
+
+    // 10. Infinite playback. `infinite_playback` (shipped OFF) is the switch
+    //     that lets the queue continue past its own last row: the player hands
+    //     the queue's OWN paths to the server's local scorer (they are the seed
+    //     set AND the exclusion set) and appends the bounded batch it answers
+    //     with as ORDINARY queue rows. Measured here on the smallest queue the
+    //     library holds (two rows, so "the last row" is reachable) and only
+    //     when that queue really scores a batch — a library with nothing
+    //     similar skips the case by name instead of failing on its contents.
+    //
+    //     The bug this pins is the ORDER of the two things: the batch has to
+    //     land BEFORE the gapless preload arms for the row that follows the
+    //     last one, or the queue runs dry mid-track, stops, and the suggested
+    //     tracks start after a silence. So the idle decoder's own contents are
+    //     read here (the state section 1 measures for an album), and the
+    //     natural end must hand over into the added set.
+    const infWas = await cfgValue(page, "infinite_playback");
+    const setInfinite = (v) => page.evaluate(async (val) => {
+      const r = await fetch("/api/config", {
+        method: "POST", headers: { "content-type": "application/json" },
+        body: JSON.stringify({ infinite_playback: val }),
+      });
+      return r.status;
+    }, v);
+    /** The rows the bar's queue popover shows as up next, in its own order. */
+    const infUpNext = () => page.evaluate(() =>
+      [...document.querySelectorAll('div[title="Drag to reorder · click to play now"]')]
+        .map((r) => (r.querySelector("span.text-xs") || {}).textContent || ""));
+    const infOpenQueue = async () => {
+      await page.locator('button[aria-label="Queue"]').first().click();
+      await sleep(350);
+    };
+    /** The app's OWN persisted queue (store.ts → `mlo.player.state.v1`), read
+     *  as paths: the store's record of the rows, which is what a duplicate row
+     *  can be told apart from a repeated title by. Polled, because the write is
+     *  coalesced (PLAYER_WRITE_MS). */
+    const infStored = async (want) => {
+      const read = () => page.evaluate(() => {
+        try {
+          const st = JSON.parse(localStorage.getItem("mlo.player.state.v1") || "null");
+          return st ? { index: st.index, paths: (st.queue || []).map((t) => t.path) } : null;
+        } catch { return null; }
+      });
+      let st = null;
+      for (let i = 0; i < 25; i++) {
+        st = await read();
+        if (st && st.paths.length >= want) return st;
+        await sleep(200);
+      }
+      return st;
+    };
+    const infSeekTo = async (frac) => {
+      const box = await page.locator("input.seek-fat").first().boundingBox();
+      if (!box || !box.width) throw new Error("seek bar missing");
+      await page.mouse.click(box.x + box.width * frac, box.y + box.height / 2);
+    };
+    /** One drag phase of the popover's OWN reorder (the `queueMove` every other
+     *  queue row has always used): start = dragstart+dragover, end = drop+
+     *  dragend. Split in two so React has re-rendered `overOff` before the drop
+     *  reads it — a real drag has that gap, a scripted one has to make it. */
+    const infDrag = (phase, from, to) => page.evaluate(([ph, f, t]) => {
+      const els = [...document.querySelectorAll('div[title="Drag to reorder · click to play now"]')];
+      if (!els[f] || !els[t]) return false;
+      const dt = new DataTransfer();
+      dt.setData("text/plain", String(f));
+      els[f].dispatchEvent(new DragEvent(ph === "start" ? "dragstart" : "dragend",
+        { bubbles: true, dataTransfer: dt }));
+      els[t].dispatchEvent(new DragEvent(ph === "start" ? "dragover" : "drop",
+        { bubbles: true, cancelable: true, dataTransfer: dt }));
+      return true;
+    }, [phase, from, to]);
+
+    // The two-track album (the smallest queue there is) and the batch its own
+    // paths score — fetched here, so the app cannot be credited for rows the
+    // scorer does not answer with.
+    const infPair = await page.evaluate(async (base) => {
+      const lib = await (await fetch(base + "/api/library")).json();
+      for (const a of lib.artists || []) {
+        for (const al of a.albums || []) {
+          if ((al.track_count ?? (al.tracks || []).length) !== 2) continue;
+          const full = await (await fetch(base + "/api/album?path=" + encodeURIComponent(al.path))).json();
+          const tracks = (full.tracks || []).map((t) => ({ path: t.path, file: t.file }));
+          if (tracks.length === 2) return { path: al.path, tracks };
+        }
+      }
+      return null;
+    }, BASE);
+    const infBatch = infPair ? await page.evaluate(async (paths) => {
+      const q = new URLSearchParams();
+      for (const p of paths) q.append("paths", p);
+      const r = await fetch("/api/recommend/queue?" + q.toString());
+      if (!r.ok) return null;
+      return ((await r.json()).items || []).map((i) => ({ path: i.path, title: i.title, file: i.file }));
+    }, infPair.tracks.map((t) => t.path)) : null;
+
+    if (infWas === undefined) {
+      check("infinite: the server ships the switch", true,
+        "skipped — this server has no infinite_playback key");
+    } else if (!infPair || !infBatch || infBatch.length < 2) {
+      check("infinite: the library offers a two-track queue that scores a batch", true,
+        `skipped — pair=${infPair ? infPair.path : "none"} batch=${infBatch ? infBatch.length : "n/a"} ` +
+        "(this case needs a two-track album and at least two similar tracks elsewhere)");
+    } else {
+      const infBatchTitles = infBatch.map((i) => i.title);
+
+      // 10a. ON: the last row of the two-track queue gains exactly the batch,
+      //      as rows the popover draws, reorders and counts like any other.
+      const infStatus = await setInfinite(true);
+      check("infinite: the server accepts infinite_playback=true", infStatus === 200, `status=${infStatus}`);
+      await page.reload({ waitUntil: "domcontentloaded" });
+      await sleep(1500);
+      check("infinite: the switch reads back ON",
+        (await cfgValue(page, "infinite_playback")) === true,
+        `infinite_playback=${JSON.stringify(await cfgValue(page, "infinite_playback"))}`);
+      await page.goto(`${BASE}/album/${encodeURIComponent(infPair.path)}`, { waitUntil: "domcontentloaded" });
+      await page.waitForSelector('tr[title="Click to play"]');
+      const infRows = await page.locator('tr[title="Click to play"]').count();
+      await pressRow(infRows - 1);                       // the album's LAST row
+      // The GROWN queue, read from the store's own record (paths) and from the
+      // bar's counter. Nothing here races the append: the base is the album's
+      // two rows BY CONSTRUCTION (the pair album is the two-track one this case
+      // selected), so the growth measured below is the batch itself.
+      const infQueued = await infStored(2 + infBatch.length);
+      check(`infinite: the two-row queue gains exactly the batch (${infBatch.length})`,
+        !!infQueued && infQueued.paths.length === 2 + infBatch.length,
+        `len=${infQueued ? infQueued.paths.length : "?"} want=${2 + infBatch.length}`);
+      const infBatchPaths = infBatch.map((i) => i.path);
+      check("infinite: the added rows ARE the batch these seeds score, in order",
+        !!infQueued && JSON.stringify(infQueued.paths.slice(2)) === JSON.stringify(infBatchPaths),
+        `added=${JSON.stringify(infQueued?.paths.slice(2))} expected=${JSON.stringify(infBatchPaths)}`);
+      check("infinite: two rows in front of the batch, nothing in the queue twice",
+        !!infQueued && infQueued.paths.slice(0, 2).join() === infPair.tracks.map((t) => t.path).join()
+          && new Set(infQueued.paths).size === infQueued.paths.length
+          && infQueued.index === 1,
+        `paths=${JSON.stringify(infQueued?.paths)} index=${infQueued?.index}`);
+      let infGrown = await probe(page);
+      for (let i = 0; i < 30 && !(infGrown.len === 2 + infBatch.length && infGrown.pos === 2); i++) {
+        await sleep(300);
+        infGrown = await probe(page);
+      }
+      check("infinite: the bar's own queue counter shows the grown queue",
+        infGrown.len === 2 + infBatch.length && infGrown.pos === 2,
+        `pos=${infGrown.pos}/${infGrown.len}`);
+      // And the queue PANE draws each added row, in the batch's order — the rows
+      // are ordinary queue rows, not a hidden mode.
+      await infOpenQueue();
+      const infAdded = await infUpNext();
+      check("infinite: the queue pane draws every added row",
+        JSON.stringify(infAdded) === JSON.stringify(infBatchTitles),
+        `drawn=${JSON.stringify(infAdded)} expected=${JSON.stringify(infBatchTitles)}`);
+
+      // Ordinary rows: the popover's own drag reorders them (the same
+      // `queueMove` every other queue row has always used), and the reorder
+      // reaches the store like any other edit's does.
+      const infOrderBefore = infQueued.paths.slice(2);
+      await infDrag("start", 0, 1);
+      await sleep(250);
+      await infDrag("end", 0, 1);
+      await sleep(800);
+      const infQueued2 = await infStored(2 + infBatch.length);
+      const infOrderAfter = infQueued2 ? infQueued2.paths.slice(2) : [];
+      check("infinite: an added row reorders like any other queue row",
+        infOrderAfter.length === infOrderBefore.length
+          && infOrderAfter[0] === infOrderBefore[1] && infOrderAfter[1] === infOrderBefore[0]
+          && infOrderAfter.slice(2).join() === infOrderBefore.slice(2).join(),
+        `${JSON.stringify(infOrderBefore)} -> ${JSON.stringify(infOrderAfter)}`);
+
+      // The batch landed BEFORE the preload window opened: the idle decoder
+      // holds the row that now follows the last one — the first of the batch,
+      // as the drag left the order.
+      await infSeekTo(0.85);
+      let infArmed = null;
+      for (let i = 0; i < 15; i++) {
+        await sleep(200);
+        infArmed = await probe(page);
+        if (infArmed.els.length > 1) break;
+      }
+      const infFileByPath = new Map(infBatch.map((i) => [i.path, i.file]));
+      const infExpectedNext = infFileByPath.get(infOrderAfter[0] || "");
+      check("infinite: the idle decoder preloads the first row of the batch",
+        !!infArmed && infArmed.els.length === 2 && !!infExpectedNext
+          && infArmed.els.some((e) => e.file === infExpectedNext && e.paused),
+        `els=[${(infArmed?.els || []).map((e) => e.file + (e.paused ? "" : "*")).join(", ")}] ` +
+        `expected=${infExpectedNext}`);
+      let infAfter = null;
+      for (let i = 0; i < 20; i++) {
+        await sleep(700);
+        infAfter = await probe(page);
+        if (infAfter.pos === infGrown.pos + 1) break;
+      }
+      assertConsistent("infinite: the natural end hands over into the batch", infAfter, infExpectedNext);
+      check("infinite: the hand-over is a queue advance, not a restart",
+        !!infAfter && infAfter.pos === infGrown.pos + 1 && infAfter.len === infGrown.len,
+        `pos ${infGrown.pos} -> ${infAfter?.pos} len=${infAfter?.len} (was ${infGrown.len})`);
+
+      // 10a2. Shuffle is NOT exempt: a shuffled queue's last row still gains the
+      //       seeds' similar set — the appended rows are the scorer's answer,
+      //       not a random draw. Only Repeat one appends nothing.
+      await page.keyboard.press("Escape");               // the pane 10a opened
+      await sleep(250);
+      const infShuffleBtn = page.locator('button[title="Shuffle"]').first();
+      await infShuffleBtn.click();
+      await sleep(250);
+      await pressRow(infRows - 1);
+      await sleep(900);                                  // the append, then its coalesced write
+      const infShuffled = await infStored(2 + infBatch.length);
+      check("infinite: with Shuffle on the added rows are still the seeds' set",
+        !!infShuffled && infShuffled.index === 1
+          && infShuffled.paths.length === 2 + infBatch.length
+          && JSON.stringify(infShuffled.paths.slice(2)) === JSON.stringify(infBatchPaths),
+        `paths=${JSON.stringify(infShuffled?.paths)} index=${infShuffled?.index}`);
+      await infShuffleBtn.click();                       // Shuffle off
+      await sleep(250);
+
+      // 10b. Repeat one: that row's successor is ITSELF, so nothing is appended.
+      const infLoopBtn = page.locator('button[title="Repeat one"]').first();
+      await infLoopBtn.click();
+      await page.keyboard.press("Escape");
+      await sleep(250);
+      await pressRow(infRows - 1);
+      await sleep(900);
+      const infLoopStart = await probe(page);
+      await infSeekTo(0.9);
+      let infLooped = null;
+      for (let i = 0; i < 24; i++) {
+        await sleep(500);
+        infLooped = await probe(page);
+        if (infLooped.els.some((e) => !e.paused && e.t < 3)) break;
+      }
+      check("infinite: Repeat one appends nothing and restarts the row in place",
+        !!infLooped && infLoopStart.len === 2 && infLooped.len === 2
+          && infLooped.pos === 2 && infLooped.playing,
+        `len ${infLoopStart.len} -> ${infLooped?.len} pos=${infLooped?.pos} playing=${infLooped?.playing}`);
+      await infLoopBtn.click();                          // Repeat one off
+
+      // 10c. OFF (the shipped default): the same queue ends exactly as it did
+      //      before this feature existed — nothing is appended and no batch is
+      //      even asked for.
+      const infSeen = [];
+      const infWatch = (r) => { if (r.url().includes("/api/recommend/queue")) infSeen.push(r.url()); };
+      await setInfinite(false);
+      await page.reload({ waitUntil: "domcontentloaded" });
+      await sleep(1500);
+      page.on("request", infWatch);
+      await page.goto(`${BASE}/album/${encodeURIComponent(infPair.path)}`, { waitUntil: "domcontentloaded" });
+      await page.waitForSelector('tr[title="Click to play"]');
+      await pressRow(infRows - 1);
+      await sleep(1200);
+      const infOffStart = await probe(page);
+      await infSeekTo(0.9);
+      let infOffEnd = null;
+      for (let i = 0; i < 25; i++) {
+        await sleep(600);
+        infOffEnd = await probe(page);
+        if (!infOffEnd.playing) break;
+      }
+      check("infinite off: the last row is not extended",
+        infOffStart.len === 2 && infOffEnd?.len === 2, `len ${infOffStart.len} -> ${infOffEnd?.len}`);
+      check("infinite off: the queue ends after its last track, exactly as before",
+        !!infOffEnd && !infOffEnd.playing && infOffEnd.pos === infOffStart.pos
+          && infOffEnd.els.every((e) => e.paused),
+        `pos=${infOffEnd?.pos}/${infOffEnd?.len} playing=${infOffEnd?.playing} ` +
+        `els=[${(infOffEnd?.els || []).map((e) => e.file + (e.paused ? "" : "*")).join(", ")}]`);
+      check("infinite off: the player never even asks for a batch", infSeen.length === 0,
+        `requests=${JSON.stringify(infSeen)}`);
+      await infOpenQueue();
+      const infHonest = await page.evaluate(() =>
+        document.body.innerText.includes("Nothing up next — it ends after this track."));
+      check("infinite off: the queue pane promises the end it delivers", infHonest, "");
+      page.off("request", infWatch);
+      await setInfinite(infWas === true);
+      await page.reload({ waitUntil: "domcontentloaded" });
+    }
 
     check("no uncaught page errors", errs.length === 0, errs.join(" | "));
   } catch (e) {

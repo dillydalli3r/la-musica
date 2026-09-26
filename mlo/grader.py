@@ -4867,7 +4867,7 @@ def run_grade_library(config):
     # grade_dist, otherwise the failure rate can exceed 100%.
     stats["total_scanned"] += len(empty_folders)
     counts = {"ok": 0, "skip": 0, "fail": 0}
-    workers = worker_count(config, default=16, maximum=16, items=len(albums))
+    workers = worker_count(config, maximum=16, items=len(albums))
     # A caller's own sink for what this run graded (spec R155). It is a PRIVATE
     # key the caller puts on the very config it hands in — the import does, so
     # its gap report can reuse the grade this step just paid for instead of

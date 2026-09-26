@@ -1566,8 +1566,10 @@ DEFAULT_CONFIG = {
 
     # Misc
     "auto_advance": True,
-    # 0 means automatic. A positive value caps every module's worker pool,
-    # which is useful on slower disks or shared machines.
+    # 0 means automatic: every core this process may use, capped only by each
+    # script's own ceiling (a tool that saturates the disk, a pool nested
+    # inside another). A positive value is that many lanes for every script —
+    # the one knob, useful on slower disks or shared machines.
     "worker_limit": 0,
     # How many tracks an offline download fetches at once — the browser's own
     # download queue and the bulk transfer endpoint both read it, so one key
@@ -1610,6 +1612,16 @@ DEFAULT_CONFIG = {
     # handover would swallow. It gates the preload and the handover only; the
     # normal load path is unchanged, and it never affects what plays.
     "gapless_playback": True,
+    # Whether the queue keeps playing past its own last track: the player
+    # appends a handful of the library's SIMILAR tracks (scored locally from
+    # the library's own tags by `server.recommend`, so the answer needs no
+    # network and cannot stall the music) as ORDINARY queue rows — the reader
+    # can reorder, remove and see them like any other row. Off (the shipped
+    # default) the queue ends after its last track exactly as it always did;
+    # the switch is the whole feature, and nothing is appended while Repeat
+    # one is armed. Its batch bounds live in `server.recommend`
+    # (QUEUE_DEFAULT_LIMIT / QUEUE_MAX_LIMIT).
+    "infinite_playback": False,
     "run_all_order": list(DEFAULT_RUN_ALL_ORDER),
 
     # Export to device (Export page). Each key is the SAVED DEFAULT behind one
@@ -2447,6 +2459,24 @@ def active_config_file():
     if mf:
         cand = os.path.join(app_data_dir(mf), "config.json")
         if os.path.isfile(cand):
+            return cand
+        # A run that was TOLD where the music folder is owns its own state: it
+        # must never write this checkout's config.json. That file is how the
+        # next process — and the login gate, which reads the very config this
+        # resolves — learns where the install lives, so a scratch run (a test
+        # harness, a tool, an agent's server) writing it made a stranger's
+        # temp folder this repo's remembered install, and every later process
+        # started answering from it. `MLO_MUSIC_FOLDER` is that instruction;
+        # without it the legacy file stays the memory it has always been.
+        if os.environ.get("MLO_MUSIC_FOLDER"):
+            # The folder is created here for the same reason the app creates
+            # it on boot: whoever asked for this run may write the config
+            # straight into the file this returns (a test does exactly that),
+            # and a config path whose directory does not exist is not a path.
+            try:
+                os.makedirs(os.path.dirname(cand), exist_ok=True)
+            except OSError:
+                pass
             return cand
     return CONFIG_FILE
 

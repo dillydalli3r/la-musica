@@ -371,7 +371,7 @@ def run_fetch_lyrics(config):
     # mlo.lyrics_providers._request), so N lanes overlap the waiting with the
     # network instead of paying it once per track. The writes are per file, so
     # nothing is shared but the counters kept on this thread.
-    workers = worker_count(config, default=4, maximum=8, items=len(files))
+    workers = worker_count(config, maximum=8, items=len(files))
     try:
         if len(files) == 1 or workers == 1:
             for path in files:

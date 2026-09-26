@@ -367,6 +367,9 @@ const check = (name, ok, detail) => {
       tableW: Math.round(table.getBoundingClientRect().width),
       kept: ths.filter((t) => t.display !== "none").map((t) => t.label),
       folded: ths.filter((t) => t.display === "none").map((t) => t.label),
+      // Every column's own width, folded ones as 0 — what the stored-widths
+      // cases below compare against the clean table's floors.
+      widths: ths.map((t) => ({ label: t.label, w: t.display === "none" ? 0 : t.w })),
       titleColW: ths.find((t) => t.label === "Title")?.w ?? 0,
       name,
     };
@@ -507,6 +510,76 @@ const check = (name, ok, detail) => {
         wrapped.length === 0 && titleRows.every((r) => r.need > r.box + 1 || r.rowH <= (shortRow?.rowH ?? 0) + 2),
         JSON.stringify(wrapped));
 
+  // ---- the same tracklist with hostile-but-legal stored widths -------------
+  /* The owner's report on v4.2.0: "columns are VERY long for some reason, this
+   * is a major bug. Also rows seem really wide." A `table-layout: fixed` table
+   * takes the sum of its columns for its own floor, so a stored width map the
+   * resize handle itself could have produced — every value inside its 40-900
+   * clamp — drew an album tracklist of 3848 px in a 1200 px box with
+   * `mlo-colw-album-tracks` = {title:900, genre:900, bitrate:900, dur:900},
+   * pushing every column after the title off the right edge. useFittedWidths
+   * makes a stored width a preference about how the table's width is SPENT,
+   * never a floor the table has to be that wide: each column keeps its own
+   * floor, what is left over is shared among the columns the reader sized, and
+   * the table comes out exactly as wide as it is with NO stored widths at all
+   * (see lib/columns.tsx). The check states exactly that, at four widths: the
+   * table's width and its wrapper's scroll are the CLEAN numbers, every column
+   * is still drawn, and no column fell under its own floor (read off the clean
+   * table at 801 px, where the table is exactly its floors). */
+  await ctx.addInitScript(() => {
+    const seed = localStorage.getItem("mlo-test-width-seed");
+    if (!seed) return;
+    for (const [key, raw] of Object.entries(JSON.parse(seed))) {
+      if (raw === null) localStorage.removeItem(key);
+      else localStorage.setItem(key, raw);
+    }
+  });
+  const WIDTHS = [1440, 1100, 801, 390];
+  const HOSTILE = JSON.stringify({
+    "mlo-colw-album-tracks": JSON.stringify({ title: 900, genre: 900, bitrate: 900, dur: 900 }),
+  });
+  const at = async (vw, seed) => {
+    await page.setViewportSize({ width: vw, height: 900 });
+    await page.evaluate((s) => {
+      if (s === null) localStorage.removeItem("mlo-test-width-seed");
+      else localStorage.setItem("mlo-test-width-seed", s);
+    }, seed);
+    await page.reload({ waitUntil: "networkidle" });
+    await page.waitForSelector("main table tbody tr", { timeout: 30000 });
+    await page.waitForTimeout(700);
+    return albumGeom();
+  };
+  const floorGeom = await at(801, null);
+  const floors800 = Object.fromEntries((floorGeom.widths || []).map((w) => [w.label, w.w]));
+  const clean = {};
+  const hostile = {};
+  for (const vw of WIDTHS) {
+    clean[vw] = await at(vw, null);
+    hostile[vw] = await at(vw, HOSTILE);
+    const c = clean[vw];
+    const h = hostile[vw];
+    const drawn = h.widths.filter((w) => w.w > 0);
+    // The floor of each column, read where the table IS its floors.
+    const under = drawn.filter((w) => (floors800[w.label] ?? 0) > 0 && w.w + 1 < floors800[w.label])
+      .map((w) => `${w.label}:${w.w}<${floors800[w.label]}`);
+    console.log(`\n[album tracklist ${vw} px] clean table ${c.tableW}, wrapper ${c.wrapScroll}/${c.wrapClient} px, `
+      + `name ${c.titleColW} px | hostile table ${h.tableW}, wrapper ${h.wrapScroll}/${h.wrapClient} px, name ${h.titleColW} px`
+      + (vw === 1440 ? `\n  hostile columns: ${h.widths.filter((w) => w.w > 0).map((w) => `${w.label}=${w.w}`).join(" ")}` : ""));
+    check(`${vw} px: a stored width map cannot widen the tracklist (${h.tableW} px vs ${c.tableW} px clean)`,
+          h.tableW === c.tableW, `${h.tableW} vs ${c.tableW}`);
+    check(`${vw} px: …nor add a sideways scroll it did not have (${h.wrapScroll} vs ${c.wrapScroll} px)`,
+          h.wrapScroll === c.wrapScroll, `${h.wrapScroll} vs ${c.wrapScroll}`);
+    /* Every column keeps at least its own floor — compared against the floors
+     * read at 801 px, where the table IS its floors. Below `md` the floors of
+     * the folded columns are not in force at all (the phone's own fold decides
+     * the layout there), so what is pinned at 390 px is the two checks above
+     * plus that no column went away. */
+    check(`${vw} px: …and every column is still drawn at least its own floor `
+          + `(${drawn.length} drawn, ${vw < 768 ? "the phone's own fold decides below md" : `${under.length} under`})`,
+          drawn.length === (c.widths.filter((w) => w.w > 0).length) && (vw < 768 || under.length === 0),
+          under.join(",") || JSON.stringify(drawn));
+  }
+  await page.evaluate(() => localStorage.removeItem("mlo-test-width-seed"));
   await page.setViewportSize({ width: 1440, height: 900 });
 
   await browser.close();

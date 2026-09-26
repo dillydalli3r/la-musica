@@ -35,7 +35,7 @@ import StatsPanel from "../components/StatsPanel";
 import TrackDetails, { CreditsPanel, creditTagsFrom } from "../components/TrackDetails";
 import { AlbumDetails } from "../components/AlbumDetails";
 import { SortHeader, sortRows, toggleSort, groupByDisc, type SortState } from "../lib/sort.tsx";
-import { ColumnsMenu, ColumnResizer, ColFloorHolder, useColumnPrefs, useColumnWidths, useCustomColumns, customCols, customColValue, ALBUM_TRACK_COLS, ALBUM_TRACK_COL_W, ALBUM_TRACK_MIN_W, ALBUM_TRACK_PHONE_CLS, ALBUM_TRACK_TITLE_FLOOR, phoneHide, TAG_COL_W, type Col } from "../lib/columns";
+import { ColumnsMenu, ColumnResizer, ColFloorHolder, useFittedWidths, useColumnPrefs, useColumnWidths, useCustomColumns, customCols, customColValue, ALBUM_TRACK_COLS, ALBUM_TRACK_COL_W, ALBUM_TRACK_MIN_W, ALBUM_TRACK_PHONE_CLS, ALBUM_TRACK_TITLE_FLOOR, phoneHide, TAG_COL_W, type Col } from "../lib/columns";
 import { useI18n } from "../lib/i18n";
 import { toast, useStore } from "../store";
 import { fmtTech, albumTech } from "../lib/fmt";
@@ -144,6 +144,10 @@ export default function AlbumPage() {
     if (id) toggleTrackCol(id);
   };
   const [trackW, setTrackW, resetTrackW] = useColumnWidths("album-tracks");
+  // The stored tracklist widths fitted to this table's own box: the reader's
+  // drags decide how the width is spent, never how wide the table is (see
+  // useFittedWidths — the same rule the library's tables follow).
+  const [drawnTrackW, trackBox] = useFittedWidths(trackW, trackDefs.filter((c) => trackCols.includes(c.id)).map((c) => c.id));
   const coverInput = useRef<HTMLInputElement>(null);
   const qc = useQueryClient();
   // The one cover policy's own words (mlo/cover_choice) and the pending state
@@ -1397,7 +1401,7 @@ export default function AlbumPage() {
 
       {/* `overflow-x-auto`: the tracklist is what overflows on a phone and the
           page cannot scroll sideways for it. */}
-      <div className="section overflow-x-auto">
+      <div className="section overflow-x-auto" ref={trackBox}>
         <table className={`w-full text-sm ${ALBUM_TRACK_MIN_W}`}>
           {/* Borderless header: the only separator is this section's own
               hairline above the table. */}
@@ -1412,7 +1416,7 @@ export default function AlbumPage() {
                 ) : (
                   <SortHeader key={c.id} label={c.label} sort={sort} sortKey={c.sortKey} onSort={(k) => setSort(toggleSort(sort, k))}
                     className={`relative ${ALBUM_TRACK_COL_W[c.id] ?? TAG_COL_W}${c.id === "num" ? " cell-nowrap" : ""}${phoneHide(ALBUM_TRACK_PHONE_CLS, c.id)}`}
-                    style={trackW[c.id] ? { width: trackW[c.id] } : undefined}>
+                    style={drawnTrackW[c.id] ? { width: drawnTrackW[c.id] } : undefined}>
                     {c.id === "title" && <ColFloorHolder className={ALBUM_TRACK_TITLE_FLOOR} />}
                     <ColumnResizer width={trackW[c.id]} onDrag={(w) => setTrackW(c.id, w)} onReset={resetTrackW} />
                   </SortHeader>

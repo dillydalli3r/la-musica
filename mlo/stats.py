@@ -465,31 +465,45 @@ def _collect_targets(targets, extensions):
     return sorted(files.values())
 
 
-def worker_count(config=None, default=None, maximum=None, items=None):
-    """Choose a bounded worker count from the shared performance setting.
+def usable_cores():
+    """How many cores THIS process may actually use.
 
-    ``worker_limit=0`` keeps the module's normal automatic behavior. An
-    explicit positive limit prevents a Run All job from creating too many
-    competing encoder processes on a busy or slower disk.
+    `process_cpu_count` respects an affinity mask (a container's `--cpuset`,
+    taskset) where `cpu_count` reports the host's cores; it is the honest
+    answer to "how many can this process use" and Python 3.13 has it. Fall
+    back to the older call on anything without it. Every sizing decision
+    (:func:`worker_count`, :func:`thread_budget`) starts from this one number,
+    so a pool and the budget it divides cannot disagree about the machine.
+    """
+    return (getattr(os, "process_cpu_count", None) or os.cpu_count)() or 1
+
+
+def worker_count(config=None, maximum=None, items=None):
+    """Choose THIS script's pool width from the shared performance setting.
+
+    ``worker_limit`` (Settings → General, "Worker threads") is the one knob
+    that decides how many lanes every script runs: ``0``/unset means "use the
+    machine", so the pool is sized from :func:`usable_cores` — a 16-core box
+    gets 16 lanes instead of whatever number was picked back when four cores
+    was a lot of computer. A script may still declare a ``maximum``: that is
+    its own honest ceiling, either because its worker's native tool already
+    saturates the machine (one encoder per core is slower, not faster, on one
+    disk) or because the work is NESTED inside another pool and must not
+    multiply the run's budget (R79) — and it caps the AUTOMATIC count only.
+    An EXPLICIT ``worker_limit`` is the user sizing the pools themselves, so
+    it is never clamped by a script's ceiling. ``items`` bounds the pool by
+    the work it actually has, so one album never starts eight lanes.
     """
     config = config or {}
-    # `process_cpu_count` respects an affinity mask (a container's `--cpuset`,
-    # taskset) where `cpu_count` reports the host's cores; it is the honest
-    # answer to "how many can this process actually use" and Python 3.13 has
-    # it. Fall back to the older call on anything without it.
-    cpu = (getattr(os, "process_cpu_count", None) or os.cpu_count)() or 1
     try:
         requested = int(config.get("worker_limit", 0) or 0)
     except (TypeError, ValueError):
         requested = 0
-    count = requested if requested > 0 else (default or cpu)
-    # `maximum` bounds the AUTOMATIC count — it exists so an unattended Run All
-    # on a busy disk does not spawn one encoder per core. An EXPLICIT
-    # `worker_limit` is the user sizing the pools themselves ("lots of threads
-    # on this box"), so it is not clamped by a module's own ceiling: a 16-core
-    # machine that asks for 16 got 8 before this.
-    if maximum is not None and requested <= 0:
-        count = min(count, maximum)
+    if requested > 0:
+        count = requested
+    else:
+        cores = usable_cores()
+        count = cores if maximum is None else min(cores, max(1, int(maximum)))
     if items is not None:
         count = min(count, max(1, int(items)))
     return max(1, count)
@@ -505,14 +519,16 @@ def thread_budget(config=None):
     2-worker run on a 16-thread host could still peg the CPU — the exact thing
     the setting exists to prevent, and what a container's CPU quota turns into
     throttling, i.e. a slower run. Anything spawning threads off a worker
-    derives its count from here. 0 (auto) reports the machine's cores.
+    derives its count from here. 0 (auto) reports the machine's cores — the
+    same number :func:`usable_cores` gives the pools, so a run's total is the
+    machine, never more.
     """
     config = config or {}
     try:
         requested = int(config.get("worker_limit", 0) or 0)
     except (TypeError, ValueError):
         requested = 0
-    return requested if requested > 0 else (os.cpu_count() or 1)
+    return requested if requested > 0 else usable_cores()
 
 
 def tool_threads(config=None, workers=1):

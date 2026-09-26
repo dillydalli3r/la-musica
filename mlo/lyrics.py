@@ -1184,7 +1184,7 @@ def _normalize_media_source_library(config, stats, albums, media_source=None):
         return stats
 
     counts = {"ok": 0, "skip": 0, "fail": 0}
-    workers = worker_count(config, default=16, maximum=16, items=len(albums))
+    workers = worker_count(config, maximum=16, items=len(albums))
 
     with ThreadPoolExecutor(max_workers=workers) as ex:
         futures = {
@@ -1278,10 +1278,7 @@ def run_format_lyrics(config):
     media_source = {}
 
     if files:
-        threads = worker_count(
-            config, default=(os.cpu_count() or 1) * 3,
-            maximum=64, items=len(files)
-        )
+        threads = worker_count(config, maximum=64, items=len(files))
         counts = {"ok": 0, "skip": 0, "fail": 0}
 
         with ThreadPoolExecutor(max_workers=threads) as ex:

@@ -282,7 +282,7 @@ label, with the clock moving. Both of the wizard's chain bars (the strip and the
 Finish step's own) draw from that one reading, so they cannot disagree.
 `tools/test_chain_bar.py` pins it against the frames a real chain publishes.
 **R79 — the worker budget is what the WHOLE run costs.** `worker_limit`
-(Settings → Performance → "Worker threads", 0 = count them from the CPU) bounds
+(Settings → General → "Worker threads", 0 = every core the machine has) bounds
 the worker pools (`mlo.stats.worker_count`) and, through
 `mlo.stats.tool_threads`, the thread count each worker's native tool is given:
 cjxl's `--num_threads`, the ffmpeg decode fallback's `-threads`. A pool of 2
@@ -5980,23 +5980,45 @@ composition instead (R267). Above `lg` the pane sits beside the artwork.
   floor instead of painting it 0 px wide in a `table-layout: fixed` table. The
   owner's four symptoms came from exactly this class (Albums → artist headers
   over empty rows, Tracks → a `#` column and nothing else, no covers, an
-  unnecessary sideways scroll on Artists). A sanitized map whose surviving widths
-  still exceed the rendered table is the ONE case that may scroll — the column
-  floors (R313) decide, and the table must not scroll when its columns fit.
-  Pinned by the hostile-prefs cases in `tools/check_library_az.mjs` (each seeded
-  through an init script before the app loads) and the geometry in
-  `tools/check_library_tables.cjs`.
+  unnecessary sideways scroll on Artists).
+
+  Sanitizing is not enough on its own: `table-layout: fixed` takes the sum of a
+  table's columns for the table's own floor (CSS 2.1 §17.5.2.1), so a map whose
+  every value is inside the handle's own 40–900 clamp — nothing `sanitizeWidths`
+  may drop — still drew a 1420 px Artists table in a 1200 px box and a 3848 px
+  album tracklist in the same box (`mlo-colw-album-tracks` = {title, genre,
+  bitrate, dur} at 900): the owner's "columns are VERY long ... rows seem really
+  wide". A stored width is therefore a preference about how a table's width is
+  SPENT, never a floor the table IS that wide: `useFittedWidths` (same file)
+  reads every column's own floor off the table itself in one layout pass, gives
+  each column that floor first, and shares what the box has left over among the
+  columns the reader sized, in proportion to how much MORE than its floor each
+  one asked for — `shown(i) = floor(i) + (stored(i) − floor(i)) × room / Σ
+  excess`. The table then renders exactly as wide as it would with no stored
+  widths at all: `w-full` where the floors fit, and the floors' own sum where
+  they do not — the one case that still scrolls (R313). One hook, wired to the
+  library's Albums/Artists/Tracks views, the album page's tracklist, the
+  library's expanded tracklists and the cached tables; the floors are read, never
+  duplicated as a second table of numbers. Pinned by the hostile-prefs cases in
+  `tools/check_library_az.mjs` (each seeded through an init script before the app
+  loads: the table's width, its scroll AND every column are the clean table's)
+  and by `tools/check_library_tables.cjs`, which measures the album tracklist at
+  1440/1100/801/390 px in both states.
 
 ### 7.63 The album badge names where its files came from, and the artist wears its own verdict
 
 - **R321 — a `Digital Media` album's badge names its SOURCE.** The badge order is
-  fixed: medium · source · countries (`Digital Media · Bandcamp · US`), built by
-  `mediaSourceLabel`/`mediaCountryLabel` in `web/src/components/Badges.tsx` from
-  the album payload's `source_summary` (`web/src/types.ts`). A source that only
-  repeats the medium (the app's own `Digital` default when nothing stated where
-  the files came from) is dropped rather than printed twice, and every surface
-  that wears the badge — the library's rows and cards and the album page header
-  — names the same release the same way.
+  fixed: medium · source · countries (`Digital · Bandcamp · US`, the medium in
+  the badge's own short form — `mediaShort` prints the medium's first word, so a
+  `Digital Media` release wears `Digital`, exactly as a `Compact Disc` one wears
+  `CD`), built by `mediaSourceLabel`/`mediaCountryLabel` in
+  `web/src/components/Badges.tsx` from the album payload's `source_summary`
+  (`web/src/types.ts`). A source that only repeats the medium (the app's own
+  `Digital` default when nothing stated where the files came from) is dropped
+  rather than printed twice, `INCONSISTENT` — the server's word for files that
+  disagree — stays with the album page's Source readout instead of reading as a
+  shop, and every surface that wears the badge — the library's cards and the
+  album page header — names the same release the same way.
 - **R322 — an artist's own verdict is a dot beside the name, and its hero fades
   rather than cuts.** `mlo.grader.grade_artist` is what the artist's checks are
   (its image and its description), the library payload now carries that verdict
@@ -6011,6 +6033,104 @@ composition instead (R267). Above `lg` the pane sits beside the artwork.
   Pinned by `tools/check_library_az.mjs` (the dot present for a passing artist
   and absent for a failing one, the two chips gone, the counts kept, and the blur
   layer's box and computed mask measured).
+
+### 7.64 One knob decides the lanes, and only independent units get them
+
+- **R323 — `worker_limit` is the ONE thread setting, and a script parallelises
+  only over units that share nothing.** Settings → General → "Worker threads"
+  (`worker_limit`, `mlo/config.py`, 0–64) is read by every script through
+  `mlo.stats.worker_count(config, maximum=…, items=…)`. `0`/unset means "use the
+  machine": the pool is `mlo.stats.usable_cores()` lanes (`process_cpu_count`,
+  so a container's affinity mask is honoured), capped only by the script's own
+  declared ceiling (`maximum` — its worker's native tool already saturates the
+  disk, or its work is nested inside another pool and must not multiply the
+  budget, R79) and by the number of items it actually has; an explicit number is
+  the user sizing the pools themselves and is never clamped by a ceiling.
+  `thread_budget` reports the same machine number and `tool_threads` divides it
+  among the lanes, so `lanes × threads per lane` adds up to the machine — not to
+  lanes × cores.
+  A loop may be pooled only when its iterations SHARE NOTHING: each unit writes
+  its own path (one file's tags, one sidecar, one image, one remux temp file),
+  and everything shared is either left to the runner thread that consumes the
+  pool's results in submission order (stats counters, the progress bar, the log
+  order, a whole-file JSON map) or computed AFTER the pool has finished (album
+  gain, album DR, a grade). A lane never increments a `stats` counter: two
+  lanes' `+=` lose updates, which is why the remux counters moved to the booking
+  loop and `mlo.artistdata`'s provenance merge is serialised behind one lock. A
+  script that cannot meet that stays serial and says why.
+  What the shipped scripts do (all widths from the setting, all ceilings stated):
+
+  | # | script | pooled unit | width |
+  |---|---|---|---|
+  | 1 | Format lyrics | file; album for the MEDIA/SOURCE pass | cores; ceilings 64 / 16 |
+  | 2 | Format CUEs | `.cue` file | cores, ceiling 64 |
+  | 3 | Optimize FLACs | FLAC file (`flac.exe`) + conversion file (ffmpeg) | cores; each encoder takes `tool_threads` |
+  | 4 | Grade | album (its tracks inside the lane) | cores, ceiling 16 |
+  | 5 | Process images | image file (cjxl/oxipng) | cores; each encoder takes `tool_threads` |
+  | 6 | Audit library | tag read · CD CRC · integrity · rip-log scoring · AudioAuditor | ceilings 8/16, nested CD decoders share one album's budget |
+  | 7 | DR & ReplayGain | album (`rsgain`), then the album's TRACK decodes inside that lane | album lanes ceiling 8; tracks = budget ÷ lanes, each ffmpeg `-threads` its share |
+  | 8 | Auto Tagging | album, then per TRACK for the decode-bound mood/genre stage | ceiling 8 |
+  | 9 | AccurateRip | CD album (`ffmpeg` WAV decode per disc) | ceiling 8, per-disc decoders share the album's budget |
+  | 10 | Format all | sidecar/sidecar-family task | ceiling 16 |
+  | 11 | Remux videos | video file, or a whole disc structure as one input | cores; each ffmpeg gets `tool_threads` |
+  | 12 | Key & BPM | track (tag scan, then librosa analysis) | ceiling 8, `bound_numeric_threads` |
+  | 13 | Fetch lyrics | track (network + write) | ceiling 8 |
+  | 14 | Beets tagging | — one `beet import` child owns one SQLite library | serial |
+  | 15 | Release tracklist | — one rate-limited MusicBrainz request per album | serial |
+  | 16 | Mood & Energy | track (tag scan, then librosa analysis) | ceiling 8, `bound_numeric_threads` |
+  | 17 | Lyrics transliterate (AI) | file (own tags/sidecar) | ceiling 8 |
+  | 18 | Publish lyrics (LRCLIB) | track | ceiling 8 |
+  | 19 | Optimize artist images | artist folder (its own `artist.jpg`) | ceiling 8 |
+  | 20 | Optimize library layout | plan lane (scan), per artist | ceiling 16; the apply pass is serial (rename → move → trash rebases the paths the next row names) |
+  | 21 | Fix AcoustID pairs | file (`fpcalc` + lookup + its own tags) | ceiling 8 |
+  | 22 | Submit fingerprints | file (`fpcalc`), the dedupe/batch stays in order | ceiling 8 |
+
+  Deliberately serial INSIDE a pooled script: `mlo/cue.py`'s album rename
+  pre-pass (renaming a `.cue` changes the path the other cues are keyed by),
+  `mlo/images.py`'s cover-rename pass (at most ONE image per folder may take
+  the cover name), `mlo/format_all.py`'s cue-repair pre-pass and its four family
+  phases (each phase is ordered behind the last), `mlo/audit.py`'s CD-format
+  tag reads and its INTEGRITY fill (each fill re-files the shared evidence map
+  under the file's new size/mtime stamp), `mlo/grader.py`'s per-track loop
+  (one pass accumulating the album's checkbook: issues, counters, the deferred
+  AUDIT resolution), `mlo/acoustid.py`'s candidate lookups (paced by the
+  service's own throttle, not by the CPU). Pinned by the pipeline suites
+  (`tools/test_remux.py` accounting, `tools/test_dynamic_range.py` album DR,
+  `tools/test_script_optimizations.py`, `tools/test_config_ui_parity.py`).
+
+### 7.65 The queue keeps playing, and the batch that keeps it going is ordinary
+
+- **R324 — infinite playback extends the queue the listener can see, and every
+  way it could is bounded.** `infinite_playback` (`mlo/config.py`, shipped
+  **off**, one Settings row in `Downloads & playback`) makes the player ask the
+  local scorer for the batch that continues a queue which has run out, and
+  append it — `web/src/lib/recommend.ts`'s `fetchQueueRecommend`/
+  `QUEUE_BATCH`, called from `PlayerBar`'s own effect when the row that is
+  playing is the queue's LAST row. Five properties make that safe, and each one
+  is the reason the feature is not a "radio mode":
+  (a) the switch is the whole feature — off, the app is byte-for-byte the app it
+  was, which `tools/check_player_state.cjs` §10 proves by watching that not one
+  request for a batch is made and that the queue ends exactly as before;
+  (b) the rows are ORDINARY queue rows in the store (`queueAdd(rows, "end")`),
+  so the queue pane, its count, drag-reorder and remove treat them like any
+  other row, and reordering one really moves it in the store's own record;
+  (c) the seed is the queue's own set and nothing else — the same paths are the
+  exclusion set, so no track already queued is ever added twice, and the batch
+  is a handful (`server/recommend.py`'s `QUEUE_DEFAULT_LIMIT`/`QUEUE_MAX_LIMIT`,
+  clamped server-side whatever a caller asks: the route is `GET`/`POST
+  /api/recommend/queue`, `recommend_for_queue`);
+  (d) the scoring is LOCAL (`server/recommend.py` over the library's own tags) —
+  no provider is consulted, so it works offline and cannot hang the music, and
+  a missing answer is an empty list that simply ends the queue;
+  (e) the append happens as the last row STARTS, which is before the gapless
+  preload arms for its successor, so the hand-over into the added set is the
+  same one an album advance gets (the idle decoder holds the first added row);
+  Repeat one appends nothing (that row's successor is itself), and shuffle is
+  not exempt — a shuffled queue's added rows are still the seeds' similar set.
+  Pinned by `tools/test_recommendations.py` (seeds, exclusions, a duplicate seed
+  list, the bounded batch, the two verbs, the web's batch number) and
+  `tools/check_player_state.cjs` §10 (the gained rows, the pane, the reorder,
+  the preload, the hand-over, and the off/Repeat-one cases).
 
 ## 8. Recommended runbook
 

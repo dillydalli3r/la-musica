@@ -248,11 +248,21 @@ try:
     rec, stats = _run(_cfg(root, library_codec="mp3"))
     calls = rec.ffmpeg_calls()
     assert len(calls) == 1, calls
+    # The conversion carries ONE lane's share of the run's thread budget
+    # (`tool_threads`, R79/R323): the VALUE is this machine's core count, so
+    # the flag is asserted as a real count here and the rest of the argv is
+    # compared exactly around it.
+    argv = list(calls[0])
+    if "-threads" in argv:
+        i = argv.index("-threads")
+        share = argv[i + 1]
+        assert share.isdigit() and 1 <= int(share) <= (os.cpu_count() or 1), argv
+        del argv[i:i + 2]
     # The one command line carries the target's args and the input/output.
-    assert calls[0] == [FFMPEG, "-y", "-v", "error", "-nostdin", "-i",
-                        src.replace("\\", "/"), "-map", "0:a:0",
-                        "-c:a", "libmp3lame", "-f", "mp3", "-b:a", "320k",
-                        calls[0][-1]], calls[0]
+    assert argv == [FFMPEG, "-y", "-v", "error", "-nostdin", "-i",
+                    src.replace("\\", "/"), "-map", "0:a:0",
+                    "-c:a", "libmp3lame", "-f", "mp3", "-b:a", "320k",
+                    calls[0][-1]], calls[0]
     assert calls[0][-1].endswith(".mp3") and ".conv_" in calls[0][-1], calls[0]
     names = _names(album)
     assert "01 track.mp3" in names, names            # the converted file
