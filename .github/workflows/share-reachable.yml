@@ -1,0 +1,86 @@
+name: share reachable from the internet
+
+# "Is my share really browsable from outside?" — answered by a real Soulseek
+# peer on a GitHub runner, which is on the internet and not on your network.
+#
+# Run it from the Actions tab (`Run workflow`). It logs in as a throwaway
+# account (nothing of yours is used, no secrets are needed), browses the share
+# and prints what a peer gets — directory and file counts, and the first names.
+# The account shares nothing itself, which is deliberate: the share has to
+# answer any peer, not just ones that share back.
+#
+# Why this exists: a client inside the owner's own network cannot answer the
+# question at all — it dials the router's public address and a router without
+# NAT reflection refuses it (issue #57, measured: refused from inside, 15
+# directories / 165 files in 0.09 s from here).
+
+on:
+  workflow_dispatch:
+    inputs:
+      target:
+        description: "Soulseek username whose share to browse"
+        required: false
+        default: "dillydallier"
+
+jobs:
+  browse:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: fetch slskd v0.26.0 — the binary the app installs
+        run: |
+          set -e
+          curl -sSL -o /tmp/slskd.zip \
+            https://github.com/slskd/slskd/releases/download/0.26.0/slskd-0.26.0-linux-x64.zip
+          mkdir -p /tmp/slskd && unzip -q -o /tmp/slskd.zip -d /tmp/slskd
+          BIN="$(find /tmp/slskd -type f -name slskd | head -1)"
+          chmod +x "$BIN"
+          echo "binary: $BIN"; "$BIN" --version || true
+
+      - name: browse the share from the internet
+        run: |
+          set -x
+          BIN="$(find /tmp/slskd -type f -name slskd | head -1)"
+          TARGET="${{ github.event.inputs.target }}"
+          TARGET="${TARGET:-dillydallier}"
+          # A throwaway account, reused across runs so no new accounts are made.
+          U="mlo-share-probe"
+          P="mlo-share-probe-not-a-secret"
+          mkdir -p /tmp/app /tmp/downloads
+          SLSKD_APP_DIR=/tmp/app SLSKD_NO_AUTH=true \
+          SLSKD_SLSK_USERNAME="$U" SLSKD_SLSK_PASSWORD="$P" \
+          SLSKD_SLSK_LISTEN_PORT=50000 SLSKD_DOWNLOADS_DIR=/tmp/downloads \
+          "$BIN" > /tmp/slskd.out 2>&1 &
+          logged=no
+          for i in $(seq 1 48); do
+            state="$(curl -s -m 10 http://127.0.0.1:5030/api/v0/server || true)"
+            case "$state" in *'"isLoggedIn":true'*) logged=yes; break;; esac
+            sleep 5
+          done
+          echo "logged_in=$logged   runner IP: $(curl -s -m 10 https://api.ipify.org)"
+          curl -s -m 240 -o /tmp/browse.json -w 'HTTP %{http_code} after %{time_total}s\n' \
+            "http://127.0.0.1:5030/api/v0/users/$TARGET/browse" || true
+          python3 - "$TARGET" <<'PY' >> "$GITHUB_STEP_SUMMARY"
+          import json, sys
+          target = sys.argv[1]
+          try:
+              d = json.load(open('/tmp/browse.json'))
+          except Exception as e:
+              print(f"## `{target}` did not answer a file list\n\n```\n{e}\n"
+                    + open('/tmp/browse.json', errors='replace').read()[:400] + "\n```")
+              raise SystemExit(0)
+          dirs = d.get('directories') or []
+          files = [f for x in dirs for f in (x.get('files') or [])]
+          print(f"## `{target}`: {len(dirs)} directories, {len(files)} files\n")
+          if not files:
+              print("> The peer connected and got an empty list — the account is "
+                    "not sharing (or its sharing is off).\n")
+          for x in dirs[:8]:
+              print(f"- `{x.get('name')}` — {len(x.get('files') or [])} files")
+          for f in files[:5]:
+              print(f"  - `{f.get('filename')}` ({f.get('size')} bytes)")
+          PY
+
+      - name: slskd's own log
+        if: always()
+        run: tail -40 /tmp/slskd.out || true
