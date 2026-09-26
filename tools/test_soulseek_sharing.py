@@ -444,6 +444,11 @@ assert audit["status"] == "listen_unconfirmed", audit["status"]
 # nothing in here can see the host's routing table
 assert any("HOST's own route out" in n and "api.ipify.org" in n
            and "exit node" in n for n in audit["notes"]), audit["notes"]
+# ...and, on the same note, the thing the owner's own client cannot do: browse the
+# share from THIS network (issue #57's follow-up — SoulseekQt on the LAN, stuck on
+# "Requesting file list…", while three external nodes reached the port)
+assert any("SAME LAN cannot browse this share" in n
+           and "Test it from another network." in n for n in audit["notes"]), audit["notes"]
 
 soulseek_port._connect = real_connect
 published["accepts"] = set()

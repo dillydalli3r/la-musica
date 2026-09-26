@@ -1,7 +1,7 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
   "productName": "la musica",
-  "version": "4.1.7",
+  "version": "4.1.8",
   "identifier": "com.musiclibraryoptimizer.lamusica",
   "build": {
     "frontendDist": "../../web/dist",
@@ -45,7 +45,7 @@
     },
     "iOS": {
       "minimumSystemVersion": "14.0",
-      "bundleVersion": "4.1.7",
+      "bundleVersion": "4.1.8",
       "infoPlist": "Info.plist"
     },
     "android": {

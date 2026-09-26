@@ -1961,7 +1961,15 @@ user asked for, in the order they asked for it. `server/exporter.py` owns both.
   machine's OWN internet-bound interface is a tunnel, not the carrier's CGNAT),
   `self-connect`
   (refused ⇒ `unknown`, never `fail`: a router without hairpinning refuses it
-  while the port may still be open) and `network` (slskd's signed-in state) —
+  while the port may still be open — and the row says what that same rule means
+  for a reader who tries the obvious test: a Soulseek client on the SAME network
+  is handed the public address and dials it from inside, so its file-list request
+  never arrives, its browse hangs on "Requesting file list…", and the share is
+  browsable from anywhere else. Measured on the owner's own install: SoulseekQt
+  on their LAN hung while three external nodes connected to the WAN address in
+  0.002–0.17 s, and slskd browsing its own username failed the same way; the
+  remedy is a client on ANOTHER network, or the router's NAT loopback) and
+  `network` (slskd's signed-in state) —
   each carrying `proves` and `cannot`. A definitive "open to the internet"
   answer needs a probe from OUTSIDE the network, which this app does not ship,
   and the payload says so. Nothing runs on its own: the probe is fired by the

@@ -623,12 +623,26 @@ def _self_connect_check(port, wan):
     cannot = ("whether the internet reaches that address: without NAT hairpinning "
               "a router refuses exactly this connection while the port is still "
               "open to the outside, so a refusal here can never be read as "
-              "closed.")
+              "closed. The same rule is why a Soulseek client on this SAME "
+              "network cannot browse this share: it is handed the public address "
+              "and dials it from inside, so its file-list request never arrives "
+              "while the share is perfectly browsable from anywhere else. The "
+              "test that means something starts on another network — a phone on "
+              "cellular, another user, or an online TCP check of the WAN address "
+              "and this port.")
     label = f"Self-connect to {wan}:{port}" if wan else "Self-connect"
     if not wan:
         return _row("self-connect", label, "unknown",
                     "no gateway stated a WAN address, so there is no public "
-                    "address to try from here.", proves, cannot)
+                    "address to try from here — which is also every container: "
+                    "the router's WAN address is not visible from inside one, and "
+                    "Test port on the HOST is where that row can answer. Nothing "
+                    "on this network can prove the share either way: a Soulseek "
+                    "client on the same LAN is handed the public address and "
+                    "dials it from inside, so a router without NAT hairpinning "
+                    "never passes its file-list request — while the share is "
+                    "browsable from anywhere else. Test it from another network.",
+                    proves, cannot)
     ok, why = _connect(wan, port, PUBLIC_TIMEOUT)
     if ok:
         return _row("self-connect", label, "ok",

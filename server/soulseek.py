@@ -2629,7 +2629,13 @@ def share_audit(cfg=None, probe=False):
              f"turn the exit node off for the host while sharing (or split-route "
              f"it) when the two differ. TCP "
              f"{_port} is the only port involved — nothing UDP, and no second "
-             f"(obfuscated) port: slskd has no obfuscated route.")
+             f"(obfuscated) port: slskd has no obfuscated route. One thing "
+             f"nothing on this network can prove either way: a Soulseek client on "
+             f"the SAME LAN cannot browse this share — the server hands it the "
+             f"public address and the router will not send a connection from "
+             f"inside back to its own public address (no NAT hairpin), so its "
+             f"file-list request never arrives while the share is browsable from "
+             f"anywhere else. Test it from another network.")
     # Every case below is a fact read off this machine or off the router —
     # nothing is inferred from intent, and a mapping nobody confirmed is never
     # reported as one.

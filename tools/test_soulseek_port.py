@@ -413,6 +413,28 @@ ok(row(hairpin, "self-connect")["state"] == "unknown"
    and "NAT hairpinning" in row(hairpin, "self-connect")["detail"],
    "a connection to the public address that is refused is unknown (no hairpinning), "
    "never fail")
+# …and the row carries the piece of that rule the owner's own report needed: their
+# SoulseekQt, on the same LAN, hanging on "Requesting file list…" while three
+# external nodes connected to the WAN address in 0.1 s. The client is handed that
+# public address and dials it from INSIDE, which the same router refuses — a fact
+# about the router, never about the share, and one the fix is to test elsewhere.
+ok("SAME network" in row(hairpin, "self-connect")["cannot"]
+   and "another network" in row(hairpin, "self-connect")["cannot"],
+   "…and the row says a client on this SAME network cannot browse the share "
+   "either, so the test that means something starts elsewhere")
+
+# No WAN stated at all — which is every container: the sentence above is the only
+# help this row can give from in there, and it must still be there.
+reads["value"] = read("mapped", port=live_port, ip=LAN, verified=True,
+                      detail="the gateway lists external port %d" % live_port)
+no_wan = sp.port_check(cfg)
+ok(row(no_wan, "self-connect")["state"] == "unknown"
+   and "no gateway stated a WAN address" in row(no_wan, "self-connect")["detail"]
+   and "Test it from another network." in row(no_wan, "self-connect")["detail"],
+   "with no WAN to dial (every container), the row still says the share cannot be "
+   "proved from this network and points at another one")
+reads["value"] = read("mapped", port=live_port, ip=LAN, external=WAN, verified=True,
+                      detail="the gateway lists external port %d" % live_port)
 ok(hairpin["verdict"] == "ok" and hairpin["ok"] is True,
    "…and that advisory row cannot lower a verdict the other rows established")
 
