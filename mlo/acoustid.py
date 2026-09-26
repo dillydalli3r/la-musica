@@ -211,6 +211,62 @@ _VIDEO_EXTS = frozenset({".mp4", ".m4v", ".mkv", ".webm", ".mka", ".avi", ".mov"
 _rate_lock = threading.Lock()
 _last_call = 0.0
 
+# Fingerprints per (launcher, fpcalc, path, size, mtime_ns). fpcalc DECODES up
+# to 120 s of the file, which is the most expensive thing this module does, and
+# the same unchanged track is fingerprinted again and again inside one session:
+# the pair fixer (script 21), the submitter (script 22), the import wizard's own
+# step and a lookup all ask about the same files minutes apart. Keyed on
+# size+mtime, so a re-download, a re-encode or an edit over the same name is
+# never served a stale fingerprint; on the executable, so pointing
+# `acoustid_fpcalc_path` at another build does not reuse the old build's values;
+# and on the LAUNCHER itself, so a caller that handed `run_tool` a different
+# function (a test double standing in for the tool, whose answers are not
+# fpcalc's) is never served the previous one's verdict. Bounded: a churning
+# library drops the map instead of growing forever.
+_FP_MEMO = {}
+_FP_MEMO_LOCK = threading.Lock()
+# A library's worth of tracks, so a whole album import and a Run All over the
+# library both stay inside it and nothing is evicted mid-pass.
+_FP_MEMO_MAX = 8192
+
+
+def _fp_memo_key(launcher, exe, path):
+    """The key a fingerprint is filed under, or None when it cannot be taken
+    (a path that vanished between the isfile check and the stat).
+
+    *launcher* is the `run_tool` this call will really use — kept IN the key,
+    not merely compared by identity: the memo then holds one bucket per
+    launcher object and one launcher cannot be answered with another's value.
+    """
+    try:
+        st = os.stat(path)
+    except OSError:
+        return None
+    return (launcher,
+            os.path.normcase(os.path.abspath(str(exe or ""))),
+            os.path.normcase(os.path.abspath(str(path))),
+            st.st_size, st.st_mtime_ns)
+
+
+def _fp_memo_get(key):
+    if key is None:
+        return None
+    with _FP_MEMO_LOCK:
+        hit = _FP_MEMO.get(key)
+    return dict(hit) if hit else None
+
+
+def _fp_memo_put(key, out):
+    if key is None:
+        return
+    with _FP_MEMO_LOCK:
+        if len(_FP_MEMO) >= _FP_MEMO_MAX:
+            # One library's worth is enough for every pass that shares these
+            # bytes; a bigger key set means the library moved under us, and a
+            # fresh map costs one decode per file rather than unbounded memory.
+            _FP_MEMO.clear()
+        _FP_MEMO[key] = dict(out)
+
 
 # --------------------------------------------------------------------------- #
 # fpcalc
@@ -284,6 +340,17 @@ def fingerprint(path, cfg=None):
 
     -> {"ok", "code", "reason", "duration", "fingerprint"}: a taken
     fingerprint, or the named reason it could not be taken.
+
+    A verdict that is a property of the FILE — the fingerprint itself, and the
+    "this file carries no fingerprintable audio" skips (not_audio /
+    no_fingerprint / too_short) — is remembered per stat, so a second caller
+    asking about the same unchanged bytes answers from memory instead of
+    decoding them again (see _FP_MEMO). The memo is per TOOL as well: a
+    different fpcalc build, or a different `run_tool` entirely (a double the
+    caller installed instead of the real launcher), is a different question and
+    is never answered with the other one's verdict. A missing or broken fpcalc
+    is NOT remembered either: that is a property of the tool, and installing it
+    has to fix the very next call.
     """
     exe = fpcalc_path(cfg)
     if not exe:
@@ -294,9 +361,21 @@ def fingerprint(path, cfg=None):
                        duration=0.0, fingerprint="")
     base = os.path.basename(str(path))
     empty = {"duration": 0.0, "fingerprint": ""}
+    # The tool this call really uses, read ONCE: the memo is keyed on it, and
+    # the call below goes through the very same object (see _fp_memo_key).
+    launcher = run_tool
+    key = _fp_memo_key(launcher, exe, path)
+    remembered = _fp_memo_get(key)
+    if remembered is not None:
+        return remembered
+
+    def _remember(out):
+        """File-specific verdicts only (see the docstring above)."""
+        _fp_memo_put(key, out)
+        return out
 
     try:
-        res = run_tool(
+        res = launcher(
             [exe, "-json", "-length", "120", path],
             capture_output=True, text=True, timeout=_FPCALC_TIMEOUT,
         )
@@ -314,9 +393,9 @@ def fingerprint(path, cfg=None):
         # SKIP - there is no fingerprint to take - not a broken tool.
         if (os.path.splitext(str(path))[1].lower() in _VIDEO_EXTS
                 or "audio stream" in err.casefold()):
-            return _result(False, NOT_AUDIO,
-                           f"{base} has no fingerprintable audio stream"
-                           + (f": {err}" if err else ""), **empty)
+            return _remember(_result(False, NOT_AUDIO,
+                                     f"{base} has no fingerprintable audio stream"
+                                     + (f": {err}" if err else ""), **empty))
         return _result(False, FPCALC_FAILED,
                        f"fpcalc failed on {base} (exit {res.returncode}"
                        + (f": {err})" if err else ")"), **empty)
@@ -328,13 +407,15 @@ def fingerprint(path, cfg=None):
                        f"{_short(res.stdout)}", **empty)
     duration, value = parsed
     if not value:
-        return _result(False, NO_FINGERPRINT,
-                       f"fpcalc found no audio to fingerprint in {base}", **empty)
+        return _remember(_result(False, NO_FINGERPRINT,
+                                 f"fpcalc found no audio to fingerprint in {base}",
+                                 **empty))
     if duration < MIN_DURATION:
-        return _result(False, TOO_SHORT,
-                       f"{base} is too short to identify ({duration:.1f}s, "
-                       f"the fingerprint needs {MIN_DURATION:.0f}s)", **empty)
-    return _result(True, OK, "", duration=duration, fingerprint=value)
+        return _remember(_result(False, TOO_SHORT,
+                                 f"{base} is too short to identify ({duration:.1f}s, "
+                                 f"the fingerprint needs {MIN_DURATION:.0f}s)",
+                                 **empty))
+    return _remember(_result(True, OK, "", duration=duration, fingerprint=value))
 
 
 # --------------------------------------------------------------------------- #

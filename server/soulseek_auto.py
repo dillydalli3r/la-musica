@@ -74,8 +74,10 @@ from mlo.stats import worker_count
 # which is what decides whether a release is digital or a pressing — and, with
 # `video_formats`, whether a music-video release is a DISC (a folder on the
 # network) or a Digital Media one (a set of YouTube uploads: see
-# acquisition_route).
-from mlo.release_choice import media_formats, video_formats
+# acquisition_route). `video_only` is that same policy reading the TRACK-level
+# flags (`media[].video`), i.e. the app's one answer to "is this release itself
+# made of music videos" — which is what a candidate search must not penalise.
+from mlo.release_choice import media_formats, video_formats, video_only
 # The library's definition of a track, for the one step that must see a
 # music-video album's files as tracks (the MB stamping below), and its
 # definition of a music VIDEO — the app's ONE container vocabulary, which the
@@ -544,9 +546,16 @@ def _queued_keys():
 
 
 def _clear_settled():
-    """Take the queue's SETTLED rows off the list — the same clear the
-    per-section buttons run, called when NEW WORK starts in the pipeline (a job
-    start, a bulk enqueue).
+    """Take the queue view's COMPLETED rows off the list when a NEW IMPORT
+    starts — the owner's rule, in `api_queue.clear_completed_for_new_import`'s
+    own words: a completed download leaves the LIST (nothing on disk is
+    touched) once another importing process starts, and a FAILED or
+    needs-attention row is never taken — those are what the user has not
+    answered yet.
+
+    Called when work is CREATED in the pipeline (a job start, a bulk enqueue —
+    both mean an album is on its way to being imported). A restart-of-search is
+    not this: the wishes worker's own pass leaves the completed rows alone.
 
     ON ITS OWN THREAD, deliberately: the clear reads the other registries (the
     queue payload asks slskd for its finished downloads), and a job start must
@@ -569,7 +578,7 @@ def _clear_settled():
     def work():
         try:
             from server import api_queue
-            api_queue.clear_settled_queue(before=before)
+            api_queue.clear_completed_for_new_import(before=before)
         except Exception:
             traceback.print_exc()
     try:
@@ -601,11 +610,12 @@ def enqueue(release_mbid=None, release=None, queries=None, kind=None, mode=None)
         _log(f"{release_mbid or _queue_key(item)}: {dup} — not queued again.")
         with _queue_lock:
             return len(_queue)
-    # A NEW RUN starts here: the queue's finished rows are taken off the list
-    # the way the per-section Clear buttons do it (`api_queue.clear_settled_queue`),
-    # so a bulk add — the paste box, "download all" — does not open onto the
-    # last run's Completed and Failed history. Live rows, background wishes and
-    # retryable failures are not clearable and stay.
+    # A NEW IMPORT RUN starts here: the queue view's COMPLETED rows are taken
+    # off the LIST (`api_queue.clear_completed_for_new_import`, the owner's
+    # rule), so a bulk add — the paste box, "download all" — does not open onto
+    # the last run's finished history. Failed rows, needs-attention rows, live
+    # rows and background wishes are never taken: those are what the user has
+    # not answered or what is still going.
     _clear_settled()
     _start_next()
     with _queue_lock:
@@ -932,7 +942,10 @@ def _notify_finish(state, result, release):
     EVERY terminal state is announced, exactly once, with a `link` that opens
     the thing the notification is about. That is the whole rule:
 
-    * it landed in the library          -> download_done   (/album/…)
+    * it landed in the library          -> import_started  (/album/…)
+      (the download is over and the album's import chain is running NOW: the
+      album's completion is `import_done` when that chain ends, and this frame
+      deliberately claims neither — see the branch below)
     * it only landed in the download
       folder                            -> import_ready    (/import?album=…)
     * nothing usable was found and the
@@ -961,9 +974,22 @@ def _notify_finish(state, result, release):
         artists = release.get("artists") or []
         if artists and isinstance(artists[0], dict):
             artist = str(artists[0].get("name") or "")
+        # The compact release summary `_run` publishes on the JOB carries the
+        # artist under `artist` (singular) — this frame is composed from that
+        # summary, not from the full payload, so reading only `artists` here
+        # named every auto-import's notice by its TITLE alone ("Download failed:
+        # Homework" for a job that spent an hour on Daft Punk).
+        artist = artist or str(release.get("artist") or "")
         title = str(release.get("title") or "")
+        year = _release_year(release)
         label = f"{artist} — {title}" if artist and title else (
             title or artist or "Soulseek download")
+        # …and the YEAR, because two editions of one album are the same words
+        # (the owner asked for "artist — album (year)"): a notice has to say
+        # WHICH pressing it is talking about, or a 1997 remaster's failure reads
+        # as the 1977 original's.
+        if year:
+            label = f"{label} ({year})"
         mbid = str(release.get("id") or "")
         album_path = str(result.get("album_path") or "")
         staging = str(result.get("staging_path") or "")
@@ -1020,7 +1046,18 @@ def _notify_finish(state, result, release):
             # "Imported <album>", with the chain's own summary). Saying
             # "imported" HERE read as "finished", so a user watching 21 scripts
             # run for another four minutes had already been told the album was
-            # done. This notice is the DOWNLOAD's, and it says so.
+            # done.
+            #
+            # So this frame is the DOWNLOAD's and the KIND says so: it goes out
+            # as `import_started` — the import phase of THIS album has begun —
+            # and never as `download_done`, which the tray and every phone read
+            # as an outcome. A frame that wakes a closed device to say "done"
+            # while the thing it names is still running is the one thing a
+            # notification must not do; the completion is `import_done` when
+            # this album's chain really ends, or the run's own frame when a
+            # whole batch finished. `import_started` is deliberately not one of
+            # the OS/PUSH kinds (web/src/lib/notifications.ts): a notice about
+            # work in progress belongs in the tray of whoever is looking.
             body = ("Downloaded and moved into your library — the import "
                     "pipeline is still finishing it (artwork, metadata, then "
                     "the configured scripts). One more notice follows when it "
@@ -1050,11 +1087,11 @@ def _notify_finish(state, result, release):
             if missing:
                 body += (f" {missing} track(s) could not be fetched "
                          f"({result.get('note') or 'see the job log'}).")
-            events.emit("download_done", label, body,
+            events.emit("import_started", f"Downloaded: {label}", body,
                         {"link": f"/album/{quote(album_path, safe='')}" if album_path
                                  else "/soulseek",
                          "release_mbid": mbid, "album_path": album_path,
-                         "imported": True,
+                         "imported": True, "import_running": True,
                          "error_count": missing})
             return
 
@@ -1857,9 +1894,21 @@ def mbid_search_queries(mbid, cfg=None):
 # --------------------------------------------------------------------------- #
 # Candidate folders from search results
 # --------------------------------------------------------------------------- #
+# What a peer's folder may hold and still BE the release: the library's own
+# audio vocabulary (mlo.paths.AUDIO_EXTS) plus the lossless sources an import
+# converts to the configured codec, plus the music-video containers a
+# music-video release is filed in (mlo.paths.LIB_VIDEO_EXTS — see
+# `_LIB_AUDIO_EXTS` below, which is that same set read for stamping).
+#
+# `.mka` is deliberately NOT here. It is Matroska AUDIO, so it was once read as
+# a track — but it is in NEITHER of the library's two sets (mlo.paths.AUDIO_EXTS
+# holds flac/ogg/opus/aac/m4a/mp3 and the PCM pair, LIB_VIDEO_EXTS holds the
+# video containers), so a folder of .mka files is an album with no tracks the
+# library can see: it downloaded, moved in, and graded as an empty folder.
+# Counting it here was how the pipeline promised a library it could not keep.
 _AUDIO_EXTS = {".flac", ".mp3", ".m4a", ".mp4", ".aac", ".ogg", ".oga", ".opus",
                ".wav", ".wma", ".aiff", ".aif", ".alac", ".ape", ".wv", ".shn",
-               ".tta", ".mpc", ".mp2", ".mka", ".dsf", ".dff"}
+               ".tta", ".mpc", ".mp2", ".dsf", ".dff"}
 # The library's own definition of a track — audio PLUS the music-video
 # containers (mlo.paths.LIB_AUDIO_EXTS, the set server.main.is_audio_file and
 # the organizer/graders read). Stamping is the one place that wants it: a
@@ -2001,11 +2050,39 @@ def _parse_trackno(path):
     return (disc, int(m.group(1))) if m else (disc, None)
 
 
-def _rank(c):
-    """Candidate order: lossless first, then the score, then the FASTEST peer,
-    its queue, and finally the peer+folder names so the order is total.
+def _video_rank(c):
+    """Where a candidate's music videos put it: 0, 1 or 2, best first.
 
-    Lossless outranks everything: a lossy folder that scores perfectly is still
+    `find_candidates` marks a candidate with what its OWN files are (`video`,
+    `video_only`), and a candidate whose planned files are the album's audio
+    ranks above one that carries a music video — which ranks above one that is
+    nothing but videos. A dict that carries neither fact (a
+    `_video_candidates` row, a job's synthetic single-file candidate) ranks 0:
+    nothing here is evidence that it holds a video.
+
+    It is the FIRST key of `_rank`, ahead of lossless, because the rule is
+    about WHAT would be downloaded and not about how good the copy is: a
+    complete audio-only folder is what the release asked for even when a peer
+    offering the same album beside its videos is offering a lossless one. The
+    penalty is applied to AUDIO releases only — for a music-video release the
+    videos ARE the album, and `find_candidates` marks none of its candidates.
+    """
+    if c.get("video_only"):
+        return 2
+    return 1 if c.get("video") else 0
+
+
+def _rank(c):
+    """Candidate order: audio before music video, lossless next, then the
+    score, then the FASTEST peer, its queue, and finally the peer+folder names
+    so the order is total.
+
+    A candidate that would satisfy the tracklist with a music video is not the
+    album (see `_video_rank`), so it sorts below every audio-only one however
+    well it scores; a folder that is nothing but videos sorts below even a
+    partial one, and only ever wins when it is all the network has.
+
+    Lossless outranks the score: a lossy folder that scores perfectly is still
     worse than a lossless one that only just matched — the download is the
     irreversible part. The score is next, and it already carries the peer's
     speed (find_candidates adds up to 4.5 points for it, deliberately under one
@@ -2026,7 +2103,8 @@ def _rank(c):
     run: two candidates the search reports identically (same user, same figures)
     still come back in one fixed order, which is what makes a job's attempts —
     and the tests that pin them — deterministic."""
-    return (not c["lossless"], -c["score"], -float(c.get("speed") or 0),
+    return (_video_rank(c), not c["lossless"], -c["score"],
+            -float(c.get("speed") or 0),
             int(c.get("queue") or 0), str(c.get("username") or ""),
             str(c.get("dir") or ""))
 
@@ -2168,10 +2246,15 @@ def find_candidates(results, release, cfg):
     """Score search results against the release track list.
 
     Returns candidates sorted best-first: [{username, dir, files, audio,
-    logs, cues, complete, score, lossless, slot, queue}]. A candidate is
-    complete when every expected track (across all discs) has a matching
-    file (matched by track number, falling back to normalized title +
+    logs, cues, complete, score, lossless, slot, queue, video, video_only}].
+    A candidate is complete when every expected track (across all discs) has a
+    matching file (matched by track number, falling back to normalized title +
     duration) and — for CD releases — every disc carries a .log and .cue.
+
+    `video`/`video_only` say what the files this candidate would download ARE
+    (a music-video container, or only those): see `_rank`, which puts them
+    ahead of every quality key so an album is never fetched as its videos when
+    the audio is on the network.
 
     Files are grouped per directory, folded per disc (…/CD1/, …/Disc 1/,
     …/CD1 [FLAC]/), and then per covering directory: a group that does not
@@ -2185,12 +2268,20 @@ def find_candidates(results, release, cfg):
     expected = _expected_tracks(release)
     discs_expected = _disc_numbers(release)
     is_cd = "CD" in (release.get("medium_formats") or [])
+    # Whether the RELEASE is itself made of music videos (every recording its
+    # payload states is a video — `mlo.release_choice.video_only`, the same
+    # reading `acquisition_route` routes on). Read once, because it switches the
+    # candidate-level video rule OFF: a music-video album's own tracks ARE
+    # videos, so penalising a folder for holding them would be penalising it for
+    # being what was asked for.
     if not expected:
         # matched == len(expected) and matched >= min_ratio * len(expected)
         # are both vacuously true for an empty track list, so any single-file
         # folder "completed" a release that has no tracks at all.
         raise ValueError("the release has no track list — a candidate folder "
                          "cannot be matched against it")
+
+    release_is_video = video_only(release)
 
     def ext_of(f):
         return os.path.splitext(f.get("file") or "")[1].lower()
@@ -2279,6 +2370,26 @@ def find_candidates(results, release, cfg):
                 seen.add(f["file"])
                 downloads.append(f)
         total = sum(int(f.get("size") or 0) for f in downloads)
+        # WHAT these files are decides the candidate's place before anything
+        # about its quality does (`_rank`): a music-video container is a
+        # library TRACK (mlo.paths.LIB_VIDEO_EXTS — the app's ONE container
+        # vocabulary) but it is not the album's audio, and the album the user
+        # asked for is the audio one. So a candidate whose tracklist only
+        # completes with a video sorts below every audio-only candidate that
+        # covers the same tracklist, and a folder that is nothing but videos
+        # sorts below even a partial one — it is the last resort, never the
+        # default pick.
+        #
+        # Read off `plans` — the files stage 2 would really download — so a
+        # bonus video sitting beside the album's own audio is not one of them
+        # (the rest of a covering root is never bought), while a folder whose
+        # every track IS a video is marked `video_only`. A music-video RELEASE
+        # wants its videos, which is why the release's own video recordings
+        # switch the whole rule off: nothing here penalises the album's own
+        # medium.
+        videos = ([f for f in plans if is_video_file(f["file"])]
+                  if not release_is_video else [])
+        video = bool(videos)
         # A fast peer both finishes sooner and is likelier to serve the whole
         # folder, so the rate the network advertised decides between otherwise
         # equal folders: the folder's SLOWEST file (a folder is only as fast as
@@ -2295,6 +2406,7 @@ def find_candidates(results, release, cfg):
             "complete": complete, "lossless": lossless, "slot": slot,
             "queue": queue, "speed": min(speeds) if speeds else 0,
             "total_size": total, "score": round(score, 1),
+            "video": video, "video_only": video and len(videos) == len(plans),
         }
 
     candidates = []
@@ -2323,7 +2435,7 @@ _TRANSFER_POLL_S = 1.0     # download poll cadence
 
 
 def _search_queries(slsk, queries, wait_s, usable=None, response_limit=0,
-                    cancel_check=None):
+                    cancel_check=None, resume=None, pending_out=None):
     """Run every query template AT ONCE and poll them in one loop.
 
     All templates are POSTed up front, so the wall time is one window
@@ -2350,14 +2462,36 @@ def _search_queries(slsk, queries, wait_s, usable=None, response_limit=0,
     the wait ends at once — a cancel during the search phase stops the NETWORK
     work, not just the polling (see `server.soulseek_auto.cancel`).
 
+    `resume` continues searches an EARLIER window left running: each entry is
+    the `[search id, query, last DTO]` a previous call put in `pending_out`,
+    and they are polled here instead of being POSTed a second time — the
+    network work is already out, only the reading was left. It is what the
+    auto-importer's TOP-UP window is made of: the first pass asks with the
+    SHORT quiet timeout (`soulseek_search_fast_seconds`) so a release the
+    network answers for becomes readable in seconds, and when nothing usable
+    came back the searches it could not finish are handed to that top-up
+    instead of being cancelled.
+
+    `pending_out`, when a list is given, receives exactly those entries instead
+    of cancelling the searches they name: a search still running when THIS
+    window closes is left at slskd for the caller's next window. Without it, a
+    search that outlived its window is cancelled and reported as "did not
+    finish" — which is what every other caller wants, because nothing else has
+    a second window to read it in.
+
     How long the wait REALLY was is kept for the caller on this thread
     (`_search_seconds`) — this function is the one place that knows when the
     wait ended, and the number it measures is what the job reports, instead of
     the configured ceiling it used to be mistaken for."""
     started = time.time()
     deadline = started + wait_s + _SEARCH_GRACE_S
-    display = " · ".join(queries)
-    watch, errors = [], []
+    # `resume` are searches an earlier window POSTed and left running: they are
+    # polled here, never sent again. `display` names every search this loop is
+    # really watching — the ones it just posted and the ones it took over — so
+    # the live search frame keeps naming a query.
+    watch = [[sid, q, res] for sid, q, res in (resume or ())]
+    display = " · ".join(queries or [q for _sid, q, _res in watch])
+    errors = []
     for q in queries:
         try:
             watch.append([slsk.search(q, timeout_ms=int(wait_s * 1000),
@@ -2414,7 +2548,14 @@ def _search_queries(slsk, queries, wait_s, usable=None, response_limit=0,
         if not slsk.is_search_done(res or {}):
             # Still running when the window closed. Nothing readable will come
             # out of it (responses are served only after a search ends), so it
-            # is cancelled rather than left occupying slskd's search slots.
+            # is cancelled rather than left occupying slskd's search slots —
+            # UNLESS the caller owns a second window (`pending_out`), which is
+            # the one that reads it: cancelling there would throw away a search
+            # the network is still answering. A usable find and a user's Cancel
+            # need no second window, so those are still dropped at slskd.
+            if pending_out is not None and not early and not cancelled:
+                pending_out.append([sid, q, res])
+                continue
             try:
                 slsk.cancel_search(sid)
             except Exception:
@@ -3734,10 +3875,11 @@ def _try_batch(slsk, ddir, batch, release, cfg, is_cd, min_score):
     EVERY candidate of the batch is queued before any of them is waited for —
     the .log gate alone on a CD, its album once that log passed — so the peers
     transfer in parallel instead of one after the other. The batch is then
-    waited candidate by candidate in rank order (`_rank`: lossless, score,
-    fastest peer), and each wait ends early the moment ANOTHER candidate's album
-    is already on disk, so the first good copy wins rather than the first in
-    rank order that happens to finish (see _batch_cancel_check).
+    waited candidate by candidate in rank order (`_rank`: audio before music
+    video, then lossless, score, fastest peer), and each wait ends early the
+    moment ANOTHER candidate's album is already on disk, so the first good copy
+    wins rather than the first in rank order that happens to finish (see
+    _batch_cancel_check).
 
     "Good" is exactly what it always was: every file arrived with slskd
     vouching for it (_wait_for_files), the album root resolves under the
@@ -4432,6 +4574,18 @@ def _album_name(release):
     return f"{(release.get('artists') or [{}])[0].get('name', '')} - {release.get('title', '')}".strip(" -")
 
 
+def _release_year(release):
+    """The release's year, as its own payload states it ("" when it states none).
+
+    Read from `date` (the field every payload — a browse row, the compact
+    summary a job publishes, a full lookup — carries) and never guessed: a
+    notice that invents a year is worse than one without, and a date MusicBrainz
+    states as "2001" or "2001-06-11" answers the same year either way."""
+    raw = str((release or {}).get("date") or "").strip()
+    m = re.match(r"(\d{4})", raw)
+    return m.group(1) if m else ""
+
+
 def _album_dir_name(release):
     """That name with the characters a filesystem refuses removed."""
     return _safe_component(_album_name(release))
@@ -4550,8 +4704,9 @@ def _video_candidates(files, artist, title, seconds=None):
     works in — ordered by the app's own ranking (_rank). Of the fields that
     ranking reads, only the peer's own figures mean anything here: a video is
     not a lossless audio folder and was not scored against a tracklist, so the
-    candidate ties on those two and the speed it uploads at, its queue and the
-    names decide the order (fastest peer first, deterministically — see _rank).
+    candidate ties on those (and on `_video_rank`, which nothing here marks)
+    and the speed it uploads at, its queue and the names decide the order
+    (fastest peer first, deterministically — see _rank).
     """
     want_artist = _norm_text(artist).lower()
     want_title = _norm_text(title).lower()
@@ -5372,6 +5527,16 @@ def _run(release_mbid=None, release=None, queries=None, username=None,
             # ceilings, because nothing may cut a transfer short.
             search_wait = int(search_seconds
                               or cfg.get("soulseek_auto_search_wait", 10) or 10)
+            # PHASE 1 asks with this SHORT quiet timeout, and that is the whole
+            # reason a good find no longer waits: slskd serves a search's
+            # responses only once the search has ENDED, so the window a query
+            # is POSTED with is the time before ANYTHING can be read at all. A
+            # release the network answers for (or does not answer for) goes
+            # quiet in seconds, ends, and becomes readable then — instead of
+            # sitting behind the top-up window below. Never longer than the
+            # window it precedes: the first pass is the short read, always.
+            fast_wait = min(int(cfg.get("soulseek_search_fast_seconds", 5) or 5),
+                            search_wait)
             response_limit = int(cfg.get("soulseek_auto_response_limit", 15) or 15)
             # Every template goes out at once and the merged responses are
             # scored on each tick: the first complete+lossless folder ends the
@@ -5382,14 +5547,22 @@ def _run(release_mbid=None, release=None, queries=None, username=None,
                         if c["complete"] and c["lossless"]]
 
             _stage("searching",
-                   f"Searching Soulseek with {len(queries_built)} query template(s)…")
-            _log(f"Searching Soulseek with {len(queries_built)} query template(s) in "
+                   f"Searching Soulseek (fast pass) with "
+                   f"{len(queries_built)} query template(s)…")
+            _log(f"Searching Soulseek (fast pass — a {int(fast_wait + _SEARCH_GRACE_S)}s "
+                 f"window, so a good folder is readable in seconds) with "
+                 f"{len(queries_built)} query template(s) in "
                  f"parallel: “{'” · “'.join(queries_built)}” … (a good folder ends "
-                 f"the search at once, otherwise {response_limit} responses or "
-                 f"{int(search_wait + _SEARCH_GRACE_S)}s)")
+                 f"the search at once, otherwise {response_limit} responses; if "
+                 f"nothing usable comes back, a {int(search_wait + _SEARCH_GRACE_S)}s "
+                 f"top-up re-reads whatever is still running)")
+            # Searches this pass could not finish are NOT cancelled here: the
+            # top-up window below re-reads them (they keep their own short quiet
+            # timeout at slskd, so they end by themselves).
+            running = []
             results, search_failed, skipped = _search_queries(
-                slsk, queries_built, search_wait, usable=_usable,
-                response_limit=response_limit,
+                slsk, queries_built, fast_wait, usable=_usable,
+                response_limit=response_limit, pending_out=running,
                 # The job's own cancel: a Cancel press during the SEARCH phase
                 # drops the slskd searches and ends the wait at once, instead of
                 # leaving the network answering for up to the whole window.
@@ -5404,7 +5577,7 @@ def _run(release_mbid=None, release=None, queries=None, username=None,
             candidates = find_candidates(responses, release, cfg)
             # The seconds this window really took, not the ceiling the line above
             # advertises: a usable folder (or a quiet network) ends a search long
-            # before `search_wait + _SEARCH_GRACE_S`, and the wish prompt reports
+            # before `fast_wait + _SEARCH_GRACE_S`, and the wish prompt reports
             # this same measured number.
             _log(f"  {len(candidates)} candidate folder(s) from {len(responses)} "
                  f"result file(s) across {len(results)} search(es) in "
@@ -5415,6 +5588,43 @@ def _run(release_mbid=None, release=None, queries=None, username=None,
                 _log(f"  Usable candidate found ({len(best)} complete lossless) — "
                      f"a good copy is in hand, so the search stopped here and the "
                      f"remaining {skipped} query template(s) were not waited out")
+
+            # ---- PHASE 2: the top-up ------------------------------------------
+            # Only when the fast pass found nothing USABLE. What it left running
+            # at slskd is not thrown away: the caller's window (the walk's
+            # per-candidate `soulseek_search_timeout_seconds`, or
+            # `soulseek_auto_search_wait`) is spent RE-READING those searches,
+            # because a search a popular album keeps alive is exactly the one
+            # whose responses are still on their way — and slskd serves them
+            # the moment it ends. A usable folder found here ends the top-up at
+            # once, like every other window, and the broad second pass below
+            # still runs after it when nothing usable came back.
+            if not best and running:
+                _stage("searching",
+                       f"Top-up search: {len(running)} search(es) still running…")
+                _log(f"No usable folder from the fast pass — top-up: re-reading the "
+                     f"{len(running)} search(es) still running at slskd, up to "
+                     f"{int(search_wait + _SEARCH_GRACE_S)}s…")
+                more, more_failed, _more_skipped = _search_queries(
+                    slsk, [], search_wait, usable=_usable,
+                    response_limit=response_limit, cancel_check=_cancelled,
+                    resume=running)
+                searched_s += _search_seconds()
+                _job_search_done()
+                for line in more_failed:
+                    # the top-up's own teardown: a search it could not finish is
+                    # cancelled there, and reported the same way phase 1 reports
+                    # one it could not start.
+                    _log(f"  ✕ {line}")
+                results = results + more
+                responses = responses + [f for _q, res in more
+                                        for f in (res.get("responses") or [])]
+                candidates = find_candidates(responses, release, cfg)
+                candidates.sort(key=_rank)
+                best = [c for c in candidates if c["complete"] and c["lossless"]]
+                _log(f"  top-up: {len(candidates)} candidate folder(s) from "
+                     f"{len(responses)} result file(s) across {len(results)} "
+                     f"search(es) in {int(searched_s)}s")
 
             # ---- ONE broader query, run after the configured one(s) -----------
             # A DIGITAL release whose configured templates name it too
@@ -5665,7 +5875,14 @@ def _run(release_mbid=None, release=None, queries=None, username=None,
             _log("Verification passed — importing into the library…")
 
             # --- stage 4: import -------------------------------------------------
-            result = _import(found["root"], release, cfg, is_cd)
+            # `media` is the MEDIUM tag `_stamp_media` writes, not the boolean
+            # the candidate decision above is made of: `_try_batch` already
+            # stamped "CD"/"Digital Media" on every file it verified, and this
+            # is the same word for any file it could not write (a locked track
+            # that the namer then moved). Passing the boolean wrote MEDIA=True
+            # on those.
+            result = _import(found["root"], release, cfg,
+                             "CD" if is_cd else "Digital Media")
             if lossy:
                 # WHAT this album is rides with the result, because every
                 # surface that reports the job reads it: the queue row says "a

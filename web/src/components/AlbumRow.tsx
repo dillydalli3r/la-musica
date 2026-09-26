@@ -103,25 +103,27 @@ export default function AlbumRow({
             whole cell (and its extra badge) disappears with it. */}
         {title != null && (
           <td className="td">
-            {/* `flex-wrap`, the same guard the track title cell carries: a
-                fixed-layout column cannot grow, so a name sharing its line
-                with badges had to win or vanish (see TrackTitleCell).
-                The name itself CLIPS on one line rather than wrapping the row
-                three lines tall — a fixed column has no other honest answer for
-                a name longer than any floor — and the whole name rides in the
-                link's title so nothing is lost silently. */}
+            {/* The name is the cell's own content, so it asks for its width:
+                `grow basis-auto`, NOT `flex-1`. A 0% basis means "I need no
+                room", and a cell that cannot give room then hands the name 0
+                px and wraps it one character per line — the Library's Albums
+                view measured exactly that (a 13 px column, a 0 px name). The
+                name itself CLIPS on one line instead (`.cell-ellipsis`), with
+                the whole name in the link's `title`, and the extra badge keeps
+                `flex-wrap` as the last resort: it moves to a second line
+                before it squeezes the name away. */}
             <div className="flex items-center gap-1.5 min-w-0 flex-wrap">
               {titleHref ? (
                 <Link
                   to={titleHref}
                   onClick={linkClick}
                   title={titleText}
-                  className="font-medium hover:text-accent-soft cell-ellipsis flex-1 min-w-0"
+                  className="font-medium hover:text-accent-soft cell-ellipsis grow basis-auto min-w-0"
                 >
                   {title}
                 </Link>
               ) : (
-                <span className="font-medium hover:text-accent-soft cell-ellipsis flex-1 min-w-0" title={titleText}>{title}</span>
+                <span className="font-medium hover:text-accent-soft cell-ellipsis grow basis-auto min-w-0" title={titleText}>{title}</span>
               )}
               {titleExtra}
             </div>

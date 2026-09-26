@@ -752,12 +752,15 @@ export async function offlineArtworkUrl(url: string): Promise<string | null> {
     const versioned = key.includes("&v=");
     // Otherwise the warmed key is the plain `?album=` the download wrote (see
     // artworkUrls), while what is rendered may add `&file=` (a track's own
-    // art) or `&staged=` — neither of which the cache knows. Cut at the FIRST
+    // art), `&staged=` or `&w=` (a surface drawing a thumbnail — the warm
+    // stores the MASTER, which is the right bytes to fall back to offline:
+    // the browser scales it down for the 74 px bar just as it did before
+    // thumbnails existed) — none of which the cache knows. Cut at the FIRST
     // of them rather than `searchParams.delete`: re-serializing would rewrite
     // `%20` as `+` and never match the warmed key for an album path with a
     // space in it.
     let cut = -1;
-    for (const part of ["&file=", "&staged="]) {
+    for (const part of ["&file=", "&staged=", "&w="]) {
       const at = key.indexOf(part);
       if (at > 0 && (cut < 0 || at < cut)) cut = at;
     }

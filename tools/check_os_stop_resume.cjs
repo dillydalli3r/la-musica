@@ -314,21 +314,40 @@ const rowsOf = (rows, kind) => (rows || []).filter((r) => kindRe(kind).test(r));
     }
 
     // (e) What the app DECLARES to the OS, which is what decides which glyphs
-    // the lock screen draws: a track step and nothing else. WebKit offers a web
-    // page skip-forward/skip-backward by default — with its own interval,
-    // whether or not the page ever asked — and the app removes both (a `null`
-    // handler is the spec's "this action is not supported") while registering
-    // the step its own transport has. The owner's card (issue #55) showed
-    // ⟲10 / 10⟳ beside this app's own metadata. Which glyphs the OS finally
-    // paints needs a device; the SET that produces them is read here.
+    // the lock screen draws: the track step, the transport, and — since
+    // issue #58 — the app's OWN ±10 s skip, which used to be declared
+    // unsupported so the card fell back to WebKit's default pair (issue #55
+    // showed ⟲10 / 10⟳ beside this app's own metadata, with nothing behind
+    // them). Which glyphs the OS finally paints needs a device; the SET that
+    // produces them, and what a press of one does, is read here.
     const actions = await page.evaluate(() => Object.fromEntries(
       Object.entries(window.__ms || {}).map(([k, v]) => [k, v === null ? "null" : typeof v])));
     check("(e) the track step is declared to the OS (previous / next / seek / play / pause)",
       ["previoustrack", "nexttrack", "seekto", "play", "pause"].every((k) => actions[k] === "function"),
       JSON.stringify(actions));
-    check("(e) the skip pair the lock screen would draw instead is declared unsupported",
-      actions.seekbackward === "null" && actions.seekforward === "null",
+    check("(e) the ±10 s skip pair is declared by the app itself",
+      actions.seekbackward === "function" && actions.seekforward === "function",
       JSON.stringify(actions));
+    if (actions.seekforward === "function" && actions.seekbackward === "function") {
+      if (!(await state(page)).live && (await playBtn.count())) await playBtn.click();
+      const forE = await until(async () => { const s = await state(page); return s.live ? s : null; }, 5000);
+      if (!forE) {
+        check("(e) a skip press moves the playing track", false, `nothing playing — ${fmtEls(await state(page))}`);
+      } else {
+        const skipBefore = await state(page);
+        const file = skipBefore.live.file;
+        await page.evaluate(() => window.__ms.seekforward({ seekOffset: 10 }));
+        await sleep(400);
+        const forward = (await state(page)).els.find((e) => e.file === file) || { t: -1 };
+        await page.evaluate(() => window.__ms.seekbackward({ seekOffset: 10 }));
+        await sleep(400);
+        const back = (await state(page)).els.find((e) => e.file === file) || { t: -1 };
+        check("(e) a skip press seeks the playing track by the offset the OS supplied",
+          Math.abs((forward.t - skipBefore.live.t) - 10) < 2.5
+          && Math.abs((back.t - forward.t) + 10) < 2.5,
+          `t ${skipBefore.live.t} -> ${forward.t} -> ${back.t}`);
+      }
+    }
 
     // (d) The other shape of the same report: iOS restarted the track itself
     // while hidden (the `play` with nobody looking that the report exists to

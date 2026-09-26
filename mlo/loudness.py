@@ -19,6 +19,7 @@ filter (and caching the result under <music>/.mlo/data/) when they are missing.
 Playback bounds that measurement (``wait_s`` / PLAYBACK_WAIT_S) so a track never
 waits on a decode to start; the run finishes in the background and is cached.
 """
+import atexit
 import json
 import math
 import os
@@ -501,9 +502,13 @@ EBUR128_PEAK_RE = re.compile(r"^\s*Peak:\s*(-?\d+(?:\.\d+)?)\s*dBFS", re.MULTILI
 ASTATS_PEAK_RE = re.compile(r"Peak level dB:\s*(-?\d+(?:\.\d+)?)")
 
 _FFMPEG_CACHE = {"exe": None, "checked": False}
-# One store rewrites the whole cache file, so the read-modify-write of
-# store_analysis is serialized (the player may ask while a scan writes).
+# Guards the in-memory cache map and the debounced write's own state (see the
+# cache section below): the player reads the map while a scan stores into it,
+# and `_flush_now` snapshots it under this lock before touching the file.
 _CACHE_LOCK = threading.Lock()
+# One writer at a time on the cache FILE (the debounce thread and the
+# process-exit flush can meet). Taken BEFORE _CACHE_LOCK, never after it.
+_WRITE_LOCK = threading.Lock()
 
 
 def _ffmpeg_exe():
@@ -651,14 +656,68 @@ def _cache_key(path):
     return os.path.normcase(os.path.normpath(os.path.abspath(str(path))))
 
 
-def _read_cache(cfg):
-    """The cache dict; a missing or corrupt file reads as empty (never raises)."""
+# The parsed cache, held in memory between reads (see _cache_map_locked): the
+# map, the file it came from, that file's stamp when we read it, and whether
+# the map holds measurements the file does not have yet.
+_CACHE_STATE = {"path": None, "stamp": None, "data": {}, "dirty": False}
+
+
+def _file_stamp(path):
+    """(mtime_ns, size) of a file, or None when it is not there."""
     try:
-        with open(_cache_path(cfg), "r", encoding="utf-8") as f:
+        st = os.stat(path)
+    except OSError:
+        return None
+    return (st.st_mtime_ns, st.st_size)
+
+
+def _read_cache(target):
+    """Parse the cache FILE at *target*; missing or corrupt reads as empty.
+
+    The raw reader — callers want `_cache_map`, which holds the parsed map and
+    only comes back here when the file changed under the process.
+    """
+    try:
+        with open(target, "r", encoding="utf-8") as f:
             data = json.load(f)
         return data if isinstance(data, dict) else {}
     except Exception:
         return {}
+
+
+def _cache_map_locked(target):
+    """The parsed map for *target*, from memory. _CACHE_LOCK must be held.
+
+    THE cache, and the fix for a quadratic scan: every store used to re-parse
+    every entry of the file to add one, and every read re-parsed the whole file
+    to answer one lookup — a pass over n tracks paid n file parses, and the
+    player measuring tracks on the fly paid a whole-file parse per request. The
+    map now lives in memory and the file's stamp (mtime_ns + size) is what
+    invalidates it: a write from anywhere else (a second app instance, a CLI
+    script) is noticed on the next read, and our own debounced write stamps the
+    file it just wrote as its own, so the next read is a hit rather than a
+    re-parse of what we already hold.
+
+    Returns the LIVE map — read it, never mutate it (`store_analysis` is the
+    one writer), and do not keep it past the call: another music folder
+    replaces it (see _CACHE_STATE).
+    """
+    stamp = _file_stamp(target)
+    if _CACHE_STATE["path"] == target and _CACHE_STATE["stamp"] == stamp:
+        return _CACHE_STATE["data"]
+    data = _read_cache(target)
+    if _CACHE_STATE["dirty"] and _CACHE_STATE["path"] == target:
+        # Our own measurements are newer than the bytes on disk, and nothing
+        # ever deletes an entry: keep them on top of what the file said.
+        data.update(_CACHE_STATE["data"])
+    _CACHE_STATE.update({"path": target, "stamp": stamp, "data": data})
+    return data
+
+
+def _cache_map(cfg):
+    """The parsed map for *cfg*'s cache file (see _cache_map_locked)."""
+    with _CACHE_LOCK:
+        return _cache_map_locked(_cache_path(cfg))
 
 
 def cached_analysis(cfg, path):
@@ -667,7 +726,7 @@ def cached_analysis(cfg, path):
     A size or mtime change means the bytes are not the ones we measured
     (re-tagging, a re-encode, a re-download over the same name).
     """
-    entry = _read_cache(cfg).get(_cache_key(path))
+    entry = _cache_map(cfg).get(_cache_key(path))
     if not isinstance(entry, dict):
         return None
     try:
@@ -679,11 +738,121 @@ def cached_analysis(cfg, path):
     return entry
 
 
-def store_analysis(cfg, path, data):
-    """Cache one file's analysis, atomically; never raises.
+def _write_cache(target, data):
+    """Write *data* to *target* atomically. True when it landed, never raises."""
+    tmp = None
+    try:
+        os.makedirs(os.path.dirname(target), exist_ok=True)
+        fd, tmp = tempfile.mkstemp(prefix=".replaygain_", suffix=".json",
+                                   dir=os.path.dirname(target) or ".")
+        with os.fdopen(fd, "w", encoding="utf-8", newline="\n") as f:
+            json.dump(data, f)
+            try:
+                f.flush()
+                os.fsync(f.fileno())
+            except OSError:
+                pass
+        os.replace(tmp, target)
+        return True
+    except OSError:
+        if tmp:
+            try:
+                os.remove(tmp)
+            except OSError:
+                pass
+        return False
 
-    # ponytail: one JSON file rewritten whole per store — switch to a
-    # per-entry file or sqlite only if a big library makes this hurt.
+
+def _flush_now():
+    """Write the in-memory map to disk if anything is pending. Never raises.
+
+    The ONLY writer of the cache file: the debounce thread calls it when a
+    quiet window closes, and the process-exit hook calls it so measurements
+    taken a second before the app was closed are not lost with a window that
+    never elapsed.
+    """
+    with _WRITE_LOCK:
+        with _CACHE_LOCK:
+            if not _CACHE_STATE["dirty"] or not _CACHE_STATE["path"]:
+                return False
+            target = _CACHE_STATE["path"]
+            data = dict(_CACHE_STATE["data"])
+            _CACHE_STATE["dirty"] = False
+        ok = _write_cache(target, data)
+        with _CACHE_LOCK:
+            if _CACHE_STATE["path"] == target:
+                # Our own write is not a foreign change: stamp it, so the next
+                # read serves the map again instead of re-parsing our own file.
+                _CACHE_STATE["stamp"] = _file_stamp(target)
+                if not ok:
+                    # Still pending: the next window (or the exit hook) tries
+                    # again instead of the entries silently going missing.
+                    _CACHE_STATE["dirty"] = True
+        return ok
+
+
+# How long the in-memory map may run ahead of the file. A DR/ReplayGain scan
+# measures hundreds of tracks in a burst, and rewriting + fsyncing the whole
+# JSON per track is what made it quadratic in the library's size; three seconds
+# of quiet is long enough that a burst is ONE write, and short enough that a
+# crash (a hard kill, which no exit hook survives) costs a measurement or two.
+_WRITE_DEBOUNCE_S = 3.0
+_FLUSH = {"due": 0.0, "thread": None}
+
+
+def _schedule_flush():
+    """Arm the debounced write: it lands _WRITE_DEBOUNCE_S after the last store."""
+    due = time.monotonic() + _WRITE_DEBOUNCE_S
+    with _CACHE_LOCK:
+        _FLUSH["due"] = due
+        t = _FLUSH["thread"]
+        if t is not None and t.is_alive():
+            return
+        t = threading.Thread(target=_flush_loop, name="mlo-replaygain-write",
+                             daemon=True)
+        _FLUSH["thread"] = t
+    t.start()
+
+
+def _flush_loop():
+    """One thread per quiet window: wait for it, write, exit.
+
+    A store arriving while the thread waits pushes `due` out — one write covers
+    the whole burst. A store arriving WHILE it writes arms a new window, and
+    the `thread is None` claim below is what lets that store start a fresh
+    thread instead of its entry waiting for a thread that is already leaving.
+    """
+    while True:
+        with _CACHE_LOCK:
+            wait = _FLUSH["due"] - time.monotonic()
+            if wait <= 0:
+                _FLUSH["thread"] = None
+                if not _CACHE_STATE["dirty"]:
+                    return
+                wait = 0.0
+        if wait > 0:
+            time.sleep(min(wait, 0.25))
+            continue
+        try:
+            _flush_now()
+        except Exception:
+            pass
+
+
+# The window may not have elapsed when the process ends (the desktop app is
+# closed mid-album, a CLI script measures one track and exits): flush what is
+# still pending rather than dropping measurements that were paid for.
+atexit.register(_flush_now)
+
+
+def store_analysis(cfg, path, data):
+    """Cache one file's analysis in memory; the disk write follows, debounced.
+
+    Never raises. The write is deliberately NOT immediate (see
+    _WRITE_DEBOUNCE_S): a scan's hundreds of measurements used to be hundreds
+    of whole-file rewrites + fsyncs, which is what made a ReplayGain pass over
+    a library quadratic. Reads never wait for it — `_cache_map` answers them —
+    and `_flush_now` (the quiet window, the exit hook) is what lands them.
     """
     try:
         st = os.stat(path)
@@ -694,27 +863,9 @@ def store_analysis(cfg, path, data):
     entry.update({"size": st.st_size, "mtime": st.st_mtime, "ts": time.time()})
     target = _cache_path(cfg)
     with _CACHE_LOCK:
-        cache = _read_cache(cfg)
-        cache[_cache_key(path)] = entry
-        tmp = None
-        try:
-            os.makedirs(os.path.dirname(target), exist_ok=True)
-            fd, tmp = tempfile.mkstemp(prefix=".replaygain_", suffix=".json",
-                                       dir=os.path.dirname(target) or ".")
-            with os.fdopen(fd, "w", encoding="utf-8", newline="\n") as f:
-                json.dump(cache, f)
-                try:
-                    f.flush()
-                    os.fsync(f.fileno())
-                except OSError:
-                    pass
-            os.replace(tmp, target)
-        except OSError:
-            if tmp:
-                try:
-                    os.remove(tmp)
-                except OSError:
-                    pass
+        _cache_map_locked(target)[_cache_key(path)] = entry
+        _CACHE_STATE["dirty"] = True
+    _schedule_flush()
 
 
 # How long a PLAYBACK request may wait for an on-demand measurement before it

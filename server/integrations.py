@@ -755,6 +755,10 @@ def release_lookup(mbid):
                     artists.append({
                         "name": ac.get("name", ""),
                         "mbid": ac["artist"].get("id"),
+                        # MusicBrainz's aliases for this credited artist —
+                        # `inc=aliases` above nests them in the same response
+                        # (mlo.autotag writes the ARTISTALIAS tags from here).
+                        "aliases": list(ac["artist"].get("aliases") or []),
                     })
             tracks.append({
                 "position": trk.get("position"),
@@ -762,6 +766,15 @@ def release_lookup(mbid):
                 "title": trk.get("title"),
                 "length": trk.get("length"),
                 "recording_mbid": rec.get("id"),
+                # This recording's own other-language titles, from the same
+                # request (the TITLEALIAS tag's source), and the name of the
+                # artist it credits — the ladder needs the name beside the
+                # aliases to tell a translation from a repeat of it.
+                "aliases": list(rec.get("aliases") or []),
+                "artist_name": str(((trk.get("artist-credit") or [{}])[0]
+                                    .get("artist") or {}).get("name") or ""),
+                "artist_aliases": list(((trk.get("artist-credit") or [{}])[0]
+                                        .get("artist") or {}).get("aliases") or []),
                 # Whether MusicBrainz states this recording IS a video. The
                 # acquisition branch reads it to tell a music-video release
                 # from an album: with the medium (media[].format) it is what
@@ -780,7 +793,8 @@ def release_lookup(mbid):
                 "isrcs": [v for v in (_isrc(i) for i in (rec.get("isrcs") or [])) if v],
             })
     release_artists = [
-        {"name": ac.get("name", ""), "mbid": ac["artist"].get("id")}
+        {"name": ac.get("name", ""), "mbid": ac["artist"].get("id"),
+         "aliases": list(ac["artist"].get("aliases") or [])}
         for ac in data.get("artist-credit", []) if "artist" in ac
     ]
     rg_obj = data.get("release-group") or {}
@@ -831,6 +845,16 @@ def release_lookup(mbid):
         # The title in the reader's locale, when MusicBrainz states one (see
         # `alias_for`) — the page shows it in parentheses beside the title.
         "alias": alias_for(data.get("aliases"), None, data.get("title")),
+        # EVERY alias MusicBrainz states, per entity: the release's own, its
+        # group's and the credited artist's (plus each recording's, in
+        # `media`). `mlo.autotag` turns them into the ALBUMALIAS /
+        # ARTISTALIAS / TITLEALIAS tags an import stamps on the files;
+        # `inc=aliases` above already carried them, so they cost no request.
+        "aliases": list(data.get("aliases") or []),
+        "release_group_aliases": list((data.get("release-group") or {})
+                                      .get("aliases") or []),
+        "artist_aliases": list((release_artists[0].get("aliases")
+                                if release_artists else []) or []),
         # MusicBrainz's own pressing comment ("Deluxe Edition", "2011
         # remaster") — empty when it states none, which is what every reader
         # treats as "no disambiguation".
@@ -1791,6 +1815,74 @@ def _isrc_codes(isrc):
     return codes
 
 
+# How many alias substitutions the advisory route may try once every source
+# came up empty under the track's stored names. Each one re-asks the
+# name-based routes, so the walk is capped: the whole-name localisation and
+# the title alone are what `_alias_queries` puts first.
+_MAX_ADVISORY_ALIAS_QUERIES = 2
+
+
+def _advisory_alias_queries(artist, title, album, recording_mbid, tags, cfg):
+    """Ordered ``(artist, title, album)`` substitutions from MB aliases, or [].
+
+    The names MusicBrainz states for the track's entities besides the stored
+    ones (`search_aliases`, the reader's locale ladder order), turned into
+    substitutions by the SAME capped walk the lyrics chain uses
+    (`mlo.lyrics_providers._alias_queries`: the whole name localised first,
+    then each entity on its own).
+
+    Only entities the track names by MBID are asked — the recording id (the
+    route's `recording_mbid`, or the file's own MUSICBRAINZ_TRACKID tag), the
+    artist id and the release-group id out of `tags`. A NAME-only MusicBrainz
+    search is deliberately not made: an unnamed track must not cost a search
+    per entity, which is also what keeps a route the caller gave no identities
+    to completely offline. Never raises; [] when MusicBrainz states nothing.
+    """
+    try:
+        from mlo.lyrics_providers import _alias_queries
+    except Exception:
+        return []
+    tags = tags if isinstance(tags, dict) else {}
+
+    def tag(*names):
+        for name in names:
+            value = str(tags.get(name) or "").strip()
+            if value:
+                return value
+        return ""
+
+    names = {}
+    recording = str(recording_mbid or "").strip() or tag("MUSICBRAINZ_TRACKID")
+    if recording and title:
+        found = search_aliases("recording", recording, cfg, title)
+        if found:
+            names["title"] = found
+    artist_id = tag("MUSICBRAINZ_ARTISTID", "MUSICBRAINZ_ALBUMARTISTID")
+    if artist_id and artist:
+        found = search_aliases("artist", artist_id, cfg, artist)
+        if found:
+            names["artist"] = found
+    group_id = tag("MUSICBRAINZ_RELEASEGROUPID")
+    if group_id and album:
+        found = search_aliases("release-group", group_id, cfg, album)
+        if found:
+            names["album"] = found
+    if not names:
+        return []
+    original = (" ".join(str(artist or "").split()),
+                " ".join(str(title or "").split()),
+                " ".join(str(album or "").split()))
+    out = []
+    for a_name, t_name, al_name, _entity, _query in _alias_queries(
+            artist, title, album, names):
+        key = (" ".join(str(a_name or "").split()),
+               " ".join(str(t_name or "").split()),
+               " ".join(str(al_name or "").split()))
+        if key != original and key not in out:
+            out.append(key)
+    return out[:_MAX_ADVISORY_ALIAS_QUERIES]
+
+
 def resolve_advisory_route(isrc="", recording_mbid="", title="", artist="",
                            album="", disc=None, track=None, track_count=None,
                            cfg=None, youtube_id="", tags=None):
@@ -1813,6 +1905,12 @@ def resolve_advisory_route(isrc="", recording_mbid="", title="", artist="",
          only) and 6. YouTube's 18+ gate for a video the track records — two
          LAST, explicit-only, album/edition-level signals that never clear a
          track and stay silent when their input is absent.
+
+    When every one of them states NOTHING under the track's stored names, the
+    NAME-based routes (3, 4 and 5) are asked again under MusicBrainz's alias
+    substitutions — the reader's locale first, the whole name localised before
+    a single entity (`_advisory_alias_queries`), original first and only while
+    the merge is still None.
 
     `answers` is the per-source map in ask order, `source` the first source
     that stated the merged value, `checked` every route that was asked. A
@@ -1852,32 +1950,47 @@ def resolve_advisory_route(isrc="", recording_mbid="", title="", artist="",
                                       lambda c=code: _spotify_advisory(c, cfg))
             if answer is not None:
                 _record_advisory(answers, answer)
-    if artist and album:
-        checked.append("apple-album")
-        key = ("apple-album", _norm_compare(artist), _norm_compare(album),
-               _advisory_int(disc), _advisory_int(track), _norm_compare(title))
-        answer = _advisory_cached(key, lambda: _apple_album_advisory(
-            artist, album, title, disc, track, track_count, cfg=cfg))
-        if answer is not None:
-            _record_advisory(answers, answer)
-    if title:
-        checked.append("itunes-song")
-        key = ("itunes-song", _norm_compare(artist), _norm_compare(title))
-        answer = _advisory_cached(key,
-                                  lambda: _itunes_song_advisory(title, artist))
-        if answer is not None:
-            _record_advisory(answers, answer)
-    # The last two are extra EXPLICIT-only signals, both album/edition level
-    # and both silent when their input is missing: a Discogs Parental
-    # Advisory sticker (a configured token only), and YouTube's own 18+ gate
-    # for a video the track already records. Neither can clear a track.
-    if artist and album and str((cfg or {}).get("discogs_token") or "").strip():
-        checked.append("discogs-parental")
-        key = ("discogs-parental", _norm_compare(artist), _norm_compare(album))
-        answer = _advisory_cached(
-            key, lambda: _discogs_parental_advisory(artist, album, cfg))
-        if answer is not None:
-            _record_advisory(answers, answer)
+
+    def _ask_names(a_name, al_name, t_name):
+        """Ask the NAME-based routes about ONE spelling of the track.
+
+        Apple's album route, Apple's song search and the Discogs edition are
+        the sources whose answer depends on what the track is CALLED; the ISRC
+        sources above are named already, which is why the alias pass below
+        re-runs only this half. `checked` records each route as it is asked,
+        in this order.
+        """
+        if a_name and al_name:
+            checked.append("apple-album")
+            key = ("apple-album", _norm_compare(a_name), _norm_compare(al_name),
+                   _advisory_int(disc), _advisory_int(track),
+                   _norm_compare(t_name))
+            answer = _advisory_cached(key, lambda: _apple_album_advisory(
+                a_name, al_name, t_name, disc, track, track_count, cfg=cfg))
+            if answer is not None:
+                _record_advisory(answers, answer)
+        if t_name:
+            checked.append("itunes-song")
+            key = ("itunes-song", _norm_compare(a_name), _norm_compare(t_name))
+            answer = _advisory_cached(
+                key, lambda: _itunes_song_advisory(t_name, a_name))
+            if answer is not None:
+                _record_advisory(answers, answer)
+        if a_name and al_name and str((cfg or {}).get("discogs_token") or "").strip():
+            checked.append("discogs-parental")
+            key = ("discogs-parental", _norm_compare(a_name),
+                   _norm_compare(al_name))
+            answer = _advisory_cached(
+                key, lambda: _discogs_parental_advisory(a_name, al_name, cfg))
+            if answer is not None:
+                _record_advisory(answers, answer)
+
+    _ask_names(artist, album, title)
+    # The last one is an extra EXPLICIT-only signal, album/edition level and
+    # silent when its input is missing: YouTube's own 18+ gate for a video the
+    # track already records. It cannot clear a track, and it is named by the
+    # video, not by the track's names — so it is asked once here, outside the
+    # name-based half.
     video = str(youtube_id or "").strip() or youtube_video_id(tags)
     if video:
         checked.append("youtube-age")
@@ -1886,6 +1999,18 @@ def resolve_advisory_route(isrc="", recording_mbid="", title="", artist="",
         if answer is not None:
             _record_advisory(answers, answer)
     value = merge_advisory(answers)
+    if value is None:
+        # The ORIGINAL names stated nothing anywhere: consult MusicBrainz's
+        # aliases (the reader's own ladder order) and re-ask the name-based
+        # routes under each substitution, stopping at the first one that
+        # states a value. The alias names are only ever read here — a source
+        # that answered for the stored names ends the question.
+        for a_name, t_name, al_name in _advisory_alias_queries(
+                artist, title, album, recording_mbid, tags, cfg):
+            _ask_names(a_name, al_name, t_name)
+            value = merge_advisory(answers)
+            if value is not None:
+                break
     return {"value": value, "source": _winning_source(answers, value),
             "checked": checked, "answers": answers}
 

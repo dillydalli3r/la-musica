@@ -3,6 +3,15 @@ import { Disc3 } from "lucide-react";
 import { api } from "../api";
 import { offlineArtworkUrl } from "../lib/mediaCache";
 
+/** The two widths the player's own surfaces ask the server for (bucketed
+ *  server-side, see `artcache.THUMB_SIZES`). Declared here because this file
+ *  is where a cover is drawn: a row's art and the player BAR's thumb are
+ *  32-74 px and both ask for `ROW_COVER_W`, so they share ONE request; the
+ *  fullscreen picture is up to 448 px and asks for `PANE_COVER_W`, which its
+ *  blurred ambient layer shares. */
+export const ROW_COVER_W = 160;
+export const PANE_COVER_W = 640;
+
 /** Cover thumbnail with a graceful fallback when the art is missing or
  * fails to load. `wrapperClass` sizes the box; the image fills it.
  *
@@ -15,10 +24,17 @@ export default function CoverImg({
   albumPath,
   coverFile,
   staged = false,
+  w,
   wrapperClass = "h-9 w-9 rounded bg-raise overflow-hidden shrink-0",
 }: {
   albumPath: string;
   coverFile?: string | null;
+  /** The width the surface DRAWS, so the server can serve a thumbnail instead
+   *  of the 1200-3000 px master (see `api.coverUrl`'s `w`). Omitted, the
+   *  master is served — which is right for a surface that really draws it
+   *  large, and what every grid card outside the player's own path still
+   *  does. Two surfaces asking for the same width share one request. */
+  w?: number;
   /** The import wizard's album — a folder the library does not list yet, whose
    *  cover the server serves only to a request that says so (the same opt-in
    *  every other call the wizard makes passes). A preview URL without it is
@@ -33,7 +49,7 @@ export default function CoverImg({
   // lib/invalidate): a different src is what re-fetches it, and it also clears
   // a remembered failure, so a cover that was missing and then uploaded loads
   // without a reload.
-  const networkUrl = coverFile ? api.coverUrl(albumPath, coverFile, { staged }) : null;
+  const networkUrl = coverFile ? api.coverUrl(albumPath, coverFile, { staged, w }) : null;
   const [offlineUrl, setOfflineUrl] = useState<string | null>(null);
 
   useEffect(() => {
@@ -82,6 +98,7 @@ export function TrackCover({
   albumCover,
   albumFallback = true,
   staged = false,
+  w = ROW_COVER_W,
   wrapperClass = "h-9 w-9 rounded bg-raise overflow-hidden shrink-0",
 }: {
   albumPath: string;
@@ -90,11 +107,15 @@ export function TrackCover({
   albumFallback?: boolean;
   /** See CoverImg — the wizard's staged album. */
   staged?: boolean;
+  /** Row art is drawn at 32-36 px, so the default is a 160 px thumbnail: it is
+   *  the width the player BAR asks for too, which is what makes a row's cover
+   *  and the bar's cover one request rather than two. */
+  w?: number;
   wrapperClass?: string;
 }) {
   const file = trackCover ?? (albumFallback ? albumCover ?? undefined : undefined);
   if (!trackCover && !albumFallback) {
     return <div className={wrapperClass} aria-hidden style={{ visibility: "hidden" }} />;
   }
-  return <CoverImg albumPath={albumPath} coverFile={file} staged={staged} wrapperClass={wrapperClass} />;
+  return <CoverImg albumPath={albumPath} coverFile={file} staged={staged} w={w} wrapperClass={wrapperClass} />;
 }

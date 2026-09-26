@@ -436,7 +436,12 @@ function ConditionRow({
         field={cond.field}
         catalogue={catalogue}
         target={target}
-        className="w-[180px]"
+        // Full width on a phone: the row wraps anyway (a 180 px picker + a
+        // 132 px op + a 180 px value cannot share a 350 px sheet), and a
+        // control that has the line to itself is a bigger target than one
+        // wrapping mid-row. `sm:` restores the fixed pair the desktop layout
+        // was designed around.
+        className="w-full sm:w-[180px]"
         onPick={(f) => onChange(newCondition(f))}
       />
       <select
@@ -457,7 +462,7 @@ function ConditionRow({
         op={cond.op}
         value={cond.value}
         onChange={(v) => onChange({ ...cond, value: v })}
-        className="w-[180px]"
+        className="w-full sm:w-[180px]"
       />
       {pending && (
         <span className="text-[10px] text-amber-300/80 shrink-0" title="Left out of the query and the count until it has a value">

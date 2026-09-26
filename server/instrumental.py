@@ -8,7 +8,11 @@
               hit must be the track, so `integrations.title_matches` guards
               the name and the duration must be within `_DURATION_TOLERANCE`
               seconds when both are known      (verified live: Rush "YYZ"
-              true, System Of A Down "Boom!" false)
+              true, System Of A Down "Boom!" false). A lookup that states
+              nothing is retried under the MusicBrainz ALIAS names the file's
+              ids know, the original names first and an alias only where the
+              stored name said nothing (`_alias_substitutions`) — the same
+              second pass the lyrics chain runs
   spotify     Spotify audio-features `instrumentalness`, reached by ISRC →
               search → track id → /v1/audio-features/{id} (needs credentials;
               >= _INSTRUMENTAL_MIN is instrumental, <= _INSTRUMENTAL_MAX is
@@ -25,6 +29,17 @@
               marker answers: a karaoke/karaoke-style name states nothing)
   lyrics      embedded LYRICS or an .lrc sidecar → NOT instrumental (the same
               evidence mlo/autotag.py already reads)
+  ai          the configured model's own answer, and the LAST resort: asked
+              only for a track that carries NO lyrics at all (the same
+              lyric-less predicate `_lyrics_present` draws — a LYRICS tag with
+              real text, or a real .lrc sidecar, means the track has words and
+              the question is never asked) and that no source above stated
+              anything about. The prompt demands ONE digit — 1 instrumental,
+              0 not — and the reply is parsed STRICTLY: a lone 0/1 after
+              trimming is the answer, anything else (prose, "maybe", a stray
+              digit inside a sentence, an empty reply, a failed or timed-out
+              call) is NO answer — the tag is left exactly as it was and the
+              reason is recorded (`answer["ai"]`), never guessed
 
 MusicBrainz is deliberately NOT a source here. Probed live on 2026-09-17:
 a recording lookup carries no instrumental field at all (only id / title /
@@ -44,11 +59,18 @@ because the alternative is a LYRICS grading failure the import parks for a
 person to answer for every instrumental track in the library.
 """
 import os
+from concurrent.futures import ThreadPoolExecutor
 
 from server import integrations as intg
 
 # Every key `answers` may carry.
-INSTRUMENTAL_SOURCES = frozenset({"lrclib", "spotify", "title", "lyrics"})
+INSTRUMENTAL_SOURCES = frozenset({"lrclib", "spotify", "title", "lyrics", "ai"})
+
+# The source key the model's own answer is recorded under. A provider of its
+# own: the readouts must be able to say the AI answered rather than LRCLIB (the
+# same reason `LYRICS_ABSENT` exists), and the gate that decides to ask it is
+# "every other source stated NOTHING".
+AI = "ai"
 
 # The source key `lyrics_absent` states its own answer under. NOT one of the
 # cross-referenced sources above: none of them said this — the statement is the
@@ -222,14 +244,182 @@ def _lyrics_answer(af, path):
     return None, ""
 
 
+# The ONE question the model is asked here. It is told the reply is parsed
+# strictly, because it is: a chat model that answers "Yes — this track is
+# instrumental (1)" states its mind in prose, and this app does not read prose
+# as a tag value.
+_AI_SYSTEM = (
+    "You decide whether a song is instrumental: a track with no sung or spoken "
+    "words at all. Reply with ONE digit and NOTHING else — 1 if the track is "
+    "instrumental, 0 if it has vocals. No words, no punctuation, no "
+    "explanation. The reply is parsed strictly: only a lone 0 or a lone 1 is "
+    "accepted, and anything else counts as no answer."
+)
+
+
+def _ai_answer(cfg, artist, title, album):
+    """(0|1|None, note) from the configured AI provider, asked at most once.
+
+    The LAST resort, and gated by its caller: the model is asked only for a
+    track with no lyrics at all that every other source stated nothing about.
+    `note` is the honest one-liner for the readout — the answer's own words
+    when there is one, and otherwise WHY there is not (the reply was not a
+    lone 0/1, or the call itself failed), so "the model did not answer" is
+    visible rather than an invented value.
+
+    A configured-endpoint answer that is not a lone 0 or 1 is NO answer: the
+    prompt says the digit and nothing else, and a value smuggled out of prose
+    is exactly the guess this app never writes into a tag. With no endpoint
+    configured (or `server/` unimportable, as in the CLI) nothing is asked and
+    nothing is recorded — an unconfigured app behaves exactly as it did
+    before this source existed.
+    """
+    if not (cfg or {}).get("instrumental_ai_classify", True):
+        return None, ""
+    try:
+        from server import ai
+    except Exception:
+        return None, ""
+    try:
+        if not ai.ai_configured(cfg):
+            return None, ""
+    except Exception:
+        return None, ""
+    text = ("Artist: " + (artist or "unknown") + "\n"
+            "Title: " + (title or "unknown") + "\n"
+            "Album: " + (album or "unknown") + "\n")
+    try:
+        reply = ai.ai_chat(cfg, _AI_SYSTEM, text, timeout=60.0)
+    except Exception as exc:
+        return None, ("ai call failed (" + type(exc).__name__
+                      + ") — nothing written")
+    answer = str(reply or "").strip()
+    if answer in ("0", "1"):
+        what = "instrumental" if answer == "1" else "has vocals"
+        return int(answer), f"ai says the track {what} (replied {answer!r})"
+    return None, (f"ai replied {answer!r} — not a lone 0 or 1, nothing written")
+
+
+def _alias_substitutions(get_tag, cfg, artist, title, album):
+    """Ordered alias name substitutions for one track, or () when it has none.
+
+    `mlo.lyrics_fetch._search_aliases` reads the file's MusicBrainz ids: with
+    none of them, with `lyrics_search_aliases` off, or with the backend
+    stripped it answers `{}` and NOTHING is looked up — no MusicBrainz request
+    is made at all. `mlo.lyrics_providers._alias_queries` turns those names
+    into the ordered `(artist, title, album, entity, query)` substitutions the
+    whole-name localisation leads, capped. Any failure here means "no alias
+    pass", which is exactly what having no aliases means.
+    """
+    try:
+        from mlo.lyrics_fetch import _search_aliases
+        from mlo.lyrics_providers import _alias_queries
+    except Exception:
+        return ()
+    try:
+        aliases = _search_aliases(get_tag, cfg, artist, title, album) or {}
+        if not aliases:
+            return ()
+        return tuple(_alias_queries(artist, title, album, aliases) or ())
+    except Exception:
+        return ()
+
+
+def _ask_entry(source, producer, key):
+    """One source's answer as a `_merge_entries` entry, or None.
+
+    ``key`` is what `intg._advisory_cached` memoizes the answer under, so a
+    track whose lookup a previous caller already paid for costs nothing.
+    """
+    answer = intg._advisory_cached((source, key), producer)
+    if not answer:
+        return None
+    value, note = answer
+    if value not in (0, 1):
+        return None
+    return source, value, str(note or "")
+
+
+def _merge_entries(entries):
+    """Ordered `(source, value, note)` asks → `(answers, notes)`.
+
+    A source asked more than once — one ISRC per pressing is the normal case,
+    an alias name after the original stated nothing — contributes its
+    STRONGEST answer: 1 is the statement no missing flag can imitate
+    (`merge_instrumental`), so a later clean answer never clears a stated
+    instrumental. Every stated note is kept, in the order the sources gave it:
+    the evidence shows the whole cross-reference, not just the winning line.
+    """
+    answers = {}
+    notes = []
+    for source, value, note in entries:
+        if value not in (0, 1) or answers.get(source) == 1:
+            continue
+        answers[source] = value
+        if note:
+            notes.append(note)
+    return answers, notes
+
+
+def _network_entries(get_tag, cfg, artist, title, album, duration, codes):
+    """The NETWORK sources for ONE track, as `_merge_entries` entries.
+
+    LRCLIB is asked under the original names and then — only when those state
+    nothing — under the alias substitutions the file's MusicBrainz ids allow,
+    original names first, the first substituted name that states 0/1 ending
+    the pass. Then one Spotify audio-features question per ISRC. This is the
+    slow half of `detect_instrumental`, which is why it runs off this thread.
+    """
+    entries = []
+
+    def ask(source, producer, key):
+        entry = _ask_entry(source, producer, key)
+        if entry:
+            entries.append(entry)
+        return entry
+
+    ask("lrclib", lambda: _lrclib_answer(artist, title, album, duration),
+        f"{artist}|{title}|{album}|{duration}".lower())
+    if not entries:
+        for a, t, al, _entity, _query in _alias_substitutions(
+                get_tag, cfg, artist, title, album):
+            if ask("lrclib",
+                   lambda a=a, t=t, al=al: _lrclib_answer(a, t, al, duration),
+                   f"{a}|{t}|{al}|{duration}".lower()):
+                break
+    for code in codes:
+        ask("spotify", lambda c=code: _spotify_answer(c, cfg), code.upper())
+    return entries
+
+
 def detect_instrumental(paths, cfg=None):
-    """{path: {"value": 0|1|None, "answers": {source: 0|1}, "evidence": str}}.
+    """{path: {"value": 0|1|None, "answers": {source: 0|1}, "evidence": str,
+    "ai": str|None}}.
 
     Every source is asked for every track (LRCLIB, Spotify when configured,
     the track's own title, lyrics evidence) and the answers are merged by
     `merge_instrumental`; `evidence` is the one-line reason each answering
     source gave. A track nobody can state anything about comes back with
     `value` None — the caller must leave the tag alone rather than invent a 0.
+
+    The AI provider (`_ai_answer`, source key `AI`) is the LAST resort, and
+    the only source gated on the others: it is asked exactly once for a track
+    that states no lyrics at all AND whose other sources all stated nothing —
+    the one case where the merged value would otherwise be None. Its strict
+    0/1 is merged like any other answer; a reply that is not a lone 0 or 1 (or
+    a failed/timeout call) writes nothing at all and its reason is `ai` in the
+    result — `None` when no endpoint is configured, so an app without one
+    behaves exactly as before this source existed.
+
+    LRCLIB that states nothing under the stored names is retried under the
+    MusicBrainz alias names (`_alias_substitutions`), the original names first:
+    a track a source knows only by its romanized name is not "unknown".
+
+    The network sources — LRCLIB (its alias pass included), Spotify and the AI
+    question — run a few tracks at a time on a `ThreadPoolExecutor`, while the
+    local evidence and the assembly stay on this thread; every job is collected
+    before this returns, and the per-source answers stay memoized, so the pool
+    changes the wall time, never an answer.
 
     Files that are unreadable, or a path that is not a track, are absent from
     the result (never an exception). The per-source answers are cached for the
@@ -239,6 +429,7 @@ def detect_instrumental(paths, cfg=None):
 
     cfg = cfg or {}
     out = {}
+    tracks = []
     for p in paths or []:
         path = os.path.normpath(str(p))
         try:
@@ -260,41 +451,77 @@ def detect_instrumental(paths, cfg=None):
             duration = _duration_seconds(af)
         except Exception:
             continue
+        tracks.append((path, af, title, artist, album, codes, duration))
 
-        answers = {}
-        notes = []
+    def _network(track):
+        _path, af, title, artist, album, codes, duration = track
+        return _network_entries(af.get_tag, cfg, artist, title, album,
+                                duration, codes)
+
+    # A few tracks at a time: LRCLIB spaces its own lookups, so one track's
+    # latency overlaps the next track's throttled wait. A single track needs no
+    # pool, and a list is FULLY collected here — nothing outlives this call.
+    if len(tracks) > 1:
+        with ThreadPoolExecutor(max_workers=min(4, len(tracks))) as pool:
+            nets = list(pool.map(_network, tracks))
+    else:
+        nets = [_network(track) for track in tracks]
+
+    rows = []
+    for track, net in zip(tracks, nets):
+        path, af, title = track[0], track[1], track[2]
+        entries = []
 
         def _ask(source, producer, key):
-            answer = intg._advisory_cached((source, key), producer)
-            if not answer:
-                return
-            value, note = answer
-            if value not in (0, 1):
-                return
-            if answers.get(source) == 1:
-                # A source asked more than once — one ISRC per pressing is
-                # the normal case — contributes its STRONGEST answer: 1 is
-                # the statement no missing flag can imitate
-                # (merge_instrumental), so a later clean code never clears a
-                # stated instrumental.
-                return
-            answers[source] = value
-            if note:
-                notes.append(note)
+            entry = _ask_entry(source, producer, key)
+            if entry:
+                entries.append(entry)
 
         # The track's own name first: a file that says "Instrumental" needs no
         # network, and its answer is part of the cross-reference either way.
         _ask("title", lambda: _title_answer(title, path), path.lower())
         _ask("lyrics", lambda: _lyrics_answer(af, path), path.lower())
-        _ask("lrclib", lambda: _lrclib_answer(artist, title, album, duration),
-             f"{artist}|{title}|{album}|{duration}".lower())
-        for code in codes:
-            _ask("spotify", lambda c=code: _spotify_answer(c, cfg), code.upper())
+        entries.extend(net)
+        rows.append((track, _merge_entries(entries)))
 
+    # The AI is the LAST resort, and it is asked once per track that reaches
+    # it: no source stated anything (so there is no answer to second-guess) and
+    # the file carries NO lyrics at all — a track with words is not this
+    # question's, and a track that has them never pays for a model call. It
+    # runs on the same kind of pool as the network half because it is a network
+    # call of its own; one ask needs no pool. The switch
+    # (`instrumental_ai_classify`) and "is an endpoint configured at all" are
+    # `_ai_answer`'s own contract, so an app with either off returns instantly
+    # and never speaks to a provider.
+    pending = [(track[0], track[3], track[2], track[4]) for track, merged
+               in rows if merge_instrumental(merged[0]) is None
+               and not _lyrics_present(track[1], track[0])]
+
+    def _ai(job):
+        return _ai_answer(cfg, job[1], job[2], job[3])
+
+    if len(pending) > 1:
+        with ThreadPoolExecutor(max_workers=min(4, len(pending))) as pool:
+            ai_answers = list(pool.map(_ai, pending))
+    else:
+        ai_answers = [_ai(job) for job in pending]
+    ai_by_path = {job[0]: got for job, got in zip(pending, ai_answers)}
+
+    for track, (answers, notes) in rows:
+        path = track[0]
+        note = None
+        if path in ai_by_path:
+            value, ai_note = ai_by_path[path]
+            note = ai_note or None
+            if value in (0, 1):
+                answers = dict(answers)
+                answers[AI] = value
+                notes = notes + [ai_note]
         out[path] = {
             "value": merge_instrumental(answers),
             "answers": answers,
             "evidence": "; ".join(notes) or "no source stated anything",
+            "ai": note,
         }
     return out
 
@@ -342,8 +569,9 @@ def lyrics_absent(paths, cfg=None):
       track whose words the chain merely did not re-fetch is not instrumental;
     * a cross-referenced source saying not-instrumental for this track
       (`detect_instrumental`, asked once, on its cached answers): LRCLIB's
-      `instrumental: false` and Spotify's `instrumentalness` know better than a
-      search that came back empty.
+      `instrumental: false`, Spotify's `instrumentalness` and the AI's own
+      strict answer for a lyric-less track know better than a search that came
+      back empty.
 
     Returns ``{"updated", "values", "evidence", "reason"}`` — the same shape
     `server.imports.fetch_instrumentals` returns, `evidence` keyed per track by

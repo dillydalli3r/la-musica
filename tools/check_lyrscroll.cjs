@@ -134,7 +134,7 @@ const check = (name, pass, detail) => results.push({ name, pass: !!pass, detail 
 
 {
   const pane = makePane({ n: 40 });
-  LYR.createLyricsGlider(pane.scroller).center(pane.lines[10], true);
+  LYR.createLyricsGlider(pane.scroller).center(pane.lines[10], "snap");
   const want = TARGET(pane, 10);
   check("centres the sung line on the anchor",
     Math.abs(pane.scroller.scrollTop - want) < 1 && want === 10 * 40 + 20 - 300 * LYR.LYRICS_ANCHOR,
@@ -145,7 +145,7 @@ const check = (name, pass, detail) => results.push({ name, pass: !!pass, detail 
   // offsetTop is walked up the offsetParent chain, so a positioned wrapper
   // between the line and the pane must not shift the target.
   const pane = makePane({ n: 40, wrapper: true });
-  LYR.createLyricsGlider(pane.scroller).center(pane.lines[10], true);
+  LYR.createLyricsGlider(pane.scroller).center(pane.lines[10], "snap");
   const want = TARGET(pane, 10);
   check("centres through a nested positioned wrapper",
     Math.abs(pane.scroller.scrollTop - want) < 1,
@@ -202,9 +202,51 @@ const check = (name, pass, detail) => results.push({ name, pass: !!pass, detail 
 {
   const pane = makePane({ n: 40 });
   const outside = { offsetParent: null, offsetTop: 0, offsetHeight: 10 };
-  LYR.createLyricsGlider(pane.scroller).center(outside, true);
+  LYR.createLyricsGlider(pane.scroller).center(outside, "snap");
   check("refuses elements outside the pane", pane.scroller.scrollTop === 0,
     `scrollTop=${pane.scroller.scrollTop}`);
+}
+
+{
+  // A READER's move is not a glide, whatever the previous line was doing: a
+  // press on a line (centerLine), an offset step, a zoom change and the
+  // re-sync after a seek all land in the same frame. The regression this pins
+  // is the owner's "when I skip to a specific line of lyrics it still shows
+  // the transition from the line before to the skipped line": the pane used to
+  // SAIL to the clicked line, and the highlight eased there behind it.
+  const pane = makePane({ n: 200 });
+  const g = LYR.createLyricsGlider(pane.scroller);
+  g.center(pane.lines[5]);                 // the clock's own advance: a glide
+  frames(4, 16.667);
+  const mid = pane.scroller.scrollTop;
+  const want = TARGET(pane, 60);
+  g.center(pane.lines[60], "snap");        // the reader picked this line
+  check("a reader-made jump lands in the same frame",
+    mid > 0 && mid < want * 0.2 && pane.scroller.scrollTop === want,
+    `mid=${mid.toFixed(1)} landed=${pane.scroller.scrollTop.toFixed(1)} want=${want.toFixed(1)}`);
+  // …and it CANCELS the glide that was in flight: a pending frame would carry
+  // the pane off the line the reader just chose.
+  const after = frames(30, 16.667);
+  check("the jump cancels the glide it interrupted",
+    after === 0 && pane.scroller.scrollTop === want,
+    `frames after the jump=${after} scrollTop=${pane.scroller.scrollTop.toFixed(1)} want=${want.toFixed(1)}`);
+}
+
+{
+  // The rule the panes read every retarget: a move the reader made (`jumpAt`
+  // is the moment they made it) snaps, and the clock's own advance — no jump
+  // in the window — glides. Both halves are asserted, because "snaps on
+  // everything" would be as wrong as the bug: the song's own progression is
+  // what the ease exists for.
+  const now = 1_000_000;
+  check("the clock's own advance still glides",
+    LYR.lyricMove(now, 0) === "glide" &&
+      LYR.lyricMove(now, now - LYR.LYRIC_JUMP_MS - 1) === "glide",
+    `no jump=${LYR.lyricMove(now, 0)} expired=${LYR.lyricMove(now, now - LYR.LYRIC_JUMP_MS - 1)}`);
+  check("a reader-made move snaps, for the whole window",
+    LYR.lyricMove(now, now) === "snap" &&
+      LYR.lyricMove(now, now - LYR.LYRIC_JUMP_MS + 1) === "snap",
+    `just now=${LYR.lyricMove(now, now)} inside=${LYR.lyricMove(now, now - LYR.LYRIC_JUMP_MS + 1)} window=${LYR.LYRIC_JUMP_MS}ms`);
 }
 
 {

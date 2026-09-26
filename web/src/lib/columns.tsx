@@ -4,7 +4,7 @@
  * (see AlbumPage, LibraryPage, DownloadsPage, TrashPage, FavoritesPage).
  * Column visibility and widths persist per view in localStorage. */
 
-import { useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
 import { Columns3, X } from "lucide-react";
 import type { MouseEvent as ReactMouseEvent } from "react";
 
@@ -35,17 +35,42 @@ export interface CustomCol {
 /** Column layout shared by every album tracklist — the album page table and
  *  the expanded album rows in the library albums view are the same table, so
  *  visible columns and drag-resized widths are stored under one prefs key.
- *  These widths stay relative (percentages plus an auto Title) so the page
- *  keeps the fluid geometry it has; the floor that stops the title being
- *  squeezed out of existence is `ALBUM_TRACK_MIN_W` on the table. */
+ *  Every column carries a px floor: a fixed layout only honours WIDTHS, so a
+ *  floor expressed as a percentage of the table moves with the table, and one
+ *  expressed as `auto` is handed whatever the columns with widths leave — the
+ *  measured 0 px name at 342. The floors are `md:`-scoped where the phone fold
+ *  already drops the column (see ALBUM_TRACK_PHONE_CLS), and the floor that
+ *  sums them into the table's own is `ALBUM_TRACK_MIN_W`. */
 export const ALBUM_TRACK_COL_W: Record<string, string> = {
   num: "w-16",
   cover: "w-[52px]",
-  title: "w-auto",
-  genre: "w-[16%]",
+  // The name column is the row's one flexible column: `auto`, so the fixed
+  // layout hands it the width the columns with floors leave instead of growing
+  // EVERY column by the same proportion (measured at 1440: the name took 378 of
+  // 1200 while its own floor is 280, and the leftover of the other eleven
+  // columns sat under their own text). The owner's album page wrapped a long
+  // title to two lines with 900 px of free table width beside it — the cell's
+  // link is what is left of the column after the row's own chrome, so the
+  // column has to take the free width for the title to get it.
+  //
+  // The floor it needs — 280, what this cell's parts need on ONE line: the name
+  // plus the marks that belong to it (advisory, cached, video, the issue
+  // counter) plus the row's constant trailing slot (heart, "…", five stars),
+  // measured 283 px on the widest row of a real album — is carried INTO the
+  // cell by `ColFloorHolder` instead of by a width here, because a width is
+  // exactly what stops the column absorbing the free width. It has to be a
+  // floor the cell reports: an auto column contributes nothing to the table's
+  // `min-w-max` floor, so the fixed layout set to that floor hands the name
+  // 0 px — measured, a 66 px column with a 0 px name wrapped nine lines deep.
+  // Below `md` the column is auto on purpose and takes whatever the phone fold
+  // leaves: the measured 122 px at 390 is a readable column, while a 280 px
+  // floor there would put a 280 px column in a 342 px row (which is why the
+  // holder is `hidden` there — see ColFloorHolder).
+  title: "md:w-auto",
+  genre: "md:w-24",
   dur: "w-20",
-  bitrate: "w-[16%]",
-  dr: "w-[10%]",
+  bitrate: "md:w-[184px]",
+  dr: "md:w-14",
 };
 /** Floor for a table whose columns carry their own width (`_COL_W` maps): a
  *  fixed layout squares up to `w-full` by scaling every column down and
@@ -59,22 +84,28 @@ export const ALBUM_TRACK_COL_W: Record<string, string> = {
  *  share the width with room to spare — same as before this floor existed. */
 export const TABLE_FIT = "w-full md:min-w-max";
 
-/** The album tracklist's floor, derived from its own columns rather than
- *  picked: the fixed ones (num 64 + cover 52 + dur 80) and the corner control
- *  (76) take 272 px up front, the percentage ones (genre 16% + bitrate 16% +
- *  DR 10%) take 42% of what is left, and the remainder goes to the auto
- *  Title column — 814 px is the width where that title is still 200 px.
- *  Narrower than this the fixed layout hands the title the leftover, which
- *  measured 0 px at a 342 px phone width, so the table holds this width and
- *  its wrapper scrolls instead. The library's expanded album rows share these
- *  columns without the corner control, so the floor is slightly generous
- *  there — harmless, it only starts scrolling a little sooner.
+/** The album tracklist's floor: the same column-driven rule every other table
+ *  here uses (`TABLE_FIT`'s `min-w-max`), not a number picked by hand.
  *
- *  `md:` only, like TABLE_FIT's `min-w-max`: below it the phone fold has
- *  already dropped the columns a phone cannot use (ALBUM_TRACK_PHONE_CLS), and
- *  a floor there would only re-create the 814 px table inside a 342 px screen —
- *  the title lost to it, one syllable per line. */
-export const ALBUM_TRACK_MIN_W = "md:min-w-[814px]";
+ *  It used to be `md:min-w-[814px]`, derived from the columns as they then
+ *  were: the fixed ones plus the corner control took 272 px up front, the
+ *  percentage ones took 42% of what was left, the auto title got the
+ *  remainder, and 814 was the width where that title was still 200 px. Every
+ *  part of that arithmetic was a snapshot — add a column (a user's tag column,
+ *  a second disc's cover), fold one on a phone, resize one by its own handle,
+ *  and the constant no longer described the table it was pinned to. It only
+ *  ever applied from `md` up anyway (below it the fold leaves the couple of
+ *  columns a phone can use, and a floor there is what put an 814 px table
+ *  inside a 342 px screen).
+ *
+ *  Now it is the columns' own sum: every album-tracklist column carries its
+ *  width (`ALBUM_TRACK_COL_W`, plus the corner control's own class), so
+ *  max-content of the fixed layout IS that sum, and a table set to this floor
+ *  stops at exactly the columns' widths and lets its `overflow-x-auto` wrapper
+ *  scroll. The name column has a fixed width from `md` up for that reason — an
+ *  auto column contributes nothing to the sum, so the one column that must
+ *  never collapse would be the one column the floor forgot. */
+export const ALBUM_TRACK_MIN_W = "md:min-w-max";
 
 /** Floor for a user-added tag column (`tag:*` ids): the values are free text,
  *  so it gets the same readable minimum as a genre cell. Without a width of its
@@ -137,19 +168,24 @@ export const TRACK_COL_W: Record<string, string> = {
   // is numbered by its position in the list ("200" in a full-library preview).
   num: "w-16",
   cover: "w-[52px]",
+  // 240, measured — and measured against this cell's own parts rather than
+  // picked: the name plus the marks that belong to it (advisory, grade,
+  // cached, video) plus the row's trailing controls are 237 px on the widest
+  // row of a real library, and the floors here are "widest value + a few px of
+  // slack" everywhere else. It is carried by `ColFloorHolder` inside the cell,
+  // not by a width here, because the column is `auto`: the name is the row's
+  // one flexible column, and it must absorb the table's free width rather than
+  // let the fixed layout grow every column of the row by the same proportion
+  // (see ALBUM_TRACK_COL_W.title). The floor still has to be REPORTED by the
+  // cell, or the table's `min-w-max` floor forgets it and the fixed layout
+  // hands the name 0 px. What this replaced was 280: the same measurement taken
+  // once, rounded up, and then paid for by every other column — the table's
+  // floor (TABLE_FIT's `min-w-max`) sums the WIDTHS, so 40 px of headroom here
+  // pushed the whole table 40 px wider than its data and put a horizontal
+  // scroll under windows that would otherwise have fitted.
   // `md:` like the album table's name column: on a phone the title is the only
   // column left beside the cover, so it takes the whole row instead.
-  //
-  // 280 px, not the 220 it carried: the cell holds the name AND the marks that
-  // belong to it (advisory, grade, cached, video) plus the row's own trailing
-  // controls, and at 220 the title lost that fight — the link was squeezed to
-  // zero and the Library's Tracks view rendered as empty rows (see
-  // TrackTitleCell). 280 is what those parts need to sit on ONE line for an
-  // ordinary title, which is what keeps the row 40 px tall instead of three
-  // lines of marks under the name; the table's floor (TABLE_FIT's `min-w-max`)
-  // grows with it and the wrapper scrolls, the documented trade for a
-  // fixed-layout table.
-  title: "md:w-[280px]",
+  title: "md:w-auto",
   // 120, measured: "Artist Gamma" at the table's own font is 112 px wide, so
   // the old 108 broke the name across two lines inside a column whose whole
   // job is saying who the track is by. The floors below are sized the same way
@@ -161,16 +197,23 @@ export const TRACK_COL_W: Record<string, string> = {
   genre: "w-24",
   // The MediumChip's own longest label ("Digital Media") is 108 px wide.
   media: "w-[112px]",
-  // 80 px, the same floor the album tracklist gives its length column: an
-  // hour-plus length is seven characters ("1:02:33"), which the old 64 px
-  // floor could only break onto a second line.
-  duration: "w-20",
+  // 88 px: an hour-plus length is seven characters ("1:02:33"), which the old
+  // 64 px floor could only break onto a second line — and the header is what
+  // sets the floor here, because a floor has to clear TWO things: "Duration"
+  // plus its sort arrow is 86 px of nowrap label, and a fixed-layout column
+  // narrower than that paints the label over the column beside it (the same
+  // rule ALBUM_COL_W documents for ADR). The album tracklist's own length
+  // column keeps 80: its label is the three letters "Dur".
+  duration: "w-[88px]",
   // 184, measured: `fmtTech`'s own string ("FLAC 16/44.1 · 104 kbps") is 177 px
   // — the app's precedent for this column is the duration one above, sized to
   // its widest value, and a format/bitrate readout that breaks into three lines
   // (one of them empty) is what the old 88 px floor did.
   bitrate: "w-[184px]",
-  dr: "w-12",
+  // 56, not 48: the "DR" label plus its sort arrow is 52 px of nowrap header,
+  // which a 48 px column paints over its neighbour (the same rule the albums
+  // table's "ADR" column follows).
+  dr: "w-14",
   source: "w-20",
   type: "w-20",
   inst: "w-20",
@@ -185,6 +228,37 @@ export const TRACK_COL_W: Record<string, string> = {
   // wherever it appears.
   rating: "w-[104px]",
 };
+
+/** The floor an `auto` title column carries INTO its cell — the width of the
+ *  zero-height box `ColFloorHolder` draws, per table:
+ *
+ *   * `ALBUM_TRACK_TITLE_FLOOR` — the album tracklist's 280 px floor
+ *     (ALBUM_TRACK_COL_W.title) minus the 24 px of gutter `.th`/`.td` put
+ *     inside every cell, which is the border-box width the fixed layout reads
+ *     off the cell's content.
+ *   * `TRACK_TITLE_FLOOR` — the same for TRACK_COL_W.title's 240 px.
+ *
+ *  They are the ONE part of the name column that did not move into a class of
+ *  its own: the number lives in the comment above each map entry, and the
+ *  holder's `w-[…]` literals are what Tailwind can see (a computed class name
+ *  is never generated). Change a name floor in the maps above and this pair
+ *  changes with it — the check that measures the tables' floors fails if it
+ *  does not. */
+export const ALBUM_TRACK_TITLE_FLOOR = "w-[256px]";
+export const TRACK_TITLE_FLOOR = "w-[216px]";
+
+/** The floor-holder box. The name column has to be `auto` (it is the row's one
+ *  flexible column — see ALBUM_TRACK_COL_W.title), and a `table-layout: fixed`
+ *  table reads an auto column's floor off its CONTENT: a `min-width` on the
+ *  cell itself is ignored there (measured: a title cell asking for 280 px came
+ *  out 66 px wide, and its name 0 px), while this empty zero-height box sets the
+ *  cell's min-content to its own width. `hidden` below `md`, where no floor
+ *  applies and the phone's own fold gives the name whatever is left. Drawn in
+ *  the header cell — that is enough, since the fixed layout's floor takes the
+ *  widest content of the column's cells. */
+export function ColFloorHolder({ className }: { className: string }) {
+  return <span aria-hidden="true" className={`hidden md:block h-0 ${className}`} />;
+}
 
 /** The track table's columns, in render order. */
 export const TRACK_COLS: Col[] = [
@@ -380,16 +454,37 @@ export function customCols(customs: CustomCol[], scope: "tags" | "meta"): Col[] 
 
 /** Drag-resized column widths per table view, persisted in localStorage.
  * Absent entries fall back to the fluid % classes; double-clicking a
- * handle (or the Columns menu reset) clears them. */
+ * handle (or the Columns menu reset) clears them.
+ *
+ * A stored width is a READING PREFERENCE, never evidence about this build —
+ * the same rule `useColumnPrefs` applies to a stored visible-id list. It is
+ * applied to a column's `<th>` as an inline width in a FIXED-layout table, so a
+ * value that is not a sane number does not merely look wrong, it takes the
+ * column out of the view: a stored `0` (or a hand-edited/imported string, or a
+ * JSON shape from an older key) pinned every data column to 0 px, which is an
+ * Albums view of artist headers over thin chevron rows, a Tracks view showing
+ * nothing but the row numbers, and no cover images — while the columns menu
+ * still listed every column, because it reads the VISIBLE list. Anything the
+ * drag handle itself could not have produced (the setter clamps to 40-900) is
+ * dropped on read, so the column keeps its own floor from the `_COL_W` maps. */
+function sanitizeWidths(raw: unknown): Record<string, number> {
+  const out: Record<string, number> = {};
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) return out;
+  for (const [id, value] of Object.entries(raw as Record<string, unknown>)) {
+    const n = typeof value === "number" ? value : Number(value);
+    if (!Number.isFinite(n) || n < 40 || n > 900) continue;
+    out[id] = Math.round(n);
+  }
+  return out;
+}
+
+/** The stored widths, sanitized (see sanitizeWidths). */
 export function useColumnWidths(key: string): [Record<string, number>, (id: string, px: number) => void, () => void] {
   const storageKey = `mlo-colw-${key}`;
   const [widths, setWidths] = useState<Record<string, number>>(() => {
     try {
       const raw = localStorage.getItem(storageKey);
-      if (raw) {
-        const parsed = JSON.parse(raw) as Record<string, number>;
-        if (parsed && typeof parsed === "object") return parsed;
-      }
+      if (raw) return sanitizeWidths(JSON.parse(raw));
     } catch {
       /* ignore */
     }
@@ -414,6 +509,90 @@ export function useColumnWidths(key: string): [Record<string, number>, (id: stri
     }
   };
   return [widths, set, reset];
+}
+
+/** The stored widths as the table can actually SHOW them, plus the ref the
+ *  table's `overflow-x-auto` wrapper takes.
+ *
+ *  A fixed layout makes the sum of its columns' own widths the table's floor
+ *  (CSS 2.1 §17.5.2.1: the used width is the greater of the table's width and
+ *  that sum — measured: the Artists view's four counter columns stored at 300
+ *  px each drew a 1420 px table inside a 1200 px wrapper, though the columns'
+ *  own floors sum to 596). So a stored map the drag handle itself could have
+ *  produced — every value inside its own 40–900 clamp — can put a sideways
+ *  scrollbar under a table whose columns fit the space with room to spare.
+ *  That is the owner's Artists tab: a short artist list with a scrollbar it
+ *  did not need.
+ *
+ *  A stored width is a preference, so its columns are the ones that give way:
+ *  when the columns' OWN floors fit the table's box, what the reader's columns
+ *  may spend in total is their own floors plus the box's free room, and a map
+ *  asking for more is scaled to that (`floors` is the px floor of every column
+ *  that can be stored, i.e. the entries whose ids the view's `_COL_W` map has
+ *  — 40/900 in, image out). The relation between the reader's columns is
+ *  exactly what a drag means, and it survives the scaling. When the columns'
+ *  own floors do NOT fit (the library's Albums and Tracks views at 1440: 1264
+ *  and 1532 px of floors in 1200 px), nothing is capped at all: a scrollbar
+ *  there is what the floors asked for, and the reader's widths are honoured
+ *  as stored.
+ *
+ *  Both numbers come from the table itself rather than from a second copy of
+ *  the floors: every reading is taken inside one layout pass, with the stored
+ *  widths switched off and the table pinned to no width of its own (so a fixed
+ *  layout's used width IS the sum of the floors) — nothing paints in between. */
+export function useFittedWidths(
+  widths: Record<string, number>,
+  floors: Record<string, number>
+): [Record<string, number>, (el: HTMLDivElement | null) => void] {
+  const box = useRef<HTMLDivElement | null>(null);
+  // Whether the wrapper is MOUNTED — the tables live behind a view switch, so
+  // the effect's first run has the ref empty and its dependencies unchanged
+  // when the reader opens the view. A callback ref says when to look again.
+  const [mounted, setMounted] = useState(false);
+  // What the stored widths may spend in total, or null when the columns' own
+  // floors already overflow the box (then there is nothing to cap).
+  const [budget, setBudget] = useState<number | null>(null);
+  useLayoutEffect(() => {
+    const el = box.current;
+    if (!el) return;
+    const read = () => {
+      const table = el.querySelector("table");
+      if (!table) return;
+      const ths = [...table.querySelectorAll<HTMLElement>("thead th")];
+      const shown = ths.map((th) => th.style.width);
+      const own = table.style.width;
+      // The floors: the stored widths off, the table pinned to nothing.
+      ths.forEach((th) => { th.style.width = ""; });
+      table.style.width = "0px";
+      const floorsW = table.scrollWidth;
+      table.style.width = own;
+      ths.forEach((th, i) => { th.style.width = shown[i]; });
+      const stored = Object.keys(widths).filter((id) => floors[id] !== undefined);
+      const mine = stored.reduce((n, id) => n + floors[id], 0);
+      setBudget(floorsW <= el.clientWidth + 1 ? mine + (el.clientWidth - floorsW) : null);
+    };
+    read();
+    // The box changes without this hook re-rendering: a window resize, the
+    // sidebar folding away, a phone turning.
+    const ro = new ResizeObserver(read);
+    ro.observe(el);
+    return () => ro.disconnect();
+  }, [widths, floors, mounted]);
+
+  const asked = Object.keys(widths).reduce((n, id) => n + (floors[id] !== undefined ? widths[id] : 0), 0);
+  const scale = budget !== null && asked > budget && asked > 0 ? budget / asked : 1;
+  // Stable identity: a ref callback that changes every render makes React call
+  // it with null and the element again on every render.
+  const attach = useCallback((el: HTMLDivElement | null) => {
+    box.current = el;
+    setMounted(!!el);
+  }, []);
+  return [
+    scale === 1
+      ? widths
+      : Object.fromEntries(Object.entries(widths).map(([id, w]) => [id, Math.max(40, Math.round(w * scale))])),
+    attach,
+  ];
 }
 
 /** Per-view "which columns are visible" menu with a width reset. An optional

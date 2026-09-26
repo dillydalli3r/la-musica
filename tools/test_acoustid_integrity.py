@@ -435,6 +435,105 @@ check("…and did not touch the pair the pipeline wrote",
       pair(COPIES["auto"]) == (REC, LOCAL_FP), f"{pair(COPIES['auto'])}")
 
 # --------------------------------------------------------------------------- #
+# (a2) THE SPELLING BEETS WRITES: every reader agrees the pair is there
+# --------------------------------------------------------------------------- #
+print("== the tagger's own spelling of the pair ==")
+# The import chain's tagger IS beets, and mediafile stores the pair as
+# `TXXX:Acoustid Id` / `----:com.apple.iTunes:Acoustid Id` — not the
+# `ACOUSTID_ID` this app writes. Every reader must find it either way: the
+# owner's report was a step saying "carries no AcoustID tag" for a file the
+# app's own import had just tagged, while the grader kept demanding the id.
+FFMPEG_EXE = None
+if os.path.isdir(_DEPS):  # noqa: F821 (module-level _DEPS above)
+    for _entry in os.listdir(_DEPS):
+        if _entry.lower().startswith("ffmpeg"):
+            _cand2 = os.path.join(_DEPS, _entry, "ffmpeg.exe")
+            if os.path.isfile(_cand2):
+                FFMPEG_EXE = _cand2
+                break
+
+
+def make_mp3(path):
+    """A minimal valid MPEG-1 Layer III stream (test_mb_metadata's recipe —
+    no bundled mp3 encoder), with an ID3 tag block to write into."""
+    import mutagen.mp3
+
+    frame = bytes.fromhex("ff fb 10 00") + b"\x00" * 100
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    with open(path, "wb") as fh:
+        fh.write(frame * 60)
+    audio = mutagen.mp3.MP3(path)
+    if audio.tags is None:
+        audio.add_tags()
+    audio.save()
+    return path
+
+
+def beets_spell(path, kind, id_value=REC, fp_value=LOCAL_FP):
+    """The pair under beets/mediafile's spellings, written with the ARBITRARY
+    key writer — what an outside tagger leaves on disk."""
+    af = AudioFile(path)
+    if kind == "mp3":
+        af.set_any_tag("TXXX:Acoustid Id", id_value)
+        af.set_any_tag("TXXX:Acoustid Fingerprint", fp_value)
+    else:
+        af.set_any_tag("----:com.apple.iTunes:Acoustid Id", id_value)
+        af.set_any_tag("----:com.apple.iTunes:Acoustid Fingerprint", fp_value)
+
+
+stub_tools()
+BEETS_DIR = os.path.join(WORK, "tagger")
+MP3 = make_mp3(os.path.join(BEETS_DIR, "01 Song.mp3"))
+beets_spell(MP3, "mp3")
+check("the reader finds the pair beets writes (mp3)",
+      pair(MP3) == (REC, LOCAL_FP), f"{pair(MP3)}")
+check("…and names both under their semantic tags",
+      vorbis_names(MP3) == ["ACOUSTID_FINGERPRINT", "ACOUSTID_ID"],
+      f"{vorbis_names(MP3)}")
+check("…so script 21 reads the recording the file states",
+      acoustid._recording_identity(MP3, AudioFile(MP3)) == (REC, "ACOUSTID_ID"),
+      f"{acoustid._recording_identity(MP3, AudioFile(MP3))}")
+check("…and a complete pair is left alone, never re-created",
+      acoustid.fix_pair(MP3, CFG)["status"] == "unchanged",
+      f"{acoustid.fix_pair(MP3, CFG)}")
+check("…and the grader reports no missing half",
+      grade(BEETS_DIR)[0] == [], f"{grade(BEETS_DIR)}")
+
+if FFMPEG_EXE:
+    M4A = os.path.join(BEETS_DIR, "02 Song.m4a")
+    subprocess.run([FFMPEG_EXE, "-v", "quiet", "-y", "-f", "lavfi", "-i",
+                    "anullsrc=r=44100:cl=stereo", "-t", "1", "-c:a", "aac",
+                    M4A], check=True, capture_output=True)
+    beets_spell(M4A, "mp4")
+    check("…and the same holds for the MP4 atom spelling",
+          pair(M4A) == (REC, LOCAL_FP)
+          and acoustid.fix_pair(M4A, CFG)["status"] == "unchanged",
+          f"{pair(M4A)} {acoustid.fix_pair(M4A, CFG)}")
+else:
+    print("  (ffmpeg absent: the MP4 atom spelling is not exercised)")
+
+# This app's own write REPLACES the other spelling — one id on disk, not two.
+acoustid.write_tags(MP3, REC, LOCAL_FP, CFG)
+_leaked = [k for k in (AudioFile(MP3).all_tags() or {})
+           if "ACOUSTID" in str(k).upper()]
+check("this app's own write leaves exactly one spelling of each half",
+      vorbis_names(MP3) == ["ACOUSTID_FINGERPRINT", "ACOUSTID_ID"],
+      f"{vorbis_names(MP3)} / {_leaked}")
+
+# Half a pair in the tagger's spelling: every consumer names the missing half.
+HALF = make_mp3(os.path.join(WORK, "tagger-half", "01 Song.mp3"))
+beets_spell(HALF, "mp3", fp_value="")
+check("a lone beets 'Acoustid Id' reads as an id with no fingerprint",
+      pair(HALF) == (REC, ""), f"{pair(HALF)}")
+check("…and the grader fails exactly the missing half",
+      grade(os.path.dirname(HALF))[0] == ["ACOUSTID_FINGERPRINT"],
+      f"{grade(os.path.dirname(HALF))}")
+check("…and script 21 completes it from the id the file stated",
+      acoustid.fix_pair(HALF, CFG)["status"] == "modified"
+      and pair(HALF) == (REC, LOCAL_FP),
+      f"{acoustid.fix_pair(HALF, CFG)} {pair(HALF)}")
+
+# --------------------------------------------------------------------------- #
 # (d) A SELECTION: several paths in one run, each file exactly once
 # --------------------------------------------------------------------------- #
 print("== a selection ==")
@@ -698,6 +797,77 @@ check("no user key is a named refusal, and nothing is read or sent",
       res["available"] is False and res["code"] == acoustid.NO_USER_KEY
       and res["note"] == "no user API key"
       and POSTED == [] and FP_CALLS == [])
+
+# --------------------------------------------------------------------------- #
+# The fingerprint memo: fpcalc DECODES the file (up to 120 s of it), and the
+# same unchanged track is asked about again and again inside one session — the
+# pair fixer, the submitter, the import wizard's own step and a lookup all run
+# over the same files minutes apart. Keyed on the file's stat (and the build),
+# so a re-download is never served a stale fingerprint.
+# --------------------------------------------------------------------------- #
+print("== fpcalc runs once per unchanged file ==")
+
+MEMO = mk("Memo Fixtures", "1-01 Memo Track.flac",
+          MUSICBRAINZ_TRACKID=REC, TITLE="Memo Track")
+BUILD_A = r"C:\stub\fpcalc.exe"
+BUILD_B = r"C:\stub\fpcalc-1.6.1.exe"
+
+
+def _memo_fpcalc(*a, **k):
+    """ONE launcher object for the whole case: the memo is keyed on the
+    launcher as well as on the file, so swapping the double (a lambda per call)
+    would be a different question every time."""
+    FP_CALLS.append(1)
+    return _R(0, json.dumps({"duration": 30.0, "fingerprint": LOCAL_FP}))
+
+
+_real_path = acoustid.fpcalc_path
+_real_tool = acoustid.run_tool
+acoustid.run_tool = _memo_fpcalc
+acoustid.fpcalc_path = lambda cfg=None: BUILD_A
+FP_CALLS.clear()
+try:
+    first = acoustid.fingerprint(MEMO, CFG)
+    second = acoustid.fingerprint(MEMO, CFG)
+    check("one unchanged file is decoded by fpcalc ONCE, however often it is asked",
+          len(FP_CALLS) == 1 and first == second
+          and first["fingerprint"] == LOCAL_FP,
+          f"{FP_CALLS} {first} {second}")
+
+    # The memo is about the FILE, not about the question: a rewritten file (a
+    # re-tag, a re-download over the same name) is fingerprinted again.
+    tag(MEMO, TITLE="Memo Track (re-tagged, and a longer title)")
+    third = acoustid.fingerprint(MEMO, CFG)
+    check("...a rewritten file is taken again (the memo is keyed on its stat)",
+          len(FP_CALLS) == 2 and third["fingerprint"] == LOCAL_FP, str(FP_CALLS))
+
+    # And it is about THIS build: another fpcalc is a different question and
+    # must not reuse the values this one produced.
+    acoustid.fpcalc_path = lambda cfg=None: BUILD_B
+    acoustid.fingerprint(MEMO, CFG)
+    check("...and another fpcalc build is not served the old build's value",
+          len(FP_CALLS) == 3, str(FP_CALLS))
+
+    # A missing tool is NOT a fact about the file, so it is never remembered:
+    # installing fpcalc has to fix the very next call.
+    acoustid.fpcalc_path = lambda cfg=None: None
+    gone = acoustid.fingerprint(MEMO, CFG)
+    check("...a missing fpcalc is never remembered (installing it fixes the call)",
+          gone["code"] == acoustid.NO_FPCALC and len(FP_CALLS) == 3,
+          f"{gone} {FP_CALLS}")
+
+    # Back to the first build and the same bytes: the memo answers, and the
+    # message the missing tool produced was not it.
+    acoustid.fpcalc_path = lambda cfg=None: BUILD_A
+    FP_CALLS.clear()
+    back = acoustid.fingerprint(MEMO, CFG)
+    check("...and the unchanged file is answered from the memo once it is back",
+          FP_CALLS == [] and back["ok"] is True
+          and back["fingerprint"] == LOCAL_FP,
+          f"{FP_CALLS} {back}")
+finally:
+    acoustid.fpcalc_path = _real_path
+    acoustid.run_tool = _real_tool
 
 # --------------------------------------------------------------------------- #
 # restore + verdict

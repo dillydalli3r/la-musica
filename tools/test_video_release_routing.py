@@ -111,6 +111,7 @@ if REAL:
 
 import mlo.audio as audio_mod  # noqa: E402
 import mlo.flac as flac_mod  # noqa: E402
+from mlo import release_choice as rc  # noqa: E402
 from mlo import tagtext  # noqa: E402
 from server import imports, soulseek, soulseek_auto as auto, wishes  # noqa: E402
 from server import main as mlo_main  # noqa: E402
@@ -251,7 +252,9 @@ def fake_download(url, dest_dir, config=None):
 
 
 def fake_search(slsk_mod, queries, wait_s, usable=None, response_limit=0,
-cancel_check=None):
+                cancel_check=None, resume=None, pending_out=None):
+    # `resume`/`pending_out` are the two-phase seam (see _search_queries): this
+    # double always answers in its own window, so it hands nothing over.
     SEARCHES.append(list(queries))
     if not SLSK_FILES:
         return [], [], 0
@@ -863,7 +866,7 @@ def traced_candidate(artist, title, want_seconds=None, config=None):
 
 
 def traced_search(slsk_mod, queries, wait_s, usable=None, response_limit=0,
-cancel_check=None):
+                  cancel_check=None, resume=None, pending_out=None):
     TRACE.append("soulseek")
     return _real_search(slsk_mod, queries, wait_s, usable, response_limit)
 
@@ -1026,6 +1029,77 @@ eq(ORGANIZED, [], "nothing was imported")
 eq(FINISHED, [], "and no chain ran")
 auto.forget(jid)
 clear_registry()
+
+# --------------------------------------------------------------------------- #
+print("\n(15) an edition of nothing but music videos ranks below the album's audio")
+# --------------------------------------------------------------------------- #
+# Issue #67: MusicBrainz states which recordings an edition holds — the flat
+# `media` list a release lookup builds, or each disc's own `tracks` in a raw
+# payload — and `media[].video` says a recording IS a music video. An edition
+# whose recordings are ALL videos must never be the better pick while an
+# edition carrying the album's own audio is on offer. The tier RANKS, it does
+# not forbid: a group offering only the video edition still gets it.
+vid = release("Digital Media", video=True, mbid="vid")
+aud = release("CD", video=False, mbid="aud")
+eq(rc.video_only(vid), True,
+   "the video edition's own flat recordings say they are videos")
+eq(rc.video_only(aud), False,
+   "and the audio edition's say they are not")
+eq(rc.choose_release({}, [vid, aud]).release_mbid, "aud",
+   "so the audio edition is the pick")
+ranked = {c.release_mbid: c for c in rc.rank_releases({}, [vid, aud])}
+ok(any("video only" in r for r in ranked["vid"].reasons),
+   "the video edition's own reasons say why it lost", ranked["vid"].reasons)
+ok(any("the video edition rule" in r for r in ranked["aud"].reasons),
+   "and the winner's deciding reason names the video tier", ranked["aud"].reasons)
+eq(rc.choose_release({}, [vid]).release_mbid, "vid",
+   "an only-video group still gets it — the rule ranks, it does not forbid")
+
+# …and the video rule outranks the MEDIUM: a video edition on the album's own
+# preferred medium (a CD) still loses to an audio edition published as a
+# download, because this is the FIRST tier and no lower one may outvote it.
+carrier_video = release("CD", video=True, mbid="cd-video")
+download_audio = release("Digital Media", video=False, mbid="dig-aud")
+eq(rc.choose_release({}, [carrier_video, download_audio]).release_mbid, "dig-aud",
+   "a video CD loses to the album's audio on a worse medium")
+eq(rc.choose_release({}, [download_audio, carrier_video]).release_mbid, "dig-aud",
+   "whatever order the two arrived in")
+
+# a payload stating NO media/video facts is not penalised: silence is not
+# evidence, so an edition whose recordings the data does not describe keeps
+# its place against an audio one instead of dropping a tier with it.
+quiet = {"id": "quiet", "title": "Video Singles", "status": "Official",
+         "date": "2004-05-01", "country": "US", "medium_formats": ["CD"]}
+eq(rc.video_only(quiet), False, "a payload with no media facts is not video-only")
+eq(rc.video_only({}), False, "and neither is an empty payload")
+quiet_rows = rc.rank_releases({}, [quiet, release("CD", video=False, mbid="plain")])
+ok(not any("video only" in r for c in quiet_rows for r in c.reasons),
+   "neither edition is penalised on the video tier", [c.reasons for c in quiet_rows])
+ok(not any("the video edition rule" in r for r in quiet_rows[0].reasons),
+   "so the video tier is not what decided them", quiet_rows[0].reasons)
+eq(rc.choose_release({}, [quiet, vid]).release_mbid, "quiet",
+   "and the unstated edition still outranks a stated all-video one")
+
+# the rule reads the NESTED disc shape too — a raw payload's `media` are
+# DISCS, each with its own track list — and ONE audio recording among the
+# videos is enough to clear the edition.
+eq(rc.video_only({"media": [{"format": "DVD", "tracks": [{"video": True}]}]}), True,
+   "a disc of nothing but video tracks is video-only")
+eq(rc.video_only({"media": [{"format": "CD", "tracks": [{"video": False}]}]}), False,
+   "a disc of audio tracks is not")
+eq(rc.video_only({"media": [{"format": "DVD", "tracks": [{"video": True},
+                                                         {"video": False}]}]}), False,
+   "one audio recording among the videos clears the edition")
+eq(rc.stated_recordings({"media": [{"format": "DVD", "tracks": [{"video": True},
+                                                                 {"video": False}]}]}),
+   [{"video": True}, {"video": False}],
+   "stated_recordings flattens a disc's own track list")
+eq(rc.stated_recordings(vid), vid["media"],
+   "and reads the flat release-lookup shape as its own recordings")
+eq(rc.stated_recordings({"media": [{"format": "CD", "tracks": []}]}), [],
+   "an empty stated track list states no recordings")
+eq(rc.stated_recordings({}), [],
+   "and neither does a payload with no media at all")
 
 # --------------------------------------------------------------------------- #
 print()

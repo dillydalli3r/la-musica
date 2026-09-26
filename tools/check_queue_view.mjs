@@ -25,8 +25,13 @@ import path from "node:path";
 const here = path.dirname(fileURLToPath(import.meta.url));
 const webDir = path.join(here, "..", "web");
 const payloadPath = process.argv[2];
+/** `--one-group`: this payload is ONE item seen twice (a release still being
+ *  verified and the finished download of the same album), and the page must
+ *  draw it in exactly one group. The base payload's own expectations below
+ *  describe a whole queue, so they are not what this mode asserts. */
+const mode = process.argv[3] || "";
 if (!payloadPath) {
-  console.error("[queue] usage: node tools/check_queue_view.mjs <payload.json>");
+  console.error("[queue] usage: node tools/check_queue_view.mjs <payload.json> [--one-group]");
   process.exit(2);
 }
 if (!existsSync(path.join(webDir, "node_modules"))) {
@@ -83,6 +88,62 @@ try {
   // React separates adjacent text nodes with <!-- --> markers; they are not
   // content, so the assertions read the flattened text.
   const flat = html.replace(/<!-- -->/g, "").replace(/\s+/g, " ");
+
+  if (mode === "--one-group") {
+    // ONE ITEM, ONE GROUP (issue #68). The payload carries the same album
+    // twice, exactly as build_queue() reports it while a release is being
+    // verified: a JOB row in in_progress and the READY row for the folder
+    // slskd already wrote, in completed. An item whose chain is still running
+    // belongs to In progress alone, so the finished row must not be drawn —
+    // and the item itself must still be there, in one group, with the other
+    // finished rows untouched.
+    const liveRows = payload.sections.in_progress || [];
+    const doneRows = payload.sections.completed || [];
+    const album = String((liveRows.find((r) => r.title) || {}).title || "");
+    const folder = String((doneRows.find((r) => r.path) || {}).path || "");
+    const leaf = folder.replace(/[\\/]+$/, "").replace(/^.*[\\/]/, "");
+    const problems = [];
+    const check = (what, ok, detail = "") => {
+      if (!ok) problems.push(`${what}${detail ? `  ${detail}` : ""}`);
+    };
+    // The payload really is one item seen twice: the folder slskd wrote is
+    // named by the album the job is fetching, which is what the page has to
+    // recognize as the same thing (nothing else about the two rows agrees).
+    check("the payload is one item in two rows (album name == folder leaf)",
+          !!album && leaf.toLowerCase() === album.toLowerCase(),
+          `${JSON.stringify(album)} vs ${JSON.stringify(leaf)}`);
+    // Where each group's text starts, so a row can be attributed to a group:
+    // the sections are rendered in the page's own order (In progress before
+    // Completed before Failed).
+    const at = (header) => flat.indexOf(`>${header} · `);
+    const inStart = at("In progress"), doneStart = at("Completed"), failStart = at("Failed");
+    check("both groups rendered", inStart > 0 && doneStart > inStart && failStart > doneStart,
+          `${inStart}/${doneStart}/${failStart}`);
+    const inChunk = inStart >= 0 && doneStart > inStart ? flat.slice(inStart, doneStart) : "";
+    const doneChunk = doneStart >= 0 && failStart > doneStart ? flat.slice(doneStart, failStart) : "";
+    // The item is drawn ONCE, in In progress, and Completed holds the one
+    // finished row this payload has that nothing is running on.
+    check("the running item is in In progress", inChunk.includes(album));
+    check("the same item is NOT in Completed", !doneChunk.includes(album));
+    check("In progress counts it once", inChunk.includes(">In progress · 1<"), inChunk.slice(0, 120));
+    check("Completed does not count it", doneChunk.includes(">Completed · 1<"), doneChunk.slice(0, 120));
+    // The dropped row is the FINISHED one: its note and its Import action are
+    // gone, while the finished row nothing is running on keeps its own.
+    check("the dropped ready row's own line is not drawn",
+          !flat.includes("In the download folder — ready to import"));
+    check("no Import button for the folder being verified",
+          !flat.includes("Import this album all the way through"));
+    check("the untouched finished row is still drawn there",
+          doneChunk.includes("Imported into the library"));
+    if (problems.length) {
+      console.error("[queue] MISSING: " + JSON.stringify(problems));
+      console.error("In progress: " + inChunk.slice(0, 1200));
+      console.error("Completed:   " + doneChunk.slice(0, 1200));
+      process.exit(1);
+    }
+    console.log("ok  an item whose chain is still running is drawn in ONE group, " +
+      "with the finished row for the same album dropped");
+  } else {
   const want = [
     ["the waiting group with its count", "Waiting · 1"],
     ["a waiting row says where in the line it is", "Waiting · #1"],
@@ -176,6 +237,7 @@ try {
   }
   console.log(`ok  the Soulseek page renders the queue sections and their rows ` +
     `(${want.length} checks, ${html.length} bytes of HTML)`);
+  }   // end of the base payload's own expectations (the --one-group mode above)
 } finally {
   await server.close();
 }

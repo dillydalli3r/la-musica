@@ -135,7 +135,18 @@ desktop targets have no `AVAudioSession`).
    it, and the next press of play is what takes it back), and
    `AVAudioSessionMediaServicesWereReset` — the ONE transition besides setup
    that re-takes the category, because the audio server restarted and nothing is
-   playing into the session at that moment.
+   playing into the session at that moment. The two teardown notifications (an
+   interruption beginning, the media server resetting) also RELEASE the
+   keep-alive's player: iOS stopped this process's render when it took the
+   session, and a handle to a player the OS has discarded is worse than none —
+   `start_keep_alive` refuses to build one while a player is stored, so the app
+   would render nothing again for the rest of its life and be suspended the next
+   time it was backgrounded. The render is rebuilt where it belongs: an
+   interruption ending with `ShouldResume`, the media server's reset, and the
+   app becoming active all re-render if the app is backgrounded AND the web
+   player still says it is playing. (`keep_alive_platform_stops` in the readout
+   counts those teardowns, so "the keep-alive was running and then the music
+   stopped" can be read as a number rather than guessed.)
 4. **The backgrounded webview** (`tauri.conf.json`): the category and
    `UIBackgroundModes: [audio]` are the app's half of the promise; the web
    content process that decodes the audio is WebKit's, and WebKit stops a page
@@ -155,12 +166,19 @@ desktop targets have no `AVAudioSession`).
    says it is playing AND the app is in the background, this process therefore
    plays half a second of generated 16-bit dither (`keepalive_wav`, ±1 LSB,
    about −90 dBFS) on a looping `AVAudioPlayer` at unity volume, on that same
-   playback session: inaudible under any master, and deliberately not digital
+   playing session: inaudible under any master, and deliberately not digital
    silence, which a platform may discount as "no audio". The state this whole
    module is in — category, background, playing, keep-alive running or not, and
    why — is readable from inside the app through `ios_audio_state` (Settings →
    Downloads & playback → Playback diagnostics), because none of it is
-   observable from a development box. It starts at
+   observable from a development box: `session_category_taken` and
+   `session_activate_last` are the two answers the session's write calls gave
+   (there is no public getter for the session's active bit, so "it refused the
+   category" and "it refused to activate" are only knowable as the answer we got
+   when we asked), `keep_alive_platform_stops` counts the platform teardowns
+   above, and `app_heartbeat` says whether `app_process_worst_gap_s` was
+   measured at all — a `0.0` without a ticking heartbeat means "nobody looked",
+   not "the process was never frozen". It starts at
    `DidEnterBackground` and when playback starts while already backgrounded
    (the lock-screen play button has no app-state notification to ride on), and
    stops the moment either half goes away. `MPNowPlayingInfoCenter` is still
@@ -179,7 +197,7 @@ one part of "mark this track as a favourite" that must be native.
 the split elsewhere in this crate is Tauri's own `desktop`/`mobile`, but Android
 drives its media notification from the webview's Media Session alone, and a
 `cfg(mobile)` star would have dragged Android into a MediaPlayer framework it
-does not have. The wiring is four steps:
+does not have. The wiring is five steps:
 
 1. **Setup** (`ios_like::register`, from the mobile shell's setup): look
    `MPRemoteCommandCenter` up dynamically, enable `likeCommand` (the star has to
@@ -194,15 +212,31 @@ does not have. The wiring is four steps:
    which is transport-only), and again whenever the app becomes active
    (`ios_like::refresh`, called by the audio-session module): the same bit is
    written by the system's now-playing plumbing, and a star a state push cannot
-   turn back on is a star that vanishes mid-album.
+   turn back on is a star that vanishes mid-album. The star's FILL is replayed
+   in the same place, from the web's OWN last answer (`set_liked` remembers it):
+   that re-assert lands exactly where the system rebuilds the command set, so
+   without the replay a liked track's star came back hollow the next time the
+   app was backgrounded and reopened — the app's hearts saying liked and the OS
+   drawing otherwise, which is the shape of "the like button does not work". The
+   web stays the only writer; what is replayed is its last word, updated in the
+   same main-thread breath as the write, so it cannot be stale — and a push
+   racing it lands after it and wins.
 2. **The star is pressed**: the handler emits the `mlo-ios-like` event to the
-   webview and answers `MPRemoteCommandHandlerStatusSuccess`. The shell writes
-   no like itself — and because it cannot tell a delivered event from a dropped
-   one, it REMEMBERS the press until the web answers with a state push of its
-   own (that is what `set_now_playing_liked` means), re-sending it the next time
-   the app is active (`ios_like::refresh`). A webview parked behind the lock
-   screen is exactly where a Tauri event goes missing, and that is where this
-   star is used.
+   webview — carrying the press's NUMBER — and answers
+   `MPRemoteCommandHandlerStatusSuccess`. The shell writes no like itself — and
+   because it cannot tell a delivered event from a dropped one, it REMEMBERS the
+   press until the web answers with a state push of its own (that is what
+   `set_now_playing_liked` means), re-sending it the next time the app is active
+   (`ios_like::refresh`). A webview parked behind the lock screen is exactly
+   where a Tauri event goes missing, and that is where this star is used. It is
+   not always a DEAF webview, though: WKWebView queues the JavaScript it is
+   handed while the web content process is suspended and runs it when the
+   process wakes, so the original hand-over and the re-delivery can both arrive.
+   The number is what makes that safe — `web/src/lib/iosFavs.ts` drops a copy of
+   a press it has already handled, and records the drop as a
+   `like-press-duplicate` row in the playback report — because two toggles of
+   the one like endpoint land exactly where the user started, which is
+   indistinguishable from a star that does nothing.
 3. **The web toggles**: `web/src/lib/iosFavs.ts`, mounted by the player bar,
    listens for that event and calls the app's one like writer —
    `useFav`/`api.likeToggle`, i.e. the same optimistic update, the same query
@@ -217,6 +251,16 @@ does not have. The wiring is four steps:
    (`MPFeedbackCommand.h`), i.e. a **filled** star when the track is favourited
    and a hollow one when it is not. The command is registered on every target
    with an empty body off iOS, so the web UI calls it unconditionally.
+5. **It is readable from inside the app**: `ios_like::command_state_rows` adds
+   `now_playing_like_enabled` (is the star pressable at this instant),
+   `now_playing_like_active` (is it drawn FILLED — MediaPlayer's own `active`
+   bit, read through the `isActive` getter its header declares),
+   `now_playing_like_web_state` (what the web last pushed) and
+   `now_playing_like_press_pending` (a press still owed to a webview that has
+   not answered) to the same Settings → Downloads & playback → Playback
+   diagnostics list as the audio-session rows. `active` beside `web_state` is
+   the mismatch that used to be undiagnosable: "the app thinks the track is
+   liked and the OS draws it hollow" is now a row pair, not an argument.
 
 What the star cannot do: the app has no dislike or bookmark, so only the like
 command is ever activated; and the star belongs to the OS's module, so it
@@ -239,20 +283,79 @@ API in them was written against those crates' vendored sources (the
 `msg_send!`'s encoding rules — `None::<&mut AnyObject>` is how an out-parameter
 like `NSError**` is passed, since raw pointers are not `Encode`, which is also
 why the audio category is read from AVFAudio's exported `NSString *const` rather
-than built) — but compiling for iOS and watching the star on a device both need
+than built), with the MediaPlayer side read off Apple's own headers
+(`MPRemoteCommandCenter.h`'s `likeCommand`/`dislikeCommand` as `MPFeedbackCommand
+*` and `skip*Command` as `MPSkipIntervalCommand *`, and `MPRemoteCommand.h`'s
+`@property (nonatomic, assign, getter = isActive) BOOL active;`) — but compiling
+for iOS and watching the star on a device both need
 Xcode, which is not installed on this machine, so neither has been run locally.
 `mobile.yml` (macOS) is the first build that type-checks these files, and the ARTIFACT is checked too: `tools/check_ios_ipa.py <ipa-or-url>` opens a
-built `.ipa`, reads `UIBackgroundModes` and the ATS key back out of its
-`Info.plist`, and looks for the Objective-C names the modules use at runtime
-(`AVAudioSession`, the playback category and mode, `NSNotificationCenter`,
-`MPRemoteCommandCenter`, `mlo-ios-like`) in the app binary — so "the mobile job
-went green" and "the IPA the owner installs carries the fix" are two separate
-facts, both checked. A device is still the only thing that can show the star
-filling on a press.
+built `.ipa`, reads `UIBackgroundModes`, all three ATS keys and the
+local-network reason back out of its `Info.plist`, and looks for the
+Objective-C names the modules use at runtime (`AVAudioSession`, the playback
+category and mode, the media-server-reset notification, `AVAudioPlayer`,
+`NSTimer`, `NSNotificationCenter`, `MPRemoteCommandCenter`, `sharedCommandCenter`,
+`likeCommand`, `dislikeCommand`, `addTargetWithHandler:`, `skipForwardCommand`,
+`mlo-ios-like`, and every readout row name) in the app binary — so "the mobile
+job went green" and "the IPA the owner installs carries the fix" are two
+separate facts, both checked. Each of those assertions is also stated as an
+app-level truth in this file, which is the contract `tools/check_ios_ipa.py`
+serves: a new iOS-side constant is asserted in the artifact only once it is
+written down here as behaviour. `tools/test_sidestore_source.py` builds a
+synthetic IPA and deletes each invariant on its own, so an assertion that could
+not fail is caught as a failure rather than trusted. A device is still the only
+thing that can show the star filling on a press.
+
+**What the shell guarantees, and what the webview does** — the split, in one
+place, because every report about iOS playback lands on the seam:
+
+- The SHELL (`ios_audio.rs`) owns the audio session: the `playback` category and
+  its activation, the keep-alive render that keeps the app process alive in the
+  background, and the notifications that put the session back. It owns the star
+  (`ios_like.rs`): the command's existence, its `enabled` and its fill — but
+  never the like itself, which it hands to the page and takes back as state.
+- The WEBVIEW owns the playback: the `<audio>` element, the Media Session
+  metadata the lock screen shows (`title`/artist/album/artwork), and the
+  transport handlers for play/pause/previous/next/seek
+  (`PlayerBar.tsx`'s `navigator.mediaSession` effect) — plus the single like
+  store, and the push that keeps the star's fill in step with it
+  (`lib/iosFavs.ts`). A transport button that does nothing while the app is
+  backgrounded is a webview/WebKit question, not a shell one; a track that
+  refuses to load at all is an ATS question (the media key above).
+- NEITHER writes the other's state: the page never calls `AVAudioSession`, and
+  the shell never writes a like or a now-playing title.
+
+**Checking it on a device** (the order that answers the most with one build):
+
+1. Settings → Downloads & playback → *Playback diagnostics*, and copy the
+   report. `session_category_taken: accepted` + `session_activate_last: accepted`
+   while a track plays is the session half; `keep_alive_running: yes` with
+   `app_in_background: yes` while the app is behind the lock screen is the
+   keep-alive half; `app_process_worst_gap_s` in the seconds with
+   `app_heartbeat: ticking` is the app process being frozen anyway (a real
+   suspension, not a guess).
+2. Play a track, lock the phone, and confirm the music continues and the lock
+   screen shows the track's own metadata. Then press the star there: the report
+   gains a `like-press` row (`iosFavs`), the heart in the app is filled when the
+   app comes back, and the rows read `now_playing_like_active: yes` with
+   `now_playing_like_web_state: liked`. A `like-press-duplicate` row with no
+   second toggle is the re-delivery path working as designed.
+3. Take a phone call (or trigger Siri) with the music playing in the
+   background, then hang up: the music should still be there and
+   `keep_alive_platform_stops` should have risen by one — that count rising is
+   the tear-down/re-render pair above doing its job, and a `keep_alive_running:
+   no` beside it, while backgrounded and playing, is the transition that never
+   came.
+4. Leave the app backgrounded for a few minutes and reopen it: `web_player_says_
+   playing`, `keep_alive_running` and the star's fill should all still agree. A
+   hollow star with `now_playing_like_web_state: liked` is the OS's own rebuild
+   winning — the replay in step 1 of the star section above is what should
+   prevent it, and a report showing it is how that gets a next fix rather than a
+   next release.
 
 ## Bundle config
 
-`bundle.iOS.minimumSystemVersion` 14.0, `bundle.iOS.bundleVersion` 4.1.11,
+`bundle.iOS.minimumSystemVersion` 14.0, `bundle.iOS.bundleVersion` 4.2.0,
 `bundle.iOS.infoPlist` and `bundle.android.minSdkVersion` 24 in
 `tauri.conf.json`. The Android package name and the iOS bundle id both come from
 the top-level `identifier` (`com.musiclibraryoptimizer.lamusica` — the old
@@ -324,23 +427,40 @@ so both Apple platforms have to be told to allow cleartext, or the app cannot
 reach *any* server:
 
 - **iOS and macOS** — `src-tauri/Info.plist` sets
-  `NSAppTransportSecurity > NSAllowsArbitraryLoadsInWebContent` **and** the
-  blanket `NSAllowsArbitraryLoads`. Tauri merges that file into the generated
+  `NSAppTransportSecurity > NSAllowsArbitraryLoadsInWebContent` **and**
+  `NSAllowsArbitraryLoadsForMedia`, plus the blanket `NSAllowsArbitraryLoads`.
+  Tauri merges that file into the generated
   iOS `Info.plist` at `tauri ios build` time — `bundle.iOS.infoPlist` names it,
   and it is the last plist merged, so what it says wins — and into the macOS
-  `.app`; without it App Transport Security blocks every `http://` and `ws://`
-  request the webview makes — fetch, WebSocket, audio and
-  video playback alike. The web-content key alone is not enough for the MEDIA:
-  an `<audio>`/`<video>` element's bytes are loaded by WebKit's media stack,
-  which reads the blanket key, so a build with only the first could open the
-  whole app and then fail every single track ("pressing play just pauses it
-  immediately"). The same file carries
+  `.app`; without those keys App Transport Security blocks every `http://` and
+  `ws://` request the webview makes — fetch, WebSocket, audio and
+  video playback alike. **Two scoped keys, not one, and the reason is a rule of
+  Apple's that reads backwards:** on iOS 10+ and macOS 10.12+ the blanket
+  `NSAllowsArbitraryLoads` is *ignored* — treated as NO — the moment any scoped
+  key is present ("In iOS 10 and later and in macOS 10.12 and later, the value of
+  the `NSAllowsArbitraryLoads` key is ignored—and the default value of NO used
+  instead—if any of the following keys are present:
+  `NSAllowsArbitraryLoadsForMedia`, `NSAllowsArbitraryLoadsInWebContent`,
+  `NSAllowsLocalNetworking`"). The web-content key covers what the page's own
+  process fetches (the document, its scripts, its XHRs); an
+  `<audio>`/`<video>` element's bytes are loaded by AVFoundation, in a process of
+  its own, and read the MEDIA key instead. A build with the web-content key
+  alone therefore loaded the whole app and then had every single track refused
+  by ATS with nothing the page could see — "pressing play just pauses it
+  immediately" — which is the shape of the owner's report this file's media key
+  answers. The blanket key is kept as the coarse exemption for a system that
+  reads no scoped key at all (iOS 9 / macOS 10.11); on every OS this app can run
+  on it is inert, and it is the two scoped keys that decide. The same file carries
   `NSLocalNetworkUsageDescription` — iOS 14+ asks before an app may talk to
   devices on the local network and cannot even prompt without a reason to show,
   so a server on the LAN would be unreachable while a Tailscale address worked.
   The shell's own native calls are still held to full ATS (there are none:
-  `lib.rs` carries no HTTP client). The mobile CI job reads all three keys back
-  out of the built `.app`, and `tools/check_ios_ipa.py` out of the shipped IPA.
+  `lib.rs` carries no HTTP client). The mobile CI job reads the plist keys back
+  out of the built `.app` (the web-content and blanket ATS keys, and the
+  local-network reason), and `tools/check_ios_ipa.py` reads all four back out of
+  the shipped IPA — the MEDIA key included, which is the one a release most
+  needs: its absence changes nothing a build log or a launch would show, and
+  every track is refused behind it.
 - **Android** — there is no config key for the manifest's cleartext flag and
   the generated project is not committed, so the allowance is applied in CI
   right after `tauri android init` (`.github/workflows/mobile.yml`). The

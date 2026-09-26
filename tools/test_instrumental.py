@@ -20,6 +20,15 @@ What this pins, with LRCLIB and Spotify stubbed (no network at all):
   * the merge rule lives in ONE place, `merge_instrumental`: instrumental
     anywhere → 1, else not-instrumental anywhere → 0, else None with NOTHING
     written (absence of evidence is never recorded as a value);
+  * the AI provider (spec R319) is the LAST source and is asked ONCE for a
+    track with no lyrics at all that no source stated anything about: a lone
+    0/1 after trimming is written the way the app writes INSTRUMENTAL and
+    attributed to the AI, while prose, a hedge, a stray digit inside a
+    sentence or an empty reply writes NOTHING and records the reason. A track
+    carrying lyrics, one a source already answered for, `instrumental_ai_
+    classify` off and an unconfigured endpoint all cost no model call, and a
+    failed/timed-out call leaves the file exactly as it was, inside the import
+    path (`server.imports.fetch_instrumentals`);
   * a variant is never the track, in BOTH directions;
   * fetch_instrumentals writes the merged value with its per-source evidence,
     never overwrites an existing 0/1 (the user's edit wins) and writes nothing
@@ -504,6 +513,155 @@ try:
     finally:
         lyrics_fetch.fetch_lyrics = real_fetch_lyrics
         lyrics_fetch.AudioFile = real_fetch_audio
+
+    # ----------------------------------------------------------------- #
+    # 8) The AI (spec R319): the LAST source, asked ONLY for a lyric-less,
+    #    evidence-less track, and parsed strictly as a lone 0/1
+    # ----------------------------------------------------------------- #
+    from server import ai as ai_mod
+
+    _real_ai_chat, _real_ai_configured = ai_mod.ai_chat, ai_mod.ai_configured
+    AI_CFG = dict(CFG, ai_base_url="http://127.0.0.1:9/v1",
+                  ai_model="test-model", instrumental_ai_classify=True)
+    try:
+        def stub_ai(reply):
+            """A configured endpoint whose answer is `reply` (or raises it)."""
+            calls = []
+
+            def fake_chat(cfg, system, user, timeout=90.0):
+                calls.append((system, user, timeout))
+                if isinstance(reply, Exception):
+                    raise reply
+                return reply
+
+            ai_mod.ai_configured = lambda c: True
+            ai_mod.ai_chat = fake_chat
+            return calls
+
+        # (a) a lyric-less track nobody states anything about: the model's lone
+        #     "1" is written the way the app writes INSTRUMENTAL, attributed to
+        #     the AI rather than to LRCLIB, and the prompt it was asked with
+        #     demands the single digit and names the track
+        clear()
+        stub_lrclib({})
+        calls = stub_ai(" 1\n")          # a lone 1 after TRIM is the answer
+        ai_track = track("30 - AiTrack.flac", title="AiTrack", duration=200)
+        out = imports.fetch_instrumentals([ai_track], AI_CFG)
+        assert out["updated"] == 1 and out["values"] == {ai_track: 1}, out
+        assert out["evidence"] == {ai_track: {"ai": 1}}, out
+        assert written(ai_track) == "1", FakeAudio.files[ai_track]
+        assert len(calls) == 1, calls
+        system, user, timeout = calls[0]
+        assert "ONE digit" in system and "NOTHING else" in system, system
+        assert "instrumental" in system and "0 if it has vocals" in system, system
+        assert "Title: AiTrack" in user and "Artist: Rush" in user, user
+        assert "Album: Moving Pictures" in user, user
+        assert timeout > 0, calls
+
+        # (b) a lone "0" is the negative answer, written the same way
+        clear()
+        stub_lrclib({})
+        stub_ai("0")
+        vocals_ai = track("31 - AiVocals.flac", title="AiVocals", duration=200)
+        out = imports.fetch_instrumentals([vocals_ai], AI_CFG)
+        assert out["values"] == {vocals_ai: 0}, out
+        assert out["evidence"] == {vocals_ai: {"ai": 0}}, out
+        assert written(vocals_ai) == "0", FakeAudio.files[vocals_ai]
+
+        # (c) anything that is not a LONE 0 or 1 is no answer: nothing may be
+        #     written out of prose, a hedge, a stray digit inside a sentence or
+        #     an empty reply, and the reason says the model replied without one
+        for reply in ("This track is instrumental, I think.", "maybe",
+                      "1 (instrumental)", "0, although it is hard to say", "",
+                      "yes", "10"):
+            clear()
+            stub_lrclib({})
+            stub_ai(reply)
+            bad = track("32 - Bad.flac", title="Bad", duration=200)
+            hit = detect(bad, AI_CFG)
+            assert hit["value"] is None and hit["answers"] == {}, (reply, hit)
+            assert "not a lone 0 or 1" in (hit["ai"] or ""), (reply, hit)
+            assert "no source stated anything" in hit["evidence"], (reply, hit)
+            out = imports.fetch_instrumentals([bad], AI_CFG)
+            assert out["updated"] == 0 and out["values"] == {}, (reply, out)
+            assert written(bad) is None, (reply, FakeAudio.files[bad])
+
+        # (d) a track that HAS lyrics never costs a call — its words are the
+        #     evidence it has vocals, and the model is never asked to
+        #     second-guess them (an embedded LYRICS tag and a real .lrc
+        #     sidecar both count)
+        clear()
+        stub_lrclib({})
+        calls = stub_ai("1")
+        sung_ai = track("33 - SungAi.flac", title="SungAi", duration=200,
+                        lyrics="[00:01.00]words")
+        side_ai = track("34 - SideAi.flac", title="SideAi", duration=200, lrc=True)
+        for with_words in (sung_ai, side_ai):
+            hit = detect(with_words, AI_CFG)
+            assert hit["value"] == 0, hit
+            assert hit["answers"] == {"lyrics": 0}, hit
+            assert hit["ai"] is None, hit
+        assert calls == [], "a track with lyrics never reaches the model"
+
+        # (e) a source that STATED a value ends the question: the AI answers
+        #     silence, it is not a second opinion on somebody else's answer
+        clear()
+        stub_lrclib({"get": {"instrumental": False, "trackName": "StatedAi",
+                             "duration": 200}})
+        calls = stub_ai("1")
+        stated_ai = track("35 - StatedAi.flac", title="StatedAi", duration=200)
+        hit = detect(stated_ai, AI_CFG)
+        assert hit["value"] == 0 and hit["answers"] == {"lrclib": 0}, hit
+        assert calls == [], "a stated answer is never second-guessed"
+
+        # (f) `instrumental_ai_classify` off: the model is never spoken to,
+        #     through the detector and through the import's own writer
+        clear()
+        stub_lrclib({})
+        calls = stub_ai("1")
+        off_cfg = dict(AI_CFG, instrumental_ai_classify=False)
+        off_track = track("36 - AiOff.flac", title="AiOff", duration=200)
+        hit = detect(off_track, off_cfg)
+        assert hit["value"] is None and hit["ai"] is None, hit
+        assert imports.fetch_instrumentals([off_track], off_cfg)["updated"] == 0
+        assert written(off_track) is None, FakeAudio.files[off_track]
+        assert calls == [], "the switch off: the AI is never asked"
+
+        # (g) a call that FAILS (timeout, bad key, dead endpoint) leaves the
+        #     track exactly as it was, says so, and never breaks the import
+        clear()
+        stub_lrclib({})
+        stub_ai(TimeoutError("no answer"))
+        dead = track("37 - AiTimeout.flac", title="AiTimeout", duration=200)
+        hit = detect(dead, AI_CFG)
+        assert hit["value"] is None and hit["answers"] == {}, hit
+        assert "ai call failed" in (hit["ai"] or ""), hit
+        out = imports.fetch_instrumentals([dead], AI_CFG)
+        assert out["updated"] == 0 and written(dead) is None, out
+
+        # (h) with no endpoint configured the question is never asked at all —
+        #     an app without an AI behaves exactly as it did before this source
+        clear()
+        stub_lrclib({})
+        calls = stub_ai("1")
+        ai_mod.ai_configured = _real_ai_configured
+        plain = track("38 - NoEndpoint.flac", title="NoEndpoint", duration=200)
+        hit = detect(plain)
+        assert hit["value"] is None and hit["ai"] is None, hit
+        assert calls == [], "an unconfigured endpoint is never called"
+
+        # (i) one call per track, no more: two lyric-less tracks cost two
+        clear()
+        stub_lrclib({})
+        calls = stub_ai("1")
+        pair = [track("39 - Pair A.flac", title="Pair A", duration=200),
+                track("40 - Pair B.flac", title="Pair B", duration=200)]
+        out = imports.fetch_instrumentals(pair, AI_CFG)
+        assert out["updated"] == 2 and len(calls) == 2, (out, calls)
+        assert {p: FakeAudio.files[p]["tags"].get("INSTRUMENTAL")
+                for p in pair} == {pair[0]: "1", pair[1]: "1"}, FakeAudio.files
+    finally:
+        ai_mod.ai_chat, ai_mod.ai_configured = _real_ai_chat, _real_ai_configured
 finally:
     mlo_audio.AudioFile = _real_audiofile
     intg._lrclib_get, intg._advisory_json, intg._spotify_token = (

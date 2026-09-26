@@ -322,9 +322,15 @@ def _run_one(wish, cfg):
     _note(wid, walk_label)
     wishes.log("info", f"Wish search: {label}"
                 + (f" ({len(walk)} ranked candidate(s) to try)" if len(walk) > 1 else ""))
-    # This attempt's window per candidate. A candidate's search is BOUNDED, and
-    # the walk's own count bounds how many of those windows one attempt may
-    # spend, so a wish can never search for ever in one pass (spec R151).
+    # This attempt's window per candidate — its TOP-UP window, the budget the
+    # job spends on a candidate whose search is still running. The job's own
+    # FIRST pass asks with the much shorter `soulseek_search_fast_seconds`
+    # (slskd serves responses only once a search has ENDED, so a readable
+    # answer in seconds is what starts a good copy downloading at once), and
+    # this window is reached only when that pass found nothing usable. A
+    # candidate's search is BOUNDED, and the walk's own count bounds how many
+    # of those windows one attempt may spend, so a wish can never search for
+    # ever in one pass (spec R151).
     window = max(5, int(cfg.get("soulseek_search_timeout_seconds", 60) or 60))
 
     last = ""
@@ -650,30 +656,6 @@ def _settle_attempt(wish, cfg, err):
     return "pending"
 
 
-def _clear_settled():
-    """Take the queue's SETTLED rows off the list when a pass really has work.
-
-    The same clear the per-section buttons run (`server.api_queue`
-    .clear_settled_queue, which reuses the clear route's own path): the owner's
-    ask is that the queue's finished sections do not pile up across runs, and a
-    pass that searches something IS a new run — its own tick included. Called
-    only when `open_wishes` is non-empty, so an idle timer does not touch the
-    list, and a job that finishes AFTER the clear stays visible.
-
-    ON ITS OWN THREAD (the pass must not wait on the queue payload's own slskd
-    read) and never raising: `api_queue` reads this module's registries, and
-    bookkeeping about the LIST must not stop a search."""
-    def work():
-        try:
-            from server import api_queue
-            api_queue.clear_settled_queue()
-        except Exception:
-            traceback.print_exc()
-    try:
-        threading.Thread(target=work, name="mlo-queue-autoclear", daemon=True).start()
-    except Exception:
-        traceback.print_exc()
-
 def _due(wish, cfg):
     """Is this wish due for its own next search? (Interval + any backoff.)"""
     return time.time() >= wishes.due_at(wish, cfg)
@@ -828,14 +810,12 @@ def _cycle(wid=None):
             if w["status"] == "searching" and w["id"] not in live:
                 wishes.mark_wanted(w["id"])
 
-        if open_wishes:
-            # A NEW RUN (this tick, an add-to-library's kick, a Search now, a
-            # retry): the queue's FINISHED rows come off the list, exactly as
-            # the per-section Clear buttons take them — the owner's ask that
-            # the finished sections do not survive into the next run. Live
-            # rows, background wishes and retryable failures are not
-            # clearable and stay; a job that settles LATER still shows.
-            _clear_settled()
+        # NO queue clear here. A pass over open wishes is a RESTART OF A
+        # SEARCH, not an import: the queue's completed rows are taken only when
+        # an IMPORT (or a download that will import) starts — see the one
+        # docstring of the rule, server.api_queue.clear_completed_for_new_import.
+        # Clearing on this tick would wipe the completed rows the user is
+        # reading between two searches of the same wish.
 
         by_id = _run_pass(open_wishes, cfg) if open_wishes else {}
         imported = sum(1 for v in by_id.values() if v == "imported")

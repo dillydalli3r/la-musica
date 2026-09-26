@@ -11,7 +11,7 @@ from concurrent.futures import ThreadPoolExecutor
 
 from mlo.stats import _find_albums, worker_count, WALK_FILES
 from mlo.grader import (_empty_folder_result, _find_empty_folders, _grade_album,
-                        printed_pct)
+                        grade_artist, printed_pct)
 from mlo.audio import AudioFile
 from mlo.artistdata import has_image, strip_mbid_suffix
 from mlo.paths import (expected_tracks_state, LIB_VIDEO_EXTS,
@@ -31,6 +31,11 @@ TRACK_TAGS = [
     "RATEYOURMUSIC_ALBUM", "RATEYOURMUSIC_TRACK", "RATEYOURMUSIC_ARTIST",
     "ALBUMARTISTSORT", "ORIGINALDATE", "RELEASETYPE", "RELEASESTATUS",
     "RELEASECOUNTRY", "CATALOGNUMBER", "LABEL", "BARCODE", "SCRIPT",
+    # MusicBrainz's other-language names (mlo.autotag writes them), read here
+    # so the library's own search blob — the client's haystack is built from
+    # every value in `tags` — finds a track by its alias as well as by the
+    # stored name, and so the rows can show "name (alias)".
+    "TITLEALIAS", "ARTISTALIAS", "ALBUMALIAS",
     # The podcast identity (mlo.naming's DERIVED type): the SERIES MusicBrainz
     # links an episode's release group to, and the episode number it states.
     # Read here so the Podcasts shelf, the series page and the Podcasts
@@ -59,6 +64,10 @@ ALBUM_LEVEL_TAGS = [
     "MUSICBRAINZ_RELEASEGROUPID",
     "RATEYOURMUSIC_ALBUM", "MEDIA", "CATALOGNUMBER", "LABEL", "BARCODE",
     "RELEASETYPE", "RELEASESTATUS", "RELEASECOUNTRY", "SCRIPT",
+    # Album-level alias facts: one release states one album name and one
+    # credited artist, so the first readable track speaks for the album (the
+    # artist page shows ARTISTALIAS beside the artist's display name).
+    "ARTISTALIAS", "ALBUMALIAS",
     # Album-level like every other release fact: one episode folder states one
     # series (the tag is written to every file of it, and the first readable
     # track is what an album-level value is read from).
@@ -221,6 +230,12 @@ def _enrich_track(tr, album_dir, cover_for=None):
     # can ever see them disagree — `lyrics_present` stays because the queries,
     # the players and the grading stats read it.
     tr["lyrics_present"] = bool(kind)
+    # The alias to show BESIDE the stored title — mlo.autotag writes the one
+    # MusicBrainz states in the reader's locale (TITLEALIAS), and a row renders
+    # `withAlias(title, alias)` exactly like the MusicBrainz pages do, so the
+    # original title stays the tag it is while the other-language name is what
+    # the reader sees. None (not "") when the file states none.
+    tr["alias"] = str((tr.get("tags") or {}).get("TITLEALIAS") or "").strip() or None
     return tr
 
 
@@ -456,6 +471,11 @@ def build_album(album_dir, cfg, light=False):
     for tr in res.get("tracks", []):
         _enrich_track(tr, album_dir, cover_for)
     res["meta"] = _album_meta(album_dir, res.get("tracks", []))
+    # The album's other-language name (ALBUMALIAS) from the same first track
+    # the meta block is read from: the album row shows it beside meta.ALBUM
+    # with `withAlias`, the shape the MusicBrainz rows already use. The
+    # original stays meta.ALBUM, which the details view reads.
+    res["alias"] = str(res["meta"].get("ALBUMALIAS") or "").strip() or None
     # The DERIVED podcast identity of this album, read from its own tags (see
     # podcast_info) — the field the Home shelf, the series page, the Podcasts
     # preset and the Artist page's Podcast bucket all read. None for anything
@@ -769,10 +789,23 @@ def _artist_display_name(artist_dir, albums_data):
     artist page reads for its header (main.py's ``/api/artist``), so both pages
     spell the artist the way the tags do; the folder name minus the id is the
     answer for a folder whose audio carries no artist tag at all (an empty or
-    framework-only folder)."""
+    framework-only folder).
+
+    The alias mlo.autotag wrote (ARTISTALIAS, the name MusicBrainz states in
+    the reader's locale) is shown BESIDE that name, "宇多田ヒカル (Hikaru
+    Utada)" — the same `withAlias` shape every MusicBrainz row uses — while
+    the ``name`` field keeps the folder's own basename, which is library
+    IDENTITY (paths, lookups), not a caption."""
     from_tags = next((str(a.get("album_artist") or "").strip()
                       for a in albums_data if a.get("album_artist")), "")
-    return from_tags or strip_mbid_suffix(os.path.basename(artist_dir))
+    base = from_tags or strip_mbid_suffix(os.path.basename(artist_dir))
+    alias = next((str((a.get("meta") or {}).get("ARTISTALIAS") or "").strip()
+                  for a in albums_data
+                  if str((a.get("meta") or {}).get("ARTISTALIAS") or "").strip()),
+                 "")
+    if alias and alias != base:
+        return f"{base} ({alias})"
+    return base
 
 
 def library_cache_key(cfg):
@@ -909,6 +942,18 @@ def build_library(cfg, progress=None):
                 # and a row that draws its initial is the honest rendering of
                 # that — not a broken-image glyph from a URL that would 404.
                 artist_image = False
+            # The artist's OWN grade (image + description, `grade_artist`) — the
+            # same verdict `/api/artist` serves for the artist page, computed
+            # here so the Artists view and Home's shelf can put the identical
+            # dot beside the name the artist page draws it beside. Two separate
+            # rules cannot drift apart, which is the whole point: a list that
+            # graded an artist differently from its own page is a lie whichever
+            # one is wrong. An unreadable folder keeps the row (the scan just
+            # listed it) and reports no verdict.
+            try:
+                artist_grade = grade_artist(artist_dir, cfg)
+            except Exception as e:
+                artist_grade = {"error": str(e)}
             result.append({
                 "path": artist_dir.replace("\\", "/"),
                 "name": os.path.basename(artist_dir),
@@ -920,6 +965,9 @@ def build_library(cfg, progress=None):
                 # (`mlo.artistdata.has_image`), so the Artists view draws an
                 # artist's own picture and every other row an initial.
                 "has_image": artist_image,
+                # Artist-level grading: only the checks that apply to an artist
+                # folder (`mlo.grader.grade_artist`). `pass` is the dot.
+                "grade": artist_grade,
             })
         _drop_filled_placeholders(result)
         return {"folder": folder.replace("\\", "/"),

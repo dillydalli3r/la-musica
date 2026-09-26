@@ -120,27 +120,12 @@ def _write_flac_tags(filepath, quality, version, enabled=None):
     audio.save()
 
 
-# Whitelist of Vorbis comment keys to keep when cleaning FLAC tags.
-# Includes all semantic tags from TAG_MAP plus common aliases and the
-# ENCODER family. Everything else is considered unused metadata and removed.
-KEEP_VORBIS_KEYS = {
-    "TITLE", "ALBUM", "ARTIST", "ALBUMARTIST", "TRACKNUMBER", "TRACKTOTAL",
-    "DISCNUMBER", "DISCTOTAL", "DATE", "YEAR", "ORIGINALDATE", "ORIGINALYEAR",
-    "GENRE", "COMPOSER", "LYRICIST", "COMMENT", "LYRICS", "UNSYNCEDLYRICS",
-    "BPM", "COPYRIGHT", "MEDIA", "SOURCE", "INSTRUMENTAL", "ITUNESADVISORY",
-    "ALBUMITUNESADVISORY", "REPLAYGAIN_TRACK_GAIN", "REPLAYGAIN_TRACK_PEAK",
-    "REPLAYGAIN_ALBUM_GAIN", "REPLAYGAIN_ALBUM_PEAK", "DYNAMIC RANGE",
-    "ALBUM DYNAMIC RANGE", "AUDIT", "LOG_GRADE", "AUDIO_MD5", "INTEGRITY",
-    "LOG_CRC", "ENCODER", "ENCODER_PROGRAM", "ENCODER_QUALITY", "ENCODER_VERSION",
-    "ENCODEDBY", "PERFORMER", "ALBUMARTIST", "ARTISTSORT", "ALBUMARTISTSORT",
-    "TITLESORT", "COMPOSERSORT", "WORK", "MOVEMENT", "PART", "CONDUCTOR",
-}
-
-
 def _clean_flac_tags(filepath, config=None, enabled=None):
     """Conditionally clean Vorbis comments — now conservative by default.
 
-    The app previously removed *any* tag not in KEEP_VORBIS_KEYS, which broke
+    The app previously removed *any* tag not in the old KEEP_VORBIS_KEYS
+    whitelist (deleted — it advertised COMMENT as keep-forever while both
+    this pass and the grader treat a COMMENT value as junk), which broke
     Picard recognition (MusicBrainz IDs etc. were deleted). New behavior:
     * Never remove tags except for the two lyric variants.
     * ``UNSYNCEDLYRICS`` is legacy (this app writes LYRICS), but
@@ -184,25 +169,32 @@ def _clean_flac_tags(filepath, config=None, enabled=None):
                     to_remove.append(k)
         # EXCESS TAGS — everything outside the shared vocabulary the grader
         # fails a track for ("Excess tags") and Format All's canonical pass
-        # strips. This path rewrites the file anyway, so leaving junk a vendor
-        # or ripper wrote behind would mean the very next grade fails a file
-        # the optimizer just touched. One predicate for both halves
-        # (mlo.grader.tag_key_allowed: TAG_MAP names in every container
-        # spelling, the encoder identity tags, beets/Picard's own spellings,
-        # the app's AUDIOAUDITOR_OVERRIDE and the language-suffixed lyrics
-        # transforms), so a strip can never delete a tag the grade requires or
-        # keep one it flags. Off with `strip_unknown_tags` — the same switch
-        # that silences the grade — and a partial cfg strips like the app does.
+        # strips, plus the one NAME the vocabulary holds whose VALUE nothing
+        # in this pipeline writes: a non-empty COMMENT ("Comment tag carries
+        # a value"). This path rewrites the file anyway, so leaving junk a
+        # vendor or ripper wrote behind would mean the very next grade fails a
+        # file the optimizer just touched. One predicate for both halves
+        # (mlo.grader.tag_key_allowed / tag_value_excess: TAG_MAP names in
+        # every container spelling, the encoder identity tags, beets/Picard's
+        # own spellings, the app's AUDIOAUDITOR_OVERRIDE and the
+        # language-suffixed lyrics transforms), so a strip can never delete a
+        # tag the grade requires or keep one it flags. Off with
+        # `strip_unknown_tags` — the same switch that silences the grade — and
+        # a partial cfg strips like the app does.
         if config is None or config.get("strip_unknown_tags", True):
             try:
-                from .grader import tag_key_allowed
+                from .grader import tag_key_allowed, tag_value_excess
             except Exception:
                 tag_key_allowed = None
             if tag_key_allowed is not None:
                 for k in list(audio.tags.keys()):
                     if k in to_remove:
                         continue
-                    if not tag_key_allowed(str(k)):
+                    val = audio.tags[k]
+                    if isinstance(val, (list, tuple)):
+                        val = " ".join(str(x) for x in val)
+                    if not tag_key_allowed(str(k)) \
+                            or tag_value_excess(str(k), val):
                         to_remove.append(k)
         if not to_remove:
             return False

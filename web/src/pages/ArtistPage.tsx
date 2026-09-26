@@ -16,6 +16,7 @@ import DownloadButton from "../components/DownloadButton";
 import { ExportButton } from "../components/ExportDialog";
 import FavHeart from "../components/FavHeart";
 import ArtistImageModal from "../components/ArtistImageModal";
+import ArtistName from "../components/ArtistName";
 import MetadataReviewModal from "../components/MetadataReviewModal";
 import MoreLikeThis from "../components/MoreLikeThis";
 import OnlineRecommendations from "../components/OnlineRecommendations";
@@ -156,9 +157,6 @@ export default function ArtistPage() {
   // they are shown muted, next to the chips the failures use.
   const gradeNotes = grade?.notes ?? [];
   const monogram = name.trim().split(/\s+/).map((w) => w[0] ?? "").join("").slice(0, 2).toUpperCase();
-  const artistGradeTitle = gradeIssues.length
-    ? gradeIssues.map((i) => i.reason || i.label).join(" · ")
-    : "Artist image and description — both present";
 
   /** Every artwork/description write invalidates the SAME queries the rest of
    *  the app refreshes after a library write: the artist payload this page
@@ -313,14 +311,18 @@ export default function ArtistPage() {
   return (
     <div className="p-6 space-y-5 mx-auto max-w-[1600px]">
       <div className="hero-flat relative overflow-hidden">
-        {/* the stored image doubles as the hero backdrop, blurred behind the
-            identity block so the name stays readable */}
+        {/* The stored image doubles as the hero backdrop, blurred behind the
+            identity block so the name stays readable. `.hero-ink` masks the
+            blur so it dissolves into the page: the hero clips its overflow,
+            and an unmasked wash is sliced off on a line at the hero's own top
+            and side edges. The layer is scaled PAST the hero box as well, so
+            the mask's transparent stop lands inside it (see index.css). */}
         {imageUrl && (
           <img
             src={imageUrl}
             alt=""
             aria-hidden
-            className="absolute inset-0 h-full w-full object-cover opacity-25 blur-2xl scale-110"
+            className="hero-ink absolute inset-0 h-full w-full object-cover opacity-25 blur-2xl scale-125"
           />
         )}
         <div className="absolute inset-0 bg-gradient-to-t from-bg via-bg/70 to-bg/30" />
@@ -342,33 +344,24 @@ export default function ArtistPage() {
           <div className="flex-1 min-w-0 w-full">
             <PageHeader
               overline="Artist"
-              title={name}
+              /* The name carries its OWN verdict: one green dot when the
+                 artist folder passes its checks (the artist image and the
+                 description). The two chips that spelled those checks out
+                 ("albums", "artist artwork 2/2") are gone — the same dot
+                 sits beside the name in every list an artist is listed in
+                 (components/ArtistName), and it reads from the same payload
+                 field this page holds. */
+              title={<ArtistName name={name} pass={grade?.pass} nameClassName="truncate" />}
               subtitle={
                 <span className="flex flex-wrap items-center gap-x-3 gap-y-1 text-sm text-zinc-400">
                   <span className="whitespace-nowrap">
                     {data.aggregate.album_count} album{data.aggregate.album_count === 1 ? "" : "s"} · {data.aggregate.track_count} track{data.aggregate.track_count === 1 ? "" : "s"}
                   </span>
-                  {/* two different verdicts, labeled: the aggregate of the album
-                      checks vs. the artist folder's own image/description checks */}
-                  <span className="inline-flex items-center gap-1.5 whitespace-nowrap" title="Grading of this artist's albums">
-                    <GradeBadge
-                      pass={!!data.aggregate.pass && !auditFails(data.aggregate.audit_summary)}
-                      score={data.aggregate.grade_pct}
-                    />
-                    <span className="text-xs text-zinc-500">albums</span>
-                  </span>
                   {grade?.error ? (
                     <span className="text-xs text-zinc-600" title={grade.error}>artist grade unavailable</span>
                   ) : grade && (grade.checks ?? 0) === 0 ? (
-                    <span className="text-xs text-zinc-600" title="Both artist checks are switched off in Settings → Grading">
+                    <span className="text-xs text-zinc-600" title="Both artist checks are switched off in Settings → Grading — the dot only says nothing failed">
                       artist checks off
-                    </span>
-                  ) : grade ? (
-                    <span className="inline-flex items-center gap-1.5 whitespace-nowrap" title={artistGradeTitle}>
-                      <GradeBadge pass={!!grade.pass} score={grade.pct ?? null} size="sm" />
-                      <span className="text-xs text-zinc-500">
-                        artist artwork{grade.checks ? ` ${grade.pass_count}/${grade.checks}` : ""}
-                      </span>
                     </span>
                   ) : null}
                   {/* the failing artist checks, in the app's standard chip —

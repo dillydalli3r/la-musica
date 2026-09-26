@@ -16,15 +16,22 @@ case where this library's text is the better one.
 
 Skips, in order: unreadable file, INSTRUMENTAL=1, no lyric text, missing
 ARTIST/TITLE, no duration (LRCLIB requires one), and "LRCLIB already has it"
-(it answers 409 on a duplicate, which is reported as a skip too). Only
-stdlib — the provider client in ``lyrics_providers`` is urllib-based.
+(it answers 409 on a duplicate, which is reported as a skip too).
+
+A track whose MusicBrainz ids give it another name (`宇多田ヒカル` / `Hikaru
+Utada`) is published under its own name pair AND each alias pair (see
+``lyrics_search_aliases``, on by default). Each name is its own record with its
+own answer, so a duplicate under one name still leaves the others free to
+publish; with no MBIDs there is exactly one pair. Only stdlib — the provider
+client in ``lyrics_providers`` is urllib-based.
 """
 import os
 import re
 
 from .audio import AudioFile
 from .lyrics import TIMESTAMP_RE, WORD_TS_RE, _lrc_for, has_lyrics_text
-from .lyrics_providers import lrclib_fetch, lrclib_publish
+from .lyrics_fetch import _search_aliases
+from .lyrics_providers import _alias_queries, lrclib_fetch, lrclib_publish
 from .paths import AUDIO_EXTS
 from .stats import (
     is_audio_file, new_stats, _collect_targets, _find_albums,
@@ -68,9 +75,14 @@ def publish_one(path, config, force=False):
     """Publish ONE track's lyrics if LRCLIB does not have them yet.
 
     Returns ``{path, status: "ok"|"skipped"|"failed", reason, message,
-    synced}`` — never raises, so one bad file cannot stop a library run."""
+    synced, names}`` — never raises, so one bad file cannot stop a library
+    run. *names* lists every name pair tried, each with its own status: the
+    file's own ``(artist, title, album)`` first, then each alias pair the
+    track's MusicBrainz ids provide. The status is ``ok`` when ANY pair
+    published, ``skipped`` when every pair was already there, else ``failed``.
+    """
     result = {"path": path, "status": "skipped", "reason": "", "message": "",
-              "synced": False}
+              "synced": False, "names": []}
     try:
         af = AudioFile(path)
         if af.audio is None:
@@ -98,26 +110,69 @@ def publish_one(path, config, force=False):
             result["reason"] = "no track duration"
             return result
 
-        if not force and lrclib_fetch(artist, title, album or None, duration):
-            # LRCLIB answers for this recording: publishing would either be
-            # rejected as a duplicate or, worse, overwrite a better text.
-            result["reason"] = "LRCLIB already has it"
-            return result
+        # The alias names are a SECOND set of submissions, not a retry: the CJK
+        # title LRCLIB lacks may sit under its Latin reading, and each name is
+        # its own record with its own answer. No MBIDs (or the switch off) makes
+        # this {} — one pair, exactly as before, with no extra request.
+        try:
+            aliases = _search_aliases(af.get_tag, config, artist, title, album)
+        except Exception:
+            aliases = {}
+
+        pairs, seen = [(artist, title, album)], {(artist, title, album)}
+        for a, t, al, _entity, _query in _alias_queries(
+                artist, title, album, aliases):
+            if (a, t, al) not in seen:
+                seen.add((a, t, al))
+                pairs.append((a, t, al))
 
         synced = bool(TIMESTAMP_RE.search(text))
         result["synced"] = synced
-        ok, message = lrclib_publish(
-            artist, title, album, duration,
-            plain=to_plain(text) if synced else text,
-            synced=text if synced else None)
-        result["message"] = message
-        if not ok:
-            # A duplicate is the database's own answer, not a failure: the
-            # text is there, which is all this script wanted.
-            result["status"] = "skipped" if "already has this track" in message else "failed"
-            result["reason"] = message
+        plain = to_plain(text) if synced else text
+        synced_body = text if synced else None
+
+        names = []
+        for a, t, al in pairs:
+            entry = {"artist": a, "title": t, "album": al, "status": "skipped"}
+            # Independent per name: a duplicate or a refusal under one name
+            # never stops the others from publishing.
+            if not force and lrclib_fetch(a, t, al or None, duration):
+                entry["reason"] = "LRCLIB already has it"
+                names.append(entry)
+                continue
+            ok, message = lrclib_publish(a, t, al, duration,
+                                         plain=plain, synced=synced_body)
+            if ok:
+                entry["status"] = "ok"
+            elif "already has this track" in message:
+                # The database's own words, not a paraphrase: the reply that
+                # reaches the user is the sentence LRCLIB wrote (`server.
+                # api_lyrics` reads this same phrase to call the row a skip).
+                entry["reason"] = message
+            else:
+                entry["status"] = "failed"
+                entry["reason"] = message
+            names.append(entry)
+
+        result["names"] = names
+        published = [n for n in names if n["status"] == "ok"]
+        if published:
+            result["status"] = "ok"
+            result["message"] = "published to LRCLIB as " + "; ".join(
+                f"{n['artist']} — {n['title']}" for n in published)
             return result
-        result["status"] = "ok"
+        refused = [n for n in names if n["status"] == "failed"]
+        if refused:
+            result["status"] = "failed"
+            result["reason"] = refused[0]["reason"]
+            return result
+        # Every name pair was already there. The reason is the answer the name
+        # actually got — LRCLIB's own sentence when it refused the duplicate,
+        # this app's phrase when its own existence check found it first — so a
+        # single-name track reports exactly what the old code did.
+        result["reason"] = next(
+            (n.get("reason") for n in names if n.get("reason")),
+            "LRCLIB already has it")
         return result
     except Exception as e:
         result["status"] = "failed"
@@ -130,6 +185,7 @@ def run_publish_lyrics(config):
     folder = config.get("music_folder") or ""
     stats = new_stats()
     stats["published"] = 0
+    stats["published_names"] = 0
     stats["already_known"] = 0
     stats["no_lyrics"] = 0
     stats["rejected"] = 0
@@ -170,6 +226,10 @@ def run_publish_lyrics(config):
         stats["total_scanned"] += 1
         if status == "ok":
             stats["published"] += 1
+            # Every name pair that actually went up, so a localised submission
+            # beside the original shows in the report (>= published).
+            stats["published_names"] += sum(
+                1 for n in got.get("names") or () if n.get("status") == "ok")
             stats["modified_count"] += 1
             _pbar_update(pbar, counts, "ok")
             return
@@ -216,12 +276,15 @@ def run_publish_lyrics(config):
         except Exception:
             pass
 
+    names_note = (f" · {stats['published_names']} name pairs"
+                  if stats["published_names"] > 0 else "")
     log(c(
         f"published {stats['published']}"
         f" · already on LRCLIB {stats['already_known']}"
         f" · no lyrics {stats['no_lyrics']}"
         f" · refused {stats['rejected']}"
-        f" · unchanged {stats['unchanged_count']}",
+        f" · unchanged {stats['unchanged_count']}"
+        + names_note,
         Color.GREEN if stats["error_count"] == 0 else Color.YELLOW,
     ))
     return stats

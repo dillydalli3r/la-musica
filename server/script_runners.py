@@ -777,14 +777,131 @@ def held_paths(cfg, targets):
                          key + os.sep)]
 
 
-def run_label(ids):
-    """The run's name in MAINTAIN → In progress: the first script, plus how
-    many follow it when the caller asked for a chain."""
+def _scope_album(targets):
+    """The ONE album a run is scoped to, as a name for the run — or "".
+
+    A run whose scope is a single folder is that album's run: an import
+    finishing the album it just downloaded, a details-menu press on one album.
+    The folder's own name is the identity the user filed it under (it is what
+    the library shows, and a download folder is named after the release).
+    Anything else — several folders, a single file, a library-wide run — has no
+    one album to name, and the caller falls back to naming the first script.
+    """
+    paths = [str(t) for t in (targets or ()) if str(t).strip()]
+    if len(paths) != 1 or not os.path.isdir(paths[0]):
+        return ""
+    return os.path.basename(os.path.normpath(paths[0]).rstrip("\\/")) or ""
+
+def run_label(ids, targets=None):
+    """The run's name in MAINTAIN → In progress.
+
+    A run scoped to ONE album is named for that album and how many steps it is
+    ("Ænima · 18 steps"). The scripts that provably cannot apply to it are not
+    in *ids* (`_chain_ids`), so the count is the work really being done, and
+    the album is what the user asked about — where "Remux videos (MKV) + 20
+    more" named a script that could never run on an audio-only album AND never
+    said which album the run was finishing. The step it is ON is not this
+    string: every step publishes "#3/18 · <the script running now>" as it
+    starts (see _run_with_progress and _run_chain_locked), so the readout
+    advances with the chain while this stays the run's own name.
+
+    Everything else keeps the name it always had: a lone script is its own name
+    (a button pressed for one script says which script), and a run over several
+    albums or the whole library starts with the first script and says how many
+    follow it."""
     names = [RUNNERS.get(i, (f"Script {i}", None))[0] for i in ids]
     if not names:
         return "Script run"
-    return names[0] if len(names) == 1 else f"{names[0]} + {len(names) - 1} more"
+    if len(names) == 1:
+        return names[0]
+    album = _scope_album(targets)
+    if album:
+        return f"{album} · {len(names)} steps"
+    return f"{names[0]} + {len(names) - 1} more"
 
+
+def _scope_holds(targets, exts):
+    """Whether any path in *targets* holds a file with one of *exts*.
+
+    The same walk the script itself would make over the same scope, with the
+    early exit a yes/no question deserves: the first matching file answers it,
+    and a folder holding none is a folder the script has nothing to do in.
+    """
+    for t in targets or ():
+        try:
+            if os.path.isfile(t):
+                if os.path.splitext(str(t))[1].lower() in exts:
+                    return True
+            elif os.path.isdir(t):
+                for _hit in mlo_stats._walk_files(t, exts):
+                    return True
+        except OSError:
+            continue
+    return False
+
+def _remux_applies(cfg, targets):
+    """Script 11: does this scope hold a video file (or a disc image) at all?
+
+    Script 11 with an explicit target list remuxes every VIDEO_EXTS file it
+    finds there, plus the disc images it recognizes when prefer_disc_streams is
+    on (`mlo.remux`'s own scan_exts) — so a scope with neither is a scope where
+    it could only ever print "No video files found. Nothing happened." An
+    audio-only album is exactly that, and it is what every import hands in.
+    A checkout WITHOUT the remux module keeps the step: the chain then reports
+    the script as unavailable, which is the honest answer, not a silent drop.
+    """
+    try:
+        from mlo import remux
+    except ImportError:
+        return True
+    exts = tuple(remux.VIDEO_EXTS)
+    if cfg.get("prefer_disc_streams", True):
+        exts += (remux.videodisc.ISO_EXT,)
+    return _scope_holds(targets, exts)
+
+# The scripts whose applicability can be settled by LOOKING at the run's own
+# scope. Everything else stays in the chain whatever the album holds: whether a
+# file needs tagging, whether beets is installed, whether the lyrics need
+# formatting is the runner's own question, and its own skip (or its honest
+# "nothing to do" pass) is what answers it.
+_APPLICABILITY_GATES = {11: _remux_applies}
+
+def _chain_ids(cfg, ids, targets):
+    """*ids* minus the scripts that provably cannot apply to this run's scope.
+
+    A CHAIN only: a lone script is the caller's exact request, so it runs and
+    says what it found (a press of Remux on an album with no video must answer
+    "No video files found.", not nothing at all). In a chain, a step that is
+    certain to report "nothing to do" is dropped here instead of run — the run's
+    own name and its "#n/N" readout then describe the work really being done
+    instead of counting a step that cannot happen.
+    """
+    ids = list(ids)
+    scope = targets if targets is not None else cfg.get("targets")
+    if len(ids) < 2 or not scope:
+        return ids
+    kept, dropped = [], []
+    for sid in ids:
+        gate = _APPLICABILITY_GATES.get(sid)
+        if gate is None:
+            kept.append(sid)
+            continue
+        try:
+            applies = bool(gate(cfg, scope))
+        except Exception:
+            # A gate that cannot answer must not decide: the script runs, as it
+            # always did, and its runner reports what it found.
+            traceback.print_exc()
+            applies = True
+        (kept if applies else dropped).append(sid)
+    if dropped:
+        log("nothing in this selection for "
+            + ", ".join(RUNNERS.get(s, (f"Script {s}", None))[0] for s in dropped)
+            + " — dropped from the run")
+    # A chain is never emptied: if EVERY step is inapplicable there is nothing
+    # left to name or count, and a run that does nothing at all is the one
+    # answer the user cannot act on — so they run, and each says what it found.
+    return kept if kept else ids
 
 def run_start_frame(ids):
     """The frame a run claims its surfaces with: ``(done, total, text, steps)``.
@@ -970,11 +1087,21 @@ def run_chain(cfg, ids, targets=None, force=None, progress=None, wait=False,
         return []
     if kept is not _scope:
         targets = kept
+    # The scope this run really has (the argument, else the one `/api/run` put
+    # in the config), read once: it decides the run's name, which steps can
+    # apply at all, and which paths the run claims.
+    scope = targets if targets is not None else cfg.get("targets")
+    # A step that provably cannot apply to what this run is scoped to is
+    # dropped before the run is announced (see _chain_ids), so the name and the
+    # "#n/N" readout describe the work really being done.
+    ids = _chain_ids(cfg, ids, scope)
+    if not ids:
+        return []
     # The claim (and with it the gate) is taken by claim_paths INSIDE the bar
     # block below, so the refusal is translated there — a PathLocked raised by
     # the body is some other job's collision, not this run's, and stays one.
     paths = held_paths(cfg, targets)
-    label = run_label(ids)
+    label = run_label(ids, scope)
     bar = _bar_context()
     # The job this run works as: a chain started inside another job (an import
     # finishing an album it already holds) JOINS it, exactly as the claim below
@@ -1002,9 +1129,10 @@ def run_chain(cfg, ids, targets=None, force=None, progress=None, wait=False,
             done, total, text, steps = run_start_frame(ids)
             if text:
                 _bar_frame(bar, done, total, text, job=job, steps=steps)
-            return _run_chain_locked(cfg, ids, targets=targets, force=force,
-                                     progress=progress, final=final, job=job,
-                                     bar=bar)
+            with _chain_scan(cfg, targets) as scan_owner:
+                return _run_chain_locked(cfg, ids, targets=targets, force=force,
+                                         progress=progress, final=final, job=job,
+                                         bar=bar, scan=scan_owner)
 
 
 def _prune_empty_target_dirs(cfg):
@@ -1121,6 +1249,52 @@ def _claimed_targets(result):
         if p and p not in out and os.path.isdir(p) and _has_audio(p):
             out.append(p)
     return out
+
+
+# The scripts that can change WHERE the library's albums are, and so invalidate
+# the album list a chain resolved for itself (mlo.stats.chain_scan_*): Auto
+# Tagging files each track under the album its tags name (its naming script),
+# Remux rewrites a container in place — which takes the last audio track out of
+# a folder that only held that container — Beets imports the library (a fresh
+# album folder per release) and Optimize library layout renames folders and
+# moves loose audio into them. Every other script writes tags or sidecars in
+# place, so the album list it discovered still describes the library. A script
+# that REPORTS moved targets (stats["moved_targets"], the declarative version of
+# the same fact) drops the list too, whatever its id.
+_ALBUM_MOVERS = frozenset({8, 11, 14, 20})
+
+
+def _moves_albums(sid, result):
+    """Whether the script that just ran may have moved the library's albums.
+
+    The chain's own album list is the library as it was when the chain started;
+    a mover invalidates it, and so does a script that FAILED — what a script did
+    before it raised is unknown, and re-walking is the only honest answer.
+    """
+    if result.get("error"):
+        return True
+    return sid in _ALBUM_MOVERS or bool(_claimed_targets(result))
+
+
+@contextlib.contextmanager
+def _chain_scan(cfg, targets):
+    """Resolve the library's album list ONCE for the chain about to run.
+
+    Yields whether this run owns the scope (so it — and only it — drops what it
+    armed). A run that NAMES its targets never arms one: its scripts read the
+    targets, not the library, and a scoped run must not install a library-wide
+    view for a concurrent one to trip over. See mlo.stats.chain_scan_start for
+    what the scope is and who invalidates it.
+    """
+    if targets is not None or cfg.get("targets") is not None:
+        yield False
+        return
+    from mlo import stats as mlo_stats
+    mlo_stats.chain_scan_start(cfg.get("music_folder"))
+    try:
+        yield True
+    finally:
+        mlo_stats.chain_scan_end()
 
 
 def _take_claimed(claimed, names, live):
@@ -1274,7 +1448,7 @@ def _follow_moved_targets(cfg, audio_names, claimed=(), misses=None,
 
 
 def _run_chain_locked(cfg, ids, targets=None, force=None, progress=None,
-                      final=None, job=None, bar=None):
+                      final=None, job=None, bar=None, scan=False):
     from server import interrupt_recovery
     cfg = dict(cfg)
     if targets is not None:
@@ -1310,6 +1484,11 @@ def _run_chain_locked(cfg, ids, targets=None, force=None, progress=None,
         results.append(result)
         _follow_moved_targets(cfg, audio_names, _claimed_targets(result),
                               misses, claim_job=job)
+        if scan and _moves_albums(sid, result):
+            # This run armed the chain's album list for itself; a script that
+            # may have moved an album (or failed halfway) makes it a lie, so the
+            # next walker resolves the library again (mlo.stats.chain_scan_drop).
+            mlo_stats.chain_scan_drop()
         label = RUNNERS.get(sid, (f"Script {sid}", None))[0]
         # Every step ends announced, including one that never entered its
         # runner (a switched-off feature, an unavailable module): the header
@@ -1333,7 +1512,9 @@ def _run_chain_locked(cfg, ids, targets=None, force=None, progress=None,
         # steps ran of how many were asked for — and the text says which.
         ran = len(results)
         _bar_frame(bar, total, total,
-                   f"#{ran}/{total} · {run_label(ids)} stopped", job=job,
+                   f"#{ran}/{total} · "
+                   f"{run_label(ids, targets if targets is not None else cfg.get('targets'))}"
+                   f" stopped", job=job,
                    steps=(ran, total))
     if ids:
         try:

@@ -44,15 +44,23 @@ function ProgressRow({
   return (
     <div className="flex items-center gap-2 min-w-0 w-full max-w-md">
       <span className="h-3 w-3 rounded-full border-2 border-zinc-700 border-t-accent-soft animate-spin shrink-0" />
+      {/* The label and the description are the two parts that may go: the bar
+          and the readout are the bar's own facts, but the description is the
+          producer's sentence and 180 px of it does not fit beside them on a
+          phone — the top bar's free space, the player bar and a toast are all
+          narrower than the 320 px this row is allowed to shrink into. So the
+          description drops below `sm` (the label still says which job it is),
+          the label caps at 5rem, and the bar keeps a 32 px stub rather than
+          collapsing to nothing. */}
       {label && (
-        <span className="text-[11px] text-zinc-300 font-medium truncate max-w-[140px] shrink-0" title={label}>
+        <span className="text-[11px] text-zinc-300 font-medium truncate max-w-[5rem] sm:max-w-[140px] shrink-0" title={label}>
           {label}
         </span>
       )}
-      <span className="text-[11px] text-zinc-400 truncate min-w-0 max-w-[180px]" title={progress.desc}>
+      <span className="hidden sm:inline text-[11px] text-zinc-400 truncate min-w-0 max-w-[180px]" title={progress.desc}>
         {progress.desc}
       </span>
-      <div className="h-1 flex-1 min-w-[64px] rounded-sm bg-raise overflow-hidden">
+      <div className="h-1 flex-1 min-w-[32px] sm:min-w-[64px] rounded-sm bg-raise overflow-hidden">
         <div
           className={`h-full bg-gradient-to-r from-accent to-accent-soft transition-all duration-300 ${known ? "" : "w-1/3 animate-pulse"}`}
           style={known ? { width: `${pct}%` } : undefined}

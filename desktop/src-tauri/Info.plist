@@ -46,17 +46,36 @@
 		<key>NSAllowsArbitraryLoadsInWebContent</key>
 		<true/>
 		<!--
-		  The blanket key as well, and the reason is MEDIA. `…InWebContent`
-		  covers what the web content process fetches — the page, its scripts,
-		  its XHRs — but an <audio>/<video> element's bytes are loaded by the
-		  media stack, which WebKit runs outside that process on modern iOS, and
-		  ATS decisions there read this key. With only the web-content key set,
-		  a phone could load the whole app and then fail every single track with
-		  no error the page can see: "pressing play just pauses it immediately"
-		  is the shape that report takes. This build is a sideloaded client for
-		  a server the user runs themselves over plain http on an address only
-		  they know; there is no certificate to validate and no App Store review
-		  to answer to.
+		  The MEDIA loader's own key, and the one that actually covers a track.
+
+		  An <audio>/<video> element's bytes are not fetched by the web content
+		  process: WebKit plays them through AVFoundation, in a process of its
+		  own, and that loader's ATS decisions read THIS key. Leaving it out is
+		  not a missing belt to go with the braces below — on iOS 10 and later
+		  the blanket key is IGNORED outright once a scoped one is present.
+		  Apple's own note on NSAllowsArbitraryLoads: "In iOS 10 and later and
+		  macOS 10.12 and later, the value of the NSAllowsArbitraryLoads key is
+		  ignored—and the default value of NO used instead—if any of the
+		  following keys are present: NSAllowsArbitraryLoadsForMedia,
+		  NSAllowsArbitraryLoadsInWebContent, NSAllowsLocalNetworking."
+
+		  So a build with only the two keys this file used to carry shipped a
+		  media exemption of NO while reading, one line further down, exactly
+		  like one of YES: the page, its scripts and its XHRs loaded (the
+		  web-content key) and every single track was then refused by ATS with no
+		  error the page can see — "pressing play just pauses it immediately".
+		  The mobile CI job and tools/check_ios_ipa.py both read this key back
+		  out of the built app for that reason: its absence has no other symptom.
+		-->
+		<key>NSAllowsArbitraryLoadsForMedia</key>
+		<true/>
+		<!--
+		  The blanket key: the coarse exemption for a system that reads no scoped
+		  key at all (iOS 9 / macOS 10.11, per the note above). It is kept
+		  because this one file is merged into the macOS .app too, and because a
+		  reader who has only ever seen the blanket recipe must find it here —
+		  but on every OS this app can run on (iOS 14 floor) it is the two scoped
+		  keys above that decide, and this one is inert.
 		-->
 		<key>NSAllowsArbitraryLoads</key>
 		<true/>

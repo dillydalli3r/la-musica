@@ -2173,7 +2173,7 @@ def get_replaygain(path: str = Query(...), mode: str = Query("")):
 
 @app.get("/api/cover")
 def get_cover(request: Request, album: str = Query(...), file: Optional[str] = Query(None),
-              color: int = Query(0), staged: bool = Query(False)):
+              color: int = Query(0), staged: bool = Query(False), w: int = Query(0)):
     """Serve an album's cover art, cached with ETag; ?color=1 returns the
     dominant color instead of the image bytes (UI tinting). Accepts an
     "mb:<release MBID>" album reference, and `staged=1` for the import
@@ -2182,11 +2182,21 @@ def get_cover(request: Request, album: str = Query(...), file: Optional[str] = Q
     call does (without it the folder guard refuses it, and the preview stays
     empty however well the cover was written).
 
-    The response tells caches to REVALIDATE, and the ETag is the byte hash of
-    the file: a cover is replaced in place (cover.jpg stays cover.jpg), so
-    "fresh for an hour" would keep serving the previous image long after the
-    write. An unchanged cover still costs only a 304 — the bytes come from the
-    mtime+size-keyed cache below, never a stale entry.
+    **Without `w`** the response tells caches to REVALIDATE, and the ETag is
+    the byte hash of the file: a cover is replaced in place (cover.jpg stays
+    cover.jpg), so "fresh for an hour" would keep serving the previous image
+    long after the write. An unchanged cover still costs only a 304 — the bytes
+    come from the mtime+size-keyed cache below, never a stale entry.
+
+    **With `w`** the bytes are the file shrunk to that width
+    (`artcache.cover_thumb`, cached on disk under the file's own stat), which
+    is what a surface that draws a 74 px bar thumb or a 448 px fullscreen
+    picture actually wants: the master is 1200-3000 px, so asking for it put
+    megabytes and a full-size decode on the play path. A sized answer may be
+    cached by the browser for a few minutes (the URL a cover write produces is
+    a different one — see `api.coverUrl`'s `v` — so an in-app replacement is
+    still a fresh fetch), and its ETag is the thumbnail's own bytes, so a
+    revalidation is a 304 whichever entry the client holds.
     """
     alb = os.path.normpath(mbresolve.resolve_album(album) or album)
     if not os.path.isdir(alb):
@@ -2197,11 +2207,22 @@ def get_cover(request: Request, album: str = Query(...), file: Optional[str] = Q
         if c is None:
             raise HTTPException(404, "no cover")
         return {"color": c, "album": alb.replace("\\", "/")}
-    data, ctype, etag = tagcache.cover_bytes(alb, file)
+    # A sized request must not even READ the master: `cover_thumb` either
+    # answers from its own cache or decodes the file itself, and the master's
+    # bytes (a 1.5 MB file, plus the LRU slot they take) stay out of the path
+    # that runs on every play.
+    p = tagcache.cover_path(alb, file)
+    thumb = artcache.cover_thumb(p, w) if (w and p) else None
+    if thumb:
+        data, ctype, etag = thumb
+        headers = {"Cache-Control": f"private, max-age={artcache.THUMB_MAX_AGE}",
+                   "Accept-Ranges": "bytes"}
+    else:
+        data, ctype, etag = tagcache.cover_bytes(alb, file)
+        headers = {"Cache-Control": "no-cache", "Accept-Ranges": "bytes"}
     if data is None:
         raise HTTPException(404, "no cover")
     from fastapi.responses import Response
-    headers = {"Cache-Control": "no-cache", "Accept-Ranges": "bytes"}
     if etag:
         headers["ETag"] = f'"{etag}"'
         inm = request.headers.get("if-none-match")
@@ -2292,6 +2313,11 @@ async def upload_cover(album: str = Query(...), file: UploadFile = File(...),
     res = _write_cover_bytes(alb, stem, ext, data)
     if selected:
         set_track_covers(alb, selected, os.path.basename(res["path"]))
+    if not staged:
+        # A library album the user just re-covered: process the new image now
+        # (see _schedule_cover_process). A staged write is the import wizard's
+        # folder — the chain finishing that import carries script 5 itself.
+        _schedule_cover_process(alb)
     return res
 
 
@@ -2581,6 +2607,94 @@ def _cover_metrics(path):
     return out
 
 
+# --------------------------------------------------------------------------- #
+# Process images after a MANUAL cover write
+# --------------------------------------------------------------------------- #
+# A manual cover write — the finder's pick (`/api/cover/fromurl`) or an upload
+# (`/api/cover`) — stores the image the user chose exactly as it arrived.
+# Script 5 ("Process images") is what re-encodes it to the library's own size,
+# crop and format, and nothing else does that for an album the user just
+# edited: a cover that arrives WITH an import is processed by that import's
+# chain (script 5 sits in the default order the chain derives from), but a
+# cover picked on an album already in the library would otherwise sit at
+# whatever the provider served until the next Run All. So the write queues the
+# script itself — for THAT album, in the background.
+#
+# Only the two human-driven routes call this. The importer's own cover step
+# (`server.imports.run_cover_step`) writes through the same
+# `_write_cover_bytes` and deliberately does not: its album is finished by an
+# import chain that already carries script 5. A STAGED write (the import
+# wizard's folder, which no chain has run over yet) is skipped for exactly the
+# same reason — the chain finishing that album processes its cover.
+_COVER_PROCESS_SCRIPT = 5
+# Two presses in a row are one intent. A write to the same album inside this
+# window is the same pick (a double click, an impatient re-apply), and the run
+# the first one queued processes the folder as it stands when it gets there —
+# so one run answers both.
+_COVER_PROCESS_COALESCE_S = 10.0
+_cover_process_lock = threading.Lock()
+# album (normcased absolute path) -> monotonic stamp of the run queued for it.
+_cover_process_queued: dict = {}
+
+
+def _schedule_cover_process(alb):
+    """Queue script 5 over ONE album, in the background, after a cover write.
+
+    Returns whether a run was queued (the routes ignore it) — False when the
+    same album was already written to inside `_COVER_PROCESS_COALESCE_S`.
+
+    The run takes the same in-process path `/api/run` does —
+    `script_runners.run_chain` with an album-scoped ``cfg["targets"]`` — so it
+    claims that album in `server.job_locks` for the length of the run (it is
+    what MAINTAIN → In progress lists, and every other writer of the album is
+    refused while it works) and ends with the cache drop a run does
+    (`_invalidate_run`), which is what makes the album page show the processed
+    cover. The scope is this one folder: the library is never walked.
+    """
+    folder = os.path.normpath(alb)
+    key = os.path.normcase(os.path.abspath(folder))
+    now = time.monotonic()
+    with _cover_process_lock:
+        last = _cover_process_queued.get(key)
+        if last is not None and now - last < _COVER_PROCESS_COALESCE_S:
+            return False
+        _cover_process_queued[key] = now
+    threading.Thread(target=_process_cover_album, args=(folder,), daemon=True,
+                     name="mlo-cover-process").start()
+    return True
+
+
+def _process_cover_album(folder):
+    """The background half of :func:`_schedule_cover_process`.
+
+    ``wait=True``: the request that queued this still holds the album for the
+    instant it takes to build its response (its own `job_locks.holds` claim), so
+    the run queues behind it — the way an import's chain queues behind the job
+    it joins — instead of answering the 409 a one-shot `/api/run` would. The
+    wait is bounded, so a wedged job cannot park this thread forever.
+
+    Everything here is best-effort: the cover the user picked is already
+    written, and a follow-up script that could not run must not turn that into
+    an error on anyone's screen.
+    """
+    from server import script_runners
+
+    try:
+        cfg = load_config()
+        cfg["targets"] = [folder]
+        results = script_runners.run_chain(
+            cfg, [_COVER_PROCESS_SCRIPT], targets=[folder], wait=True,
+            timeout=job_locks.DEFAULT_WAIT)
+        _invalidate_run(cfg, results)
+    except script_runners.RunBusy as e:
+        # Something else held the album past the wait (a library-wide sweep, an
+        # import of it — that run processes this album too): say so, and leave
+        # the cover exactly as the user wrote it.
+        print(f"[mlo] Process images after a cover write did not start: {e}")
+    except Exception:
+        traceback.print_exc()
+
+
 def _sniff_image_ext(data: bytes, content_type: str) -> str:
     """File-extension for image bytes, from magic numbers, then the
     Content-Type, defaulting to .jpg (the common cover-art case)."""
@@ -2716,6 +2830,10 @@ async def cover_from_url(album: str = Query(...), url: str = Query(...),
     res = _write_cover_bytes(alb, stem, _sniff_image_ext(data, ctype), data)
     if selected:
         set_track_covers(alb, selected, os.path.basename(res["path"]))
+    if not staged:
+        # The finder's pick on a library album: process the image the user
+        # chose now (see _schedule_cover_process).
+        _schedule_cover_process(alb)
     return res
 
 
@@ -3412,10 +3530,45 @@ def _run_scripts(req: RunRequest):
     results = script_runners.run_chain(
         cfg, list(req.ids), targets=None, force=req.force if req.force is not None else None,
     )
-    tagcache.invalidate_all()
-    mbresolve.invalidate()
+    _invalidate_run(cfg, results)
     _announce_run(req.ids, results, cfg.get("targets"))
     return {"results": results}
+
+
+def _invalidate_run(cfg, results):
+    """Drop the caches this run made stale — and nothing else.
+
+    Every run used to end with ``tagcache.invalidate_all()`` +
+    ``mbresolve.invalidate()``, so the library page right after a ONE-ALBUM run
+    (a graded album, an import's chain, a press on one folder) re-parsed every
+    track in the library with mutagen. A run that named its targets touched
+    those folders — plus the folders a script MOVED an album into, which the
+    runner reports as ``stats["moved_targets"]`` — and
+    :func:`server.tagcache.invalidate_album` is exactly the scoped drop for
+    them (it clears the tag/art entries under those folders and the one
+    assembled ``/api/library`` payload; ``server.imports`` invalidates the same
+    way after writing an album). Only a run with no targets at all — Run All, a
+    library-wide sweep — really did touch everything, and keeps the
+    library-wide drop.
+
+    mbresolve's index is dropped either way, on purpose: it is ONE timestamp
+    over the whole library and its invalidation is O(1) (the index rebuilds
+    lazily), while a scoped run that renamed a folder must not keep resolving
+    the old paths to it.
+    """
+    paths = [str(p) for p in (cfg.get("targets") or []) if str(p).strip()]
+    extra = []
+    for r in results or []:
+        for d in ((r.get("stats") or {}).get("moved_targets") or ()):
+            if str(d).strip():
+                extra.append(str(d))
+    mbresolve.invalidate()
+    if not paths:
+        # No targets at all: the run swept the library, so everything it holds
+        # may have changed — the moved folders it reported are a subset of that.
+        tagcache.invalidate_all()
+        return
+    tagcache.invalidate_album(*(paths + extra))
 
 
 def _announce_run(ids, results, targets=None):
@@ -5441,8 +5594,9 @@ def soulseek_search_cancel(req: SoulseekSearchCancelRequest):
 
 
 def _clear_settled_in_background():
-    """Take the queue's finished rows off the LIST when new work starts — on its
-    own thread (see api_queue.clear_settled_queue for what it takes and why),
+    """Take the queue's COMPLETED rows off the LIST when a download that will
+    import starts — on its own thread (see
+    api_queue.clear_completed_for_new_import for what it takes and why),
     because the queue payload asks slskd for its finished downloads and a
     request the user is waiting on must not wait for that.
 
@@ -5455,7 +5609,7 @@ def _clear_settled_in_background():
     def work():
         try:
             from server import api_queue
-            api_queue.clear_settled_queue(before=before)
+            api_queue.clear_completed_for_new_import(before=before)
         except Exception:
             pass
     threading.Thread(target=work, name="mlo-queue-autoclear", daemon=True).start()
@@ -5478,14 +5632,14 @@ def _queue_downloads(soulseek, username, files):
         # SlskdHTTPError is an httpx.HTTPStatusError; its str() now carries
         # slskd's own message (see soulseek._error_text).
         raise HTTPException(502, f"slskd did not queue the download: {e}")
-    # A download the user just asked for IS a new run: the queue's FINISHED
-    # rows come off the list the way the per-section Clear buttons take them
-    # (`api_queue.clear_settled_queue`), so the page's own search→download does
-    # not push the previous run's Completed/Failed history in front of the work
-    # it just started. Live rows stay, and a download that finishes later still
-    # shows. After the enqueue, never before: a refused press must not clear
-    # anything. Only reached when files were really queued (the callers filter
-    # to non-empty lists).
+    # A download the user just asked for IS a new run: the queue's COMPLETED
+    # rows come off the list (`api_queue.clear_completed_for_new_import`, the
+    # automatic rule — completed only, never failed or needs-attention), so the
+    # page's own search→download does not push the previous run's Completed
+    # history in front of the work it just started. Live rows stay, and a
+    # download that finishes later still shows. After the enqueue, never
+    # before: a refused press must not clear anything. Only reached when files
+    # were really queued (the callers filter to non-empty lists).
     _clear_settled_in_background()
     return out
 
@@ -7896,6 +8050,12 @@ def instrumental_fetch(req: InstrumentalFetchRequest):
     instrumental → 0, else NO value and no write (absence of evidence is never
     recorded as a value, and a variant title is never read as the track). A
     file that already carries 0/1 is left alone: the user's edit wins.
+
+    A track no source could state anything about and that carries no lyrics at
+    all is asked of the configured AI provider instead
+    (`instrumental_ai_classify`, ON): one call, answered strictly as a lone
+    0/1 (1 instrumental), recorded under the `ai` source key. A reply that is
+    not a lone digit — or a call that failed — writes nothing.
 
     Returns {updated, values, evidence}: `values` maps the file path to the
     merged value and `evidence` maps it to what each source said

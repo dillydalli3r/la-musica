@@ -971,6 +971,11 @@ def build_queue(cfg=None):
     return {
         "sections": sections,
         "counts": counts,
+        # What the last AUTOMATIC clear took (see
+        # `clear_completed_for_new_import`): a float stamp and a count, so the
+        # page can note "N completed downloads cleared from the list (nothing
+        # was deleted)" in one line. `{"at": 0.0, "count": 0}` until one runs.
+        "auto_cleared": dict(_AUTO_CLEARED),
         "running": len([j for j in all_jobs if j["state"] in ("running", "confirm")]),
         "concurrency": soulseek_auto.concurrency(cfg),
         "candidate_slots": soulseek_auto.candidate_slots(cfg),
@@ -1175,15 +1180,17 @@ def queue_clear(req: QueueClearRequest, before: float = 0.0):
 
 
 def clear_settled_queue(cfg=None, before: float = 0.0):
-    """Take the SETTLED rows off the queue's FINISHED sections — the same clear
-    the per-section buttons run, called when NEW WORK starts.
+    """Take the SETTLED rows off the queue's FINISHED sections — BOTH of them,
+    completed and failed. This is the EXPLICIT clear, and the meaning any
+    caller that says "take the settled rows" gets: the per-section/global clear
+    routes, and whoever else really means both.
 
-    The owner's ask: the queue's finished sections must not pile up across
-    runs ("Ensure sections here are auto-cleared when new jobs / searches /
-    auto-importing / add to library runs"). It is called where the work is
-    CREATED — a job start, a bulk enqueue, a page download, the wishes worker's
-    own pass — never by a page, so an add from any surface clears them and the
-    UI has nothing to know.
+    The AUTOMATIC clear an import runs is the NARROWER rule in
+    `clear_completed_for_new_import` below — completed only, gated by
+    `soulseek_clear_completed_on_import` — and THAT is the one to use where new
+    work is CREATED. Keeping the two apart is deliberate: this function's
+    meaning must not quietly become "take the completed ones", or a caller that
+    wants the settled rows taken would lose the failed section it asked for.
 
     It reuses `queue_clear`'s own path, section by section, and only over the
     two sections that are HISTORY: **completed** and **failed**. What that
@@ -1214,10 +1221,67 @@ def clear_settled_queue(cfg=None, before: float = 0.0):
     return cleared
 
 
+# The readout of the LAST automatic clear, for `build_queue`'s `auto_cleared`
+# block — the page's one-line "N completed downloads cleared from the list
+# (nothing was deleted)". It is a report of what happened, never state the
+# queue's own correctness depends on: the ROWS are the truth and this only
+# says how many the last automatic clear took, and when.
+_AUTO_CLEARED = {"at": 0.0, "count": 0}
+
+
+def clear_completed_for_new_import(cfg=None, before: float = 0.0):
+    """THE RULE, in one place: when a NEW IMPORT/CHAIN STARTS, the queue's
+    COMPLETED rows come off the list.
+
+    The owner's ask, verbatim: "completed downloads in the soulseek menu
+    should, by default, be automatically cleared once another importing
+    process starts". Three things make this exactly that rule and no more:
+
+    * ONLY the `completed` section. A `failed` row and a `needs_attention` row
+      are this run's news or the user's own pending question, never the last
+      run's history: they are NEVER taken here, and the per-section Clear
+      buttons stay the only thing that takes them. `clear_settled_queue` above
+      is the wider "take the settled rows" call for a caller that really wants
+      it — this is not it.
+    * ONLY when an IMPORT (or a download that will import) STARTS: an
+      auto-import enqueue, a job start, a page download, the "import everything
+      downloaded" runner. A RESTART OF A SEARCH is not an import — the wishes
+      worker's own pass must not call this, or a tick between searches would
+      wipe the completed rows the user is reading.
+    * a SETTING, never a hardcoded rule: `soulseek_clear_completed_on_import`
+      (default true). Switched off, nothing is taken automatically and the
+      completed rows stay until the user's own Clear — which is what makes
+      "by default" honest.
+
+    Nothing on disk is deleted, ever: this is the same dismissal/state
+    semantics as `queue_clear` — the rows leave the LIST, the downloads and the
+    album history stay where they are. `before` is the cut the other clears use
+    (see `clear_settled_queue`): only rows already settled when the new run
+    started are taken, so a job that finishes a heartbeat later still shows.
+
+    The last clear is recorded for the page (`build_queue`'s `auto_cleared`).
+    Never raises, and returns how many rows went: a queue that cannot be read
+    must not stop the import that asked."""
+    if cfg is None:
+        cfg = load_config()
+    if not cfg.get("soulseek_clear_completed_on_import", True):
+        return 0
+    try:
+        out = queue_clear(QueueClearRequest(scope="completed"), before=before)
+    except Exception:
+        return 0
+    cleared = int((out or {}).get("cleared") or 0)
+    _AUTO_CLEARED["at"] = time.time()
+    _AUTO_CLEARED["count"] = cleared
+    return cleared
+
+
 def _clear_settled_for_new_run():
-    """`clear_settled_queue` for the pipeline's own callers (a deferred import:
-    `server.soulseek_auto` is imported BY this module, so it cannot import this
-    one at module level). Kept here so the callers read the same one line.
+    """`clear_completed_for_new_import` for the pipeline's own callers (a
+    deferred import: `server.soulseek_auto` is imported BY this module, so it
+    cannot import this one at module level). Kept here so the callers read the
+    same one line, and so the rule itself lives in ONE docstring (the function
+    above).
 
     The cut is stamped HERE, on the caller's thread, before any work is done:
     the callers run the clear on a daemon thread so a job start never waits on
@@ -1226,7 +1290,7 @@ def _clear_settled_for_new_run():
     before = time.time()
     try:
         from server import api_queue
-        return api_queue.clear_settled_queue(before=before)
+        return api_queue.clear_completed_for_new_import(before=before)
     except Exception:
         return 0
 

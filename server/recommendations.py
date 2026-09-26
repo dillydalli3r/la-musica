@@ -150,15 +150,26 @@ def _top_artists(artists, limit):
             continue
         agg = ar.get("aggregate") or {}
         first = sorted(albs, key=lambda a: str(a.get("path") or "").lower())[0]
-        rows.append({
+        row = {
             "path": str(ar.get("path") or "").replace("\\", "/"),
             "artist": name,
             "album_count": len(albs),
             "track_count": agg.get("track_count") or 0,
+            # The ALBUM rollup's percentage (what the card prints under the
+            # name). The artist folder's own verdict is `grade` below — two
+            # different questions the shelf draws as two different things.
             "grade_pct": agg.get("grade_pct"),
             "cover_path": first.get("path") or "",
             "cover": first.get("cover_file"),
-        })
+        }
+        # The artist's OWN grade rides along untouched: the library row the
+        # shelf is built from already carries it (`mlo.grader.grade_artist`,
+        # see server.library), so the dot beside a name on Home is the dot the
+        # artist page draws — no second grading pass, no second rule. Rows
+        # without one (a caller handing in its own dicts) simply have no dot.
+        if "grade" in ar:
+            row["grade"] = ar["grade"]
+        rows.append(row)
     rows.sort(key=lambda r: (-r["album_count"], r["artist"].lower()))
     rows = rows[:limit]
     # Imported here, at the point of use: only this shelf asks the filesystem
@@ -313,9 +324,19 @@ def grade_warning(lib):
       that step runs — and a strip that reported it would be describing the
       process, not the library. The album's own row already says "Script run"
       for the same reason; when the claim goes the album is a finding again.
+      The albums an IMPORT holds right now — `server.imports._importing_now`,
+      the three claim kinds the queue's own In progress section reads, so both
+      surfaces agree about what "being imported" is — are counted in
+      `albums_importing`, which the strip prints in one clause: a reader whose
+      failing album left the list the moment its chain started is told where it
+      went instead of wondering which album the strip lost. It counts the
+      FINDINGS left out on that account (graded, failing, mid-import), not
+      every claim in the registry — an album that was never a finding has none
+      to lose.
 
     `albums_failing`, `tracks_failing` and the `items` (with their `more`) are
-    the findings that are LISTED, and a busy album is in none of them. The
+    the findings that are LISTED, and a busy or mid-import album is in none of
+    them — `albums_importing` counting the ones the import held back. The
     TOTALS are not: `pass_count`/`total_checks`/`grade_pct` keep counting the
     library's checks exactly as the Home header prints them, busy album
     included — a strip that quietly dropped a running album's checks from the
@@ -335,19 +356,39 @@ def grade_warning(lib):
     against the album itself (no file to name) always makes an album row and
     carries the grader's own sentence as `reason`.
     """
+    # The ONE notion of "this album is being imported": server.imports reads
+    # `job_locks.holder` and takes the three claim kinds the import queue's own
+    # In progress section reads, so the strip and the queue cannot disagree
+    # about it. Imported here rather than at module level: `server.imports`
+    # drags in the whole chain service, and this module is imported from inside
+    # routes that must not join that cycle.
+    from server import imports
     albums = [alb for ar in (lib.get("artists") or [])
               for alb in (ar.get("albums") or [])]
     pass_count = sum(int(a.get("pass_count") or 0) for a in albums)
     total_checks = sum(int(a.get("total_checks") or 0) for a in albums)
     items = []
     tracks_failing = 0
+    albums_importing = 0
     for alb in albums:
         # See the docstring: neither of these was graded, so neither is wrong.
         if alb.get("pending") or not (alb.get("total_checks") or 0) or alb.get("pass"):
             continue
-        # …and a busy album is mid-write rather than wrong. Asked absolutely
-        # (job_locks.busy, not holder): the answer is a fact about the album,
-        # not about whatever this request happens to be running inside.
+        # An album an import holds is mid-write by definition — its chain is
+        # filling the very tags the grader has just read as missing — so it is
+        # not a finding, and it is COUNTED, because a strip that only dropped it
+        # would look like it lost an album. A claim held by the CALLER's own job
+        # is not a conflict to `_importing_now` (see job_locks.busy), so that
+        # one falls through to the absolute rule below instead: held back all
+        # the same, just not counted — and a second reading of the registry is
+        # exactly what this pair is here to avoid.
+        if imports._importing_now(alb.get("path")) is not None:
+            albums_importing += 1
+            continue
+        # …and any other live job's album is mid-write rather than wrong. Asked
+        # absolutely (job_locks.busy, not holder): the answer is a fact about
+        # the album, not about whatever this request happens to be running
+        # inside.
         if job_locks.busy(alb.get("path")):
             continue
         bad = [tr for tr in (alb.get("tracks") or []) if tr.get("issues")]
@@ -405,6 +446,9 @@ def grade_warning(lib):
         "total_checks": total_checks,
         "grade_pct": grade_pct,
         "albums_failing": len(items),
+        # The failing albums an import is holding right now — not listed, and
+        # the strip says so in one clause rather than looking short an album.
+        "albums_importing": albums_importing,
         "tracks_failing": tracks_failing,
         "items": items[:_GRADE_WARNING_MAX],
         "more": more,

@@ -465,15 +465,19 @@ def _format_audio_tags(path, cfg, force=False, af=None):
         # Optimization leaves only tags this app (and its graders) understand:
         # anything outside the shared vocabulary — TAG_MAP, the encoder
         # identity tags, beets/Picard's own spellings and the app's
-        # AUDIOAUDITOR_OVERRIDE — is removed. The predicate comes from the
-        # grader (mlo.grader.tag_key_allowed) so the strip pass and the
-        # excess-tag grade can never disagree about what "excess" means.
+        # AUDIOAUDITOR_OVERRIDE — is removed, and so is a non-empty COMMENT:
+        # the vocabulary holds the NAME but nothing in this pipeline ever
+        # writes a value there, which is what the grade's own value rule says
+        # ("Comment tag carries a value"). The predicates come from the grader
+        # (mlo.grader.tag_key_allowed / tag_value_excess) so the strip pass and
+        # the excess-tag grade can never disagree about what "excess" means.
         # Default True to match DEFAULT_CONFIG (mlo/config.py:821) — a partial
         # cfg (tests, smoke suites) must strip like the shipped app does.
         if cfg.get("strip_unknown_tags", True):
-            from .grader import tag_key_allowed
-            for key in list(af.all_tags().keys()):
-                if tag_key_allowed(key):
+            from .grader import tag_key_allowed, tag_value_excess
+            for key, value in list(af.all_tags().items()):
+                if tag_key_allowed(key) \
+                        and not tag_value_excess(key, value):
                     continue
                 try:
                     if af.delete_tag(key):

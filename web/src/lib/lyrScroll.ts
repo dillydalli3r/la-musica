@@ -18,12 +18,18 @@
 
 import { useCallback, useEffect, useRef, useState, type RefObject } from "react";
 
+/** Which way a retarget lands. `snap` = the pane arrives in the same frame;
+ *  `glide` = the rAF ease carries it there. */
+export type LyricMove = "glide" | "snap";
+
 export interface LyricsGlider {
   /** The scroller this glider drives. */
   readonly el: HTMLElement;
-  /** Bring `el` to the pane's lyric anchor line. `snap` jumps immediately
-   * (seeks, track changes); default glides from here. */
-  center(el: HTMLElement, snap?: boolean): void;
+  /** Bring `el` to the pane's lyric anchor line. `"snap"` lands immediately
+   * (a press on a line, an offset / zoom change, a seek — anything the reader
+   * did), `"glide"` (the default) carries there with the shared ease — the
+   * clock's own advance to the next line. */
+  center(el: HTMLElement, move?: LyricMove): void;
   /** Stop gliding and adopt the current position as resting (user took
    * over the pane with the wheel / touch). */
   stop(): void;
@@ -84,7 +90,7 @@ export function createLyricsGlider(c: HTMLElement, anchor: number = LYRICS_ANCHO
 
   return {
     el: c,
-    center(el, snap = false) {
+    center(el, move = "glide") {
       // Walk the offsetParent chain up to the scroller (it is the nearest
       // positioned ancestor — every pane marks it `relative`).
       let top = 0;
@@ -103,7 +109,10 @@ export function createLyricsGlider(c: HTMLElement, anchor: number = LYRICS_ANCHO
       // (and then skipping the restart because the loop is already `active`)
       // killed the loop outright — the pane froze mid-flight on the next line
       // change and stayed frozen for the rest of the track.
-      if (snap || instant) {
+      //
+      // A SNAP has to cancel: the reader's own move must not be carried on by
+      // whatever frame was already in flight towards the old line.
+      if (move === "snap" || instant) {
         cancelAnimationFrame(raf);
         c.scrollTop = target;
         active = false;
@@ -143,12 +152,29 @@ export function createLyricsGlider(c: HTMLElement, anchor: number = LYRICS_ANCHO
 const HOLD_MS = 1200;
 /** A clock jump this large between frames can only be a seek. */
 const SEEK_JUMP = 1.2;
-/** Window around a seek in which a move SNAPS instead of gliding (scrubbing
- * should land where you dropped the needle, not sail there). */
-const SEEK_SNAP = 600;
-/** Window after a click-to-seek in which moves still glide — navigating by
- * lyric line stays animated, and the click outranks its own clock jump. */
-const CLICK_GLIDE = 1500;
+/** How long a reader-made move keeps the pane SNAPPING — one window for both
+ *  halves of the move: the scroller lands on its target in the same frame
+ *  instead of gliding there (`lyricMove` below) AND the line's own emphasis
+ *  drops its transition for the same window (`snapping`, which the surfaces
+ *  render with), so the words and the highlight arrive together. It covers the
+ *  re-parse the offset buttons trigger and the re-sync a seek causes: skipping
+ *  to a line used to show the transit from the line before it, and a scrub
+ *  sailed to where the needle was dropped.
+ *
+ *  Long enough to span the commit that carries the move (a starved renderer
+ *  commits late) and the emphasis' own `duration-motion-slow`, short enough
+ *  that the next line the CLOCK advances to animates again. */
+export const LYRIC_JUMP_MS = 600;
+
+/** Which way a retarget lands: `snap` for any move the READER made — a press
+ *  on a line, an offset step, a zoom change, a seek — and `glide` for the
+ *  clock's own advance to the next line. `jumpAt` is the timestamp of the last
+ *  reader-made move (0 = none this session). Pure on purpose: the rule is the
+ *  behaviour the owner reported, so tools/check_lyrscroll.cjs pins both halves
+ *  of it without a DOM. */
+export function lyricMove(now: number, jumpAt: number, window = LYRIC_JUMP_MS): LyricMove {
+  return now - jumpAt < window ? "snap" : "glide";
+}
 
 export interface LyricsFollowOptions {
   /** First line of the active cluster (row index); -1 = nothing sung yet. */
@@ -169,25 +195,35 @@ export interface LyricsFollowOptions {
 }
 
 /** Auto-follow for one lyrics pane: keeps the sung line on the anchor line,
- * snaps on seeks, glides on line steps, and gets out of the reader's way
- * for `HOLD_MS` after a wheel / touch. Shared by every pane so they can't
- * drift apart. */
+ * snaps on every reader-made move, glides on the clock's own line steps, and
+ * gets out of the reader's way for `HOLD_MS` after a wheel / touch. Shared by
+ * every pane so they can't drift apart. */
 export function useLyricsFollow({
   active, time, playing, scroll, rows, reset = null, anchor = LYRICS_ANCHOR,
 }: LyricsFollowOptions): {
-  /** Centre row `i` right now (click-to-seek) — outranks a reader hold. */
+  /** Centre row `i` right now (click-to-seek) — outranks a reader hold, and
+   * lands in the same frame: the reader picked the line. */
   centerLine: (i: number) => void;
+  /** The reader moved the words themselves without naming a line — an offset
+   * step, a zoom change, a seek. The pane re-centres on the sung line
+   * instantly instead of gliding to it. */
+  jump: () => void;
+  /** True for `LYRIC_JUMP_MS` after any of the above: the surfaces drop their
+   * line transition for the window, so the emphasis lands with the words
+   * rather than easing across them. */
+  snapping: boolean;
   /** The reader wheeled / touched the pane. */
   takeOver: () => void;
 } {
   const glider = useRef<LyricsGlider | null>(null);
   const holdUntil = useRef(0);
   const holdTimer = useRef(0);
-  const seekAt = useRef(0);
-  const glideAt = useRef(0);
+  const jumpAt = useRef(0);
+  const snapTimer = useRef(0);
   const prevTime = useRef(-1);
   const playingRef = useRef(playing);
   const [kick, setKick] = useState(0);
+  const [snapping, setSnapping] = useState(false);
 
   // One glider per pane ELEMENT, made on demand: the pane unmounts and
   // remounts around lyrics presence and video mode, and a glider left
@@ -207,6 +243,20 @@ export function useLyricsFollow({
     window.clearTimeout(holdTimer.current);
   }, []);
 
+  // Every reader-made move goes through here: it marks the jump window the
+  // retarget rule reads (`lyricMove`), holds the emphasis transition off for
+  // the same window, and kicks the follow effect so the pane re-centres even
+  // when the active line itself did not change (an offset step inside one
+  // line, a zoom change).
+  const markJump = useCallback(() => {
+    jumpAt.current = Date.now();
+    releaseHold();
+    setSnapping(true);
+    window.clearTimeout(snapTimer.current);
+    snapTimer.current = window.setTimeout(() => setSnapping(false), LYRIC_JUMP_MS);
+    setKick((k) => k + 1);
+  }, [releaseHold]);
+
   const takeOver = useCallback(() => {
     forPane()?.stop();
     holdUntil.current = Date.now() + HOLD_MS;
@@ -221,10 +271,9 @@ export function useLyricsFollow({
   const centerLine = useCallback((i: number) => {
     const el = rows.current[i];
     if (!el) return;
-    glideAt.current = Date.now();
-    releaseHold();
-    forPane()?.center(el, false);
-  }, [rows, forPane, releaseHold]);
+    markJump();
+    forPane()?.center(el, "snap");
+  }, [rows, forPane, markJump]);
 
   // New track: rewind, and drop any hold or glide left over from the one
   // that just ended. Declared before the follow effect so the rewind wins
@@ -243,19 +292,20 @@ export function useLyricsFollow({
     glider.current?.destroy();
     glider.current = null;
     window.clearTimeout(holdTimer.current);
+    window.clearTimeout(snapTimer.current);
   }, []);
 
-  // Seek: a jump the reader did not ask for by line. Re-centre even when the
-  // jump lands inside the line that was already active, which the active-line
-  // effect below would never see.
+  // Seek: the clock jumped by more than a line, so the reader did it (the
+  // scrub bar, or a seek from anywhere else in the app) — the re-sync that
+  // follows is a jump, not a line step. Re-centre even when the jump lands
+  // inside the line that was already active, which the active-line effect
+  // below would never see.
   useEffect(() => {
     const prev = prevTime.current;
     prevTime.current = time;
     if (prev < 0 || Math.abs(time - prev) <= SEEK_JUMP) return;
-    seekAt.current = Date.now();
-    releaseHold();
-    setKick((k) => k + 1);
-  }, [time, releaseHold]);
+    markJump();
+  }, [time, markJump]);
 
   // Play resumes: the pane was left wherever the reader parked it, and the
   // rest of the line can be half a minute long — waiting for the NEXT line
@@ -273,13 +323,11 @@ export function useLyricsFollow({
     if (active < 0 || Date.now() < holdUntil.current) return;
     const el = rows.current[active];
     if (!el) return;
-    const now = Date.now();
-    const glide = now - glideAt.current < CLICK_GLIDE || now - seekAt.current > SEEK_SNAP;
-    forPane()?.center(el, !glide);
+    forPane()?.center(el, lyricMove(Date.now(), jumpAt.current));
     // Deps: the active line and the kicks only. Never the clock — the pane
     // moves one step per line, not one per frame.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [active, kick, forPane, rows]);
 
-  return { centerLine, takeOver };
+  return { centerLine, jump: markJump, snapping, takeOver };
 }

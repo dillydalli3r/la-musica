@@ -104,12 +104,14 @@ fn set_now_playing_liked(liked: bool) {
 
 /// Tell the shell whether the player is producing sound right now.
 ///
-/// This is the iOS audio session's input (`src/ios_audio.rs`): the session is
-/// activated when playback starts and handed back — with
-/// `NotifyOthersOnDeactivation` — when it stops, which is Apple's own guidance
-/// ("defer this call until your app begins audio playback… to ensure that you
-/// won't prematurely interrupt any other background audio"). The web UI calls
-/// it as the player's `playing` state changes (`web/src/lib/iosAudio.ts`).
+/// This is the iOS audio session's input (`src/ios_audio.rs`): playback
+/// STARTING activates the session, which is Apple's own guidance ("defer this
+/// call until your app begins audio playback… to ensure that you won't
+/// prematurely interrupt any other background audio"), and playback stopping
+/// deliberately does NOT hand it back — a pause landing in the same second as a
+/// start once took the session away mid-startup, which is the owner's "pressing
+/// play just makes them pause immediately" (R268). The web UI calls it as the
+/// player's `playing` state changes (`web/src/lib/iosAudio.ts`).
 ///
 /// Registered on EVERY target, with an empty body off iOS, for the same reason
 /// as the star's command above: the web UI calls it unconditionally, and the

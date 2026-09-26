@@ -1004,15 +1004,23 @@ def _preflight(paths):
     formats behind the drive-fit estimate and the post-export duration check.
 
     Returns ``{"durations": {path: s}, "pcm_kbps": {path: kbps},
-    "disc_albums": {album dir: bool}}``. Unreadable sources are simply absent
-    from the tables — the per-track pass reports them.
+    "disc_albums": {album dir: bool}, "files": {path: AudioFile}}``.
+    Unreadable sources are simply absent from the tables — the per-track pass
+    reports them.
+
+    *files* is the parse each table above was built from, kept so the worker
+    that exports that path does not parse it a SECOND time: a video container
+    costs an ffprobe process per parse, and `_one` (the pool's per-track work)
+    needs the very same object for its tags. One AudioFile per source, held for
+    the run.
     """
-    durations, pcm, discs = {}, {}, {}
+    durations, pcm, discs, files = {}, {}, {}, {}
     for path in paths:
         try:
             af = AudioFile(path)
             if af.audio is None:
                 continue
+            files[path] = af
             durations[path] = _duration(af)
             pcm[path] = _pcm_kbps(af)
             album_dir = os.path.dirname(path)
@@ -1025,7 +1033,8 @@ def _preflight(paths):
         # its files disagree, or the only disc number present is not the
         # first (a "disc 2" that lost its sibling still must not read "01").
         disc_albums[album_dir] = len(numbers) > 1 or max(numbers) > 1
-    return {"durations": durations, "pcm_kbps": pcm, "disc_albums": disc_albums}
+    return {"durations": durations, "pcm_kbps": pcm, "disc_albums": disc_albums,
+            "files": files}
 
 
 def _estimate_bytes(codec, quality, paths, pre):
@@ -2195,7 +2204,13 @@ def export_tracks(cfg, paths, dest, subfolder="Music", codec="copy",
             if not os.path.isfile(path):
                 raise FileNotFoundError(path)
             src_ext = os.path.splitext(path)[1].lower()
-            af = AudioFile(path)
+            # The preflight already parsed this source — its header, tags and
+            # stream info are what its duration/disc tables were built from —
+            # and a video container costs an ffprobe process per parse, so the
+            # worker is handed THAT parse instead of paying for a second one.
+            # A path the preflight could not read is not in the table and is
+            # parsed (and reported) here exactly as before.
+            af = pre["files"].get(path) or AudioFile(path)
             if af.audio is None:
                 raise RuntimeError(af.error or "unreadable")
             # "copy" keeps the source extension; explicit codecs use theirs,

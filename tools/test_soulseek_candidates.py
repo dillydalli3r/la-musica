@@ -157,6 +157,70 @@ assert [c["dir"] for c in sorted(_twins, key=soulseek_auto._rank)] == \
 assert rank_order(rankable("zeta", folder="Music/A/"),
                   rankable("alpha", folder="Music/Z/")) == ["alpha", "zeta"]
 
+# 4. MUSIC VIDEOS: an album must never be fetched as its videos (issue #67).
+#    A `.mp4` beside a `.flac` is a library TRACK (mlo.paths.LIB_VIDEO_EXTS) but
+#    it is not the album's audio, so a candidate whose tracklist only completes
+#    with a video sorts below an audio-only one however well it matches: taking
+#    a music-video folder for an album is not the wrong copy, it is the wrong
+#    thing. Read off the files the candidate would really download (`plans`).
+video_only = folder("vidpeer", "Album MP4", "mp4")
+audio_only = folder("audpeer", "Album WAV", "wav")
+_pick = soulseek_auto.find_candidates(video_only + audio_only, RELEASE, CFG)
+assert [c["dir"] for c in _pick] == ["Music/Album WAV/", "Music/Album MP4/"], \
+    [c["dir"] for c in _pick]
+assert _pick[1]["video"] is True and _pick[1]["video_only"] is True, _pick[1]
+assert _pick[0]["video"] is False and _pick[0]["video_only"] is False, _pick[0]
+# The video folder is the BETTER SCORED one here and still loses: with the same
+# file count its free slot and its fast peer put it ahead on every non-video key,
+# so the first key of `_rank` is what decided.
+_video_fast = folder("vidpeer", "Album MP4", "mp4")
+for _r in _video_fast:
+    _r["size"], _r["speed"] = 40_000_000, 9_000_000
+_audio_slow = folder("audpeer", "Album WAV", "wav", slot=False, queue=500)
+for _r in _audio_slow:
+    _r["speed"] = 64_000
+_pick2 = soulseek_auto.find_candidates(_video_fast + _audio_slow, RELEASE, CFG)
+assert [c["dir"] for c in _pick2] == ["Music/Album WAV/", "Music/Album MP4/"], \
+    [(c["dir"], c["score"], soulseek_auto._video_rank(c)) for c in _pick2]
+assert _pick2[1]["score"] > _pick2[0]["score"], [c["score"] for c in _pick2]
+# A folder of nothing BUT videos is the last resort, never the default: it is
+# still returned (the network may have nothing else), but an audio folder that
+# is not even COMPLETE is offered first.
+_partial = folder("audpeer", "Album WAV", "wav")[:1]
+_partial.append(row("audpeer", "Music/Album WAV/README.txt"))
+_pick3 = soulseek_auto.find_candidates(video_only + _partial, RELEASE,
+                                       dict(CFG, soulseek_auto_complete_ratio=0.5))
+assert [c["dir"] for c in _pick3] == ["Music/Album WAV/", "Music/Album MP4/"], \
+    [(c["dir"], c["complete"], c["video_only"]) for c in _pick3]
+assert _pick3[1]["complete"] and not _pick3[0]["complete"], _pick3
+# A BONUS video beside the album's own audio is not a video candidate: only the
+# files this candidate would really download decide (the rest of a covering root
+# is never bought), so an album with one extra .mkv is not penalised for it.
+_with_bonus = folder("audpeer", "Album WAV", "wav") + [
+    row("audpeer", "Music/Album WAV/Album.mkv", duration=900.0)]
+_bonus = soulseek_auto.find_candidates(_with_bonus, RELEASE, CFG)
+assert len(_bonus) == 1 and _bonus[0]["video"] is False, _bonus
+# A music-video RELEASE wants its videos: the rule switches off for a release
+# whose own recordings MusicBrainz states are videos (`video_only`), so the
+# disc/YouTube fallback still finds the videos it was asked for.
+VIDEO_RELEASE = dict(RELEASE, media=[dict(t, video=True) for t in RELEASE["media"]])
+_vid = soulseek_auto.find_candidates(video_only + folder("audpeer", "Album WAV", "wav"),
+                                     VIDEO_RELEASE, CFG)
+assert all(c["video"] is False and c["video_only"] is False for c in _vid), \
+    [(c["dir"], c["video"], c["video_only"]) for c in _vid]
+# `_video_candidates` rows (and a job's synthetic one) carry neither fact, so
+# they rank exactly as they always did — 0, not a KeyError.
+assert soulseek_auto._video_rank({"lossless": False, "score": 0}) == 0
+assert soulseek_auto._video_rank({"video": True, "video_only": False}) == 1
+assert soulseek_auto._video_rank({"video": True, "video_only": True}) == 2
+assert soulseek_auto._video_rank({"video_only": True}) == 2
+# …and the same three facts hold for a rankable pair, so the key is what
+# separates them and the pre-existing total order is untouched.
+assert rank_order(dict(rankable("vid"), video=True),
+                  dict(rankable("aud"), video=False)) == ["aud", "vid"]
+assert rank_order(dict(rankable("vidonly"), video=True, video_only=True),
+                  dict(rankable("vid"), video=True)) == ["vid", "vidonly"]
+
 
 # --------------------------------------------------------------------------- #
 # _local_download_candidates: the two layouts slskd leaves on disk
@@ -1132,8 +1196,44 @@ def _tree_files(root):
     return out
 
 
+def job_stage_patches(cfg, scores, verified, imported, calls, **over):
+    """The stages `run_job` stubs, for a caller that drives the job ITSELF.
+
+    Same contract as `run_job`: `load_config` answers this suite's config,
+    `_import`/`_verify_album`/`_stamp_media` record into the lists handed in
+    and succeed, `_score_logs` is the scripted scorer, and the download-dir
+    clear is a no-op (its own block drives the real one). A test that starts
+    jobs through `start_job` — the only path that really runs several of them
+    side by side — patches `soulseek` itself and needs exactly the same stage
+    seam, so it lives in one place instead of two."""
+    patches = dict(
+        load_config=lambda: dict(cfg or JOB_CFG),
+        _score_logs=scores or score_logs(),
+        # The download-dir clear runs on a SUCCESSFUL import and this suite's
+        # `_import` never moves anything: stubbed here so the trees the
+        # assertions elsewhere read stay put (the clear itself is driven for
+        # real, with keep_dir, in its own block).
+        _clear_downloads=lambda *a, **k: {},
+        _verify_album=lambda root, c, is_cd: (
+            verified.append(root)
+            or calls.append(("verify", root, is_cd))
+            or (True, [])),
+        _stamp_media=lambda root, media, c: (
+            calls.append(("stamp", root, media)) or (0, [])),
+        _import=lambda root, r, c, media: (
+            imported.append(root)
+            or calls.append(("import", root,
+                             list(r.get("medium_formats") or []), media))
+            or {"album_path": root, "imported": True}),
+        traceback=SimpleNamespace(print_exc=lambda *a, **k: None),
+    )
+    patches.update(over)
+    return patches
+
+
 def run_job(release, rows, cfg=None, scores=None, queries=None, stub_cls=AutoSlsk,
-            confirm_lossy=False, answer=None, keep_dir=False, **over):
+            confirm_lossy=False, answer=None, keep_dir=False, search_seconds=None,
+            **over):
     """Drive one whole _run() against a scripted slskd and planted downloads.
 
     Files are planted as finished downloads only where the job is supposed to
@@ -1155,7 +1255,12 @@ def run_job(release, rows, cfg=None, scores=None, queries=None, stub_cls=AutoSls
     medium switched BEFORE verification?" is answerable. The slskd double
     itself is on JobRun.stub (its query journal, cancellation log, ...), and any
     further `over` keyword replaces one of the stubbed stages for a test that
-    needs the real one (the download-dir clear) or a scripted verdict."""
+    needs the real one (the download-dir clear) or a scripted verdict.
+
+    `search_seconds` is the window the CALLER owns — the fallback walk hands
+    each candidate edition its own (`soulseek_search_timeout_seconds`), so the
+    tests that pin what a job does with that budget pass it here instead of
+    letting the job read the config's own `soulseek_auto_search_wait`."""
     saved = _snapshot_job()
     saved_time = soulseek_auto.time
     # Every worker this call starts, joined before the global job state is
@@ -1188,31 +1293,15 @@ def run_job(release, rows, cfg=None, scores=None, queries=None, stub_cls=AutoSls
         # The stages this suite stubs, with any `over` from the caller applied on
         # top: a test that needs the REAL clear (or a scripted verify verdict)
         # overrides exactly that one stage.
-        _patches = dict(
-            load_config=lambda: dict(cfg or JOB_CFG),
-            _score_logs=scores or score_logs(),
-            # The download-dir clear runs on a SUCCESSFUL import and this suite's
-            # `_import` never moves anything: stubbed here so the trees the
-            # assertions elsewhere read stay put (the clear itself is driven for
-            # real, with keep_dir, in its own block).
-            _clear_downloads=lambda *a, **k: {},
-            _verify_album=lambda root, c, is_cd: (
-                verified.append(root)
-                or calls.append(("verify", root, is_cd))
-                or (True, [])),
-            _stamp_media=lambda root, media, c: (
-                calls.append(("stamp", root, media)) or (0, [])),
-            _import=lambda root, r, c, media: (
-                imported.append(root)
-                or calls.append(("import", root,
-                                 list(r.get("medium_formats") or []), media))
-                or {"album_path": root, "imported": True}),
-            traceback=SimpleNamespace(print_exc=lambda *a, **k: None),
-        )
-        _patches.update(over)
+        _patches = job_stage_patches(cfg, scores, verified, imported, calls, **over)
         with Patch(soulseek, is_running=stub.is_running, web_up=stub.web_up,
                    server_state=stub.server_state, download_dir=stub.download_dir,
                    search=stub.search, search_results=stub.search_results,
+                   # A search the job drops ("that template was not waited out")
+                   # goes through the module function, so the stub has to own it
+                   # too — otherwise the DELETE is aimed at a real slskd and the
+                   # stub's own cancellation journal stays empty.
+                   cancel_search=stub.cancel_search,
                    enqueue_download=stub.enqueue_download,
                    downloads_state=stub.downloads_state,
                    cancel_downloads=stub.cancel_downloads), \
@@ -1224,7 +1313,8 @@ def run_job(release, rows, cfg=None, scores=None, queries=None, stub_cls=AutoSls
                 # scripts its searches against.
                 soulseek_auto._run(release=release,
                                    queries=(["job album"] if queries is None else queries),
-                                   confirm_lossy=confirm_lossy)
+                                   confirm_lossy=confirm_lossy,
+                                   search_seconds=search_seconds)
             if answer is None:
                 drv()
             else:
@@ -3144,7 +3234,12 @@ assert [c[0] for c in run.calls] == ["stamp", "verify", "import"], run.calls
 assert run.calls[0][2] == "Digital Media", run.calls     # stamped as a WEB rip
 assert run.calls[1][2] is False, run.calls               # no CD log/CRC audit
 assert run.calls[2][2] == ["Digital Media"], run.calls   # the release that imported
-assert run.calls[2][3] is False, run.calls
+# …and the MEDIA it imports as is the release's own medium word, not the
+# boolean the candidate decision is made of: the stamp above already wrote
+# "Digital Media" on the files, and this is the same word for a track it could
+# not write (`_stamp_media` fills an empty slot only), so nothing can land with
+# MEDIA=False on it.
+assert run.calls[2][3] == "Digital Media", run.calls
 assert sorted(run.submitted()) == sorted(r["file"] for r in WEBRIP_ROWS), run.submitted()
 # ...and the release the CALLER handed in is untouched — the switch is the job's
 # own in-memory view, never a mutation of MusicBrainz's release dict.
@@ -3696,9 +3791,16 @@ assert any("lossy copy" in m and "soulseek_auto_lossy_policy" in m for m in _log
 assert not any(m == ("Only lossy copies found (MP3) — a lossless copy is "
                      "preferred, so nothing was downloaded.") for m in _log), _log
 _done = [e for e in _said if e[0] == "download_done"]
-assert _done, [e[0] for e in _said]
-assert "lossy copy (MP3)" in _done[-1][2], _done[-1]
-assert "soulseek_auto_lossy_policy" in _done[-1][2], _done[-1]
+assert not _done, [e[0] for e in _said]
+# …and the frame that DOES carry it is the import's own beginning, not a
+# completion: the download is over, the chain it started is still running, and a
+# kind every client reads as an outcome must not go out here (issue #67 — a user
+# watching the scripts run had already been told the album was done).
+_started = [e for e in _said if e[0] == "import_started"]
+assert _started, [e[0] for e in _said]
+assert "lossy copy (MP3)" in _started[-1][2], _started[-1]
+assert "soulseek_auto_lossy_policy" in _started[-1][2], _started[-1]
+assert _started[-1][1] == "Downloaded: Job Artist — Job Album (1996)", _started[-1][1]
 # ...and the INTERACTIVE path still asks, whatever the key says: a person who
 # asked for the release by hand is offered the lossy copy, never handed it.
 _said.clear()
@@ -3712,6 +3814,361 @@ finally:
 assert ask.prompt and ask.prompt["reason"] == "lossy_only", ask.prompt
 assert ask.job["state"] == "error", ask.job
 assert (ask.enqueued, ask.imported) == ([], []), (ask.enqueued, ask.imported)
+
+# --------------------------------------------------------------------------- #
+# 9. THE FAST PASS. The owner's ask, twice: "auto-importing must act faster on a
+#    good find — it should not have to wait 60 s first — and it must keep
+#    searching other releases while that happens".
+#
+#    slskd serves `/searches/{id}/responses` only once a search has ENDED, so
+#    the quiet timeout a query is POSTED with is the time before ANYTHING can be
+#    read at all. The job now asks with the short `soulseek_search_fast_seconds`
+#    and enqueues the first usable folder the moment it is readable; the long
+#    `soulseek_search_timeout_seconds` is the TOP-UP window, spent only when the
+#    fast pass found nothing usable, and it re-reads the searches phase 1 left
+#    running instead of cancelling them.
+# --------------------------------------------------------------------------- #
+print("== the fast pass: a good find downloads in seconds, not in a window ==")
+
+
+class SlskdQuietModel(AutoSlsk):
+    """AutoSlsk whose searches END the way slskd's really do.
+
+    slskd ends a search `searchTimeout` — the `timeout_ms` this client POSTs —
+    after the last peer answered, and serves the responses only once the search
+    has ENDED (while it runs the API reports counters and no responses, see
+    soulseek.search). A release nobody answers for is therefore READABLE exactly
+    `timeout_ms/1000` seconds after it was posted, whatever deadline the caller
+    set — which is what makes the window a search is POSTED with observable
+    here, and it is the root cause of a perfect folder found at t≈2 s being
+    first readable at t≈60 s.
+
+    The clock is the suite's own FakeClock (`soulseek_auto.time`, read at call
+    time because run_job installs it after the stub is built), so every window
+    runs instantly in real time and the ordering is exact. `slow` makes one
+    query behave like a BUSY release: slskd's quiet timer keeps being pushed by
+    peers still answering, so the search outlives the caller's own window."""
+
+    def __init__(self, ddir, rows, slow=None):
+        super().__init__(ddir, rows)
+        self.posted = {}          # sid -> (posted at, quiet seconds)
+        self.journal = []         # (clock, "search"|"enqueue", detail)
+        self.slow = dict(slow or {})
+
+    def search(self, query, timeout_ms=None, response_limit=0):
+        sid = super().search(query, timeout_ms, response_limit)
+        quiet = self.slow.get(query, (timeout_ms or 0) / 1000.0)
+        self.posted[sid] = (soulseek_auto.time.time(), quiet)
+        self.journal.append((soulseek_auto.time.time(), "search", query))
+        return sid
+
+    def search_results(self, sid):
+        posted_at, quiet = self.posted.get(sid, (0.0, 0.0))
+        if soulseek_auto.time.time() < posted_at + quiet:
+            return {"state": "InProgress", "isComplete": False, "responses": [],
+                    "responseCount": 0, "fileCount": 0}
+        return super().search_results(sid)
+
+    def enqueue_download(self, username, wanted):
+        self.journal.append((soulseek_auto.time.time(), "enqueue", username))
+        return super().enqueue_download(username, wanted)
+
+    def at(self, kind):
+        """Every journal entry of one kind, in the order it happened."""
+        return [e for e in self.journal if e[1] == kind]
+
+
+# (a) ONE complete lossless folder, readable the moment the fast pass's own
+#     quiet window ends, with the WALKER's 60 s window handed in as the caller's
+#     own (`search_seconds` — exactly what server.wishes_worker passes per
+#     candidate). The download is enqueued at that moment, not 60 s later.
+run = run_job(JOB_RELEASE, ONE_DISC_ROWS, stub_cls=SlskdQuietModel,
+              search_seconds=60)
+assert run.job["state"] == "done" and run.imported, run.job
+# The query went out with the SHORT window — 5000 ms, not the walker's 60000:
+# slskd hands searchTimeout to Soulseek.NET as MILLISECONDS, and it is the time
+# before anything can be read at all.
+assert [(q, t) for q, t, _l in run.stub.searches] == [("Job Album", 5000)], \
+    run.stub.searches
+# ...and the ORDERING the owner asked for, with no real sleep anywhere: posted
+# at t=0, ended by the stub 5 s later (slskd's own rule), enqueued THEN.
+_posts, _enqueues = run.stub.at("search"), run.stub.at("enqueue")
+assert _posts and _posts[0][0] == 0, run.stub.journal
+assert _enqueues, run.stub.journal
+assert _enqueues[0][0] >= 5, run.stub.journal        # the search had to end first
+assert _enqueues[0][0] < 60, run.stub.journal        # ...long before the top-up
+assert _enqueues[0][0] <= 5 + 2 * soulseek_auto._SEARCH_POLL_S, run.stub.journal
+# A usable folder was in hand, so the top-up window was never spent: one search,
+# no second window, and the running one was not cancelled either.
+assert len(run.stub.searches) == 1, run.stub.searches
+assert run.stub.cancelled_searches == [], run.stub.cancelled_searches
+assert os.path.basename(run.imported[-1]) == "Album", run.imported
+# The run's own lines name the phase they are in, and phase 2 never happened.
+assert any("fast pass" in e["msg"] for e in run.job["log"]), run.job["log"]
+assert not any("top-up: re-reading" in e["msg"] for e in run.job["log"]), run.job["log"]
+
+# (b) A BUSY release: the network keeps answering, so the search is still
+#     running when the fast pass's window (5s + the grace tail) closes. It is
+#     NOT cancelled and NOT forgotten — the top-up window re-reads it, so the
+#     album still lands, and it is read the moment it ends.
+run = run_job(JOB_RELEASE, ONE_DISC_ROWS,
+              stub_cls=lambda d, r: SlskdQuietModel(d, r, slow={"Job Album": 55.0}),
+              search_seconds=60)
+assert run.job["state"] == "done" and run.imported, run.job
+# ONE search was ever POSTED: the top-up took the outstanding one over
+# (`resume`) instead of asking the network the same question again.
+assert [q for q, _t, _l in run.stub.searches] == ["Job Album"], run.stub.searches
+assert run.stub.cancelled_searches == [], run.stub.cancelled_searches
+assert run.stub.at("search")[0][0] == 0, run.stub.journal
+_enq = run.stub.at("enqueue")
+assert _enq and 50 <= _enq[0][0] < 105, run.stub.journal
+assert os.path.basename(run.imported[-1]) == "Album", run.imported
+_msgs = [e["msg"] for e in run.job["log"]]
+assert any("fast pass" in m for m in _msgs), _msgs
+assert any("top-up: re-reading" in m for m in _msgs), _msgs
+
+# (c) A BETTER copy that only turns up in a search which is still running when
+#     the transfer starts does not cancel it. `LateBetter` answers the job's
+#     second configured template with a higher-scoring complete lossless folder,
+#     but 30 s after it was posted: the first template has already handed the job
+#     a usable folder, so its download starts at t≈5 and the job moves on. The
+#     better copy rides a search that is dropped at slskd, and nothing the job
+#     had already started is cancelled for it (before this change the job waited
+#     out the whole 60 s window, ranked the better copy first and cancelled the
+#     one it had started).
+print("== a better copy arriving later does not cancel the transfer already started ==")
+
+
+def cd_folder(user, folder, *, slot=True, queue=0, speed=1_000_000):
+    """A complete 2-track CD folder — one rip log and one cue — with the peer
+    facts that decide its score (the log gate and the ranking read both)."""
+    out = []
+    for name, length in (("01 - Alpha.flac", 200.0), ("02 - Beta.flac", 210.0),
+                         ("rip.log", 200.0), ("Album.cue", 200.0)):
+        r = row(user, f"{folder}/{name}", duration=length)
+        r["size"] = 0                       # planted by the test, not the peer
+        r["slot"], r["queue"], r["speed"] = slot, queue, speed
+        out.append(r)
+    return out
+
+
+WORSE_ROWS = cd_folder("peer", "Music/Album", slot=False, queue=500, speed=200_000)
+BETTER_ROWS = cd_folder("betterpeer", "Music/Better", slot=True, queue=0,
+                        speed=9_000_000)
+
+
+class LateBetter(SlskdQuietModel):
+    """SlskdQuietModel whose SECOND query answers with the better-scoring copy,
+    but only 30 s after it was posted (a busy release slskd keeps alive)."""
+
+    def __init__(self, ddir, first_rows, better_rows, better_query="CAT-1"):
+        super().__init__(ddir, first_rows, slow={better_query: 30.0})
+        self.better_rows, self.better_query = better_rows, better_query
+
+    def search_results(self, sid):
+        n = int(str(sid).split("-")[1]) - 1
+        query = self.searches[n][0] if n < len(self.searches) else ""
+        if query == self.better_query and soulseek_auto.time.time() >= 30:
+            return {"state": "Completed", "isComplete": True,
+                    "responses": self.better_rows}
+        return super().search_results(sid)
+
+
+run = run_job(JOB_RELEASE, WORSE_ROWS + BETTER_ROWS,
+              stub_cls=lambda d, r: LateBetter(d, WORSE_ROWS, BETTER_ROWS),
+              queries=["job album", "catalognumber"], search_seconds=60)
+assert run.job["state"] == "done" and run.imported, run.job
+assert [q for q, _t, _l in run.stub.searches] == ["Job Album", "CAT-1"], \
+    run.stub.searches
+# The job started the folder it could READ: that enqueue went out at t≈5, long
+# before the better copy's search would have ended at t=30.
+_enq = run.stub.at("enqueue")
+assert _enq and _enq[0][0] < 30, run.stub.journal
+assert all(e[2] == "peer" for e in _enq), run.stub.journal
+# ...and nothing already started was cancelled for the marginally better copy:
+# its SEARCH was dropped at slskd (never waited out), its files were never
+# asked for, and the import is the folder whose transfer had started.
+assert run.stub.cancelled_searches == ["sid-2"], run.stub.cancelled_searches
+assert run.stub.cancelled == [], run.stub.cancelled
+assert not any("Better" in f for f in run.submitted()), run.submitted()
+assert os.path.basename(run.imported[-1]) == "Album", run.imported
+# ONE window was spent on the configured templates: the job did not go back for
+# the better copy after its own transfer had started.
+assert len(run.stub.searches) == 2 and len(run.stub.at("search")) == 2, \
+    run.stub.journal
+assert not any("top-up: re-reading" in e["msg"] for e in run.job["log"]), run.job["log"]
+
+# (d) TWO releases at once: one job's transfer in flight — a peer that has the
+#     album but keeps us in slskd's queue — must not hold the other release's
+#     SEARCH. Driven through the real `start_job` (their own threads, their own
+#     slskd calls), with the stub journaling the order of everything that
+#     happened.
+print("== two releases: a queued transfer never holds another release's search ==")
+
+
+def two_track_rows(user, folder, *, size=0, slot=True, queue=0, speed=1_000_000):
+    """A complete 2-track DIGITAL folder (no .log gate) with the peer facts
+    that decide its score. `size` is what the search advertises for each file;
+    0 means "the peer stated no size", which the wait accepts off disk."""
+    out = []
+    for name, length in (("01 - Alpha.flac", 200.0), ("02 - Beta.flac", 210.0)):
+        r = row(user, f"{folder}/{name}", duration=length)
+        r["size"], r["slot"], r["queue"], r["speed"] = size, slot, queue, speed
+        out.append(r)
+    return out
+
+
+HELD_RELEASE = dict(JOB_RELEASE, id="44444444-5555-6666-7777-888888888888",
+                    title="Held Album", medium_formats=["Digital Media"])
+FAST_RELEASE = dict(JOB_RELEASE, id="55555555-6666-7777-8888-999999999999",
+                    title="Fast Album", medium_formats=["Digital Media"])
+# The held peer is slow AND queued, so its album transfer sits in slskd's queue
+# for its own queue budget (queue x the average file, at its own rate) — the
+# "transfer in flight" the other release must not be held behind.
+HELD_ROWS = two_track_rows("heldpeer", "Music/Held", size=30_000_000, slot=False,
+                           queue=40, speed=100_000)
+FAST_ROWS = two_track_rows("fastpeer", "Music/Fast")
+
+
+class TwoJobsSlsk(AutoSlsk):
+    """AutoSlsk for TWO jobs at once: each search is answered with ITS release's
+    rows (keyed by the query text), the held peer's album transfers stay in
+    slskd's queue, and every call is journaled — so "was the other release's
+    SEARCH running while this job's transfer was still in flight?" is answered
+    from the stub, not from a race in the test."""
+
+    def __init__(self, ddir, held_rows, fast_rows, held="heldpeer"):
+        super().__init__(ddir, [])
+        self.held = held
+        self.rows_by_query = {"held": held_rows, "fast": fast_rows}
+        self.by_sid = {}
+        self.journal = []
+        self.watch_job = 0        # the held job's id
+        self.snapshot = None      # what the FAST job's search saw of it
+
+    def search(self, query, timeout_ms=None, response_limit=0):
+        sid = super().search(query, timeout_ms, response_limit)
+        which = "held" if "held" in str(query).lower() else "fast"
+        self.by_sid[sid] = self.rows_by_query[which]
+        self.journal.append((soulseek_auto.time.time(), "search", which))
+        if which == "fast":
+            st = soulseek_auto.job_state(self.watch_job)
+            self.snapshot = {
+                "held_in_flight": bool(self.queues.get(self.held)),
+                "held_state": st.get("state"),
+                "held_stage": st.get("stage_key"),
+            }
+        return sid
+
+    def search_results(self, sid):
+        return {"state": "Completed", "isComplete": True,
+                "responses": self.by_sid.get(sid, [])}
+
+    def downloads_state(self):
+        state = super().downloads_state()
+        for entry in state:
+            if entry["username"] != self.held:
+                continue
+            for d in entry["directories"]:
+                for f in d["files"]:
+                    f["state"] = "Queued, Remotely"
+        return state
+
+    def enqueue_download(self, username, wanted):
+        self.journal.append((soulseek_auto.time.time(), "enqueue", username))
+        return super().enqueue_download(username, wanted)
+
+
+_two_dir = tempfile.mkdtemp(prefix="mlo-two-jobs-")
+_two_saved = dict(soulseek_auto._jobs)
+_two_saved_order = list(soulseek_auto._order)
+_two_saved_primary, _two_saved_seq = soulseek_auto._primary, soulseek_auto._seq
+_two_saved_job = _snapshot_job()
+_two_saved_time = soulseek_auto.time
+_two_verified, _two_imported, _two_calls = [], [], []
+try:
+    for _r in HELD_ROWS + FAST_ROWS:
+        put_file(_two_dir, *_r["file"].split("/"))
+    _two_stub = TwoJobsSlsk(_two_dir, HELD_ROWS, FAST_ROWS)
+    soulseek_auto.time = FakeClock()
+    with Patch(soulseek_auto,
+               **job_stage_patches(dict(JOB_CFG, soulseek_search_concurrency=3),
+                                   None, _two_verified, _two_imported, _two_calls)), \
+         Patch(soulseek, is_running=_two_stub.is_running, web_up=_two_stub.web_up,
+               server_state=_two_stub.server_state,
+               download_dir=_two_stub.download_dir, search=_two_stub.search,
+               search_results=_two_stub.search_results,
+               cancel_search=_two_stub.cancel_search,
+               enqueue_download=_two_stub.enqueue_download,
+               downloads_state=_two_stub.downloads_state,
+               cancel_downloads=_two_stub.cancel_downloads):
+        _held = soulseek_auto.start_job(release=HELD_RELEASE, queries=["held album"])
+        assert _held.get("ok") and _held.get("job"), _held
+        _held_id = _held["job"]["id"]
+        _two_stub.watch_job = _held_id
+        # Wait (REAL time — these are real threads) until the held job has
+        # really asked slskd for its album and is sitting on the peer's queue.
+        _deadline = real_time.time() + 30
+        while (real_time.time() < _deadline
+               and not _two_stub.queues.get(_two_stub.held)):
+            real_time.sleep(0.001)
+        assert _two_stub.queues.get(_two_stub.held), \
+            "the held job never enqueued its album: " + repr(
+                soulseek_auto.job_state(_held_id))
+        # Only NOW does the other release start, so its search lands while that
+        # transfer is in flight.
+        _fast = soulseek_auto.start_job(release=FAST_RELEASE, queries=["fast album"])
+        assert _fast.get("ok") and _fast.get("job"), _fast
+        _fast_id = _fast["job"]["id"]
+        _deadline = real_time.time() + 60
+        while real_time.time() < _deadline:
+            if soulseek_auto.job_state(_fast_id)["state"] not in ("running", "confirm"):
+                break
+            real_time.sleep(0.005)
+        _fast_state = soulseek_auto.job_state(_fast_id)
+        assert _fast_state["state"] == "done", _fast_state
+        # THE ASK: the second release's search went out, and the first job's
+        # transfer was STILL in flight (in slskd's queue, its own job running)
+        # at that moment.
+        assert _two_stub.snapshot is not None, _two_stub.journal
+        assert _two_stub.snapshot == {"held_in_flight": True,
+                                      "held_state": "running",
+                                      "held_stage": "downloading"}, _two_stub.snapshot
+        # ...and the order the two jobs' calls happened in: the held job's
+        # transfer, then the other release's search, then ITS download.
+        _events = [(k, w) for _t, k, w in _two_stub.journal]
+        assert _events.index(("enqueue", "heldpeer")) \
+            < _events.index(("search", "fast")), _events
+        assert _events.index(("search", "fast")) \
+            < _events.index(("enqueue", "fastpeer")), _events
+        # The other release imported its OWN album, off the SAME fast window
+        # (5000 ms), and the held job never imported anything.
+        assert _two_imported, _two_imported
+        assert os.path.basename(_two_imported[-1]) == "Fast", _two_imported
+        assert not any("Held" in p for p in _two_imported), _two_imported
+        assert [t for q, t, _l in _two_stub.searches if "fast" in q.lower()] == [5000], \
+            _two_stub.searches
+        # The held job is standing down on its own cancel, not left spinning:
+        # the test's own teardown must not outlive the patches.
+        soulseek_auto.cancel(_held_id)
+        _deadline = real_time.time() + 30
+        while real_time.time() < _deadline:
+            if soulseek_auto.job_state(_held_id)["state"] not in ("running", "confirm"):
+                break
+            real_time.sleep(0.005)
+        assert soulseek_auto.job_state(_held_id)["state"] not in ("running", "confirm"), \
+            soulseek_auto.job_state(_held_id)
+finally:
+    with soulseek_auto._lock:
+        soulseek_auto._jobs.clear()
+        soulseek_auto._jobs.update(_two_saved)
+        soulseek_auto._order[:] = _two_saved_order
+        soulseek_auto._primary = _two_saved_primary
+        soulseek_auto._seq = _two_saved_seq
+        soulseek_auto._job.clear()
+        soulseek_auto._job.update(_two_saved_job)
+    soulseek_auto.time = _two_saved_time
+    shutil.rmtree(_two_dir, ignore_errors=True)
 
 print("ok")
 

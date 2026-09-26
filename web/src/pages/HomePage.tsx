@@ -13,6 +13,7 @@ import Segmented from "../components/Segmented";
 import StatsPanel from "../components/StatsPanel";
 import { useI18n } from "../lib/i18n";
 import ArtistAvatar from "../components/ArtistAvatar";
+import ArtistName from "../components/ArtistName";
 import { GRID_SIZE_MIN } from "../lib/fmt";
 import { albumRef } from "../lib/refs";
 import { GRID_SIZES, useGridSize, useSelectMode } from "../lib/libraryView";
@@ -126,7 +127,16 @@ function ArtistShelf({ title, artists }: { title: string; artists?: HomeArtist[]
               coverFile={ar.cover}
               className="h-20 w-20 rounded-full bg-raise overflow-hidden shrink-0"
             />
-            <div className="mt-2 text-sm font-medium truncate w-full">{ar.artist}</div>
+            {/* The card's own name row carries the artist's OWN verdict too
+                (`top_artists[].grade`, passed through from the library row the
+                shelf is built from) — the same dot, from the same rule, that
+                the artist page draws beside the same name. */}
+            <ArtistName
+              name={ar.artist}
+              pass={ar.grade?.pass}
+              className="mt-2 w-full justify-center text-sm font-medium"
+              nameClassName="truncate"
+            />
             <div className="text-[11px] text-zinc-500 tabular-nums">
               {ar.album_count} album{ar.album_count === 1 ? "" : "s"}
               {ar.grade_pct != null && <span> · {Math.round(ar.grade_pct)}%</span>}

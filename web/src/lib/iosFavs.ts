@@ -20,6 +20,11 @@ import { note, shortPath } from "./pbDiag";
  *    app uses, so the same optimistic patch, the same query invalidation, the
  *    same toast rules. The shell deliberately does NOT write a like itself:
  *    one writer, and the star can never disagree with the hearts on screen.
+ *    The event carries the shell's press NUMBER, and a copy of a press this
+ *    hook has already handled is dropped: a press handed to a parked webview is
+ *    queued rather than lost, so the shell re-sends it when the app is next
+ *    active — and two toggles of the one like endpoint land exactly where the
+ *    user started, which is indistinguishable from a star that does nothing.
  *  * the current track, or its liked state, changed → this hook pushes that
  *    state to the shell, which mirrors it onto the OS star's `active` property
  *    ("the user already likes this item", per MediaPlayer's MPFeedbackCommand.h)
@@ -38,7 +43,11 @@ import { note, shortPath } from "./pbDiag";
  *  desktop-class user agent, which is exactly the kind of guess a favourite
  *  should not hang on. */
 
-/** MUST match `LIKE_EVENT` in `desktop/src-tauri/src/ios_like.rs`. */
+/** MUST match `LIKE_EVENT` in `desktop/src-tauri/src/ios_like.rs`. Its payload
+ *  is the shell's press NUMBER: one press can be delivered twice — the original
+ *  hand-over is queued while the web content process is parked, and the shell
+ *  re-sends it the next time the app is active — so the page must be able to
+ *  tell a re-delivery from a second press (see `useIosFavBridge`). */
 const LIKE_EVENT = "mlo-ios-like";
 
 /** The shell command that mirrors the current track's liked state onto the OS
@@ -65,6 +74,14 @@ export function useIosFavBridge(path: string | null | undefined, mbid?: string |
     toggleRef.current = toggle;
   }, [toggle]);
 
+  // The shell's number of the last press this page acted on, so its re-delivery
+  // cannot toggle the same like twice: a press that reached a PARKED webview is
+  // queued rather than dropped, so the original hand-over and the shell's
+  // re-send (`ios_like::refresh`) can both arrive — and two toggles of one
+  // server-side toggle endpoint land exactly where the user started, which
+  // looks like a star that does nothing at all.
+  const handledPress = useRef<number | null>(null);
+
   useEffect(() => {
     if (!IN_TAURI) return;
     let unlisten: (() => void) | undefined;
@@ -75,12 +92,22 @@ export function useIosFavBridge(path: string | null | undefined, mbid?: string |
         // static import would put a Tauri-only module in the browser bundle
         // too, where there is no shell behind it.
         const { listen } = await import("@tauri-apps/api/event");
-        const un = await listen(LIKE_EVENT, () => {
+        const un = await listen<number>(LIKE_EVENT, (event) => {
           // An OS star press that reached the page — the same proof the
           // mediaSession rows carry for the transport buttons, and the only
           // way to tell "the shell never sent it" from "the app got it and
           // the heart did not move".
-          note("iosFavs", { event: "like-press" });
+          //
+          // A payload that is not a number is an older shell's bare ping
+          // (this module's first wire sent none): it is handled, never
+          // de-duplicated, because there is nothing to compare.
+          const press = typeof event.payload === "number" ? event.payload : null;
+          if (press !== null && press === handledPress.current) {
+            note("iosFavs", { event: "like-press-duplicate", press });
+            return;
+          }
+          if (press !== null) handledPress.current = press;
+          note("iosFavs", { event: "like-press", press });
           toggleRef.current();
         });
         // The component can unmount (or StrictMode can remount) while the

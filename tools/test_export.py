@@ -688,6 +688,36 @@ try:
     os.remove(os.path.join(AUD_LIB, "Audit Album.cue"))
 
 
+    # -------------------------------------------- each source is parsed ONCE
+    # The preflight parses every source (the duration / disc tables) and the
+    # worker that exports that path needs the very same parse for its tags — a
+    # video container costs an ffprobe PROCESS per parse, so the second parse
+    # per track was pure waste. A hand-built structure is asked for on purpose:
+    # a SCRIPTED one also probes paths[0] once up front (see the structure
+    # check), which is a different question and not this count. Counted, not
+    # timed.
+    _srcs = {os.path.normcase(os.path.abspath(t)) for t in TRACKS}
+    _opens = []
+    _real_af = exporter.AudioFile
+
+    def _counting_af(path, *a, **kw):
+        _opens.append(os.path.normcase(os.path.abspath(str(path))))
+        return _real_af(path, *a, **kw)
+
+    ONCE_DEST = os.path.join(ROOT, "OnceDest")
+    os.makedirs(ONCE_DEST)
+    try:
+        exporter.AudioFile = _counting_af
+        once = exporter.export_tracks(CFG, TRACKS, ONCE_DEST, codec="copy",
+                                      structure="album", workers=4)
+    finally:
+        exporter.AudioFile = _real_af
+    per_source = [p for p in _opens if p in _srcs]
+    assert once["exported"] == len(TRACKS), once
+    assert len(per_source) == len(TRACKS), (
+        f"{len(per_source)} parses of {len(TRACKS)} sources — every source is "
+        "parsed once per export: the preflight's parse is handed to the worker")
+
     # ------------------------------------------------------------ refusal
     try:
         exporter.export_tracks(CFG, [one], LIB, codec="copy")

@@ -475,19 +475,21 @@ assert all(r[3]["status"] == "imported" for r in progress_rows), progress_rows
 # identity its lookup reads) and joined before the chain. One frame for the
 # pair, because that is what it is: two steps on one worker, in their own
 # order (`imports._files_step`).
-PHASES = ["Looking up links…", "Fetching genres…",
-          "Fetching metadata and cover art…", "Fetching advisories…",
-          "Checking instrumentals…"]
-labels = [row[2] for row in hook_rows]
-assert all(labels.count(p) == 2 for p in PHASES), labels
-firsts = [labels.index(p) for p in PHASES]
-assert firsts == sorted(firsts), list(zip(PHASES, firsts))
-# …and a phase frame says only WHERE the import is: no count and no step pair,
-# so the wizard's strip draws it as an indeterminate bar under the phase's own
-# name rather than as a percentage of something — the pair belongs to a chain
-# that has actually started (tools/test_chain_bar.py pins both halves).
-phase_rows = [row for row in hook_rows if row[2] in PHASES]
-assert all(row[0] == 0 and row[1] == 0 and row[3] is None for row in phase_rows), phase_rows
+# A phase frame says what this import is DOING, so an import with nothing to do
+# publishes none: this fixture's config runs no chain and switches every network
+# step off (links, metadata, cover art, advisories, instrumentals), and the
+# albums carry no MusicBrainz identity for the release-identity or genre steps
+# to work from — so there is no step to announce, and the strip must not be told
+# that there is (the owner's report: a step that is a no-op for this album, or a
+# family that is switched off, must not be published at all). The exact
+# sequences a fixture that DOES have work publishes are pinned in the phase
+# section at the end of this file.
+PHASE_TEXTS = ("Looking up links…", "Stamping the release's identity…",
+               "Fetching genres…", "Settling the digital release…",
+               "Fetching metadata and cover art…", "Fetching advisories…",
+               "Checking instrumentals…")
+phase_rows = [row for row in hook_rows if row[2] in PHASE_TEXTS]
+assert phase_rows == [], phase_rows
 
 # re-running on the album that is already in the library is a no-op move
 again = imports.bulk_import([{"path": out["items"][0]["album_path"]}], CFG)
@@ -944,7 +946,7 @@ try:
 
     dropped = imports.drop_arrived_values(album, ARRIVED_CFG, [13])
     assert dropped == {"checked": 1, "failed": 0, "lyrics": 1, "genre": 1,
-                       "advisory": 1, "cover": 1}, dropped
+                       "advisory": 1, "cover": 1, "alias": 0}, dropped
     af = arrived(track)
     assert not af.has_tag("GENRE"), af.all_tags()
     assert not af.has_tag("ITUNESADVISORY"), af.all_tags()
@@ -1033,7 +1035,7 @@ try:
         imports.cover_candidates = _real_candidates
     af = arrived(wired_track)
     assert res["dropped"] == {"checked": 1, "failed": 0, "lyrics": 0, "genre": 1,
-                              "advisory": 0, "cover": 1}, res["dropped"]
+                              "advisory": 0, "cover": 1, "alias": 0}, res["dropped"]
     assert af.get_tag("GENRE") == "Rock; Shoegaze", af.get_tag("GENRE")
     assert af.embedded_pictures() == [], af.embedded_pictures()
     assert "peer lyric" in (af.get_lyrics() or ""), af.get_lyrics()
@@ -1129,7 +1131,8 @@ try:
     # WHAT ARRIVED went first, all three families of it (the cover switch is
     # off, so the peer's art is left where it is — nobody claimed that family)
     assert e2e_res["dropped"] == {"checked": 1, "failed": 0, "lyrics": 1,
-                                  "genre": 1, "advisory": 1, "cover": 0}, e2e_res["dropped"]
+                                  "genre": 1, "advisory": 1, "cover": 0,
+                                  "alias": 0}, e2e_res["dropped"]
     af = arrived(e2e_track)
     # …and each one is now the IMPORT's: the fetched lyric (the sidecar it
     # arrived with was replaced with the embedded tag the format asks for), the
@@ -1710,3 +1713,304 @@ assert not mlo_paths.load_pending(landed_dir), \
     "the framework marker is cleared by the import that filled the album"
 shutil.rmtree(IDENT_MF, ignore_errors=True)
 print("release identity: all assertions passed")
+
+# --------------------------------------------------------------------------- #
+# The phases an import publishes: what THIS album is having done to it
+# --------------------------------------------------------------------------- #
+print("== the import's published phases ==")
+# The owner's ask: the step display must make sense and be up to date. A phase
+# frame is the import's readout BEFORE its first script, so it names work that
+# is really about to happen to THIS album — a step that is a no-op for it (a CD
+# rip has nothing digital to settle), a family that is switched off (links,
+# metadata, cover art, advisories, instrumentals) or a decision the album states
+# nothing for (no release identity to stamp, no genre source to ask) is not
+# announced at all. Asserted as the EXACT sequence, in order, because "which
+# frames" is the whole contract — a count is satisfied by any producer that
+# happens to publish as many.
+PHASE_MF = os.path.join(ROOT, "phase_music")
+os.makedirs(PHASE_MF, exist_ok=True)
+PHASE_CFG = {"music_folder": PHASE_MF, "import_auto_scripts": True,
+             "import_scripts": [4], "advisory_auto_fetch": True,
+             "instrumental_auto_fetch": True, "metadata_auto_fetch": False,
+             "cover_auto_fetch": False, "rym_links_auto": False,
+             "genre_autofill": True, "import_autonomy": "automatic"}
+PHASE_RELEASE = {"id": "phase-rel-1", "release_group_id": "phase-rg-1",
+                 "title": "Phase Album", "date": "1996-06-11",
+                 "medium_formats": ["Digital Media"],
+                 "artists": [{"name": "Phase Artist", "mbid": "phase-art-1"}],
+                 "media": [{"disc": 1, "position": 1, "title": "Track One",
+                            "recording_mbid": "phase-rec-1", "video": False}]}
+_phase_rows = []
+_prev_hook = getattr(_stats, "progress_hook", None)
+
+
+def _phase_hook(done, total, desc, steps=None):
+    _phase_rows.append((desc, done, total, steps))
+
+
+# The two writers the chain's own steps would reach are stubbed: this suite
+# runs offline, and what is under test is WHICH phase is announced, not what the
+# fetchers do (tools/test_import_pipeline.py's own advisory section covers them
+# then, with the same stubs).
+_saved_fetch_adv, _saved_fetch_inst = imports.fetch_advisories, imports.fetch_instrumentals
+imports.fetch_advisories = lambda paths, cfg=None: {"updated": 0}
+imports.fetch_instrumentals = lambda paths, cfg=None: {"written": 0}
+# …and the chain itself, so no script really runs here: the fixture's chain is
+# what makes the advisory and instrumental phases real (they are gated on a
+# chain that reads what they write), and a grade run would take a minute of this
+# suite's time without telling it anything about phases.
+_saved_chain_fn_phases = script_runners.run_chain
+script_runners.run_chain = lambda cfg, ids, **kw: [
+    {"id": sid, "label": f"Script {sid}", "stats": {}, "error": None}
+    for sid in ids]
+
+
+def phase_album(name):
+    for i in (1, 2):
+        make_wav(os.path.join(PHASE_MF, name, f"{i:02d} - track.wav"))
+    return os.path.join(PHASE_MF, name)
+
+
+def published_phases(album, cfg, release=None):
+    """The PHASE frames one import published, in order.
+
+    The chain's own frames ("Grade", "#2/4 Key & BPM", …) travel on the same
+    hook, so only the vocabulary `imports._phase` publishes is read back:
+    `PHASE_TEXTS` is that list, one entry per step in `_finish_album`.
+    """
+    _phase_rows.clear()
+    _stats.progress_hook = _phase_hook
+    try:
+        imports.finish_album(album, dict(cfg), release=release)
+    finally:
+        _stats.progress_hook = _prev_hook
+    return [row[0] for row in _phase_rows if row[0] in PHASE_TEXTS]
+
+
+try:
+    # (1) an album with a release and a genre source: exactly the steps it
+    #     really has, in the order they run — and nothing else (every other
+    #     family is off in PHASE_CFG, and this fixture's tracks state no MEDIA,
+    #     so the digital-release settling has nothing to settle either).
+    _got = published_phases(phase_album("Phase One"), PHASE_CFG, PHASE_RELEASE)
+    assert _got == ["Stamping the release's identity…", "Fetching genres…",
+                    "Fetching advisories…", "Checking instrumentals…"], _got
+    # (2) …and a GENRE-LESS config skips the genre frame (the owner's example),
+    #     keeping every other step exactly where it was.
+    _got = published_phases(phase_album("Phase Two"),
+                            dict(PHASE_CFG, genre_autofill=False), PHASE_RELEASE)
+    assert _got == ["Stamping the release's identity…",
+                    "Fetching advisories…", "Checking instrumentals…"], _got
+    # (3) an album the app knows nothing about: no release, no MusicBrainz
+    #     identity, no chain — no step to announce at all.
+    _got = published_phases(phase_album("Phase Three"),
+                            dict(PHASE_CFG, import_auto_scripts=False,
+                                 import_scripts=[]))
+    assert _got == [], _got
+    # (4) …and a phase frame says only WHERE the import is: no count and no step
+    #     pair, so the strip draws an indeterminate bar under the phase's name
+    #     rather than a percentage of something. The pair belongs to a chain
+    #     that has actually started (tools/test_chain_bar.py pins both halves).
+    _phase_rows.clear()
+    _stats.progress_hook = _phase_hook
+    try:
+        imports.finish_album(phase_album("Phase Four"), dict(PHASE_CFG),
+                             release=PHASE_RELEASE)
+    finally:
+        _stats.progress_hook = _prev_hook
+    _phase_frames = [row for row in _phase_rows if row[0] in PHASE_TEXTS]
+    assert _phase_frames, _phase_rows
+    assert all(row[1] == 0 and row[2] == 0 and row[3] is None
+               for row in _phase_frames), _phase_frames
+finally:
+    imports.fetch_advisories, imports.fetch_instrumentals = _saved_fetch_adv, _saved_fetch_inst
+    script_runners.run_chain = _saved_chain_fn_phases
+    shutil.rmtree(PHASE_MF, ignore_errors=True)
+print("phases: all assertions passed")
+
+# --------------------------------------------------------------------------- #
+# The import's own completion frame names the ALBUM, not the folder
+# --------------------------------------------------------------------------- #
+# `imports._announce_import` is the ONE entry/exit every import path announces
+# through, and it used to name the album by `os.path.basename(path)`: a
+# downloaded folder is a peer's spelling, a bare UUID or the title alone, so the
+# frame named nothing a user could place. It reads the album's own tags now.
+print("== the import's own notices ==")
+from server import events as _events  # noqa: E402
+from mlo.audio import AudioFile as _AudioFile  # noqa: E402
+
+NOTICE_DIR = os.path.join(ROOT, "notice_music")
+os.makedirs(NOTICE_DIR, exist_ok=True)
+# A real tagged FLAC under a folder named like a bare UUID — the shape a
+# downloaded folder really has once the app has named nothing.
+_notice_folder = os.path.join(NOTICE_DIR, "5be1a1e2-0f0f-4a1b-9c3d-deadbeef0000")
+notice_track = peer_flac(_notice_folder)
+from mutagen.flac import FLAC as _NoticeFLAC  # noqa: E402
+
+_notice_file = _NoticeFLAC(notice_track)
+_notice_file["DATE"] = "1996-06-11"
+_notice_file.save()
+_notice_said = []
+_real_emit_fn = _events.emit
+_events.emit = lambda kind, title, body, data=None, **kw: _notice_said.append(
+    (kind, title, body, data))
+try:
+    imports._announce_import("import_started", _notice_folder, cfg=IDENT_CFG)
+    imports._announce_import("import_done", _notice_folder,
+                             {"chained": True, "scripts": [1], "errors": [],
+                              "chain": [1]}, cfg=IDENT_CFG)
+finally:
+    _events.emit = _real_emit_fn
+assert [row[0] for row in _notice_said] == ["import_started", "import_done"], _notice_said
+assert _notice_said[0][1] == "Importing Test Artist — Peer Album (1996)", _notice_said[0]
+assert _notice_said[1][1] == "Imported Test Artist — Peer Album (1996)", _notice_said[1]
+# …and the identity helper is what both read: the folder is a bare UUID here, so
+# a by-the-folder name would be that UUID.
+assert imports.album_identity_label(_notice_folder) == \
+    "Test Artist — Peer Album (1996)", imports.album_identity_label(_notice_folder)
+shutil.rmtree(NOTICE_DIR, ignore_errors=True)
+print("import notices: all assertions passed")
+
+# --------------------------------------------------------------------------- #
+# The arrived ALIAS tags are the import's to replace (issue #59)
+# --------------------------------------------------------------------------- #
+print("== the arrived aliases ==")
+# `mlo.autotag` writes TITLEALIAS / ARTISTALIAS / ALBUMALIAS from the release
+# the import holds, and it COMPLETES a list rather than replacing it — so the
+# peer's spellings have to go first, exactly like the other four families an
+# import decides. The family is the release-identity stamp's ("links"): a user
+# who kept that family for review keeps the arrived aliases too.
+alias_dir = os.path.join(ROOT, "alias_music")
+os.makedirs(alias_dir, exist_ok=True)
+# The same real-FLAC fixture the arrived-values section builds, so the tags are
+# read back through the app's own tag layer (`arrived`) rather than through a
+# second vocabulary of this test's own.
+alias_track = peer_flac(alias_dir)
+from mutagen.flac import FLAC as _FLAC
+
+_alias_file = _FLAC(alias_track)
+_alias_file["TITLEALIAS"] = "The Peer's Spelling"
+_alias_file["TITLEALIAS-JA"] = "ピアの綴り"
+_alias_file["ARTISTALIAS"] = "Peer Alias"
+_alias_file.save()
+alias_cfg = {"music_folder": alias_dir, "advisory_auto_fetch": False,
+             "cover_auto_fetch": False, "genre_autofill": True}
+alias_dropped = imports.drop_arrived_values(alias_dir, alias_cfg, [])
+# The GENRE the peer shipped goes with them (the import decides that family) and
+# the advisory/cover families are switched off here, so their values stay — the
+# count of the family under test is the one that matters.
+assert alias_dropped == {"checked": 1, "failed": 0, "lyrics": 0, "genre": 1,
+                         "advisory": 0, "cover": 0, "alias": 1}, alias_dropped
+_af = arrived(alias_track)
+assert not _af.has_tag("TITLEALIAS"), _af.all_tags()
+assert _af.get_tag("TITLEALIAS-JA") is None, _af.all_tags()
+assert not _af.has_tag("ARTISTALIAS"), _af.all_tags()
+# …and the family a user kept for review keeps them: nothing is dropped.
+_alias_file = _FLAC(alias_track)
+_alias_file["TITLEALIAS"] = "The Peer's Spelling"
+_alias_file.save()
+kept_dropped = imports.drop_arrived_values(
+    alias_dir, dict(alias_cfg, import_review_families=["links"]), [])
+assert kept_dropped["alias"] == 0, kept_dropped
+assert arrived(alias_track).has_tag("TITLEALIAS"), "a kept family is not emptied"
+shutil.rmtree(alias_dir, ignore_errors=True)
+print("aliases: all assertions passed")
+
+# --------------------------------------------------------------------------- #
+# ONE chain per album, whoever asks second (the owner's "scripts run twice")
+# --------------------------------------------------------------------------- #
+print("== a second import of an album that is already being imported ==")
+# The owner's report: "the scripts in auto-importing seem to be run twice". Two
+# autonomous paths can reach ONE album (a download's own finish and the import
+# queue, a page download and a wish), and the second must not queue behind the
+# first and then run the whole pipeline again — that is the repeat, and both
+# halves of it (the six look-ups and every script) are what the album's second
+# import is refused for. The rule lives in `finish_album` and is about the
+# ALBUM: the only caller allowed to chain an album another import holds is the
+# one holding it (this job's own nested steps).
+import threading as _threading
+
+from server import job_locks as _job_locks
+
+DOUBLE_MF = os.path.join(ROOT, "double_music")
+os.makedirs(DOUBLE_MF, exist_ok=True)
+DOUBLE_CFG = {"music_folder": DOUBLE_MF, "import_auto_scripts": True,
+              "import_scripts": [4], "advisory_auto_fetch": False,
+              "instrumental_auto_fetch": False, "metadata_auto_fetch": False,
+              "cover_auto_fetch": False, "rym_links_auto": False,
+              "genre_autofill": False, "import_autonomy": "automatic"}
+double_album = os.path.join(DOUBLE_MF, "Double Album")
+for _i in (1, 2):
+    make_wav(os.path.join(double_album, f"{_i:02d} - track.wav"))
+
+DOUBLE_CHAINS = []
+DOUBLE_GATE = _threading.Event()
+_saved_chain_fn = script_runners.run_chain
+
+
+def _blocking_chain(cfg, ids, targets=None, force=None, progress=None,
+                    wait=False, timeout=None, final=None):
+    DOUBLE_CHAINS.append(list(ids))
+    if len(DOUBLE_CHAINS) == 1:
+        # hold the first chain open: the second caller must meet a RUNNING
+        # import, which is exactly the moment the rule is about
+        DOUBLE_GATE.wait(20)
+    if final is not None:
+        final[:] = list(targets or [])
+    return [{"id": sid, "label": f"Script {sid}", "stats": {}, "error": None}
+            for sid in ids]
+
+
+script_runners.run_chain = _blocking_chain
+first = {}
+
+
+def _first_import():
+    with _job_locks.holding([double_album], kind="import", label="First import"):
+        first["res"] = imports.finish_album(double_album, dict(DOUBLE_CFG))
+
+
+_thread = _threading.Thread(target=_first_import, name="mlo-double-first",
+                            daemon=True)
+_thread.start()
+_deadline = time.time() + 30
+while time.time() < _deadline and not DOUBLE_CHAINS:
+    time.sleep(0.02)
+assert DOUBLE_CHAINS, "the first import never reached its chain"
+try:
+    # (1) a SECOND AUTONOMOUS IMPORT with a job of its own: it must answer the
+    #     album's state instead of queueing behind the first and then running
+    #     the whole pipeline again. (A caller with NO job identity deliberately
+    #     still waits and then runs — an import must never skip its chain; that
+    #     contract is `tools/test_job_locks.py`'s "a queued import says what it
+    #     waits for".)
+    with _job_locks.holding([], kind="import", label="Second import"):
+        second = imports.finish_album(double_album, dict(DOUBLE_CFG))
+    assert second.get("already_importing") is True, second
+    assert second.get("chained") is False and second.get("scripts") == [], second
+    assert "already importing this album" in str(second.get("note")), second
+    assert len(DOUBLE_CHAINS) == 1, \
+        f"a second import must not start a chain of its own: {DOUBLE_CHAINS}"
+    # (2) …and the BULK queue (the wizard's finish, the page's import) is the
+    #     other path that used to "just re-run the chain" over a library album:
+    #     its row for an album an import is on reports that instead.
+    bulk = imports.bulk_import([{"path": double_album}], dict(DOUBLE_CFG))
+    assert bulk["total"] == 1 and bulk["items"][0]["status"] == "failed", bulk
+    assert bulk["items"][0].get("already_importing") is True, bulk["items"][0]
+    assert "already importing this album" in str(bulk["items"][0]["error"]), \
+        bulk["items"][0]
+    assert len(DOUBLE_CHAINS) == 1, DOUBLE_CHAINS
+finally:
+    DOUBLE_GATE.set()
+    _thread.join(30)
+    script_runners.run_chain = _saved_chain_fn
+assert first["res"].get("chained") is True, first.get("res")
+assert len(DOUBLE_CHAINS) == 1, DOUBLE_CHAINS
+# …and once nothing holds the album, the same bulk row DOES run the chain: the
+# refusal is about an import that is running, never about the album's history.
+_idle = imports.bulk_import([{"path": double_album, "move": False}],
+                            dict(DOUBLE_CFG))
+assert _idle["items"][0].get("chained") is True, _idle["items"][0]
+shutil.rmtree(DOUBLE_MF, ignore_errors=True)
+print("one chain per album: all assertions passed")
+

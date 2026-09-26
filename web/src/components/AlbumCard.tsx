@@ -2,7 +2,7 @@ import { Link } from "react-router-dom";
 import { Play } from "lucide-react";
 import { useStore } from "../store";
 import { statusFor } from "../lib/status";
-import { AdvisoryMark, albumAdvisory, mediaShort, releaseCountries } from "./Badges";
+import { AdvisoryMark, albumAdvisory, mediaSourceLabel, releaseCountries } from "./Badges";
 import { albumTech } from "../lib/fmt";
 import CoverImg from "./CoverImg";
 import FavHeart from "./FavHeart";
@@ -51,6 +51,12 @@ export default function AlbumCard({ al, artistName, selectable, selected, onSele
   const inLibrary = al.owned !== false;
   const artist = artistName ?? al.artist ?? al.album_artist ?? al.path.split(/[\\/]/).slice(0, -1).pop() ?? "";
   const media = al.media || al.meta?.MEDIA;
+  /* The medium AND, for a download, its provenance ("Digital · Bandcamp") —
+   * the same words the album page's own chip prints, built by the same
+   * helper, so a card and the page it opens cannot name one release two ways.
+   * The countries stay their own badge below (one long list wraps inside its
+   * own line instead of stretching the medium). */
+  const mediaLabel = mediaSourceLabel(media, al.source_summary);
   const countries = releaseCountries(al.meta?.RELEASECOUNTRY);
   // The two cover facts that are not the release country: the release's own ADR
   // and the codec/bitrate summary. Read once here because the overlay draws the
@@ -177,14 +183,14 @@ export default function AlbumCard({ al, artistName, selectable, selected, onSele
               `mt-auto` keeps the column on the cover's bottom edge while there
               is room; with none, it shrinks and clips instead of riding up into
               the button. */}
-          {(media || countries.length > 0 || tech) && (
+          {(mediaLabel || countries.length > 0 || tech) && (
             <div className="mt-auto min-h-0 max-w-full overflow-hidden flex flex-col items-start justify-end gap-1 pointer-events-none">
-              {media && (
+              {mediaLabel && (
                 <span
                   className="pointer-events-auto max-w-full break-words text-[9px] font-semibold tracking-wide leading-snug rounded px-1 py-0.5 border border-white/10 bg-black/65 text-zinc-200"
-                  title={`Media: ${media}`}
+                  title={`Media: ${media}${al.source_summary ? ` · Source: ${al.source_summary}` : ""}`}
                 >
-                  {mediaShort(media)}
+                  {mediaLabel}
                 </span>
               )}
               {countries.length > 0 && (

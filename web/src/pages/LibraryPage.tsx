@@ -14,6 +14,7 @@ import {
 } from "../lib/sort.tsx";
 import {
   ColumnResizer, ColumnsMenu, useColumnPrefs, useColumnWidths, useCustomColumns,
+  ColFloorHolder, ALBUM_TRACK_TITLE_FLOOR, TRACK_TITLE_FLOOR, useFittedWidths,
   customColValue, customCols, ALBUM_TRACK_COLS, ALBUM_TRACK_COL_W, ALBUM_TRACK_MIN_W, TABLE_FIT, TAG_COL_W,
   // The track table's own columns, floors and phone folds — shared with the
   // Export page's preview so the two tables cannot drift apart.
@@ -26,6 +27,7 @@ import { albumRef, trackRef, artistRef, entityLinkClick } from "../lib/refs";
 import { fmtTech, fmtDuration, fmtDateCell, originalYear, GRID_SIZE_MIN } from "../lib/fmt";
 import { EmptyState, GradeBadge, MediaChip, AdvisoryMark, CachedMark, PageLoading, PendingMark } from "../components/Badges";
 import ArtistAvatar from "../components/ArtistAvatar";
+import ArtistName from "../components/ArtistName";
 import LockedChip from "../components/LockedChip";
 import { forceDict, loadForceSel } from "../lib/force";
 import Segmented from "../components/Segmented";
@@ -70,10 +72,17 @@ import Popover from "../components/Popover";
  *  that shipped short: its 48 px floor was the DR value's width, while "ADR"
  *  plus the arrow is 41 px — 53 px before the label clears its own cell. */
 const ALBUM_COL_W: Record<string, string> = {
-  // `md:` because below that the phone fold has already dropped the columns
-  // beside it, and the name shares the row with the cover, the chevron and the
-  // row actions — a 220 px floor there would push those off the screen.
-  album: "md:w-[220px]",
+  // 128 px at every width below `md` — a phone keeps this column with the
+  // chevron, the cover and the row's actions, and `md:w-[220px]` alone left it
+  // NOTHING to stand on: measured on the Albums view at 390, the column came
+  // out 13 px and the name 0 px (a name clipped to nothing, which is what the
+  // owner's screenshot shows as a blank album row), and 7 px at 320. The floor
+  // is what the row's own name needs beside those three cells: 40 + 64 + 96 =
+  // 200 px of chrome, so 128 is what a 342 px row has left for the name, and
+  // the table then fits with 14 px to spare instead of overflowing.
+  // From `md` up the wider 220 px floor takes over, where the columns beside
+  // it are back.
+  album: "w-32 md:w-[220px]",
   artist: "w-[116px]",
   year: "w-16",
   // 72, not 64: the header's own label ("TRACKS" at 11 px, tracked out) plus
@@ -123,6 +132,19 @@ const ARTIST_COL_W: Record<string, string> = {
   tracks: "w-[88px]",
   checks: "w-[88px]",
   grade: "w-[112px]",
+};
+
+/** The same four floors as NUMBERS, for the one thing on this page that has to
+ *  do arithmetic with them: `useFittedWidths` needs a stored column's own floor
+ *  in px to know what the reader's widths may spend (see LIBRARY_ARTIST_WIDTHS
+ *  below). They cannot be derived from the class strings above without parsing
+ *  Tailwind, so the pair is kept in lockstep by hand — the check that measures
+ *  the Artists table's floor at a narrow window fails if they drift apart. */
+const ARTIST_COL_FLOOR: Record<string, number> = {
+  albums: 88,
+  tracks: 88,
+  checks: 88,
+  grade: 112,
 };
 
 const ARTIST_COLS: Col[] = [
@@ -378,6 +400,12 @@ export default function LibraryPage() {
   const [albumW, setAlbumW, resetAlbumW] = useColumnWidths("albums");
   const [artistW, setArtistW, resetArtistW] = useColumnWidths("artists");
   const [trackW, setTrackW, resetTrackW] = useColumnWidths("tracks");
+  /* The Artists table's stored widths as the table can show them, and the ref
+   * its scroll wrapper takes: the artists columns' own floors are 596 px, and
+   * the owner's tab drew a scrollbar under a short artist list because four
+   * stored drag widths (each well inside the handle's own range) summed past
+   * the table's box. See useFittedWidths. */
+  const [artistWidths, artistBox] = useFittedWidths(artistW, ARTIST_COL_FLOOR);
 
   // One GET /api/ratings per scope for the whole page (react-query dedupes it
   // across every row, and the star controls share the cache). Declared HERE,
@@ -813,6 +841,30 @@ export default function LibraryPage() {
    * business, and a filter that re-ordered anything would be a second order
    * fighting the column headers. */
   const alphabet = useLibraryAlphabet();
+  // The sidebar's own entry, pressed while the Library is ALREADY open, is a
+  // reset of what this page searches (see App.tsx's `clearSearchOnRePress`:
+  // it empties the shared query box — this page's box edits the same store
+  // value — and fires this event for the toolbar state that lives HERE).
+  // Everything the toolbar narrows the list by but the query is cleared:
+  // the quick preset, the two facets, the A–Z name box and letter, and the
+  // `?filter=` parameter a link can arrive with.
+  const { setName: setAzName, setLetter: setAzLetter } = alphabet;
+  useEffect(() => {
+    const onClear = () => {
+      setPreset("all");
+      setRatingFilter("any");
+      setAdvisoryFilter("any");
+      setAzName("");
+      setAzLetter(null);
+      setSearchParams((p) => {
+        const next = new URLSearchParams(p);
+        next.delete("filter");
+        return next;
+      }, { replace: true });
+    };
+    window.addEventListener("mlo:clear-search", onClear);
+    return () => window.removeEventListener("mlo:clear-search", onClear);
+  }, [setAzName, setAzLetter, setSearchParams]);
   const azNeedle = useMemo(() => foldName(alphabet.name.trim()), [alphabet.name]);
   // "Group by artist" is the grid's and the album table's own toggle, and it
   // leads the name only where those two actually DRAW the headers: in the
@@ -1704,7 +1756,7 @@ export default function LibraryPage() {
       {/* ---------------- Artists table ---------------- */}
       {view === "artists" && (
         <div>
-          <div className="overflow-x-auto">
+          <div className="overflow-x-auto" ref={artistBox}>
             <table className={`${TABLE_FIT} text-sm`}>
               <thead className="border-b border-border">
                 <tr>
@@ -1721,7 +1773,7 @@ export default function LibraryPage() {
                   {ARTIST_COLS.filter((c) => artistCols.includes(c.id)).map((c) => (
                     <SortHeader key={c.id} label={c.label} sort={artistSort} sortKey={c.sortKey} onSort={setArtistSort}
                       className={`relative ${ARTIST_COL_W[c.id] ?? TAG_COL_W}${phoneHide(ARTIST_PHONE_CLS, c.id)}`}
-                      style={artistW[c.id] ? { width: artistW[c.id] } : undefined}>
+                      style={artistWidths[c.id] ? { width: artistWidths[c.id] } : undefined}>
                       <ColumnResizer width={artistW[c.id]} onDrag={(w) => setArtistW(c.id, w)} onReset={() => resetArtistW()} />
                     </SortHeader>
                   ))}
@@ -1777,15 +1829,21 @@ export default function LibraryPage() {
                               was what this table used to print.
                               `truncate` clips a name longer than the column —
                               the title carries the whole one, so the clip is
-                              never silent (the interface checks that). */}
-                          <Link
+                              never silent (the interface checks that).
+                              The shared render puts the artist's OWN grade
+                              beside the name (`grade`, the artist folder's
+                              image/description verdict — server.library now
+                              sends it per row), so this list and the artist
+                              page it opens say the same thing about the same
+                              artist. */}
+                          <ArtistName
                             to={artistRef(a)}
                             onClick={(e) => e.stopPropagation()}
-                            className="font-medium hover:text-accent-soft truncate"
-                            title={a.display_name || a.name}
-                          >
-                            {a.display_name || a.name}
-                          </Link>
+                            name={a.display_name || a.name}
+                            pass={a.grade?.pass}
+                            className="font-medium hover:text-accent-soft"
+                            nameClassName="truncate"
+                          />
                         </div>
                       </td>
                       {artistCols.includes("albums") && (
@@ -1834,6 +1892,7 @@ export default function LibraryPage() {
                     <SortHeader key={c.id} label={c.label} sort={trackSort} sortKey={c.sortKey} onSort={setTrackSort}
                       className={`relative ${TRACK_COL_W[c.id] ?? (c.tag ? TAG_COL_W : "")}${phoneHide(TRACK_PHONE_CLS, c.id)}`}
                       style={trackW[c.id] ? { width: trackW[c.id] } : undefined}>
+                      {c.id === "title" && <ColFloorHolder className={TRACK_TITLE_FLOOR} />}
                       <ColumnResizer width={trackW[c.id]} onDrag={(w) => setTrackW(c.id, w)} onReset={() => resetTrackW()} />
                     </SortHeader>
                     )
@@ -2267,6 +2326,7 @@ function AlbumRowGroup({
                     ) : (
                       <th key={c.id} className={`th relative ${ALBUM_TRACK_COL_W[c.id] ?? TAG_COL_W}${phoneHide(TRACK_PHONE_CLS, c.id)}`} style={trackWidths[c.id] ? { width: trackWidths[c.id] } : undefined}>
                         {c.label}
+                        {c.id === "title" && <ColFloorHolder className={ALBUM_TRACK_TITLE_FLOOR} />}
                         <ColumnResizer width={trackWidths[c.id]} onDrag={(w) => onTrackWidth(c.id, w)} onReset={onResetTrackWidths} />
                       </th>
                     )

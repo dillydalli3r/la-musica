@@ -12,7 +12,7 @@ import type { AuthStatus } from "./api";
 import type { Library as LibraryData } from "./types";
 import type { LucideIcon } from "lucide-react";
 import { albumRef, artistRef, trackRef } from "./lib/refs";
-import { toast, useStore } from "./store";
+import { progressKey, toast, useStore } from "./store";
 import { withAlias } from "./lib/mbtext";
 import CreditsFooter from "./components/Credits";
 import AccountMenu from "./components/AccountMenu";
@@ -90,6 +90,52 @@ import { EmptyState, PendingMark } from "./components/Badges";
  *  re-read: long enough that an import chain's several outcomes cost one
  *  refetch, short enough that the page is live to the eye. */
 const LIVE_LIBRARY_MS = 1500;
+
+/** The tag families a locale alias rides on: the bare key (`TITLEALIAS`), or
+ *  the family with a locale suffix (`TITLEALIAS-ja`) — the form the importer
+ *  writes when the reader's own language has a name for the record. */
+const ALIAS_TAG_FAMILIES = ["TITLEALIAS", "ARTISTALIAS", "ALBUMALIAS"];
+
+/** The event a sidebar re-press fires: one entry, pressed while its page is
+ *  already open, is a RESET of that page's search rather than a navigation.
+ *  The app-wide search value lives in the store (cleared by the caller), but a
+ *  page's OWN toolbar state — the Library's quick presets, its rating/advisory
+ *  facets and its A–Z rail — is local to the page, so it listens for this.
+ *  Named here and in LibraryPage: the two halves of one rule. */
+export const CLEAR_SEARCH_EVENT = "mlo:clear-search";
+
+/** Is the sidebar entry `to` the page already on screen? `end` is the
+ *  NavLink's own matching rule, kept so the reset fires exactly when the link
+ *  renders as active. */
+export function isSameRoute(pathname: string, to: string, end: boolean): boolean {
+  return pathname === to || (!end && pathname.startsWith(`${to}/`));
+}
+
+/** What a sidebar click does besides navigating: nothing, unless the entry
+ *  points at the page already open — then it is the reset, so the app-wide
+ *  search value is emptied here and the page's own toolbar is told to do the
+ *  same (CLEAR_SEARCH_EVENT). The store is read through `getState` on purpose:
+ *  the nav renders once per route and must never re-render for a keystroke. */
+export function clearSearchOnRePress(pathname: string, to: string, end: boolean): void {
+  if (!isSameRoute(pathname, to, end)) return;
+  useStore.getState().setQuery("");
+  window.dispatchEvent(new Event(CLEAR_SEARCH_EVENT));
+}
+
+/** Does any alias value in a row's tag map contain `q` (already lower-cased)?
+ *  The top-bar search reads the same tags the rows carry, so a reader who
+ *  knows a record by its translated name finds it — not only by the canonical
+ *  title the file also has. The map is either a track's `tags` or an album's
+ *  `meta`; both are the same tag map one level apart. */
+function aliasHit(tags: object | null | undefined, q: string): boolean {
+  if (!tags) return false;
+  for (const [key, value] of Object.entries(tags)) {
+    const family = key.toUpperCase();
+    if (!ALIAS_TAG_FAMILIES.some((f) => family === f || family.startsWith(`${f}-`))) continue;
+    if (String(value ?? "").toLowerCase().includes(q)) return true;
+  }
+  return false;
+}
 
 const NAV_GROUPS: { labelKey: MessageKey; items: { to: string; labelKey: MessageKey; icon: LucideIcon; end: boolean }[] }[] = [
   {
@@ -257,14 +303,49 @@ const PROGRESS_SWEEP_MS = 1000;
  *  otherwise leave its bar up forever, so this asks the lock registry instead:
  *  a job the server no longer lists, whose numbers have ALSO stopped moving,
  *  is gone. A job that is merely slow still holds its lock, so a stalled
- *  export keeps its bar. */
+ *  export keeps its bar.
+ *
+ *  The same poll also STARTS bars, which is what makes reloading mid-run
+ *  survivable: the registry carries each job's progress, so a page that loads
+ *  with a run already in flight gets its bar back on the first answer instead
+ *  of waiting for the producer's next frame (see the effect below). */
 function useProgressSweep(count: number) {
   // Mounting the poll here keeps the fallback honest wherever the stack is
   // drawn: same query key, so it is the request the player bar already makes.
-  useJobLocks();
+  const locks = useJobLocks();
   const qc = useQueryClient();
   const prune = useStore((s) => s.pruneProgress);
+  const frame = useStore((s) => s.setProgress);
   const live = count > 0;
+  // A reload used to lose every bar: the stack is fed by live frames alone,
+  // and a run that was already going when the page loaded publishes nothing
+  // until its NEXT frame — a long step can take minutes. The lock registry
+  // carries the same numbers (`progress` on each job), so the poll that prunes
+  // also SEEDS: every job it reports with progress gets its bar back on the
+  // first answer, through the store's own frame action, so there is still one
+  // write path and one key (`progressKey`).
+  useEffect(() => {
+    const jobs = locks.data?.jobs;
+    if (!jobs) return;
+    const have = useStore.getState().progresses;
+    for (const j of jobs) {
+      const p = j.progress;
+      if (!p) continue;
+      // A live frame is the fresher number while frames keep coming; this
+      // fills the hole a reload leaves (and names a job whose first frame has
+      // not landed yet).
+      if (have[progressKey({ job: j.job })]) continue;
+      frame({
+        job: j.job,
+        kind: j.kind,
+        label: j.label,
+        done: p.done ?? 0,
+        total: p.total ?? 0,
+        desc: p.text ?? "",
+        steps: p.steps ?? undefined,
+      });
+    }
+  }, [locks.data, frame]);
   useEffect(() => {
     if (!live) return;
     const tick = window.setInterval(() => {
@@ -303,7 +384,11 @@ function LiveProgress() {
   useProgressSweep(entries.length);
   if (!entries.length) return null;
   return (
-    <div className="absolute right-4 top-full mt-1 z-40 flex flex-col gap-1">
+    // `left-2 … sm:left-auto`: a bar is up to `max-w-md` wide, so anchored only
+    // at `right-4` it hung off the LEFT edge of a phone. Below `sm` it is
+    // pinned to both edges instead (the bar's own row degrades), and from `sm`
+    // up it is the free-floating cluster it always was.
+    <div className="absolute left-2 right-2 sm:left-auto sm:right-4 top-full mt-1 z-40 flex flex-col gap-1">
       <ProgressStack entries={entries} onCancelExport={cancelExport} />
     </div>
   );
@@ -659,13 +744,23 @@ export default function App() {
   const hits = useMemo(() => {
     if (!lib || q.length < 2) return { artists: [], albums: [], tracks: [] };
     const has = (v: string | null | undefined) => (v ?? "").toLowerCase().includes(q);
+    // A row matches its own name OR an alias tag value: the payload keeps
+    // `TITLEALIAS[-locale]` / `ARTISTALIAS[-locale]` / `ALBUMALIAS[-locale]`
+    // beside the canonical one, and a reader typing the name they know means
+    // the same record either way. An ARTIST has tag maps only through its own
+    // albums and their tracks, so those are what it is searched in.
     const albums = lib.artists.flatMap((a) => a.albums);
     return {
-      artists: lib.artists.filter((a) => has(a.display_name) || has(a.name)).slice(0, 4),
-      albums: albums.filter((al) => has(al.meta?.ALBUM)).slice(0, 4),
+      artists: lib.artists
+        .filter((a) =>
+          has(a.display_name) || has(a.name) ||
+          a.albums.some((al) => aliasHit(al.meta, q) || al.tracks.some((t) => aliasHit(t.tags, q)))
+        )
+        .slice(0, 4),
+      albums: albums.filter((al) => has(al.meta?.ALBUM) || aliasHit(al.meta, q)).slice(0, 4),
       tracks: albums
         .flatMap((al) => al.tracks.map((t) => ({ al, t })))
-        .filter(({ t }) => has(t.tags?.TITLE))
+        .filter(({ t }) => has(t.tags?.TITLE) || aliasHit(t.tags, q))
         .slice(0, 5),
     };
   }, [lib, q]);
@@ -968,6 +1063,7 @@ export default function App() {
                 to={to}
                 end={end}
                 title={collapsed ? t(labelKey) : undefined}
+                onClick={() => clearSearchOnRePress(location.pathname, to, end)}
                 className={({ isActive }) =>
                   // Monochrome-style: the active entry is a solid accent block
                   // with contrast text; inactive ones stay quiet. The label
@@ -1013,7 +1109,7 @@ export default function App() {
             role="dialog"
             aria-modal="true"
             aria-label={t("topbar.menu_open")}
-            className="safe-drawer anim-pop fixed left-0 top-0 bottom-0 z-50 w-52 bg-panel border-r border-border p-2 flex flex-col gap-1 overflow-y-auto overscroll-contain md:hidden shadow-2xl"
+            className="safe-drawer anim-pop fixed left-0 top-0 bottom-0 z-50 w-60 max-w-[85vw] bg-panel border-r border-border p-2 flex flex-col gap-1 overflow-y-auto overscroll-contain md:hidden shadow-2xl"
           >
             <div className="flex items-center gap-2 border-b border-border pb-2 mb-1 px-1">
               <img src="/icon.png" alt="la musica" className="h-7 w-7 rounded-md object-cover ring-1 ring-border shadow-sm" />
@@ -1038,7 +1134,10 @@ export default function App() {
                     key={to}
                     to={to}
                     end={end}
-                    onClick={() => setNavOpen(false)}
+                    onClick={() => {
+                      clearSearchOnRePress(location.pathname, to, end);
+                      setNavOpen(false);
+                    }}
                     className={({ isActive }) =>
                       `nav-link flex items-center gap-2.5 rounded-lg px-3 py-3 text-sm border ${
                         isActive
@@ -1051,7 +1150,13 @@ export default function App() {
                       <Icon className="h-4 w-4 shrink-0" />
                       {to === "/soulseek" && <SlskIconDot dot={slskDot} />}
                     </span>
-                    <span className="whitespace-nowrap">{t(labelKey)}</span>
+                    {/* Wrapping, not nowrap: a translation is longer than the
+                        English label it was written beside ("Now playing" is
+                        two words, "En lecture" or a German compound is not)
+                        and a nowrap label in a 208 px drawer clipped the very
+                        words the rail exists to say. The drawer scrolls, so an
+                        extra line costs nothing. */}
+                    <span className="min-w-0 break-words">{t(labelKey)}</span>
                   </NavLink>
                 ))}
               </div>
@@ -1107,7 +1212,7 @@ export default function App() {
               the title both say which mode is active, so a clipped option
               label is never the only clue. */}
           <select
-            className="input tap-hit h-9 w-[5.5rem] sm:w-[7.5rem] shrink-0 !py-0 !px-2 text-[11px] sm:text-xs !bg-panel/60 backdrop-blur cursor-pointer pointer-events-auto"
+            className="input tap-hit h-9 w-[4.5rem] sm:w-[7.5rem] shrink-0 !py-0 !px-2 text-[11px] sm:text-xs !bg-panel/60 backdrop-blur cursor-pointer pointer-events-auto"
             aria-label={t("topbar.search_source")}
             title={source === "mb" ? t("topbar.search_mb_hint") : t("topbar.search_local_hint")}
             value={source}
@@ -1116,11 +1221,17 @@ export default function App() {
             <option value="local">{t("topbar.search_local")}</option>
             <option value="mb">{t("topbar.search_mb")}</option>
           </select>
-          {/* the search input spans the rest of the bar. `.search-field` is a
-              query container: index.css drops the magnifier's inset when the
-              field itself gets too narrow to say anything (phone widths, and
-              any app zoom — see the rule). */}
-          <div className="search-field relative flex-1 pointer-events-auto">
+          {/* the search input spans the rest of the bar, and COLLAPSES when the
+              bar runs out: `min-w-0` is what lets a flex item shrink below its
+              own content's width, and an input's content width is a 20-char
+              default field — ~150 px the row would otherwise be forced to
+              hold beside four 36 px icons on a 320 px screen. The bar's
+              priority is the other way round: the icons keep their box, the
+              field takes whatever is left. `.search-field` is a query
+              container: index.css drops the magnifier's inset when the field
+              itself gets too narrow to say anything (phone widths, and any app
+              zoom — see the rule). */}
+          <div className="search-field relative flex-1 min-w-0 pointer-events-auto">
             {/* Above the input, not under it: the input paints its own
                 translucent panel background and comes LATER in the DOM, so a
                 positioned icon with no z-index sat behind it — the field then

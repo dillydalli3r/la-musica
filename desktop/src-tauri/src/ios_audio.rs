@@ -132,14 +132,28 @@
 //!   the one transition that also re-takes the CATEGORY — the audio server
 //!   restarted, everything must be configured from scratch, and nothing is
 //!   playing into the session at that moment (the reset is what stopped it).
+//!   Both of those transitions also RELEASE the keep-alive's player
+//!   (`platform_release_keep_alive`): iOS stopped this process's render when it
+//!   took the session, and a handle to a player the OS has discarded is worse
+//!   than none — `start_keep_alive` refuses to build one while a player is
+//!   stored, so the app would render nothing again for the rest of its life and
+//!   be suspended the next time it went to the background. The render is
+//!   rebuilt where it belongs: an interruption ending with `ShouldResume` and
+//!   the media server's reset re-render if the app is backgrounded AND the web
+//!   player is still playing.
 //! * The category comes from the framework's own exported constant rather than
 //!   a copied string, and AVFAudio is linked explicitly: `objc_getClass` only
 //!   finds a class whose framework is LOADED.
 //! * No category options, deliberately: `MixWithOthers` would let the music play
 //!   over whatever else the phone is doing, and a player is not a sound effect.
 //! * A session that will not take the category — or will not activate — is
-//!   logged, never fatal. The same rule as the star: nothing about the OS's
-//!   audio furniture is worth the app, which still plays while it is in front.
+//!   logged, never fatal, and RECORDED: the app's own state page (R289) carries
+//!   `session_category_taken` and `session_activate_last`, because "the session
+//!   is not there at all", "it refused `playback`" and "it refused to activate"
+//!   are three different bugs that the owner's reports cannot tell apart, and
+//!   the session's active bit has no public getter to read instead. The same
+//!   rule as the star: nothing about the OS's audio furniture is worth the app,
+//!   which still plays while it is in front.
 //! * Every notification name and user-info key comes from the framework's own
 //!   exported symbol, for the same reason as the category: the string's value
 //!   is an implementation detail, the symbol is what Apple documents.
@@ -164,7 +178,7 @@
 
 use std::cell::RefCell;
 use std::ptr::NonNull;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU8, Ordering};
 
 use block2::{DynBlock, RcBlock};
 use objc2::msg_send;
@@ -231,6 +245,39 @@ static PLAYING: AtomicBool = AtomicBool::new(false);
 /// Whether the app is in the background. Written by the two app-state
 /// notifications, read by the keep-alive below.
 static IN_BACKGROUND: AtomicBool = AtomicBool::new(false);
+
+/// What the session's two write calls last answered, as `state` prints them:
+/// `NEVER_ASKED` until something asked, then `ACCEPTED` or `REFUSED`.
+///
+/// Both calls answer with a BOOL, and until now that answer only ever reached
+/// `eprintln!` — a log on a development box and a black hole on a phone.
+/// "`AVAudioSession` could not be taken at all", "the session would not take
+/// the category" and "the session would not activate" are three different bugs
+/// (the owner's reports cannot tell them apart), and these two records are what
+/// makes them answerable from the app's own state page (R289).
+static CATEGORY_ANSWER: AtomicU8 = AtomicU8::new(NEVER_ASKED);
+static ACTIVATE_ANSWER: AtomicU8 = AtomicU8::new(NEVER_ASKED);
+
+/// The three values `CATEGORY_ANSWER` and `ACTIVATE_ANSWER` take.
+const NEVER_ASKED: u8 = 0;
+const ACCEPTED: u8 = 1;
+const REFUSED: u8 = 2;
+
+/// How many times the platform has taken this process's own render away — an
+/// interruption starting, or the audio server restarting (the two callers of
+/// `platform_release_keep_alive`). The keep-alive is rebuilt at the next
+/// transition, so a rising count beside `keep_alive_running: yes` is this
+/// module working; a rising count beside `keep_alive_running: no` while the app
+/// is backgrounded and the web player says it is playing is the transition that
+/// never came.
+static PLATFORM_STOPS: AtomicU32 = AtomicU32::new(0);
+
+/// Whether the app-process heartbeat is actually ticking: `start_heartbeat`
+/// sets it when the runtime handed back a timer. Without it
+/// `app_process_worst_gap_s` is 0.0 because NOTHING MEASURED, which reads
+/// exactly like "this process was never frozen" — the one distinction that row
+/// exists to make (R289).
+static HEARTBEAT: AtomicBool = AtomicBool::new(false);
 
 /// Frames of silence the keep-alive loops: 0.5 s of 16-bit mono at 44.1 kHz.
 /// The player loops it (`numberOfLoops = -1`), so the buffer only has to be
@@ -308,14 +355,28 @@ fn start_heartbeat() {
     let block: &DynBlock<dyn Fn(NonNull<AnyObject>) + 'static> = &block;
     // SAFETY: a live NSTimer class, and `scheduledTimerWithTimeInterval:repeats:
     // block:` is the documented factory; 1.0 s, repeating, with the block above.
-    let _timer: Option<Retained<AnyObject>> = unsafe {
+    let timer: Option<Retained<AnyObject>> = unsafe {
         msg_send![class, scheduledTimerWithTimeInterval: 1.0f64, repeats: true, block: block]
     };
+    // The readout's `app_heartbeat` row: a runtime that refused the timer must
+    // not make `app_process_worst_gap_s` read as "never frozen" (see
+    // `HEARTBEAT`).
+    HEARTBEAT.store(timer.is_some(), Ordering::SeqCst);
 }
 
 /// "yes"/"no" for the readout below (`state`).
 fn yesno(value: bool) -> String {
     if value { "yes".to_string() } else { "no".to_string() }
+}
+
+/// The word for one of the session's two recorded answers (`CATEGORY_ANSWER`,
+/// `ACTIVATE_ANSWER`) in the readout.
+fn answer(record: u8) -> String {
+    match record {
+        ACCEPTED => "accepted".into(),
+        REFUSED => "refused".into(),
+        _ => "never asked".into(),
+    }
 }
 
 /// The process-wide `AVAudioSession`, or `None` when this process has none at
@@ -344,6 +405,7 @@ fn take_category(session: &AnyObject) -> bool {
             error: None::<&mut AnyObject>
         ]
     };
+    CATEGORY_ANSWER.store(if categorised { ACCEPTED } else { REFUSED }, Ordering::SeqCst);
     if !categorised {
         eprintln!(
             "[mlo-desktop] the iOS audio session would not take the playback \
@@ -360,14 +422,16 @@ fn activate(session: &AnyObject) -> bool {
     // documented activation call, `active` is the BOOL it takes and `options`
     // is an `AVAudioSessionSetActiveOptions` bitset — none of them, since this
     // app never hands the session back.
-    unsafe {
+    let activated: bool = unsafe {
         msg_send![
             session,
             setActive: true,
             withOptions: 0usize,
             error: None::<&mut AnyObject>
         ]
-    }
+    };
+    ACTIVATE_ANSWER.store(if activated { ACCEPTED } else { REFUSED }, Ordering::SeqCst);
+    activated
 }
 
 /// Put the session back the way a playing app needs it, if the app is playing.
@@ -437,9 +501,22 @@ pub fn state() -> Vec<(String, String)> {
         ("app_in_background".into(), yesno(IN_BACKGROUND.load(Ordering::SeqCst))),
         ("keep_alive_running".into(), yesno(running)),
         ("keep_alive_error".into(), error.unwrap_or_else(|| "none".into())),
-        // This process's own worst freeze. "0.0" means it was never away long
-        // enough to matter; anything in the seconds is iOS having suspended the
-        // app — the exact claim no development box can check for us.
+        // Whether the platform has taken this process's own render away, and
+        // how often: the answer to "the keep-alive was running a minute ago
+        // and the music still stopped" (see `PLATFORM_STOPS`).
+        ("keep_alive_platform_stops".into(), PLATFORM_STOPS.load(Ordering::SeqCst).to_string()),
+        // What the session's two write calls answered. These are the first
+        // three questions a report about this module asks — is there a session,
+        // did it take `playback`, and is it active — and the session's ACTIVE
+        // bit has no public getter, so the answer this process got when it
+        // asked is the only honest form of it.
+        ("session_category_taken".into(), answer(CATEGORY_ANSWER.load(Ordering::SeqCst))),
+        ("session_activate_last".into(), answer(ACTIVATE_ANSWER.load(Ordering::SeqCst))),
+        // This process's own worst freeze — and whether anything measured it at
+        // all. "0.0" means it was never away long enough to matter; anything in
+        // the seconds is iOS having suspended the app — the exact claim no
+        // development box can check for us.
+        ("app_heartbeat".into(), if HEARTBEAT.load(Ordering::SeqCst) { "ticking" } else { "missing (worst gap unmeasured)" }.to_string()),
         ("app_process_worst_gap_s".into(), APP_HEARTBEAT.with(|slot| {
             format!("{:.1}", slot.borrow().worst_gap_ms as f64 / 1000.0)
         })),
@@ -600,15 +677,45 @@ fn start_keep_alive() {
 /// Stop the keep-alive. Idempotent, and the only place the player is released —
 /// dropping the last reference stops it, and `stop` is called first so the
 /// stop is explicit rather than a side effect of the release.
-fn stop_keep_alive() {
+///
+/// Answers whether a player was actually there to release, which is what
+/// `platform_release_keep_alive` counts for the readout.
+fn stop_keep_alive() -> bool {
     KEEP_ALIVE.with(|slot| {
         if let Some(player) = slot.borrow_mut().player.take() {
             // SAFETY: a live AVAudioPlayer; `stop` is the documented call.
             unsafe {
                 let _: () = msg_send![&*player, stop];
             }
+            true
+        } else {
+            false
         }
-    });
+    })
+}
+
+/// The platform has taken this process's own render away, and what it silenced
+/// is DEAD: an interruption starting (iOS has stopped the app's audio) or the
+/// audio server restarting (Apple: every audio object must be recreated).
+///
+/// Both transitions used to leave `KEEP_ALIVE.player` holding a player the OS
+/// had already discarded, and that is a trap rather than a leak:
+/// `start_keep_alive` refuses to build one while a player is stored, so after
+/// the FIRST interruption this process rendered nothing again for the rest of
+/// the app's life. The app then has no audio of its own at exactly the moment
+/// iOS asks "is this app playing?", and the suspension takes the music with it
+/// — the owner's *"audio just cuts out after tabbing out of the app"*, arriving
+/// one phone call later and looking for all the world like a different bug.
+///
+/// So the slot is emptied, and the count of these teardowns is published: the
+/// rebuild itself belongs to whatever transition follows (an interruption
+/// ending with `ShouldResume`, the media server's reset, the app becoming
+/// active), and starting a render into a session that belongs to a phone call
+/// is the interruption this module exists to avoid.
+fn platform_release_keep_alive() {
+    if stop_keep_alive() {
+        PLATFORM_STOPS.fetch_add(1, Ordering::SeqCst);
+    }
 }
 
 /// Render silence of this process's own exactly while both halves of the
@@ -692,41 +799,57 @@ fn user_info_usize(notification: &AnyObject, key: &NSString) -> Option<usize> {
 
 /// An interruption: iOS taking the session (a call, an alarm, another app).
 ///
-/// `Began` needs nothing done — iOS has already stopped the sound, and the
-/// webview's own element fires `pause`, which is what clears the player's state
-/// through the store (and, over the bridge, this module's `PLAYING`). That is
-/// deliberately not duplicated here: the shell's record of what the WEB wanted
-/// is only ever written by the web.
+/// `Began` needs nothing done to the SESSION — iOS has already stopped the
+/// sound, and the webview's own element fires `pause`, which is what clears the
+/// player's state through the store (and, over the bridge, this module's
+/// `PLAYING`). That is deliberately not duplicated here: the shell's record of
+/// what the WEB wanted is only ever written by the web. What it does need is
+/// the keep-alive's dead player released (`platform_release_keep_alive`) —
+/// iOS has silenced this process's render, and holding the handle would stop it
+/// from ever being rebuilt.
 ///
 /// `Ended` re-asserts only when iOS says `ShouldResume`. Without that option
 /// the session belongs to whatever took it, and the next press of play is what
-/// takes it back (see `set_playing`).
+/// takes it back (see `set_playing`). With it, the keep-alive is re-rendered in
+/// the same breath: the web player's `playing` never changed across the
+/// interruption — iOS paused the AUDIO, not the page's idea of it — so no
+/// `set_playback_active` is coming to start it again, and a backgrounded app
+/// with no render of its own is suspended (R288).
 fn on_interruption(notification: &AnyObject) {
     let began = user_info_usize(notification, unsafe { AVAudioSessionInterruptionTypeKey })
         .is_some_and(|kind| kind == INTERRUPTION_BEGAN);
     if began {
+        platform_release_keep_alive();
         return;
     }
     let may_resume = user_info_usize(notification, unsafe { AVAudioSessionInterruptionOptionKey })
         .is_some_and(|options| options & SHOULD_RESUME != 0);
     if may_resume {
         reassert();
+        sync_keep_alive();
     }
 }
 
 /// The audio server restarted. Apple's rule is to reconfigure everything from
 /// scratch, and (when the app wants to keep playing) to start the audio again —
-/// the session object survives, its configuration does not. This is the ONE
-/// place besides setup where the category is taken: nothing is playing into it
-/// at this moment (the reset is what killed the audio), so the call cannot
-/// interrupt anybody's playback. The star's command is re-asserted in the same
-/// breath for the same reason: what the system knew about this app's
-/// now-playing furniture is gone.
+/// the session object survives, its configuration does not, and neither does any
+/// audio object this process was holding. This is the ONE place besides setup
+/// where the category is taken: nothing is playing into it at this moment (the
+/// reset is what killed the audio), so the call cannot interrupt anybody's
+/// playback. The keep-alive's player is released rather than kept (a dead handle
+/// would stop it from ever being rebuilt — see `platform_release_keep_alive`),
+/// and re-rendered if the app is still backgrounded with the web player still
+/// playing, which is exactly the app this rule is about: iOS asked "is this app
+/// playing?" and, without the render, the answer after a reset would be no. The
+/// star's command is re-asserted in the same breath for the same reason: what
+/// the system knew about this app's now-playing furniture is gone.
 fn on_media_services_reset() {
+    platform_release_keep_alive();
     if let Some(session) = session() {
         take_category(&session);
     }
     reassert();
+    sync_keep_alive();
     crate::ios_like::refresh();
 }
 

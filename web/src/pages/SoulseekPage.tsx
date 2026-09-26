@@ -1806,7 +1806,64 @@ const QUEUE_STAGE: Record<string, { label: string; cls: string; icon: typeof Sta
 const SECTIONS_ELSEWHERE = ["in_progress", "background", "needs_attention",
                             "completed", "failed"] as const;
 
-/** One section of the queue payload, or an empty list.
+/** Stages that mean the release's own chain is RUNNING right now: the copy is
+ *  arriving, its files are being checked, or the import (the configured chain
+ *  included) is writing the album. */
+const CHAIN_STAGES: Record<string, true> = {
+  downloading: true, verifying: true, importing: true,
+};
+
+/** EVERY name ONE row can be recognized by: the item's own identity, however
+ *  the payload happens to spell it.
+ *
+ *  A row that names a folder — `path`, a finished download's own folder in the
+ *  download dir, or `album_path`, the album a release is being fetched into —
+ *  is identified by that folder AND by its last segment. The segment is what
+ *  makes a row and the finished download of the SAME album comparable: a release
+ *  still in the pipeline carries no folder at all (its `album_path` is only
+ *  filled once its import ran), while the folder slskd wrote it to is named by
+ *  the album — so the album's own name and the release's title are carried by
+ *  both rows, and the two compare equal. The row's id is always one of its
+ *  names (nothing but that row is that row), and a row with no folder and no
+ *  title falls back to its id alone.
+ *
+ *  Normalized the way an album key is everywhere else (separators, trailing
+ *  slashes, case), so two rows about one folder compare equal however each side
+ *  spelled the path. */
+function itemNames(item: SlskQueueItem): string[] {
+  const out = [item.id];
+  const folder = String(item.path || item.album_path || "")
+    .replace(/\\/g, "/").replace(/\/+$/, "");
+  if (folder) {
+    const whole = folder.toLowerCase();
+    out.push(whole);
+    const leaf = whole.replace(/^.*\//, "").trim();
+    if (leaf && leaf !== whole) out.push(leaf);
+  }
+  const title = String(item.title || "").trim().toLowerCase();
+  if (title) out.push(title);
+  return out;
+}
+
+/** Which rows ONE group draws — the ONE membership predicate every group in
+ *  this page is built from.
+ *
+ *  A row's section in the payload is where its registry filed it, and for the
+ *  groups below that IS the answer (`queued` is split into waiting and looking
+ *  by its own `waiting` flag where the panel renders it). The one boundary the
+ *  payload cannot see is the ITEM: a release being verified and the finished
+ *  download already sitting in the download dir are two rows — a job row and a
+ *  `ready` row — of ONE album, which is the owner's own screenshot (Ænima under
+ *  "In progress" as Verifying… AND under "Completed" with an Import button, two
+ *  rows for one album). An item whose chain is still running belongs to In
+ *  progress ALONE; "Completed" is for a download that really finished.
+ *
+ *  So a finished row is not drawn while a row whose chain is running carries
+ *  one of the same names, and it comes back by itself the moment that chain ends
+ *  and the running row leaves the queue — both sides are re-read on the poll.
+ *  Only a FINISHED section loses rows here, and only to a RUNNING one: a release
+ *  that is merely still searching has landed nothing, so nothing is hidden on
+ *  its account.
  *
  *  `sections?.[name] ?? []` and never `sections?.name.length`: optional
  *  chaining guards the OBJECT, not the key — a payload from a server that
@@ -1818,7 +1875,22 @@ function queueRows(
   sections: SlskQueuePayload["sections"] | undefined,
   name: keyof SlskQueuePayload["sections"],
 ): SlskQueueItem[] {
-  return sections?.[name] ?? [];
+  const rows = sections?.[name] ?? [];
+  if (name !== "completed" || rows.length === 0) return rows;
+  const running = new Set<string>();
+  for (const [section, list] of Object.entries(sections ?? {})) {
+    if (section === "completed") continue;
+    for (const row of list ?? []) {
+      // The chain is running: the copy is arriving, the files are being
+      // checked, the import is writing the album — or the job has settled and
+      // its chain (`chain_running`) is still going.
+      if (!row.chain_running && !CHAIN_STAGES[row.stage]) continue;
+      for (const n of itemNames(row)) running.add(n);
+    }
+  }
+  return running.size === 0
+    ? rows
+    : rows.filter((row) => !itemNames(row).some((n) => running.has(n)));
 }
 
 function QueueProgress({ p, stage }: { p: NonNullable<SlskQueueItem["progress"]>; stage: string }) {
@@ -3198,6 +3270,11 @@ function SharingCard({ running, ownUsername, onBrowse }: {
 
   const autostart: boolean = data?.autostart ?? true;
   const audit = (probed ?? (data?.audit as SlskShareAudit | undefined)) ?? null;
+  // The number the guide below names, in this install's terms: the audit's own
+  // listen port when the payload carries one, else the port the app ships
+  // (server/soulseek.py `_int_setting(cfg, "soulseek_listen_port", 50000)`) —
+  // never a number invented here.
+  const listenPort = Number(audit?.port?.listen_port) || 50000;
   const savedDirs: string[] = data?.dirs ?? [];
   const dirty =
     dirs !== null &&
@@ -3334,6 +3411,88 @@ function SharingCard({ running, ownUsername, onBrowse }: {
           </button>
         </div>
       </div>
+
+      {/* How a peer actually reaches these files — the owner's own ask (issue
+          #68: sharing only worked after PowerShell shenanigans, so the card
+          should say what has to line up). The three links are the ones
+          server/soulseek.py's `_listen_hint` states one install at a time, and
+          the indoor client's blindness is what
+          .github/workflows/share-reachable.yml measures (refused from inside,
+          15 folders / 165 files in 0.09 s from a runner on the internet, issue
+          #57) — this copy must not contradict either. Collapsed by default like
+          every other explanation on this page, and it claims nothing about THIS
+          install: the audit above is the measurement. */}
+      <details className="rounded border border-border/60 bg-raise/40 px-2 py-1.5">
+        <summary className="text-[11px] text-zinc-400 cursor-pointer">
+          How to actually reach the files you share
+        </summary>
+        <div className="mt-1.5 space-y-1.5 text-[10px] text-zinc-500 leading-relaxed">
+          <div className="text-zinc-400">
+            A peer downloads over TWO connections. The first one it opens to the
+            Soulseek server (search, the folder list). For the second — the file
+            itself — it opens a connection back to your listen port{" "}
+            <span className="font-mono">{listenPort}</span>. Three links have to
+            line up before that connection arrives, and each one is a different
+            machine's job:
+          </div>
+          <ol className="list-decimal ml-4 space-y-1">
+            <li>
+              <span className="text-zinc-400">The container publishes the port.</span>{" "}
+              In a container install the host needs a line for it in
+              docker-compose.yml — <span className="font-mono">ports: "{listenPort}:{listenPort}"</span>,
+              with <span className="font-mono">MLO_SOULSEEK_LISTEN_PORT</span>{" "}
+              naming that same number when it is set. Nothing further can reach
+              the daemon until the host has this: a router cannot forward to a
+              container address.
+            </li>
+            <li>
+              <span className="text-zinc-400">The router forwards it.</span> TCP{" "}
+              <span className="font-mono">{listenPort}</span> on the router must
+              point at the HOST's LAN address — the address that machine has on
+              your own network (on a bare-metal install, this machine's own; a
+              router cannot forward to a container address).
+            </li>
+            <li>
+              <span className="text-zinc-400">Your traffic leaves by your ISP line.</span>{" "}
+              The Soulseek server hands peers whatever address your login came
+              from. If a VPN, a Tailscale exit node or a second router carries
+              this host, that address is not your home router's, and a correct
+              forward on that router serves nothing while every other row stays
+              green. Compare it with a "what is my IP" page on the host, or press{" "}
+              <span className="text-zinc-400">Test port</span> on the Settings
+              tab — its Addresses row measures the route this host leaves by.
+            </li>
+          </ol>
+          <div>
+            <span className="text-zinc-400">Your own client cannot check any of this.</span>{" "}
+            From inside your network it dials the router's public address, and a
+            router without NAT hairpinning (reflection) refuses that even while
+            the port is open to the outside — so a refusal here proves nothing
+            either way, which is exactly why the Test port self-connect row can
+            never fail. A real answer needs a peer that is NOT on your network:{" "}
+            <span className="font-mono">.github/workflows/share-reachable.yml</span>{" "}
+            (Actions → "share reachable from the internet" → Run workflow, with
+            your Soulseek username) logs in as a throwaway account on a GitHub
+            runner, browses your share and prints the folder and file counts it
+            got. Measured there: 15 folders / 165 files in 0.09 s from the
+            internet, refused from inside the network (issue #57). An upload in
+            the list below is the same proof from the other end — a peer opened a
+            connection to that port and took a file.
+          </div>
+          <div>
+            <span className="text-zinc-400">Windows firewall.</span> The host's
+            own firewall also has to allow inbound TCP on that port; Windows
+            blocks a new program's listen port by default. In an ADMIN PowerShell
+            on the host:
+            <pre className="mt-1 font-mono text-[10px] text-zinc-400 whitespace-pre-wrap break-all">
+              {`New-NetFirewallRule -DisplayName "la musica slskd listen ${listenPort}" -Direction Inbound -Action Allow -Protocol TCP -LocalPort ${listenPort}`}
+            </pre>
+            The rule goes on the HOST (and in a container install, on it rather
+            than on any container network), and it only opens the door: links 1–3
+            above still have to line up.
+          </div>
+        </div>
+      </details>
 
       {audit && (
         <div className="space-y-1.5">
@@ -5121,6 +5280,62 @@ function StagingPanel() {
   );
 }
 
+/** A path component that is slskd's own bookkeeping rather than a folder or a
+ *  name a person gave anything: the `p2p` level a peer's transfer arrives under,
+ *  and the UUID levels below it (`p2p/<uuid>/<uuid>` — the owner's screenshot,
+ *  two brackets of noise in a history row). */
+const OPAQUE_SEG = /^(p2p|\[?[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\]?)$/i;
+
+/** The fields one upload row of slskd's upload tree carries that this list
+ *  draws. The tree arrives as slskd's own JSON (see server/soulseek.py's
+ *  `uploads_state`), so the names it may spell are written down once, here. */
+interface SharedUpload {
+  username?: string;
+  dir?: string;
+  filename?: string;
+  size?: number;
+  bytesTransferred?: number;
+  state?: string;
+  requestedAt?: string;
+  startedAt?: string;
+  endedAt?: string;
+}
+
+/** What ONE uploaded file's row says: the album it belongs to (falling back to
+ *  the file's own name), the peer, when it went, and its size — never the path
+ *  slskd walks to it.
+ *
+ *  slskd groups uploads per user and per remote directory, and names each file
+ *  by its path below the share root. The album is the LAST real folder in that
+ *  path (a bare file name leaves no folder at all, and then the file names
+ *  itself), the peer is the username with the same opaque levels stripped, and
+ *  the time is whichever stamp slskd published for the transfer — when it
+ *  ended, when it started, or when it was requested. Anything slskd did not say
+ *  is left empty here rather than invented, and the untouched path rides in the
+ *  row's tooltip so the full detail is still one hover away. */
+function sharedUpload(f: SharedUpload) {
+  const segments = (p: unknown) => String(p ?? "").replace(/\\/g, "/")
+    .split("/").map((s) => s.trim()).filter((s) => s && !OPAQUE_SEG.test(s));
+  const inFile = segments(f.filename);
+  const inDir = segments(f.dir);
+  const file = inFile.length ? inFile[inFile.length - 1] : "file";
+  const album = inDir.length ? inDir[inDir.length - 1]
+    : (inFile.length > 1 ? inFile[inFile.length - 2] : "");
+  const raw = String(f.username ?? "");
+  const inPeer = segments(raw);
+  // A username that is nothing but opaque levels is the network's own label for
+  // a peer this app cannot name: say `p2p` rather than print the UUIDs.
+  const peer = inPeer.length ? inPeer[inPeer.length - 1] : (raw ? "p2p" : "");
+  const stamp = Date.parse(String(f.endedAt || f.startedAt || f.requestedAt || ""));
+  return {
+    album, file, peer,
+    live: f.state === "InProgress",
+    when: Number.isFinite(stamp) ? timeAgo(stamp / 1000) : "",
+    state: String(f.state ?? ""),
+    full: [String(f.dir ?? ""), String(f.filename ?? "")].filter(Boolean).join("/"),
+  };
+}
+
 /** Shared history: what other users are / were downloading from you —
  * live uploads plus everything completed, from slskd's upload transfers. */
 function UploadsPanel({ running }: { running: boolean }) {
@@ -5155,18 +5370,31 @@ function UploadsPanel({ running }: { running: boolean }) {
         <EmptyState title="No uploads yet" hint="No one has pulled from your shares since slskd last started." />
       ) : (
         <div className="space-y-1 max-h-[300px] overflow-auto stagger">
-          {[...sharingNow, ...past].slice(0, 60).map((f) => (
-            <div key={`${f.username}\u0000${f.dir}\u0000${f.filename}`} className="flex items-center gap-3 px-2 py-1.5 rounded hover:bg-white/[0.04] text-xs">
-              <div className="flex-1 min-w-0">
-                <div className="truncate text-zinc-200" title={f.filename}>{fileName(f.filename ?? "")}</div>
-                <div className="text-[10px] text-zinc-600 truncate">{f.username}</div>
+          {[...sharingNow, ...past].slice(0, 60).map((f) => {
+            // What this row IS, off slskd's own fields (see `sharedUpload`):
+            // album, file, peer, time — and the full path for the tooltip.
+            const u = sharedUpload(f);
+            const full = u.full || u.file;
+            return (
+              <div key={`${f.username}\u0000${f.dir}\u0000${f.filename}`}
+                className="flex items-center gap-3 px-2 py-1.5 rounded hover:bg-white/[0.04] text-xs"
+                title={[full, u.state].filter(Boolean).join("\n")}>
+                <div className="flex-1 min-w-0">
+                  <div className="truncate text-zinc-200" title={full}>{u.album || u.file}</div>
+                  <div className="truncate text-[10px] text-zinc-600" title={full}>
+                    {u.peer || "unknown user"}
+                    {u.album ? ` · ${u.file}` : ""}
+                  </div>
+                </div>
+                <span className="text-zinc-500 w-16 text-right shrink-0">
+                  {fmtSize(f.bytesTransferred ?? f.size ?? 0)}
+                </span>
+                <span className="text-zinc-500 w-20 text-right shrink-0 truncate">
+                  {u.live ? "sharing now" : u.when || "—"}
+                </span>
               </div>
-              <span className="text-zinc-500 w-16 text-right shrink-0">{fmtSize(f.bytesTransferred ?? f.size ?? 0)}</span>
-              <span className={`w-20 text-right shrink-0 chip text-[9px] border ${f.state === "InProgress" ? "bg-sky-900/40 text-sky-300 border-sky-800" : f.state === "Completed" ? "bg-emerald-900/40 text-emerald-300 border-emerald-800" : "bg-raise border-border text-zinc-400"}`}>
-                {f.state === "InProgress" ? "sharing" : f.state?.toLowerCase()}
-              </span>
-            </div>
-          ))}
+            );
+          })}
         </div>
       )}
     </div>

@@ -14,13 +14,13 @@ import LyricOffset from "./LyricOffset";
 import { DetailsDialog } from "./AlbumDetails";
 import { parseHexColor } from "../lib/accent";
 import { toast, useStore } from "../store";
-import { fmtTech, fmtPair, isVideoFile } from "../lib/fmt";
+import { fmtTech, fmtPair, isVideoFile, originalYear } from "../lib/fmt";
 import { albumRef, artistRef, libraryRow, trackRef } from "../lib/refs";
 import { AdvisoryMark, LyricsKindChip, allowPlainOf } from "./Badges";
 import StarRating from "./StarRating";
 import ScrollingText from "./ScrollingText";
 import { ratingOf, useRatings, useSetRating } from "../lib/ratings";
-import CoverImg from "./CoverImg";
+import CoverImg, { ROW_COVER_W, PANE_COVER_W } from "./CoverImg";
 import Popover, { MenuItem } from "./Popover";
 import ScrubSeek from "./ScrubSeek";
 import { MAX_DB, MIN_DB, activeAnalyser } from "../lib/analyser";
@@ -578,11 +578,12 @@ export function npLyricsMode({
  *  this pane covers the whole app, so navigating behind it would look like
  *  nothing happened.
  *
- *  `scroll` is the drifting line the block layout uses (components/
- *  ScrollingText), the same component the title beside it uses — one marquee,
- *  not a second. The phone's compact header passes `scroll={false}`: its title
- *  has always been a truncating span, so these lines keep that layout's own
- *  form and only gain the link.
+ *  Every metadata line on this surface DRIFTS when it does not fit
+ *  (components/ScrollingText) — one marquee for the block and for the phone's
+ *  compact header, measured rather than guessed, so a line that fits sits
+ *  still. Issue #66 is why the compact header gained it: the same long title
+ *  was readable in the block and cut at "…" in the header that stands in for
+ *  it below `md`.
  *
  *  The hover affordance is an underline rather than the bar's
  *  `text-accent-soft`: this surface draws its ink from the polarity table
@@ -593,20 +594,14 @@ function MetaLink({
   href,
   text,
   className,
-  scroll = true,
   onOpen,
 }: {
   href: string | null;
   text: string;
   className?: string;
-  scroll?: boolean;
   onOpen: () => void;
 }) {
-  const inner = scroll ? (
-    <ScrollingText text={text} className={className} />
-  ) : (
-    <span className={`block min-w-0 truncate ${className ?? ""}`}>{text}</span>
-  );
+  const inner = <ScrollingText text={text} className={className} />;
   if (!href) return inner;
   return (
     <Link
@@ -1192,7 +1187,7 @@ export default function NowPlayingView(p: Props) {
   // has no width, so every row's offsetTop is measured against a
   // one-character-wide layout — a write from there would park the pane deep in
   // the song, and it is the reopen below that re-centres it instead.
-  const { centerLine, takeOver } = useLyricsFollow({
+  const { centerLine, jump, snapping, takeOver } = useLyricsFollow({
     active: paneOpen ? activeLine : -1,
     time: dispTime,
     playing: p.playing,
@@ -1355,12 +1350,17 @@ export default function NowPlayingView(p: Props) {
             active size and scaled down when inactive — a compositor-only
             animation, so text never re-wraps mid-growth and the scroll
             target never shifts under it. Weight is constant for the same
-            reason (weight changes re-flow glyph widths). */}
+            reason (weight changes re-flow glyph widths).
+            The ease is dropped while the reader's own move is landing
+            (`snapping`): pressing a line, stepping the offset or parking the
+            needle used to show the highlight easing off the line BEFORE the
+            jump while the words were already at the new one (owner report) —
+            the clock's own advance is the only move that animates. */}
         <div
           ref={(el) => {
             primaryRefs.current[i] = el;
           }}
-          className={`${size.active} leading-snug ${synced ? `${LINE_EASE} font-semibold` : ""} ${
+          className={`${size.active} leading-snug ${synced ? "font-semibold" : ""} ${synced && !snapping ? LINE_EASE : ""} ${
             isActive ? ink.active : synced ? ink.dim : ink.plain
           }`}
           style={
@@ -1395,6 +1395,17 @@ export default function NowPlayingView(p: Props) {
   // title, then ALBUM, then ARTIST — the two sub-lines render identically.
   const albumLine = p.current.album || freshTags?.ALBUM || album?.meta?.ALBUM || "—";
   const artistLine = p.current.artist || freshTags?.ARTIST || p.current.albumPath.split("/").pop() || "";
+  // The ORIGINAL release year (issue #66) — the rule every card and library
+  // row already follows: a remaster keeps the year its album first came out,
+  // so `ORIGINALDATE` is the value and `DATE` is only the fallback
+  // (`originalYear`, lib/fmt). The track's own tags are read first and the
+  // album payload second: a track tagged with its own original date is what is
+  // playing, and a queue row that carries no tags still gets the album's year.
+  const yearMeta = {
+    ORIGINALDATE: freshTags?.ORIGINALDATE ?? album?.meta?.ORIGINALDATE,
+    DATE: freshTags?.DATE ?? album?.meta?.DATE,
+  };
+  const releaseYear = originalYear(yearMeta);
   // The three lines' own pages. The track route always resolves (the path form
   // is the fallback), while album/artist come from the library row above — no
   // row, no link, which is what keeps a previewed download's lines from
@@ -1497,11 +1508,22 @@ export default function NowPlayingView(p: Props) {
           its own page; the row keeps its fixed height either way. */}
       <div
         className="h-5 mt-1 flex items-center justify-center gap-2 min-w-0"
-        title={[albumLine, artistLine].filter(Boolean).join(" · ")}
+        title={[albumLine, artistLine, releaseYear].filter(Boolean).join(" · ")}
       >
         <MetaLink href={albumHref} text={albumLine} className={`text-sm ${ink.dim}`} onOpen={p.onClose} />
         {albumLine && artistLine ? <span className={`shrink-0 text-sm ${ink.dim}`}>·</span> : null}
         {artistLine ? <MetaLink href={artistHref} text={artistLine} className={`text-sm ${ink.dim}`} onOpen={p.onClose} /> : null}
+        {/* The original release year rides THIS row rather than a line of its
+            own (issue #66): the block is a fixed-height stack, and the year is
+            part of the same fact pair the row already states. Absent tags draw
+            nothing at all — no separator, no dash — so a release with no date
+            reads exactly as it did before. */}
+        {releaseYear ? (
+          <>
+            <span className={`shrink-0 text-sm ${ink.dim}`}>·</span>
+            <span className={`shrink-0 text-sm ${ink.dim}`}>{releaseYear}</span>
+          </>
+        ) : null}
       </div>
       {/* Fixed height and always rendered, like the rows above, so the block
           never jumps on next/previous. The control's own tooltip carries the
@@ -1791,7 +1813,7 @@ export default function NowPlayingView(p: Props) {
           enough to stay a backdrop. */}
       <div ref={ambRef} className="absolute inset-0 overflow-clip" aria-hidden>
         <div className="amb-cover absolute inset-0 blur-3xl opacity-[0.34]">
-          <CoverImg albumPath={p.current.albumPath} coverFile={coverFile} wrapperClass="w-full h-full" />
+          <CoverImg albumPath={p.current.albumPath} coverFile={coverFile} w={PANE_COVER_W} wrapperClass="w-full h-full" />
         </div>
         <div className="amb-sweep absolute -inset-1/2">
           <div
@@ -1944,16 +1966,28 @@ export default function NowPlayingView(p: Props) {
             {/* up next — lives beside the queue it describes; click opens it.
                 Always on the bar: inert when nothing is queued, and then it
                 wears the family's idle ink rather than an opacity of its own
-                (`pointer-events-none` already makes the hover half inert). */}
+                (`pointer-events-none` already makes the hover half inert).
+
+                The chip is a FIXED width, and the name inside it marquees:
+                it used to be `max-w-[15rem]`, so the box was as wide as the
+                name in it and every control to its right slid along the bar
+                whenever the queue advanced — a short "OK" and a long "Part
+                Two: The Sequel" put the queue / visualizer / lyrics / options
+                buttons in different places on the same screen. Reserved, the
+                row is stable and a name too long for it drifts instead of
+                being cut (components/ScrollingText, the marquee the lyrics
+                block and the player bar's own title use). `w-[9rem]` below
+                `lg` is the same rule at the width the bar actually has room
+                for; the reserved box never depends on the text. */}
             <button
-              className={`max-w-[15rem] min-w-0 items-center gap-1.5 px-1.5 py-1 rounded-md text-[10px] font-mono hidden sm:flex ${
+              className={`w-[9rem] lg:w-[15rem] min-w-0 items-center gap-1.5 px-1.5 py-1 rounded-md text-[10px] font-mono hidden sm:flex ${
                 queueOpen ? barOn : barOff
               } ${upNextLabel ? "transition-colors" : "pointer-events-none"}`}
               onClick={() => setQueueOpen(true)}
               title={upNextLabel ? `Up next — ${upNextLabel} · click to view the queue` : "Up next — nothing queued"}
             >
               <span className="uppercase tracking-widest opacity-70 shrink-0">Up next</span>
-              <span className="truncate">{upNextLabel || "—"}</span>
+              <ScrollingText text={upNextLabel || "—"} className="flex-1 min-w-0" />
             </button>
             <button
               ref={queueTriggerRef}
@@ -2108,6 +2142,7 @@ export default function NowPlayingView(p: Props) {
                         const next = (p / 100) * LYRIC_ZOOM_BASE;
                         setLyricZoom(next);
                         persist(ZOOM_KEY, String(next));
+                        jump();
                       }}
                     />
                   </div>
@@ -2121,11 +2156,22 @@ export default function NowPlayingView(p: Props) {
                     >
                       Offset
                     </span>
+                    {/* `jump` on both halves: the step re-parses the line
+                        times, so the highlight moves under the reader's own
+                        hand, and the Save rewrites the whole file. Either way
+                        the pane lands where it belongs in one frame instead of
+                        gliding there (`useLyricsFollow`). */}
                     <LyricOffset
                       path={p.current.path}
                       ms={offsetMs}
-                      onChange={setOffsetMs}
-                      onSaved={(lrc) => setLyricsText(lrc)}
+                      onChange={(ms) => {
+                        setOffsetMs(ms);
+                        jump();
+                      }}
+                      onSaved={(lrc) => {
+                        setLyricsText(lrc);
+                        jump();
+                      }}
                     />
                   </div>
                   <div className="text-[10px] uppercase tracking-wider text-zinc-500 px-1 pt-2 pb-1">This track</div>
@@ -2293,19 +2339,21 @@ export default function NowPlayingView(p: Props) {
                 <CoverImg
                   albumPath={p.current.albumPath}
                   coverFile={coverFile}
+                  w={ROW_COVER_W}
                   wrapperClass="shrink-0 w-12 h-12 rounded-lg shadow-lg bg-raise overflow-hidden"
                 />
                 {/* min-w-0 + truncate down the whole chain, and the readout is
                     the ONE box allowed to keep its width: at 390px a long
                     title has to give way, but a clipped format readout is the
-                    report this surface already has a history of. */}
+                    report this surface already has a history of.
+                    The three lines now DRIFT like the block's own (issue #66:
+                    the same long title was read on a desktop and cut at "…"
+                    here): the header is the block's stand-in below `md`, so it
+                    carries the same marquee — measured, so a line that fits
+                    stays still — over the fixed `h-6` / `h-5` rows. */}
                 <div className="flex-1 min-w-0">
                   <div className={`h-6 flex items-center gap-2 min-w-0 ${ink.shade}`} title={title}>
-                    {/* This header keeps the truncating spans it has always
-                        used — the drifting line belongs to the block layout,
-                        where the title has one — so the three lines become
-                        links over those same spans (see MetaLink). */}
-                    <MetaLink href={trackHref} text={title} className={`text-base font-bold ${ink.active}`} scroll={false} onOpen={p.onClose} />
+                    <MetaLink href={trackHref} text={title} className={`text-base font-bold ${ink.active}`} onOpen={p.onClose} />
                     {techStr && (
                       <span className={`shrink-0 text-[11px] font-mono ${ink.dim}`} title={techTip || undefined}>
                         {techStr}
@@ -2314,11 +2362,20 @@ export default function NowPlayingView(p: Props) {
                   </div>
                   <div
                     className={`h-5 flex items-center gap-1 min-w-0 ${ink.shade}`}
-                    title={[albumLine, artistLine].filter(Boolean).join(" · ")}
+                    title={[albumLine, artistLine, releaseYear].filter(Boolean).join(" · ")}
                   >
-                    <MetaLink href={albumHref} text={albumLine} className={`text-xs ${ink.dim}`} scroll={false} onOpen={p.onClose} />
+                    <MetaLink href={albumHref} text={albumLine} className={`text-xs ${ink.dim}`} onOpen={p.onClose} />
                     {albumLine && artistLine ? <span className={`shrink-0 text-xs ${ink.dim}`}>·</span> : null}
-                    {artistLine ? <MetaLink href={artistHref} text={artistLine} className={`text-xs ${ink.dim}`} scroll={false} onOpen={p.onClose} /> : null}
+                    {artistLine ? <MetaLink href={artistHref} text={artistLine} className={`text-xs ${ink.dim}`} onOpen={p.onClose} /> : null}
+                    {/* The same original release year the block shows — the
+                        phone's header IS the block below `md`, so the two must
+                        not disagree about the release. */}
+                    {releaseYear ? (
+                      <>
+                        <span className={`shrink-0 text-xs ${ink.dim}`}>·</span>
+                        <span className={`shrink-0 text-xs ${ink.dim}`}>{releaseYear}</span>
+                      </>
+                    ) : null}
                   </div>
                 </div>
               </div>
@@ -2333,6 +2390,7 @@ export default function NowPlayingView(p: Props) {
               <CoverImg
                 albumPath={p.current.albumPath}
                 coverFile={coverFile}
+                w={PANE_COVER_W}
                 // One size per breakpoint per LAYOUT: the art never jumps when a
                 // track's lyrics load or finish, and above lg the pane sits
                 // beside it so the size is the same either way. Below `md` the
@@ -2406,7 +2464,7 @@ export default function NowPlayingView(p: Props) {
               from assistive tech costs no tab stop. */}
           {!videoPath && lyricsDrawable && (
             <div
-              className={`relative flex flex-col max-w-3xl overflow-clip transition-[width,max-height,opacity,transform] duration-300 ease-out ${
+              className={`lyr-corner-host relative flex flex-col max-w-3xl overflow-clip transition-[width,max-height,opacity,transform] duration-300 ease-out ${
                 paneOpen
                   ? "flex-1 min-h-[45vh] [@media(min-height:560px)]:min-h-0 w-full lg:min-h-0 lg:h-full lg:max-w-none lg:flex-none lg:w-[56%] lg:ml-auto opacity-100 translate-x-0"
                   : "flex-none min-h-0 max-h-0 w-0 max-w-0 opacity-0 translate-x-6 pointer-events-none"
@@ -2462,50 +2520,64 @@ export default function NowPlayingView(p: Props) {
                   </div>
                 )}
               </div>
-              {/* The two lyric controls, ON the lyrics and SUBTLE. Both used
-                  to live only in the options popover, so nudging the sync or
-                  fitting the size to the room meant leaving the words to go
-                  and find them — and neither is a thing a listener should have
-                  to hunt for while the song plays. Chrome, not a panel: no
-                  background, no border, the ink's own tone (it brightens on
-                  hover, and it fades with the pane's own stale state because
-                  it rides the same surface), so it reads as part of the words
-                  rather than a control strip pasted over the artwork (R52c).
-                  Rendered only while the pane is OPEN: collapsed, there is
-                  nothing on screen to size or to shift.
+              {/* The two lyric controls, in the pane's OWN top-right corner:
+                  the corner is the one place over the words that is never a
+                  lyric line, and it is where `LyricsSidebar` carries them too
+                  (issue #63). They used to be a `justify-end` row UNDER the
+                  scroller, which made the reading surface shorter on every
+                  screen to hold a strip of chrome the reader touches twice.
 
-                  The ink is the table's FULL strength (`ink.chromeStrong`) and
-                  the row rests at it: the controls inside dim their own glyphs
-                  (0.7 on the step buttons, 0.8 on the value), and that is the
-                  whole of the "subtle" this strip needs. It used to be the
-                  muted `ink.chromeText` at 0.6, and on the light table that is
-                  a translucent near-black at 0.75 × 0.6 — 0.45 alpha, 2.9:1 on
-                  the white cover — and 0.42 alpha after the glyph dim, which
-                  is the "they blend into the background" report. The row's own
-                  rest opacity is 1 now, so nothing multiplies on top of the
-                  values: measured at 11.6:1 on the dark cover and 6.4:1 on the
-                  white one, from 2.4:1 and 1.9:1 before
-                  (tools/check_np_metadata_contrast.cjs asserts both per cover).
+                  Revealed, not permanent: on a device with a real pointer the
+                  strip fades in when the pointer is over the pane (or when
+                  the reader tabs into it) and fades out again, and while it is
+                  out it takes no hit — a tap on a line near the corner still
+                  seeks (`.lyr-corner`, index.css). A touch device has no hover
+                  to reveal it with, so there it is simply always on.
+
+                  No background, no border: the ink is the table's FULL
+                  strength (`ink.chromeStrong`) and the glyphs inside dim
+                  themselves (0.7 on the step buttons, 0.8 on the value), which
+                  is the whole of the "subtle" this strip needs. It used to be
+                  the muted `ink.chromeText` at 0.6, and on the light table that
+                  is a translucent near-black at 0.75 × 0.6 — 0.45 alpha, 2.9:1
+                  on the white cover — and 0.42 alpha after the glyph dim,
+                  which is the "they blend into the background" report. The
+                  inner row's own rest opacity is 1, so nothing multiplies on
+                  top of the values: measured at 11.6:1 on the dark cover and
+                  6.4:1 on the white one (tools/check_np_metadata_contrast.cjs
+                  asserts both per cover, and now asserts the reveal itself).
                   The stale fade stays where it was: that is a state, not the
-                  resting tone. */}
+                  resting tone.
+
+                  Rendered only while the pane is OPEN: collapsed, there is
+                  nothing on screen to size or to shift. */}
               {paneOpen && (
-                <div className={`shrink-0 flex items-center justify-end gap-4 px-6 pb-2 pt-1 text-[11px] transition-opacity duration-300 ${ink.shade} ${ink.chromeStrong} ${
-                  staleLyrics ? "opacity-40" : "opacity-100"
-                }`}>
-                  <LyricZoom
-                    pct={Math.round((lyricZoom / LYRIC_ZOOM_BASE) * 100)}
-                    onChange={(p) => {
-                      const next = (p / 100) * LYRIC_ZOOM_BASE;
-                      setLyricZoom(next);
-                      persist(ZOOM_KEY, String(next));
-                    }}
-                  />
-                  <LyricOffset
-                    path={p.current.path}
-                    ms={offsetMs}
-                    onChange={setOffsetMs}
-                    onSaved={(lrc) => setLyricsText(lrc)}
-                  />
+                <div className="lyr-corner absolute top-0 right-0 z-10 px-5 pt-2 pb-1 text-[11px]">
+                  <div className={`flex items-center justify-end gap-4 transition-opacity duration-300 ${ink.shade} ${ink.chromeStrong} ${
+                    staleLyrics ? "opacity-40" : "opacity-100"
+                  }`}>
+                    <LyricZoom
+                      pct={Math.round((lyricZoom / LYRIC_ZOOM_BASE) * 100)}
+                      onChange={(p) => {
+                        const next = (p / 100) * LYRIC_ZOOM_BASE;
+                        setLyricZoom(next);
+                        persist(ZOOM_KEY, String(next));
+                        jump();
+                      }}
+                    />
+                    <LyricOffset
+                      path={p.current.path}
+                      ms={offsetMs}
+                      onChange={(ms) => {
+                        setOffsetMs(ms);
+                        jump();
+                      }}
+                      onSaved={(lrc) => {
+                        setLyricsText(lrc);
+                        jump();
+                      }}
+                    />
+                  </div>
                 </div>
               )}
             </div>

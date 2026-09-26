@@ -31,8 +31,23 @@ WORD_SPACE_AFTER_TS_RE = re.compile(r"(<\d{2}:\d{2}\.\d{2,3}>)[ \t]+")
 
 
 
+# LRC headers. Two predicates, because the two questions differ:
+#   * PRESENCE (has_lyrics_text): every one of these is a header, not a
+#     lyric — a file that holds only headers has no lyrics. `[offset:…]` is
+#     in here: an offset alone is not words.
+#   * FORMATTING (format_lyrics_text): the DESCRIPTIVE headers are dropped
+#     from the text; `[offset:…]` is a real instruction an LRC reader applies,
+#     so it survives (and a stored file that carries one is not "malformed").
+# `id` is the ID3v2 unsynchronised-lyrics frame's own content descriptor
+# ("[id:$00000000]", "[id:]"), written into the text by a converter that
+# mistook the frame header for a line. `length` is the file's stated total
+# time, not the track's words.
 LRC_META_RE = re.compile(
-    r"^\s*\[(?:ar|ti|al|by|au|la|offset|length|re|ve):.*\]\s*$",
+    r"^\s*\[(?:ar|ti|al|by|au|la|offset|length|re|ve|id):.*\]\s*$",
+    re.IGNORECASE,
+)
+LRC_DROP_RE = re.compile(
+    r"^\s*\[(?:ar|ti|al|by|au|la|length|re|ve|id):.*\]\s*$",
     re.IGNORECASE,
 )
 
@@ -62,6 +77,41 @@ def _is_credit_line(line):
     body = TIMESTAMP_RE.sub("", line or "")
     body = WORD_TS_RE.sub("", body).strip()
     return bool(body) and bool(CREDIT_LINE_RE.match(body))
+
+
+def _norm_identity(text):
+    """Case-, dash- and whitespace-insensitive form of a credit line.
+
+    Dashes collapse to "-" so "Title – Artist" and "Title — Artist" compare
+    equal to "Title - Artist"; whitespace is removed outright so a missing
+    space around the dash ("Title-Artist") is the same credit too.
+    """
+    s = str(text or "")
+    for ch in "\u2010\u2011\u2012\u2013\u2014\u2015":
+        s = s.replace(ch, "-")
+    return re.sub(r"\s+", "", s).casefold()
+
+
+def _is_identity_line(line, title, artist):
+    """True for a line that merely repeats the track's own identity.
+
+    A download often leads with "Title - Artist" (or "Artist - Title") above
+    the words, at [00:00.00], and stored verbatim it became the first lyric
+    line. Both orders are recognised, using the FILE'S REAL TAGS, and the
+    comparison ignores case, dashes and spacing — so an unrelated prose line
+    is never eaten and a track missing either tag never matches.
+    """
+    if not str(title or "").strip() or not str(artist or "").strip():
+        return False
+    body = TIMESTAMP_RE.sub("", line or "")
+    body = WORD_TS_RE.sub("", body)
+    body = _norm_identity(body)
+    if not body:
+        return False
+    return body in {
+        _norm_identity(f"{title} - {artist}"),
+        _norm_identity(f"{artist} - {title}"),
+    }
 
 
 # A line carrying two or more timestamps. ESLyrics on foobar2000 cannot
@@ -157,6 +207,7 @@ def format_lyrics_text(text, precision=2, strip_metadata=True,
                        lrc_extended_enabled=True,
                        lrc_add_zero_timestamp=False,
                        lrc_zero_timestamp_blank=False,
+                       track_title=None, track_artist=None,
                        cfg=None):
     """
     Cleans lyrics:
@@ -166,7 +217,10 @@ def format_lyrics_text(text, precision=2, strip_metadata=True,
     - one line per timestamp: stacked timestamps are split up (unless Extended)
     - a [00:00.00] stacked in front of other stamps is dropped
     - timestamp-only lines lend their stamps to the next untimed line
-    - no LRC metadata lines (unless Enhanced word-sync lines)
+    - no LRC metadata lines (unless Enhanced word-sync lines); `[offset:…]` is
+      an instruction and is kept
+    - no leading credit line that merely repeats the track's identity
+      (*track_title* / *track_artist*, or their cfg equivalents)
     - no duplicate blank lines
 
     The result is idempotent: cleaning already-clean lyrics is a no-op.
@@ -189,6 +243,10 @@ def format_lyrics_text(text, precision=2, strip_metadata=True,
             pass
         strip_metadata = cfg.get("lrc_strip_metadata", strip_metadata)
         collapse_blank_lines = cfg.get("lrc_collapse_blank_lines", collapse_blank_lines)
+        # The track's own identity, when the caller carries it in cfg
+        # (mlo.lyrics._process_lyrics_for_audio and the grader both do).
+        track_title = cfg.get("lrc_track_title", track_title)
+        track_artist = cfg.get("lrc_track_artist", track_artist)
 
     text = text.replace("\r\n", "\n").replace("\r", "\n")
     precision = 3 if int(precision) == 3 else 2
@@ -205,6 +263,9 @@ def format_lyrics_text(text, precision=2, strip_metadata=True,
     zero_ts = f"[00:00.{'0' * precision}]"
     lines = []
     pending_stamps = []
+    # Whether any lyric TEXT has been emitted yet: a credit line that repeats
+    # the track's identity counts only while it still LEADS the words.
+    seen_lyric = False
 
     for ln in text.split("\n"):
         s = ln.strip()
@@ -214,7 +275,7 @@ def format_lyrics_text(text, precision=2, strip_metadata=True,
             pending_stamps = []
             continue
 
-        if strip_metadata and LRC_META_RE.match(s):
+        if strip_metadata and LRC_DROP_RE.match(s):
             # Enhanced lines with word timestamps are not metadata
             if not (lrc_enhanced_enabled and WORD_TS_RE.search(s)):
                 continue
@@ -226,6 +287,15 @@ def format_lyrics_text(text, precision=2, strip_metadata=True,
         # nothing but credits now has no lyrics at all, which is what
         # has_lyrics_text reports and what the fetch chain skips.
         if _is_credit_line(s):
+            lines.append("")
+            pending_stamps = []
+            continue
+
+        # The same credit, in the "Title - Artist" shape: a download's own
+        # header line above the words. Only a LEADING line is dropped, and
+        # only when it repeats this track's real tags (see _is_identity_line)
+        # — an unrelated prose line is never eaten.
+        if not seen_lyric and _is_identity_line(s, track_title, track_artist):
             lines.append("")
             pending_stamps = []
             continue
@@ -266,6 +336,7 @@ def format_lyrics_text(text, precision=2, strip_metadata=True,
             for ts in pending_stamps:
                 lines.append(f"{ts}{s}")
             pending_stamps = []
+            seen_lyric = True
             continue
 
         # Whatever this line is, it is timed: stray stamps die here.
@@ -286,6 +357,7 @@ def format_lyrics_text(text, precision=2, strip_metadata=True,
                     lines.append(f"{ts}{body}")
                 stacked = []
             lines.append(part.rstrip())
+            seen_lyric = True
 
     cleaned = lines
     if collapse_blank_lines:
@@ -618,6 +690,8 @@ def _format_for_storage(text, cfg, optimize=True, is_for_lrc=False):
             lrc_enhanced_word_sync=cfg.get("lrc_enhanced_word_sync", True),
             lrc_extended_enabled=cfg.get("lrc_extended_enabled", True),
             lrc_add_zero_timestamp=eff_zero,
+            track_title=cfg.get("lrc_track_title"),
+            track_artist=cfg.get("lrc_track_artist"),
             cfg=cfg_view,
         )
     return _canonical_lyrics(
@@ -631,6 +705,15 @@ def _process_lyrics_for_audio(audio_path, cfg, media_source=None):
 
     if af.audio is None:
         return ("fail", 0, 0, f"load: {af.error}")
+
+    # The track's own identity, read here while the container is open and
+    # carried in a cfg view the formatter reads: a lyric whose LEADING line
+    # merely repeats "TITLE - ARTIST" (or "ARTIST - TITLE") is a download
+    # header, not words, and the same predicate has to be available to every
+    # _format_for_storage call below (embedded tag and .lrc sidecar alike).
+    cfg = dict(cfg)
+    cfg["lrc_track_title"] = af.get_tag("TITLE")
+    cfg["lrc_track_artist"] = af.get_tag("ARTIST")
 
     # What the album-level MEDIA/SOURCE pass needs (see
     # _normalize_album_media_source), read here WHILE THE CONTAINER IS OPEN:
@@ -659,6 +742,30 @@ def _process_lyrics_for_audio(audio_path, cfg, media_source=None):
     # Clean embedded lyrics (no trailing newline / blank lines).
     can_write_lyrics = should_write_audio_tag(cfg, "LYRICS", filepath=audio_path)
     can_write_instr = should_write_audio_tag(cfg, "INSTRUMENTAL", filepath=audio_path)
+
+    # A track whose OWN `INSTRUMENTAL` tag states 1 has no words by its own
+    # definition: a `LYRICS` tag or `.lrc` left over from before it was
+    # recognised as instrumental (an empty/stub tag, or text from an earlier
+    # lookup) is a contradiction, not a fact. The file's classification wins
+    # and script 1 clears BOTH stores — the reverse direction (real lyrics
+    # under INSTRUMENTAL=1) is the instrumentation flip below, and this is not
+    # a writer overwriting a fact it did not establish: it removes text the
+    # file itself says cannot be there, so the lyrics checks stop reporting a
+    # track that has no words (mlo.grader's lyrics block skips an instrumental
+    # the same way).
+    if str(af.get_tag("INSTRUMENTAL") or "").strip() == "1" and can_write_lyrics:
+        _lyr_keys = {str(k).upper().rsplit(":", 1)[-1]
+                     for k in (af.all_tags() or {})}
+        if _lyr_keys & {"LYRICS", "UNSYNCEDLYRICS"} and af.delete_lyrics():
+            modified = True
+        if lrc_exists:
+            try:
+                os.remove(lrc_path)
+                lrc_exists = False
+                modified = True
+            except OSError:
+                pass
+
     if (force or cfg.get("optimize_embedded_lyrics", True)) and can_write_lyrics:
         cur = af.get_lyrics()
         if cur:

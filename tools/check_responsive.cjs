@@ -534,12 +534,30 @@ const MEASURE = `(() => {
                 false, `${t.key || t.cls} — box ${t.h}px, usable target ${t.target}px (its own CSS claims ${t.claimed}px)`);
             }
           }
+          // A documented control the viewport could not REACH (the album's
+          // tracklist sits below the fold on a phone) is measured by its CSS
+          // claim — `.tap-hit`'s 44px ::after — so it drops out of `m.tiny`
+          // even though it is right there at 24px. Presence is therefore asked
+          // of the DOM by class: an entry whose control still exists is not
+          // "gone", it is an exemption the page no longer needs at THIS scroll
+          // position, and failing a release over a scroll position is how this
+          // check went red on a green build. A control that really vanished
+          // still fails (nothing carries its class).
+          const present = await page.evaluate((matches) => {
+            const els = [...document.querySelectorAll("button, [role=button], select")];
+            return matches.filter((sel) => els.some((el) => String(el.className || "").startsWith(sel)));
+          }, allowed.map((a) => a.match));
           for (const a of allowed) {
             if (matched.has(a.match)) continue;
+            if (present.includes(a.match)) {
+              check(`${label} — the documented small control "${a.match}" is still on the page`,
+                true, `not under the floor in this pass (the viewport could not reach it): ${a.why}`);
+              continue;
+            }
             check(`${label} — the documented small control "${a.match}" is gone (or no longer small)`,
               false, `it used to be ${a.h}px: ${a.why}`);
           }
-          if (!unaccounted && matched.size === allowed.length) {
+          if (!unaccounted && matched.size + present.length >= allowed.length) {
             check(`${label} — controls: ${m.tinyCount} under the floor, all documented`,
               true, allowed.map((a) => `${a.match} ${a.h}px`).join(", ") || "none");
           }

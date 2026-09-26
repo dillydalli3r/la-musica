@@ -631,6 +631,9 @@ DEFAULT_CONFIG = {
     "grade_check_key_bpm": True,
     # Excess tags: any key the optimizer's strip pass would remove (outside
     # TAG_MAP + encoder identity tags) fails grading — run Optimize to strip.
+    # A non-empty COMMENT is part of the same check and the same strip: the
+    # vocabulary HOLDS the name but nothing in the pipeline ever writes a
+    # value there, so a value is a ripper's or vendor tagger's note.
     "grade_check_excess_tags": True,
     # Raw, un-remuxed video files (VOB/AVI/WMV/TS...) fail grading — run
     # script 11 to normalize them to MKV. Remuxed MKV/MP4 videos are fine.
@@ -677,9 +680,19 @@ DEFAULT_CONFIG = {
     # failed for their absence (the player measures on the fly instead);
     # a half-written set is a real defect.
     "grade_check_replaygain": True,
-    # AcoustID identity tags: pair check, never fires on files carrying
-    # neither ACOUSTID_ID nor ACOUSTID_FINGERPRINT.
+    # AcoustID identity tags: REQUIRED on every audio track — ACOUSTID_ID and
+    # ACOUSTID_FINGERPRINT together, or the track fails naming what is missing.
+    # Script 21 completes or CREATES the pair from the file itself (the
+    # fingerprint is taken locally with fpcalc), so this needs no API key —
+    # `acoustid_api_key` only gates the service lookups.
     "grade_check_acoustid": True,
+    # A name written in a non-Latin script needs its locale alias tag beside
+    # it (TITLEALIAS / ARTISTALIAS, optionally locale-suffixed) — the name a
+    # reader in the configured locale searches for, which the tagging pass
+    # takes from MusicBrainz' own aliases. What "needs one" means is
+    # mlo.lyrics_xlit's script test (the same one that decides a lyric
+    # transliteration), so a Latin-script library is never charged for it.
+    "grade_check_alias_needed": True,
     # The album description sidecar (description.txt) is a legitimate part of
     # an album folder — allowed as a file category by default.
     "grade_include_description": True,
@@ -869,6 +882,13 @@ DEFAULT_CONFIG = {
     "auto_zero_advisory_for_instrumental": True,
     # Fetch INSTRUMENTAL (0/1) from the external sources during auto tagging + import.
     "instrumental_auto_fetch": True,
+    # Ask the configured AI provider about a track no source stated anything
+    # about and that carries no lyrics at all — the model is the last resort,
+    # and its answer must be ONE digit (1 instrumental / 0 not). It costs one
+    # model call per lyric-less, evidence-less track; off, such a track is
+    # left exactly as it was (or settled by the app's own lyrics-absent rule,
+    # which is a local decision and costs no call).
+    "instrumental_ai_classify": True,
     "force_auto_tag": False,
 
     # Key & BPM analysis (script 12): librosa-backed BPM + initial key.
@@ -1116,6 +1136,14 @@ DEFAULT_CONFIG = {
     # the import reported success — a failed import keeps its files so it can
     # be retried without downloading them again.
     "soulseek_clear_downloads": True,
+    # Completed downloads leave the queue's LIST by themselves when the next
+    # import/chain starts (a job start, a bulk add, a page download, "import
+    # everything downloaded") — the queue is a view of what is happening now,
+    # not a log. ON by default. It takes ONLY the completed section: a failed
+    # or needs-attention row stays until the user clears it, a restart of a
+    # SEARCH never clears anything, and nothing on disk is ever deleted (see
+    # server.api_queue.clear_completed_for_new_import).
+    "soulseek_clear_completed_on_import": True,
     "soulseek_download_dir": "",
     # Size caps on the app's two TRANSIENT stores: the download/staging pair
     # above (finished transfers waiting to be imported, plus slskd's in-flight
@@ -1196,12 +1224,28 @@ DEFAULT_CONFIG = {
     # moment a usable folder appears.
     "soulseek_fallback_candidates": 5,
     # How long ONE candidate's search is given before it counts as not found and
-    # the walk moves on. The same QUIET window `soulseek_auto_search_wait` is
-    # (slskd ends a search when the network stops answering, with the app's own
-    # response grace tail on top), but per candidate: a walk of three may
-    # therefore wait up to three of these, and a usable folder still ends a
-    # candidate's search in seconds.
+    # the walk moves on — its TOP-UP window. The same QUIET window
+    # `soulseek_auto_search_wait` is (slskd ends a search when the network stops
+    # answering, with the app's own response grace tail on top), but per
+    # candidate: a walk of three may therefore wait up to three of these, and a
+    # usable folder still ends a candidate's search in seconds.
+    #
+    # It is NOT the time before anything can start. slskd serves a search's
+    # responses only once the search has ENDED, so a window this long used to
+    # mean a perfect folder found at t≈2 s was first readable at t≈60 s. The
+    # FIRST pass now asks with `soulseek_search_fast_seconds` below; this window
+    # is what is left when that pass found nothing usable — it keeps reading the
+    # searches still running at slskd (and the broad second pass still runs
+    # after it).
     "soulseek_search_timeout_seconds": 60,
+    # The FIRST pass's quiet window, and the reason a good find starts
+    # downloading in seconds: every configured query template is POSTed with
+    # this timeout, so a release the network answers for (or does not answer for
+    # at all) goes quiet and ENDS in seconds and its responses become readable —
+    # the moment one complete lossless folder is readable its download is
+    # enqueued and the job moves on. The long window above is only spent when
+    # this pass found nothing usable. Never longer than the window it precedes.
+    "soulseek_search_fast_seconds": 5,
     # Peers that must answer before the search is scored instead of waiting on
     # slskd's quiet timer: a popular album never goes quiet, and slskd only
     # hands back its responses once a search has ENDED — this is what stops a
@@ -1557,6 +1601,15 @@ DEFAULT_CONFIG = {
     # with the API answering from its cache the downloaded copy plays whatever
     # this says, because it is the only thing that can.
     "playback_source": "stream",
+    # Whether the player joins two tracks with no gap: the idle of its two
+    # audio elements preloads the next sequential track, and a natural end
+    # hands the sound over to it instead of going through a load. On (the
+    # shipped default) an album plays as the CD did; off, every track is
+    # loaded and started on its own — the honest choice for a shuffle-style
+    # listener, a gapless-hostile device, or a file that ends with silence the
+    # handover would swallow. It gates the preload and the handover only; the
+    # normal load path is unchanged, and it never affects what plays.
+    "gapless_playback": True,
     "run_all_order": list(DEFAULT_RUN_ALL_ORDER),
 
     # Export to device (Export page). Each key is the SAVED DEFAULT behind one
@@ -1786,6 +1839,10 @@ _INT_RANGES = {
     # search window allows.
     "soulseek_fallback_candidates": (1, 10),
     "soulseek_search_timeout_seconds": (5, 300),
+    # The first pass's own window: short by definition (the whole point is a
+    # readable answer in seconds), and never longer than the top-up window it
+    # precedes.
+    "soulseek_search_fast_seconds": (2, 60),
     "soulseek_auto_response_limit": (5, 500),
     # How many of a release's tracks the MBID-driven queries chase (see the key
     # in DEFAULT_CONFIG): at least one, and never one per track of a box set.

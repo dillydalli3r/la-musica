@@ -35,7 +35,7 @@ import StatsPanel from "../components/StatsPanel";
 import TrackDetails, { CreditsPanel, creditTagsFrom } from "../components/TrackDetails";
 import { AlbumDetails } from "../components/AlbumDetails";
 import { SortHeader, sortRows, toggleSort, groupByDisc, type SortState } from "../lib/sort.tsx";
-import { ColumnsMenu, ColumnResizer, useColumnPrefs, useColumnWidths, useCustomColumns, customCols, customColValue, ALBUM_TRACK_COLS, ALBUM_TRACK_COL_W, ALBUM_TRACK_MIN_W, ALBUM_TRACK_PHONE_CLS, phoneHide, TAG_COL_W, type Col } from "../lib/columns";
+import { ColumnsMenu, ColumnResizer, ColFloorHolder, useColumnPrefs, useColumnWidths, useCustomColumns, customCols, customColValue, ALBUM_TRACK_COLS, ALBUM_TRACK_COL_W, ALBUM_TRACK_MIN_W, ALBUM_TRACK_PHONE_CLS, ALBUM_TRACK_TITLE_FLOOR, phoneHide, TAG_COL_W, type Col } from "../lib/columns";
 import { useI18n } from "../lib/i18n";
 import { toast, useStore } from "../store";
 import { fmtTech, albumTech } from "../lib/fmt";
@@ -753,10 +753,12 @@ export default function AlbumPage() {
                   </div>
                 }
                 chips={[
-                  // media + release countries / tech / album DR / disc count,
-                  // where the identity block already showed them. The media
-                  // chip names the pressing the same way the album's card does.
-                  mediaCountryLabel(data.media, data.meta?.RELEASECOUNTRY),
+                  // media (+ a download's source) + release countries / tech /
+                  // album DR / disc count, where the identity block already
+                  // showed them. The media chip names the pressing — and, for
+                  // a digital release, where the files came from — the same
+                  // way the album's card does.
+                  mediaCountryLabel(data.media, data.meta?.RELEASECOUNTRY, data.source_summary),
                   albumTech(data.tracks),
                   data.meta?.["ALBUM DYNAMIC RANGE"] ? `ADR ${data.meta["ALBUM DYNAMIC RANGE"]}` : null,
                   maxDisc > 1 ? `${maxDisc} disc${maxDisc === 1 ? "" : "s"}` : null,
@@ -1411,6 +1413,7 @@ export default function AlbumPage() {
                   <SortHeader key={c.id} label={c.label} sort={sort} sortKey={c.sortKey} onSort={(k) => setSort(toggleSort(sort, k))}
                     className={`relative ${ALBUM_TRACK_COL_W[c.id] ?? TAG_COL_W}${c.id === "num" ? " cell-nowrap" : ""}${phoneHide(ALBUM_TRACK_PHONE_CLS, c.id)}`}
                     style={trackW[c.id] ? { width: trackW[c.id] } : undefined}>
+                    {c.id === "title" && <ColFloorHolder className={ALBUM_TRACK_TITLE_FLOOR} />}
                     <ColumnResizer width={trackW[c.id]} onDrag={(w) => setTrackW(c.id, w)} onReset={resetTrackW} />
                   </SortHeader>
                 )

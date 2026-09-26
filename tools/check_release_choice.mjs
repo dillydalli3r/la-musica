@@ -21,6 +21,24 @@
  *                               asserted for the same contract, so a real
  *                               response and this fixture cannot drift apart
  *
+ * And the artist page's release-group TYPE derivation —
+ * `web/src/lib/artistReleaseGroups.ts`, which the page's filter menu, its
+ * collapsible sections and its per-type action rows all read — is asserted on
+ * the decisions themselves, off one discography fixture: Album/EP/Single lead
+ * and the long tail is one bucket ordered by how many groups each type holds,
+ * the leaders start open while the bucket starts folded, and the menu's box
+ * finds a compound label ("Album + Live") by word, by whole spelling and with
+ * spaces and case ignored.
+ *
+ * Both MARKUP halves ride the same harness: the artist page above, and the
+ * release-group page's editions table — its header row read in ORDER (… Country
+ * · Cat # · Barcode, the catalog number immediately before the bar code), a
+ * row's own catalog numbers joined with " + " and readable whole in the cell's
+ * tooltip, one Cat # cell per edition, and the em dash the Date column prints
+ * beside an edition that states none. The number needs nothing at the source:
+ * `release_group_browse` already reads each release's `label-info` through
+ * `mlo.release_choice.catalog_numbers`.
+ *
  * Run:  node tools/check_release_choice.mjs [payload.json]
  * Exit codes: 0 pass, 1 a check failed (the missing ones are printed), 2 the
  * environment cannot run it (no web/node_modules).
@@ -268,6 +286,256 @@ try {
       if (!ok) missing.push(`${state}: ${what}`);
     }
   }
+
+  /* ---- the artist page's release-group TYPE derivation --------------------
+   *
+   * `lib/artistReleaseGroups` is what the artist page's filter menu, its
+   * collapsible sections and its per-type action rows all read, so the three
+   * decisions the owner asked for are asserted here on the decisions
+   * themselves — no DOM, no page, no server. The fixture is one discography
+   * holding every shape the page has to survive: compound labels of both kind
+   * (a secondary on a leading primary, and a long tail whose types tie on one
+   * group each), which is exactly where a count-ordered bucket and a
+   * label-ordered one part company. */
+  const t = await server.ssrLoadModule("/src/lib/artistReleaseGroups.ts");
+  const album = (n) => ({ title: `Studio ${n}`, primary_type: "Album", secondary_types: [] });
+  const discography = [
+    ...Array.from({ length: 5 }, (_, i) => album(i)),
+    { title: "Live at the Apollo", primary_type: "Album", secondary_types: ["Live"] },
+    { title: "Greatest Hits", primary_type: "Album", secondary_types: ["Compilation"] },
+    { title: "EP One", primary_type: "EP", secondary_types: [] },
+    { title: "EP Two", primary_type: "EP", secondary_types: [] },
+    { title: "Hit", primary_type: "Single", secondary_types: [] },
+    { title: "B-sides", primary_type: "Other", secondary_types: ["Compilation"] },
+    { title: "More B-sides", primary_type: "Other", secondary_types: ["Compilation"] },
+    { title: "Peel Session", primary_type: "Broadcast", secondary_types: [] },
+    { title: "Untyped bootleg" },                      // no primary type at all
+  ];
+  const sections = t.typeSections(discography);
+  const labels = sections.map((s) => s.label);
+  const groupsOf = (label) => (sections.find((s) => s.label === label)?.groups ?? [])
+    .map((g) => g.label);
+  const options = [{ label: t.ALL_TYPES, count: discography.length, section: "", compound: false },
+                   ...t.typeFilterOptions(sections)];
+  const picked = (q) => t.filterTypeOptions(options, q).map((o) => o.label);
+  const albumSection = sections.find((s) => s.label === "Album");
+  const moreSection = sections.find((s) => s.label === "More");
+  const liveOnly = t.selectedSections(sections, "Album + Live");
+  const artWants = [
+    ["Album, EP and Single lead, and nothing else does",
+      JSON.stringify(labels) === JSON.stringify(["Album", "EP", "Single", "More"])
+      && new Set(labels).size === labels.length],
+    ["a leading section carries its own compound types, biggest first",
+      JSON.stringify(groupsOf("Album"))
+        === JSON.stringify(["Album", "Album + Compilation", "Album + Live"])],
+    ["the long tail is one bucket, ordered by how many groups each type holds, "
+      + "ties broken by label", JSON.stringify(groupsOf("More"))
+        === JSON.stringify(["Other + Compilation", "Broadcast", "Other"])],
+    ["the bucket's header counts every row in it", moreSection?.count === 4],
+    ["no row is lost or counted twice",
+      sections.reduce((n, s) => n + s.count, 0) === discography.length],
+    ["the leading sections start open and the bucket starts folded",
+      t.typeSectionOpen(albumSection, {}) === true && t.typeSectionOpen(moreSection, {}) === false],
+    ["a press folds a leading section and unfolds the bucket",
+      t.typeSectionOpen(albumSection, t.toggleTypeSection({}, albumSection)) === false
+      && t.typeSectionOpen(moreSection, t.toggleTypeSection({}, moreSection)) === true],
+    ["a type the reader named opens the bucket that holds it",
+      t.typeSectionOpen(moreSection, {}, "Broadcast") === true],
+    ["a discography of nothing but 'other' types opens its one section, having "
+      + "no tail to fold",
+      (() => {
+        const only = t.typeSections([{ primary_type: "Other" }, { primary_type: "Broadcast" }]);
+        return only.length === 1 && t.typeSectionOpen(only[0], {}) === true;
+      })()],
+    ["a compound pick is that one type, never every group of its primary",
+      liveOnly.length === 1 && liveOnly[0].count === 1
+      && JSON.stringify(liveOnly[0].groups.map((g) => g.label)) === JSON.stringify(["Album + Live"])],
+    ["the menu offers only types the sections draw",
+      options.slice(1).every((o) => labels.includes(o.label)
+        || sections.some((s) => s.groups.some((g) => g.label === o.label)))],
+    ["the menu's rows are the sections' rows, in one order",
+      JSON.stringify(options.map((o) => o.label)) === JSON.stringify([
+        "All", "Album", "Album + Compilation", "Album + Live", "EP", "Single",
+        "More", "Other + Compilation", "Broadcast", "Other",
+      ])],
+    ["the filter finds a compound label by one of its words", picked("live").join() === "Album + Live"],
+    ["...and by its whole spelling, spacing and case aside",
+      picked("album+LIVE").join() === "Album + Live"],
+    ["a section's own name is a pick of its every type", picked("Single").join() === "Single"],
+    ["an empty box is every row, and a query nothing carries is none",
+      picked("  ").length === options.length && picked("opera").length === 0],
+    ["ranks are Album/EP/Single and then a tie for everything else",
+      t.rgTypeRank("Album + Live") === 0 && t.rgTypeRank("EP + Compilation") === 1
+      && t.rgTypeRank("Single") === 2 && t.rgTypeRank("Other") === 3
+      && t.rgTypeRank("Broadcast") === 3],
+    ["a group MusicBrainz served without a primary type is Other, and lands in the bucket",
+      t.rgTypeLabel({ secondary_types: ["Demo"] }) === "Other + Demo"
+      && groupsOf("More").includes("Other")],
+  ];
+  for (const [what, ok] of artWants) {
+    count += 1;
+    if (!ok) missing.push(`type derivation: ${what}`);
+  }
+
+  /* ---- the same decisions, in the ARTIST PAGE's own markup ----------------
+   *
+   * The pure decisions above say what the fold SHOULD be; only the page can
+   * say whether a folded section really draws no rows. `MBArtistPage` is the
+   * one App.tsx routes to, rendered here with its payload already in the query
+   * cache and a router around it — no browser, but the real component, and the
+   * markup is what a reader gets. */
+  const { MBArtistPage, MBReleaseGroupPage } =
+    await server.ssrLoadModule("/src/pages/MusicBrainzPage.tsx");
+  // react-router-dom as the PAGE's own import resolves it (Node's "node"
+  // condition -> dist/index.mjs), for the reason react-query is imported the
+  // way it is above: two copies of it are two React contexts, and a
+  // MemoryRouter from one would not be seen by the page's own useNavigate.
+  const { MemoryRouter, Route, Routes } = await import(pathToFileURL(
+    path.join(webDir, "node_modules/react-router-dom/dist/index.mjs")).href);
+  const ARTIST = "a74b1b7f-71a5-4011-9441-d0b5e4122711";
+  const rg = (id, title, primaryType, secondaryTypes = []) => ({
+    id, title, primary_type: primaryType, secondary_types: secondaryTypes,
+    first_release_date: "1997-01-20",
+  });
+  const artistGroups = [
+    rg("a1", "Studio 1", "Album"), rg("a2", "Studio 2", "Album"), rg("a3", "Studio 3", "Album"),
+    rg("a4", "Live at the Apollo", "Album", ["Live"]),
+    rg("e1", "Come to Daddy", "EP"),
+    rg("s1", "Windowlicker", "Single"),
+    rg("o1", "Untyped bootleg", "Other"),
+    rg("o2", "Rarities", "Other", ["Compilation"]),
+    rg("b1", "Peel Session", "Broadcast"),
+  ];
+  const foldedPage = (() => {
+    const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    client.setQueryData(["mbArtist", ARTIST], {
+      pages: [{ id: ARTIST, name: "Aphex Twin", release_groups: artistGroups,
+                total: artistGroups.length, next: null }],
+      pageParams: [0],
+    });
+    return renderToString(
+      React.createElement(QueryClientProvider, { client },
+        React.createElement(MemoryRouter, { initialEntries: [`/mb/artist/${ARTIST}`] },
+          React.createElement(Routes, null,
+            React.createElement(Route, {
+              path: "/mb/artist/:id",
+              element: React.createElement(MBArtistPage),
+            })))))
+      .replace(/<!-- -->/g, "").replace(/&#x27;/g, "'").replace(/&#39;/g, "'")
+      .replace(/&quot;/g, '"').replace(/&amp;/g, "&")
+      .replace(/\s+/g, " ");
+  })();
+  const at = (needle) => foldedPage.indexOf(needle);
+  // A reader's view of one fragment: the page's own words with the tags taken
+  // out — a count sits in its own element, so text alone would run the label
+  // and the number together with markup in between.
+  const asRead = (from, span) =>
+    (from < 0 ? "" : foldedPage.slice(from, from + span))
+      .replace(/<[^>]*>/g, " ").replace(/\s+/g, " ").trim();
+  // The section headers' own words: a folded header a reader can press says
+  // "Show … (n)", an open one says "Fold … away". Nothing else on the page
+  // carries either sentence, so these are the folds themselves.
+  const albumHead = "Fold this artist's Album release groups away";
+  const epHead = "Fold this artist's EP release groups away";
+  const singleHead = "Fold this artist's Single release groups away";
+  const moreHead = "Show this artist's More release groups (3)";
+  const pageWants = [
+    ["the four sections are drawn in the derivation's order",
+      [albumHead, epHead, singleHead, moreHead].every((h) => at(h) >= 0)
+      && at(albumHead) < at(epHead) && at(epHead) < at(singleHead)
+      && at(singleHead) < at(moreHead)],
+    ["Album, EP and Single are OPEN and the bucket is FOLDED, in the markup",
+      (foldedPage.match(/Fold this artist's/g) ?? []).length === 3 && at(moreHead) >= 0],
+    ["an open section draws its rows, its compound types named",
+      at("Studio 1") >= 0 && at("Studio 2") >= 0 && at("Studio 3") >= 0
+      && at("Live at the Apollo") >= 0 && at("Album + Live · 1") >= 0
+      && at("Come to Daddy") >= 0 && at("Windowlicker") >= 0],
+    ["the folded bucket draws NONE of its rows",
+      ["Peel Session", "Rarities", "Untyped bootleg"].every((t) => at(t) === -1)],
+    ["...but its types are still one press away in the add panel",
+      at("Broadcast") >= 0 && at("Other + Compilation") >= 0],
+    ["the filter's trigger says what is on screen and how many rows that is",
+      /^All types \(9\)/.test(asRead(at("All types"), 160))],
+  ];
+  for (const [what, ok] of pageWants) {
+    count += 1;
+    if (!ok) missing.push(`artist page: ${what}`);
+  }
+
+  /* ---- the release-group page's editions table ---------------------------
+   *
+   * The owner asked for each edition's CATALOG NUMBER in a column of its own,
+   * immediately before the bar code. The number is already IN the payload the
+   * page holds — `release_group_browse` reads every release's own
+   * `label-info` through `mlo.release_choice.catalog_numbers` (the reader the
+   * release choice ranks by), so `catalog_numbers` / `catalog_number` ride each
+   * row — and what is asserted here is the table: the header's own order, the
+   * row's own numbers joined the app's way, the tooltip that carries a value
+   * an ellipsis may cut, and the same em dash beside an edition that states
+   * none that the Date column prints. */
+  const RGV = "aaaa0000-1111-2222-3333-444455556666";
+  const edition = (id, title, catNumbers, barcode) => ({
+    id, title, alias: null, date: "1997-01-20", country: "JP", status: "Official",
+    disambiguation: "", medium: "CD", formats: "1×CD", disc_count: 1, track_count: 16,
+    track_breakdown: "", barcode, catalog_numbers: catNumbers,
+    catalog_number: catNumbers[0] ?? "", score: 1, reasons: [],
+  });
+  const rgPayload = {
+    id: RGV, title: "Homework", alias: null, disambiguation: "",
+    artist: "Daft Punk", artist_mbid: null, primary_type: "Album", secondary_types: [],
+    genres: [], first_release_date: "1997-01-20", podcast: null,
+    countries: [], total: 2, offset: 0, next: null,
+    releases: [
+      edition("rel-cat", "Homework (Japanese edition)", ["SRCS 8757", "CK 62240"], "4988009875798"),
+      edition("rel-nocat", "Homework (promo)", [], ""),
+    ],
+  };
+  const rgPage = (() => {
+    const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    client.setQueryData(["mbRG", RGV], { pages: [rgPayload], pageParams: [0] });
+    return renderToString(
+      React.createElement(QueryClientProvider, { client },
+        React.createElement(MemoryRouter, { initialEntries: [`/mb/rg/${RGV}`] },
+          React.createElement(Routes, null,
+            React.createElement(Route, {
+              path: "/mb/rg/:id",
+              element: React.createElement(MBReleaseGroupPage),
+            })))))
+      .replace(/<!-- -->/g, "").replace(/&#x27;/g, "'").replace(/&#39;/g, "'")
+      .replace(/&quot;/g, '"').replace(/&amp;/g, "&")
+      .replace(/\s+/g, " ");
+  })();
+  // The header row's own words, tags aside: the columns in the order they are
+  // drawn, so "Cat #" before "Barcode" is adjacency and not just both present.
+  const headText = (() => {
+    const from = rgPage.indexOf("<thead");
+    const to = rgPage.indexOf("</thead>");
+    return from < 0 || to < 0 ? ""
+      : rgPage.slice(from, to).replace(/<[^>]*>/g, " ").replace(/\s+/g, " ").trim();
+  })();
+  const catCell = "SRCS 8757 + CK 62240";
+  // The cell's own classes, so the count is of Cat # cells and not of every
+  // `cell-ellipsis` in the table (the Tracks column carries one too).
+  const catCellClass = /font-mono text-\[11px\] cell-ellipsis/;
+  const rgWants = [
+    ["the editions table's columns are Date, Title, Format, Discs, Tracks, Country, "
+      + "Cat #, Barcode",
+      headText === "Date Title Format Discs Tracks Country Cat # Barcode"],
+    ["the Cat # column carries a pixel floor, like its neighbours",
+      /class="th w-\[150px\]">Cat #<\/th>/.test(rgPage)],
+    ["a row prints its OWN catalog numbers, joined the app's way",
+      rgPage.includes(catCell)],
+    ["a value an ellipsis may cut is readable whole in the tooltip",
+      rgPage.includes(`title="${catCell}"`)],
+    ["every edition draws one Cat # cell",
+      (rgPage.match(new RegExp(catCellClass.source, "g")) ?? []).length === 2],
+    ["an edition that states no number says so with the Date column's em dash",
+      (rgPage.match(new RegExp(`${catCellClass.source}"(?: title="[^"]*")?>—</td>`)) ?? []).length === 1],
+  ];
+  for (const [what, ok] of rgWants) {
+    count += 1;
+    if (!ok) missing.push(`release-group page: ${what}`);
+  }
   if (missing.length) {
     console.error("[choice] MISSING: " + JSON.stringify(missing));
     console.error(refusedPick.replace(/></g, ">\n<").split("\n")
@@ -276,7 +544,13 @@ try {
   }
   console.log("ok  the release-choice panel says which edition it will fetch, why, " +
     `and which ones it ranked (${count} checks over ${checks.length} states` +
-    `${payloadPaths.length ? `, including ${payloadPaths.map((p) => path.basename(p)).join(", ")}` : ""})`);
+    `${payloadPaths.length ? `, including ${payloadPaths.map((p) => path.basename(p)).join(", ")}` : ""}), ` +
+    `and the artist page's type derivation leads with Album/EP/Single, folds the ` +
+    `long tail into one count-ordered bucket and finds a compound type by name ` +
+    `(${artWants.length} decisions), with the folds the page really draws ` +
+    `(${pageWants.length} in its markup), and the release-group page's editions ` +
+    `table carries each edition's own catalog number beside its bar code ` +
+    `(${rgWants.length} in its markup)`);
 } finally {
   await server.close();
 }

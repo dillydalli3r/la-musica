@@ -19,7 +19,7 @@ from .audit import note_integrity, recorded_integrity, save_evidence
 from .tools import detect_all_tools
 from .lyrics import (
     _lrc_for, _canonical_lyrics, format_lyrics_text, has_lyrics_text,
-    stored_lyrics_kind, text_meets_sync_level,
+    stored_lyrics_kind, text_meets_sync_level, LRC_META_RE,
 )
 # The genre list rules and the lyric-transform need rule each live in ONE
 # module the writers already use (mlo.genres for the import / scripts 8, 10,
@@ -40,7 +40,8 @@ from .genres import display_name as genre_display_name
 # SAME function, not a second opinion about what canonical means.
 from .tagtext import MEDIA_VALUES as _MEDIA_VALUES, canonical_value, spacing_problem
 from .lyrics_xlit import (
-    XLIT_SIDECAR, dominant_script, primary_translation_lang, xlit_needs,
+    XLIT_SIDECAR, _LATIN_THRESHOLD, dominant_script, non_latin_ratio,
+    primary_translation_lang, xlit_needs,
 )
 from .cue import canonical_cue_text
 from .naming import (DEFAULT_NAMING_SCRIPT, UNKNOWN_RELEASE_TYPE,
@@ -340,6 +341,21 @@ def _tag_key_norm(key):
     return re.sub(r"[\s_]+", "", str(key)).upper()
 
 
+# The locale-alias family: the name a release, an artist or a track is ALSO
+# known by, for a reader whose locale does not use the name's own script
+# (TITLEALIAS, ARTISTALIAS, ALBUMALIAS), optionally suffixed with the locale
+# it translates into (TITLEALIAS-JA) — the same "the detail lives in the tag
+# NAME" shape TRANSLATION-EN / TRANSLITERATION-JA-LATN have. Declared here
+# (not in mlo.audio.TAG_MAP) because the tag is written by name and the
+# language is open-ended; grade_check_alias_needed requires the family and
+# the strip passes must never see it as excess.
+ALIAS_TAGS = ("TITLEALIAS", "ARTISTALIAS", "ALBUMALIAS")
+
+# Names carrying their own detail after a hyphen — a script whose language
+# is part of the NAME, not a fixed TAG_MAP entry.
+TAG_NAME_PREFIXES = ("TRANSLATION-", "TRANSLITERATION-") + tuple(
+    f"{_t}-" for _t in ALIAS_TAGS)
+
 # Every tag name this app (TAG_MAP), its encoder markers, and beets/Picard
 # (BEETS_TAGS) may write — normalized with _tag_key_norm. THE single source
 # of truth: the excess-tag grade below and the Optimize/Format All strip pass
@@ -348,30 +364,82 @@ def _tag_key_norm(key):
 TAG_ALLOWLIST = frozenset(
     _tag_key_norm(k) for k in (
         *TAG_MAP, "ENCODER_PROGRAM", "ENCODER_QUALITY", "ENCODER_VERSION",
-        *BEETS_TAGS))
+        *BEETS_TAGS, *ALIAS_TAGS))
+
+
+def _tag_name_allowed(name):
+    """Whether a bare tag NAME (no "TXXX:" / freeform wrapper) is in the
+    vocabulary — exactly, or as a member of one of the prefix families."""
+    ku = str(name).upper()
+    if _tag_key_norm(ku) in TAG_ALLOWLIST:
+        return True
+    return ku.startswith(TAG_NAME_PREFIXES)
 
 
 def tag_key_allowed(key):
     """Whether *key* — in any file-side spelling the tag API emits (vorbis
     name, "TXXX:desc", "----:com.apple.iTunes:desc", a raw ID3 frame id such
-    as "PRIV:owner", or a language-suffixed lyrics transform) — is part of
-    the vocabulary this app and beets write. Anything else is junk a vendor
-    or ripper left behind."""
+    as "PRIV:owner", a language-suffixed lyrics transform or a locale-suffixed
+    alias) — is part of the vocabulary this app and beets write. Anything else
+    is junk a vendor or ripper left behind."""
     k = str(key)
     ku = k.upper()
-    if _tag_key_norm(k) in TAG_ALLOWLIST:
-        return True
-    if ku.startswith(("TRANSLATION-", "TRANSLITERATION-")):
+    if _tag_name_allowed(k):
         return True
     if ku.startswith("TXXX:"):
         # ID3 freeform frames: allowed when the frame's description names a
         # tag the script or beets writes.
-        return _tag_key_norm(k.split(":", 1)[1]) in TAG_ALLOWLIST
+        return _tag_name_allowed(k.split(":", 1)[1])
     if ku.startswith("----:"):
         # MP4 freeform atoms ("----:com.apple.iTunes:Name"): same rule on
         # the sub-name.
-        return _tag_key_norm(k.rsplit(":", 1)[-1]) in TAG_ALLOWLIST
+        return _tag_name_allowed(k.rsplit(":", 1)[-1])
     return ku.split(":", 1)[0] in BEETS_ID3_FRAMES
+
+
+def tag_value_excess(key, value):
+    """Whether a tag whose NAME is in the vocabulary still carries a value
+    nothing in this pipeline writes.
+
+    COMMENT is the one such name: every writer this app has stores a name it
+    owns, and COMMENT is not one of them (mlo.tagtext leaves it alone as free
+    text, which is exactly why a value there is always somebody else's note —
+    a ripper, a vendor tagger, a friend's rip). The strip passes delete it
+    with the same predicate the grade uses (see mlo.containers /
+    mlo.format_all), gated on `strip_unknown_tags` like the name rule."""
+    ku = str(key).upper()
+    if ku.startswith(("TXXX:", "----:")):
+        ku = ku.rsplit(":", 1)[-1]
+    if _tag_key_norm(ku) != "COMMENT":
+        return False
+    return bool(str(value or "").strip())
+
+
+def _stored_alias(af, base):
+    """Whether the file carries *base* (TITLEALIAS / ARTISTALIAS /
+    ALBUMALIAS) — bare or locale-suffixed ("TITLEALIAS-JA") — in any
+    container spelling the tag API emits."""
+    base = str(base).upper()
+    for key in (af.all_tags() or {}):
+        name = str(key).upper()
+        if name.startswith(("TXXX:", "----:")):
+            name = name.rsplit(":", 1)[-1]
+        name = _tag_key_norm(name)
+        if name == base or name.startswith(base + "-"):
+            return True
+    return False
+
+
+def alias_needed(value):
+    """Whether a name is written in a script a locale alias translates — the
+    SAME test script 17 applies to lyrics (mlo.lyrics_xlit's
+    non_latin_ratio / dominant_script pair, at the threshold that decides a
+    transliteration), asked of TITLE / ARTIST and of the ALBUM name."""
+    text = str(value or "")
+    if not text.strip():
+        return False
+    return (non_latin_ratio(text) >= _LATIN_THRESHOLD
+            and dominant_script(text) != "latin")
 
 
 def _tag_value(af, name):
@@ -496,15 +564,22 @@ def _zero_target_allows_grader(cfg, is_for_lrc: bool) -> bool:
 
 
 def _lyrics_formatted(text, cfg, is_for_lrc=False, check_spaces=True,
-                      check_blank_lines=True):
+                      check_blank_lines=True, track_title=None,
+                      track_artist=None):
     """True when the lyrics already match the configured formatting
     (timestamps, metadata stripping, blank collapse, no trailing blanks).
 
     Idempotency check against the raw text: running the Lyrics formatter
     must not change it (so a stray trailing newline, CRLF, or timestamp
-    precision drift is caught too). When enhanced LRC is enabled, word-level
-    <mm:ss.xx> timestamps are also validated for correct precision/formatting.
-    Respects lrc_zero_timestamp_target and blank mode.
+    precision drift is caught too, as is a stray `[id:…]`/header line or a
+    leading "Title - Artist" credit line the formatter would drop). When
+    enhanced LRC is enabled, word-level <mm:ss.xx> timestamps are also
+    validated for correct precision/formatting. Respects
+    lrc_zero_timestamp_target and blank mode.
+
+    *track_title* / *track_artist* are the file's real tags: the formatter
+    needs them to recognise a leading credit line that merely repeats the
+    track's identity, so the check judges exactly what the writer would drop.
 
     *check_spaces* / *check_blank_lines* mirror grade_check_lyrics_spaces
     and grade_check_lyrics_blank_lines: a disabled toggle must not fail the
@@ -527,6 +602,8 @@ def _lyrics_formatted(text, cfg, is_for_lrc=False, check_spaces=True,
                 lrc_extended_enabled=bool(cfg.get("lrc_extended_enabled", True)),
                 lrc_add_zero_timestamp=eff_zero,
                 lrc_zero_timestamp_blank=bool(cfg.get("lrc_zero_timestamp_blank", False)),
+                track_title=track_title,
+                track_artist=track_artist,
             ),
             append_final_newline=cfg.get("append_final_newline", False),
         )
@@ -696,13 +773,10 @@ def _lyrics_zero_timestamp_ok(text, cfg, is_for_lrc=False):
         s = ln.strip()
         if not s:
             continue
-        low = s.lower()
-        is_meta = (low.startswith("[ar:") or low.startswith("[ti:") or
-                   low.startswith("[al:") or low.startswith("[by:") or
-                   low.startswith("[au:") or low.startswith("[la:") or
-                   low.startswith("[offset:") or low.startswith("[length:") or
-                   low.startswith("[re:") or low.startswith("[ve:"))
-        if is_meta and "<" not in s:
+        # The same predicate the presence question asks (mlo.lyrics'
+        # LRC_META_RE), so a new header family can never be known to one side
+        # and not the other. Enhanced lines with word stamps are not headers.
+        if LRC_META_RE.match(s) and "<" not in s:
             continue
         # First lyric line found — check per blank setting
         if cfg.get("lrc_zero_timestamp_blank", False):
@@ -1971,6 +2045,21 @@ def _grade_album(album_dir, lyrics_format, cfg=None):
                           + " (run Optimize FLACs (script 3) or Format all "
                             "(script 10) to strip them)", basename)
                 track["issues"].append("TAGS")
+            # COMMENT is the one name the vocabulary HOLDS whose value this
+            # pipeline never writes (mlo.tagtext leaves it alone as free text,
+            # which is what makes a stored value always somebody else's note —
+            # a ripper's or a vendor tagger's). A VALUE-level rule of the same
+            # check and the same strip passes: a non-empty COMMENT fails the
+            # track with its own issue code and script 10 / Optimize delete it.
+            _comments = sorted({str(_k) for _k, _v in (af.all_tags() or {}).items()
+                                if tag_value_excess(_k, _v)})
+            if _comments:
+                total_checks += 1
+                failed_checks += 1
+                add_issue("Comment tag carries a value: " + ", ".join(_comments)
+                          + " (run Optimize FLACs (script 3) or Format all "
+                            "(script 10) to clear it)", basename)
+                track["issues"].append("COMMENT")
 
         if cfg.get("grade_check_key_bpm", True) and not is_video_track:
             for t in ("INITIALKEY", "BPM"):
@@ -2006,11 +2095,41 @@ def _grade_album(album_dir, lyrics_format, cfg=None):
                             add_issue(f"INITIALKEY '{v}' not {notation} notation", basename)
                         track["issues"].append(t)
 
-        # AcoustID fingerprint pair (opt-in feature): a file carrying one
-        # half must carry both — mlo.acoustid writes ID and fingerprint
-        # together. A file with neither is never graded, so a library that
-        # does not use the feature can never fail here.
-        if cfg.get("grade_check_acoustid", True) and not is_video_track:
+        # Locale ALIASES (grade_check_alias_needed): a TITLE or ARTIST written
+        # in a non-Latin script is a name a reader in the configured locale
+        # cannot search for, so the tagging pass stores the alias MusicBrainz
+        # holds for it (TITLEALIAS / ARTISTALIAS, optionally locale-suffixed:
+        # TITLEALIAS-JA) beside the name itself. What "needs one" means is the
+        # SAME test script 17 asks of lyrics (mlo.lyrics_xlit.non_latin_ratio /
+        # dominant_script at the transliteration threshold), so this is a
+        # script reading, not a second heuristic. A Latin name never needs an
+        # alias and is never counted — a Latin library's grade is unchanged.
+        if cfg.get("grade_check_alias_needed", True) and not is_video_track:
+            for _field, _alias in (("TITLE", "TITLEALIAS"),
+                                   ("ARTIST", "ARTISTALIAS")):
+                if not alias_needed(track["values"].get(_field)
+                                    or af.get_tag(_field)):
+                    continue
+                total_checks += 1
+                if _stored_alias(af, _alias):
+                    continue
+                failed_checks += 1
+                add_issue(f"Missing {_alias} for the non-Latin script {_field}"
+                          " (run Beets tagging (script 14) with locale "
+                          "translations, or set the tag in the editor)",
+                          basename)
+                track["issues"].append(_alias)
+
+        # AcoustID fingerprint pair: REQUIRED on every audio track, key or no
+        # key — mlo.acoustid writes ID and fingerprint together, script 21
+        # completes or creates the pair from the file itself (fpcalc runs
+        # locally, so an empty `acoustid_api_key` skips only the LOOKUPS), and
+        # a track the pair cannot be written for is exactly what the check is
+        # for. It stands down with `acoustid_enabled` off: that switch makes
+        # script 21 a no-op (mlo.cli.SCRIPT_GATES), and demanding a tag no pass
+        # could write would be a permanent FAIL.
+        if cfg.get("grade_check_acoustid", True) \
+                and cfg.get("acoustid_enabled", True) and not is_video_track:
             _a_id = _a_fp = ""
             for _k, _v in (af.all_tags() or {}).items():
                 # TXXX:ACOUSTID_ID / ----:com.apple.iTunes:acoustid_id both
@@ -2020,21 +2139,25 @@ def _grade_album(album_dir, lyrics_format, cfg=None):
                     _a_id = str(_v or "").strip()
                 elif _name == "ACOUSTIDFINGERPRINT":
                     _a_fp = str(_v or "").strip()
-            if _a_id or _a_fp:
-                total_checks += 1
-                if not (_a_id and _a_fp):
-                    _missing = ("ACOUSTID_FINGERPRINT" if _a_id
-                                else "ACOUSTID_ID")
-                    failed_checks += 1
-                    # The half pair is the one thing here no other check can
-                    # fix, and the pass that completes it is a step of the
-                    # chain — named the way the neighbours name their actions
-                    # ("run Audit Library", "run organize"). The tag that is
-                    # missing is still named, which is what a reader searches
-                    # the tags for.
-                    add_issue(f"Missing {_missing} (run Fix AcoustID pairs)",
-                              basename)
-                    track["issues"].append(_missing)
+            total_checks += 1
+            if not (_a_id and _a_fp):
+                # The missing half is the one thing here no other check can
+                # fix, and the pass that writes it is a step of the chain —
+                # named the way the neighbours name their actions ("run Audit
+                # Library", "run organize"). The tag that is missing is still
+                # named, which is what a reader searches the tags for: a file
+                # carrying NEITHER half is missing both, and script 21 creates
+                # the pair from the file's own fingerprint.
+                if _a_id:
+                    _missing = ["ACOUSTID_FINGERPRINT"]
+                elif _a_fp:
+                    _missing = ["ACOUSTID_ID"]
+                else:
+                    _missing = ["ACOUSTID_ID", "ACOUSTID_FINGERPRINT"]
+                failed_checks += 1
+                add_issue("Missing " + " and ".join(_missing)
+                          + " (run Fix AcoustID pairs)", basename)
+                track["issues"].extend(_missing)
 
         # File/folder names must match the naming script (the same script the
         # organizer applies), relative to the music folder — exact match for
@@ -2463,7 +2586,15 @@ def _grade_album(album_dir, lyrics_format, cfg=None):
         # Skip if LYRICS disabled for this filetype.
         # Configurable via grade_check_lyrics_* and grade_check_lyrics_zero/crop
         if embedded or lrc:
-            if not should_write_audio_tag(cfg, "LYRICS", filepath=ap):
+            if inst_val == "1":
+                # The track's own statement wins: an INSTRUMENTAL=1 file has
+                # no words, so a leftover tag/sidecar is not "lyrics not
+                # optimally formatted" — script 1 clears it (the same
+                # predicate: mlo.lyrics._process_lyrics_for_audio drops both
+                # stores for INSTRUMENTAL=1). The contradiction itself is
+                # still reported by grade_check_instrumental above.
+                pass
+            elif not should_write_audio_tag(cfg, "LYRICS", filepath=ap):
                 pass
             elif not cfg.get("grade_check_lyrics_format", True):
                 pass
@@ -2473,6 +2604,11 @@ def _grade_album(album_dir, lyrics_format, cfg=None):
             else:
                 total_checks += 1
                 lyr_text = str(lyr) if embedded else None
+                # The track's own identity, so the format comparison judges a
+                # leading "Title - Artist" header line the way the formatter
+                # does (same predicate, same real tags).
+                _ly_title = af.get_tag("TITLE")
+                _ly_artist = af.get_tag("ARTIST")
                 lrc_text = None
                 if lrc:
                     try:
@@ -2490,11 +2626,13 @@ def _grade_album(album_dir, lyrics_format, cfg=None):
                     _ly_blanks = cfg.get("grade_check_lyrics_blank_lines", True)
                     if lyr_text and not _lyrics_formatted(
                             lyr_text, cfg, is_for_lrc=False,
-                            check_spaces=_ly_spaces, check_blank_lines=_ly_blanks):
+                            check_spaces=_ly_spaces, check_blank_lines=_ly_blanks,
+                            track_title=_ly_title, track_artist=_ly_artist):
                         fmt_ok = False
                     if lrc_text and not _lyrics_formatted(
                             lrc_text, cfg, is_for_lrc=True,
-                            check_spaces=_ly_spaces, check_blank_lines=_ly_blanks):
+                            check_spaces=_ly_spaces, check_blank_lines=_ly_blanks,
+                            track_title=_ly_title, track_artist=_ly_artist):
                         fmt_ok = False
                 # Zero timestamp check if enabled
                 if cfg.get("grade_check_lyrics_zero", True):

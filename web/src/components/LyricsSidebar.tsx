@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState, type CSSProperties } from "react";
 import { AudioLines, X } from "lucide-react";
 import { api } from "../api";
 import { parsePlayerLrc, parseLrc, splitStoredLines, hasLyricsText, activeLineRange, KaraokeWords, type LrcLine } from "./LyricsViewer";
@@ -189,7 +189,7 @@ export default function LyricsSidebar({
   // Auto-follow owns the pane — the shared controller, so this panel and the
   // fullscreen player behave identically. Only a wheel / touch hands it to
   // the reader, and only for a few seconds.
-  const { centerLine, takeOver } = useLyricsFollow({
+  const { centerLine, jump, snapping, takeOver } = useLyricsFollow({
     active: activeStart,
     time: dispTime,
     playing,
@@ -208,30 +208,60 @@ export default function LyricsSidebar({
   const title = payload?.title || current?.title || (current ? current.file.replace(/\.[^.]+$/, "") : "Lyrics");
   const album = payload?.album || current?.album || "";
 
+  // The pane's top edge is the BOTTOM of the app's top chrome, which is not a
+  // constant: the shell hangs its live progress rows off the top bar's own
+  // bottom edge (App's `LiveProgress`, one row per live producer), and that
+  // band is exactly where this pane's title row — title, album, offset, zoom —
+  // was drawn. A run's progress row and the lyrics header landed on top of one
+  // another (owner screenshot). The chrome is measured here and published as
+  // `--mlo-chrome-bottom` for `.safe-lyrics` (index.css), whose own 3rem +
+  // inset rule stays underneath as the floor: a device with no rows, or no JS,
+  // keeps the geometry it had.
+  //
+  // The rows are `top-full`, i.e. OUTSIDE the bar's own box, so the bar's
+  // children are what is measured and only those hanging below it count (a
+  // dropdown nested inside a cluster starts above the edge and is ignored).
+  const [chromeBottom, setChromeBottom] = useState(0);
+  useEffect(() => {
+    const measure = () => {
+      const header = document.querySelector("header");
+      if (!header) return;
+      const bar = header.getBoundingClientRect();
+      let bottom = bar.bottom;
+      for (const child of header.children) {
+        const r = child.getBoundingClientRect();
+        if (r.height > 0 && r.top >= bar.bottom - 1) bottom = Math.max(bottom, r.bottom + 4);
+      }
+      setChromeBottom(Math.ceil(bottom));
+    };
+    measure();
+    // The band appears, gains a row and goes away while the pane is open, and
+    // all three are a child-list change somewhere under the bar.
+    const observer = new MutationObserver(measure);
+    const header = document.querySelector("header");
+    if (header) observer.observe(header, { childList: true, subtree: true });
+    window.addEventListener("resize", measure);
+    return () => {
+      observer.disconnect();
+      window.removeEventListener("resize", measure);
+    };
+  }, []);
+
   return (
-    <aside className="safe-lyrics fixed right-0 w-full max-w-[100vw] sm:w-[380px] z-30 bg-panel/95 backdrop-blur border-l border-border shadow-2xl flex flex-col">
+    <aside
+      /* `lyr-corner-host`: the pane's own corner strip (below) is revealed
+         while the pointer is over this pane or a chip inside it has focus —
+         see `.lyr-corner` in index.css. */
+      className="safe-lyrics lyr-corner-host fixed right-0 w-full max-w-[100vw] sm:w-[380px] z-30 bg-panel/95 backdrop-blur border-l border-border shadow-2xl flex flex-col"
+      /* 0 = not measured yet: the helper's own safe-area rule is used, exactly
+         as it was before this measurement existed. */
+      style={chromeBottom ? ({ "--mlo-chrome-bottom": `${chromeBottom}px` } as CSSProperties) : undefined}
+    >
       <div className="flex items-center gap-2 px-4 py-2.5 border-b border-border/60">
         <div className="min-w-0 flex-1">
           <div className="text-xs font-semibold truncate">{title}</div>
           {album && <div className="text-[10px] text-zinc-500 truncate">{album}</div>}
         </div>
-        <LyricOffset
-          className="mr-1"
-          path={path}
-          ms={offsetMs}
-          onChange={setOffsetMs}
-          /* The saved text replaces the pane's copy: the server's shift is the
-             canonical one (it formats for the storage target), and the pending
-             nudge that produced it is spent — the control resets itself. */
-          onSaved={(lrc) => setPayload((p) => (p ? { ...p, lyrics: lrc } : p))}
-        />
-        <LyricZoom
-          pct={zoom}
-          onChange={(p) => {
-            setZoom(p);
-            localStorage.setItem(ZOOM_KEY, String(p));
-          }}
-        />
         <button
           className={`p-1.5 rounded-lg transition-colors ${viz ? "text-accent hover:text-accent-soft" : "text-zinc-500 hover:text-white"} hover:bg-raise`}
           onClick={toggleViz}
@@ -247,6 +277,10 @@ export default function LyricsSidebar({
           <X className="h-4 w-4" />
         </button>
       </div>
+      {/* The reading surface and its own corner strip. The strip is a SIBLING
+          of the scroller (inside this relative wrapper), not a child of it:
+          it must stay put while the lyrics scroll under it. */}
+      <div className="relative flex-1 min-h-0 flex flex-col">
       <div
         ref={scrollRef}
         className="relative flex-1 min-h-0 overflow-y-auto overscroll-contain px-5 py-4 no-scrollbar lyr-fade"
@@ -295,7 +329,13 @@ export default function LyricsSidebar({
                   ref={(el) => {
                     primaryRefs.current[i] = el;
                   }}
-                  className={`text-[15px] leading-snug font-semibold transition-[transform,color] duration-300 ${
+                  /* The ease is dropped while a reader-made move is landing
+                     (`snapping`): pressing a line, stepping the offset or
+                     parking the needle used to ease the highlight off the line
+                     BEFORE the jump while the words were already at the new
+                     one. The clock's own advance is the only move that
+                     animates. */
+                  className={`text-[15px] leading-snug font-semibold ${snapping ? "" : "transition-[transform,color] duration-300"} ${
                     isActive ? "text-white" : synced ? "text-zinc-500" : "text-zinc-300"
                   }`}
                   style={{
@@ -339,6 +379,47 @@ export default function LyricsSidebar({
             )}
           </div>
         )}
+      </div>
+      {/* The pane's own corner strip (issue #63): the same two controls the
+          fullscreen pane carries in its corner, in the same place relative to
+          the words, and the same reveal — `.lyr-corner` fades it in while the
+          pointer is over this pane (or a chip has focus) and keeps it out of
+          the way — and out of the hit test — otherwise. On a touch device it
+          is simply always on.
+          It sits BELOW the header row rather than beside it: the pane's
+          top-right CORNER of the reading surface is this wrapper's, and the
+          header keeps its own controls (visualizer, close) where a reader
+          already finds them. No background or border of its own — the ink
+          inherits the pane's, exactly as the header-row copy did. */}
+      <div className="lyr-corner absolute top-0 right-0 z-10 flex items-center gap-2 pl-6 pr-1 pt-1 text-[11px]">
+        <LyricOffset
+          className="mr-1"
+          path={path}
+          ms={offsetMs}
+          onChange={(ms) => {
+            setOffsetMs(ms);
+            /* The reader moved the words themselves: the pane lands on the
+               new line in the same frame instead of gliding from the old one
+               (see useLyricsFollow). */
+            jump();
+          }}
+          /* The saved text replaces the pane's copy: the server's shift is the
+             canonical one (it formats for the storage target), and the pending
+             nudge that produced it is spent — the control resets itself. */
+          onSaved={(lrc) => {
+            setPayload((p) => (p ? { ...p, lyrics: lrc } : p));
+            jump();
+          }}
+        />
+        <LyricZoom
+          pct={zoom}
+          onChange={(p) => {
+            setZoom(p);
+            localStorage.setItem(ZOOM_KEY, String(p));
+            jump();
+          }}
+        />
+      </div>
       </div>
       {viz && (
         <div className="border-t border-border/60 px-4 py-2">

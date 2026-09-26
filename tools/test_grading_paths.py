@@ -787,24 +787,140 @@ set_tags(flac, dict(NO_MOOD, MOOD="melancholic"))
 del_tags(flac, list(REPLAYGAIN_TAGS))
 
 # ----------------------------------------------------------------------
-# AcoustID pair (opt-in: never graded when the file carries neither tag)
+# AcoustID pair (REQUIRED: key or no key, script 21 creates it locally)
 # ----------------------------------------------------------------------
 print("== acoustid pair ==")
+del_tags(flac, ["ACOUSTID_ID", "ACOUSTID_FINGERPRINT"])
 base = _grade_album(album, "EMBEDDED", cfg)
-res = _grade_album(album, "EMBEDDED", dict(cfg, grade_check_acoustid=True))
-ok(res["total_checks"] == base["total_checks"]
-   and res["pass_count"] == res["total_checks"],
-   "a file with neither AcoustID tag is never graded (check not counted)")
+# No API key at all: script 21 needs none (fpcalc takes the fingerprint
+# locally and the id comes off the file), so its absence must not skip the
+# check — the track fails for a tag nothing has written yet.
+ac_cfg = dict(cfg, grade_check_acoustid=True, acoustid_api_key="")
+res = _grade_album(album, "EMBEDDED", ac_cfg)
+ok(res["total_checks"] == base["total_checks"] + 1
+   and res["tracks"][0]["issues"] == ["ACOUSTID_ID", "ACOUSTID_FINGERPRINT"],
+   f"a track with no AcoustID pair fails with an empty api key "
+   f"(got {res['tracks'][0]['issues']})")
+ok(any("Missing ACOUSTID_ID and ACOUSTID_FINGERPRINT" in i
+       and "Fix AcoustID pairs" in i for i in res["issues"]),
+   f"the issue names both halves and the script that writes them "
+   f"(got {res['issues']})")
 set_tags(flac, dict(NO_MOOD, MOOD="melancholic", ACOUSTID_ID="9f4e1d2c"))
-res = _grade_album(album, "EMBEDDED", dict(cfg, grade_check_acoustid=True))
+res = _grade_album(album, "EMBEDDED", ac_cfg)
 ok(res["tracks"][0]["issues"] == ["ACOUSTID_FINGERPRINT"],
-   f"a lone ACOUSTID_ID fails the pair check (got {res['tracks'][0]['issues']})")
+   f"a lone ACOUSTID_ID fails naming the fingerprint "
+   f"(got {res['tracks'][0]['issues']})")
+set_tags(flac, dict(NO_MOOD, MOOD="melancholic",
+                    ACOUSTID_FINGERPRINT="AQADtEmS"))
+del_tags(flac, ["ACOUSTID_ID"])
+res = _grade_album(album, "EMBEDDED", ac_cfg)
+ok(res["tracks"][0]["issues"] == ["ACOUSTID_ID"],
+   f"a lone ACOUSTID_FINGERPRINT fails naming the id "
+   f"(got {res['tracks'][0]['issues']})")
 set_tags(flac, dict(NO_MOOD, MOOD="melancholic", ACOUSTID_ID="9f4e1d2c",
                     ACOUSTID_FINGERPRINT="AQADtEmS"))
-res = _grade_album(album, "EMBEDDED", dict(cfg, grade_check_acoustid=True))
-ok(res["pass_count"] == res["total_checks"],
+res = _grade_album(album, "EMBEDDED", ac_cfg)
+ok(res["pass_count"] == res["total_checks"]
+   and not any("ACOUSTID" in i for i in res["tracks"][0]["issues"]),
    f"a complete AcoustID pair passes ({res['pass_count']}/{res['total_checks']})")
+# `acoustid_enabled` off is the family's own switch: script 21 is then a no-op
+# (mlo.cli.SCRIPT_GATES), so the check stands down instead of failing every
+# track for a tag no pass could write. The baseline carries the same tags, so
+# only the check itself differs.
+off_base = _grade_album(album, "EMBEDDED", cfg)
+res = _grade_album(album, "EMBEDDED",
+                   dict(ac_cfg, acoustid_enabled=False))
+ok(res["total_checks"] == off_base["total_checks"]
+   and res["pass_count"] == res["total_checks"]
+   and not any("ACOUSTID" in i for i in res["tracks"][0]["issues"]),
+   f"acoustid_enabled=False stands the check down "
+   f"({res['pass_count']}/{res['total_checks']} vs "
+   f"{off_base['pass_count']}/{off_base['total_checks']})")
 set_tags(flac, dict(NO_MOOD, MOOD="melancholic"))
+del_tags(flac, ["ACOUSTID_ID", "ACOUSTID_FINGERPRINT"])
+
+# ----------------------------------------------------------------------
+# Locale alias (grade_check_alias_needed): a non-Latin name needs its alias
+# ----------------------------------------------------------------------
+print("== locale alias ==")
+JA_TITLE = "君の名は"
+# Naming off: the fixture's path is built from its Latin tags, so changing the
+# TITLE to a Japanese one would fail grade_check_naming for a reason this case
+# is not about (and the alias rule never depends on the path).
+alias_cfg = dict(cfg, grade_check_alias_needed=True, grade_check_naming=False)
+latin = _grade_album(album, "EMBEDDED", alias_cfg)
+set_tags(flac, dict(NO_MOOD, MOOD="melancholic", TITLE=JA_TITLE))
+res = _grade_album(album, "EMBEDDED", alias_cfg)
+ok(res["tracks"][0]["issues"] == ["TITLEALIAS"],
+   f"a non-Latin TITLE without its alias fails (got {res['tracks'][0]['issues']})")
+ok(res["total_checks"] - res["pass_count"] == 1,
+   f"and costs exactly one grade point "
+   f"({res['pass_count']}/{res['total_checks']})")
+# …and it is the TITLE's script that decides it: the Latin fixture is graded
+# one check lighter, with the same tag set otherwise (TITLE is a per-track tag,
+# so the generic hygiene sweep does not count it).
+ok(res["total_checks"] == latin["total_checks"] + 1
+   and latin["pass_count"] == latin["total_checks"],
+   f"a Latin name is never graded for an alias "
+   f"({latin['pass_count']}/{latin['total_checks']}, non-Latin "
+   f"{res['pass_count']}/{res['total_checks']})")
+ok(any("Missing TITLEALIAS" in i for i in res["issues"]),
+   f"the issue names the alias tag to write (got {res['issues']})")
+set_tags(flac, dict(NO_MOOD, MOOD="melancholic", TITLE=JA_TITLE,
+                    TITLEALIAS="Kimi no na wa"))
+res = _grade_album(album, "EMBEDDED", alias_cfg)
+ok(res["pass_count"] == res["total_checks"]
+   and not any("ALIAS" in i for i in res["tracks"][0]["issues"]),
+   f"the alias tag satisfies it ({res['pass_count']}/{res['total_checks']})")
+# The Latin title keeps its own check: a Latin TITLE is never graded (only the
+# non-Latin ARTIST is, leaving exactly one alias check), and a locale-suffixed
+# alias satisfies it the same way a bare one does.
+set_tags(flac, dict(NO_MOOD, MOOD="melancholic", TITLE="Song",
+                    ARTIST="宇多田ヒカル",
+                    **{"ARTISTALIAS-JA": "Hikaru Utada"}))
+res = _grade_album(album, "EMBEDDED", alias_cfg)
+ok(res["pass_count"] == res["total_checks"]
+   and not any("ALIAS" in i for i in res["tracks"][0]["issues"]),
+   f"a Latin title is never counted and the suffixed artist alias satisfies "
+   f"the artist ({res['pass_count']}/{res['total_checks']})")
+off_alias = _grade_album(album, "EMBEDDED", cfg)
+res = _grade_album(album, "EMBEDDED", dict(cfg, grade_check_alias_needed=False))
+ok(res["total_checks"] == off_alias["total_checks"] - 1
+   and res["pass_count"] == res["total_checks"]
+   and not any("ALIAS" in i for i in res["tracks"][0]["issues"]),
+   f"grade_check_alias_needed=False stops the whole check "
+   f"({res['pass_count']}/{res['total_checks']} vs "
+   f"{off_alias['pass_count']}/{off_alias['total_checks']})")
+# Back to the fixture every block below grades: a Latin TITLE / ARTIST and no
+# alias tags (which the other cases' partial cfgs would otherwise fail).
+set_tags(flac, dict(NO_MOOD, MOOD="melancholic"))
+del_tags(flac, ["TITLEALIAS", "ARTISTALIAS-JA"])
+
+# ----------------------------------------------------------------------
+# COMMENT: the one allow-listed NAME whose VALUE is junk
+# ----------------------------------------------------------------------
+print("== comment value ==")
+excess_cfg = dict(cfg, grade_check_excess_tags=True, strip_unknown_tags=True)
+plain = _grade_album(album, "EMBEDDED", excess_cfg)
+set_tags(flac, dict(NO_MOOD, MOOD="melancholic", COMMENT="ripped by some tool"))
+res = _grade_album(album, "EMBEDDED", excess_cfg)
+ok(res["tracks"][0]["issues"] == ["COMMENT"],
+   f"a non-empty COMMENT fails with its own code "
+   f"(got {res['tracks'][0]['issues']})")
+ok(res["total_checks"] - res["pass_count"] == 1
+   and any("Comment tag carries a value" in i for i in res["issues"]),
+   f"the value rule costs one grade point and is named "
+   f"({res['pass_count']}/{res['total_checks']}, {res['issues']})")
+# It is part of the excess check, so both switches gate it — a COMMENT nothing
+# can clear must not fail (same tags, the strip switched off).
+res = _grade_album(album, "EMBEDDED",
+                   dict(excess_cfg, strip_unknown_tags=False))
+ok(res["pass_count"] == res["total_checks"]
+   and not any("COMMENT" in str(i) for i in res["tracks"][0]["issues"]),
+   f"strip_unknown_tags=False stands the value rule down too "
+   f"({res['pass_count']}/{res['total_checks']})")
+set_tags(flac, dict(NO_MOOD, MOOD="melancholic"))
+del_tags(flac, ["COMMENT"])
 
 # ----------------------------------------------------------------------
 # Album description (grade_check_album_description)

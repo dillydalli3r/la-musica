@@ -295,6 +295,54 @@ from server import main as srv  # noqa: E402
 CFG = {"music_folder": MUSIC, "cover_target_size": 1200, "naming_script": ""}
 srv.load_config = lambda: dict(CFG)
 
+# --------------------------------------------------------------------------- #
+# A manual cover write queues script 5 ("Process images") for that one album
+# (server.main._schedule_cover_process). Every write below IS such a write, so
+# the RUN is stubbed for the whole endpoints section: a real Process images
+# would rewrite the very images these checks assert on, and hold the album
+# while the next check wrote it. The stub records exactly what the queued run
+# was scoped to — the ids and cfg["targets"] — and nothing else.
+#
+# The route is called directly (not through a TestClient), so every optional
+# parameter is passed explicitly — `staged` included: its default is FastAPI's
+# `Query(False)` sentinel, which is TRUTHY, and a direct call that omits it
+# reads as a staged (import-wizard) write.
+# --------------------------------------------------------------------------- #
+import time  # noqa: E402
+
+from server import script_runners as runners_mod  # noqa: E402
+
+ENQUEUED = []        # one entry per queued run: {"ids", "targets", "wait"}
+
+
+def _spy_run_chain(cfg, ids, targets=None, **kwargs):
+    ENQUEUED.append({"ids": list(ids),
+                     "targets": [str(t) for t in (cfg.get("targets") or [])],
+                     "wait": kwargs.get("wait")})
+    return [{"id": i, "name": "run_process_images", "label": "Process images",
+             "stats": {}} for i in ids]
+
+
+_REAL_RUN_CHAIN = runners_mod.run_chain
+runners_mod.run_chain = _spy_run_chain
+
+
+def enqueued_for(folder):
+    """The queued runs scoped to exactly *folder* (nothing else is read)."""
+    return [e for e in ENQUEUED if e["targets"] == [folder]]
+
+
+def wait_for_runs(folder, n=1, timeout=20.0):
+    """Wait until *n* runs were queued for *folder*; returns what was queued.
+
+    The queueing itself is synchronous inside the route; only the thread that
+    calls run_chain is background, so a short wait is all this needs.
+    """
+    deadline = time.time() + timeout
+    while time.time() < deadline and len(enqueued_for(folder)) < n:
+        time.sleep(0.02)
+    return enqueued_for(folder)
+
 REAL = REAL_MUSIC_FOLDER.replace("\\", "/").rstrip("/").lower()
 # Only meaningful when there IS a configured music folder to stay away from: a
 # checkout without config.json (CI) reads "" here, and every path starts with
@@ -427,6 +475,181 @@ check("POST /api/cover without a track writes cover.*", t_upload_album_cover_unc
 check("an image format Pillow cannot decode still uploads", t_upload_format_pillow_cannot_read)
 check("POST /api/cover/fromurl accepts tracks=", t_fromurl_tracks)
 check("POST /api/cover/clear drops entries, keeps the image", t_clear_endpoint)
+
+# --------------------------------------------------------------------------- #
+# 4b. a MANUAL cover write queues script 5 for that one album, once
+# --------------------------------------------------------------------------- #
+print("== script 5 after a manual cover write ==")
+P = album("ManualPick")
+for n in ("01 - P1.flac", "02 - P2.flac"):
+    make_flac(os.path.join(P, n), f"Song {n[0:2]}", int(n[:2]))
+
+
+def t_manual_pick_queues_one_run():
+    """The owner's own flow: search, pick, apply (POST /api/cover/fromurl)."""
+    orig = srv.intg.fetch_image_bytes
+    srv.intg.fetch_image_bytes = lambda url: (image_bytes((1400, 1400)),
+                                              "image/png")
+    try:
+        res = asyncio.run(srv.cover_from_url(
+            album=P, url="http://example.invalid/pick.png", track=None,
+            tracks=None, staged=False))
+    finally:
+        srv.intg.fetch_image_bytes = orig
+    assert res["ok"] is True, res
+    runs = wait_for_runs(P)
+    assert len(runs) == 1, runs
+    time.sleep(0.3)                      # a second, unintended run lands here
+    assert len(enqueued_for(P)) == 1, enqueued_for(P)
+    assert runs[0]["ids"] == [5], runs[0]
+    assert runs[0]["targets"] == [P], runs[0]
+
+
+def t_manual_upload_queues_one_run():
+    """The other manual route: an uploaded file (POST /api/cover)."""
+    U = album("ManualUpload")
+    make_flac(os.path.join(U, "01 - U.flac"), "Song U", 1)
+    res = asyncio.run(srv.upload_cover(
+        album=U, file=Upload(image_bytes((1400, 1400)), filename="front.png"),
+        track=None, tracks=None, staged=False))
+    assert res["ok"] is True, res
+    runs = wait_for_runs(U)
+    assert len(runs) == 1, runs
+    time.sleep(0.3)
+    assert len(enqueued_for(U)) == 1, enqueued_for(U)
+    assert runs[0]["ids"] == [5], runs[0]
+    assert runs[0]["targets"] == [U], runs[0]
+
+
+def t_double_press_queues_one_run():
+    """Two presses in a row on one album are ONE run (coalesced per album)."""
+    D = album("ManualTwice")
+    make_flac(os.path.join(D, "01 - D.flac"), "Song D", 1)
+    for _ in range(2):
+        res = asyncio.run(srv.upload_cover(
+            album=D, file=Upload(image_bytes((1400, 1400)), filename="front.png"),
+            track=None, tracks=None, staged=False))
+        assert res["ok"] is True, res
+    runs = wait_for_runs(D)
+    assert len(runs) == 1, runs
+    time.sleep(0.3)
+    assert len(enqueued_for(D)) == 1, enqueued_for(D)
+    assert runs[0]["targets"] == [D], runs[0]
+
+
+def t_importer_cover_step_queues_none():
+    """The AUTOMATIC write (server.imports.run_cover_step) queues nothing:
+    its album belongs to an import chain, which carries script 5 itself."""
+    from server import imports as imports_mod
+
+    A = album("ManualAuto")
+    make_flac(os.path.join(A, "01 - Z.flac"), "Song Z", 1)
+    real_candidates = imports_mod.cover_candidates
+    real_bytes = srv._cover_url_bytes
+    imports_mod.cover_candidates = lambda album_dir, cfg=None: {
+        "chosen": {"source": "stub", "big": "http://example.invalid/big.jpg",
+                   "reasons": ["stub"], "width": 1400, "height": 1400},
+        "candidate_count": 1, "provider": "stub", "artist": "Cover Artist",
+        "album": "Cover Album", "release_group": "", "notes": [],
+        "rejected_count": 0}
+    srv._cover_url_bytes = lambda url, artist="", substitute=True: (
+        image_bytes((1400, 1400)), "image/png")
+    try:
+        out = imports_mod.run_cover_step(
+            A, dict(CFG, cover_auto_fetch=True, cover_review=False))
+    finally:
+        imports_mod.cover_candidates = real_candidates
+        srv._cover_url_bytes = real_bytes
+    assert out["fetched"] is True, out
+    assert os.path.isfile(str(out["applied"].get("cover"))), out
+    time.sleep(0.3)
+    assert enqueued_for(A) == [], enqueued_for(A)
+
+
+def t_staged_write_queues_none():
+    """A STAGED write is the import wizard's folder: the chain that finishes
+    that album runs script 5, so the write queues nothing here."""
+    W = os.path.join(TMP, "staged-wizard")      # outside the music folder
+    os.makedirs(W, exist_ok=True)
+    res = asyncio.run(srv.upload_cover(
+        album=W, file=Upload(image_bytes((1400, 1400)), filename="front.png"),
+        track=None, tracks=None, staged=True))
+    assert res["ok"] is True, res
+    time.sleep(0.3)
+    assert enqueued_for(os.path.normpath(W)) == [], ENQUEUED
+
+
+def t_queued_run_claims_the_album():
+    """The queued run really is a `run_chain`: it reaches the script runner
+    with this one album in scope AND holds it in job_locks while it works —
+    the row MAINTAIN → In progress lists, and the lock other writers answer."""
+    Q = album("ManualHold")
+    make_flac(os.path.join(Q, "01 - Q.flac"), "Song Q", 1)
+    seen = []
+    real_runner = runners_mod.RUNNERS[5]
+
+    def spy_images(cfg):
+        targets = [str(t) for t in (cfg.get("targets") or [])]
+        seen.append({"targets": targets,
+                     "busy": [srv.job_locks.busy(t) for t in targets],
+                     "rows": [(j.get("kind"), j.get("label"))
+                              for j in srv.job_locks.jobs()]})
+        return {"processed": 0}
+
+    runners_mod.run_chain = _REAL_RUN_CHAIN      # the real path, this once
+    runners_mod.RUNNERS[5] = ("Process images", spy_images)
+    try:
+        res = asyncio.run(srv.upload_cover(
+            album=Q, file=Upload(image_bytes((1400, 1400)), filename="front.png"),
+            track=None, tracks=None, staged=False))
+        assert res["ok"] is True, res
+        deadline = time.time() + 30
+        while not seen and time.time() < deadline:
+            time.sleep(0.02)
+    finally:
+        runners_mod.run_chain = _spy_run_chain
+        runners_mod.RUNNERS[5] = real_runner
+    assert seen, "the queued run never reached its script runner"
+    assert len(seen) == 1, seen
+    assert seen[0]["targets"] == [Q], seen
+    assert seen[0]["busy"] == [True], seen
+    assert ("scripts", "Process images") in seen[0]["rows"], seen
+
+
+def t_second_pick_after_the_window_queues_again():
+    """Coalescing is a WINDOW, not a per-album latch: a later pick on the same
+    album is a new intent and gets its own run."""
+    L = album("ManualLater")
+    make_flac(os.path.join(L, "01 - L.flac"), "Song L", 1)
+    orig = srv._COVER_PROCESS_COALESCE_S
+    srv._COVER_PROCESS_COALESCE_S = 0.05
+    try:
+        for _ in range(2):
+            res = asyncio.run(srv.upload_cover(
+                album=L,
+                file=Upload(image_bytes((1400, 1400)), filename="front.png"),
+                track=None, tracks=None, staged=False))
+            assert res["ok"] is True, res
+            time.sleep(0.3)               # well past the shrunken window
+    finally:
+        srv._COVER_PROCESS_COALESCE_S = orig
+    runs = wait_for_runs(L, 2)
+    assert len(runs) == 2, runs
+    assert [r["targets"] for r in runs] == [[L], [L]], runs
+
+
+check("a picked cover queues ONE run scoped to the album",
+      t_manual_pick_queues_one_run)
+check("an uploaded cover queues ONE run scoped to the album",
+      t_manual_upload_queues_one_run)
+check("the same press twice queues one run", t_double_press_queues_one_run)
+check("a pick after the coalesce window queues its own run",
+      t_second_pick_after_the_window_queues_again)
+check("the importer's own cover step queues none",
+      t_importer_cover_step_queues_none)
+check("a staged (wizard) cover write queues none", t_staged_write_queues_none)
+check("the queued run holds the album and is a script run",
+      t_queued_run_claims_the_album)
 
 # --------------------------------------------------------------------------- #
 # 5. consumers: grading + the library payload

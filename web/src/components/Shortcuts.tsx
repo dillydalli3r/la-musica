@@ -17,6 +17,7 @@ export interface Shortcut {
 export const SHORTCUTS: Shortcut[] = [
   { keys: ["Space"], label: "Play / pause", where: "player" },
   { keys: ["←", "→"], label: "Seek 5 seconds", where: "player" },
+  { keys: ["Ctrl", "Z"], label: "Undo the last jump inside this track", where: "player" },
   { keys: ["[", "]"], label: "Playback speed down / up", where: "player" },
   { keys: ["0"], label: "Reset playback speed", where: "player" },
   { keys: ["F"], label: "Fullscreen viewer", where: "anywhere" },

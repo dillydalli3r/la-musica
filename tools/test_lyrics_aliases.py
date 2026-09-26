@@ -23,7 +23,17 @@ Pinned here:
     left intact by the normalising the chain matches with,
   * `server.integrations.search_aliases`: the ordered, de-duplicated name list
     the pass feeds on (locale first, then a Latin reading, `search hint`
-    aliases and the stored name itself dropped).
+    aliases and the stored name itself dropped),
+  * the SAME fallback in the two other lookups that miss a stored name — the
+    advisory route (`resolve_advisory_route`, its name-based sources re-asked
+    under the alias names only after every source stated nothing for the
+    stored ones) and the instrumental detector's LRCLIB lookup — original
+    names first, and NO MusicBrainz request at all when the file carries no
+    ids,
+  * publishing: a track with aliases is submitted under the original name pair
+    AND each alias pair, with independent outcomes (a 409 under one name skips
+    only that name), and `lyrics_search_aliases` off leaves the one original
+    pair.
 
 Run:  python tools/test_lyrics_aliases.py
 """
@@ -642,9 +652,292 @@ check(mb_calls, "the second pass is what asked MusicBrainz")
 check("wrote" not in body, "the box returns a HIT, never a write result")
 
 
+# --------------------------------------------------------------------------- #
+# 6. The ADVISORY route's alias fallback — original names first, always
+# --------------------------------------------------------------------------- #
+# `search_aliases` again (the same ordered names), turned into substitutions by
+# the lyrics chain's own `_alias_queries`, and only the NAME-based sources
+# re-asked: Apple's album route and song search (and the Discogs edition when a
+# token is configured). The alias names are read only when the stored ones
+# stated NOTHING.
+ADV_TAGS = {"MUSICBRAINZ_TRACKID": "rec-1", "MUSICBRAINZ_ARTISTID": "art-1",
+            "MUSICBRAINZ_RELEASEGROUPID": "rg-1"}
+si._ADVISORY_CACHE.clear()
+adv_calls = []
+
+
+def fake_apple(artist, album, title="", disc=None, track=None, track_count=None,
+               timeout=None, cfg=None):
+    adv_calls.append(("apple-album", artist, album))
+    return None
+
+
+def fake_song(title, artist="", timeout=None):
+    adv_calls.append(("itunes-song", artist, title))
+    if (artist, title) == (EN_ARTIST, EN_TITLE):
+        return (1, "itunes-song")
+    return None
+
+
+mb_calls = []
+with Patch(si, _apple_album_advisory=fake_apple), \
+     Patch(si, _itunes_song_advisory=fake_song), \
+     Patch(si, mb_get_cached=fake_mb):
+    route = si.resolve_advisory_route(title=JP_TITLE, artist=JP_ARTIST,
+                                      album=JP_ALBUM, tags=ADV_TAGS,
+                                      cfg={"locale": "en"})
+check(route["value"] == 1,
+      f"an advisory nobody stated under the stored names is found under the alias: {route}")
+check(route["source"] == "itunes-song", route)
+check(adv_calls[0][1:] == (JP_ARTIST, JP_ALBUM),
+      f"the ORIGINAL names are asked first: {adv_calls}")
+check(adv_calls[1][1:] == (JP_ARTIST, JP_TITLE),
+      f"…and the original song search right after: {adv_calls}")
+check((EN_ARTIST, EN_TITLE) in [c[1:] for c in adv_calls],
+      f"the alias pair is asked only after they stated nothing: {adv_calls}")
+check("artist/art-1" in mb_calls and "recording/rec-1" in mb_calls
+      and "release-group/rg-1" in mb_calls,
+      f"the aliases come from the ids the file carries: {mb_calls}")
+
+# …and a source that DOES state something ends the question: not one alias name
+# is asked, and MusicBrainz is never reached for them.
+si._ADVISORY_CACHE.clear()
+adv_calls, mb_calls = [], []
+
+
+def fake_apple_hit(artist, album, title="", disc=None, track=None,
+                   track_count=None, timeout=None, cfg=None):
+    adv_calls.append(("apple-album", artist, album))
+    return (1, "apple-album")
+
+
+with Patch(si, _apple_album_advisory=fake_apple_hit), \
+     Patch(si, _itunes_song_advisory=fake_song), \
+     Patch(si, mb_get_cached=fake_mb):
+    route = si.resolve_advisory_route(title=JP_TITLE, artist=JP_ARTIST,
+                                      album=JP_ALBUM, tags=ADV_TAGS,
+                                      cfg={"locale": "en"})
+check(route["value"] == 1 and route["source"] == "apple-album", route)
+check(mb_calls == [], f"a stated advisory costs no alias lookup: {mb_calls}")
+check(not [c for c in adv_calls if c[1:] == (EN_ARTIST, EN_TITLE)],
+      f"and no alias name is ever asked: {adv_calls}")
+
+# A caller that gave no MusicBrainz ids gets no alias pass — and no request.
+si._ADVISORY_CACHE.clear()
+adv_calls, mb_calls = [], []
+with Patch(si, _apple_album_advisory=fake_apple), \
+     Patch(si, _itunes_song_advisory=fake_song), \
+     Patch(si, mb_get_cached=fake_mb):
+    route = si.resolve_advisory_route(title="Nobody", artist="Nobody At All",
+                                      album="Nothing", cfg={})
+check(route["value"] is None, route)
+check(mb_calls == [], f"no ids is no MusicBrainz lookup at all: {mb_calls}")
+
+# …and the IMPORT path really passes those ids, so a library-wide advisory run
+# reaches the aliases too — the route is only half of the wiring
+# (server/imports.fetch_advisories supplies the file's own ids).
+from server import imports as _imports  # noqa: E402
+
+si._ADVISORY_CACHE.clear()
+adv_calls, mb_calls = [], []
+adv_path = make_flac("advisory-alias.flac", dict(JP_TAGS))
+with Patch(si, _apple_album_advisory=fake_apple), \
+     Patch(si, _itunes_song_advisory=fake_song), \
+     Patch(si, mb_get_cached=fake_mb):
+    adv = _imports.fetch_advisories([adv_path], {"music_folder": TMP,
+                                                 "advisory_fallback": "none"})
+check(adv["values"].get(adv_path) == 1
+      and adv["sources"].get(adv_path) == "itunes-song",
+      f"an import's advisory step finds the track under its alias: {adv}")
+check(adv_calls and adv_calls[0][1:] == (JP_ARTIST, JP_ALBUM),
+      f"…the stored names first: {adv_calls}")
+check((EN_ARTIST, EN_TITLE) in [c[1:] for c in adv_calls],
+      f"…and the alias names through the ids the step passes: {adv_calls}")
+
+# The recording id ALONE already reaches the TITLE's alias, with the artist
+# alias absent: a Japanese-titled track Apple knows under its romanized title
+# is rated instead of left unstated. (The artist id here is one MusicBrainz has
+# no aliases for, so only the title substitution is available.)
+si._ADVISORY_CACHE.clear()
+adv_calls, mb_calls = [], []
+
+
+def fake_song_title(title, artist="", timeout=None):
+    adv_calls.append(("itunes-song", artist, title))
+    return (1, "itunes-song") if title == EN_TITLE else None
+
+
+title_path = make_flac("advisory-title-alias.flac",
+                       dict(JP_TAGS, MUSICBRAINZ_ARTISTID="art-title-only"))
+with Patch(si, _apple_album_advisory=fake_apple), \
+     Patch(si, _itunes_song_advisory=fake_song_title), \
+     Patch(si, mb_get_cached=fake_mb):
+    adv = _imports.fetch_advisories([title_path], {"music_folder": TMP,
+                                                   "advisory_fallback": "none"})
+check(adv["values"].get(title_path) == 1,
+      f"a title-only alias still rates the track: {adv}")
+_song_calls = [c[1:] for c in adv_calls if c[0] == "itunes-song"]
+check(_song_calls and _song_calls[0] == (JP_ARTIST, JP_TITLE),
+      f"the stored title first: {_song_calls}")
+check((JP_ARTIST, EN_TITLE) in _song_calls,
+      f"then the alias title: {_song_calls}")
+
+
+# --------------------------------------------------------------------------- #
+# 7. The INSTRUMENTAL detector's alias fallback (the same rule, same helpers)
+# --------------------------------------------------------------------------- #
+class _Resp:
+    def __init__(self, payload, status=200):
+        self.status_code = status
+        self._payload = payload
+
+    def json(self):
+        return self._payload
+
+
+si._ADVISORY_CACHE.clear()
+inst_calls = []
+
+
+def fake_lrclib(endpoint, params, timeout=15, retries=3):
+    inst_calls.append((endpoint, dict(params)))
+    if (params.get("artist_name") == EN_ARTIST
+            and params.get("track_name") == EN_TITLE):
+        return _Resp({"instrumental": True, "trackName": EN_TITLE,
+                      "duration": 1})
+    return _Resp({"message": "not found"}, 404)
+
+
+inst_path = make_flac("instr-alias-hit.flac", dict(JP_TAGS))
+mb_calls = []
+with Patch(si, mb_get_cached=fake_mb), Patch(si, _lrclib_get=fake_lrclib):
+    got = inst.detect_instrumental([inst_path], CFG)[inst_path]
+check(got["value"] == 1 and got["answers"] == {"lrclib": 1},
+      f"LRCLIB's instrumental flag is found under the alias name: {got}")
+check(inst_calls[0][1].get("track_name") == JP_TITLE,
+      f"the original name is tried first: {inst_calls}")
+check(any(c[1].get("track_name") == EN_TITLE for c in inst_calls),
+      f"the alias name is what answered: {inst_calls}")
+check(mb_calls, f"the alias names came from the file's MusicBrainz ids: {mb_calls}")
+
+# …and without ids the lookup is exactly the one original pass, no MB request.
+si._ADVISORY_CACHE.clear()
+inst_calls, mb_calls = [], []
+plain_path = make_flac("instr-no-ids.flac", {"ARTIST": "Rush", "TITLE": "YYZ"})
+with Patch(si, mb_get_cached=fake_mb), Patch(si, _lrclib_get=fake_lrclib):
+    got = inst.detect_instrumental([plain_path], CFG)[plain_path]
+check(got["value"] is None, got)
+check(mb_calls == [], f"no MusicBrainz ids costs no MB lookup: {mb_calls}")
+check({c[1].get("artist_name") for c in inst_calls} == {"Rush"},
+      f"and only the stored name is asked (get then search): {inst_calls}")
+
+
+# --------------------------------------------------------------------------- #
+# 8. Publishing under every alias name pair (script 18 / the batch route)
+# --------------------------------------------------------------------------- #
+from mlo import lyrics_publish as pub  # noqa: E402
+
+si._ADVISORY_CACHE.clear()
+pub_path = make_flac("publish-alias.flac",
+                     dict(JP_TAGS, LYRICS="[00:01.00]Hello there"))
+submitted = []
+
+
+def fake_pub(artist, track, album, duration, plain=None, synced=None):
+    submitted.append((artist, track, album))
+    return True, "published to LRCLIB — thank you for contributing!"
+
+
+mb_calls = []
+_real_fetch, _real_publish = pub.lrclib_fetch, pub.lrclib_publish
+pub.lrclib_fetch = lambda *a, **k: None
+pub.lrclib_publish = fake_pub
+try:
+    with Patch(si, mb_get_cached=fake_mb):
+        got = pub.publish_one(pub_path, dict(CFG, lyrics_search_aliases=True))
+finally:
+    pub.lrclib_fetch, pub.lrclib_publish = _real_fetch, _real_publish
+check(len(submitted) >= 2,
+      f"a track with aliases is published under more than one name pair: {submitted}")
+check(submitted[0] == (JP_ARTIST, JP_TITLE, JP_ALBUM),
+      f"the original pair goes first: {submitted}")
+check((EN_ARTIST, EN_TITLE, JP_ALBUM) in submitted,
+      f"and the localized alias pair follows: {submitted}")
+check(got["status"] == "ok", got)
+check(len(got.get("names") or []) == len(submitted),
+      f"every pair is reported with its own outcome: {got.get('names')}")
+check(all(n["status"] == "ok" for n in got["names"]), got["names"])
+
+# INDEPENDENT outcomes: a duplicate under the alias name is that pair's skip,
+# never a failure of the original (and never a reason to stop).
+si._ADVISORY_CACHE.clear()
+pub_path2 = make_flac("publish-alias-dup.flac",
+                      dict(JP_TAGS, LYRICS="[00:01.00]Hello there"))
+submitted = []
+
+
+def fake_pub_dup(artist, track, album, duration, plain=None, synced=None):
+    submitted.append((artist, track, album))
+    if (artist, track) == (EN_ARTIST, EN_TITLE):
+        return False, "LRCLIB already has this track"
+    return True, "published to LRCLIB — thank you for contributing!"
+
+
+pub.lrclib_fetch = lambda *a, **k: None
+pub.lrclib_publish = fake_pub_dup
+try:
+    with Patch(si, mb_get_cached=fake_mb):
+        got = pub.publish_one(pub_path2, dict(CFG))
+finally:
+    pub.lrclib_fetch, pub.lrclib_publish = _real_fetch, _real_publish
+_pairs = {f"{n['artist']}·{n['title']}": n for n in got.get("names") or []}
+check(got["status"] == "ok", f"one duplicate does not stop the others: {got}")
+check(_pairs.get(f"{EN_ARTIST}·{EN_TITLE}", {}).get("status") == "skipped",
+      f"the duplicate name is a skip for itself: {_pairs.get(f'{EN_ARTIST}·{EN_TITLE}')}")
+check(_pairs.get(f"{JP_ARTIST}·{JP_TITLE}", {}).get("status") == "ok",
+      f"…while the original still publishes: {_pairs.get(f'{JP_ARTIST}·{JP_TITLE}')}")
+
+# The switch is the same one the lyrics chain honours: off, one pair only.
+si._ADVISORY_CACHE.clear()
+pub_path3 = make_flac("publish-alias-off.flac",
+                      dict(JP_TAGS, LYRICS="[00:01.00]Hello there"))
+submitted = []
+pub.lrclib_fetch = lambda *a, **k: None
+pub.lrclib_publish = fake_pub
+try:
+    with Patch(si, mb_get_cached=fake_mb):
+        got = pub.publish_one(pub_path3, dict(CFG, lyrics_search_aliases=False))
+finally:
+    pub.lrclib_fetch, pub.lrclib_publish = _real_fetch, _real_publish
+check(submitted == [(JP_ARTIST, JP_TITLE, JP_ALBUM)] and len(mb_calls) >= 0,
+      f"lyrics_search_aliases off publishes the original pair alone: {submitted}")
+
+# …and the BATCH ROUTE reports every name's own outcome: `publish_one`'s
+# `names` rides through `server/api_lyrics.lyrics_publish_batch` (the result
+# dict it spreads), so the editor's batch panel can say which names landed.
+si._ADVISORY_CACHE.clear()
+submitted = []
+pub.lrclib_fetch = lambda *a, **k: None
+pub.lrclib_publish = fake_pub
+try:
+    with Patch(api_lyrics, load_config=lambda: dict(CFG)), \
+         Patch(si, mb_get_cached=fake_mb):
+        _r = CLIENT.post("/api/lyrics/publish-batch",
+                         json={"paths": [pub_path]})
+finally:
+    pub.lrclib_fetch, pub.lrclib_publish = _real_fetch, _real_publish
+_body = _r.json()
+_names = ((_body.get("results") or [{}])[0] or {}).get("names") or []
+check(_r.status_code == 200 and _body.get("ok") == 1,
+      f"the batch route publishes and counts the track: {_body}")
+check(any(n.get("artist") == EN_ARTIST and n.get("title") == EN_TITLE
+          for n in _names) and any(n.get("artist") == JP_ARTIST for n in _names),
+      f"…and reports every name pair with its own outcome: {_names}")
+
+
 if failures:
     for f in failures:
         print("FAIL:", f)
     raise SystemExit(1)
-print(f"ok — {checks} checks: plain fallback + alias pass, both directions, "
-      f"no second pass when the first answered")
+print(f"ok — {checks} checks: plain fallback + alias pass in the lyrics chain, "
+      f"the advisory route, the instrumental detector and publishing")

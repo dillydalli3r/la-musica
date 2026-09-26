@@ -297,7 +297,107 @@ def _decode_mp4_value(v):
         return str(v)
 
 
+# --------------------------------------------------------------------------- #
+# Chain-scoped library scan
+# --------------------------------------------------------------------------- #
+# A script CHAIN (Run All, an import's chain) runs up to 21 scripts over ONE
+# library, and every album-walking script used to discover that library for
+# itself: `_find_albums` re-walked the whole music folder per script — the same
+# answer, re-derived a dozen times, on a library where one walk is thousands of
+# scandir calls. So a chain resolves the album list ONCE (chain_scan_start) and
+# the walkers inside it are served that list.
+#
+# OPT-IN and chain-scoped on purpose: outside a scope (a page request, a CLI
+# script, a test, a lone runner) every walker still sees the library as it is
+# NOW, and nothing is memoized. A script that MOVES an album — or one that
+# failed halfway, so what it did is unknown — drops the list
+# (chain_scan_drop), the next walker resolves it again, and the chain ends the
+# scope however it ends (chain_scan_end, in a finally at the chain's own entry
+# point).
+_SCAN = {"root": "", "albums": None}
+_SCAN_LOCK = threading.Lock()
+
+
+def _scan_root_key(root_dir):
+    """The comparison key for *root_dir* ("" when it is not a usable path)."""
+    try:
+        text = str(root_dir or "")
+    except Exception:
+        return ""
+    return os.path.normcase(os.path.abspath(text)) if text else ""
+
+
+def _scan_hit(root_dir):
+    """The chain's own album list for *root_dir*, or None when there is none.
+
+    None means "walk it": either no scope is active, or this walker is asking
+    about ANOTHER library (a caller must never be handed the albums of a music
+    folder it did not ask about).
+    """
+    with _SCAN_LOCK:
+        if _SCAN["albums"] is None or not _SCAN["root"]:
+            return None
+        return _SCAN["albums"] if _scan_root_key(root_dir) == _SCAN["root"] else None
+
+
+def _scan_store(root_dir, albums):
+    """Keep *albums* for the chain in flight, when that is the same library."""
+    with _SCAN_LOCK:
+        if _SCAN["root"] and _scan_root_key(root_dir) == _SCAN["root"]:
+            _SCAN["albums"] = list(albums)
+
+
+def chain_scan_start(root_dir):
+    """Resolve *root_dir*'s album list once, for the chain that is starting.
+
+    Returns the list (empty for a root that does not exist — the same answer a
+    walk would give). Every `_find_albums` inside the scope is then answered
+    from it until the scope is dropped or ended.
+    """
+    with _SCAN_LOCK:
+        _SCAN["root"], _SCAN["albums"] = _scan_root_key(root_dir), None
+    if not os.path.isdir(str(root_dir or "")):
+        with _SCAN_LOCK:
+            _SCAN["root"] = ""
+        return []
+    albums = _find_albums(root_dir)      # stores itself (the scope is armed)
+    return albums
+
+
+def chain_scan_drop():
+    """Forget the chain's album list: a script moved an album (or failed).
+
+    The scope STAYS active — the next walker resolves the library again and the
+    scripts after it share that fresh answer.
+    """
+    with _SCAN_LOCK:
+        if _SCAN["root"]:
+            _SCAN["albums"] = None
+
+
+def chain_scan_end():
+    """End the scope: walkers discover the library for themselves again."""
+    with _SCAN_LOCK:
+        _SCAN["root"], _SCAN["albums"] = "", None
+
+
 def _find_albums(root_dir, dirs_out=None):
+    """Every folder that holds audio at or below *root_dir*, sorted.
+
+    A chain that is in flight has already resolved this list for its own
+    library (`chain_scan_start`): a walker inside it is served that answer
+    instead of re-walking the whole music folder per script, which is what a
+    Run All over a real library paid for every one of its album-walking
+    scripts.
+
+    *dirs_out* (the walker's own directory scan) is never answered from the
+    chain's list: a caller that wants the per-directory detail wants THIS
+    walk, and the grader is the one caller that asks for it.
+    """
+    if dirs_out is None:
+        hit = _scan_hit(root_dir)
+        if hit is not None:
+            return list(hit)
     albums = set()
     # The walker yields a directory's files one after another, so the parent
     # is the same string for the whole album: normalizing it once per album
@@ -316,7 +416,13 @@ def _find_albums(root_dir, dirs_out=None):
             # os.path.dirname comparisons (Windows allows both / and \).
             last_raw, last_album = raw, os.path.normpath(raw)
             albums.add(last_album)
-    return sorted(albums)
+    result = sorted(albums)
+    if dirs_out is None:
+        # A chain that is in flight just paid for this walk: keep the answer
+        # for its next script (a no-op when no scope is active, which is every
+        # caller outside a chain).
+        _scan_store(root_dir, result)
+    return result
 
 
 def _collect_targets(targets, extensions):

@@ -57,6 +57,12 @@ export interface TrackTags {
   ARTIST?: string | null;
   ALBUM?: string | null;
   DATE?: string | null;
+  /** The ORIGINAL release date (ID3 TORY / Vorbis ORIGINALDATE / MP4
+   *  originaldate): a remaster keeps the year the work was first released, so
+   *  the player bar shows THIS in preference to `DATE` (lib/fmt.originalYear).
+   *  Written only when the tagger set it — an untagged file falls back to
+   *  `DATE`. */
+  ORIGINALDATE?: string | null;
   GENRE?: string | null;
   ITUNESADVISORY?: string | null;
   INSTRUMENTAL?: string | null;
@@ -399,13 +405,20 @@ export interface LayoutSnapshot {
  *  percentage is null when no check ran at all. A pending framework album and
  *  an album with zero checks are never findings — nothing was graded either
  *  way — so `albums_failing` counts the albums that really failed, one entry
- *  of `items` each. */
+ *  of `items` each. An album an import is running over right now is not one of
+ *  them (its chain is filling the very tags the grader read as missing) and is
+ *  counted apart, in `albums_importing`, so the strip can say where such an
+ *  album went instead of looking like it lost one. */
 export interface GradeWarning {
   ok: boolean;
   pass_count: number;
   total_checks: number;
   grade_pct: number | null;
   albums_failing: number;
+  /** Failing albums an import holds right now: left out of the counts above
+   *  (and of `items`), and named in one clause so the strip does not read as
+   *  an album short. */
+  albums_importing: number;
   tracks_failing: number;
   /** Worst first (lowest grade, then the most failing tracks), capped at 12;
    *  whatever did not fit is `more`. */
@@ -514,7 +527,11 @@ export interface Artist {
   has_image?: boolean;
   /** Artist image + description stored in the artist folder. */
   artwork?: ArtistArtworkFields;
-  /** Artist-level grading: only the checks that apply to an artist folder. */
+  /** Artist-level grading: only the checks that apply to an artist folder.
+   *  The artist page computes it for the folder it opened, and every
+   *  `/api/library` row carries its own (`server.library`), so the dot beside
+   *  a name in a list is the verdict beside the same name on the page it
+   *  opens — one rule, one payload field. */
   grade?: ArtistGrade;
 }
 
@@ -879,6 +896,16 @@ export interface MBReleaseRow {
   /** per-disc track counts ("10 + 11") for a multi-disc edition */
   track_breakdown?: string;
   barcode?: string;
+  /** Every catalog number MusicBrainz states for this edition, in its own
+   *  order — one per label, so a pressing released by two labels carries two.
+   *  Read off the browse's `label-info` by `mlo.release_choice.catalog_numbers`,
+   *  the same reader the release-choice ranking fills a candidate from, so the
+   *  group page's rows and the ranking can never disagree about which number an
+   *  edition carries. */
+  catalog_numbers?: string[];
+  /** The first of `catalog_numbers`, kept as its own key for the payloads that
+   *  only state one (a search hit, a release lookup). */
+  catalog_number?: string;
   disambiguation?: string;
   primary_type?: string;
   secondary_types?: string[];
@@ -1200,6 +1227,12 @@ export interface HomeArtist {
    *  image before the fallback can replace it. Absent means the same as false
    *  — never assume a picture is there. */
   has_image?: boolean;
+  /** The artist's OWN grade (`mlo.grader.grade_artist`: the artist folder's
+   *  image and description), passed through from the library row this shelf is
+   *  built from — the same object the artist page holds, so the dot beside the
+   *  name here and there is one verdict. Absent on a row that was never
+   *  graded: no dot, never a guess. */
+  grade?: ArtistGrade;
 }
 
 /** One Home shelf row: the LIBRARY's own album row plus the shelf's reason for

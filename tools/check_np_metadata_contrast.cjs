@@ -2,7 +2,8 @@
 /* Fullscreen player legibility over ANY cover — the metadata tiers AND the
  * chrome around them: the title, the format line ("16/44.1") and the
  * album/artist lines, plus the seek bar, the volume bar, the top bar's icon
- * family and the two bottom-right lyric chips. The failure the owner reported
+ * family and the two lyric chips in the pane's top-right corner. The failure
+ * the owner reported
  * was a mid-grey cover where the title's white read fine but the secondary
  * lines (zinc-500 / zinc-400) sat barely above 2:1 on that same field; the
  * same report a pass later was the BARS disappearing into the artwork.
@@ -30,7 +31,8 @@
  *     one 36 px box around a 20 px glyph, one pitch — with both toggles
  *     flipped off and back on so BOTH families are measured, not whichever
  *     state the run happened to catch.
- *   - the two bottom-right chips (zoom `− 100% +`, offset `− 0.0s +`): one
+ *   - the two lyric chips, in the pane's top-right corner behind a hover reveal
+ *     (issue #63; zoom `− 100% +`, offset `− 0.0s +`): one
  *     geometry (same boxes, same gaps, same cy), the value CENTRED between the
  *     two glyphs (it was right-packed, which left 27 px of air on the `−` side
  *     against 12 px on the `+`: issue #56), the `−`/`+` glyphs found in the
@@ -260,7 +262,7 @@ async function inkStats(page, clip, thresh = 14) {
 
 /** The fullscreen player's chrome as the DOM reports it: the two sliders (with
  *  the ink variables the player sets on them), the top bar's icon buttons, and
- *  the two bottom-right lyric chips with every child rect. */
+ *  the two lyric chips (the pane's top-right corner) with every child rect. */
 const readChrome = (page) => page.evaluate(() => {
   const overlay = document.querySelector("div.fixed.inset-0.z-50");
   if (!overlay) return null;
@@ -299,7 +301,7 @@ const readChrome = (page) => page.evaluate(() => {
       engaged: b.getAttribute("aria-pressed") === "true" || b.getAttribute("aria-expanded") === "true",
     };
   }) : [];
-  // the bottom-right lyric chips: the one `justify-end` row carrying the two
+  // the lyric chips (top-right of the pane): the one `justify-end` row with the two
   // steppers (each chip is a span of ⊖ / value box / ⊕ and — on the offset
   // chip — the Save/Discard slot), with every child rect. One level of
   // children UNDER each child too: the slot is the box the two action buttons
@@ -334,6 +336,38 @@ const readChrome = (page) => page.evaluate(() => {
   } : null;
   return { sliders, icons, chips };
 });
+
+/** Reveal the lyric chips before measuring them (issue #63).
+ *
+ *  They now live in the pane's top-right corner behind `.lyr-corner`'s hover
+ *  reveal (index.css): on a device with a real pointer they are held back
+ *  until the reader points at the pane, so every read below has to put the
+ *  pointer there first — and the reveal itself is asserted rather than
+ *  assumed, because a strip that is simply ALWAYS painted would otherwise pass
+ *  every one of these measurements (there would be nothing to notice).
+ *
+ *  Returns the strip's own opacity at rest and revealed. */
+async function revealChips(page) {
+  const probe = () => page.evaluate(() => {
+    const root = document.querySelector("div.fixed.inset-0.z-50");
+    const strip = root && root.querySelector(".lyr-corner");
+    const pane = root ? root.querySelector(".no-scrollbar")?.parentElement : null;
+    if (!pane) return null;
+    const r = pane.getBoundingClientRect();
+    return {
+      opacity: strip ? Number(getComputedStyle(strip).opacity) : null,
+      point: { x: Math.round(r.x + r.width / 2), y: Math.round(r.y + r.height / 2) },
+    };
+  });
+  await page.mouse.move(40, 405);      // the empty artwork: the resting state
+  await sleep(300);
+  const rest = await probe();
+  if (!rest) return null;
+  await page.mouse.move(rest.point.x, rest.point.y);   // over the pane
+  await sleep(350);
+  const shown = await probe();
+  return { restOpacity: rest.opacity, opacity: shown.opacity };
+}
 
 /** Press the offset chip's `+` for real, and read every chip box back.
  *
@@ -488,7 +522,8 @@ const settleIcons = (page) => page.evaluate(async () => {
  *     is engaged, with one 36 px box and one 20 px glyph. The row used to mix
  *     full-strength ink on the plain buttons, `text-accent` on the fullscreen
  *     button and a dimmed toggle for the rest.
- *   - the two bottom-right LYRIC CHIPS (zoom `− 100% +`, offset `− 0.0s +`):
+ *   - the two LYRIC CHIPS, in the pane's top-right corner (zoom `− 100% +`,
+ *     offset `− 0.0s +`):
  *     one geometry (the `−` and `+` at the same offset from either chip's own
  *     edges, the value box the same width, the same cy) and their own
  *     contrast at rest, on both polarities.
@@ -558,8 +593,15 @@ async function measureChrome(page, label, hex) {
   }
   console.log(`  ${label}: ${sliderReport.join(" | ")}`);
 
-  // ---- the two bottom-right lyric chips ---------------------------------
-  const chips = chrome.chips;
+  // ---- the two lyric chips (pane's top-right corner) ---------------------
+  // In the pane's top-right CORNER now, and held back until the pointer is
+  // over the pane: revealed first, and the reveal asserted, so every read here
+  // is of the state a reader sees when they reach for these controls.
+  const reveal = await revealChips(page);
+  check(`${label}: the lyric chips are held back until the pointer is over the pane`,
+    !!reveal && reveal.restOpacity === 0 && reveal.opacity === 1, JSON.stringify(reveal));
+  const shownChrome = await readChrome(page);
+  const chips = shownChrome && shownChrome.chips;
   if (!chips || chips.items.length < 2) {
     check(`${label}: both lyric chips are on screen (zoom + offset)`, false,
       JSON.stringify(chips && chips.items.length));
@@ -763,7 +805,11 @@ async function measureChrome(page, label, hex) {
   await sleep(400);
   await park();
   await page.screenshot({ path: path.join(SHOTS, `${label}-topright.png`), clip: { x: 880, y: 0, width: 560, height: 60 } }).catch(() => {});
-  await page.screenshot({ path: path.join(SHOTS, `${label}-chips.png`), clip: { x: 880, y: 780, width: 560, height: 120 } }).catch(() => {});
+  // The chips ride the pane's top-right corner and are only painted while the
+  // pointer is over the pane, so the shot of them has to be taken the same way
+  // a reader gets to them.
+  await revealChips(page);
+  await page.screenshot({ path: path.join(SHOTS, `${label}-chips.png`), clip: { x: 900, y: 56, width: 460, height: 140 } }).catch(() => {});
   return { sliderReport, icons: idle.map((i) => `${i.label}=${i.color}@${i.opacity}`) };
 }
 

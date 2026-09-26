@@ -34,10 +34,12 @@
  *     120 px, at most two lines, the whole title in its `title` — and keeps the
  *     row's chrome (the heart, the "…", the stars) laid out inside that cell
  *     and tappable with the phone's own 44 px hit area. At `md` and up nothing
- *     folds and the album table keeps its 814 px floor. Before this the album
- *     page held that floor at every width, so a 390 px phone drew an 814 px
- *     table in a 342 px wrapper and gave the name 8 px — one syllable per line,
- *     which is the owner's screenshot (issue #55).
+ *     folds and the album table holds the floor its own columns sum to
+ *     (`ALBUM_TRACK_MIN_W`, derived from the column spec — it was a pinned
+ *     814 px before that). Before the phone fold existed the album page held
+ *     that floor at every width, so a 390 px phone drew an 814 px table in a
+ *     342 px wrapper and gave the name 8 px — one syllable per line, which is
+ *     the owner's screenshot (issue #55).
  *
  * It RATES ONE TRACK through `PUT /api/ratings` so the rating facet has
  * something to find: point it at a scratch library (`MLO_MUSIC_FOLDER`), never
@@ -270,7 +272,8 @@ const check = (name, ok, detail) => {
    * fold the Library's tables use, the row's spine (# / name / length) kept, a
    * name column with room to read (>= 120 px, at most two lines, the whole
    * title in its `title`), the row's own chrome laid out INSIDE that cell and
-   * tappable — and, at `md` and up, the fold gone and the 814 px floor back.
+   * tappable — and, at `md` and up, the fold gone and the floor the columns
+   * themselves sum to back.
    *
    * The library it points at needs at least one title long enough to wrap, or
    * the >= 40 px link rule flags a name that is legitimately 35 px wide (the
@@ -418,16 +421,92 @@ const check = (name, ok, detail) => {
         (phone.name?.rowH ?? 0) < 180, `${phone.name?.rowH} px tall`);
 
   // Desktop and tablet are untouched: at `md` and up nothing folds and the
-  // album table holds the 814 px floor of its own columns, so its wrapper
-  // scrolls rather than the name collapsing any further.
+  // album table holds the floor its own columns sum to (ALBUM_TRACK_COL_W plus
+  // the corner control; 888 px, and 1080 with the owner's two 96 px tag
+  // columns this check sets up). It used to be a pinned `md:min-w-[814px]`,
+  // which is why the bound below is the columns' own sum rather than the old
+  // constant — the floor is DERIVED from the column spec now (see
+  // ALBUM_TRACK_MIN_W in lib/columns), so what is pinned is that the table is
+  // wider than the wrapper it sits in and the wrapper is what scrolls.
   await page.setViewportSize({ width: 800, height: 900 });
   await page.waitForTimeout(300);
   const md = await albumGeom();
   console.log("\n[album tracklist @800]");
   check("md and up fold nothing", (md.folded || []).length === 0, (md.folded || []).join(","));
-  check("and the table keeps its 814 px floor", md.tableW >= 814, `${md.tableW} px`);
+  check("and the table holds its columns' own floor", md.tableW >= 880, `${md.tableW} px`);
   check("…with the wrapper scrolling for it",
         md.wrapScroll > md.wrapClient + 1, `${md.wrapScroll} vs ${md.wrapClient}`);
+
+  // ---- the album tracklist at 1440: the NAME column takes the free width ----
+  /* The owner's second report on this table: a long title wrapped to two lines
+   * while the table had hundreds of px of free width beside it. The fixed
+   * layout was spreading that free width over EVERY column in proportion to its
+   * width, so the name column grew from its 280 px floor to 378 of 1200 while
+   * the name's own box (the column minus the row's chrome) got 216 — and the
+   * leftover of the other columns sat under their own text, which is the gap
+   * the screenshot shows between the name and Genre.
+   *
+   * The name column is `md:w-auto` now (ALBUM_TRACK_COL_W.title) so it takes
+   * what the fixed columns leave, and it keeps its floor through
+   * `ColFloorHolder` — an empty zero-height box inside the header cell, because
+   * a `min-width` on the cell is IGNORED in a fixed layout (measured: a title
+   * cell asking for 280 px came out 66 px wide with a 0 px name). What this
+   * case pins is both halves: the column takes the free width (with the owner's
+   * two 96 px tag columns set up here, the floors sum to 1080 in a 1200 px
+   * wrapper, so the name must come out 400 px — it came out 311 while the free
+   * width was shared out proportionally), and the wrapper still does not scroll
+   * at this width, so the width it took WAS free.
+   *
+   * The second half is the reader's own outcome: of the album's titles, any
+   * title whose one-line width fits the name's box must be drawn on ONE line,
+   * the same row height as a short one. A title whose one-line width does not
+   * fit (a genuinely long name at this window) wraps — that is the case the
+   * floor-and-scroll rule exists for, and the @800 block above still measures
+   * the scroll. */
+  await page.setViewportSize({ width: 1440, height: 900 });
+  await page.waitForTimeout(400);
+  const wide = await albumGeom();
+  /** The album's titles as drawn, with each one's ONE-LINE width measured off
+   *  a clone (`nowrap`, no max-width), so "it should not have wrapped" is a
+   *  fact about the title and not about the window. */
+  const titleRows = await page.evaluate(() => {
+    const table = [...document.querySelectorAll("main table")].find((t) =>
+      [...t.querySelectorAll("thead th")].some((th) => (th.textContent || "").trim() === "Title"));
+    if (!table) return [];
+    return [...table.querySelectorAll("tbody tr")].map((tr) => {
+      const link = [...tr.querySelectorAll("a[title*='Click to play']")].find((a) => (a.textContent || "").trim());
+      if (!link) return null;
+      const clone = link.cloneNode(true);
+      clone.style.cssText = "position:absolute;white-space:nowrap;max-width:none;visibility:hidden;left:-9999px";
+      document.body.appendChild(clone);
+      const need = Math.round(clone.getBoundingClientRect().width);
+      clone.remove();
+      const lh = parseFloat(getComputedStyle(link).lineHeight) || 20;
+      return {
+        text: (link.textContent || "").trim(),
+        need,
+        box: Math.round(link.getBoundingClientRect().width),
+        lines: +(link.getBoundingClientRect().height / lh).toFixed(2),
+        rowH: Math.round(tr.getBoundingClientRect().height),
+      };
+    }).filter(Boolean);
+  });
+  console.log("\n[album tracklist @1440]");
+  console.log(`  name column ${wide.titleColW} px, wrapper ${wide.wrapScroll}/${wide.wrapClient} px, rows: `
+    + titleRows.map((r) => `"${r.text.slice(0, 18)}…" need ${r.need} box ${r.box} ${r.lines} line(s)`).join(" | "));
+  check(`the name column takes the table's free width (${wide.titleColW} px, its own floor is 280)`,
+        wide.titleColW >= 380, `${wide.titleColW} px`);
+  check(`…and the table still fits, so what it took was free `
+        + `(${wide.wrapScroll}/${wide.wrapClient} px)`,
+        wide.wrapScroll <= wide.wrapClient + 1, JSON.stringify({ scroll: wide.wrapScroll, client: wide.wrapClient }));
+  const shortRow = titleRows.slice().sort((a, b) => a.need - b.need)[0];
+  const wrapped = titleRows.filter((r) => r.need <= r.box + 1 && r.lines > 1);
+  check(`a title that fits its box is drawn on ONE line, at a short title's row height `
+        + `(${titleRows.length} title(s), longest needs ${Math.max(0, ...titleRows.map((r) => r.need))} px `
+        + `in a ${shortRow?.box ?? 0} px box)`,
+        wrapped.length === 0 && titleRows.every((r) => r.need > r.box + 1 || r.rowH <= (shortRow?.rowH ?? 0) + 2),
+        JSON.stringify(wrapped));
+
   await page.setViewportSize({ width: 1440, height: 900 });
 
   await browser.close();

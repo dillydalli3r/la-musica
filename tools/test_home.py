@@ -12,6 +12,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import threading
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, ROOT)
@@ -169,6 +170,9 @@ gw_lib = {"artists": [{"path": "C:/M/A", "name": "Alpha", "albums": [
 gw = r.grade_warning(gw_lib)
 assert gw["ok"] is False and gw["albums_failing"] == 3, gw
 assert gw["tracks_failing"] == 3, gw
+# Nothing is being imported in an idle library, and that is a number the strip
+# prints beside the failing count.
+assert gw["albums_importing"] == 0, gw
 # The totals are the SAME sums the Home header prints, so the strip and the
 # percentage beside it cannot disagree: 26 of 35 checks.
 assert (gw["pass_count"], gw["total_checks"], gw["grade_pct"]) == (26, 35, 74.3), gw
@@ -210,6 +214,11 @@ assert [i["album"] for i in busy_gw["items"]] == ["Three", "One"], busy_gw["item
 # the sums the header beside the strip prints, not the findings' own count.
 assert (busy_gw["pass_count"], busy_gw["total_checks"], busy_gw["grade_pct"]) == \
     (26, 35, 74.3), busy_gw
+# A job that holds the album is not an IMPORT though — `beets`/`lyrics` are not
+# among the claim kinds the import queue reads — so the strip holds the album
+# back without saying an import took it: the count is the import's own, not a
+# second name for the busy rule.
+assert busy_gw["albums_importing"] == 0, busy_gw
 # A claim on a FILE inside the album covers the album too — the job holding one
 # of its tracks is writing that album — which is the registry's own containment
 # rule, asked absolutely: this call runs inside the claim's own job context and
@@ -217,6 +226,75 @@ assert (busy_gw["pass_count"], busy_gw["total_checks"], busy_gw["grade_pct"]) ==
 with jl.holding(["C:/M/A/One/1.flac"], kind="lyrics", label="Lyrics"):
     inner_gw = r.grade_warning(gw_lib)
 assert [i["album"] for i in inner_gw["items"]] == ["Two", "Three"], inner_gw["items"]
+assert inner_gw["albums_importing"] == 0, inner_gw
+# --------------------------------------------------------------------------- #
+# An album an IMPORT is on right now — the owner's report: "Tool — Ænima" mid
+# import listed as "1 album falls short … missing dynamic range, audit, cover,
+# early energy, initialkey, log, lyrics, mood, path, tags, tag case", while its
+# chain was filling exactly those tags. `server.imports._importing_now` is the
+# app's own answer for that (the three kinds `server.api_queue` reads too), and
+# the strip both leaves the album out AND says how many it left out, so a
+# reader whose album just left the list is told where it went.
+# --------------------------------------------------------------------------- #
+def _with_import_claim(paths, fn):
+    """Run *fn* while a FOREIGN auto-import claim holds *paths*.
+
+    On its own thread, because a claim held by the CALLER's job is deliberately
+    not a conflict to `job_locks.holder` (see job_locks.busy) — which is the
+    real thing being modelled here: the import runs in its own job, and the
+    request that draws the strip has none of its own."""
+    ready, release = threading.Event(), threading.Event()
+
+    def _hold():
+        with jl.holding(list(paths), kind="auto-import", label="Import Tool — Ænima"):
+            ready.set()
+            release.wait(10)
+
+    t = threading.Thread(target=_hold, daemon=True)
+    t.start()
+    assert ready.wait(10), "the auto-import claim was never taken"
+    try:
+        return fn()
+    finally:
+        release.set()
+        t.join(10)
+
+importing_gw = _with_import_claim(["C:/M/A/Two"], lambda: r.grade_warning(gw_lib))
+# The album is NOT a finding: its folder holds a live import claim whatever the
+# grader read in it, and a running import reported as a broken album would be
+# the strip describing the process instead of the library.
+assert importing_gw["albums_failing"] == 2, importing_gw
+assert importing_gw["tracks_failing"] == 1, importing_gw
+assert [i["album"] for i in importing_gw["items"]] == ["Three", "One"], importing_gw["items"]
+# …and the strip knows it left one out, which is what it prints in one clause
+# instead of leaving the reader to wonder which album went missing.
+assert importing_gw["albums_importing"] == 1, importing_gw
+# The totals are untouched by any of this: the same sums the header prints.
+assert (importing_gw["pass_count"], importing_gw["total_checks"]) == (26, 35), importing_gw
+# The claim released: the SAME album is a finding again, and nothing is being
+# imported any more. One album, two answers, and the difference is the claim.
+released_gw = r.grade_warning(gw_lib)
+assert released_gw["albums_failing"] == 3, released_gw
+assert released_gw["albums_importing"] == 0, released_gw
+assert [i["album"] for i in released_gw["items"]] == ["Two", "Three", "One"], released_gw["items"]
+# TWO albums an import holds read as two — the count is of albums, and the
+# plural is a sentence too (the client's own words are checked below).
+two_importing_gw = _with_import_claim(["C:/M/A/Two", "C:/M/A/Three"],
+                                      lambda: r.grade_warning(gw_lib))
+assert (two_importing_gw["albums_failing"], two_importing_gw["albums_importing"]) == (1, 2), \
+    two_importing_gw
+# A claim on the folder ABOVE the album is the registry's own containment rule
+# (a job holding the artist folder is working on every album in it), asked of
+# the import kinds: all three findings are held back, and all three are counted.
+artist_claim_gw = _with_import_claim(["C:/M/A"], lambda: r.grade_warning(gw_lib))
+assert (artist_claim_gw["albums_failing"], artist_claim_gw["albums_importing"]) == (0, 3), \
+    artist_claim_gw
+# A PASSING album an import holds is not a finding left out, so it is not in the
+# count: the clause explains the findings the strip is not showing, and a pass
+# has none to lose.
+fine_claim_gw = _with_import_claim(["C:/M/A/Fine"], lambda: r.grade_warning(gw_lib))
+assert (fine_claim_gw["albums_failing"], fine_claim_gw["albums_importing"]) == (3, 0), \
+    fine_claim_gw
 # The same library with no claim at all is the full three findings (`gw` above):
 # the difference is the claim, not the fixture.
 assert gw["ok"] is False and gw["albums_failing"] == 3, gw
@@ -252,6 +330,7 @@ assert whole_gw["grade_pct"] == 100.0, whole_gw["grade_pct"]
 # percentage is below 100, and nothing listed means 100 — `None` when no check
 # was graded at all (an install with every check switched off).
 for _gw in (huge_gw, whole_gw, gw, cap, busy_gw, inner_gw,
+            importing_gw, two_importing_gw,
             r.grade_warning({"artists": []})):
     if _gw["items"]:
         assert _gw["grade_pct"] is not None and _gw["grade_pct"] < 100.0, _gw
@@ -293,7 +372,10 @@ assert acoustid_gw["items"][0]["codes"] == ["ACOUSTID_FINGERPRINT"], acoustid_gw
 # environment cannot run it.
 # --------------------------------------------------------------------------- #
 _STRIP_CASES = {"huge": huge_gw, "whole": whole_gw, "two": two_gw,
-                "acoustid": acoustid_gw}
+                "acoustid": acoustid_gw,
+                # The one clause that is about an album NOT in the list: an
+                # import is on it, it is counted, and the strip says so.
+                "importing": importing_gw, "importing_two": two_importing_gw}
 
 _STRIP_CHECK = r'''
 import { existsSync, readFileSync } from "node:fs";
@@ -322,7 +404,24 @@ globalThis.localStorage = {
   removeItem: (k) => store.delete(k),
   clear: () => store.clear(),
 };
+// The app's own modules touch the page as they LOAD — the store reads its saved
+// player state, starts its slow save tick and registers the page's listeners,
+// the api client owns a socket. There is no page here: registration is the one
+// thing the strip can never need, so the timers are `unref`'d (a live 5 s tick
+// must not keep THIS process alive: it is a render, not a page) and the event
+// API is inert, instead of an unrelated module's bookkeeping taking the check
+// down with it.
+const noop = () => {};
+globalThis.addEventListener = noop;
+globalThis.removeEventListener = noop;
+const realSetInterval = globalThis.setInterval;
+globalThis.setInterval = (fn, ms, ...rest) => {
+  const handle = realSetInterval(fn, ms, ...rest);
+  if (handle && typeof handle.unref === "function") handle.unref();
+  return handle;
+};
 globalThis.window = globalThis;
+globalThis.document = { addEventListener: noop, removeEventListener: noop };
 
 const payload = JSON.parse(readFileSync(process.argv[2], "utf8"));
 const failed = [];
@@ -368,6 +467,14 @@ try {
      text.huge.includes("1 album falls short of the library's grading checks"));
   ok("…and the same sentence in the plural",
      text.two.includes("2 albums fall short of the library's grading checks"));
+  // The album an import holds is not in the list, and the sentence says so:
+  // "1 album being imported is left out" beside the failing count, and the
+  // plural with two. A strip that only counted would read as an album short.
+  ok("the album an import holds is named as left out",
+     text.importing.includes("1 album being imported is left out")
+     && !text.importing.includes("albums being imported are left out"));
+  ok("…and two of them read as two",
+     text.importing_two.includes("2 albums being imported are left out"));
   // The reason a reader is given for the half pair is the step that completes
   // it, not the bare code the strip used to open up ("acoustid fingerprint").
   ok("the AcoustID half pair names the step that completes it",
@@ -381,7 +488,7 @@ if (failed.length) {
   for (const label of failed) console.error(`[grade-strip] MISSING: ${label}`);
   process.exit(1);
 }
-console.log("ok  the strip's own words (4 payloads, 11 checks)");
+console.log("ok  the strip's own words (6 payloads, 17 checks)");
 '''
 
 _strip_dir = tempfile.mkdtemp(prefix="mlo-grade-strip-")
@@ -393,10 +500,17 @@ try:
     with open(_check_path, "w", encoding="utf-8") as _f:
         _f.write(_STRIP_CHECK)
     # 2 is the convention tools/check_*.mjs use for "this environment cannot run
-    # me" (no node, no web/node_modules): a note, not a failure.
-    _strip = subprocess.run(["node", _check_path, _payload_path], capture_output=True,
-                            text=True, cwd=ROOT,
-                            env=dict(os.environ, MLO_ROOT=ROOT))
+    # me" (no node, no web/node_modules): a note, not a failure. The timeout is
+    # a backstop against the one way a render can hang — a module of the app
+    # leaving a live timer behind, which `console.log` then never gets past —
+    # and it says so rather than blocking the suite for good.
+    try:
+        _strip = subprocess.run(["node", _check_path, _payload_path], capture_output=True,
+                                text=True, cwd=ROOT, timeout=180,
+                                env=dict(os.environ, MLO_ROOT=ROOT))
+    except subprocess.TimeoutExpired:
+        raise AssertionError("the strip's own words: node did not finish in 180 s "
+                             "(a module of the app left a live timer behind)")
     if _strip.returncode == 0:
         print("  ok   " + _strip.stdout.strip().removeprefix("ok  "))
     elif _strip.returncode == 2:

@@ -345,9 +345,11 @@ def finish_album(album_dir, cfg=None, progress=None, force=None, release=None,
     # The claim's own name in MAINTAIN → In progress: the run this import is
     # about to do (the same wording a chain claims itself with, so a queued
     # import is not renamed the moment its scripts start), or the album when
-    # this library configures no chain at all.
+    # this library configures no chain at all. `targets=[path]` is what makes
+    # that wording the ALBUM's ("An Album · 18 steps", the steps this album
+    # really needs) rather than the chain's first script's.
     chain = chain_for(cfg)
-    label = (script_runners.run_label(chain) if chain
+    label = (script_runners.run_label(chain, targets=[path]) if chain
              else "Import " + (os.path.basename(path.rstrip("\\/")) or path))
     if wait:
         # ONE IMPORT PER ALBUM. A second autonomous caller used to QUEUE behind
@@ -357,19 +359,22 @@ def finish_album(album_dir, cfg=None, progress=None, force=None, release=None,
         # second run wanted). The album is already being imported, so this call
         # answers that instead of duplicating the work; the user's own press
         # (``wait=False``) keeps its 409, whose sentence names the holder.
-        # A job importing its OWN claim is not a duplicate — the download job
-        # holds the album from its first byte and then runs this very import
-        # under that same claim — so the guard only fires for a FOREIGN job.
+        #
+        # The rule is about the ALBUM and about who is asking: a caller inside
+        # a job of its own that is NOT the holder is refused, because it is a
+        # second autonomous import of an album the first is already finishing.
+        # The holder itself is not (this import's own nested steps; a download
+        # job that claimed the folder before its first byte and then runs this
+        # very import under that same claim), and neither is a caller with NO
+        # job identity at all: that one WAITS for the claim and then runs, which
+        # is the contract the import queue and every background caller rely on
+        # (an import must not skip its chain — an album left unimported is worse
+        # than a repeat). `tools/test_job_locks.py` pins that waiting call.
         try:
             running = _importing_now(path)
             mine = script_runners.job_locks.current()
         except Exception:
             running, mine = None, None
-        # Only an IDENTIFIED job that is not the holder is a duplicate. A caller
-        # with no job of its own (an unmanaged background thread) keeps the old
-        # wait-then-run behaviour: skipping there could leave an album the
-        # download's own chain is holding unimported, which is far worse than
-        # the repeat this guard removes.
         if running is not None and mine is not None and running.get("job") != mine:
             holder = str(running.get("label") or "An import")
             return {"path": path, "scripts": [], "chain": [], "errors": [],
@@ -507,10 +512,14 @@ def _finish_album(path, cfg, progress=None, force=None, release=None,
     # links. Gated by rym_links_auto; a lookup that finds nothing is one log
     # line (the user pastes the URL in the links editor), never an error.
     # Announced first: what the user pressed was "Run the import chain", and
-    # this is where the time before its first script goes (see `_phase` — a
-    # family switched off finishes in the same breath and its line is replaced
-    # by the next one, so nothing here can be left standing as a stale claim).
-    _phase("Looking up links…")
+    # this is where the time before its first script goes. A family this import
+    # will NOT fetch is not announced at all: the text says what the album is
+    # having done to it, and a line about work that is switched off is a claim
+    # the run itself then contradicts (the owner's report: a step that is a
+    # no-op for this album must not be published). The cut is the SAME switch
+    # the step below reads, so the line and the work can never disagree.
+    if run_cfg.get("rym_links_auto", True):
+        _phase("Looking up links…")
     try:
         rym = stamp_rym_links(path, run_cfg)
         if rym["note"].startswith("could not resolve"):
@@ -550,19 +559,22 @@ def _finish_album(path, cfg, progress=None, force=None, release=None,
     # `settle_digital_import`'s SOURCE decision both read MEDIA, so they see
     # the release's own medium rather than a guess. Never fatal: an album
     # whose tags cannot be written reports it in this import's own result.
-    _phase("Stamping the release's identity…")
     # The release this import is for, resolved once for EVERY step below that
     # reads it (this stamp, the genres step): the payload the caller handed in,
     # else the one CACHED MusicBrainz lookup the genres step would otherwise
-    # make by itself.
+    # make by itself. Resolved BEFORE the phase below is published, because
+    # whether there is anything to stamp is what decides whether the import has
+    # a step there to announce at all.
     rel = release
+    if not rel and album_mbid:
+        try:
+            from server import integrations as intg
+            rel, _rid = intg.resolve_release(album_mbid)
+        except Exception:
+            rel = None
+    if rel:
+        _phase("Stamping the release's identity…")
     try:
-        if not rel and album_mbid:
-            try:
-                from server import integrations as intg
-                rel, _rid = intg.resolve_release(album_mbid)
-            except Exception:
-                rel = None
         if rel:
             out["release_identity"] = _stamp_release_identity(path, rel, run_cfg)
             if out["release_identity"]["failed"]:
@@ -582,8 +594,12 @@ def _finish_album(path, cfg, progress=None, force=None, release=None,
     # one the user kept for themselves (`import_policy.effective_config`), so a
     # reviewed Genres family is left alone here exactly as it is by the wizard.
     # Runs BEFORE the chain, because script 8 reads what this writes. Never
-    # fatal: a genre that cannot be resolved is a gap the report names.
-    _phase("Fetching genres…")
+    # fatal: a genre that cannot be resolved is a gap the report names. A
+    # config that fetches no genre (`genre_autofill` off — the switch the step
+    # itself reads — or a kept Genres family) has nothing to announce: that is
+    # the "genre-less config" whose bar must not say "Fetching genres…".
+    if run_cfg.get("genre_autofill", True) and (rel or album_mbid):
+        _phase("Fetching genres…")
     if run_cfg.get("genre_autofill", True):
         if not rel and album_mbid:
             # The identity the import just stamped is enough to ask for the
@@ -625,7 +641,15 @@ def _finish_album(path, cfg, progress=None, force=None, release=None,
     # Its result rides in this import's report (`settled`): a SOURCE nobody
     # could state is a `source` gap the report raises as a prompt, and lyrics
     # that went are named in `chain_summary`'s own line — never silent.
-    _phase("Settling the digital release…")
+    #
+    # Announced only for an album this step has an answer for — a Digital Media
+    # release, which is the one medium the grader requires a SOURCE on (see
+    # `stamp_album_source`, the same test) — because for anything else (a CD
+    # rip, a vinyl transfer) the step is a no-op and the strip must not spend a
+    # phase on it. The lyrics half is decided by `drop_arrived_values` before
+    # this runs, so the frame follows what the step really does.
+    if _album_is_digital(path):
+        _phase("Settling the digital release…")
     try:
         _settle_rel = release
         if _settle_rel is None and album_mbid:
@@ -672,7 +696,14 @@ def _finish_album(path, cfg, progress=None, force=None, release=None,
     # by the identity the import just stamped and stored by the cover page's
     # own writer. With `*_review` on, the candidates are staged for the user
     # instead.
-    _phase("Fetching metadata and cover art…")
+    # Both file steps are announced together — one frame for the pair, because
+    # that is what it is: two steps on one worker, in their own order — and
+    # only when at least one of them will run: with `metadata_auto_fetch` and
+    # `cover_auto_fetch` both off there is nothing being fetched (the album is
+    # not having its artwork or its descriptions looked for), so the strip is
+    # not told that there is.
+    if run_cfg.get("metadata_auto_fetch", True) or run_cfg.get("cover_auto_fetch", True):
+        _phase("Fetching metadata and cover art…")
 
     def _files_step():
         got = {}
@@ -694,9 +725,11 @@ def _finish_album(path, cfg, progress=None, force=None, release=None,
     # album tag stale. Gated by advisory_auto_fetch; never fatal. Only fetched
     # when a chain is configured to read them — they exist to feed script 8 and
     # the lyrics step, and a chain that is switched off must not leave those
-    # tags behind as a side effect.
-    _phase("Fetching advisories…")
+    # tags behind as a side effect. The frame rides INSIDE that same condition:
+    # an import that fetches no advisories (no chain, or the switch off) does
+    # not say it is fetching them.
     if chain and run_cfg.get("advisory_auto_fetch", True):
+        _phase("Fetching advisories…")
         try:
             out["advisory"] = fetch_advisories([path], run_cfg)
         except Exception:
@@ -705,9 +738,9 @@ def _finish_album(path, cfg, progress=None, force=None, release=None,
     # Instrumental detection sits next to it for the same reason (the chain's
     # lyrics step reads INSTRUMENTAL), and is independent of the advisory: a
     # track can be instrumental and explicit-rated. Gated by
-    # instrumental_auto_fetch; never fatal.
-    _phase("Checking instrumentals…")
+    # instrumental_auto_fetch; never fatal. Same rule for its frame.
     if chain and cfg.get("instrumental_auto_fetch", True):
+        _phase("Checking instrumentals…")
         try:
             out["instrumental"] = fetch_instrumentals([path], cfg)
         except Exception:
@@ -1020,18 +1053,26 @@ def _announce_import(kind, path, out=None, cfg=None):
     so the wizard, the bulk queue, the panel's import and the auto-import's
     chain all announce the same way, and a config that switched them off says so
     through `events._notify_configured`, like every other kind.
+
+    The album is named by its IDENTITY — ``album_identity_label``'s "artist —
+    album (year)", from the tags (or the framework marker) — and never by the
+    folder it happens to sit in: a downloaded folder is routinely a peer's
+    spelling, a bare UUID or the release title alone, so a notice built from
+    `os.path.basename(path)` named nothing a user could place. The album has
+    just been imported, so its tags are there to read; the link still points at
+    the path, which is what the router needs.
     """
     try:
         from server import events
-        name = os.path.basename(os.path.normpath(path or "")) or path
+        label = album_identity_label(path, cfg)
         if kind == "import_started":
-            events.emit("import_started", f"Importing {name}",
+            events.emit("import_started", f"Importing {label}",
                         "Moving the album into the library and running the "
                         "configured chain.",
                         data={"path": path, "link": f"/album/{path}"}, config=cfg)
             return
         summary = chain_summary(out or {}) or "Import finished."
-        events.emit("import_done", f"Imported {name}", summary,
+        events.emit("import_done", f"Imported {label}", summary,
                     data={"path": path, "link": f"/album/{path}"}, config=cfg)
     except Exception:
         traceback.print_exc()
@@ -1498,6 +1539,17 @@ def fetch_advisories(paths, cfg=None, force=False):
                 track=af.get_tag("TRACKNUMBER"),
                 track_count=per_folder.get(os.path.dirname(path)),
                 cfg=cfg,
+                # The MusicBrainz ids the alias fallback reads: when every
+                # source is silent about the stored names, the name-based
+                # routes are re-asked under the entity aliases these ids name
+                # (server.integrations._advisory_alias_queries reads exactly
+                # these keys). With none, the route is its old self and asks
+                # nothing; only the four MBID keys travel, so the route's own
+                # youtube_video_id(tags) is untouched.
+                tags={k: af.get_tag(k) for k in (
+                    "MUSICBRAINZ_TRACKID", "MUSICBRAINZ_ARTISTID",
+                    "MUSICBRAINZ_ALBUMARTISTID",
+                    "MUSICBRAINZ_RELEASEGROUPID")},
             )
             # The provider route stated something, or nobody did — the ladder
             # settles the second case (an instrumental is 0, the AI judges the
@@ -1616,10 +1668,12 @@ def fetch_instrumentals(paths, cfg=None):
 
     The detection itself is ``server.instrumental.detect_instrumental``, which
     cross-references every available source (LRCLIB, Spotify audio-features,
-    the file's own title marker, lyrics evidence) and merges them: any source
-    saying instrumental wins, otherwise any source saying not-instrumental,
-    otherwise NO answer and no write. A file that already carries 0/1 is left
-    alone (the user's manual edit wins).
+    the file's own title marker, lyrics evidence — and, for a lyric-less track
+    none of them states anything about, the configured AI provider, one call
+    answering strictly 0/1 under `instrumental_ai_classify`) and merges them:
+    any source saying instrumental wins, otherwise any source saying
+    not-instrumental, otherwise NO answer and no write. A file that already
+    carries 0/1 is left alone (the user's manual edit wins).
 
     Returns ``{"updated": n, "values": {path: 0|1}, "evidence": {path:
     {source: 0|1}}}``.
@@ -1841,6 +1895,91 @@ def album_identity(album_dir, cfg=None):
     artist = str(info.get("artist") or "").strip() or artist
     album = str(info.get("title") or "").strip() or album
     return artist, album
+
+
+def _title_year(album_dir):
+    """The year the album's own tags state ("" when none of them does).
+
+    DATE first, ORIGINALDATE second — the two the tagger writes from the
+    release — and only the leading four digits are read: a notice names a year,
+    not a pressing's day."""
+    from mlo.audio import AudioFile
+    for path in _audio_files(album_dir):
+        try:
+            af = AudioFile(path)
+            if af.audio is None:
+                continue
+            raw = str(af.get_tag("DATE") or af.get_tag("ORIGINALDATE") or "").strip()
+        except Exception:
+            continue
+        m = re.match(r"(\d{4})", raw)
+        if m:
+            return m.group(1)
+    return ""
+
+
+def _album_is_digital(album_dir):
+    """Whether the album's own MEDIA says Digital Media — the one medium the
+    digital-release settling has an answer for.
+
+    The same test `stamp_album_source` makes before it does anything (every
+    track's canonical MEDIA must be the one digital spelling): SOURCE is what
+    the grader requires of a digital release, and script 1 deletes one from
+    every other medium. Read here so a phase can be announced only when there
+    is really a step (`_finish_album`), never as a second opinion about what to
+    write. Never raises; an album whose tags cannot be read is not digital.
+    """
+    from mlo.audio import AudioFile
+    from mlo.tagtext import canonical_text
+    values = set()
+    for path in _audio_files(album_dir):
+        try:
+            af = AudioFile(path)
+            if af.audio is None:
+                continue
+            media = str(af.get_tag("MEDIA") or "").strip()
+        except Exception:
+            continue
+        if media:
+            values.add(canonical_text("MEDIA", media))
+    return values == {"Digital Media"}
+
+
+def album_identity_label(album_dir, cfg=None):
+    """The album's identity as ONE line: ``artist — album (year)``.
+
+    What a notification, a queue row or a prompt calls this album by. Read from
+    the album's own tags (``album_identity``, which falls back to the framework
+    marker of an album whose audio has not arrived) plus the year those two
+    state — NEVER from the folder's name: an imported folder can be a peer's
+    spelling, a bare UUID, or nothing but the release title, and a notice naming
+    that names nothing the user recognises (the owner's report: "notification
+    text must name the album's identity, never a raw folder name or a path with
+    UUIDs").
+
+    Any part the album does not state is left OUT rather than invented, and the
+    folder's own name is the last resort — a caller that has nothing else still
+    gets something addressable. Never raises.
+    """
+    try:
+        artist, album = album_identity(album_dir, cfg)
+    except Exception:
+        artist, album = "", ""
+    year = ""
+    try:
+        from mlo.paths import load_pending
+        year = str((load_pending(album_dir) or {}).get("year") or "").strip()
+    except Exception:
+        year = ""
+    if not year:
+        try:
+            year = _title_year(album_dir)
+        except Exception:
+            year = ""
+    name = " — ".join(p for p in (artist, album) if p)
+    if not name:
+        name = os.path.basename(os.path.normpath(str(album_dir or ""))) or str(album_dir or "")
+    return f"{name} ({year})" if year else name
 
 
 def apply_metadata(album_dir, cfg=None):
@@ -2870,11 +3009,32 @@ def drop_arrived_values(album_dir, cfg=None, chain=None):
         # inside a file is nobody's but the downloader's until an import
         # decides the family.
         "cover": bool(cfg.get("cover_auto_fetch", True)) and "cover" not in kept,
+        # MusicBrainz ALIASES (TITLEALIAS / ARTISTALIAS / ALBUMALIAS and their
+        # locale-suffixed spellings): mlo.autotag writes them from the release
+        # the import holds BEFORE the chain. The "links" family is the one
+        # that owns that release-identity stamp, so a user who keeps it for
+        # review keeps the arrived aliases too.
+        "alias": "links" not in kept,
     }
     if not any(drop.values()):
         return {"checked": len(_audio_files(album_dir)), "failed": 0,
-                "lyrics": 0, "genre": 0, "advisory": 0, "cover": 0}
+                "lyrics": 0, "genre": 0, "advisory": 0, "cover": 0, "alias": 0}
     keep_synced = bool(cfg.get("import_keep_synced_lyrics", False))
+
+    def _alias_family(key):
+        """Whether one all_tags() key names a MusicBrainz alias tag.
+
+        The bare family and every locale-suffixed spelling (TITLEALIAS-JA):
+        mlo.audio's all_tags() already names both in the app's own vocabulary
+        (TXXX:TITLEALIAS-JA and the freeform atom resolve to TITLEALIAS-JA),
+        and the wrapper is stripped here for a file another tagger left a raw
+        spelling on.
+        """
+        name = str(key).upper()
+        if name.startswith(("TXXX:", "----:")):
+            name = name.rsplit(":", 1)[-1]
+        return name.split("-", 1)[0] in ("TITLEALIAS", "ARTISTALIAS",
+                                         "ALBUMALIAS")
 
     def _one(path):
         """One file: which families lost an arrived value, or "failed"."""
@@ -2942,6 +3102,21 @@ def drop_arrived_values(album_dir, cfg=None, chain=None):
             if drop["cover"] and af.embedded_pictures():
                 if af.remove_embedded_pictures():
                     gone.append("cover")
+            if drop["alias"]:
+                # Every alias tag the file carries — the bare family and each
+                # locale-suffixed spelling — read through all_tags() so the
+                # container's own spelling is found whatever the tagger used.
+                # mlo.autotag writes these from the release the import holds,
+                # and write_mb_tags COMPLETES a list rather than replacing it,
+                # so the peer's values must go first.
+                aliases = [k for k in (af.all_tags() or {})
+                           if _alias_family(k)
+                           and should_write_audio_tag(cfg, str(k),
+                                                      filepath=path)]
+                for _key in aliases:
+                    af.delete_tag(_key)
+                if aliases:
+                    gone.append("alias")
             return gone
         except Exception:
             traceback.print_exc()
@@ -2949,7 +3124,7 @@ def drop_arrived_values(album_dir, cfg=None, chain=None):
 
     files = _audio_files(album_dir)
     out = {"checked": len(files), "failed": 0, "lyrics": 0, "genre": 0,
-           "advisory": 0, "cover": 0}
+           "advisory": 0, "cover": 0, "alias": 0}
     # Distinct FILES share nothing: every write above is one container rewrite
     # of its own file (mlo.audio, one flush per file), so an album's tracks go
     # side by side instead of one after another — the same fan-out
@@ -4009,6 +4184,29 @@ def _bulk_one(item, cfg):
         # library folder the import did not produce
         row["status"] = "skipped"
         row["error"] = "no audio files"
+        return row
+
+    # ONE CHAIN PER ALBUM, whoever asks — and BEFORE anything of this row
+    # touches the album. A bulk row for an album an import is ALREADY chaining
+    # (the download's own finish, the import queue, another bulk run) used to
+    # move it (a second copy, when it came from outside the library) and then
+    # run the configured chain again over an album the first caller had just
+    # finished — the owner's "the scripts in auto-importing seem to be run
+    # twice". The rule is the album's, not the caller's: it is being imported,
+    # so this row reports that instead of duplicating minutes of work. A re-run
+    # the user asks for later (nothing holding the album) is untouched.
+    try:
+        holder = _importing_now(src)
+    except Exception:
+        traceback.print_exc()
+        holder = None
+    if holder is not None:
+        row["status"] = "failed"
+        row["album_path"] = str(src).replace("\\", "/")
+        row["error"] = (f"{str(holder.get('label') or 'An import')} is already "
+                        f"importing this album")
+        row["already_importing"] = True
+        row["note"] = row["error"]
         return row
 
     move = item.get("move")

@@ -185,7 +185,7 @@ publishes, including the ones that write nothing until they do.
 | 18 | Publish lyrics (LRCLIB) | Submits missing lyrics to the community database (every examined track counts as scanned, published included) | nothing locally | no (external side effect) | **yes** (LRCLIB) |
 | 19 | Optimize artist images | Re-fits `Artists/<Artist>/artist.*` to `artist_image_aspect` / `artist_image_target_size`, re-encodes as `artist.jpg`/`artist.png` | the artist image in place (only when it has to move) | re-encodes in place; never deletes | no |
 | 20 | Optimize library layout | The music folder's shape against `<music>/Artists/<Artist>/<Album>/…`: audio at the root or in an artist folder, stray files, unexpected folders, empty albums, `wrong_case` rows. With `layout_apply` (ON) it SETTLES what the folder itself proves — a wrong-case name is renamed, audio outside an album folder is moved into the one its tags name, and what is excess goes to the Trash (a stray file, a folder inside an album that is neither a disc folder nor holds audio, an album folder with no audio, a foreign root folder holding no audio, an album-less artist folder, the `.mlo_*` leftovers) — and reports every other row with the reason it stayed, re-derived at the move (R185). Writes ONE report describing the whole library (plus a `fixes` list) to `<music>/.mlo/data/`, which the Library page warns from; scoped to `targets` when a run names them, and library-wide when it does not (R9) | one report file + the renamed/moved/removed paths | `layout_apply` (removals go to the Trash) | no |
-| 21 | Fix AcoustID pairs | Completes (or CREATES) a track's `ACOUSTID_ID`/`ACOUSTID_FINGERPRINT` pair — the failure `Missing ACOUSTID_ID (run Fix AcoustID pairs)`. The recording the pair must name is a question the FILE answers itself (its own `ACOUSTID_ID`, its `MUSICBRAINZ_TRACKID`, or the recording MBID this app's naming script wrote into the file name), and the fingerprint is taken from the audio locally by fpcalc — so a CD rip AcoustID has never seen, or a run with no usable key, is repairable with no request at all. The service is asked only for a half pair whose file names no recording anywhere; a file carrying no AcoustID tag and naming no recording is skipped, never written from a guess | `ACOUSTID_ID`, `ACOUSTID_FINGERPRINT` | no | only for a half pair that names no recording |
+| 21 | Fix AcoustID pairs | Completes (or CREATES) a track's `ACOUSTID_ID`/`ACOUSTID_FINGERPRINT` pair — the failures `Missing ACOUSTID_ID and ACOUSTID_FINGERPRINT` and `Missing ACOUSTID_ID` / `Missing ACOUSTID_FINGERPRINT` (all `(run Fix AcoustID pairs)`). The recording the pair must name is a question the FILE answers itself (its own `ACOUSTID_ID`, its `MUSICBRAINZ_TRACKID`, or the recording MBID this app's naming script wrote into the file name), and the fingerprint is taken from the audio locally by fpcalc — so a CD rip AcoustID has never seen, or a run with no usable key, is repairable with no request at all. The service is asked only for a half pair whose file names no recording anywhere; a file carrying no AcoustID tag and naming no recording is skipped, never written from a guess | `ACOUSTID_ID`, `ACOUSTID_FINGERPRINT` | no | only for a half pair that names no recording |
 | 22 | Submit fingerprints (AcoustID) | Gives AcoustID the fingerprint and the MusicBrainz recording id a file already states (`mlo.acoustid.submit_files`): the recording is read the way script 21 reads it, the fingerprint is taken locally, the service is asked what it already links (`pair_known`) and what this app already handed over (`load_submissions`), and only what is genuinely new goes in ONE batched `v2/submit` — each track reported ACCEPTED, ALREADY_KNOWN, REJECTED or skipped with a named cause. **Not in the shipped order** (`OPT_IN_SCRIPTS`): a submission is a public, outward-facing write, so it runs only when someone asks — a details menu, `POST /api/import/acoustid/submit`, the wizard's AcoustID step, or a `run_all_order` the user put it in themselves | nothing locally | no | **yes** (AcoustID database) |
 
 **R243 — Fix AcoustID pairs (21) completes OR creates the pair from the file
@@ -207,7 +207,7 @@ that reason — the network is never asked to identify a whole library by name.
 `write_tags` still refuses a lone `ACOUSTID_ID` (NO_FINGERPRINT); the runner
 (`run_fix_pairs`) counts `modified`/`unchanged`/`skipped`/`failed` per file. No
 force flag exists, and none is wanted: its subject IS the incomplete pair. The
-grader's `Missing ACOUSTID_ID (run Fix AcoustID pairs)` is therefore repairable
+grader's `Missing ACOUSTID_ID and ACOUSTID_FINGERPRINT (run Fix AcoustID pairs)` is therefore repairable
 for the file whose NAME already stated its recording — the case that made the
 instruction unactionable — and the script is runnable for a track, an album or
 any selection through `POST /api/run {ids: [21], targets: […]}` (a FILE target
@@ -318,7 +318,7 @@ names the scripts it did not run and lets the container go.
 
 ## 3. Grading checks
 
-68 keys exist; **every one of them ships ON**, checks and file categories
+70 keys exist; **every one of them ships ON**, checks and file categories
 alike. A fresh install grades strictly without anyone pressing a preset: the
 two that used to ship off (`grade_check_audit`, `grade_include_other`) are
 named in `mlo/config.py::STRICT_DEFAULT_KEYS` so the change is visible rather
@@ -340,16 +340,17 @@ group still renders (section *Other checks*).
 | `grade_check_genre_order` | Genre order (family first) | ON | the family slot, if present, is FIRST and no genre repeats (`GENRE_ORDER`) |
 | `grade_check_genre_vocab` | Genre vocabulary | ON | every name is one MusicBrainz publishes (`GENRE_VOCAB`); grading never rewrites the tag |
 | `grade_check_replaygain` | ReplayGain tags present | ON | opt-in per file: any `REPLAYGAIN_*` tag means all four must exist |
-| `grade_check_acoustid` | AcoustID tags present | ON | opt-in pair: `ACOUSTID_ID` and `ACOUSTID_FINGERPRINT` together |
+| `grade_check_acoustid` | AcoustID tags required | ON | every audio track carries the `ACOUSTID_ID` + `ACOUSTID_FINGERPRINT` pair — neither half stored fails naming both, a half pair fails naming the missing one (`ACOUSTID_ID` / `ACOUSTID_FINGERPRINT`). `acoustid_api_key` is NOT needed (script 21 takes the fingerprint locally with fpcalc and reads the recording id off the file); the check stands down while `acoustid_enabled` is off, since then script 21 does nothing |
+| `grade_check_alias_needed` | Locale alias for non-Latin names | ON | a `TITLE` / `ARTIST` written in a non-Latin script needs its alias tag — `TITLEALIAS` / `ARTISTALIAS`, optionally locale-suffixed (`TITLEALIAS-JA`); the test is `mlo.lyrics_xlit`'s own script reading (`non_latin_ratio` ≥ `_LATIN_THRESHOLD` and `dominant_script` ≠ latin), so a Latin-script name is never graded or counted (`TITLEALIAS` / `ARTISTALIAS`) |
 | `grade_check_encoder` | Encoder identity | ON | the `ENCODER_*` markers switched on in `encoder_tags` are present (covers included while `reencode_images` is on) |
 | `grade_check_naming` | Naming script match | ON | the full relative path equals the evaluated `naming_script`; full and 8-char MBIDs both accepted (`PATH`) |
 | `grade_check_filename_case` | Path capitalization | ON | letter case matches the script exactly (`PATH_CASE`) |
 | `grade_check_ext_case` | Lowercase extensions | ON | no `.FLAC`-style extension in the folder |
 | `grade_check_key_bpm` | Key & BPM | ON | `INITIALKEY` (in `audiometa_key_notation`) and `BPM` exist |
-| `grade_check_excess_tags` | Excess tags | ON | no tag outside `mlo.grader.TAG_ALLOWLIST` (`TAGS`); gated as well on `strip_unknown_tags` |
+| `grade_check_excess_tags` | Excess tags | ON | no tag outside `mlo.grader.TAG_ALLOWLIST` (`TAGS`), and no VALUE in the one allow-listed name nothing here ever writes — a non-empty `COMMENT` fails with its own code (`COMMENT`, value rule `mlo.grader.tag_value_excess`); gated as well on `strip_unknown_tags`, which both strip passes (3, 10) follow |
 | `grade_check_media` | Media type | ON | `MEDIA` exists, is in `KNOWN_MEDIA`, and is uniform across the album (`MEDIA`) |
 | `grade_check_source` | Source tag | ON | `MEDIA=digital media` requires a non-empty, uniform `SOURCE`; any other medium must NOT carry one (`SOURCE`) |
-| `grade_check_instrumental` | Instrumental consistency | ON | `INSTRUMENTAL=1` tracks carry no lyrics; `INSTRUMENTAL=0` tracks are graded for lyrics |
+| `grade_check_instrumental` | Instrumental consistency | ON | `INSTRUMENTAL=1` tracks carry no lyrics; `INSTRUMENTAL=0` tracks are graded for lyrics. An `INSTRUMENTAL=1` track is charged nothing by the lyrics presence/format checks — script 1 clears the leftover both stores (R318) — while this check keeps naming the contradiction until it does |
 | `grade_check_disallowed` | Disallowed file types | ON | no file whose category is switched off in `grade_include_*` |
 | `grade_check_extra_images` | Stray images | ON | no image that is neither `cover.*` nor a per-track sidecar |
 | `grade_check_empty_folders` | Empty folders | ON | no audio-less folder (`EMPTY_FOLDER`) |
@@ -377,6 +378,7 @@ group still renders (section *Other checks*).
 | `grade_check_audit` | Require audit tag | ON | the track's audit verdict is REAL — missing or non-REAL fails (`AUDIT`). It ships **on** now: with the CD verdict decided by the rip's own evidence (§5, R21) an unaudited library is a library nobody has checked, which is the thing this check exists to say |
 | `grade_check_log_checksum` | Log checksum valid | ON | a log checksum that IS PRESENT must verify (`LOG_CHECKSUM`); one that is ABSENT is not required and costs nothing — XLD, EAC before v1.0 and a 1.0+ log whose `Log checksum` line is gone are judged by their per-track CRCs alone (R30) |
 | `grade_check_accuraterip` | AccurateRip verified (audit only) | ON | a `.accurip` whose verdict is not REAL marks the album's audit FAKE (and the track red). Together with `audit_require_accuraterip` it is what can turn the audit verdict FAKE; **it never adds a grade point** |
+| `grade_check_flac_md5` | FLAC stream MD5 (STREAMINFO) | ON | a FLAC's own decoded-audio digest is verified against the audio (`FLAC_MD5` / `FLAC_MD5_ABSENT` / `FLAC_MD5_UNKNOWN`) |
 | `grade_check_log_grade` | Log grade present & in range | ON | `LOG_GRADE` exists, is an integer 0-100 and is at least `grade_log_score_threshold` (default 100; 0 disables the threshold) |
 
 ### Identity links, covers, formatting, lyrics, categories
@@ -394,7 +396,7 @@ group still renders (section *Other checks*).
 | `grade_check_lyrics_spaces` | Lyrics — no padding | ON | no leading/trailing space on a lyric line |
 | `grade_check_lyrics_blank_lines` | Lyrics — blank line rules | ON | blank lines match the formatter's canonical output |
 | `grade_check_lyrics_zero` | Lyrics — zero timestamp rule | ON | the `[00:00.00]` leader follows `lrc_add_zero_timestamp` / `lrc_zero_timestamp_blank` / `lrc_zero_timestamp_target` |
-| `grade_check_lyrics_format` | Lyrics — canonical formatting | ON | re-running the formatter would change nothing (timestamps at `lrc_timestamp_precision`, `lrc_strip_metadata`, `lrc_collapse_blank_lines`, no merged timestamps) |
+| `grade_check_lyrics_format` | Lyrics — canonical formatting | ON | re-running the formatter would change nothing (timestamps at `lrc_timestamp_precision`, `lrc_strip_metadata`, `lrc_collapse_blank_lines`, no merged timestamps) — so a stored lyric still carrying a stray `[id:…]` frame descriptor, an `[ti:]`/`[ar:]`-style header, or a leading credit line that repeats the track's own `TITLE - ARTIST` fails, while `[offset:…]` (an instruction, not a header) passes |
 | `grade_check_cue_spaces` / `grade_check_cue_blank_lines` / `grade_check_cue_format` | CUE — no padding / no blank lines / canonical formatting | ON | CUE lines are trimmed, blank lines absent, and the sheet is byte-equivalent to the canonical formatter's output (`keep_empty_cue_lines`, `keep_other_cue_lines`, `cue_file_type`, `append_final_newline`) |
 | `grade_check_accurip_format` | `.accurip` — canonical formatting | ON | each line trimmed, outer blank lines handled (`keep_empty_accurip_lines`) |
 | `grade_check_cue_files` | CUE — referenced files exist | ON | every `FILE` line names a file that is in the album |
@@ -422,8 +424,14 @@ Every MusicBrainz field with a home in the container's tag system is written
 wrote is never reported as an excess tag and never stripped by script 10, while
 a genuinely foreign tag still is. A field with no home is not invented under an
 ad-hoc key; the writer reports what it could not place.
-**R16 — ReplayGain and AcoustID are opt-in families** (R42): absence is never a
-failure, a half-written set always is.
+**R16 — ReplayGain is an opt-in family** (R42): absence is never a failure, a half-written
+set always is. **AcoustID is required**, key or no key: every audio track carries the
+`ACOUSTID_ID` + `ACOUSTID_FINGERPRINT` pair (`grade_check_acoustid`), neither half stored
+fails naming both, and script 21 creates the pair locally — the API key gates lookups only.
+**R16a — a name in a non-Latin script needs its alias** (`grade_check_alias_needed`): the
+TITLE / ARTIST's alias tag (`TITLEALIAS` / `ARTISTALIAS`, optionally locale-suffixed) is what
+a reader in the configured locale searches for, and the same script test `mlo.lyrics_xlit`
+applies to lyrics decides whether one is needed, so a Latin library is never charged for it.
 **R17 — CD vs Digital Media vs other.** `_is_cd()` is exactly `MEDIA == "cd"`
 (case-insensitive); the CUE/LOG/AccurateRip/CRC/`LOG_GRADE` expectations are
 gated on it. `MEDIA == "digital media"` requires `SOURCE`. Any other value in
@@ -443,7 +451,7 @@ graded, taggable track rather than an invisible one.
 The three presets are one-click starting points on the Grading page; they edit
 the local config copy and only take effect on **Save** (`POST /api/config`).
 **R18 — the SHIPPED defaults ARE Strict**: every `grade_check_*` and every
-`grade_include_*` key ships `true` (68 of 68), so a fresh install grades
+`grade_include_*` key ships `true` (70 of 70), so a fresh install grades
 strictly with nobody pressing anything. The two that used to ship off —
 `grade_check_audit` and `grade_include_other` — are named in
 `mlo/config.py::STRICT_DEFAULT_KEYS`, so the change is a readable fact rather
@@ -573,6 +581,7 @@ The default writer of everything else is *Beets tagging (14) · import*.
 | Tag | Family | Written by | Graded by |
 | --- | --- | --- | --- |
 | `TITLE`, `ARTIST`, `ALBUM`, `ALBUMARTIST`, `TRACKNUMBER`, `DISCNUMBER`, `DATE` | identity | Beets tagging (14) · import | `grade_check_missing_tags` |
+| `TITLEALIAS`, `ARTISTALIAS` (identity), `ALBUMALIAS` (release) | identity / release | Beets tagging (14) · import · locale aliases · the tag editor | `grade_check_alias_needed` (the two per-track ones), `grade_check_excess_tags` (never excess — the family is in `TAG_ALLOWLIST`, bare or locale-suffixed) |
 | `GENRE` | identity | Auto tagging (8) · genre import · Format all (10) trims | `grade_check_genre`, `_genre_count`, `_genre_order`, `_genre_vocab` |
 | `MEDIA`, `SOURCE` | release | Format lyrics (1) · media/source normalization | `grade_check_media`, `grade_check_source` |
 | `ITUNESADVISORY` | identity | Auto tagging (8) · advisory fetch | `grade_check_missing_tags` |
@@ -585,10 +594,11 @@ The default writer of everything else is *Beets tagging (14) · import*.
 | `REPLAYGAIN_TRACK_GAIN` / `_PEAK`, `REPLAYGAIN_ALBUM_GAIN` / `_PEAK` | audio | DR & ReplayGain (7) | `grade_check_replaygain` (opt-in family) |
 | `AUDIT`, `LOG_GRADE`, `LOG_CRC`, `INTEGRITY` | provenance | Audit library (6) | `grade_check_audit`, `grade_check_log_grade`, `grade_check_excess_tags` |
 | `AUDIO_MD5` | provenance | nothing — legacy, read only | `grade_check_excess_tags` |
+| `COMMENT` | identity | nothing — the free text of whatever ripper or vendor tagger made the file | `grade_check_excess_tags` (the value rule: a non-empty `COMMENT` fails with code `COMMENT`, and Optimize (3) / Format all (10) clear it) |
 | `AUDIOAUDITOR_OVERRIDE` | provenance | the track editor (manual) | `grade_check_audit` (wins over every derived verdict) |
 | `LYRICS`, `UNSYNCEDLYRICS` | lyrics | Fetch lyrics (13) · lyrics editor | `grade_check_lyrics`, `_lyrics_format` |
 | `TRANSLITERATION`, `TRANSLATION` | lyrics | Lyrics transliterate (AI) (17) | `grade_check_xlit_transliteration`, `_xlit_translation`, `_lyrics_lang_tags` |
-| `ACOUSTID_ID`, `ACOUSTID_FINGERPRINT` | provenance | the import wizard's AcoustID apply (fingerprint match) — the PAIR in one save, verified by re-read — and Fix AcoustID pairs (21), which every import chain runs over the album it just imported: it completes a half pair, and creates the pair for a file that names its recording but carries none (the id from the file, the fingerprint local) | `grade_check_acoustid` |
+| `ACOUSTID_ID`, `ACOUSTID_FINGERPRINT` | provenance | the import wizard's AcoustID apply (fingerprint match) — the PAIR in one save, verified by re-read — and Fix AcoustID pairs (21), which every import chain runs over the album it just imported: it completes a half pair, and creates the pair for a file that names its recording but carries none (the id from the file, the fingerprint local) | `grade_check_acoustid` ; the pair is REQUIRED on every audio track (`grade_check_acoustid`), and BOTH spellings a tagger writes are read — this app's `ACOUSTID_ID` and beets/mediafile's `Acoustid Id` / `Acoustid Fingerprint`, the spelling its chroma plugin writes and this app's own import runs |
 | `ENCODER_PROGRAM`, `ENCODER_QUALITY`, `ENCODER_VERSION` | provenance | Optimize FLACs (3) | `grade_check_encoder` |
 | `MUSICBRAINZ_*`, `RATEYOURMUSIC_*`, `RELEASETYPE`, `CATALOGNUMBER`, `LABEL`, `BARCODE`, `ISRC`, `WORK`, `MOVEMENT`, … | release | Beets tagging (14) · import · MusicBrainz writes | `grade_check_album_tags`, `grade_check_mb_links`, `grade_check_rym_links`, `grade_check_naming` |
 | `PERFORMER`, `PRODUCER`, `ENGINEER`, `MIXER`, `ARRANGER`, `DJMIXER`, `CONDUCTOR`, `WRITER`, `DIRECTOR`, `COMPOSERSORT`, `MUSICBRAINZ_COMPOSERID` | release | Beets tagging (14, `beets_credits`) · Auto tagging (8) — the release's own artist/recording/work relations, fetched in ONE request per album | `grade_check_excess_tags` (allowlisted, never foreign) |
@@ -1307,7 +1317,46 @@ rating.
   import both answered `qobuz` 1200×1200 `img/qobuz.jpg` with "ranked above the
   1200×1200 deezer candidate on the configured source order" over the same 23
   candidates, and the import stored that image as `cover.jpg` (1200×1200 JPEG).
+- **R56f — a MANUAL cover write processes the image it just wrote.** `POST
+  /api/cover/fromurl` (the finder's pick) and `POST /api/cover` (an upload)
+  queue script 5, "Process images", over THAT album and nothing else
+  (`server.main._schedule_cover_process`) — the same in-process path `/api/run`
+  takes: `server.script_runners.run_chain` with `cfg["targets"]` set to the one
+  album folder, so the run claims the album in `server.job_locks` (the row
+  MAINTAIN → In progress lists, and the lock every other writer of that album
+  answers) and ends with the cache drop a run does (`_invalidate_run`), which
+  is what makes the page show the processed cover. The library is never walked:
+  the scope is the one folder. Only a write to a LIBRARY album fires — a
+  `staged` write (the import wizard's folder) and the importer's own cover step
+  (`server.imports.run_cover_step`, the automatic writer, which shares
+  `_write_cover_bytes` with the routes) queue NOTHING, because the import chain
+  that finishes such an album already carries script 5 (R183). Two presses on
+  one album inside `_COVER_PROCESS_COALESCE_S` are ONE run: the run the first
+  queued processes the folder as it stands when it gets there. Pinned by
+  `tools/test_track_covers.py` (a manual pick and a manual upload each queue
+  exactly one album-scoped script-5 run, twice in a row is still one, a pick
+  after the window queues its own, the importer's cover step and a staged write
+  queue none, and the queued run reaches the script runner with its album still
+  held in `job_locks`).
 
+- **R56g — a surface asks for the cover at the size it DRAWS, and the answer is
+  cached under the master's own stat.** `GET /api/cover?w=` takes a width
+  bucketed to 160 / 320 / 640 / 1200 (`server.artcache`), re-crops and re-encodes
+  from the master only for a bucket it does not hold, keeps the result under
+  `<music>/.mlo/data/cover_thumbs` keyed by the cover file's path + size + mtime,
+  and a cache hit reads the thumb and never the master. The URL a cover WRITE
+  reports carries the new bytes immediately (the write invalidates its own
+  entry), so a replaced cover is never a stale hit. Measured on the play path
+  (74 px slot, 1400 px master, emulated 20 Mbit/s link): 3.13 MB and two
+  requests, artwork at ~1230 ms → 12 KB, one request, artwork at ~98 ms — the
+  same paint budget as the track's own metadata — and a repeat play moves no
+  bytes over the wire. The fullscreen pane's picture and its ambient blur share
+  ONE sized request, and the next sequential track's cover is preloaded with the
+  gapless preload (R300). The offline cache still resolves a warmed plain master
+  for a sized URL, so a downloaded album's art opens with the server down.
+  Pinned by `tools/test_cover_preview.py` (drawn width, its crop, its bytes and
+  the invalidation). `tools/measure_cover.cjs` / `measure_pane.cjs` /
+  `measure_preload.cjs` are the measurement harnesses the numbers came from.
 ### 7.6 Tag value spelling and spacing
 
 - **R57** — a tag VALUE is written in the one canonical form its family has:
@@ -2052,6 +2101,32 @@ user asked for, in the order they asked for it. `server/exporter.py` owns both.
   added". The reply is the page-level button's own — `useAddToLibrary`'
   `missing` count, the server's `albums[].created` replacing the press
   acknowledgement, and the queued search reported in the same words.
+
+- **R317 — every edition row says its own catalog number, and the column keeps
+  its floor.** R244's table gains the one fact that identifies which PRINTING a
+  row is: `MBReleaseGroupPage`'s editions table now reads `… Country · Cat # ·
+  Barcode`, the catalog number in a column of its own immediately before the bar
+  code (the header row a reader sees is `Date · Title · Format · Discs · Tracks
+  · Country · Cat # · Barcode`). The label and its `w-[150px]` floor are the MB
+  search results' own `catalog_number` column's ("Cat #", same width), so the
+  app names this one thing once. Nothing had to be added at the source: the
+  number already rides every row of the payload the page holds —
+  `integrations.release_group_browse` reads each release's own `label-info`
+  through `mlo.release_choice.catalog_numbers`, the same reader the release
+  choice fills a candidate from and dedupes by (R169), so a row and the ranking
+  cannot disagree about which number an edition carries — and it publishes both
+  `catalog_numbers` (every one, MusicBrainz's order) and `catalog_number` (the
+  first, the key a search hit carries). The cell prints the LIST joined with
+  " + ", the way the app joins multi-value text elsewhere (a group's compound
+  release types, a multi-disc row's `10 + 11` breakdown), because MusicBrainz
+  states one number per label and a two-label pressing really has two; it is
+  `cell-ellipsis` with the whole value in its tooltip so a long join neither
+  wraps nor squeezes its neighbours (R313's discipline, applied to this table),
+  and an edition that states none prints the em dash the Date column prints
+  rather than an empty cell. Pinned by `tools/check_release_choice.mjs`, which
+  renders the page and reads the header row's own words IN ORDER, a row's own
+  numbers joined, the tooltip, exactly one Cat # cell per edition, and the em
+  dash beside the edition that states none.
 
 ### 7.12 What enters the library: the edition, the source, and the name in your language
 
@@ -2801,11 +2876,21 @@ user asked for, in the order they asked for it. `server/exporter.py` owns both.
 - **R151 — each candidate's search is BOUNDED, and the walk stops at the end of
   its own list.** A walk asks at most `soulseek_fallback_candidates` editions
   (shipped **5**, clamped to 1–10; **1** is the pre-walk behaviour — the best
-  edition and nothing behind it), and each candidate's search is given
-  `soulseek_search_timeout_seconds` of quiet (shipped **60**) before it counts as
-  not found and the walk moves on — **per candidate**, so a walk of five may
-  wait up to three of those, while a usable folder still ends a candidate's
-  search in seconds. That window is the app's EXISTING one, not a second timer:
+  edition and nothing behind it), and each candidate's search is asked in TWO
+  passes. The FIRST (`soulseek_search_fast_seconds`, shipped **5**, clamped to
+  2–60 and never longer than the window below) is the window every configured
+  query template is POSTed with: slskd serves a search's responses only once it
+  has ENDED, so a short quiet window is what makes a low-traffic release
+  READABLE in seconds — the moment one complete lossless folder is readable its
+  download is enqueued and the job moves on. `soulseek_search_timeout_seconds`
+  of quiet (shipped **60**) is the TOP-UP window, spent only when the fast pass
+  found nothing usable: it keeps reading the searches that are still running at
+  slskd (never re-asking the network the same question) before the candidate
+  counts as not found and the walk moves on — **per candidate**, and then plus
+  the broad second pass a digital release gets. A usable folder ends either pass
+  in seconds, and a transfer already started is never cancelled for a
+  marginally better copy that turns up later. That top-up window is the app's
+  EXISTING one, not a second timer:
   it is the quiet time `soulseek_auto_search_wait` means, plus the response grace
   tail `_search_queries` adds (`wait_s + _SEARCH_GRACE_S`), now passed per job
   (`start_job(search_seconds=…)`). It bounds the SEARCH only — a candidate that
@@ -3192,7 +3277,15 @@ user asked for, in the order they asked for it. `server/exporter.py` owns both.
   chain left the album at, because a script may have moved it). A caller that
   cannot name what it touched still gets `invalidate_all()`, and nothing about
   what a reader then sees changes — the album's tags are re-read from disk, not
-  served from the cache that was just invalidated by name.
+  served from the cache that was just invalidated by name. The same rule now
+  covers the person's own run: `/api/run` (`server.main._invalidate_run`) drops
+  the folders the run NAMED plus the folders a script moved an album INTO
+  (`stats["moved_targets"]`, the report the chain itself follows), and only a run
+  with no targets at all — Run All, a library-wide sweep, which really did touch
+  everything — keeps `invalidate_all()`. `mbresolve.invalidate()` is still called
+  either way: that index is ONE timestamp over the whole library and rebuilding
+  it is lazy, while a run that renamed a folder must not keep resolving the old
+  paths to it.
 
 
 - **R110 — the app's two transient stores have two INDEPENDENT size caps, and
@@ -4621,9 +4714,19 @@ composition instead (R267). Above `lg` the pane sits beside the artwork.
   above it or on a file inside it, the registry's own containment rule): a chain
   writes an album across its steps, so the tag a later step has not written yet
   is missing right up until that step runs, and a strip that named it would be
-  reporting the run rather than the library. `albums_failing`, `tracks_failing`,
-  `items` and `more` are the findings that are LISTED and a busy album is in
-  none of them, while `pass_count`/`total_checks`/`grade_pct` stay the library's
+  reporting the run rather than the library. An album an **import** is on right
+  now — `server.imports._importing_now`, the same three claim kinds
+  (`auto-import`, `import`, `scripts`) `server.api_queue` reads to keep a
+  release in its In progress section, so the two surfaces agree about what
+  "being imported" is — is that same finding held back, and it is **counted
+  apart** in `albums_importing`: the summary line says so in one clause (`1
+  album being imported is left out` / `2 albums being imported are left out`)
+  rather than leaving a reader whose failing album just left the list to wonder
+  which album the strip lost. The count is of the FINDINGS left out that way
+  (graded, failing, mid-import), so a passing album or one whose audio has not
+  arrived is never in it. `albums_failing`, `tracks_failing`,
+  `items` and `more` are the findings that are LISTED and a busy or mid-import
+  album is in none of them, while `pass_count`/`total_checks`/`grade_pct` stay the library's
   own sums including it, so the strip never disagrees with the header printed
   beside it. **The strip cannot stay stale through a run**: `["gradesSummary"]`
   is refetched whenever the client's own lock list (`web/src/lib/locks`, the 2 s
@@ -5021,7 +5124,11 @@ composition instead (R267). Above `lg` the pane sits beside the artwork.
 - **R269 — cleartext media needs the blanket ATS key, and the LAN needs a
   reason.** `NSAllowsArbitraryLoadsInWebContent` covers what the web content
   PROCESS fetches; the bytes of an `<audio>`/`<video>` element are loaded by
-  WebKit's media stack, which reads `NSAllowsArbitraryLoads`. Both are set in
+  WebKit's media stack, which reads `NSAllowsArbitraryLoadsForMedia`. The
+  blanket key is NOT a substitute: on iOS 10+ any scoped key present makes iOS
+  ignore `NSAllowsArbitraryLoads` outright (Apple's own note on the key), so a
+  build carrying the blanket key alone passes a plist check and then refuses
+  every plain-http track with no error the page can see. All three are set in
   `desktop/src-tauri/Info.plist`, and `NSLocalNetworkUsageDescription` gives
   iOS 14+ something to show when it asks for local-network access — without it
   the permission cannot be requested at all, so a LAN server is unreachable
@@ -5037,7 +5144,10 @@ composition instead (R267). Above `lg` the pane sits beside the artwork.
   press and re-sends it the next time the app is active (`refresh`, called by
   the session module), and forgets it the moment the web pushes a state of its
   own through `set_now_playing_liked` — so the press lands once, and only when
-  nothing answered it.
+  nothing answered it. Nothing there changes when BOTH copies of the event
+  arrive: the press carries a number and the page drops a re-delivery it has
+  already handled, so a parked webview that queued the event cannot toggle the
+  star twice when it wakes.
 
 - **R271 — the WebAudio graph owns the volume, and a gesture unlocks it.**
   `HTMLMediaElement.volume` is read-only on iOS: assigning it is dropped without
@@ -5079,7 +5189,13 @@ composition instead (R267). Above `lg` the pane sits beside the artwork.
   already backgrounded (the lock-screen play button has no app-state
   notification to ride on), and stops the moment either half of the condition
   goes away: nothing renders in the foreground, and the cost is bounded to the
-  time the app is out of sight AND the user is listening. The star's `enabled`
+  time the app is out of sight AND the user is listening. The player is a
+  resource, not a fact: an interruption
+  (`AVAudioSessionInterruptionTypeBegan`) or a media-services reset tears the
+  session's players down, so both RELEASE the looping player rather than
+  leaving a dead handle behind — a stale one made the keep-alive a permanent
+  no-op after the first phone call — and it is rendered again at the next
+  transition that wants it. The star's `enabled`
   bit is re-asserted on playback start in the same breath, because that is the
   moment WebKit publishes its own remote-command set from the web content
   process (`RemoteCommandListenerCocoa::updateSupportedCommands` →
@@ -5104,7 +5220,12 @@ composition instead (R267). Above `lg` the pane sits beside the artwork.
   `play`/`pause`/`error`/`stalled` events with the visibility state and
   readyState at that moment, every Media Session action the OS sent, seeks with
   their source, and the AudioContext's state transitions
-  (`web/src/lib/pbDiag.ts`). Two heartbeats sit beside those rows, because
+  (`web/src/lib/pbDiag.ts`) plus the rows the keep-alive's own state needed:
+  `session_category_taken`, `session_activate_last`,
+  `keep_alive_platform_stops` (the interruption and media-services-reset
+  teardowns above), `app_heartbeat`, and the star's three-way state —
+  `now_playing_like_active`, `now_playing_like_web_state` and
+  `now_playing_like_press_pending`. Two heartbeats sit beside those rows, because
   "which process froze" is the question the reports cannot answer from the
   outside: the page's own 1 s tick (a gap of 3 s or more is a frozen or
   suspended web content process) and the shell's (`app_process_worst_gap_s` — a
@@ -5144,15 +5265,20 @@ composition instead (R267). Above `lg` the pane sits beside the artwork.
   webview's Media Session everywhere: the star is `likeCommand`, the
   ⟲10 / 10⟳ pair is `skipForward`/`skipBackward`, a track step is
   `nexttrack`/`previoustrack`. Three consequences, each measured rather than
-  assumed. (1) The web player declares the two SKIP actions unsupported
-  (`setActionHandler("seekbackward" | "seekforward", null)` in `PlayerBar.tsx`,
-  the spec's "this action is not supported") so the system draws the step the
-  app's own transport has — WebKit offers a page the skip pair by default, with
-  its own interval, which is where the owner's card got them while showing this
-  app's metadata (issue #55). (2) `ios_like.rs` asserts `likeCommand.enabled` at
+  assumed. (1) The web player REGISTERS the two skip actions
+  (`seekbackward`/`seekforward` in `PlayerBar.tsx`, ±10 s, honouring the
+  platform's own `seekOffset`), so the card carries ⟲10 / 10⟳ and pressing one
+  seeks that track — through 4.1.11 they were declared unsupported, which is
+  where the owner's card got WebKit's own pair while showing this app's
+  metadata (issue #55) — and it publishes
+  `navigator.mediaSession.setPositionState` (duration, position, rate) so the
+  lock-screen scrubber has a timeline instead of inferring one. (2)
+  `ios_like.rs` asserts `likeCommand.enabled` at
   the transition AND again half a second later (`assert_again_soon`), because
   the same bit is written by WebKit's own media-session plumbing a few
-  milliseconds after the web event that caused it: a star a state push cannot
+  milliseconds after the web event that caused it — and the re-assert replays
+  the web's OWN last pushed state, `active` as well as `enabled`, because the
+  fill is lost exactly where the command set is rebuilt — a star a state push cannot
   turn back on is a star that vanishes mid-album, one layer under R288. (3) Both
   are readable rather than arguable: `ios_like::command_state_rows` adds
   `now_playing_like_enabled` and the two `now_playing_skip_*_enabled` bits to
@@ -5195,14 +5321,14 @@ composition instead (R267). Above `lg` the pane sits beside the artwork.
 
 - **R275 — an artist's discography opens on Album, EP, Single.** The types a
   listener means by "the discography" come first, then everything else
-  (most-populated first, then by label). `byReleaseGroupType` in
-  `web/src/pages/MusicBrainzPage.tsx` is the ONE derivation behind the type
-  chips, the sections under them and the "Add or download by release type"
-  panel, so a row and a chip cannot disagree about what leads; a compound label
-  is ranked by its PRIMARY type ("Album + Live" sorts with the albums). It used
-  to be the order MusicBrainz happened to serve, which made an artist with 49
-  live albums and 10 studio ones open on "Album + Live" — a discography that
-  reads as live records.
+  (most-populated first, then by label). `byReleaseGroupType` —
+  `web/src/lib/artistReleaseGroups.ts` since R298 — is the ONE derivation behind
+  the type filter, the sections under it and the "Add or download by release
+  type" panel, so a row and a filter row cannot disagree about what leads; a
+  compound label is ranked by its PRIMARY type ("Album + Live" sorts with the
+  albums). It used to be the order MusicBrainz happened to serve, which made an
+  artist with 49 live albums and 10 studio ones open on "Album + Live" — a
+  discography that reads as live records.
 
 - **R276 — genres are stored lower-case and PRINTED as a reader writes them.**
   The library's filter buckets (`GENRE_FAMILIES`), the tag vocabulary and the
@@ -5305,6 +5431,38 @@ composition instead (R267). Above `lg` the pane sits beside the artwork.
   `git show HEAD:` and pass after. What the app still cannot do is ship the probe
   from outside; the payload's note says so, and the row's `cannot` says the gateway
   a container sees is Docker's bridge, never the owner's router.
+
+- **R298 — an artist's discography is four foldable sections, and its type
+  filter is a menu that searches.** R275 put Album, EP and Single first, but
+  every compound type still drew its own chip and its own block, so an artist
+  with a broadcast, a DJ-mix, a demo and two compilations carried a chip row
+  that wrapped to several lines at a phone width above a page of blocks nobody
+  scrolls. The types still lead exactly as R275 says, and the derivation now
+  lives in `web/src/lib/artistReleaseGroups.ts` — pure, DOM-free, so the rank,
+  the sections, the fold and the label filter are decisions a test calls
+  directly; `MBArtistPage` imports it and decides nothing itself. It draws FOUR
+  sections: Album, EP and Single, each holding its own compound types, then one
+  `More` bucket holding every other type ordered by how many release groups it
+  holds. Every section header folds its rows away at a press, **Album, EP and
+  Single start OPEN and the bucket starts FOLDED** (the long tail is one line
+  until it is asked for — unless the discography has no leaders at all, where
+  the bucket IS the discography and opens like any other section, since a fold
+  over the whole page would hide every row behind a press nothing explains), and
+  a type the reader NAMED in the filter opens its
+  own section, so a search can never land on folded rows. The chip row is
+  replaced by one menu: its trigger says what is on screen and how many rows
+  that is, its box filters the type LABELS ("live" reaches "Album + Live", and
+  so does "album+live" — spacing and case aside), and it offers only labels the
+  sections draw, so a filter can never name a type the discography does not
+  hold. The "Add or download by release type" panel reads the same derivation —
+  one row per compound type, in the same order, under its section's own line —
+  so a row can never offer a type a section will not draw. Pinned by
+  `tools/check_release_choice.mjs`, which asserts the section order, the
+  bucket's count order, the two folded defaults, the "a compound pick is that
+  one type" rule and the label filter over one discography fixture — and then
+  renders the page ITSELF and reads the markup: the four headers in that order,
+  Album/EP/Single open, the `More` header folded with none of its rows drawn,
+  and its types still one press away in the add panel.
 
 ### 7.49 The acquisition pipeline: Failed means given up, and searches get faster
 
@@ -5552,6 +5710,308 @@ composition instead (R267). Above `lg` the pane sits beside the artwork.
 
 ---
 
+### 7.53 The player remembers where you were, and gives a jump back
+
+- **R299 — a reload restores the queue, the track and the second, and a
+  restored start is not a play.** `web/src/store.ts` keeps
+  `mlo.player.state.v1` (`{queue, index, path, time}`) in `localStorage`,
+  hydrated as the store is created — every row validated, the index clamped, a
+  `time` dropped when its `path` is not the row's — so a stale entry cannot
+  point at a track the queue no longer holds. The position is written on a
+  coalesced timer and on `pagehide`, never per `timeupdate`; the mount effect
+  seeks from the element's own metadata and does NOT start playback. What
+  counts as a play is unchanged (`PLAY_START_SECONDS`), so resuming adds none
+  and pressing the row from the start still adds one.
+  `tools/check_player_state.cjs` asserts the whole path. Importing store.ts has
+  NO side effects — no timer, no listener, no `window` at module scope; the
+  shell calls `startPlayerPersistence()` once — because a module-scope timer
+  keeps node's event loop alive and hangs every SSR harness that imports the
+  tree (the regression the 4.2 branch found).
+
+- **R300 — gapless is a setting, and off means off.** `gapless_playback`
+  (default ON) is the gate on both halves: the idle element's preload of the
+  next sequential track, and the hand-over in `handleEnded` that plays it
+  without a load step. Off, the preload never arms and every track takes the
+  normal load path. Shuffle and any non-sequential hop were never gapless and
+  still are not.
+
+- **R301 — Ctrl+Z / Cmd+Z undoes the last jump.** Every user-initiated seek of
+  ≥2 s (the seek bar, the ±10 s commands, a media-session skip, a lyric-line
+  jump) pushes `{track, from, to}` on a bounded stack (5); the shortcut seeks
+  the SAME track back to `from`, once per entry, and drops an entry whose track
+  is no longer playing rather than seeking it into the wrong song. It never
+  changes the queue, never fires from a text field's own undo, and has no
+  button: it is named in the app's keyboard help. Micro-seeks (a drag's own
+  steps) never enter the stack.
+
+- **R302 — what the OS draws now moves with the app's own transport.**
+  `seekbackward`/`seekforward` are REGISTERED (±10 s, honouring the platform's
+  `seekOffset`), so the lock screen's ⟲10 / 10⟳ seek this app's track instead
+  of WebKit's default interval behind it (R296(1) is superseded), and
+  `navigator.mediaSession.setPositionState` publishes duration, position and
+  rate so the OS scrubber has a timeline to draw. `tools/check_os_stop_resume.cjs`
+  reads the declared set back and presses a skip to assert the seek.
+
+### 7.54 The now-playing surfaces: what is drawn, and what must not move
+
+- **R303 — the year is on both surfaces, and no element resizes another.** The
+  player bar and the fullscreen pane both print the track's ORIGINAL release
+  year (`ORIGINALDATE`, `DATE` as the fallback — `originalYear` in
+  `web/src/lib/fmt.ts`), on the album line where a remaster still shows the
+  work's year. The ReplayGain readout, the UP NEXT value and the tech readout
+  hold reserved space (`tabular-nums`, fixed/grid tracks) so a long or short
+  value changes nothing around it, and the star rating sits AFTER the
+  bitrate/format readout, not before it.
+
+- **R304 — long text drifts, and a jump does not.** Artist/album/title on the
+  player surfaces auto-scroll through the existing `ScrollingText` component
+  instead of truncating to nothing. A clock-driven lyric retarget glides; a
+  READER-made jump (a clicked line, the offset buttons, a zoom change, a
+  re-sync after a seek) snaps in the same frame — the scroller must not replay
+  the transition from the line the reader skipped past
+  (`web/src/lib/lyrScroll.ts`, `tools/check_lyrscroll.cjs` asserts both).
+
+- **R305 — the lyrics pane is a pane, and the corner is where its controls
+  live.** The zoom and offset controls sit in the lyrics pane's own corner
+  (top-right, revealed on a fine pointer, always tappable on a touch screen) on
+  both surfaces, with their popover copies kept as the discoverable path. The
+  docked sidebar takes the app's chrome into account: it starts below the top
+  bar and never covers the run/progress row (`--mlo-chrome-bottom`, published by
+  the shell).
+
+- **R306 — the visualizer's columns land on whole device pixels.** The
+  background bars are laid out in device pixels over a backing store rounded to
+  whole columns and rows (`web/src/lib/vizBars.ts`), and each frame covers the
+  whole canvas, so no stale edge column survives a frame — the "lines coming in
+  from the edges" of the owner's report.
+
+### 7.55 The acquisition queue: one chain, one row, and a notice only when it ends
+
+- **R307 — one chain per album.** An album the pipeline is already on (a
+  `job_locks` claim of kind `auto-import`, `import` or `scripts`) is never
+  chained a second time: the download's own finish and the import queue both
+  route through the same check, so the scripts run exactly once for one album
+  (the owner's "the scripts seem to run twice"). `tools/test_import_pipeline.py`
+  counts the invocations.
+
+- **R308 — a release that needs a music video to be complete is never the
+  default pick.** The Soulseek candidate rule ranks a video-carrying folder
+  below an audio-only one that covers the expected tracklist, and a video-only
+  folder below both; `mlo/release_choice` keeps the same rule for the edition
+  choice itself. A video RELEASE (a concert film) still ranks as what it is.
+
+- **R309 — a notice means the work ended.** A finished download and the end of
+  a WHOLE import are the only two frames that reach a closed device
+  (`web/src/lib/notifications.ts`'s OS/push kind lists): a started transfer, a
+  download still being verified, one album of a bulk run and a chain still
+  running stay in the app. Every one of them names the album — artist, album,
+  year — never a folder name or a path with UUIDs in it.
+
+- **R310 — the queue's rows are exclusive, and its history is readable.**
+  `server/api_queue.py`'s stages and the page's own grouping agree: an item
+  whose chain is still running is drawn in In progress and NOT in Completed
+  (the owner's Ænima, shown in both), and a download only reaches Completed
+  when it really finished. Finished rows leave the list by themselves when the
+  next import starts (`soulseek_clear_completed_on_import`, ON; a failed or
+  needs-attention row stays). The Shared history rows name the album, the peer,
+  the file, when and how big — slskd's `p2p/<uuid>/<uuid>` levels are stripped
+  from the text and kept in the row's tooltip — and the sharing card carries the
+  three-links guide (publish line, router forward to the HOST's LAN address,
+  the host's own egress) with the Windows firewall command for the listen port.
+
+- **R311 — the import's step is named for the work it is doing.** The chain's
+  progress text is the album-scoped label (`Remux videos (MKV) + 20 more` for a
+  purely audio album is exactly what this rule forbids): a script that provably
+  cannot apply to the album is dropped from the chain before it runs, and the
+  import's own `_phase` reads are published only when the step really happens
+  for this album (no genre frame with no genre source, no instrumental frame
+  with the step off). `tools/test_import_pipeline.py` asserts the sequence.
+
+### 7.56 A verdict is not drawn while the album is still being imported
+
+- **R312 — a mid-import album is left out of the verdict, and said so.**
+  `GET /api/grades/summary` asks `server.imports._importing_now` (the same
+  `job_locks` claim the queue reads) and skips those albums before counting, so
+  Home's strip and the Library banner cannot report an album as failing the
+  checks its own import chain is still filling; the payload carries
+  `albums_importing` and the banner prints that clause instead of silently
+  losing a row (the owner's Ænima, reported "falls short" mid-import).
+
+### 7.57 The tables fit their data, and the shell fits the phone
+
+- **R313 — a table's floor is its columns, and a title never collapses.**
+  Album/playlist tracklists carry per-column pixel floors (`web/src/lib/columns.tsx`,
+  `AlbumRow`, `TrackTitleCell`) so the wrapped cell cannot squeeze the title to
+  0 px; below `md` the album page's table scrolls as a whole instead of wrapping
+  each cell, and unnamed/oversized columns fold rather than crush their
+  neighbours. The album row's name column is `w-32 md:w-[220px]` for the same
+  reason. `tools/check_library_tables.cjs` holds the floor.
+
+- **R314 — the shell survives 320 px.** The top bar's search collapses while
+  its icons keep their box, the phone drawer is `w-60 max-w-[85vw]` with
+  wrapping labels, a query-builder condition stacks below `sm`, and a progress
+  row degrades to a label + bar on a phone (`web/src/components/ProgressBar.tsx`)
+  instead of overflowing the player's chrome.
+
+### 7.58 The pipeline's wall clock is measured, and what was measured
+
+- **R315 — the pipeline's own cost is a number, and the cheap wins are in.**
+  Measured on `tools/perf_pipeline.py` (which already times every script
+  through the app's own runner), the 4.2 changes were: `/api/run` invalidates
+  the tag cache for the run's own targets (and each mover's `moved_targets`)
+  instead of the whole library, the chain resolves the album list ONCE and
+  hands it to every script that would otherwise walk the tree again, the
+  replaygain store keeps its map in memory with an mtime check and a debounced
+  write instead of rewriting the file per measurement, `fpcalc` answers are
+  memoised on `(path, size, mtime_ns)`, the exporter's preflight hands its
+  parsed sources to the worker instead of re-opening every file, and the layout
+  pass asks "does this hold audio below" with a short-circuiting walk. Numbers
+  and the harness command: `docs/release-notes/release-notes-4.2.0.md`.
+
+### 7.59 An alias is a name
+
+- **R316 — aliases are imported, shown, searched, published and required.**
+  MusicBrainz aliases arrive from the same release request as everything else
+  (`inc=aliases`) and are written as `TITLEALIAS` / `ARTISTALIAS` /
+  `ALBUMALIAS` — with a `-<locale>` suffix when MB states the language, so
+  which language an alias is in travels with it, and a list value holds every
+  alias of that language. The library payload carries the alias BESIDE the
+  original (`track.alias`, `album.alias`, `_artist_display_name`), the search
+  bar's haystack and the query catalogue both see the alias tags, the advisory
+  and lyrics lookups ask the ORIGINAL name first and re-ask under the alias
+  only when the first states nothing, and `mlo/lyrics_publish` submits the
+  original pair AND each alias pair (independent outcomes; a 409 skips that one
+  name). `grade_check_alias_needed` fails a track whose title is written in a
+  non-Latin script and carries no alias, and the alias family is in the tag
+  allowlist so writing one is never an excess-tag failure.
+
+### 7.60 A lyric is words, not headers
+
+- **R318 — the stray header and the identity credit line are not lyrics, in the
+  file and in the grade.** Script 1's canonicaliser (`mlo/lyrics.py`,
+  `format_lyrics_text`) drops the whole family of dead lines a download leaves
+  above the words: the ID3v2 unsynchronised-lyrics frame's own content
+  descriptor `[id:…]` in every spelling and value (`[id:$00000000]`, `[id:]`,
+  `[ID:…]`) together with the descriptive headers
+  `[ti:]`/`[ar:]`/`[al:]`/`[au:]`/`[by:]`/`[re:]`/`[ve:]`/`[length:]`/`[la:]`
+  (`LRC_DROP_RE`), and a LEADING line that merely repeats the track's own
+  identity — `TITLE - ARTIST` as well as `ARTIST - TITLE`, read from the file's
+  real tags, case/dash/spacing-insensitive (`_is_identity_line`,
+  `_norm_identity`). `[offset:…]` is the one header that is an INSTRUCTION a
+  player applies, so it survives formatting; it is still a header for the
+  presence question, so `has_lyrics_text` (`LRC_META_RE`) counts a file that
+  holds only an offset or only `[id:…]` as having no lyrics. Both predicates
+  live in `mlo/lyrics.py` and are asked by the writer (`_process_lyrics_for_audio`
+  carries `TITLE`/`ARTIST` in the cfg view the formatter reads) and by the
+  grader (`_lyrics_formatted` takes the same tags from the file it is grading),
+  so **script 1 clears exactly what the grade flags** — no second, drifting
+  rule. This is the existing `grade_check_lyrics_format` check (its
+  idempotency comparison: re-running the formatter must change nothing), with
+  the existing `grade_check_lyrics` presence check reading the corrected
+  `has_lyrics_text`; **no new check key is introduced, so the count stays 70**.
+  `tools/test_lyrics_fix.py` holds the case: a file carrying
+  `[id:$00000000]`, an `[ar:]`-style header and a matching `TITLE - ARTIST`
+  line formats to the timed lines only and grades as one failed check, the
+  same file with an unrelated prose line keeps it, `[offset:-250]` survives,
+  and script 1's own pass turns the failing fixture into the passing one.
+
+  **The same predicate settles a track that says it is instrumental.** A file
+  whose OWN `INSTRUMENTAL` tag states 1 has no words by its own definition, so
+  a `LYRICS` tag or `.lrc` left behind (the empty/stub/whitespace tag, or text
+  an earlier lookup stored before the track was recognised as instrumental) is
+  a contradiction, not a fact: script 1's `_process_lyrics_for_audio` clears
+  BOTH stores on such a file, and the file's classification is kept. This is
+  not a writer overwriting a fact it did not establish — it removes text the
+  file itself says cannot be there — and it is the opposite direction of
+  `fix_instrumental_from_lyrics`, which still flips a tag whose lyrics the
+  script cannot clear (a filetype whose LYRICS writes are switched off). The
+  grade agrees: the lyrics presence check already asks only `INSTRUMENTAL=0`
+  tracks, and the format block now skips `INSTRUMENTAL=1` entirely, so an
+  instrumental is charged nothing for a leftover its own script is about to
+  clear (R4 — a check that does not apply is not counted), while
+  `grade_check_instrumental` keeps naming the contradiction for as long as the
+  text is there. `tools/test_lyrics_fix.py` asserts both halves:
+  `INSTRUMENTAL=1` + leftover `LYRICS` tag + 0-byte `.lrc` grades 0/0 (nothing
+  reported), script 1 removes both and keeps `INSTRUMENTAL=1`, and the same
+  leftover on an `INSTRUMENTAL=0` track still fails the format check and is
+  NOT cleared by the script.
+
+### 7.61 The AI answers what every other source was silent on
+
+- **R319 — a lyric-less track nobody could answer for is asked of the AI, and
+  only a lone 0/1 is believed.** `server/instrumental.detect_instrumental`
+  gains `ai` as its LAST source (`server/instrumental._ai_answer`, evidence key
+  `AI = "ai"`), asked at most once per track, under three conditions that must
+  hold at the same moment: no other source stated anything (the merge would be
+  None — an answer a provider already gave is never second-guessed), the file
+  carries NO lyrics at all (the existing `_lyrics_present` predicate: a LYRICS
+  tag with real text or a real `.lrc` sidecar — lyrics ARE the evidence of
+  vocals, so a track that has them never costs a call), and
+  `instrumental_ai_classify` (ON, one model call per lyric-less track) with a
+  configured `ai_base_url` + `ai_model`. The prompt
+  (`server/instrumental._AI_SYSTEM`) demands ONE digit and nothing else — 1
+  instrumental, 0 not — and the reply is parsed STRICTLY: a lone 0/1 after
+  trimming is the answer, written the way the app writes INSTRUMENTAL (the
+  `0`/`1` tag, through the same `should_write_audio_tag` gate every writer
+  uses) and attributed to `ai` in the reply's evidence, so the readouts say the
+  model answered rather than LRCLIB. Anything else — prose, a hedge, a digit
+  inside a sentence, an empty reply, or a failed/timed-out call — writes
+  NOTHING and records why (`answer["ai"]`, e.g. "ai call failed (TimeoutError)
+  — nothing written"), which is what keeps the import path
+  (`server.imports.fetch_instrumentals`, the detector's caller) from guessing
+  and from crashing: the file keeps the state it had and the import continues.
+  No call at all for a track with lyrics, one a source already answered for, an
+  unconfigured endpoint, or the switch off. `tools/test_instrumental.py` holds
+  every case, exercised through the import's own writer.
+
+### 7.62 A stored preference is never evidence about this build
+
+- **R320 — a persisted view preference can never blank a view or invent a scroll
+  bar.** Two layers, both in `web/src/lib/columns.tsx`. The visible-column list
+  is keyed by version (`mlo-cols4-*`) and a list from an older key is MIGRATED
+  rather than trusted (its surviving ids kept, every column this build ships
+  visible added), because a prefs entry cannot be evidence about a column that
+  did not exist when it was written — and a list that would leave the table
+  nothing but furniture (the row number, the cover) is replaced by the view's own
+  defaults AND re-stored, so the menu, the table and the next toggle agree. The
+  stored WIDTH map is sanitized on read (`sanitizeWidths`): only finite numbers
+  inside the range the drag handle itself can produce (40–900 px) survive, so a
+  `0`, a string, a legacy shape or a non-object falls back to the column's own
+  floor instead of painting it 0 px wide in a `table-layout: fixed` table. The
+  owner's four symptoms came from exactly this class (Albums → artist headers
+  over empty rows, Tracks → a `#` column and nothing else, no covers, an
+  unnecessary sideways scroll on Artists). A sanitized map whose surviving widths
+  still exceed the rendered table is the ONE case that may scroll — the column
+  floors (R313) decide, and the table must not scroll when its columns fit.
+  Pinned by the hostile-prefs cases in `tools/check_library_az.mjs` (each seeded
+  through an init script before the app loads) and the geometry in
+  `tools/check_library_tables.cjs`.
+
+### 7.63 The album badge names where its files came from, and the artist wears its own verdict
+
+- **R321 — a `Digital Media` album's badge names its SOURCE.** The badge order is
+  fixed: medium · source · countries (`Digital Media · Bandcamp · US`), built by
+  `mediaSourceLabel`/`mediaCountryLabel` in `web/src/components/Badges.tsx` from
+  the album payload's `source_summary` (`web/src/types.ts`). A source that only
+  repeats the medium (the app's own `Digital` default when nothing stated where
+  the files came from) is dropped rather than printed twice, and every surface
+  that wears the badge — the library's rows and cards and the album page header
+  — names the same release the same way.
+- **R322 — an artist's own verdict is a dot beside the name, and its hero fades
+  rather than cuts.** `mlo.grader.grade_artist` is what the artist's checks are
+  (its image and its description), the library payload now carries that verdict
+  per artist row (`server/library.py`, passed through to Home's shelf by
+  `server/recommendations._top_artists`), and every place an artist's NAME is
+  drawn — the artist page's title, the library's Artists view, Home's artist
+  shelf, Favorites — draws `web/src/components/ArtistName.tsx`'s green dot when
+  it passes, instead of chips spelling the two checks out (a FAILING artist still
+  names the check it failed, in words). The hero's blurred cover backdrop carries
+  the `.hero-ink` mask (a radial gradient ending transparent, the same idiom the
+  player's surfaces use), so it fades out instead of ending on a hard edge.
+  Pinned by `tools/check_library_az.mjs` (the dot present for a passing artist
+  and absent for a failing one, the two chips gone, the counts kept, and the blur
+  layer's box and computed mask measured).
+
 ## 8. Recommended runbook
 
 Nothing here is a substitute for the app's own Dependencies page: run it first
@@ -5715,7 +6175,7 @@ Settings row offers it).
 
 ## 10. Honest limits of this spec
 
-- The check **count** is 68 today; the registry derives it from
+- The check **count** is 70 today; the registry derives it from
   `DEFAULT_CONFIG`, so a new check appears on the Grading page the day it exists
   even if this document has not caught up. The registry raises when a claim here
   points at a key the config does not hold.

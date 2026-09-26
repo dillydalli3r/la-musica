@@ -221,7 +221,9 @@ def _candidate():
 
 
 def stub_search(slsk_, queries, wait_s, usable=None, response_limit=0,
-cancel_check=None):
+                cancel_check=None, resume=None, pending_out=None):
+    # `resume`/`pending_out` are the two-phase seam (see _search_queries): a
+    # double always answers in its own window, so it has nothing to hand over.
     PIPE.search_calls += 1
     return ([("q", {"responses": list(PIPE.responses)})], [], 0)
 

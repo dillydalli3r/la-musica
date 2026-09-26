@@ -1007,7 +1007,14 @@ def carry_album_files(src_dir, dst_dir, *, music_folder="", log=None):
         if _is_audio(name):
             continue
         path = os.path.join(src_dir, name)
-        if os.path.isdir(path) and mlo_stats._find_albums(path):
+        # "Does this folder hold audio anywhere below?" is the whole question,
+        # and the first audio file answers it: `_find_albums` walked the entire
+        # subtree to build a set + sort of album folders, then threw all of it
+        # away except for "is it empty". `_walk_files` is the same walk and
+        # stops at the first match (the docstring above still holds: a folder
+        # that holds audio beneath it is music the mover did not take).
+        if os.path.isdir(path) and next(
+                mlo_stats._walk_files(path, mlo_stats.LIB_AUDIO_EXTS), None):
             continue
         carrying.append(name)
     moved, left = _carry_entries(src_dir, dst_dir, carrying)

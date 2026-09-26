@@ -13,7 +13,8 @@ import TrackTitleCell from "../components/TrackTitleCell";
 import StarRating from "../components/StarRating";
 import { ratingOf, useRatings, useSetRating } from "../lib/ratings";
 import {
-  TABLE_FIT, TRACK_COLS, TRACK_COL_W, TRACK_PHONE_CLS, PHONE_HIDE, phoneHide, type Col,
+  TABLE_FIT, TRACK_COLS, TRACK_COL_W, TRACK_PHONE_CLS, PHONE_HIDE, phoneHide,
+  ColFloorHolder, TRACK_TITLE_FLOOR, type Col,
 } from "../lib/columns";
 import type { Artist, Track } from "../types";
 
@@ -671,6 +672,7 @@ export default function ExportPage() {
                   {PREVIEW_COLS.map((c) => (
                     <th key={c.id} className={`th !py-1 ${TRACK_COL_W[c.id] ?? ""}${phoneHide(TRACK_PHONE_CLS, c.id)}`}>
                       {c.id === "cover" ? <span className="sr-only">Cover</span> : c.label}
+                      {c.id === "title" && <ColFloorHolder className={TRACK_TITLE_FLOOR} />}
                     </th>
                   ))}
                 </tr>

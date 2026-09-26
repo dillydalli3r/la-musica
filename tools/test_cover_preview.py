@@ -68,6 +68,16 @@ CFG = {"music_folder": MUSIC, "cover_target_size": 8,
        "cover_jpeg_quality": 90}
 mlo_main.load_config = lambda *a, **k: dict(CFG)
 
+# A cover write to a LIBRARY album also queues script 5 for that album
+# (server.main._schedule_cover_process, spec R56f): background work that holds
+# the album's job_locks claim while it runs. Section 4 writes the same album
+# twice in a row, so the second write would be refused 409 by the first write's
+# own follow-up run ("… is in use by Process images"). What this suite pins is
+# the preview URL and the bytes it answers, so the follow-up is stubbed out
+# here; that it fires AND holds the album is `tools/test_track_covers.py`'s
+# check (and `tools/test_job_locks.py` stubs it for the same reason).
+mlo_main._schedule_cover_process = lambda alb: False
+
 # A real (if silent) MP3 frame sequence: an album with no audio file is not an
 # album at all, and /api/album would 404 instead of naming its cover.
 _MP3_FRAME = bytes([0xFF, 0xFB, 0x90, 0x00]) + b"\x00" * 413
@@ -309,6 +319,103 @@ try:
     assert cover_info_file(FOREIGN) == "cover.jpg"
 finally:
     mlo_main.intg.fetch_image_bytes = _orig_fetch
+
+# --------------------------------------------------------------------------- #
+# 6) The SIZED cover — what the surfaces that draw a small one ask for.
+#
+#    The player bar draws 74 px, the fullscreen picture 448: both used to
+#    fetch the master (a 1200-3000 px JPEG, 0.3-3 MB) and let the browser
+#    shrink it, which is the round trip the owner measured as "about a second"
+#    between pressing play and the artwork. `?w=` serves the file shrunk to
+#    that width, encoded ONCE and then read from disk by every later request —
+#    which is what these checks pin, because a re-encode per request or a
+#    validator that forces a round trip on every play would both bring the
+#    latency straight back. The master path (no `w`) must stay exactly as it
+#    was: the offline warm stores the full-size file, and nothing here may
+#    change what it gets.
+# --------------------------------------------------------------------------- #
+try:
+    from PIL import Image  # noqa: F401 — the SHRINK is Pillow's, server-side
+except Exception:
+    print("cover preview: sized-cover checks SKIPPED (no Pillow)")
+else:
+    from io import BytesIO
+
+    from server import artcache
+
+    SIZED = os.path.join(MUSIC, "Artists", "Preview Artist", "2001 - Sized Album")
+    os.makedirs(SIZED, exist_ok=True)
+    with open(os.path.join(SIZED, "01 - Song.mp3"), "wb") as f:
+        f.write(_MP3_FRAME * 40)
+    # 900x600, drawn as the bar draws it: the shrink has to keep the SHAPE
+    # (the same crop) and land on the asked width.
+    big = os.path.join(SIZED, "cover.jpg")
+    Image.new("RGB", (900, 600), (12, 90, 200)).save(big, "JPEG", quality=95)
+    # The thumbnail cache lives in THIS album's own data dir (the live
+    # install's music folder must never be written to by a test).
+    thumbs = os.path.join(MUSIC, ".mlo", "data", artcache.thumb_dir().rsplit(os.sep, 1)[-1])
+    artcache.thumb_dir = lambda *a, **k: thumbs
+
+    master = fetch(SIZED)
+    assert master.status_code == 200, master.text
+    assert "no-cache" in master.headers["cache-control"], master.headers
+    master_bytes = master.content
+
+    thumb = fetch(SIZED, params={"w": "160"})
+    assert thumb.status_code == 200, thumb.text
+    assert thumb.headers["content-type"].startswith("image/"), thumb.headers
+    drawn = Image.open(BytesIO(thumb.content))
+    assert drawn.size == (160, 107), drawn.size          # 900x600 shrunk, same crop
+    assert len(thumb.content) < len(master_bytes) // 4, (
+        len(thumb.content), len(master_bytes))
+    # A sized answer may be KEPT by the browser — that is what makes a repeat
+    # play (and a queue row, and the fullscreen pane) cost no round trip at
+    # all. The token a cover WRITE reports still lands on a different URL
+    # (`api.coverUrl`'s `v`), so an in-app replacement is still refetched.
+    assert "max-age=" in thumb.headers["cache-control"], thumb.headers
+    assert thumb.headers["etag"] != master.headers["etag"], "the thumb reuses the master's ETag"
+    revalidated = fetch(SIZED, params={"w": "160"},
+                        headers={"If-None-Match": thumb.headers["etag"]})
+    assert revalidated.status_code == 304, (revalidated.status_code, revalidated.text)
+    assert revalidated.content == b"", revalidated.content
+
+    def thumb_entries():
+        return {n: (os.stat(os.path.join(thumbs, n)).st_mtime_ns,
+                    os.stat(os.path.join(thumbs, n)).st_size)
+                for n in os.listdir(thumbs) if n.endswith(".bin")}
+
+    first = thumb_entries()
+    assert len(first) == 1, first                     # one width asked, one entry
+    for _ in range(3):
+        again_bytes = fetch(SIZED, params={"w": "160"})
+        assert again_bytes.content == thumb.content, "the cached thumbnail changed"
+    assert thumb_entries() == first, (
+        "the thumbnail was re-encoded (the cache entry was rewritten) per request")
+
+    # A second width is a second entry, and a width BETWEEN the steps lands on
+    # the same bucket — otherwise every pixel count the UI computes would be a
+    # new encode and the surfaces would stop sharing bytes.
+    assert fetch(SIZED, params={"w": "500"}).content == fetch(SIZED, params={"w": "400"}).content
+    assert len(thumb_entries()) == 2, thumb_entries()
+
+    # A cover replaced IN PLACE is a new entry, never a stale hit: the key is
+    # the file's own stat, not the URL.
+    Image.new("RGB", (900, 600), (230, 40, 40)).save(big, "JPEG", quality=95)
+    os.utime(big, ns=(0, 0))                          # a write inside one mtime tick
+    replaced = fetch(SIZED, params={"w": "160"})
+    assert replaced.status_code == 200, replaced.text
+    assert replaced.content != thumb.content, "the shrunk cover outlived its file"
+    assert replaced.headers["etag"] != thumb.headers["etag"], (
+        "the replaced cover reports the same ETag")
+
+    # An image already at or below the asked width is served as ITS OWN bytes:
+    # no upscale, no re-encode, no second cache entry — a 700 px cover asked
+    # for at 640 stays that 700 px cover.
+    small_album_cover = os.path.join(ALBUM, cover_file(ALBUM))
+    small_asked = fetch(ALBUM, cover_file(ALBUM), params={"w": "1200"})
+    assert small_asked.status_code == 200, small_asked.text
+    assert small_asked.content == on_disk(small_album_cover), (
+        "a cover below the asked width was re-encoded")
 
 print("cover preview: all checks passed")
 shutil.rmtree(TMP, ignore_errors=True)

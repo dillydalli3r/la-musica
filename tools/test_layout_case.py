@@ -716,6 +716,29 @@ ok(not os.path.exists(CARRY_SRC),
 shutil.rmtree(CARRY_DST, ignore_errors=True)
 shutil.rmtree(CARRY_DST2, ignore_errors=True)
 
+# "Does this folder hold audio ANYWHERE below?" is answered by the first audio
+# file a walk finds, and the answer must not depend on how deep that audio is:
+# a nested disc folder is still music the mover did not take, and the walk that
+# answers it recurses like the album scan it replaced.
+DEEP_SRC = os.path.join(MF, "Artists", "DeepSrc")
+DEEP_DST = os.path.join(MF, "Artists", "DeepDst")
+for _rel, _blob in (("cover.jpg", b"the album's cover"),
+                    ("Disc 2/Inner/1-01 Song.flac", b"fLaC" + b"\0" * 32)):
+    _p = os.path.join(DEEP_SRC, _rel)
+    os.makedirs(os.path.dirname(_p), exist_ok=True)
+    with open(_p, "wb") as _f:
+        _f.write(_blob)
+os.makedirs(DEEP_DST, exist_ok=True)
+moved, left = layoutmod.carry_album_files(DEEP_SRC, DEEP_DST, music_folder=MF)
+ok(moved == ["cover.jpg"]
+   and os.path.isdir(os.path.join(DEEP_SRC, "Disc 2", "Inner"))
+   and not os.path.exists(os.path.join(DEEP_SRC, "cover.jpg")),
+   f"audio nested TWO folders deep is still audio the mover did not take: the "
+   f"folder is left where it is and only the album's own cover travels "
+   f"({moved}, {left})")
+shutil.rmtree(DEEP_SRC, ignore_errors=True)
+shutil.rmtree(DEEP_DST, ignore_errors=True)
+
 print("== the re-derivation: a report that no longer describes the folder ==")
 # apply_fixes is handed a report by its callers. The panel's route re-scans
 # first, but a runner passes the report it just built, and either way a row is

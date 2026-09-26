@@ -152,6 +152,85 @@ for _ in range(100):
 check("a cancelled run reports cancelled or done with the album it started",
       import_queue.status()["state"] in ("cancelled", "done", "error"))
 
+print("== the run's completion frame names the ALBUM, not the folder ==")
+# The owner's rule: a notice names the album's identity (artist — album (year)),
+# never a raw folder name or a path with UUIDs. The run's own frame is emitted
+# from _run with the album already in the library, so the album's OWN TAGS are
+# what it reads — and the stub importer above reports a path that does not
+# exist, which is why this case plants a real, tagged album.
+import wave as _wave  # noqa: E402
+from mlo.audio import AudioFile  # noqa: E402
+from server import events as events_mod  # noqa: E402
+
+identity_music = tempfile.mkdtemp(prefix="mlo-import-identity-")
+identity_cfg = {"music_folder": identity_music, "soulseek_download_dir": ddir}
+identity_album = os.path.join(identity_music, "5be1a1e2-0f0f-4a1b-9c3d-deadbeef0000")
+os.makedirs(identity_album, exist_ok=True)
+_wav = os.path.join(identity_album, "01 - Track.wav")
+with _wave.open(_wav, "wb") as _w:
+    _w.setnchannels(1)
+    _w.setsampwidth(2)
+    _w.setframerate(8000)
+    _w.writeframes(b"\0\0" * 400)
+_af = AudioFile(_wav)
+_af.set_tag("ALBUMARTIST", "Identity Artist")
+_af.set_tag("ALBUM", "Identity Album")
+_af.set_tag("DATE", "1996-06-11")
+
+import_queue.set_importer(lambda path: {"path": path, "album_root": identity_album,
+                                        "errors": [], "chained": True,
+                                        "chain_off": False,
+                                        "scripts": [{"id": 1, "label": "x", "error": ""}]})
+said = []
+_real_emit = events_mod.emit
+events_mod.emit = lambda kind, title, body, data=None, **kw: said.append(
+    (kind, title, body, data))
+try:
+    started = import_queue.start(paths=[identity_album])
+    check("the single-album run starts", started.get("ok") is True, str(started))
+    # The run's frame is emitted AFTER its state flips to done, so waiting on
+    # the STATE races the notice: join the runner's own thread instead.
+    thread = import_queue._thread
+    if thread is not None:
+        thread.join(20)
+finally:
+    events_mod.emit = _real_emit
+    import_queue.set_importer(None)
+done = [e for e in said if e[0] == "download_done"]
+check("the run ends with ONE completion frame", len(done) == 1, str([e[0] for e in said]))
+if done:
+    check("...naming the album's identity, not the folder",
+          done[0][1] == "Imported Identity Artist — Identity Album (1996)",
+          done[0][1])
+    check("...and carrying it as the album, so a client needs no second read",
+          done[0][3].get("album") == "Identity Artist — Identity Album (1996)",
+          str(done[0][3].get("album")))
+    check("...while the LINK stays the path the router opens",
+          done[0][3].get("link", "").startswith("/album/"), str(done[0][3].get("link")))
+shutil.rmtree(identity_music, ignore_errors=True)
+
+# …and a run of SEVERAL albums is a tally, not one album's name (the run has no
+# single subject — the frames above are the per-album ones).
+import_queue.set_importer(lambda path: {"path": path, "album_root": path,
+                                        "errors": [], "chained": True,
+                                        "chain_off": False,
+                                        "scripts": [{"id": 1, "label": "x", "error": ""}]})
+said = []
+events_mod.emit = lambda kind, title, body, data=None, **kw: said.append(
+    (kind, title, body, data))
+try:
+    import_queue.start(paths=[one, two])
+    thread = import_queue._thread
+    if thread is not None:
+        thread.join(20)
+finally:
+    events_mod.emit = _real_emit
+done = [e for e in said if e[0] == "download_done"]
+check("a multi-album run ends with one tally frame", len(done) == 1, str([e[0] for e in said]))
+if done:
+    check("...counting the albums it imported",
+          done[0][1] == "Imported 2 albums", done[0][1])
+
 shutil.rmtree(music, ignore_errors=True)
 print(f"\n{len(FAILED)} failure(s)")
 sys.exit(1 if FAILED else 0)

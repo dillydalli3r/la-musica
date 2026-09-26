@@ -257,6 +257,116 @@ _EXTRA_RELEASE_TAGS = (
 # the recording id of the track's own position, and the artist it credits.
 _PER_TRACK_TAGS = ("MUSICBRAINZ_TRACKID", "MUSICBRAINZ_ARTISTID")
 
+# The alias tags, one per entity. The BARE key holds the one alias the
+# reader's locale ladder chose (`server.integrations.alias_for`) — the name
+# the library and the pages show beside the stored one — and each locale
+# MusicBrainz states ALSO gets its own tag carrying the language in its name
+# (TITLEALIAS-JA, ARTISTALIAS-EN_PH — mlo.audio._ALIAS_TAG_PREFIXES owns the
+# spellings). The suffix is the language tracking: it is what survives on the
+# file, so a later run in another locale can still read every name
+# MusicBrainz stated rather than only this run's pick.
+_ALIAS_TAGS = (
+    ("TITLEALIAS", "title"),      # the recording (per track)
+    ("ARTISTALIAS", "artist"),    # the credited artist
+    ("ALBUMALIAS", "album"),      # the release / its group
+)
+
+
+def _alias_norm(value):
+    """Comparison key for "is this the same name?" — case and spacing ignored.
+
+    `server.integrations._alias_key`'s own rule: a tag must never carry "X" as
+    X's alias, and MusicBrainz states the same name with its own spacing.
+    """
+    return " ".join(str(value or "").split()).casefold()
+
+
+def _alias_tag_values(prefix, aliases, name, config=None):
+    """(tag, value) pairs for ONE entity's MusicBrainz aliases.
+
+    The bare *prefix* carries the ONE alias the reader's locale ladder chose
+    (`server.integrations.alias_for`) — the name a page or the library shows
+    beside the stored one, which is why the alias list is parsed through that
+    ladder instead of being stored raw. Every alias MusicBrainz gives a
+    `locale` gets its own tag (`TITLEALIAS-JA`) whose value is EVERY alias of
+    that locale, as a list — several aliases may share one language, and the
+    container stores a list as repeated fields.
+
+    `search hint` aliases (MusicBrainz's search-index spellings) and a name
+    equal to the stored one are dropped, exactly as `alias_for` drops them, so
+    a file never carries a name as its own alias. Returns [] when MusicBrainz
+    states no usable alias — nothing is written for nothing.
+    """
+    try:
+        from server.integrations import _ALIAS_SKIP_TYPES, alias_for
+    except Exception:            # plain CLI / a stripped backend: no aliases
+        return []
+    rows = [a for a in (aliases or []) if isinstance(a, dict)
+            and str(a.get("name") or "").strip()
+            and str(a.get("type") or "").strip().lower() not in _ALIAS_SKIP_TYPES]
+    if not rows:
+        return []
+    out = []
+    chosen = alias_for(rows, config, name)
+    if chosen:
+        out.append((prefix, chosen))
+    by_locale = {}
+    for row in rows:
+        locale = str(row.get("locale") or "").strip()
+        if not locale:
+            continue
+        value = str(row.get("name") or "").strip()
+        if _alias_norm(value) == _alias_norm(name):
+            continue
+        names = by_locale.setdefault(f"{prefix}-{locale.upper()}", [])
+        if _alias_norm(value) not in {_alias_norm(v) for v in names}:
+            names.append(value)
+    for tag, names in by_locale.items():
+        # A one-value list is written as the plain string: the container holds
+        # both, and a single alias reads back the same either way.
+        out.append((tag, names[0] if len(names) == 1 else names))
+    return out
+
+
+def _merge_alias_rows(*groups):
+    """Alias rows of several entities as ONE list, first source first.
+
+    A release and its release group often state the same alias (and a
+    translated album name may live on either), so the rows are de-duplicated
+    by name and the earlier source's row wins — the same `_alias_norm`
+    comparison a language's own list uses. Non-dict and blank rows are
+    dropped; `_alias_tag_values` filters the rest.
+    """
+    out, seen = [], set()
+    for rows in groups:
+        for row in rows or []:
+            if not isinstance(row, dict):
+                continue
+            key = _alias_norm(row.get("name"))
+            if not key or key in seen:
+                continue
+            seen.add(key)
+            out.append(row)
+    return out
+
+
+def _release_artist_aliases(release):
+    """The credited artist's alias rows on a release payload, or [].
+
+    The payload states them twice (the release's own `artist_aliases`, filled
+    by server.integrations.release_lookup, and nested in each artist row for
+    the payloads that carry one — mlo.autotag's own cached release); the first
+    non-empty answer wins so both paths tag identically.
+    """
+    rows = release.get("artist_aliases")
+    if rows:
+        return rows
+    artists = release.get("artists") or []
+    if artists and isinstance(artists[0], dict):
+        return artists[0].get("aliases") or []
+    return []
+
+
 # release_lookup's own `inc` list, so the album's release comes back with its
 # label-info (label + catalog numbers) and the release group's types in ONE
 # request that the browser cache then holds for every later album.
@@ -268,10 +378,14 @@ _PER_TRACK_TAGS = ("MUSICBRAINZ_TRACKID", "MUSICBRAINZ_ARTISTID")
 # per album, not one per track — the app rate-limits itself to one request a
 # second), and `work-rels`/`work-level-rels` bring the work each track
 # performs, which is where its composers and lyricists live. `url-rels` is
-# what carries the licence relationship.
+# what carries the licence relationship. `aliases` is the LAST level of the
+# same request: MusicBrainz answers a release lookup with the release's own
+# aliases AND (confirmed against the live service) the credited artists' and
+# each recording's aliases nested inside the same payload, so the ALBUMALIAS /
+# ARTISTALIAS / TITLEALIAS tags below cost no extra request.
 _RELEASE_INC = ("artists+recordings+media+release-groups+artist-credits"
                 "+genres+labels+isrcs+recording-level-rels+artist-rels"
-                "+work-rels+work-level-rels+url-rels")
+                "+work-rels+work-level-rels+url-rels+aliases")
 
 
 # ----------------------------------------------------------------------
@@ -599,6 +713,9 @@ def _cached_release(mbid):
             rec = trk.get("recording") or {}
             artists = [ac["artist"]["id"] for ac in trk.get("artist-credit") or []
                        if ac.get("artist")]
+            credit_artist = next((ac.get("artist") or {}
+                                  for ac in trk.get("artist-credit") or []
+                                  if ac.get("artist")), {})
             # The people behind the track. ONE release request carried them
             # (see _RELEASE_INC): the recording's own relations hold the
             # performer/producer/engineer/mixer/arranger/DJ-mix/conductor
@@ -609,6 +726,15 @@ def _cached_release(mbid):
             tracks[(disc, int(pos))] = {
                 "recording_mbid": str(rec.get("id") or ""),
                 "artist_mbid": str(artists[0] if artists else ""),
+                # This track's own title and the artist it credits, together
+                # with MusicBrainz's aliases for both (`inc=aliases` above
+                # carries them nested inside the same response). The alias
+                # writer needs the NAME beside the aliases: the ladder drops
+                # an alias that only repeats it.
+                "title": str(trk.get("title") or ""),
+                "artist_name": str(credit_artist.get("name") or ""),
+                "aliases": list(rec.get("aliases") or []),
+                "artist_aliases": list(credit_artist.get("aliases") or []),
                 # The id of this POSITION (distinct from the recording) and
                 # the ISRCs MusicBrainz knows for it: `inc` above already
                 # fetched both, and they are what the naming script and the
@@ -622,11 +748,21 @@ def _cached_release(mbid):
             }
     album_artists = [ac["artist"]["id"] for ac in data.get("artist-credit") or []
                      if ac.get("artist")]
+    album_credit = next((ac.get("artist") or {}
+                         for ac in data.get("artist-credit") or []
+                         if ac.get("artist")), {})
     return {
         "id": str(data.get("id") or ""),
         "release_group_id": str(rg.get("id") or ""),
+        "title": str(data.get("title") or ""),
         # the release's artist credit IS the album artist (Picard semantics)
         "album_artist_mbid": str(album_artists[0] if album_artists else ""),
+        # MusicBrainz's aliases, from the SAME request (`inc=aliases`): the
+        # release's own, its group's, and the credited artist's — the three
+        # sources of the ALBUMALIAS / ARTISTALIAS tags (mlo.autotag).
+        "aliases": list(data.get("aliases") or []),
+        "release_group_aliases": list(rg.get("aliases") or []),
+        "artist_aliases": list(album_credit.get("aliases") or []),
         "tracks": tracks,
         "label": label,
         "catalog_number": catalogs[0] if catalogs else "",
@@ -732,7 +868,7 @@ def _podcast_slot_open(af):
     return not str(af.get_tag("PODCASTSERIES") or "").strip()
 
 
-def album_release_tags(release, disc=1):
+def album_release_tags(release, disc=1, config=None):
     """EVERY album-level value of *release* ONE file of it should carry.
 
     The values the whole release repeats on each of its files — its identity
@@ -782,10 +918,24 @@ def album_release_tags(release, disc=1):
     title = str((release.get("medium_titles") or {}).get(int(disc or 1)) or "")
     if title:
         values.append(("DISCSUBTITLE", title))
+    # The album's and the credited artist's aliases — the same on every file
+    # of the release, so they belong to this album-level half. The release's
+    # own aliases and its GROUP's are merged (either may be the one that
+    # states the translated name; the release's rows win a duplicate).
+    values.extend(_alias_tag_values(
+        "ALBUMALIAS",
+        _merge_alias_rows(release.get("aliases"),
+                          release.get("release_group_aliases")),
+        str(release.get("title") or ""), config))
+    artists = release.get("artists") or []
+    artist_name = (str(artists[0].get("name") or "")
+                   if artists and isinstance(artists[0], dict) else "")
+    values.extend(_alias_tag_values(
+        "ARTISTALIAS", _release_artist_aliases(release), artist_name, config))
     return values
 
 
-def mb_track_tags(release, slot, disc=1, album_artist_mbid=""):
+def mb_track_tags(release, slot, disc=1, album_artist_mbid="", config=None):
     """EVERY MusicBrainz value ONE track's file should carry, as (tag, value).
 
     The album-level values every file of the release repeats (its identity:
@@ -806,10 +956,18 @@ def mb_track_tags(release, slot, disc=1, album_artist_mbid=""):
     """
     # The album-level half first — ONE definition of it, shared with an
     # import's own stamp (`album_release_tags`).
-    values = album_release_tags(release, disc)
+    values = album_release_tags(release, disc, config)
 
     slot = slot or {}
     values.append(("MUSICBRAINZ_TRACKID", slot.get("recording_mbid") or ""))
+    # The track's own aliases, per track: the recording's other-language
+    # titles and the artist this track credits (a featured artist may differ
+    # from the release's own, and both sets are completed into the tag).
+    values.extend(_alias_tag_values(
+        "TITLEALIAS", slot.get("aliases"), str(slot.get("title") or ""), config))
+    values.extend(_alias_tag_values(
+        "ARTISTALIAS", slot.get("artist_aliases"),
+        str(slot.get("artist_name") or ""), config))
     values.append(("MUSICBRAINZ_ARTISTID",
                    slot.get("artist_mbid") or album_artist_mbid))
     # The id of this track's POSITION on this release — a different id from
@@ -934,7 +1092,8 @@ def fill_release_identity(files, release, config=None):
             af = AudioFile(path)
             if af.audio is None:
                 return "failed"
-            values = album_release_tags(rel, disc=_track_position(af, path)[0])
+            values = album_release_tags(rel, disc=_track_position(af, path)[0],
+                                        config=config)
             if not values:
                 return "skipped"
             defer = hasattr(af, "defer_save")
@@ -1132,7 +1291,8 @@ def _fill_release_tags(info, config, album_dir):
         # extras and the whole credit table — from the ONE release request
         # made above.
         per_track = mb_track_tags(release, slot, disc=key[0],
-                                  album_artist_mbid=release["album_artist_mbid"])
+                                  album_artist_mbid=release["album_artist_mbid"],
+                                  config=config)
         # ONE container rewrite per file. Each set_tag used to save the whole
         # file for itself, so filling twelve tags on a 30 MB track rewrote it
         # twelve times; the flush below is where all of them land. A handle
@@ -1275,8 +1435,15 @@ def run_auto_tagging(config):
     if config.get("auto_zero_advisory_for_instrumental", True):
         log("  ITUNESADVISORY: zeroed on instrumentals (auto_zero_advisory_for_instrumental)")
     if config.get("auto_instrumental", True):
+        # The line names the sources the run will ACTUALLY ask: the AI is the
+        # last resort (`instrumental_ai_classify`, one call per lyric-less
+        # track no source stated anything about), so a run with it off must
+        # not claim it was asked.
+        _inst_sources = "LRCLIB, Spotify, the file's own name, lyrics"
+        if config.get("instrumental_ai_classify", True):
+            _inst_sources += ", the AI when nothing else states one"
         log("  INSTRUMENTAL: " + (
-            "cross-referenced (LRCLIB, Spotify, the file's own name, lyrics)"
+            f"cross-referenced ({_inst_sources})"
             if config.get("instrumental_auto_fetch", True) else
             "0 when lyrics present (no-lyrics tracks left untouched)"))
     if config.get("mood_enabled", True):

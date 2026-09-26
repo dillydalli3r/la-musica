@@ -1,6 +1,7 @@
 import { useEffect, useRef } from "react";
 import { MAX_DB, MIN_DB, activeAnalyser } from "../lib/analyser";
 import { currentAccent, subscribeAccent } from "../lib/accent";
+import { vizBars } from "../lib/vizBars";
 
 /** Height-mapping constants, all in dBFS. FLOOR_DB is the empty baseline,
  *  CEIL_DB the full height (full scale), TILT_DB the lift of the top band
@@ -171,9 +172,37 @@ export default function Visualizer({ playing, className = "", ink }: {
       const dpr = Math.min(2, window.devicePixelRatio || 1);
       const w = canvas.clientWidth;
       const h = canvas.clientHeight;
+      if (!w || !h) {
+        // Nothing to draw into yet (a collapsed pane): keep the loop alive at
+        // the idle rate so the strip comes back with the pane.
+        onTimer = true;
+        handle = window.setTimeout(tick, IDLE_MS);
+        return;
+      }
+
+      // A canvas resize blanks the backing store by itself, so a resized
+      // frame is always repainted (see the idle skip below). The check is on
+      // the BACKING STORE, not on the CSS width: a height change (the strip's
+      // box, a zoomed pane) or a devicePixelRatio change (the window dragged
+      // to another monitor, a browser zoom step) used to leave the old bitmap
+      // in place, and the browser then stretched it into the new box — two
+      // offset rows of bars, the reported "messed up" strip. Comparing what
+      // the canvas actually holds catches all three; width alone missed two.
+      const backW = Math.round(w * dpr);
+      const backH = Math.round(h * dpr);
+      const resized = backW !== canvas.width || backH !== canvas.height;
+      if (resized) {
+        canvas.width = backW;
+        canvas.height = backH;
+      }
 
       const analyser = activeAnalyser();
-      const n = BARS;
+      // The bar grid, in the canvas' own pixels (see lib/vizBars): whole
+      // device columns, spanning the strip exactly, never wider than it.
+      const W = canvas.width;
+      const H = canvas.height;
+      const bars = vizBars(W, BARS);
+      const n = bars.length;
 
       // ---- gather band values (0..1) -------------------------------
       let live = false;
@@ -199,23 +228,6 @@ export default function Visualizer({ playing, className = "", ink }: {
       // recovered.
       onTimer = synthetic;
       handle = synthetic ? window.setTimeout(tick, IDLE_MS) : requestAnimationFrame(tick);
-      if (!w || !h) return;
-
-      // A canvas resize blanks the backing store by itself, so a resized
-      // frame is always repainted (see the idle skip below). The check is on
-      // the BACKING STORE, not on the CSS width: a height change (the strip's
-      // box, a zoomed pane) or a devicePixelRatio change (the window dragged
-      // to another monitor, a browser zoom step) used to leave the old bitmap
-      // in place, and the browser then stretched it into the new box — two
-      // offset rows of bars, the reported "messed up" strip. Comparing what
-      // the canvas actually holds catches all three; width alone missed two.
-      const backW = Math.round(w * dpr);
-      const backH = Math.round(h * dpr);
-      const resized = backW !== canvas.width || backH !== canvas.height;
-      if (resized) {
-        canvas.width = backW;
-        canvas.height = backH;
-      }
 
       // Idle: nothing to animate, so the strip eases onto its baseline and
       // then stops repainting altogether — a paused canvas costs the timer
@@ -235,8 +247,12 @@ export default function Visualizer({ playing, className = "", ink }: {
       }
       repaint = false;
       lastIdle = now;
-      ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
-      ctx.clearRect(0, 0, w, h);
+      // Identity transform: everything below is in the canvas' OWN pixels, so
+      // the clear covers the whole backing store exactly — no fractional edge
+      // for a previous frame's ink to survive in — and every bar sits on whole
+      // device columns (see lib/vizBars).
+      ctx.setTransform(1, 0, 0, 1, 0, 0);
+      ctx.clearRect(0, 0, W, H);
 
       for (let i = 0; i < n; i++) {
         let target: number;
@@ -266,30 +282,35 @@ export default function Visualizer({ playing, className = "", ink }: {
       }
 
       // ---- draw ------------------------------------------------------
-      const gap = Math.max(1.5, w / n * 0.28);
-      const bw = Math.max(1.5, (w - gap * (n - 1)) / n);
-      const base = h;
+      // Two device pixels — the resting bar's height and the corner radius —
+      // are the same SHAPE at any pixel ratio, which is why they scale with
+      // `dpr` here instead of being the fixed CSS numbers they used to be.
+      const floor = Math.max(2, Math.round(2 * dpr));
+      const base = H;
+      // The grid's own gap, read back off the grid, is what the halo is
+      // measured from: hue and spacing stay in step with the bars.
+      const gap = bars.length > 1 ? bars[1].x - bars[0].w : floor;
+      const halo = gap * 1.2;
       // ONE ramp for the whole strip, anchored to the canvas instead of
       // rebuilt per bar: the old code allocated a CanvasGradient for every
       // bar on every frame (56 throwaway objects at 60 fps). The ramp runs
       // from the quiet colour at the baseline to the bright one at the top of
       // the strip, so a taller bar carries MORE of it — the meter reads level
       // as brightness as well as height.
-      const ramp = ctx.createLinearGradient(0, base, 0, base - Math.max(1, h - 2));
+      const ramp = ctx.createLinearGradient(0, base, 0, base - Math.max(1, H - floor));
       ramp.addColorStop(0, `rgb(${accent} / 0.5)`);
       ramp.addColorStop(1, `rgb(${accentSoft} / 0.95)`);
       for (let i = 0; i < n; i++) {
         const v = Math.max(0.02, levels.current[i] ?? 0);
-        const x = i * (bw + gap);
-        const bh = Math.max(2, v * (h - 2));
-        const r = Math.min(bw / 2, 2);
+        const { x, w: bw } = bars[i];
+        const bh = Math.max(floor, v * (H - floor));
+        const r = Math.min(bw / 2, floor);
         // Halo behind the loudest bars: a wider, faint rounded rect instead of
         // shadowBlur, which would re-blur the whole strip every frame.
         if (motion && v > GLOW_AT) {
-          const pad = gap * 1.2;
           ctx.fillStyle = `rgb(${accent} / ${(0.08 + (v - GLOW_AT) * 0.4).toFixed(2)})`;
           ctx.beginPath();
-          ctx.roundRect(x - pad, base - bh - pad, bw + pad * 2, bh + pad, r + pad);
+          ctx.roundRect(x - halo, base - bh - halo, bw + halo * 2, bh + halo, r + halo);
           ctx.fill();
         }
         ctx.fillStyle = ramp;

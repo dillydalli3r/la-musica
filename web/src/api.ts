@@ -2461,11 +2461,22 @@ export const api = {
    *
    *  An explicit `token` — including `null` — wins over the remembered
    *  version, which is how a caller names the version-less key the offline
-   *  cache stores (see mediaCache's forgetAlbumArtwork). */
+   *  cache stores (see mediaCache's forgetAlbumArtwork).
+   *
+   *  `w` asks the server for the cover SHRUNK to that width (bucketed
+   *  server-side), which is what a surface that draws a 74 px bar thumb — or
+   *  a fullscreen picture and its blurred ambient layer — must ask for: the
+   *  master is 1200–3000 px, so fetching it put megabytes and a full-size
+   *  decode between "press play" and the artwork. The sized answer is
+   *  cacheable for minutes (a replaced cover's URL carries a new `v`, so the
+   *  app's own writes still refetch immediately), and two surfaces that ask
+   *  for the same width share ONE request. Omitted, the master is served
+   *  exactly as it always was — the offline warm (mediaCache.artworkUrls) and
+   *  anything that needs full resolution keep it. */
   coverUrl: (
     albumPath: string,
     coverFile?: string | null,
-    opts?: { token?: string | null; staged?: boolean }
+    opts?: { token?: string | null; staged?: boolean; w?: number }
   ) => {
     const v = opts && "token" in opts
       ? opts.token
@@ -2476,7 +2487,8 @@ export const api = {
       `${API}/cover?album=${encodeURIComponent(albumPath)}` +
         (coverFile ? `&file=${encodeURIComponent(coverFile)}` : "") +
         (v ? `&v=${encodeURIComponent(v)}` : "") +
-        (opts?.staged ? "&staged=true" : "")
+        (opts?.staged ? "&staged=true" : "") +
+        (opts?.w ? `&w=${Math.round(opts.w)}` : "")
     );
   },
   /** A remote provider image (`/api/art`), proxied and cached by the backend —

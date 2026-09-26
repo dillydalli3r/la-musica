@@ -35,7 +35,8 @@
  * controls never mounted at all. So the pass measures the phone the way a
  * reader meets it: the pane is up with the track's own lines under the compact
  * header, it scrolls without pushing the transport off the viewport, both
- * controls sit under the last line and really move the display (one zoom press
+ * controls sit in the pane's own top-right corner — revealed by a hover, always on
+ * for a touch device — and really move the display (one zoom press
  * = the scroller's inline `zoom` 1.5 → 1.575; a +2.0 s offset takes the
  * emphasis off every line of a two-second track and puts it back), a track with
  * no lyrics draws no pane and no inert control, the transport row stands on
@@ -113,6 +114,74 @@ const stampDigits = (t, decimals) => {
  *  that still reads like this is the bug the owner reported. */
 const wholeSeconds = (t) =>
   `${Math.floor(t / 60)}:${String(Math.floor(t % 60)).padStart(2, "0")}`;
+
+/* ---- the frequency strip's bar grid, as arithmetic ----------------------
+ * The strip is a canvas, and what the owner photographed at its edges ("faint
+ * lines coming in from the edges") is a RASTER fact before it is a drawing
+ * bug: a bar whose edges land between device pixels is painted as a partially
+ * covered column, and a frame cleared in CSS pixels stops at a fractional edge
+ * — whatever is beyond it is the previous frame's ink. lib/vizBars computes
+ * the grid on the DEVICE grid, so this section asserts that arithmetic
+ * directly, the way tools/check_lyrscroll.cjs asserts its glider: whole
+ * columns, spanning the strip EXACTLY, never wider than it. The grid it
+ * replaced fails all three (fractional edges everywhere, and every strip
+ * narrower than 166 px drew its last bars past the right edge). */
+{
+  let gridError = null;
+  let vizBars = null;
+  try {
+    const ts = require(path.join(__dirname, "..", "web", "node_modules", "typescript"));
+    const src = path.join(__dirname, "..", "web", "src", "lib", "vizBars.ts");
+    const js = ts.transpileModule(fs.readFileSync(src, "utf8"), {
+      fileName: src,
+      compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2020 },
+    }).outputText;
+    const mod = { exports: {} };
+    new Function("require", "module", "exports", js)(require, mod, mod.exports);
+    vizBars = mod.exports.vizBars;
+  } catch (e) {
+    gridError = String((e && e.message) || e).split("\n")[0].slice(0, 120);
+  }
+  if (!vizBars) {
+    check("the bar grid can be read (web/node_modules/typescript present)", false, gridError);
+  } else {
+    const WIDTHS = [1, 20, 60, 111, 150, 166, 166.5, 209, 313, 348, 435, 500, 501, 960];
+    const strips = WIDTHS.map((w) => ({ w, bars: vizBars(w, 56) }));
+    const bad = (fn) => strips.filter(fn).map(({ w }) => w);
+    check("the strip's bars are whole device columns, each at least one wide",
+      bad(({ bars }) => bars.length === 0 || bars.some((b) => !Number.isInteger(b.x) || !Number.isInteger(b.w) || b.w < 1)).length === 0,
+      JSON.stringify(strips.map(({ w, bars }) => `${w}:${bars.length && bars.every((b) => Number.isInteger(b.x) && Number.isInteger(b.w) && b.w >= 1) ? "ok" : "bad"}`)));
+    check("the grid spans the strip exactly — bar 0 at the left edge, the last one ending at the right edge",
+      bad(({ w, bars }) => !bars.length || bars[0].x !== 0 || bars[bars.length - 1].x + bars[bars.length - 1].w !== Math.round(w)).length === 0,
+      JSON.stringify(strips.map(({ w, bars }) => `${w}:${bars.length ? `${bars[0].x}..${bars[bars.length - 1].x + bars[bars.length - 1].w}` : "none"}`)));
+    check("the bars never overlap and never leave a negative gap",
+      bad(({ bars }) => bars.some((b, i) => i > 0 && b.x < bars[i - 1].x + bars[i - 1].w)).length === 0,
+      JSON.stringify(strips.map(({ w, bars }) => `${w}:${bars.some((b, i) => i > 0 && b.x < bars[i - 1].x + bars[i - 1].w) ? "bad" : "ok"}`)));
+    // The room a strip of this size HAS and the bars it must carry: 56 bands
+    // wherever there is room for them (one whole column each, plus the gap),
+    // and fewer only on a strip too small to hold them (`Math.floor(W/2)`).
+    check("a real strip carries every band (56), and a tiny one degrades instead of overflowing",
+      vizBars(500, 56).length === 56 && vizBars(400, 56).length === 56 && vizBars(112, 56).length === 56 &&
+        vizBars(60, 56).length === 30 && vizBars(1, 56).length === 1,
+      JSON.stringify([500, 400, 112, 60, 1].map((w) => `${w}:${vizBars(w, 56).length}`)));
+    check("an empty strip draws no bars at all",
+      vizBars(0, 56).length === 0 && vizBars(0.4, 56).length === 0, `${vizBars(0, 56).length}/${vizBars(0.4, 56).length}`);
+    // The gap is what gives way in a tight strip, never the fit — and it does
+    // so monotonically: the design's 28 %-of-a-slot on a wide strip, down to a
+    // single device column on a phone-sized one, and never below zero (the
+    // very narrow strips sit flush). The old grid's floors could not give at
+    // all, which is how the tail of the spectrum came to be drawn off the edge.
+    const gapsAt = [960, 500, 400, 209, 112].map((w) => {
+      const b = vizBars(w, 56);
+      return { w, gap: b.length > 1 ? b[1].x - (b[0].x + b[0].w) : 0 };
+    });
+    check("the design's gap gives way as the strip narrows, and never eats the fit",
+      gapsAt.every((g) => g.gap >= 1) &&
+        gapsAt.every((g, i) => i === 0 || g.gap <= gapsAt[i - 1].gap) &&
+        gapsAt[0].gap > gapsAt[gapsAt.length - 1].gap,
+      JSON.stringify(gapsAt));
+  }
+}
 
 /** Everything this check asserts on, read from the live DOM.
  *
@@ -526,6 +595,12 @@ const phoneState = (page) => page.evaluate(() => {
   };
   const scroller = root.querySelector(".no-scrollbar");
   const pane = scroller ? scroller.parentElement : null;
+  // The corner strip the lyric chips ride in (`.lyr-corner`, index.css): the
+  // chips are read individually below, but "in the pane's top-right corner" is
+  // a claim about the STRIP's box, not about each chip — the zoom chip is the
+  // left half of the two, so on a narrow pane its own x sits left of the pane's
+  // middle while the strip is still hard against the right edge.
+  const cornerStrip = root.querySelector(".lyr-corner");
   const toggle = root.querySelector('button[aria-label="Toggle the lyrics pane"]');
   const zoomOut = root.querySelector('button[aria-label="Smaller lyrics"]');
   const zoomIn = root.querySelector('button[aria-label="Larger lyrics"]');
@@ -617,6 +692,9 @@ const phoneState = (page) => page.evaluate(() => {
       inViewport: inViewport(scroller),
     } : null,
     toggle: toggle ? { title: toggle.getAttribute("title"), pressed: toggle.getAttribute("aria-pressed"), box: box(toggle) } : null,
+    cornerStrip: cornerStrip
+      ? { box: box(cornerStrip), opacity: Number(getComputedStyle(cornerStrip).opacity) }
+      : null,
     zoom: zoomIn ? { box: box(zoomIn), inViewport: inViewport(zoomIn), hit: reachable(zoomIn), value: zoomBox ? zoomBox.value : null } : null,
     offset: offPlus ? { box: box(offPlus), inViewport: inViewport(offPlus), hit: reachable(offPlus), minusHit: offMinus ? reachable(offMinus) : false, label: offsetLabel ? offsetLabel.textContent.trim() : null, save: !!offsetSave && reachable(offsetSave) } : null,
     compactRow: compactRow ? { box: box(compactRow), visible: compactRow.offsetParent !== null, title: headerTitle } : null,
@@ -638,6 +716,42 @@ const stepOffset = async (page, n, which) => {
   const b = page.locator(`div.fixed.inset-0.z-50 ${sel}`).first();
   for (let i = 0; i < n; i++) { await b.click(); await sleep(90); }
   await sleep(350);
+};
+
+/** Point at the pane so its corner chips are revealed, and answer what the
+ *  strip's own opacity was before and after (issue #63).
+ *
+ *  The chips used to be a footer row, always painted. They are now an
+ *  absolutely positioned corner strip that a fine pointer reveals —
+ *  `.lyr-corner`, index.css — and while it is hidden it is also
+ *  `pointer-events: none`, so nothing about it can be measured, hit-tested or
+ *  CLICKED until the pointer is over the pane. A touch device has no hover to
+ *  reveal it with and wears it always on (asserted in the touch context at the
+ *  end of the phone pass). */
+const revealCorner = async (page) => {
+  const probe = () => page.evaluate(() => {
+    const root = document.querySelector("div.fixed.inset-0.z-50");
+    const strip = root && root.querySelector(".lyr-corner");
+    const pane = root ? root.querySelector(".no-scrollbar")?.parentElement : null;
+    if (!pane) return null;
+    const r = pane.getBoundingClientRect();
+    // The pane's UPPER HALF, kept clear of the corner strip itself: moving the
+    // pointer onto the controls would measure a different state than the one a
+    // reader arrives in (they point at the words, the strip appears).
+    const y = Math.round(r.y + Math.min(60, r.height / 2));
+    return {
+      opacity: strip ? Number(getComputedStyle(strip).opacity) : null,
+      point: { x: Math.round(r.x + r.width / 2), y },
+    };
+  });
+  await page.mouse.move(4, 4);
+  await sleep(300);
+  const rest = await probe();
+  if (!rest) return null;
+  await page.mouse.move(rest.point.x, rest.point.y);
+  await sleep(350);
+  const shown = await probe();
+  return { restOpacity: rest.opacity, opacity: shown.opacity };
 };
 
 /** Everything a phone fullscreen player must do with lyrics, at one size.
@@ -754,15 +868,41 @@ const phoneLyricsPass = async (browser, albumPath, albumLyricText, w, h) => {
         ? `row ${scrolled.transportRow.children} controls on ${scrolled.transportRow.lineCount} line(s), h=${scrolled.transportRow.rowH} vs tallest control ${scrolled.transportRow.rowKidH} @y=${scrolled.transportRow.box.y} inViewport=${scrolled.transportRow.inViewport}; heart inRow=${scrolled.heart?.inRow} hit=${scrolled.heart?.hit} inViewport=${scrolled.heart?.inViewport}`
         : "the transport row was not found");
 
-    // ---- the two controls, at the BOTTOM of the words ----------------------
-    const bottomEdge = scrolled.pane.y + scrolled.pane.h / 2;
-    check(`${tag}: the zoom control is on the pane's bottom edge and clickable`,
-      !!scrolled.zoom && scrolled.zoom.hit && scrolled.zoom.inViewport && scrolled.zoom.box.y > bottomEdge,
-      scrolled.zoom ? `at y=${scrolled.zoom.box.y} of a pane ${scrolled.pane.y}..${scrolled.pane.bottom} (hit=${scrolled.zoom.hit}, on screen=${scrolled.zoom.inViewport})` : "not rendered");
+    // ---- the two controls, in the pane's TOP-RIGHT corner (issue #63) -----
+    // They used to be a row UNDER the scroller, at the bottom of the words;
+    // they are now an absolutely positioned corner strip that a fine pointer
+    // reveals (`.lyr-corner`, index.css — a touch device, which has no hover to
+    // reveal them with, always shows them; asserted in its own context at the
+    // end of this pass). So the pointer goes over the pane first, exactly as a
+    // reader's cursor would, and the reveal itself is asserted rather than
+    // assumed: the strip must be held back at rest AND painted once pointed at.
+    const reveal = await revealCorner(page);
+    check(`${tag}: the corner strip is held back until the pointer is over the pane`,
+      !!reveal && reveal.restOpacity === 0 && reveal.opacity === 1, JSON.stringify(reveal));
+    const corner = await phoneState(page);
+    const paneMidY = scrolled.pane.y + scrolled.pane.h / 2;
+    const paneRight = scrolled.pane.x + scrolled.pane.w;
+    // "In the corner" is measured on the STRIP: it must be hard against the
+    // pane's right edge and at its top, inside the pane, with both chips
+    // painted and reachable inside it (the zoom chip is the left half of the
+    // two, so its own x is not what says "right-hand side").
+    check(`${tag}: the corner strip rides the pane's top-right corner`,
+      !!corner.cornerStrip && corner.cornerStrip.opacity === 1 &&
+        corner.cornerStrip.box.x >= scrolled.pane.x &&
+        corner.cornerStrip.box.y <= scrolled.pane.y + 24 &&
+        Math.abs(corner.cornerStrip.box.x + corner.cornerStrip.box.w - paneRight) <= 2,
+      `strip ${corner.cornerStrip?.box.x},${corner.cornerStrip?.box.y} ${corner.cornerStrip?.box.w}×${corner.cornerStrip?.box.h} of a pane ${scrolled.pane.x},${scrolled.pane.y} ${scrolled.pane.w}×${scrolled.pane.h} (opacity ${corner.cornerStrip?.opacity})`);
+    check(`${tag}: the zoom control is in that corner and clickable`,
+      !!corner.zoom && corner.zoom.hit && corner.zoom.inViewport && corner.zoom.box.y < paneMidY &&
+        !!corner.cornerStrip && corner.zoom.box.x >= corner.cornerStrip.box.x - 1 &&
+        corner.zoom.box.x + corner.zoom.box.w <= paneRight + 1,
+      corner.zoom ? `at ${corner.zoom.box.x},${corner.zoom.box.y} of a pane ${scrolled.pane.x},${scrolled.pane.y} ${scrolled.pane.w}×${scrolled.pane.h} (hit=${corner.zoom.hit}, on screen=${corner.zoom.inViewport})` : "not rendered");
     check(`${tag}: the offset control is beside it and clickable`,
-      !!scrolled.offset && scrolled.offset.hit && scrolled.offset.inViewport && scrolled.offset.minusHit && scrolled.offset.box.y > bottomEdge,
-      scrolled.offset ? `at y=${scrolled.offset.box.y}, label ${scrolled.offset.label} (hit=${scrolled.offset.hit}/${scrolled.offset.minusHit}, on screen=${scrolled.offset.inViewport})` : "not rendered");
-    if (!scrolled.zoom || !scrolled.offset) return;
+      !!corner.offset && corner.offset.hit && corner.offset.inViewport && corner.offset.minusHit &&
+        corner.offset.box.y < paneMidY &&
+        !!corner.cornerStrip && corner.offset.box.x + corner.offset.box.w <= paneRight + 1,
+      corner.offset ? `at ${corner.offset.box.x},${corner.offset.box.y}, label ${corner.offset.label} (hit=${corner.offset.hit}/${corner.offset.minusHit}, on screen=${corner.offset.inViewport})` : "not rendered");
+    if (!corner.zoom || !corner.offset) return;
 
     // The zoom has to MOVE the lines, not just its own label: the pane takes
     // the multiplier as an inline `zoom` on the scroller, so the computed value
@@ -836,12 +976,14 @@ const phoneLyricsPass = async (browser, albumPath, albumLyricText, w, h) => {
       wide.error || `pressed=${wide.toggle?.pressed} pane ${wide.pane?.w}×${wide.pane?.h} compact header ${!!wide.compactRow}`);
     await page.locator('div.fixed.inset-0.z-50 button[aria-label="Toggle the lyrics pane"]').first().click();
     await settledPane(page);
+    await revealCorner(page);       // the corner chips are hidden until pointed at
     const wideOn = await phoneState(page);
     check(`${tag} → 1440×900: ON at the desktop width, and back at ${tag}`,
       wideOn.pane.w > 0 && wideOn.pane.hidden === "false" && !!wideOn.zoom && wideOn.zoom.hit,
       `pane ${wideOn.pane?.w}×${wideOn.pane?.h} hidden=${wideOn.pane?.hidden} zoom ${!!wideOn.zoom}`);
     await page.setViewportSize({ width: w, height: h });
     await settledPane(page);
+    await revealCorner(page);
     const narrow = await phoneState(page);
     check(`${tag}: the desktop press follows the reader back down to the phone`,
       narrow.pane.w > 0 && narrow.pane.hidden === "false" && !!narrow.compactRow && narrow.compactRow.visible &&
@@ -880,6 +1022,42 @@ const phoneLyricsPass = async (browser, albumPath, albumLyricText, w, h) => {
         !!plain.heart && plain.heart.inRow && plain.heart.hit,
       plain?.error || `track "${plain?.block?.title ?? plain?.compactRow?.title}" (was "${lyricTrackTitle}"): pane ${!!plain?.scroller} control ${!!plain?.toggle} header ${plain?.compactRow?.visible} cover ${plain?.cover?.w}px block ${plain?.block?.visible} transport ${plain?.transport?.inViewport}`);
     await page.screenshot({ path: `${SHOTS}/phone-${w}x${h}-no-lyrics.png` });
+
+    // ---- a TOUCH device has no hover, so the corner is simply on ----------
+    // `.lyr-corner`'s reveal is a `@media (hover: hover) and (pointer: fine)`
+    // rule (index.css); a touch device keeps the strip painted and tappable
+    // with no pointer event at all, which is the half a mouse-driven context
+    // cannot show — Playwright reports `hover: hover` for a plain context even
+    // with `hasTouch` set, so this needs a MOBILE one (same shape as the
+    // coarse-pointer context at the end of this file).
+    const touchCtx = await browser.newContext({
+      viewport: { width: w, height: h }, isMobile: true, hasTouch: true, deviceScaleFactor: 2,
+    });
+    try {
+      const tPage = await touchCtx.newPage();
+      await openOnLyricTrack(tPage, albumPath);
+      await settledPane(tPage);
+      const t = await phoneState(tPage);
+      check(`${tag}: on a touch device the corner chips are painted and tappable with no hover`,
+        !t.error && !!t.zoom && !!t.offset && t.zoom.hit && t.offset.hit && t.zoom.inViewport && t.offset.inViewport,
+        t.error || `zoom hit=${t.zoom?.hit} offset hit=${t.offset?.hit} (pane ${t.pane?.w}×${t.pane?.h})`);
+      const landed = await tPage.evaluate(() => {
+        const root = document.querySelector("div.fixed.inset-0.z-50");
+        const strip = root && root.querySelector(".lyr-corner");
+        if (!strip) return null;
+        const r = strip.getBoundingClientRect();
+        const el = document.elementFromPoint(Math.round(r.x + r.width / 2), Math.round(r.y + r.height / 2));
+        return el ? `${el.tagName}.${String(el.className).slice(0, 20)}` : "none";
+      });
+      check(`${tag}: and a press in the corner really reaches the strip`,
+        !!landed && landed !== "none" && !landed.includes("CANVAS") && !landed.includes("DIV."),
+        String(landed));
+    } catch (e) {
+      check(`${tag}: the touch context could be driven`, false,
+        `could not complete the pass: ${String(e.message || e).split("\n")[0].slice(0, 120)}`);
+    } finally {
+      await touchCtx.close();
+    }
   } catch (e) {
     // A context that cannot be driven is a FAILED check, not a lost run: the
     // results already collected still have to reach the console.
@@ -1343,7 +1521,7 @@ const stampDecimalsPass = async (page, album) => {
   // The owner's report, measured: at 390×844 (a phone) and at 566×1040 (their
   // own window) the lyrics control has to put REAL lines on screen under the
   // phone's compact header, the pane has to carry the offset / zoom controls at
-  // its bottom edge where a thumb can reach them, turning it off has to leave
+  // the pane's top-right corner where a thumb can reach them, turning it off has to leave
   // the plain compact block, and a track with no lyrics has to draw no pane at
   // all. The pass also proves the one-state rule the long way round: the OFF
   // press taken on the phone is what a RELOAD comes back to, and what the SAME

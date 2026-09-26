@@ -128,6 +128,25 @@ def start(paths=None, on_done=None):
                     finished_at=0.0)
         _thread = threading.Thread(target=_run, args=(work, on_done),
                                    name="mlo-import-all", daemon=True)
+        # A NEW IMPORT IS RUNNING: the queue view's COMPLETED rows come off its
+        # list (nothing on disk is touched, and failed/needs-attention rows are
+        # never taken — see api_queue.clear_completed_for_new_import). Off this
+        # thread on purpose: the clear reads the whole queue payload, and
+        # `start()` holds `_lock` for its whole body. The CUT is stamped HERE,
+        # before the thread is spawned: the clear's read of slskd takes seconds,
+        # and a row that settles while it is in flight — including one this very
+        # run finished — is THIS run's news, not history.
+        before = time.time()
+
+        def _autoclear():
+            try:
+                from server import api_queue
+                api_queue.clear_completed_for_new_import(before=before)
+            except Exception:
+                pass
+
+        threading.Thread(target=_autoclear, name="mlo-queue-autoclear",
+                         daemon=True).start()
         _thread.start()
         return {"ok": True, "status": status()}
 
@@ -255,14 +274,21 @@ def _run(work, on_done=None):
             # with it verbatim.
             only = str(mine[0].get("album_root") or "") if len(mine) == 1 else ""
             note = _run_note(mine)
+            # NAMED BY ITS IDENTITY, never by the folder: the album is in the
+            # library by now, so its own tags (artist — album (year)) are what
+            # say WHICH album this run finished — a downloaded folder's name is
+            # a peer's spelling of it, or a bare UUID.
+            album_label = imports.album_identity_label(only) if only else ""
             events.emit(
                 "download_done",
-                f"Imported {imported} album" + ("s" if imported != 1 else ""),
+                f"Imported {album_label}" if album_label
+                else f"Imported {imported} album" + ("s" if imported != 1 else ""),
                 (f"{failed} failed" if failed else "all done")
                 + f" — {imported} of {total} finished downloading and imported"
                 + (f". {note[0].upper()}{note[1:]}." if note else ""),
                 {"link": f"/album/{quote(only, safe='')}" if only else "/library",
                  "album_path": only.replace("\\", "/"),
+                 "album": album_label,
                  "imported": imported, "failed": failed, "note": note},
             )
         elif failed:

@@ -10,48 +10,59 @@ config always produce the same pick.
 The rules, in the order they decide. Each tier is weighted so heavily that no
 lower tier can ever outvote a higher one, which is why the score IS the order:
 
-1. status      official > an unstated status > withdrawn/expired/cancelled >
+1. video       an edition whose every recording MusicBrainz states is a music
+               video sorts BELOW one that carries the album's own audio.
+               Whatever the medium, the status or the date, an edition that is
+               nothing but videos is never the better pick while an edition of
+               audio is on offer — and the signal is the stated RECORDINGS
+               (`media[].video`), never the medium. It RANKS, it does not
+               forbid: a group whose only edition is the video one still gets
+               it, and an edition the data does not describe is not read as
+               video at all.
+2. status      official > an unstated status > withdrawn/expired/cancelled >
                promotion > bootleg. An unofficial edition is only ever chosen
                when the group offers nothing official, and its reason says so.
-2. medium      `auto_import_medium_order`, best first — CD, then the other
+3. medium      `auto_import_medium_order`, best first — CD, then the other
                physical media (the video carriers DVD, Blu-ray, VHS, Video CD
                and LaserDisc named ahead of Digital Media, so a physical music
                video beats the same video published as a download), digital
                last by default. A format the order does not name ranks after
                every configured one.
-3. set         a box set — media this library cannot use (a DVD, a Blu-ray)
+4. set         a box set — media this library cannot use (a DVD, a Blu-ray)
                carried BESIDE the album's own, or three discs of the album —
                sorts below the album's own. A release whose own medium is the
                video carrier (a single-disc DVD/Blu-ray/VHS) is not a bundle
-               and is ranked by rule 2 like any other medium.
-4. compressed  a release that names itself a re-encode of a disc (BDRip,
+               and is ranked by rule 3 like any other medium: what separates a
+               video edition is its stated recordings (rule 1), not its medium.
+5. compressed  a release that names itself a re-encode of a disc (BDRip,
                DVDRip, x264, …) sorts below the disc's own streams — a remux or
                a full-disc edition is taken as it comes, never a derivative.
-5. tracks      a release short of the release group's OWN track count is
+6. tracks      a release short of the release group's OWN track count is
                penalised, so a 1-track promo can never beat the full album.
-6. date        the EARLIEST release date wins — the original pressing, not a
+7. date        the EARLIEST release date wins — the original pressing, not a
                reissue or a deluxe — unless a later one is materially more
-               complete (tier 5 outranks this one). The reference is the
+               complete (tier 6 outranks this one). The reference is the
                earliest edition this group OFFERS, not the group's stated
                first-release-date: a pressing that predates that date is still
                the earlier record of the two, and an album whose original is
                not on offer is decided by the editions that are.
-7. precision   an edition that states its date in full (YYYY-MM-DD) beats one
+8. precision   an edition that states its date in full (YYYY-MM-DD) beats one
                that states only its month or its year when the two could be the
                same day — the album folder is named after this date.
-8. edition     `prefer_original_edition` (default true): a clean/explicit-edited
+9. edition     `prefer_original_edition` (default true): a clean/explicit-edited
                edition sorts below the original — a clean edition may carry
                altered audio.
-9. plain       a plain title beats a disambiguated/parenthesised one. A
+10. plain      a plain title beats a disambiguated/parenthesised one. A
                MusicBrainz comment ("(BMG Club edition)", "(CB 811)", "edited
                version") is the data saying this edition needed distinguishing,
                so it loses the tie to a title that carries none. Nothing is
                read INTO the comment: club, promo and remaster mean the same
                thing here — one comment against no comment.
-10. country    `prefer_release_country` — a TIE-BREAKER and nothing else.
+11. country    `prefer_release_country` — a TIE-BREAKER and nothing else.
 
-Country is rule 5 in the brief and sorts LAST here on purpose: a tie-breaker
-must not outvote any rule above it, and every tier above is lexicographic.
+A country preference is the brief's own tie-breaker and sorts LAST here on
+purpose: a tie-breaker must not outvote any rule above it, and every tier above
+is lexicographic.
 
 The config's eligibility rules — `auto_import_avoid_promo` and
 `auto_import_require_country` — are always EVALUATED and reported
@@ -64,7 +75,10 @@ can report "the best edition is one auto-import would refuse". A caller's own
 release-group type filter is not a config rule and excludes an edition from
 every pick either way.
 
-MusicBrainz fields read, per rule: `status` (release), `media[].format` and
+MusicBrainz fields read, per rule: `media[].video` on every recording the
+release states — the flat `media` of a release lookup or each disc's `tracks`
+in a raw payload (release, the video rule), `status` (release),
+`media[].format` and
 `medium_formats` (release), `track-count` per medium + the release group's own
 count (release / release group), `date` (release) against
 `first-release-date` (release group), `disambiguation` (release),
@@ -112,10 +126,11 @@ _PROMO_STATUSES = frozenset({"promotion", "bootleg", "pseudo-release", "pseudo r
 # later one). The digits are the levels quantized to 0..7, which keeps the
 # score monotone in every tier while staying readable (0.8757).
 _SCORE_BASE = 8
-_TIER_NAMES = ("status", "medium", "set", "compressed", "tracks", "date",
+_TIER_NAMES = ("video", "status", "medium", "set", "compressed", "tracks", "date",
                "precision", "edition", "disambiguation", "country")
 # What a tie-break sentence calls each tier (see _deciding_reason).
 _TIER_LABELS = {
+    "video": "the video edition rule",
     "status": "release status",
     "medium": "the medium order",
     "set": "the box-set rule",
@@ -127,12 +142,15 @@ _TIER_LABELS = {
     "disambiguation": "the plain-title rule",
     "country": "the preferred country",
 }
-# …and the substance of the three rules a reader cannot get from the losing
+# …and the substance of the four rules a reader cannot get from the losing
 # edition's own reasons: that the winner IS the earliest rather than merely
-# first in the list, that its fuller date is what beat the other, and that the
-# other edition's comment is what lost it. A reason a user has to infer from a
+# first in the list, that its fuller date is what beat the other, that the
+# other edition's comment is what lost it, and that the other edition's own
+# recordings are all music videos. A reason a user has to infer from a
 # difference between two rows is the silent tie-break this exists to avoid.
 _TIER_NOTES = {
+    "video": "an edition whose recordings are all music videos ranks below one "
+             "that carries the album's audio",
     "date": "the earliest release date offered wins",
     "precision": "a full date beats one that states only its month or its year",
     "disambiguation": "a title with no MusicBrainz disambiguation comment "
@@ -691,6 +709,48 @@ def video_formats(rel):
     return [f for f in media_formats(rel) if is_video_format(f)]
 
 
+def stated_recordings(rel):
+    """Every recording MusicBrainz STATES on the release, from both shapes.
+
+    `server/integrations.release_lookup` builds `media` as a FLAT list where
+    each entry IS a recording (`video`, `title`, `length`, `recording_mbid`),
+    while a raw MusicBrainz payload's `media` is a list of DISCS, each with its
+    own `"tracks"` list. Both read as one list of recordings here: a `Mapping`
+    entry whose `tracks` is a list contributes those tracks, and any other
+    entry is itself a recording.
+
+    An unstated track list is NOT evidence about anything: a payload with no
+    list `media`, or a disc stating no tracks, answers [] — and a rule reading
+    this must draw no conclusion from that silence (`video_only` does not).
+    """
+    media = rel.get("media") if isinstance(rel, Mapping) else None
+    if not isinstance(media, list):
+        return []
+    out = []
+    for entry in media:
+        if not isinstance(entry, Mapping):
+            continue
+        tracks = entry.get("tracks")
+        if isinstance(tracks, list):
+            out.extend(t for t in tracks if isinstance(t, Mapping))
+        else:
+            out.append(entry)
+    return out
+
+
+def video_only(rel):
+    """Whether MusicBrainz states EVERY recording on *release* is a video.
+
+    True only for an edition that states recordings AND states that all of
+    them are music videos (`media[].video`; see `stated_recordings`). One audio
+    recording clears the edition, and so does a payload whose recordings the
+    data does not describe at all — silence is not evidence, so an unstated
+    edition is never read as a music video release.
+    """
+    recordings = stated_recordings(rel)
+    return bool(recordings) and all(bool(r.get("video")) for r in recordings)
+
+
 def disc_count(rel):
     """How many media the release holds (1 when MusicBrainz states none)."""
     media = rel.get("media")
@@ -737,7 +797,7 @@ def _stated_granularity(date):
 
 def _date_precision(date):
     """How much of the date MusicBrainz states: 1.0 day, 0.66 month, 0.33
-    year, 0.0 nothing — the date tier's own tie-break (rule 7).
+    year, 0.0 nothing — the date tier's own tie-break (rule 8).
 
     The album folder is named after this date, so an edition stating only
     "1983" pins the folder to a year while one stating "1983-09-13" pins it to
@@ -861,7 +921,7 @@ def _status_reason(status):
 
 
 def _set_level(rel):
-    """(level, reason) for the box-set tier — rule 3 in the module docstring.
+    """(level, reason) for the box-set tier — rule 4 in the module docstring.
 
     A box set is not a bigger album: it is the album plus media this library
     cannot use (a DVD, a Blu-ray) and, at its worst, four more discs of the
@@ -875,7 +935,12 @@ def _set_level(rel):
     carrier — a single-disc DVD/Blu-ray/VHS, i.e. a music video released on
     a disc — is not that: it holds one thing, its own recording, and its
     medium is ranked by the medium order like any other (which is what puts
-    a physical video release ahead of a Web one).
+    a physical video release ahead of a Web one). That stays true for THIS
+    tier — the DVD-versus-Digital-Media order of issue #53 is deliberately
+    not reversed — but an edition whose RECORDINGS MusicBrainz states are all
+    music videos is separated by the video tier instead (rule 1), whatever
+    its medium: the MEDIUM is not the signal for that rule, the stated
+    recordings are, and no medium order may outvote it.
     """
     formats = list(media_formats(rel))
     video = [f for f in formats if is_video_format(f)]
@@ -902,25 +967,36 @@ def _evaluate(rel, ctx, index):
     count = track_count(rel)
     reasons = []
 
-    # 1. status ...
+    # 1. the video edition rule — the recordings MusicBrainz STATES for this
+    #    edition (`media[].video`), not its medium: an edition that is nothing
+    #    but music videos never beats one carrying the album's own audio.
+    #    Silence is not evidence, so an edition the data does not describe is
+    #    not penalised here (`video_only`).
+    level_video = 0.0 if video_only(rel) else 1.0
+    if level_video == 0.0:
+        reasons.append("video only — MusicBrainz states every recording is a "
+                       "music video, so an edition carrying the album's own "
+                       "audio ranks above it")
+
+    # 2. status ...
     level_status = _STATUS_LEVELS.get(low, _STATUS_LEVELS[""])
     reasons.append(_status_reason(low))
     if low != "official" and not ctx.has_official:
-        # Rule 1's other half: this is only ever the pick because there is
+        # Rule 2's other half: this is only ever the pick because there is
         # nothing official to take, and the reason has to say so.
         reasons.append("no official edition exists — this is the only kind on offer")
 
-    # 2. medium ...
+    # 3. medium ...
     rank, label = medium_rank(rel, ctx.order)
     level_medium = ((len(ctx.order) - rank) / len(ctx.order)) if rank < len(ctx.order) else 0.0
     reasons.append(f"{label} — preferred medium (order {rank + 1})" if rank < len(ctx.order)
                    else f"{label or 'no medium stated'} — not in the configured medium order")
 
-    # 3. the set: what the edition actually HOLDS ...
+    # 4. the set: what the edition actually HOLDS ...
     level_set, set_reason = _set_level(rel)
     reasons.append(set_reason)
 
-    # 4. the disc's own streams, not someone's re-encode of them: a BDRip or a
+    # 5. the disc's own streams, not someone's re-encode of them: a BDRip or a
     #    DVDRip is a lossy derivative, and when the group also offers the disc
     #    (a remux, a full disc, the original pressing) that is what to take.
     if ctx.keep_disc_streams and is_compressed_release(rel):
@@ -930,7 +1006,7 @@ def _evaluate(rel, ctx, index):
     else:
         level_compressed = 1.0
 
-    # 5. completeness ...
+    # 6. completeness ...
     if count <= 0:
         level_tracks = 0.5
         reasons.append("no track count on MusicBrainz — not counted against it")
@@ -957,16 +1033,16 @@ def _evaluate(rel, ctx, index):
                            + ("the release group's own count" if ctx.expected_stated
                               else "the fullest edition offered"))
 
-    # 6. date — the EARLIEST edition offered wins (see `_release_date_level`).
+    # 7. date — the EARLIEST edition offered wins (see `_release_date_level`).
     level_date, date_reason = _release_date_level(date, ctx)
     reasons.append(date_reason)
 
-    # 7. date precision — the tie-break INSIDE the date rule: two editions that
+    # 8. date precision — the tie-break INSIDE the date rule: two editions that
     #    could be the same day are separated by which of them states more of
     #    its date, because the album folder is named after it.
     level_precision = _date_precision(date)
 
-    # 8. edition kind ...
+    # 9. edition kind ...
     clean = bool(_CLEAN_RE.search(f"{title} {disambiguation}"))
     if clean and ctx.keep_original:
         level_edition = 0.0
@@ -976,7 +1052,7 @@ def _evaluate(rel, ctx, index):
         if clean:
             reasons.append("clean edition — prefer_original_edition is off, so it is not penalised")
 
-    # 9. plain title — a MusicBrainz disambiguation comment is that data saying
+    # 10. plain title — a MusicBrainz disambiguation comment is that data saying
     #    this edition needed distinguishing, so a title carrying one loses the
     #    tie to a title that carries none. Nothing is read INTO the comment
     #    (see the module docstring): club, promo and remaster are one case.
@@ -985,7 +1061,7 @@ def _evaluate(rel, ctx, index):
         reasons.append(f'MusicBrainz disambiguation "{disambiguation}" — a '
                        "title with no comment ranks above it")
 
-    # 10. country (a tie-breaker, so it is the last tier) ...
+    # 11. country (a tie-breaker, so it is the last tier) ...
     if ctx.country:
         if country and country.lower() == ctx.country.lower():
             level_country = 1.0
@@ -1023,8 +1099,8 @@ def _evaluate(rel, ctx, index):
         reasons=tuple(reasons), eligible=eligible,
         index=index, type_ok=type_ok,
     )
-    return ((level_status, level_medium, level_set, level_compressed, level_tracks,
-             level_date, level_precision, level_edition, level_plain,
+    return ((level_video, level_status, level_medium, level_set, level_compressed,
+             level_tracks, level_date, level_precision, level_edition, level_plain,
              level_country), candidate)
 
 

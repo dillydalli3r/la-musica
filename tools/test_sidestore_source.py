@@ -14,8 +14,12 @@ came from this file: the version entry had no `date` at all (and the app's
 next decode failure waiting behind the first).
 
 Everything AltStore's own documentation names required is asserted here, so the
-published file cannot regress to that state. Offline: the "IPA" is a file of a
-known size and nothing is fetched.
+published file cannot regress to that state. The same IPA is then handed to
+tools/check_ios_ipa.py — a synthetic one this time, built from that tool's own
+needle list — and every invariant the tool asserts (each Info.plist key, each
+Objective-C name in the binary) is deleted on its own, because an assertion that
+cannot fail is decoration rather than a check. Offline: the "IPA" is a file of a
+known size or a zip this file writes, and nothing is fetched.
 
 Run:  python tools/test_sidestore_source.py
 """
@@ -23,7 +27,11 @@ import datetime
 import importlib.util
 import json
 import os
+import plistlib
+import subprocess
+import sys
 import tempfile
+import zipfile
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
@@ -119,6 +127,142 @@ stamped = gen.build(ipa, VERSION, TAG, date="2026-09-24T12:46:30Z")
 check("--date is honoured verbatim",
       stamped["apps"][0]["versions"][0]["date"] == "2026-09-24T12:46:30Z",
       stamped["apps"][0]["versions"][0].get("date"))
+
+# --------------------------------------------------------------------------- #
+# tools/check_ios_ipa.py — the SHIPPED IPA carries the iOS pieces.
+#
+# That tool needs a built .ipa, which only the macOS CI job can produce, so it
+# is exercised here against a synthetic one with the same shape: `Payload/*.app`
+# holding an Info.plist and an executable. The binary is assembled from the
+# tool's OWN needle list, so a needle added there is covered here without a
+# second edit — and then every invariant is deleted from the fixture, one at a
+# time, and the tool has to fail on each. That is the whole point of the check:
+# an assertion that cannot fail is decoration (issue #58 is the background-audio
+# mode, the plain-http exemption and the like/command-centre symbols).
+# --------------------------------------------------------------------------- #
+IPA_TOOL = os.path.join(ROOT, "tools", "check_ios_ipa.py")
+
+
+def _ipa_tool():
+    """tools/check_ios_ipa.py, loaded as a module (it is a script)."""
+    spec = importlib.util.spec_from_file_location("check_ios_ipa", IPA_TOOL)
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
+
+
+ipa_check = _ipa_tool()
+# The executable: comfortably over the tool's "this is the app" floor, and
+# carrying every name it looks for — string literals, exactly as a `strip`ped
+# release build carries them.
+PAD = b"\0" * (ipa_check.BUILD_MIN_BYTES + 1000)
+APP_PLIST = {
+    "CFBundleShortVersionString": VERSION,
+    "UIBackgroundModes": ["audio"],
+    "NSAppTransportSecurity": {
+        "NSAllowsArbitraryLoadsInWebContent": True,
+        "NSAllowsArbitraryLoadsForMedia": True,
+        "NSAllowsArbitraryLoads": True,
+    },
+    "NSLocalNetworkUsageDescription": "la musica connects to the la musica server you run.",
+}
+
+
+def _binary(omit=None):
+    """The fixture's executable: every needle but `omit`.
+
+    A needle that CONTAINS the omitted one is blanked rather than kept, because
+    there is no such artifact as one without the other: `likeCommand` lives
+    inside `dislikeCommand`'s spelling, and `AVAudioSession` inside the
+    category/mode constant names. The tool must fail either way, which is what
+    is asserted — the mutation only has to be honest about the artifact.
+    """
+    parts = []
+    for needle, _ in ipa_check.NEEDLES:
+        if needle == omit:
+            continue
+        parts.append(b"X" * len(needle) if omit and omit in needle else needle)
+    return PAD + b"".join(parts)
+
+
+def _write_ipa(path, plist=None, binary=None):
+    with zipfile.ZipFile(path, "w") as z:
+        z.writestr("Payload/la-musica.app/Info.plist",
+                   plistlib.dumps(APP_PLIST if plist is None else plist))
+        z.writestr("Payload/la-musica.app/la-musica",
+                   _binary() if binary is None else binary)
+    return path
+
+
+def _run_ipa_check(path):
+    return subprocess.run([sys.executable, IPA_TOOL, path],
+                          capture_output=True, text=True)
+
+
+print("\n== the shipped IPA carries the iOS pieces ==")
+good_ipa = _write_ipa(os.path.join(work, "synthetic-good.ipa"))
+good = _run_ipa_check(good_ipa)
+check("a build carrying every iOS piece passes",
+      good.returncode == 0, (good.stdout or good.stderr)[-400:])
+
+# The file the SideStore part above wrote is not a zip: the tool's own "this
+# argument is unusable" code, distinct from "an invariant failed".
+check("an unusable argument exits 2 (not 1)",
+      _run_ipa_check(ipa).returncode == 2, _run_ipa_check(ipa).stdout[-200:])
+check("no argument at all exits 2",
+      subprocess.run([sys.executable, IPA_TOOL], capture_output=True, text=True).returncode == 2)
+
+# Every plist invariant, deleted on its own. The exact key the issue is about:
+# NSAllowsArbitraryLoadsForMedia is what covers an <audio> element's bytes, and
+# on iOS 10+ the blanket key is ignored while a scoped one is present, so a
+# build without it looks complete and refuses every track.
+NO_MEDIA = {"CFBundleShortVersionString": VERSION,
+            "UIBackgroundModes": ["audio"],
+            "NSAppTransportSecurity": {
+                "NSAllowsArbitraryLoadsInWebContent": True,
+                "NSAllowsArbitraryLoads": True,
+            },
+            "NSLocalNetworkUsageDescription": "la musica connects to the la musica server you run."}
+NO_BLANKET = {"CFBundleShortVersionString": VERSION,
+              "UIBackgroundModes": ["audio"],
+              "NSAppTransportSecurity": {
+                  "NSAllowsArbitraryLoadsInWebContent": True,
+                  "NSAllowsArbitraryLoadsForMedia": True,
+              },
+              "NSLocalNetworkUsageDescription": "la musica connects to the la musica server you run."}
+NO_WEB = {"CFBundleShortVersionString": VERSION,
+          "UIBackgroundModes": ["audio"],
+          "NSAppTransportSecurity": {
+              "NSAllowsArbitraryLoadsForMedia": True,
+              "NSAllowsArbitraryLoads": True,
+          },
+          "NSLocalNetworkUsageDescription": "la musica connects to the la musica server you run."}
+NO_LAN = dict(APP_PLIST, NSLocalNetworkUsageDescription="   ")
+NO_AUDIO = dict(APP_PLIST, UIBackgroundModes=["fetch"])
+NO_MODES = dict(APP_PLIST)
+del NO_MODES["UIBackgroundModes"]
+
+PLIST_MUTATIONS = [
+    ("UIBackgroundModes missing", NO_MODES),
+    ("UIBackgroundModes without audio", NO_AUDIO),
+    ("NSAllowsArbitraryLoadsInWebContent missing", NO_WEB),
+    ("NSAllowsArbitraryLoadsForMedia missing (the one that covers a track)", NO_MEDIA),
+    ("NSAllowsArbitraryLoads missing", NO_BLANKET),
+    ("NSLocalNetworkUsageDescription blank", NO_LAN),
+]
+for label, plist in PLIST_MUTATIONS:
+    path = _write_ipa(os.path.join(work, "plist-" + str(len(label)) + ".ipa"), plist=plist)
+    run = _run_ipa_check(path)
+    check(f"deleting {label} fails the check", run.returncode == 1,
+          f"exit {run.returncode}: {(run.stdout or '').strip()[-200:]}")
+
+# …and every name in the binary, the like/command-centre ones included.
+for needle, what in ipa_check.NEEDLES:
+    name = needle.decode().strip(":").replace("/", "_").replace(" ", "_")
+    path = _write_ipa(os.path.join(work, f"bin-{name}.ipa"), binary=_binary(omit=needle))
+    run = _run_ipa_check(path)
+    check(f"deleting {needle.decode()} ({what}) fails the check", run.returncode == 1,
+          f"exit {run.returncode}: {(run.stdout or '').strip()[-160:]}")
 
 print()
 if FAIL:

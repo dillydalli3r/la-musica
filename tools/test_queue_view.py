@@ -157,7 +157,9 @@ class Pipeline:
             self.starved.append(stage)
 
     def search(self, slsk_, queries, wait_s, usable=None, response_limit=0,
-    cancel_check=None):
+    cancel_check=None, resume=None, pending_out=None):
+        # `resume`/`pending_out` are the two-phase seam (see _search_queries):
+        # this double answers in its own window, so it hands nothing over.
         job_id, label, t0 = self._enter("searching")
         try:
             self._gate("searching")
@@ -568,7 +570,7 @@ with Patch(auto, load_config=lambda: dict(CFG),
     PIPE.expect_two = None
 
     def _blocking_search(slsk_, queries, wait_s, usable=None, response_limit=0,
-    cancel_check=None):
+    cancel_check=None, resume=None, pending_out=None):
         hold.wait(10)
         return ([("q", {"responses": []})], [], 0)
 
@@ -613,7 +615,7 @@ with Patch(auto, load_config=lambda: dict(CFG),
     hold2 = threading.Event()
 
     def _blocking_search2(slsk_, queries, wait_s, usable=None, response_limit=0,
-    cancel_check=None):
+    cancel_check=None, resume=None, pending_out=None):
         hold2.wait(10)
         return ([("q", {"responses": []})], [], 0)
 
@@ -905,6 +907,14 @@ FIXTURE_WISHES = [
 ]
 FIXTURE_READY = os.path.join(REDIRECT, "downloads", "peer", "Some Album")
 os.makedirs(FIXTURE_READY, exist_ok=True)
+# The album the import RUN is on, deliberately NOT the finished download above:
+# an import run whose current album is also sitting in the download folder as a
+# ready row is ONE item in two rows, and the page now draws those once (see the
+# --one-group case below, which is exactly that pair). This fixture is about a
+# queue with real rows in every section, so the run works on its own album and
+# the finished one waits for its own Import press.
+FIXTURE_IMPORTING = os.path.join(REDIRECT, "downloads", "peer", "Other Album")
+os.makedirs(FIXTURE_IMPORTING, exist_ok=True)
 
 with Patch(auto, jobs=lambda: [dict(j) for j in FIXTURE_JOBS],
            queued=lambda: [{"release_mbid": "22222222", "key": "22222222",
@@ -917,7 +927,7 @@ with Patch(auto, jobs=lambda: [dict(j) for j in FIXTURE_JOBS],
                             "source": "musicbrainz", "position": 1}]), \
      Patch(wishes, list_wishes=lambda: [dict(w) for w in FIXTURE_WISHES]), \
      Patch(import_queue, status=lambda: {
-         "state": "running", "total": 2, "done": 1, "current": FIXTURE_READY,
+         "state": "running", "total": 2, "done": 1, "current": FIXTURE_IMPORTING,
          "results": [], "errors": [], "started_at": 8.0, "finished_at": 0.0}), \
      Patch(slsk, ready_albums=lambda *a, **k: [FIXTURE_READY]):
     fixture = _queue(client)
@@ -1087,6 +1097,86 @@ elif ui.returncode == 2:
           + (ui.stderr.strip().splitlines() or [""])[0])
 else:
     raise AssertionError("the page render check failed:\n" + ui.stdout + ui.stderr)
+
+# --------------------------------------------------------------------------- #
+# 7b. ONE ITEM, ONE GROUP: the release still being verified and the finished
+#     download of the same album are two rows, and the page draws them once
+# --------------------------------------------------------------------------- #
+# The owner's screenshot (issue #68): Ænima under "In progress" as Verifying…
+# AND under "Completed" with an Import button. Both rows are REAL — the job
+# registry reports the verifying job and the download folder holds the finished
+# copy of the same album, so `build_queue` files one in each section, and this
+# case leaves that payload exactly as the server builds it: the SERVER is not
+# the surface that has to draw one item once, the page is. While the chain is
+# running the item belongs to In progress ALONE ("Completed" is a download that
+# really finished), and the two rows agree on nothing but the album's own name:
+# the release's `title`, and the leaf of the folder slskd wrote it to.
+DEDUPE_ALBUM = "Ænima"
+DEDUPE_FOLDER = os.path.join(REDIRECT, "downloads", "peer", DEDUPE_ALBUM)
+os.makedirs(DEDUPE_FOLDER, exist_ok=True)
+DEDUPE_JOBS = [
+    {"id": 21, "state": "running",
+     "stage": "Verifying downloads against the rip log / decoders…",
+     "stage_key": "verifying",
+     "release": {"id": "abcd1234", "artist": "Tool", "title": DEDUPE_ALBUM},
+     "log": [], "attempts": [], "result": None, "confirm": None, "search": None,
+     # The progress block is deliberately gone: it is cleared once the album's
+     # files are down (soulseek_auto._job_progress(None) before verify), so the
+     # row carries NO folder of its own at this stage — the album's name is the
+     # only thing the two rows share.
+     "progress": None, "wish_id": None, "source": "soulseek",
+     "label": f"Tool — {DEDUPE_ALBUM}", "started_at": 20.0, "ended_at": 0.0},
+]
+# One finished row nothing is running on, in the same section: the filter must
+# drop the duplicate and NOTHING else (an imported album's own row).
+UNTOUCHED = "F:/Music/Artists/Daft Punk - Homework"
+with Patch(auto, jobs=lambda: [dict(j) for j in DEDUPE_JOBS], queued=lambda: []), \
+     Patch(wishes, list_wishes=lambda: []), \
+     Patch(import_queue, status=lambda: {"state": "idle", "total": 0, "done": 0,
+                                         "current": "", "results": [], "errors": [],
+                                         "started_at": 0.0, "finished_at": 0.0}), \
+     Patch(slsk, ready_albums=lambda *a, **k: [DEDUPE_FOLDER]):
+    dedupe = _queue(client)
+    live_rows = dedupe["sections"]["in_progress"]
+    done_rows = dedupe["sections"]["completed"]
+    # The pair is really in the payload: the release being verified, and the
+    # finished download of the same album still in the download folder.
+    assert [r["stage"] for r in live_rows] == ["verifying"], live_rows
+    assert [r["kind"] for r in done_rows if r["path"]] == ["ready"], done_rows
+    ready_row, live_row = done_rows[0], live_rows[0]
+    assert ready_row["path"] == DEDUPE_FOLDER and ready_row["title"] == DEDUPE_ALBUM, ready_row
+    assert live_row["title"] == DEDUPE_ALBUM and not live_row["album_path"], live_row
+    assert os.path.basename(ready_row["path"]) == live_row["title"], (ready_row, live_row)
+    # …and the album's own Imported row rides along, so "nothing else moved" is
+    # asserted by the page and not only by this test.
+    dedupe["sections"]["completed"].append({
+        "id": "job:20", "kind": "job", "job_id": 20, "wish_id": None,
+        "stage": "completed", "source_key": "soulseek", "source": "Soulseek",
+        "title": "Homework", "artist": "Daft Punk", "release_mbid": "",
+        "release": wishes.release_identity({}, ""), "album_path": UNTOUCHED,
+        "progress": None, "reason": "", "note": "Imported into the library",
+        "created_at": 4.0, "updated_at": 5.0, "cancelable": False,
+        "clearable": True, "log_tail": [],
+    })
+    dedupe["counts"]["completed"] = len(dedupe["sections"]["completed"])
+    dedupe_payload = os.path.join(REDIRECT, "queue-one-group-payload.json")
+    with open(dedupe_payload, "w", encoding="utf-8") as f:
+        json.dump(dedupe, f)
+
+# The page has to draw that item ONCE, in In progress, with the untouched
+# finished row still where it belongs. Exit 2 is the same "tooling is not
+# installed" as above.
+ui_one = subprocess.run(["node", os.path.join("tools", "check_queue_view.mjs"),
+                         dedupe_payload, "--one-group"],
+                        cwd=ROOT, capture_output=True, text=True)
+if ui_one.returncode == 0:
+    print("ok  " + ui_one.stdout.strip().removeprefix("ok  "))
+elif ui_one.returncode == 2:
+    print("SKIPPED  the one-group render check (node or web/node_modules missing): "
+          + (ui_one.stderr.strip().splitlines() or [""])[0])
+else:
+    raise AssertionError("the one-group render check failed:\n"
+                         + ui_one.stdout + ui_one.stderr)
 
 # --------------------------------------------------------------------------- #
 # 8. a failed ATTEMPT is not a give-up, and a settled failed JOB is not a row
@@ -1301,7 +1391,14 @@ def _recorded_clear(cfg=None, before=0.0):
     return 0
 
 
-with Patch(api_queue, clear_settled_queue=_recorded_clear), \
+# Both names the automatic path can reach the clear through are recorded: the
+# rule lives in `clear_completed_for_new_import`, `clear_settled_queue` is what
+# the call sites used before the rule was narrowed, and `_clear_settled_for_new_run`
+# (the pipeline's own entry point, deliberately NOT stubbed here) ends in the
+# first one either way — so exactly ONE record lands per call, carrying the cut
+# the caller really stamped.
+with Patch(api_queue, clear_settled_queue=_recorded_clear,
+           clear_completed_for_new_import=_recorded_clear), \
      Patch(auto, jobs=lambda: [], queued=lambda: [], _start_next=lambda: None), \
      Patch(slsk, ready_albums=lambda *a, **k: []):
     # `enqueue` is the bulk "Add to queue" path (the paste box, "download all").
@@ -1326,6 +1423,209 @@ with Patch(api_queue, clear_settled_queue=_recorded_clear), \
 
 print("ok  a new run clears the queue's settled rows (and only those) — from the "
       "job-start and bulk-enqueue paths, not from a page")
+
+# --------------------------------------------------------------------------- #
+# 10. the AUTOMATIC clear is the NARROWER rule: COMPLETED rows only, a new
+#     IMPORT (never a search) only, and only while the setting says so
+# --------------------------------------------------------------------------- #
+# The owner's rule — "completed downloads in the soulseek menu should, by
+# default, be automatically cleared once another importing process starts" — has
+# four ways to be wrong, so each is its own verdict here: a completed row must
+# GO when a new import starts, must SURVIVE a restart of a SEARCH, a failed row
+# and a parked wish must never be taken, the setting must really switch it off,
+# and the payload must be able to say what the last automatic clear took.
+#
+# The cases are collected instead of asserted one after another: they are five
+# independent verdicts on ONE rule, and a run that stopped at the first would
+# hide the other four behind it.
+AUTO_CFG = dict(CFG, wishes_max_attempts=2)
+_AUTO_FAILS = []
+
+
+def _autoclear_case(name, fn):
+    """Run one verdict; keep its failure for the one assert at the end."""
+    try:
+        fn()
+    except Exception as e:
+        _AUTO_FAILS.append(f"{name}: {type(e).__name__}: {e}")
+
+
+def _auto_stubs(jobs=None):
+    """The two patches every case here runs on: the registries the queue payload
+    reads, and the pipeline's own start-up path PARKED.
+
+    The registries are stubbed because a case about the CLEAR must not depend on
+    what slskd answers on this machine. `_start_next`/`_clear_settled` are parked
+    because this suite leaves REAL job threads behind (they fail and drain the
+    bulk queue): a job that starts while a case runs IS an import start, and the
+    clear it spawns — correct behaviour, not a bug — would take the completed
+    rows the case is asserting about. The clear under test is driven directly
+    (`_auto_clear`), so parking these hides nothing about it."""
+    return (Patch(auto, jobs=(jobs or (lambda: [])), queued=lambda: [],
+                  forget=_forget, _start_next=lambda *a, **k: None,
+                  _clear_settled=lambda *a, **k: None),
+            Patch(slsk, ready_albums=lambda *a, **k: []))
+
+
+def _auto_payload(cfg=AUTO_CFG, jobs=None):
+    """The queue as the page reads it. The job registry defaults to empty: these
+    cases are about the WISH rows' sections, and a stub keeps them about one
+    thing — the cases that need a JOB row pass the registry section 9 models
+    (`_JOBS`, whose `_forget` is what `queue_clear` really removes with)."""
+    registry, albums = _auto_stubs(jobs)
+    with registry, albums:
+        return api_queue.build_queue(cfg)
+
+
+def _auto_clear(jobs=None):
+    """The real trigger, on a hermetic queue: the entry point every import start
+    (a job, a bulk add, a page download, the import-all runner) runs."""
+    registry, albums = _auto_stubs(jobs)
+    with registry, albums:
+        return api_queue._clear_settled_for_new_run()
+
+
+def _auto_registry(*jobs):
+    """Register JOB rows in the suite's modelled registry and return the reader
+    the helpers take. `queue_clear` removes a job with `soulseek_auto.forget`,
+    which `_forget` answers by dropping the row — so a response that survives
+    the clear really survived it."""
+    _JOBS["rows"] = [dict(j) for j in jobs]
+    return lambda: [dict(j) for j in _JOBS["rows"]]
+
+
+def _auto_listed(payload):
+    return {r["id"] for rows in payload["sections"].values() for r in rows}
+
+
+def _auto_ids(payload, section):
+    """The ids a section holds — the message a failed assert carries, so a run
+    that breaks here says "these rows were where you did not expect" instead of
+    dumping every row's whole payload."""
+    return sorted(r["id"] for r in payload["sections"][section])
+
+
+def _auto_wish(title, tail):
+    return wishes.add_wish(f"e0e0e0e0-{tail}", title=title, artist="An Artist",
+                           source="soulseek")["id"]
+
+
+def _case_import_drops_completed():
+    """(a) a completed row leaves the list when a NEW IMPORT starts."""
+    wid = _auto_wish("Done Once", "1111-2222-3333-444444444444")
+    wishes.mark_imported(wid, os.path.join(REDIRECT, "Artists", "Done Once"))
+    was = _auto_payload()
+    assert f"wish:{wid}" in _auto_ids(was, "completed"), \
+        sorted(_auto_listed(was))
+    # The real trigger: `_clear_settled_for_new_run` is the entry point every
+    # import start (a job, a bulk add, a page download, the import-all runner)
+    # goes through.
+    taken = _auto_clear()
+    now = _auto_payload()
+    assert taken >= 1, taken
+    assert f"wish:{wid}" not in _auto_ids(now, "completed"), \
+        sorted(_auto_listed(now))
+    assert f"wish:{wid}" not in _auto_listed(now), sorted(_auto_listed(now))
+
+
+def _case_never_takes_failed_or_parked():
+    """(c) a failed row and a needs-attention row are NEVER taken.
+
+    Both kinds are here because they fail for different reasons: a FAILED JOB is
+    clearable history with no retry policy in the picture at all — the broad
+    "take the settled rows" clear DID take it — while a failed WISH only becomes
+    clearable once the retry policy calls it terminal."""
+    fid = _auto_wish("Gave Up", "5555-6666-7777-888888888888")
+    wishes.mark_failed(fid, "the peer went away mid-transfer", 2)   # cap spent
+    gid = _auto_wish("Nothing Anywhere", "9999-aaaa-bbbb-cccccccccccc")
+    wishes.mark_not_found(gid, "nothing out there", 1)
+    jobs = _auto_registry(_failed_job(301, "Failed Job", None, 40.0))
+    was = _auto_payload(jobs=jobs)
+    assert f"wish:{fid}" in _auto_ids(was, "failed"), _auto_ids(was, "failed")
+    assert "job:301" in _auto_ids(was, "failed"), _auto_ids(was, "failed")
+    assert f"wish:{gid}" in _auto_ids(was, "needs_attention"), \
+        _auto_ids(was, "needs_attention")
+    _auto_clear(jobs=jobs)
+    now = _auto_payload(jobs=jobs)
+    assert f"wish:{fid}" in _auto_ids(now, "failed"), _auto_ids(now, "failed")
+    assert "job:301" in _auto_ids(now, "failed"), _auto_ids(now, "failed")
+    assert f"wish:{gid}" in _auto_ids(now, "needs_attention"), \
+        _auto_ids(now, "needs_attention")
+
+
+def _case_search_restart_keeps_completed():
+    """(b) the same completed row SURVIVES a restart of a SEARCH."""
+    wid = _auto_wish("Still Listed", "eeee-1111-2222-333333333333")
+    wishes.mark_imported(wid, os.path.join(REDIRECT, "Artists", "Still Listed"))
+    was = _auto_payload()
+    assert f"wish:{wid}" in _auto_ids(was, "completed"), sorted(_auto_listed(was))
+    # The wishes worker's own pass IS a restart of a search (a tick, a Search
+    # now, a retry), so it must not touch the list. The pass's heavy half is
+    # stubbed — the case is about the CLEAR — and the pipeline's start-up path
+    # is parked for the same reason as everywhere in this section: a job start
+    # IS an import start, and one landing mid-case would say nothing about the
+    # pass.
+    registry, albums = _auto_stubs()
+    with Patch(worker, _due=lambda w, cfg: True, _run_pass=lambda ws, cfg: {},
+               _prime_identities=lambda cfg: None), \
+         Patch(wishes, reconcile_with_library=lambda cfg: 0), \
+         Patch(worker.import_policy, auto_acquisition_enabled=lambda cfg: True), \
+         registry, albums:
+        worker.run_cycle()
+        # A clear runs on its own thread, so give one time to land before
+        # looking: the verdict must be about the RULE, not about a race.
+        real_time.sleep(0.6)
+    now = _auto_payload()
+    assert f"wish:{wid}" in _auto_ids(now, "completed"), sorted(_auto_listed(now))
+
+
+def _case_setting_off_takes_nothing():
+    """(d) with `soulseek_clear_completed_on_import` false, nothing is taken."""
+    wid = _auto_wish("Kept By Setting", "1234-5678-9abc-def012345678")
+    wishes.mark_imported(wid, os.path.join(REDIRECT, "Artists", "Kept By Setting"))
+    readout = dict(api_queue._AUTO_CLEARED)
+    off = dict(AUTO_CFG, soulseek_clear_completed_on_import=False)
+    with Patch(api_queue, load_config=lambda: dict(off)):
+        taken = _auto_clear()
+    assert taken == 0, taken
+    now = _auto_payload()
+    assert f"wish:{wid}" in _auto_ids(now, "completed"), \
+        sorted(_auto_listed(now))
+    assert dict(api_queue._AUTO_CLEARED) == readout, api_queue._AUTO_CLEARED
+    # …and ON again it takes the very same row: the switch is the only thing
+    # that stopped it, not a fixture that never matched.
+    assert _auto_clear() >= 1
+    assert f"wish:{wid}" not in _auto_listed(_auto_payload())
+
+
+def _case_readout():
+    """(e) the payload reports the last automatic clear."""
+    api_queue._AUTO_CLEARED.update(at=0.0, count=0)
+    fresh = _auto_payload()
+    assert fresh["auto_cleared"] == {"at": 0.0, "count": 0}, fresh["auto_cleared"]
+    wid = _auto_wish("Reported", "abcd-1111-2222-3333-444444444444")
+    wishes.mark_imported(wid, os.path.join(REDIRECT, "Artists", "Reported"))
+    taken = _auto_clear()
+    now = _auto_payload()
+    assert taken >= 1, taken
+    assert set(now["auto_cleared"]) == {"at", "count"}, now["auto_cleared"]
+    assert now["auto_cleared"]["count"] == taken, now["auto_cleared"]
+    assert isinstance(now["auto_cleared"]["at"], float), now["auto_cleared"]
+    assert now["auto_cleared"]["at"] > 0.0, now["auto_cleared"]
+
+
+_autoclear_case("a new import drops the completed rows", _case_import_drops_completed)
+_autoclear_case("a search restart keeps them",
+                _case_search_restart_keeps_completed)
+_autoclear_case("a failed or parked row is never taken",
+                _case_never_takes_failed_or_parked)
+_autoclear_case("the setting switches it off", _case_setting_off_takes_nothing)
+_autoclear_case("the payload reports the clear", _case_readout)
+assert not _AUTO_FAILS, "\n".join(_AUTO_FAILS)
+
+print("ok  the AUTOMATIC clear takes only COMPLETED rows, only when a new IMPORT "
+      "starts (a search restart keeps them), only while "
+      "soulseek_clear_completed_on_import is on — and the payload reports it")
 
 PIPE.expect_two = None
 auto.cancel()

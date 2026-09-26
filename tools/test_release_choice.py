@@ -663,6 +663,31 @@ try:
     assert page["releases"][0]["reasons"] and "disambiguation" in page["releases"][0]
     assert page["releases"][0]["disambiguation"] == ""
 
+    # Each row carries the edition's own CATALOG NUMBERS, which is what the
+    # editions table's "Cat #" column prints: read off the release's own
+    # `label-info` by `mlo.release_choice.catalog_numbers` — the same reader the
+    # ranking fills a candidate from and the fallback walk compares by (R169) —
+    # so a row and the choice can never disagree about which number an edition
+    # carries. MusicBrainz states one number per label, so a two-label pressing
+    # really has two and they arrive in MusicBrainz's own order; the singular
+    # `catalog_number` key is the first of them, which is what the payloads that
+    # state only one (a search hit, a release lookup) carry.
+    _transport(RG_PAYLOAD, [dict(rel(MBID["cd"], date="1997-01-20"), title="Album",
+                                 barcode="4988009875798",
+                                 **{"label-info": [{"catalog-number": "SRCS 8757"},
+                                                   {"catalog-number": "CK 62240"}]})])
+    cat = intg.release_group_browse(MBID["rg-1"])["releases"][0]
+    assert cat["catalog_numbers"] == ["SRCS 8757", "CK 62240"], cat.get("catalog_numbers")
+    assert cat["catalog_number"] == "SRCS 8757", cat.get("catalog_number")
+    assert cat["barcode"] == "4988009875798", cat.get("barcode")
+    # An edition that states none carries the EMPTY pair — the table draws its
+    # em dash from the empty string, exactly as the Date column does.
+    _transport(RG_PAYLOAD, [dict(rel(MBID["cd"], date="1997-01-20"), title="Album")])
+    bare = intg.release_group_browse(MBID["rg-1"])["releases"][0]
+    assert bare["catalog_numbers"] == [] and bare["catalog_number"] == "", (
+        bare.get("catalog_numbers"), bare.get("catalog_number"))
+    _transport(RG_PAYLOAD, RAW)
+
     # group_targets: one policy pick, with its score and reasons; "all" is
     # every ELIGIBLE edition (the bootleg is not one).
     rows, err = intg.group_targets(MBID["rg-1"], "best")

@@ -179,21 +179,31 @@ def get_library(key, builder):
     return payload
 
 
+def cover_path(album, file=None):
+    """The cover image FILE an album serves: *file* when it is really in the
+    folder, else the first of the standard names that exists, else None.
+
+    Split out of `cover_bytes` because the sized-thumb path (see
+    `artcache.cover_thumb`) has to know WHICH file it is shrinking — the
+    bytes' cache key is that file's stat.
+    """
+    if file:
+        cand = os.path.normpath(os.path.join(album, os.path.basename(file)))
+        if os.path.isfile(cand):
+            return cand
+        return None
+    for cand in ("cover.jpg", "cover.jpeg", "cover.png", "cover.jxl", "cover.webp", "cover.bmp"):
+        full = os.path.join(album, cand)
+        if os.path.isfile(full):
+            return full
+    return None
+
+
 def cover_bytes(album, file=None):
     """Return (bytes, ctype, etag) for an album cover file, cached."""
     import hashlib
 
-    p = None
-    if file:
-        cand = os.path.normpath(os.path.join(album, os.path.basename(file)))
-        if os.path.isfile(cand):
-            p = cand
-    else:
-        for cand in ("cover.jpg", "cover.jpeg", "cover.png", "cover.jxl", "cover.webp", "cover.bmp"):
-            full = os.path.join(album, cand)
-            if os.path.isfile(full):
-                p = full
-                break
+    p = cover_path(album, file)
     if p is None:
         return None, None, None
     key = _stat_key(p)

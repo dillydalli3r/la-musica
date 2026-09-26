@@ -12,6 +12,11 @@
  *      screen (they are kept, dimmed, during the load), which seeked the new
  *      track to the old track's timestamp.
  *
+ * Section 8 is a different kind of check on the same surface: the cover the
+ * player bar draws must be fetched once, at the width it draws it, and a
+ * repeat play of the same album must not touch the network at all (see
+ * server/artcache.py's `cover_thumb` and `api.coverUrl`'s `w`).
+ *
  * Needs a live backend serving the built app (`web/dist`):
  *   npm --prefix web run build
  *   python -m uvicorn server.main:app --host 127.0.0.1 --port 8010
@@ -204,6 +209,272 @@ function assertConsistent(label, p, expectedFile) {
         lastClicked >= 0 && Math.abs(activeRow - lastClicked) <= 1,
         `clickedRow=${lastClicked} activeRow=${activeRow} t=${rapid.els.find((e) => !e.paused)?.t}`);
     }
+
+    // ---- The player's persisted state, the gapless switch, and Ctrl+Z -------
+
+    /** Press an album row the way the sections above do, but without
+     *  Playwright's actionability wait: the lyric section leaves the page
+     *  scrolled inside the pane, and the first row then never "receives
+     *  events" within the timeout. The row's own click is dispatched instead —
+     *  the click plumbing is what sections 1-4 already prove. */
+    const pressRow = async (i) => {
+      // The album page refetches after every reload in these sections, so the
+      // rows may not be there yet: wait for them, or the dispatch below would
+      // silently press nothing (which read as "playback paused").
+      await page.waitForSelector('tr[title="Click to play"]', { timeout: 10000 }).catch(() => {});
+      await page.evaluate((n) => {
+        const tr = [...document.querySelectorAll('tr[title="Click to play"]')][n];
+        if (tr) tr.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+      }, i);
+    };
+    const playingT = (p) => p.els.find((e) => !e.paused)?.t ?? -1;
+    /** A REAL pointer seek on the bar (the only kind the player records as a
+     *  user jump — the undo stack is fed by the bar's own pointer/drag, the
+     *  ±s keys and the OS's skip actions). */
+    const clickBarAt = async (frac) => {
+      const box = await page.locator("input.seek-fat").first().boundingBox();
+      const x = box.x + Math.max(2, Math.min(box.width - 2, box.width * frac));
+      await page.mouse.click(x, box.y + box.height / 2);
+    };
+    const playsTotal = (page0) => page0.evaluate(async () =>
+      (await (await fetch("/api/top?period=all&kind=tracks&limit=1")).json()).plays_total);
+    const cfgValue = (page0, key) => page0.evaluate(async (k) =>
+      (await (await fetch("/api/config")).json())[k], key);
+
+    // 4b. The bar shows the ORIGINAL release year (ORIGINALDATE, `DATE` as the
+    //     fallback) on the album line — a remaster keeps the year the work came
+    //     out. Conditional: only a library whose tags carry one can say.
+    {
+      await pressRow(0);
+      await sleep(1800);
+      const albumLine = await page.evaluate(() => {
+        const a = document.querySelector('a[title="Open the album page"]');
+        return a ? a.textContent : null;
+      });
+      const tags = await page.evaluate(async (base) => {
+        const el = document.querySelector("a[title='Open the track page']");
+        if (!el) return null;
+        const href = el.getAttribute("href") || "";
+        const m = /[?&]path=([^&]+)/.exec(href);
+        if (!m) return null;
+        const r = await fetch(base + "/api/tags?path=" + m[1]);
+        return r.ok ? await r.json() : null;
+      }, BASE);
+      const raw = tags && (tags.ORIGINALDATE || tags.DATE || (tags.tags && (tags.tags.ORIGINALDATE || tags.tags.DATE)));
+      const want = /^(\d{4})/.exec(String(raw || ""))?.[1] || "";
+      check("the bar's album line carries the original release year",
+        !want || String(albumLine || "").includes(want),
+        `albumLine=${JSON.stringify(albumLine)} tag=${JSON.stringify(raw)} want=${want || "(no date tag — skipped)"}`);
+    }
+
+    // 5. Ctrl+Z undoes the user's own last jump inside a track (owner request:
+    //    "a way to rewind the last action of the user" — no button, shortcut
+    //    only). The stack is bounded, one press drains one entry, a micro-seek
+    //    never enters it, and a track change drops it.
+    //
+    // The sections above leave the lyrics pane open and the page wherever the
+    // pane's own scrolling put it: reload onto the album route so the rows this
+    // section clicks are the ones it means.
+    await page.goto(`${BASE}/album/${encodeURIComponent(album.path)}`, { waitUntil: "domcontentloaded" });
+    await page.waitForSelector('tr[title="Click to play"]');
+    await pressRow(0);
+    await sleep(1500);
+    const beforeUndo = await probe(page);
+    const tFrom = playingT(beforeUndo);
+    const longEnough = (beforeUndo.seekMax || 0) >= 8;
+    if (!longEnough) {
+      check("undo: a track long enough to jump in", true, `skipped — track is ${beforeUndo.seekMax}s`);
+    } else {
+      await clickBarAt(0.7);
+      await sleep(400);
+      const jumped = playingT(await probe(page));
+      check("undo: a seek-bar jump lands far from where it started", jumped > tFrom + 4, `t ${tFrom} -> ${jumped}`);
+      // The seek bar keeps the focus after a seek — Ctrl+Z must still work
+      // (a range input is not "typing"; a text field would be).
+      await page.evaluate(() => document.querySelector("input.seek-fat").focus());
+      await page.keyboard.press("Control+z");
+      await sleep(400);
+      const undone = playingT(await probe(page));
+      check("undo: Ctrl+Z seeks back to where the jump started (focus on the seek bar)",
+        Math.abs(undone - tFrom) <= 1.5, `t=${undone} was ${tFrom}`);
+      const singleFrom = playingT(await probe(page));
+      await page.keyboard.press("Control+z");
+      await sleep(400);
+      const singleTo = playingT(await probe(page));
+      check("undo: one entry, one press — a second Ctrl+Z is a no-op",
+        singleTo >= singleFrom - 0.2 && singleTo - singleFrom <= 1.5, `t ${singleFrom} -> ${singleTo}`);
+      // A micro-seek is noise, not an action: nothing to undo afterwards.
+      // Clicked ~1 s on from where the track is now.
+      const microT = playingT(await probe(page));
+      const microMax = (await probe(page)).seekMax || 1;
+      await clickBarAt(Math.min(0.99, (microT + 1) / microMax));
+      await sleep(300);
+      const micro = playingT(await probe(page));
+      await page.keyboard.press("Control+z");
+      await sleep(400);
+      const afterMicro = playingT(await probe(page));
+      check("undo: a 1 s micro-seek never enters the stack",
+        afterMicro >= micro - 0.2 && afterMicro - micro <= 1.5, `micro t=${micro} after Ctrl+Z t=${afterMicro}`);
+      // A stale entry: the jump was made in a track that is gone (a track
+      // change clears the stack), so Ctrl+Z cannot seek the new one into it.
+      await clickBarAt(0.85);
+      await sleep(300);
+      await pressRow(1);
+      await sleep(1200);
+      const newTrack = await probe(page);
+      const newT = playingT(newTrack);
+      await page.keyboard.press("Control+z");
+      await sleep(400);
+      const afterStale = playingT(await probe(page));
+      check("undo: a jump made in another track is dropped, not applied",
+        newT >= 0 && newT < 6 && afterStale >= 0 && afterStale < 6,
+        `new track t=${newT} -> ${afterStale} (a stale entry would have jumped to the old track's second)`);
+      assertConsistent("after Ctrl+Z", await probe(page), album.tracks[1]);
+    }
+
+    // 6. A reload mid-track: the queue, the track and the second inside it come
+    //    back PAUSED (mlo.player.state.v1) — and the resume that follows is not
+    //    a new play, while pressing the row again is one.
+    await pressRow(0);
+    await sleep(1500);
+    const preReload = await probe(page);
+    const tReload = playingT(preReload);
+    const file0 = preReload.els.find((e) => !e.paused)?.file ?? "";
+    const playsBefore = await playsTotal(page);
+    await page.reload({ waitUntil: "domcontentloaded" });
+    await sleep(2500);
+    const postReload = await probe(page);
+    const restored = postReload.els.find((e) => e.file === file0);
+    check("reload: the queue and the row come back",
+      postReload.pos === preReload.pos && postReload.len === preReload.len,
+      `pos=${postReload.pos}/${postReload.len} (was ${preReload.pos}/${preReload.len})`);
+    check("reload: the same track comes back PAUSED at the remembered second",
+      !!restored && postReload.els.every((e) => e.paused) && !postReload.playing
+        && Math.abs((restored?.t ?? -1) - tReload) <= 1 && tReload > 0.3,
+      `t=${restored?.t} was ${tReload} playing=${postReload.playing} files=[${postReload.els.map((e) => e.file).join(", ")}]`);
+    if (!longEnough) {
+      check("reload: the play count is kept honest", true, "skipped — track too short to resume into");
+    } else {
+      await page.evaluate(() => (document.activeElement instanceof HTMLElement) && document.activeElement.blur());
+      await page.keyboard.press("Space");                 // resume
+      await sleep(1200);
+      const resumeT = playingT(await probe(page));
+      check("reload: resuming plays on from the restored second (no restart at 0)",
+        resumeT > tReload - 0.5, `t=${resumeT} restored at ${restored?.t}`);
+      check("reload: the resume is not counted as a new play",
+        (await playsTotal(page)) === playsBefore, `plays ${playsBefore} -> ${await playsTotal(page)}`);
+      await pressRow(0);                             // the same row, from the start
+      await sleep(1500);
+      check("pressing the same track from the start still counts a play",
+        (await playsTotal(page)) === playsBefore + 1, `plays ${playsBefore} -> ${await playsTotal(page)}`);
+    }
+
+    // 7. `gapless_playback: false` — the preload and the handover are gated off,
+    //    and the natural end still plays the next track through the normal load.
+    const gaplessWas = await cfgValue(page, "gapless_playback");
+    const setGapless = (v) => page.evaluate(async (val) => {
+      const r = await fetch("/api/config", {
+        method: "POST", headers: { "content-type": "application/json" },
+        body: JSON.stringify({ gapless_playback: val }),
+      });
+      return r.status;
+    }, v);
+    const setStatus = await setGapless(false);
+    check("gapless: the server accepts gapless_playback=false", setStatus === 200, `status=${setStatus}`);
+    await page.reload({ waitUntil: "domcontentloaded" });
+    await sleep(1400);
+    await pressRow(0);
+    await sleep(1500);
+    await seekNearEnd();                                  // the window a preload would use
+    await sleep(600);
+    const gaplessOff = await probe(page);
+    check("gapless off: the idle element is NOT preloaded with the next track",
+      gaplessOff.els.length <= 1,
+      `elements-with-src=${gaplessOff.els.length} files=[${gaplessOff.els.map((e) => e.file).join(", ")}]`);
+    let afterOff = null;
+    for (let i = 0; i < 30; i++) {
+      await sleep(1000);
+      afterOff = await probe(page);
+      if (afterOff.pos === gaplessOff.pos + 1 && afterOff.els.some((e) => !e.paused)) break;
+    }
+    assertConsistent("gapless off: the natural end still loads the next track", afterOff,
+      album.tracks[afterOff.pos - 1]);
+    await setGapless(gaplessWas === undefined ? true : gaplessWas);
+    await page.reload({ waitUntil: "domcontentloaded" });
+
+    // 8. The cover on the play path: the width the surface DRAWS, one request
+    //    for it, and no network at all on a repeat play.
+    //
+    //    Pressing play used to fetch the album's whole cover file (a
+    //    1200-3000 px JPEG, 0.3-3 MB) for a 74 px bar thumb — twice, because
+    //    the OS media session asks for its own — and every later track of that
+    //    album revalidated it (`Cache-Control: no-cache`), which is the second
+    //    the owner measured between pressing play and the artwork appearing.
+    //    `?w=` serves the file shrunk to a bucket (server/artcache.py's
+    //    `cover_thumb`), re-encoded once and then read from disk, and its
+    //    answer is cacheable for minutes. This pins the CLIENT's half of the
+    //    contract: ask for a thumbnail, keep it, and do not ask again for the
+    //    same album's cover.
+    //
+    //    The browser cache is emptied first: the sections above have already
+    //    played this album, and a property about what a play COSTS cannot be
+    //    read off a warm cache.
+    const coversOnWire = () => page.evaluate(() =>
+      performance.getEntriesByType("resource")
+        .filter((e) => e.name.includes("/api/cover") && !e.name.includes("color=1"))
+        .map((e) => ({ url: e.name, bytes: e.transferSize })));
+    const barArt = () => page.evaluate(() => {
+      const img = document.querySelector('button[title^="Album art"] img');
+      return img ? { src: img.currentSrc || img.src, w: img.naturalWidth, complete: img.complete } : null;
+    });
+    const albumCoverOf = (url) => url.includes(encodeURIComponent(album.path)) || url.includes(album.path);
+
+    const cdp = await page.context().newCDPSession(page);
+    await cdp.send("Network.enable");
+    await cdp.send("Network.clearBrowserCache");
+    await page.goto(`${BASE}/album/${encodeURIComponent(album.path)}`, { waitUntil: "domcontentloaded" });
+    await page.waitForSelector('tr[title="Click to play"]');
+    await page.evaluate(() => performance.clearResourceTimings());
+    await pressRow(0);
+    await sleep(3000);
+    const art1 = await barArt();
+    const played = await coversOnWire();
+    const barUrl = art1?.src || "";
+    const mine = played.filter((e) => e.url === barUrl);
+    const fetched = mine.filter((e) => e.bytes > 0);
+    check("the play path asks for a cover at the width it draws (not the master)",
+      !!art1 && art1.complete && /[?&]w=\d+/.test(art1.src) && art1.w > 0 && art1.w <= 320,
+      `src=…${(art1?.src || "").split("/api/cover")[1]} naturalWidth=${art1?.w} complete=${art1?.complete}`);
+    // A track row draws its cover at 32-36 px and asks for the same bucket, so
+    // the row that queued the track and the bar that shows it are ONE request;
+    // a row carrying its own art (a per-track sidecar) legitimately differs.
+    const rowSrc = await page.evaluate(() => {
+      const img = document.querySelector('tr img[src*="/api/cover"]');
+      return img ? img.src : "";
+    });
+    const fileParam = (u) => (/[?&]file=([^&]*)/.exec(u || "") || [, ""])[1];
+    check("the bar and a track row share ONE cover URL",
+      !rowSrc || fileParam(rowSrc) !== fileParam(barUrl) || rowSrc === barUrl,
+      `row=…${rowSrc.split("/api/cover")[1] || rowSrc} bar=…${barUrl.split("/api/cover")[1]}`);
+    check("the play path fetches it once, small — never the master",
+      fetched.length <= 1 && fetched.every((e) => e.bytes < 128 * 1024),
+      `fetches=${fetched.length} bytes=[${fetched.map((e) => e.bytes).join(", ")}] (0 = the ` +
+      `entry was already in the browser's memory cache) ` +
+      `album-cover entries=${played.filter((e) => albumCoverOf(e.url)).length}`);
+
+    // The repeat play: the next row of the SAME album (same cover URL). Its
+    // cached bytes are still fresh, so the network must not be touched — the
+    // bar's own re-render, the queue row and the OS media session all read the
+    // entry the first play put there.
+    await pressRow(1);
+    await sleep(2500);
+    const after2 = await coversOnWire();
+    const freshForBar = after2.filter((e) => e.url === barUrl && e.bytes > 0)
+      .filter((e) => !mine.some((p) => p.url === e.url && p.bytes === e.bytes));
+    check("a repeat play of the same album asks the network for nothing",
+      freshForBar.length === 0,
+      `fresh entries for the bar's cover: ${JSON.stringify(freshForBar)}`);
+    await cdp.detach().catch(() => {});
 
     check("no uncaught page errors", errs.length === 0, errs.join(" | "));
   } catch (e) {

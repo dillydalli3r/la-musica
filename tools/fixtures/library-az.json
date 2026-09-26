@@ -1,5 +1,5 @@
 {
- "note": "captured from a scratch server (MLO_MUSIC_FOLDER=F:/tmp/mlo-lib-az) over the synthetic library",
+ "note": "captured from a scratch server (MLO_MUSIC_FOLDER=F:/tmp/mlo-lib-az) over the synthetic library; the artists' own `grade` objects (and Artist Alpha/Beta's `has_image`) were added by hand afterwards for the artist-dot cases — server.library sends grade per row now, and these two carry the pass/fail pair the check needs",
  "album_path": "F:/tmp/mlo-lib-az/Artist Alpha/2020 - First Album",
  "library": {
   "folder": "F:/tmp/mlo-lib-az",
@@ -548,7 +548,22 @@
      "pass": false,
      "audit_summary": "REAL"
     },
-    "has_image": false
+    "has_image": true,
+    "grade": {
+     "path": "F:/tmp/mlo-lib-az/Artist Alpha",
+     "checks": 2,
+     "pass_count": 2,
+     "failed_checks": 0,
+     "pct": 100.0,
+     "pass": true,
+     "issues": [],
+     "notes": [],
+     "artwork": {
+      "image": true,
+      "image_file": "artist.jpg",
+      "description": true
+     }
+    }
    },
    {
     "path": "F:/tmp/mlo-lib-az/Artist Beta",
@@ -822,7 +837,29 @@
      "pass": false,
      "audit_summary": "FAKE"
     },
-    "has_image": false
+    "has_image": true,
+    "grade": {
+     "path": "F:/tmp/mlo-lib-az/Artist Beta",
+     "checks": 2,
+     "pass_count": 1,
+     "failed_checks": 1,
+     "pct": 50.0,
+     "pass": false,
+     "issues": [
+      {
+       "code": "ARTIST_DESCRIPTION_MISSING",
+       "label": "Artist description",
+       "where": "Artist Beta",
+       "reason": "no description.txt (or it is blank)"
+      }
+     ],
+     "notes": [],
+     "artwork": {
+      "image": true,
+      "image_file": "artist.jpg",
+      "description": false
+     }
+    }
    },
    {
     "path": "F:/tmp/mlo-lib-az/Artist Gamma",

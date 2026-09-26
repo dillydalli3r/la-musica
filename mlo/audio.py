@@ -209,18 +209,28 @@ TAG_MAP = {
         "mp4": ("freeform", "com.apple.iTunes", "RATING"),
     },
     # AcoustID identity (Picard-compatible). Written during import when a
-    # fingerprint match is accepted; graded only when a file already carries
-    # one of the two, so a library that never fingerprinted anything is never
-    # failed for their absence.
+    # fingerprint match is accepted; required by grade_check_acoustid (script
+    # 21 completes or creates the pair from the file itself). Two spellings
+    # are READ per container: this app's own, and the one beets/mediafile
+    # writes (its chroma plugin stores "Acoustid Id" / "Acoustid Fingerprint"
+    # as TXXX descriptions and iTunes atoms) — beets IS this app's import
+    # tagger, so a file the app itself just imported carries the tag under
+    # that name, and a reader that only knew "ACOUSTID_ID" reported the pair
+    # the file does hold as missing (script 21 said "carries no AcoustID
+    # tag", `_recording_identity` found nothing). Writing drops the other
+    # spelling, so a file never holds the same id twice.
     "ACOUSTID_ID": {
         "flac": "ACOUSTID_ID",
-        "mp3": ("TXXX", "ACOUSTID_ID"),
-        "mp4": ("freeform", "com.apple.iTunes", "ACOUSTID_ID"),
+        "mp3": (("TXXX", "ACOUSTID_ID"), ("TXXX", "Acoustid Id")),
+        "mp4": (("freeform", "com.apple.iTunes", "ACOUSTID_ID"),
+                ("freeform", "com.apple.iTunes", "Acoustid Id")),
     },
     "ACOUSTID_FINGERPRINT": {
         "flac": "ACOUSTID_FINGERPRINT",
-        "mp3": ("TXXX", "ACOUSTID_FINGERPRINT"),
-        "mp4": ("freeform", "com.apple.iTunes", "ACOUSTID_FINGERPRINT"),
+        "mp3": (("TXXX", "ACOUSTID_FINGERPRINT"),
+                ("TXXX", "Acoustid Fingerprint")),
+        "mp4": (("freeform", "com.apple.iTunes", "ACOUSTID_FINGERPRINT"),
+                ("freeform", "com.apple.iTunes", "Acoustid Fingerprint")),
     },
     # Classical work/movement (Picard-compatible: ID3 MVNM/MVIN, TXXX:WORK)
     "WORK": {
@@ -544,6 +554,31 @@ TAG_MAP = {
         "mp3": ("TLAN", None),
         "mp4": ("freeform", "com.apple.iTunes", "LANGUAGE"),
     },
+    # MusicBrainz ALIASES: the names MusicBrainz states for an entity besides
+    # its canonical one, written by the import from the release payload
+    # (mlo.autotag). The bare key holds the ONE alias the reader's locale
+    # ladder chose (`server.integrations.alias_for`) — the name the library
+    # and the pages show beside the stored one — while a locale MusicBrainz
+    # states gets its own tag whose name carries the language
+    # (TITLEALIAS-JA, ARTISTALIAS-EN_PH, ...). Those suffixed keys have no
+    # fixed entry here (the locale set is open-ended); see
+    # `_ALIAS_TAG_PREFIXES`. A key holds a LIST — several aliases of one
+    # language — as repeated fields, exactly like GENRE.
+    "TITLEALIAS": {
+        "flac": "TITLEALIAS",
+        "mp3": ("TXXX", "TITLEALIAS"),
+        "mp4": ("freeform", "com.apple.iTunes", "TITLEALIAS"),
+    },
+    "ARTISTALIAS": {
+        "flac": "ARTISTALIAS",
+        "mp3": ("TXXX", "ARTISTALIAS"),
+        "mp4": ("freeform", "com.apple.iTunes", "ARTISTALIAS"),
+    },
+    "ALBUMALIAS": {
+        "flac": "ALBUMALIAS",
+        "mp3": ("TXXX", "ALBUMALIAS"),
+        "mp4": ("freeform", "com.apple.iTunes", "ALBUMALIAS"),
+    },
     # A medium's own title ("Disc 2: The Rarities"), MusicBrainz's medium
     # `title`. TSST is the ID3v2.4 frame for it — and ID3v2.3 has no disc-title
     # frame at all, which is why the TXXX spelling is listed second: mutagen's
@@ -711,6 +746,27 @@ _ID3_KINDS = ("mp3", "aac", "wav", "aiff")
 # TRANSLITERATION-JA-LATN) — the same prefixes mlo.config keys the LYRICS
 # family on — so they cannot be fixed TAG_MAP entries. See set_tag.
 _LYRICS_TRANSFORM_PREFIXES = ("TRANSLATION-", "TRANSLITERATION-")
+
+# MusicBrainz aliases carry their LOCALE in the tag name the same way
+# (TITLEALIAS-JA, ARTISTALIAS-EN_PH, ALBUMALIAS-ZH_HANS — see the TAG_MAP
+# entries above): the suffix sets MusicBrainz uses are open-ended, so no fixed
+# entry can hold every one. The freeform spellings mirror the bare entries
+# (TXXX / the iTunes freeform atom), so an alias with a locale reads back as
+# the same kind of tag an alias without one does.
+_ALIAS_TAG_PREFIXES = ("TITLEALIAS-", "ARTISTALIAS-", "ALBUMALIAS-")
+
+
+def _alias_tag_spec(name):
+    """The container spec for a locale-suffixed alias tag, or None.
+
+    None for every other name: this is the narrow, open-ended pair the
+    TAG_MAP cannot spell, not a general escape hatch.
+    """
+    text = str(name or "").upper()
+    if not text.startswith(_ALIAS_TAG_PREFIXES):
+        return None
+    return {"flac": text, "mp3": ("TXXX", text),
+            "mp4": ("freeform", "com.apple.iTunes", text)}
 
 
 def _is_id3_frame_id(key):
@@ -1685,6 +1741,8 @@ class AudioFile:
 
         spec = TAG_MAP.get(name)
         if spec is None:
+            spec = _alias_tag_spec(name)
+        if spec is None:
             return None
 
         kind = self.kind
@@ -1821,6 +1879,8 @@ class AudioFile:
                         continue
                     raw = str(k)
                     canonical = _FLAC_CANONICAL.get(raw.lower(), raw)
+                    if canonical == raw and _alias_tag_spec(raw):
+                        canonical = raw.upper()
                     out[canonical] = str(val)
 
             elif self.kind in _ID3_KINDS:
@@ -1830,7 +1890,8 @@ class AudioFile:
                         continue
                     if fid == "TXXX":
                         desc = str(frame.desc)
-                        canonical = self._mp3_canonical("TXXX", desc)
+                        canonical = self._mp3_canonical("TXXX", desc) or (
+                            desc.upper() if _alias_tag_spec(desc) else "")
                         out[canonical or f"TXXX:{desc}"] = self._id3_text(frame) or ""
                     elif fid == "USLT":
                         out["LYRICS"] = self.get_lyrics() or ""
@@ -1905,6 +1966,8 @@ class AudioFile:
                     if raw.startswith("----:com.apple.iTunes:"):
                         name = raw.rsplit(":", 1)[-1]
                         canonical = _MP4_FREEFORM_CANONICAL.get(name.lower(), raw)
+                        if canonical == raw and _alias_tag_spec(name):
+                            canonical = name.upper()
                     else:
                         canonical = _MP4_ATOM_CANONICAL.get(raw, raw)
                     out[canonical] = self._mp4_text(vals) or ""
@@ -1954,7 +2017,7 @@ class AudioFile:
                 # one shape the container can hold. get_tag() only knows the
                 # TAG_MAP names, but all_tags() emits the container's own keys
                 # for a video, so both spellings resolve here.
-                spec = TAG_MAP.get(name.upper())
+                spec = TAG_MAP.get(name.upper()) or _alias_tag_spec(name)
                 key = str(spec["flac"] if spec else name)
                 return split_list(
                     self._video_tags.get(self._video_canonical(key)))
@@ -1970,7 +2033,7 @@ class AudioFile:
                 return []
 
             if self.kind in _ID3_KINDS:
-                spec = TAG_MAP.get(name.upper())
+                spec = TAG_MAP.get(name.upper()) or _alias_tag_spec(name)
                 specs = _mp3_specs(spec) if spec else ()
                 if not specs:
                     specs = ((("TXXX", name[5:]) if name.upper().startswith("TXXX:")
@@ -2004,7 +2067,7 @@ class AudioFile:
                 return []
 
             if self.kind == "mp4":
-                spec = TAG_MAP.get(name.upper())
+                spec = TAG_MAP.get(name.upper()) or _alias_tag_spec(name)
                 atoms = _mp4_specs(spec) if spec else (name,)
                 out = []
                 for atom in atoms:
@@ -2246,6 +2309,12 @@ class AudioFile:
             spec = {"flac": name, "mp3": ("TXXX", name),
                     "mp4": ("freeform", "com.apple.iTunes", name)}
         if spec is None:
+            # The alias tags carry their locale in the NAME (TITLEALIAS-JA):
+            # like the transforms above, the suffix set is open-ended, so the
+            # freeform spellings are built here rather than falling through to
+            # set_any_tag, which refuses a name that is not an ID3 frame ID.
+            spec = _alias_tag_spec(name)
+        if spec is None:
             # raw / unknown key: fall back to the arbitrary-key writer so
             # custom tags (TXXX:..., freeform atoms, vorbis comments) work
             return self.set_any_tag(name, value)
@@ -2419,6 +2488,11 @@ class AudioFile:
         if name == "LYRICS":
             return self.delete_lyrics()
         spec = TAG_MAP.get(name)
+        if spec is None:
+            # Locale-suffixed alias tags (TITLEALIAS-JA) have no fixed entry;
+            # their stored spelling is built here so a drop deletes the frame
+            # the write actually created (see _alias_tag_spec).
+            spec = _alias_tag_spec(name)
         if spec is None:
             return self.delete_any_tag(name)
 

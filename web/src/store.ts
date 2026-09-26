@@ -176,6 +176,17 @@ interface Store {
    * fullscreen player, persisted across reloads. */
   vol: number;
   setVol: (v: number) => void;
+  /** Where a RELOAD found the player (`mlo.player.state.v1`): the track the
+   *  queue was on and the second inside it. The queue and `index` above are
+   *  hydrated from the same record, so the player bar only has to seek — once
+   *  the restored track's own metadata arrives — and it must do so PAUSED: a
+   *  page cannot start sound on its own, and a surprise album is worse than
+   *  pressing play. Both are 0/null for a session that was not restored. */
+  resumePath: string | null;
+  resumeTime: number;
+  /** The restore has been honoured (the seek happened, or the queue moved on):
+   *  no later load may replay it. */
+  clearResume: () => void;
 }
 
 const VOL_KEY = "mlo.vol";
@@ -185,6 +196,149 @@ function initialVol(): number {
   if (raw === null || raw === "") return 1;
   const n = Number(raw);
   return Number.isFinite(n) && n >= 0 && n <= 1 ? n : 1;
+}
+
+// ---- Where the player was when the page went away ------------------------
+// A reload — a refresh, a phone that evicted the tab, a shell that restarted —
+// used to come back to an empty bar: the queue, the row and the second inside
+// it lived only in memory. They are now kept in one localStorage record and
+// hydrated HERE, in the store module, because that is the only place that runs
+// before the player bar mounts (and the bar is mounted once for the session).
+//
+// What is deliberately NOT in the record is whether the track was playing: a
+// page cannot start sound without a gesture, and silently resuming an album
+// into a room is worse than one press. A restored session is always paused.
+
+const PLAYER_STATE_KEY = "mlo.player.state.v1";
+/** How long two saves must be apart. Wide enough that a burst of queue edits
+ *  (a drag-reorder, a trim, a press that replaces the queue) costs one write,
+ *  tight enough that a reload right after an edit still comes back to it. */
+const PLAYER_WRITE_MS = 500;
+/** The slow tick that keeps the stored SECOND roughly current while the page
+ *  lives: a reload then loses at most this much of the track. `timeupdate`
+ *  fires about four times a second and is never itself a write — that would be
+ *  a synchronous `localStorage.setItem` per frame. */
+const PLAYER_SLOW_MS = 5000;
+
+/** The record as written — and as read back. `path` rides beside the queue
+ *  because `index` alone cannot say WHICH track a second belonged to: a queue
+ *  edit between two writes leaves the index pointing at a row the position was
+ *  never recorded for, and the path is what the position is matched against. */
+interface PlayerState {
+  queue: QueueTrack[];
+  index: number;
+  path: string;
+  time: number;
+}
+
+/** One queue row as it survives a JSON round trip — or null when it is not a
+ *  row this build can play. A hand-edited or half-written record must degrade
+ *  to "nothing to restore", never to a queue of `undefined`. */
+function asQueueTrack(v: unknown): QueueTrack | null {
+  if (!v || typeof v !== "object") return null;
+  const t = v as Partial<QueueTrack>;
+  if (typeof t.path !== "string" || !t.path) return null;
+  if (typeof t.file !== "string" || !t.file) return null;
+  if (typeof t.albumPath !== "string") return null;
+  return {
+    path: t.path,
+    file: t.file,
+    albumPath: t.albumPath,
+    artist: typeof t.artist === "string" ? t.artist : undefined,
+    album: typeof t.album === "string" ? t.album : undefined,
+    title: typeof t.title === "string" ? t.title : undefined,
+    coverFile: typeof t.coverFile === "string" || t.coverFile === null ? t.coverFile : undefined,
+    albumCover: typeof t.albumCover === "string" || t.albumCover === null ? t.albumCover : undefined,
+    advisory: typeof t.advisory === "string" || t.advisory === null ? t.advisory : undefined,
+  };
+}
+
+/** The stored record, or null when there is nothing usable in it. */
+function readPlayerState(): PlayerState | null {
+  try {
+    const raw = localStorage.getItem(PLAYER_STATE_KEY);
+    if (!raw) return null;
+    const parsed = JSON.parse(raw) as Partial<PlayerState> | null;
+    if (!parsed || !Array.isArray(parsed.queue)) return null;
+    const queue = parsed.queue.map(asQueueTrack).filter((t): t is QueueTrack => t !== null);
+    if (!queue.length) return null;
+    const rawIndex = parsed.index;
+    const index = typeof rawIndex === "number" && Number.isInteger(rawIndex)
+      ? Math.min(Math.max(rawIndex, 0), queue.length - 1)
+      : 0;
+    const rawTime = parsed.time;
+    const time = typeof rawTime === "number" && Number.isFinite(rawTime) && rawTime > 0 ? rawTime : 0;
+    const path = queue[index].path;
+    // The second is only restored for the row it was recorded for.
+    return { queue, index, path, time: parsed.path === path ? time : 0 };
+  } catch {
+    return null; // storage disabled, or the value was edited by hand
+  }
+}
+
+/** What this page load starts from (null on the first run). */
+const RESTORED = readPlayerState();
+
+/** The player's live position, reported by the player bar (which owns the
+ *  element) and captured with the queue on the next write. A module variable,
+ *  never store state: it changes several times a second and nothing renders
+ *  from it. */
+let playerPos: { path: string | null; time: number } = { path: null, time: 0 };
+
+/** The player bar's report of what the ACTIVE element holds and where it is.
+ *  The path is carried so a position can never be attributed to the wrong
+ *  row (see `playerSnapshot`). */
+export function notePlayerPosition(path: string | null, time: number) {
+  playerPos = { path, time: Number.isFinite(time) && time >= 0 ? time : 0 };
+}
+
+let playerWrite: number | undefined;
+
+/** The record to write — or null when there is no queue to come back to, in
+ *  which case the key is REMOVED (a cleared queue must not return). */
+function playerSnapshot(): PlayerState | null {
+  const st = useStore.getState();
+  const track = st.queue[st.index];
+  if (!track) return null;
+  // The second belongs to the track the ELEMENT holds. A track change or an
+  // edit can leave the store naming another row while the recorded position is
+  // still the outgoing track's; resuming the neighbour in the middle would be
+  // the bug this guard exists for.
+  const time = playerPos.path === track.path ? playerPos.time : 0;
+  return {
+    queue: st.queue,
+    index: st.index,
+    path: track.path,
+    time: Math.round(time * 10) / 10,
+  };
+}
+
+function writePlayerState() {
+  playerWrite = undefined;
+  try {
+    const snap = playerSnapshot();
+    if (snap) localStorage.setItem(PLAYER_STATE_KEY, JSON.stringify(snap));
+    else localStorage.removeItem(PLAYER_STATE_KEY);
+  } catch {
+    /* storage disabled: the session simply survives no reload */
+  }
+}
+
+/** Save, coalesced. Scheduled by every queue mutation (below), by each pause
+ *  and by the slow tick — never per `timeupdate`. */
+export function savePlayerState() {
+  if (playerWrite !== undefined) return;
+  playerWrite = window.setTimeout(writePlayerState, PLAYER_WRITE_MS);
+}
+
+/** Save NOW: the page is going away, the sound just stopped, or the store
+ *  changed in a way whose next tick may never run. */
+export function flushPlayerState() {
+  if (playerWrite !== undefined) {
+    clearTimeout(playerWrite);
+    playerWrite = undefined;
+  }
+  writePlayerState();
 }
 
 export const useStore = create<Store>((set) => ({
@@ -234,7 +388,10 @@ export const useStore = create<Store>((set) => ({
     }),
   playing: null,
   setPlaying: (playing) => set({ playing }),
-  queue: [],
+  // The queue and the row are the bulk of a restored session (see
+  // `PLAYER_STATE_KEY`): a reload comes back to the same list, on the same
+  // track, paused. `playing` above stays null through every one of these.
+  queue: RESTORED?.queue ?? [],
   setQueue: (queue) => set((st) => ({ queue, queueId: st.queueId + 1 })),
   // Deliberately does NOT bump queueId: the player reloads audio on queueId
   // changes, and appending "next"/"end" must not interrupt the playing track.
@@ -279,7 +436,7 @@ export const useStore = create<Store>((set) => ({
       else if (from > st.index && to <= st.index) index = st.index + 1;
       return { queue, index };
     }),
-  index: 0,
+  index: RESTORED?.index ?? 0,
   setIndex: (index) => set({ index }),
   queueId: 0,
   playToken: 0,
@@ -297,6 +454,12 @@ export const useStore = create<Store>((set) => ({
     }
     set((st) => ({ queue, index, queueId: st.queueId + 1, playToken: st.playToken + 1, playing: queue[index]?.path ?? null }));
   },
+  // The restore's own two values, read once by the player bar. They are store
+  // state rather than module constants so the bar can clear them the moment
+  // the seek has happened — a later load of the same track must start at 0.
+  resumePath: RESTORED?.path ?? null,
+  resumeTime: RESTORED?.time ?? 0,
+  clearResume: () => set((st) => (st.resumePath === null && st.resumeTime === 0 ? {} : { resumePath: null, resumeTime: 0 })),
   query: "",
   setQuery: (query) => set({ query }),
   sort: null,
@@ -354,6 +517,41 @@ export const useStore = create<Store>((set) => ({
     }, 250);
   },
 }));
+
+let persistenceStarted = false;
+
+/** Start the player's own persistence: the queue-mutation subscription, the
+ *  slow save and the two flushes.
+ *
+ *  A function, and NOT module-scope work, on purpose: importing this module
+ *  must have no side effects at all. Several Node/vite-SSR harnesses import
+ *  the store's graph — `check_release_choice.mjs` and the payload checks
+ *  transitively — and a `setInterval` created at import time keeps their event
+ *  loop alive so they never exit, while a `window.addEventListener` throws in
+ *  the ones that stub `window` with a bare object. Everything here is
+ *  browser-only and reachable from the browser, so the shell calls this once
+ *  when the app mounts (PlayerBar, which is mounted for the session's life).
+ *  Idempotent: a re-mount costs nothing. */
+export function startPlayerPersistence() {
+  if (persistenceStarted) return;
+  persistenceStarted = true;
+  // Every queue mutation — a press that replaces the queue, a reorder, a
+  // removal, the row moving on — schedules a save: the queue IS the restore's
+  // bulk, and this is the one seam all of them pass. The SECOND inside a track
+  // is not written from here (it changes four times a second); a pause and the
+  // slow tick below keep it current. A pause is the moment worth keeping
+  // exactly, so it flushes instead of waiting for a coalesced write.
+  useStore.subscribe((st, prev) => {
+    if (st.queue !== prev.queue || st.index !== prev.index) savePlayerState();
+    if (st.playing !== prev.playing && !st.playing) flushPlayerState();
+  });
+  window.setInterval(savePlayerState, PLAYER_SLOW_MS);
+  // The page going away is the last chance for a coalesced write, and
+  // `visibilitychange` is the event iOS fires before it kills a backgrounded
+  // tab (`pagehide` is not guaranteed there).
+  window.addEventListener("pagehide", flushPlayerState);
+  document.addEventListener("visibilitychange", flushPlayerState);
+}
 let volWrite: number | undefined;
 
 let toastSeq = 0;

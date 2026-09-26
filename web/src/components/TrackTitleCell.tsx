@@ -51,23 +51,28 @@ export default function TrackTitleCell({
    *  still may not shrink (its constant width is what this cell exists for),
    *  so what gives is the LINE: the name gets the cell's full width first, the
    *  slot keeps its own row — and its own x on every row, which is the
-   *  alignment a stack of rows is read by. `md:flex-1` puts the two back side
-   *  by side, so nothing above `md` changes. */
+   *  alignment a stack of rows is read by. The `flex-wrap` is `max-md:` only,
+   *  and above `md` the two halves are simply side by side again, so nothing
+   *  above `md` changes. */
   stackOnPhone?: boolean;
 }) {
   return (
     <div className={`flex items-center gap-1.5 min-w-0${stackOnPhone ? " max-md:flex-wrap" : ""} ${className}`}>
-      {/* `flex-wrap` is what keeps a narrow cell readable. A table column
-          cannot grow (the layout is fixed — see index.css), so a row has a
-          fixed width to spend, and before this the trailing slot's
-          constant-width marks simply won: the title link (`flex-1 min-w-0`)
-          was squeezed to 0 px and wrapped one character per line, which is how
-          the Library's Tracks view came to render as empty rows 200 px tall.
-          Wrapping gives the title its own line — the marks move UNDER it when
-          a cell is too narrow to hold both — while the trailing slot keeps its
-          own x on every row with the width for it (the alignment this cell
-          exists for). */}
-      <div className={`flex items-center gap-1.5 min-w-0 flex-wrap${stackOnPhone ? " max-md:grow max-md:basis-full md:flex-1" : " flex-1"}`}>{children}</div>
+      {/* `grow basis-auto` — deliberately NOT `flex-1`. `flex-1` is a 0%
+          BASIS, so this half's hypothetical width is zero: it never asks for
+          room, the outer line never wraps for it, and it can be squeezed to 0
+          px while the trailing slot keeps its own width. That is how the
+          Library's Tracks view came to render empty 200 px rows — the title
+          link at 0 px, one character per line (the failure this cell exists
+          to prevent), and how the album name column measured 0-13 px on a
+          390 px phone. With the basis back on the CONTENT, this half asks for
+          the width its name and marks need; if the cell cannot give it, the
+          line wraps and the trailing slot moves under the name, and the inner
+          `flex-wrap` still moves the trailing MARKS under the name as a last
+          resort. The table's own floors (lib/columns) are what normally make
+          that second line unnecessary: each column carries the width its
+          data needs, so a row that fits the table always fits the cell. */}
+      <div className={`flex items-center gap-1.5 min-w-0 flex-wrap grow basis-auto${stackOnPhone ? " max-md:basis-full" : ""}`}>{children}</div>
       {/* gap-1.5, the same as the title side: at gap-0.5 the actions menu sat
           2 px from the star rating, so the `…` and the stars ran together as
           one cluster while every other pair in the row was 6 px apart — the

@@ -1084,10 +1084,148 @@ check("and the foreign 50 % it replaced is behind it, never the last word",
       and bar_frames[-1][0] != 4,
       f"{[(f[0], f[1], f[2]) for f in bar_frames]}")
 check("the run's own row starts at zero as well",
-      (fresh_rows.get(script_runners.run_label([3, 5])) or {}).get("done") == 0
-      and (fresh_rows.get(script_runners.run_label([3, 5])) or {}).get("total") == 2
-      and (fresh_rows.get(script_runners.run_label([3, 5])) or {}).get("steps") == [1, 2],
+      (fresh_rows.get(script_runners.run_label([3, 5], targets=[album_a])) or {}).get("done") == 0
+      and (fresh_rows.get(script_runners.run_label([3, 5], targets=[album_a])) or {}).get("total") == 2
+      and (fresh_rows.get(script_runners.run_label([3, 5], targets=[album_a])) or {}).get("steps") == [1, 2],
       str(fresh_rows))
+
+print("== a chain is named for the album, and counts only what can run ==")
+
+# An import of a purely audio album (the owner's screenshot, "Remux videos
+# (MKV) + 20 more"): the shipped chain starts with script 11 (Remux videos),
+# which for such an album could only ever answer "No video files found." So the
+# chain must not carry that step — and must not NAME it either. What the run is
+# doing is finishing ONE album, and its name says which one.
+video_album = os.path.join(music, "Artists", "Other", "Video Album")
+os.makedirs(video_album, exist_ok=True)
+with open(os.path.join(video_album, "concert.mkv"), "wb") as fh:
+    fh.write(b"not really video: the extension is the whole question here")
+
+kept_audio = script_runners._chain_ids({}, [11, 3, 5], [album_a])
+check("script 11 is not in a chain over an album with no video in it",
+      kept_audio == [3, 5], str(kept_audio))
+check("...but it stays for an album that holds a video file",
+      script_runners._chain_ids({}, [11, 3, 5], [video_album]) == [11, 3, 5])
+check("...and a lone press of it is never dropped (it answers for itself)",
+      script_runners._chain_ids({}, [11], [album_a]) == [11])
+check("...and an unscoped run keeps it (a library can hold video anywhere)",
+      script_runners._chain_ids({}, [11, 3], None) == [11, 3])
+check("the run's name is the album's own, with the steps that will really run",
+      script_runners.run_label([3, 5], targets=[album_a])
+      == os.path.basename(album_a) + " · 2 steps",
+      script_runners.run_label([3, 5], targets=[album_a]))
+check("...a lone script keeps its own name",
+      script_runners.run_label([3], targets=[album_a]) == "Optimize FLACs")
+check("...and a run over several albums names the first script, as before",
+      script_runners.run_label([3, 5], targets=[album_a, album_b])
+      == "Optimize FLACs + 1 more",
+      script_runners.run_label([3, 5], targets=[album_a, album_b]))
+
+# And the step readout TRACKS the chain: every step publishes itself as it
+# starts, so the run's name never has to change for the surface to stay
+# current ("Remux videos (MKV)" while the chain is really grading is exactly
+# the frozen readout that was reported).
+bar_frames.clear()
+_stats.progress_hook = recorder                  # the relay a run talks to
+ran_steps = []
+
+
+def step_runner(name):
+    def run(cfg):
+        ran_steps.append(name)
+        return {"modified_count": 0}
+    return run
+
+
+script_runners.RUNNERS[11] = ("Remux videos (MKV)", step_runner("remux"))
+script_runners.RUNNERS[3] = ("Optimize FLACs", step_runner("flac"))
+script_runners.RUNNERS[5] = ("Process images", step_runner("images"))
+chain_res = None
+try:
+    chain_res = script_runners.run_chain({"music_folder": music}, [11, 3, 5],
+                                         targets=[album_a])
+finally:
+    _stats.progress_hook = real_hook
+    script_runners.RUNNERS.clear()
+    script_runners.RUNNERS.update(real_runners)
+
+steps = [f[2] for f in bar_frames if f[2]]
+check("the chain dropped the step that could not apply, and it never ran",
+      ran_steps == ["flac", "images"] and
+      [r.get("id") for r in (chain_res or [])] == [3, 5],
+      f"{ran_steps} {chain_res}")
+check("the step readout advances with the chain it is on",
+      any("#1/2" in t and "Optimize FLACs" in t for t in steps)
+      and any("#2/2" in t and "Process images" in t for t in steps),
+      str(steps))
+check("...and the run's name is the album, never the dropped script",
+      not any("Remux" in t for t in steps) and
+      script_runners.run_label([3, 5], targets=[album_a])
+      == os.path.basename(album_a) + " · 2 steps",
+      f"{steps} {script_runners.run_label([3, 5], targets=[album_a])}")
+
+print("== a chain resolves the library's albums once, and only for itself ==")
+
+# Every album-walking script used to discover the library for itself, so a Run
+# All walked it once per script. The chain resolves it once (a scope it ends
+# however it ends) — and a walker outside that scope still sees the library as
+# it IS, which is what keeps a page request (or the next run) from being served
+# a stale album list for the life of the process.
+from mlo import stats as _mlo_stats                 # noqa: E402
+
+walks = []
+_real_walk = _mlo_stats._walk_files
+
+
+def counting_walk(root, exts, dirs_out=None):
+    walks.append(root)
+    return _real_walk(root, exts, dirs_out)
+
+
+def album_probe(counts, seen):
+    def run(cfg):
+        counts.append(len(walks))
+        seen.append(_mlo_stats._find_albums(cfg["music_folder"]))
+        counts.append(len(walks))
+        return {"modified_count": 0}
+    return run
+
+
+try:
+    _mlo_stats._walk_files = counting_walk
+    counts, seen = [], []
+    script_runners.RUNNERS[3] = ("Optimize FLACs", album_probe(counts, seen))
+    script_runners.RUNNERS[5] = ("Process images", album_probe(counts, seen))
+    script_runners.run_chain({"music_folder": music}, [3, 5])
+    check("each script of the chain sees the library's albums",
+          len(seen) == 2 and bool(seen[0]) and seen[0] == seen[1],
+          str([len(s) for s in seen]))
+    check("...from ONE walk for the whole chain, not one per script",
+          len(counts) == 4 and len(set(counts)) == 1,
+          f"walk counts around each lookup: {counts}")
+    before = len(walks)
+    outside = _mlo_stats._find_albums(music)
+    check("...and the scope is over when the chain ends (an independent "
+          "caller walks again, and sees the same library)",
+          len(walks) == before + 1 and outside == seen[0],
+          f"walks={before} -> {len(walks)}")
+
+    # A script that MOVES an album — or one that failed, so what it did is
+    # unknown — makes the list a lie, and the next walker resolves it again.
+    counts, seen = [], []
+    script_runners.RUNNERS[14] = ("Beets tagging", lambda cfg: {
+        "modified_count": 1, "moved_targets": [album_a]})
+    script_runners.RUNNERS[3] = ("Optimize FLACs", album_probe(counts, seen))
+    script_runners.run_chain({"music_folder": music}, [14, 3])
+    check("a mover in the chain drops the list: the script after it walks",
+          len(counts) == 2 and counts[1] == counts[0] + 1,
+          f"walk counts around the lookup after the mover: {counts}")
+    check("...and it did walk (the list it was handed was dropped, not reused)",
+          counts[0] > 0, str(counts))
+finally:
+    _mlo_stats._walk_files = _real_walk
+    script_runners.RUNNERS.clear()
+    script_runners.RUNNERS.update(real_runners)
 
 print("== a run cut short ends the surface instead of freezing on it ==")
 
@@ -1342,6 +1480,15 @@ if mlo_main is not None:
         dest_drive = tempfile.mkdtemp(prefix="mlo-locks-dest-")
 
         mlo_main._cover_url_bytes = lambda *a, **k: (png, "image/png")
+        # A cover write to a LIBRARY album also queues script 5 for that album
+        # (server.main._schedule_cover_process, spec R56f): background work that
+        # takes the album's job_locks claim, which would sit under these probes'
+        # feet — the holder thread below would fail to claim and the route under
+        # test would answer a foreign job's refusal. What this section pins is
+        # the ROUTES' own claims, so the follow-up run is stubbed out here; that
+        # it claims the album is `tools/test_track_covers.py`'s check.
+        _real_schedule_cover_process = mlo_main._schedule_cover_process
+        mlo_main._schedule_cover_process = lambda alb: False
         probe("the cover upload", [album],
               lambda: client.post(f"/api/cover?album={album}",
                                   files={"file": ("cover.png", png, "image/png")}))
@@ -1395,6 +1542,7 @@ if mlo_main is not None:
             _first, _second = asyncio.run(concurrent_covers())
         finally:
             mlo_main._cover_url_bytes = _quick_bytes
+        mlo_main._schedule_cover_process = _real_schedule_cover_process
         if _first.status_code in (401, 428):
             print("  SKIP  the concurrent check (auth gate on)")
         else:

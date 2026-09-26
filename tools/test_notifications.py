@@ -246,6 +246,82 @@ try:
 finally:
     script_runners.run_chain = _real_chain
 
+print("== a run invalidates what it touched, not the whole library ==")
+
+# Every run used to end with `tagcache.invalidate_all()`: the library page
+# right after a ONE-ALBUM run re-parsed every track in the library with
+# mutagen. A run that named its targets drops those folders' entries (plus the
+# folders a script moved an album into), and only a run with no targets at all
+# keeps the library-wide drop.
+import server.mbresolve as mbresolve                 # noqa: E402
+import server.tagcache as tagcache                   # noqa: E402
+
+_folder = str(main_mod.load_config().get("music_folder") or "")
+_target = os.path.join(_folder, "Some Album") if _folder else r"F:\Music\A\One"
+_moved = os.path.join(_folder, "Some Album (2024)") if _folder else r"F:\Music\A\One (2024)"
+calls = {"album": [], "all": 0, "mb": 0}
+_real_album_inv = tagcache.invalidate_album
+_real_all_inv = tagcache.invalidate_all
+_real_mb_inv = mbresolve.invalidate
+
+
+def _stub_chain(results):
+    def fake(cfg, ids, targets=None, force=None, progress=None, wait=False,
+             timeout=None):
+        return [dict(r) for r in results]
+    return fake
+
+
+def _count_all():
+    calls["all"] += 1
+
+
+def _count_mb():
+    calls["mb"] += 1
+
+
+try:
+    tagcache.invalidate_album = lambda *folders: calls["album"].append(list(folders))
+    tagcache.invalidate_all = _count_all
+    mbresolve.invalidate = _count_mb
+
+    script_runners.run_chain = _stub_chain(
+        [{"id": 3, "label": "Optimize FLACs", "stats": {"modified_count": 1}}])
+    main_mod._run_scripts(main_mod.RunRequest(ids=[3], targets=[_target]))
+    scoped = (list(calls["album"][-1]) if calls["album"] else None,
+              calls["all"], calls["mb"])
+    check("a one-album run drops THAT album's cached tags, not the whole library",
+          scoped == ([os.path.normpath(_target)], 0, 1), str(scoped))
+
+    # A script that MOVED the album (beets does, on every import) reports where
+    # it put it: that folder's cache is stale too, and it is not one the caller
+    # named.
+    script_runners.run_chain = _stub_chain(
+        [{"id": 14, "label": "Beets tagging",
+          "stats": {"modified_count": 1, "moved_targets": [_moved]}}])
+    main_mod._run_scripts(main_mod.RunRequest(ids=[14], targets=[_target]))
+    check("...and the folders a script moved an album INTO are dropped with them",
+          calls["album"][-1] == [os.path.normpath(_target), _moved],
+          str(calls["album"][-1]))
+
+    # A library-wide run really did touch everything, so it keeps the drop —
+    # even when a script reported a folder it moved (the sweep's own writes are
+    # not limited to that folder).
+    script_runners.run_chain = _stub_chain(
+        [{"id": 14, "label": "Beets tagging",
+          "stats": {"modified_count": 9, "moved_targets": [_moved]}}])
+    before = len(calls["album"])
+    main_mod._run_scripts(main_mod.RunRequest(ids=[14]))
+    check("a run with no targets at all still drops the whole library's cache",
+          calls["all"] == 1 and len(calls["album"]) == before
+          and calls["mb"] == 3,
+          f"{calls}")
+finally:
+    tagcache.invalidate_album = _real_album_inv
+    tagcache.invalidate_all = _real_all_inv
+    mbresolve.invalidate = _real_mb_inv
+    script_runners.run_chain = _real_chain
+
 print("== a newer release ==")
 tmp = os.path.join(tempfile.mkdtemp(prefix="mlo-notify-"), "update_check.json")
 version_mod.cache_path = lambda: tmp

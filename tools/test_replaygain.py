@@ -25,6 +25,7 @@ through rsgain are the same number:
 Run:  python tools/test_replaygain.py
 """
 import array
+import json
 import os
 import shutil
 import subprocess
@@ -235,9 +236,15 @@ try:
         "analyzed": True, "source": "ffmpeg",
         "album_gain_db": None, "album_peak_db": None,
     })
-    assert os.path.isfile(cache_file), cache_file
+    # The store answers the very next read from MEMORY, and the FILE follows on
+    # its own quiet window (loudness._WRITE_DEBOUNCE_S) — a scan's hundreds of
+    # measurements must not be hundreds of whole-file rewrites + fsyncs.
     entry = loudness.cached_analysis(cache_cfg, track_path)
     assert entry["gain_db"] == 1.5 and entry["peak"] == 0.75, entry
+    assert not os.path.isfile(cache_file), cache_file
+    assert loudness._flush_now() is True
+    assert os.path.isfile(cache_file), cache_file
+    entry = loudness.cached_analysis(cache_cfg, track_path)
     assert entry["lufs"] == -19.5 and entry["source"] == "ffmpeg", entry
     assert entry["analyzed"] is True, entry
     assert entry["size"] == 32 and entry["mtime"] == os.stat(track_path).st_mtime, entry
@@ -270,6 +277,53 @@ try:
     assert entry["gain_db"] == 0.25, entry
     assert len(list(os.listdir(os.path.dirname(cache_file)))) == 1, \
         os.listdir(os.path.dirname(cache_file))   # no temp litter
+
+    # ---- the burst is ONE write, and reads do not re-parse the file ------
+    # Both are what made a scan quadratic: a whole-file rewrite per store, and
+    # a whole-file parse per read. Counted, not timed.
+    burst = []
+    for i in range(5):
+        p_i = os.path.join(root, "Artist", "Album", f"burst {i}.flac")
+        with open(p_i, "wb") as f:
+            f.write(b"b" * (16 + i))
+        burst.append(p_i)
+    writes, reads = [], []
+    _real_write = loudness._write_cache
+    _real_read = loudness._read_cache
+    _real_debounce = loudness._WRITE_DEBOUNCE_S
+    loudness._WRITE_DEBOUNCE_S = 3600.0     # no quiet window closes in this case
+    loudness._write_cache = lambda target, data: (
+        writes.append(len(data)), _real_write(target, data))[1]
+    loudness._read_cache = lambda target: (reads.append(target),
+                                          _real_read(target))[1]
+    try:
+        for p_i in burst:
+            loudness.store_analysis(cache_cfg, p_i, {
+                "gain_db": -3.0, "peak": 0.5, "lufs": -17.0,
+                "analyzed": True, "source": "ffmpeg"})
+        assert writes == [], writes        # not one rewrite per measurement...
+        for p_i in burst:                  # ...and every one reads back NOW
+            assert (loudness.cached_analysis(cache_cfg, p_i) or {}).get("gain_db") == -3.0
+        for _ in range(20):                # 20 lookups: zero file parses
+            loudness.cached_analysis(cache_cfg, burst[0])
+        assert reads == [], reads
+        assert loudness._flush_now() is True
+        assert writes == [6], writes       # one write, all six entries in it
+        assert reads == [], reads          # our own write is not a foreign one
+        with open(cache_file, "r", encoding="utf-8") as f:
+            on_disk = json.load(f)
+        assert len(on_disk) == 6, sorted(on_disk)
+    finally:
+        loudness._write_cache = _real_write
+        loudness._read_cache = _real_read
+        loudness._WRITE_DEBOUNCE_S = _real_debounce
+
+    # Another process rewriting the file is NOTICED (its stamp changed), so the
+    # memory map is not a stale copy of the file this process last held.
+    with open(cache_file, "w", encoding="utf-8") as f:
+        json.dump({}, f)
+    assert loudness.cached_analysis(cache_cfg, burst[0]) is None
+    assert loudness.cached_analysis(cache_cfg, track_path) is None
 
     # A path that does not exist is simply not cached (never raises).
     loudness.store_analysis(cache_cfg, os.path.join(root, "gone.flac"), entry)

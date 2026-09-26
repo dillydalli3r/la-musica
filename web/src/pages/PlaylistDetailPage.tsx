@@ -17,6 +17,7 @@ import { TrackActionsMenu } from "../components/TagActionsMenu";
 import FavHeart from "../components/FavHeart";
 import OverflowMenu from "../components/OverflowMenu";
 import { trackRef, entityLinkClick } from "../lib/refs";
+import { PHONE_HIDE } from "../lib/columns";
 import { useI18n } from "../lib/i18n";
 import { fmtDuration } from "../lib/fmt";
 import {
@@ -424,18 +425,27 @@ export default function PlaylistDetailPage() {
                 and the reorder handle 96 more, artist + album + duration take
                 40% of what is left, and Duration (8%) has to hold the 56 px a
                 "3:45" needs — 56 / 0.08 = 700. There the Title still has
-                0.6 × 700 − 192 = 228 px. The table has no phone fold, so unlike
-                the library's tables this floor applies at every width. */}
-            <table className="w-full text-sm min-w-[700px]">
+                0.6 × 700 − 192 = 228 px.
+                The floor is `md:` only, and below `md` the columns a phone
+                cannot use fold with the same `PHONE_HIDE` rule the album
+                tracklist uses for its reference columns: the COVER (the album
+                page's rationale — the art is not what a phone row is read for)
+                and the release data (Artist, Album). What is left is the row's
+                own spine (# / Title / Duration) plus the reorder handle, and
+                every one of them carries a real px floor: Duration's 8% is
+                27 px of a 342 px row, which paints the "Duration" label over
+                the column beside it (measured), and the handle's 96 px buys
+                24 px of gutter for three 16 px glyphs. */}
+            <table className="w-full text-sm md:min-w-[700px]">
               <thead className="border-b border-border">
                 <tr>
                   <th className="th w-12">#</th>
-                  <th className="th w-12" title="Cover art"><span className="sr-only">Cover</span></th>
+                  <th className={`th w-12${PHONE_HIDE}`} title="Cover art"><span className="sr-only">Cover</span></th>
                   <th className="th">Title</th>
-                  <th className="th w-[16%]">Artist</th>
-                  <th className="th w-[16%]">Album</th>
-                  <th className="th w-[8%]">Duration</th>
-                  {reorderable && <th className="th w-24"><span className="sr-only">Actions</span></th>}
+                  <th className={`th w-[16%]${PHONE_HIDE}`}>Artist</th>
+                  <th className={`th w-[16%]${PHONE_HIDE}`}>Album</th>
+                  <th className="th w-20">Duration</th>
+                  {reorderable && <th className="th w-16 md:w-24"><span className="sr-only">Actions</span></th>}
                 </tr>
               </thead>
               <tbody>
@@ -477,7 +487,7 @@ export default function PlaylistDetailPage() {
                     >
                       {/* position in the PLAYLIST (1, 2, 3…) */}
                       <td className="td cell-nowrap text-zinc-600 tabular-nums">{i + 1}</td>
-                      <td className="td cell-cover pr-0">
+                      <td className={`td cell-cover pr-0${PHONE_HIDE}`}>
                         <TrackCover
                           albumPath={m?.albumPath ?? t.split("/").slice(0, -1).join("/")}
                           trackCover={m?.coverFile}
@@ -487,10 +497,22 @@ export default function PlaylistDetailPage() {
                       </td>
                       <td className="td">
                         <div className="flex flex-wrap items-center gap-x-1.5 gap-y-0.5 min-w-0">
+                          {/* `grow basis-auto`, not `flex-1 min-w-[8rem]`: a
+                              0% basis is a claim of "no width needed", so the
+                              name was squeezed to nothing whenever the cell was
+                              narrow (the same failure TrackTitleCell and
+                              AlbumRow document), and an 8rem MINIMUM is a hard
+                              floor a 390 px row cannot honour — it painted over
+                              the Duration column beside it. With the basis back
+                              on the content the name asks for its own width and
+                              the heart/menu wrap under it instead; the name
+                              itself CLIPS on one line with the whole title in
+                              `title`, which is the rule every other row here
+                              follows (no mid-title wrap on a phone). */}
                           <Link
                             to={trackRef({ path: t, tags: { MUSICBRAINZ_TRACKID: m?.mbid ?? undefined } })}
-                            className="break-words flex-1 min-w-[8rem] hover:text-accent-soft"
-                            title="Click to play · Ctrl-click to open track page"
+                            className="hover:text-accent-soft cell-ellipsis grow basis-auto min-w-0"
+                            title={`${m?.title ?? t.split("/").pop()} · Click to play · Ctrl-click to open track page`}
                             onClick={(e) => entityLinkClick(e, () => navigate(trackRef({ path: t, tags: { MUSICBRAINZ_TRACKID: m?.mbid ?? undefined } })))}
                           >
                             {m?.title ?? t.split("/").pop()}
@@ -499,19 +521,24 @@ export default function PlaylistDetailPage() {
                             <FavHeart kind="track" id={t} iconClass="h-3.5 w-3.5" revealOnHover />
                           </span>
                           <span className="row-hover shrink-0" onClick={(e) => e.stopPropagation()}>
-                            <TrackActionsMenu path={t} />
+                            <TrackActionsMenu path={t} buttonClass="!p-1 text-zinc-500 hover:text-white tap-hit" />
                           </span>
                         </div>
                       </td>
-                      <td className="td text-zinc-400 break-words">{m?.artist ?? "—"}</td>
-                      <td className="td text-zinc-500 break-words">{m?.album ?? "—"}</td>
+                      <td className={`td text-zinc-400 break-words${PHONE_HIDE}`}>{m?.artist ?? "—"}</td>
+                      <td className={`td text-zinc-500 break-words${PHONE_HIDE}`}>{m?.album ?? "—"}</td>
                       <td className="td text-zinc-500">{m?.dur ? fmtDuration(m.dur) : "—"}</td>
                       {reorderable && (
                         <td className="td pr-0" onClick={(e) => e.stopPropagation()}>
+                          {/* `tap`: the glyphs are 16 px and the row is the
+                              phone's whole surface — the app's own recipe for a
+                              control sized by its content (index.css), which
+                              grows the BOX to 44 px below `md`/on a coarse
+                              pointer instead of leaving a coin-toss target. */}
                           <div className="flex gap-0.5 items-center">
-                            <button className="text-zinc-600 hover:text-zinc-300 disabled:opacity-30" title="Move up" onClick={() => move(i, -1)} disabled={i === 0}><ChevronUp className="h-4 w-4" /></button>
-                            <button className="text-zinc-600 hover:text-zinc-300 disabled:opacity-30" title="Move down" onClick={() => move(i, 1)} disabled={i === tracks.length - 1}><ChevronDown className="h-4 w-4" /></button>
-                            <button className="text-zinc-600 hover:text-red-400 ml-1" title="Remove from playlist" onClick={() => removeTrack(t)}>
+                            <button className="tap text-zinc-600 hover:text-zinc-300 disabled:opacity-30" title="Move up" onClick={() => move(i, -1)} disabled={i === 0}><ChevronUp className="h-4 w-4" /></button>
+                            <button className="tap text-zinc-600 hover:text-zinc-300 disabled:opacity-30" title="Move down" onClick={() => move(i, 1)} disabled={i === tracks.length - 1}><ChevronDown className="h-4 w-4" /></button>
+                            <button className="tap text-zinc-600 hover:text-red-400 ml-1" title="Remove from playlist" onClick={() => removeTrack(t)}>
                               <Trash2 className="h-3.5 w-3.5" />
                             </button>
                           </div>

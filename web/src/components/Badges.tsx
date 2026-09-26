@@ -94,15 +94,51 @@ export function releaseCountries(value: string | null | undefined): string[] {
   return out;
 }
 
-/** The one media label every album/release badge wears: the medium, then the
- *  release countries — "CD · US, CA". A card and the page header it opens
- *  name the same pressing the same way, and an album released in several
- *  countries says so instead of showing a single code it picked. */
+/** The medium plus, for a DIGITAL MEDIA release, where its files CAME FROM —
+ *  "Digital · Bandcamp", "CD" for a rip, exactly as before.
+ *
+ *  A download has no pressing, so the fact that takes the pressing's place is
+ *  its provenance: `source_summary` (mlo.grader reads the tracks' SOURCE tags)
+ *  is the shop the downloader was pointed at ("Bandcamp", "Qobuz", "Deezer"),
+ *  "Soulseek" for this app's own downloads, or the reader's own word — and
+ *  `Digital` when no file states one, which is the default the MEDIA/SOURCE
+ *  pass writes (mlo.paths.DEFAULT_DIGITAL_SOURCE). A source that only repeats
+ *  the medium is dropped rather than printed twice ("Digital · Digital"), and
+ *  `INCONSISTENT` — the server's summary word for files that disagree — is a
+ *  state, not a source, so it stays with the album page's own Source readout
+ *  instead of reading as a shop called INCONSISTENT.
+ *
+ *  The medium is digital when the word `mediaShort` prints IS "Digital" — the
+ *  label both a "Digital Media" value and a hand-written "Digital" one wear,
+ *  and the format this app grades a release with no disc as
+ *  (mlo.grader._is_digital). */
+export function mediaSourceLabel(
+  media: string | null | undefined,
+  source: string | null | undefined
+): string | null {
+  const medium = mediaShort(media);
+  const origin = (source ?? "").trim();
+  const stated = (medium ?? "").toLowerCase() === "digital"
+    && origin !== ""
+    && origin.toLowerCase() !== (medium ?? "").toLowerCase()
+    && origin.toUpperCase() !== "INCONSISTENT";
+  const parts = [medium, stated ? origin : ""].filter(Boolean);
+  return parts.length ? parts.join(" · ") : null;
+}
+
+/** The one media label every album/release badge wears: the medium and its
+ *  source for a download (see mediaSourceLabel), then the release countries —
+ *  "CD · US, CA", "Digital · Bandcamp · DE". A card and the page header it
+ *  opens name the same release the same way, an album released in several
+ *  countries says so instead of showing a single code it picked, and the
+ *  ORDER is fixed (medium, source, countries) so two surfaces cannot list the
+ *  same facts in two orders. */
 export function mediaCountryLabel(
   media: string | null | undefined,
-  country: string | null | undefined
+  country: string | null | undefined,
+  source?: string | null
 ): string | null {
-  const parts = [mediaShort(media), releaseCountries(country).join(", ")].filter(Boolean);
+  const parts = [mediaSourceLabel(media, source), releaseCountries(country).join(", ")].filter(Boolean);
   return parts.length ? parts.join(" · ") : null;
 }
 

@@ -28,6 +28,20 @@
  *     kept by the stub and the printed count is read off the heading line.
  *   * At 390 px the name box and the letter button must still share ONE row and
  *     stay inside the screen: the phone is where a toolbar turns into a stack.
+ *   * The ARTIST's own verdict is one green dot beside the name — the artist
+ *     folder's checks (image + description, `grade_artist`) — instead of the
+ *     two chips the artist hero used to spell out ("albums", "artist artwork
+ *     2/2"), and the SAME dot, from the SAME payload field, is drawn wherever
+ *     a name is listed: the hero, the Library's Artists view, Home's artist
+ *     shelf and Favorites' artist table. The stub answers all four out of the
+ *     two `grade` objects the payload carries (one artist passing, one
+ *     failing), so the check reads both sides of the rule on every surface.
+ *     The artist hero's cover-derived backdrop is measured too — the blurred
+ *     layer covers the hero's box and is extended past it, it is masked by a
+ *     gradient whose transparent stop is already reached along the hero's
+ *     whole border (a fade, never the hard line `overflow-hidden` used to slice
+ *     it off at), and the legibility rules it must not touch — the layer's
+ *     opacity and the `bg` gradient over it — are still exactly what they were.
  *
  * The payload is a REAL capture (tools/fixtures/library-az.json): a scratch
  * server over tools/make_test_library.py's synthetic library, grown by hand so
@@ -180,6 +194,74 @@ const VERSION = {
  * pair the server suite proves (tools/test_recommendations.py asserts the
  * server's own default is the same number). */
 const recommendAsked = [];
+/* A 4x4 PNG (the fixture's artists claim `has_image`, so the page asks for
+ * one): real bytes, so the hero's backdrop layer is a layer that painted
+ * something rather than a broken image the browser drew a glyph for. */
+const PNG = Buffer.from(
+  "iVBORw0KGgoAAAANSUhEUgAAAAQAAAAECAIAAAAmkwkpAAAAE0lEQVR4nGOsiDrBAANMcBZeDgBQyAGi+HlBlgAAAABJRU5ErkJggg==",
+  "base64");
+/* The artist under test. */
+const ARTIST_ALPHA = "Artist Alpha";
+const ARTIST_BETA = "Artist Beta";
+
+/** `GET /api/artist` for one library row: the row's own albums/aggregate plus
+ *  the artwork block the page draws (image, description, provenance) and the
+ *  row's own `grade` — the artist folder's verdict, which is what the dot
+ *  beside the name reads. */
+const artistPayload = (row) => {
+  const hasImage = !!row.has_image;
+  return {
+    path: row.path,
+    name: row.name,
+    display_name: row.display_name || row.name,
+    albums: row.albums,
+    aggregate: row.aggregate,
+    artwork: {
+      image: hasImage,
+      image_file: hasImage ? "artist.jpg" : null,
+      image_url: hasImage ? `/api/artist/image?artist=${encodeURIComponent(row.path)}` : null,
+      description: row.grade?.artwork?.description ? "A stored artist description." : null,
+      description_source: null,
+      description_url: null,
+      provenance: {},
+      auto_image: true,
+      auto_description: true,
+    },
+    grade: row.grade,
+  };
+};
+
+/** What Home's artist shelf draws, per row (`recommendations._top_artists`):
+ *  the card's own fields plus the artist's grade, which the shelf passes
+ *  through from the library row it was built from. */
+const homeArtist = (row) => ({
+  path: row.path,
+  artist: row.display_name || row.name,
+  album_count: row.albums.length,
+  track_count: row.aggregate?.track_count ?? 0,
+  grade_pct: row.aggregate?.grade_pct ?? null,
+  cover_path: row.albums[0]?.path || "",
+  cover: row.albums[0]?.cover_file ?? null,
+  has_image: !!row.has_image,
+  grade: row.grade,
+});
+/* Home's payload, kept to what the page reads: the shelves the fixture has no
+ * rows for answer empty (each shelf draws nothing), and the artist shelf
+ * carries the same graded rows the Library lists. */
+const HOME = {
+  stats: {
+    artists: served.artists.length,
+    albums: served.artists.reduce((n, a) => n + a.albums.length, 0),
+    tracks: served.artists.reduce(
+      (n, a) => n + a.albums.reduce((m, al) => m + (al.tracks?.length || 0), 0), 0),
+    playlists: 0,
+    grade_pct: null,
+  },
+  recent: [], top_rated: [], rated: [], favorites: [], discover: [],
+  podcasts: [], pending: [], wanted: [], needs_attention: [],
+  top_artists: served.artists.slice(0, 3).map(homeArtist),
+  grade_warning: null,
+};
 const apiStub = createHttpServer((req, res) => {
   const url = req.url || "";
   const json = (body) => {
@@ -196,6 +278,25 @@ const apiStub = createHttpServer((req, res) => {
   }
   if (url.startsWith("/api/library")) return json(served);
   if (url.startsWith("/api/album?")) return json(album);
+  /* The artist page's own payload, built from the row the LIBRARY answer
+   * carries — one `grade` object drives both, which is exactly the agreement
+   * the dot cases below are about. `/api/artist/image` answers real PNG bytes
+   * so the hero's cover-derived backdrop is a layer with pixels in it (the
+   * fixture's artists carry `has_image`, so the page asks for it). */
+  if (url.startsWith("/api/artist/image")) {
+    res.writeHead(200, { "content-type": "image/png" });
+    return res.end(PNG);
+  }
+  if (url.startsWith("/api/artist?")) {
+    const want = new URL(url, "http://127.0.0.1").searchParams.get("path") || "";
+    const row = served.artists.find((a) => a.path === want);
+    if (!row) {
+      res.writeHead(404, { "content-type": "application/json" });
+      return res.end("{}");
+    }
+    return json(artistPayload(row));
+  }
+  if (url.startsWith("/api/home")) return json(HOME);
   if (url.startsWith("/api/recommend")) {
     // The shelf asks with a POST body (a playlist or a favourites set is a seed
     // LIST); the older GET form has none. Either way the answer is the
@@ -211,6 +312,16 @@ const apiStub = createHttpServer((req, res) => {
     return;
   }
   if (url.startsWith("/api/ratings")) return json({ ratings: {} });
+  /* The Favorites page's own store: the two graded artists are hearted, so its
+   * artist table lists them (it joins these paths with the library payload the
+   * page also holds, and draws the shared name render). */
+  if (url.startsWith("/api/favorites")) {
+    return json({
+      albums: [],
+      artists: [served.artists[0].path, served.artists[1].path],
+      playlists: [],
+    });
+  }
   if (url.startsWith("/api/auth/users")) return json({ users: [] });
   // Everything else — the grade summary, the favorites, the lock list — is a
   // question the pages under test guard on: an ERROR is what those guards are
@@ -667,6 +778,438 @@ try {
         + `(${seededCols?.stored ?? 0} ids stored, # kept: ${seededCols?.storedHasNum})`,
         !!seededCols && seededCols.stored >= 8 && seededCols.storedHasNum === true,
         JSON.stringify(seededCols));
+  // ------------------------- 7. the artist's own verdict: one dot
+  // The owner's ask: an artist's health is ONE green dot beside its name, not
+  // two chips spelling the checks out — and the dot is the SAME bit on the
+  // artist page and in every list that names an artist, so a list and the page
+  // it opens can never disagree. The fixture grades two artists: Artist Alpha
+  // passes its own checks (artist image + description, 2/2) and Artist Beta
+  // fails one (no description, 1/2). The stub answers the artist page, the
+  // library and Home out of those same two `grade` objects, which is what makes
+  // "the list and the page agree" a property of what is DRAWN and not of two
+  // fixtures that happen to match.
+  const alphaRow = served.artists.find((a) => a.name === ARTIST_ALPHA);
+  const betaRow = served.artists.find((a) => a.name === ARTIST_BETA);
+  const plural = (n, word) => `${n} ${word}${n === 1 ? "" : "s"}`;
+  check("fixture: one artist passes its own checks and one fails",
+        alphaRow?.grade?.pass === true && betaRow?.grade?.pass === false,
+        `alpha=${alphaRow?.grade?.pass} beta=${betaRow?.grade?.pass}`);
+
+  /** One artist's hero, read off the live DOM: the name and its dot, the
+   *  counts line, whether the two removed chips are still drawn anywhere in
+   *  it, and the cover-derived backdrop's own geometry and computed style. */
+  const heroOf = async (row) => {
+    await page.goto(`${base}/artist/${encodeURIComponent(row.path)}`);
+    await page.waitForSelector(".hero-flat h1", { timeout: 30000 });
+    await page.waitForTimeout(250);
+    return page.evaluate(() => {
+      const box = (el) => {
+        const r = el.getBoundingClientRect();
+        return { left: r.left, top: r.top, right: r.right, bottom: r.bottom, width: r.width, height: r.height };
+      };
+      const hero = document.querySelector(".hero-flat");
+      const layer = hero.querySelector(".hero-ink");
+      const style = layer ? getComputedStyle(layer) : null;
+      const texts = [...hero.querySelectorAll("span")].map((s) => (s.textContent || "").trim());
+      const dot = hero.querySelector("h1 .artist-dot");
+      return {
+        name: (hero.querySelector("h1")?.textContent || "").trim(),
+        dot: !!dot,
+        dotLabel: dot?.getAttribute("aria-label") || "",
+        counts: texts.find((t) => /^\d+ albums? · \d+ tracks?$/.test(t)) || "",
+        // The two pass chips this hero used to spell its verdicts out with:
+        // the album rollup's "albums", and "artist artwork 2/2".
+        passChips: texts.filter((t) => t === "albums" || /^artist artwork/.test(t)),
+        failures: texts.filter((t) => t === "Artist description"),
+        heroBox: box(hero),
+        layerBox: layer ? box(layer) : null,
+        layerOpacity: style?.opacity ?? null,
+        layerMask: style ? style.maskImage || style.webkitMaskImage : null,
+        // The legibility rule this fade is not allowed to change: the `bg`
+        // gradient still painted over the wash, between it and the text.
+        overlay: !!hero.querySelector("div.absolute.inset-0.bg-gradient-to-t"),
+      };
+    });
+  };
+
+  const alphaHero = await heroOf(alphaRow);
+  check(`the hero draws the passing artist's dot beside the name (${alphaHero.name})`,
+        alphaHero.name === ARTIST_ALPHA && alphaHero.dot === true
+          && alphaHero.dotLabel.includes("Artist checks pass"),
+        JSON.stringify({ name: alphaHero.name, dot: alphaHero.dot, label: alphaHero.dotLabel }));
+  check("and no longer spells the checks out in chips (`albums`, `artist artwork`)",
+        alphaHero.passChips.length === 0, JSON.stringify(alphaHero.passChips));
+  check(`while the informational counts stay (${alphaHero.counts})`,
+        alphaHero.counts === `${plural(alphaRow.aggregate.album_count, "album")} · `
+          + plural(alphaRow.aggregate.track_count, "track"),
+        `"${alphaHero.counts}"`);
+
+  // The backdrop: the layer is scaled PAST the hero's box and masked, so the
+  // wash fades instead of being sliced off at the hero's `overflow-hidden`
+  // edge. Coverage is geometry — the layer's own box against the hero's.
+  const covers = (l, h) => !!l
+    && l.left <= h.left + 1 && l.top <= h.top + 1
+    && l.right >= h.right - 1 && l.bottom >= h.bottom - 1;
+  // The numbers, the way this check logs the shelf's own geometry: what the
+  // backdrop measured, so a passing run says how much bigger the layer is.
+  console.log(`\n[library-az] artist hero: backdrop layer `
+    + `${Math.round(alphaHero.layerBox?.width ?? 0)}x${Math.round(alphaHero.layerBox?.height ?? 0)} px `
+    + `over the hero's ${Math.round(alphaHero.heroBox.width)}x${Math.round(alphaHero.heroBox.height)} px, `
+    + `opacity ${alphaHero.layerOpacity}, mask "${String(alphaHero.layerMask).replace(/\s+/g, " ").slice(0, 120)}", `
+    + `overlay ${alphaHero.overlay}`);
+  check(`the backdrop's blur layer covers the hero box `
+        + `(layer ${Math.round(alphaHero.layerBox?.width ?? 0)}x${Math.round(alphaHero.layerBox?.height ?? 0)} `
+        + `over hero ${Math.round(alphaHero.heroBox.width)}x${Math.round(alphaHero.heroBox.height)})`,
+        covers(alphaHero.layerBox, alphaHero.heroBox), JSON.stringify(alphaHero.layerBox));
+  check("…and it is extended past that box, so the fade lands inside the hero's clip",
+        !!alphaHero.layerBox
+          && alphaHero.layerBox.width > alphaHero.heroBox.width + 8
+          && alphaHero.layerBox.height > alphaHero.heroBox.height + 8,
+        JSON.stringify({ layer: alphaHero.layerBox, hero: alphaHero.heroBox }));
+  check("…and the blur is masked by a gradient ending transparent, not a hard edge",
+        typeof alphaHero.layerMask === "string" && /gradient/.test(alphaHero.layerMask)
+          && /rgba\(0, 0, 0, 0\)|transparent/.test(alphaHero.layerMask),
+        String(alphaHero.layerMask));
+  /* The fade itself, as geometry rather than by eye: the mask's transparent
+   * stop, resolved against the layer the browser actually laid out, must
+   * already be reached along the hero's WHOLE border. Positive alpha anywhere
+   * on that border is the hard edge the owner reported — `overflow-hidden`
+   * slicing a wash that was still visible — and coverage alone would not catch
+   * it: the old `scale-110` layer covered the box too. The border is sampled
+   * (corners, edge midpoints and between) because the binding point is not a
+   * corner: it is wherever the ellipse's own radius runs out first. */
+  const fadeAtBorder = (mask, layer, hero) => {
+    const m = /radial-gradient\(\s*([\d.]+)%\s+([\d.]+)%\s+at\s+([\d.]+)%\s+([\d.]+)%\s*,([\s\S]*)\)/
+      .exec(mask || "");
+    const stop = /(?:rgba\(0, 0, 0, 0\)|transparent)\s+([\d.]+)%/.exec(m?.[5] || "");
+    if (!m || !stop || !layer || !hero) return null;
+    const rx = (Number(m[1]) / 100) * layer.width;
+    const ry = (Number(m[2]) / 100) * layer.height;
+    const cx = layer.left + (Number(m[3]) / 100) * layer.width;
+    const cy = layer.top + (Number(m[4]) / 100) * layer.height;
+    // 32 points around the hero's own border, in the mask's own units.
+    const points = [];
+    for (const [edge, n] of [["top", hero.width], ["bottom", hero.width],
+                             ["left", hero.height], ["right", hero.height]]) {
+      for (let i = 0; i <= 8; i += 1) {
+        const t = i / 8;
+        const x = edge === "left" ? hero.left
+          : edge === "right" ? hero.right : hero.left + t * hero.width;
+        const y = edge === "top" ? hero.top
+          : edge === "bottom" ? hero.bottom : hero.top + t * hero.height;
+        points.push(Math.sqrt(((x - cx) / rx) ** 2 + ((y - cy) / ry) ** 2));
+      }
+    }
+    return { end: Number(stop[1]) / 100, min: Math.min(...points) };
+  };
+  const fade = fadeAtBorder(alphaHero.layerMask, alphaHero.layerBox, alphaHero.heroBox);
+  check(`…and that fade is already complete along the hero's whole border `
+        + `(transparent by ${Math.round((fade?.end ?? 0) * 100)}% of the mask's radius; `
+        + `the border's own nearest point is at ${Math.round((fade?.min ?? 0) * 100)}%)`,
+        !!fade && fade.min >= fade.end, JSON.stringify(fade));
+  check("…with the legibility rules untouched: the wash keeps its opacity and the "
+        + "bg gradient is still painted over it",
+        alphaHero.layerOpacity === "0.25" && alphaHero.overlay === true,
+        `opacity=${alphaHero.layerOpacity} overlay=${alphaHero.overlay}`);
+
+  const betaHero = await heroOf(betaRow);
+  check(`an artist that fails its own checks carries no dot (${betaHero.name})`,
+        betaHero.name === ARTIST_BETA && betaHero.dot === false,
+        JSON.stringify({ name: betaHero.name, dot: betaHero.dot, label: betaHero.dotLabel }));
+  check("…and the failing check is still named in the hero, in words",
+        betaHero.failures.length === 1, JSON.stringify(betaHero.failures));
+
+  // The Library's Artists view: the same dot, on the rows whose `grade` says
+  // the same thing — and nothing at all on an artist the payload never graded.
+  await page.goto(`${base}/library`);
+  await page.waitForSelector("text=Artists", { timeout: 30000 });
+  await viewTab("Artists").click();
+  await page.waitForTimeout(250);
+  const artistRows = await page.evaluate(([alpha, beta]) => {
+    const rows = [...document.querySelectorAll("main table tbody tr")];
+    const read = (name) => {
+      const row = rows.find((r) => (r.querySelector("a")?.textContent || "").trim() === name);
+      return row
+        ? { found: true, dot: !!row.querySelector("a .artist-dot"), name: (row.querySelector("a")?.textContent || "").trim() }
+        : { found: false, dot: false, name: "" };
+    };
+    return {
+      alpha: read(alpha),
+      beta: read(beta),
+      dots: rows.filter((r) => r.querySelector("a .artist-dot")).length,
+    };
+  }, [ARTIST_ALPHA, ARTIST_BETA]);
+  check("the Library's Artists view draws that dot beside the name that passes",
+        artistRows.alpha.found && artistRows.alpha.dot === true, JSON.stringify(artistRows));
+  check("…and none beside the name that fails",
+        artistRows.beta.found && artistRows.beta.dot === false, JSON.stringify(artistRows));
+  check("…and a row the payload never graded grew none either",
+        artistRows.dots === 1, `${artistRows.dots} dots`);
+
+  // Home's artist shelf — the third place a name is listed, and the one whose
+  // rows come off the SAME library row: one dot, two surfaces.
+  await page.goto(`${base}/`);
+  await page.waitForSelector(`a[title="${ARTIST_ALPHA}"]`, { timeout: 30000 });
+  await page.waitForTimeout(250);
+  const shelfDots = await page.evaluate(([alpha, beta]) => {
+    const read = (name) => {
+      const card = document.querySelector(`a[title="${CSS.escape(name)}"]`);
+      return card
+        ? {
+            found: true,
+            dot: !!card.querySelector(".artist-dot"),
+            // What the row NAMES, read the way tools/check_home_artists.cjs
+            // reads a shelf caption (`span.text-sm` — the shared render's own
+            // name span): the display name, never the folder's `[mbid]`.
+            caption: card.querySelector("span.text-sm")?.textContent?.trim() || "",
+          }
+        : { found: false, dot: false, caption: "" };
+    };
+    return { alpha: read(alpha), beta: read(beta) };
+  }, [ARTIST_ALPHA, ARTIST_BETA]);
+  check("Home's artist shelf draws it too, on the same artist",
+        shelfDots.alpha.found && shelfDots.alpha.dot === true, JSON.stringify(shelfDots));
+  check("…and none on the artist that fails, so the shelf and the page agree",
+        shelfDots.beta.found && shelfDots.beta.dot === false, JSON.stringify(shelfDots));
+  check("…while the card still names the artist (the caption the shelf's own check reads)",
+        shelfDots.alpha.caption === ARTIST_ALPHA && shelfDots.beta.caption === ARTIST_BETA,
+        JSON.stringify([shelfDots.alpha.caption, shelfDots.beta.caption]));
+
+  // Favorites' artist table is the fourth surface listing an artist's name,
+  // off the same library rows: same dot, same rule.
+  await page.goto(`${base}/favorites/artists`);
+  await page.waitForSelector("text=Artist Alpha", { timeout: 30000 });
+  await page.waitForTimeout(250);
+  const favDots = await page.evaluate(([alpha, beta]) => {
+    const rows = [...document.querySelectorAll("main table tbody tr")];
+    const read = (name) => {
+      const row = rows.find((r) => (r.querySelector("a")?.textContent || "").trim() === name);
+      return row
+        ? { found: true, dot: !!row.querySelector("a .artist-dot") }
+        : { found: false, dot: false };
+    };
+    return { alpha: read(alpha), beta: read(beta) };
+  }, [ARTIST_ALPHA, ARTIST_BETA]);
+  check("Favorites' artist table draws it on the artist that passes…",
+        favDots.alpha.found && favDots.alpha.dot === true, JSON.stringify(favDots));
+  check("…and none on the one that fails",
+        favDots.beta.found && favDots.beta.dot === false, JSON.stringify(favDots));
+
+  /* The sidebar's OWN entry, pressed while its page is already open, is a
+   * RESET of that page's search rather than a navigation (App.tsx's
+   * `clearSearchOnRePress`): it empties the app-wide query box — the Library's
+   * own box edits the same store value — tells the page to clear the rest of
+   * its toolbar, and does NOT navigate. Pressed from ANOTHER page it is an
+   * ordinary first navigation and must leave the search alone. */
+  const libraryRows = () => page.evaluate(() =>
+    document.querySelectorAll("main table tbody tr, main a[href^='/album/']").length);
+  const searchBox = page.locator('main input[title^="Plain words match"]').first();
+  await page.goto(`${base}/library`);
+  await page.waitForSelector('main input[title^="Plain words match"]', { timeout: 30000 });
+  await page.waitForTimeout(600);
+  const allRows = await libraryRows();
+  await searchBox.fill("zzzz-matches-nothing");
+  await page.waitForTimeout(600);
+  const narrowedRows = await libraryRows();
+  await page.getByRole("link", { name: "Library", exact: true }).first().click();
+  await page.waitForTimeout(600);
+  const pressed = { value: await searchBox.inputValue(), rows: await libraryRows() };
+  check(`re-pressing the sidebar's own entry clears the Library's search `
+        + `(${narrowedRows} of ${allRows} rows while typed, ${pressed.rows} rows after, box "${pressed.value}")`,
+        narrowedRows < allRows && pressed.value === "" && pressed.rows === allRows,
+        JSON.stringify(pressed));
+
+  await page.goto(`${base}/genres`);
+  await page.waitForTimeout(400);
+  await page.getByRole("link", { name: "Library", exact: true }).first().click();
+  await page.waitForTimeout(700);
+  check(`and a first press from another page still just navigates (${new URL(page.url()).pathname})`,
+        new URL(page.url()).pathname === "/library" && (await searchBox.inputValue()) === "",
+        page.url());
+
+  /* ---- 8. a download's badge names where its files came from ------------
+   * A pressing's badge is its medium and its release countries ("CD · US, CA").
+   * A DIGITAL release has no pressing, so the fact that takes that place is
+   * where the files came from — the album's own `source_summary`, built by the
+   * server from the tracks' SOURCE tags ("Bandcamp", "Qobuz", the reader's own
+   * shop word, "Soulseek"). The app's own default source is the word "Digital"
+   * (mlo.paths.DEFAULT_DIGITAL_SOURCE): it repeats the medium and is dropped
+   * rather than printed twice. The card and the album page print the same
+   * words in the same order, because they are built by the same helper. */
+  const sourced = albumAt(0);           // the album page's own release
+  sourced.source_summary = "Bandcamp";
+  sourced.meta = { ...(sourced.meta || {}), RELEASECOUNTRY: "US; CA" };
+  album.source_summary = "Bandcamp";    // the page's payload for the same album
+  album.meta = { ...(album.meta || {}), RELEASECOUNTRY: "US; CA" };
+  const unsourced = albumAt(3);         // a download with no shop of its own
+  unsourced.source_summary = "Digital";
+  const physical = albumAt(1);          // the rip: its badge must not move
+  physical.source_summary = null;
+
+  /** One card's badges: the medium (+source) chip and, beside it, the release
+   *  countries — read off the card that links to `title`, the way a reader
+   *  finds it. */
+  const cardBadge = (title) => page.evaluate((name) => {
+    const link = [...document.querySelectorAll("a")].find((a) => (a.getAttribute("title") || "") === name);
+    const card = link?.closest(".group");
+    const media = card?.querySelector('[title^="Media: "]');
+    const country = card?.querySelector('[title^="Released in "]');
+    return media
+      ? { media: (media.textContent || "").trim(), title: media.getAttribute("title"),
+          country: (country?.textContent || "").trim() }
+      : null;
+  }, title);
+
+  await page.goto(`${base}/library`);
+  await page.waitForSelector("input[aria-label='Filter the list by name']", { timeout: 30000 });
+  await page.waitForTimeout(700);
+  const sourcedCard = await cardBadge(titleOf(sourced));
+  check(`a digital release that states a source wears it beside the medium `
+        + `("${sourcedCard?.media || "no media chip"}")`,
+        sourcedCard?.media === "Digital · Bandcamp", JSON.stringify(sourcedCard));
+  check(`…and the tooltip still names the release's own medium `
+        + `("${sourcedCard?.title || "no tooltip"}")`,
+        sourcedCard?.title === "Media: Digital Media · Source: Bandcamp", String(sourcedCard?.title));
+  const unsourcedCard = await cardBadge(titleOf(unsourced));
+  check(`a digital release that states none keeps the medium alone `
+        + `("${unsourcedCard?.media || "no media chip"}")`,
+        unsourcedCard?.media === "Digital", JSON.stringify(unsourcedCard));
+  const physicalCard = await cardBadge(titleOf(physical));
+  check(`a disc release's badge is unchanged ("${physicalCard?.media || "no media chip"}")`,
+        physicalCard?.media === "CD", JSON.stringify(physicalCard));
+  await page.goto(`${base}/album/${encodeURIComponent(albumPath)}`);
+  await page.waitForSelector("h1", { timeout: 30000 });
+  await page.waitForTimeout(600);
+  const WANT_CHIP = "Digital · Bandcamp · US, CA";
+  const albumChip = await page.evaluate((want) => {
+    const seen = [...document.querySelectorAll("main span")].map((el) => (el.textContent || "").trim());
+    // The chip itself, not a card's badge on the page's own shelf.
+    return { hit: seen.includes(want) || null, digital: seen.filter((t) => t.startsWith("Digital")) };
+  }, WANT_CHIP);
+  check(`…and the album page names the same release the same way, countries and all `
+        + `("${albumChip.digital.join(" / ") || "no chip"}")`,
+        albumChip.hit === true, JSON.stringify(albumChip.digital));
+  console.log(`\n[digital badges] card "${sourcedCard?.media}" (tooltip "${sourcedCard?.title}") | `
+    + `no source of its own "${unsourcedCard?.media}" | disc "${physicalCard?.media}" (countries "${physicalCard?.country}") | `
+    + `album page "${albumChip.digital.join(" / ")}"`);
+
+  /* ---- 9. stored column widths: hostile maps, and the reader's own ------
+   * The browser-level reproduction of the owner's blank Albums/Tracks views:
+   * a stored width map with 0/garbage values used to be applied verbatim into a
+   * `table-layout: fixed` table and collapsed every data column. sanitizeWidths
+   * drops anything the drag handle could not have produced (the setter clamps
+   * to 40-900) so a column keeps its own floor from the `_COL_W` maps — while a
+   * SANE stored width still has to be honoured, because it is the reader's own
+   * choice.
+   *
+   * The seed is copied into the real key by an init script on every load: an
+   * init script of its own per case would keep re-writing the older maps on
+   * every later navigation (they accumulate on the context). */
+  await page.addInitScript(() => {
+    const seed = localStorage.getItem("mlo-test-width-seed");
+    if (!seed) return;
+    for (const [key, raw] of Object.entries(JSON.parse(seed))) {
+      if (raw === null) localStorage.removeItem(key);
+      else localStorage.setItem(key, raw);
+    }
+  });
+  /** The table that carries a given header label, as drawn: the box its
+   *  `overflow-x-auto` wrapper gives it, the column count, and the cover cell
+   *  of its first real data row (the Artists table's rows are single-cell
+   *  group headings, and the Albums table's first row is one too). */
+  const tableView = (label) => page.evaluate((head) => {
+    const table = [...document.querySelectorAll("main table")]
+      .find((t) => [...t.querySelectorAll("thead th")].some((th) => (th.textContent || "").trim() === head));
+    if (!table) return null;
+    const wrap = table.parentElement;
+    const heads = [...table.querySelectorAll("thead th")];
+    const names = heads.map((th) => (th.textContent || "").trim());
+    const coverAt = names.indexOf("Cover");
+    // The first row that draws a whole row's worth of cells.
+    const row = [...table.querySelectorAll("tbody tr")].find((tr) => tr.querySelectorAll("td").length > 2);
+    const widths = {};
+    heads.forEach((th, i) => { if (names[i]) widths[names[i]] = Math.round(th.getBoundingClientRect().width); });
+    const coverCell = row && coverAt >= 0 ? row.querySelectorAll("td")[coverAt] : null;
+    return {
+      wrapClient: wrap.clientWidth, wrapScroll: wrap.scrollWidth,
+      headers: names.filter(Boolean).length,
+      cells: row ? row.querySelectorAll("td").length : 0,
+      cover: coverCell ? Math.round(coverCell.getBoundingClientRect().width) : 0,
+      widths,
+    };
+  }, label);
+
+  /** Load the Library with `seed` (a {key: rawJson} map) in place and open one
+   *  view. */
+  const widthCase = async (seed, tab, label) => {
+    await page.evaluate((s) => localStorage.setItem("mlo-test-width-seed", s), JSON.stringify(seed));
+    await page.goto(`${base}/library`);
+    await page.waitForSelector("text=Artists", { timeout: 30000 });
+    await viewTab(tab).click();
+    await page.waitForTimeout(900);
+    return tableView(label);
+  };
+
+  const zeroTracks = ["num", "cover", "title", "artist", "album", "year", "genre", "duration", "bitrate", "dr"];
+  const hostileTracks = [];
+  for (const [what, raw] of [
+    ["every column pinned to 0", JSON.stringify(Object.fromEntries(zeroTracks.map((id) => [id, 0])))],
+    ["a width that is not a number", JSON.stringify({ title: "wide", album: "wide" })],
+    ["an array instead of a map", JSON.stringify([120, 240, 360])],
+    ["null", "null"],
+    ["a legacy key shape", JSON.stringify({ "tags.TITLE": 200, Title: 120, TITLE: 90 })],
+  ]) {
+    const t = await widthCase({ "mlo-colw-tracks": raw }, "Tracks", "Title");
+    hostileTracks.push({ what, t });
+    check(`Tracks: a stored width map holding ${what} still draws the table `
+          + `(${t?.headers ?? 0} headers, ${t?.cells ?? 0} cells, cover ${t?.cover ?? 0} px)`,
+          !!t && t.headers >= 8 && t.cells >= 8 && t.cover >= 20, JSON.stringify(t?.widths));
+  }
+  const zeroAlbums = await widthCase(
+    { "mlo-colw-albums": JSON.stringify({ album: 0, artist: 0, year: 0, tracks: 0, grade: 0, media: 0 }) },
+    "Albums", "Album");
+  check(`Albums: the same hostile map leaves the album table's rows intact `
+        + `(${zeroAlbums?.headers ?? 0} headers, ${zeroAlbums?.cells ?? 0} cells, cover ${zeroAlbums?.cover ?? 0} px)`,
+        !!zeroAlbums && zeroAlbums.headers >= 8 && zeroAlbums.cells >= 8 && zeroAlbums.cover >= 20,
+        JSON.stringify(zeroAlbums?.widths));
+  const sane = await widthCase({ "mlo-colw-tracks": JSON.stringify({ title: 300 }) }, "Tracks", "Title");
+  check(`a sane stored width is still honoured — the reader's own 300 px title column `
+        + `(${sane?.widths?.Title ?? 0} px)`,
+        (sane?.widths?.Title ?? 0) === 300, JSON.stringify(sane?.widths));
+
+  /* ---- 10. the Artists tab must not scroll while its columns fit --------
+   * The owner's screenshot: a short artist list with a scrollbar along the
+   * bottom. `table-layout: fixed` makes the sum of the columns' own widths the
+   * table's floor, so four stored drag widths — every one of them well inside
+   * the handle's own 40-900 range — drew a 1420 px table in a 1200 px wrapper
+   * although the artists columns' own floors sum to 596 px. useFittedWidths
+   * brings the stored map inside what the table can show (the columns' floors
+   * plus the box's free room), which keeps the reader's proportions and leaves
+   * the sideways scroll to the case it is the design for: a table whose own
+   * floors genuinely exceed its box (the Albums and Tracks views at 1440,
+   * measured below). */
+  await viewTab("Artists").click();
+  await page.waitForTimeout(400);
+  const artistsClean = await tableView("Artist");
+  const overWide = await widthCase(
+    { "mlo-colw-artists": JSON.stringify({ albums: 300, tracks: 300, checks: 300, grade: 300 }) },
+    "Artists", "Artist");
+  check(`Artists: the columns' own floors fit the box, so no stored map may scroll it `
+        + `(${overWide?.wrapScroll ?? 0} vs ${overWide?.wrapClient ?? 0} px with four stored 300 px columns; `
+        + `clean ${artistsClean?.wrapScroll ?? 0} vs ${artistsClean?.wrapClient ?? 0} px)`,
+        !!overWide && overWide.wrapScroll <= overWide.wrapClient + 1
+          && (overWide.widths.Grade ?? 0) > 0 && (overWide.widths.Checks ?? 0) > 0,
+        JSON.stringify(overWide?.widths));
+  const albumsOver = await widthCase({ "mlo-colw-albums": null, "mlo-colw-tracks": null }, "Albums", "Album");
+  const tracksOver = await widthCase({ "mlo-colw-tracks": null }, "Tracks", "Title");
+  console.log(`\n[stored widths] hostile Tracks maps draw `
+    + hostileTracks.map(({ what, t }) => `${t?.headers ?? 0}h/${t?.cells ?? 0}c/cover ${t?.cover ?? 0}px (${what})`).join(", ")
+    + ` | hostile Albums map ${zeroAlbums?.headers ?? 0}h/${zeroAlbums?.cells ?? 0}c/cover ${zeroAlbums?.cover ?? 0}px`
+    + ` | sane 300 px title -> ${sane?.widths?.Title ?? 0} px (its own floor: ${tracksOver?.widths?.Title ?? 0} px)`);
+  console.log(`[library-az tables @1440] Artists ${artistsClean?.wrapScroll}/${artistsClean?.wrapClient} px `
+    + `(with four stored 300 px columns: ${overWide?.wrapScroll}/${overWide?.wrapClient} px), `
+    + `Albums ${albumsOver?.wrapScroll}/${albumsOver?.wrapClient} px, Tracks ${tracksOver?.wrapScroll}/${tracksOver?.wrapClient} px`);
+  await page.evaluate(() => localStorage.removeItem("mlo-test-width-seed"));
 } finally {
   await browser.close();
   await vite.close();

@@ -368,6 +368,49 @@ ok("TAG_CASE" not in canon["tracks"][0]["issues"],
    f"the fixed file passes the case check (got {canon['tracks'][0]['issues']})")
 
 # --------------------------------------------------------------------------- #
+print("== COMMENT: a name the vocabulary holds whose VALUE is junk ==")
+# COMMENT is free text canonicalisation must leave alone (above) — which is
+# exactly why a VALUE there is always somebody else's note. Grading fails it
+# with its own issue code and script 10 clears it, both under the excess-tag
+# switch the rest of the strip follows.
+EXCESS = dict(ISO, grade_check_excess_tags=True, strip_unknown_tags=True)
+assert EXCESS["grade_check_excess_tags"], "the case below grades the excess check"
+raw_tags(wrong, {"TITLE": "Song Name", "MEDIA": "Digital Media",
+                 "COMMENT": "ripped by some tool"})
+commented = _grade_album(fixture, "EMBEDDED", EXCESS)
+ok("COMMENT" in commented["tracks"][0]["issues"],
+   f"a non-empty COMMENT fails the track (got {commented['tracks'][0]['issues']})")
+ok(any("Comment tag carries a value" in i and "COMMENT" in i
+       for i in commented["issues"]),
+   f"the album issue names the tag and the script that clears it "
+   f"(got {commented['issues']})")
+
+stats3 = run_format_all(cfg)
+comment_after = AudioFile(wrong).get_tag("COMMENT")
+ok(not comment_after,
+   f"script 10 cleared the COMMENT value ({comment_after!r})")
+ok(comment_after is None and stats3["modified_count"] >= 1,
+   f"and reported the file as modified (modified={stats3['modified_count']})")
+clean = _grade_album(fixture, "EMBEDDED", EXCESS)
+ok("COMMENT" not in clean["tracks"][0]["issues"],
+   f"the cleared file passes the same check (got {clean['tracks'][0]['issues']})")
+# The check is gated like the rest of the strip: with strip_unknown_tags off,
+# nothing in the pipeline can clear a COMMENT, so grading does not demand it.
+no_strip = _grade_album(fixture, "EMBEDDED",
+                        dict(EXCESS, strip_unknown_tags=False))
+ok("COMMENT" not in no_strip["tracks"][0]["issues"],
+   "strip_unknown_tags=False stops both the strip and the grade")
+
+# An ALIAS tag is never excess — the family is part of the vocabulary, bare or
+# locale-suffixed, in every container spelling.
+raw_tags(wrong, {"TITLE": "Song Name", "MEDIA": "Digital Media",
+                 "TITLEALIAS": "Kimi no na wa", "ARTISTALIAS-JA": "Hikaru Utada"})
+with_alias = _grade_album(fixture, "EMBEDDED", EXCESS)
+ok(not any(i.startswith("Excess tags:") for i in with_alias["issues"]),
+   f"TITLEALIAS / ARTISTALIAS-JA are not excess tags (got {with_alias['issues']})")
+raw_tags(wrong, {"TITLE": "Song Name", "MEDIA": "Digital Media"})
+
+# --------------------------------------------------------------------------- #
 print("== the registry exposes the canonical vocabulary ==")
 from server.tags_registry import registry                               # noqa: E402
 
@@ -382,6 +425,19 @@ ok("grade_check_tag_case" in {c["key"] for c in reg["checks"]},
 ok(by_key["RELEASETYPE"]["graded_by"] == ["grade_check_tag_case"],
    f"RELEASETYPE is graded by the case check "
    f"(got {by_key['RELEASETYPE']['graded_by']})")
+# A tag nothing writes reports no writer, and the alias family is a row of its
+# own so the Grading page can show what the alias check grades.
+ok(by_key["COMMENT"]["writer"].startswith("nothing"),
+   f"COMMENT reports no writer instead of the import's own name "
+   f"(got {by_key['COMMENT']['writer']!r})")
+ok(by_key["COMMENT"]["graded_by"] == ["grade_check_excess_tags"]
+   and "COMMENT" in by_key["COMMENT"]["issue_codes"],
+   f"COMMENT is graded by the excess check with its own code "
+   f"(got {by_key['COMMENT']['graded_by']}/{by_key['COMMENT']['issue_codes']})")
+ok(by_key["TITLEALIAS"]["graded_by"] == ["grade_check_alias_needed"]
+   and "TITLEALIAS-" in reg["allowed_prefixes"],
+   f"the alias family is a registry row behind its own check "
+   f"(got {by_key['TITLEALIAS']['graded_by']} / {reg['allowed_prefixes']})")
 
 shutil.rmtree(tmp, ignore_errors=True)
 shutil.rmtree(lib, ignore_errors=True)

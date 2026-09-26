@@ -19,6 +19,12 @@ picture, or nothing — never a different cover standing in for it.
 
 Nothing here raises: a total failure is `(None, None, None)` and the UI keeps
 its own placeholder.
+
+The module also owns the second, STAT-keyed cache in the same data dir: the
+LOCAL covers an album's own file is served as, shrunk to the width a surface
+draws it (`cover_thumb`, reached through `GET /api/cover?w=`). That one exists
+for latency, not for a refusing CDN — a 74 px bar thumb must not fetch a
+1200 px master.
 """
 import hashlib
 import json
@@ -123,8 +129,8 @@ _MAGIC = (
 )
 
 
-def cache_dir(music_folder=None):
-    """`<music>/.mlo/data/art_cache` — the app's own state dir for covers."""
+def _data_subdir(name, music_folder=None):
+    """`<music>/.mlo/data/<name>` — the app's own state dir for covers."""
     if music_folder is None:
         try:
             from mlo.config import load_config
@@ -138,7 +144,18 @@ def cache_dir(music_folder=None):
         d = app_data_dir(music_folder)
     except Exception:
         d = None
-    return os.path.join(d, "art_cache") if d else None
+    return os.path.join(d, name) if d else None
+
+
+def cache_dir(music_folder=None):
+    """`<music>/.mlo/data/art_cache` — provider artwork, keyed by its URL."""
+    return _data_subdir("art_cache", music_folder)
+
+
+def thumb_dir(music_folder=None):
+    """`<music>/.mlo/data/cover_thumbs` — LOCAL covers shrunk to a surface's
+    drawn width (see `cover_thumb`), keyed by the cover file's stat."""
+    return _data_subdir("cover_thumbs", music_folder)
 
 
 def allowed(url):
@@ -462,3 +479,163 @@ def fetch_art(url, *, artist="", album="", release_group_mbid="", cfg=None,
         # call was not allowed to reach.
         _FAILS[key] = time.time() + FAIL_TTL
     return None, None, None
+
+
+# --------------------------------------------------------------------------- #
+# Local covers, shrunk to the width a surface actually draws.
+#
+# The provider cache above is keyed by a URL. This one is keyed by the cover
+# FILE's own stat, because that is what changes when a cover is replaced in
+# place (cover.jpg stays cover.jpg, so a URL-keyed entry would go on serving
+# the previous picture). Every surface that draws a cover smaller than the
+# master — the player bar's 74 px thumb, the fullscreen picture and its
+# blurred ambient layer, the queue/track rows — used to pull the whole file
+# (a 1200-3000 px JPEG, 0.3-3 MB) and let the browser shrink it: megabytes of
+# transfer and an extra full-size decode between "press play" and the artwork
+# appearing. A request now asks for one of THUMB_SIZES and gets bytes that
+# size, encoded ONCE and then read from disk by every later request, every
+# other surface and the next server run.
+# --------------------------------------------------------------------------- #
+# The widths a caller may ask for. Bucketed on purpose: an arbitrary `w` per
+# call site would put a new file in the cache for every pixel count the UI
+# ever computes, and lose the sharing between surfaces that is half the point.
+THUMB_SIZES = (160, 320, 640, 1200)
+# Thumbnails are drawn small and often; 88 is the app's own "invisible at this
+# size" JPEG quality (the library-write path keeps its own, higher one).
+THUMB_QUALITY = 88
+# How long a browser may keep a sized cover WITHOUT asking again. A cover is
+# replaced in place, so this is the window in which a stale thumb could still
+# be shown — five minutes, and the client that did the write is not even in it:
+# the URL carries the version token the write reported (`api.coverUrl`'s `v`),
+# so its own surfaces fetch the new picture immediately. The point of the
+# window is the opposite end: the surfaces that show the SAME album again
+# (the next track, the reopened fullscreen pane, the queue row) must not spend
+# a round trip between "press play" and the artwork.
+THUMB_MAX_AGE = 300
+
+
+def thumb_width(w):
+    """*w* snapped up to the next THUMB_SIZES step (0 = no thumb asked)."""
+    try:
+        w = int(w or 0)
+    except (TypeError, ValueError):
+        return 0
+    if w <= 0:
+        return 0
+    for size in THUMB_SIZES:
+        if w <= size:
+            return size
+    return THUMB_SIZES[-1]
+
+
+def _thumb_key(path, w, st):
+    return hashlib.sha1(
+        ("thumb|%s|%d|%d|%d" % (os.path.normcase(path), getattr(st, "st_mtime_ns", 0),
+                                getattr(st, "st_size", 0), w)).encode("utf-8")).hexdigest()
+
+
+def _encode_thumb(fp, w):
+    """(bytes, ctype) for *fp* at *w* px, or ``(None, None)``.
+
+    JPEG is decoded through Pillow's `draft()` first, which for a JPEG is the
+    difference between decoding 1400×1400 to shrink it and decoding the 350×350
+    the shrink is going to keep anyway. An image with transparency stays a PNG
+    (the bar draws the thumb over `bg-raise`); everything else becomes a
+    progressive JPEG.
+    """
+    import io
+
+    from PIL import Image
+
+    try:
+        img = Image.open(fp)
+        try:
+            orientation = img.getexif().get(0x0112)          # 274 = Orientation
+        except Exception:
+            orientation = None
+        if orientation and orientation != 1:
+            # The browser applies EXIF orientation to the MASTER (`image-
+            # orientation: from-image`), so a thumbnail that ignored it would
+            # draw the cover on its side the moment the surface started asking
+            # for one. `draft` is skipped here: the transpose decodes anyway.
+            from PIL import ImageOps
+
+            img = ImageOps.exif_transpose(img)
+        else:
+            img.draft("RGB", (w, w))
+        img.load()
+        img.thumbnail((w, w), Image.LANCZOS)
+        buf = io.BytesIO()
+        # An image with transparency stays a PNG — the bar draws the thumb over
+        # `bg-raise`, and `convert("RGB")` would paint those pixels black.
+        # `info["transparency"]` is only how a PALETTE image carries it; an
+        # RGBA/LA image has it in the mode.
+        if img.mode in ("RGBA", "LA") or (img.mode == "P" and "transparency" in img.info):
+            img.convert("RGBA").save(buf, "PNG", optimize=True)
+            return buf.getvalue(), "image/png"
+        img.convert("RGB").save(buf, "JPEG", quality=THUMB_QUALITY,
+                                optimize=True, progressive=True)
+        return buf.getvalue(), "image/jpeg"
+    except Exception:
+        return None, None
+
+
+def _source_size(fp):
+    """(width, height) of the image in *fp* without decoding it, or None."""
+    try:
+        from PIL import Image
+
+        with Image.open(fp) as img:
+            return img.size
+    except Exception:
+        return None
+
+
+def cover_thumb(path, w):
+    """*path* at the bucketed width *w*: ``(bytes, ctype, etag)``, or None.
+
+    None means "there is no thumbnail here, serve the master" — the file
+    cannot be decoded at all (a ``cover.jxl`` on a Pillow without the plugin):
+    a cover must never fail because the shrink did. A file already at or below
+    *w* is served as ITS OWN bytes (no upscale, no re-encode, no second cache
+    entry — a 700 px cover asked for at 640 is still that 700 px cover).
+
+    The etag is the hash of the bytes actually returned, and every call after
+    the first reads them from this function's disk cache: the key is the
+    cover file's stat, so a replaced cover is a different entry rather than a
+    stale hit.
+    """
+    import hashlib
+
+    w = thumb_width(w)
+    if not w:
+        return None
+    try:
+        st = os.stat(path)
+    except OSError:
+        return None
+
+    d = thumb_dir()
+    key = _thumb_key(path, w, st)
+    hit = _read(key, d)
+    if hit:
+        return hit[0], hit[1], hashlib.md5(hit[0]).hexdigest()
+
+    size = _source_size(path)
+    if size is None:
+        return None
+    if max(size) <= w:
+        try:
+            with open(path, "rb") as fh:
+                raw = fh.read()
+        except OSError:
+            return None
+        if not raw:
+            return None
+        return raw, _ctype(None, raw) or "image/jpeg", hashlib.md5(raw).hexdigest()
+
+    blob, tctype = _encode_thumb(path, w)
+    if not blob:
+        return None
+    _write(key, d, blob, tctype, "thumb", path)
+    return blob, tctype, hashlib.md5(blob).hexdigest()

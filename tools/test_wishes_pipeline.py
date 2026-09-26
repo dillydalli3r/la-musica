@@ -153,7 +153,10 @@ class Pipeline:
         self.searches = 0
 
     def search(self, slsk_, queries, wait_s, usable=None, response_limit=0,
-    cancel_check=None):
+               cancel_check=None, resume=None, pending_out=None):
+        # `resume`/`pending_out` are the two-phase seam (see _search_queries):
+        # this double always answers in its own window, so it hands nothing
+        # over for a top-up pass to re-read.
         self.searches += 1
         responses = [("peer", {"fileCount": 4})] if self.found else []
         return ([("q", {"responses": responses})], [], 0)

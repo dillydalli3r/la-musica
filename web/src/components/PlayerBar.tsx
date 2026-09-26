@@ -4,9 +4,9 @@ import { Link } from "react-router-dom";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { Disc3, Info, ListMusic, ListPlus, Maximize2, Mic2, Play, Pause, SkipBack, SkipForward, Shuffle, Repeat, Timer, Volume2, X } from "lucide-react";
 import { api, isOffline } from "../api";
-import { toast, useStore } from "../store";
+import { notePlayerPosition, startPlayerPersistence, toast, useStore } from "../store";
 import { fmtDuration } from "../lib/fmt";
-import { fmtPair, fmtTech, isVideoFile } from "../lib/fmt";
+import { fmtPair, fmtTech, isVideoFile, originalYear } from "../lib/fmt";
 import { nextSpeed, fmtSpeed } from "../lib/playback";
 import { playbackSource } from "../lib/mediaCache";
 import { heldBy, useJobLocks, useLockLabel, useLockWhy } from "../lib/locks";
@@ -24,6 +24,7 @@ import { applyEq, applyReplayGain, applyVolume, attachAnalyser, audibleLatencySe
 import { eqApplyRefusal } from "../lib/eqNodes";
 import FavHeart from "./FavHeart";
 import NowPlayingView from "./NowPlayingView";
+import { ROW_COVER_W } from "./CoverImg";
 import ScrollingText from "./ScrollingText";
 import LyricsSidebar from "./LyricsSidebar";
 import TrackDownloadExport from "./TrackDownloadExport";
@@ -57,6 +58,14 @@ type RgMode = "track" | "album" | "off";
  *  the first second of the element's audio is a resume, and counting it would
  *  turn every pause/play into another play. See PlayerBar's `countPlay`. */
 const PLAY_START_SECONDS = 1;
+
+/** A jump shorter than this is not worth an undo entry: a drag on the seek bar
+ *  emits a seek per pointermove, and a one-second nudge is not the misclick the
+ *  stack exists for (it would push the real jump out of the handful kept). */
+const JUMP_MIN_SECONDS = 2;
+/** How many jumps the undo stack keeps — the owner's "last action", with room
+ *  for a couple of misclicks in a row. */
+const JUMP_STACK_MAX = 5;
 
 /** How long the player waits between re-asks for a gain the backend is still
  *  measuring on the fly, in ms. Growing, because a whole-file EBU R128 decode
@@ -116,6 +125,17 @@ function noteSeek(source: "app" | "mediaSession" | "ios-shell", el: HTMLMediaEle
   const round1 = (n: number) => Math.round(n * 10) / 10;
   note("seek", { source, from: el ? round1(el.currentTime) : null, to: round1(to) });
 }
+
+/** The input types that own their own undo (the undo handler below reads this
+ *  inline). A `range` input — the seek bar — is NOT one of them: the owner's
+ *  misclick is a seek-bar click and the focus stays on that control afterwards,
+ *  so treating every input as "typing" would ignore the very Ctrl+Z the undo
+ *  exists for. Text-ish fields keep their own. */
+const TEXT_INPUT_TYPES: Record<string, true> = {
+  "": true, text: true, search: true, email: true, password: true, url: true,
+  tel: true, number: true, date: true, "datetime-local": true, month: true,
+  time: true, week: true,
+};
 
 
 export default function PlayerBar() {
@@ -181,7 +201,32 @@ export default function PlayerBar() {
   // load effect). Starts at the mount's token so the first press of the session
   // behaves like any other.
   const loadedToken = useRef(playToken);
-  const [time, setTime] = useState(0);
+  // Where a RELOAD left the player (store.ts → `mlo.player.state.v1`): the
+  // queue and the row came back with the hydrated store, and this is the second
+  // inside that row. Read once into a ref, because it is a fact about THIS page
+  // load rather than state that changes: the load effect below recognises the
+  // restored track by it, loads it without playing, and the seek lands when
+  // that element's own metadata arrives (`applyRestore`).
+  const restore = useRef<{ path: string; time: number } | null>(
+    (() => {
+      const st = useStore.getState();
+      return st.resumePath ? { path: st.resumePath, time: st.resumeTime } : null;
+    })()
+  );
+  // The last few USER-INITIATED jumps inside a track (oldest first), which
+  // Ctrl+Z takes back one at a time (see the undo effect). `path` is the track
+  // the jump happened in, so an entry whose track is no longer loaded is
+  // dropped rather than applied to whatever plays now — and the whole stack is
+  // cleared when a track is loaded, because a queue change is not an action
+  // this undoes.
+  const jumps = useRef<{ path: string | null; from: number; to: number }[]>([]);
+  // Where a drag on the seek bar started: the drag is ONE entry (its own
+  // pointermove seeks are micro-seeks and would otherwise fill the stack).
+  const dragFrom = useRef<number | null>(null);
+  // A restored track's video must not start itself: latched per path, so the
+  // codec probe's remount cannot quietly autoplay it either (see the popout).
+  const videoRestored = useRef<string | null>(restore.current?.path ?? null);
+  const [time, setTime] = useState(restore.current?.time ?? 0);
   const [duration, setDuration] = useState(0);
   const [shuffle, setShuffle] = useState(false);
   const [loop, setLoop] = useState(false);
@@ -522,6 +567,89 @@ export default function PlayerBar() {
     // costs the play and nothing else.
     void api.recordPlay(path).catch(() => {});
   };
+
+  /** Put a reloaded session back where it was, on the track it was on.
+   *
+   *  Called from the element's OWN `loadedmetadata` and never before: a
+   *  `currentTime` written while the element still has no src (the load's src
+   *  is resolved asynchronously) is simply dropped, and the seek would be lost.
+   *  Only the restored track is honoured, only once, and both the ref here and
+   *  the store's own copy are cleared — a later load of the same track is an
+   *  ordinary one and starts at 0, which is also what "press this song again"
+   *  has to mean.
+   *
+   *  The `play` event that follows a resume is NOT a new play: the counter is
+   *  seeded with this element+path first, so a restored start (including one
+   *  restored inside the first second, where the position check could not tell
+   *  them apart) records nothing. See `countPlay` and PLAY_START_SECONDS. */
+  const applyRestore = (el: HTMLMediaElement, path: string | null) => {
+    const r = restore.current;
+    if (!r || !path || path !== r.path) return;
+    restore.current = null;
+    useStore.getState().clearResume();
+    counted.current = { el, path };
+    if (r.time > 0) {
+      try {
+        el.currentTime = r.time;
+      } catch { /* a refused seek costs the position, not the track */ }
+      setTime(r.time);
+    }
+    note("restore", { path: shortPath(path), at: Math.round(r.time * 10) / 10 });
+  };
+
+  /** Record one USER-INITIATED jump inside a track, for Ctrl+Z.
+   *
+   *  `from` is the position BEFORE the seek (every caller has it in hand) and
+   *  `path` names the track the element holds, so a stale entry can be told
+   *  apart from a live one. Anything under JUMP_MIN_SECONDS is ignored: a drag
+   *  emits a seek per pointermove, and those are noise, not actions. */
+  const noteJump = (el: HTMLMediaElement | null, from: number, to: number) => {
+    if (!el) return;
+    if (!Number.isFinite(from) || !Number.isFinite(to)) return;
+    if (Math.abs(to - from) < JUMP_MIN_SECONDS) return;
+    const stack = jumps.current;
+    stack.push({ path: pathOf(el), from, to });
+    if (stack.length > JUMP_STACK_MAX) stack.splice(0, stack.length - JUMP_STACK_MAX);
+  };
+
+  // Ctrl+Z / Cmd+Z: undo the newest jump inside the current track — the
+  // owner's "I misclicked and skipped a minute ahead", with no button for it.
+  // ONE entry per press (the stack drains; it is never rewound as a whole),
+  // and an entry is dropped silently when the track it happened in is no longer
+  // loaded — which is what keeps a queue change un-undoable through this.
+  // Typing keeps its own undo: an event that started in a field is ignored.
+  useEffect(() => {
+    const onUndo = (e: KeyboardEvent) => {
+      if (!(e.ctrlKey || e.metaKey) || e.altKey || e.shiftKey) return;
+      if (e.key.toLowerCase() !== "z") return;
+      // Typing keeps its own undo. A RANGE input does not count as typing (see
+      // TEXT_INPUT_TYPES): the seek bar keeps the focus after the misclick this
+      // exists for.
+      const t = e.target instanceof HTMLElement ? e.target : null;
+      if (t && (t.isContentEditable || t instanceof HTMLTextAreaElement
+        || (t instanceof HTMLInputElement && TEXT_INPUT_TYPES[t.type] === true))) return;
+      const stack = jumps.current;
+      while (stack.length) {
+        const jump = stack.pop() as { path: string | null; from: number; to: number };
+        // Stale: nothing holds that track any more, so there is no position to
+        // go back to. Dropped — and the NEXT entry gets its turn, so one press
+        // still undoes one action.
+        const el = jump.path ? elementFor(jump.path) : null;
+        if (!el) continue;
+        e.preventDefault();
+        noteSeek("app", el, jump.from);
+        el.currentTime = jump.from;
+        setTime(jump.from);
+        toast(`Undone — back to ${fmtDuration(jump.from)}`);
+        return;
+      }
+    };
+    window.addEventListener("keydown", onUndo);
+    return () => window.removeEventListener("keydown", onUndo);
+    // Reads refs, the store and stable setters only, so one listener for the
+    // session is never stale — the same reasoning as the visibility listener.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
   // Music-video presentation, owned here because this is where the single
   // <video> decoder lives: how the fullscreen picture fills the screen, and
   // which caption track is showing (null = as tagged). The fullscreen overlay
@@ -580,6 +708,38 @@ export default function PlayerBar() {
   const coverFile = current?.coverFile ?? libCover?.track ?? current?.albumCover ?? libCover?.album ?? null;
   const coverAlbumPath = current?.albumPath ?? "";
 
+  // The NEXT track's cover, resolved by the same rule as the current one (a
+  // queue row carries its own filenames; a playlist/.m3u8 row gets them from
+  // the library payload) and fetched while the current track plays. That is
+  // what makes the artwork of the track that is ABOUT to play a cache hit
+  // instead of a round trip started at the moment it starts: the bar, the
+  // queue row and the fullscreen pane all ask for a width this warm already
+  // put in the browser's cache (see `coverWarm`).
+  const nextCover = useMemo(() => {
+    const nx = queue[index + 1];
+    if (!nx || !nx.albumPath) return null;
+    const row = coverByPath.get(nx.path) ?? null;
+    const file = nx.coverFile ?? row?.track ?? nx.albumCover ?? row?.album ?? null;
+    return file ? api.coverUrl(nx.albumPath, file, { w: ROW_COVER_W }) : null;
+  }, [queue, index, coverByPath]);
+  const warmedCover = useRef<string | null>(null);
+  useEffect(() => {
+    // Only while something is actually playing: a queue being BUILT (rows
+    // added to "next", a restored session sitting paused) must not fetch art
+    // for a track the reader may never reach. Once the sound is on, the next
+    // track's cover goes out at the START of the current one — many minutes
+    // of slack before the gapless handover, and before any skip, instead of a
+    // round trip that begins when the track does.
+    if (!playing || !nextCover || warmedCover.current === nextCover) return;
+    warmedCover.current = nextCover;
+    // An <img> the page never draws: the point is the browser's own cache
+    // (fetch + decode), which the bar's own <img> then paints from.
+    const img = new Image();
+    img.decoding = "async";
+    img.src = nextCover;
+    img.decode?.().catch(() => {});
+  }, [playing, nextCover]);
+
   // The album and artist lines open their own pages, and a queue row carries
   // only the folder it came from — while the routes prefer a MusicBrainz ID
   // (lib/refs). So their library rows come from the SAME payload the covers
@@ -616,6 +776,15 @@ export default function PlayerBar() {
   // the half it does not have.
   const albumText = current?.album ?? "—";
   const artistText = current?.artist ?? current?.albumPath.split("/").pop() ?? "";
+  // The ORIGINAL release year of what is playing (`ORIGINALDATE`, falling back
+  // to `DATE`): a remaster keeps the year the work came out, which is the one a
+  // reader recognises. Rendered inside the album line, where the album pages
+  // and the library's own rows put it too — and only when there is an album for
+  // it to belong to, so the "—" of a folder-less queue row stays a dash. The
+  // tags land a beat after the queue row does, which is why this can appear
+  // once the per-track fetch answers (the line re-measures and drifts then).
+  const releaseYear = originalYear(currentTags?.tags);
+  const albumLine = current?.album && releaseYear ? `${current.album} · ${releaseYear}` : albumText;
   // A job claiming the file that is PLAYING never stops it: the stream already
   // has its handle, and cutting the listener off mid-track would be a worse bug
   // than the lock. The state is said out loud instead — once per track — so
@@ -669,7 +838,14 @@ export default function PlayerBar() {
           title: displayTitle,
           artist: current.artist ?? "",
           album: current.album ?? "",
-          artwork: [{ src: api.coverUrl(coverAlbumPath, coverFile), sizes: "512x512", type: "image/jpeg" }],
+          // The OS overlay asks for this URL itself, so it must be the one
+          // the bar already has: the SAME width, hence the same bytes and the
+          // same cache entry. Asking for a bigger bucket here would add a
+          // second cover fetch (219 KB of it, measured) to every track change
+          // — competing with the audio stream for the very seconds this fix
+          // exists to protect — and a second fetch is also what a cover
+          // replaced in place would have to be waited on twice for.
+          artwork: [{ src: api.coverUrl(coverAlbumPath, coverFile, { w: ROW_COVER_W }), sizes: "160x160", type: "image/jpeg" }],
         });
       }
       ms.setActionHandler("play", () => {
@@ -699,20 +875,42 @@ export default function PlayerBar() {
         note("mediaSession", { action: "nexttrack" });
         stepRef.current(1);
       });
-      // …and the two SKIP actions are declared unsupported, which is what makes
-      // the system draw those two steps instead. A web page is offered
-      // skip-forward/skip-backward by default — WebKit enables the pair with its
-      // own interval whether or not the page ever asked — and the lock screen
-      // then renders ⟲10 / 10⟳ where this app's transport is a TRACK STEP: the
-      // ⏮ ⏸ ⏭ the bar has carried since 4.1.0 and the queue answers. The
-      // handlers are REMOVED, never replaced (a `null` handler is the spec's
-      // "this action is not supported"), so a platform that keeps the skip pair
-      // anyway loses nothing but the two actions the app never had. Owner's
-      // report, and the reason this is here rather than in the shell: the card
-      // it was drawn on showed the skip pair with the app's own metadata around
-      // it (issue #55).
-      ms.setActionHandler("seekbackward", null);
-      ms.setActionHandler("seekforward", null);
+      // The two SKIP actions, registered for real. This reverses an earlier
+      // decision (issue #55) that declared the pair UNSUPPORTED — a `null`
+      // handler is the spec's "this action does not exist" — to keep the lock
+      // screen's ⟲10 / 10⟳ from standing in for the app's own ⏮ ⏸ ⏭ track step.
+      // The cost of that was the opposite report (issue #58): with no handler
+      // registered, iOS/Control Center/CarPlay draw NO skip buttons at all, and
+      // the driver has no way to move inside the track from the place they
+      // actually press. So the pair seeks: ±10 s, or the platform's own
+      // interval when it supplies one (`seekOffset`, seconds), clamped into the
+      // track. A track step remains what the app's own transport does, and the
+      // OS's `nexttrack`/`previoustrack` above still step the queue.
+      const skipBy = (dir: 1 | -1, requested?: number) => {
+        const el = media();
+        if (!el) return;
+        // The platform's interval when it states one, 10 s otherwise. `to` is
+        // clamped to the track: a skip past the end would `ended` the track and
+        // a negative one throws.
+        const off = typeof requested === "number" && Number.isFinite(requested) && requested > 0
+          ? requested
+          : 10;
+        const limit = Number.isFinite(el.duration) && el.duration > 0 ? el.duration : Infinity;
+        const from = el.currentTime;
+        const to = Math.max(0, Math.min(limit, el.currentTime + dir * off));
+        noteSeek("mediaSession", el, to);
+        el.currentTime = to;
+        setTime(to);
+        noteJump(el, from, to);
+      };
+      ms.setActionHandler("seekbackward", (d?: { seekOffset?: number }) => {
+        note("mediaSession", { action: "seekbackward", vis: document.visibilityState, offset: d?.seekOffset ?? null });
+        skipBy(-1, d?.seekOffset);
+      });
+      ms.setActionHandler("seekforward", (d?: { seekOffset?: number }) => {
+        note("mediaSession", { action: "seekforward", vis: document.visibilityState, offset: d?.seekOffset ?? null });
+        skipBy(1, d?.seekOffset);
+      });
       // Scrubbing from the lock screen / Control Center / a car stereo. Without
       // a handler the OS draws a scrubber that springs back to where the app
       // thinks it is, which reads as "seeking is broken in the background".
@@ -721,9 +919,11 @@ export default function PlayerBar() {
         if (!el || typeof d?.seekTime !== "number") return;
         // `from` before `to`, so the row shows which way and how far — an OS
         // scrub that lands somewhere else than it asked for is its own clue.
+        const from = el.currentTime;
         noteSeek("mediaSession", el, d.seekTime);
         el.currentTime = d.seekTime;
         setTime(d.seekTime);
+        noteJump(el, from, d.seekTime);
       });
     } catch {
       /* media session unsupported — ignore */
@@ -747,6 +947,53 @@ export default function PlayerBar() {
       /* unsupported — the controls simply do not follow */
     }
   }, [playing, current]);
+
+  // The duration/rate the report last recorded for `setPositionState` — one row
+  // per track and per speed, not one per tick (see the effect below).
+  const notedPositionState = useRef("");
+
+  // …and WHERE inside the track it is. `playbackState` alone leaves the
+  // platform's scrubber with no position at all: iOS draws it from whatever it
+  // last believed and springs it back there on the next touch, which is the
+  // "the lock-screen scrubber misbehaves" half of the report (issue #58).
+  // `setPositionState` is the only way to tell the OS the duration, the second,
+  // and the rate the app is really playing at. It is called as the clock moves
+  // — that is what the API is for — and the values are clamped into the range
+  // the spec requires (a non-positive duration, or a position outside
+  // [0, duration], throws and would leave the widget stale).
+  useEffect(() => {
+    const ms = navigator.mediaSession;
+    if (!ms || typeof ms.setPositionState !== "function") return;
+    const duration = effDuration;
+    if (!(duration > 0)) return;
+    const position = Math.max(0, Math.min(duration, time));
+    // The report gets one row per duration/rate (not one per tick — the ring
+    // keeps 40 events, and a row per second would bury everything else): what
+    // the app TOLD the OS about the track, which is the half a report about a
+    // misbehaving lock-screen scrubber needs to see.
+    const shape = `${Math.round(duration)}|${speed}`;
+    if (notedPositionState.current !== shape) {
+      notedPositionState.current = shape;
+      note("positionstate", { duration: Math.round(duration), rate: speed });
+    }
+    try {
+      ms.setPositionState({ duration, position, playbackRate: speed });
+    } catch {
+      // The OS refused the triple (a rate outside its range, a duration it
+      // disagrees with). Worth a row: on the device that misbehaves this is the
+      // difference between "the app never told it" and "it would not listen".
+      note("positionstate-refused", { duration: Math.round(duration), position: Math.round(position), rate: speed });
+    }
+  }, [effDuration, time, speed]);
+
+  // The second the next page load restores: handed to the store's own snapshot
+  // HERE, where the player's clock lands, and never written to disk from this
+  // path (store.ts coalesces the write, flushes on a pause and ticks slowly in
+  // between — `timeupdate` itself is deliberately not a write). `current` and
+  // `time` are read together for the same reason: a track change moves `current`
+  // before the new element has produced a second, and a position recorded for
+  // the wrong row would resume the neighbouring song mid-way.
+  useEffect(() => notePlayerPosition(current?.path ?? null, time), [current?.path, time]);
 
   // ---- The track's favourite, and the OS's star ---------------------------
   // Every heart in the player — the desktop bar's, the phone bar's and both
@@ -780,6 +1027,13 @@ export default function PlayerBar() {
   const rgModeRaw = cfg?.replaygain_mode;
   const rgMode: RgMode = rgModeRaw === "album" || rgModeRaw === "off" ? rgModeRaw : "track";
   const rgPreamp = typeof cfg?.replaygain_preamp_db === "number" ? cfg.replaygain_preamp_db : 0;
+  // `gapless_playback` (Downloads & playback, shipped ON): the idle element
+  // holds the next sequential track and a natural end hands the sound over to
+  // it. Off, both the preload and the handover are skipped, and every track
+  // goes down the ordinary load path — one element, one load, no handover. A
+  // server too old to ship the key reads as ON, which is the shipped default
+  // and the behaviour every track already had.
+  const gapless = cfg?.gapless_playback !== false;
   // The equalizer the config names (`playback_eq_profile`, owned by the
   // Equalizer page): its bands go onto the SAME WebAudio graph as the gain —
   // installed once per profile change, and inherited by any element attached
@@ -915,6 +1169,15 @@ export default function PlayerBar() {
     if (!rgWatch.current.has(path)) rgAskAgain(path, 0);
   };
 
+  // The store's own persistence — its slow save, its two page-away flushes and
+  // the subscription that writes on a queue mutation — is started HERE, from
+  // the component that owns the player and stays mounted for the session. A
+  // call rather than module-scope work, because importing the store must have
+  // no side effects: the Node/SSR harnesses import this graph, and a timer
+  // created at import time never lets them exit (startPlayerPersistence is
+  // idempotent, so the shell's re-mounts cost nothing).
+  useEffect(() => startPlayerPersistence(), []);
+
   // Reload + play whenever the queue identity or index changes (keyed on
   // queueId so a fresh queue at the same index still reloads). Skipped when
   // the gapless swap already loaded and started the next track.
@@ -931,6 +1194,20 @@ export default function PlayerBar() {
     // nothing. `playToken` (bumped by every play press, never by a queue edit)
     // is what tells them apart.
     if (track.path === loadedPath.current && playToken === loadedToken.current) return;
+    // A RELOADED page: the store hydrated this queue, this row and the second
+    // inside it. The track is loaded like any other but NOT started, and the
+    // position is applied when its own metadata lands (see `applyRestore`) —
+    // so the pause below, the `setTime(0)` and the `play()` calls are exactly
+    // what must not happen here. The restore is consumed by this one load:
+    // any later load of the same path is an ordinary one.
+    //
+    // A DELIBERATE press is never a restore, even on the restored row and even
+    // if the seek never landed (a track that was locked when the page opened):
+    // pressing a row must play. `playToken` is what says a press happened —
+    // `loadedToken` still holds the mount's value until something loads.
+    const pressed = playToken !== loadedToken.current;
+    const restoring = !pressed && restore.current?.path === track.path;
+    if (!restoring) restore.current = null;
     // Switching tracks must FEEL immediate: silence the outgoing audio the
     // moment the selection changes, before the new source is fetched and
     // decoded. Without this the old track kept playing until the new one was
@@ -951,6 +1228,28 @@ export default function PlayerBar() {
     }
     loadedPath.current = track.path;
     loadedToken.current = playToken;
+    if (restoring) {
+      // Re-armed on the restore, deliberately and explicitly: these are the
+      // refs the handover and the preload act on, and "this track is loaded,
+      // nothing is preloaded, no swap has happened, the active element is A"
+      // is the state a restored, PAUSED track must be in. A stale one would let
+      // the near-end preload hand the sound over to a track the restored
+      // position was never about, or make the next index change take the
+      // swapped branch and load nothing at all. (On the fresh page this load
+      // happens on they already hold these values; stating them is what makes
+      // the restore independent of that.)
+      preloaded.current = -1;
+      preloadedPath.current = null;
+      swapped.current = false;
+      activeIsA.current = true;
+      pathOnA.current = null;
+      pathOnB.current = null;
+      pathOnVideo.current = null;
+    }
+    // …and which element holds a restored VIDEO (the popout's own `autoPlay` is
+    // what starts a video, so the restore has to turn it off — see the latch's
+    // note in the popout below).
+    videoRestored.current = restoring ? track.path : null;
     // Pre-warm this track's gain. The request is what STARTS a missing
     // server-side measurement, so asking here — before src resolution, before
     // the video popout's own load — gives that decode the longest head start,
@@ -961,11 +1260,21 @@ export default function PlayerBar() {
     void rgFor(track.path);
     // Nothing has been counted for this track yet — the play is recorded by
     // the element's own `play` event (countPlay), so loading must not count
-    // anything, only forget the previous track's count.
-    counted.current = { el: null, path: null };
+    // anything, only forget the previous track's count. A restored track seeds
+    // the counter from its own element in `applyRestore` instead: the resume
+    // that follows a reload is not a new play either.
+    counted.current = { el: null, path: restoring ? track.path : null };
+    // The undo stack belongs to the track being left: a jump made in it is not
+    // something Ctrl+Z may apply to whatever loads next (and a track change is
+    // not an action the stack undoes anyway).
+    jumps.current = [];
     const video = isVideoFile(track.file) || isVideoFile(track.path);
-    setTime(0);
-    setDuration(0);
+    // A restored position is NOT a restart: the bar keeps the second the store
+    // hydrated, and the element seeks to it once it has a src (applyRestore).
+    if (!restoring) {
+      setTime(0);
+      setDuration(0);
+    }
     if (video) {
       // Music videos play through the popout <video> — pause the <audio>
       // pair and drop their sources so exactly one decoder exists.
@@ -1002,7 +1311,9 @@ export default function PlayerBar() {
         v.playbackRate = speed;
         applyVolume(v, vol);
         applyElGain(v, true);
-        startElement(v, track.path);
+        // A restored video waits for a press: the popout's element carries
+        // `autoPlay` off for exactly this load, and nothing here starts it.
+        if (!restoring) startElement(v, track.path);
       }
       const gen = rgGen.current;
       void rgFor(track.path).then((r) => {
@@ -1084,17 +1395,29 @@ export default function PlayerBar() {
       // installed is temporary: keep asking, and land the value on this
       // element while it plays rather than leaving the track unnormalised.
       if (rgGen.current === gen && r?.pending) watchRgPending(track.path);
+      // A reloaded track is loaded and left sitting at the remembered second:
+      // no play() (the page has no gesture to start sound with, and the bar
+      // must come back PAUSED), and the seek lands on this element's own
+      // `loadedmetadata` (applyRestore).
+      if (restoring) return;
       startElement(el, track.path);
     })();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [index, queueId, playToken]);
 
   // Preload the next sequential track into the idle element as the current
-  // one approaches its end — this is what makes the handover gapless.
+  // one approaches its end — this is what makes the handover gapless. Skipped
+  // entirely while `gapless_playback` is off: nothing is fetched ahead, the
+  // idle element stays empty and a natural end goes down the ordinary load
+  // path (which is also what the handover branch below then declines to take).
   useEffect(() => {
-    if (shuffle || !current) return;
+    if (!gapless || shuffle || !current) return;
     const next = index + 1;
     if (next >= queue.length) return;
+    // A restored track that is merely loaded (never played) must not have a
+    // preload waiting in the idle element: the handover would start it on a
+    // track transition the reader never asked for.
+    if (restore.current) return;
     // A reorder may have changed what "next" is — re-preload when the path
     // in the idle element no longer matches queue[next].
     if (preloaded.current === next && preloadedPath.current === queue[next].path) return;
@@ -1149,7 +1472,7 @@ export default function PlayerBar() {
       idle.load();
     });
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [time, duration, index, queue, shuffle]);
+  }, [time, duration, index, queue, shuffle, gapless]);
 
   useEffect(() => {
     const el = media();
@@ -1313,15 +1636,21 @@ export default function PlayerBar() {
         if (document.querySelector("[data-lrc-editor]")) return; // lyrics editor owns seeking
         const a = media();
         if (a) {
-          noteSeek("app", a, Math.max(0, a.currentTime - 5));
-          a.currentTime = Math.max(0, a.currentTime - 5);
+          const from = a.currentTime;
+          const to = Math.max(0, a.currentTime - 5);
+          noteSeek("app", a, to);
+          a.currentTime = to;
+          noteJump(a, from, to);
         }
       } else if (code === "ArrowRight") {
         if (document.querySelector("[data-lrc-editor]")) return;
         const a = media();
         if (a && a.duration) {
-          noteSeek("app", a, Math.min(a.duration, a.currentTime + 5));
-          a.currentTime = Math.min(a.duration, a.currentTime + 5);
+          const from = a.currentTime;
+          const to = Math.min(a.duration, a.currentTime + 5);
+          noteSeek("app", a, to);
+          a.currentTime = to;
+          noteJump(a, from, to);
         }
       }
     };
@@ -1469,7 +1798,12 @@ export default function PlayerBar() {
       setPlaying(null);
       return;
     }
-    if (!shuffle && next < queue.length && preloaded.current === next) {
+    // The two-element handover, and the ONE place a restored position could be
+    // clobbered: with `gapless_playback` off there is no preload to hand over
+    // to (the branch is skipped and the ordinary load path takes the next
+    // track), and a restore that has not been applied yet owns the position —
+    // a swap would set the clock to 0 on a track the reader never heard start.
+    if (gapless && !restore.current && !shuffle && next < queue.length && preloaded.current === next) {
       swapped.current = true;
       // The handover element is the one that is NOT holding the track that
       // just finished — the preload wrote the incoming track there. Resolving
@@ -1509,7 +1843,12 @@ export default function PlayerBar() {
   };
   const onMeta = (e: SyntheticEvent<HTMLAudioElement>) => {
     const d = e.currentTarget.duration;
-    if (e.currentTarget === audio()) setDuration(Number.isFinite(d) ? d : 0);
+    if (e.currentTarget === audio()) {
+      setDuration(Number.isFinite(d) ? d : 0);
+      // The reloaded position lands HERE, on the element's own metadata: the
+      // seek needs a src, and this is the event that says the new one is there.
+      applyRestore(e.currentTarget, pathOf(e.currentTarget));
+    }
   };
   const onVideoTime = (e: SyntheticEvent<HTMLVideoElement>) => {
     setTime(e.currentTarget.currentTime);
@@ -1519,6 +1858,9 @@ export default function PlayerBar() {
     // container duration take over (effDuration).
     const d = e.currentTarget.duration;
     setDuration(Number.isFinite(d) ? d : 0);
+    // A restored VIDEO lands here too: the element loads its src
+    // asynchronously and this is the one event that says a seek would stick.
+    applyRestore(e.currentTarget, pathOnVideo.current);
   };
 
   const togglePlay = () => {
@@ -1574,7 +1916,7 @@ export default function PlayerBar() {
         >
           {current && !thumbFailed ? (
             <img
-              src={api.coverUrl(coverAlbumPath, coverFile)}
+              src={api.coverUrl(coverAlbumPath, coverFile, { w: ROW_COVER_W })}
               alt=""
               onError={() => setThumbFailed(true)}
               className="h-full w-full object-cover"
@@ -1587,9 +1929,12 @@ export default function PlayerBar() {
         <div className="min-w-0 flex-1 ml-[76px] pl-3" title={current ? [current.artist, current.album].filter(Boolean).join(" · ") : undefined}>
           {current ? (
             <>
-              {/* badge + tech readout hug the title: the window only takes
-                  the width the text needs, and shrinks (marquee) when the
-                  name is too long — they never get pushed to the edge */}
+              {/* badge, tech readout, stars: the title keeps the flexible
+                  width and drifts (marquee) when the name is too long, and the
+                  three readouts after it hold their own — the rating is LAST
+                  because its readout ("4.5") comes and goes with the value,
+                  and in front of the tech readout it moved those digits every
+                  time a track was rated. */}
               <div className="flex items-baseline gap-2 min-w-0">
                 {/* title opens the track's own page (tag editing, links, lyrics) */}
                 <Link
@@ -1600,6 +1945,11 @@ export default function PlayerBar() {
                   <ScrollingText text={displayTitle} />
                 </Link>
                 <AdvisoryMark value={currentTags?.tags?.ITUNESADVISORY ?? current.advisory} />
+                {techStr && (
+                  <span className="text-[10px] font-mono text-zinc-500 shrink-0" title={techTip || "Bit depth/sample rate"}>
+                    {techStr}
+                  </span>
+                )}
                 <StarRating
                   size="sm"
                   className="self-center"
@@ -1607,15 +1957,10 @@ export default function PlayerBar() {
                   onChange={(v) => setRating(current.path, v)}
                   pending={pending(current.path)}
                 />
-                {techStr && (
-                  <span className="text-[10px] font-mono text-zinc-500 shrink-0" title={techTip || "Bit depth/sample rate"}>
-                    {techStr}
-                  </span>
-                )}
               </div>
               {/* the album and the artist open their own pages, and each drifts
                   like the title when it does not fit (see MetaLine) */}
-              <MetaLine href={albumHref} text={albumText} className="text-[11px] text-zinc-500" title="Open the album page" />
+              <MetaLine href={albumHref} text={albumLine} className="text-[11px] text-zinc-500" title="Open the album page" />
               <MetaLine href={artistHref} text={artistText} className="text-[11px] text-zinc-500" title="Open the artist page" />
             </>
           ) : (
@@ -1640,6 +1985,14 @@ export default function PlayerBar() {
               max={effDuration || 0}
               step={0.05}
               value={Math.min(time, effDuration || 0)}
+              // A drag is ONE undo entry: `from` is read when the pointer lands
+              // and the entry is pushed when it lifts, so the pointermove seeks
+              // in between (each a micro-seek, which noteJump ignores anyway)
+              // never fill the stack.
+              onPointerDown={() => {
+                const a = media();
+                dragFrom.current = a ? a.currentTime : null;
+              }}
               onChange={(e) => {
                 const a = media();
                 if (!a) return;
@@ -1647,9 +2000,14 @@ export default function PlayerBar() {
                 a.currentTime = Number(e.target.value);
                 setTime(Number(e.target.value));
               }}
+              onPointerUp={() => {
+                const a = media();
+                if (a && dragFrom.current !== null) noteJump(a, dragFrom.current, a.currentTime);
+                dragFrom.current = null;
+              }}
               className="flex-1 min-w-0 seek-fat"
               disabled={idle}
-              title="Seek — ← / → nudge 5s"
+              title="Seek — ← / → nudge 5s · Ctrl+Z undoes a jump"
             />
             <span className="w-10 shrink-0">{fmtDuration(effDuration)}</span>
           </div>
@@ -1722,7 +2080,7 @@ export default function PlayerBar() {
                   opens the same queue popover. Always on the bar: inert
                   (like the rest) when there is nothing queued. */}
               <button
-                className={`hidden lg:flex items-center gap-1.5 px-1.5 py-1 rounded-md font-mono text-[10px] tabular-nums min-w-0 max-w-[13rem] shrink ${
+                className={`hidden lg:flex items-center gap-1.5 px-1.5 py-1 rounded-md font-mono text-[10px] tabular-nums shrink-0 ${
                   upNextTrack
                     ? "text-zinc-500 hover:text-white hover:bg-raise"
                     : "text-zinc-600 opacity-40 pointer-events-none"
@@ -1735,7 +2093,16 @@ export default function PlayerBar() {
                 }
               >
                 <span className="uppercase tracking-widest text-zinc-600 shrink-0">Up next</span>
-                <span className="truncate">{upNextTitle || "—"}</span>
+                {/* A FIXED slot for the value, and the title drifts inside it
+                    (components/ScrollingText): the readout used to size itself
+                    to whatever the next track was called, so a longer name
+                    pushed the queue position, the queue button and the whole
+                    action row along with it — and a title past the old 13 rem
+                    cap was simply cut. The slot holds the longest title the row
+                    can show before it starts drifting, and never resizes. */}
+                <span className="block w-[6.5rem] shrink-0 min-w-0">
+                  <ScrollingText text={upNextTitle || "—"} />
+                </span>
               </button>
               {/* queue position — the fraction lives here, left of the playlist
                   button; clicking it (or the queue button) opens the queue */}
@@ -1989,12 +2356,19 @@ export default function PlayerBar() {
               <VolumePct value={vol} onChange={setVol} className="text-[10px]" />
               {/* the applied ReplayGain, right where the level is set — the
                   number is the dB the player is adding, the tooltip says where
-                  it came from. Absent entirely at unity. */}
-              {rgGain !== null && (
-                <span className="text-[10px] font-mono tabular-nums shrink-0 text-zinc-500 cursor-help" title={rgTip}>
-                  RG {fmtDb(rgGain)}
-                </span>
-              )}
+                  it came from. Absent entirely at unity, but its SLOT is not:
+                  the row is a flex line, and a readout that came and went (or
+                  that grew from "-9.9 dB" to "-10.0 dB") moved the volume
+                  percent beside it every time. Fixed width and right-aligned,
+                  with the value inside it; `tabular-nums` keys the digits so
+                  even a changing number cannot re-flow the line. */}
+              <span className="w-[5rem] shrink-0 text-right text-[10px] font-mono tabular-nums text-zinc-500">
+                {rgGain !== null && (
+                  <span className="cursor-help" title={rgTip}>
+                    RG {fmtDb(rgGain)}
+                  </span>
+                )}
+              </span>
             </div>
           </div>
 
@@ -2037,7 +2411,7 @@ export default function PlayerBar() {
             disabled={idle}
           >
             {current && !thumbFailed ? (
-              <img src={api.coverUrl(coverAlbumPath, coverFile)} alt="" onError={() => setThumbFailed(true)} className="h-full w-full object-cover" />
+              <img src={api.coverUrl(coverAlbumPath, coverFile, { w: ROW_COVER_W })} alt="" onError={() => setThumbFailed(true)} className="h-full w-full object-cover" />
             ) : (
               <Disc3 className={`h-5 w-5 ${idle ? "text-zinc-700" : "text-zinc-600"}`} />
             )}
@@ -2061,7 +2435,7 @@ export default function PlayerBar() {
                 <div className="flex items-baseline gap-1.5 min-w-0 text-[11px] text-zinc-500">
                   {artistText ? <MetaLine href={artistHref} text={artistText} title="Open the artist page" /> : null}
                   {artistText && current.album ? <span className="shrink-0">·</span> : null}
-                  {current.album ? <MetaLine href={albumHref} text={current.album} title="Open the album page" /> : null}
+                  {current.album ? <MetaLine href={albumHref} text={albumLine} title="Open the album page" /> : null}
                   {!artistText && !current.album ? <span>—</span> : null}
                 </div>
               </>
@@ -2141,6 +2515,10 @@ export default function PlayerBar() {
               preferTranscode={preferTranscode}
               aspect={videoAspect}
               captions={captions}
+              // The one video that must NOT start itself: the track a reload
+              // restored (the latch is set by the load effect and cleared for
+              // every ordinary load).
+              autoPlay={videoRestored.current !== current.path}
               onTime={onVideoTime}
               onMeta={(e) => {
                 // A transcode-fallback remount creates a fresh element with
@@ -2204,9 +2582,11 @@ export default function PlayerBar() {
               onSeek={(t) => {
                 const a = media();
                 if (!a) return;
+                const from = a.currentTime;
                 noteSeek("app", a, t);
                 a.currentTime = t;
                 setTime(t);
+                noteJump(a, from, t);
               }}
               onStep={step}
               onToggleShuffle={() => setShuffle(!shuffle)}
@@ -2246,8 +2626,10 @@ export default function PlayerBar() {
             onSeek={(t) => {
               const a = media();
               if (!a) return;
+              const from = a.currentTime;
               a.currentTime = t;
               setTime(t);
+              noteJump(a, from, t);
             }}
             getAudioTime={getAudioTime}
             onClose={() => setLyricsOpen(false)}
@@ -2300,6 +2682,7 @@ function VideoPopout({
   preferTranscode = false,
   aspect = "contain",
   captions = null,
+  autoPlay = true,
   onTime,
   onMeta,
   onEnded,
@@ -2309,15 +2692,20 @@ function VideoPopout({
   path: string;
   videoRef: React.RefObject<HTMLVideoElement | null>;
   /** Draw filling the viewport (fullscreen) instead of the popout card's
-   * aspect-ratio box — and drop the native controls, since the viewer draws
-   * its own transport over the picture. */
+   *  aspect-ratio box — and drop the native controls, since the viewer draws
+   *  its own transport over the picture. */
   fill?: boolean;
   preferTranscode?: boolean;
   /** object-fit for the fullscreen picture (contain / cover / stretch). */
   aspect?: VideoAspect;
   /** Caption track to show: null = as tagged (the `default` track), -1 = off,
-   * >= 0 = that entry of `tracks`. */
+   *  >= 0 = that entry of `tracks`. */
   captions?: number | null;
+  /** Start as soon as the source is there — the ordinary case. Off for the one
+   *  video a page reload restored: this element's src arrives asynchronously, so
+   *  its own `autoPlay` (not a `play()` call from the load effect) is what
+   *  starts a video, and a restored session must come back paused. */
+  autoPlay?: boolean;
   onTime: (e: SyntheticEvent<HTMLVideoElement>) => void;
   onMeta: (e: SyntheticEvent<HTMLVideoElement>) => void;
   onEnded: (e?: SyntheticEvent<HTMLVideoElement>) => void;
@@ -2389,7 +2777,7 @@ function VideoPopout({
       // meter NOR the ReplayGain the bar reports for it.
       crossOrigin="anonymous"
       controls={!fill}
-      autoPlay
+      autoPlay={autoPlay}
       playsInline
       preload="auto"
       onTimeUpdate={onTime}

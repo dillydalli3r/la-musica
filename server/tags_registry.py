@@ -43,7 +43,7 @@ from mlo.audio import TAG_MAP, _mp4_specs, _mp3_specs
 from mlo.cli import SCRIPT_LABELS
 from mlo.config import (AUDIO_TAG_TYPES, DEFAULT_CONFIG, _LYRICS_PREFIXES,
                         _audio_tag_family, should_write_audio_tag)
-from mlo.grader import (ALBUM_TAGS, PER_TRACK_TAGS, TAG_ALLOWLIST,
+from mlo.grader import (ALBUM_TAGS, ALIAS_TAGS, PER_TRACK_TAGS, TAG_ALLOWLIST,
                         TAG_PRESENCE_CHECKS, tag_key_allowed)
 # The canonical-value table the writers store (see _enum_for): the registry
 # owns no value policy of its own, so a tag's closed set is read from the
@@ -76,6 +76,11 @@ TAG_FAMILY = {
     "MOVEMENTNUMBER": "identity", "COMPOSER": "identity",
     "LYRICIST": "identity", "REMIXER": "identity", "COMMENT": "identity",
     "COPYRIGHT": "identity", "ITUNESADVISORY": "identity",
+    # A name a reader in another script's locale searches for, sitting beside
+    # the name itself: an identity tag (an ALBUMALIAS names the release, so it
+    # is release-level like ALBUM).
+    "TITLEALIAS": "identity", "ARTISTALIAS": "identity",
+    "ALBUMALIAS": "release",
     # The rest of the credit table MusicBrainz states on a recording (and on
     # its work): who played what, who produced, engineered, mixed, arranged,
     # conducted or directed it. People, so they are identity — the same family
@@ -136,6 +141,14 @@ FAMILY_OTHER = "other"
 TAG_INFO = {
     "TITLE": ("Title", "The track's own name."),
     "ARTIST": ("Artist", "The performing artist credited on this track."),
+    "TITLEALIAS": ("Title alias", "The track's title for a reader whose locale does not use its "
+                                  "script (MusicBrainz's own alias). Locale-suffixed when it is "
+                                  "for one in particular: TITLEALIAS-JA."),
+    "ARTISTALIAS": ("Artist alias", "The artist's name for a reader whose locale does not use its "
+                                    "script — the romanised name on Soulseek folders, say. "
+                                    "Locale-suffixed when it is for one: ARTISTALIAS-JA."),
+    "ALBUMALIAS": ("Album alias", "The release's title for a reader whose locale does not use its "
+                                  "script. Locale-suffixed when it is for one: ALBUMALIAS-JA."),
     "ALBUMARTIST": ("Album artist", "Who the release is filed under — one value across the album."),
     "ALBUMARTISTSORT": ("Album artist sort", "Sort spelling of the album artist (The Beatles → Beatles)."),
     "ARTISTSORT": ("Artist sort", "Sort spelling of the track artist."),
@@ -168,7 +181,9 @@ TAG_INFO = {
     "LANGUAGE": ("Language", "Language of the release's text, ISO 639-3 (eng, deu, …)."),
     "DISCSUBTITLE": ("Disc title", "This medium's own title (\"Disc 2: The Rarities\") — per disc, so "
                                    "a multi-disc release can name each one."),
-    "COMMENT": ("Comment", "Free-text note on the file."),
+    "COMMENT": ("Comment", "Free-text note on the file. Nothing in this pipeline writes one, so "
+                           "a value here is a ripper's or vendor tagger's note: the grader fails "
+                           "it and the strip passes delete it."),
     "COPYRIGHT": ("Copyright", "The release's copyright line."),
     "ITUNESADVISORY": ("Advisory", "Content rating: 0 clean, 1 explicit, 2 cleaned."),
     "ALBUM": ("Album", "The release's title, one value across its tracks."),
@@ -280,8 +295,22 @@ TAG_WRITER = {
     "UNSYNCEDLYRICS": _LYRICS,
     "TRANSLATION": _script(17),
     "TRANSLITERATION": _script(17),
-    "ACOUSTID_ID": _RELEASE_WRITER + " (fingerprint match)",
-    "ACOUSTID_FINGERPRINT": _RELEASE_WRITER + " (fingerprint match)",
+    # Nothing writes a locale alias off its own bat: the tagging pass stores
+    # the alias MusicBrainz holds for the name (beets translations, script 14)
+    # and the tag editor takes one by hand. An alias the grade can neither
+    # find nor see is exactly what `grade_check_alias_needed` names.
+    "TITLEALIAS": f"{_RELEASE_WRITER} · locale aliases · the tag editor",
+    "ARTISTALIAS": f"{_RELEASE_WRITER} · locale aliases · the tag editor",
+    "ALBUMALIAS": f"{_RELEASE_WRITER} · locale aliases · the tag editor",
+    # No writer at all: it is the free text of whatever ripper or vendor
+    # tagger made the file, which is why its VALUE fails the excess grade and
+    # the strip passes clear it.
+    "COMMENT": "nothing — free text a ripper or vendor tagger wrote; "
+               "the strip passes (3, 10) clear it",
+    "ACOUSTID_ID": _RELEASE_WRITER + " (fingerprint match) · "
+                   + _script(21) + " (completes or creates the pair)",
+    "ACOUSTID_FINGERPRINT": _RELEASE_WRITER + " (fingerprint match) · "
+                            + _script(21) + " (completes or creates the pair)",
     "ENCODER_PROGRAM": _script(3),
     "ENCODER_QUALITY": _script(3),
     "ENCODER_VERSION": _script(3),
@@ -393,6 +422,16 @@ TAG_CHECKS = {
     "BPM": ("grade_check_key_bpm",),
     "ACOUSTID_ID": ("grade_check_acoustid",),
     "ACOUSTID_FINGERPRINT": ("grade_check_acoustid",),
+    # The name a locale alias has to sit beside, and the alias tag itself:
+    # both sides of `grade_check_alias_needed` (a non-Latin TITLE / ARTIST is
+    # failed when its alias is missing).
+    "TITLE": ("grade_check_alias_needed",),
+    "ARTIST": ("grade_check_alias_needed",),
+    "TITLEALIAS": ("grade_check_alias_needed",),
+    "ARTISTALIAS": ("grade_check_alias_needed",),
+    # The one NAME the vocabulary holds whose VALUE is still junk: the excess
+    # check grades the value too (issue code COMMENT), so the row says so.
+    "COMMENT": ("grade_check_excess_tags",),
     "AUDIT": ("grade_check_audit", "grade_check_tag_case"),
     "AUDIOAUDITOR_OVERRIDE": ("grade_check_audit",),
     "LOG_GRADE": ("grade_check_log_grade",),
@@ -434,6 +473,11 @@ TAG_ISSUE_CODES = {
     "RATEYOURMUSIC_ALBUM": ("RYM_LINK",),
     "ACOUSTID_ID": ("ACOUSTID_ID",),
     "ACOUSTID_FINGERPRINT": ("ACOUSTID_FINGERPRINT",),
+    # The alias tag whose absence the check names, and the COMMENT value the
+    # excess check fails.
+    "TITLEALIAS": ("TITLEALIAS",),
+    "ARTISTALIAS": ("ARTISTALIAS",),
+    "COMMENT": ("COMMENT",),
     "AUDIT": ("AUDIT",),
     "INTEGRITY": ("FLAC_MD5", "FLAC_MD5_ABSENT", "FLAC_MD5_UNKNOWN"),
     "LOG_GRADE": ("LOG_GRADE",),
@@ -460,7 +504,8 @@ CHECK_LABELS = {
     "grade_check_filename_case": "Path capitalization",
     "grade_check_ext_case": "Lowercase extensions",
     "grade_check_key_bpm": "Key & BPM",
-    "grade_check_acoustid": "AcoustID tags present",
+    "grade_check_acoustid": "AcoustID tags required",
+    "grade_check_alias_needed": "Locale alias for non-Latin names",
     "grade_check_excess_tags": "Excess tags",
     "grade_check_media": "Media type",
     "grade_check_source": "Source tag",
@@ -535,26 +580,47 @@ def _humanize(key: str) -> str:
 # --------------------------------------------------------------------------- #
 # Derivations
 # --------------------------------------------------------------------------- #
-def _tag_spellings():
+def _spellings_for(name, spec):
     """key -> the file-side spellings the tag API can emit for it.
 
-    Built from TAG_MAP's container specs (the vorbis name, each ID3 frame /
+    Built from a TAG_MAP container spec (the vorbis name, each ID3 frame /
     TXXX description / UFID owner, each MP4 atom / freeform name) and filtered
     through ``tag_key_allowed``: what ships is what the grader's own predicate
     accepts, so a client testing membership asks the same question a strip pass
     does."""
+    forms = {str(spec.get("flac") or "")}
+    for frame, desc in _mp3_specs(spec):
+        forms.add(f"{frame}:{desc}" if desc else str(frame))
+    for atom in _mp4_specs(spec):
+        if isinstance(atom, tuple) and atom[0] == "freeform":
+            forms.add(f"----:{atom[1]}:{atom[2]}")
+        elif not isinstance(atom, tuple):
+            forms.add(str(atom))
+    return sorted(f for f in forms if f and tag_key_allowed(f))
+
+
+def _tag_spellings():
+    """key -> spellings, for every tag TAG_MAP names."""
     out = {}
     for name, spec in TAG_MAP.items():
-        forms = {str(spec.get("flac") or "")}
-        for frame, desc in _mp3_specs(spec):
-            forms.add(f"{frame}:{desc}" if desc else str(frame))
-        for atom in _mp4_specs(spec):
-            if isinstance(atom, tuple) and atom[0] == "freeform":
-                forms.add(f"----:{atom[1]}:{atom[2]}")
-            elif not isinstance(atom, tuple):
-                forms.add(str(atom))
-        out[name] = sorted(f for f in forms if f and tag_key_allowed(f))
+        out[name] = _spellings_for(name, spec)
     return out
+
+
+def _alias_spellings(key):
+    """The locale-alias family (TITLEALIAS / ARTISTALIAS / ALBUMALIAS), whose
+    detail lives in the tag NAME (TITLEALIAS-JA).
+
+    Read from TAG_MAP when the tag has an entry there (the writer's own
+    contract), the plain vorbis name otherwise — the family is written by name
+    and its locales are open-ended, so the registry shows it with or without a
+    TAG_MAP entry."""
+    spec = TAG_MAP.get(key)
+    if spec is not None:
+        return _spellings_for(key, spec)
+    return sorted(f for f in (key, f"TXXX:{key}",
+                              f"----:com.apple.iTunes:{key}")
+                  if tag_key_allowed(f))
 
 
 def _norm_spelling(form: str) -> str:
@@ -682,6 +748,10 @@ def _build():
     spellings = {k: _tag_spellings()[k] for k in TAG_MAP}
     for key in ("ENCODER_PROGRAM", "ENCODER_QUALITY", "ENCODER_VERSION"):
         spellings[key] = _encoder_spellings(key)
+    # The alias family is written by NAME (its locale lives in the name), so a
+    # TAG_MAP entry is not what makes it exist — the registry rows are.
+    for key in ALIAS_TAGS:
+        spellings.setdefault(key, _alias_spellings(key))
 
     # Reverse index: an emitted spelling -> its canonical key, keyed the way
     # the grader compares names (mlo.grader._tag_key_norm: case, spaces and
@@ -724,11 +794,13 @@ def _build():
         "tags": tags,
         "aliases": aliases,
         # The grader's OWN allow-list (mlo.grader.TAG_ALLOWLIST, the set its
-        # excess check and the strip passes both test), plus the lyrics-
-        # transform prefixes whose language lives in the tag name. A client
+        # excess check and the strip passes both test), plus the tag-name
+        # prefixes whose detail lives in the NAME: the lyrics transforms
+        # (TRANSLATION-EN) and the locale aliases (TITLEALIAS-JA). A client
         # tests excess against these rather than re-deriving the predicate.
         "allowed": sorted(TAG_ALLOWLIST),
-        "allowed_prefixes": list(_LYRICS_PREFIXES),
+        "allowed_prefixes": list(_LYRICS_PREFIXES)
+                             + [f"{_t}-" for _t in ALIAS_TAGS],
         "checks": checks,
     }
     _assert_known(built)

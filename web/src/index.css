@@ -307,16 +307,61 @@ body {
   padding-bottom: max(env(safe-area-inset-bottom, 0px), var(--mlo-inset-bottom, 0px));
 }
 /* The lyrics pane is `fixed` too, and is anchored between the two bars rather
-   than inside them: under the top bar (3rem tall, itself pushed down by the
-   notch) and above the player bar (5.75rem = its 0.25rem + 4.75rem row +
-   0.75rem padding). The shell has already lifted the player bar by the
-   home-indicator inset, so an offset measured from the viewport edge has to
-   repeat both insets — otherwise the pane covers the bar's top row on a
-   notched device, and swallows the bar's own controls. */
+   than inside them: under the top chrome (the 3rem bar — itself pushed down by
+   the notch — plus whatever hangs below it, see the rule) and above the player
+   bar (5.75rem = its 0.25rem + 4.75rem row + 0.75rem padding). The shell has
+   already lifted the player bar by the home-indicator inset, so an offset
+   measured from the viewport edge has to repeat both insets — otherwise the
+   pane covers the bar's top row on a notched device, and swallows the bar's
+   own controls. */
 .safe-lyrics {
-  top: calc(3rem + max(env(safe-area-inset-top, 0px), var(--mlo-inset-top, 0px)));
+  /* The pane's top edge is the BOTTOM of the app's top chrome, not a fixed
+     3rem: the shell hangs the live progress rows off the bar's own bottom
+     edge (App's `LiveProgress`), so a run's row lands in the same band the
+     pane's title and controls were drawn in — the report this fixes. The rows
+     are `top-full`, i.e. OUTSIDE the bar's own box, and there is one per live
+     producer, so the band's height is measured and published as
+     `--mlo-chrome-bottom` (LyricsSidebar); unset (no JS, no rows) the bar's
+     own bottom is the anchor, which is the behaviour every desktop had.
+     The safe-area helper stays underneath as the FLOOR rather than a
+     duplicate: with `--mlo-inset-*` test-hooked (or a notch on a device whose
+     chrome is drawn by the OS) the inset term is what keeps the pane off the
+     notch, and the measured box already carries it on a real device. */
+  top: max(
+    var(--mlo-chrome-bottom, 3rem),
+    calc(3rem + max(env(safe-area-inset-top, 0px), var(--mlo-inset-top, 0px)))
+  );
   bottom: calc(5.75rem + max(env(safe-area-inset-bottom, 0px), var(--mlo-inset-bottom, 0px)));
   padding-right: max(env(safe-area-inset-right, 0px), var(--mlo-inset-right, 0px));
+}
+
+/* The lyric-size and offset chips, in the lyric pane's own top-right corner —
+   the fullscreen player's lyrics pane (NowPlayingView) and the docked
+   LyricsSidebar both draw them here, and the options popover keeps its copies
+   as the discoverable path (issue #63).
+
+   Revealed, not permanent: on a device that has a real pointer the strip
+   rides the words invisibly until the reader points at the pane — or tabs
+   into a chip — and then fades in. A TOUCH device has no hover to reveal it
+   with, so there it is always on, and always tappable. While it is hidden it
+   is `pointer-events: none`, so a tap on a lyric line near the corner still
+   seeks the track instead of landing on an invisible stepper; the chips stay
+   in the tab order either way, which is what `:focus-within` reveals them
+   for. */
+.lyr-corner {
+  opacity: 1;
+  transition: opacity 0.18s ease-out;
+}
+@media (hover: hover) and (pointer: fine) {
+  .lyr-corner {
+    opacity: 0;
+    pointer-events: none;
+  }
+  .lyr-corner-host:hover .lyr-corner,
+  .lyr-corner-host:focus-within .lyr-corner {
+    opacity: 1;
+    pointer-events: auto;
+  }
 }
 
 /* Every flyout panel (Popover.tsx) — the ONE clamp that keeps a long menu
@@ -569,6 +614,34 @@ body {
   .table-scroll > table {
     min-width: 46rem;
   }
+}
+
+/* The detail hero's cover-derived wash: the stored artwork, blurred behind
+   the identity block. It FADES — it must never end on a line. The layer is
+   scaled past the hero's box (a blurred halo is bigger than the picture it
+   came from) and then masked, because the hero clips its overflow: without a
+   mask the wash is sliced off at the hero's own top and side edges, which is
+   the hard edge the owner's screenshot shows. The mask is a radial gradient
+   ending in `transparent`, the same idiom the fullscreen player's cover layers
+   use (`.amb-orb`, the ambience's radial fields) — the wash dissolves in every
+   direction instead of stopping at a rectangle.
+   The stops are read against the SCALED layer, and the fade is complete
+   BEFORE the hero's border: at `scale-125` the hero's own edge is ~83% of the
+   mask's horizontal radius and — the binding one, because the mask's centre
+   sits above the middle — ~53% of its vertical one, so a transparent stop at
+   50% leaves a margin of nothing at EVERY point of the hero's box for the clip
+   to cut. Sampled by tools/check_library_az.mjs, which resolves these numbers
+   against the layer it measures.
+   Legibility is untouched: the layer's own opacity, and the `bg` gradient
+   painted over it, are what keep the name readable — this only softens the
+   wash's edge, never brightens it. */
+.hero-ink {
+  -webkit-mask-image: radial-gradient(
+    ellipse 60% 60% at 50% 42%,
+    #000 0%, #000 20%, rgb(0 0 0 / 0) 50%);
+  mask-image: radial-gradient(
+    ellipse 60% 60% at 50% 42%,
+    #000 0%, #000 20%, rgb(0 0 0 / 0) 50%);
 }
 
 /* Back-and-forth marquee for overflowing titles (player bar): drifts to the
@@ -1026,6 +1099,7 @@ table td {
   .amb-bloom,
   .artwork-glow,
   .title-marquee,
+  .lyr-corner,
   .nav-link,
   .nav-icon {
     animation: none !important;

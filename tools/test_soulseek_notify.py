@@ -269,5 +269,68 @@ finally:
     auto._jobs.pop(4242, None)
     auto._tl.jid = None
 
+print("== a settled job's own frames: what they may CLAIM ==")
+# The download-finished notice must mean the download finished, and NOTHING may
+# say the album is done while its import chain is still running (issue #67: a
+# user watching 21 scripts run for another four minutes had already been told
+# the album was imported). The chain's own `import_done` — emitted by
+# server.imports when it has really been over the album — and the run's own
+# frame (server.import_queue) are the two completions there are.
+COMPLETION_KINDS = ("download_done", "import_done")
+drain()
+# The COMPACT release summary a job publishes (`_run` → `_job["release"]`: the
+# artist under `artist`, singular) — the shape _notify_finish is handed.
+compact = {"id": "11111111-2222-3333-4444-555555555555", "title": "An Album",
+           "artist": "An Artist", "date": "1996-06-11", "country": "GB",
+           "media_formats": ["CD"]}
+auto._notify_finish("done", {"imported": True, "album_path": r"F:\Lib\An Album",
+                             "organized": True, "partial": False},
+                    dict(compact))
+said = frames()
+check("...no completion kind is emitted while the chain runs",
+      [e for e in said if e["event"] in COMPLETION_KINDS] == [],
+      str([e["event"] for e in said]))
+started = frames("import_started")
+check("...the download's finish is announced as the IMPORT that began",
+      len(started) == 1, str(len(started)))
+if started:
+    check("...naming the album's identity, artist and year",
+          started[0]["title"] == "Downloaded: An Artist — An Album (1996)",
+          started[0]["title"])
+    check("...and saying the pipeline is still finishing it",
+          "still finishing it" in started[0]["body"], started[0]["body"])
+    check("...with the album page as its link",
+          started[0]["data"].get("link", "").startswith("/album/"),
+          str(started[0]["data"]))
+# The same frame from a FULL release payload (the shape `import_ready`'s callers
+# hold) reads the same identity: `artists[0].name`, and the same year.
+drain()
+auto._notify_finish("done", {"imported": False, "staging_path": r"F:\Dl\An Album"},
+                    {"title": "An Album", "date": "1996",
+                     "artists": [{"name": "An Artist"}]})
+ready = frames("import_ready")
+check("a download that only reached the download folder is READY, not done",
+      len(ready) == 1, str([e["event"] for e in frames()]))
+if ready:
+    check("...named by the album's identity too",
+          ready[0]["title"] == "An Artist — An Album (1996)", ready[0]["title"])
+    check("...and it claims no completion either",
+          [e for e in frames() if e["event"] in COMPLETION_KINDS] == [],
+          str([e["event"] for e in frames()]))
+# …and a FAILURE names the album the same way: the artist the compact summary
+# carries under `artist` used to be read as nothing, so every auto-import's
+# failure was titled by its album name alone ("Download failed: An Album").
+drain()
+auto._notify_finish("error", {"error": "no usable copy", "outcome": "rejected"},
+                    dict(compact))
+failed = frames("download_failed")
+check("a failed download names the artist and the year as well",
+      len(failed) == 1 and failed[0]["title"] ==
+      "Download failed: An Artist — An Album (1996)",
+      str([e["title"] for e in failed]))
+check("...and a failure is not mistaken for a completion",
+      [e for e in frames() if e["event"] in COMPLETION_KINDS] == [],
+      str([e["event"] for e in frames()]))
+
 print(f"\n{len(FAILED)} failure(s)")
 sys.exit(1 if FAILED else 0)

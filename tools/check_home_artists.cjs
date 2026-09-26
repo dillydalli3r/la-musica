@@ -119,7 +119,10 @@ const readShelf = (page, title) => page.evaluate((want) => {
       const img = a.querySelector("img");
       return {
         name: a.getAttribute("title") || "",
-        caption: a.querySelector("div.text-sm")?.textContent?.trim() || "",
+        // The name is drawn by the shared artist-name render
+        // (components/ArtistName): a `span.text-sm` holding the name and,
+        // beside it, the artist's own verdict dot (no text of its own).
+        caption: a.querySelector("span.text-sm")?.textContent?.trim() || "",
         src: img?.getAttribute("src") || null,
         decoded: img ? img.naturalWidth > 0 : null,
         circle: !!a.querySelector("div.rounded-full"),

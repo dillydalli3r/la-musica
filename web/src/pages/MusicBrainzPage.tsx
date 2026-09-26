@@ -3,7 +3,7 @@ import { Link, useNavigate, useParams, useSearchParams } from "react-router-dom"
 import {
   keepPreviousData, useInfiniteQuery, useQuery, useQueryClient,
 } from "@tanstack/react-query";
-import { ArrowDown, ArrowUp, ArrowUpDown, ArrowUpRight, Check, HelpCircle, Library, Loader2, Search, Zap } from "lucide-react";
+import { ArrowDown, ArrowUp, ArrowUpDown, ArrowUpRight, Check, ChevronDown, ChevronRight, HelpCircle, Library, ListFilter, Loader2, Search, Zap } from "lucide-react";
 import { api } from "../api";
 import type {
   Library as LibraryData, MBArtistBrowse, MBCountryEvent, MBReleaseGroupBrowse, MBReleaseGroupRow,
@@ -12,6 +12,11 @@ import type {
 import { albumRef } from "../lib/refs";
 import { withAlias } from "../lib/mbtext";
 import { TABLE_FIT } from "../lib/columns";
+import {
+  ALL_TYPES, filterTypeOptions, selectedSections, toggleTypeSection, typeFilterOptions,
+  typeSectionOpen, typeSections,
+  type TypeFilterOption,
+} from "../lib/artistReleaseGroups";
 import { EmptyState, PageLoading } from "../components/Badges";
 import { MbIcon } from "../components/Links";
 import PageHeader from "../components/PageHeader";
@@ -98,6 +103,20 @@ const tracksLabel = (r: RelRow) => {
   if ((r.disc_count ?? 1) > 1) return `${r.track_breakdown}`;
   return `${r.track_count}`;
 };
+
+/** An edition's catalog numbers as ONE line — what the release-group table's
+ *  "Cat no." column prints.
+ *
+ *  MusicBrainz states one number per label, so a pressing released by two
+ *  labels carries two, and the app joins multi-value text with " + " (the
+ *  compound release types over a row, the per-disc track breakdown). The LIST
+ *  is preferred, because it is what MusicBrainz's own order holds, and the
+ *  single `catalog_number` is the fallback for the payloads that only state one
+ *  (a search hit, a release lookup). "" when the edition states none — the
+ *  cell prints its own em dash, exactly as the Date column does. */
+const catalogLabel = (r: RelRow) =>
+  (r.catalog_numbers?.length ? r.catalog_numbers : r.catalog_number ? [r.catalog_number] : [])
+    .join(" + ");
 
 const fmtLen = (ms?: number | null) => {
   if (!ms) return "—";
@@ -1372,50 +1391,12 @@ export function MBSearchPage() {
 /* Artist                                                              */
 /* ------------------------------------------------------------------ */
 
-/** The artist's release groups grouped by TYPE, in the order a reader looks for
- *  them.
- *
- *  The label is MusicBrainz's own compound spelling ("Album + Compilation" —
- *  primary type first, then every secondary type) and the page's sections and
- *  its action rows are one and the same categorisation, so a row can never
- *  offer a type the sections do not show.
- *
- *  The ORDER is Album, EP, Single first — the three types that make up almost
- *  every artist's real discography — and everything else after them. It used to
- *  be the order MusicBrainz happened to serve, which made an artist with 49
- *  live albums and 10 studio ones open on "Album + Live": a discography that
- *  reads as live records. A compound label is ranked by its PRIMARY type
- *  ("Album + Live" sorts with Albums, "EP + Compilation" with EPs), which is
- *  also the part of the type a listener means when they say "the albums". */
-const RG_TYPE_FIRST = ["album", "ep", "single"];
-
-function rgTypeRank(label: string): number {
-  const primary = label.split(" + ")[0].trim().toLowerCase();
-  const i = RG_TYPE_FIRST.indexOf(primary);
-  return i === -1 ? RG_TYPE_FIRST.length : i;
-}
-
-function byReleaseGroupType(groups: RGRow[]): { label: string; list: RGRow[] }[] {
-  const order: string[] = [];
-  const byLabel = new Map<string, RGRow[]>();
-  for (const rg of groups) {
-    const label = [rg.primary_type || "Other", ...(rg.secondary_types ?? [])].join(" + ");
-    const list = byLabel.get(label);
-    if (list) list.push(rg);
-    else {
-      byLabel.set(label, [rg]);
-      order.push(label);
-    }
-  }
-  return order
-    .map((label) => ({ label, list: byLabel.get(label) as RGRow[] }))
-    // Relevance first, then the types carrying the most rows, then the label —
-    // so the order is total and does not depend on which page of MusicBrainz
-    // the rows happened to arrive in.
-    .sort((a, b) => rgTypeRank(a.label) - rgTypeRank(b.label)
-      || b.list.length - a.list.length
-      || a.label.localeCompare(b.label));
-}
+/* The artist's release-group TYPE derivation — the rank, the sections, the
+ * folding — is `lib/artistReleaseGroups`: pure, DOM-free and proved there
+ * (tools/check_release_choice.mjs renders none of it). The page's type filter,
+ * its collapsible sections and `ArtistTypeActions`' rows are all that ONE
+ * derivation, so a row can never offer a type a section does not draw, and a
+ * filter can never name a type the discography does not hold. */
 
 /** One action row: the type it acts on (as MusicBrainz spells it, a compound
  *  "Album + Live" included), the type SELECTION the server is asked for, and
@@ -1426,13 +1407,13 @@ interface TypeActionRow { label: string; types: string[]; count: number | null }
 /** The artist's whole action block: one Add to library button for the
  *  discography and one for EVERY release-group type it actually has.
  *
- *  `groups` is the page's own discography — the very list the type chips above
- *  filter — so a row and a chip are one thing seen twice: a type the panel can
- *  add is a type the chips can show, and the counts agree. Each row sends its
- *  type as ONE selection ("Album + Live"), which the server matches against a
- *  group's WHOLE type (primary + exactly those secondaries) through
- *  `mlo.release_choice.type_matches`, and the server starts the search for
- *  each album as it records it, so one button is the whole action: the album
+ *  `groups` is the page's own discography — the very list the type filter menu
+ *  above it reads — so a row and a filter row are one thing seen twice: a type
+ *  the panel can add is a type the menu can show, and the counts agree. Each
+ *  row sends its type as ONE selection ("Album + Live"), which the server
+ *  matches against a group's WHOLE type (primary + exactly those secondaries)
+ *  through `mlo.release_choice.type_matches`, and the server starts the search
+ *  for each album as it records it, so one button is the whole action: the album
  *  is in the library and Soulseek is already looking for its audio. (There
  *  used to be a second "Download all" button; it differed only in a flag that
  *  asked for exactly this, so it said the same thing twice.) Each row owns its
@@ -1442,9 +1423,10 @@ interface TypeActionRow { label: string; types: string[]; count: number | null }
  *  The queue's own view is refetched on success, so the albums these buttons
  *  created show up there.
  *
- *  One row per release-group TYPE, in the SAME order as the chips and sections
- *  above it (Album, EP, Single first — see `byReleaseGroupType`; it is one
- *  derivation, so a row and a chip cannot disagree about what leads) — and
+ *  One row per release-group TYPE, in the SAME order as the sections above it
+ *  (Album, EP, Single first, then the `More` bucket's types by size — see
+ *  `typeSections`; it is one derivation, so a row and a section cannot disagree
+ *  about what leads), each row under its section's own line — and
  *  deliberately no "Whole artist" row: the page header's own Add to library
  *  button IS that action (with "All" selected it hands over the whole
  *  discography), so a row beside it would be a second control for one meaning.
@@ -1456,10 +1438,12 @@ function ArtistTypeActions({ artistId, mode, groups }: {
   const qc = useQueryClient();
   const [busy, setBusy] = useState("");
   const [said, setSaid] = useState<Record<string, { text: string; ok: boolean }>>({});
-  const rows: TypeActionRow[] = useMemo(
-    () => byReleaseGroupType(groups)
-      .map(({ label, list }) => ({ label, types: [label.toLowerCase()], count: list.length })),
-    [groups]);
+  // The rows ARE the page's sections read back — same derivation, so the panel
+  // and the discography above it cannot disagree about what leads. The `More`
+  // bucket's types stay rows too (this panel is the only way to add ONE type;
+  // the header's button is the whole artist), and each row keeps the section it
+  // came from so the panel can draw the same groups the page draws.
+  const sections = useMemo(() => typeSections(groups), [groups]);
 
   const run = async (row: TypeActionRow) => {
     setBusy(row.label);
@@ -1513,40 +1497,53 @@ function ArtistTypeActions({ artistId, mode, groups }: {
         {t("mb.actions_title")}
       </div>
       <div className="p-1.5">
-        {rows.map((row) => {
-          const mine = busy === row.label;
-          const answer = said[row.label];
-          return (
-            <div key={row.label} className="rounded-md px-1.5 py-1 hover:bg-raise/60">
-              <div className="flex items-center gap-2">
-                <span className="text-sm text-zinc-300 truncate flex-1 min-w-0">
-                  {row.label}
-                  {row.count !== null ? (
-                    <span className="text-zinc-500 text-xs">
-                      {" · "}{t("mb.actions_groups", { n: row.count })}
-                    </span>
-                  ) : null}
-                </span>
-                <button
-                  className="btn-ghost !py-1 text-xs shrink-0"
-                  disabled={mine}
-                  title={t("mb.actions_add_hint")}
-                  onClick={() => run(row)}
-                >
-                  {mine ? spinner : <Library className="h-3.5 w-3.5" />}
-                  {t("mb.add_to_library")}
-                </button>
+        {sections.map((section) => (
+          <div key={section.label}>
+            {/* The section's own line, and only where it says something the
+                rows under it do not: a type named exactly like its section
+                needs no heading repeating it. */}
+            {section.groups.length > 1 ? (
+              <div className="px-3 pt-2 pb-0.5 text-[10px] uppercase tracking-wider text-zinc-500">
+                {section.label} · {section.count}
               </div>
-              {mine ? (
-                <div className="text-[11px] text-zinc-500 pb-1">{t("mb.actions_working")}</div>
-              ) : answer ? (
-                <div className={`text-[11px] pb-1 ${answer.ok ? "text-zinc-500" : "text-amber-500"}`}>
-                  {answer.text}
+            ) : null}
+            {section.groups.map(({ label, list }) => {
+              const row: TypeActionRow = { label, types: [label.toLowerCase()], count: list.length };
+              const mine = busy === row.label;
+              const answer = said[row.label];
+              return (
+                <div key={row.label} className="rounded-md px-1.5 py-1 hover:bg-raise/60">
+                  <div className="flex items-center gap-2">
+                    <span className="text-sm text-zinc-300 truncate flex-1 min-w-0">
+                      {row.label}
+                      {row.count !== null ? (
+                        <span className="text-zinc-500 text-xs">
+                          {" · "}{t("mb.actions_groups", { n: row.count })}
+                        </span>
+                      ) : null}
+                    </span>
+                    <button
+                      className="btn-ghost !py-1 text-xs shrink-0"
+                      disabled={mine}
+                      title={t("mb.actions_add_hint")}
+                      onClick={() => run(row)}
+                    >
+                      {mine ? spinner : <Library className="h-3.5 w-3.5" />}
+                      {t("mb.add_to_library")}
+                    </button>
+                  </div>
+                  {mine ? (
+                    <div className="text-[11px] text-zinc-500 pb-1">{t("mb.actions_working")}</div>
+                  ) : answer ? (
+                    <div className={`text-[11px] pb-1 ${answer.ok ? "text-zinc-500" : "text-amber-500"}`}>
+                      {answer.text}
+                    </div>
+                  ) : null}
                 </div>
-              ) : null}
-            </div>
-          );
-        })}
+              );
+            })}
+          </div>
+        ))}
       </div>
     </div>
   );
@@ -1556,15 +1553,24 @@ export function MBArtistPage() {
   const { id = "" } = useParams();
   const nav = useNavigate();
   const { warm: prefetch, cool: unprefetch } = useMbPrefetch();
-  // Which release-group TYPE is selected. A chip FILTERS the one discography
-  // loaded below; it is not a new question to MusicBrainz. The type of a group
-  // is the pair (primary type, secondary types) MusicBrainz reports on every
-  // row, so a compound chip like "Album + Live" is answerable from the payload
-  // itself — and it can only be answered exactly, because the tail of the list
-  // loads EVERY page (see AutoLoad's `all`): an artist's types can sit past the
-  // first page, and a filter over a half-loaded discography is what this page
-  // used to get wrong.
-  const [typeFilter, setTypeFilter] = useState<string>("All");
+  // Which release-group TYPE the discography below shows. The filter menu
+  // FILTERS the one discography loaded here; it is not a new question to
+  // MusicBrainz. The type of a group is the pair (primary type, secondary
+  // types) MusicBrainz reports on every row, so a compound pick like
+  // "Album + Live" is answerable from the payload itself — and it can only be
+  // answered exactly, because the tail of the list loads EVERY page (see
+  // AutoLoad's `all`): an artist's types can sit past the first page, and a
+  // filter over a half-loaded discography is what this page used to get wrong.
+  const [typeFilter, setTypeFilter] = useState<string>(ALL_TYPES);
+  // The filter menu's own text box — a filter over the TYPE LABELS, so the long
+  // tail (a dozen types of one or two groups each) is reachable by name instead
+  // of by scrolling a chip row that wraps to several lines on a phone.
+  const [typeMenu, setTypeMenu] = useState(false);
+  const [typeQuery, setTypeQuery] = useState("");
+  // Each section's fold as the READER left it, keyed by section label: absent
+  // means untouched, and then the page's own default (`typeSectionOpen`) says
+  // whether it is open — the leading types open, the `More` bucket shut.
+  const [opened, setOpened] = useState<Record<string, boolean>>({});
   const discography = useInfiniteQuery({
     queryKey: ["mbArtist", id],
     queryFn: ({ pageParam }) => api.mbArtist(id, pageParam as number, 300),
@@ -1585,16 +1591,34 @@ export function MBArtistPage() {
   const groups: RGRow[] = (discography.data?.pages ?? []).flatMap((p) => p.release_groups ?? []);
   const rgTotal: number = discography.data?.pages.at(-1)?.total ?? groups.length;
 
-  // The chips, the sections below them and the "Add or download by release
-  // type" panel are ONE derivation over ONE discography: `byReleaseGroupType`
-  // names every group's type as MusicBrainz spells a compound one ("Album +
-  // Live" — primary type first, then its secondary types) and lists the rows
-  // of each. So a chip cannot name a type the panel does not, or the other way
-  // round, and "Album + Live" is the live albums only, never every album.
-  const sections = byReleaseGroupType(groups);
-  const selected = typeFilter === "All" ? sections
-    : sections.filter((s) => s.label === typeFilter);
-  const shown = selected.flatMap((s) => s.list);
+  // The filter menu, the sections below it and the "Add or download by release
+  // type" panel are ONE derivation over ONE discography
+  // (`lib/artistReleaseGroups`): it names every group's type as MusicBrainz
+  // spells a compound one ("Album + Live" — primary type first, then its
+  // secondary types), leads with Album, EP and Single, folds every other type
+  // into the `More` bucket ordered by size, and resolves a pick to the rows it
+  // means. So a menu row cannot name a type a section does not draw, or the
+  // other way round, and "Album + Live" is the live albums only, never every
+  // album.
+  const sections = typeSections(groups);
+  const selected = selectedSections(sections, typeFilter);
+  const shown = selected.flatMap((s) => s.groups.flatMap((g) => g.list));
+  // "All" is the server's own total (it knows what MusicBrainz still has to
+  // serve); every other row counts the rows the derivation holds, which is
+  // what the section under it will draw.
+  const menuRows: TypeFilterOption[] = filterTypeOptions(
+    [{ label: ALL_TYPES, count: rgTotal, section: "", compound: false },
+      ...typeFilterOptions(sections)],
+    typeQuery);
+  const pick = (label: string) => {
+    setTypeFilter(label);
+    setTypeMenu(false);
+    setTypeQuery("");
+    // A new pick resets the folds: the section it named opens (see
+    // `typeSectionOpen`), and one the reader had folded by hand should not
+    // swallow the rows they just asked for.
+    setOpened({});
+  };
 
   if (!id) return null;
   if (isLoading) return <PageLoading label="Asking MusicBrainz…" />;
@@ -1666,95 +1690,191 @@ export function MBArtistPage() {
         ) : null}
         {groups.length === 0 ? (
           <EmptyState
-            title={typeFilter === "All"
+            title={typeFilter === ALL_TYPES
               ? "No release groups on MusicBrainz"
               : `No ${typeFilter} release groups`}
-            hint={typeFilter === "All"
+            hint={typeFilter === ALL_TYPES
               ? undefined
               : "MusicBrainz holds no release group of that type for this artist — switch back to All."}
           />
         ) : (
           <>
-            <div className="flex gap-1 flex-wrap mb-4">
-              {[{ label: "All", count: rgTotal },
-                ...sections.map(({ label, list }) => ({ label, count: list.length }))]
-                .map(({ label, count }) => (
+            <div className="flex items-center gap-2 mb-4 flex-wrap">
+              <div className="relative">
+                {/* The old chip row put one chip per compound type on the page,
+                    which at a phone width wrapped to four lines and buried the
+                    three types a reader came for. One menu instead: its trigger
+                    says what is on screen (and how many), and the menu's own box
+                    finds a type by name — including the ones folded into
+                    `More`. */}
                 <button
-                  key={label}
-                  className={`chip px-2.5 py-1 border ${
-                    typeFilter === label
-                      ? "bg-accent on-accent border-transparent font-semibold"
-                      : "bg-raise border-border text-zinc-400 hover:text-white"
-                  }`}
-                  title={
-                    label === "All"
-                      ? "Every release group MusicBrainz holds for this artist"
-                      : `This artist's ${label} release groups — the same type the panel above adds`
-                  }
-                  onClick={() => setTypeFilter(label)}
+                  className="chip px-2.5 py-1 border bg-raise border-border text-zinc-300 hover:text-white flex items-center gap-1.5"
+                  aria-haspopup="menu"
+                  aria-expanded={typeMenu}
+                  title={`Which release-group types to show — MusicBrainz spells a compound type as its primary type plus its secondary ones ("Album + Live")`}
+                  onClick={() => setTypeMenu(!typeMenu)}
                 >
-                  {label} ({count})
+                  <ListFilter className="h-3.5 w-3.5" />
+                  {typeFilter === ALL_TYPES ? "All types" : typeFilter}
+                  <span className="text-zinc-500">({shown.length})</span>
+                  <ChevronDown className="h-3 w-3" />
                 </button>
-              ))}
+                <Popover open={typeMenu} onClose={() => { setTypeMenu(false); setTypeQuery(""); }}
+                         align="left" panelClass="w-[min(22rem,calc(100vw-1rem))] p-1.5">
+                  <div className="sticky top-0 -mt-1.5 pt-1.5 pb-1 bg-zinc-950 z-10">
+                    <div className="relative">
+                      <Search className="h-3.5 w-3.5 absolute left-2.5 top-1/2 -translate-y-1/2 text-zinc-600" />
+                      <input
+                        className="input !py-1 text-xs pl-8"
+                        placeholder="Find a type…"
+                        aria-label="Filter the release-group types by name"
+                        autoFocus
+                        value={typeQuery}
+                        onChange={(e) => setTypeQuery(e.target.value)}
+                      />
+                    </div>
+                  </div>
+                  {menuRows.length === 0 && (
+                    <div className="text-xs text-zinc-500 px-2.5 py-2">
+                      No release-group type of this artist matches. The box takes
+                      MusicBrainz's own spelling — "Album + Live", "EP + Compilation".
+                    </div>
+                  )}
+                  {/* The rows ARE the page's sections, in the page's order: a
+                      section's own row first, then the compound types inside it
+                      that the section row does not already name. So a pick can
+                      only mean a type the sections below can draw. */}
+                  {menuRows.map((row) => (
+                    <button
+                      key={`${row.section}/${row.label}`}
+                      role="menuitem"
+                      aria-current={typeFilter === row.label ? "true" : undefined}
+                      title={row.compound
+                        ? `${row.label} — one type of this artist, filed under ${row.section}`
+                        : row.label === ALL_TYPES
+                          ? "Every release group MusicBrainz holds for this artist"
+                          : `Every ${row.label} release group of this artist`}
+                      onClick={() => pick(row.label)}
+                      className={`w-full text-left text-xs py-1.5 pr-2.5 rounded-lg flex items-center gap-2 transition-colors tap ${
+                        row.compound ? "pl-6" : "pl-2.5 font-semibold"
+                      } ${
+                        typeFilter === row.label
+                          ? "bg-white/10 text-white"
+                          : "text-zinc-300 hover:bg-white/10"
+                      }`}
+                    >
+                      <span className="flex-1 truncate">{row.label}</span>
+                      <span className="text-zinc-500 tabular-nums shrink-0">{row.count}</span>
+                    </button>
+                  ))}
+                </Popover>
+              </div>
+              {typeFilter !== ALL_TYPES && (
+                <button
+                  className="chip px-2.5 py-1 border bg-raise border-border text-zinc-400 hover:text-white"
+                  title="Back to every release group MusicBrainz holds for this artist"
+                  onClick={() => pick(ALL_TYPES)}
+                >
+                  Clear
+                </button>
+              )}
             </div>
             {groups.length !== rgTotal && (
               <div className="text-[11px] text-zinc-500 mb-3">
-                Showing {groups.length} of {rgTotal}{typeFilter === "All" ? "" : ` ${typeFilter}`} release groups
+                Showing {groups.length} of {rgTotal}{typeFilter === ALL_TYPES ? "" : ` ${typeFilter}`} release groups
               </div>
             )}
-            {selected.map(({ label, list }) => (
-              <div key={label} className="mb-5">
-                <div className="text-[11px] uppercase tracking-widest text-zinc-500 mb-1.5">
-                  {label} · {list.length}
-                </div>
-                <div className="rounded-lg border border-border overflow-hidden table-scroll">
-                  <div className="stagger">
-                    {list.map((rg) => (
-                      <div
-                        key={rg.id}
-                        className="table-row !cursor-pointer"
-                        onClick={() => nav(`/mb/rg/${rg.id}`)}
-                        onMouseEnter={() => prefetch("release-group", rg.id)}
-                        onMouseLeave={unprefetch}
-                      >
-                        <div className="px-3 py-2 flex items-center gap-3 min-w-0">
-                          <span className="text-xs font-mono text-zinc-500 w-10 shrink-0">
-                            {(rg.first_release_date || "—").slice(0, 4)}
-                          </span>
-                          <span className="text-sm text-zinc-200 truncate flex-1">
-                            {withAlias(rg.title, rg.alias)}
-                            {rg.secondary_types?.length ? (
-                              <span className="text-zinc-500 text-xs"> ({rg.secondary_types.join(" + ")})</span>
-                            ) : null}
-                          </span>
-                          <button
-                            className="p-1.5 rounded-lg text-zinc-500 hover:text-white hover:bg-raise transition-colors shrink-0"
-                            title="Add this release group to your library and start searching for it"
-                            disabled={busy}
-                            onClick={(e) => {
-                              e.stopPropagation();   // the row itself opens the group
-                              // The row knows this group's title and the artist
-                              // it belongs to, so it sends them: the add then
-                              // records the album and answers at once instead of
-                              // resolving the group's editions inside the request
-                              // (see the group page's own button).
-                              run([String(rg.id)], "release_group", mode, 0,
-                                  { title: rg.title || "", artist: a.name || "" });
-                            }}
-                          >
-                            <Library className="h-4 w-4" />
-                          </button>
-                          <ExtLink href={mbUrl("release-group", rg.id)} title="Open on MusicBrainz" />
+            {/* One fold per section, and the fold is a real one: a folded
+                section draws its header and no rows at all. Album, EP and
+                Single open (they are what a reader came for); the `More`
+                bucket — an artist's long tail, usually many types of one or
+                two groups each — starts folded away, which is what keeps a
+                discography of 49 live albums from opening as four screens of
+                types. */}
+            {selected.map((section) => {
+              const open = typeSectionOpen(section, opened, typeFilter);
+              return (
+                <section key={section.label} className="mb-5">
+                  <button
+                    type="button"
+                    className="tap flex w-full items-center gap-1.5 mb-1.5 text-left text-[11px] font-semibold uppercase tracking-widest text-zinc-400 select-none"
+                    aria-expanded={open}
+                    title={open
+                      ? `Fold this artist's ${section.label} release groups away`
+                      : `Show this artist's ${section.label} release groups (${section.count})`}
+                    onClick={() => setOpened((prev) => toggleTypeSection(prev, section))}
+                  >
+                    {open
+                      ? <ChevronDown className="h-3.5 w-3.5 text-zinc-500" />
+                      : <ChevronRight className="h-3.5 w-3.5 text-zinc-500" />}
+                    {section.label} · {section.count}
+                    {section.extras && !open ? (
+                      <span className="font-normal normal-case tracking-normal text-zinc-600">
+                        — {section.groups.length} other type{section.groups.length === 1 ? "" : "s"}, folded away
+                      </span>
+                    ) : null}
+                  </button>
+                  {open ? section.groups.map((group) => (
+                    <div key={group.label} className="mb-3">
+                      {/* A section of ONE compound type needs no line naming
+                          it twice; the `More` bucket always does, because its
+                          header says the bucket and not the type. */}
+                      {section.groups.length > 1 || section.groups[0].label !== section.label ? (
+                        <div className="text-[11px] uppercase tracking-widest text-zinc-500 mb-1.5 pl-5">
+                          {group.label} · {group.list.length}
+                        </div>
+                      ) : null}
+                      <div className="rounded-lg border border-border overflow-hidden table-scroll">
+                        <div className="stagger">
+                          {group.list.map((rg) => (
+                            <div
+                              key={rg.id}
+                              className="table-row !cursor-pointer"
+                              onClick={() => nav(`/mb/rg/${rg.id}`)}
+                              onMouseEnter={() => prefetch("release-group", rg.id)}
+                              onMouseLeave={unprefetch}
+                            >
+                              <div className="px-3 py-2 flex items-center gap-3 min-w-0">
+                                <span className="text-xs font-mono text-zinc-500 w-10 shrink-0">
+                                  {(rg.first_release_date || "—").slice(0, 4)}
+                                </span>
+                                <span className="text-sm text-zinc-200 truncate flex-1">
+                                  {withAlias(rg.title, rg.alias)}
+                                  {rg.secondary_types?.length ? (
+                                    <span className="text-zinc-500 text-xs"> ({rg.secondary_types.join(" + ")})</span>
+                                  ) : null}
+                                </span>
+                                <button
+                                  className="p-1.5 rounded-lg text-zinc-500 hover:text-white hover:bg-raise transition-colors shrink-0"
+                                  title="Add this release group to your library and start searching for it"
+                                  disabled={busy}
+                                  onClick={(e) => {
+                                    e.stopPropagation();   // the row itself opens the group
+                                    // The row knows this group's title and the artist
+                                    // it belongs to, so it sends them: the add then
+                                    // records the album and answers at once instead of
+                                    // resolving the group's editions inside the request
+                                    // (see the group page's own button).
+                                    run([String(rg.id)], "release_group", mode, 0,
+                                        { title: rg.title || "", artist: a.name || "" });
+                                  }}
+                                >
+                                  <Library className="h-4 w-4" />
+                                </button>
+                                <ExtLink href={mbUrl("release-group", rg.id)} title="Open on MusicBrainz" />
+                              </div>
+                            </div>
+                          ))}
                         </div>
                       </div>
-                    ))}
-                  </div>
-                </div>
-              </div>
-            ))}
-            {/* `all`: the chips above and the panel's rows are derived from
-                the groups loaded here, so this list fetches every page rather
-                than waiting for the tail to be scrolled into view — an
+                    </div>
+                  )) : null}
+                </section>
+              );
+            })}
+            {/* `all`: the filter menu above and the panel's rows are derived
+                from the groups loaded here, so this list fetches every page
+                rather than waiting for the tail to be scrolled into view — an
                 artist's compound types can live past the first page. */}
             <AutoLoad
               loaded={groups.length}
@@ -2048,6 +2168,16 @@ export function MBReleaseGroupPage() {
                   <SortTh label="Discs" k="disc_count" sort={sort} onSort={onSort} className="w-[64px] cell-nowrap text-right" />
                   <SortTh label="Tracks" k="track_count" sort={sort} onSort={onSort} className="w-[96px] cell-nowrap text-right" />
                   <th className="th w-[72px]">Country</th>
+                  {/* The pressing's own number, immediately before the barcode:
+                      the two are what identifies one printing of a release, and
+                      a reader hunting a specific pressing looks for the catalog
+                      number first (a Japanese edition's barcode is not what its
+                      cover prints). Labelled and floored exactly as the search
+                      results' own `catalog_number` column is ("Cat #",
+                      `w-[150px]`), so the app names this one thing once; the
+                      ellipsis keeps a two-label join on one line with its whole
+                      value in the tooltip. */}
+                  <th className="th w-[150px]">Cat #</th>
                   <th className="th w-[150px]">Barcode</th>
                   <th className="th w-20"></th>
                 </tr>
@@ -2087,6 +2217,12 @@ export function MBReleaseGroupPage() {
                       {tracksLabel(r) || "—"}
                     </td>
                     <td className="td text-zinc-500">{r.country || "—"}</td>
+                    <td
+                      className="td text-zinc-600 font-mono text-[11px] cell-ellipsis"
+                      title={catalogLabel(r) || undefined}
+                    >
+                      {catalogLabel(r) || "—"}
+                    </td>
                     <td className="td text-zinc-600 font-mono text-[11px] truncate">{r.barcode || ""}</td>
                     {/* The row's own action adds THIS edition: the release's
                         own id with kind "release" — the same call the release

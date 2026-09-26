@@ -9,6 +9,7 @@ import { AdvisoryMark, CachedMark, EmptyState, PageLoading } from "../components
 import PageHeader from "../components/PageHeader";
 import { TrackCover } from "../components/CoverImg";
 import AlbumCard from "../components/AlbumCard";
+import ArtistName from "../components/ArtistName";
 import DownloadButton from "../components/DownloadButton";
 import { ExportButton, usePlaylistTracks } from "../components/ExportDialog";
 import MoreLikeThis from "../components/MoreLikeThis";
@@ -534,9 +535,16 @@ function FavArtists() {
                     >
                       <Play className="h-3.5 w-3.5" />
                     </button>
-                    <Link to={artistRef(a)} className="font-medium hover:text-accent-soft break-words flex-1 min-w-0">
-                      {displayName}
-                    </Link>
+                    {/* The shared artist-name render: the same dot the
+                        Library's artist view and the artist page draw, off
+                        the same `grade` the library row carries. */}
+                    <ArtistName
+                      to={artistRef(a)}
+                      name={displayName}
+                      pass={a.grade?.pass}
+                      className="font-medium hover:text-accent-soft flex-1 min-w-0"
+                      nameClassName="break-words"
+                    />
                     <span className="shrink-0">
                       <FavHeart kind="artist" id={a.path} mbid={artistMbid(a)} iconClass="h-3.5 w-3.5" revealOnHover />
                     </span>

@@ -221,6 +221,19 @@ export default function GradeWarning({ initial, mode = "strip" }: {
               two albums fall short of them. */}
           {data.albums_failing === 1 ? "album falls short of" : "albums fall short of"} the
           library's grading checks
+          {/* An album mid-import is held back rather than listed (its chain is
+              filling the tags the grader read as missing), and the reader who
+              watched it leave the list is told that here: without the clause
+              the count would simply look short an album. */}
+          {data.albums_importing > 0 && (
+            <>
+              {" · "}
+              <span className="font-mono">{data.albums_importing}</span>{" "}
+              {data.albums_importing === 1
+                ? "album being imported is left out"
+                : "albums being imported are left out"}
+            </>
+          )}
           {data.tracks_failing > 0 && (
             <>
               {" · "}

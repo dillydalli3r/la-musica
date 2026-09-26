@@ -861,6 +861,13 @@ export default function SettingsPage() {
         { k: "force_auto_tag", label: "Force re-tag", type: "bool" },
         { k: "force_mood", label: "Force mood & energy re-analysis (script 16)", type: "bool" },
         { k: "instrumental_auto_fetch", label: "Look the INSTRUMENTAL verdict up when nothing states one", type: "bool" },
+        {
+          k: "instrumental_ai_classify", label: "Ask the AI provider about lyric-less tracks", type: "bool",
+          help: "When a track has no lyrics at all (no LYRICS tag, no .lrc sidecar) and no source states an "
+                + "INSTRUMENTAL verdict, the configured AI model is asked once and must answer a single digit — "
+                + "1 instrumental, 0 not. Costs one model call per such track; a reply that is not a lone 0 or 1 "
+                + "writes nothing at all and the track is left as it was. Needs an AI base URL and model above.",
+        },
       ],
     },
     {
@@ -1049,8 +1056,10 @@ export default function SettingsPage() {
         { k: "soulseek_auto_search_wait", label: "Fallback search window (seconds of quiet on a rare album)", type: "number", min: 5, max: 300 },
         { k: "soulseek_fallback_candidates", label: "Candidates tried per release (best first)", type: "number", min: 1, max: 10,
           help: "How many of a release group's ranked editions one search walks: the best first, then the next. The release-choice policy ranks them (status, medium, completeness, original date), so a rare pressing no longer costs you the album — the search moves on to the next edition instead. 1 turns the walk off (the best edition only). A group with fewer eligible editions than this simply ends at the end of its own list." },
-        { k: "soulseek_search_timeout_seconds", label: "Search window per candidate (seconds)", type: "number", min: 5, max: 300,
-          help: "How long ONE candidate's search is given before it counts as not found and the walk moves on to the next edition — per candidate, so a walk of five may wait up to five of these. It is the same kind of quiet window as the fallback search window above (slskd ends a search when the network stops answering, plus the app's own response grace), and a usable folder still ends a candidate's search in seconds. A walk whose candidates all come back empty is not dropped: the release stays in the Background list and keeps being searched." },
+        { k: "soulseek_search_fast_seconds", label: "Fast search window (seconds)", type: "number", min: 2, max: 60,
+          help: "The window the FIRST search pass asks with, and the reason a good find starts downloading in seconds. slskd only serves a search's results once the search has ENDED, so a quiet window this short is what makes a low-traffic release readable straight away — the moment one complete lossless folder is readable its download is enqueued and the job moves on. Default 5." },
+        { k: "soulseek_search_timeout_seconds", label: "Top-up search window per candidate (seconds)", type: "number", min: 5, max: 300,
+          help: "The budget for a candidate the fast pass above did NOT answer for: the job keeps reading the searches that are still running at slskd for up to this long, then walks on to the next ranked edition — per candidate, so a walk of five may wait up to five of these. It is the same kind of quiet window as the fallback search window above (slskd ends a search when the network stops answering, plus the app's own response grace), and a usable folder still ends it in seconds. A walk whose candidates all come back empty is not dropped: the release stays in the Background list and keeps being searched." },
         {
           k: "soulseek_auto_response_limit", label: "Responses before a search is scored (5–500)", type: "number", min: 5, max: 500,
           help: "slskd only hands back a search's results once it has ENDED, and a popular album never goes quiet — this ends the search early instead of waiting out the whole window. Lower = faster and fewer peers; higher = slower and more candidates.",
@@ -1151,6 +1160,11 @@ export default function SettingsPage() {
           options: [["stream", "Streaming from the server — default"], ["downloaded", "The downloaded copy"]],
           help: "Streaming asks the server for the library file even when a copy is downloaded; the downloaded copy plays what is cached, "
                 + "saving bandwidth and working with the server away. Either way a copy plays when the server cannot be reached.",
+        },
+        {
+          k: "gapless_playback", label: "Play albums without a gap between tracks", type: "bool",
+          help: "On, the player keeps the next track preloaded and hands the sound over at a natural track end, so an album plays as the CD did. "
+                + "Off, every track is loaded and started on its own — pick it for a device that dislikes the handover, or when a track's trailing silence is being swallowed.",
         },
       ],
     },

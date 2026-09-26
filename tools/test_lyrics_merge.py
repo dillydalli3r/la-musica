@@ -266,7 +266,11 @@ ok(after.get_tag("INSTRUMENTAL") is None,
 status2, _r, _a, info2 = _process_lyrics_for_audio(flac1, cfg)
 ok(status2 == "unchanged", f"e2e re-run status {status2} ({info2})")
 
-# INSTRUMENTAL auto-flip reflects persisted state after a reload.
+# INSTRUMENTAL=1 WINS over a leftover lyric (R318): the file's own
+# classification is the fact, so the script clears the words that contradict
+# it instead of flipping the tag. (fix_instrumental_from_lyrics still flips a
+# tag the script cannot act on — see mlo.lyrics; here the lyrics writes are
+# enabled, so the removal path runs first.)
 flac2 = os.path.join(tmp, "inst.flac")
 make_flac(flac2)
 f = MutFLAC(flac2)
@@ -274,11 +278,24 @@ f["LYRICS"] = "[00:12.34]\nnext"
 f["INSTRUMENTAL"] = "1"
 f.save()
 status3, _r, _a, info3 = _process_lyrics_for_audio(flac2, cfg)
-ok(status3 == "modified", f"inst flip status {status3} ({info3})")
-ok(AudioFile(flac2).get_tag("INSTRUMENTAL") == "0",
-   "inst flip: INSTRUMENTAL cleared with lyrics persisted")
-ok(AudioFile(flac2).get_lyrics() == "[00:12.34]next",
-   "inst flip: pending-stamp attachment through the pipeline")
+ok(status3 == "modified", f"inst clear status {status3} ({info3})")
+ok(AudioFile(flac2).get_tag("INSTRUMENTAL") == "1",
+   "inst clear: the file's own INSTRUMENTAL=1 is kept")
+ok(not (AudioFile(flac2).get_lyrics() or "").strip(),
+   "inst clear: the leftover LYRICS tag is removed")
+
+# The same pending-stamp lyric on a track that is NOT instrumental is
+# canonicalised as before (the attachment this case has always covered).
+flac2b = os.path.join(tmp, "notinst.flac")
+make_flac(flac2b)
+f = MutFLAC(flac2b)
+f["LYRICS"] = "[00:12.34]\nnext"
+f["INSTRUMENTAL"] = "0"
+f.save()
+status3b, _r, _a, info3b = _process_lyrics_for_audio(flac2b, cfg)
+ok(status3b == "modified", f"notinst status {status3b} ({info3b})")
+ok(AudioFile(flac2b).get_lyrics() == "[00:12.34]next",
+   "notinst: pending-stamp attachment through the pipeline")
 
 # ----------------------------------------------------------------------
 # Forced failure: failed embed must keep the sidecar, return fail
