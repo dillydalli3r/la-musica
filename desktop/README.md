@@ -252,7 +252,7 @@ filling on a press.
 
 ## Bundle config
 
-`bundle.iOS.minimumSystemVersion` 14.0, `bundle.iOS.bundleVersion` 4.1.9,
+`bundle.iOS.minimumSystemVersion` 14.0, `bundle.iOS.bundleVersion` 4.1.10,
 `bundle.iOS.infoPlist` and `bundle.android.minSdkVersion` 24 in
 `tauri.conf.json`. The Android package name and the iOS bundle id both come from
 the top-level `identifier` (`com.musiclibraryoptimizer.lamusica` — the old

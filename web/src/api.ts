@@ -1256,6 +1256,12 @@ export interface SoulseekStaging {
 export interface SlskBrowse {
   username: string;
   directories: { directory: string; files: { filename: string; size: number }[] }[];
+  /** True when the answer came from this app's own share instead of the peer
+   *  network — a browse of your OWN account, which the peer network cannot
+   *  serve from inside your network (R297). `note` says so in the server's
+   *  own words, and is shown as-is. */
+  local?: boolean;
+  note?: string;
 }
 
 /** One private-message conversation (slskd): the peer and its unread count.

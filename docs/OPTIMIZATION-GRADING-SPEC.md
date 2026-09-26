@@ -1980,6 +1980,22 @@ user asked for, in the order they asked for it. `server/exporter.py` owns both.
   answer needs a probe from OUTSIDE the network, which this app does not ship,
   and the payload says so. Nothing runs on its own: the probe is fired by the
   page's *Test port* action.
+- **R297 — a browse of your OWN account is answered from your own share, and
+  says so.** That is the one browse the peer network cannot serve from inside
+  this network: the Soulseek server hands every client the address it published
+  for the account — this network's own public address — and a router without
+  NAT loopback refuses exactly that dial, which is the wall R77's `self-connect`
+  row measures, and why the Browse modal used to end in slskd's "cannot connect
+  to itself" 500. When `GET /api/soulseek/browse/<username>` names the
+  configured `soulseek_username` (case-insensitively), the app answers from the
+  index slskd serves (`GET /shares/contents` — the very tree a peer receives),
+  makes no round trip, marks the answer `local: true`, and carries a `note`
+  the page shows: it is this app's own share, and a peer-network browse of it
+  needs the router's NAT loopback. Nothing is walked from disk and nothing is
+  invented. Every other username still goes to slskd's peer browse, 502 and its
+  own words unchanged; an index that cannot be read is that 502, never an empty
+  share. Bounded and cached like a browse: 48 MB of index at most, 60 s of
+  reuse, `refresh=1` bypasses it.
 
 ### 7.11 MusicBrainz browsing and the watch dialog
 

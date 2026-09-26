@@ -6845,30 +6845,60 @@ def soulseek_user(username: str):
         raise HTTPException(502, f"user info failed: {e}")
 
 
+# What a browse of this app's OWN account answers with, and why it is read
+# locally: the peer network cannot answer it from inside this network. The
+# Soulseek server hands every client the address it published for the account —
+# this network's own public address — and a router without NAT loopback refuses
+# exactly that dial (the port check's `self-connect` row measures the wall).
+# slskd's own index is the tree a peer is served, so the answer is the same one
+# a browse over the internet would bring back (R297).
+LOCAL_SHARE_NOTE = (
+    "Read from this app's own share — the same folders and files a peer is "
+    "served. Browsing your own account over the peer network needs your router "
+    "to reflect its own public address (NAT loopback); this answer does not."
+)
+
+
+def _browse_rows(dirs):
+    """The browse answer's own shape: {directory, files:[{filename, size}]}."""
+    return [{"directory": str(d.get("directory") or ""),
+             "files": [{"filename": str(f.get("filename") or ""),
+                        "size": int(f.get("size") or 0)}
+                       for f in (d.get("files") or [])]}
+            for d in (dirs or [])]
+
+
 @app.get("/api/soulseek/browse/{username}")
 def soulseek_browse(username: str, refresh: int = Query(0)):
     """Every shared folder of a remote user — the manual-pick view: what else
     does this uploader have before queueing individual files?
 
-    We only normalize slskd's payload to {username, directories:[…]}; slskd
-    does the browsing over the peer network, so an offline user (slskd 404)
-    or our OWN username (slskd cannot connect to itself) answers 5xx. That is
-    an upstream failure carrying slskd's own explanation, hence 502.
-    `refresh=1` bypasses the 120 s in-process cache (the modal's Refresh
-    button used to re-issue the same cached answer)."""
+    Our OWN username is answered from this app's own share (LOCAL_SHARE_NOTE,
+    R297): that browse cannot be served over the peer network from inside this
+    network, so it is read from the index slskd serves and carries
+    `local: true`.
+
+    Otherwise slskd does the browsing over the peer network and we only
+    normalize its payload to {username, directories:[…]}: an offline user
+    (slskd 404) answers 5xx — an upstream failure carrying slskd's own
+    explanation, hence 502. `refresh=1` bypasses the 120 s in-process cache
+    (the modal's Refresh button used to re-issue the same cached answer)."""
     from server import soulseek
     if not (soulseek.is_running() or soulseek.web_up(load_config())):
         raise HTTPException(404, "slskd is not running")
+    cfg = load_config()
+    if soulseek.is_own_username(username, cfg):
+        try:
+            rows = soulseek.local_browse(cfg, use_cache=not refresh)
+        except Exception as e:
+            raise HTTPException(502, f"browse failed: {e}")
+        return {"username": username, "local": True,
+                "note": LOCAL_SHARE_NOTE, "directories": _browse_rows(rows)}
     try:
         dirs = soulseek.browse(username, use_cache=not refresh) or []
     except Exception as e:
         raise HTTPException(502, f"browse failed: {e}")
-    return {"username": username,
-            "directories": [{"directory": str(d.get("directory") or ""),
-                             "files": [{"filename": str(f.get("filename") or ""),
-                                        "size": int(f.get("size") or 0)}
-                                       for f in (d.get("files") or [])]}
-                            for d in dirs]}
+    return {"username": username, "directories": _browse_rows(dirs)}
 
 
 class SoulseekMessageRequest(BaseModel):

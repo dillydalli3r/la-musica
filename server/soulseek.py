@@ -1853,6 +1853,65 @@ def browse(username, cfg=None, use_cache=True):
 
 
 # --------------------------------------------------------------------------- #
+# Our OWN share, when a caller asks for it by name (R297)
+# --------------------------------------------------------------------------- #
+_LOCAL_BROWSE_TTL = 60.0
+# The index slskd serves, as one JSON document: generous, because a browse of
+# your own share is only ever answered from it, and bounded, because a share
+# that holds a whole NAS must not be read into memory unbounded.
+_LOCAL_BROWSE_MAX_BYTES = 48 * 1024 * 1024
+_local_browse_cache: dict = {}
+_local_browse_lock = threading.Lock()
+
+
+def is_own_username(username, cfg=None):
+    """Is `username` the account this app shares as?
+
+    Case- and whitespace-insensitive: Soulseek usernames do not distinguish
+    case, and the configured one is typed by a human."""
+    want = str(username or "").strip().lower()
+    return bool(want) and want == str(
+        (cfg or {}).get("soulseek_username") or "").strip().lower()
+
+
+def local_browse(cfg=None, use_cache=True):
+    """This app's OWN share in the browse shape -> [{directory, files:[…]}].
+
+    The one browse the peer network cannot answer from here: the Soulseek
+    server hands every client the address it published for the account — on
+    this network that is this network's own public address — and a router
+    without NAT loopback refuses exactly that dial. The port check's
+    `self-connect` row measures the same wall, and this app used to answer a
+    browse of its own username with slskd's "cannot connect to itself" 500.
+    slskd already holds the index it answers browses with, so the tree a peer
+    receives is one local read away (`GET /shares/contents`), with nothing
+    walked from disk and nothing invented.
+
+    Cached like `browse()`: the endpoint has no pagination — a large library is
+    a large document — while a modal that opens twice in a minute asks the same
+    question. Raises slskd's own words when the index cannot be read."""
+    key = os.path.normcase(str((cfg or {}).get("music_folder") or ""))
+    now = time.time()
+    if use_cache:
+        with _local_browse_lock:
+            hit = _local_browse_cache.get(key)
+        if hit and now - hit[0] < _LOCAL_BROWSE_TTL:
+            return hit[1]
+    rows, _truncated, error = _share_contents(
+        cfg, limit_bytes=_LOCAL_BROWSE_MAX_BYTES)
+    if error:
+        raise RuntimeError(error)
+    if use_cache and key:
+        with _local_browse_lock:
+            _local_browse_cache[key] = (now, rows)
+            if len(_local_browse_cache) > 4:
+                oldest = min(_local_browse_cache.items(),
+                             key=lambda kv: kv[1][0])[0]
+                _local_browse_cache.pop(oldest, None)
+    return rows
+
+
+# --------------------------------------------------------------------------- #
 # Private messages (slskd's /api/v0/conversations routes)
 # --------------------------------------------------------------------------- #
 def _message_user(username):

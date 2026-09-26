@@ -746,5 +746,46 @@ assert audit["problems"][0]["code"] == "share_state_unreadable"
 
 print("ok  slskd's own errors are surfaced by the client, the route and the audit")
 
+# --------------------------------------------------------------------------- #
+# 4) a browse of our OWN account is answered from our own share (R297)
+# --------------------------------------------------------------------------- #
+ready()
+# the route reads the app's own config; the suite's config is the one that
+# names the account, and that name IS the app's own
+srv_main.load_config = lambda: CFG
+fake.contents = FakeSlskd._contents_for(TRACK, TRACK_SIZE)
+
+fake.calls.clear()
+own = srv_main.soulseek_browse("Tester", refresh=1)   # CFG says "tester": case does not matter
+assert own["local"] is True, own
+assert "own share" in own["note"] and "NAT loopback" in own["note"], own["note"]
+assert own["directories"] == [{
+    "directory": "Artists\\Some Artist\\Some Album (1999)",
+    "files": [{"filename": "Artists\\Some Artist\\Some Album (1999)\\01 - A Track.flac",
+               "size": TRACK_SIZE}]}], own["directories"]
+assert not [c for c in fake.calls if "/browse" in c[1]], fake.calls
+assert ("GET", "/shares/contents") in fake.calls, fake.calls
+
+# any OTHER username is still slskd's browse over the peer network
+fake.calls.clear()
+other = srv_main.soulseek_browse("Some Other User", refresh=1)
+assert "local" not in other, other
+# slskd's route takes the name as ONE percent-encoded path segment
+assert ("GET", "/users/Some%20Other%20User/browse") in fake.calls, fake.calls
+
+# an index that cannot be read is slskd's own words, not an empty share
+fake.statuses["GET /shares/contents"] = 503
+try:
+    srv_main.soulseek_browse("tester", refresh=1)
+except Exception as e:
+    assert getattr(e, "status_code", None) == 502, e
+    assert "slskd is unhappy" in str(getattr(e, "detail", "")), e
+else:
+    raise AssertionError("an unreadable share index answered as a browse")
+fake.statuses.pop("GET /shares/contents", None)
+
+print("ok  browsing our own account is answered from our own share, and says so")
+
+
 shutil.rmtree(_TMP, ignore_errors=True)
 print("ok")

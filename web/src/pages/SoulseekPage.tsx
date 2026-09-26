@@ -1306,6 +1306,13 @@ function BrowseModal({ username, onAuto, onClose }: {
         value={text}
         onChange={(e) => setText(e.target.value)}
       />
+      {/* Browsing your own account: the answer is read from this app's own
+          share, and says so (R297). */}
+      {data?.local && data.note && (
+        <p className="rounded-lg border border-border bg-panel/60 px-3 py-2 text-[11px] leading-relaxed text-zinc-400">
+          {data.note}
+        </p>
+      )}
       {isLoading ? (
         <PageLoading label={`Browsing ${username}'s shares…`} />
       ) : error ? (
