@@ -60,7 +60,10 @@ jobs:
           echo "logged_in=$logged   runner IP: $(curl -s -m 10 https://api.ipify.org)"
           curl -s -m 240 -o /tmp/browse.json -w 'HTTP %{http_code} after %{time_total}s\n' \
             "http://127.0.0.1:5030/api/v0/users/$TARGET/browse" || true
-          python3 - "$TARGET" <<'PY' >> "$GITHUB_STEP_SUMMARY"
+          # the report goes to the log as well as the job summary: the summary
+          # is what a reader sees in the Actions UI, the log is what a terminal
+          # (or `gh run view --log`) can read.
+          python3 - "$TARGET" <<'PY' 2>&1 | tee -a "$GITHUB_STEP_SUMMARY"
           import json, sys
           target = sys.argv[1]
           try:
