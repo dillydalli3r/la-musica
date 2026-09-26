@@ -4,8 +4,8 @@ import json
 import os
 import tempfile
 
-from .paths import (CONFIG_FILE, DEFAULT_DIGITAL_SOURCE, app_data_dir, downloads_dir,
-                    legacy_state_dirs, read_music_folder_guess, trash_dir,
+from .paths import (CONFIG_FILE, REPO_CONFIG_FILE, DEFAULT_DIGITAL_SOURCE, app_data_dir,
+                    downloads_dir, legacy_state_dirs, read_music_folder_guess, trash_dir,
                     trash_root)
 from .naming import DEFAULT_NAMING_SCRIPT, RELEASE_TYPES
 # The genre-list ceiling, so `mb_genre_count`'s validated range below and the
@@ -2728,7 +2728,16 @@ def _move_state_dir(src, dst, copy=False):
 
 def _write_stub(music_folder):
     """Legacy-path config.json: records the folder that owns the .mlo/data
-    dir so read_music_folder_guess() keeps resolving on the next run."""
+    dir so read_music_folder_guess() keeps resolving on the next run.
+
+    A run that was TOLD its folder (`MLO_MUSIC_FOLDER`) never stamps the
+    CHECKOUT's own file: it is not the install migrating, and that one line is
+    read by the next process here — whose login gate then answers from a
+    scratch install, which recreates the folder and keeps the loop alive.
+    A scratch `CONFIG_FILE` (a test's own stub) is still written, because there
+    the write IS the contract being tested."""
+    if os.environ.get("MLO_MUSIC_FOLDER") and CONFIG_FILE == REPO_CONFIG_FILE:
+        return
     try:
         with open(CONFIG_FILE, "w", encoding="utf-8") as f:
             json.dump({"music_folder": music_folder}, f, indent=2)

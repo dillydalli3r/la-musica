@@ -40,6 +40,10 @@ SCRIPT_DIR = _resolve_script_dir()
 
 CONFIG_FILE = os.path.join(SCRIPT_DIR, "config.json")
 
+# The path as it ships (tests monkeypatch `CONFIG_FILE` to a scratch file; the
+# checkout's own file stays what this names, so a write can tell them apart).
+REPO_CONFIG_FILE = CONFIG_FILE
+
 
 # Legacy locations (repo-local) that predate the Data folder; a stub
 # config.json left behind by the migration keeps pointing at the music dir.

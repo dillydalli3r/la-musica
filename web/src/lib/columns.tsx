@@ -326,15 +326,49 @@ export function phoneHide(cls: Record<string, string>, id: string): string {
  *  choice survives), and every column this build ships visible by default is
  *  added, because a prefs entry cannot be evidence about a column that did not
  *  exist when it was written. Unticking anything after that is stored under the
- *  new key and honoured for good. */
+ *  new key and honoured for good.
+ *
+ *  A list under the CURRENT key is not evidence either. The ids it holds were
+ *  the ids the build that wrote it OFFERED, so a column this build ships
+ *  visible by default either did not exist there or could not be unticked — and
+ *  the owner's album tracklist read three columns (`["num","cover","title"]`
+ *  of seven) with a Columns menu that listed all seven, so nothing on screen
+ *  said where the other four had gone. What makes the two readable apart is
+ *  the record kept BESIDE the list (`mlo-coldft-*`): the default visible ids
+ *  that were in force when it was written. A list whose record still matches
+ *  this build's own defaults is obeyed verbatim — that is a choice the reader
+ *  made about THESE columns, and it survives every reload. A list whose record
+ *  is missing or different is the same MIGRATION the v3 one gets: the ids it
+ *  still has are kept, and the columns this build ships visible by default that
+ *  its own record did NOT have come back, because a column absent from that
+ *  build's defaults could not have been deliberately unticked in it. Unticking
+ *  after that is stored with a fresh record and honoured until a build changes
+ *  what its defaults ARE. */
 export function useColumnPrefs(key: string, defs: Col[]): [string[], (id: string) => void] {
   // v4: ids are versioned (the key moves when they change), and a v3 list is
   // migrated rather than filtered — see the block comment above.
   const storageKey = `mlo-cols4-${key}`;
   const legacyKey = `mlo-cols3-${key}`;
+  // The defaults the stored list was written under (see the block comment).
+  // The reader's OWN tag columns are deliberately not part of the record: they
+  // live in `mlo-customcols-*`, so adding one must not look like this build
+  // changing its defaults and resurrect a column unticked from the same list.
+  const defsKey = `mlo-coldft-${key}`;
+  const allVisible = defs.filter((c) => !c.defHidden).map((c) => c.id);
+  const shipped = defs.filter((c) => !c.defHidden && !c.tag).map((c) => c.id);
+  /** Store a list TOGETHER with the defaults it was written under: the record
+   *  says nothing on its own, and a list whose record went missing is the
+   *  migration case (it would be reconciled once, then recorded again). */
+  const remember = (list: string[]) => {
+    try {
+      localStorage.setItem(storageKey, JSON.stringify(list));
+      localStorage.setItem(defsKey, JSON.stringify(shipped));
+    } catch {
+      /* ignore */
+    }
+  };
   const [visible, setVisible] = useState<string[]>(() => {
     const ids = new Set(defs.map((d) => d.id));
-    const allVisible = defs.filter((c) => !c.defHidden).map((c) => c.id);
     // A stored list that would leave the table nothing but furniture (the row
     // number, the cover) is not a choice anyone made about which columns to
     // READ: the owner's Tracks view drew a `#` header and a column of row
@@ -344,27 +378,52 @@ export function useColumnPrefs(key: string, defs: Col[]): [string[], (id: string
     // the same rule as the v3 note above, one step further on.
     const chromeIds = new Set(defs.filter((d) => d.chrome).map((d) => d.id));
     const drawsData = (list: string[]) => list.some((id) => !chromeIds.has(id));
+    /** The default ids the stored list was written under, or null when there
+     *  is no record to read (a list written before this record existed, a
+     *  hand-edited key, storage switched off). */
+    const writtenUnder = (): string[] | null => {
+      try {
+        const raw = localStorage.getItem(defsKey);
+        if (!raw) return null;
+        const arr = JSON.parse(raw) as unknown;
+        return Array.isArray(arr) && arr.every((x) => typeof x === "string") ? (arr as string[]) : null;
+      } catch {
+        return null;
+      }
+    };
+    /** What the list is drawn as: its own ids, plus the columns this build
+     *  ships visible by default that its record did NOT have (see the block
+     *  comment). With no record at all every default comes back — nothing in
+     *  the list can say which of them the build that wrote it ever offered. */
+    const reconcile = (kept: string[], record: string[] | null) => {
+      const known = record ?? [];
+      const next = [...kept, ...allVisible.filter((id) => !known.includes(id))];
+      return [...new Set(next)];
+    };
     try {
       const raw = localStorage.getItem(storageKey);
       if (raw) {
         const arr = JSON.parse(raw) as string[];
         const kept = arr.filter((x) => ids.has(x));
-        if (kept.length && drawsData(kept)) return kept;
+        const record = writtenUnder();
+        const fresh = !!record && record.length === shipped.length && shipped.every((id) => record.includes(id));
+        if (kept.length && drawsData(kept) && fresh) return kept;
         // Ignoring a list is not enough: the Columns menu draws the list this
         // hook RETURNS, so the reader sees the defaults ticked while the stored
         // one is still `["num"]` — and the next tick in that menu would write
         // from the broken list and collapse the table to the one column they
-        // clicked. So the defaults are STORED as well as drawn, once, and the
-        // menu, the table and the next toggle all agree from here on.
-        localStorage.setItem(storageKey, JSON.stringify(allVisible));
-        return allVisible;
+        // clicked. So the reconciled list is STORED as well as drawn, once,
+        // and the menu, the table and the next toggle all agree from here on.
+        const next = kept.length && drawsData(kept) ? reconcile(kept, record) : allVisible;
+        remember(next);
+        return next;
       }
       const old = localStorage.getItem(legacyKey);
       if (old) {
         const arr = JSON.parse(old) as string[];
         const kept = arr.filter((x) => ids.has(x));
         const next = [...new Set([...kept, ...allVisible])];
-        localStorage.setItem(storageKey, JSON.stringify(next));
+        remember(next);
         localStorage.removeItem(legacyKey);
         return next;
       }
@@ -376,11 +435,7 @@ export function useColumnPrefs(key: string, defs: Col[]): [string[], (id: string
   const toggle = (id: string) =>
     setVisible((v) => {
       const next = v.includes(id) ? v.filter((x) => x !== id) : [...v, id];
-      try {
-        localStorage.setItem(storageKey, JSON.stringify(next));
-      } catch {
-        /* ignore */
-      }
+      remember(next);
       return next;
     });
   return [visible, toggle];

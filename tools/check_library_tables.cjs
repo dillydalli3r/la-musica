@@ -14,6 +14,14 @@
  *     so a nowrap label wider than its cell paints over the neighbour;
  *   * every column is at least as wide as its widest VALUE — measured from a
  *     clone of the cell, so the report says how much a floor is short;
+ *   * a stored visible-id list cannot gut the album tracklist: a list of three
+ *     ids (`mlo-cols4-album-tracks = ["num","cover","title"]`, the owner's
+ *     three-column shape) is migrated back to the columns this build ships —
+ *     widths map and all — while a list written WITH the record of the defaults
+ *     it was written under (`mlo-coldft-*`) is the reader's own unticking and
+ *     is obeyed. A one-line row is also pinned at the clean row's height and
+ *     under 60 px: the 70 px the owner's screenshot shows is that 52 px row at
+ *     the app's own zoom (`mlo.zoom` 135 → 70 px exactly), not a box in the row.
  *   * a value longer than any sane column may be CLIPPED instead, but only in
  *     the open: the clipping element (the app's `.cell-ellipsis`, or Tailwind's
  *     `truncate` — the check reads the computed style, not one class name)
@@ -367,6 +375,10 @@ const check = (name, ok, detail) => {
       tableW: Math.round(table.getBoundingClientRect().width),
       kept: ths.filter((t) => t.display !== "none").map((t) => t.label),
       folded: ths.filter((t) => t.display === "none").map((t) => t.label),
+      // Every row's height: a ROW that is taller than a one-line row is a fact
+      // about the row, and the owner's tracklist rows were all ~70 px.
+      rowMin: Math.min(...[...table.querySelectorAll("tbody tr")].map((tr) => Math.round(tr.getBoundingClientRect().height))),
+      rowMax: Math.max(...[...table.querySelectorAll("tbody tr")].map((tr) => Math.round(tr.getBoundingClientRect().height))),
       // Every column's own width, folded ones as 0 — what the stored-widths
       // cases below compare against the clean table's floors.
       widths: ths.map((t) => ({ label: t.label, w: t.display === "none" ? 0 : t.w })),
@@ -582,7 +594,109 @@ const check = (name, ok, detail) => {
   await page.evaluate(() => localStorage.removeItem("mlo-test-width-seed"));
   await page.setViewportSize({ width: 1440, height: 900 });
 
+  // ---- a stored visible-id list that hides most of the table --------------
+  /* The owner's album page, read as a SHAPE: three columns (`#`, COVER, Title)
+   * with the title eating the row and Genre / Dur / Bitrate / DR simply not
+   * drawn — while the same table's Columns menu lists all seven, because that
+   * menu draws the list the hook RETURNS. A stored list under the CURRENT key
+   * was obeyed blindly: `mlo-cols4-album-tracks = ["num","cover","title"]` drew
+   * three columns of a seven-column build and nothing on screen said where the
+   * other four had gone.
+   *
+   * A stored list is a reading of the build that WROTE it, never evidence about
+   * this one — the rule the v3 key (`mlo-cols3-*`) and `useFittedWidths` below
+   * already follow. What makes a deliberate reading and a stale one tellable
+   * apart is the record of the defaults in force when the list was written
+   * (`mlo-coldft-*`, written beside it by `useColumnPrefs`): without a record —
+   * or with one from a build whose default visible set was different — the list
+   * is MIGRATED, its own ids kept and every column this build ships visible by
+   * default added back, and the repaired list is stored so the menu, the table
+   * and the next tick agree. With the matching record, unticking is the
+   * reader's own choice about these columns and is obeyed on every reload.
+   *
+   * The ROW height is pinned here too, because the owner's screenshot carries
+   * the same number: ~70 px per row. There is no 70 px box in a row — a
+   * one-line row is the cover cell's own 32 px box plus the `.td`'s 20 px of
+   * padding = 52 px, measured. The 70 in the screenshot is that 52 px at the
+   * app's own zoom (main.tsx's device zoom scales the ROOT FONT SIZE: at
+   * `mlo.zoom` 135 the same row measures exactly 70 px), so what is pinned is
+   * the number the layout owns — the row must be the CLEAN row's height, and
+   * under 60 px at 100 %. */
+  /* The hostile states seed `mlo-coldft-album-tracks` to null on purpose: that
+   * record is what a list written by a build that had no such record looks
+   * like, and a record left behind by the case above would make the next seed
+   * read as the reader's own choice. */
+  const THREE_IDS = JSON.stringify({
+    "mlo-cols4-album-tracks": JSON.stringify(["num", "cover", "title"]),
+    "mlo-coldft-album-tracks": null,
+  });
+  const THREE_IDS_AND_WIDTHS = JSON.stringify({
+    "mlo-cols4-album-tracks": JSON.stringify(["num", "cover", "title"]),
+    "mlo-colw-album-tracks": JSON.stringify({ title: 900, genre: 900, bitrate: 900, dur: 900 }),
+    "mlo-coldft-album-tracks": null,
+  });
+  const UNTICKED_WITH_RECORD = JSON.stringify({
+    "mlo-cols4-album-tracks": JSON.stringify(["num", "cover", "title", "genre", "dur", "bitrate", "tag:RC", "tag:WR"]),
+    "mlo-coldft-album-tracks": JSON.stringify(["num", "cover", "title", "genre", "dur", "bitrate", "dr"]),
+  });
+  const storedList = () => page.evaluate(() => ({
+    list: JSON.parse(localStorage.getItem("mlo-cols4-album-tracks") || "null"),
+    record: JSON.parse(localStorage.getItem("mlo-coldft-album-tracks") || "null"),
+  }));
+  const control = await at(1568, JSON.stringify({
+    "mlo-cols4-album-tracks": null,
+    "mlo-colw-album-tracks": null,
+    "mlo-coldft-album-tracks": null,
+  }));
+  const gutted = await at(1568, THREE_IDS);
+  const guttedStored = await storedList();
+  const guttedWidths = await at(1568, THREE_IDS_AND_WIDTHS);
+  const unticked = await at(1568, UNTICKED_WITH_RECORD);
+  const untickedStored = await storedList();
+  /** The label of every column the table DRAWS, in its own order — the corner
+   *  cell (select toggle + columns chooser) is the table's furniture, not a
+   *  data column, so it is left out of the set the two states are compared on. */
+  const colset = (g) => (g.kept || []).filter((l) => l !== "(corner)").join(",");
+  /** The SHORTEST row on the table: the one line's height. The longest title in
+   *  this library is 55 characters and legitimately wraps in the 9-column
+   *  control, which is what `albumGeom`'s own `name.rowH` measures — the owner's
+   *  rows were all the same height, so the one-line row is the number to pin. */
+  const oneLineRow = (g) => g.rowMin ?? 0;
+  const CONTROL_COLS = colset(control);
+  console.log("\n[album tracklist @1568, stored visible list]");
+  for (const [what, g] of [["control", control], ["three ids", gutted], ["three ids + 900 px widths", guttedWidths],
+    ["dr unticked, with the record", unticked]]) {
+    console.log(`  ${what.padEnd(26)} ${colset(g)} · table ${g.tableW} px in ${g.wrapScroll}/${g.wrapClient} px `
+      + `· rows ${oneLineRow(g)}-${g.rowMax} px`);
+  }
+  console.log(`  stored after the three-id list: ${JSON.stringify(guttedStored.list)} under record `
+    + `${JSON.stringify(guttedStored.record)}`);
+  check(`the control draws the album tracklist's own default columns (${CONTROL_COLS})`,
+        control.kept.includes("Title") && CONTROL_COLS.split(",").length >= 9, control.kept.join(","));
+  check(`a stored list of three ids cannot gut the tracklist (${colset(gutted)} vs ${CONTROL_COLS})`,
+        colset(gutted) === CONTROL_COLS, colset(gutted));
+  check(`…and the owner's own stored 900 px widths beside it do not hide anything either `
+        + `(${colset(guttedWidths)}, table ${guttedWidths.tableW} px vs ${control.tableW} px)`,
+        colset(guttedWidths) === CONTROL_COLS && guttedWidths.tableW === control.tableW
+          && guttedWidths.wrapScroll === control.wrapScroll,
+        JSON.stringify({ cols: colset(guttedWidths), table: guttedWidths.tableW, wrap: guttedWidths.wrapScroll }));
+  check(`…the repaired list is STORED, so the Columns menu and the next tick work from what is on screen `
+        + `(${(guttedStored.list || []).length} ids, record ${(guttedStored.record || []).length})`,
+        Array.isArray(guttedStored.list) && guttedStored.list.includes("dr") && guttedStored.list.length >= 9
+          && Array.isArray(guttedStored.record) && guttedStored.record.length === 7,
+        JSON.stringify(guttedStored));
+  check(`a one-line row is the CLEAN row's height, not 70 px `
+        + `(${oneLineRow(gutted)} px gutted, ${oneLineRow(control)} px clean at 100 %)`,
+        oneLineRow(control) > 0 && oneLineRow(gutted) === oneLineRow(control) && oneLineRow(control) < 60,
+        `gutted ${oneLineRow(gutted)}, control ${oneLineRow(control)}, table ${gutted.tableW} px`);
+  check(`…and a list written UNDER this build's defaults is obeyed — the reader's own unticking survives `
+        + `(${colset(unticked)})`,
+        colset(unticked) === CONTROL_COLS.split(",").filter((l) => l !== "DR").join(","),
+        JSON.stringify({ drawn: colset(unticked), stored: untickedStored.list }));
+
+  await page.evaluate(() => localStorage.removeItem("mlo-test-width-seed"));
+
   await browser.close();
-  console.log(`\n${failures ? `${failures} problem(s)` : "PASS — library tables, facets, and the album tracklist at 390 px"}`);
+  console.log(`\n${failures ? `${failures} problem(s)` : "PASS — library tables, facets, the album tracklist at 390 px, and the stored column list"}`);
   process.exit(failures ? 1 : 0);
 })();
