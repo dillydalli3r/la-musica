@@ -3156,7 +3156,14 @@ const AUDIT_AMBER: Record<string, true> = {
  * slskd yaml is regenerated from them at start) with the live share audit,
  * rescan and the autostart preference. Reserved folders (.mlo/data /
  * .mlo/downloads / .mlo/trash) are filtered server-side and never shared. */
-function SharingCard({ running }: { running: boolean }) {
+function SharingCard({ running, ownUsername, onBrowse }: {
+  running: boolean;
+  /** The account this app shares as — what a browse of your OWN share
+   *  asks for. Read from the app's own index, never over the network
+   *  (R297), so it answers on a stock install with no router setting. */
+  ownUsername: string;
+  onBrowse: (username: string) => void;
+}) {
   const qc = useQueryClient();
   // Polling is the point here, not a nicety: a rescan invalidates this query
   // ONCE, and that single answer lands while slskd has indexed a fraction of
@@ -3311,6 +3318,16 @@ function SharingCard({ running }: { running: boolean }) {
             title="Read slskd's own share index and look for a file that is on disk — the list a peer WOULD get once its connection to the listen port is accepted"
           >
             {probing ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Eye className="h-3.5 w-3.5" />} Verify browse
+          </button>
+          <button
+            className="btn-ghost !py-1 text-xs tap"
+            onClick={() => onBrowse(ownUsername)}
+            disabled={!ownUsername}
+            title={ownUsername
+              ? `See the folders and files this app serves as ${ownUsername} — read from its own share index`
+              : "Waiting for the Soulseek account to load"}
+          >
+            <FolderOpen className="h-3.5 w-3.5" /> Browse my share
           </button>
           <button className="btn-ghost !py-1 text-xs tap" onClick={rescan} disabled={busy || !running}>
             <RefreshCw className="h-3.5 w-3.5" /> Rescan
@@ -4070,7 +4087,9 @@ export default function SoulseekPage() {
 
       {tab === "sharing" && (
         <>
-          <SharingCard running={running} />
+          <SharingCard running={running}
+            ownUsername={String((status as { username?: string } | undefined)?.username || "")}
+            onBrowse={setBrowseUser} />
           <UploadsPanel running={running} />
         </>
       )}

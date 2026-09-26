@@ -1991,7 +1991,10 @@ user asked for, in the order they asked for it. `server/exporter.py` owns both.
   index slskd serves (`GET /shares/contents` — the very tree a peer receives),
   makes no round trip, marks the answer `local: true`, and carries a `note`
   the page shows: it is this app's own share, and a peer-network browse of it
-  needs the router's NAT loopback. Nothing is walked from disk and nothing is
+  needs the router's NAT loopback. The sharing card opens it with **Browse my
+  share**, disabled only until the account is known — so what a peer is served
+  is one press away on a stock install, with no router setting and no host
+  setup. Nothing is walked from disk and nothing is
   invented. Every other username still goes to slskd's peer browse, 502 and its
   own words unchanged; an index that cannot be read is that 502, never an empty
   share. Bounded and cached like a browse: 48 MB of index at most, 60 s of

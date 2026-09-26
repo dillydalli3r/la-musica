@@ -2107,7 +2107,7 @@ dependencies = [
 
 [[package]]
 name = "mlo-desktop"
-version = "4.1.10"
+version = "4.1.11"
 dependencies = [
  "block2",
  "objc2",
