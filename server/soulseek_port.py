@@ -42,9 +42,11 @@ look at the port.
 """
 import ipaddress
 import os
+import re
 import socket
 import time
 from datetime import datetime, timezone
+from urllib.parse import quote
 
 from mlo.config import load_config
 
@@ -655,6 +657,92 @@ def _self_connect_check(port, wan):
 
 
 # --------------------------------------------------------------------------- #
+# What the NETWORK hands peers for this account
+# --------------------------------------------------------------------------- #
+# slskd's own failure message names the address it dialled when asked to browse
+# someone: "Failed to establish a direct or indirect message connection to
+# <user> (1.2.3.4:50000)". For a browse of OUR OWN username that address is the
+# Soulseek server's answer for this account — the one fact in the whole path this
+# app cannot ask for any other way, because nothing here speaks the Soulseek
+# protocol. Parsed rather than trusted: a wording change upstream leaves the row
+# saying it could not read the address, never a wrong one.
+_PEER_ADDR = re.compile(r"\(([0-9a-fA-F:.]+):(\d+)\)")
+
+
+def _peers_told_check(cfg, port, running):
+    """What the network hands peers for this account, and whether the path
+    answers from slskd's own position.
+
+    Every row above describes THIS machine's side of the listen port, and all of
+    them can be green while the address the Soulseek server publishes for the
+    account is wrong — a login that went out through a VPN, a listen port that
+    moved. slskd can read that address back: browsing our own username makes it
+    ask the server where this account is and dial it, and both outcomes are the
+    answer. A file list means the path works from wherever slskd runs; a failure
+    names the address it tried, which IS what peers are told.
+
+    The two failure shapes are told apart, which is the reason this is a row and
+    not a log line. An address whose PORT is not the port this app listens on
+    means the network dials somewhere else, and restarting slskd re-registers it.
+    An address that matches and still refuses is the router declining its own
+    public address to a connection that starts inside — no NAT hairpinning —
+    which is exactly what a Soulseek client on the SAME network gets: it dials
+    that same address, its file-list request never arrives, and it hangs on
+    "Requesting file list…" while the share is browsable from anywhere else.
+    Measured on the owner's install: SoulseekQt on their LAN hung on that, three
+    external nodes connected to the same address in 0.002–0.17 s, and this row
+    read 216.212.53.255:50000 out of slskd's own words."""
+    proves = ("that the Soulseek server hands peers the address this app expects "
+              "for this account — slskd asked the server and dialled what it "
+              "answered.")
+    cannot = ("what that address does from OUTSIDE this network: slskd dials from "
+              "wherever slskd itself runs, so a router without NAT hairpinning "
+              "refuses it here while the port stays open to the internet.")
+    label = "Peers are told"
+    username = str((cfg or {}).get("soulseek_username") or "").strip()
+    if not running:
+        return _row("peers_told", label, "unknown",
+                    "slskd is not running, so there is no peer address to read.",
+                    proves, cannot)
+    if not username:
+        return _row("peers_told", label, "unknown",
+                    "no Soulseek username is configured, so there is no peer "
+                    "address to read.", proves, cannot)
+    from server import soulseek
+    try:
+        rows = soulseek._normalize_browse(soulseek._request(
+            "GET", f"/users/{quote(username, safe='')}/browse", timeout=30.0))
+    except Exception as e:
+        text = str(e)
+        found = _PEER_ADDR.search(text)
+        if not found:
+            return _row("peers_told", label, "warn",
+                        f"slskd could not browse this account and its answer named "
+                        f"no address: {text[:220]}", proves, cannot)
+        where, got = found.group(1), int(found.group(2))
+        if got != int(port):
+            return _row("peers_told", label, "fail",
+                        f"the Soulseek server is telling peers {where}:{got}, not "
+                        f"the {port} this app listens on — restart slskd so it "
+                        f"registers its listen port again.", proves, cannot)
+        return _row("peers_told", label, "unknown",
+                    f"peers are told {where}:{got}, and this machine cannot dial "
+                    f"it from where slskd runs. A router without NAT hairpinning "
+                    f"refuses its own public address to a connection that starts "
+                    f"inside — which is also why a Soulseek client on the SAME "
+                    f"network cannot browse this share (it is handed that same "
+                    f"address) while the port is open to the outside. Test it from "
+                    f"another network, or turn on the router's NAT loopback.",
+                    proves, cannot)
+    count = len(rows or [])
+    return _row("peers_told", label, "ok",
+                f"slskd browsed this account's own share and read {count} "
+                f"director{'y' if count == 1 else 'ies'} — the address the "
+                f"network hands out is this one, and the path answers.", proves,
+                cannot)
+
+
+# --------------------------------------------------------------------------- #
 # slskd's own answer
 # --------------------------------------------------------------------------- #
 def _network_check(running, cfg):
@@ -754,6 +842,10 @@ def port_check(cfg=None):
         _mapping_check(port, read, stored),
         _address_check(read, stored, lan, container=container, gateway=gateway),
         _self_connect_check(port, wan),
+        # The one row that reads the address the NETWORK publishes for this
+        # account: slskd asks the Soulseek server for it by browsing our own
+        # username, and reports the address back whether or not the dial worked.
+        _peers_told_check(cfg, port, running),
         _network_check(running, cfg),
     ]
     if container:

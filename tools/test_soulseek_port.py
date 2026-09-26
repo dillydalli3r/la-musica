@@ -473,6 +473,85 @@ ok(row(down, "listen")["state"] == "fail",
    "…and the listener row still reports what this machine does with the port")
 soulseek.client_running = lambda cfg=None: True
 
+print("== the peers-told row: what the NETWORK hands out ==")
+# The one row that asks the Soulseek server, through slskd, where this account
+# is: a browse of our OWN username. Stubbed the way the gateway seams are — the
+# row must never dial anything by itself in a suite.
+_asked = []
+_browse = {"value": None}
+
+
+def _fake_request(method, path, json_body=None, timeout=30.0, retries=1):
+    _asked.append((method, path, timeout))
+    outcome = _browse["value"]
+    if isinstance(outcome, Exception):
+        raise outcome
+    return outcome
+soulseek._request = _fake_request
+soulseek._normalize_browse = lambda payload: payload
+with_user = dict(cfg, soulseek_username="tester")
+
+_browse["value"] = [{"name": "Artists", "fileCount": 3}]
+answered = sp.port_check(with_user)
+ok(row(answered, "peers_told")["state"] == "ok"
+   and "read 1 directory" in row(answered, "peers_told")["detail"],
+   "a browse of our own share that answers is ok — the address the network hands "
+   "out is this one and the path works from where slskd runs")
+ok(_asked and "/users/tester/browse" in _asked[-1][1],
+   "…and it is read by asking slskd to browse THIS account")
+
+# The owner's own shape: the address is right, and the dial is refused from
+# inside the network (no NAT hairpin) — while three external nodes connected to
+# that same address. Unknown, with the address in the row's words.
+_browse["value"] = soulseek.SlskdHTTPError(
+    "slskd GET /users/tester/browse answered 500 for url 'http://127.0.0.1:5030/…'",
+    request=None, response=None,
+    detail=("Failed to browse user tester: Failed to establish a direct or "
+            "indirect message connection to tester (%s:%d)" % (WAN, live_port)))
+hairpinned = sp.port_check(with_user)
+detail = row(hairpinned, "peers_told")["detail"]
+ok(row(hairpinned, "peers_told")["state"] == "unknown"
+   and "%s:%d" % (WAN, live_port) in detail
+   and "SAME network cannot browse this share" in detail
+   and "NAT loopback" in detail,
+   "an address that matches and refuses is unknown, names the address peers are "
+   "given, and says a client on this network cannot use it")
+
+# And the other shape, which is a real fault: the network dials a different PORT.
+_browse["value"] = soulseek.SlskdHTTPError(
+    "slskd GET /users/tester/browse answered 500", request=None, response=None,
+    detail=("Failed to establish a direct or indirect message connection to "
+            "tester (%s:%d)" % (WAN, live_port + 1)))
+wrong_port = sp.port_check(with_user)
+ok(row(wrong_port, "peers_told")["state"] == "fail"
+   and "restart slskd" in row(wrong_port, "peers_told")["detail"],
+   "a network dialling another port is a failure with the remedy, not a shrug")
+
+# slskd's words without an address: nothing to report but the fact it could not
+# be read — never a wrong address.
+_browse["value"] = soulseek.SlskdHTTPError(
+    "slskd GET /users/tester/browse answered 500", request=None, response=None,
+    detail="Failed to browse user tester: an unexpected error occurred")
+unreadable = sp.port_check(with_user)
+ok(row(unreadable, "peers_told")["state"] == "warn"
+   and "named no address" in row(unreadable, "peers_told")["detail"],
+   "slskd's failure without an address is a warning that says the address could "
+   "not be read")
+
+# No username / no daemon: the row cannot be made, and says which.
+_browse["value"] = None
+anonymous = sp.port_check(cfg)
+ok(row(anonymous, "peers_told")["state"] == "unknown"
+   and "no Soulseek username" in row(anonymous, "peers_told")["detail"],
+   "without a configured username there is no peer address to read")
+soulseek.client_running = lambda cfg=None: False
+skipped = sp.port_check(with_user)
+ok(row(skipped, "peers_told")["state"] == "unknown"
+   and "slskd is not running" in row(skipped, "peers_told")["detail"],
+   "…and with slskd down the row is skipped rather than guessed")
+soulseek.client_running = lambda cfg=None: True
+_browse["value"] = [{"name": "Artists", "fileCount": 3}]
+
 print("== the verdict and the payload ==")
 reads["value"] = read("mapped", port=live_port, ip=LAN, external=WAN, verified=True,
                       gateway=GATEWAY,
@@ -482,7 +561,7 @@ good = sp.port_check(cfg)
 ok(good["verdict"] == "ok" and good["ok"] is True,
    "a listener and a router mapping together read ok")
 ok([c["id"] for c in good["checks"]] == ["listen", "publish", "mapping", "address",
-                                         "self-connect", "network"],
+                                         "self-connect", "peers_told", "network"],
    "every row is reported, in a stable order")
 ok(all({"id", "label", "state", "detail", "proves", "cannot"} <= set(c)
        for c in good["checks"]),

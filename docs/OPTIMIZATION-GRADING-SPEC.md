@@ -1947,7 +1947,7 @@ user asked for, in the order they asked for it. `server/exporter.py` owns both.
   `soulseek_auto._batch_width`), so the app never asks slskd for more than it
   will serve. The Queue tab reads all three numbers back in its header.
 - **R77 — the Soulseek port check states what it proves.** `GET
-  /api/soulseek/port-check` returns six rows — `listen` (a real TCP connect
+  /api/soulseek/port-check` returns seven rows — `listen` (a real TCP connect
   plus a bind test), `publish` (whether the HOST publishes the very port the
   daemon holds, read from inside a container against the container's gateway
   with the app's own served port as the control — R290), `mapping` (what the
@@ -1961,14 +1961,20 @@ user asked for, in the order they asked for it. `server/exporter.py` owns both.
   machine's OWN internet-bound interface is a tunnel, not the carrier's CGNAT),
   `self-connect`
   (refused ⇒ `unknown`, never `fail`: a router without hairpinning refuses it
-  while the port may still be open — and the row says what that same rule means
-  for a reader who tries the obvious test: a Soulseek client on the SAME network
-  is handed the public address and dials it from inside, so its file-list request
-  never arrives, its browse hangs on "Requesting file list…", and the share is
-  browsable from anywhere else. Measured on the owner's own install: SoulseekQt
-  on their LAN hung while three external nodes connected to the WAN address in
-  0.002–0.17 s, and slskd browsing its own username failed the same way; the
-  remedy is a client on ANOTHER network, or the router's NAT loopback) and
+  while the port may still be open — which is also what a Soulseek client on the
+  SAME network gets, since it is handed the public address and dials it from
+  inside; that reader's remedy is a client on another network, or the router's
+  NAT loopback),
+  `peers_told` (the one row that asks the NETWORK: slskd browses this account's
+  own username, which makes the Soulseek server state the address it publishes
+  for it — the address is read out of slskd's own words, so a wording change
+  leaves the row saying it could not be read rather than naming a wrong one; an
+  address whose PORT differs from the configured listen port is a `fail` with
+  "restart slskd" as its remedy, an address that matches and refuses is
+  `unknown` and says what a client on the same network gets. Measured on the
+  owner's install: `peers are told 216.212.53.255:50000`, three external nodes
+  connected to that address in 0.002–0.17 s, and SoulseekQt on their LAN hung on
+  "Requesting file list…" against it), and
   `network` (slskd's signed-in state) —
   each carrying `proves` and `cannot`. A definitive "open to the internet"
   answer needs a probe from OUTSIDE the network, which this app does not ship,
