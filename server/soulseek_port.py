@@ -21,10 +21,14 @@ of it that row is:
                   the fallback a NAT-PMP gateway leaves (it has no request that
                   reads an entry back, so the answer that MADE the mapping is the
                   only word that will ever exist for it);
-  * address       the LAN address the mapping points at vs this machine, and the
-                  WAN address the gateway states — so a CGNAT or double NAT setup,
-                  where NO port mapping can ever work, is named as that instead of
-                  being blamed on a firewall;
+  * address       the LAN address the mapping points at vs this machine, the WAN
+                  address the gateway states, and the shape of this machine's OWN
+                  route to the internet — so a setup where NO port mapping can
+                  ever work is named as that instead of being blamed on a
+                  firewall, and one 100.64.0.0/10 address is called a carrier's
+                  CGNAT (an ISP call) or a tunnel carrying this host's traffic
+                  (leave the tunnel) by what the routes say, never by the
+                  address alone;
   * self-connect  a TCP connection from here to <WAN address>:<port>. A router
                   without NAT hairpinning refuses that while the port is still
                   open to the outside, so this row can never fail;
@@ -87,7 +91,19 @@ CONTAINER_NOTE = ("This app runs in a container: the gateway a probe can see "
                   "cannot forward to a container address. Name the router's LAN "
                   "address in the Soulseek settings and the app asks it directly "
                   "instead: both the unicast search and NAT-PMP work from in here "
-                  "once the router is named.")
+                  "once the router is named. One thing no container can read is "
+                  "the HOST's own route out, so it cannot be checked from this "
+                  "side at all: when the host's traffic leaves through a VPN or a "
+                  "Tailscale exit node, the address the Soulseek server is handed "
+                  "for this client is THAT one and a forward on the home router "
+                  "serves nothing. On the host, compare its own egress (a \"what "
+                  "is my IP\" page, or curl https://api.ipify.org) with the WAN "
+                  "address the router's admin page shows — the address row here "
+                  "reports that same number for the router when a gateway read "
+                  "answered — and turn the exit node off for the host while "
+                  "sharing, or split-route it, when the two differ. A bare-metal "
+                  "install has this measured for it: it is the Addresses row of "
+                  "Test port.")
 
 # What each gateway verdict means for the port, whichever side reported it (the
 # live read, or `soulseek.portmap_state`, which uses `mlo.portmap`'s own state
@@ -101,8 +117,11 @@ GATEWAY_STATES = {"mapped": "ok", "refused": "fail", "error": "fail",
                   "off": "unknown", "pending": "unknown", "checking": "unknown",
                   "client_down": "unknown"}
 
-# The CGNAT range carriers put subscribers behind (RFC 6598). An address in it is
-# the one situation no port mapping can ever fix, so it is named as itself.
+# The CGNAT range carriers put subscribers behind (RFC 6598) — and, because
+# Tailscale hands its nodes addresses out of the same block, also what a routed
+# tunnel's own interface holds. One range, two opposite remedies, so an address in
+# here is never named as either one from the address alone: the shape is read from
+# the routes (`_egress_fact`).
 CARRIER_NET = ipaddress.ip_network("100.64.0.0/10")
 
 # The mapping states that are a verdict FROM a gateway (the rest of
@@ -144,13 +163,22 @@ def _plain(text):
     return " ".join(str(text or "").split()).lower()
 
 
+def _in_carrier(address):
+    """Whether a stated address is in the carrier/tunnel range (False for junk)."""
+    try:
+        ip = ipaddress.ip_address(str(address or "").strip())
+    except ValueError:
+        return False
+    return ip.version == 4 and ip in CARRIER_NET
+
+
 def _wan_kind(address):
     """What a stated WAN address is -> "public"/"carrier"/"private" ("" if not one)."""
     try:
         ip = ipaddress.ip_address(str(address or "").strip())
     except ValueError:
         return ""
-    if ip.version == 4 and ip in CARRIER_NET:
+    if _in_carrier(address):
         return "carrier"
     return "private" if ip.is_private else "public"
 
@@ -394,14 +422,89 @@ def _mapping_check(port, read, stored):
 # --------------------------------------------------------------------------- #
 # The addresses
 # --------------------------------------------------------------------------- #
-def _address_check(read, stored, lan, container=False):
+def _egress_fact(gateway, lan):
+    """The 100.64.0.0/10 shape of this machine's OWN route to the internet.
+
+    The range is one block with two opposite meanings. What a CARRIER puts in
+    front of the router is the situation no port mapping anywhere can fix, and
+    only the ISP can. What a TUNNEL puts on this machine's internet-bound
+    interface looks identical in the address and is fixed HERE — and it is the
+    one that reads green on every other row, because the Soulseek server learns
+    the client's address from the LOGIN connection: the owner's live install had
+    its traffic leaving through a Tailscale exit node, so peers were handed the
+    exit node's egress while the router's own WAN (and the mapping on it) were
+    perfectly fine, and a browse could never land.
+
+    The address cannot tell the two apart, so the shape is read from the routes,
+    which a carrier's CGNAT cannot imitate: a tunnel adds its OWN, more specific
+    default route, so the address this machine picks for a public destination
+    (`portmap.local_ip()`, no hint — the OS's own choice) ends up on a different
+    network than the address the router reaches it on (`lan`, measured against
+    the gateway that would have to forward the port). The same address range on
+    BOTH of those is a line that really hands out CGNAT.
+
+    Returns (state, sentence) — ("", "") when nothing in the range was read, which
+    is also every container: the host's routing table is not visible from in
+    there, so the container-facing hints carry this check instead of a guess. And
+    a `warn` when the range IS on the internet route but the route to the router
+    could not be read: that is the one case the two shapes cannot be told apart,
+    and it says so rather than picking a remedy."""
+    from mlo import portmap
+    egress = str(portmap.local_ip() or "").strip()
+    if not _in_carrier(egress):
+        return "", ""
+    egress_net, lan_net = portmap._network24(egress), portmap._network24(lan)
+    hop_net = portmap._network24(gateway)
+    if not (lan_net and hop_net):
+        return "warn", (
+            f"this machine's own address on the route to the internet is "
+            f"{egress}, in 100.64.0.0/10, and the route to the router could not "
+            f"be read from here — so which of the two shapes wears that address "
+            f"cannot be told apart: a carrier's CGNAT (no port mapping anywhere "
+            f"can fix it, and the ISP is the only one who can) or a tunnel "
+            f"carrying this host's traffic (an exit node or any \"route all\" "
+            f"VPN — turned off for this host, or split-routed, at once). Compare "
+            f"the host's own egress with the address the router's admin page "
+            f"shows: the same address is the carrier's, a different one is the "
+            f"tunnel's.")
+    if lan_net == egress_net and hop_net == egress_net:
+        return "fail", (
+            f"this machine's own address on the route to the internet is "
+            f"{egress}, in 100.64.0.0/10, and it is also the address the router "
+            f"serves it on ({lan} via {gateway}): the line itself hands out a "
+            f"carrier-grade NAT address this far out (a router in bridge mode, or "
+            f"a connection with nothing but CGNAT in front of it), so inbound "
+            f"connections are not routed here at all and no port mapping anywhere "
+            f"can fix it. Ask the ISP for a public address.")
+    return "fail", (
+        f"this machine reaches the internet through a TUNNEL, which no row above "
+        f"can see: the address it picks for a public destination is {egress}, in "
+        f"100.64.0.0/10, while "
+        + (f"the address the router reaches it on is another network entirely "
+           f"({lan} via {gateway})" if lan_net != egress_net else
+           f"the route it takes there leaves by a next hop of its own "
+           f"({gateway}{', itself in that range' if _in_carrier(gateway) else ''})")
+        + f". An exit node or any \"route all\" VPN does exactly that — it adds "
+          f"its own, more specific default route, and Tailscale's own node "
+          f"addresses are this very block — so the address the Soulseek server is "
+          f"handed for this client is the tunnel's egress, peers try to connect "
+          f"BACK to it, and a forward on {gateway} serves an address nothing "
+          f"dials. Turn the exit node off for this host, or split-route it so "
+          f"this app's traffic leaves by the ISP line, while you share — this is "
+          f"NOT a carrier's CGNAT, so no call to the ISP can change it.")
+
+
+def _address_check(read, stored, lan, container=False, gateway=""):
     """The addresses the port's reachability depends on.
 
-    Two shapes decide whether ANY mapping can work: where the mapping points (a
-    forward to another host forwards nothing here), and what address the gateway
+    Three shapes decide whether ANY mapping can work: where the mapping points (a
+    forward to another host forwards nothing here), what address the gateway
     states for itself — a carrier-grade NAT, or a router that is itself behind
     another router, is the one situation a port mapping can never fix, and it is
-    named as that instead of being blamed on a firewall.
+    named as that instead of being blamed on a firewall — and which interface this
+    machine's own internet-bound traffic leaves by (`_egress_fact`: a routed
+    tunnel wears the same 100.64.0.0/10 address as a carrier's CGNAT and is fixed
+    here rather than at the ISP).
 
     `container` is the shape this check has to be told about, because inside one
     the two addresses are SUPPOSED to differ: the router must forward the port to
@@ -414,9 +517,12 @@ def _address_check(read, stored, lan, container=False):
     reached that address on the port is a forward that lands on a listener."""
     proves = ("that the addresses this app can read line up: the mapping points "
               "at this machine, and the router states a public address for itself.")
-    cannot = ("whether the carrier really routes that address to this router, and "
+    cannot = ("whether the carrier really routes that address to this router, "
               "whether the router's own answer is true — its admin page is the "
-              "other place to look.")
+              "other place to look — and whether a tunnel's provider happens to "
+              "forward the port despite this. The tunnel shape itself is only read "
+              "off a 100.64.0.0/10 egress: a VPN whose own interface holds any "
+              "other address is not named here.")
     mapping_ip = str(read.get("internal_ip") or stored.get("internal_ip") or "").strip()
     wan = str(read.get("external_ip") or stored.get("external_ip") or "").strip()
     bridged = bool(container) and bool(mapping_ip) and bool(lan) and mapping_ip != lan
@@ -483,6 +589,16 @@ def _address_check(read, stored, lan, container=False):
         facts.append(("warn",
                       f"the gateway stated its own WAN address as {wan!r}, which "
                       f"is not an address this can read."))
+    if not container:
+        # LAST, because it is the one fact no other row can see and the one that
+        # decides for peers when everything above is green: a tunnel carrying this
+        # host's traffic makes the router's own WAN (and any forward on it) an
+        # address nobody dials. A container is skipped outright — its own route is
+        # Docker's bridge, so the host's is not readable from in there at all, and
+        # the hints say so instead (CONTAINER_NOTE, `soulseek._listen_hint`).
+        shape, egress = _egress_fact(gateway, lan)
+        if shape:
+            facts.append((shape, egress))
     for want in ("fail", "warn", "unknown", "ok"):
         if any(state == want for state, _text in facts):
             state = want
@@ -622,7 +738,7 @@ def port_check(cfg=None):
         # probe sent there measures the router, not the host's port list.
         _publish_check(state, cfg, container=container, gateway=""),
         _mapping_check(port, read, stored),
-        _address_check(read, stored, lan, container=container),
+        _address_check(read, stored, lan, container=container, gateway=gateway),
         _self_connect_check(port, wan),
         _network_check(running, cfg),
     ]

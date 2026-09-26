@@ -13,9 +13,13 @@ things that decide the answer:
     about but cannot read back is a warning (never "open"), and an entry whose
     absence proves nothing is `unknown` rather than a failure;
   * the ADDRESS and SELF-CONNECT rows: a carrier-grade NAT or a double NAT is
-    NAMED as that, and a refused connection to the public address is `unknown` —
-    never `fail`, because a router without NAT hairpinning refuses exactly that
-    while the port may still be open to the outside.
+    NAMED as that, a 100.64.0.0/10 address on this machine's OWN route to the
+    internet is told apart from one the carrier hands out by the routes (a tunnel
+    carrying the host's traffic, fixed here, vs the line's CGNAT, which is the
+    ISP's — opposite remedies for the same numbers), and a refused connection to
+    the public address is `unknown` — never `fail`, because a router without NAT
+    hairpinning refuses exactly that while the port may still be open to the
+    outside;
 
 Nothing here touches the network beyond loopback: every gateway seam
 (`portmap.read_port`, `default_gateway`, `local_ip`) and slskd's REST call are
@@ -303,6 +307,100 @@ ok(row(no_wan, "address")["state"] == "unknown"
    and "no gateway stated its WAN address" in row(no_wan, "address")["detail"],
    "no stated WAN address leaves the address row unknown, not failed")
 
+# The two shapes one 100.64.0.0/10 address can be, told apart by the ROUTES and
+# never by the address — measured on the owner's install, where the host's traffic
+# left through a Tailscale exit node: egress 87.249.138.224 while the router's own
+# WAN was a different, public address, so every row about the router was green and
+# a peer's browse still could not land. A carrier's CGNAT and a tunnel wear the
+# same numbers with opposite remedies, so each sentence has to name its own.
+
+def local_ips(lan, egress):
+    """`local_ip` as a machine really answers it: the route to the gateway, and
+    the route to the internet with no hint (the OS's own choice)."""
+    return lambda gateway="": (lan if gateway else egress)
+
+
+portmap.local_ip = local_ips("192.168.40.62", "100.72.6.55")
+tunnel_cfg = {"soulseek_listen_port": live_port, "soulseek_upnp": True,
+              "soulseek_router_ip": "192.168.40.1"}
+reads["value"] = read("mapped", port=live_port, ip="192.168.40.62",
+                      external="216.212.53.255", verified=True,
+                      gateway="192.168.40.1",
+                      detail="the gateway lists external port %d" % live_port)
+tunnel = sp.port_check(tunnel_cfg)
+addr = row(tunnel, "address")
+ok(addr["state"] == "fail" and "TUNNEL" in addr["detail"],
+   "a 100.64.0.0/10 address on this machine's own route to the internet is a "
+   "tunnel, not a carrier's CGNAT")
+ok("100.72.6.55" in addr["detail"] and "192.168.40.62" in addr["detail"],
+   "…and it states what was measured: the address the internet is reached by and "
+   "the one the router reaches this machine on")
+ok("exit node" in addr["detail"] and "split-route" in addr["detail"],
+   "…with the remedy for THAT shape (leave the exit node / split-route the host)")
+ok("Ask the ISP" not in addr["detail"],
+   "…and never the carrier's remedy for it: no call to the ISP can change a tunnel")
+ok("the gateway states 216.212.53.255" in addr["detail"],
+   "…while the router's own, public WAN is still reported above it, which is "
+   "exactly the green-everywhere shape the owner hit")
+ok(row(tunnel, "mapping")["state"] == "ok" and tunnel["verdict"] == "fail"
+   and tunnel["ok"] is False,
+   "…and the verdict fails on it: every other row passed and peers still dial an "
+   "address no forward can serve")
+ok("tunnel's provider happens to forward" in addr["cannot"],
+   "…and the row still says what it cannot know: whether the tunnel's own "
+   "provider forwards the port despite this")
+ok("100.64.0.0/10 egress" in addr["cannot"],
+   "…including its own limit: a VPN whose interface holds any other address is "
+   "not named as this shape")
+
+# A route table whose own default hop is in the range: that is a tunnel's own
+# route (an exit node's next hop), and the machine's address on the router's route
+# is then the same one — the hop is the difference, and the sentence says so.
+portmap.local_ip = local_ips("100.72.6.55", "100.72.6.55")
+hop_cfg = {"soulseek_listen_port": live_port, "soulseek_upnp": True,
+           "soulseek_router_ip": "100.64.0.1"}
+reads["value"] = read("mapped", port=live_port, ip="100.72.6.55",
+                      external=WAN, verified=True, gateway="100.64.0.1",
+                      detail="the gateway lists external port %d" % live_port)
+hop = sp.port_check(hop_cfg)
+ok(row(hop, "address")["state"] == "fail"
+   and "next hop of its own (100.64.0.1" in row(hop, "address")["detail"],
+   "a default hop inside 100.64.0.0/10 is read as the tunnel's own route")
+
+# …and the OTHER shape the same block can be: the line hands this machine itself a
+# CGNAT address (a bridged modem), where the address on the router's route IS the
+# address the internet is reached by — no local setting can fix that one, so the
+# remedy is the ISP's and the tunnel's advice must not appear.
+portmap.local_ip = local_ips("100.64.5.20", "100.64.5.20")
+line_cfg = {"soulseek_listen_port": live_port, "soulseek_upnp": True,
+            "soulseek_router_ip": "100.64.5.1"}
+reads["value"] = read("mapped", port=live_port, ip="100.64.5.20",
+                      external="100.64.9.9", verified=True, gateway="100.64.5.1",
+                      detail="the gateway lists external port %d" % live_port)
+line = sp.port_check(line_cfg)
+addr = row(line, "address")
+ok(addr["state"] == "fail" and "carrier-grade NAT" in addr["detail"]
+   and "Ask the ISP" in addr["detail"],
+   "the same address as THIS machine's own on the router's network is the line's "
+   "CGNAT, and the remedy is the ISP's")
+ok("TUNNEL" not in addr["detail"] and "exit node" not in addr["detail"],
+   "…and the tunnel's remedy is not offered for it")
+
+# …and when the route to the router cannot be read, which shape it is cannot be
+# told apart at all: the row says that instead of picking a remedy (an exit node's
+# advice for a carrier line, or the ISP for a tunnel, are both wrong half the time).
+portmap.local_ip = local_ips("", "100.72.6.55")
+reads["value"] = read("mapped", port=live_port, ip=LAN, external=WAN, verified=True,
+                      detail="the gateway lists external port %d" % live_port)
+unread_router = sp.port_check({"soulseek_listen_port": live_port,
+                               "soulseek_upnp": True})
+addr = row(unread_router, "address")
+ok(addr["state"] == "warn" and "cannot be told apart" in addr["detail"],
+   "an unreadable route to the router leaves the shape unclaimed, as a warning")
+ok("Ask the ISP" not in addr["detail"] and "exit node off" not in addr["detail"],
+   "…naming neither remedy as the answer")
+portmap.local_ip = lambda gateway="": LAN
+
 # --------------------------------------------------------------------------- #
 # 4) the self-connect row: a refusal is never a failure
 # --------------------------------------------------------------------------- #
@@ -511,6 +609,27 @@ ok("HOST's address" in addr["detail"] and "another device" not in addr["detail"]
    "…and it says whose address that is instead of accusing the mapping")
 ok(bridged["verdict"] != "fail",
    f"…and the verdict is not the fail it used to be ({bridged['verdict']})")
+
+# …and the ONE thing in front of the host that a container cannot see at all: the
+# host's own route out. An address in the carrier range read from IN HERE is not
+# evidence of anything (this process answers on Docker's bridge), so the row must
+# not name a tunnel from it — the note on the mapping row asks the owner to make
+# that comparison on the host instead, which is the only place it can be made.
+portmap.local_ip = lambda gateway="": "100.72.6.55"
+sp._connect = dials({live_port})
+from_bridge = sp.port_check(bridged_cfg)
+ok("TUNNEL" not in row(from_bridge, "address")["detail"]
+   and row(from_bridge, "address")["state"] == "ok",
+   "a range address measured inside a container is never called a tunnel: the "
+   "host's routing table is not visible from in there")
+ok("host's traffic leaves through a VPN or a Tailscale exit node"
+   in row(from_bridge, "mapping")["detail"],
+   "…and the note on the mapping row names the trap instead")
+ok("api.ipify.org" in row(from_bridge, "mapping")["detail"]
+   and "the WAN address the router's admin page shows"
+   in row(from_bridge, "mapping")["detail"],
+   "…with the comparison to make on the HOST and what to compare it against")
+portmap.local_ip = lambda gateway="": "172.18.0.3"
 
 # The same numbers on a DIRECT install are still the real failure they are.
 portmap.local_ip = real_local_ip

@@ -2297,6 +2297,33 @@ def _served_uploads(cfg=None):
         return 0
 
 
+# The one link of a container install that neither the app nor the container can
+# measure: the HOST's own route out. A VPN or a Tailscale exit node carrying the
+# host's traffic puts an address in front of the Soulseek network that no forward
+# on the home router can serve — the server hands peers whatever address the
+# LOGIN connection came from, and the login is the host's egress, not the
+# router's WAN. From inside the container every row still passes (the share index
+# is served, the port is published, the mapping is there), which is exactly the
+# report this answers: the file count shows on other clients and browsing fails.
+# One string, used by every container hint that names the router, so the check and
+# the fix cannot drift apart. (A bare-metal install has it MEASURED instead —
+# `soulseek_port._egress_fact`, the Addresses row of Test port.)
+EGRESS_TRAP = ("Before the router, check the one thing a container cannot: the "
+               "HOST's own route out. If the host's traffic leaves through a VPN "
+               "or a Tailscale exit node, the Soulseek server is handed THAT "
+               "address for this client and a peer's browse connects back to it, "
+               "so a forward on the home router serves nothing — what the share "
+               "holds still shows on other clients while opening it fails. On the "
+               "host, compare its own egress (a \"what is my IP\" page, or curl "
+               "https://api.ipify.org) with the WAN address the router's own "
+               "admin page shows — Test port's Addresses row reports that same "
+               "number for the router when a gateway read answered, and the "
+               "host's egress is the one number no read from in here can supply "
+               "— and when the two differ turn the exit node off for the host "
+               "while sharing, or split-route it, so this app's traffic leaves by "
+               "the ISP line.")
+
+
 def _listen_hint(port_state, publish=""):
     """What to do about an unconfirmed listen port, in THIS install's terms.
 
@@ -2312,7 +2339,15 @@ def _listen_hint(port_state, publish=""):
     machines: a publish line the host does not have (R279's "one port, one
     number" failing in the one way agreeing numbers cannot rule out) is the
     compose file's, and a publish line that IS there leaves only the router. An
-    unread one is named as unread rather than guessed at."""
+    unread one is named as unread rather than guessed at.
+
+    A container can no more read the HOST's routing table than it can its port
+    list, and that is the third link: the address the host's own traffic leaves
+    by is the address the Soulseek server hands to peers, so a VPN or a Tailscale
+    exit node makes even a correct publish line and a correct forward useless
+    while every other row stays green. That one is stated as a check the owner
+    makes on the host (`EGRESS_TRAP`) — never as something the app detected from
+    in here."""
     port = int(port_state.get("listen_port") or 0)
     if port_state.get("container"):
         if publish == "fail":
@@ -2324,8 +2359,8 @@ def _listen_hint(port_state, publish=""):
                     f"MLO_SOULSEEK_LISTEN_PORT naming that same number when it is "
                     f"set), and after that TCP {port} still has to be forwarded on "
                     f"the ROUTER to the HOST's LAN address — a router cannot "
-                    f"forward to a container address. Then press Test port on this "
-                    f"page.")
+                    f"forward to a container address. {EGRESS_TRAP} Then press Test "
+                    f"port on this page.")
         if publish == "ok":
             return (f"Running in a container: the host publishes TCP {port} — this "
                     f"app measured it from inside — so the compose line is not the "
@@ -2333,9 +2368,11 @@ def _listen_hint(port_state, publish=""):
                     f"TCP {port} on the ROUTER to the HOST's LAN address, at the "
                     f"address the internet actually sees for this host (a VPN, a "
                     f"tunnel or a second router in front changes which address "
-                    f"peers dial). Automatic opening cannot reach the router from "
-                    f"in here: the gateway this process sees is Docker's bridge. "
-                    f"Then press Test port on this page.")
+                    f"peers dial). {EGRESS_TRAP} A bare-metal install has this "
+                    f"measured for it instead — the Addresses row of Test port. "
+                    f"Automatic opening cannot reach the router from in here: the "
+                    f"gateway this process sees is Docker's bridge. Then press Test "
+                    f"port on this page.")
         return (f"Running in a container: publish the port in docker-compose.yml "
                 f"(ports: \"{port}:{port}\") and forward TCP {port} on the ROUTER "
                 f"to the HOST's LAN address — a router cannot forward to a "
@@ -2343,10 +2380,16 @@ def _listen_hint(port_state, publish=""):
                 f"router from in here (the gateway this process sees is Docker's "
                 f"bridge). Which number the host publishes could not be read from "
                 f"inside this container — `docker port <container-name>` on the "
-                f"host says it. Then press Test port on this page.")
+                f"host says it. {EGRESS_TRAP} Then press Test port on this page.")
     return (f"Forward TCP {port} on the router to this machine's LAN address, or "
             f"turn on automatic port opening if the router speaks UPnP. Test "
-            f"port on this page says what can be seen from here.")
+            f"port on this page says what can be seen from here — the Addresses "
+            f"row included, and it measures the one thing in front of the router: "
+            f"when the address this machine reaches the internet by is a "
+            f"100.64.0.0/10 one on a different network than the router, the "
+            f"traffic leaves through a VPN or a Tailscale exit node and no forward "
+            f"on that router can help until the exit node is off for this machine "
+            f"(or split-routed).")
 
 
 def share_audit(cfg=None, probe=False):
@@ -2573,9 +2616,20 @@ def share_audit(cfg=None, probe=False):
              f"over the Soulseek listen port, which has to be published by "
              f"docker-compose.yml (ports: \"{_port}:{_port}\") to the same port "
              f"configured here, and then forwarded on the router at the address "
-             f"the internet sees for this host. TCP {_port} is the only port "
-             f"involved — nothing UDP, and no second (obfuscated) port: slskd has "
-             f"no obfuscated route.")
+             f"the internet sees for this host — and that address is decided by "
+             f"the HOST's own route out, which nothing inside this container can "
+             f"read: when the host's traffic leaves through a VPN or a Tailscale "
+             f"exit node, the address the Soulseek server is handed for this "
+             f"client is the tunnel's, so a forward on the home router serves "
+             f"nothing and the share still lists here while peers cannot browse "
+             f"it. Compare the host's own egress (a \"what is my IP\" page, or "
+             f"curl https://api.ipify.org, run ON the host) with the WAN address "
+             f"the router's admin page shows — Test port's Addresses row reports "
+             f"that same number for the router when a gateway read answered — and "
+             f"turn the exit node off for the host while sharing (or split-route "
+             f"it) when the two differ. TCP "
+             f"{_port} is the only port involved — nothing UDP, and no second "
+             f"(obfuscated) port: slskd has no obfuscated route.")
     # Every case below is a fact read off this machine or off the router —
     # nothing is inferred from intent, and a mapping nobody confirmed is never
     # reported as one.

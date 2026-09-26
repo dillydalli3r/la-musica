@@ -158,6 +158,7 @@ pub fn set_liked(liked: bool) {
         let _: () = msg_send![&*like, setEnabled: true];
         let _: () = msg_send![&*like, setActive: liked];
     }
+    assert_again_soon();
 }
 
 /// Re-assert that the star is pressable, without touching its state — and hand
@@ -178,6 +179,17 @@ pub fn refresh() {
             }
         }
     }
+    assert_enabled();
+    assert_again_soon();
+}
+
+/// One bit, one place: `likeCommand.enabled = true`, or a quiet return when
+/// this process has no command centre to write.
+///
+/// Deliberately only `enabled`: `active` (the star's FILL) belongs to the web
+/// UI's own store, and a re-assert that replayed a snapshot of it would fight
+/// the newest push.
+fn assert_enabled() {
     let Some(like) = like_command() else {
         return;
     };
@@ -185,6 +197,96 @@ pub fn refresh() {
     unsafe {
         let _: () = msg_send![&*like, setEnabled: true];
     }
+}
+
+/// The star is asserted at the transition AND again a moment later — the second
+/// look is what this file's `enabled` comment is about.
+///
+/// The command centre has two owners writing it in the same breath: this module
+/// (the star exists for the APP to offer) and the webview's now-playing
+/// plumbing (WebKit rewrites the command set whenever the media session
+/// changes, which is asynchronous to the web event that caused it). An
+/// `enabled` written at the transition can therefore be cleared by WebKit's own
+/// write landing a few milliseconds later — the owner's "there is no star
+/// button" with a command centre that says otherwise — and the star stays
+/// hidden until the next push. The delayed pass closes that window; it writes
+/// `enabled` only, so it can never un-do a state the web has pushed since.
+///
+/// One timer at a time: `set_liked` fires on every track change and every like
+/// press, and a timer per call would be work for nothing. The class is looked
+/// up rather than assumed, exactly like the heartbeat in `ios_audio.rs`: a
+/// runtime without `NSTimer` loses the second look, never the app. The timer
+/// runs on the calling thread's run loop, which is the same constraint the
+/// keep-alive carries — every caller here is the main thread (`set_liked` rides
+/// a Tauri command the mobile runtime delivers there, `refresh` a UIKit
+/// notification) — and an off-main call would only cost the second look.
+fn assert_again_soon() {
+    static PENDING: AtomicBool = AtomicBool::new(false);
+    if PENDING.swap(true, Ordering::SeqCst) {
+        return;
+    }
+    let Some(class) = AnyClass::get(c"NSTimer") else {
+        PENDING.store(false, Ordering::SeqCst);
+        return;
+    };
+    let block = RcBlock::new(|_timer: NonNull<AnyObject>| {
+        PENDING.store(false, Ordering::SeqCst);
+        assert_enabled();
+    });
+    // The `&DynBlock<…>` binding is the shape `msg_send!` accepts for a block
+    // argument, and the run loop retains the scheduled timer (see the
+    // heartbeat's timer in `ios_audio.rs`) — so the token is dropped on purpose.
+    let block: &DynBlock<dyn Fn(NonNull<AnyObject>) + 'static> = &block;
+    // SAFETY: a live NSTimer class and the documented factory selector; one
+    // shot, half a second out, with the block above.
+    let _timer: Option<Retained<AnyObject>> = unsafe {
+        msg_send![class, scheduledTimerWithTimeInterval: 0.5f64, repeats: false, block: block]
+    };
+}
+
+/// Is this command pressable right now, as the system has it? (`"unavailable"`
+/// when this process has no such command at all.)
+fn command_enabled(command: Option<Retained<AnyObject>>) -> String {
+    let Some(command) = command else {
+        return "unavailable".into();
+    };
+    // SAFETY: a live `MPRemoteCommand` (or `MPFeedbackCommand`, which is one);
+    // `isEnabled` is its own read-only getter.
+    let on: bool = unsafe { msg_send![&*command, isEnabled] };
+    (if on { "yes" } else { "no" }).into()
+}
+
+/// The readout rows for the in-app state page (`ios_audio::state`): which of the
+/// Now Playing commands this process has, and whether the system currently has
+/// them ENABLED.
+///
+/// The owner's reports about this furniture — "there is no star button", the
+/// lock screen's ⟲10 / 10⟳ pair instead of a track step — are about what the OS
+/// drew from bits that two owners write (see `assert_again_soon`), and neither
+/// can be seen from a development box. These rows are the measurement: a
+/// `now_playing_like_enabled` of "no" while the phone shows no star is the
+/// webview's write having won, and a `skip_*` of "yes" is where the ±10 s
+/// buttons come from (the web player declares both skip actions unsupported —
+/// see the `navigator.mediaSession` effect in
+/// `web/src/components/PlayerBar.tsx` — so the same question is answerable one
+/// layer up).
+pub fn command_state_rows() -> Vec<(String, String)> {
+    let Some(center) = command_center() else {
+        return vec![
+            ("now_playing_like_enabled".into(), "unavailable".into()),
+            ("now_playing_skip_back_enabled".into(), "unavailable".into()),
+            ("now_playing_skip_forward_enabled".into(), "unavailable".into()),
+        ];
+    };
+    // SAFETY: messages to the live centre; each is a read-only property
+    // returning the command the centre owns.
+    let skip_back: Option<Retained<AnyObject>> = unsafe { msg_send![&*center, skipBackwardCommand] };
+    let skip_forward: Option<Retained<AnyObject>> = unsafe { msg_send![&*center, skipForwardCommand] };
+    vec![
+        ("now_playing_like_enabled".into(), command_enabled(like_command())),
+        ("now_playing_skip_back_enabled".into(), command_enabled(skip_back)),
+        ("now_playing_skip_forward_enabled".into(), command_enabled(skip_forward)),
+    ]
 }
 
 /// Wire the star up once, at app setup: enable the like command, leave the

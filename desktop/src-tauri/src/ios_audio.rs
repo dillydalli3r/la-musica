@@ -461,6 +461,11 @@ pub fn state() -> Vec<(String, String)> {
         }
         None => out.push(("session_category".into(), "AVAudioSession unavailable".into())),
     }
+    // The Now Playing furniture the OS draws from outside this process's own
+    // audio: whether the star this app offers is pressable at this instant, and
+    // whether the ±10 s skip pair the lock screen shows for a web page is still
+    // enabled. See `ios_like::command_state_rows` — that module owns the bits.
+    out.extend(crate::ios_like::command_state_rows());
     out
 }
 

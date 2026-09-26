@@ -32,14 +32,22 @@ export const LYRIC_ZOOM_STEP = 5;
  *  one chip and inset on the other and the `−`/`+` stood at visibly different
  *  distances from the number they step. Measured, the gap from the value to
  *  the `+` was 17 px on the zoom against 13 px on the offset. Both now use one
- *  fixed 40 px value box, right-packed, number + unit as two inline elements
- *  (the unit is a 9 px sub-element on BOTH chips — `%` and `s` read the same
- *  way), so the two buttons land at the same offset from either end of either
- *  chip. tools/check_np_metadata_contrast.cjs asserts the rects. */
+ *  fixed 40 px value box, number + unit as two inline elements (the unit is a
+ *  9 px sub-element on BOTH chips — `%` and `s` read the same way), so the two
+ *  buttons land at the same offset from either end of either chip.
+ *
+ *  The value is CENTRED in that box (issue #56: "these buttons should be more
+ *  centered, all − / + text should line up well"). Right-packed, the number
+ *  hugged the `+` and left a hole beside the `−`: measured off the owner's own
+ *  screenshot, 27 px of air on the `−` side against 12 px on the `+` side, on
+ *  both chips. Centred, the two step buttons read as one pair around the value
+ *  they step — the boxes are fixed, so the `−`/`+` still land at identical
+ *  offsets on both chips, which is what the shared strings are for.
+ *  tools/check_np_metadata_contrast.cjs asserts the rects AND the symmetry. */
 export const LYRIC_STEP_BTN =
   "h-7 w-7 inline-flex items-center justify-center rounded-md text-current opacity-70 hover:opacity-100 hover:bg-white/10 disabled:opacity-30 disabled:hover:bg-transparent transition-colors";
 export const LYRIC_VALUE_BOX =
-  "h-5 w-10 inline-flex items-center justify-end gap-0.5 shrink-0 text-[10px] leading-none font-mono tabular-nums text-current opacity-80 hover:opacity-100 focus-within:opacity-100 transition-opacity";
+  "h-5 w-10 inline-flex items-center justify-center gap-0.5 shrink-0 text-[10px] leading-none font-mono tabular-nums text-current opacity-80 hover:opacity-100 focus-within:opacity-100 transition-opacity";
 export const LYRIC_VALUE_UNIT = "text-[9px]";
 
 export default function LyricZoom({ pct, onChange, className }: {

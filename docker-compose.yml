@@ -75,6 +75,18 @@ services:
       # forward that port to this machine as well if a router sits in front of
       # it — that is the half no publish line can do.
       #
+      # ...AND A FORWARD IS ONLY WORTH THE ADDRESS IT SERVES. Peers are given
+      # the address the Soulseek server sees your LOGIN come from, which is the
+      # HOST's own route out — so when the host sends its traffic through a VPN
+      # or a Tailscale exit node, that address is the VPN's egress and a forward
+      # on the home router points at nothing anyone dials: the share's file count
+      # still shows on other clients and browsing it fails. Nothing in the
+      # container can read the host's routing table; compare the host's own
+      # egress ("what is my IP" there, or curl https://api.ipify.org) with the
+      # WAN address the router's admin page shows, and turn the exit node off for
+      # the host while sharing (or split-route it so this app's traffic leaves by
+      # the ISP line) when the two differ.
+      #
       # ONE TCP PORT IS ALL OF IT. slskd's inbound side is a single TCP listener,
       # UDP is only ever outbound, and there is no second "obfuscated" port to
       # publish — an obfuscated route is a SoulseekQt feature slskd does not

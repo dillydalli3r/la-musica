@@ -534,6 +534,12 @@ const phoneState = (page) => page.evaluate(() => {
   const offPlus = root.querySelector('button[aria-label="Lyrics 0.1 s later"]');
   const offsetRow = offPlus ? offPlus.parentElement : null;
   const offsetLabel = offsetRow ? offsetRow.querySelector("span[title^='Lyric offset']") : null;
+  /** The offset chip's Save box. Since issue #56 it is in the DOM in EVERY
+   *  state — its slot is the width that keeps the steppers still when the offset
+   *  turns dirty — so "is there something to save" is read the way a reader
+   *  reads it: is the box REACHABLE? `invisible` loses the hit test exactly as
+   *  it loses the press. */
+  const offsetSave = offsetRow ? offsetRow.querySelector('button[title^="Save"], button[aria-label^="Save"]') : null;
   const transport = root.querySelector('button[aria-label="Play"], button[aria-label="Pause"]');
   // The transport row itself (the play button's own parent) and the controls
   // standing on it. `lineCount` is the point of R267's row rule: while the row
@@ -612,7 +618,7 @@ const phoneState = (page) => page.evaluate(() => {
     } : null,
     toggle: toggle ? { title: toggle.getAttribute("title"), pressed: toggle.getAttribute("aria-pressed"), box: box(toggle) } : null,
     zoom: zoomIn ? { box: box(zoomIn), inViewport: inViewport(zoomIn), hit: reachable(zoomIn), value: zoomBox ? zoomBox.value : null } : null,
-    offset: offPlus ? { box: box(offPlus), inViewport: inViewport(offPlus), hit: reachable(offPlus), minusHit: offMinus ? reachable(offMinus) : false, label: offsetLabel ? offsetLabel.textContent.trim() : null, save: !!(offsetRow && offsetRow.querySelector('button[title^="Save"], button[aria-label^="Save"]')) } : null,
+    offset: offPlus ? { box: box(offPlus), inViewport: inViewport(offPlus), hit: reachable(offPlus), minusHit: offMinus ? reachable(offMinus) : false, label: offsetLabel ? offsetLabel.textContent.trim() : null, save: !!offsetSave && reachable(offsetSave) } : null,
     compactRow: compactRow ? { box: box(compactRow), visible: compactRow.offsetParent !== null, title: headerTitle } : null,
     cover: coverImg ? { ...box(coverImg), inViewport: inViewport(coverImg) } : null,
     block: block ? { box: box(block), visible: block.offsetParent !== null, title: blockTitle } : null,

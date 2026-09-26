@@ -31,9 +31,15 @@
  *     flipped off and back on so BOTH families are measured, not whichever
  *     state the run happened to catch.
  *   - the two bottom-right chips (zoom `− 100% +`, offset `− 0.0s +`): one
- *     geometry (same boxes, same gaps, same cy, and the `−`/`+` glyphs found
- *     in the PIXELS at the same offset from either chip's own edges) and their
- *     own contrast at rest.
+ *     geometry (same boxes, same gaps, same cy), the value CENTRED between the
+ *     two glyphs (it was right-packed, which left 27 px of air on the `−` side
+ *     against 12 px on the `+`: issue #56), the `−`/`+` glyphs found in the
+ *     PIXELS at the same offset from either chip's own edges, and their own
+ *     contrast at rest. The offset chip also reserves its Save/Discard slot in
+ *     BOTH states, and a real press on its `+` must leave every chip box where
+ *     it was — appended-when-dirty, those two widened the strip by 58 px the
+ *     instant the offset was dialled and the reader's next press landed on
+ *     Save, a write into the track's own lyrics (issue #56 again).
  *
  * Four covers are stubbed: dark (#101014), the mid-grey one the old polarity
  * rule used to flip on (#808080), the bright-grey boundary case (#b4b4b4) and
@@ -294,8 +300,25 @@ const readChrome = (page) => page.evaluate(() => {
     };
   }) : [];
   // the bottom-right lyric chips: the one `justify-end` row carrying the two
-  // steppers (each chip is a span of ⊖ / value box / ⊕ [+ Save / Discard when
-  // the offset is dirty]), with every child rect
+  // steppers (each chip is a span of ⊖ / value box / ⊕ and — on the offset
+  // chip — the Save/Discard slot), with every child rect. One level of
+  // children UNDER each child too: the slot is the box the two action buttons
+  // live in, and the zoom chip's value box holds the typeable input.
+  const kid = (k) => {
+    const cs = getComputedStyle(k);
+    const r = rect(k);
+    return {
+      tag: k.tagName.toLowerCase(),
+      text: String(k.value !== undefined ? k.value : k.textContent || "").trim().slice(0, 10),
+      rect: r,
+      fontSize: cs.fontSize,
+      color: cs.color,
+      opacity: Number(cs.opacity),
+      visibility: cs.visibility,
+      scroll: k.tagName === "INPUT" ? { scrollWidth: k.scrollWidth, clientWidth: k.clientWidth } : null,
+      kids: [...k.children].map(kid),
+    };
+  };
   const row = [...overlay.querySelectorAll("div")].find((d) =>
     typeof d.className === "string" && d.className.includes("justify-end") &&
     [...d.children].filter((c) => c.querySelectorAll && c.querySelectorAll("button").length >= 2).length >= 2);
@@ -306,22 +329,82 @@ const readChrome = (page) => page.evaluate(() => {
     items: [...row.children].map((chip) => ({
       gap: getComputedStyle(chip).gap,
       rect: rect(chip),
-      kids: [...chip.children].map((k) => {
-        const cs = getComputedStyle(k);
-        return {
-          tag: k.tagName.toLowerCase(),
-          text: String(k.value !== undefined ? k.value : k.textContent || "").trim().slice(0, 10),
-          rect: rect(k),
-          fontSize: cs.fontSize,
-          color: cs.color,
-          opacity: Number(cs.opacity),
-          scroll: k.tagName === "INPUT" ? { scrollWidth: k.scrollWidth, clientWidth: k.clientWidth } : null,
-        };
-      }),
+      kids: [...chip.children].map(kid),
     })),
   } : null;
   return { sliders, icons, chips };
 });
+
+/** Press the offset chip's `+` for real, and read every chip box back.
+ *
+ *  This is issue #56's second half: the Save and the Discard used to be
+ *  appended when the offset turned dirty, so the first step widened the strip
+ *  by 58 px and slid every box under the reader's finger — their next press
+ *  landed on Save (a write into the track's own lyrics) or on Discard. The slot
+ *  those two live in is reserved in BOTH states, so the row's own rect and the
+ *  two chips' steppers must come back identical, and the slot's box must be the
+ *  same size with its buttons now visible.
+ *
+ *  A real mouse press at the button's own centre is what makes the offset
+ *  dirty: a synthetic `.click()` would reach the handler through a box the
+ *  reader could not press, which is the thing being ruled out. The Discard
+ *  press at the end puts the chip back at rest, so the contrast samples taken
+ *  after this are read on the surface the reader gets. */
+async function measureDirtyShift(page, chips, steppers) {
+  const locate = (aria) => page.evaluate((aria) => {
+    const overlay = document.querySelector("div.fixed.inset-0.z-50");
+    if (!overlay) return null;
+    const row = [...overlay.querySelectorAll("div")].find((d) =>
+      typeof d.className === "string" && d.className.includes("justify-end") &&
+      [...d.children].filter((c) => c.querySelectorAll && c.querySelectorAll("button").length >= 2).length >= 2);
+    const chip = row && [...row.children][1];
+    const btn = chip && [...chip.querySelectorAll("button")].find((b) => b.getAttribute("aria-label") === aria);
+    if (!btn) return null;
+    const r = btn.getBoundingClientRect();
+    return { x: r.x + r.width / 2, y: r.y + r.height / 2 };
+  }, aria);
+  // the rects that must not move: the row, both chips, and each chip's steppers
+  const shape = (c) => {
+    const out = { row: c.rect };
+    c.items.forEach((chip, i) => {
+      const who = ["zoom", "offset"][i];
+      out[who] = chip.rect;
+      chip.kids.slice(0, steppers).forEach((k, n) => { out[`${who}.kid${n}`] = k.rect; });
+    });
+    return out;
+  };
+  const KEYS = ["x", "y", "w", "h", "right", "cy"];
+  const before = await shape(chips);
+  const at = await locate("Lyrics 0.1 s later");
+  if (!at) return null;
+  await page.mouse.click(at.x, at.y);
+  await sleep(350);
+  const after = (await readChrome(page)).chips;
+  if (!after) return null;
+  const moved = [];
+  const now = shape(after);
+  for (const who of Object.keys(before)) {
+    for (const key of KEYS) {
+      if (now[who] && Math.abs(before[who][key] - now[who][key]) > 0.5) {
+        moved.push(`${who}.${key} ${before[who][key]}→${now[who][key]}`);
+      }
+    }
+  }
+  const slotBefore = chips.items[1].kids[steppers];
+  const slotAfter = after.items[1].kids[steppers];
+  const away = await locate("Discard pending lyric offset");
+  if (away) {
+    await page.mouse.click(away.x, away.y);
+    await sleep(350);
+  }
+  return {
+    moved,
+    slotBefore: slotBefore ? slotBefore.rect.w : null,
+    slotAfter: slotAfter ? slotAfter.rect.w : null,
+    slotVisibilityBefore: slotBefore ? slotBefore.visibility : "?",
+    slotVisible: !!slotAfter && slotAfter.visibility === "visible",
+  };
+}
 
 /** Park both sliders mid-way: without a live value there is no played run to
  *  measure, and the check would only ever see one colour of track. React only
@@ -484,11 +567,27 @@ async function measureChrome(page, label, hex) {
   }
   const [zoom, offset] = chips.items;
   const rel = (chip, k, key) => +(k.rect[key] - chip.rect.x).toFixed(1);
-  const geom = (chip) => chip.kids.map((k) => `${k.tag}:${rel(chip, k, "x")}+${k.rect.w}x${k.rect.h}`);
-  check(`${label}: the two lyric chips are one geometry (same boxes, same gaps, same cy)`,
+  // The STEPPERS are each chip's first three children (`−`, the value box,
+  // `+`). The offset chip carries a fourth — the Save/Discard slot (issue #56)
+  // — which the zoom chip has none of, so the comparison is over the common
+  // prefix and the slot is asserted on its own.
+  const STEPPERS = 3;
+  const geom = (chip) => chip.kids.slice(0, STEPPERS).map((k) => `${k.tag}:${rel(chip, k, "x")}+${k.rect.w}x${k.rect.h}`);
+  const slot = offset.kids[STEPPERS];
+  check(`${label}: the two lyric chips are one stepper geometry (same boxes, same gaps, same cy)`,
     JSON.stringify(geom(zoom)) === JSON.stringify(geom(offset)) &&
       zoom.gap === offset.gap && zoom.rect.h === offset.rect.h,
     `zoom=[${geom(zoom)}] gap=${zoom.gap} :: offset=[${geom(offset)}] gap=${offset.gap}`);
+  // The reserved slot: the two action boxes exist in EVERY state (hidden while
+  // nothing is dialled in), which is what keeps the steppers still. Appended
+  // only when dirty, they widened the strip by 58 px at the first step and the
+  // reader's next press landed on Save — a write into the track's own lyrics.
+  check(`${label}: the offset chip reserves its Save/Discard slot while clean`,
+    !!slot && zoom.kids.length === STEPPERS && offset.kids.length === STEPPERS + 1 &&
+      slot.tag === "span" && slot.rect.w === 58 && slot.visibility === "hidden" &&
+      slot.kids.filter((k) => k.tag === "button").length === 2,
+    `zoom kids=${zoom.kids.length} :: offset kids=${offset.kids.length} :: slot=`
+    + (slot ? `${slot.tag} ${slot.rect.w}px ${slot.visibility} [${slot.kids.map((k) => `${k.tag} ${k.rect.w}`).join(", ")}]` : "missing"));
   check(`${label}: the zoom and offset values share one typography`,
     zoom.kids[1].fontSize === offset.kids[1].fontSize &&
       zoom.kids[1].rect.w === offset.kids[1].rect.w,
@@ -508,6 +607,7 @@ async function measureChrome(page, label, hex) {
     return rs.length >= 3 ? {
       minus: ((rs[0][0] + rs[0][1]) / 2 + chips.rect.x - chip.rect.x),
       plus: ((rs[rs.length - 1][0] + rs[rs.length - 1][1]) / 2 + chips.rect.x - chip.rect.x),
+      valueStart: rs[1][0] + chips.rect.x - chip.rect.x,
       valueEnd: rs[rs.length - 2][1] + chips.rect.x - chip.rect.x,
       n: rs.length,
     } : null;
@@ -519,6 +619,34 @@ async function measureChrome(page, label, hex) {
   check(`${label}: the value sits the same distance from the + on both chips`,
     !!zo && !!oo && Math.abs((zo.plus - zo.valueEnd) - (oo.plus - oo.valueEnd)) <= 3,
     `zoom value→+ = ${zo ? (zo.plus - zo.valueEnd).toFixed(1) : "?"}px :: offset = ${oo ? (oo.plus - oo.valueEnd).toFixed(1) : "?"}px`);
+  // …and it sits CENTRED between the two glyphs (issue #56: "these buttons
+  // should be more centered"). Right-packed — the shape this replaced — the
+  // number hugged the `+` and left a hole beside the `−`: measured off the
+  // owner's own screenshot, 27 px of air on the `−` side against 12 px on the
+  // `+` side, on both chips. Measured as the value's ink CENTRE against the
+  // midpoint of the two glyphs, which is the one reading a glyph's own side
+  // bearings cannot bias: the first and last glyphs of a value (`1` in `100`,
+  // `+` in `+0.1`) carry theirs inside their advance, so comparing the two air
+  // gaps directly would charge the layout for the font.
+  const centreOff = (o) => (o ? Math.abs((o.valueStart + o.valueEnd) / 2 - (o.minus + o.plus) / 2) : NaN);
+  const zc = centreOff(zo), oc = centreOff(oo);
+  check(`${label}: the value is centred between the − and the + on both chips`,
+    !!zo && !!oo && zc <= 3 && oc <= 3,
+    `zoom ink centre is ${zc.toFixed(1)}px off the midpoint (−${zo ? zo.minus.toFixed(1) : "?"}/+${zo ? zo.plus.toFixed(1) : "?"}) :: `
+    + `offset ${oc.toFixed(1)}px (−${oo ? oo.minus.toFixed(1) : "?"}/+${oo ? oo.plus.toFixed(1) : "?"})`);
+
+  // The steppers must still be exactly where they were once the offset is
+  // dirty — the whole of issue #56's second report ("they shouldn't move when
+  // the confirm button pops up, it makes it easily clickable by accident").
+  // Read from the same DOM rects, before and after a press on the offset's `+`,
+  // and discarded afterwards so the contrast samples below see the chip at
+  // rest.
+  const steady = await measureDirtyShift(page, chips, STEPPERS);
+  check(`${label}: pressing + leaves every chip box where it was`,
+    !!steady && steady.moved.length === 0,
+    steady ? `moved=${JSON.stringify(steady.moved)} slot=${steady.slotBefore}→${steady.slotAfter} visible=${steady.slotVisible}` : "could not press the offset +");
+  check(`${label}: the Save/Discard slot becomes visible on the same box`, !!steady && steady.slotVisible && steady.slotAfter === steady.slotBefore,
+    steady ? `before=${steady.slotBefore}px ${steady.slotVisibilityBefore} → after=${steady.slotAfter}px visible=${steady.slotVisible}` : "?");
 
   // Contrast at rest, each element against the field IT sits on: the value box
   // (small text, AA is 4.5:1) and the two step buttons' glyphs (non-text, 3:1).

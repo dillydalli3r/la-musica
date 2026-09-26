@@ -1956,7 +1956,10 @@ user asked for, in the order they asked for it. `server/exporter.py` owns both.
   address the gateway states, so CGNAT is named as CGNAT; inside a container
   the two addresses are SUPPOSED to differ — the mapping must point at the HOST
   — so that shape is judged by whether the address answers on the port and never
-  reported as another device holding it, R292), `self-connect`
+  reported as another device holding it, R292; R294 adds the shape no peer
+  address can survive, read from the routes: a 100.64.0.0/10 address on this
+  machine's OWN internet-bound interface is a tunnel, not the carrier's CGNAT),
+  `self-connect`
   (refused ⇒ `unknown`, never `fail`: a router without hairpinning refuses it
   while the port may still be open) and `network` (slskd's signed-in state) —
   each carrying `proves` and `cannot`. A definitive "open to the internet"
@@ -4450,7 +4453,11 @@ composition instead (R267). Above `lg` the pane sits beside the artwork.
   that hint by measurement in a container**: a publish line the host demonstrably
   does not have is its own problem code (`listen_unpublished`, naming the compose
   line and the pin), and a measured pass clears the compose file and leaves only
-  the router.
+  the router. **R294 adds the third link to every one of those container hints**:
+  the HOST's own route out, which decides the address peers are handed, is named
+  as a check the owner makes on the host — a VPN or a Tailscale exit node carrying
+  the host's traffic makes a correct publish line and a correct forward equally
+  useless, and nothing inside the container can read the host's routing table.
 
 ### 7.34 The Browse sheet reads the payload's names and the store's ratings
 
@@ -4706,7 +4713,21 @@ composition instead (R267). Above `lg` the pane sits beside the artwork.
   one square box per step (`h-7 w-7 inline-flex items-center justify-center`)
   with the glyph centred by flex, never by its own metrics, and both sides of a
   pair take the same box: a padded text `+` sits wherever its font puts it, which
-  is what made the pair read lopsided beside the value it steps.
+  is what made the pair read lopsided beside the value it steps. The two lyric
+  chips are ONE layout, shared through `LYRIC_STEP_BTN`, `LYRIC_VALUE_BOX` and
+  `LYRIC_VALUE_UNIT`: the same boxes, the same gaps, the same value box (40 px,
+  `h-5`), and the value CENTRED in it — right-packed, the number hugged the `+`
+  and left 27 px of air beside the `−` against 12 px on the other side (issue
+  #56: "these buttons should be more centered, all − / + text should line up
+  well"). The offset chip's Save/Discard pair also lives in a slot whose width
+  is there in EVERY state (the buttons are `invisible` until the offset is
+  dirty): rendered only once dirty, they widened the chip by 58 px the instant
+  the first step landed, which slid the fullscreen player's `justify-end` footer
+  that far left and put the reader's next press — aimed at the `+` they had just
+  used — on Save, a write into the track's own lyrics. Both halves are measured
+  in `tools/check_np_metadata_contrast.cjs` (the value's ink centre against the
+  midpoint of the two glyphs, the slot's width in both states, and a real press
+  on the `+` that must leave every box in the strip where it was).
 
 ### 7.39 A music video YouTube does not have comes from the network
 
@@ -5060,6 +5081,54 @@ composition instead (R267). Above `lg` the pane sits beside the artwork.
   rule is that the state behind them is a screen the owner can read back, not a
   question they have to answer from memory.
 
+- **R295 — a pause nobody asked for, arriving while the page is hidden, is the
+  PLATFORM stopping the track: it is named, and it is recovered.** iOS stopping
+  the webview's playback in the background is the owner's oldest open report
+  ("audio stops playing after app is unfocused"), and from inside the page it has
+  exactly one signature: a `pause` on the element that no app path caused —
+  nothing in the web layer pauses on visibility, so every deliberate pause in
+  `PlayerBar.tsx` goes through `pauseApp`, and that is what "asked" means.
+  `handlePause` arms `osStopped` with the element, its track and the element's
+  own state when the event arrives while the document is hidden and the app did
+  not ask (`asked === false`), and writes an `os-stop` row to the playback report
+  (R289) carrying readyState, currentTime, ended, networkState and the app's
+  last reason; `recover()` — called from the same `visibilitychange`/`pageshow`
+  reconcile that already existed — restarts that element ONCE when the reader
+  comes back, if the queue is still on that track and the platform has not
+  already restarted it itself, and reports the outcome as `os-resume`
+  (including a refusal). Every deliberate pause CLEARS the marker, so a pause
+  the reader pressed — the transport, the sleep timer, the queue's end, a track
+  change, or the lock screen's own pause — can never be undone by returning to
+  the app. Measured in `tools/check_os_stop_resume.cjs` (21/21 after, 9/18
+  against the pre-change sources): the stop resumes where it stopped with
+  exactly one extra `play()`, nothing happens when nothing stopped, a
+  reader's pause and a lock-screen pause both survive, and a track the platform
+  already restarted is not played at twice.
+
+- **R296 — what the OS draws for this app is a set the app DECLARES, and the
+  bits it draws from are re-asserted after the platform's own write.** The
+  lock-screen card is drawn from `MPRemoteCommandCenter` on iOS and the
+  webview's Media Session everywhere: the star is `likeCommand`, the
+  ⟲10 / 10⟳ pair is `skipForward`/`skipBackward`, a track step is
+  `nexttrack`/`previoustrack`. Three consequences, each measured rather than
+  assumed. (1) The web player declares the two SKIP actions unsupported
+  (`setActionHandler("seekbackward" | "seekforward", null)` in `PlayerBar.tsx`,
+  the spec's "this action is not supported") so the system draws the step the
+  app's own transport has — WebKit offers a page the skip pair by default, with
+  its own interval, which is where the owner's card got them while showing this
+  app's metadata (issue #55). (2) `ios_like.rs` asserts `likeCommand.enabled` at
+  the transition AND again half a second later (`assert_again_soon`), because
+  the same bit is written by WebKit's own media-session plumbing a few
+  milliseconds after the web event that caused it: a star a state push cannot
+  turn back on is a star that vanishes mid-album, one layer under R288. (3) Both
+  are readable rather than arguable: `ios_like::command_state_rows` adds
+  `now_playing_like_enabled` and the two `now_playing_skip_*_enabled` bits to
+  R289's readout (what the system currently has, so "there is no star button"
+  can be answered with the bit), and `tools/check_os_stop_resume.cjs` asserts
+  the declared action set in the page. Which glyphs the OS finally paints on a
+  device is Apple's — the set that produces them is what this app controls, and
+  it is now named, asserted and reported.
+
 - **R272 — the playing state follows the ELEMENT, both ways.** `pause` already
   cleared the player's state; `play` now sets it, for the track the queue is
   actually on. Without the other half, a track change — which pauses the
@@ -5382,6 +5451,71 @@ composition instead (R267). Above `lg` the pane sits beside the artwork.
   Proven by `tools/check_library_az.mjs`, which serves a library carrying both
   shapes — one album explicit only through its tracks, one clean all the way
   down — and asserts the mark on the card in a real browser (54/54 checks).
+
+### 7.52 The address peers are handed: a tunnel is not a carrier's CGNAT
+
+- **R294 — a 100.64.0.0/10 address is read as the shape the ROUTES say, and each
+  shape carries its own remedy.** The range is one block with two opposite
+  meanings: what a carrier puts in front of the router (RFC 6598 — nothing a port
+  mapping anywhere can do, and only the ISP can), and what a routed tunnel puts on
+  this machine's OWN internet-bound interface (Tailscale hands its nodes 100.64/10
+  addresses, so a host using an exit node answers every public destination with
+  one). The `address` row of Test port (R77) named the carrier for both. The
+  owner's live install was the tunnel, and it is the shape that reads green
+  EVERYWHERE: `soulseek.share_audit(probe=True)` inside the container returned
+  status "ok" — share scan complete, 165 files in 14 directories served from
+  `/music/Artists`, `browse.ok` true, no mismatch — while compose published
+  50000, the router held a mapping for it, slskd was `Connected, LoggedIn` on
+  50000, and the host's own egress was 87.249.138.224 through a Tailscale exit
+  node, whose `0.0.0.0/0 → 100.64.0.1 via 100.72.6.55` route (metric 6) won over
+  the physical NIC's (metric 25) even though the router's own NAT-PMP WAN was
+  216.212.53.255. The Soulseek server learns a client's address from the LOGIN
+  connection, so peers were handed the exit node's egress, and their *Browse* —
+  a connection BACK to the listen port — could never land: the share's file count
+  showed on other clients and opening it did not, which is how the issue came in.
+  `soulseek_port._egress_fact` reads the shape from the routes, which a carrier's
+  CGNAT cannot imitate: `portmap.local_ip()` with NO hint is the interface the OS
+  itself picks for a public destination, and it is compared (`portmap._network24`)
+  with `portmap.local_ip(gateway)`, the address the router that would have to
+  forward the port reaches this machine on. The same network on both, with the
+  route's own next hop on it too, means the line hands this machine a CGNAT
+  address (a bridged modem): `fail`, "carrier-grade NAT", ask the ISP. Any other
+  reading — a different network toward the router, or a next hop inside the range
+  on a network of its own, which is what an exit node's route looks like — is a
+  TUNNEL: `fail`, naming the addresses it measured, the shape, and the fix that is
+  local (leave the exit node for this host, or split-route it so this app's traffic
+  leaves by the ISP line), with the row's `cannot` keeping the one thing it cannot
+  know (whether the tunnel's provider happens to forward the port anyway). Neither
+  remedy is ever offered for the other shape, and where the route to the router
+  cannot be read at all the row says the two cannot be told apart and claims
+  neither. A container is SKIPPED outright — the host's routing table is not
+  visible from in there — so the container-facing text carries the check instead
+  and states it as a check, never as something the app detected: the note on the
+  port check's `mapping` row (`soulseek_port.CONTAINER_NOTE`),
+  `soulseek._EGRESS_TRAP` on all three container branches of `_listen_hint`, and
+  the audit's own container note all say what the owner must do on the HOST —
+  compare the host's egress (a "what is my IP" page, or `curl
+  https://api.ipify.org` there) with the WAN address the router's admin page
+  shows (Test port's `address` row reports that same number for the router when a
+  gateway read answered, and the host's egress is the one number no read from
+  inside the container supplies), and turn the exit node off for the host while
+  sharing (or split-route it) when the two differ. The bare-metal hint points at
+  the Addresses row instead, which measures it there. `README.md` gained **"Soulseek
+  in Docker: the three links that have to line up"** — the compose publish line,
+  the router's forward
+  to the HOST's LAN address (a router cannot forward to a container address), and
+  this egress trap as the third, which makes the second irrelevant while it is on
+  — and `docker-compose.yml`'s port comment names the trap beside the forward.
+  What the row does NOT read is a VPN whose own interface holds an address outside
+  100.64.0.0/10 (a NordVPN-style tunnel takes a 10.x one), and its `cannot` says
+  so rather than passing as "no tunnel there".
+  Pinned by `tools/test_soulseek_port.py` §3 (the tunnel shape with the owner's
+  measured addresses and its own remedy and NOT the ISP's, the same block read as
+  the line's CGNAT when the router's route carries it, a default hop inside the
+  range, the unreadable-route warning that names neither remedy, and that a
+  container never claims a tunnel) and `tools/test_soulseek_sharing.py` (the trap
+  in all three container hints and in the audit's own note): both fail against the
+  pre-fix modules restored from `git show HEAD:` and pass after.
 
 ---
 

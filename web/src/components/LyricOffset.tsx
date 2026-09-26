@@ -4,7 +4,9 @@ import { api } from "../api";
 import { LYRIC_STEP_BTN, LYRIC_VALUE_BOX, LYRIC_VALUE_UNIT } from "./LyricZoom";
 
 /** The lyric-offset control both lyric surfaces carry: `−`, the pending shift,
- *  `+`, and a Save that appears only once there is something to save.
+ *  `+`, and a Save that appears only once there is something to save — in a
+ *  slot whose width is there either way, so the steppers never move under the
+ *  finger (issue #56; see the slot's own comment below).
  *
  *  What it moves is the SYNC, not the sound: the reader hears the lines arrive
  *  early or late against the track and nudges every timestamp until they land.
@@ -111,6 +113,20 @@ export default function LyricOffset({ path, ms, onChange, onSaved, className }: 
   // and in the sidebar header, and a value printed straight into a
   // `text-right` box here against an inset `%` there is what put the two
   // `−`/`+` pairs at different distances from the numbers they step.
+  //
+  // The Save and the Discard are a SLOT, not a pair of buttons that comes and
+  // goes (issue #56: "they shouldn't move when the confirm button pops up — it
+  // makes it easily clickable by accident"). Rendered only once the offset was
+  // dirty, they widened this chip by their own 58 px the instant the first step
+  // landed: in the fullscreen player's `justify-end` footer the whole strip
+  // slid that far left, so the reader's next press — aimed at the `+` they had
+  // just used — landed on the Save (a write into the file's own lyrics) or on
+  // the Discard. The slot holds their width in every state and only its CONTENT
+  // appears (`invisible`, so an unseen button is nothing to hit either), which
+  // makes the steppers immovable no matter what is dialled in. It trails the
+  // `+` because that is where the strip's own edge is on the fullscreen
+  // surface — the reserved space reads as the row's padding, not as a hole
+  // between two chips.
   const btn = LYRIC_STEP_BTN;
   const dirty = ms !== 0;
 
@@ -148,7 +164,10 @@ export default function LyricOffset({ path, ms, onChange, onSaved, className }: 
       >
         <Plus className="h-3 w-3" />
       </button>
-      {dirty && (
+      <span
+        className={`inline-flex items-center gap-0.5 shrink-0 ${dirty ? "" : "invisible"}`}
+        aria-hidden={!dirty}
+      >
         <button
           className="h-7 w-7 inline-flex items-center justify-center rounded-md text-accent hover:text-accent-soft hover:bg-raise transition-colors disabled:opacity-40"
           onClick={save}
@@ -158,17 +177,16 @@ export default function LyricOffset({ path, ms, onChange, onSaved, className }: 
         >
           {busy ? <Loader2 className="h-3 w-3 animate-spin" /> : <Check className="h-3 w-3" />}
         </button>
-      )}
-      {dirty && !busy && (
         <button
           className={btn}
           onClick={() => onChange(0)}
+          disabled={busy}
           title="Discard the pending offset"
           aria-label="Discard pending lyric offset"
         >
           <RotateCcw className="h-3 w-3" />
         </button>
-      )}
+      </span>
     </span>
   );
 }

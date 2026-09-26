@@ -68,8 +68,13 @@ export const TABLE_FIT = "w-full md:min-w-max";
  *  measured 0 px at a 342 px phone width, so the table holds this width and
  *  its wrapper scrolls instead. The library's expanded album rows share these
  *  columns without the corner control, so the floor is slightly generous
- *  there — harmless, it only starts scrolling a little sooner. */
-export const ALBUM_TRACK_MIN_W = "min-w-[814px]";
+ *  there — harmless, it only starts scrolling a little sooner.
+ *
+ *  `md:` only, like TABLE_FIT's `min-w-max`: below it the phone fold has
+ *  already dropped the columns a phone cannot use (ALBUM_TRACK_PHONE_CLS), and
+ *  a floor there would only re-create the 814 px table inside a 342 px screen —
+ *  the title lost to it, one syllable per line. */
+export const ALBUM_TRACK_MIN_W = "md:min-w-[814px]";
 
 /** Floor for a user-added tag column (`tag:*` ids): the values are free text,
  *  so it gets the same readable minimum as a genre cell. Without a width of its
@@ -94,6 +99,26 @@ export const ALBUM_TRACK_COLS: Col[] = [
  *  The class has to sit on the header AND on the cells, or the fixed-layout
  *  grid misaligns; `md` is where each column comes back. */
 export const PHONE_HIDE = " hidden md:table-cell";
+
+/** The album tracklist's own phone fold — deliberately NOT `TRACK_PHONE_CLS`.
+ *  An album's tracklist is read as a spine: the track NUMBER is the row's
+ *  address in the release and the LENGTH beside it is what a reader scans down,
+ *  so both stay on a phone. The Library's Tracks view lists unrelated files,
+ *  has no spine to keep, and folds them there; the album page does not.
+ *
+ *  What a phone cannot use is the reference data — genre, bitrate, dynamic
+ *  range, and every user-added tag column (`phoneHide` folds those, the same
+ *  fallback the other tables use). The COVER folds with them, and that is
+ *  measured rather than stylistic: the page hands the table 342 px at 390 px,
+ *  the corner control (columns chooser + select toggle) takes 76 and # + Dur
+ *  another 144, so the Title column gets the last 122 — and the title cell has
+ *  to hold the heart, the "…" and the rating stars beside the name too. The 52
+ *  px cover is what buys the name its room, and it is the one column this table
+ *  can lose without costing the reader anything: the album's own cover is the
+ *  hero above the table, and it is the art every track in the album shares. */
+export const ALBUM_TRACK_PHONE_CLS: Record<string, string> = {
+  cover: PHONE_HIDE, genre: PHONE_HIDE, bitrate: PHONE_HIDE, dr: PHONE_HIDE,
+};
 
 /** The track table's floors — one narrowest-usable width per column, in px,
  *  same rule as the album table's own map: they are also the table's floor,
@@ -195,11 +220,13 @@ export const TRACK_COLS: Col[] = [
  *  the cell is a live star control, exactly like the album tracklist's. */
 export const TRACK_RATING_COL: Col = { id: "rating", label: "Rating", sortKey: "rating" };
 
-/** Both track tables (the Tracks view, the export preview and every album
- *  tracklist): only the cover and the title stay on a phone, every column id
- *  named here folds at `md`. The tables name the length column differently
- *  (`duration` in the Tracks view, `dur` in an album tracklist), which is why
- *  both ids appear. */
+/** The track tables that list whole tracks in LIBRARY order — the Tracks view,
+ *  the export preview, and the Library's expanded album rows (which share the
+ *  album columns but fold like a track list): only the cover and the title stay
+ *  on a phone, every column id named here folds at `md`. The tables name the
+ *  length column differently (`duration` in the Tracks view, `dur` in an album
+ *  tracklist), which is why both ids appear. The album PAGE's tracklist keeps
+ *  `#` and `dur` and is folded by ALBUM_TRACK_PHONE_CLS instead — see there. */
 export const TRACK_PHONE_CLS: Record<string, string> = {
   num: PHONE_HIDE, artist: PHONE_HIDE, album: PHONE_HIDE, year: PHONE_HIDE,
   genre: PHONE_HIDE, media: PHONE_HIDE, duration: PHONE_HIDE, dur: PHONE_HIDE,

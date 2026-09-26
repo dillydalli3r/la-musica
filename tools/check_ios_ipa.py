@@ -49,6 +49,8 @@ NEEDLES = [
     (b"NSNotificationCenter", "the session's lifecycle observers (ios_audio.rs)"),
     (b"MPRemoteCommandCenter", "the Now Playing command centre (ios_like.rs)"),
     (b"mlo-ios-like", "the star-press event (ios_like.rs / iosFavs.ts)"),
+    (b"skipForwardCommand", "the skip pair the readout measures (ios_like.rs)"),
+    (b"now_playing_like_enabled", "the Now Playing readout rows (ios_like.rs)"),
 ]
 
 # Enough of the app to prove this is the app and not an empty bundle.

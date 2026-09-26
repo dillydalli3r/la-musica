@@ -35,7 +35,7 @@ import StatsPanel from "../components/StatsPanel";
 import TrackDetails, { CreditsPanel, creditTagsFrom } from "../components/TrackDetails";
 import { AlbumDetails } from "../components/AlbumDetails";
 import { SortHeader, sortRows, toggleSort, groupByDisc, type SortState } from "../lib/sort.tsx";
-import { ColumnsMenu, ColumnResizer, useColumnPrefs, useColumnWidths, useCustomColumns, customCols, customColValue, ALBUM_TRACK_COLS, ALBUM_TRACK_COL_W, ALBUM_TRACK_MIN_W, TAG_COL_W, type Col } from "../lib/columns";
+import { ColumnsMenu, ColumnResizer, useColumnPrefs, useColumnWidths, useCustomColumns, customCols, customColValue, ALBUM_TRACK_COLS, ALBUM_TRACK_COL_W, ALBUM_TRACK_MIN_W, ALBUM_TRACK_PHONE_CLS, phoneHide, TAG_COL_W, type Col } from "../lib/columns";
 import { useI18n } from "../lib/i18n";
 import { toast, useStore } from "../store";
 import { fmtTech, albumTech } from "../lib/fmt";
@@ -1404,12 +1404,12 @@ export default function AlbumPage() {
               {selectMode && <th className="th w-10"></th>}
               {trackDefs.filter((c) => trackCols.includes(c.id)).map((c) =>
                 c.id === "cover" ? (
-                  <th key={c.id} className={`th relative ${ALBUM_TRACK_COL_W[c.id] ?? TAG_COL_W}`} title="Cover art">
+                  <th key={c.id} className={`th relative ${ALBUM_TRACK_COL_W[c.id] ?? TAG_COL_W}${phoneHide(ALBUM_TRACK_PHONE_CLS, c.id)}`} title="Cover art">
                     <span className="sr-only">Cover</span>
                   </th>
                 ) : (
                   <SortHeader key={c.id} label={c.label} sort={sort} sortKey={c.sortKey} onSort={(k) => setSort(toggleSort(sort, k))}
-                    className={`relative ${ALBUM_TRACK_COL_W[c.id] ?? TAG_COL_W}${c.id === "num" ? " cell-nowrap" : ""}`}
+                    className={`relative ${ALBUM_TRACK_COL_W[c.id] ?? TAG_COL_W}${c.id === "num" ? " cell-nowrap" : ""}${phoneHide(ALBUM_TRACK_PHONE_CLS, c.id)}`}
                     style={trackW[c.id] ? { width: trackW[c.id] } : undefined}>
                     <ColumnResizer width={trackW[c.id]} onDrag={(w) => setTrackW(c.id, w)} onReset={resetTrackW} />
                   </SortHeader>
@@ -1503,7 +1503,7 @@ export default function AlbumPage() {
                   </td>
                 )}
                 {trackCols.includes("num") && (
-                  <td className="td text-zinc-500 cell-nowrap">
+                  <td className={`td text-zinc-500 cell-nowrap${phoneHide(ALBUM_TRACK_PHONE_CLS, "num")}`}>
                     {/* multi-disc albums number tracks D-TT (2-1, 2-2, …) */}
                     <span className="tabular-nums">
                       {multiDisc ? `${g.disc}-${tr.tracknumber ?? tr.tags.TRACKNUMBER ?? "?"}` : tr.tracknumber ?? tr.tags.TRACKNUMBER ?? "—"}
@@ -1511,7 +1511,7 @@ export default function AlbumPage() {
                   </td>
                 )}
                 {trackCols.includes("cover") && (
-                  <td className="td cell-cover pr-0">
+                  <td className={`td cell-cover pr-0${phoneHide(ALBUM_TRACK_PHONE_CLS, "cover")}`}>
                     <TrackCover
                       albumPath={data.path}
                       trackCover={tr.cover_file}
@@ -1523,18 +1523,26 @@ export default function AlbumPage() {
                 {trackCols.includes("title") && (
                   <td className="td">
                     <TrackTitleCell
+                      stackOnPhone
                       trailing={
                         <>
                           <span className="shrink-0" onClick={(e) => e.stopPropagation()}>
+                            {/* No phone class here: FavHeart's own box already
+                                carries `tap-hit`, so its 26 px square is a
+                                44 px tap target below `md`. The stars keep the
+                                app's star geometry (see StarRating); their strip
+                                is 70 px wide as it is. */}
                             <FavHeart kind="track" id={tr.path} mbid={tr.tags.MUSICBRAINZ_TRACKID} iconClass="h-3.5 w-3.5" title={undefined} revealOnHover />
                           </span>
                           {/* The "…": what this ONE file can be asked to do —
                               tagging, its scripts (lyrics among them), credits
                               and the stored readout. Hover-revealed like the
                               heart beside it: a row's actions are not worth
-                              permanent space. */}
+                              permanent space. `tap-hit` for the same reason the
+                              heart has it: the row is the phone's whole surface
+                              and this button is 24 px across. */}
                           <span className="row-hover shrink-0" onClick={(e) => e.stopPropagation()}>
-                            <TrackActionsMenu path={tr.path} releaseMbid={tr.tags.MUSICBRAINZ_ALBUMID} />
+                            <TrackActionsMenu path={tr.path} releaseMbid={tr.tags.MUSICBRAINZ_ALBUMID} buttonClass="!p-1 text-zinc-500 hover:text-white tap-hit" />
                           </span>
                           <span className="shrink-0" onClick={(e) => e.stopPropagation()}>
                             <StarRating size="sm" value={ratingOf(ratings, tr.path)} onChange={(v) => setRating(tr.path, v)} pending={pending(tr.path)} />
@@ -1544,8 +1552,15 @@ export default function AlbumPage() {
                     >
                       <Link
                         to={trackRef(tr)}
-                        className="hover:text-accent-soft break-words min-w-0"
-                        title="Click to play · Ctrl-click to open track page"
+                        /* `max-md:line-clamp-2`: at 390 px the Title column is
+                           122 px — the row is # + name + length, the same
+                           spine the desktop table draws — and a title left to
+                           wrap freely spends four lines of a phone screen on
+                           one name. Two lines, ellipsis, and the whole title
+                           in `title` (the rule a clip lives by here); `md` and
+                           up wrap as before. */
+                        className="hover:text-accent-soft break-words min-w-0 max-md:line-clamp-2"
+                        title={`${tr.tags.TITLE ?? tr.file} · Click to play · Ctrl-click to open track page`}
                         onClick={(e) => entityLinkClick(e, () => navigate(trackRef(tr)))}
                       >
                         {tr.tags.TITLE ?? tr.file}
@@ -1593,17 +1608,17 @@ export default function AlbumPage() {
                     </TrackTitleCell>
                   </td>
                 )}
-                {trackCols.includes("genre") && <td className="td text-zinc-500 break-words">{tr.tags.GENRE ?? "—"}</td>}
+                {trackCols.includes("genre") && <td className={`td text-zinc-500 break-words${phoneHide(ALBUM_TRACK_PHONE_CLS, "genre")}`}>{tr.tags.GENRE ?? "—"}</td>}
                 {trackCols.includes("dur") && (
-                  <td className="td text-zinc-500 cell-nowrap">{fmtDuration(tr.tech.length)}</td>
+                  <td className={`td text-zinc-500 cell-nowrap${phoneHide(ALBUM_TRACK_PHONE_CLS, "dur")}`}>{fmtDuration(tr.tech.length)}</td>
                 )}
                 {trackCols.includes("bitrate") && (
-                  <td className="td text-zinc-500">
+                  <td className={`td text-zinc-500${phoneHide(ALBUM_TRACK_PHONE_CLS, "bitrate")}`}>
                     {tr.tech.bitrate || tr.tech.bits_per_sample ? fmtTech(tr.tech) : "—"}
                   </td>
                 )}
                 {trackCols.includes("dr") && (
-                  <td className="td text-zinc-500 tabular-nums" title={`Dynamic range${tr.tags["ALBUM DYNAMIC RANGE"] ? ` · album ${tr.tags["ALBUM DYNAMIC RANGE"]}` : ""}`}>
+                  <td className={`td text-zinc-500 tabular-nums${phoneHide(ALBUM_TRACK_PHONE_CLS, "dr")}`} title={`Dynamic range${tr.tags["ALBUM DYNAMIC RANGE"] ? ` · album ${tr.tags["ALBUM DYNAMIC RANGE"]}` : ""}`}>
                     {tr.tags["DYNAMIC RANGE"] ?? "—"}
                   </td>
                 )}
@@ -1611,7 +1626,7 @@ export default function AlbumPage() {
                     the same order their headers render in above */}
                 {trackCustom.map((c) =>
                   trackCols.includes(c.id) ? (
-                    <td key={c.id} className="td text-zinc-500 break-words" title={c.label}>
+                    <td key={c.id} className={`td text-zinc-500 break-words${phoneHide(ALBUM_TRACK_PHONE_CLS, c.id)}`} title={c.label}>
                       {customColValue(tr, c.tag) || "—"}
                     </td>
                   ) : null

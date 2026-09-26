@@ -72,7 +72,12 @@ function assertConsistent(label, p, expectedFile) {
   const errs = [];
   try {
     browser = await chromium.launch({ executablePath: process.env.CHROME, headless: true });
-    const page = await browser.newContext({ viewport: { width: 1440, height: 900 } }).then((c) => c.newPage());
+    // No service worker: the built app registers one, and its first
+    // `controllerchange` reloads the page — which destroys the context this
+    // script's very first `evaluate` is running in ("Execution context was
+    // destroyed, most likely because of a navigation", 0/1 checks). The rest of
+    // the suite's Playwright checks block it for the same reason.
+    const page = await browser.newContext({ viewport: { width: 1440, height: 900 }, serviceWorkers: "block" }).then((c) => c.newPage());
     page.setDefaultTimeout(15000);
     page.on("pageerror", (e) => errs.push(e.message));
 

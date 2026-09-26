@@ -28,6 +28,16 @@
  *   * the toolbar's facets do what they say: Rated keeps only rated rows,
  *     Unrated drops them, Explicit matches the count the payload reports, and
  *     Clean excludes them.
+ *   * at 390 px the album page's TRACKLIST folds the columns a phone cannot use
+ *     (the same `PHONE_HIDE` rule the Library's tables use), keeps the row's
+ *     spine (# / name / length), hands the name a reading column — at least
+ *     120 px, at most two lines, the whole title in its `title` — and keeps the
+ *     row's chrome (the heart, the "…", the stars) laid out inside that cell
+ *     and tappable with the phone's own 44 px hit area. At `md` and up nothing
+ *     folds and the album table keeps its 814 px floor. Before this the album
+ *     page held that floor at every width, so a 390 px phone drew an 814 px
+ *     table in a 342 px wrapper and gave the name 8 px — one syllable per line,
+ *     which is the owner's screenshot (issue #55).
  *
  * It RATES ONE TRACK through `PUT /api/ratings` so the rating facet has
  * something to find: point it at a scratch library (`MLO_MUSIC_FOLDER`), never
@@ -250,7 +260,177 @@ const check = (name, ok, detail) => {
   await page.keyboard.press("Escape");
   if (process.env.OUT) await page.screenshot({ path: `${OUT}/facet-clean.png` });
 
+  // ---- the album page's tracklist at 390 px (issue #55) ----
+  /* The owner's report: "title text in album pages looks very squished, title
+   * text has aggressive text wrapping". The cause was geometric — the album
+   * table held the desktop floor (`min-w-[814px]`) at every width, so a 390 px
+   * phone got an 814 px table inside a 342 px wrapper, the fixed layout handed
+   * the auto Name column the 8 px left over, and the browser broke the title
+   * one syllable per line. What is pinned here is the phone's answer: the same
+   * fold the Library's tables use, the row's spine (# / name / length) kept, a
+   * name column with room to read (>= 120 px, at most two lines, the whole
+   * title in its `title`), the row's own chrome laid out INSIDE that cell and
+   * tappable — and, at `md` and up, the fold gone and the 814 px floor back.
+   *
+   * The library it points at needs at least one title long enough to wrap, or
+   * the >= 40 px link rule flags a name that is legitimately 35 px wide (the
+   * same rule the Library's own views are held to). `F:/tmp/mlo-iss55a` is the
+   * scratch library this was written against: one album, five tracks, titles
+   * from 5 to 55 characters, one explicit, and the owner's two extra tag
+   * columns (Rc / Wr).
+   */
+  const albumPath = (lib.artists || []).flatMap((a) => a.albums || [])[0]?.path;
+  if (!albumPath) {
+    console.error("[check_library_tables] the library has no album to open");
+    process.exit(1);
+  }
+  // The owner's own shape: two user-added tag columns (Rc, Wr) beside the
+  // built-ins. A fold that only knew the built-in ids would leave both 96 px
+  // tag columns in the phone row — and they are what squeezed the name first.
+  await ctx.addInitScript(() => {
+    localStorage.setItem("mlo-customcols-album-tracks", JSON.stringify([
+      { id: "tag:RC", label: "Rc", tag: "RC" },
+      { id: "tag:WR", label: "Wr", tag: "WR" },
+    ]));
+  });
+  /** The album tracklist as the width in force draws it: which columns folded,
+   *  what the NAME column got, and where the row's own chrome landed. The row
+   *  measured is the one with the LONGEST title — a short name is as wide as
+   *  its own text and would say nothing about whether the column has room. */
+  const albumGeom = () => page.evaluate(() => {
+    const table = [...document.querySelectorAll("main table")].find((t) =>
+      [...t.querySelectorAll("thead th")].some((th) => (th.textContent || "").trim() === "Title"));
+    if (!table) return { none: true };
+    const wrap = table.parentElement;
+    const ths = [...table.querySelectorAll("thead th")].map((th) => ({
+      // The corner cell (the select toggle + the columns chooser) draws no
+      // label of its own; the cover column does (`sr-only` "Cover").
+      label: (th.textContent || "").trim() || "(corner)",
+      w: Math.round(th.getBoundingClientRect().width),
+      display: getComputedStyle(th).display,
+    }));
+    const named = [...table.querySelectorAll("tbody tr")].map((tr) => {
+      const link = [...tr.querySelectorAll("a[title*='Click to play']")]
+        .find((a) => (a.textContent || "").trim());
+      return link ? { tr, link, text: (link.textContent || "").trim() } : null;
+    }).filter(Boolean).sort((a, b) => b.text.length - a.text.length);
+    let name = null;
+    if (named[0]) {
+      const { tr, link, text } = named[0];
+      const cell = link.closest("td");
+      const lh = parseFloat(getComputedStyle(link).lineHeight) || 20;
+      /** The chrome the cell must not squeeze out. Each control is asked for by
+       *  the name it PUBLISHES (its aria-label / title), not by a class the
+       *  markup may rename: the like heart, the "…" track actions, the stars. */
+      const chrome = [
+        ["heart", cell.querySelector("button[aria-label*='favorite' i]")],
+        ["…", cell.querySelector("button[title^='Track actions']")],
+        ["stars", cell.querySelector("[role='group'][aria-label^='Rating']")],
+      ].map(([what, el]) => {
+        if (!el) return { what, missing: true };
+        // On screen before hit-testing: a point below the fold has no element.
+        el.scrollIntoView({ block: "center" });
+        const r = el.getBoundingClientRect();
+        const hitArea = getComputedStyle(el, "::after");
+        const at = document.elementFromPoint(r.left + r.width / 2, r.top + r.height / 2);
+        const box = cell.getBoundingClientRect();
+        return {
+          what,
+          w: Math.round(r.width), h: Math.round(r.height),
+          // The phone hit area the element itself carries (`tap-hit`'s ::after,
+          // the app's own way of reaching 44 px without growing the control).
+          tap: hitArea.content !== "none" ? Math.round(parseFloat(hitArea.width)) : 0,
+          inside: r.left >= box.left - 1 && r.right <= box.right + 1,
+          hit: !!at && (at === el || el.contains(at)),
+        };
+      });
+      const box = cell.getBoundingClientRect();
+      name = {
+        text,
+        titleAttr: link.getAttribute("title") || "",
+        w: Math.round(link.getBoundingClientRect().width),
+        lines: +(link.getBoundingClientRect().height / lh).toFixed(2),
+        lh,
+        cellW: Math.round(box.width),
+        rowH: Math.round(tr.getBoundingClientRect().height),
+        chrome,
+      };
+    }
+    return {
+      vw: innerWidth,
+      docScroll: document.documentElement.scrollWidth,
+      wrapClient: Math.round(wrap.clientWidth),
+      wrapScroll: Math.round(wrap.scrollWidth),
+      tableW: Math.round(table.getBoundingClientRect().width),
+      kept: ths.filter((t) => t.display !== "none").map((t) => t.label),
+      folded: ths.filter((t) => t.display === "none").map((t) => t.label),
+      titleColW: ths.find((t) => t.label === "Title")?.w ?? 0,
+      name,
+    };
+  });
+
+  await page.setViewportSize({ width: 390, height: 844 });
+  await page.goto(`${BASE}/album/${encodeURIComponent(albumPath)}`, { waitUntil: "networkidle", timeout: 60000 });
+  await page.waitForSelector("main table tbody tr", { timeout: 30000 });
+  // The rows fade in on `.stagger` (a 10 px translateY), and a rect read
+  // mid-animation is not the layout: settled first.
+  await page.waitForTimeout(900);
+  const phone = await albumGeom();
+  if (process.env.OUT) await page.screenshot({ path: `${OUT}/album-phone.png` });
+  console.log("\n[album tracklist @390]");
+  check("the album page draws its tracklist", !!phone.name,
+        phone.name ? `"${phone.name.text.slice(0, 26)}…"` : "no row with a title link");
+  const fits = +!!phone.name && phone.wrapScroll <= phone.wrapClient + 1 && phone.docScroll <= phone.vw + 1;
+  check("the table fits the phone — nothing scrolls sideways",
+        fits, `wrapper ${phone.wrapScroll}/${phone.wrapClient} px, page ${phone.docScroll}/${phone.vw} px`);
+  check("the phone folds the columns it cannot use",
+        (phone.folded || []).join(",") === "Cover,Genre,Bitrate,DR,Rc,Wr", (phone.folded || []).join(","));
+  // The corner cell is the table's own chrome (the columns chooser and the
+  // select toggle), not a data column: a phone keeps it, and keeps the row's
+  // spine with it.
+  const spine = (phone.kept || []).filter((l) => l !== "(corner)").join(",");
+  check("and keeps the row's spine — number, name, length",
+        spine === "#,Title,Dur" && (phone.kept || []).includes("(corner)"),
+        (phone.kept || []).join(","));
+  check("the name column has room to read as a name (>= 120 px)",
+        phone.titleColW >= 120, `${phone.titleColW} px, name cell ${phone.name?.cellW} px`);
+  check("a long name is not squeezed (its link is >= 40 px wide)",
+        (phone.name?.w ?? 0) >= 40, `${phone.name?.w} px for "${phone.name?.text?.slice(0, 26)}…"`);
+  check("and it wraps to at most two lines",
+        (phone.name?.lines ?? 99) <= 2, `${phone.name?.lines} line(s) of ${phone.name?.lh} px`);
+  check("the whole title stays one tap-hold away",
+        !!phone.name && phone.name.titleAttr.includes(phone.name.text), (phone.name?.titleAttr || "").slice(0, 48));
+  const chrome = phone.name?.chrome || [];
+  check("the row's chrome lands inside the name cell, not squeezed out",
+        chrome.length === 3 && chrome.every((c) => !c.missing && c.inside && c.hit),
+        chrome.map((c) => `${c.what} ${c.w ?? "?"}x${c.h ?? "?"}${c.inside ? "" : " outside"}${c.hit ? "" : " unhittable"}`).join(", "));
+  // The icon buttons carry the phone's 44 px hit area (the app's `tap-hit`);
+  // the stars keep the app's own star geometry — a 70 px strip whose halves are
+  // as small as they are on every other rating control in the app — so what is
+  // pinned for them is the width of that strip.
+  check("the icon buttons carry the phone's 44 px hit area",
+        chrome.filter((c) => c.what !== "stars").every((c) => c.tap >= 40),
+        chrome.filter((c) => c.what !== "stars").map((c) => `${c.what} ${c.tap} px`).join(", "));
+  check("and the rating strip is a target in its own right (>= 40 px wide)",
+        (chrome.find((c) => c.what === "stars")?.w ?? 0) >= 40,
+        `${chrome.find((c) => c.what === "stars")?.w} px`);
+  check("the phone row is not a runaway ribbon",
+        (phone.name?.rowH ?? 0) < 180, `${phone.name?.rowH} px tall`);
+
+  // Desktop and tablet are untouched: at `md` and up nothing folds and the
+  // album table holds the 814 px floor of its own columns, so its wrapper
+  // scrolls rather than the name collapsing any further.
+  await page.setViewportSize({ width: 800, height: 900 });
+  await page.waitForTimeout(300);
+  const md = await albumGeom();
+  console.log("\n[album tracklist @800]");
+  check("md and up fold nothing", (md.folded || []).length === 0, (md.folded || []).join(","));
+  check("and the table keeps its 814 px floor", md.tableW >= 814, `${md.tableW} px`);
+  check("…with the wrapper scrolling for it",
+        md.wrapScroll > md.wrapClient + 1, `${md.wrapScroll} vs ${md.wrapClient}`);
+  await page.setViewportSize({ width: 1440, height: 900 });
+
   await browser.close();
-  console.log(`\n${failures ? `${failures} problem(s)` : "PASS — library tables and facets"}`);
+  console.log(`\n${failures ? `${failures} problem(s)` : "PASS — library tables, facets, and the album tracklist at 390 px"}`);
   process.exit(failures ? 1 : 0);
 })();

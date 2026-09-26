@@ -397,6 +397,13 @@ assert "50000:50000" in hint, hint
 # ...and where the host's own port list could not be read (the control refused
 # too), the hint says that instead of pretending to know
 assert "docker port <container-name>" in hint, hint
+# ...and every container hint carries the one link no container can read: the
+# HOST's own route out, which is the address the Soulseek server hands peers for
+# this client. The app cannot measure it from in here, so the hint is a check the
+# owner makes on the host — never a claim that the app detected something
+assert "HOST's own route out" in hint, hint
+assert "Tailscale exit node" in hint and "api.ipify.org" in hint, hint
+assert "turn the exit node off" in hint, hint
 
 # The half of the remedy the numbers cannot pick: R279 keeps the compose file and
 # the daemon from disagreeing about the NUMBER, and the publish line is whether
@@ -430,7 +437,13 @@ hint = next(p for p in audit["problems"] if p["code"] == "listen_unreachable")["
 assert "the host publishes TCP 50000" in hint, hint
 assert "the compose line is not the problem" in hint, hint
 assert "address the internet actually sees" in hint, hint
+assert "HOST's own route out" in hint and "exit node" in hint, hint
 assert audit["status"] == "listen_unconfirmed", audit["status"]
+# ...and the audit's own container note names the same trap, on the card where the
+# owner reads what is shared: the egress decides the address peers dial, and
+# nothing in here can see the host's routing table
+assert any("HOST's own route out" in n and "api.ipify.org" in n
+           and "exit node" in n for n in audit["notes"]), audit["notes"]
 
 soulseek_port._connect = real_connect
 published["accepts"] = set()

@@ -255,7 +255,22 @@ export default function PlayerBar() {
    *  Every app-initiated pause goes through this, so nothing in this component
    *  may call an element's `.pause()` directly any more. */
   const appPaused = useRef<{ el: HTMLMediaElement | null; at: number; why: string }>({ el: null, at: 0, why: "" });
+  /** A stop the APP did not ask for while the page was hidden — the platform
+   *  taking the audio session while the webview could not see the screen —
+   *  remembered so the way back in can restart it.
+   *
+   *  A ref beside `appPaused` on purpose: every deliberate pause clears it
+   *  (below), so the only way a marker survives to the next `visible` is that
+   *  nothing in the app asked for this element to stop — which is what makes
+   *  the restart on return safe. See `handlePause` and the reconcile effect. */
+  const osStopped = useRef<{ el: HTMLMediaElement; path: string; why: string | null } | null>(null);
   const pauseApp = (el: HTMLMediaElement | null | undefined, why: string) => {
+    // Whatever the platform was doing, the app now wants this element silent:
+    // a pause the reader asked for (the transport, the lock screen, the sleep
+    // timer, the queue moving on) must never be undone by coming back to the
+    // app. The marker is what "the OS stopped it, the reader did not" means,
+    // so an app pause is exactly the moment it stops being true.
+    osStopped.current = null;
     if (el) appPaused.current = { el, at: Date.now(), why };
     try { el?.pause(); } catch { /* a refused pause is the element's own business */ }
   };
@@ -287,6 +302,24 @@ export default function PlayerBar() {
     note("pause", { ...elFacts(el, pathOf(el)), asked, why: asked ? appPaused.current.why : null });
     const p = useStore.getState().playing;
     if (p && elementFor(p) !== el) return;
+    // The owner's report, decided: the page could not see the screen while the
+    // element it was playing stopped, and no app pause explains it — iOS took
+    // the audio session. Marked so coming back to the app can pick the track
+    // up again (see the reconcile effect); `why` keeps the app's last reason so
+    // a late event from the app's OWN pause is not read as the platform's, and
+    // `late` says outright that the marker was withheld for exactly that.
+    if (!asked && document.visibilityState === "hidden" && p && elementFor(p) === el) {
+      const late = appPaused.current.el === el;
+      if (!late) osStopped.current = { el, path: p, why: appPaused.current.why || null };
+      note("os-stop", {
+        ...elFacts(el, p),
+        why: appPaused.current.why || null,
+        late,
+        at: Math.round(el.currentTime * 10) / 10,
+        ended: el.ended,
+        net: el.networkState,
+      });
+    }
     setPlaying(null);
   };
 
@@ -311,6 +344,11 @@ export default function PlayerBar() {
     // decoder state, and whether the page could see the screen (a `play` while
     // hidden is iOS restarting the track the owner never touched).
     note("play", elFacts(el, p));
+    // Sound is coming out of this element again, so the app's last pause on it
+    // no longer explains anything the element does next: left in place, it
+    // would read a later, genuine OS stop as that stale app pause (`late` in
+    // `handlePause`) and lose the recovery for a stop nobody asked for.
+    if (appPaused.current.el === el) appPaused.current = { el: null, at: 0, why: "" };
     if (!p) return;
     const st = useStore.getState();
     if (st.queue[st.index]?.path !== p) return;
@@ -324,9 +362,12 @@ export default function PlayerBar() {
    *  the stream, a policy — then produced silence with the bar still claiming
    *  the track was playing, which is the report "pressing play just pauses
    *  immediately" with no reason attached. The rejection IS the report, so it
-   *  clears the claim it could not honour and says why. */
+   *  clears the claim it could not honour and says why. The promise comes back
+   *  so a caller with a report row of its own can say how the attempt went —
+   *  the way back in from a browser stop does exactly that. */
   const startElement = (el: HTMLMediaElement, path?: string | null) => {
-    void el.play().catch((e: unknown) => {
+    const started = el.play();
+    void started.catch((e: unknown) => {
       const err = e as { name?: string } | null;
       // The report keeps the refusals too — this is the row that separates
       // "iOS would not let us start" from "iOS stopped us afterwards".
@@ -341,6 +382,7 @@ export default function PlayerBar() {
         ` — ${err?.name || "the browser said no"}. It usually means the app has no audio session to play into.`
       );
     });
+    return started;
   };
 
   /** The element's own `error` — the only witness that a stream never loaded.
@@ -383,8 +425,37 @@ export default function PlayerBar() {
   // Re-check the truth on the way in: `playing` may only stand while the
   // element really is.
   useEffect(() => {
+    /** And then do something about it: a stop the app never asked for
+     *  (`handlePause` recorded it as `os-stop`, and every deliberate pause has
+     *  cleared the marker since) is the platform having taken the audio session
+     *  while nobody was looking, so coming back is exactly the moment to start
+     *  the track again. `startElement` is the same path every play goes
+     *  through — the refusal rules out nothing and the report says how it went.
+     *
+     *  One shot either way: a resumed track must not be played at again on the
+     *  next visibility flip, and a refusal must not be re-asked forever. What
+     *  the reader has done in the meantime is checked first — a queue that moved
+     *  on, an element that now holds another track, a track that ran to its end
+     *  — because restarting any of those is music nobody asked for. */
+    const recover = () => {
+      if (document.visibilityState !== "visible") return;
+      const m = osStopped.current;
+      if (!m) return;
+      osStopped.current = null;
+      const st = useStore.getState();
+      if (st.queue[st.index]?.path !== m.path || pathOf(m.el) !== m.path || m.el.ended) return;
+      // Already running (the platform restarted it, or a lock-screen press
+      // did): a second play() would only be a lie in the report.
+      if (!m.el.paused) return;
+      void startElement(m.el, m.path).then(
+        () => note("os-resume", { ...elFacts(m.el, m.path), why: m.why, ok: true, name: null }),
+        (e: unknown) =>
+          note("os-resume", { ...elFacts(m.el, m.path), why: m.why, ok: false, name: (e as { name?: string } | null)?.name ?? null }),
+      );
+    };
     const reconcile = () => {
       if (document.visibilityState !== "visible") return;
+      recover();
       const p = useStore.getState().playing;
       if (!p) return;
       const el = elementFor(p);
@@ -418,8 +489,9 @@ export default function PlayerBar() {
       window.removeEventListener("pageshow", onShow);
       window.removeEventListener("pagehide", onHide);
     };
-    // `elementFor` reads refs only, so this listener installed once is never
-    // stale — and re-installing it per queue change would be churn.
+    // `elementFor`, `pathOf` and `recover` read refs (and the store's own
+    // getters) only, so this listener installed once is never stale — and
+    // re-installing it per queue change would be churn.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
@@ -627,6 +699,20 @@ export default function PlayerBar() {
         note("mediaSession", { action: "nexttrack" });
         stepRef.current(1);
       });
+      // …and the two SKIP actions are declared unsupported, which is what makes
+      // the system draw those two steps instead. A web page is offered
+      // skip-forward/skip-backward by default — WebKit enables the pair with its
+      // own interval whether or not the page ever asked — and the lock screen
+      // then renders ⟲10 / 10⟳ where this app's transport is a TRACK STEP: the
+      // ⏮ ⏸ ⏭ the bar has carried since 4.1.0 and the queue answers. The
+      // handlers are REMOVED, never replaced (a `null` handler is the spec's
+      // "this action is not supported"), so a platform that keeps the skip pair
+      // anyway loses nothing but the two actions the app never had. Owner's
+      // report, and the reason this is here rather than in the shell: the card
+      // it was drawn on showed the skip pair with the app's own metadata around
+      // it (issue #55).
+      ms.setActionHandler("seekbackward", null);
+      ms.setActionHandler("seekforward", null);
       // Scrubbing from the lock screen / Control Center / a car stereo. Without
       // a handler the OS draws a scrubber that springs back to where the app
       // thinks it is, which reads as "seeking is broken in the background".
