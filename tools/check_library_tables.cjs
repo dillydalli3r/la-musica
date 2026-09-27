@@ -14,14 +14,16 @@
  *     so a nowrap label wider than its cell paints over the neighbour;
  *   * every column is at least as wide as its widest VALUE — measured from a
  *     clone of the cell, so the report says how much a floor is short;
- *   * a stored visible-id list cannot gut the album tracklist: a list of three
- *     ids (`mlo-cols4-album-tracks = ["num","cover","title"]`, the owner's
- *     three-column shape) is migrated back to the columns this build ships —
- *     widths map and all — while a list written WITH the record of the defaults
- *     it was written under (`mlo-coldft-*`) is the reader's own unticking and
- *     is obeyed. A one-line row is also pinned at the clean row's height and
- *     under 60 px: the 70 px the owner's screenshot shows is that 52 px row at
- *     the app's own zoom (`mlo.zoom` 135 → 70 px exactly), not a box in the row.
+ *   * a stored visible-id list cannot gut the album tracklist: the owner's own
+ *     state — `mlo-cols4-album-tracks = ["num","cover","title"]`, with a v1
+ *     record or none — draws all seven columns and is rewritten as the v2
+ *     record (`{v: 2, removed, added}`, `mlo-coldft-*`) that says what the
+ *     reader CHOSE; and a v2 record that says "removed dr" keeps `dr` hidden
+ *     across reloads. The owner's 900 px width map beside the same list hides
+ *     nothing either. A one-line row is also pinned at the clean row's height
+ *     and under 60 px: the 70 px the owner's screenshot shows is that 52 px row
+ *     at the app's own zoom (`mlo.zoom` 135 → 70 px exactly), not a box in the
+ *     row.
  *   * a value longer than any sane column may be CLIPPED instead, but only in
  *     the open: the clipping element (the app's `.cell-ellipsis`, or Tailwind's
  *     `truncate` — the check reads the computed style, not one class name)
@@ -605,14 +607,17 @@ const check = (name, ok, detail) => {
    *
    * A stored list is a reading of the build that WROTE it, never evidence about
    * this one — the rule the v3 key (`mlo-cols3-*`) and `useFittedWidths` below
-   * already follow. What makes a deliberate reading and a stale one tellable
-   * apart is the record of the defaults in force when the list was written
-   * (`mlo-coldft-*`, written beside it by `useColumnPrefs`): without a record —
-   * or with one from a build whose default visible set was different — the list
-   * is MIGRATED, its own ids kept and every column this build ships visible by
-   * default added back, and the repaired list is stored so the menu, the table
-   * and the next tick agree. With the matching record, unticking is the
-   * reader's own choice about these columns and is obeyed on every reload.
+   * already follow. What is stored beside the list (`mlo-coldft-*`) is the
+   * reader's own CHOICE as a versioned record — `{v: 2, removed, added}`, which
+   * columns this build ships visible they took away and which it does not ship
+   * they put there — and the drawn set is derived from that, never from the
+   * list. A record without the version (a v1 fingerprint, a bare array, no
+   * record at all) is UNKNOWN rather than a choice: the list is MIGRATED, its
+   * own ids kept and every column this view draws by default added back, and
+   * the result is re-recorded as v2. That is what the owner's own state needs —
+   * the three-id list PLUS the v1 record — and what makes a reader's real
+   * unticking stick: a v2 record that says "removed dr" hides dr on every later
+   * load.
    *
    * The ROW height is pinned here too, because the owner's screenshot carries
    * the same number: ~70 px per row. There is no 70 px box in a row — a
@@ -622,22 +627,34 @@ const check = (name, ok, detail) => {
    * `mlo.zoom` 135 the same row measures exactly 70 px), so what is pinned is
    * the number the layout owns — the row must be the CLEAN row's height, and
    * under 60 px at 100 %. */
-  /* The hostile states seed `mlo-coldft-album-tracks` to null on purpose: that
-   * record is what a list written by a build that had no such record looks
-   * like, and a record left behind by the case above would make the next seed
-   * read as the reader's own choice. */
+  /* The hostile states seed `mlo-coldft-album-tracks` explicitly on purpose: a
+   * record left behind by the case above would make the next seed read as the
+   * reader's own choice. `THREE_IDS_AND_V1` is the owner's state exactly — the
+   * three-id list plus a v1 record (a bare array of ids, the shape the first
+   * record had), which says nothing about what they CHOSE and must therefore be
+   * reconciled, not obeyed. */
   const THREE_IDS = JSON.stringify({
     "mlo-cols4-album-tracks": JSON.stringify(["num", "cover", "title"]),
+    "mlo-colw-album-tracks": null,
     "mlo-coldft-album-tracks": null,
+  });
+  const THREE_IDS_AND_V1 = JSON.stringify({
+    "mlo-cols4-album-tracks": JSON.stringify(["num", "cover", "title"]),
+    "mlo-colw-album-tracks": null,
+    "mlo-coldft-album-tracks": JSON.stringify(["num", "cover", "title", "genre", "dur", "bitrate", "dr"]),
   });
   const THREE_IDS_AND_WIDTHS = JSON.stringify({
     "mlo-cols4-album-tracks": JSON.stringify(["num", "cover", "title"]),
     "mlo-colw-album-tracks": JSON.stringify({ title: 900, genre: 900, bitrate: 900, dur: 900 }),
     "mlo-coldft-album-tracks": null,
   });
-  const UNTICKED_WITH_RECORD = JSON.stringify({
-    "mlo-cols4-album-tracks": JSON.stringify(["num", "cover", "title", "genre", "dur", "bitrate", "tag:RC", "tag:WR"]),
-    "mlo-coldft-album-tracks": JSON.stringify(["num", "cover", "title", "genre", "dur", "bitrate", "dr"]),
+  /* The reader's OWN state as v2: they removed `dr` and added the two tag
+   * columns. No list is seeded at all — the v2 record is the state, and the
+   * drawn set has to come from it. */
+  const UNTICKED_V2 = JSON.stringify({
+    "mlo-cols4-album-tracks": null,
+    "mlo-colw-album-tracks": null,
+    "mlo-coldft-album-tracks": JSON.stringify({ v: 2, removed: ["dr"], added: ["tag:RC", "tag:WR"] }),
   });
   const storedList = () => page.evaluate(() => ({
     list: JSON.parse(localStorage.getItem("mlo-cols4-album-tracks") || "null"),
@@ -650,9 +667,15 @@ const check = (name, ok, detail) => {
   }));
   const gutted = await at(1568, THREE_IDS);
   const guttedStored = await storedList();
+  const guttedV1 = await at(1568, THREE_IDS_AND_V1);
+  const guttedV1Stored = await storedList();
   const guttedWidths = await at(1568, THREE_IDS_AND_WIDTHS);
-  const unticked = await at(1568, UNTICKED_WITH_RECORD);
+  const unticked = await at(1568, UNTICKED_V2);
   const untickedStored = await storedList();
+  // The same v2 record, read a SECOND time: the reader's removal is the state,
+  // so a reload must not resurrect `dr` (that is the whole point of the version).
+  const untickedReload = await at(1568, UNTICKED_V2);
+  const untickedReloadStored = await storedList();
   /** The label of every column the table DRAWS, in its own order — the corner
    *  cell (select toggle + columns chooser) is the table's furniture, not a
    *  data column, so it is left out of the set the two states are compared on. */
@@ -662,37 +685,51 @@ const check = (name, ok, detail) => {
    *  control, which is what `albumGeom`'s own `name.rowH` measures — the owner's
    *  rows were all the same height, so the one-line row is the number to pin. */
   const oneLineRow = (g) => g.rowMin ?? 0;
+  const V2 = (r) => !!r && r.v === 2 && Array.isArray(r.removed) && Array.isArray(r.added);
   const CONTROL_COLS = colset(control);
+  const UNTICKED_COLS = CONTROL_COLS.split(",").filter((l) => l !== "DR").join(",");
   console.log("\n[album tracklist @1568, stored visible list]");
-  for (const [what, g] of [["control", control], ["three ids", gutted], ["three ids + 900 px widths", guttedWidths],
-    ["dr unticked, with the record", unticked]]) {
-    console.log(`  ${what.padEnd(26)} ${colset(g)} · table ${g.tableW} px in ${g.wrapScroll}/${g.wrapClient} px `
+  for (const [what, g] of [["control", control], ["three ids", gutted], ["three ids + v1 record", guttedV1],
+    ["three ids + 900 px widths", guttedWidths], ["v2 record: removed dr", unticked],
+    ["…and the same record reloaded", untickedReload]]) {
+    console.log(`  ${what.padEnd(28)} ${colset(g)} · table ${g.tableW} px in ${g.wrapScroll}/${g.wrapClient} px `
       + `· rows ${oneLineRow(g)}-${g.rowMax} px`);
   }
-  console.log(`  stored after the three-id list: ${JSON.stringify(guttedStored.list)} under record `
-    + `${JSON.stringify(guttedStored.record)}`);
+  console.log(`  after the three-id list: list ${JSON.stringify(guttedStored.list)} · record ${JSON.stringify(guttedStored.record)}`);
+  console.log(`  after the v1 record:     list ${JSON.stringify(guttedV1Stored.list)} · record ${JSON.stringify(guttedV1Stored.record)}`);
+  console.log(`  after the v2 record:     list ${JSON.stringify(untickedStored.list)} · record ${JSON.stringify(untickedStored.record)}`
+    + ` | reloaded: ${JSON.stringify(untickedReloadStored.list)}`);
   check(`the control draws the album tracklist's own default columns (${CONTROL_COLS})`,
         control.kept.includes("Title") && CONTROL_COLS.split(",").length >= 9, control.kept.join(","));
   check(`a stored list of three ids cannot gut the tracklist (${colset(gutted)} vs ${CONTROL_COLS})`,
         colset(gutted) === CONTROL_COLS, colset(gutted));
+  check(`…nor can it beside the v1 record — the owner's own state (${colset(guttedV1)})`,
+        colset(guttedV1) === CONTROL_COLS, colset(guttedV1));
   check(`…and the owner's own stored 900 px widths beside it do not hide anything either `
         + `(${colset(guttedWidths)}, table ${guttedWidths.tableW} px vs ${control.tableW} px)`,
         colset(guttedWidths) === CONTROL_COLS && guttedWidths.tableW === control.tableW
           && guttedWidths.wrapScroll === control.wrapScroll,
         JSON.stringify({ cols: colset(guttedWidths), table: guttedWidths.tableW, wrap: guttedWidths.wrapScroll }));
-  check(`…the repaired list is STORED, so the Columns menu and the next tick work from what is on screen `
-        + `(${(guttedStored.list || []).length} ids, record ${(guttedStored.record || []).length})`,
+  check(`…the repaired state is STORED as v2, so the menu and the next tick work from what is on screen `
+        + `(list ${(guttedStored.list || []).length} ids, record ${JSON.stringify(guttedStored.record)})`,
         Array.isArray(guttedStored.list) && guttedStored.list.includes("dr") && guttedStored.list.length >= 9
-          && Array.isArray(guttedStored.record) && guttedStored.record.length === 7,
+          && V2(guttedStored.record) && guttedStored.record.removed.length === 0,
         JSON.stringify(guttedStored));
+  check(`…and the v1 record is rewritten as v2 too (${JSON.stringify(guttedV1Stored.record)})`,
+        V2(guttedV1Stored.record) && Array.isArray(guttedV1Stored.list) && guttedV1Stored.list.includes("dr")
+          && guttedV1Stored.list.length >= 9,
+        JSON.stringify(guttedV1Stored));
+  check(`a v2 record's own removal is obeyed — the reader unticked DR (${colset(unticked)})`,
+        colset(unticked) === UNTICKED_COLS, JSON.stringify({ drawn: colset(unticked), stored: untickedStored.list }));
+  check(`…and it still holds on the NEXT load, so the removal is the state `
+        + `(${colset(untickedReload)}, list ${JSON.stringify(untickedReloadStored.list)})`,
+        colset(untickedReload) === UNTICKED_COLS && V2(untickedReloadStored.record)
+          && (untickedReloadStored.record.removed || []).join(",") === "dr",
+        JSON.stringify({ drawn: colset(untickedReload), record: untickedReloadStored.record }));
   check(`a one-line row is the CLEAN row's height, not 70 px `
         + `(${oneLineRow(gutted)} px gutted, ${oneLineRow(control)} px clean at 100 %)`,
         oneLineRow(control) > 0 && oneLineRow(gutted) === oneLineRow(control) && oneLineRow(control) < 60,
         `gutted ${oneLineRow(gutted)}, control ${oneLineRow(control)}, table ${gutted.tableW} px`);
-  check(`…and a list written UNDER this build's defaults is obeyed — the reader's own unticking survives `
-        + `(${colset(unticked)})`,
-        colset(unticked) === CONTROL_COLS.split(",").filter((l) => l !== "DR").join(","),
-        JSON.stringify({ drawn: colset(unticked), stored: untickedStored.list }));
 
   await page.evaluate(() => localStorage.removeItem("mlo-test-width-seed"));
 

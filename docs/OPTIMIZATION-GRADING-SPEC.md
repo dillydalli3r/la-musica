@@ -6005,29 +6005,35 @@ composition instead (R267). Above `lg` the pane sits beside the artwork.
   and by `tools/check_library_tables.cjs`, which measures the album tracklist at
   1440/1100/801/390 px in both states.
 
-  A list under the CURRENT key is not evidence either — the same rule one step
-  further on. The ids a stored list holds are the ids the build that WROTE it
-  offered, so a column this build ships visible by default either did not exist
-  there or could not be unticked in it; the owner's album tracklist read three
-  columns (`mlo-cols4-album-tracks` = `["num","cover","title"]` out of seven)
-  with a Columns menu that listed all seven ticked, because that menu draws the
-  list the hook RETURNS. `useColumnPrefs` therefore writes the default visible
-  ids that were in force BESIDE every list it stores (`mlo-coldft-*` — a record
-  of the list, never read on its own, and the reader's own tag columns are left
-  out of it because they live in `mlo-customcols-*`): a list whose record still
-  matches this build's own defaults is a choice the reader made about THESE
-  columns and is obeyed verbatim, while a list whose record is missing or
-  different is migrated like the v3 one — the ids it still has are kept and the
-  columns this build ships visible that its own record did NOT have come back.
-  Deliberate unticking keeps working, re-recording itself with every tick, until
-  a build changes what its defaults ARE. Pinned by `tools/check_library_tables.cjs`
-  at 1568 px: the three-id list draws the clean table's columns, that list beside
-  the owner's `mlo-colw-album-tracks` 900s hides nothing either, the repaired
-  list is STORED (so the menu, the table and the next tick agree), and a
-  one-line row is the CLEAN row's height — 52 px at 100 %, the cover cell's own
-  32 px box plus `.td`'s 20 px of padding, which is why the ~70 px of the
-  owner's screenshot is that row at the app's own zoom (`mlo.zoom` 135 →
-  70 px exactly), not a box in the row.
+  A list under the CURRENT key is not evidence either, and the reason is sharper
+  than the key's own: a list of three ids looks exactly like a reader who once
+  unticked four columns. The owner's album tracklist read three columns
+  (`mlo-cols4-album-tracks` = `["num","cover","title"]` out of seven) behind a
+  Columns menu that listed all seven ticked — that menu draws the list the hook
+  RETURNS — so nothing said where the other four had gone, and obeying the list
+  kept it that way. What is stored is therefore the reader's CHOICE, as a
+  versioned record beside the list (`mlo-coldft-*`): `{v: 2, removed, added}` —
+  which of the columns this build SHIPS visible they took away, and which
+  columns it does not ship (the `defHidden` built-ins, and their own tag
+  columns) they put there. The drawn set is DERIVED from the record — every
+  shipped column minus `removed`, plus `added`, in the table's own order — so a
+  column a later build starts shipping appears by itself, a column this build no
+  longer has is simply not there, and no stored list can quietly subtract a
+  column the reader never touched. A record WITHOUT that version (the v1 shape,
+  which was a fingerprint of a list; a hand-edited key; no record at all) is
+  UNKNOWN rather than a choice: it is the same MIGRATION the v3 key gets — the
+  ids the list still has are kept, every column this view draws by default is
+  added back (the reader's own tag columns included), and the result is
+  re-recorded as v2, once. An untick after that is
+  a `removed` entry and holds across reloads for good (showing the column again
+  takes it out of `removed`). Pinned by `tools/check_library_tables.cjs` at
+  1568 px: the three-id list draws the clean table's columns with a v1 record
+  and with none, both are rewritten as v2, a v2 record that removed `dr` keeps
+  `dr` hidden on the next load, the owner's `mlo-colw-album-tracks` 900s hide
+  nothing either, and a one-line row is the CLEAN row's height — 52 px at 100 %,
+  the cover cell's own 32 px box plus `.td`'s 20 px of padding, which is why the
+  ~70 px of the owner's screenshot is that row at the app's own zoom
+  (`mlo.zoom` 135 → 70 px exactly), not a box in the row.
 
 ### 7.63 The album badge names where its files came from, and the artist wears its own verdict
 

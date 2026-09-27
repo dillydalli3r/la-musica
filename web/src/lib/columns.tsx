@@ -32,6 +32,23 @@ export interface CustomCol {
   tag: string;
 }
 
+/** The reader's own column state for one view, stored BESIDE the visible-id
+ *  list (`mlo-coldft-*`) and read as the state — see `useColumnPrefs`.
+ *
+ *  `removed` is what they took out of the columns this build SHIPS visible;
+ *  `added` is what they put there that it does not ship (the `defHidden`
+ *  built-ins, and their own tag columns). The record says what was CHOSEN,
+ *  where a stored list only says what was once drawn — which is how a list of
+ *  three ids, written by a build with fewer album columns, could pass for a
+ *  reader who had unticked four of seven. `v` is what makes that impossible: a
+ *  record without the version is unknown, and unknown is reconciled once from
+ *  whatever the list still has (see the hook). */
+interface ColRecord {
+  v: 2;
+  removed: string[];
+  added: string[];
+}
+
 /** Column layout shared by every album tracklist — the album page table and
  *  the expanded album rows in the library albums view are the same table, so
  *  visible columns and drag-resized widths are stored under one prefs key.
@@ -328,94 +345,120 @@ export function phoneHide(cls: Record<string, string>, id: string): string {
  *  exist when it was written. Unticking anything after that is stored under the
  *  new key and honoured for good.
  *
- *  A list under the CURRENT key is not evidence either. The ids it holds were
- *  the ids the build that wrote it OFFERED, so a column this build ships
- *  visible by default either did not exist there or could not be unticked — and
- *  the owner's album tracklist read three columns (`["num","cover","title"]`
- *  of seven) with a Columns menu that listed all seven, so nothing on screen
- *  said where the other four had gone. What makes the two readable apart is
- *  the record kept BESIDE the list (`mlo-coldft-*`): the default visible ids
- *  that were in force when it was written. A list whose record still matches
- *  this build's own defaults is obeyed verbatim — that is a choice the reader
- *  made about THESE columns, and it survives every reload. A list whose record
- *  is missing or different is the same MIGRATION the v3 one gets: the ids it
- *  still has are kept, and the columns this build ships visible by default that
- *  its own record did NOT have come back, because a column absent from that
- *  build's defaults could not have been deliberately unticked in it. Unticking
- *  after that is stored with a fresh record and honoured until a build changes
- *  what its defaults ARE. */
+ *  A list under the CURRENT key is not evidence either, and the reason is
+ *  sharper than the key's own: a list of three ids looks exactly like a reader
+ *  who once unticked four columns. The owner's album tracklist read three
+ *  columns (`["num","cover","title"]` of seven) behind a Columns menu that
+ *  listed all seven ticked — the menu draws the list this hook RETURNS — so
+ *  nothing on screen said where the other four had gone, and obeying the list
+ *  kept it that way forever.
+ *
+ *  What is therefore stored is the reader's CHOICE, as a versioned record
+ *  beside the list (`mlo-coldft-*`): `{v: 2, removed, added}` — which of the
+ *  columns this build SHIPS visible they took away, and which columns it does
+ *  not ship (the `defHidden` built-ins, and their own tag columns) they put
+ *  there. The drawn set is DERIVED from it — every shipped column minus
+ *  `removed`, plus `added`, in the table's own order — so a column a later
+ *  build starts shipping appears by itself, a column this build no longer has
+ *  is simply not there, and no stored list can quietly subtract a column the
+ *  reader never touched. A record WITHOUT that version (a v1 fingerprint, a
+ *  hand-edited key, another shape) is UNKNOWN rather than a choice: it is the
+ *  same MIGRATION the v3 key gets — the ids the stored list still has are
+ *  kept, every column this view draws by default comes back, and the result
+ *  is re-recorded as v2, once. An untick after that is a `removed` entry and
+ *  sticks across reloads for good; showing a column again takes it out of
+ *  `removed`. */
 export function useColumnPrefs(key: string, defs: Col[]): [string[], (id: string) => void] {
   // v4: ids are versioned (the key moves when they change), and a v3 list is
   // migrated rather than filtered — see the block comment above.
   const storageKey = `mlo-cols4-${key}`;
   const legacyKey = `mlo-cols3-${key}`;
-  // The defaults the stored list was written under (see the block comment).
-  // The reader's OWN tag columns are deliberately not part of the record: they
-  // live in `mlo-customcols-*`, so adding one must not look like this build
-  // changing its defaults and resurrect a column unticked from the same list.
-  const defsKey = `mlo-coldft-${key}`;
+  const recordKey = `mlo-coldft-${key}`;
   const allVisible = defs.filter((c) => !c.defHidden).map((c) => c.id);
+  /** The columns THIS build ships visible by default: the built-ins. The
+   *  `defHidden` built-ins and the reader's own tag columns are not shipped —
+   *  they are what the record's `added` is for. */
   const shipped = defs.filter((c) => !c.defHidden && !c.tag).map((c) => c.id);
-  /** Store a list TOGETHER with the defaults it was written under: the record
-   *  says nothing on its own, and a list whose record went missing is the
-   *  migration case (it would be reconciled once, then recorded again). */
-  const remember = (list: string[]) => {
+  const ids = new Set(defs.map((d) => d.id));
+  const shippedIds = new Set(shipped);
+  // A list that would leave the table nothing but furniture (the row number,
+  // the cover) is not a choice anyone made about which columns to READ: the
+  // owner's Tracks view drew a `#` header and a column of row numbers with
+  // nothing in it (their words: "NOTHING SHOWS UP"), and the Columns menu
+  // looked right, because the columns this build never drew were never offered
+  // to be unticked. The view's own defaults are used instead — the same rule as
+  // the v3 note above, one step further on.
+  const chromeIds = new Set(defs.filter((d) => d.chrome).map((d) => d.id));
+  const drawsData = (list: string[]) => list.some((id) => !chromeIds.has(id));
+  /** The reader's choice as a record: what they took OUT of the shipped set
+   *  and what they ADDED to it. Deriving both from a drawn list is what makes
+   *  one toggle and one repair the same operation (see `remember`). */
+  const asChoice = (list: string[]): ColRecord => ({
+    v: 2,
+    removed: shipped.filter((id) => !list.includes(id)),
+    added: [...new Set(list)].filter((id) => ids.has(id) && !shippedIds.has(id)),
+  });
+  /** The columns a record draws, in the table's own order: every shipped
+   *  column the reader did not remove, plus everything they added. This is the
+   *  ONLY place a drawn set comes from — a stored list is never read as one. */
+  const drawnBy = (record: ColRecord) =>
+    defs.filter((c) => !record.removed.includes(c.id) && (shippedIds.has(c.id) || record.added.includes(c.id)))
+      .map((c) => c.id);
+  /** Store a choice: the record is the state, and the list beside it is the
+   *  menu's copy of what that state draws — written together, so the two
+   *  cannot disagree. */
+  const remember = (record: ColRecord) => {
     try {
-      localStorage.setItem(storageKey, JSON.stringify(list));
-      localStorage.setItem(defsKey, JSON.stringify(shipped));
+      localStorage.setItem(recordKey, JSON.stringify(record));
+      localStorage.setItem(storageKey, JSON.stringify(drawnBy(record)));
     } catch {
       /* ignore */
     }
   };
-  const [visible, setVisible] = useState<string[]>(() => {
-    const ids = new Set(defs.map((d) => d.id));
-    // A stored list that would leave the table nothing but furniture (the row
-    // number, the cover) is not a choice anyone made about which columns to
-    // READ: the owner's Tracks view drew a `#` header and a column of row
-    // numbers with nothing in it (their words: "NOTHING SHOWS UP"), and the
-    // Columns menu looked right, because the columns this build never drew were
-    // never offered to be unticked. The view's own defaults are used instead —
-    // the same rule as the v3 note above, one step further on.
-    const chromeIds = new Set(defs.filter((d) => d.chrome).map((d) => d.id));
-    const drawsData = (list: string[]) => list.some((id) => !chromeIds.has(id));
-    /** The default ids the stored list was written under, or null when there
-     *  is no record to read (a list written before this record existed, a
-     *  hand-edited key, storage switched off). */
-    const writtenUnder = (): string[] | null => {
-      try {
-        const raw = localStorage.getItem(defsKey);
-        if (!raw) return null;
-        const arr = JSON.parse(raw) as unknown;
-        return Array.isArray(arr) && arr.every((x) => typeof x === "string") ? (arr as string[]) : null;
-      } catch {
-        return null;
-      }
-    };
-    /** What the list is drawn as: its own ids, plus the columns this build
-     *  ships visible by default that its record did NOT have (see the block
-     *  comment). With no record at all every default comes back — nothing in
-     *  the list can say which of them the build that wrote it ever offered. */
-    const reconcile = (kept: string[], record: string[] | null) => {
-      const known = record ?? [];
-      const next = [...kept, ...allVisible.filter((id) => !known.includes(id))];
-      return [...new Set(next)];
-    };
+  /** The record as v2, or null for anything else — no record at all, a
+   *  hand-edited key, and every record from before the version. A v1 record is
+   *  a fingerprint of a list rather than a statement about the reader's choice,
+   *  so it is UNKNOWN, not obeyed. */
+  const readRecord = (): ColRecord | null => {
     try {
+      const raw = localStorage.getItem(recordKey);
+      if (!raw) return null;
+      const parsed = JSON.parse(raw) as Partial<ColRecord> | null;
+      if (!parsed || typeof parsed !== "object" || parsed.v !== 2) return null;
+      const listOf = (x: unknown) => (Array.isArray(x) ? x.filter((id): id is string => typeof id === "string") : []);
+      return { v: 2, removed: listOf(parsed.removed), added: listOf(parsed.added) };
+    } catch {
+      return null;
+    }
+  };
+  const [visible, setVisible] = useState<string[]>(() => {
+    try {
+      const record = readRecord();
+      if (record) {
+        const next = drawnBy(record);
+        if (next.length && drawsData(next)) {
+          // A shipped column this record never mentioned is drawn by it, so the
+          // menu's copy is put back in step after a build changed its defaults.
+          if (localStorage.getItem(storageKey) !== JSON.stringify(next)) {
+            localStorage.setItem(storageKey, JSON.stringify(next));
+          }
+          return next;
+        }
+        // A record that hides every data column is the same furniture-only
+        // state a list could be — the defaults are drawn and re-recorded.
+        remember(asChoice(allVisible));
+        return allVisible;
+      }
       const raw = localStorage.getItem(storageKey);
       if (raw) {
         const arr = JSON.parse(raw) as string[];
         const kept = arr.filter((x) => ids.has(x));
-        const record = writtenUnder();
-        const fresh = !!record && record.length === shipped.length && shipped.every((id) => record.includes(id));
-        if (kept.length && drawsData(kept) && fresh) return kept;
-        // Ignoring a list is not enough: the Columns menu draws the list this
-        // hook RETURNS, so the reader sees the defaults ticked while the stored
-        // one is still `["num"]` — and the next tick in that menu would write
-        // from the broken list and collapse the table to the one column they
-        // clicked. So the reconciled list is STORED as well as drawn, once,
-        // and the menu, the table and the next toggle all agree from here on.
-        const next = kept.length && drawsData(kept) ? reconcile(kept, record) : allVisible;
-        remember(next);
+        // No v2 record: the list is a reading of the build that WROTE it, so
+        // the ids it still has are kept and every column this view draws by
+        // default comes back — then the result is recorded as v2, once.
+        const base = kept.length && drawsData(kept) ? kept : allVisible;
+        const next = [...new Set([...base, ...allVisible])];
+        remember(asChoice(next));
         return next;
       }
       const old = localStorage.getItem(legacyKey);
@@ -423,7 +466,7 @@ export function useColumnPrefs(key: string, defs: Col[]): [string[], (id: string
         const arr = JSON.parse(old) as string[];
         const kept = arr.filter((x) => ids.has(x));
         const next = [...new Set([...kept, ...allVisible])];
-        remember(next);
+        remember(asChoice(next));
         localStorage.removeItem(legacyKey);
         return next;
       }
@@ -435,7 +478,7 @@ export function useColumnPrefs(key: string, defs: Col[]): [string[], (id: string
   const toggle = (id: string) =>
     setVisible((v) => {
       const next = v.includes(id) ? v.filter((x) => x !== id) : [...v, id];
-      remember(next);
+      remember(asChoice(next));
       return next;
     });
   return [visible, toggle];
