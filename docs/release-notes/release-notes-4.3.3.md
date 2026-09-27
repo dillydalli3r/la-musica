@@ -2,7 +2,7 @@
 
 Four reports from a real install, one of them outright broken.
 
-## The album page was the one page with no width
+## The album and track pages had no page width
 
 Every page in the app is `mx-auto max-w-[1600px]` — Home, Library, Artist,
 Downloads, Favorites, Grading, the import wizard — and **AlbumPage and
