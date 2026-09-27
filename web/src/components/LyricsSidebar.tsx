@@ -3,6 +3,7 @@ import { AudioLines, X } from "lucide-react";
 import { api } from "../api";
 import { parsePlayerLrc, parseLrc, splitStoredLines, hasLyricsText, activeLineRange, KaraokeWords, type LrcLine } from "./LyricsViewer";
 import { useLyricsFollow, LYRICS_PAD_BOTTOM, LYRICS_PAD_TOP } from "../lib/lyrScroll";
+import { isInstrumental } from "./Badges";
 import Visualizer from "./Visualizer";
 import LyricZoom, { LYRIC_ZOOM_MAX, LYRIC_ZOOM_MIN } from "./LyricZoom";
 import LyricOffset from "./LyricOffset";
@@ -106,7 +107,7 @@ export default function LyricsSidebar({
           lyrics: main,
           xlit: typeof t.lyrics_xlit === "string" && t.lyrics_xlit.trim() ? splitStoredLines(t.lyrics_xlit, withLeader) : null,
           trans: typeof t.lyrics_trans === "string" && t.lyrics_trans.trim() ? splitStoredLines(t.lyrics_trans, withLeader) : null,
-          instrumental: ((t.tags as Record<string, string>)?.INSTRUMENTAL ?? "").toString().trim() === "1",
+          instrumental: isInstrumental(t.tags),
           forPath: path,
           title: (t.tags as Record<string, string>)?.TITLE,
           album: (t.tags as Record<string, string>)?.ALBUM,
@@ -316,11 +317,17 @@ export default function LyricsSidebar({
                 onClick={
                   seekable
                     ? () => {
-                        // Seek, then center the clicked line directly — the
-                        // active-line step misses clicks inside the line
-                        // that is already playing.
+                        // Seek, then carry the reader to the clicked line —
+                        // the active-line step misses clicks inside the line
+                        // that is already playing, and "glide" is what makes
+                        // the pane TRAVEL there instead of teleporting. The
+                        // 60 fps clock is seeded with the target time in the
+                        // same breath: the emphasis lands with the press
+                        // instead of one frame behind it, which is the flash
+                        // the report named.
+                        setSmoothTime(l.time);
                         onSeek(l.time);
-                        centerLine(i);
+                        centerLine(i, "glide");
                       }
                     : undefined
                 }

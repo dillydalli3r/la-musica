@@ -6766,7 +6766,18 @@ def _similarity(a, b):
 # --------------------------------------------------------------------------- #
 # LRCLIB
 # --------------------------------------------------------------------------- #
-_LRCLIB_HEADERS = {"User-Agent": USER_AGENT}
+def _lrclib_ua():
+    """The ONE LRCLIB User-Agent: the engine client's, which carries the app's
+    own version (LRCLIB's implementation requirements ask for name, version
+    and a link). Imported here rather than spelled twice — this module's own
+    `USER_AGENT` is MusicBrainz's and says "2.0", a version the app left
+    behind."""
+    from mlo.lyrics_providers import USER_AGENT
+
+    return USER_AGENT
+
+
+_LRCLIB_HEADERS = {"User-Agent": _lrclib_ua()}
 _lrclib_last = 0.0
 _lrclib_lock = threading.Lock()
 

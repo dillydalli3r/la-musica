@@ -58,13 +58,61 @@ ok(pub.to_plain("[00:01.00]<00:01.20>Kimi <00:01.60>no na\n[00:03.50]\n") == "Ki
 ok(pub.to_plain("[ti:Song]\n[ar:Band]\nHello\n") == "Hello",
    "LRC metadata headers are not lyrics")
 
-print("== the submission body ─────────────────────────────────────────")
-sent = {}
+print("== the publish token (LRCLIB's proof of work) ───────────────────")
+# The rule is LRCGET's solver, which LRCLIB's docs point at: nonce = 0, 1, 2 …
+# in decimal appended to the prefix, kept when sha256(prefix + nonce) compares
+# at most the target byte by byte from the front. The smallest nonce is the
+# answer, and the test finds it the slow way so the fast one has something to
+# disagree with.
+import hashlib
+import json
+
+
+def smallest_nonce(prefix, target, limit=4_000_000):
+    for n in range(limit):
+        if hashlib.sha256((prefix + str(n)).encode()).digest()[:len(target)] <= target:
+            return str(n)
+    return None
+
+
+PREFIX = "la-musica-check-"
+TWO_DEEP = bytes([0, 0, 0xFF]) + b"\x00" * 29
+want = smallest_nonce(PREFIX, TWO_DEEP)
+got = lp.solve_publish_challenge(PREFIX, TWO_DEEP.hex())
+ok(got == want, f"the smallest satisfying nonce is returned ({got} vs {want})")
+ok(hashlib.sha256((PREFIX + got).encode()).digest()[:3] <= TWO_DEEP[:3],
+   "and its digest satisfies the target")
+# A digest that EQUALS the target is accepted (LRCGET's compare stops at the
+# first difference and only a greater byte rejects) — even though the tail of
+# LRCLIB's own target is all zeros and would never be reached.
+EQUAL_PREFIX = "equal-case-"
+eq_nonce = "0"
+EQ_TARGET = hashlib.sha256((EQUAL_PREFIX + eq_nonce).encode()).digest()
+ok(lp.solve_publish_challenge(EQUAL_PREFIX, EQ_TARGET.hex()) == eq_nonce,
+   "a digest equal to the target is accepted")
+ok(lp.solve_publish_challenge("p", "zz") is None, "a target that is not hex solves to nothing")
+ok(lp.solve_publish_challenge("p", "") is None, "an empty target solves to nothing")
+ok(lp.solve_publish_challenge("p", "00" * 32, 0.2) is None,
+   "an unsatisfiable target gives up at its deadline instead of spinning")
+
+print("== the submission request ───────────────────────────────────────")
+# Two requests reach LRCLIB per publish: the challenge, then the submission
+# carrying that token. The metadata is the BODY's — LRCLIB's PublishRequest
+# has no query half — and the token is fresh per submission, so it is neither
+# cached nor reused.
+CHALLENGE = {"prefix": PREFIX, "target": TWO_DEEP.hex()}
+sent = []
+answers = {}
 
 
 def fake_request(url, headers=None, data=None, timeout=15, retries=3):
-    sent.update(url=url, headers=headers or {}, data=data)
-    return sent.pop("status", 201), sent.pop("body", b"")
+    sent.append({"url": url, "headers": headers or {}, "data": data})
+    for key, answer in answers.items():
+        if key in url:
+            return answer
+    if url.endswith("/request-challenge"):
+        return 200, json.dumps(CHALLENGE).encode()
+    return 201, b""
 
 
 real_request = lp._request
@@ -73,22 +121,45 @@ try:
     okr, msg = lp.lrclib_publish("Artist", "Song", "Album", 213,
                                  plain="Hello\nthere", synced="[00:01.00]Hello\n[00:03.00]there")
     ok(okr and "published" in msg, f"a 201 is a published submission ({msg})")
-    ok("artist_name=Artist" in sent["url"] and "track_name=Song" in sent["url"]
-       and "album_name=Album" in sent["url"] and "duration=213" in sent["url"],
-       f"the query carries artist/track/album/duration ({sent['url'].split('?')[1]})")
+    ok(len(sent) == 2 and sent[0]["url"].endswith("/request-challenge") and sent[0]["data"] == b"",
+       f"the publish first asks for a challenge ({[s['url'] for s in sent]})")
     import json
-    body = json.loads(sent["data"].decode("utf-8"))
-    ok(body == {"plainLyrics": "Hello\nthere", "syncedLyrics": "[00:01.00]Hello\n[00:03.00]there"},
-       f"both lyric forms travel in the JSON body ({body})")
-    ok(sent["headers"].get("Content-Type") == "application/json"
-       and sent["headers"].get("User-Agent"),
+    challenge_body = json.loads(sent[1]["data"].decode("utf-8"))
+    ok(challenge_body == {"trackName": "Song", "artistName": "Artist", "albumName": "Album",
+                          "duration": 213, "plainLyrics": "Hello\nthere",
+                          "syncedLyrics": "[00:01.00]Hello\n[00:03.00]there"},
+       f"the metadata and both lyric forms travel in the JSON body ({challenge_body})")
+    ok("?" not in sent[1]["url"], f"the submission URL carries no query string ({sent[1]['url']})")
+    token = sent[1]["headers"].get("X-Publish-Token") or ""
+    pre, _, nonce = token.partition(":")
+    ok(pre == PREFIX and hashlib.sha256((pre + nonce).encode()).digest()[:3] <= TWO_DEEP[:3],
+       f"the submission carries the solved challenge as X-Publish-Token ({token[:24]}…)")
+    ok(sent[1]["headers"].get("Content-Type") == "application/json"
+       and sent[1]["headers"].get("User-Agent", "").startswith("la musica v"),
        "the request carries its type and the descriptive User-Agent LRCLIB requires")
 
-    lp._request = lambda *a, **k: (409, b"track already exists")
+    # A token LRCLIB refuses is reported with LRCLIB's own words.
+    sent.clear()
+    answers["/publish"] = (400, b'{"code":400,"name":"IncorrectPublishTokenError",'
+                                b'"message":"The provided publish token is incorrect"}')
+    okr, msg = lp.lrclib_publish("Artist", "Song", "Album", 213, plain="Hello")
+    ok(not okr and "IncorrectPublishTokenError" in msg, f"a refused token is reported ({msg})")
+
+    # No challenge, no submission: an unreachable challenge endpoint fails the
+    # publish instead of sending it unauthenticated.
+    sent.clear()
+    answers.clear()
+    answers["/request-challenge"] = (503, b"")
+    okr, msg = lp.lrclib_publish("Artist", "Song", "Album", 213, plain="Hello")
+    ok(not okr and "publish token" in msg and not any(s["url"].endswith("/publish") for s in sent),
+       f"a missing challenge fails before any submission ({msg})")
+
+    answers.clear()
+    answers["/publish"] = (409, b"track already exists")
     okr, msg = lp.lrclib_publish("Artist", "Song", "Album", 213, plain="Hello")
     ok(not okr and "already has this track" in msg, f"a 409 is reported as a duplicate ({msg})")
 
-    lp._request = lambda *a, **k: (429, b"")
+    answers["/publish"] = (429, b"")
     okr, msg = lp.lrclib_publish("Artist", "Song", "Album", 213, plain="Hello")
     ok(not okr and "rate-limit" in msg, f"a 429 names the rate limit ({msg})")
 

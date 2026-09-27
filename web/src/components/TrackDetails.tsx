@@ -9,7 +9,7 @@ import type { AdvisoryFetchResult, CreditRow, InstrumentalFetchResult } from "..
 import type { Track } from "../types";
 import { fmtDuration, fmtTech } from "../lib/fmt";
 import { trackRef } from "../lib/refs";
-import { AuditBadge, GradeBadge, LyricsKindChip, advisoryLine, advisoryOutcome, allowPlainOf, instrumentalLine } from "./Badges";
+import { AuditBadge, GradeBadge, LyricsKindChip, advisoryLine, advisoryOutcome, allowPlainOf, instrumentalLine, isInstrumental } from "./Badges";
 import TrackDownloadExport from "./TrackDownloadExport";
 import Modal from "./Modal";
 import LogReport from "./LogReport";
@@ -155,7 +155,12 @@ export default function TrackDetails({
     replyFor(checked?.inst?.values, trackPath) ?? tags.INSTRUMENTAL,
     answerSources(replyFor(checked?.inst?.evidence, trackPath))
   );
-
+  // The tag the app HIDES lyrics under: an instrumental's stored words are
+  // never shown (NowPlayingView's own state rule, `npLyricsMode`), so this
+  // panel may not grade the text the player refuses to show — a stored plain
+  // text on an instrumental read "✕ Plain … this track should hold a synced
+  // version", which is a demand no instrumental can satisfy (reported).
+  const instrumentalTag = isInstrumental(track.tags);
   return (
     <Modal
       onClose={onClose}
@@ -191,7 +196,9 @@ export default function TrackDetails({
               title: tagTooltip(reg, key),
               value: String(tags[key as keyof typeof tags]),
             })),
-            { label: "Lyrics", value: track.lyrics_kind ? (
+            { label: "Lyrics", value: instrumentalTag ? (
+              <span className="text-zinc-500">instrumental — stored lyrics stay hidden</span>
+            ) : track.lyrics_kind ? (
               <span className="inline-flex items-center gap-1.5 min-w-0">
                 <LyricsKindChip kind={track.lyrics_kind} allowPlain={allowPlain} size="sm" />
                 <span className="text-zinc-500">{lyricsSource}</span>

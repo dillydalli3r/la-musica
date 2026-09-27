@@ -439,8 +439,9 @@ const check = (name, ok, detail) => {
 
   // Desktop and tablet are untouched: at `md` and up nothing folds and the
   // album table holds the floor its own columns sum to (ALBUM_TRACK_COL_W plus
-  // the corner control; 888 px, and 1080 with the owner's two 96 px tag
-  // columns this check sets up). It used to be a pinned `md:min-w-[814px]`,
+  // the corner control; 952 px, and 1144 with the owner's two 96 px tag
+  // columns this check sets up — the genre floor alone is 160 of that, sized to
+  // a two-name value). It used to be a pinned `md:min-w-[814px]`,
   // which is why the bound below is the columns' own sum rather than the old
   // constant — the floor is DERIVED from the column spec now (see
   // ALBUM_TRACK_MIN_W in lib/columns), so what is pinned is that the table is
@@ -468,11 +469,12 @@ const check = (name, ok, detail) => {
    * `ColFloorHolder` — an empty zero-height box inside the header cell, because
    * a `min-width` on the cell is IGNORED in a fixed layout (measured: a title
    * cell asking for 280 px came out 66 px wide with a 0 px name). What this
-   * case pins is both halves: the column takes the free width (with the owner's
-   * two 96 px tag columns set up here, the floors sum to 1080 in a 1200 px
-   * wrapper, so the name must come out 400 px — it came out 311 while the free
-   * width was shared out proportionally), and the wrapper still does not scroll
-   * at this width, so the width it took WAS free.
+   * case pins is both halves: the column takes the free width — it must be
+   * exactly what the wrapper has after the fixed columns, measured as that
+   * difference rather than as a number, since the floors themselves are
+   * measurements of their own values and move when one is re-measured (the
+   * genre floor did: 96 → 160 px, "Rock; Garage Rock" is 148) — and the wrapper
+   * still does not scroll at this width, so the width it took WAS free.
    *
    * The second half is the reader's own outcome: of the album's titles, any
    * title whose one-line width fits the name's box must be drawn on ONE line,
@@ -511,8 +513,18 @@ const check = (name, ok, detail) => {
   console.log("\n[album tracklist @1440]");
   console.log(`  name column ${wide.titleColW} px, wrapper ${wide.wrapScroll}/${wide.wrapClient} px, rows: `
     + titleRows.map((r) => `"${r.text.slice(0, 18)}…" need ${r.need} box ${r.box} ${r.lines} line(s)`).join(" | "));
-  check(`the name column takes the table's free width (${wide.titleColW} px, its own floor is 280)`,
-        wide.titleColW >= 380, `${wide.titleColW} px`);
+  // The name column is the row's ONE flexible column, so what it takes is
+  // whatever the wrapper has left after every other cell — the data columns
+  // AND the corner control, which is chrome but still holds width. Stated as
+  // that difference rather than as a number, because the fixed columns' floors
+  // are measurements of their own values and move when one of them is
+  // re-measured (the genre floor did: 96 → 160 px for a two-name value).
+  const otherCols = wide.widths.filter((w) => w.w > 0 && w.label !== "Title")
+    .reduce((n, w) => n + w.w, 0);
+  const slack = wide.wrapClient - otherCols - wide.titleColW;
+  check(`the name column takes the table's free width (${wide.titleColW} px = `
+        + `${wide.wrapClient} − ${otherCols} of other cells, its own floor is 280)`,
+        wide.titleColW >= 280 && Math.abs(slack) <= 2, `${wide.titleColW} px, ${slack} px unaccounted`);
   check(`…and the table still fits, so what it took was free `
         + `(${wide.wrapScroll}/${wide.wrapClient} px)`,
         wide.wrapScroll <= wide.wrapClient + 1, JSON.stringify({ scroll: wide.wrapScroll, client: wide.wrapClient }));
@@ -595,6 +607,24 @@ const check = (name, ok, detail) => {
   }
   await page.evaluate(() => localStorage.removeItem("mlo-test-width-seed"));
   await page.setViewportSize({ width: 1440, height: 900 });
+
+  // ---- the album page obeys the app's own page width ----------------------
+  /* The report behind it: "Columns in the app are way to long, atleast on
+   * album pages, also rows seem to wide. To be perfectly clear, columns should
+   * auto-fit to the space on screen." AlbumPage (and TrackPage) were the only
+   * pages without the `mx-auto max-w-[1600px]` wrapper every other page
+   * carries — Home, Library, Artist, Downloads, Favorites, Grading, Settings,
+   * the import wizard — so the tracklist was the one surface that stretched to
+   * the window: at 2560 the table was 2320 px wide and the name column alone
+   * took 1712 of it. Since the name column is deliberately the row's one
+   * flexible column (R313, and the owner's own earlier report about a title
+   * wrapping while free width sat beside it), the page width IS the lever: the
+   * free width is the page's, and the page is 1600 px like every other one. */
+  const capped = await at(2560, null);
+  check("a 2560 px window does not widen the album tracklist past the app's page width",
+        capped.tableW <= 1600 && capped.wrapScroll <= capped.wrapClient + 1
+        && capped.titleColW < 1200,
+        `table ${capped.tableW} px, name column ${capped.titleColW} px, wrapper ${capped.wrapScroll}/${capped.wrapClient} px`);
 
   // ---- a stored visible-id list that hides most of the table --------------
   /* The owner's album page, read as a SHAPE: three columns (`#`, COVER, Title)

@@ -84,7 +84,15 @@ export const ALBUM_TRACK_COL_W: Record<string, string> = {
   // floor there would put a 280 px column in a 342 px row (which is why the
   // holder is `hidden` there — see ColFloorHolder).
   title: "md:w-auto",
-  genre: "md:w-24",
+  // 160, measured: "Rock; Garage Rock" — a two-name genre, which is what the
+  // app's own vocabulary writes — is 148 px at this table's font, so the old
+  // 96 wrapped it onto THREE lines and made every track row 80 px tall (the
+  // 32 px cover cell set 52; the wrapped genre set the row). The report is the
+  // one above this table's name column: "columns are way to long … rows seem
+  // too wide". Sized the way the rest of the floors are (widest value + a few
+  // px of slack); a three-name value still wraps, and the row still grows with
+  // it — a taller row is honest, but only for a value that really is long.
+  genre: "md:w-40",
   dur: "w-20",
   bitrate: "md:w-[184px]",
   dr: "md:w-14",
@@ -125,9 +133,11 @@ export const TABLE_FIT = "w-full md:min-w-max";
 export const ALBUM_TRACK_MIN_W = "md:min-w-max";
 
 /** Floor for a user-added tag column (`tag:*` ids): the values are free text,
- *  so it gets the same readable minimum as a genre cell. Without a width of its
- *  own such a column is auto, and TABLE_FIT's `min-w-max` would then grow the
- *  table to the longest tag value it can find. */
+ *  so it gets a readable minimum — the width a single genre name holds (the
+ *  genre column itself is sized to a two-name value, `ALBUM_TRACK_COL_W`).
+ *  Without a width of its own such a column is auto, and TABLE_FIT's
+ *  `min-w-max` would then grow the table to the longest tag value it can
+ *  find. */
 export const TAG_COL_W = "w-[96px]";
 
 /** Default album-tracklist columns (num/cover/title/genre/dur/bitrate/DR). */

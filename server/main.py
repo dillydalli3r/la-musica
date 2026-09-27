@@ -4706,6 +4706,14 @@ async def lyrics_publish(req: LyricsPublishRequest):
             stored = af.get_lyrics()
             if stored:
                 synced = stored
+    if synced is not None and plain is None:
+        # A synced text goes up with its plain form — LRCLIB's own validator
+        # has refused a synced-only body before (the editor derives this for
+        # its own paste, and script 18 does it too), so whichever way the
+        # synced text arrived, the plain half is derived here.
+        from mlo.lyrics_publish import to_plain
+
+        plain = to_plain(synced) or None
     ok, msg = await asyncio.to_thread(
         lrclib_publish, artist, track, album, duration, plain, synced)
     # `forced` says the caller overrode the community-copy rule, so the UI can

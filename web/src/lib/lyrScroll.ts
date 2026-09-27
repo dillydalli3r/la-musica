@@ -25,10 +25,10 @@ export type LyricMove = "glide" | "snap";
 export interface LyricsGlider {
   /** The scroller this glider drives. */
   readonly el: HTMLElement;
-  /** Bring `el` to the pane's lyric anchor line. `"snap"` lands immediately
-   * (a press on a line, an offset / zoom change, a seek — anything the reader
-   * did), `"glide"` (the default) carries there with the shared ease — the
-   * clock's own advance to the next line. */
+  /** Bring `el` to the pane's lyric anchor line. `"snap"` lands in the same
+   *  frame — a scrub, an offset / zoom change, anything the reader did that is
+   *  a jump; `"glide"` (the default) carries there with the shared ease — the
+   *  clock's own advance to the next line, and a press on a line. */
   center(el: HTMLElement, move?: LyricMove): void;
   /** Stop gliding and adopt the current position as resting (user took
    * over the pane with the wheel / touch). */
@@ -152,23 +152,33 @@ export function createLyricsGlider(c: HTMLElement, anchor: number = LYRICS_ANCHO
 const HOLD_MS = 1200;
 /** A clock jump this large between frames can only be a seek. */
 const SEEK_JUMP = 1.2;
-/** How long a reader-made move keeps the pane SNAPPING — one window for both
- *  halves of the move: the scroller lands on its target in the same frame
- *  instead of gliding there (`lyricMove` below) AND the line's own emphasis
- *  drops its transition for the same window (`snapping`, which the surfaces
- *  render with), so the words and the highlight arrive together. It covers the
- *  re-parse the offset buttons trigger and the re-sync a seek causes: skipping
- *  to a line used to show the transit from the line before it, and a scrub
- *  sailed to where the needle was dropped.
+/** How long a reader-made move keeps the pane SNAPPING — the line's own
+ *  emphasis drops its transition for the window (`snapping`, which the
+ *  surfaces render with), so the highlight lands at once instead of easing
+ *  across the lines between the one left behind and the one arrived at. It
+ *  covers the re-parse the offset buttons trigger and the re-sync a seek
+ *  causes: skipping to a line used to show the transit from the line before
+ *  it.
+ *
+ *  The PANE's half of the move is not decided here: a scrub still lands on its
+ *  target in the same frame (`lyricMove` below), while a press on a line —
+ *  the one move where the reader asked to be BROUGHT somewhere — glides
+ *  (`centerLine`).
  *
  *  Long enough to span the commit that carries the move (a starved renderer
  *  commits late) and the emphasis' own `duration-motion-slow`, short enough
  *  that the next line the CLOCK advances to animates again. */
 export const LYRIC_JUMP_MS = 600;
+/** How long after a press its own seek is still recognised as that press.
+ *  `centerLine` runs in the click handler and the clock jump it caused arrives
+ *  with the next commit; anything past a few hundred ms later is a seek the
+ *  reader made elsewhere (the scrub bar) and is treated as one. */
+const PRESS_SEEK_MS = 250;
 
-/** Which way a retarget lands: `snap` for any move the READER made — a press
- *  on a line, an offset step, a zoom change, a seek — and `glide` for the
- *  clock's own advance to the next line. `jumpAt` is the timestamp of the last
+/** Which way a retarget lands: `snap` for the reader moves that are a jump —
+ *  an offset step, a zoom change, a scrub — and `glide` for the clock's own
+ *  advance to the next line and for a press on a line (whose move `centerLine`
+ *  passes explicitly). `jumpAt` is the timestamp of the last SNAPPING
  *  reader-made move (0 = none this session). Pure on purpose: the rule is the
  *  behaviour the owner reported, so tools/check_lyrscroll.cjs pins both halves
  *  of it without a DOM. */
@@ -195,15 +205,18 @@ export interface LyricsFollowOptions {
 }
 
 /** Auto-follow for one lyrics pane: keeps the sung line on the anchor line,
- * snaps on every reader-made move, glides on the clock's own line steps, and
- * gets out of the reader's way for `HOLD_MS` after a wheel / touch. Shared by
- * every pane so they can't drift apart. */
+ * snaps on the reader moves that are jumps (a scrub, an offset step, a zoom
+ * change), carries the reader on a press, glides on the clock's own line
+ * steps, and gets out of the reader's way for `HOLD_MS` after a wheel / touch.
+ * Shared by every pane so they can't drift apart. */
 export function useLyricsFollow({
   active, time, playing, scroll, rows, reset = null, anchor = LYRICS_ANCHOR,
 }: LyricsFollowOptions): {
-  /** Centre row `i` right now (click-to-seek) — outranks a reader hold, and
-   * lands in the same frame: the reader picked the line. */
-  centerLine: (i: number) => void;
+  /** Centre row `i` (a press on a line, or a pane re-opening). Outranks a
+   *  reader hold, and the emphasis lands with the call either way; `move`
+   *  decides the PANE's half — the default "snap" for a re-open that must not
+   *  drift, "glide" for a press, which is a request to be brought there. */
+  centerLine: (i: number, move?: LyricMove) => void;
   /** The reader moved the words themselves without naming a line — an offset
    * step, a zoom change, a seek. The pane re-centres on the sung line
    * instantly instead of gliding to it. */
@@ -219,6 +232,10 @@ export function useLyricsFollow({
   const holdUntil = useRef(0);
   const holdTimer = useRef(0);
   const jumpAt = useRef(0);
+  // When the pane last started carrying the reader to a line they pressed
+  // (`centerLine(i, "glide")`) — the seek that press causes must not be read
+  // as a scrub (see the seek effect below).
+  const pressAt = useRef(0);
   const snapTimer = useRef(0);
   const prevTime = useRef(-1);
   const playingRef = useRef(playing);
@@ -248,8 +265,13 @@ export function useLyricsFollow({
   // the same window, and kicks the follow effect so the pane re-centres even
   // when the active line itself did not change (an offset step inside one
   // line, a zoom change).
-  const markJump = useCallback(() => {
-    jumpAt.current = Date.now();
+  //
+  // `snapMove` is false for a press on a line, whose pane move is a glide: the
+  // emphasis still snaps (that is the half a jump always wants), but nothing
+  // carries a time stamp into the retarget rule, so the follow effect a press
+  // also kicks glides to the same line instead of landing on it.
+  const markJump = useCallback((snapMove = true) => {
+    if (snapMove) jumpAt.current = Date.now();
     releaseHold();
     setSnapping(true);
     window.clearTimeout(snapTimer.current);
@@ -268,11 +290,17 @@ export function useLyricsFollow({
     }, HOLD_MS + 50);
   }, [forPane]);
 
-  const centerLine = useCallback((i: number) => {
+  const centerLine = useCallback((i: number, move: LyricMove = "snap") => {
     const el = rows.current[i];
     if (!el) return;
-    markJump();
-    forPane()?.center(el, "snap");
+    // A press on a line is the one reader-made move that CARRIES the reader:
+    // the emphasis lands at once (`snapping`, so nothing eases across the
+    // lines between), and the pane glides there instead of teleporting.
+    // `pressAt` marks that jump for the seek effect below — a seek it can see
+    // but did not ask for is a scrub, and a scrub snaps.
+    if (move === "glide") pressAt.current = Date.now();
+    markJump(move === "snap");
+    forPane()?.center(el, move);
   }, [rows, forPane, markJump]);
 
   // New track: rewind, and drop any hold or glide left over from the one
@@ -300,10 +328,16 @@ export function useLyricsFollow({
   // follows is a jump, not a line step. Re-centre even when the jump lands
   // inside the line that was already active, which the active-line effect
   // below would never see.
+  //
+  // A press on a line seeks too, and its own centerLine already did all of
+  // that; the only thing left for this effect to do would be to snap the pane
+  // out from under the glide it just started, which is the teleport this
+  // guard exists to stop.
   useEffect(() => {
     const prev = prevTime.current;
     prevTime.current = time;
     if (prev < 0 || Math.abs(time - prev) <= SEEK_JUMP) return;
+    if (Date.now() - pressAt.current < PRESS_SEEK_MS) return;
     markJump();
   }, [time, markJump]);
 

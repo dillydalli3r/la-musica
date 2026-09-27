@@ -16,7 +16,7 @@ import { parseHexColor } from "../lib/accent";
 import { toast, useStore } from "../store";
 import { fmtTech, fmtPair, isVideoFile, originalYear } from "../lib/fmt";
 import { albumRef, artistRef, libraryRow, trackRef } from "../lib/refs";
-import { AdvisoryMark, LyricsKindChip, allowPlainOf } from "./Badges";
+import { AdvisoryMark, LyricsKindChip, allowPlainOf, isInstrumental } from "./Badges";
 import StarRating from "./StarRating";
 import ScrollingText from "./ScrollingText";
 import { ratingOf, useRatings, useSetRating } from "../lib/ratings";
@@ -1119,7 +1119,7 @@ export default function NowPlayingView(p: Props) {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [p.current.path]);
 
-  const instrumental = (tags?.INSTRUMENTAL ?? "").toString().trim() === "1";
+  const instrumental = isInstrumental(tags);
   // The lyrics on screen belong to `lyricsFor`; until the new track's
   // payload arrives they are stale — kept for layout stability, dimmed and
   // never highlighted.
@@ -1338,10 +1338,14 @@ export default function NowPlayingView(p: Props) {
         onClick={
           seekable
             ? () => {
+                // The 60 fps clock is seeded with the target time first, so
+                // the emphasis lands with the press rather than a frame
+                // behind it; then the seek, then the pane's own move, which
+                // "glide" makes a travel instead of a teleport (see
+                // `centerLine`).
+                setSmoothTime(l.time);
                 p.onSeek(l.time);
-                // Center the clicked line NOW — the active-line step alone
-                // misses clicks inside the line already playing.
-                centerLine(i);
+                centerLine(i, "glide");
               }
             : undefined
         }
@@ -1496,8 +1500,14 @@ export default function NowPlayingView(p: Props) {
             notice invented for the player. Nothing is reserved for it: the
             state is a property of the TRACK, so a track change can take the
             mark away — but the row is the player's fixed-height title row
-            either way, so nothing the block is made of moves when it does. */}
-        {lyricsState === "plain-refused" && (
+            either way, so nothing the block is made of moves when it does.
+            The mark waits for the track's OWN payload (`!staleLyrics`), the
+            same freshness gate `hasLyrics` uses: the state is derived from the
+            text on screen, which is deliberately the PREVIOUS track's while
+            the next one loads, so an ungated mark claimed "plain" from lyrics
+            the new track may not even have — an instrumental reached by next /
+            previous wore it for the length of the fetch (reported). */}
+        {lyricsState === "plain-refused" && !staleLyrics && (
           <LyricsKindChip kind="plain" allowPlain={false} size="sm" />
         )}
       </div>

@@ -629,7 +629,14 @@ export default function AlbumPage() {
         />
         <div className="absolute inset-0 bg-bg/50" />
       </div>
-      <div className="relative z-10 p-6 space-y-5">
+      {/* The app's ONE page width, like every other page: without it the
+          album page was the only surface that stretched to the window, so on a
+          wide monitor the tracklist's own floor plus the whole of the free
+          width landed in the name column — the reported "columns are way too
+          long, rows too wide". 1600 px is what Library/Artist/Favorites and
+          the rest are capped at, so the tracklist column measures the same
+          here as it does there. */}
+      <div className="relative z-10 p-6 space-y-5 mx-auto max-w-[1600px]">
         {/* hero: the cover plus the album identity, flush on the page
             background; the cover's own colour tints it. */}
         <div

@@ -6162,6 +6162,100 @@ composition instead (R267). Above `lg` the pane sits beside the artwork.
   `tools/check_player_state.cjs` §10 (the gained rows, the pane, the reorder,
   the preload, the hand-over, and the off/Repeat-one cases).
 
+### 7.66 A submission to LRCLIB is a token, a body, and LRCLIB's own words
+
+- **R325 — the publish client speaks LRCLIB's CURRENT contract, and its
+  refusals are reported verbatim.** Publishing a lyric is the one thing this
+  app does that writes to somebody else's database, and it is a POST that is
+  refused unless it carries BOTH halves of that contract:
+  (a) **a publish token.** `POST /api/publish` demands a fresh, single-use
+  `X-Publish-Token`, obtained from `POST /api/request-challenge`: a `prefix`
+  and a `target`, and the client must find the smallest `nonce` (decimal, 0, 1,
+  2 …) whose `sha256(prefix + nonce)` compares at most that target byte by byte
+  from the front — the rule LRCLIB's docs point at (LRCGET's
+  `challenge_solver.rs`). `mlo/lyrics_providers.solve_publish_challenge` is
+  that solver, bounded by `PUBLISH_SOLVE_DEADLINE`; the current target is three
+  zero bytes (~1 in 16.7M, measured 1.1M hashes/s ⇒ ~15 s), and the web's
+  `lyricsPublish` timeout sits above the deadline. Every submission takes a
+  FRESH token: a token is spent by the request it authorized, so one is never
+  cached or reused, and a publish that cannot get one fails without sending an
+  unauthenticated submission.
+  (b) **the metadata in the BODY.** `trackName`, `artistName`, `albumName`,
+  `duration`, `plainLyrics`, `syncedLyrics` — LRCLIB's `PublishRequest` has no
+  query-string half, and a submission whose fields are on the query is a 422
+  however good its token is. A synced text still travels with its plain form
+  beside it — `mlo/lyrics_publish.to_plain` strips the stamps, the editor
+  derives it for the paste it sends, and the endpoint derives it when a caller
+  submits a synced text alone.
+  The reply is LRCLIB's own: `201` is the submission, and anything else is
+  reported with the status and the response body (`400
+  IncorrectPublishTokenError`, a 429 rate limit, a 409 duplicate from an older
+  server) rather than turned into a generic failure. The client also identifies
+  itself the way LRCLIB requires — name, version and link — with the version
+  read from `mlo.__version__`, so a release cannot leave a stale copy behind.
+  Pinned by `tools/test_lyrics_publish.py` (the smallest nonce, the equality
+  boundary, an unsatisfiable target at its deadline, the token header, the body
+  fields, no query string, and the refusal wording) and
+  `tools/check_lrclib_publish.py`, which drives the real
+  `POST /api/lyrics/publish` against a stub that enforces the same rule and
+  verifies the submitted token itself.
+
+### 7.67 A press on a lyric line carries the reader, and an instrumental has no lyrics verdict
+
+- **R326 — a press on a lyric line MOVES the pane there, and the emphasis lands
+  with the press.** Pressing a line seeks to it, and the pane was made to SNAP
+  for exactly that move — it teleported, and the emphasis followed a frame
+  later, which the owner reported as "it kinda teleports to it … for like one
+  frame it shows the previous line then cuts to the next one very quickly and
+  looks jarring". The two halves are now separate and each answers the report:
+  the pane is CARRIED (`centerLine(i, "glide")`, the one reader-made move whose
+  choice a glide is), while every other reader move — a scrub on the bar, an
+  offset step, a zoom change — still lands in the same frame (`lyricMove`,
+  `jump`); and the surfaces seed the 60 fps clock (`setSmoothTime(l.time)`) so
+  the clicked line is the emphasised one in the press's own commit rather than
+  the next one. The seek the press causes is recognised as the press
+  (`PRESS_SEEK_MS`) and does not re-snap the pane through `markJump`. Pinned by
+  `tools/check_lyric_press.cjs`, which fails on the teleport (the biggest
+  single-frame step is the whole move) and measures the emphasis frame and the
+  closest approach to the anchor lane; the module-level halves stay in
+  `tools/check_lyrscroll.cjs`.
+- **R327 — the album and track pages are the app's page width, and a column
+  floor is a MEASURED value.** Every page in the app is
+  `mx-auto max-w-[1600px]`; AlbumPage and TrackPage were the two without it, so
+  the tracklist was the one surface that stretched to the window — at 2560 px
+  the table was 2320 px wide with the name column alone taking 1712 of it,
+  which is the reported "columns are way to long, atleast on album pages, also
+  rows seem to wide … columns should auto-fit to the space on screen". The
+  name column is deliberately the row's one flexible column (R313), so the page
+  width is the right lever: the free width is the page's, and the page is the
+  same 1600 px the Library's tables get. The genre column's floor is the other
+  half of that report: 96 px could not hold "Rock; Garage Rock" (148 px at the
+  table's font), so it wrapped onto three lines and made every track row 80 px
+  tall — the floor is 160 now, measured the way the other floors are (widest
+  value + a few px of slack), and the row is 52 px again.
+  `tools/check_library_tables.cjs` holds both: a 2560 px window may not widen
+  the tracklist past the page width, the name column must be exactly what the
+  wrapper has left after every other cell, and a one-line row keeps a one-line
+  row's height.
+- **R328 — an instrumental track carries no lyrics verdict, anywhere.** The app
+  hides an instrumental's stored words (`npLyricsMode`: the state wins over the
+  text), so no surface may grade them: a stored PLAIN text on a track tagged
+  `INSTRUMENTAL=1` was reported with the full failing vocabulary — the red
+  cross and the sentence "this track should hold a synced version" — on the
+  track page's own chip row and in the stored readout (`TrackDetails`), a
+  demand no instrumental can satisfy ("it shouldn't say 'x plain' for
+  instrumental tracks", reported). Both surfaces now say what the app does
+  instead ("Instrumental", "instrumental — stored lyrics stay hidden"), and the
+  derivation lives once (`Badges.isInstrumental`) for the player, the sidebar,
+  the page and the readout. Two guards come with it: the player's refused-plain
+  mark waits for the track's OWN payload (`!staleLyrics`, the gate
+  `hasLyrics` already used), so a track change cannot wear the previous
+  track's lyrics state — an instrumental reached by next / previous wore the
+  red mark for the length of the fetch; and the lyrics-kind chip keeps its
+  meaning everywhere else (a plain text in the EDITOR, and a staged file during
+  an import, are statements about that text, which is what those surfaces are
+  for).
+
 ## 8. Recommended runbook
 
 Nothing here is a substitute for the app's own Dependencies page: run it first

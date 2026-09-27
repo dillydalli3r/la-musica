@@ -2408,13 +2408,16 @@ export const api = {
   // Submit lyrics to LRCLIB on behalf of a track (or with explicit fields).
   /** Submit lyrics to LRCLIB. `force` overrides the "the database already has
    *  this recording" rule — the editor sends it only on an explicitly-confirmed
-   *  second press, and the reply carries `exists` so the UI can offer that. */
+   *  second press, and the reply carries `exists` so the UI can offer that.
+   *  The timeout is minutes, not seconds: every submission first solves
+   *  LRCLIB's proof-of-work challenge (~2^24 sha256, measured 15-25 s), which
+   *  the server does in one process (`mlo/lyrics_providers.py`). */
   lyricsPublish: (body: { path?: string; artist?: string; track?: string; album?: string; duration?: number; plain?: string; synced?: string; force?: boolean }) =>
     json<{ ok: boolean; message: string; exists?: boolean; forced?: boolean }>(`${API}/lyrics/publish`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(body),
-    }, 60000),
+    }, 180000),
   /** Distribute word/syllable times inside each line's slot, weighted by
    *  length (deterministic, no network). `text` defaults to the stored
    *  lyrics; the reply is the full LRC. */

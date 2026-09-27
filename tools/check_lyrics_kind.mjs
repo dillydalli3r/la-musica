@@ -167,6 +167,22 @@ const ALBUM_PAYLOAD = {
   source_summary: null,
 };
 
+/** The reported state, on its own album so the cases above keep their three
+ *  tracks: a track TAGGED instrumental (`INSTRUMENTAL=1`) that still carries a
+ *  stored plain text. The app hides an instrumental's words everywhere
+ *  (`npLyricsMode`), so no surface may grade them — the track page and the
+ *  readout used to wear the red "Plain" mark and the sentence "this track
+ *  should hold a synced version", which no instrumental can satisfy. */
+const INST_TRACK = {
+  ...track(1, "01 - Instrumental.flac", "plain"),
+  tags: { ...TRACKS[1].tags, TITLE: "Wordless Kind", INSTRUMENTAL: "1" },
+};
+const INST_ALBUM = {
+  ...ALBUM_PAYLOAD,
+  tracks: [INST_TRACK], track_count: 1, pass_count: 1, total_checks: 1,
+  lyrics_present: 1, lyrics_expected: 1, instrumental_count: 1,
+};
+
 /** The library the import wizard reads — the album AND its tracks, which is
  *  what the per-track steps (lyrics among them) list. */
 const LIBRARY = {
@@ -400,6 +416,20 @@ check("track page: the lyric-less track wears no kind mark at all",
 check("track page: the synced track's lyrics PANE says timed too",
       (tpSynced.html.match(/data-lyrics-kind="synced"/g) || []).length >= 1);
 
+// An INSTRUMENTAL track's stored plain text is not a lyrics verdict: the
+// header says what the app does with those words instead of grading them.
+const tpInst = await render("/src/pages/TrackPage.tsx", `/track/${enc(INST_TRACK.path)}`,
+  [[["config"], cfg(false)], [["album", ALBUM], INST_ALBUM],
+   [["track-tags", INST_TRACK.path], { ...trackTags(INST_TRACK.path, PLAIN_TEXT), tags: INST_TRACK.tags }]],
+  (mod) => React.createElement(Routes, null,
+    React.createElement(Route, { path: "/track/:path", element: React.createElement(mod.default) })));
+check("track page: an instrumental's stored plain text is NOT a lyrics failure",
+      !chipElement(tpInst.html, "plain") && !tpInst.html.includes("data-lyrics-fail")
+      && !tpInst.text.includes("Accept plain (unsynced) lyrics"),
+      tpInst.text.slice(0, 240));
+check("track page: …its header says what the app does with the words",
+      tpInst.html.includes("stored lyrics stay hidden"), tpInst.text.slice(0, 240));
+
 // --------------------------------------------------------------------------- #
 // 5. the track's own READOUT (TrackDetails) — the "Lyrics" row
 // --------------------------------------------------------------------------- #
@@ -425,6 +455,13 @@ check("track details (setting on): …and the neutral chip instead",
       && !chipElement(detPlainOn.html, "plain").includes("data-lyrics-fail"));
 check("track details: the lyric-less track's row says missing, with no chip",
       detNone.text.includes("missing") && kindCount(detNone.html) === 0, String(kindCount(detNone.html)));
+
+const detInst = await render("/src/components/TrackDetails.tsx", "/",
+  albumCache(false),
+  (mod) => React.createElement(mod.default, { track: INST_TRACK, albumPath: ALBUM, onClose: () => {} }));
+check("track details: an instrumental's Lyrics row states the app's behaviour, not a kind",
+      !chipElement(detInst.html, "plain") && detInst.html.includes("instrumental — stored lyrics stay hidden"),
+      detInst.text.slice(0, 240));
 
 // --------------------------------------------------------------------------- #
 // 6. the track's own lyric surfaces: LyricsViewer and LyricsManagerModal

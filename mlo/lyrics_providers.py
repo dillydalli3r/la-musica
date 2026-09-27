@@ -90,6 +90,7 @@ keys stayed pinned instead of guessed:
   mishear (that is stated in Settings, not hidden).
 """
 import base64
+import hashlib
 import html
 import json
 import os
@@ -101,11 +102,22 @@ import urllib.error
 import urllib.parse
 import urllib.request
 
-USER_AGENT = "MusicLibraryOptimizer/2 (la musica)"
+from mlo import __version__ as _APP_VERSION
+
+# LRCLIB's implementation requirements ask for "name, version and a link to
+# its homepage" in the User-Agent, and the version is read from the app itself
+# so a release does not leave a second copy of it behind (tools/check_versions
+# hashes the copies it knows about; this one derives).
+USER_AGENT = f"la musica v{_APP_VERSION} (https://github.com/dillydalli3r/la-musica)"
 _DESKTOP_UA = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
                "(KHTML, like Gecko) Chrome/122.0 Safari/537.36")
 
 LRCLIB_BASE = "https://lrclib.net/api"
+# How long a publish token may take to solve. The work is ~2^24 sha256
+# attempts (LRCLIB's current target), measured at 1.1M/s in this process, so
+# the average is ~15 s and 120 s is past the 1-in-10,000 tail; the web call's
+# own timeout sits above it (web/src/api.ts, `lyricsPublish`).
+PUBLISH_SOLVE_DEADLINE = 120.0
 NETEASE_BASE = "https://music.163.com/api"
 KUGOU_SEARCH = "https://krcs.kugou.com/search"
 KUGOU_DOWNLOAD = "https://lyrics.kugou.com/download"
@@ -408,15 +420,84 @@ def lrclib_fetch(artist, track, album=None, duration=None):
     return None
 
 
+def solve_publish_challenge(prefix, target_hex, deadline_s=PUBLISH_SOLVE_DEADLINE):
+    """The nonce that satisfies LRCLIB's challenge, or None if the deadline
+    runs out first.
+
+    The rule is LRCGET's own solver (`challenge_solver.rs`), which is what
+    LRCLIB's docs point at: the fresh `prefix` from /api/request-challenge,
+    then nonce = 0, 1, 2 … in DECIMAL appended to it, and a nonce is the
+    answer when sha256(prefix + nonce) compares at most the `target` byte by
+    byte from the front. The target's leading zero bytes are the whole
+    constraint in practice (LRCLIB hands out `000000FF00…`: three zero bytes,
+    ~1 in 16.7M, measured 2026-09-27), so they are tested first and the tail
+    compare — the part that only matters for a digest that gets past them —
+    stays off the hot path.
+
+    One process, one thread: sha256 over a 40-byte input holds the GIL, so
+    threads buy nothing and a process pool would buy ~10x for the price of a
+    second interpreter table inside a server request. The measured rate is
+    1.1M hashes/s ⇒ ~15 s of the default deadline's budget for the average
+    solve. `honey: single-process; a process pool pays only if a batch ever
+    publishes hundreds of tracks in one run.`"""
+    try:
+        target = bytes.fromhex(str(target_hex))
+    except ValueError:
+        return None
+    if not target:
+        return None
+    zeros = 0
+    while zeros < len(target) and target[zeros] == 0:
+        zeros += 1
+    prefix_b = prefix.encode("utf-8")
+    tail = target[zeros:]
+    end = time.monotonic() + float(deadline_s)
+    nonce = 0
+    while True:
+        digest = hashlib.sha256(prefix_b + str(nonce).encode("ascii")).digest()
+        i = 0
+        while i < zeros and digest[i] == 0:
+            i += 1
+        if i == zeros and digest[zeros:] <= tail:
+            return str(nonce)
+        nonce += 1
+        if nonce % 65536 == 0 and time.monotonic() > end:
+            return None
+
+
+def request_publish_token(deadline_s=PUBLISH_SOLVE_DEADLINE):
+    """A one-shot `X-Publish-Token` from LRCLIB: (token, "") or (None, why).
+
+    Every submission needs a fresh token and every token works once, so this
+    is called per publish and never cached. The challenge request goes through
+    the same throttle as the lookups — it is an ordinary LRCLIB request."""
+    status, raw = _request(
+        f"{LRCLIB_BASE}/request-challenge", data=b"",
+        headers={"User-Agent": USER_AGENT, "Content-Type": "application/json"},
+        timeout=15)
+    if status != 200:
+        return None, f"LRCLIB would not hand out a publish token ({status or 'no answer'})"
+    try:
+        doc = json.loads((raw or b"").decode("utf-8"))
+        prefix, target = str(doc["prefix"]), str(doc["target"])
+    except Exception:
+        return None, "LRCLIB's publish challenge was not readable"
+    nonce = solve_publish_challenge(prefix, target, deadline_s)
+    if nonce is None:
+        return None, ("the LRCLIB publish challenge did not solve in time "
+                      "(it is a proof-of-work this app does in one process)")
+    return f"{prefix}:{nonce}", ""
+
+
 def lrclib_publish(artist, track, album, duration, plain=None, synced=None):
     """Submit lyrics to LRCLIB (POST /api/publish). Returns (ok, message).
 
     The one implementation of the submission: script 18 (auto-publishing for
     tracks LRCLIB does not have yet) and the manual "Publish to LRCLIB" panel
-    (through server.integrations) both land here, so the request body, the
-    required User-Agent and the error wording exist once. At least one of
-    plain/synced must carry text; a synced text is best sent with its plain
-    form beside it, which is what the script does."""
+    (through server.integrations) both land here, so the metadata body, the
+    required User-Agent, the publish token and the error wording exist once.
+    At least one of plain/synced must carry text; a synced text is best sent
+    with its plain form beside it, which is what the script does."""
     artist = (artist or "").strip()
     track = (track or "").strip()
     album = (album or "").strip()
@@ -432,16 +513,23 @@ def lrclib_publish(artist, track, album, duration, plain=None, synced=None):
         duration = 0
     if duration <= 0:
         return False, "track duration is required for publishing"
-    params = urllib.parse.urlencode({
-        "artist_name": artist, "track_name": track,
-        "album_name": album or track, "duration": duration,
-    })
-    body = json.dumps({"plainLyrics": plain or "",
-                       "syncedLyrics": synced or ""}).encode("utf-8")
+    token, why = request_publish_token()
+    if token is None:
+        return False, why
+    # The metadata is the BODY's — LRCLIB's PublishRequest has no query half.
+    body = json.dumps({
+        "trackName": track,
+        "artistName": artist,
+        "albumName": album or track,
+        "duration": duration,
+        "plainLyrics": plain or "",
+        "syncedLyrics": synced or "",
+    }).encode("utf-8")
     status, raw = _request(
-        f"{LRCLIB_BASE}/publish?{params}",
-        headers={"User-Agent": USER_AGENT, "Content-Type": "application/json"},
-        data=body, timeout=20)
+        f"{LRCLIB_BASE}/publish",
+        headers={"User-Agent": USER_AGENT, "Content-Type": "application/json",
+                 "X-Publish-Token": token},
+        data=body, timeout=30)
     if status in (200, 201):
         return True, "published to LRCLIB — thank you for contributing!"
     if status == 409:

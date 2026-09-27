@@ -345,6 +345,20 @@ export function allowPlainOf(cfg: Record<string, unknown> | undefined): boolean 
   return typeof v === "boolean" ? v : undefined;
 }
 
+/** The track's own "no words to show" state: `INSTRUMENTAL` exactly "1" — the
+ *  tag is 0/1, so anything else (absent included) is unknown, not
+ *  instrumental.
+ *
+ *  Every surface that makes a claim about a track's LYRICS reads it: the
+ *  player's state rule hides an instrumental's stored words instead of showing
+ *  or refusing them (`npLyricsMode`), and the kind chip follows — a stored
+ *  plain text on an instrumental is not a lyrics failure, because there are no
+ *  words to sync ("it shouldn't say 'x plain' for instrumental tracks",
+ *  reported from the track page and the stored readout). */
+export function isInstrumental(tags: { INSTRUMENTAL?: unknown } | null | undefined): boolean {
+  return String(tags?.INSTRUMENTAL ?? "").trim() === "1";
+}
+
 /** The one lyrics-kind mark every surface wears, so a track's lyrics read the
  *  same in a table row, a page header and the stored readout:
  *

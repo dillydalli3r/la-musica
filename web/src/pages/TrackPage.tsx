@@ -8,7 +8,7 @@ import { uncacheTrack } from "../lib/mediaCache";
 import { LinkEditorButton, MbIcon, RymIcon } from "../components/Links";
 import { SubtitledVideo } from "../components/SubtitledVideo";
 import { useStore, toast } from "../store";
-import { AuditBadge, GradeBadge, IssueList, EmptyState, PageLoading, LyricsKindChip, allowPlainOf } from "../components/Badges";
+import { AuditBadge, GradeBadge, IssueList, EmptyState, PageLoading, LyricsKindChip, allowPlainOf, isInstrumental } from "../components/Badges";
 import CoverImg from "../components/CoverImg";
 import DownloadButton from "../components/DownloadButton";
 import { ExportButton } from "../components/ExportDialog";
@@ -262,7 +262,7 @@ export default function TrackPage() {
     .filter((g) => g.rows.length > 0);
 
   return (
-    <div className="p-6 space-y-5">
+    <div className="p-6 space-y-5 mx-auto max-w-[1600px]">
       {/* A music video in a dialog, not a hand-rolled overlay: the portal,
           backdrop click, Escape, focus trap and the phone sheet all come from
           `Modal` (#53) — the old `fixed inset-0 z-50` box had none of them, so
@@ -401,8 +401,19 @@ export default function TrackPage() {
           {/* WHICH KIND the stored lyrics are, beside the verdicts: a synced
               lyric is a fact, and a plain one is a failing state while the
               user's `lyrics_allow_plain` says plain is not acceptable — never
-              for a track with no lyrics at all (nothing is rendered then). */}
-          <LyricsKindChip kind={track?.lyrics_kind} allowPlain={allowPlain} showReason />
+              for a track with no lyrics at all (nothing is rendered then), and
+              never for an INSTRUMENTAL one either: the app hides its stored
+              words everywhere (`npLyricsMode`), so grading them here told the
+              reader a track with no words to sync "should hold a synced
+              version" (reported). */}
+          {isInstrumental(tags) ? (
+            <span className="chip border border-border bg-zinc-800 text-zinc-400"
+                  title="Instrumental track — its stored lyrics stay hidden, as in the player">
+              Instrumental
+            </span>
+          ) : (
+            <LyricsKindChip kind={track?.lyrics_kind} allowPlain={allowPlain} showReason />
+          )}
         </div>
       </PageHeader>
 
