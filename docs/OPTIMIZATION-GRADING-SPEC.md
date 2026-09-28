@@ -6388,7 +6388,10 @@ composition instead (R267). Above `lg` the pane sits beside the artwork.
   app-state stores whose content reaches a payload, plus the whole config),
   single-flight + TTL for the library payload, a short-TTL memo for the album
   and artist routes, a 60-second storage snapshot refreshed BEHIND the request
-  (stale-while-revalidate), and stat-keyed memos for ffprobe probes and the
+  (stale-while-revalidate) and walked once at startup (`_lifespan`'s
+  `storage-warm` thread, so even the FIRST poll after a restart answers from
+  memory — measured 6.97 s → 0.051 s on the owner's install), and stat-keyed
+  memos for ffprobe probes and the
   cover colour. The contract these must keep: a row is served ONLY when its
   identity matches exactly (a changed, added or deleted file misses; a settings
   change is unreachable), every in-app write drops what it invalidated through

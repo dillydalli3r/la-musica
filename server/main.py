@@ -157,6 +157,22 @@ async def _lifespan(app: FastAPI):
         cache_caps.start()
     except Exception as e:
         print(f"[mlo] cache caps worker failed to start: {e}")
+    # The storage snapshot (the Home page's own card polls it): its FIRST
+    # request after a restart is the one that pays the walk, because only a
+    # STALE entry is served off the request path and a fresh process has none.
+    # Measured on the owner's bind-mounted library, in the container: 6.97 s
+    # for that first poll, 0.01 s for every one after it — so the walk is
+    # worked here instead, beside the other startup workers, and the card's
+    # very first poll answers from memory too.
+    def _warm_storage_snapshot():
+        try:
+            from server import api_storage
+            cfg = load_config()
+            api_storage.storage_snapshot(cfg, api_storage._music_folder(cfg))
+        except Exception as e:
+            print(f"[mlo] storage snapshot warm-up failed: {e}")
+    threading.Thread(target=_warm_storage_snapshot, daemon=True,
+                     name="storage-warm").start()
     yield
     # Stop taking new work first (the two workers above are the app's own
     # source of new jobs), then the honest part: wait — bounded — for whatever
