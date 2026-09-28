@@ -1884,7 +1884,7 @@ export default function ImportWizard() {
    *  Accepting the match also writes its AcoustID identity into the files
    *  (apply=true: ACOUSTID_ID + ACOUSTID_FINGERPRINT). In queue mode the
    *  wizard follows the album the release is for. */
-  const useAcoustidRelease = async (row: AcoustidAlbumMatch) => {
+  const acceptAcoustidRelease = async (row: AcoustidAlbumMatch) => {
     const index = uploaded.findIndex((a) => a.path === row.path);
     if (index >= 0 && index !== albumIndex) switchAlbum(index);
     setAcoustidBusy(true);
@@ -2846,7 +2846,7 @@ export default function ImportWizard() {
    *  the button that asks the other question, one press at a time, and it is
    *  the only route from an AcoustID match to a release besides the opt-in
    *  `import_acoustid_autofill` setting. It ends in the SAME flow a manual id
-   *  takes (`useAcoustidRelease` → `pickRelease`), so tags are written by one
+   *  takes (`acceptAcoustidRelease` → `pickRelease`), so tags are written by one
    *  writer either way, and accepting the match also files its ACOUSTID pair. */
   const matchReleaseFromFingerprint = async () => {
     const paths = uploaded.length ? uploaded.map((a) => a.path) : albumPath ? [albumPath] : [];
@@ -2871,7 +2871,7 @@ export default function ImportWizard() {
           : "The fingerprint matched nothing");
         return;
       }
-      await useAcoustidRelease(row);
+      await acceptAcoustidRelease(row);
     } catch (e) {
       toast.error(String(e));
     } finally {
@@ -3521,7 +3521,7 @@ const finish = async () => {
             canMatchAll={!!(releaseId || extractMbid(mbLink))}
             matchAllBusy={matchAllBusy}
             onRun={runAcoustid}
-            onUse={useAcoustidRelease}
+            onUse={acceptAcoustidRelease}
             onSubmit={submitAcoustidRelease}
             onMatchAll={matchQueueToRelease}
           />
@@ -3751,7 +3751,7 @@ const finish = async () => {
                 canMatchAll={false}
                 matchAllBusy={false}
                 onRun={runAcoustid}
-                onUse={useAcoustidRelease}
+                onUse={acceptAcoustidRelease}
                 onSubmit={submitAcoustidRelease}
                 onMatchAll={matchQueueToRelease}
               />
