@@ -26,6 +26,7 @@ export const SCRIPTS: { ids: number[]; label: string }[] = [
   { ids: [20], label: "Scan library layout" },
   { ids: [21], label: "Fix AcoustID pairs" },
   { ids: [22], label: "Submit fingerprints (AcoustID)" },
+  { ids: [23], label: "Optimize tags" },
 ];
 
 /** The scripts the SHIPPED Run All chain deliberately does not carry
@@ -52,13 +53,14 @@ export const SCRIPT_LABEL: Record<number, string> = Object.fromEntries(
  *  publish → 17 transliterate, 8 auto tagging, 5 images → 19 the artist images
  *  stored beside them, 6 audit, 7 DR & ReplayGain, 9 AccurateRip (its own
  *  sidecar names), 12 key & BPM, 16 mood, 15 the release manifest (after the
- *  tagger that gives it its release id), 10 format all, 20 the layout report
- *  of the tree format all just settled, 21 the AcoustID pair the grader then
- *  reads as complete, and 4 grade last. This mirrors
+ *  tagger that gives it its release id), 10 format all, 23 the tag strip (the
+ *  same excess lists 10 trims by, on their own) right behind it, 20 the layout
+ *  report of the tree format all just settled, 21 the AcoustID pair the grader
+ *  then reads as complete, and 4 grade last. This mirrors
  *  server/imports.py's DEFAULT_CHAIN, which lists the same steps minus the
  *  opt-in 16/17 and 19 — and minus 20, which describes the whole music folder
  *  and so has nothing to say about the one album a chain is finishing. */
-export const DEFAULT_RUN_ALL = [11, 3, 14, 15, 2, 1, 13, 18, 17, 8, 5, 19, 6, 7, 9, 12, 16, 10, 20, 21, 4];
+export const DEFAULT_RUN_ALL = [11, 3, 14, 15, 2, 1, 13, 18, 17, 8, 5, 19, 6, 7, 9, 12, 16, 10, 23, 20, 21, 4];
 
 /** True when the id is a script the runner knows about. */
 export function isScriptId(n: unknown): n is number {

@@ -9,7 +9,12 @@ detects what needs formatting, fixing only what is incorrect:
 * .lrc / embedded LYRICS — canonical_lyrics + format_lyrics_text
 * Audio tags — leading/trailing spaces and blank lines stripped, and the tags
   that have a canonical spelling written in it (mlo.tagtext: MEDIA, SOURCE,
-  RELEASETYPE, RELEASESTATUS, AUDIT, RELEASECOUNTRY, SCRIPT, MOOD)
+  RELEASETYPE, RELEASESTATUS, AUDIT, RELEASECOUNTRY, SCRIPT, MOOD), plus the
+  tags this app would never write: `excess_tags` — anything outside the shared
+  vocabulary, a `COMMENT` carrying a value and the alias family's own excess
+  (R16b) — deleted by `strip_excess_tags`, the ONE stripper the Tag hygiene
+  script (mlo.taghygiene, script 23) runs on its own, scoped to what the user
+  pressed, when an album's junk tags are to be cleared without this pass.
 
 It is intentionally non-destructive: it only rewrites files that are not
 already in canonical form, and it never regenerates .accurip via CUETools
@@ -387,6 +392,67 @@ def _format_tag_values(key, raw):
     return canonical_text(key, _trim_tag_lines(raw))
 
 
+def excess_tags(af, cfg=None):
+    """Every tag *af* should not carry: ``[tag name]``, in the order read.
+
+    The list is the grader's own, so a strip can never leave what the grade
+    flags (or delete what it requires):
+
+      * a NAME outside the shared vocabulary — TAG_MAP, the encoder identity
+        tags, beets'/Picard's spellings, the alias families and the app's own
+        override (`mlo.grader.tag_key_allowed`),
+      * a `COMMENT` that carries a value, the one name the vocabulary HOLDS
+        whose value nothing in this pipeline writes
+        (`mlo.grader.tag_value_excess`),
+      * an ALIAS tag nothing needs — the name is one the configured locale
+        already reads, it is spelled for a locale the app does not write, it is
+        a second spelling of the same alias, or its value is the name itself
+        (`mlo.grader.alias_file_excess`, spec R16a/R16b). The family is in the
+        vocabulary — the app writes it — so without this rule a stale alias
+        would live on the file forever while the grade kept failing it.
+
+    Gated by `strip_unknown_tags`, the switch that decides whether this app
+    leaves only the tags its own writers produce: with it off nothing here is
+    excess (which is also why the excess-tag grade stands down with it).
+    ONE predicate for the two callers: Format All's tag pass below and the Tag
+    hygiene script (`mlo.taghygiene`, script 23), which is this same strip on
+    its own, scoped to what the user pressed.
+    """
+    if not (cfg or {}).get("strip_unknown_tags", True):
+        return []
+    from .grader import alias_file_excess, tag_key_allowed, tag_value_excess
+    out = []
+    for key, value in list(af.all_tags().items()):
+        if tag_key_allowed(key) and not tag_value_excess(key, value):
+            continue
+        out.append(key)
+    out.extend(key for key, _why in alias_file_excess(af, cfg))
+    return out
+
+
+def strip_excess_tags(af, cfg=None):
+    """Delete `excess_tags` from *af*; the tag names that actually went.
+
+    Compares the file's own tags before and after rather than trusting each
+    `delete_tag`'s return: a container that matched nothing to delete (a
+    spelling the tag API does not map onto a frame) must not be reported as a
+    removal, and the caller's flush is then a no-op instead of a rewrite.
+    Nothing is ever written here — a file whose list is empty is not touched
+    at all.
+    """
+    names = excess_tags(af, cfg)
+    if not names:
+        return []
+    before = {str(k).upper() for k in (af.all_tags() or {})}
+    for key in names:
+        try:
+            af.delete_tag(key)
+        except Exception:
+            pass
+    after = {str(k).upper() for k in (af.all_tags() or {})}
+    return sorted(before - after)
+
+
 def _format_audio_tags(path, cfg, force=False, af=None):
     """Trim every tag's lines, drop blank ones, canonicalise the tags that have
     a canonical spelling (mlo.tagtext) and cap GENRE at `mb_genre_count`.
@@ -479,39 +545,15 @@ def _format_audio_tags(path, cfg, force=False, af=None):
         # Optimization leaves only tags this app (and its graders) understand:
         # anything outside the shared vocabulary — TAG_MAP, the encoder
         # identity tags, beets/Picard's own spellings and the app's
-        # AUDIOAUDITOR_OVERRIDE — is removed, and so is a non-empty COMMENT:
-        # the vocabulary holds the NAME but nothing in this pipeline ever
-        # writes a value there, which is what the grade's own value rule says
-        # ("Comment tag carries a value"). The predicates come from the grader
-        # (mlo.grader.tag_key_allowed / tag_value_excess) so the strip pass and
-        # the excess-tag grade can never disagree about what "excess" means.
-        # Default True to match DEFAULT_CONFIG (mlo/config.py:821) — a partial
-        # cfg (tests, smoke suites) must strip like the shipped app does.
-        if cfg.get("strip_unknown_tags", True):
-            from .grader import (alias_file_excess, tag_key_allowed,
-                                 tag_value_excess)
-            drop = []
-            for key, value in list(af.all_tags().items()):
-                if tag_key_allowed(key) \
-                        and not tag_value_excess(key, value):
-                    continue
-                drop.append(key)
-            # …and the ALIAS family's own excess rule (spec R16b): an alias
-            # tag the configured locale does not need — "Radiohead" with an
-            # ARTISTALIAS, a spelling for another locale (TITLEALIAS-JA in an
-            # `en` library), a second spelling of the same alias, a value that
-            # is the name itself — is exactly as excess as a foreign tag, and
-            # `alias_file_excess` is the grade's own predicate. Without this
-            # the family would be in TAG_ALLOWLIST (it must be: the app writes
-            # it) and a stale alias would live on the file forever while the
-            # grade kept failing it.
-            drop.extend(key for key, _why in alias_file_excess(af, cfg))
-            for key in drop:
-                try:
-                    if af.delete_tag(key):
-                        changed = True
-                except Exception:
-                    pass
+        # AUDIOAUDITOR_OVERRIDE — is removed, and so is a non-empty COMMENT and
+        # the alias family's own excess (spec R16b); `excess_tags` is that one
+        # list and `strip_excess_tags` the one deletion, shared with the Tag
+        # hygiene script (mlo.taghygiene, script 23) so the two can never
+        # disagree about what "excess" means. The predicates come from the
+        # grader (mlo.grader.tag_key_allowed / tag_value_excess /
+        # alias_file_excess) for the same reason.
+        if strip_excess_tags(af, cfg):
+            changed = True
         # The one container write of this pass: a failed flush (a read-only
         # file, a full disk) must NOT be reported as "formatted" — the tags
         # never reached disk and grading would keep failing on them.

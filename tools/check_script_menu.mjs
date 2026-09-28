@@ -165,9 +165,12 @@ try {
     && tenForced.every((e, i) => e.label.includes(payload.scripts.find((s) => s.id === 10).force.options[i].owner_label))
     && tenForced.map((e) => e.force).join(",") === "accurip,cue,lyrics,autotag",
     JSON.stringify(tenForced.map((e) => [e.force, e.label])));
+  // A script with ONE flag is just itself ("13 · Fetch lyrics" was the example
+  // until 13 lost its flag in v4.4.0 — it fills, never replaces, R330 — so the
+  // fixture that still carried one hid this; 1 owns `force_lyrics` alone).
   check("a single-flag script's forced entry is labelled with the script its press runs",
-    album.forced.entries.find((e) => e.id === 13)?.label === "13 · Fetch lyrics",
-    album.forced.entries.find((e) => e.id === 13)?.label);
+    album.forced.entries.find((e) => e.id === 1)?.label === "1 · Format lyrics",
+    album.forced.entries.find((e) => e.id === 1)?.label);
 
   console.log("\n== Run all ==");
   check("the Run-all entry exists, over the chain scoped to the entity",

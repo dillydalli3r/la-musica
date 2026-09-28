@@ -305,7 +305,7 @@ TAG_WRITER = {
     # Nothing writes a locale alias off its own bat: the tagging pass stores
     # the ONE alias MusicBrainz holds for a name that needs one (beets
     # translations, script 14 — and the import's own stamp for the album-level
-    # pair), the tag editor takes one by hand, and the strip passes (3, 10)
+    # pair), the tag editor takes one by hand, and the strip passes (3, 10, 23)
     # clear a spelling the configured locale does not need. An alias the grade
     # can neither find nor see is exactly what `grade_check_alias_needed`
     # names; one it should never see is `grade_check_alias_excess`.
@@ -316,7 +316,7 @@ TAG_WRITER = {
     # tagger made the file, which is why its VALUE fails the excess grade and
     # the strip passes clear it.
     "COMMENT": "nothing — free text a ripper or vendor tagger wrote; "
-               "the strip passes (3, 10) clear it",
+               "the strip passes (3, 10, 23) clear it",
     "ACOUSTID_ID": _RELEASE_WRITER + " (fingerprint match) · "
                    + _script(21) + " (completes or creates the pair)",
     "ACOUSTID_FINGERPRINT": _RELEASE_WRITER + " (fingerprint match) · "

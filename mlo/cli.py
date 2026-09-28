@@ -64,6 +64,8 @@ SCRIPTS = (
     (21, "Fix AcoustID pairs", "complete or create ACOUSTID_ID / ACOUSTID_FINGERPRINT pairs"),
     (22, "Submit fingerprints (AcoustID)",
      "give AcoustID the fingerprint + MusicBrainz recording each track states"),
+    (23, "Optimize tags",
+     "delete excess tags: junk names, a valued COMMENT, unneeded aliases"),
 )
 SCRIPT_LABELS = {sid: name for sid, name, _ in SCRIPTS}
 
@@ -73,7 +75,7 @@ SCRIPT_LABELS = {sid: name for sid, name, _ in SCRIPTS}
 SCRIPT_GATES = {7: "dr_replaygain_enabled", 12: "audiometa_enabled",
                 16: "mood_enabled", 17: ("lyrics_xlit_enabled", "lyrics_translate_enabled"),
                 18: "lrclib_auto_publish", 21: "acoustid_enabled",
-                22: "acoustid_enabled"}
+                22: "acoustid_enabled", 23: "strip_unknown_tags"}
 
 
 def _print_script_list(with_desc=True):
@@ -588,6 +590,9 @@ def build_script_runners():
         # reason for a lazy import). It is NOT in the shipped Run All order:
         # see server.script_runners.OPT_IN_SCRIPTS.
         22: ("mlo.acoustid", "run_submit_fingerprints"),
+        # 23 deletes tags through the same stripper script 10 uses, so it is
+        # resolved on first use like every other pass that opens a container.
+        23: ("mlo.taghygiene", "run_tag_hygiene"),
     }
     runners = {}
     for sid, name, _desc in SCRIPTS:

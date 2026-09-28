@@ -1,4 +1,4 @@
-"""The 20 library scripts, in one place every caller shares.
+"""The 23 library scripts, in one place every caller shares.
 
 Extracted from ``server/main.py``'s ``RUNNERS`` table so the import pipeline
 (:mod:`server.imports`), the bulk queue and the Soulseek importer run exactly
@@ -235,6 +235,13 @@ RUNNERS: dict[int, tuple[str, "callable"]] = {
     # runner, never a silent skip.
     22: ("Submit fingerprints (AcoustID)",
          _optional("mlo.acoustid", "run_submit_fingerprints")),
+    # 23 is the tag strip script 10 performs as a step of its own pass
+    # (mlo.format_all.strip_excess_tags), on its own and scoped to what the
+    # user pressed: the excess-tag and alias grades name it as the fixer, and
+    # an album's details menu needs an entry that clears those tags without a
+    # re-encode (3) or a whole-library format pass (10). It only DELETES (never
+    # writes a value), and a file with nothing excess is not written at all.
+    23: ("Optimize tags", _optional("mlo.taghygiene", "run_tag_hygiene")),
 }
 
 # Scripts the Run All order deliberately does NOT carry. Every other script
@@ -330,6 +337,11 @@ _DISABLED = {
     # 22 is not in it — see OPT_IN_SCRIPTS), or an explicit press from a
     # details menu would be refused for the very reason it exists.
     22: "acoustid_enabled",
+    # 23 deletes exactly the tags script 10's strip pass deletes, and that
+    # strip is what `strip_unknown_tags` governs: with the switch off nothing
+    # in this app is "excess" — the grade's excess check stands down with it
+    # too — so a chain would be running a pass with no subject.
+    23: "strip_unknown_tags",
 }
 
 

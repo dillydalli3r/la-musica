@@ -107,7 +107,7 @@ An issue is `{code, label, where, reason}` for album-level and artist problems
 
 ---
 
-## 2. The 22 optimization scripts
+## 2. The 23 optimization scripts
 
 Ids, titles and the shipped order are `mlo/cli.py:SCRIPTS` and
 `mlo/config.py:DEFAULT_RUN_ALL_ORDER`; the runners are
@@ -115,10 +115,10 @@ Ids, titles and the shipped order are `mlo/cli.py:SCRIPTS` and
 chain both call).
 
 **R8 — Run All runs `run_all_order`**, shipped as
-`[11, 3, 14, 15, 2, 1, 13, 18, 17, 8, 5, 19, 6, 7, 9, 12, 16, 10, 20, 21, 4]`:
-everything that moves a file first, everything that reads it last. A saved order
-is honoured as saved (ids outside 1–22 are dropped; legacy 8/9-id orders are
-migrated).
+`[11, 3, 14, 15, 2, 1, 13, 18, 17, 8, 5, 19, 6, 7, 9, 12, 16, 10, 23, 20, 21,
+4]`: everything that moves a file first, everything that reads it last. A saved
+order is honoured as saved (ids outside 1–23 are dropped; legacy 8/9-id orders
+are migrated).
 **R9 — the import chain is DERIVED from the run order, minus a declared
 exception.** `import_scripts` replaces it outright; an empty list means the
 default, which is `DEFAULT_RUN_ALL_ORDER` minus `LIBRARY_WIDE_SCRIPTS` — one
@@ -187,6 +187,36 @@ publishes, including the ones that write nothing until they do.
 | 20 | Optimize library layout | The music folder's shape against `<music>/Artists/<Artist>/<Album>/…`: audio at the root or in an artist folder, stray files, unexpected folders, empty albums, `wrong_case` rows. With `layout_apply` (ON) it SETTLES what the folder itself proves — a wrong-case name is renamed, audio outside an album folder is moved into the one its tags name, and what is excess goes to the Trash (a stray file, a folder inside an album that is neither a disc folder nor holds audio, an album folder with no audio, a foreign root folder holding no audio, an album-less artist folder, the `.mlo_*` leftovers) — and reports every other row with the reason it stayed, re-derived at the move (R185). Writes ONE report describing the whole library (plus a `fixes` list) to `<music>/.mlo/data/`, which the Library page warns from; scoped to `targets` when a run names them, and library-wide when it does not (R9) | one report file + the renamed/moved/removed paths | `layout_apply` (removals go to the Trash) | no |
 | 21 | Fix AcoustID pairs | Completes (or CREATES) a track's `ACOUSTID_ID`/`ACOUSTID_FINGERPRINT` pair — the failures `Missing ACOUSTID_ID and ACOUSTID_FINGERPRINT` and `Missing ACOUSTID_ID` / `Missing ACOUSTID_FINGERPRINT` (all `(run Fix AcoustID pairs)`). The recording the pair must name is a question the FILE answers itself (its own `ACOUSTID_ID`, its `MUSICBRAINZ_TRACKID`, or the recording MBID this app's naming script wrote into the file name), and the fingerprint is taken from the audio locally by fpcalc — so a CD rip AcoustID has never seen, or a run with no usable key, is repairable with no request at all. The service is asked only for a half pair whose file names no recording anywhere; a file carrying no AcoustID tag and naming no recording is skipped, never written from a guess | `ACOUSTID_ID`, `ACOUSTID_FINGERPRINT` | no | only for a half pair that names no recording |
 | 22 | Submit fingerprints (AcoustID) | Gives AcoustID the fingerprint and the MusicBrainz recording id a file already states (`mlo.acoustid.submit_files`): the recording is read the way script 21 reads it, the fingerprint is taken locally, the service is asked what it already links (`pair_known`) and what this app already handed over (`load_submissions`), and only what is genuinely new goes in ONE batched `v2/submit` — each track reported ACCEPTED, ALREADY_KNOWN, REJECTED or skipped with a named cause. **Not in the shipped order** (`OPT_IN_SCRIPTS`): a submission is a public, outward-facing write, so it runs only when someone asks — a details menu, `POST /api/import/acoustid/submit`, the wizard's AcoustID step, or a `run_all_order` the user put it in themselves | nothing locally | no | **yes** (AcoustID database) |
+| 23 | Optimize tags | The tag strip script 10 already performs as a step of its own pass, on its own and scoped (`mlo/taghygiene.py`): every tag the grader calls excess — a name outside the shared vocabulary, a `COMMENT` carrying a value, an alias nothing needs (R16a/R16b: the name is one the locale reads, the spelling is for another locale, a second spelling of the same alias, or the value is the name itself) | tags | **yes** (deletes the excess tags) | no |
+
+**R343 — Optimize tags (23) is the excess-tag strip on its own: scoped, and it
+only deletes.** The list it deletes is the grader's own —
+`mlo.format_all.excess_tags`, built from `mlo.grader.tag_key_allowed` (names
+outside the shared vocabulary: TAG_MAP, the encoder identity tags,
+beets/Picard's spellings, the app's `AUDIOAUDITOR_OVERRIDE`), `tag_value_excess`
+(a `COMMENT` carrying a value) and `alias_file_excess` (the alias family's own
+excess, R16a/R16b) — and the deletion is `mlo.format_all.strip_excess_tags`, the
+ONE stripper script 10's tag pass calls too. Two callers, one predicate: a
+scoped hygiene run can never leave a tag the grade flags, nor delete one it
+requires, and the two passes cannot drift apart about what "excess" means. A
+write is a change: the file's own tags are compared before and after the
+deletes, and a file with nothing excess is not written at all (`delete_tag` is
+what dirties the container, and the flush of a clean handle is a no-op), so a
+run over a clean library touches no file's bytes — `tools/test_tag_hygiene.py`
+asserts that with mtimes — and a run reports its counts the way R10a requires
+(`scanned == modified + skipped + errors`, plus `tags_removed`; a write that
+fails is reported with its file). Gated by `strip_unknown_tags` (R12). It has NO
+force flag (R11): its subject IS the excess tag, so a file that carries none is
+deliberately left alone on every run — the same reasoning as script 21's pair.
+It is FILE-scoped (`server/script_menu.py`, `mlo.stats._collect_targets`), which
+is what puts "23 · Optimize tags" in an album's menu and in a track row's: one
+album's junk tags are cleared without a lossless re-encode (3) or a
+whole-library format pass (10), which is why the excess and alias failures now
+name it FIRST in their own instruction ("run Optimize tags (script 23) on the
+album, or …", `mlo/grader.py`). It writes files and nothing else, and drops the
+tag cache of exactly the folders it rewrote (`server.tagcache.invalidate_album`,
+never `invalidate_all` — the scoped drop `/api/run` and an import already make
+for the folders a run names).
 
 **R243 — Fix AcoustID pairs (21) completes OR creates the pair from the file
 itself, and only asks the service for a half pair that names no recording.**
@@ -253,7 +283,9 @@ no-op: `dr_replaygain_enabled` (7), `audiometa_enabled` (12), `mood_enabled` (16
 `lyrics_xlit_enabled` / `lyrics_translate_enabled` (17), `lrclib_auto_publish`
 (18), `acoustid_enabled` (21 — the same switch the AcoustID lookup itself
 refuses on, so a run says WHY it did nothing instead of reporting an empty
-pass). Scripts 9/10/11/12/13/16/17/18 whose module is missing are reported
+pass), `strip_unknown_tags` (23 — with that switch off nothing in this app is
+excess, since the excess-tag grade and script 10's strip read it too, so the
+hygiene pass would have no subject). Scripts 9/10/11/12/13/16/17/18 whose module is missing are reported
 unavailable rather than silently passing.
 **R13 — scripts clean up after themselves**: folders a run emptied are pruned
 bottom-up (never a folder that holds anything, never the music root), and the run
@@ -345,13 +377,13 @@ group still renders (section *Other checks*).
 | `grade_check_replaygain` | ReplayGain tags present | ON | opt-in per file: any `REPLAYGAIN_*` tag means all four must exist |
 | `grade_check_acoustid` | AcoustID tags required | ON | every audio track carries the `ACOUSTID_ID` + `ACOUSTID_FINGERPRINT` pair — neither half stored fails naming both, a half pair fails naming the missing one (`ACOUSTID_ID` / `ACOUSTID_FINGERPRINT`). `acoustid_api_key` is NOT needed (script 21 takes the fingerprint locally with fpcalc and reads the recording id off the file); the check stands down while `acoustid_enabled` is off, since then script 21 does nothing |
 | `grade_check_alias_needed` | Locale alias for names the locale cannot read | ON | a `TITLE` / `ARTIST` / `ALBUM` written in a script the configured `locale` does not read needs its alias tag — `TITLEALIAS` / `ARTISTALIAS` / `ALBUMALIAS`, in a spelling the app writes (`mlo.audio.alias_spelling_ok`: the bare tag, or the configured locale's own suffix). The rule is `server.integrations.alias_required` (the SAME answer the writers, the import's stamp and script 8's prescan ask), built on `mlo.lyrics_xlit`'s script reading (`non_latin_ratio` ≥ `_LATIN_THRESHOLD` and `dominant_script` ≠ latin) plus the locale's own script, so a Latin name — and a name in the locale's own script — is never graded or counted |
-| `grade_check_alias_excess` | Locale alias only where needed | ON | an alias tag NOTHING needs fails: a name the configured locale already reads carrying one (`Radiohead` with an `ARTISTALIAS`), a spelling for a locale the app does not write (`TITLEALIAS-JA` in an `en` library), a second spelling of the same alias, or a value that is the name itself (`X (X)`). Predicate `mlo.grader.alias_keys_excess` — the same one Optimize (3) / Format all (10) delete by |
+| `grade_check_alias_excess` | Locale alias only where needed | ON | an alias tag NOTHING needs fails: a name the configured locale already reads carrying one (`Radiohead` with an `ARTISTALIAS`), a spelling for a locale the app does not write (`TITLEALIAS-JA` in an `en` library), a second spelling of the same alias, or a value that is the name itself (`X (X)`). Predicate `mlo.grader.alias_keys_excess` — the same one Format all (10) and Optimize tags (23) delete by |
 | `grade_check_encoder` | Encoder identity | ON | the `ENCODER_*` markers switched on in `encoder_tags` are present (covers included while `reencode_images` is on) |
 | `grade_check_naming` | Naming script match | ON | the full relative path equals the evaluated `naming_script`; full and 8-char MBIDs both accepted (`PATH`) |
 | `grade_check_filename_case` | Path capitalization | ON | letter case matches the script exactly (`PATH_CASE`) |
 | `grade_check_ext_case` | Lowercase extensions | ON | no `.FLAC`-style extension in the folder |
 | `grade_check_key_bpm` | Key & BPM | ON | `INITIALKEY` (in `audiometa_key_notation`) and `BPM` exist |
-| `grade_check_excess_tags` | Excess tags | ON | no tag outside `mlo.grader.TAG_ALLOWLIST` (`TAGS`), and no VALUE in the one allow-listed name nothing here ever writes — a non-empty `COMMENT` fails with its own code (`COMMENT`, value rule `mlo.grader.tag_value_excess`); gated as well on `strip_unknown_tags`, which both strip passes (3, 10) follow |
+| `grade_check_excess_tags` | Excess tags | ON | no tag outside `mlo.grader.TAG_ALLOWLIST` (`TAGS`), and no VALUE in the one allow-listed name nothing here ever writes — a non-empty `COMMENT` fails with its own code (`COMMENT`, value rule `mlo.grader.tag_value_excess`); gated as well on `strip_unknown_tags`, which the strip passes (3, 10, 23) follow |
 | `grade_check_media` | Media type | ON | `MEDIA` exists, is in `KNOWN_MEDIA`, and is uniform across the album (`MEDIA`) |
 | `grade_check_source` | Source tag | ON | `MEDIA=digital media` requires a non-empty, uniform `SOURCE`; any other medium must NOT carry one (`SOURCE`) |
 | `grade_check_instrumental` | Instrumental consistency | ON | `INSTRUMENTAL=1` tracks carry no lyrics; `INSTRUMENTAL=0` tracks are graded for lyrics. An `INSTRUMENTAL=1` track is charged nothing by the lyrics presence/format checks — script 1 clears the leftover both stores (R318) — while this check keeps naming the contradiction until it does |
@@ -464,10 +496,14 @@ grading fails the family when the name needs no alias (a Latin name — or one i
 script — carrying one), when the tag is spelled for a locale the app does not write
 (`TITLEALIAS-JA` in an `en` library), when it is a second spelling of the same alias, or when its
 value IS the name (`X (X)`). `mlo.grader.alias_keys_excess` is that ONE predicate: the grade
-fails the family when it answers anything, and Optimize (3) / Format all (10)
-(`mlo.format_all`, gated on `strip_unknown_tags` like the rest of the strip) delete exactly those
-tags — so a stale alias an earlier locale wrote is cleaned up instead of living on the file
-forever. `ALBUMALIAS` is graded by both halves like the other two; it is written by the import
+fails the family when it answers anything, and Format all (10) (`mlo.format_all`) deletes exactly
+those tags — gated on `strip_unknown_tags` like the rest of the strip — so a stale alias an
+earlier locale wrote is cleaned up instead of living on the file forever. Optimize tags (23,
+R343) is that same deletion on its own — `mlo.format_all.excess_tags` +
+`strip_excess_tags`, one stripper with two callers — scoped to the album or track the user
+pressed, which clears one album's aliases without the library-wide pass (10) or a lossless
+re-encode (3, whose rewrite strip follows the vocabulary half only, `mlo.containers`).
+`ALBUMALIAS` is graded by both halves like the other two; it is written by the import
 and the tagging stage and was graded by nothing before this rule.
 **R17 — CD vs Digital Media vs other.** `_is_cd()` is exactly `MEDIA == "cd"`
 (case-insensitive); the CUE/LOG/AccurateRip/CRC/`LOG_GRADE` expectations are
@@ -631,7 +667,7 @@ The default writer of everything else is *Beets tagging (14) · import*.
 | `REPLAYGAIN_TRACK_GAIN` / `_PEAK`, `REPLAYGAIN_ALBUM_GAIN` / `_PEAK` | audio | DR & ReplayGain (7) | `grade_check_replaygain` (opt-in family) |
 | `AUDIT`, `LOG_GRADE`, `LOG_CRC`, `INTEGRITY` | provenance | Audit library (6) | `grade_check_audit`, `grade_check_log_grade`, `grade_check_excess_tags` |
 | `AUDIO_MD5` | provenance | nothing — legacy, read only | `grade_check_excess_tags` |
-| `COMMENT` | identity | nothing — the free text of whatever ripper or vendor tagger made the file | `grade_check_excess_tags` (the value rule: a non-empty `COMMENT` fails with code `COMMENT`, and Optimize (3) / Format all (10) clear it) |
+| `COMMENT` | identity | nothing — the free text of whatever ripper or vendor tagger made the file | `grade_check_excess_tags` (the value rule: a non-empty `COMMENT` fails with code `COMMENT`, and Optimize tags (23)/Optimize FLACs (3)/Format all (10) clear it) |
 | `AUDIOAUDITOR_OVERRIDE` | provenance | the track editor (manual) | `grade_check_audit` (wins over every derived verdict) |
 | `LYRICS`, `UNSYNCEDLYRICS` | lyrics | Fetch lyrics (13) · lyrics editor | `grade_check_lyrics`, `_lyrics_format` |
 | `TRANSLITERATION`, `TRANSLATION` | lyrics | Lyrics transliterate (AI) (17) | `grade_check_xlit_transliteration`, `_xlit_translation`, `_lyrics_lang_tags` |

@@ -1,5 +1,5 @@
 # la musica
-**v4.5.1** — a self-hosted app that *manages, optimizes, audits, grades and plays* your music library, from a browser, a desktop window or a phone.
+**v4.6.0** — a self-hosted app that *manages, optimizes, audits, grades and plays* your music library, from a browser, a desktop window or a phone.
 **la musica** is a FastAPI backend plus a React UI over the `mlo` engine: music and music videos, playlists, likes and favourites, artist artwork and biographies, a multi-source lyrics chain and MusicBrainz/Discogs/AcoustID identity.
 State — config, playlists, the beets library, Soulseek config, caches, runtime-installed tools — lives in one hidden `.mlo` folder beside your music; release notes are in `docs/release-notes/release-notes-<version>.md`. Contract: [`docs/OPTIMIZATION-GRADING-SPEC.md`](docs/OPTIMIZATION-GRADING-SPEC.md).
 ## Quick start
@@ -62,8 +62,8 @@ Sharing is not the web UI: another user reaches your files by opening a connecti
 3. **The HOST's traffic actually leaves by the ISP line.** A peer's *Browse* is a connection BACK to the address the Soulseek server learned from your **login connection**, so a VPN or Tailscale exit node on the host makes it unforwardable however green everything else reads: compare your egress (`curl https://api.ipify.org`) with the router's WAN address and split-route the host while sharing; bare-metal installs get this measured in *Test port* → *Addresses*.
 
 **A client on YOUR OWN network cannot prove any of it**: a same-LAN client is handed your public address and dials it from *inside*, and a router without NAT hairpinning refuses exactly that while the port is open to everyone else — test from another network.
-### Optimization — the 22 scripts
-Optimization → *Run All* executes `run_all_order`, shipped as **11 → 3 → 14 → 15 → 2 → 1 → 13 → 18 → 17 → 8 → 5 → 19 → 6 → 7 → 9 → 12 → 16 → 10 → 20 → 21 → 4**; every script also runs on its own, a script that moves an album takes its claim with it (`server.job_locks.move`), and **22 (Submit fingerprints) is opt-in** (it publishes to AcoustID's public database) so it is not in the shipped order (`server.script_runners.OPT_IN_SCRIPTS`).
+### Optimization — the 23 scripts
+Optimization → *Run All* executes `run_all_order`, shipped as **11 → 3 → 14 → 15 → 2 → 1 → 13 → 18 → 17 → 8 → 5 → 19 → 6 → 7 → 9 → 12 → 16 → 10 → 23 → 20 → 21 → 4**; every script also runs on its own, a script that moves an album takes its claim with it (`server.job_locks.move`), and **22 (Submit fingerprints) is opt-in** (it publishes to AcoustID's public database) so it is not in the shipped order (`server.script_runners.OPT_IN_SCRIPTS`).
 
 | # | Script | What it does |
 | --- | --- | --- |
@@ -89,6 +89,7 @@ Optimization → *Run All* executes `run_all_order`, shipped as **11 → 3 → 1
 | 20 | Optimize library layout | Settles what it can prove with `layout_apply`: case-correct names, misplaced audio, empty albums, stray sidecars |
 | 21 | Fix AcoustID pairs | Completes OR creates the pair: the recording from `ACOUSTID_ID`, then `MUSICBRAINZ_TRACKID`, then the one bracketed UUID in its file name; fingerprint taken locally (`fpcalc`) |
 | 22 | Submit fingerprints (AcoustID) | Gives AcoustID the fingerprint + the MusicBrainz recording id a file states (recording from `ACOUSTID_ID`, then `MUSICBRAINZ_TRACKID`, then the file name's UUID; fingerprint from `ACOUSTID_FINGERPRINT`, else `fpcalc`); needs `acoustid_user_key` |
+| 23 | Optimize tags | The tag strip script 10 already performs as a step of its own pass, on its own and scoped to the album or track you press: the tags this app would not write — names outside the shared vocabulary, a `COMMENT` carrying a value, and the alias tags nothing needs (R16a/R16b: wrong locale, a duplicate spelling, or the name itself) |
 
 **What script 17 transliterates is decided from evidence** (`mlo/lyrics_xlit.xlit_needs`): the track's `LANGUAGE` tag, then the script of its lyrics, then the function words of the languages the app knows; **script 6** keeps an evidence record per file (size, mtime and FLAC's STREAMINFO MD5), so an unchanged album is not re-audited.
 Force flags, one per script (`force_lyrics`, `force_cue`, `force_tracklist`, `force_reencode_flac`, `force_reencode_images`, `force_audit`, `force_accurip`, `force_dr_replaygain`, `force_audiometa`, `force_mood`, `force_auto_tag`, `force_xlit`, `force_publish`, …) really turn a switch off — script 13 has none (a lyrics run fills what is missing and never replaces stored words, R330), and script 20 is the one key that turns work *off* (`layout_apply`). Pure no-ops are skipped: `dr_replaygain_enabled` (7), `audiometa_enabled` (12), `mood_enabled` (16), `lyrics_xlit_enabled` / `lyrics_translate_enabled` (17), `lrclib_auto_publish` (18), `acoustid_enabled` (21, 22). By default cover art is **not** embedded (covers live on disk as `cover.*` plus per-track sidecars); Settings → *Embedded covers* (`embed_covers`, `embed_cover_jpeg_quality`, `embed_cover_resolution`) makes script 10 embed them.
@@ -115,7 +116,7 @@ The same React build runs in every target, and **every one is a client of a serv
 The iOS IPA ships as a **SideStore/AltStore source** — add `https://github.com/dillydalli3r/la-musica/releases/latest/download/source.json` once (`tools/make_sidestore_source.py` builds it, `.github/workflows/release.yml` publishes it). Both halves build locally — `cd web && npm install && npm run build`, then `cd ../desktop && npm install && npx tauri build` (`.github/workflows/desktop.yml` builds the three desktop bundles).
 - **Desktop** is a shell and opens **its own wizard** (Server → Account → Notifications → Done), where *Test* probes `${address}/api/health`. **Capabilities are the server's** (`GET /api/capabilities`), both mobile artifacts are **sideload builds, signed by nobody here** (debug APK, `--no-sign` IPA), a plain-http server needs the platform's exemption (`desktop/src-tauri/Info.plist`, which also sets `UIBackgroundModes: audio` ; `.github/workflows/mobile.yml` enforces it).
 ## Terminal entry point
-`python -m mlo` — the classic console menu: scripts 1–22, Run All, the config editor and the tool table. It is **not** stdlib-only (`mlo` imports `mutagen`), so run it from the server's environment.
+`python -m mlo` — the classic console menu: scripts 1–23, Run All, the config editor and the tool table. It is **not** stdlib-only (`mlo` imports `mutagen`), so run it from the server's environment.
 ## Security & accounts
 Everything the API can do — read the library, rewrite tags, move and delete files, start downloads — is one password away from anyone who can reach the port; the top bar's rightmost control is the account menu (change password, sign out everywhere).
 

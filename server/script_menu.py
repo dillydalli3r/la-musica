@@ -115,6 +115,11 @@ SCOPES: Dict[int, str] = {
     22: "file",   # mlo/acoustid.py: one fingerprint + one MusicBrainz recording
                   # id belong to one FILE — the selection's own paths are what
                   # the submission is about, and its skips name files.
+    23: "file",   # mlo/taghygiene.py: the excess tags are read per FILE (the
+                  # grader's own predicate), so an album's menu and a track's
+                  # both clean exactly the files they hold — which is what
+                  # makes "clean this album's tags" available without a
+                  # re-encode (3) or a format pass (10).
 }
 
 # One line per script, for the report and for the test's non-empty check.
@@ -141,6 +146,7 @@ BECAUSE: Dict[int, str] = {
     20: "fixes the layout of a whole subtree",
     21: "completes one file's AcoustID pair",
     22: "submits one file's fingerprint with its MusicBrainz recording",
+    23: "deletes one file's excess tags (unneeded aliases included)",
 }
 
 # --------------------------------------------------------------------------- #

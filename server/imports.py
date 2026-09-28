@@ -354,7 +354,7 @@ def finish_album(album_dir, cfg=None, progress=None, force=None, release=None,
     if wait:
         # ONE IMPORT PER ALBUM. A second autonomous caller used to QUEUE behind
         # the claim and then run the whole pipeline again — the six pre-chain
-        # lookups and all 21 scripts, over an album the first caller had just
+        # lookups and all 22 scripts, over an album the first caller had just
         # finished ("it's doing the scripts again", with nothing about the
         # second run wanted). The album is already being imported, so this call
         # answers that instead of duplicating the work; the user's own press

@@ -1348,6 +1348,62 @@ def check_format_all_cover_prepared_once(tmp):
        f"measured {len(prepared)}: {prepared})")
 
 
+# --------------------------------------------------------------------------- #
+# Script 23 — Optimize tags: the strip is ONE write per file it really cleans,
+# and NO write at all for the files it finds nothing on.
+# --------------------------------------------------------------------------- #
+def check_tag_hygiene_writes_only_what_it_changes(tmp):
+    """The scoped strip: one container save for the dirty file, zero for the
+    clean ones.
+
+    A "clean the tags" pass that rewrote every file it looked at would cost a
+    whole-library container save (and with flac_no_padding, a re-encode) for a
+    library that had nothing wrong — and the details menu offers this on any
+    album. The counter is on the CONTAINER write (`AudioFile._save_container`,
+    the single path to `mutagen.save`), not on the calls into it.
+    """
+    from mlo import audio as audio_mod
+    from mlo.taghygiene import run_tag_hygiene
+
+    album = os.path.join(tmp, "taghygiene_album")
+    os.makedirs(album, exist_ok=True)
+    dirty = make_flac(os.path.join(album, "01 - Dirty.flac"), 1,
+                      {"TITLE": "Lost Umbrella", "ARTIST": "Radiohead",
+                       "ALBUM": "The Album", "ARTISTALIAS": "Radiohead",
+                       "COMMENT": "ripped by some tool"})
+    clean = make_flac(os.path.join(album, "02 - Clean.flac"), 1,
+                      {"TITLE": "Song", "ARTIST": "Radiohead",
+                       "ALBUM": "The Album"})
+
+    saves = []
+    real_save = audio_mod.AudioFile._save_container
+
+    def counting_save(self, *a, **kw):
+        saves.append(self.path)
+        return real_save(self, *a, **kw)
+
+    audio_mod.AudioFile._save_container = counting_save
+    try:
+        stats = run_tag_hygiene(cfg(music_folder=album, targets=[album],
+                                    strip_unknown_tags=True))
+    finally:
+        audio_mod.AudioFile._save_container = real_save
+
+    ok(len(saves) == 1 and saves[0] == dirty,
+       f"script 23: ONE container write for 2 files — the file that had excess "
+       f"(was: a write per file opened; measured {len(saves)}: {saves})")
+    ok(stats["modified_count"] == 1 and stats["tags_removed"] == 2
+       and stats["skipped_count"] == 1,
+       f"script 23: and it reports what it removed "
+       f"({stats['modified_count']} cleaned, {stats['tags_removed']} tags, "
+       f"{stats['skipped_count']} already clean)")
+    from mlo.audio import AudioFile
+    ok(AudioFile(clean).get_tag("ARTIST") == "Radiohead"
+       and AudioFile(dirty).get_tag("ARTISTALIAS") is None,
+       "script 23: the clean file kept its tags and the dirty one lost its "
+       "unneeded alias")
+
+
 def _tone_flac(path, seconds=3, freq=220.0):
     """A real, non-silent FLAC: the audit's detectors decide on audio, and a
     silent fixture gets no verdict to skip on."""
@@ -1609,6 +1665,7 @@ def main():
         ("script 1  Format lyrics (one open)", check_lyrics_one_open_per_track),
         ("script 1  Format lyrics (album pass reads)", check_lyrics_album_pass_still_reads),
         ("script 10 Format all (cover cache)", check_format_all_cover_prepared_once),
+        ("script 23 Optimize tags (writes)", check_tag_hygiene_writes_only_what_it_changes),
         ("script 7/3 ffprobe spawns", check_ffprobe_asked_only_when_needed),
         ("all       atomic sidecar writes", check_fsync_dir),
         ("all       the worker budget knob", check_worker_budget_semantics),

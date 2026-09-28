@@ -121,7 +121,7 @@ assert imports.chain_for({"import_auto_scripts": False}) == []
 # --------------------------------------------------------------------------- #
 # Registry + one script
 # --------------------------------------------------------------------------- #
-assert sorted(script_runners.RUNNERS) == list(range(1, 23)), sorted(script_runners.RUNNERS)
+assert sorted(script_runners.RUNNERS) == list(range(1, 24)), sorted(script_runners.RUNNERS)
 assert script_runners.RUNNERS[2][0] == "Format CUEs", script_runners.RUNNERS[2]
 assert script_runners.RUNNERS[2][1].__name__ == "run_format_cues", script_runners.RUNNERS[2]
 assert all(label for label, _ in script_runners.RUNNERS.values())

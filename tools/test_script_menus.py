@@ -65,6 +65,12 @@ EXPECTED_SCRIPTS = {
     # same pass the import route runs). Deliberately NOT in the shipped Run All
     # order — see OPT_IN_SCRIPTS in server/script_runners.py.
     22: "Submit fingerprints (AcoustID)",
+    # 23 is the tag strip script 10 already performs as a step of its own pass
+    # (mlo/format_all.py excess_tags + strip_excess_tags), on its own and
+    # scoped: the excess-tag/alias grades name it as the fixer, the album and
+    # track menus offer it, and an import runs it with the rest of the chain.
+    # It only DELETES — a file with nothing excess is not written at all.
+    23: "Optimize tags",
 }
 
 
@@ -181,9 +187,10 @@ def without_comments(rel):
 def handwritten_id_lists(rel):
     """The script-id literals *rel* types into its own code (comments aside)."""
     out = []
+    top = max(EXPECTED_SCRIPTS)
     for m in ID_LIST.finditer(without_comments(rel)):
         ids = [int(n) for n in re.findall(r"\d+", m.group(0))]
-        if len(ids) >= 3 and len(set(ids)) == len(ids) and all(1 <= n <= 21 for n in ids):
+        if len(ids) >= 3 and len(set(ids)) == len(ids) and all(1 <= n <= top for n in ids):
             out.append(ids)
     return out
 
@@ -429,7 +436,7 @@ def check_run_all_migration(check):
     check("the stale script-15 entry is shed and 15 is re-anchored after beets",
           got.count(15) == 1 and got.index(15) == got.index(14) + 1, str(got))
     check("every script lands exactly once in a normalized order",
-          sorted(got) == list(range(1, 22)), str(sorted(got)))
+          sorted(got) == [i for i in range(1, 24) if i != 22], str(sorted(got)))
     # 17/18 were never in a saved order before they existed; the same
     # shed-and-anchor rule has to place them after the fetch they read from.
     check("18 (publish) lands after 13 (fetch lyrics) in a normalized order",
@@ -439,9 +446,18 @@ def check_run_all_migration(check):
     # 20 and 21 were not in any saved order yet either: they join at their
     # anchors, which are the final pass (10) and the report on it (20).
     check("20 (layout scan) lands after 10 (format all) for an existing install",
-          got.count(20) == 1 and got.index(20) == got.index(10) + 1, str(got))
+          got.count(20) == 1 and got.index(10) < got.index(20)
+          and got.index(20) < got.index(21), str(got))
     check("21 (AcoustID pairs) lands right after 20 for an existing install",
           got.count(21) == 1 and got.index(21) == got.index(20) + 1, str(got))
+    # 23 (the tag strip) was in no saved order either: it joins right behind
+    # 10, the pass whose excess lists it deletes by — pushing the read-outs
+    # (20, 21) no further than they already were, and never after the pass
+    # they come from.
+    check("23 (tag hygiene) lands right behind 10 for an existing install",
+          got.count(23) == 1 and got.index(23) == got.index(10) + 1
+          and got.index(23) < got.index(20) and got.index(21) == got.index(20) + 1,
+          str(got))
     # ...and on a later load they are KEPT where the user put them: unlike 15,
     # their ids never meant anything else, so a saved position is a real choice
     # and re-anchoring them would silently undo the drag.
@@ -452,7 +468,7 @@ def check_run_all_migration(check):
 
     junk = cfg.normalize_config({"music_folder": "X", "run_all_order": [99, "a", 4, 4, -1]})
     check("unknown / duplicate run-all ids are dropped",
-          all(1 <= n <= 21 for n in junk["run_all_order"]) and len(set(junk["run_all_order"])) == len(junk["run_all_order"]),
+          all(1 <= n <= 23 for n in junk["run_all_order"]) and len(set(junk["run_all_order"])) == len(junk["run_all_order"]),
           str(junk["run_all_order"]))
 
     twice = cfg.normalize_config(cfg.normalize_config({"music_folder": "X"}))
@@ -550,8 +566,8 @@ def main():
     check("the web and the server declare the same opt-in scripts",
           opt_in_py == opt_in_web and bool(opt_in_py),
           f"server={sorted(opt_in_py)} web={sorted(opt_in_web)}")
-    check("canonical registry has 22 scripts", len(canon) == 22, str(sorted(canon)))
-    check("canonical numbers are 1..22", sorted(canon) == list(range(1, 23)))
+    check("canonical registry has 23 scripts", len(canon) == 23, str(sorted(canon)))
+    check("canonical numbers are 1..23", sorted(canon) == list(range(1, 24)))
     check("every opt-in script is a real script", opt_in_py <= set(canon),
           f"unknown={sorted(opt_in_py - set(canon))}")
     check("server RUNNERS == canonical numbers", runners == set(canon), f"server={sorted(runners)}")
@@ -573,13 +589,13 @@ def main():
     print("run-all order")
     py_run_all = python_default_run_all()
     check("DEFAULT_RUN_ALL covers every script that ships in the order",
-          sorted(run_all) == [i for i in range(1, 23) if i not in opt_in_py],
+          sorted(run_all) == [i for i in range(1, 24) if i not in opt_in_py],
           str(sorted(run_all)))
     check("…and leaves the opt-in scripts out of it",
           not (set(run_all) & opt_in_py), str(sorted(set(run_all) & opt_in_py)))
     check("DEFAULT_RUN_ALL has no duplicates", len(run_all) == len(set(run_all)), str(run_all))
     check("mlo/config.py DEFAULT_RUN_ALL_ORDER covers every script",
-          sorted(py_run_all) == [i for i in range(1, 23) if i not in opt_in_py],
+          sorted(py_run_all) == [i for i in range(1, 24) if i not in opt_in_py],
           str(sorted(py_run_all)))
     check("python and web run-all order agree", py_run_all == run_all,
           f"python={py_run_all} web={run_all}")

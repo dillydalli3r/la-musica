@@ -122,9 +122,10 @@ LEGACY_DEFAULT_MEDIUM_ORDER = (
 # tagging (mood/genre/advisory), 5 images → 19 artist images (the two image
 # passes together: covers then the artwork stored beside them), 6 audit, 7 DR
 # & ReplayGain, 9 AccurateRip, 12 key & BPM, 16 mood & energy, then 10
-# Format all (the canonical trim), 20 the layout report on the resulting
-# tree, 21 the AcoustID pair fix whose tag writes grading reads, and 4 Grade
-# last.
+# Format all (the canonical trim) with 23, the tag strip that deletes the
+# SAME excess lists on its own (junk names, a valued COMMENT, unneeded
+# aliases), right behind it, 20 the layout report on the resulting tree, 21
+# the AcoustID pair fix whose tag writes grading reads, and 4 Grade last.
 # The order this replaced ran CUEs before the converters — a cue could name
 # "….wav" for an album that had become FLAC — and beets fourth-from-last, so
 # the album was moved after images/audit/DR had been computed for paths that
@@ -156,7 +157,7 @@ LEGACY_DEFAULT_MEDIUM_ORDER = (
 # is idempotent, and it is the same move `beets_organize_after` already makes
 # for 14.
 # Keep in step with web/src/lib/scripts.ts (tests/test_script_menus).
-DEFAULT_RUN_ALL_ORDER = [11, 3, 14, 15, 2, 1, 13, 18, 17, 8, 5, 19, 6, 7, 9, 12, 16, 10, 20, 21, 4]
+DEFAULT_RUN_ALL_ORDER = [11, 3, 14, 15, 2, 1, 13, 18, 17, 8, 5, 19, 6, 7, 9, 12, 16, 10, 23, 20, 21, 4]
 
 # The genre-source order that shipped before the two-source default: recognizing
 # it lets normalize_config treat it as "never customized" (see below).
@@ -2431,17 +2432,17 @@ def normalize_config(user=None) -> dict:
             # xlit/translate script when the id last moved), and the anchor
             # rule puts every later id where the pipeline wants it.
             #
-            # 20 (layout scan), 21 (AcoustID pairs) and 22 (AcoustID submit)
-            # are KEPT instead: they are the newest ids and have never meant
-            # anything else, so a saved order that holds one holds the user's
-            # own position for it, and shedding it would silently undo that. An
-            # order written before they existed simply has neither and gets
-            # them from the same anchor rule below — except 22, which is
-            # deliberately never anchored: it submits to a PUBLIC database, so
-            # it runs when a person put it in their chain (or pressed it in a
-            # menu), never because an install was upgraded
+            # 20 (layout scan), 21 (AcoustID pairs), 22 (AcoustID submit) and
+            # 23 (tag strip) are KEPT instead: they are the newest ids and have
+            # never meant anything else, so a saved order that holds one holds
+            # the user's own position for it, and shedding it would silently
+            # undo that. An order written before they existed simply has none
+            # and gets them from the same anchor rule below — except 22, which
+            # is deliberately never anchored: it submits to a PUBLIC database,
+            # so it runs when a person put it in their chain (or pressed it in
+            # a menu), never because an install was upgraded
             # (server.script_runners.OPT_IN_SCRIPTS).
-            if ((1 <= script_id <= 14 or script_id in (20, 21, 22))
+            if ((1 <= script_id <= 14 or script_id in (20, 21, 22, 23))
                     and script_id not in clean_order):
                 clean_order.append(script_id)
     # Migrate legacy sequential default [1..8] to systematic pipeline
@@ -2493,6 +2494,10 @@ def normalize_config(user=None) -> dict:
         # 21 AcoustID pairs — after 20 and so also before the grader, which is
         # the script that reports the incomplete pair it completes
         _insert_script(clean_order, 21, [20, 10, 16, 12])
+        # 23 tag strip — right behind 10 (Format all), whose trim lists it
+        # deletes by: the final tag passes together, then the read-outs (20,
+        # 21) and the grader, which is where the shipped order puts it.
+        _insert_script(clean_order, 23, [10, 16, 12])
     cfg["run_all_order"] = clean_order or list(DEFAULT_RUN_ALL_ORDER)
     return cfg
 

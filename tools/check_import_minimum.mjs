@@ -259,7 +259,14 @@ const boxes = (html) => [...html.matchAll(/<input type="checkbox"([^>]*)>([^<]*)
 const grid = boxes(finish.html);
 const ticked = grid.filter((b) => b.checked).map((b) => b.label);
 const chainly = "Beets tagging → Optimize FLACs → Grade";
-check("the Finish step renders a box per script", grid.length === 21, `${grid.length} boxes`);
+// One box per script in the app's own post-import list (`DEFAULT_RUN_ALL` in
+// web/src/lib/scripts.ts — the source the wizard reads), NOT a literal: this
+// asserted 21 and went red the moment a script was added, which says nothing
+// about the page.
+const scripts = await server.ssrLoadModule("/src/lib/scripts.ts");
+const declared = scripts.DEFAULT_RUN_ALL.length;
+check("the Finish step renders a box per script", grid.length === declared,
+      `${grid.length} boxes, ${declared} in DEFAULT_RUN_ALL`);
 check("the boxes are ticked on the import chain, and only on it",
       ticked.join(" → ") === chainly, ticked.join(" → "));
 check("the chain's ids head the grid, in the chain's own order",

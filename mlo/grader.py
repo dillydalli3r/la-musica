@@ -2120,8 +2120,9 @@ def _grade_album(album_dir, lyrics_format, cfg=None):
                 total_checks += 1
                 failed_checks += 1
                 add_issue("Excess tags: " + ", ".join(_extra)
-                          + " (run Optimize FLACs (script 3) or Format all "
-                            "(script 10) to strip them)", basename)
+                          + " (run Optimize tags (script 23) on the album, or "
+                            "Optimize FLACs (script 3) / Format all (script 10) "
+                            "to strip them)", basename)
                 track["issues"].append("TAGS")
             # COMMENT is the one name the vocabulary HOLDS whose value this
             # pipeline never writes (mlo.tagtext leaves it alone as free text,
@@ -2135,8 +2136,9 @@ def _grade_album(album_dir, lyrics_format, cfg=None):
                 total_checks += 1
                 failed_checks += 1
                 add_issue("Comment tag carries a value: " + ", ".join(_comments)
-                          + " (run Optimize FLACs (script 3) or Format all "
-                            "(script 10) to clear it)", basename)
+                          + " (run Optimize tags (script 23) on the album, or "
+                            "Optimize FLACs (script 3) / Format all (script 10) "
+                            "to clear it)", basename)
                 track["issues"].append("COMMENT")
 
         if cfg.get("grade_check_key_bpm", True) and not is_video_track:
@@ -2224,8 +2226,9 @@ def _grade_album(album_dir, lyrics_format, cfg=None):
                 add_issue(f"Unneeded {_alias}: "
                           + "; ".join(f"{_tag} — {_reason}"
                                       for _tag, _reason in _why)
-                          + " (run Optimize FLACs (script 3) or Format all "
-                            "(script 10) to clear it)",
+                          + " (run Optimize tags (script 23) on the album, or "
+                            "Format all (script 10) over the library, to clear "
+                            "it)",
                           basename)
                 if _alias not in track["issues"]:
                     track["issues"].append(_alias)

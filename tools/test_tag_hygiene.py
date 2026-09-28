@@ -23,9 +23,14 @@ REPORTS, what a script WRITES):
     fails nor counts.
   * script 10 (Format all) rewrites an existing library — bad spacing and bad
     case together — reports what it changed, and a second run changes nothing.
+  * script 23 (Optimize tags, `mlo/taghygiene.py`) is that strip on its own and
+    scoped: it deletes exactly the grader's excess list (junk names, a valued
+    COMMENT, unneeded aliases — `mlo.format_all.excess_tags`), leaves a NEEDED
+    alias alone, and does not write a clean file at all (mtime + bytes).
 
 Run:  python tools/test_tag_hygiene.py   (exit 0 = pass, 1 = failure)
 """
+import hashlib
 import os
 import shutil
 import subprocess
@@ -36,8 +41,9 @@ import wave
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from mlo.config import DEFAULT_CONFIG
-from mlo.format_all import run_format_all
+from mlo.format_all import excess_tags, run_format_all
 from mlo.grader import _grade_album
+from mlo.taghygiene import run_tag_hygiene
 from mlo.tagtext import (CANONICAL_VALUES, canonical_text, canonical_value,
                          collapse_spacing, has_internal_space_run,
                          spacing_problem)
@@ -512,6 +518,110 @@ drop_tags(wrong, ALIAS_KEYS)
 raw_tags(wrong, {"TITLE": "Song Name", "MEDIA": "Digital Media"})
 
 # --------------------------------------------------------------------------- #
+print("== script 23: Optimize tags — that same strip, on its own and scoped ==")
+# The details menus offer ONE entry per registry id, and the passes the
+# excess-tag grades pointed at are whole passes: 3 re-encodes a file, 10
+# formats the library. 23 (mlo/taghygiene.py) is the SCOPED entry point to the
+# SAME list and the SAME deletion — `mlo.format_all.excess_tags` /
+# `strip_excess_tags`, which script 10's own tag pass calls too — so one
+# album's junk tags can be cleared from that album's menu. It writes nothing
+# but the deletion: a file with nothing excess is not written at all, and a
+# NEEDED alias is never touched.
+hyg = tempfile.mkdtemp(prefix="mlo_tag_hygiene_")
+album = os.path.join(hyg, "Album")
+os.makedirs(album)
+HYG = dict(DEFAULT_CONFIG, music_folder=hyg, locale="en",
+           strip_unknown_tags=True)
+
+dirty = os.path.join(album, "01 - Dirty.flac")
+make_flac(dirty)
+raw_tags(dirty, {"TITLE": "Lost Umbrella", "ARTIST": "Radiohead",
+                 "ALBUM": "The Album", "GENRE": "Shoegaze",
+                 "ARTISTALIAS": "Radiohead",          # the name itself
+                 "TITLEALIAS-JA": "ロストアンブレラ",  # another locale
+                 "COMMENT": "ripped by some tool",    # a value nothing writes
+                 "MYJUNKTAG": "vendor junk"})         # outside the vocabulary
+needed = os.path.join(album, "02 - Needed.flac")
+make_flac(needed)
+# The alias a reader of `en` NEEDS: the name is in a script that locale cannot
+# read, and the alias is the app's own bare spelling of it.
+raw_tags(needed, {"TITLE": "君の名は", "ARTIST": "RADWIMPS",
+                  "ALBUM": "君の名は", "TITLEALIAS": "Your Name"})
+untouched = os.path.join(album, "03 - Clean.flac")
+make_flac(untouched)
+raw_tags(untouched, {"TITLE": "Song", "ARTIST": "Radiohead",
+                     "ALBUM": "The Album", "GENRE": "Rock"})
+
+
+def _state(path):
+    """The two things a write cannot leave alone: mtime and the bytes."""
+    with open(path, "rb") as fh:
+        return (os.stat(path).st_mtime_ns, hashlib.sha256(fh.read()).hexdigest())
+
+
+# What the grader calls excess, from the script's OWN list (not a
+# re-derivation here): the four tags above and nothing else.
+expect = sorted(str(k).upper() for k in excess_tags(AudioFile(dirty), HYG))
+ok(expect == ["ARTISTALIAS", "COMMENT", "MYJUNKTAG", "TITLEALIAS-JA"],
+   f"the shared list names exactly the four excess tags ({expect})")
+before = {p: _state(p) for p in (dirty, needed, untouched)}
+
+st23 = run_tag_hygiene(dict(HYG, targets=[album]))
+held = {str(k).upper() for k in (AudioFile(dirty).all_tags() or {})}
+ok(not held & set(expect),
+   f"script 23 deleted them all (still holding {sorted(held)})")
+ok(all(AudioFile(dirty).get_tag(t) for t in ("TITLE", "ARTIST", "ALBUM", "GENRE")),
+   "…and left every tag that is not excess alone, GENRE included")
+ok(AudioFile(needed).get_tag("TITLEALIAS") == "Your Name"
+   and _state(needed) == before[needed],
+   "a NEEDED alias is never stripped — and the file is not written at all")
+ok(_state(untouched) == before[untouched],
+   "a clean file is not written at all (mtime and bytes unmoved)")
+ok(st23["modified_count"] == 1 and st23["skipped_count"] == 2
+   and st23["tags_removed"] == len(expect) and st23["error_count"] == 0,
+   f"the run reports what it did ({st23['modified_count']} cleaned, "
+   f"{st23['tags_removed']} tags removed, {st23['skipped_count']} skipped)")
+ok(st23["total_scanned"] == st23["modified_count"] + st23["skipped_count"]
+   + st23["error_count"],
+   "every scanned file leaves exactly one verdict (R10a)")
+
+# The whole library, with no targets at all (what Run All posts): the pass is
+# idempotent and touches no file — the promise the clean file above made, now
+# over every file of the run.
+state2 = {p: _state(p) for p in (dirty, needed, untouched)}
+st23b = run_tag_hygiene(dict(HYG))
+ok(st23b["modified_count"] == 0 and st23b["tags_removed"] == 0
+   and st23b["skipped_count"] == 3 and st23b["error_count"] == 0,
+   f"a library-wide re-run is a no-op ({st23b['modified_count']} cleaned)")
+ok({p: _state(p) for p in (dirty, needed, untouched)} == state2,
+   "…and not one file's mtime or bytes moved")
+
+# The switch the whole rule is gated on (`strip_unknown_tags`, the one the
+# excess-tag grade and script 10's strip read): off, nothing is excess and the
+# pass deletes nothing — and a chain skips it, which tools/test_script_menu.py
+# pins from the menu's side.
+raw_tags(dirty, {"MYJUNKTAG": "vendor junk"})
+st23_off = run_tag_hygiene(dict(HYG, targets=[album],
+                                strip_unknown_tags=False))
+held_off = {str(k).upper() for k in (AudioFile(dirty).all_tags() or {})}
+ok("MYJUNKTAG" in held_off and st23_off["modified_count"] == 0
+   and st23_off["tags_removed"] == 0,
+   f"strip_unknown_tags=False deletes nothing ({sorted(held_off)})")
+
+# What the grade reported BEFORE, it reports nothing of AFTER: the album the
+# script cleaned is clean of both excess families on the next grade.
+raw_tags(dirty, {"TITLE": "Lost Umbrella", "ARTIST": "Radiohead",
+                 "ARTISTALIAS": "Radiohead"})
+HYG_GRADE = dict(HYG, grade_check_excess_tags=True,
+                 grade_check_alias_excess=True, grade_include_music=True)
+run_tag_hygiene(dict(HYG, targets=[album]))
+graded = _grade_album(album, "EMBEDDED", HYG_GRADE)
+ok(not [i for i in graded["issues"]
+        if i.startswith(("Unneeded", "Excess tags"))],
+   f"the cleaned album carries no excess/alias failure any more "
+   f"({graded['issues']})")
+
+# --------------------------------------------------------------------------- #
 print("== the registry exposes the canonical vocabulary ==")
 from server.tags_registry import registry                               # noqa: E402
 
@@ -552,4 +662,5 @@ ok("grade_check_alias_excess" in {c["key"] for c in reg["checks"]}
 
 shutil.rmtree(tmp, ignore_errors=True)
 shutil.rmtree(lib, ignore_errors=True)
+shutil.rmtree(hyg, ignore_errors=True)
 print(f"\nPASS — {passed} assertion(s)")

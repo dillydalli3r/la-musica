@@ -1047,7 +1047,7 @@ def _notify_finish(state, result, release):
             # script chain — runs on a thread of its own and announces itself
             # when it is really over (`imports._announce_import` →
             # "Imported <album>", with the chain's own summary). Saying
-            # "imported" HERE read as "finished", so a user watching 21 scripts
+            # "imported" HERE read as "finished", so a user watching 22 scripts
             # run for another four minutes had already been told the album was
             # done.
             #

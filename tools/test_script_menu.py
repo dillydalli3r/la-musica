@@ -230,6 +230,23 @@ check("the kinds are the five the model names and every one is decided",
 check("a file-scoped script reaches every kind",
       all(set(row["applies_to"]) == set(KINDS)
           for row in data["scripts"] if row["scope"] == "file"))
+# The tag strip (23, mlo/taghygiene.py) is the SCOPED entry point to the same
+# deletion script 10 performs as a step of its own pass: it is file-scoped, so
+# an album's files can be cleaned from the album's menu and a track's from its
+# row — and it is in the track row's Run-all list too, because a file menu
+# really can run it.
+check("23 (Optimize tags) is offered by an album's menu and a track row's",
+      BY_ID[23]["scope"] == "file" and set(BY_ID[23]["applies_to"]) == set(KINDS)
+      and 23 in album and 23 in track
+      and 23 in data["run_all"]["by_kind"]["track"],
+      f"scope={BY_ID[23]['scope']} kinds={BY_ID[23]['applies_to']}")
+check("...states what it deletes, and offers no forced re-run",
+      "excess" in BECAUSE[23] and not BY_ID[23]["force"]["options"],
+      str((BECAUSE[23], BY_ID[23]["force"])))
+check("...is gated on the switch its whole rule is gated on",
+      BY_ID[23]["gate"]["keys"] == ["strip_unknown_tags"]
+      and BY_ID[23]["gate"]["enabled"] is True,
+      str(BY_ID[23]["gate"]))
 
 # --------------------------------------------------------------------------- #
 # Force flags
@@ -327,6 +344,21 @@ run = script_runners.run_script(16, {"music_folder": REDIRECT, "mood_enabled": F
 check("...and the reason is the RUN's own sentence",
       run.get("skipped") is True and run.get("reason") == mood["gate"]["reason"],
       f"run={run.get('reason')!r} menu={mood['gate']['reason']!r}")
+
+# 23's switch is `strip_unknown_tags` — the one script 10's strip and the
+# excess-tag grade read: with it off nothing in this app is excess, so the
+# hygiene pass really does nothing and a chain skips it.
+strip = payload(cfg={"music_folder": REDIRECT, "strip_unknown_tags": False})
+hygiene = next(r for r in strip["scripts"] if r["id"] == 23)
+strip_run = script_runners.run_script(
+    23, {"music_folder": REDIRECT, "strip_unknown_tags": False},
+    targets=[__file__])
+check("23 is skipped on the strip switch, and says so",
+      hygiene["applies_to"] and hygiene["gate"]["enabled"] is False
+      and hygiene["gate"]["reason"] == "strip_unknown_tags is off"
+      and strip_run.get("skipped") is True
+      and strip_run.get("reason") == hygiene["gate"]["reason"],
+      f"menu={hygiene['gate']} run={strip_run.get('reason')!r}")
 
 # 17 does transliteration OR translation: one switch on keeps it alive (the
 # any-of rule script_runners.run_script applies). A menu that read that rule as
