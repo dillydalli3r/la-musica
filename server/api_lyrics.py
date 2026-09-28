@@ -128,7 +128,7 @@ def lyrics_auto(req: LyricsPathsRequest):
         res["path"] = path
         results.append(res)
     if any(r.get("status") == "ok" for r in results):
-        tagcache.invalidate_all()
+        tagcache.invalidate_album(*{os.path.dirname(p) for _, p in resolved})
     return {
         "results": results,
         "order": provider_order(cfg),
@@ -179,7 +179,7 @@ def lyrics_xlit(req: LyricsPathsRequest):
         stats = run_lyrics_xlit(run_cfg)
         errors += [str(e) for e in (stats.get("errors") or [])]
         if stats.get("modified_count"):
-            tagcache.invalidate_all()
+            tagcache.invalidate_album(*{os.path.dirname(p) for _, p in resolved})
     return {
         "stats": stats,
         "paths": [path for path, _ in resolved],

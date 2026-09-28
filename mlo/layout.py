@@ -33,11 +33,11 @@ stale, so the Library warning can never claim a scan that did not happen.
 """
 import json
 import os
-import re
 import tempfile
 import time
 
 from . import stats as mlo_stats
+from .discs import is_disc_dir
 from .paths import (IMAGE_EXTS, album_sidecar_of, app_data_dir, library_root,
                     mlo_root, move_path, trash_path)
 from .ui import Color, c, log, print_header
@@ -49,8 +49,6 @@ _ALBUM_SIDECARS = {".lrc", ".cue", ".log", ".accurip"}
 # Folders allowed directly in the music folder. `.mlo*` covers the app's own
 # state dirs; everything else is reported.
 _ROOT_ALLOWED = {".mlo"}
-# Disc folders are the one nesting the app creates and understands.
-_DISC_RE = re.compile(r"^(cd|disc|disk)\s*\d+$", re.I)
 
 # Where the last scan is kept: app state, next to config.json, so it travels
 # with the music folder it describes and the library itself never gains a file.
@@ -682,9 +680,10 @@ def scan_library(cfg=None, stats=None):
                 fp = os.path.join(ap, f)
                 opened(sink)
                 if os.path.isdir(fp):
-                    if _DISC_RE.match(f) or _is_disc_structure(fp):
-                        # A disc folder (CD1, Disc 2 …) and a disc STRUCTURE
-                        # (VIDEO_TS/BDMV, the shape a DVD/Blu-ray rip comes in)
+                    if is_disc_dir(f) or _is_disc_structure(fp):
+                        # A disc folder (CD1, Disc 2 … — mlo.discs holds the
+                        # ONE vocabulary) and a disc STRUCTURE (VIDEO_TS/BDMV,
+                        # the shape a DVD/Blu-ray rip comes in)
                         # are both the layout working as intended: the remux
                         # turns the structure into one MKV (mlo.videodisc).
                         closed(sink, skipped=True)
@@ -1126,7 +1125,7 @@ def _may_trash(src, kind, lib, folder):
     if kind in ("unexpected_folder", "empty_album", "unexpected_subfolder"):
         if not os.path.isdir(src):
             return False, "it is not a folder any more"
-        if _DISC_RE.match(base) or _is_disc_structure(src):
+        if is_disc_dir(base) or _is_disc_structure(src):
             return False, "it is a disc folder \u2014 the layout wants it"
         if _has_audio(src):
             return False, "it holds audio now"

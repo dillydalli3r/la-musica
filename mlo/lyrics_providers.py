@@ -465,12 +465,128 @@ def solve_publish_challenge(prefix, target_hex, deadline_s=PUBLISH_SOLVE_DEADLIN
             return None
 
 
-def request_publish_token(deadline_s=PUBLISH_SOLVE_DEADLINE):
+def solve_challenges_batch(items):
+    """Solve a batch of LRCLIB challenges in THIS process.
+
+    A `PublishTokenPool` worker's whole body: ``[(prefix, target), …]`` in,
+    ``[nonce | None, …]`` out, in order. Module-level and picklable, so a
+    spawn-context pool needs nothing else from the caller's world.
+    """
+    return [solve_publish_challenge(prefix, target) for prefix, target in items]
+
+
+class PublishTokenPool:
+    """LRCLIB's proof-of-work, solved across PROCESSES instead of lanes.
+
+    LRCLIB hands out one fresh challenge per submission and the solve is
+    sha256 in a tight loop — ~1.1M hashes/s in one process, ~15 s per token at
+    their current difficulty (three leading zero bytes, measured 2026-09-27).
+    The publish script's own lanes are THREADS, and threads buy nothing here:
+    measured on this machine, 6 threads reach 1.13x the throughput of one
+    (sha256 over a 40-byte input holds the GIL). A 26-track album is therefore
+    ~6.5 minutes of wall clock at ANY lane count — the "on 7/20 Publish Lyrics
+    for five minutes" the owner reported. A spawn-context pool gives the real
+    width, one core per token: the same album is ~50 s on 8 workers.
+
+    Never fatal. An environment that cannot make child processes (a frozen
+    build without `freeze_support`, a sandbox that refuses spawn) leaves
+    `workers` at 0 and every `solve` runs in the caller's own thread — the
+    pre-existing path, unchanged.
+    """
+
+    def __init__(self, workers, announce=None):
+        self._wanted = max(1, int(workers))
+        self._announce = announce
+        self._pool = None
+        self._dead = False          # spawn refused: this thread solves instead
+        self._lock = threading.Lock()
+
+    def _start(self):
+        """Build the pool the FIRST time a token is actually needed.
+
+        A run that publishes nothing (every track already on LRCLIB — the
+        common case for an album that came from a tagged rip) must not pay for
+        eight child interpreters, and neither must a caller whose publish is
+        stubbed. The cost appears on the first `solve` and is then paid once.
+        """
+        if self._pool is not None or self._dead:
+            return self._pool
+        with self._lock:
+            if self._pool is not None or self._dead:
+                return self._pool
+            try:
+                import multiprocessing as mp
+                import sys
+
+                # A frozen build (the desktop app) spawns its own executable as
+                # the worker; `freeze_support` is what tells that child it is a
+                # worker rather than a second copy of the app. PyInstaller's own
+                # runtime hook normally does this — calling it here is the
+                # documented belt for the builds that do not, and it is a no-op
+                # everywhere else.
+                if getattr(sys, "frozen", False):
+                    mp.freeze_support()
+                self._pool = mp.get_context("spawn").Pool(self._wanted)
+            except Exception:
+                self._dead = True
+                self._pool = None
+                return None
+            if self._announce is not None:
+                try:
+                    self._announce(f"solving LRCLIB's publish proof-of-work on "
+                                   f"{self.workers} process(es)")
+                except Exception:
+                    pass
+            return self._pool
+
+    @property
+    def workers(self) -> int:
+        """How many processes are really solving (0 = this thread does it)."""
+        pool = self._pool
+        if pool is not None:
+            return int(getattr(pool, "_processes", 0) or 0)
+        # Not built yet: the width it WILL have, unless spawn was refused.
+        return 0 if self._dead else self._wanted
+
+    def solve(self, prefix, target):
+        """The nonce for ONE challenge, or None when it did not solve.
+
+        `Pool.map` is thread-safe, so the lanes that call this concurrently do
+        land on separate workers — the parallelism is the point, and no lock
+        may sit here.
+        """
+        pool = self._start()
+        if pool is None:
+            return solve_publish_challenge(prefix, target)
+        try:
+            out = pool.map(solve_challenges_batch, [[(prefix, target)]])
+            return (out or [None])[0]
+        except Exception:
+            # A pool that died (a child killed by the OS, a pickling failure)
+            # must not fail the submission: solve it here instead.
+            return solve_publish_challenge(prefix, target)
+
+    def close(self):
+        pool, self._pool = self._pool, None
+        if pool is None:
+            return
+        try:
+            pool.terminate()
+        except Exception:
+            pass
+
+
+def request_publish_token(deadline_s=PUBLISH_SOLVE_DEADLINE, solver=None):
     """A one-shot `X-Publish-Token` from LRCLIB: (token, "") or (None, why).
 
     Every submission needs a fresh token and every token works once, so this
     is called per publish and never cached. The challenge request goes through
-    the same throttle as the lookups — it is an ordinary LRCLIB request."""
+    the same throttle as the lookups — it is an ordinary LRCLIB request.
+
+    *solver* (a `PublishTokenPool`) is what a batch run passes so the solve
+    happens on a core of its own; a single submission (the manual publish
+    panel) leaves it None and solves in this thread.
+    """
     status, raw = _request(
         f"{LRCLIB_BASE}/request-challenge", data=b"",
         headers={"User-Agent": USER_AGENT, "Content-Type": "application/json"},
@@ -482,14 +598,16 @@ def request_publish_token(deadline_s=PUBLISH_SOLVE_DEADLINE):
         prefix, target = str(doc["prefix"]), str(doc["target"])
     except Exception:
         return None, "LRCLIB's publish challenge was not readable"
-    nonce = solve_publish_challenge(prefix, target, deadline_s)
+    nonce = (solver.solve(prefix, target) if solver is not None
+             else solve_publish_challenge(prefix, target, deadline_s))
     if nonce is None:
         return None, ("the LRCLIB publish challenge did not solve in time "
                       "(it is a proof-of-work this app does in one process)")
     return f"{prefix}:{nonce}", ""
 
 
-def lrclib_publish(artist, track, album, duration, plain=None, synced=None):
+def lrclib_publish(artist, track, album, duration, plain=None, synced=None,
+                   solver=None):
     """Submit lyrics to LRCLIB (POST /api/publish). Returns (ok, message).
 
     The one implementation of the submission: script 18 (auto-publishing for
@@ -497,7 +615,11 @@ def lrclib_publish(artist, track, album, duration, plain=None, synced=None):
     (through server.integrations) both land here, so the metadata body, the
     required User-Agent, the publish token and the error wording exist once.
     At least one of plain/synced must carry text; a synced text is best sent
-    with its plain form beside it, which is what the script does."""
+    with its plain form beside it, which is what the script does.
+
+    *solver* (a `PublishTokenPool`) solves the challenge on a core of its own
+    during a batch run; a one-off submission leaves it None and solves in the
+    caller's own thread."""
     artist = (artist or "").strip()
     track = (track or "").strip()
     album = (album or "").strip()
@@ -513,7 +635,7 @@ def lrclib_publish(artist, track, album, duration, plain=None, synced=None):
         duration = 0
     if duration <= 0:
         return False, "track duration is required for publishing"
-    token, why = request_publish_token()
+    token, why = request_publish_token(solver=solver)
     if token is None:
         return False, why
     # The metadata is the BODY's — LRCLIB's PublishRequest has no query half.

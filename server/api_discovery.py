@@ -229,7 +229,7 @@ def ensure_artist_album_metadata(album_dir, cfg=None, force=False, progress=None
         fetched = fetched or out[item]["state"] == "fetched"
     if fetched:
         # The album's folder and the artist's folder both just changed.
-        tagcache.invalidate_all()
+        tagcache.invalidate_album(album_dir, folder)
     return out
 
 
@@ -482,7 +482,7 @@ def artist_image_save(req: ImageRequest):
                                  source_url=url, kind="artist", label=label)
     if not path:
         raise HTTPException(400, "not a usable image")
-    tagcache.invalidate_all()
+    tagcache.invalidate_album(folder)
     return {"ok": True, "file": os.path.basename(path), "source": source or "manual",
             "source_url": url,
             "image": _artist_image_payload(folder, req.artist)}
@@ -498,7 +498,7 @@ async def artist_image_upload(artist: str = Form(...), file: UploadFile = File(.
                                  source_url=None, kind="artist", label="Uploaded")
     if not path:
         raise HTTPException(400, "not a usable image")
-    tagcache.invalidate_all()
+    tagcache.invalidate_album(folder)
     return {"ok": True, "file": os.path.basename(path),
             "image": _artist_image_payload(folder, artist)}
 
@@ -508,7 +508,7 @@ def artist_image_clear(artist: str = Query(...)):
     cfg = load_config()
     folder = _artist_folder(artist, cfg)
     removed = artistdata.clear_image(folder)
-    tagcache.invalidate_all()
+    tagcache.invalidate_album(folder)
     return {"ok": removed}
 
 
@@ -535,7 +535,7 @@ def artist_description_save(req: TextRequest):
         artistdata.write_provenance(folder, {"description_source": source,
                                              "description_source_url": source_url,
                                              "description_title": title}, kind="artist", cfg=cfg)
-    tagcache.invalidate_all()
+    tagcache.invalidate_album(folder)
     return {"ok": True, "source": source, "text": text,
             "description": _artist_text_payload(folder)}
 
@@ -545,7 +545,7 @@ def artist_description_clear(artist: str = Query(...)):
     cfg = load_config()
     folder = _artist_folder(artist, cfg)
     removed = artistdata.delete_description(folder, kind="artist", cfg=cfg)
-    tagcache.invalidate_all()
+    tagcache.invalidate_album(folder)
     return {"ok": removed}
 
 
@@ -581,7 +581,7 @@ def album_description_save(req: AlbumTextRequest):
                                                 "description_source_url": source_url,
                                                 "description_title": title},
                                     kind="album", cfg=cfg)
-    tagcache.invalidate_all()
+    tagcache.invalidate_album(album_dir)
     return {"ok": True, "source": source, "text": text,
             "description": {"present": True, "text": text, "source": source,
                             "source_url": source_url}}
@@ -593,7 +593,7 @@ def album_description_clear(path: str = Query(...)):
     album_dir = os.path.normpath(path)
     _guard(album_dir)
     removed = artistdata.delete_description(album_dir, kind="album", cfg=cfg)
-    tagcache.invalidate_all()
+    tagcache.invalidate_album(album_dir)
     return {"ok": removed}
 
 

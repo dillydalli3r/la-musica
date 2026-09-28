@@ -488,11 +488,25 @@ def _format_audio_tags(path, cfg, force=False, af=None):
         # Default True to match DEFAULT_CONFIG (mlo/config.py:821) — a partial
         # cfg (tests, smoke suites) must strip like the shipped app does.
         if cfg.get("strip_unknown_tags", True):
-            from .grader import tag_key_allowed, tag_value_excess
+            from .grader import (alias_file_excess, tag_key_allowed,
+                                 tag_value_excess)
+            drop = []
             for key, value in list(af.all_tags().items()):
                 if tag_key_allowed(key) \
                         and not tag_value_excess(key, value):
                     continue
+                drop.append(key)
+            # …and the ALIAS family's own excess rule (spec R16b): an alias
+            # tag the configured locale does not need — "Radiohead" with an
+            # ARTISTALIAS, a spelling for another locale (TITLEALIAS-JA in an
+            # `en` library), a second spelling of the same alias, a value that
+            # is the name itself — is exactly as excess as a foreign tag, and
+            # `alias_file_excess` is the grade's own predicate. Without this
+            # the family would be in TAG_ALLOWLIST (it must be: the app writes
+            # it) and a stale alias would live on the file forever while the
+            # grade kept failing it.
+            drop.extend(key for key, _why in alias_file_excess(af, cfg))
+            for key in drop:
                 try:
                     if af.delete_tag(key):
                         changed = True

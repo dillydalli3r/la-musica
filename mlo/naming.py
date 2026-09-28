@@ -527,7 +527,36 @@ def _first_part(value):
     return s
 
 
-def track_variables(tags, release_type=None):
+def folder_disc(tags, path):
+    """The disc a file's own name/folder states, when its DISCNUMBER tag states
+    nothing — else None.
+
+    A release that arrives as disc SUBFOLDERS states its discs in the folder
+    names ("…/Album/CD1/01 x.flac", "…/Album/1/01 x.flac"), and the naming
+    script's %discnumber% used to read "1" for every one of its files: the
+    organizer then renamed both discs onto the SAME "1-TT Title" names, which
+    collapsed the release into one flat tracklist — the second disc's audio
+    replacing the first's on disk. The reading itself is mlo.discs (the ONE
+    disc vocabulary), applied to the file's own path, and a DISCNUMBER tag that
+    is present always wins: it is the release's own statement, the folder is
+    only what carries it.
+
+    Returns the disc number, or None when the tags state one already, no path
+    was given, or nothing in the path states a disc (a flat folder, the normal
+    single-disc album)."""
+    if str((tags or {}).get("DISCNUMBER") or "").strip():
+        return None
+    if not path:
+        return None
+    from .discs import disc_number_of_path   # lazy: mlo.discs imports mlo.naming
+
+    try:
+        return disc_number_of_path(path)
+    except Exception:
+        return None
+
+
+def track_variables(tags, release_type=None, path=None):
     """Build the variable map for one track from its tag dict.
 
     Multi-valued tags are reduced to their FIRST entry (_first_multi) so a
@@ -542,6 +571,11 @@ def track_variables(tags, release_type=None):
                                track's position ON THIS release (unique per
                                release, so it is the one that names a file
                                unambiguously inside one album).
+
+    *path* (the file's own path) is what %discnumber% falls back to when the
+    DISCNUMBER tag states nothing — see :func:`folder_disc`. Callers that hand
+    in tags alone keep the old behaviour (disc 1), which is why the organizer,
+    the one caller that MOVES files onto those names, is the one that passes it.
     """
     tags = tags or {}
     date = tags.get("DATE") or ""
@@ -566,7 +600,8 @@ def track_variables(tags, release_type=None):
         "media": tags.get("MEDIA") or "",
         "catalognumber": tags.get("CATALOGNUMBER") or "",
         "label": _first_multi(tags.get("LABEL")),
-        "discnumber": _first_part(tags.get("DISCNUMBER")) or "1",
+        "discnumber": (_first_part(tags.get("DISCNUMBER"))
+                       or str(folder_disc(tags, path) or "") or "1"),
         "disctotal": _first_part(tags.get("DISCTOTAL") or tags.get("TOTALDISCS")) or "",
         "tracknumber": _first_part(tags.get("TRACKNUMBER")) or "",
         "tracktotal": _first_part(tags.get("TRACKTOTAL") or tags.get("TOTALTRACKS")) or "",

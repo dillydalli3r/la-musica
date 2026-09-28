@@ -286,6 +286,101 @@ assert soulseek.import_completed(ICFG) == []        # nothing left to import
 soulseek.downloads_state = _real_downloads_state
 
 # --------------------------------------------------------------------------- #
+# A multi-disc release: ONE album, its discs intact, per-file disc tags
+# --------------------------------------------------------------------------- #
+# The release arrives as DISC SUBFOLDERS plus a sibling the mover must take
+# along. "Album/CD1 + Album/CD2 + Album/Extras" is ONE album — the old rule
+# ("every album-bearing child is a disc folder") split the extras off, so this
+# release landed in the library as THREE folders named after its discs.
+import wave as _wave
+from server import soulseek_auto
+
+
+def put_wav(rel, tags):
+    """A real (tiny) WAV carrying tags — the disc stamp has to be readable."""
+    from mlo.audio import AudioFile
+    p = os.path.join(DD, rel)
+    os.makedirs(os.path.dirname(p), exist_ok=True)
+    with _wave.open(p, "wb") as w:
+        w.setnchannels(1)
+        w.setsampwidth(2)
+        w.setframerate(8000)
+        w.writeframes(b"\0\0" * 800)
+    af = AudioFile(p)
+    for k, v in tags.items():
+        af.set_tag(k, v)
+    return p
+
+
+put_wav("Multi Disc Set/CD1/01 - One.wav", {"TITLE": "One", "TRACKNUMBER": "1"})
+put_wav("Multi Disc Set/CD1/02 - Two.wav", {"TITLE": "Two", "TRACKNUMBER": "2"})
+put_wav("Multi Disc Set/CD2/01 - Three.wav", {"TITLE": "Three", "TRACKNUMBER": "1"})
+put_wav("Multi Disc Set/CD2/02 - Four.wav", {"TITLE": "Four", "TRACKNUMBER": "2"})
+put("Multi Disc Set/CD1/CD1.log", 64)
+put("Multi Disc Set/CD2/CD2.log", 64)
+put_wav("Multi Disc Set/Extras/bonus.wav", {"TITLE": "Bonus", "TRACKNUMBER": "3"})
+# a rip that numbers its folders "1"/"2" is the same release
+put_wav("Numbered Discs/1/01 - Alpha.wav", {"TITLE": "Alpha", "TRACKNUMBER": "1"})
+put_wav("Numbered Discs/2/01 - Beta.wav", {"TITLE": "Beta", "TRACKNUMBER": "1"})
+# ...while the ALBUM "25" (a numbered name, no numbered siblings) is its own
+# album one level down, never swallowed as a "disc 25"
+put_wav("Numbered Names/25/01 - Hello.wav", {"TITLE": "Hello", "TRACKNUMBER": "1"})
+
+md_ready = sorted(os.path.basename(p) for p in soulseek.ready_albums(ICFG))
+assert "Multi Disc Set" in md_ready, md_ready
+assert "Numbered Discs" in md_ready, md_ready
+assert "25" in md_ready, md_ready
+assert "CD1" not in md_ready and "CD2" not in md_ready and \
+    "Extras" not in md_ready and "1" not in md_ready and "2" not in md_ready, \
+    md_ready
+
+md_moved = soulseek.import_completed(ICFG)
+md_album = os.path.join(ART, "Multi Disc Set")
+assert md_album in md_moved, md_moved
+# ONE album: every disc AND the extras ride along, nothing split off
+for rel in ("CD1/01 - One.wav", "CD1/02 - Two.wav", "CD1/CD1.log",
+            "CD2/01 - Three.wav", "CD2/02 - Four.wav", "CD2/CD2.log",
+            "Extras/bonus.wav"):
+    assert os.path.isfile(os.path.join(md_album, rel)), rel
+for split in ("CD1", "CD2", "Extras", "Multi Disc Set (2)"):
+    assert not os.path.isdir(os.path.join(ART, split)), split
+assert os.path.join(ART, "Numbered Discs") in md_moved, md_moved
+assert os.path.join(ART, "25") in md_moved, md_moved
+
+# the MusicBrainz stamp then writes each file's own disc and position from the
+# release's tracklist — read off the DISC FOLDER the file sits in — so disc 2's
+# first track stays track 1 OF DISC 2 and is never renumbered into disc 1
+RELEASE_2D = {
+    "id": "11111111-2222-3333-4444-555555555555",
+    "title": "Multi Disc Set", "date": "1997",
+    "release_group_id": "", "catalog_number": "", "label": "",
+    "barcode": "", "country": "", "status": "Official",
+    "medium_formats": ["CD"],
+    "artists": [{"name": "Multi Artist", "mbid": ""}],
+    "media": [{"disc": 1, "position": 1, "title": "One"},
+              {"disc": 1, "position": 2, "title": "Two"},
+              {"disc": 2, "position": 1, "title": "Three"},
+              {"disc": 2, "position": 2, "title": "Four"}],
+}
+stamped = soulseek_auto._stamp_mb_tags(md_album, RELEASE_2D)
+assert stamped >= 4, stamped
+_expect = {os.path.join("CD1", "01 - One.wav"): ("1", "1", "One"),
+           os.path.join("CD1", "02 - Two.wav"): ("1", "2", "Two"),
+           os.path.join("CD2", "01 - Three.wav"): ("2", "1", "Three"),
+           os.path.join("CD2", "02 - Four.wav"): ("2", "2", "Four")}
+for rel, (disc, track, title) in _expect.items():
+    from mlo.audio import AudioFile as _AF
+    _t = _AF(os.path.join(md_album, rel))
+    assert str(_t.get_tag("DISCNUMBER")) == disc, (rel, _t.get_tag("DISCNUMBER"))
+    assert str(_t.get_tag("TRACKNUMBER")) == track, (rel, _t.get_tag("TRACKNUMBER"))
+    assert str(_t.get_tag("TITLE")) == title, (rel, _t.get_tag("TITLE"))
+# the folder names the discs the stamp used: (disc, position) is the key, and
+# no two discs share one
+_keys = {soulseek_auto._parse_trackno(os.path.join(md_album, rel))
+         for rel in _expect}
+assert _keys == {(1, 1), (1, 2), (2, 1), (2, 2)}, _keys
+
+# --------------------------------------------------------------------------- #
 # library root = <music folder>/Artists (contract A): organize() renames INTO
 # it and /api/import/ingest resolves the album folder under it
 # --------------------------------------------------------------------------- #
@@ -365,6 +460,70 @@ with open(os.path.join(SRC_ING, "02 - y.flac"), "wb") as f:
 ing2 = mlo_main.import_ingest(source=SRC_ING, target="Ingested Album")
 assert os.path.normcase(ing2["path"]) == os.path.normcase(
     (DEST + " (2)").replace("\\", "/")), ing2
+
+# --------------------------------------------------------------------------- #
+# A tag-less disc-subfolder release organizes into ONE flat D-TT album
+# --------------------------------------------------------------------------- #
+# The discs must not collapse onto one set of names. With no DISCNUMBER tags,
+# %discnumber% read "1" for every file, so the organizer renamed disc 2's
+# tracks onto disc 1's own names — the second disc's audio REPLACED the first's
+# on disk (four files in, two out). The disc folder the file sits in is the
+# evidence the name is built from, and it is what gets recorded in the tag.
+from mlo.audio import AudioFile as _DiscAF  # noqa: E402
+
+DISC_SRC = os.path.join(MF2, "Unsorted", "Disc Subfolders")
+_DISC_FILES = ((1, ("One", "Two")), (2, ("Three", "Four")))
+for _disc, _titles in _DISC_FILES:
+    for _i, _title in enumerate(_titles, start=1):
+        _p = os.path.join(DISC_SRC, "CD%d" % _disc, "%02d - %s.wav" % (_i, _title))
+        os.makedirs(os.path.dirname(_p), exist_ok=True)
+        with _wave.open(_p, "wb") as _w:
+            _w.setnchannels(1)
+            _w.setsampwidth(2)
+            _w.setframerate(8000)
+            _w.writeframes(b"\0\0" * 800)
+        _af = _DiscAF(_p)
+        for _k, _v in (("TITLE", _title), ("TRACKNUMBER", str(_i)),
+                       ("ALBUM", "Disc Subfolders"), ("ALBUMARTIST", "Disc Artist"),
+                       ("DATE", "1999")):
+            _af.set_tag(_k, _v)          # NOTE: no DISCNUMBER anywhere
+
+_refresh2 = mlo_main._refresh_slskd_shares_soon
+mlo_main._refresh_slskd_shares_soon = lambda: None
+try:
+    _dorg = mlo_main.organize(mlo_main.OrganizeRequest(paths=[DISC_SRC], dry_run=False))
+finally:
+    mlo_main._refresh_slskd_shares_soon = _refresh2
+_r2 = _dorg["results"][0]
+assert _r2.get("ok"), _r2
+assert not _r2["errors"], _r2["errors"]
+assert _r2["discs_recorded"] == 4, _r2
+DISC_OUT = os.path.normpath(_r2["album_root"].replace("/", os.sep))
+_disc_names = sorted(f for f in os.listdir(DISC_OUT) if f.lower().endswith(".wav"))
+assert _disc_names == ["1-01 One.wav", "1-02 Two.wav",
+                       "2-01 Three.wav", "2-02 Four.wav"], _disc_names
+for _name, _disc in (("1-01 One.wav", "1"), ("1-02 Two.wav", "1"),
+                     ("2-01 Three.wav", "2"), ("2-02 Four.wav", "2")):
+    _got = str(_DiscAF(os.path.join(DISC_OUT, _name)).get_tag("DISCNUMBER") or "")
+    assert _got == _disc, (_name, _got)
+# the disc folders are gone — the album is ONE flat folder, and every track's
+# name still states its own disc, so grading's expected path (read from the
+# tags recorded above) matches what organize wrote
+assert not os.path.isdir(os.path.join(DISC_OUT, "CD1")), os.listdir(DISC_OUT)
+assert not os.path.isdir(os.path.join(DISC_OUT, "CD2")), os.listdir(DISC_OUT)
+
+# doing it again changes nothing: the disc is a tag now, so nothing is derived,
+# nothing is rewritten and no name moves
+mlo_main._refresh_slskd_shares_soon = lambda: None
+try:
+    _dorg2 = mlo_main.organize(mlo_main.OrganizeRequest(paths=[DISC_OUT], dry_run=False))
+finally:
+    mlo_main._refresh_slskd_shares_soon = _refresh2
+_r2b = _dorg2["results"][0]
+assert _r2b["discs_recorded"] == 0, _r2b
+assert _r2b["moved"] == 0, _r2b
+assert sorted(f for f in os.listdir(DISC_OUT) if f.lower().endswith(".wav")) == \
+    _disc_names, os.listdir(DISC_OUT)
 
 # --------------------------------------------------------------------------- #
 # U3: transfer progress fields, junk folders, .incomplete pruning, locked move

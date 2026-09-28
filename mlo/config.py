@@ -686,13 +686,24 @@ DEFAULT_CONFIG = {
     # fingerprint is taken locally with fpcalc), so this needs no API key —
     # `acoustid_api_key` only gates the service lookups.
     "grade_check_acoustid": True,
-    # A name written in a non-Latin script needs its locale alias tag beside
-    # it (TITLEALIAS / ARTISTALIAS, optionally locale-suffixed) — the name a
-    # reader in the configured locale searches for, which the tagging pass
-    # takes from MusicBrainz' own aliases. What "needs one" means is
-    # mlo.lyrics_xlit's script test (the same one that decides a lyric
-    # transliteration), so a Latin-script library is never charged for it.
+    # A name written in a script the configured `locale` cannot read needs its
+    # alias tag beside it (TITLEALIAS / ARTISTALIAS / ALBUMALIAS, optionally
+    # locale-suffixed) — the name a reader there searches for, which the
+    # tagging pass takes from MusicBrainz' own aliases. What "needs one" means
+    # is `server.integrations.alias_required`: a Latin name never needs one,
+    # and a name in the locale's OWN script does not either (the script
+    # reading is mlo.lyrics_xlit's, the one that decides a lyric
+    # transliteration), so a Latin library is never charged for it.
     "grade_check_alias_needed": True,
+    # …and an alias tag that is NOT needed is excess (spec R16b): a name the
+    # configured locale already reads carrying one ("Radiohead" with an
+    # ARTISTALIAS), a spelling for a locale the app does not write
+    # (TITLEALIAS-JA in an `en` library), a second spelling of the same alias,
+    # or a value that is the name itself. This is what makes "only what is
+    # required" auditable — the writers store at most ONE alias per entity and
+    # script 10 clears what an earlier locale left behind (the same predicate,
+    # mlo.grader.alias_keys_excess).
+    "grade_check_alias_excess": True,
     # The album description sidecar (description.txt) is a legitimate part of
     # an album folder — allowed as a file category by default.
     "grade_include_description": True,
@@ -1078,6 +1089,16 @@ DEFAULT_CONFIG = {
     # to the existing title/artist search when fpcalc is missing, no key is
     # configured, or nothing matches.
     "import_acoustid": True,
+    # The FINGERPRINT never chooses a release by itself during an interactive
+    # import: the wizard's automatic detect reads the album's TAGS
+    # (`/api/album/mbdetect`), and an album whose tags name no release waits
+    # for a press on "Match from fingerprint" beside the release field. This is
+    # the opt-in that lets the fingerprint fill it anyway — off by default, in
+    # the owner's words, because "it actually shouldn't auto-fill purely based
+    # on the AcoustID": a fingerprint is evidence about the AUDIO and never
+    # about which EDITION the user wants. Unattended imports (a Soulseek
+    # auto-import) match under `import_acoustid` and are not affected by this.
+    "import_acoustid_autofill": False,
     "acoustid_enabled": True,
     "acoustid_api_key": "",
     # SUBMITTING to AcoustID is a second credential, not a second app key: the

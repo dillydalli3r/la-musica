@@ -238,7 +238,8 @@ RELAXED_OFF = frozenset((
     "grade_check_tag_case",
     "grade_check_lyrics_blank_lines", "grade_check_cue_blank_lines",
     "grade_check_filename_case", "grade_check_ext_case",
-    "grade_check_excess_tags", "grade_check_mb_links", "grade_check_rym_links",
+    "grade_check_excess_tags", "grade_check_alias_excess",
+    "grade_check_mb_links", "grade_check_rym_links",
     "grade_check_replaygain", "grade_check_album_description",
     "grade_check_artist_image", "grade_check_artist_description",
 ))

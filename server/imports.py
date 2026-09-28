@@ -37,7 +37,7 @@ import uuid
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 from mlo.config import DEFAULT_RUN_ALL_ORDER, load_config
-from mlo.discs import disk_track_keys, match_disc_row, sidecar_tracklist
+from mlo.discs import disk_rows, match_disc_row, sidecar_tracklist
 from mlo.paths import (AUDIO_EXTS, expected_tracks_state, library_root,
                        load_expected_tracks, move_path, save_expected_tracks)
 # The shared worker-count policy (`worker_limit`): the per-track tag writes
@@ -1372,8 +1372,11 @@ def record_sidecar_tracklist(album_dir, cfg=None):
                     row["file"] = os.path.basename(p)
                     break
         manifest.append(row)
-    keys, names = disk_track_keys(album_dir, audio)
-    state = expected_tracks_state(manifest, keys, names)
+    rows_on_disk = disk_rows(album_dir, audio)
+    keys = {(r["disc"], int(r["position"])) for r in rows_on_disk
+            if r["position"] is not None}
+    names = [r["file"] for r in rows_on_disk]
+    state = expected_tracks_state(manifest, keys, names, rows_on_disk)
     if not any(s["missing"] for s in state):
         return None
     if not save_expected_tracks(album_dir, None, manifest):
@@ -1383,13 +1386,70 @@ def record_sidecar_tracklist(album_dir, cfg=None):
     return {"release_id": None, "tracks": manifest}
 
 
+def stamp_folder_discs(album_dir, cfg=None):
+    """Record the disc each file's own FOLDER states, where no tag states one.
+
+    A release that arrives as disc SUBFOLDERS ("…/Album/CD1/01 x.flac",
+    "…/Album/1/01 x.flac") states its discs in the folder names and nowhere
+    else: the files carry no DISCNUMBER, and the naming script's %discnumber%
+    then reads "1" for every one of them. The organizer renames both discs onto
+    the SAME "1-TT Title" names, which collapses the release into one flat
+    tracklist — the second disc's audio replacing the first's on disk (or
+    arriving as a "(2)"-suffixed duplicate).
+
+    Recording the disc BEFORE the naming script runs is what keeps the two
+    apart, and the tag is what every reader then agrees on: the path the
+    organizer builds, the grader's expected path (read from the same tags), the
+    expected-tracklist manifest's (disc, position) keys and the per-disc log
+    gates all read DISCNUMBER.
+
+    FILL-ONLY, like every other import writer: a DISCNUMBER the file (or the
+    release stamp) already carries is the release's own statement and is never
+    touched, and a file whose path states no disc at all — the ordinary flat
+    album — is left exactly as it is. The reading is
+    mlo.discs.disc_number_of_path, the ONE disc vocabulary.
+
+    Returns the number of files stamped.
+    """
+    from mlo.audio import AudioFile
+    from mlo.config import should_write_audio_tag
+    from mlo.discs import disc_number_of_path
+
+    album_dir = _album_dir(album_dir)
+    if not os.path.isdir(album_dir):
+        return 0
+    cfg = cfg if cfg is not None else load_config()
+    stamped = 0
+    for path in _audio_files(album_dir):
+        disc = disc_number_of_path(path)
+        if not disc or not should_write_audio_tag(cfg, "DISCNUMBER",
+                                                  filepath=path):
+            continue
+        try:
+            af = AudioFile(path)
+            if af.audio is None or str(af.get_tag("DISCNUMBER") or "").strip():
+                continue
+            af.defer_save(True)
+            ok = False
+            try:
+                af.set_tag("DISCNUMBER", str(disc))
+                ok = True
+            finally:
+                if af.defer_save(False) is False:
+                    ok = False
+            if ok:
+                stamped += 1
+        except Exception:
+            traceback.print_exc()
+    return stamped
+
+
 # The provenance a value the file ALREADY carried is reported with when this
 # run did not ask anyone about it (`force=False`). `sources` is normally "who
 # stated this value"; an echoed value was stated by the file's own tag, and
 # saying so is what keeps the readout from showing "source unknown" beside a
 # 0 that a provider may well disagree with.
 EXISTING_TAG = "existing-tag"
-
 # `status[path]` — what this run did to the value it reports for *path*.
 STATUS_WRITTEN = "written"       # the tag now holds what this run wrote
 STATUS_UNCHANGED = "unchanged"   # decided, and the tag already read that
@@ -2677,6 +2737,7 @@ def acoustid_match(paths, cfg=None, progress=None, apply=False, expect=None,
                 "note": acoustid.acoustid_enabled_note(cfg) or "AcoustID unavailable",
                 "albums": [], "ok": False, "code": acoustid.check(cfg)["code"]}
 
+    tagged_albums = []
     rows = []
     for album in albums:
         row = {"path": album, "tagged": 0, "writes": [], **_ACOUSTID_ROW}
@@ -2715,12 +2776,14 @@ def acoustid_match(paths, cfg=None, progress=None, apply=False, expect=None,
                 row["writes"] = writes
                 row["tagged"] = sum(1 for w in writes if w.get("ok"))
                 if row["tagged"]:
-                    tagcache.invalidate_all()
+                    tagged_albums.append(album)
         for key in ("status", "code", "reason", "conflict", "conflicts",
                     "skips", "failures"):
             row[key] = report.get(key)
         row["total"] = report["tracks"]["total"]
         rows.append(row)
+    if tagged_albums:
+        tagcache.invalidate_album(*tagged_albums)
 
     errors = [r for r in rows if r.get("status") == "error"]
     return {"available": True,
@@ -2987,7 +3050,7 @@ def drop_arrived_values(album_dir, cfg=None, chain=None):
     per family of the FILES that lost an arrived value.
     """
     from mlo import import_policy
-    from mlo.audio import AudioFile
+    from mlo.audio import AudioFile, alias_tag_parts
     from mlo.config import should_write_audio_tag
     from mlo.lyrics import _lrc_for
 
@@ -3024,17 +3087,12 @@ def drop_arrived_values(album_dir, cfg=None, chain=None):
     def _alias_family(key):
         """Whether one all_tags() key names a MusicBrainz alias tag.
 
-        The bare family and every locale-suffixed spelling (TITLEALIAS-JA):
-        mlo.audio's all_tags() already names both in the app's own vocabulary
-        (TXXX:TITLEALIAS-JA and the freeform atom resolve to TITLEALIAS-JA),
-        and the wrapper is stripped here for a file another tagger left a raw
-        spelling on.
+        mlo.audio.alias_tag_parts is the ONE rule for the family — bare or
+        locale-suffixed (TITLEALIAS-JA), in any container spelling — so this
+        drop and the grade that requires the tag can never disagree about
+        what an alias tag is.
         """
-        name = str(key).upper()
-        if name.startswith(("TXXX:", "----:")):
-            name = name.rsplit(":", 1)[-1]
-        return name.split("-", 1)[0] in ("TITLEALIAS", "ARTISTALIAS",
-                                         "ALBUMALIAS")
+        return bool(alias_tag_parts(key)[0])
 
     def _one(path):
         """One file: which families lost an arrived value, or "failed"."""

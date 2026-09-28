@@ -44,7 +44,7 @@ import os
 import re
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
-from .audio import AudioFile
+from .audio import ALIAS_TAG_SUBJECTS, AudioFile
 from .config import DEFAULT_CONFIG, should_write_audio_tag
 # one genre list policy for every writer: the trimmer, the top-up below and
 # the import all keep order, drop case-insensitive repeats and cap the same way
@@ -134,6 +134,76 @@ def genre_count(cfg, requested=None):
     return max(1, min(cap, want))
 
 
+def _stored_genres(af):
+    """What the container holds for GENRE: the names, and the verbatim shape.
+
+    Returns ``(names, stored)`` — *names* is the list split out of the stored
+    values (the app's own repeated fields, or one ``"; "``-joined value another
+    tagger left, or a single plain value), *stored* is what the container
+    holds VERBATIM, which is what a "did anything change?" test must compare
+    against. A file keeping one ``"; "``-joined value has to be rewritten into
+    repeated fields even when the names inside it are already canonical and in
+    order: leaving the join in place is not "nothing to clean", it is the other
+    tagger's spelling.
+    """
+    values = af.tag_values("GENRE")
+    if not values:
+        raw = af.get_tag("GENRE")
+        if raw is None:
+            return [], []
+        values = [raw]
+    stored = [str(v) for v in values]
+    if len(stored) == 1 and ";" in stored[0]:
+        values = stored[0].split(";")
+    # Blank repeats are dropped rather than kept: a file carrying ["", "Rock"]
+    # must not end up with the empty string as its first genre.
+    names = [v for v in (str(v).strip() for v in values) if v]
+    return names, stored
+
+
+def genre_plan(af, names, count):
+    """What GENRE this file should hold, and whether it already does.
+
+    Returns ``(want, changed)``: *want* is the list to store through
+    `genre_apply` (one name writes one plain value, several write repeated
+    fields, empty deletes the tag) and *changed* is False when the container
+    already holds exactly that — the test EVERY genre writer makes before it
+    touches a file, because writing a tag rewrites the whole container on
+    FLAC/MP3/MP4 and a genre import that re-imported the same list rewrote
+    every track of the album for nothing (2.0 s for 8 tracks, and it moved
+    every file's mtime, which is what made the pages after it re-read the
+    library).
+
+    *names* is the list the caller wants, highest-priority first; it is
+    canonicalized and capped here through the shared `normalize_genres`, so
+    `mb_genre_count` means the same thing to every writer. ``count == 0`` is
+    "keep none", the convention `trim_genres` documents (not
+    `normalize_genres`' own 0, which means "no cap", for rendering).
+    """
+    try:
+        count = max(0, int(count))
+    except (TypeError, ValueError):
+        count = 0
+    kept = normalize_genres(names, count) if count else []
+    # What the tag should hold: repeated fields for a list, one plain value for
+    # a single genre — the shapes `genre_apply` writes.
+    want = [kept[0]] if len(kept) == 1 else kept
+    _, stored = _stored_genres(af)
+    return want, want != stored
+
+
+def genre_apply(af, want):
+    """Write (or delete) GENRE so the file holds exactly *want*.
+
+    The ONE applier: a list writes repeated GENRE fields, one value stays a
+    plain string, none deletes the tag (an empty GENRE is worse than no
+    GENRE).
+    """
+    if want:
+        return af.set_tag("GENRE", want if len(want) > 1 else want[0])
+    return af.delete_tag("GENRE")
+
+
 def trim_genres(af, count):
     """Keep the first `count` genre values, drop the rest. Returns how many
     values were removed (0 = nothing changed, no container write).
@@ -151,46 +221,24 @@ def trim_genres(af, count):
         count = max(0, int(count))
     except (TypeError, ValueError):
         return 0
-    values = af.tag_values("GENRE")
-    if not values:
-        raw = af.get_tag("GENRE")
-        if raw is None:
-            return 0
-        values = [raw]
-    # What the CONTAINER holds, verbatim. The guard below compares against
-    # THIS and not against the names split out of it: a file keeping one
-    # "; "-joined value has to be rewritten into repeated fields even when the
-    # names inside it are already canonical and in order — leaving the join in
-    # place is not "nothing to clean", it is the other tagger's spelling.
-    stored = [str(v) for v in values]
-    if len(values) == 1 and ";" in str(values[0]):
-        # ONE stored value that is really a "; "-joined list — the spelling
-        # another tagger leaves behind, which tag_values() hands back whole
-        # (repeated fields are the app's own spelling). Split it, or the file
-        # would read as a single genre called "Rock; Alternative Rock; Indie".
-        values = str(values[0]).split(";")
-    # Blank repeats are dropped rather than kept: a file carrying ["", "Rock"]
-    # must not end up with the empty string as its first genre.
-    values = [v for v in (str(v).strip() for v in values) if v]
-    # `count == 0` is this helper's "keep none" (delete the tag), which is NOT
-    # normalize_genres' own 0 — there 0 means "no cap", for rendering.
-    kept = normalize_genres(values, count) if count else []
-    # What the tag should hold: repeated fields for a list, one plain value for
-    # a single genre — the shapes `set_tag` writes below.
-    want = [kept[0]] if len(kept) == 1 else kept
-    if want == stored:
+    names, stored = _stored_genres(af)
+    if not names:
+        # Nothing to keep — but a container holding ONLY blanks ([""] or
+        # ["  "]) still has an empty GENRE to remove, which the original
+        # counted as zero removals and deleted anyway.
+        if stored:
+            af.delete_tag("GENRE")
+        return 0
+    want, changed = genre_plan(af, names, count)
+    if not changed:
         # Nothing to remove, nothing to clean and nothing re-spelled: never
         # rewrite a container for nothing.
         return 0
-    if want:
-        # A list writes repeated GENRE fields; one value stays a plain string.
-        af.set_tag("GENRE", want if len(want) > 1 else want[0])
-    else:
-        # Nothing survives the cap — an empty GENRE is worse than no GENRE.
-        af.delete_tag("GENRE")
+    genre_apply(af, want)
+    kept = want
     # Never negative: one stored value holding a " / "-joined list is split
     # into more names than it had fields, and "removed" must stay a count.
-    return max(0, len(values) - len(kept))
+    return max(0, len(names) - len(kept))
 
 
 # ----------------------------------------------------------------------
@@ -257,19 +305,13 @@ _EXTRA_RELEASE_TAGS = (
 # the recording id of the track's own position, and the artist it credits.
 _PER_TRACK_TAGS = ("MUSICBRAINZ_TRACKID", "MUSICBRAINZ_ARTISTID")
 
-# The alias tags, one per entity. The BARE key holds the one alias the
-# reader's locale ladder chose (`server.integrations.alias_for`) — the name
-# the library and the pages show beside the stored one — and each locale
-# MusicBrainz states ALSO gets its own tag carrying the language in its name
-# (TITLEALIAS-JA, ARTISTALIAS-EN_PH — mlo.audio._ALIAS_TAG_PREFIXES owns the
-# spellings). The suffix is the language tracking: it is what survives on the
-# file, so a later run in another locale can still read every name
-# MusicBrainz stated rather than only this run's pick.
-_ALIAS_TAGS = (
-    ("TITLEALIAS", "title"),      # the recording (per track)
-    ("ARTISTALIAS", "artist"),    # the credited artist
-    ("ALBUMALIAS", "album"),      # the release / its group
-)
+# The alias tag each entity gets is `mlo.audio.ALIAS_TAG_SUBJECTS` — the ONE
+# mapping of alias family to the NAME it annotates, shared with the grade and
+# its strip pass. What this module adds is the RULE: the BARE key carries the
+# one alias the reader's locale ladder chose (`server.integrations.alias_for`)
+# — the name the library and the pages show beside the stored one — and only
+# when that name NEEDS one (`server.integrations.alias_required`, spec R16a),
+# so script 8's prescan, the writer and the grade ask one question.
 
 
 def _alias_norm(value):
@@ -282,50 +324,46 @@ def _alias_norm(value):
 
 
 def _alias_tag_values(prefix, aliases, name, config=None):
-    """(tag, value) pairs for ONE entity's MusicBrainz aliases.
+    """The alias tag ONE entity should carry, as [(tag, value)] — at most one.
 
-    The bare *prefix* carries the ONE alias the reader's locale ladder chose
+    The value is the ONE alias the reader's locale ladder chooses
     (`server.integrations.alias_for`) — the name a page or the library shows
-    beside the stored one, which is why the alias list is parsed through that
-    ladder instead of being stored raw. Every alias MusicBrainz gives a
-    `locale` gets its own tag (`TITLEALIAS-JA`) whose value is EVERY alias of
-    that locale, as a list — several aliases may share one language, and the
-    container stores a list as repeated fields.
+    beside the stored name, which is why the alias list is parsed through that
+    ladder instead of being stored raw — and it is written AT ALL only when the
+    name needs one (`server.integrations.alias_required`, spec R16a): a name
+    the configured locale can read is never annotated, so `Radiohead` carries
+    no ARTISTALIAS in an `en` library and `宇多田ヒカル` carries none for a `ja`
+    reader. That is the whole rule the owner asked for: WHATS REQUIRED, and
+    nothing else.
+
+    Nothing of the per-locale fan-out survives: every locale MusicBrainz stated
+    used to get a tag of its own (TITLEALIAS-JA, TITLEALIAS-RU …) holding every
+    alias of that language, so one file carried names no reader of the
+    configured locale asked for, in scripts they may not read. ONE tag per
+    entity, ONE value — the bare *prefix*, the tag every reader of the file
+    (`mlo.grader`'s alias checks, the app's search) already looks for.
 
     `search hint` aliases (MusicBrainz's search-index spellings) and a name
     equal to the stored one are dropped, exactly as `alias_for` drops them, so
     a file never carries a name as its own alias. Returns [] when MusicBrainz
-    states no usable alias — nothing is written for nothing.
+    states no usable alias, when the name needs none, or when the ladder finds
+    nothing readable — nothing is written for nothing.
     """
     try:
-        from server.integrations import _ALIAS_SKIP_TYPES, alias_for
+        from server.integrations import (_ALIAS_SKIP_TYPES, alias_for,
+                                         alias_required)
     except Exception:            # plain CLI / a stripped backend: no aliases
+        return []
+    text = str(name or "").strip()
+    if not alias_required(text, config):
         return []
     rows = [a for a in (aliases or []) if isinstance(a, dict)
             and str(a.get("name") or "").strip()
             and str(a.get("type") or "").strip().lower() not in _ALIAS_SKIP_TYPES]
     if not rows:
         return []
-    out = []
-    chosen = alias_for(rows, config, name)
-    if chosen:
-        out.append((prefix, chosen))
-    by_locale = {}
-    for row in rows:
-        locale = str(row.get("locale") or "").strip()
-        if not locale:
-            continue
-        value = str(row.get("name") or "").strip()
-        if _alias_norm(value) == _alias_norm(name):
-            continue
-        names = by_locale.setdefault(f"{prefix}-{locale.upper()}", [])
-        if _alias_norm(value) not in {_alias_norm(v) for v in names}:
-            names.append(value)
-    for tag, names in by_locale.items():
-        # A one-value list is written as the plain string: the container holds
-        # both, and a single alias reads back the same either way.
-        out.append((tag, names[0] if len(names) == 1 else names))
-    return out
+    chosen = alias_for(rows, config, text)
+    return [(prefix, chosen)] if chosen else []
 
 
 def _merge_alias_rows(*groups):
@@ -365,6 +403,39 @@ def _release_artist_aliases(release):
     if artists and isinstance(artists[0], dict):
         return artists[0].get("aliases") or []
     return []
+
+
+def _alias_slot_open(af, config=None):
+    """Whether this file still MISSES an alias tag it should carry.
+
+    The alias half of script 8's prescan (see `_fill_release_tags`): an entity
+    whose name needs an alias (`server.integrations.alias_required`) and whose
+    file carries no alias tag for it is an OPEN slot, so an album that is
+    complete in every other way still costs the one release request that can
+    write it — which is what makes an alias land during the import chain
+    instead of only when somebody runs the tagging pass by hand (spec R16a).
+
+    A name that needs nothing (the ordinary Latin library) opens nothing: the
+    prescan's contract — an album that already carries everything this stage
+    could write is never asked about — is untouched for it. A tag suffixed for
+    a locale the app does not write does not close the slot either
+    (mlo.audio.alias_spelling_ok): it is excess, and the same run's strip pass
+    deletes it, so the file must gain the spelling the reader actually needs.
+    """
+    try:
+        from server.integrations import alias_locale, alias_required
+    except Exception:            # plain CLI / a stripped backend: no aliases
+        return False
+    from .audio import alias_family_of, alias_spelling_ok
+    want = alias_locale(config)
+    have = {alias_family_of(k) for k in (af.all_tags() or {})
+            if alias_spelling_ok(k, want)}
+    for alias, field in ALIAS_TAG_SUBJECTS.items():
+        if alias in have:
+            continue
+        if alias_required(af.get_tag(field), config):
+            return True
+    return False
 
 
 # release_lookup's own `inc` list, so the album's release comes back with its
@@ -1241,9 +1312,14 @@ def _fill_release_tags(info, config, album_dir):
     # (MusicBrainz may spell the same date in full, and the album folder is
     # named after it) and a RELEASECOUNTRY holding one code (it may be the
     # first event of a release out in several countries — the one case where
-    # the request is what tells the two apart).
+    # the request is what tells the two apart). The alias slots are the third
+    # (see _alias_slot_open): a name that needs a locale alias and has none is
+    # something this request could write, while a name that needs nothing
+    # keeps its album as cheap as before.
     slots = [tag for tag, _key in _RELEASE_TAGS] + list(_PER_TRACK_TAGS)
-    if not any(_slot_open(d["af"], tag) for d in info for tag in slots) \
+    alias_open = any(_alias_slot_open(d["af"], config) for d in info)
+    if not alias_open \
+            and not any(_slot_open(d["af"], tag) for d in info for tag in slots) \
             and not any(_podcast_slot_open(d["af"]) for d in info):
         return 0, "release tags: nothing to fill"
 
@@ -1255,15 +1331,18 @@ def _fill_release_tags(info, config, album_dir):
     # the one the album was matched against
     manifest_ids = {t["disc"] * 1000 + t["position"]: t["recording_mbid"]
                     for t in manifest["tracks"] if t.get("recording_mbid")}
-    if not any(_clean_value(
-            _release_country_codes(release) if tag == "RELEASECOUNTRY"
-            else str(release.get(key) or "").strip())
-            for tag, key in _RELEASE_TAGS + _EXTRA_RELEASE_TAGS) \
+    if not alias_open \
+            and not any(_clean_value(
+                _release_country_codes(release) if tag == "RELEASECOUNTRY"
+                else str(release.get(key) or "").strip())
+                for tag, key in _RELEASE_TAGS + _EXTRA_RELEASE_TAGS) \
             and not release["tracks"] and not manifest_ids \
             and not (release.get("podcast") or {}):
         # Nothing to write: the release states no identity, no extra fact and
         # no tracklist this album can be matched against — and it is no
-        # podcast episode either, whose series alone would be worth writing.
+        # podcast episode either, whose series alone would be worth writing
+        # (an open alias slot is the same kind of reason: the release's or the
+        # track's alias rows are what this request was made for).
         return 0, "release tags: release carries none"
 
     written = 0

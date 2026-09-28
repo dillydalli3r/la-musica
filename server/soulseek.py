@@ -28,6 +28,7 @@ from urllib.parse import quote
 import httpx
 
 from mlo.config import load_config
+from mlo.discs import is_disc_parent
 from mlo.fetchdeps import installed_path
 from mlo.paths import LIB_AUDIO_EXTS, library_root
 from server.beetscfg import REPO_ROOT
@@ -3046,6 +3047,28 @@ def _holds_album_files(path, direct_only=False):
     return False
 
 
+def disc_parent(path):
+    """Whether `path` is the PARENT of a multi-disc release: its children are
+    the release's discs, so `path` is the ONE album the mover must take —
+    …/Album/CD1 + …/Album/CD2, …/Album/1 + …/Album/2.
+
+    The rule itself is mlo.discs.is_disc_parent (ONE disc vocabulary) and it is
+    deliberately wider than "every child is a disc folder": any other
+    album-bearing child — a stray log/cue folder, an artwork or bonus folder —
+    RIDES ALONG with the discs instead of splitting off into an album of its
+    own. A child that is only a bare number counts when the children are a
+    numbered set ("1"+"2"), so a peer folder named after the album "25" is not
+    mistaken for a disc.
+
+    It is read by the mover, the walk behind it and the readiness check, from
+    this ONE place, so all three can never disagree about what an album is."""
+    children = [c for c in sorted(os.listdir(path))
+                if not c.startswith(".")
+                and os.path.isdir(os.path.join(path, c))
+                and _holds_album_files(os.path.join(path, c))]
+    return is_disc_parent(children)
+
+
 def _prune_incomplete(ddir):
     """Delete the empty staging trees slskd leaves in the incomplete dir.
 
@@ -3395,8 +3418,9 @@ def import_completed(cfg=None, finish=False, progress=None):
         beside them becomes a "Soulseek <container>" album;
       * a loose file -> gathered into a "Soulseek" album.
 
-    A folder whose children are all disc folders (`…/Album/CD1` + `…/CD2`) is
-    taken as the ONE album it is, not as two albums named after the discs.
+    A folder whose children are the discs of a release (`…/Album/CD1` +
+    `…/CD2`, `…/Album/1` + `…/2`, extras included — see disc_parent) is taken
+    as the ONE album it is, not as two albums named after the discs.
 
     Every move goes through mlo.paths.move_path, so a file slskd still holds
     open is retried and then reported instead of degrading into copy+delete
@@ -3482,26 +3506,16 @@ def import_completed(cfg=None, finish=False, progress=None):
             return
         moved.append(dest)
 
-    def disc_parent(path):
-        """True when every album-bearing child of `path` is a DISC folder
-        (…/Album/CD1 + …/Album/CD2): `path` is then the album, not its
-        discs."""
-        from server.soulseek_auto import _disc_number
-        children = [c for c in sorted(os.listdir(path))
-                    if not c.startswith(".")
-                    and os.path.isdir(os.path.join(path, c))
-                    and _holds_album_files(os.path.join(path, c))]
-        return bool(children) and all(_disc_number(c) for c in children)
-
     def take_tree(epath):
         """Import the album folders below a CONTAINER directory, then any loose
         file sitting beside them.
 
         A directory holding an album file directly is an album; one whose
-        children are all disc folders is its album's parent. Anything else is a
-        container — a per-user folder, a batch id, or a level of the peer's own
-        share path — and the walk follows it down until it reaches albums, so
-        the staging layout's depth needs no special case here."""
+        children are the discs of a release (see the module's `disc_parent`) is
+        its album's parent. Anything else is a container — a per-user folder,
+        a batch id, or a level of the peer's own share path — and the walk
+        follows it down until it reaches albums, so the staging layout's depth
+        needs no special case here."""
         for c in sorted(os.listdir(epath)):
             if c.startswith("."):
                 continue
@@ -3586,9 +3600,10 @@ def ready_albums(cfg=None):
     This is the list the Downloads page and the "Import all completed" button
     work from, so it must answer the SAME question the mover does — minus the
     moving. That means the same walk and the same rules: an album is a folder
-    holding an audio file (directly, or as its ONE parent when every child is
-    a disc folder), a folder whose transfers are still running is not ready,
-    and a folder holding only rip evidence is a leftover rather than an album.
+    holding an audio file (directly, or as its ONE parent when its children
+    are the release's discs — see disc_parent), a folder whose transfers are
+    still running is not ready, and a folder holding only rip evidence is a
+    leftover rather than an album.
 
     Nothing here moves, renames or prunes anything: it is a read, and it is
     called from a polling endpoint, so an incomplete download must simply be
@@ -3602,14 +3617,6 @@ def ready_albums(cfg=None):
 
     def still_downloading(src):
         return _still_downloading(src, ddir, pending)
-
-    def disc_parent(path):
-        from server.soulseek_auto import _disc_number
-        children = [c for c in sorted(os.listdir(path))
-                    if not c.startswith(".")
-                    and os.path.isdir(os.path.join(path, c))
-                    and _holds_album_files(os.path.join(path, c))]
-        return bool(children) and all(_disc_number(c) for c in children)
 
     out = []
 

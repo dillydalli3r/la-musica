@@ -321,7 +321,7 @@ names the scripts it did not run and lets the container go.
 
 ## 3. Grading checks
 
-70 keys exist; **every one of them ships ON**, checks and file categories
+71 keys exist; **every one of them ships ON**, checks and file categories
 alike. A fresh install grades strictly without anyone pressing a preset: the
 two that used to ship off (`grade_check_audit`, `grade_include_other`) are
 named in `mlo/config.py::STRICT_DEFAULT_KEYS` so the change is visible rather
@@ -344,7 +344,8 @@ group still renders (section *Other checks*).
 | `grade_check_genre_vocab` | Genre vocabulary | ON | every name is one MusicBrainz publishes (`GENRE_VOCAB`); grading never rewrites the tag |
 | `grade_check_replaygain` | ReplayGain tags present | ON | opt-in per file: any `REPLAYGAIN_*` tag means all four must exist |
 | `grade_check_acoustid` | AcoustID tags required | ON | every audio track carries the `ACOUSTID_ID` + `ACOUSTID_FINGERPRINT` pair — neither half stored fails naming both, a half pair fails naming the missing one (`ACOUSTID_ID` / `ACOUSTID_FINGERPRINT`). `acoustid_api_key` is NOT needed (script 21 takes the fingerprint locally with fpcalc and reads the recording id off the file); the check stands down while `acoustid_enabled` is off, since then script 21 does nothing |
-| `grade_check_alias_needed` | Locale alias for non-Latin names | ON | a `TITLE` / `ARTIST` written in a non-Latin script needs its alias tag — `TITLEALIAS` / `ARTISTALIAS`, optionally locale-suffixed (`TITLEALIAS-JA`); the test is `mlo.lyrics_xlit`'s own script reading (`non_latin_ratio` ≥ `_LATIN_THRESHOLD` and `dominant_script` ≠ latin), so a Latin-script name is never graded or counted (`TITLEALIAS` / `ARTISTALIAS`) |
+| `grade_check_alias_needed` | Locale alias for names the locale cannot read | ON | a `TITLE` / `ARTIST` / `ALBUM` written in a script the configured `locale` does not read needs its alias tag — `TITLEALIAS` / `ARTISTALIAS` / `ALBUMALIAS`, in a spelling the app writes (`mlo.audio.alias_spelling_ok`: the bare tag, or the configured locale's own suffix). The rule is `server.integrations.alias_required` (the SAME answer the writers, the import's stamp and script 8's prescan ask), built on `mlo.lyrics_xlit`'s script reading (`non_latin_ratio` ≥ `_LATIN_THRESHOLD` and `dominant_script` ≠ latin) plus the locale's own script, so a Latin name — and a name in the locale's own script — is never graded or counted |
+| `grade_check_alias_excess` | Locale alias only where needed | ON | an alias tag NOTHING needs fails: a name the configured locale already reads carrying one (`Radiohead` with an `ARTISTALIAS`), a spelling for a locale the app does not write (`TITLEALIAS-JA` in an `en` library), a second spelling of the same alias, or a value that is the name itself (`X (X)`). Predicate `mlo.grader.alias_keys_excess` — the same one Optimize (3) / Format all (10) delete by |
 | `grade_check_encoder` | Encoder identity | ON | the `ENCODER_*` markers switched on in `encoder_tags` are present (covers included while `reencode_images` is on) |
 | `grade_check_naming` | Naming script match | ON | the full relative path equals the evaluated `naming_script`; full and 8-char MBIDs both accepted (`PATH`) |
 | `grade_check_filename_case` | Path capitalization | ON | letter case matches the script exactly (`PATH_CASE`) |
@@ -431,10 +432,43 @@ ad-hoc key; the writer reports what it could not place.
 set always is. **AcoustID is required**, key or no key: every audio track carries the
 `ACOUSTID_ID` + `ACOUSTID_FINGERPRINT` pair (`grade_check_acoustid`), neither half stored
 fails naming both, and script 21 creates the pair locally — the API key gates lookups only.
-**R16a — a name in a non-Latin script needs its alias** (`grade_check_alias_needed`): the
-TITLE / ARTIST's alias tag (`TITLEALIAS` / `ARTISTALIAS`, optionally locale-suffixed) is what
-a reader in the configured locale searches for, and the same script test `mlo.lyrics_xlit`
-applies to lyrics decides whether one is needed, so a Latin library is never charged for it.
+**R16a — an alias tag exists only where the locale cannot read the name**
+(`grade_check_alias_needed`). One rule, asked by everything: `server.integrations.alias_required`
+— a name needs its alias when it is written in a script the configured `locale` (`locale`,
+Settings → Import & tags) does not read, and MusicBrainz states a readable name for it. A LATIN
+name never needs one (`Radiohead` carries no `ARTISTALIAS` in an `en` library — the owner's own
+example), and a name in the locale's OWN script does not either (`宇多田ヒカル` needs
+`Hikaru Utada` for `en`, nothing for `ja`). The script reading underneath is `mlo.lyrics_xlit`'s
+(`non_latin_ratio` ≥ `_LATIN_THRESHOLD` and `dominant_script` ≠ latin — the pair that decides a
+lyric transliteration), and the picker stays `alias_for`'s: `alias_for` chooses the ONE name the
+pages show beside the stored one, so the file and the page agree (R87). Every writer asks the
+same pair — `mlo.autotag._alias_tag_values` (the Auto Tagging stage, and the beets import plugin
+through the same `write_mb_tags`), the import's own stamp (`mlo.autotag.fill_release_identity`
+via `server.imports._stamp_release_identity`, album-level `ALBUMALIAS` / `ARTISTALIAS`), and
+script 8's prescan, whose alias slot `mlo.autotag._alias_slot_open` opens ONLY for a name that
+needs one — an album that is otherwise complete still costs the one release request that can
+write its alias, while a Latin album's prescan stays exactly as cheap as before.
+**WRITE AT MOST ONE VALUE PER ENTITY.** The bare `TITLEALIAS` / `ARTISTALIAS` / `ALBUMALIAS`
+carries `alias_for`'s pick and that is all that is written: no per-locale fan-out
+(`TITLEALIAS-JA`, `TITLEALIAS-RU` … for every locale MusicBrainz states), no second spelling of
+the same alias, no `-<LOCALE>` spelling but the configured locale's own. That spelling rule is
+`mlo.audio.alias_spelling_ok`, asked by everything (the writer's own "is it already there" probe
+`_alias_slot_open`, the grade that requires the tag, the grade and strip that delete the wrong
+one): the bare family, or the family suffixed with the configured locale or a variant of its
+language. A file holds what a reader of the configured locale needs and nothing else — and a
+spelling for another locale does not stand in for it, so script 8 still writes the one the reader
+needs while script 10 clears the other.
+**R16b — an alias tag nothing needs is EXCESS** (`grade_check_alias_excess`, default ON). The
+mirror of R16a, and the reason "only what's required" is auditable rather than merely intended:
+grading fails the family when the name needs no alias (a Latin name — or one in the locale's own
+script — carrying one), when the tag is spelled for a locale the app does not write
+(`TITLEALIAS-JA` in an `en` library), when it is a second spelling of the same alias, or when its
+value IS the name (`X (X)`). `mlo.grader.alias_keys_excess` is that ONE predicate: the grade
+fails the family when it answers anything, and Optimize (3) / Format all (10)
+(`mlo.format_all`, gated on `strip_unknown_tags` like the rest of the strip) delete exactly those
+tags — so a stale alias an earlier locale wrote is cleaned up instead of living on the file
+forever. `ALBUMALIAS` is graded by both halves like the other two; it is written by the import
+and the tagging stage and was graded by nothing before this rule.
 **R17 — CD vs Digital Media vs other.** `_is_cd()` is exactly `MEDIA == "cd"`
 (case-insensitive); the CUE/LOG/AccurateRip/CRC/`LOG_GRADE` expectations are
 gated on it. `MEDIA == "digital media"` requires `SOURCE`. Any other value in
@@ -584,7 +618,7 @@ The default writer of everything else is *Beets tagging (14) · import*.
 | Tag | Family | Written by | Graded by |
 | --- | --- | --- | --- |
 | `TITLE`, `ARTIST`, `ALBUM`, `ALBUMARTIST`, `TRACKNUMBER`, `DISCNUMBER`, `DATE` | identity | Beets tagging (14) · import | `grade_check_missing_tags` |
-| `TITLEALIAS`, `ARTISTALIAS` (identity), `ALBUMALIAS` (release) | identity / release | Beets tagging (14) · import · locale aliases · the tag editor | `grade_check_alias_needed` (the two per-track ones), `grade_check_excess_tags` (never excess — the family is in `TAG_ALLOWLIST`, bare or locale-suffixed) |
+| `TITLEALIAS`, `ARTISTALIAS` (identity), `ALBUMALIAS` (release) | identity / release | Beets tagging (14) · import (the album-level pair) · locale aliases · the tag editor | `grade_check_alias_needed` (missing where a name needs one), `grade_check_alias_excess` (present where none is needed), `grade_check_excess_tags` (the family is in `TAG_ALLOWLIST`, bare or locale-suffixed, so a legitimate alias is never a foreign tag) |
 | `GENRE` | identity | Auto tagging (8) · genre import · Format all (10) trims | `grade_check_genre`, `_genre_count`, `_genre_order`, `_genre_vocab` |
 | `MEDIA`, `SOURCE` | release | Format lyrics (1) · media/source normalization | `grade_check_media`, `grade_check_source` |
 | `ITUNESADVISORY` | identity | Auto tagging (8) · advisory fetch | `grade_check_missing_tags` |
@@ -2513,6 +2547,23 @@ user asked for, in the order they asked for it. `server/exporter.py` owns both.
     for every script, so nothing in an import ever walks the library (`mlo/cli`'s
     own Run All is the explicit, user-started library-wide path and is not what
     an import runs).
+
+- **R340 — the fingerprint never chooses a release by itself during an
+  interactive import.** The wizard's automatic detect reads the album's own
+  TAGS (`GET /api/album/mbdetect`: a MusicBrainz release id in any track's
+  tags) and, when they name none, searches MusicBrainz for the album its tags
+  describe — both are evidence about what the files SAY they are. An AcoustID
+  fingerprint is evidence about the AUDIO, and what it matches is a release
+  group with many editions: the one press that accepts it is
+  **Match from fingerprint**, the button beside the release field
+  (`ImportWizard.matchReleaseFromFingerprint`), which ends in the same
+  `useAcoustidRelease` → `pickRelease` flow a manually pasted id takes, so the
+  tags are written by one writer either way and the accepted match files its
+  `ACOUSTID_ID`/`ACOUSTID_FINGERPRINT` pair. `import_acoustid_autofill`
+  (Settings → Import, **off by default**) is the opt-in that lets that same
+  match run automatically at the Links step — it is the ONLY automatic route
+  from a fingerprint to a release. Unattended imports are unaffected: a
+  Soulseek auto-import matches under `import_acoustid` on its own.
 
 - **R164 — a script that moves an album reports the folder the album is in
   WHEN THE SCRIPT RETURNS, and the chain follows it.** A script that takes an
@@ -5873,20 +5924,24 @@ composition instead (R267). Above `lg` the pane sits beside the artwork.
 
 ### 7.59 An alias is a name
 
-- **R316 — aliases are imported, shown, searched, published and required.**
-  MusicBrainz aliases arrive from the same release request as everything else
-  (`inc=aliases`) and are written as `TITLEALIAS` / `ARTISTALIAS` /
-  `ALBUMALIAS` — with a `-<locale>` suffix when MB states the language, so
-  which language an alias is in travels with it, and a list value holds every
-  alias of that language. The library payload carries the alias BESIDE the
+- **R316 — aliases are imported, shown, searched, published and required, and
+  only where they are needed (R16a/R16b).** MusicBrainz aliases arrive from the
+  same release request as everything else (`inc=aliases`) and are written as
+  `TITLEALIAS` / `ARTISTALIAS` / `ALBUMALIAS` — AT MOST ONE value per entity,
+  the name `server.integrations.alias_for` picks for the configured `locale`,
+  and only when the entity's own name is written in a script that locale cannot
+  read (`alias_required`): a `-<locale>` suffix is part of the vocabulary (it
+  names the language an alias is for) but the app writes no spelling but the
+  configured locale's own. The library payload carries the alias BESIDE the
   original (`track.alias`, `album.alias`, `_artist_display_name`), the search
   bar's haystack and the query catalogue both see the alias tags, the advisory
   and lyrics lookups ask the ORIGINAL name first and re-ask under the alias
   only when the first states nothing, and `mlo/lyrics_publish` submits the
   original pair AND each alias pair (independent outcomes; a 409 skips that one
-  name). `grade_check_alias_needed` fails a track whose title is written in a
-  non-Latin script and carries no alias, and the alias family is in the tag
-  allowlist so writing one is never an excess-tag failure.
+  name). Grading fails both directions: `grade_check_alias_needed` fails a name
+  that needs an alias and has none, `grade_check_alias_excess` fails an alias
+  nothing needs (or a spelling the app does not write), and the family is in the
+  tag allowlist so a legitimate alias is never an excess-tag failure.
 
 ### 7.60 A lyric is words, not headers
 
@@ -6183,6 +6238,25 @@ composition instead (R267). Above `lg` the pane sits beside the artwork.
   FRESH token: a token is spent by the request it authorized, so one is never
   cached or reused, and a publish that cannot get one fails without sending an
   unauthenticated submission.
+  The solve is sha256 in a tight loop over a 40-byte input, which HOLDS THE
+  GIL: measured on this machine, six threads reach **1.13x** the throughput of
+  one, so script 18's own lanes — threads — cannot overlap it. A 26-track album
+  is therefore ~6.5 minutes of wall clock at any lane count (the owner's "on
+  7/20 Publish Lyrics for five minutes"), and the fix is width across
+  processes: `mlo.lyrics_providers.PublishTokenPool` (a spawn-context
+  `multiprocessing.Pool`, one core per token, created once per run by
+  `mlo.lyrics_publish.run_publish_lyrics`) solves each challenge on a worker
+  while the lanes keep the network busy. Measured on ONE saved set of eight
+  challenges: **120.4 s with the lanes solving in-thread against 50.8 s
+  through an eight-process pool** — and the pooled floor is the HARDEST
+  challenge in the batch (LRCLIB's difficulty varies per challenge: recorded
+  samples run from 1.1 s to ~50 s of CPU), so the win is the batch, not one
+  token: a run's cost becomes max(hardest, sum / workers) instead of the sum,
+  which is what turns a 26-track album from ~6.5 minutes into about one. The
+  pool is never required: an environment that cannot spawn (a frozen
+  build without `freeze_support`, a sandbox) leaves `workers` at 0 and every
+  token is solved in the calling thread, which is the pre-existing path; a
+  one-off submission (the manual publish panel) has no pool at all.
   (b) **the metadata in the BODY.** `trackName`, `artistName`, `albumName`,
   `duration`, `plainLyrics`, `syncedLyrics` — LRCLIB's `PublishRequest` has no
   query-string half, and a submission whose fields are on the query is a 422
@@ -6384,9 +6458,11 @@ composition instead (R267). Above `lg` the pane sits beside the artwork.
   per `GET /api/storage`** (polled every 60 s by the Home page card) and
   **5.59 s per cold `GET /api/grades/summary`**. The app now keeps:
   `server/tagindex.py` (a persistent per-album payload store keyed on every
-  entry of the album folder as `relpath|mtime_ns|size`, plus a stamp of the
-  app-state stores whose content reaches a payload, plus the whole config),
-  single-flight + TTL for the library payload, a short-TTL memo for the album
+  entry of the album folder as `relpath|mtime_ns|size`, plus a per-album stamp
+  of the app-state stores whose content reaches a payload, plus the whole
+  config),
+  a single flight for the library payload's FIRST build and
+  stale-while-revalidate after it (R338), a short-TTL memo for the album
   and artist routes, a 60-second storage snapshot refreshed BEHIND the request
   (stale-while-revalidate) and walked once at startup (`_lifespan`'s
   `storage-warm` thread, so even the FIRST poll after a restart answers from
@@ -6405,6 +6481,138 @@ composition instead (R267). Above `lg` the pane sits beside the artwork.
   index is empty), and a change made outside the app is bounded by the TTL
   (30 s on the album/artist pages, 60 s on the library payload) rather than
   seen instantly.
+
+### 7.70 A disc is one vocabulary, and a disc folder is one album
+
+- **One disc vocabulary** (R335). `mlo.discs` is the only place that decides
+  what states a disc: `disc_dir_number`/`is_disc_dir` (a folder named `CD1`,
+  `Disc 2`, `Disk1`, `Volume 1`, `DVD 2`, `CD1 [FLAC]` — decoration stripped —
+  or a bare index), `bare_disc_index`+`is_disc_parent` (a bare `1`/`2` counts
+  as a disc only as part of a numbered set starting at 1: `1`+`2` is a rip, a
+  lone `25` is the album "25"), `disc_number_of_path` (a file on disk: its own
+  name, else its disc folder). The search's candidate trees, the download mover
+  and the layout scan all call these; no module keeps its own disc regex.
+- **A disc-subfolder release is ONE album** (R336). When a folder's
+  album-bearing children are its discs (`Album/CD1`+`Album/CD2`,
+  `Album/1`+`Album/2`), the mover takes that folder whole: any other
+  album-bearing child (a stray log/cue folder, art, a bonus folder) rides
+  along instead of splitting off as an album of its own, and nothing is
+  imported as `CD1`/`CD2`. `server.soulseek.disc_parent` is that rule, once,
+  for the move and the readiness list.
+- **Discs never share a track-number space** (R337). A file's DISCNUMBER is the
+  disc its own path states, recorded fill-only at import
+  (`server.imports.stamp_folder_discs`, before the naming script) so
+  `%discnumber%`, the organized path and the path grading expects all read the
+  same value; `(disc, position)` is the key everywhere, and no file of one disc
+  may be renamed onto another's name (an untagged `CD1/`+`CD2/` release used to
+  collapse into one flat list on organize, disc 2's audio overwriting disc 1's).
+  Files: `mlo/discs.py`, `mlo/naming.py`, `mlo/layout.py`,
+  `server/soulseek.py`, `server/soulseek_auto.py`, `server/imports.py`
+  (`stamp_folder_discs`), `server/main.py` (organize passes the track path +
+  records the disc).
+- **A disc's rows and its files may be numbered in different conventions**
+  (R341). A release numbered CONTINUOUSLY — disc 2 = tracks 14-26, which is
+  what the CD's own TOC states and what this app writes as `2-14 …` — against
+  a manifest numbered PER DISC (disc 2 = tracks 1-13, which is what
+  MusicBrainz states) shares no `(disc, position)` key on that disc at all, and
+  every row of the second disc read "not imported" beside the files that were
+  right there (the owner's own library: The Wall, US CD C2K 36183 — 13 rows,
+  13 files, 13 false "not imported"). `mlo.paths.expected_tracks_state` takes
+  the album's own audio as rows (`mlo.discs.disk_rows`: disc, track number and
+  TITLE per file) and, for a disc whose manifest rows and files share NO
+  position, aligns them BY ORDER — the i-th row against the i-th file — and
+  only when there is nothing to disagree with: the same COUNT on both sides and
+  a title that matches wherever both state one. A different convention is a
+  renumbering; a different title is a different tracklist, and those rows stay
+  missing. Measured on that album: 13 of 13 disc-2 rows present with the rule,
+  0 of 13 without it, and 13 of 13 still missing when the titles are bent.
+  Pinned by `tools/test_single_song_import.py`.
+- **A rip log's checksums are matched to the files the same way** (R342). EAC
+  numbers a DISC's tracks 1..N, so `CD-2.log` states rows 1-13 for the disc
+  whose files are `2-14 …` — and every one of those tracks graded "Track not
+  covered by .log CRC (unverifiable CD rip)" beside a log that covered all of
+  them (measured on The Wall: 13 files, 13 CRC rows, 0 matched by number and
+  13 by order). `mlo.discs.log_crc_map` is the ONE matcher, used by the
+  grader's CRC coverage/value pass AND by the audit's `verify_album_checksums`:
+  by track number first, and BY ORDER when the log's rows and the disc's files
+  share NO number at all — guarded by equal counts, a number for every file,
+  and the log's own TOC playtime against the file's within `TOC_TOLERANCE_S`.
+  A partial overlap is ambiguous and stays uncovered; a file the log does not
+  really cover is never given somebody else's checksum. Each caller keeps its
+  own "which track is this file" rule (the grader reads the FILE NAME first,
+  the verifier the tag) through `number_of`, so nothing else about the two
+  passes moved. Pinned by `tools/test_grading_paths.py`.
+
+### 7.71 A page load never waits for a rebuild, and a tag write is a change
+
+- **R338 — the library tree is SERVED, and re-derived behind the page.** The
+  assembled `/api/library` payload is what every page's first paint asks for,
+  and its memo used to be a hard 60-second TTL with a blocking rebuild: the
+  request that found it expired paid the whole walk and every album row in it,
+  ON a request thread. Measured on the owner's install (170 files, bind-mounted
+  library in Docker Desktop on Windows, warm reads 40-60 ms): **0.9 s, 5.5 s
+  and 14.5 s rebuilds**, twice inside one minute of otherwise warm reads — the
+  "pages take tens of seconds" this rule exists to remove. Three changes,
+  together:
+
+  * **Stale-while-revalidate.** `tagcache.get_library` returns the cached tree
+    as it stands when it is merely old (`_LIB_TTL`) OR when an in-app write
+    marked it dirty, and rebuilds it on a daemon thread
+    (`tagcache._refresh_library`, single-flight, never raises, stamped after
+    the build). The first paint of a COLD process still builds in-request and
+    still single-flights — that is the only blocking build left.
+  * **The tree is warmed at startup** (`_lifespan`'s `library-warm` thread,
+    beside `storage-warm`), so the first visit after a restart is served from
+    memory: measured 11.3 s cold walk → **0.13 s** on a 320-file scratch
+    library, and 0.05-0.09 s warm.
+  * **An in-app write drops only what it wrote.** `invalidate_path`/
+    `invalidate_album` no longer clear the whole tag cache or the tree — the
+    tree is marked dirty and re-derived behind the next request, and 36 of the
+    45 `tagcache.invalidate_all()` call sites were narrowed to the folders the
+    operation actually touched (an import used to make the next library page
+    re-parse every track with mutagen). The 9 that stay global are the ones
+    whose change really is library-wide: a settings save, the explicit Refresh,
+    and the "the affected set is unknown" fallback in `imports._invalidate_caches`.
+
+  The contract that pays for it, stated once: the rows a user sees immediately
+  after an in-app write are the pre-write ones for as long as the background
+  refresh takes (`tagcache._refresh_library`, ~1 s for a library this size),
+  while every PER-PAGE payload (album, artist, grades) is still dropped by the
+  same invalidation and rebuilt fresh — so the page in front of the user is
+  never stale, only the list behind it can lag by one refresh. A change made
+  OUTSIDE the app keeps its TTL bound.
+- **R339 — the library-state stamp is PER ALBUM.** `tagindex.dir_signature`
+  used to append one library-wide stamp of the four app-state stores (audit
+  evidence, artwork provenance, AcoustID submissions, AccurateRip identities),
+  and the import chain rewrites those stores once per album — Audit library,
+  AccurateRip and Process images all run on the album being imported. Every one
+  of those writes therefore made EVERY album's row unreachable: that is what
+  produced the 14.5 s and 5.5 s rebuilds above, on a library whose warm reads
+  are 40 ms. `tagindex.state_stamp(album_dir, cfg)` now reads each store's own
+  share: entries keyed by a path under the album, entries the album sits under
+  (an artist-level record its albums all read), and — for a store whose records
+  state no path at all (the AcoustID submissions are keyed by a fingerprint) —
+  the whole file's stamp, which is written by the submit script alone and never
+  by an import. Parsing is cached per (file, mtime, size), so a build parses
+  each store once. Verified: another album's audit evidence leaves this album's
+  identity byte-identical, while the album it is about changes.
+- **A tag write happens only when the value CHANGES.** Writing a container is a
+  whole-file rewrite on FLAC/MP3/MP4, and the genre import set the tag
+  unconditionally: every run rewrote every track of the album (8 tracks: 2.0 s)
+  and moved their mtimes, which is what made the library pages after it re-read
+  the album. `mlo.autotag.genre_plan(af, names, count)` is now the one decision
+  — it canonicalizes and caps through the shared `normalize_genres` and
+  compares against what the CONTAINER holds verbatim (so another tagger's
+  `"; "`-joined value is still rewritten into repeated fields), `genre_apply`
+  is the one applier, `trim_genres` is built on the same pair, and
+  `server.main._write_album_genres` runs ONE pass per file (the second loop
+  that re-opened every file it had just written is gone) in parallel across
+  files (`worker_count`). Verified over HTTP: a second identical
+  `/api/genres/import` reports `updated: 0` and moves **0** mtimes; the first
+  writes 8 files in 40 ms. Pinned by `tools/test_tagindex.py` (the tree's
+  serve-and-refresh behaviour, the per-album stamp) and
+  `tools/test_genres.py`/`test_genre_format.py`/`test_tag_hygiene.py`.
+
 
 ## 8. Recommended runbook
 

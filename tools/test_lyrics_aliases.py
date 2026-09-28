@@ -847,7 +847,7 @@ pub_path = make_flac("publish-alias.flac",
 submitted = []
 
 
-def fake_pub(artist, track, album, duration, plain=None, synced=None):
+def fake_pub(artist, track, album, duration, plain=None, synced=None, solver=None):
     submitted.append((artist, track, album))
     return True, "published to LRCLIB — thank you for contributing!"
 
@@ -880,7 +880,7 @@ pub_path2 = make_flac("publish-alias-dup.flac",
 submitted = []
 
 
-def fake_pub_dup(artist, track, album, duration, plain=None, synced=None):
+def fake_pub_dup(artist, track, album, duration, plain=None, synced=None, solver=None):
     submitted.append((artist, track, album))
     if (artist, track) == (EN_ARTIST, EN_TITLE):
         return False, "LRCLIB already has this track"

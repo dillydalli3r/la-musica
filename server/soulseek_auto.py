@@ -82,6 +82,9 @@ from mlo.release_choice import media_formats, video_formats, video_only
 # music-video album's files as tracks (the MB stamping below), and its
 # definition of a music VIDEO — the app's ONE container vocabulary, which the
 # video fallback below judges a peer's file by (never a second extension list).
+from mlo.discs import (DISC_BRACKET_RE as _BRACKET_DISC_RE,
+                       disc_number_of_path as _disc_number_of_path,
+                       is_disc_dir as _is_disc_dir)
 from mlo.paths import LIB_AUDIO_EXTS, is_video_file
 # The app's ONE filename rule (see _safe_component): a folder this module names
 # has to be the same folder the organizer and the export would name.
@@ -1935,54 +1938,15 @@ _TRACKNO_RE = re.compile(r"^(\d{1,3})(?:\s*[-._]|\s+|\)|$)")
 # "Album - 01 - Title.flac": the flat share layout, track number mid-name.
 _MID_NUM_RE = re.compile(r"[-_.]\s*(\d{1,3})\s*[-_.]\s*\S")
 _TAIL_NUM_RE = re.compile(r"(\d{1,3})\s*$")   # "track01"
-# The disc token a folder or file name can carry ("CD1", "Disc 2", "Disk1",
-# "Volume 1"), ignoring the decoration shares wrap their folders in
-# ("CD1 [FLAC]").
-_DISC_NUM_RE = re.compile(r"(?:^|[^A-Za-z0-9])(?:cd|disc|disk|dvd|bd|volume|vol)"
-                          r"\s*[-_.]?\s*(\d{1,2})(?![0-9])", re.IGNORECASE)
-_DISC_DIR_RE = re.compile(r"(?:cd|disc|disk|dvd|bd|volume|vol)\s*[-_.]?\s*\d{1,2}",
-                          re.IGNORECASE)
-_DECOR_RE = re.compile(r"[\s._-]*[\(\[]([^\)\]]*)[\)\]][\s._-]*$")
-_LEAD_DISC_RE = re.compile(r"^(\d{1,2})\s*-\s*\d{1,3}(?:\D|$)")     # 1-03 style
-_BRACKET_DISC_RE = re.compile(r"^[\(\[]\s*(\d{1,2})\s*[\)\]]\s*")   # (1) 01 - Title
-
-
-def _strip_decor(name):
-    """"CD1 [FLAC]" -> "CD1"; "Album (1994)" -> "Album"."""
-    name = str(name or "")
-    while True:
-        m = _DECOR_RE.search(name)
-        if not m:
-            return name.strip()
-        name = name[:m.start()]
-
-
-def _is_disc_dir(name):
-    """True when a directory name is a disc folder — "CD1", "CD 1", "Disk1",
-    "Disk 2", "Volume 1", "CD1 [FLAC]" — rather than an album folder that
-    merely carries a decoration ("Album [FLAC]", "Album (1994)")."""
-    bare = _strip_decor(name)
-    return bool(bare) and _DISC_DIR_RE.fullmatch(bare) is not None
-
-
-def _disc_number(name):
-    """Disc number a folder or file NAME claims ("CD1", "Disc 2 [FLAC]",
-    "1-03 rip", "(2) 01 x"), or None when the name says nothing."""
-    base = os.path.basename(str(name or "").replace("\\", "/")).strip()
-    stem = _strip_decor(os.path.splitext(base)[0] or base)
-    m = _DISC_NUM_RE.search(stem)
-    if m:
-        return int(m.group(1))
-    m = _LEAD_DISC_RE.match(stem)
-    if m:
-        return int(m.group(1))
-    m = _BRACKET_DISC_RE.match(stem)
-    return int(m.group(1)) if m else None
-
-
+# The disc vocabulary itself lives in mlo.discs — the module that owns
+# multi-disc — and is imported at the top of this file as _is_disc_dir and
+# _disc_number_of_path: the mover, the readiness check and the search must read
+# "CD1"/"Disc 2"/"1" the SAME way, and a second local set here is exactly how
+# they stopped doing that.
 def _album_root(path):
     """Fold per-disc subfolders (…/CD1/01 - x.flac, …/Disc 1/…,
-    …/Disk 2/…, …/CD1 [FLAC]/…) into one album root."""
+    …/Disk 2/…, …/1-03 rip/…, …/CD1 [FLAC]/…) into one album root. The rule is
+    mlo.discs.is_disc_dir (ONE disc vocabulary)."""
     d = os.path.dirname(path.replace("\\", "/"))
     parts = d.rstrip("/").split("/")
     if len(parts) >= 2 and _is_disc_dir(parts[-1]):
@@ -2016,10 +1980,11 @@ def _ancestors(root, levels=2):
 
 
 def _named_disc(path):
-    """Disc a folder/file path explicitly names — its folder first, then its
-    own name (…/CD2/01 - x.flac, …/CD1.log, …/1-02 x.flac) — or None."""
-    p = str(path).replace("\\", "/")
-    return _disc_number(os.path.dirname(p)) or _disc_number(os.path.basename(p))
+    """Disc a folder/file path explicitly names — the file's own name first,
+    then the disc FOLDER it sits in (…/CD2/01 - x.flac, …/CD1.log,
+    …/1-02 x.flac, …/1/01 x.flac) — or None. The reading is
+    mlo.discs.disc_number_of_path, the ONE disc vocabulary."""
+    return _disc_number_of_path(path)
 
 
 def _disc_of(path):

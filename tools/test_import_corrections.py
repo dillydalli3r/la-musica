@@ -353,7 +353,7 @@ def record_xlit(calls):
 
 
 def record_publish(calls):
-    def publish_one(path, config, force=False):
+    def publish_one(path, config, force=False, solver=None):
         calls.append({"path": os.path.basename(path), "force": force})
         return {"path": path, "status": "skipped", "reason": "recorded",
                 "message": "", "synced": False}
@@ -484,7 +484,8 @@ before = tags_of(m)
 sent = []
 
 
-def fake_publish(artist, title, album, duration, plain=None, synced=None):
+def fake_publish(artist, title, album, duration, plain=None, synced=None,
+                 solver=None):
     sent.append({"artist": artist, "title": title, "album": album,
                  "duration": duration, "plain": plain, "synced": synced})
     return True, "Published"

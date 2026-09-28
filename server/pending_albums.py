@@ -638,7 +638,7 @@ def create(release, cfg=None, *, source=SOURCE, queries=None, title="",
     try:
         from server import events
         from server import tagcache
-        tagcache.invalidate_all()       # the library gained a folder
+        tagcache.invalidate_album(folder)
         events.emit("album_pending",
                     f"Added to your library: {artist} — {title}".strip(" —"),
                     "Searching Soulseek for it now.",
@@ -747,7 +747,7 @@ def create_from_request(mbid, *, release_mbid="", kind="", title="", artist="",
     try:
         from server import events
         from server import tagcache
-        tagcache.invalidate_all()       # the library gained a folder
+        tagcache.invalidate_album(folder)
         events.emit("album_pending",
                     f"Added to your library: {artist} — {title}".strip(" —"),
                     "Asking MusicBrainz what this release is — the search "

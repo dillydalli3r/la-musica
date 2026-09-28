@@ -884,7 +884,8 @@ def check_publish_concurrency(tmp):
         time.sleep(LATENCY)
         return None                      # LRCLIB does not have it yet
 
-    def fake_publish(artist, title, album, duration, plain=None, synced=None):
+    def fake_publish(artist, title, album, duration, plain=None, synced=None,
+                     solver=None):
         time.sleep(LATENCY)
         return True, "published"
 

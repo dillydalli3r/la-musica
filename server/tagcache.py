@@ -33,6 +33,10 @@ _build_done = threading.Condition(_lock)
 _tag_cache = OrderedDict()
 _lib_cache = {}  # key -> (built_at, payload)
 _lib_building = set()  # keys a thread is currently building
+# Keys whose cached tree an in-app write made stale, and the keys a background
+# thread is rebuilding right now. See `_refresh_library`.
+_lib_dirty = set()
+_lib_refreshing = set()
 _payload_cache = {}  # (kind, path, config key) -> (built_at, payload)
 _cover_cache = OrderedDict()
 _color_cache = OrderedDict()  # cover stat key -> "#rrggbb"
@@ -129,14 +133,18 @@ def read_track(path, tag_list=None):
 
 
 def invalidate_path(path):
-    """Drop cached entries for a path (after tag writes / renames)."""
+    """Drop cached entries for a path (after tag writes / renames).
+
+    The assembled `/api/library` tree is NOT dropped here: it is marked dirty
+    and re-derived behind the next request (see `get_library`), because a tag
+    write to one file made the next page load rebuild every row in it.
+    """
     with _lock:
         norm = os.path.normcase(path)
         keys = [k for k in _tag_cache if k[0] == norm]
         for k in keys:
             del _tag_cache[k]
-        for key in list(_lib_cache):
-            del _lib_cache[key]
+        _lib_dirty.update(_lib_cache)
         _payload_cache.clear()
     _drop_index([path])
 
@@ -189,10 +197,12 @@ def invalidate_album(*folders):
     entire library) made the next library page re-parse every track in it —
     paying library-wide for one album's import.
 
-    The assembled `/api/library` payload still goes: it is keyed by the library
-    folder and the config (`library.library_cache_key`), not per album, so there
-    is no scoped way to drop it — but it is ONE entry and it really does hold
-    this album. A path that is not under any *folder* is left alone.
+    The assembled `/api/library` payload still goes stale — it is keyed by the
+    library folder and the config (`library.library_cache_key`), not per album,
+    so there is no scoped way to keep it — but it is marked DIRTY rather than
+    dropped: the next request is served the tree as it stands and the refresh
+    happens behind it (`get_library`). A path that is not under any *folder* is
+    left alone.
     """
     roots = [str(f or "") for f in folders if str(f or "")]
     if not roots:
@@ -204,23 +214,67 @@ def invalidate_album(*folders):
             del _cover_cache[key]
         for key in [k for k in _color_cache if any(_inside(k[0], r) for r in roots)]:
             del _color_cache[key]
-        _lib_cache.clear()
+        _lib_dirty.update(_lib_cache)
         _payload_cache.clear()
         _build_done.notify_all()
     _drop_index(roots)
 
 
-def get_library(key, builder):
-    """TTL-cached library payload. key = (music_folder, relevant config).
+def _refresh_library(key, builder):
+    """Rebuild one cached tree OFF the request path (single-flight).
 
-    SINGLE-FLIGHT. The first paint of every page asks for this tree — Home,
-    the Library page, its facets and query engine, the grade summary, the
-    discovery shelves — and they arrive at once, from several request threads.
-    Building the tree used to be done by whoever found the entry expired, so a
-    cold process paid the whole library once PER concurrent request (measured:
-    a restart made a small library take tens of seconds to answer, then the
-    same seconds again for the next tab). Now the first caller builds and the
-    others wait for that one result.
+    Never runs while the key is being built for a first paint, never twice at
+    once, and never raises: a refresh that fails leaves the cached tree in
+    place and the next request tries again. The stamp is written AFTER the
+    build, like the first paint's, so a slow scan is not born already stale.
+    """
+    with _lock:
+        if key in _lib_refreshing or key in _lib_building:
+            return
+        _lib_refreshing.add(key)
+
+    def run():
+        payload = None
+        try:
+            payload = builder()
+        except BaseException as e:
+            print(f"[mlo] library background refresh failed: {e}")
+        with _lock:
+            if payload is not None:
+                _lib_cache[key] = (time.time(), payload)
+                _lib_dirty.discard(key)
+            _lib_refreshing.discard(key)
+            _build_done.notify_all()
+
+    threading.Thread(target=run, daemon=True, name="library-refresh").start()
+
+
+def get_library(key, builder):
+    """The assembled library tree: served from memory, refreshed behind it.
+
+    SINGLE-FLIGHT for the first paint. The first paint of every page asks for
+    this tree — Home, the Library page, its facets and query engine, the grade
+    summary, the discovery shelves — and they arrive at once, from several
+    request threads. Building the tree used to be done by whoever found the
+    entry expired, so a cold process paid the whole library once PER concurrent
+    request (measured: a restart made a small library take tens of seconds to
+    answer, then the same seconds again for the next tab). The first caller
+    builds and the others wait for that one result.
+
+    A tree that is merely OLD (`_LIB_TTL`) or that an in-app write marked dirty
+    is STALE-WHILE-REVALIDATE instead of a rebuild: it is returned as it stands
+    and `_refresh_library` re-derives it in the background, so no page load
+    ever waits for a walk it did not ask for. Measured on the owner's install
+    (170 files, bind-mounted library, Docker Desktop on Windows): the tree took
+    0.9-14.5 s to rebuild IN the request that found it stale — every minute the
+    TTL lapsed, and again after every import, tag write and script run — which
+    is exactly the "Loading… that takes a while" this exists to remove. The
+    contract that pays for it: the rows a user sees right after an in-app write
+    are the pre-write ones for as long as the refresh takes (one album build
+    per changed folder, ~1 s for a whole library this size), while every
+    PER-PAGE payload (album, artist, grades) is dropped outright by the same
+    invalidation and rebuilt fresh. A change made OUTSIDE the app is bounded by
+    the TTL, as before.
 
     A builder that raises wakes the waiters and does not stamp the cache: the
     next caller builds instead of waiting for a result that is not coming.
@@ -228,12 +282,19 @@ def get_library(key, builder):
     while True:
         with _lock:
             hit = _lib_cache.get(key)
-            if hit and time.time() - hit[0] < _LIB_TTL:
-                return hit[1]
+            if hit is not None:
+                stale = key in _lib_dirty or time.time() - hit[0] >= _LIB_TTL
+                payload = hit[1]
+                break
             if key not in _lib_building:
                 _lib_building.add(key)
+                payload = None
                 break
             _build_done.wait(timeout=300.0)
+    if payload is not None:
+        if stale:
+            _refresh_library(key, builder)
+        return payload
     try:
         payload = builder()
     except BaseException:
@@ -244,6 +305,7 @@ def get_library(key, builder):
     with _lock:
         # Stamp AFTER the build: a slow scan must not be born already stale.
         _lib_cache[key] = (time.time(), payload)
+        _lib_dirty.discard(key)
         _lib_building.discard(key)
         _build_done.notify_all()
     return payload

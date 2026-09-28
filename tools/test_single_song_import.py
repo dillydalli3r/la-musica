@@ -246,7 +246,16 @@ def upload(target_dir, names, extra=()):
 
 def album_row(path):
     """The library payload's row for one album folder (the album page's own
-    source), or None."""
+    source), or None.
+
+    The tree is STALE-WHILE-REVALIDATE after an in-app write: a scoped
+    invalidation (`tagcache.invalidate_album`, what the import routes use) marks
+    it dirty and the next read is served the pre-write rows while the rebuild
+    runs behind it. The row is therefore read from a tree built for the
+    question — the same thing tools/test_add_to_library.py's `fresh_library`
+    does."""
+    from server import tagcache
+    tagcache.invalidate_all()
     want = os.path.normcase(os.path.abspath(path))
     for artist in lib_mod.build_library(load_config()).get("artists", []):
         for alb in artist.get("albums", []):
@@ -349,6 +358,60 @@ eq(row["partial_reason"], "1 of 4 tracks of the album's tracklist are in this fo
    "the album says how much of the release is there")
 state = discs.album_expected_state(album_dir)
 eq((state["present"], state["missing"]), (1, 3), "the completeness rule agrees")
+
+# --------------------------------------------------------------------------- #
+# 1b. A disc whose FILES and whose MANIFEST ROWS are numbered in different
+#     conventions. The owner's own library: The Wall (US CD, C2K 36183) is a
+#     2-CD release whose files carry the CD's CONTINUOUS numbering — disc 2 is
+#     `2-14 … 2-26` — while MusicBrainz numbers that disc's rows 1-13, so all
+#     thirteen rows of the second disc read "not imported" beside thirteen
+#     files that were right there. The rows are aligned by ORDER, and only when
+#     nothing disagrees.
+# --------------------------------------------------------------------------- #
+print("== a disc numbered 14-26 against a manifest numbered 1-13 ==")
+cont = os.path.join(pathmod.library_root(MF), "Continuous Discs")
+shutil.rmtree(cont, ignore_errors=True)
+os.makedirs(cont, exist_ok=True)
+cont_names = []
+for disc, first, titles in ((1, 1, ["One", "Two"]), (2, 5, ["Three", "Four"])):
+    for i, title in enumerate(titles):
+        pos = first + i                       # disc 2 continues 5, 6 …
+        name = f"{disc}-{pos:02d} {title}.flac"
+        make_track(os.path.join(cont, name), 1, pos, title)
+        cont_names.append(name)
+cont_manifest = [
+    {"disc": 1, "position": 1, "title": "One", "file": ""},
+    {"disc": 1, "position": 2, "title": "Two", "file": ""},
+    {"disc": 2, "position": 1, "title": "Three", "file": ""},
+    {"disc": 2, "position": 2, "title": "Four", "file": ""},
+]
+pathmod.save_expected_tracks(cont, None, cont_manifest)
+cont_rows = discs.disk_rows(cont)
+cont_keys = {(r["disc"], r["position"]) for r in cont_rows if r["position"] is not None}
+cont_disk_names = [r["file"] for r in cont_rows]
+by_keys_only = pathmod.expected_tracks_state(cont_manifest, cont_keys, cont_disk_names)
+eq(sum(1 for r in by_keys_only if r["missing"]), 2,
+   "the key test alone calls the disc-2 rows missing — the bug this covers")
+aligned = pathmod.expected_tracks_state(cont_manifest, cont_keys, cont_disk_names, cont_rows)
+eq(sum(1 for r in aligned if r["missing"]), 0,
+   "the order alignment places both disc-2 files on their own rows")
+eq([r["disc"] for r in aligned], [1, 1, 2, 2], "and they are the disc-2 rows")
+state = discs.album_expected_state(cont)
+eq((state["present"], state["missing"]), (4, 0),
+   "the completeness rule the library and the grader share agrees")
+# The guard: the alignment needs the titles to agree. A disc whose files are a
+# DIFFERENT tracklist must stay missing rather than be renamed into place.
+bent = [dict(r) for r in cont_manifest]
+for r in bent:
+    if r["disc"] == 2:
+        r["title"] = "Some Other Song"
+eq(sum(1 for r in pathmod.expected_tracks_state(bent, cont_keys, cont_disk_names, cont_rows)
+       if r["missing"]), 2,
+   "a row whose title disagrees is NOT matched by order")
+# The fixture goes: later sections sweep this same scratch library (a forced
+# AccurateRip run walks every album in it), and a complete album left behind
+# would be written for by a run that is asserting nothing was written.
+shutil.rmtree(cont, ignore_errors=True)
 
 # --------------------------------------------------------------------------- #
 # 2. grading: partial, said in those words, with the per-track AccurateRip

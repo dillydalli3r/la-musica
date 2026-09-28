@@ -353,7 +353,7 @@ def _run_one(wish, cfg):
             # the library changed — drop caches so the UI sees the new album
             try:
                 from server import tagcache, mbresolve
-                tagcache.invalidate_all()
+                tagcache.invalidate_album(detail, wish.get("target_dir"), wish.get("album_path"))
                 mbresolve.invalidate()
             except Exception:
                 pass

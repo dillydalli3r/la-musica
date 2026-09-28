@@ -4,7 +4,8 @@ import re
 import subprocess
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
-from .audio import AudioFile, TAG_MAP
+from .audio import (AudioFile, TAG_MAP, ALIAS_TAG_SUBJECTS,
+                    alias_family_of, alias_spelling_ok, alias_tag_parts)
 from .config import DEFAULT_CONFIG, should_write_audio_tag
 # The stream-MD5 vocabulary and its reference check (mlo.flac), and the record
 # an audit already made of it (mlo.audit) — the grade_check_flac_md5 check
@@ -40,8 +41,7 @@ from .genres import display_name as genre_display_name
 # SAME function, not a second opinion about what canonical means.
 from .tagtext import MEDIA_VALUES as _MEDIA_VALUES, canonical_value, spacing_problem
 from .lyrics_xlit import (
-    XLIT_SIDECAR, _LATIN_THRESHOLD, dominant_script, non_latin_ratio,
-    primary_translation_lang, xlit_needs,
+    XLIT_SIDECAR, dominant_script, primary_translation_lang, xlit_needs,
 )
 from .cue import canonical_cue_text
 from .naming import (DEFAULT_NAMING_SCRIPT, UNKNOWN_RELEASE_TYPE,
@@ -415,31 +415,109 @@ def tag_value_excess(key, value):
     return bool(str(value or "").strip())
 
 
-def _stored_alias(af, base):
-    """Whether the file carries *base* (TITLEALIAS / ARTISTALIAS /
-    ALBUMALIAS) — bare or locale-suffixed ("TITLEALIAS-JA") — in any
-    container spelling the tag API emits."""
+def stored_alias_tags(af, base):
+    """``[(tag name, value)]`` *af* carries for ONE alias family — bare or
+    locale-suffixed ("TITLEALIAS-JA") — in any container spelling the tag API
+    emits, each named as the FILE spells it (mlo.audio.alias_tag_parts is the
+    one rule for that, so the grade, the strip pass and the writer's own
+    presence probe cannot disagree)."""
     base = str(base).upper()
-    for key in (af.all_tags() or {}):
-        name = str(key).upper()
-        if name.startswith(("TXXX:", "----:")):
-            name = name.rsplit(":", 1)[-1]
-        name = _tag_key_norm(name)
-        if name == base or name.startswith(base + "-"):
-            return True
-    return False
+    return [(str(key), value)
+            for key, value in (af.all_tags() or {}).items()
+            if alias_family_of(key) == base]
 
 
-def alias_needed(value):
-    """Whether a name is written in a script a locale alias translates — the
-    SAME test script 17 applies to lyrics (mlo.lyrics_xlit's
-    non_latin_ratio / dominant_script pair, at the threshold that decides a
-    transliteration), asked of TITLE / ARTIST and of the ALBUM name."""
-    text = str(value or "")
-    if not text.strip():
-        return False
-    return (non_latin_ratio(text) >= _LATIN_THRESHOLD
-            and dominant_script(text) != "latin")
+def _stored_alias(af, base, cfg=None):
+    """Whether the file carries *base* (TITLEALIAS / ARTISTALIAS /
+    ALBUMALIAS) in a spelling the app writes for the configured locale — what
+    `grade_check_alias_needed` asks, and the same question
+    `mlo.autotag._alias_slot_open` asks before it spends a MusicBrainz
+    request: a tag suffixed for a locale the app does not write (TITLEALIAS-JA
+    in an `en` library) is not the alias the reader needs, it is the excess the
+    other half of the rule fails (`alias_keys_excess`)."""
+    from server.integrations import alias_locale
+    want = alias_locale(cfg)
+    return any(alias_spelling_ok(tag, want)
+               for tag, _value in stored_alias_tags(af, base))
+
+
+def alias_needed(value, cfg=None):
+    """Whether a name NEEDS its locale alias tag — `server.integrations
+    .alias_required`'s own answer (spec R16a), the one the writers
+    (mlo.autotag), the importer's stamp and script 8's prescan also ask: a
+    Latin name never needs one, and a name in another script needs one only
+    when the configured locale does not read that script. The script reading
+    underneath is mlo.lyrics_xlit's (`non_latin_ratio` / `dominant_script`,
+    the pair that decides a lyric transliteration)."""
+    from server.integrations import alias_required
+    return alias_required(value, cfg)
+
+
+def _alias_name_key(value):
+    """Comparison key for "is this the same name?" — case and spacing ignored
+    (mlo.autotag._alias_norm's rule: a tag must never carry "X" as X's OWN
+    alias)."""
+    return " ".join(str(value or "").split()).casefold()
+
+
+def alias_keys_excess(base, found, name, cfg=None):
+    """The alias tags of family *base* that a file whose name is *name* should
+    NOT carry: ``[(tag, why)]``, empty when the file holds exactly what the
+    writers produce (spec R16b).
+
+    The alias family's twin of `tag_key_allowed` / `tag_value_excess`: the
+    grade fails the family as soon as this answers anything, and the strip
+    pass (mlo.format_all) deletes exactly these tags — so a strip can never
+    leave what the grade flags. What is excess:
+
+      * a name that needs NO alias (spec R16a) makes every spelling excess —
+        "Radiohead" carries no ARTISTALIAS in an ``en`` library,
+      * the app writes AT MOST ONE alias per entity, so a second spelling of
+        the same alias is excess,
+      * a suffix names the locale it is for, and only the configured locale's
+        own spelling is ever written (``TITLEALIAS-JA`` in an ``en`` library),
+      * a value equal to the name says nothing ("X (X)" never renders).
+    """
+    text = str(name or "").strip()
+    if not found or not text:
+        # Nothing to judge the alias against: a file with no name at all is
+        # failed by the required-tags sweep, and an alias cannot be called
+        # excess without knowing the name it annotates.
+        return []
+    if not alias_needed(text, cfg):
+        return [(tag, "its name needs no alias in the configured locale")
+                for tag, _value in found]
+    from server.integrations import alias_locale
+    want = alias_locale(cfg)
+    out, keep = [], ""
+    for tag, value in found:
+        if not alias_spelling_ok(tag, want):
+            out.append((tag, f"it is spelled for locale "
+                             f"{alias_tag_parts(tag)[1]}, and only {want} is "
+                             f"written"))
+            continue
+        values = value if isinstance(value, (list, tuple)) else [value]
+        if any(_alias_name_key(v) == _alias_name_key(text) for v in values):
+            out.append((tag, "its value is the name itself"))
+            continue
+        if not keep:
+            keep = tag
+            continue
+        out.append((tag, "only one alias spelling per name is written"))
+    return out
+
+
+def alias_file_excess(af, cfg=None):
+    """Every alias tag on *af* the app would not write: ``[(tag, why)]``.
+
+    The strip pass's own list (mlo.format_all deletes exactly these) and the
+    same predicate the alias-excess grade reads, so the two can never
+    disagree about what "an unneeded alias" is."""
+    out = []
+    for base, field in ALIAS_TAG_SUBJECTS.items():
+        out.extend(alias_keys_excess(base, stored_alias_tags(af, base),
+                                     af.get_tag(field) or "", cfg))
+    return out
 
 
 def _tag_value(af, name):
@@ -2095,30 +2173,62 @@ def _grade_album(album_dir, lyrics_format, cfg=None):
                             add_issue(f"INITIALKEY '{v}' not {notation} notation", basename)
                         track["issues"].append(t)
 
-        # Locale ALIASES (grade_check_alias_needed): a TITLE or ARTIST written
-        # in a non-Latin script is a name a reader in the configured locale
-        # cannot search for, so the tagging pass stores the alias MusicBrainz
-        # holds for it (TITLEALIAS / ARTISTALIAS, optionally locale-suffixed:
-        # TITLEALIAS-JA) beside the name itself. What "needs one" means is the
-        # SAME test script 17 asks of lyrics (mlo.lyrics_xlit.non_latin_ratio /
-        # dominant_script at the transliteration threshold), so this is a
-        # script reading, not a second heuristic. A Latin name never needs an
-        # alias and is never counted — a Latin library's grade is unchanged.
+        # Locale ALIASES (grade_check_alias_needed): a name written in a script
+        # the configured locale does not read is one a reader there cannot
+        # search for, so the tagging pass stores the alias MusicBrainz holds
+        # for it (TITLEALIAS / ARTISTALIAS / ALBUMALIAS, optionally
+        # locale-suffixed: TITLEALIAS-JA) beside the name itself. What "needs
+        # one" means is `server.integrations.alias_required` — the SAME answer
+        # the writers, the importer's stamp and script 8's prescan ask (R87:
+        # display and file agree), built on mlo.lyrics_xlit's script test (the
+        # one that decides a lyric transliteration). A Latin name never needs
+        # one and is never counted, and a name in the locale's OWN script is
+        # not counted either, so a Latin library — and a Japanese library read
+        # in `ja` — is unchanged.
         if cfg.get("grade_check_alias_needed", True) and not is_video_track:
-            for _field, _alias in (("TITLE", "TITLEALIAS"),
-                                   ("ARTIST", "ARTISTALIAS")):
+            for _alias, _field in ALIAS_TAG_SUBJECTS.items():
                 if not alias_needed(track["values"].get(_field)
-                                    or af.get_tag(_field)):
+                                    or af.get_tag(_field), cfg):
                     continue
                 total_checks += 1
-                if _stored_alias(af, _alias):
+                if _stored_alias(af, _alias, cfg):
                     continue
                 failed_checks += 1
                 add_issue(f"Missing {_alias} for the non-Latin script {_field}"
                           " (run Beets tagging (script 14) with locale "
                           "translations, or set the tag in the editor)",
                           basename)
-                track["issues"].append(_alias)
+                if _alias not in track["issues"]:
+                    track["issues"].append(_alias)
+
+        # …and its mirror (grade_check_alias_excess, spec R16b): an alias tag
+        # nothing needs is EXCESS — the name is one the configured locale
+        # already reads ("Radiohead" with an ARTISTALIAS), it is spelled for a
+        # locale the app does not write (TITLEALIAS-JA in an `en` library), it
+        # is a second spelling of the same alias, or its value is the name
+        # itself. ONE predicate with the strip pass
+        # (mlo.grader.alias_keys_excess, which mlo.format_all deletes by), so
+        # an album is never failed for a tag the pipeline would leave behind.
+        if cfg.get("grade_check_alias_excess", True):
+            for _alias, _field in ALIAS_TAG_SUBJECTS.items():
+                _found = stored_alias_tags(af, _alias)
+                if not _found:
+                    continue
+                total_checks += 1
+                _why = alias_keys_excess(
+                    _alias, _found,
+                    track["values"].get(_field) or af.get_tag(_field), cfg)
+                if not _why:
+                    continue
+                failed_checks += 1
+                add_issue(f"Unneeded {_alias}: "
+                          + "; ".join(f"{_tag} — {_reason}"
+                                      for _tag, _reason in _why)
+                          + " (run Optimize FLACs (script 3) or Format all "
+                            "(script 10) to clear it)",
+                          basename)
+                if _alias not in track["issues"]:
+                    track["issues"].append(_alias)
 
         # AcoustID fingerprint pair: REQUIRED on every audio track, key or no
         # key — mlo.acoustid writes ID and fingerprint together, script 21
@@ -3042,9 +3152,10 @@ def _grade_album(album_dir, lyrics_format, cfg=None):
         if cfg.get("grade_check_crc", True):
             try:
                 from .discs import parse_log_checksums, read_log_text, \
-                    album_discs as _album_discs, disc_of_filename, \
-                    _file_track_number, _disc_pattern_for as _pat2, \
-                    _disc_expected_name as _exp_name
+                    parse_log_track_seconds, log_crc_map, _file_seconds, \
+                    _track_num_of, album_discs as _album_discs, \
+                    disc_of_filename, _file_track_number, \
+                    _disc_pattern_for as _pat2, _disc_expected_name as _exp_name
                 log_paths = [os.path.join(album_dir, f)
                              for f in all_files
                              if f.lower().endswith(".log")]
@@ -3093,6 +3204,46 @@ def _grade_album(album_dir, lyrics_format, cfg=None):
                     disc_by_path = {p: d for d, paths in (discs_map or {}).items()
                                     for p in paths}
                     single_log = len(log_paths) <= 1
+                    # ONE mapping per disc, by PATH: the log numbers a disc's
+                    # tracks 1..N while the files may be numbered release-wide
+                    # (`2-14 …`), so the pair is matched by number first and by
+                    # order when they share none (`mlo.discs.log_crc_map`) —
+                    # otherwise every track of that disc read "not covered by
+                    # .log CRC" beside a log that covered all of them.
+                    crc_by_path = {}
+                    paths_by_disc = {}
+                    for ap in audio_paths:
+                        dd = (disc_by_path.get(ap)
+                              or disc_of_filename(os.path.basename(ap)) or 1)
+                        paths_by_disc.setdefault(dd, []).append(ap)
+                    log_seconds_by_disc = {}
+                    for lp in sorted(log_paths):
+                        dd = _disc_for_log(lp) or 1
+                        log_seconds_by_disc.setdefault(dd, {}).update(
+                            parse_log_track_seconds(read_log_text(lp)))
+                    for dd, disc_paths in paths_by_disc.items():
+                        crcs = per_disc_crc.get(dd)
+                        seconds = log_seconds_by_disc.get(dd) or {}
+                        if crcs is None and single_log:
+                            # Exactly one log covers the album's tracks,
+                            # whichever disc its name claims — a single-disc
+                            # rip whose log name carries no disc number.
+                            crcs = next(iter(per_disc_crc.values()), {}) or unmapped_crc
+                            seconds = next(iter(log_seconds_by_disc.values()), {})
+                        elif crcs is None and unmapped_crc and not per_disc_crc:
+                            # Every log failed to state its disc (unusual
+                            # names): their checksums are all there is, and
+                            # nothing can be attributed to the wrong disc
+                            # because no disc was attributable at all.
+                            crcs = unmapped_crc
+                        crc_by_path.update(log_crc_map(
+                            crcs or {}, disc_paths, seconds,
+                            durations={q: _file_seconds(q) for q in disc_paths},
+                            # The grader reads a track's position off the FILE
+                            # NAME first (D-TT survives a stale TRACKNUMBER
+                            # tag); the verifier reads it off the tag.
+                            number_of=lambda q: (_track_num_of(q)
+                                                 or _file_track_number(q))))
                     # (path, the CRC the log states for it) for the value
                     # pass below, filled while the mapping is already resolved
                     # here — the disc-to-log attribution must not be guessed
@@ -3104,31 +3255,10 @@ def _grade_album(album_dir, lyrics_format, cfg=None):
                             continue
                         if _is_video_file(tr_track.get("file")):
                             continue
-                        # Use _track_num_of for D-TT like 1-01 -> 01, not disc number
-                        try:
-                            from .discs import _track_num_of
-                            tn = _track_num_of(ap)
-                            if tn is None:
-                                tn = _file_track_number(ap)
-                        except Exception:
-                            tn = _file_track_number(ap)
-                        d = (disc_by_path.get(ap)
-                             or disc_of_filename(os.path.basename(ap)) or 1)
-                        crcs = per_disc_crc.get(d)
-                        if crcs is None and single_log:
-                            # Exactly one log covers the album's tracks,
-                            # whichever disc its name claims — a single-disc
-                            # rip whose log name carries no disc number.
-                            crcs = next(iter(per_disc_crc.values()), {}) or unmapped_crc
-                        elif crcs is None and unmapped_crc and not per_disc_crc:
-                            # Every log failed to state its disc (unusual
-                            # names): their checksums are all there is, and
-                            # nothing can be attributed to the wrong disc
-                            # because no disc was attributable at all.
-                            crcs = unmapped_crc
-                        covered = tn is not None and tn in (crcs or {})
+                        crc = crc_by_path.get(ap)
+                        covered = crc is not None
                         if covered:
-                            stated.append((ap, (crcs or {}).get(tn)))
+                            stated.append((ap, crc))
                         total_checks += 1
                         if not covered:
                             failed_checks += 1

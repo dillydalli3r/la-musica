@@ -98,6 +98,28 @@ MB_PAYLOAD = {
 # event for states no country, and the tag must then be left exactly as it is.
 MB_PAYLOAD_NO_COUNTRY = {k: v for k, v in MB_PAYLOAD.items()
                          if k not in ("country", "release-events")}
+# The same release with NAMES the configured locale (`en` in DEFAULT_CONFIG)
+# cannot read, and MusicBrainz's alias for each — the fixture the alias slot
+# below needs: a Japanese release title and a Japanese track title, each with
+# its English alias on the SAME request (`inc=aliases`).
+MB_PAYLOAD_ALIAS = dict(
+    MB_PAYLOAD,
+    title="ファーストラブ",
+    aliases=[{"name": "First Love", "locale": "en", "primary": True,
+              "type": "Release name"}],
+)
+MB_PAYLOAD_ALIAS["media"] = [{
+    "position": 1, "format": "CD",
+    "tracks": [{
+        "position": 1, "id": "release-track-1", "title": "君の名は",
+        "recording": {
+            "id": "recording-1",
+            "aliases": [{"name": "Your Name", "locale": "en", "primary": True,
+                         "type": "Recording name"}],
+        },
+        "artist-credit": [{"artist": {"id": "artist-1"}}],
+    }],
+}]
 CALLS = []
 
 
@@ -110,9 +132,15 @@ def _mb_stub(calls=CALLS, payload=MB_PAYLOAD):
     countries) and the real write rule — no network, no HTTP client.
     `release_countries` is the server's own reader of a release's events,
     imported from the real module: the countries the pass writes and the
-    countries the pages show must be parsed by the same code.
+    countries the pages show must be parsed by the same code. The alias rule
+    (`alias_required`), its locale (`alias_locale`) and the picker
+    (`alias_for`) come from the real module the same way: which slot the
+    prescan opens and which name a file gets are the app's own answers
+    (issue #75), not this harness's.
     """
     from server.integrations import release_countries
+    from server.integrations import (_ALIAS_SKIP_TYPES, alias_for,
+                                     alias_locale, alias_required)
 
     module = types.ModuleType("server.integrations")
 
@@ -122,6 +150,10 @@ def _mb_stub(calls=CALLS, payload=MB_PAYLOAD):
 
     module.mb_get_cached = mb_get_cached
     module.release_countries = release_countries
+    module._ALIAS_SKIP_TYPES = _ALIAS_SKIP_TYPES
+    module.alias_for = alias_for
+    module.alias_locale = alias_locale
+    module.alias_required = alias_required
     return module
 
 
@@ -140,6 +172,11 @@ class FakeAF:
 
     def get_tag(self, name):
         return self.tags.get(name)
+
+    def all_tags(self):
+        """AudioFile's own reader: the alias slot asks what tags the file
+        already carries (mlo.autotag._alias_slot_open)."""
+        return dict(self.tags)
 
     def set_tag(self, name, value):
         if isinstance(value, (list, tuple)):
@@ -248,6 +285,76 @@ finally:
         sys.modules["server.integrations"] = saved
 ok(other.get_tag("DATE") == "1975" and other.get_tag("ORIGINALDATE") == "1975-01-02",
    "a date that contradicts MusicBrainz is never overwritten")
+
+# --------------------------------------------------------------------------- #
+# 2b) The ALIAS slot: a name the locale cannot read is itself a reason to ask
+#     (issue #75 / spec R16a). The `full` case above is a LATIN album: every
+#     name there needs no alias, so its prescan still opens nothing. Here the
+#     album is complete in exactly the same way and the only thing it can gain
+#     is the alias its Japanese titles need.
+# --------------------------------------------------------------------------- #
+CALLS.clear()
+sys.modules["server.integrations"] = _mb_stub(CALLS, MB_PAYLOAD_ALIAS)
+try:
+    alias_af = album_file("alias-needed",
+                          dict(FULL, TITLE="君の名は", ALBUM="ファーストラブ"))
+    written, note = autotag._fill_release_tags(
+        [{"af": alias_af}], cfg, os.path.dirname(alias_af.path))
+finally:
+    if saved is None:
+        del sys.modules["server.integrations"]
+    else:
+        sys.modules["server.integrations"] = saved
+ok(len(CALLS) == 1,
+   f"an album complete except for the alias it needs IS asked about ({note})")
+ok(alias_af.get_tag("TITLEALIAS") == "Your Name",
+   f"…and the track's alias lands ({alias_af.get_tag('TITLEALIAS')!r})")
+ok(alias_af.get_tag("ALBUMALIAS") == "First Love",
+   f"…with the album's own ({alias_af.get_tag('ALBUMALIAS')!r}, written={written})")
+ok(not [t for t in alias_af.tags
+        if t.startswith(("TITLEALIAS-", "ARTISTALIAS-", "ALBUMALIAS-"))],
+   f"…and nothing per-locale is written ({sorted(alias_af.tags)})")
+
+# The SAME album with the Latin names the fixture uses keeps the alias slot
+# shut: the pass writes nothing and asks nothing (the `full` case above is
+# this assertion with a payload that states no alias either).
+CALLS.clear()
+sys.modules["server.integrations"] = _mb_stub(CALLS, MB_PAYLOAD_ALIAS)
+try:
+    latin_af = album_file("alias-not-needed", FULL)
+    written, note = autotag._fill_release_tags(
+        [{"af": latin_af}], cfg, os.path.dirname(latin_af.path))
+finally:
+    if saved is None:
+        del sys.modules["server.integrations"]
+    else:
+        sys.modules["server.integrations"] = saved
+ok(written == 0 and note == "release tags: nothing to fill" and not CALLS
+   and not [t for t in latin_af.tags if "ALIAS" in t],
+   f"a Latin album opens no alias slot and still costs nothing ({note})")
+
+# A tag suffixed for a locale the app does NOT write does not close the slot
+# either (mlo.audio.alias_spelling_ok): it is the excess the same chain's strip
+# pass deletes, so the pass must still write the spelling the reader needs —
+# otherwise script 10 would remove the only alias the file had and nothing
+# would ever put the right one back.
+CALLS.clear()
+sys.modules["server.integrations"] = _mb_stub(CALLS, MB_PAYLOAD_ALIAS)
+try:
+    odd_af = album_file("alias-wrong-locale",
+                        dict(FULL, TITLE="君の名は", ALBUM="ファーストラブ",
+                             **{"TITLEALIAS-JA": "君の名は"}))
+    written, note = autotag._fill_release_tags(
+        [{"af": odd_af}], cfg, os.path.dirname(odd_af.path))
+finally:
+    if saved is None:
+        del sys.modules["server.integrations"]
+    else:
+        sys.modules["server.integrations"] = saved
+ok(len(CALLS) == 1 and odd_af.get_tag("TITLEALIAS") == "Your Name"
+   and odd_af.get_tag("TITLEALIAS-JA") == "君の名は",
+   f"a wrong-locale spelling is not the alias, so the pass still writes it "
+   f"({odd_af.get_tag('TITLEALIAS')!r}, {note})")
 
 
 # --------------------------------------------------------------------------- #

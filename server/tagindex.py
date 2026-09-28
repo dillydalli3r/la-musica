@@ -67,15 +67,9 @@ _MEM: "OrderedDict[str, tuple]" = OrderedDict()   # key -> (sig, payload)
 # Reentrant: the drop paths hold it while asking `_connect` for the connection,
 # and every sqlite use is serialized behind it because the ONE connection is
 # handed to every builder thread.
-_LOCK = threading.RLock()           # guards _conn/_conn_path/_MEM/_stamp
+_LOCK = threading.RLock()           # guards _conn/_conn_path/_MEM/_state_cache
 _conn = None                        # sqlite3.Connection, or None when disabled
 _conn_path = None                   # the path _conn belongs to (or failed for)
-_stamp_cache = (0.0, "", "")        # (monotonic, folder, stamp)
-
-# The top-level state stamp is the same answer for every album of one build and
-# costs one scandir; a very short TTL keeps one build from paying it 200 times
-# while still seeing a write that lands between two builds.
-_STAMP_TTL = 1.0
 
 
 def db_file(cfg) -> "str | None":
@@ -156,61 +150,113 @@ def _entry_stamp(path) -> str:
         return "-"
 
 
-def _state_files(cfg) -> list:
-    """The per-library state FILES whose content reaches an album payload.
+# The per-library state stores whose content reaches an album payload, and how
+# one album's share of each is read:
+#
+#   "keys"  — the map is keyed by a PATH (a track, an album folder, a .accurip),
+#             so the album's share is the entries under it (and the entries it
+#             sits under: an artist-level record its albums all read).
+#   "whole" — the map's records do not state a path (the AcoustID submissions
+#             are keyed by a fingerprint and hold no filename), so the album
+#             takes the whole store's stamp. That store is written by the
+#             submit script alone, not by the per-album import chain.
+_STATE_STORES = (
+    ("mlo.audit", "_evidence_path", "keys"),
+    ("mlo.artistdata", "_provenance_path", "keys"),
+    ("mlo.accurip", "_identity_path", "keys"),
+    ("mlo.acoustid", "submissions_file", "whole"),
+)
 
-    Named through the module that owns each store, so a store that moves is
-    found where it lives rather than by a second guess at its name:
+_state_cache = {}   # store path -> ((mtime_ns, size), parsed dict)
 
-    * the audit evidence (`mlo.audit`), which the AUDIT/INTEGRITY rows are read
-      from — the one store that decides a grade without touching a file;
-    * the artwork provenance map (`mlo.artistdata`), which the album page's
-      description source is read from;
-    * the acoustid submissions and accurate-stream identities the tagging and
-      audit runs file (`mlo.acoustid`, `mlo.accurip`).
 
-    Anything not in this list does NOT reach a payload, and the app's data
-    folder deliberately holds volatile things too (slskd's log, job queues) —
-    stamping the whole folder would make every album look changed every time
-    the downloader writes a line.
+def _read_state(path):
+    """The parsed state store at *path*, re-read only when the file changes.
+
+    One album's signature asks for its share of four stores, and a library
+    build asks once per album: parsing each store once per (file, mtime) is
+    what keeps that cheap.
     """
-    out = []
-    for module, attr in (("mlo.audit", "_evidence_path"),
-                         ("mlo.artistdata", "_provenance_path"),
-                         ("mlo.acoustid", "submissions_file"),
-                         ("mlo.accurip", "_identity_path")):
+    try:
+        st = os.stat(path)
+        key = (st.st_mtime_ns, st.st_size)
+    except OSError:
+        return {}
+    hit = _state_cache.get(path)
+    if hit is not None and hit[0] == key:
+        return hit[1]
+    try:
+        with open(path, "r", encoding="utf-8") as fh:
+            data = json.load(fh)
+    except Exception:
+        data = {}
+    if not isinstance(data, dict):
+        data = {}
+    if len(_state_cache) > 8:
+        _state_cache.clear()
+    _state_cache[path] = (key, data)
+    return data
+
+
+def _shares_folder(key, root) -> bool:
+    """Whether a state store's PATH key belongs to *root*'s view.
+
+    True when the key is inside the album, or when the album sits inside the
+    key: the stores hold artist- and library-level records (an artist's
+    artwork provenance, say) that every album beneath them reads, so a change
+    to one is a change to all of them — and to nothing else.
+    """
+    low = os.path.normcase(os.path.normpath(str(key or "")))
+    return bool(low) and (low == root or low.startswith(root + os.sep)
+                          or root.startswith(low + os.sep))
+
+
+def state_stamp(album_dir, cfg) -> str:
+    """THIS album's share of the per-library state stores.
+
+    Their change must make an index row unreachable: the audit evidence store
+    decides the AUDIT/INTEGRITY verdicts a grade carries, and it is written by
+    a run rather than by a file write, so no file stat would ever show it.
+
+    Read PER ALBUM on purpose. It used to be one library-wide stamp, and the
+    four stores are rewritten by the import chain's own scripts — Audit
+    library, AccurateRip, Process images — once per album as an import
+    proceeds. Measured on the owner's install (170 files, bind-mounted
+    library): every one of those writes made EVERY album's row unreachable, so
+    the library page after an import re-read the whole library from disk —
+    14.5 s and 5.5 s rebuilds, twice inside one minute of otherwise warm
+    40 ms reads. An album now pays only for the stores that speak about it.
+    """
+    try:
+        root = os.path.normcase(os.path.normpath(os.path.abspath(album_dir)))
+    except Exception:
+        return ""
+    parts = []
+    for module, attr, how in _STATE_STORES:
         try:
             mod = __import__(module, fromlist=[attr])
             path = getattr(mod, attr)(cfg)
-            if path:
-                out.append(str(path))
         except Exception:
             continue
-    return out
-
-
-def state_stamp(cfg) -> str:
-    """A stamp of the per-library state stores an album payload reads.
-
-    Their change must make index rows unreachable: the audit evidence store
-    decides the AUDIT/INTEGRITY verdicts a grade carries, and it is written by
-    a run rather than by a file write, so no file stat would ever show it.
-    """
-    global _stamp_cache
-
-    try:
-        from mlo.paths import app_data_dir
-
-        folder = app_data_dir(cfg.get("music_folder"))
-    except Exception:
-        return ""
-    now = time.monotonic()
-    if _stamp_cache[1] == folder and now - _stamp_cache[0] < _STAMP_TTL:
-        return _stamp_cache[2]
-    stamp = ";".join(f"{os.path.basename(p)}={_entry_stamp(p)}"
-                     for p in _state_files(cfg))
-    _stamp_cache = (now, folder, stamp)
-    return stamp
+        if not path:
+            continue
+        name = os.path.basename(path)
+        if how == "whole":
+            parts.append(f"{name}={_entry_stamp(path)}")
+            continue
+        data = _read_state(path)
+        for key in sorted(data, key=str):
+            if not _shares_folder(key, root):
+                continue
+            try:
+                value = json.dumps(data[key], sort_keys=True, default=str)
+            except Exception:
+                value = str(data[key])
+            # Truncated: the stamp is an identity, not a copy — a store value
+            # big enough to dominate the signature (a fingerprint) only has to
+            # keep changing it when it changes.
+            parts.append(f"{name}:{key}={value[:200]}")
+    return ";".join(parts)
 
 
 def dir_signature(album_dir, cfg) -> "str | None":
@@ -243,7 +289,7 @@ def dir_signature(album_dir, cfg) -> "str | None":
     except OSError:
         return None
     rows.sort()
-    rows.append("state:" + state_stamp(cfg))
+    rows.append("state:" + state_stamp(album_dir, cfg))
     return "\n".join(rows)
 
 

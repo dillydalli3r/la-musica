@@ -5,7 +5,7 @@ import { useQuery, useQueryClient } from "@tanstack/react-query";
 import {
   UploadCloud, ExternalLink, Check, ChevronLeft, ChevronRight, ChevronDown, Wand2,
   Plus, Trash2, Disc3, FolderOpen, X, Search, Loader2, Image as ImageIcon, AlertTriangle,
-  Languages, FileArchive,
+  Languages, FileArchive, Fingerprint,
 } from "lucide-react";
 import { api, answerSources, replyFor, IN_MOBILE_SHELL, IN_TAURI } from "../api";
 import type { AdvisoryFetchResult, MetadataFetchItem, MetadataItemKind } from "../api";
@@ -929,6 +929,21 @@ export default function ImportWizard() {
       if (cancelled) return;
       if (!id) {
         setDetectStatus("none");
+        // The OPT-IN route, and the only automatic one from a fingerprint to
+        // a release: `import_acoustid_autofill` (Settings → Import, off by
+        // default). It cannot answer from tags, so it runs before the name
+        // guard below — an album whose files carry no tags at all is exactly
+        // the case it exists for. With the setting off, nothing here touches
+        // the fingerprint: the release stays empty until the user pastes a
+        // link, searches, or presses "Match from fingerprint".
+        if (cfg?.import_acoustid_autofill) {
+          attempt.done = true;
+          if (autoSearched.current !== albumPath) {
+            autoSearched.current = albumPath;
+            matchReleaseFromFingerprint();
+          }
+          return;
+        }
         // No MBID in the tags either: the fetch the step offers runs here.
         // Leaving step 0 ("Import … into library") IS the continue that used
         // to be followed by remembering to press "Fetch release & auto-match"
@@ -958,7 +973,7 @@ export default function ImportWizard() {
       cancelled = true;
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [step, albumPath, trackList, releaseId]);
+  }, [step, albumPath, trackList, releaseId, cfg?.import_acoustid_autofill]);
 
   // Manual "Detect from tags" — always available, one click.
   const detectFromTags = async () => {
@@ -2792,7 +2807,7 @@ export default function ImportWizard() {
     }
     setBusy(true);
     setAdvError(null);
-    setAct({ label: `Re-rating ${targets.length} track(s) — asking the sources anyway…` });
+    setAct({ label: `Re-rating ${targets.length} track(s)…` });
     try {
       const res = await api.mbAdvisoryFetch({ paths: targets, staged, force: true });
       setAdvReply(res);
@@ -2819,6 +2834,49 @@ export default function ImportWizard() {
     } finally {
       setAct(null);
       setBusy(false);
+    }
+  };
+
+  /** The release field's OWN action: fingerprint the album, and use the
+   *  release the fingerprint matches.
+   *
+   *  The interactive path never lets a fingerprint choose a release by itself
+   *  — the wizard's automatic detect reads the album's TAGS (`/api/album/
+   *  mbdetect`) and the release it fetches is the one those tags name. This is
+   *  the button that asks the other question, one press at a time, and it is
+   *  the only route from an AcoustID match to a release besides the opt-in
+   *  `import_acoustid_autofill` setting. It ends in the SAME flow a manual id
+   *  takes (`useAcoustidRelease` → `pickRelease`), so tags are written by one
+   *  writer either way, and accepting the match also files its ACOUSTID pair. */
+  const matchReleaseFromFingerprint = async () => {
+    const paths = uploaded.length ? uploaded.map((a) => a.path) : albumPath ? [albumPath] : [];
+    if (!paths.length) {
+      toast("Import the files first — AcoustID fingerprints the staged album");
+      return;
+    }
+    setAcoustidBusy(true);
+    setAct({ label: `Fingerprinting ${paths.length} album(s) with AcoustID…` });
+    try {
+      const res = await api.importAcoustid(paths, false, staged);
+      setAcoustid(res);
+      if (!res.available) {
+        toast(`Fingerprinting unavailable — ${res.note}`);
+        return;
+      }
+      const rows = res.albums ?? [];
+      const row = rows.find((a) => a.path === albumPath) ?? rows[0];
+      if (!row || !row.release_group_id) {
+        toast(rows.length
+          ? "The fingerprint matched no MusicBrainz release — search or paste a link"
+          : "The fingerprint matched nothing");
+        return;
+      }
+      await useAcoustidRelease(row);
+    } catch (e) {
+      toast.error(String(e));
+    } finally {
+      setAct(null);
+      setAcoustidBusy(false);
     }
   };
 
@@ -3718,6 +3776,23 @@ const finish = async () => {
                 ) : mbLink.trim() ? (
                   <span className="chip bg-amber-900/50 text-amber-300 border border-amber-900 shrink-0">No MusicBrainz ID found</span>
                 ) : null}
+                {/* The fingerprint, one press at a time: it fills this field
+                    ONLY when pressed (or when Settings → Import's opt-in asks
+                    for it), because a fingerprint is evidence about the AUDIO
+                    and never about which EDITION the user wants. */}
+                <button
+                  className="btn-ghost tap shrink-0"
+                  onClick={matchReleaseFromFingerprint}
+                  disabled={acoustidBusy || !albumPath}
+                  title={"Fingerprint the album with AcoustID and use the release it matches — "
+                         + "nothing is chosen from the fingerprint unless this is pressed "
+                         + "(Settings → Import can run it automatically)"}
+                >
+                  {acoustidBusy
+                    ? <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                    : <Fingerprint className="h-3.5 w-3.5" />}
+                  Match from fingerprint
+                </button>
               </div>
               {detectStatus !== "idle" && !releaseId && (
                 <div className="text-xs text-zinc-500 flex items-center gap-1.5">
@@ -5084,19 +5159,24 @@ const finish = async () => {
             )}
           </div>
           <div className="flex justify-center gap-2 mt-5">
-            {albumPath && (
-              /* The album's MusicBrainz id first: it survives the rename the
-                 chain's beets/organize step performs, while a raw path only
-                 works until the next reorganization. */
+            {albumPath ? (
+              /* Done IS "open the album": the pressed button lands on the
+                 album the run just finished, the same target the old
+                 secondary button used — the album's MusicBrainz id first,
+                 because it survives the rename the chain's beets/organize
+                 step performs while a raw path only works until the next
+                 reorganization. A run with no album path (nothing landed)
+                 keeps the plain button, which just closes the wizard. */
               <Link
                 to={releaseId ? `/album/mb:${encodeURIComponent(releaseId)}` : `/album/${encodeURIComponent(albumPath)}`}
-                className="btn-ghost tap"
+                className="btn-primary tap"
                 onClick={finish}
               >
-                Open album
+                Done
               </Link>
+            ) : (
+              <button className="btn-primary tap" onClick={finish}>Done</button>
             )}
-            <button className="btn-primary tap" onClick={finish}>Done</button>
           </div>
         </div>
       )}

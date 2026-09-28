@@ -99,6 +99,18 @@ def tags_of(path):
             ("TITLE", "MEDIA", "MOOD", "SOURCE", "RELEASETYPE")}
 
 
+def drop_tags(path, keys):
+    """Remove tags straight from the container — `raw_tags`' mirror. A fixture
+    is ONE file reused by many cases, and `raw_tags` only ever ADDS, so a case
+    that leaves an alias behind would otherwise grade the next one."""
+    from mutagen.flac import FLAC
+    f = FLAC(path)
+    for k in keys:
+        if k in f:
+            del f[k]
+    f.save()
+
+
 # --------------------------------------------------------------------------- #
 print("== mlo.tagtext: the rule itself ==")
 # A CLOSED vocabulary is folded and rewritten in its canonical spelling.
@@ -401,13 +413,102 @@ no_strip = _grade_album(fixture, "EMBEDDED",
 ok("COMMENT" not in no_strip["tracks"][0]["issues"],
    "strip_unknown_tags=False stops both the strip and the grade")
 
-# An ALIAS tag is never excess — the family is part of the vocabulary, bare or
-# locale-suffixed, in every container spelling.
+# --------------------------------------------------------------------------- #
+print("== aliases: written only where the locale needs them (R16a / R16b) ==")
+# The alias family is in the vocabulary — a legitimate alias is never a
+# FOREIGN tag — but it is graded BOTH ways, and by the configured locale's own
+# script: `grade_check_alias_needed` fails a name that needs an alias and has
+# none, `grade_check_alias_excess` fails an alias nothing needs (or a spelling
+# the app does not write). The mirror of "Radiohead needs no ARTISTALIAS".
+ALIASES = dict(ISO, grade_check_alias_needed=True,
+               grade_check_alias_excess=True, strip_unknown_tags=True)
+
+ALIAS_KEYS = ("TITLEALIAS", "ARTISTALIAS", "ALBUMALIAS", "TITLEALIAS-JA",
+              "ARTISTALIAS-JA", "ALBUMALIAS-EN", "TITLEALIAS-EN")
+
+drop_tags(wrong, ALIAS_KEYS + ("ARTIST",))
+raw_tags(wrong, {"TITLE": "君の名は", "MEDIA": "Digital Media"})
+ja_title = _grade_album(fixture, "EMBEDDED", ALIASES)
+ok("TITLEALIAS" in ja_title["tracks"][0]["issues"]
+   and any("Missing TITLEALIAS" in i for i in ja_title["issues"]),
+   f"a name the locale cannot read without its alias fails "
+   f"(got {ja_title['tracks'][0]['issues']})")
+drop_tags(wrong, ALIAS_KEYS)
+raw_tags(wrong, {"TITLE": "君の名は", "MEDIA": "Digital Media",
+                 "TITLEALIAS": "Your Name"})
+with_needed = _grade_album(fixture, "EMBEDDED", ALIASES)
+ok(not any("ALIAS" in i for i in with_needed["tracks"][0]["issues"])
+   and not any("ALIAS" in i for i in with_needed["issues"]),
+   f"…and the alias it needs passes BOTH halves "
+   f"(got {with_needed['tracks'][0]['issues']})")
+
+# The mirror: a name the locale reads needs NOTHING, and an alias there fails.
+drop_tags(wrong, ALIAS_KEYS)
+raw_tags(wrong, {"TITLE": "Radiohead", "MEDIA": "Digital Media",
+                 "TITLEALIAS": "レディオヘッド"})
+radiohead = _grade_album(fixture, "EMBEDDED", ALIASES)
+ok("TITLEALIAS" in radiohead["tracks"][0]["issues"],
+   f"an alias on a name the locale reads fails "
+   f"(got {radiohead['tracks'][0]['issues']})")
+ok(any("Unneeded TITLEALIAS" in i for i in radiohead["issues"]),
+   f"the issue names the tag and why (got {radiohead['issues']})")
+ok(not any(i.startswith("Excess tags:") for i in radiohead["issues"]),
+   "…as its own check, not as a foreign tag — the family stays in the vocabulary")
+
+# A spelling for a locale the app does not write (the configured one is `en`
+# here) is excess even when the name DOES need an alias, and so is a value
+# that is the name itself.
+drop_tags(wrong, ALIAS_KEYS + ("ARTIST",))
 raw_tags(wrong, {"TITLE": "Song Name", "MEDIA": "Digital Media",
-                 "TITLEALIAS": "Kimi no na wa", "ARTISTALIAS-JA": "Hikaru Utada"})
-with_alias = _grade_album(fixture, "EMBEDDED", EXCESS)
-ok(not any(i.startswith("Excess tags:") for i in with_alias["issues"]),
-   f"TITLEALIAS / ARTISTALIAS-JA are not excess tags (got {with_alias['issues']})")
+                 "ARTIST": "宇多田ヒカル", "ARTISTALIAS-JA": "Utada Hikaru"})
+suffixed = _grade_album(fixture, "EMBEDDED", ALIASES)
+ok("ARTISTALIAS" in suffixed["tracks"][0]["issues"]
+   and any("spelled for locale JA" in i for i in suffixed["issues"])
+   and any("Missing ARTISTALIAS" in i for i in suffixed["issues"]),
+   f"a suffix for another locale fails BOTH halves — it is not the alias the "
+   f"reader needs, and it is one the app does not write ({suffixed['issues']})")
+drop_tags(wrong, ALIAS_KEYS + ("ARTIST",))
+raw_tags(wrong, {"TITLE": "君の名は", "MEDIA": "Digital Media",
+                 "TITLEALIAS": "君の名は"})
+same = _grade_album(fixture, "EMBEDDED", ALIASES)
+ok("TITLEALIAS" in same["tracks"][0]["issues"]
+   and any("the name itself" in i for i in same["issues"]),
+   f"an alias equal to the name fails (X (X) says nothing) ({same['issues']})")
+
+# Script 10 clears exactly what the grade flags — "the files hold only what is
+# required afterwards" — and a NEEDED alias survives it untouched.
+drop_tags(wrong, ALIAS_KEYS)
+raw_tags(wrong, {"TITLE": "Song Name", "ALBUM": "Song Name",
+                 "MEDIA": "Digital Media", "ALBUMALIAS": "Song Name (EN)"})
+stats4 = run_format_all(cfg)
+ok(AudioFile(wrong).get_tag("ALBUMALIAS") is None and stats4["modified_count"] >= 1,
+   "script 10 cleared an unneeded ALBUMALIAS "
+   f"({AudioFile(wrong).get_tag('ALBUMALIAS')!r}, modified={stats4['modified_count']})")
+cleared = _grade_album(fixture, "EMBEDDED", ALIASES)
+ok(not any("ALIAS" in i for i in cleared["tracks"][0]["issues"]),
+   f"and the grade passes afterwards (got {cleared['tracks'][0]['issues']})")
+drop_tags(wrong, ALIAS_KEYS)
+raw_tags(wrong, {"TITLE": "君の名は", "MEDIA": "Digital Media",
+                 "TITLEALIAS": "Your Name"})
+run_format_all(cfg)
+ok(AudioFile(wrong).get_tag("TITLEALIAS") == "Your Name",
+   "…while a NEEDED alias is never stripped")
+
+# Both halves are toggles like every other check.
+drop_tags(wrong, ALIAS_KEYS)
+raw_tags(wrong, {"TITLE": "Radiohead", "MEDIA": "Digital Media",
+                 "TITLEALIAS": "レディオヘッド"})
+off_excess = _grade_album(fixture, "EMBEDDED",
+                          dict(ALIASES, grade_check_alias_excess=False))
+ok("TITLEALIAS" not in off_excess["tracks"][0]["issues"],
+   "grade_check_alias_excess=False stops the excess half")
+drop_tags(wrong, ALIAS_KEYS)
+raw_tags(wrong, {"TITLE": "君の名は", "MEDIA": "Digital Media"})
+off_needed = _grade_album(fixture, "EMBEDDED",
+                          dict(ALIASES, grade_check_alias_needed=False))
+ok("TITLEALIAS" not in off_needed["tracks"][0]["issues"],
+   "grade_check_alias_needed=False stops the missing half")
+drop_tags(wrong, ALIAS_KEYS)
 raw_tags(wrong, {"TITLE": "Song Name", "MEDIA": "Digital Media"})
 
 # --------------------------------------------------------------------------- #
@@ -434,10 +535,20 @@ ok(by_key["COMMENT"]["graded_by"] == ["grade_check_excess_tags"]
    and "COMMENT" in by_key["COMMENT"]["issue_codes"],
    f"COMMENT is graded by the excess check with its own code "
    f"(got {by_key['COMMENT']['graded_by']}/{by_key['COMMENT']['issue_codes']})")
-ok(by_key["TITLEALIAS"]["graded_by"] == ["grade_check_alias_needed"]
+ok(by_key["TITLEALIAS"]["graded_by"] == ["grade_check_alias_excess",
+                                         "grade_check_alias_needed"]
+   and by_key["ALBUMALIAS"]["graded_by"] == ["grade_check_alias_excess",
+                                             "grade_check_alias_needed"]
+   and "grade_check_alias_needed" in by_key["ALBUM"]["graded_by"]
    and "TITLEALIAS-" in reg["allowed_prefixes"],
-   f"the alias family is a registry row behind its own check "
-   f"(got {by_key['TITLEALIAS']['graded_by']} / {reg['allowed_prefixes']})")
+   f"the alias family is a registry row behind BOTH alias checks "
+   f"(got {by_key['TITLEALIAS']['graded_by']} / "
+   f"{by_key['ALBUMALIAS']['graded_by']} / {by_key['ALBUM']['graded_by']} / "
+   f"{reg['allowed_prefixes']})")
+ok("grade_check_alias_excess" in {c["key"] for c in reg["checks"]}
+   and not reg.get("checks_unlabelled")
+   and all(c["label"] for c in reg["checks"]),
+   "…and the new check is a labelled row of the registry's check list")
 
 shutil.rmtree(tmp, ignore_errors=True)
 shutil.rmtree(lib, ignore_errors=True)

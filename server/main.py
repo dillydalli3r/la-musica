@@ -173,6 +173,20 @@ async def _lifespan(app: FastAPI):
             print(f"[mlo] storage snapshot warm-up failed: {e}")
     threading.Thread(target=_warm_storage_snapshot, daemon=True,
                      name="storage-warm").start()
+    # The assembled library tree: the first paint of Home, the Library page,
+    # its facets, the grade summary and every discovery shelf ask for it, and a
+    # process that has just started has no memo, so the request that finds the
+    # cache empty pays the walk and every album row in it. Worked here, beside
+    # the other startup threads, so that first paint is served from memory too
+    # (the tree is stale-while-revalidate after this — `tagcache.get_library`).
+    def _warm_library():
+        try:
+            from server import library
+            library.build_library(load_config())
+        except Exception as e:
+            print(f"[mlo] library warm-up failed: {e}")
+    threading.Thread(target=_warm_library, daemon=True,
+                     name="library-warm").start()
     yield
     # Stop taking new work first (the two workers above are the app's own
     # source of new jobs), then the honest part: wait — bounded — for whatever
@@ -2557,7 +2571,7 @@ def _write_cover_bytes(alb: str, stem: str, ext: str, data: bytes):
     # of the same stem in the old format.
     if ext != orig_ext:
         _drop_stale_cover(alb, f"{stem}{orig_ext}")
-    tagcache.invalidate_all()
+    tagcache.invalidate_album(alb)
     mbresolve.invalidate()
     out = {"ok": True, "path": dest.replace("\\", "/"), "token": _cover_token(dest)}
     out.update(_cover_metrics(dest))
@@ -2889,7 +2903,7 @@ def cover_clear(req: CoverClearRequest):
     _guard_folder(alb, req.staged, "album")
     names = [os.path.basename(str(t)) for t in (req.tracks or []) if str(t).strip()]
     clear_track_covers(alb, names or None)
-    tagcache.invalidate_all()
+    tagcache.invalidate_album(alb)
     return {"ok": True}
 
 
@@ -3102,7 +3116,7 @@ def videos_download_youtube(req: YoutubeDownloadRequest):
             # below, so it does not end the request here.
             yt_why = f"YouTube download failed: {e}"
         else:
-            tagcache.invalidate_all()
+            tagcache.invalidate_album(dest)
             return {"ok": True, "file": str(got.get("path") or "").replace("\\", "/"),
                     "candidate": candidate, "container": got.get("container"),
                     "height": got.get("height"), "abr": got.get("abr")}
@@ -3180,6 +3194,7 @@ def videos_match(req: VideoMatchRequest):
     # Video writes are full lossless rewrites, so a raw container (VOB/AVI/…)
     # comes back as a same-stem MKV: report the files that were re-emitted.
     swapped = []
+    written_dirs = set()
     for a in req.assignments:
         p = os.path.normpath(a.path)
         if not os.path.isfile(p):
@@ -3209,12 +3224,14 @@ def videos_match(req: VideoMatchRequest):
             continue
         updated += 1
         final = (af.tag_output_path or p).replace("\\", "/")
+        written_dirs.add(os.path.dirname(os.path.normpath(final)))
+        written_dirs.add(os.path.dirname(p))
         if af.container_changed:
             swapped.append(final)
         tagcache.invalidate_path(os.path.normpath(final))
         tagcache.invalidate_path(p)
     if updated:
-        tagcache.invalidate_all()
+        tagcache.invalidate_album(*(written_dirs | {album}))
         mbresolve.invalidate()
     if errors and not updated:
         raise HTTPException(500, "; ".join(errors))
@@ -4922,7 +4939,7 @@ def album_remove(req: AlbumRemove, request: Request = None):
             500,
             f"could not move {name} to the trash — a file inside it is still "
             f"in use (stop playback and retry)")
-    tagcache.invalidate_all()
+    tagcache.invalidate_album(p)
     mbresolve.invalidate()
     _refresh_slskd_shares_soon()
     return {"ok": True, "trash": dest.replace("\\", "/")}
@@ -5199,7 +5216,7 @@ def trash_delete(req: TrashDelete = TrashDelete(), request: Request = None):
         _manifest_forget(trash, deleted)
         # Same invalidation the move endpoint does: the library, MB cache and
         # slskd shares all still describe the deleted files.
-        tagcache.invalidate_all()
+        tagcache.invalidate_album(trash)
         mbresolve.invalidate()
         _refresh_slskd_shares_soon()
     return {"deleted": deleted, "failed": failed, "freed": freed}
@@ -5226,6 +5243,7 @@ def trash_restore(req: TrashRestore = TrashRestore(), request: Request = None):
     root = os.path.realpath(trash)
     origins = _manifest_read(trash)
     restored, failed = [], []
+    restored_roots = set()
     for name in req.names:
         err = _trash_name_error(name, root)
         src = os.path.join(trash, name)
@@ -5262,11 +5280,12 @@ def trash_restore(req: TrashRestore = TrashRestore(), request: Request = None):
         else:
             origins.pop(name, None)
             restored.append({"name": name, "to": target.replace("\\", "/")})
+            restored_roots.add(target if os.path.isdir(target) else os.path.dirname(target))
     if restored:
         # Same invalidation the move endpoint does — the library just gained
         # albums back, and the manifest just lost rows.
         _manifest_write(trash, origins)
-        tagcache.invalidate_all()
+        tagcache.invalidate_album(*restored_roots)
         mbresolve.invalidate()
         _refresh_slskd_shares_soon()
     return {"restored": restored, "failed": failed}
@@ -6655,8 +6674,9 @@ def _stamp_import_identity(album_dirs):
 # --------------------------------------------------------------------------- #
 # "Import" is one album's whole trip into the library, and it is deliberately
 # ONE function: convert the lossless sources, write MEDIA, stamp the
-# MusicBrainz identity, organize with the naming script, then run the
-# configured import chain. Every entry point that imports — the classic
+# MusicBrainz identity, record the disc a disc-subfolder release arrived in,
+# organize with the naming script, then run the configured import chain. Every
+# entry point that imports — the classic
 # one-click route, the per-album row, the sequential "import all completed"
 # runner, and a wish whose download has landed — goes through here, so what an
 # album ends up as cannot depend on which button was pressed.
@@ -6680,7 +6700,8 @@ def _import_one_album(album, cfg, chain_async=True, progress=None):
     to completion before touching the next one.
     """
     out = {"path": album, "album_root": album, "converted": 0,
-           "media_tagged": 0, "identity_stamped": 0, "organized": False,
+           "media_tagged": 0, "identity_stamped": 0, "discs_recorded": 0,
+           "organized": False,
            "chain_started": False, "chain": None, "errors": []}
     try:
         # Everything that is not already in the configured library codec
@@ -6707,6 +6728,17 @@ def _import_one_album(album, cfg, chain_async=True, progress=None):
     except Exception as e:
         traceback.print_exc()
         out["errors"].append(f"MusicBrainz identity failed: {e}")
+    try:
+        # A release that arrived as disc SUBFOLDERS states its discs in the
+        # folder names; recording that BEFORE the naming script runs is what
+        # keeps %discnumber% from collapsing two discs onto one set of names
+        # (see imports.stamp_folder_discs). Fill-only, so a release whose tags
+        # already say the disc is untouched.
+        from server import imports as _discs_imports
+        out["discs_recorded"] = _discs_imports.stamp_folder_discs(album, cfg)
+    except Exception as e:
+        traceback.print_exc()
+        out["errors"].append(f"disc stamping failed: {e}")
     try:
         # Best-effort: an organize failure must not lose the imported files
         # (they stay in their import folder and can be organized later).
@@ -6857,7 +6889,7 @@ def soulseek_import():
     # failed to organize is not a successful batch. The error text is handed
     # back the same way the pre-per-album route handed its own back.
     organize_errors = [e for r in results for e in r["errors"] if e.startswith("organize failed")]
-    tagcache.invalidate_all()
+    tagcache.invalidate_album(*moved)
     mbresolve.invalidate()
     return {"ok": True, "moved": moved, "skipped": skipped,
             "failed": failed,
@@ -7750,35 +7782,92 @@ def _genre_names(value, cap):
 def _write_album_genres(files, names, per_track=None, limit=None):
     """Write GENRE per track: the track's own genres first (MusicBrainz
     recording genres, when the release has them), then the album-level merged
-    list, canonicalized and capped through `mlo.genres.normalize_genres`
-    (MusicBrainz's own spelling, the family first, at most *limit* names) — so
-    the file holds the same list the import and the trimming scripts keep.
-    Returns the files written."""
+    list, canonicalized and capped (`mlo.autotag.genre_plan`, the same
+    `normalize_genres` the trimming scripts use) — so the file holds the same
+    list the import and the trimming scripts keep.
+
+    ONE pass per file, and a file is written only when the genre it should
+    hold differs from the genre it holds: `genre_plan` compares against the
+    container's own spelling first, so re-importing an album whose genres have
+    not changed writes NOTHING and returns `updated: 0` — the import used to
+    set the tag unconditionally, which rewrote every track of the album (8
+    tracks: 2.0 s of whole-container rewrites) and moved every file's mtime,
+    which in turn made the next library page re-read all of it.
+
+    A track the chain has no answer for is TRIMMED to the cap instead: the
+    stored list is canonicalized and cut, which is the cap's other half (a
+    file that already carried more genres than `mb_genre_count` comes down to
+    it here, the way script 8 and script 10 do it). That replaces the second
+    loop that used to re-open every file right after this write.
+
+    Files are written in PARALLEL (`worker_count`, the one pool-width knob):
+    a container rewrite is file I/O, and no two threads touch the same file.
+    The tag/cover caches are invalidated once, after the pool is joined.
+
+    Returns {"updated": files whose container was written, "trimmed": files
+    that came down to the cap, "extra": values removed in total, "files":
+    their basenames}.
+    """
+    from concurrent.futures import ThreadPoolExecutor
+
     from mlo.audio import AudioFile
-    from mlo.genres import DEFAULT_GENRE_COUNT, normalize_genres
+    from mlo.autotag import genre_apply, genre_plan
+    from mlo.genres import DEFAULT_GENRE_COUNT
+    from mlo.stats import worker_count
     from server import soulseek_auto
 
     per_track = per_track or {}
     count = limit or DEFAULT_GENRE_COUNT
-    updated = 0
-    for p in files:
+
+    def one(p):
+        """(written, trimmed, extra) for one file; never raises."""
         try:
             af = AudioFile(p)
             if af.audio is None:
-                continue
-            merged = normalize_genres(
-                list(per_track.get(soulseek_auto._parse_trackno(p)) or [])
-                + list(names or []), count)
-            # A list, so set_tag writes repeated GENRE fields (one "A; B"
-            # string is what makes players show a single genre by that name).
-            if merged and af.set_tag("GENRE", merged):
-                updated += 1
+                return (0, 0, 0)
+            wanted = list(per_track.get(soulseek_auto._parse_trackno(p)) or [])
+            if wanted or names:
+                # The chain answered: its list REPLACES the file's own.
+                want, changed = genre_plan(af, wanted + list(names or []), count)
+                if not changed:
+                    return (0, 0, 0)
+                genre_apply(af, want)
+                return (1, 0, 0)
+            # No answer from any source: enforce the cap on what is stored.
+            from mlo.autotag import _stored_genres
+            stored, _verbatim = _stored_genres(af)
+            want, changed = genre_plan(af, stored, count)
+            if not changed:
+                return (0, 0, 0)
+            genre_apply(af, want)
+            return (1, 1, max(0, len(stored) - len(want)))
         except Exception:
-            continue
+            return (0, 0, 0)
+
+    workers = worker_count(load_config(), maximum=min(8, os.cpu_count() or 1),
+                           items=len(files))
+    if workers <= 1 or len(files) <= 1:
+        results = [one(p) for p in files]
+    else:
+        with ThreadPoolExecutor(max_workers=workers) as pool:
+            results = list(pool.map(one, files))
+
+    updated = sum(r[0] for r in results)
+    trimmed = sum(r[1] for r in results)
+    extra = sum(r[2] for r in results)
+    written = [os.path.basename(p) for p, r in zip(files, results) if r[0]]
     if updated:
-        tagcache.invalidate_all()
+        # SCOPED, not `invalidate_all`: the folders this run actually wrote.
+        # A whole-cache clear made the next library page re-parse every track
+        # in the library and drop the assembled tree, which the page then
+        # rebuilt IN the request (measured on the owner's install: 2.7-14.5 s
+        # for a genre import of one album, whose own files number 8).
+        folders = sorted({os.path.dirname(p)
+                          for p, r in zip(files, results) if r[0]})
+        tagcache.invalidate_album(*folders)
         mbresolve.invalidate()
-    return updated
+    return {"updated": updated, "trimmed": trimmed, "extra": extra,
+            "files": written}
 
 
 class GenreChainImportRequest(BaseModel):
@@ -7859,30 +7948,17 @@ def _run_genre_chain(paths, limit=None, progress=None, sources=None, staged=Fals
     # ONE writer, is what applies the cap to the file.
     per_track = chain.get("per_track") or {}
 
-    updated = _write_album_genres(files, names, per_track, limit=cap)
     # The cap is a per-track contract the import has to LEAVE BEHIND, not just
-    # apply to what it writes: a track that already carried more genres than
-    # the setting allows comes down to `mb_genre_count` here, through the one
-    # trimmer script 8 and script 10 also use. Counts are extra values / tracks
-    # touched, so the caller can say what the cap actually did.
-    from mlo.autotag import trim_genres
-    trimmed = extra = 0
-    trimmed_files = []
-    for p in files:
-        try:
-            af = AudioFile(p)
-            if af.audio is None:
-                continue
-            removed = trim_genres(af, cap)
-        except Exception:
-            continue
-        if removed:
-            trimmed += 1
-            extra += removed
-            trimmed_files.append(os.path.basename(p))
-    if trimmed:
-        tagcache.invalidate_all()
-        mbresolve.invalidate()
+    # apply to what it writes: the write pass enforces it on every file —
+    # including one the chain had no answer for, whose stored list is trimmed
+    # through the same `mlo.autotag` planner (script 8 and script 10 do it the
+    # same way). It used to take a SECOND loop that re-opened every file this
+    # one had just written; the counts below are what that loop reported.
+    write = _write_album_genres(files, names, per_track, limit=cap)
+    updated = write["updated"]
+    trimmed = write["trimmed"]
+    extra = write["extra"]
+    trimmed_files = write["files"] if trimmed else []
     levels = chain.get("levels") or {}
     level_counts = chain.get("level_counts") or {}
     notes = dict(chain.get("notes") or {})
@@ -8179,6 +8255,7 @@ def metadata_apply(req: MetadataApplyRequest):
     cfg = load_config()
     kind = (req.kind or "").strip().lower()
     album_dir = ""
+    folder = ""
     if req.album_path:
         album_dir = os.path.normpath(req.album_path)
         if not os.path.isdir(album_dir):
@@ -8255,7 +8332,7 @@ def metadata_apply(req: MetadataApplyRequest):
 
     if album_dir:
         imports_mod.stage_metadata(album_dir, None, cfg)
-    tagcache.invalidate_all()
+    tagcache.invalidate_album(album_dir, folder)
     return {"ok": True, "saved": str(saved).replace("\\", "/")}
 
 
@@ -8318,6 +8395,7 @@ def organize(req: OrganizeRequest):
     shorter = bool(cfg.get("short_folder_names", False))
 
     results = []
+    touched = []
     for album_dir in req.paths:
         p = os.path.normpath(mbresolve.resolve_album(album_dir) or album_dir)
         if not os.path.isdir(p):
@@ -8346,7 +8424,8 @@ def organize(req: OrganizeRequest):
         errors = []
         for t in tracks:
             try:
-                vars_ = track_variables(t["tags"], release_type=release_type)
+                vars_ = track_variables(t["tags"], release_type=release_type,
+                                        path=t["path"])
                 rel = eval_script(script, vars_, shorter_ids=shorter)
             except Exception as e:
                 errors.append(f"{t['file']}: script error: {e}")
@@ -8491,6 +8570,19 @@ def organize(req: OrganizeRequest):
             continue
 
         moved = 0
+        # The disc the names above were built from, when only the file's own
+        # FOLDER stated it (a release that arrived as disc subfolders and with
+        # no DISCNUMBER tags): recorded in the file, so the album's tags and
+        # its paths say the same thing — the grader's expected path is this same
+        # script evaluated from the tags, and it requires DISCNUMBER of a
+        # multi-disc album. Fill-only: a tag that is already there wins, and an
+        # album that stated its discs in its tags is untouched.
+        discs_recorded = 0
+        try:
+            from server import imports as _imports
+            discs_recorded = _imports.stamp_folder_discs(p, cfg)
+        except Exception as e:
+            errors.append(f"disc stamping: {e}")
         for src, dst in moves + sidecar_moves:
             try:
                 os.makedirs(os.path.dirname(dst), exist_ok=True)
@@ -8608,17 +8700,20 @@ def organize(req: OrganizeRequest):
         except Exception as e:
             errors.append(f"cue maintenance: {e}")
 
+        touched.extend([p, new_root])
         results.append({
             "path": album_dir,
             "ok": True,
             "moved": moved,
             "leftovers": leftovers,
+            "discs_recorded": discs_recorded,
             "album_root": new_root.replace("\\", "/"),
             "pruned": pruned,
             "notes": notes,
             "errors": errors,
         })
-    tagcache.invalidate_all()
+    if touched:
+        tagcache.invalidate_album(*touched)
     mbresolve.invalidate()
     if any(r.get("moved") for r in results):
         _refresh_slskd_shares_soon()
@@ -8984,7 +9079,7 @@ async def import_upload(
         if stage and os.path.isdir(stage):
             import shutil
             shutil.rmtree(stage, ignore_errors=True)
-    tagcache.invalidate_all()
+    tagcache.invalidate_album(album_path)
     return {"ok": True, "saved": saved,
             "album_path": album_path.replace("\\", "/"),
             "album_name": os.path.basename(album_path), "merged": merged}
@@ -9069,7 +9164,7 @@ def _ingest_one_file(src, target, cfg, folder):
             raise HTTPException(
                 500, f"could not import {os.path.basename(src)} — a file inside "
                      f"it is still in use (stop playback and retry)")
-    tagcache.invalidate_all()
+    tagcache.invalidate_album(album_path, os.path.dirname(src))
     mbresolve.invalidate()
     imports_svc.record_sidecar_tracklist(album_path, cfg)
     return {"ok": True, "path": album_path.replace("\\", "/"),
@@ -9171,7 +9266,7 @@ def import_ingest(source: str = Query(...), target: str = Query(...)):
                 os.rmdir(src)  # the one file left: the folder goes with it
             except OSError:
                 pass
-            tagcache.invalidate_all()
+            tagcache.invalidate_album(album_path, src)
             mbresolve.invalidate()
             imports_svc.record_sidecar_tracklist(album_path, cfg)
             return {"ok": True, "path": album_path.replace("\\", "/"),
@@ -9194,7 +9289,7 @@ def import_ingest(source: str = Query(...), target: str = Query(...)):
             500,
             f"could not import {name} — a file inside it is still in use "
             f"(stop playback and retry)")
-    tagcache.invalidate_all()
+    tagcache.invalidate_album(dest, src)
     mbresolve.invalidate()
     imports_svc.record_sidecar_tracklist(dest, cfg)
     return {"ok": True, "path": dest.replace("\\", "/"),
@@ -9327,12 +9422,12 @@ def import_expected(req: ImportExpected):
         # the rip is not there (server.imports.record_sidecar_tracklist).
         recorded = imports_svc.record_sidecar_tracklist(target, cfg)
         if recorded:
-            tagcache.invalidate_all()
+            tagcache.invalidate_album(target)
             return {"ok": True, "tracks": len(recorded["tracks"]),
                     "source": "sidecars"}
     if not save_expected_tracks(target, req.release_id, tracks):
         raise HTTPException(500, "could not write the release tracklist")
-    tagcache.invalidate_all()
+    tagcache.invalidate_album(target)
     return {"ok": True, "tracks": len(tracks)}
 
 
@@ -9493,7 +9588,7 @@ def downloads_delete(req: DownloadsDelete = DownloadsDelete()):
         else:
             deleted.append(name)
     if deleted:
-        tagcache.invalidate_all()
+        tagcache.invalidate_album(ddir)
         _refresh_slskd_shares_soon()
     return {"deleted": deleted, "failed": failed, "freed": freed}
 
@@ -9540,7 +9635,7 @@ def downloads_import(req: DownloadsImport = DownloadsImport()):
         if err:
             failed.append({"name": name, "error": str(err)})
     if moved:
-        tagcache.invalidate_all()
+        tagcache.invalidate_album(ddir, *[m["path"] for m in moved])
         mbresolve.invalidate()
         _refresh_slskd_shares_soon()
     return {"moved": moved, "failed": failed}
@@ -9633,7 +9728,7 @@ def soulseek_staging_delete(req: StagingRequest):
     err, freed = _staging_remove(root, req.name)
     if err:
         raise HTTPException(502, err)
-    tagcache.invalidate_all()
+    tagcache.invalidate_album(root)
     _refresh_slskd_shares_soon()
     return {"ok": True, "freed": freed}
 
@@ -9670,7 +9765,7 @@ def soulseek_staging_clear(req: StagingRequest):
         if err:
             failed.append({"name": name, "reason": err})
     if cleared:
-        tagcache.invalidate_all()
+        tagcache.invalidate_album(root)
         _refresh_slskd_shares_soon()
     return {"ok": True, "cleared": cleared, "freed": freed, "failed": failed}
 
@@ -9778,7 +9873,7 @@ def library_layout_remove_empty_artist(req: AlbumRemove, request: Request = None
             500,
             f"could not move {os.path.basename(p) or 'artist'} to the trash — a "
             f"file inside it is still in use (stop playback and retry)")
-    tagcache.invalidate_all()
+    tagcache.invalidate_album(p)
     mbresolve.invalidate()
     _refresh_slskd_shares_soon()
     return {"ok": True, "trash": dest.replace("\\", "/")}

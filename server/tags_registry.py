@@ -141,14 +141,21 @@ FAMILY_OTHER = "other"
 TAG_INFO = {
     "TITLE": ("Title", "The track's own name."),
     "ARTIST": ("Artist", "The performing artist credited on this track."),
-    "TITLEALIAS": ("Title alias", "The track's title for a reader whose locale does not use its "
-                                  "script (MusicBrainz's own alias). Locale-suffixed when it is "
-                                  "for one in particular: TITLEALIAS-JA."),
-    "ARTISTALIAS": ("Artist alias", "The artist's name for a reader whose locale does not use its "
-                                    "script — the romanised name on Soulseek folders, say. "
-                                    "Locale-suffixed when it is for one: ARTISTALIAS-JA."),
-    "ALBUMALIAS": ("Album alias", "The release's title for a reader whose locale does not use its "
-                                  "script. Locale-suffixed when it is for one: ALBUMALIAS-JA."),
+    "TITLEALIAS": ("Title alias", "The track's title for a reader whose configured locale does "
+                                  "not read the script it is written in (MusicBrainz's own alias) "
+                                  "— AT MOST ONE value, and only when the title needs one: a "
+                                  "Latin title never gets one. Locale-suffixed when it is for "
+                                  "one in particular: TITLEALIAS-JA."),
+    "ARTISTALIAS": ("Artist alias", "The artist's name for a reader whose configured locale does "
+                                    "not read the script it is written in — the romanised name on "
+                                    "Soulseek folders, say. AT MOST ONE value, written only when "
+                                    "the name needs one (\"Radiohead\" never has one in an `en` "
+                                    "library). Locale-suffixed when it is for one: "
+                                    "ARTISTALIAS-JA."),
+    "ALBUMALIAS": ("Album alias", "The release's title for a reader whose configured locale does "
+                                  "not read the script it is written in — at most one value, and "
+                                  "only when the title needs one. Locale-suffixed when it is for "
+                                  "one: ALBUMALIAS-JA."),
     "ALBUMARTIST": ("Album artist", "Who the release is filed under — one value across the album."),
     "ALBUMARTISTSORT": ("Album artist sort", "Sort spelling of the album artist (The Beatles → Beatles)."),
     "ARTISTSORT": ("Artist sort", "Sort spelling of the track artist."),
@@ -296,9 +303,12 @@ TAG_WRITER = {
     "TRANSLATION": _script(17),
     "TRANSLITERATION": _script(17),
     # Nothing writes a locale alias off its own bat: the tagging pass stores
-    # the alias MusicBrainz holds for the name (beets translations, script 14)
-    # and the tag editor takes one by hand. An alias the grade can neither
-    # find nor see is exactly what `grade_check_alias_needed` names.
+    # the ONE alias MusicBrainz holds for a name that needs one (beets
+    # translations, script 14 — and the import's own stamp for the album-level
+    # pair), the tag editor takes one by hand, and the strip passes (3, 10)
+    # clear a spelling the configured locale does not need. An alias the grade
+    # can neither find nor see is exactly what `grade_check_alias_needed`
+    # names; one it should never see is `grade_check_alias_excess`.
     "TITLEALIAS": f"{_RELEASE_WRITER} · locale aliases · the tag editor",
     "ARTISTALIAS": f"{_RELEASE_WRITER} · locale aliases · the tag editor",
     "ALBUMALIAS": f"{_RELEASE_WRITER} · locale aliases · the tag editor",
@@ -423,12 +433,16 @@ TAG_CHECKS = {
     "ACOUSTID_ID": ("grade_check_acoustid",),
     "ACOUSTID_FINGERPRINT": ("grade_check_acoustid",),
     # The name a locale alias has to sit beside, and the alias tag itself:
-    # both sides of `grade_check_alias_needed` (a non-Latin TITLE / ARTIST is
-    # failed when its alias is missing).
+    # both sides of `grade_check_alias_needed` (a name the configured locale
+    # cannot read is failed when its alias is missing) AND of
+    # `grade_check_alias_excess` (an alias where no reader needs one, or in a
+    # spelling the app does not write).
     "TITLE": ("grade_check_alias_needed",),
     "ARTIST": ("grade_check_alias_needed",),
-    "TITLEALIAS": ("grade_check_alias_needed",),
-    "ARTISTALIAS": ("grade_check_alias_needed",),
+    "ALBUM": ("grade_check_alias_needed",),
+    "TITLEALIAS": ("grade_check_alias_needed", "grade_check_alias_excess"),
+    "ARTISTALIAS": ("grade_check_alias_needed", "grade_check_alias_excess"),
+    "ALBUMALIAS": ("grade_check_alias_needed", "grade_check_alias_excess"),
     # The one NAME the vocabulary holds whose VALUE is still junk: the excess
     # check grades the value too (issue code COMMENT), so the row says so.
     "COMMENT": ("grade_check_excess_tags",),
@@ -474,9 +488,11 @@ TAG_ISSUE_CODES = {
     "ACOUSTID_ID": ("ACOUSTID_ID",),
     "ACOUSTID_FINGERPRINT": ("ACOUSTID_FINGERPRINT",),
     # The alias tag whose absence the check names, and the COMMENT value the
-    # excess check fails.
+    # excess check fails. The alias codes serve BOTH alias checks (the missing
+    # half and the excess half) — the tag is the same tag.
     "TITLEALIAS": ("TITLEALIAS",),
     "ARTISTALIAS": ("ARTISTALIAS",),
+    "ALBUMALIAS": ("ALBUMALIAS",),
     "COMMENT": ("COMMENT",),
     "AUDIT": ("AUDIT",),
     "INTEGRITY": ("FLAC_MD5", "FLAC_MD5_ABSENT", "FLAC_MD5_UNKNOWN"),
@@ -506,6 +522,7 @@ CHECK_LABELS = {
     "grade_check_key_bpm": "Key & BPM",
     "grade_check_acoustid": "AcoustID tags required",
     "grade_check_alias_needed": "Locale alias for non-Latin names",
+    "grade_check_alias_excess": "Locale alias only where needed",
     "grade_check_excess_tags": "Excess tags",
     "grade_check_media": "Media type",
     "grade_check_source": "Source tag",

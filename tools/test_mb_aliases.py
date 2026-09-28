@@ -152,6 +152,32 @@ for key, where in (('"genres+aliases"', "artist identity"),
     ok(key in src, f"{where} asks MusicBrainz for aliases ({key})")
 ok(src.count("alias_for(") >= 4, "and each of them attaches the chosen alias")
 
+print("== when a name NEEDS its alias tag (spec R16a) ==")
+# The tagging half of the readability rule above: a tag is written only where
+# the configured locale cannot read the name. `alias_required` IS that answer
+# — the writers, the importer's stamp, script 8's prescan and the grade all
+# ask it — so the pages and the files agree (R87).
+_req = intg.alias_required
+ok(_req("Radiohead", {"locale": "en"}) is False,
+   "a Latin name never needs an alias (Radiohead in an `en` library)")
+ok(_req("Radiohead", {"locale": "ja"}) is False,
+   "…under any locale: there is no script a Latin name's reader cannot read")
+ok(_req("宇多田ヒカル", {"locale": "en"}) is True,
+   "a Japanese name needs one for an `en` reader")
+ok(_req("宇多田ヒカル", {"locale": "ja"}) is False,
+   "…and none for a `ja` reader, who reads it already")
+ok(_req("宇多田ヒカル", {}) is True,
+   "no configured locale reads as the default (`en`)")
+ok(_req("Кино", {"locale": "ru"}) is False and _req("Кино", {"locale": "en"}) is True,
+   "the rule follows the locale's own script (Cyrillic: ru no, en yes)")
+ok(_req("Björk", {"locale": "en"}) is False,
+   "a Latin name with diacritics is Latin")
+ok(_req("", {"locale": "en"}) is False and _req(None, {"locale": "en"}) is False,
+   "no name is no alias")
+ok(intg.alias_locale({}) == "en" and intg.alias_locale({"locale": "JA"}) == "ja",
+   f"the tag locale falls back to the shipped default and folds case "
+   f"({intg.alias_locale({})!r}/{intg.alias_locale({'locale': 'JA'})!r})")
+
 print("== an alias must be as readable as the name it annotates ==")
 # A Latin name is never annotated with a foreign-script alias just because
 # MusicBrainz flags that one primary: the pages used to show "Radiohead
@@ -185,10 +211,10 @@ print("== the alias TAGS the import writes ==")
 # MusicBrainz's aliases are an IMPORT-DECIDED value (issue #59): mlo.autotag is
 # the one writer, fed the rows server.integrations.release_lookup reads out of
 # `inc=aliases` on the SAME release request (no extra request). The BARE key
-# holds the alias the reader's locale ladder chose (`alias_for`) — what the
-# library shows beside the stored name — and every alias MusicBrainz gives a
-# locale ALSO gets its own tag (TITLEALIAS-EN_PH, ...) holding EVERY alias of
-# that language as a list: the suffix is the language tracking.
+# holds the ONE alias the reader's locale ladder chose (`alias_for`) — what the
+# library shows beside the stored name — and ONLY when the name needs one
+# (`alias_required`, issue #75): a name the configured locale can read is never
+# annotated, and nothing is ever spelled per-locale.
 import glob as _glob  # noqa: E402
 import shutil as _shutil  # noqa: E402
 import subprocess as _subprocess  # noqa: E402
@@ -239,46 +265,59 @@ _SLOT = {"recording_mbid": "rec-1", "artist_mbid": "art-1", "title": "光",
          "isrcs": [], "aliases": _TITLE_ALIASES,
          "artist_aliases": _ARTIST_ALIASES, "credits": {}}
 
+
 _ALBUM_VALUES = dict(album_release_tags(_RELEASE, disc=1, config=CFG_EN))
-ok(_ALBUM_VALUES.get("ALBUMALIAS") == "First Love (English)",
-   f"ALBUMALIAS is the ladder's pick for the reader ({_ALBUM_VALUES.get('ALBUMALIAS')!r})")
-ok(_ALBUM_VALUES.get("ALBUMALIAS-EN") == "First Love (English)",
-   "…and the locale key tracks the language")
+# The album's own title is "First Love" — Latin, which an `en` reader reads —
+# so it needs NO alias (issue #75): "First Love (English)" annotates a name the
+# reader already has. The artist IS Japanese, so exactly one ARTISTALIAS lands.
+ok("ALBUMALIAS" not in _ALBUM_VALUES,
+   f"a Latin album title gets no ALBUMALIAS in an `en` library "
+   f"({_ALBUM_VALUES.get('ALBUMALIAS')!r})")
 ok(_ALBUM_VALUES.get("ARTISTALIAS") == "Hikaru Utada",
-   f"ARTISTALIAS is the ladder's pick ({_ALBUM_VALUES.get('ARTISTALIAS')!r})")
-ok(_ALBUM_VALUES.get("ARTISTALIAS-EN") == ["Cubic U", "Hikaru Utada"],
-   f"a locale with SEVERAL aliases is stored as a LIST, in MusicBrainz's order ({_ALBUM_VALUES.get('ARTISTALIAS-EN')!r})")
-ok(_ALBUM_VALUES.get("ARTISTALIAS-EN_PH") == "Utada Hikaru",
-   "a regional locale gets its own suffixed tag (en_PH)")
-ok(_ALBUM_VALUES.get("ARTISTALIAS-JA") == "ヒッキー",
-   "…and a ja one (whose value equal to the stored name was dropped)")
-ok("Utada" not in (_ALBUM_VALUES.get("ARTISTALIAS-EN") or []),
+   f"ARTISTALIAS is the ladder's pick for the non-Latin artist "
+   f"({_ALBUM_VALUES.get('ARTISTALIAS')!r})")
+ok(not [t for t in _ALBUM_VALUES if t.startswith("ARTISTALIAS-")],
+   "…and nothing is spelled per-locale (no ARTISTALIAS-EN / -EN_PH / -JA) "
+   f"({sorted(_ALBUM_VALUES)})")
+ok(not any(str(v) == "Utada" for v in _ALBUM_VALUES.values()),
    "a `search hint` alias never reaches a tag")
 
+# The SAME release under a JAPANESE title: now the album name is one an `en`
+# reader cannot read, so it gets its alias — the ladder's pick, ONE value, and
+# still no locale-suffixed tag of any kind.
+_JA_RELEASE = dict(_RELEASE, title="ファーストラブ")
+_JA_VALUES = dict(album_release_tags(_JA_RELEASE, disc=1, config=CFG_EN))
+ok(_JA_VALUES.get("ALBUMALIAS") == "First Love (English)",
+   f"a non-Latin album title gets its alias ({_JA_VALUES.get('ALBUMALIAS')!r})")
+ok(not [t for t in _JA_VALUES if t.startswith("ALBUMALIAS-")],
+   f"…one value, no per-locale fan-out ({sorted(_JA_VALUES)})")
 # A release that states NO alias of its own falls back to its GROUP's, which is
-# where a translated album name usually lives.
-_RG_ONLY = dict(_RELEASE, aliases=[], albums=None)
+# where a translated album name usually lives — the merging is unchanged, only
+# what is written from it is.
+_RG_ONLY = dict(_RELEASE, title="ファーストラブ",
+                release_group_aliases=[{"name": "First Love", "locale": "en",
+                                        "primary": True,
+                                        "type": "Release group name"}])
 _RG_ONLY.pop("aliases")
 _RG_VALUES = dict(album_release_tags(_RG_ONLY, disc=1, config=CFG_EN))
-ok(_RG_VALUES.get("ALBUMALIAS-JA") == "ファーストラブ",
-   f"the release GROUP's aliases are the ALBUMALIAS fallback ({_RG_VALUES.get('ALBUMALIAS-JA')!r})")
-ok(_ALBUM_VALUES.get("ALBUMALIAS-JA") == "ファーストラブ",
-   f"…and both entities' aliases are merged when both state some ({_ALBUM_VALUES.get('ALBUMALIAS-JA')!r})")
+ok(_RG_VALUES.get("ALBUMALIAS") == "First Love",
+   f"the release GROUP's aliases are still the ALBUMALIAS source "
+   f"({_RG_VALUES.get('ALBUMALIAS')!r})")
 
 _TRACK_VALUES = dict(mb_track_tags(_RELEASE, _SLOT, disc=1,
                                    album_artist_mbid="art-1", config=CFG_EN))
 ok(_TRACK_VALUES.get("TITLEALIAS") == "Hikari",
    f"the track's own alias is the ladder's pick ({_TRACK_VALUES.get('TITLEALIAS')!r})")
-ok(_TRACK_VALUES.get("TITLEALIAS-EN") == ["Hikari", "Hikari (English Version)"],
-   f"a multi-alias locale is a list ({_TRACK_VALUES.get('TITLEALIAS-EN')!r})")
-ok(_TRACK_VALUES.get("TITLEALIAS-EN-LATN") == "Hikari (romanized)",
-   f"a script locale keeps its own suffixed tag ({_TRACK_VALUES.get('TITLEALIAS-EN-LATN')!r})")
-# The ja reader's ladder answer is the Japanese name itself, which IS the stored
-# name: no alias is written for it.
+ok(not [t for t in _TRACK_VALUES
+        if t.startswith(("TITLEALIAS-", "ARTISTALIAS-", "ALBUMALIAS-"))],
+   f"…with no locale-suffixed tag beside it ({sorted(_TRACK_VALUES)})")
+# A ja reader reads both names already — a Japanese title and a Japanese
+# artist — and the Latin album title never needs one: no alias tag at all.
 _JA_TRACK = dict(mb_track_tags(_RELEASE, _SLOT, disc=1,
                                album_artist_mbid="art-1", config={"locale": "ja"}))
-ok("TITLEALIAS" not in _JA_TRACK and "TITLEALIAS-JA" not in _JA_TRACK,
-   f"a value equal to the stored name is not its own alias ({_JA_TRACK.get('TITLEALIAS')!r})")
+ok(not [t for t in _JA_TRACK if "ALIAS" in t],
+   "a ja reader is charged no alias for names they already read "
+   f"({sorted(t for t in _JA_TRACK if 'ALIAS' in t)})")
 # A release that states no aliases at all writes nothing — no empty tags.
 _BARE = dict(_RELEASE, aliases=[], release_group_aliases=[], artist_aliases=[],
              artists=[{"name": "宇多田ヒカル", "mbid": "art-1"}])
@@ -314,28 +353,56 @@ else:
                     capture_output=True)
     _af = AudioFile(_path)
     for _k, _v in (("TITLE", "光"), ("ARTIST", "宇多田ヒカル"),
-                   ("ALBUMARTIST", "宇多田ヒカル"), ("ALBUM", "First Love"),
+                   ("ALBUMARTIST", "宇多田ヒカル"), ("ALBUM", "ファーストラブ"),
                    ("TRACKNUMBER", "1")):
         _af.set_tag(_k, _v)
-    # the REAL write path, from the stubbed release payload
+    # the REAL write path, from the stubbed release payload (whose title is the
+    # Japanese one this file carries, so ALBUMALIAS has something to annotate)
     _af.defer_save(True)
     _written, _refused = write_mb_tags(
-        _af, mb_track_tags(_RELEASE, _SLOT, disc=1, album_artist_mbid="art-1",
+        _af, mb_track_tags(_JA_RELEASE, _SLOT, disc=1, album_artist_mbid="art-1",
                            config=CFG_EN), CFG_EN)
     _af.defer_save(False)
-    ok(_written >= 4 and not _refused,
+    ok(_written >= 3 and not _refused,
        f"the alias tags land through the real writer ({_written}, {_refused})")
     _back = AudioFile(_path)
     ok(_back.get_tag("TITLEALIAS") == "Hikari",
        f"TITLEALIAS reads back ({_back.get_tag('TITLEALIAS')!r})")
-    ok(_back.tag_values("TITLEALIAS-EN") == ["Hikari", "Hikari (English Version)"],
-       f"the locale list survives as repeated fields ({_back.tag_values('TITLEALIAS-EN')!r})")
-    ok(_back.get_tag("ARTISTALIAS-EN_PH") == "Utada Hikaru",
-       f"a region-suffixed alias reads back ({_back.get_tag('ARTISTALIAS-EN_PH')!r})")
+    ok(_back.get_tag("ARTISTALIAS") == "Hikaru Utada",
+       f"ARTISTALIAS reads back ({_back.get_tag('ARTISTALIAS')!r})")
     ok(_back.get_tag("ALBUMALIAS") == "First Love (English)",
        f"ALBUMALIAS reads back ({_back.get_tag('ALBUMALIAS')!r})")
-    ok("TITLEALIAS-EN-LATN" in _back.all_tags(),
-       f"all_tags() names the suffixed keys canonically ({sorted(_back.all_tags())})")
+    ok(not [t for t in _back.all_tags()
+            if str(t).upper().rsplit(":", 1)[-1].startswith(
+                ("TITLEALIAS-", "ARTISTALIAS-", "ALBUMALIAS-"))],
+       f"…and NOTHING is spelled per-locale ({sorted(_back.all_tags())})")
+
+    # The IMPORT's own stamp (`server.imports._stamp_release_identity` →
+    # `mlo.autotag.fill_release_identity`) is the SAME writer: an import that
+    # holds the release stamps the album-level pair at once, with no script 8
+    # run and no manual pass. It writes ONLY the album-level half — the
+    # per-track alias belongs to the tagging stage.
+    from mlo.autotag import fill_release_identity  # noqa: E402
+    _path2 = os.path.join(_album_dir, "02 - 光2.flac")
+    _subprocess.run([_FLAC, "-f", "-s", "-o", _path2, _wav], check=True,
+                    capture_output=True)
+    _af2 = AudioFile(_path2)
+    for _k, _v in (("TITLE", "光"), ("ARTIST", "宇多田ヒカル"),
+                   ("ALBUMARTIST", "宇多田ヒカル"), ("ALBUM", "ファーストラブ"),
+                   ("TRACKNUMBER", "2")):
+        _af2.set_tag(_k, _v)
+    _res2 = fill_release_identity([_path2], _JA_RELEASE, CFG_EN)
+    _back2 = AudioFile(_path2)
+    ok(_res2["written"] == 1 and _res2["failed"] == 0,
+       f"the importer's stamp writes the album-level tags ({_res2})")
+    ok(_back2.get_tag("ALBUMALIAS") == "First Love (English)"
+       and _back2.get_tag("ARTISTALIAS") == "Hikaru Utada",
+       f"…the alias the album and its artist need ({_back2.get_tag('ALBUMALIAS')!r} / "
+       f"{_back2.get_tag('ARTISTALIAS')!r})")
+    ok(_back2.get_tag("TITLEALIAS") is None and not [
+        t for t in _back2.all_tags()
+        if str(t).upper().rsplit(":", 1)[-1].startswith("TITLEALIAS-")],
+       "…and nothing of the per-track half, which is the tagging stage's")
 
 print("== the library reads them: display and search ==")
 from server import api_query as _api_query  # noqa: E402
@@ -363,7 +430,7 @@ if _FLAC:
        "…while the original title stays the tag it is (the details)")
     ok(_res.get("alias") == "First Love (English)",
        f"the album row carries ALBUMALIAS beside meta.ALBUM ({_res.get('alias')!r})")
-    ok(_res["meta"].get("ALBUM") == "First Love",
+    ok(_res["meta"].get("ALBUM") == "ファーストラブ",
        "…and the original album name stays visible")
     # The library's search blob IS every value of tags (the client's haystack,
     # LibraryPage's `Object.values(t.tags)`), so the alias reaches the search.

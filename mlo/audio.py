@@ -554,16 +554,19 @@ TAG_MAP = {
         "mp3": ("TLAN", None),
         "mp4": ("freeform", "com.apple.iTunes", "LANGUAGE"),
     },
-    # MusicBrainz ALIASES: the names MusicBrainz states for an entity besides
-    # its canonical one, written by the import from the release payload
-    # (mlo.autotag). The bare key holds the ONE alias the reader's locale
-    # ladder chose (`server.integrations.alias_for`) — the name the library
-    # and the pages show beside the stored one — while a locale MusicBrainz
-    # states gets its own tag whose name carries the language
-    # (TITLEALIAS-JA, ARTISTALIAS-EN_PH, ...). Those suffixed keys have no
-    # fixed entry here (the locale set is open-ended); see
-    # `_ALIAS_TAG_PREFIXES`. A key holds a LIST — several aliases of one
-    # language — as repeated fields, exactly like GENRE.
+    # MusicBrainz ALIASES: the name a reader in another script's locale
+    # searches for, written by the import from the release payload
+    # (mlo.autotag) — ONCE per entity, and ONLY when the configured `locale`
+    # cannot read the entity's own name, which is why `Radiohead` has no
+    # ARTISTALIAS in an `en` library (server.integrations.alias_required, spec
+    # R16a). The BARE key holds the ONE alias the reader's locale ladder chose
+    # (`alias_for`), the name the library and the pages show beside the
+    # stored one; a `-<locale>` spelling (TITLEALIAS-JA, ARTISTALIAS-EN_PH) is
+    # part of the VOCABULARY — a hand-tagged or older file may carry one, and
+    # the app writes no spelling but the configured locale's own — so the
+    # suffixed keys have no fixed entry here (the locale set is open-ended);
+    # see `_ALIAS_TAG_PREFIXES`. A key holds ONE value; a `-<locale>` spelling
+    # a file already carries may hold several, as repeated fields like GENRE.
     "TITLEALIAS": {
         "flac": "TITLEALIAS",
         "mp3": ("TXXX", "TITLEALIAS"),
@@ -754,6 +757,93 @@ _LYRICS_TRANSFORM_PREFIXES = ("TRANSLATION-", "TRANSLITERATION-")
 # (TXXX / the iTunes freeform atom), so an alias with a locale reads back as
 # the same kind of tag an alias without one does.
 _ALIAS_TAG_PREFIXES = ("TITLEALIAS-", "ARTISTALIAS-", "ALBUMALIAS-")
+
+# The alias FAMILIES as the bare names TAG_MAP holds, in the order an entity
+# is read (the track, its artist, the release it is on).
+ALIAS_TAG_BASES = ("TITLEALIAS", "ARTISTALIAS", "ALBUMALIAS")
+
+# The tag each alias family annotates: the NAME whose script decides whether
+# the alias is needed at all (`server.integrations.alias_required`) and the
+# value an excess report names. ONE mapping, read by the writer and its
+# prescan (mlo.autotag), by the grade and its strip pass (mlo.grader,
+# mlo.format_all) and by the alias drop of an import
+# (server.imports.drop_arrived_values) — so the four can never disagree about
+# which name an alias belongs to.
+ALIAS_TAG_SUBJECTS = {
+    "TITLEALIAS": "TITLE",
+    "ARTISTALIAS": "ARTIST",
+    "ALBUMALIAS": "ALBUM",
+}
+
+
+def alias_tag_parts(name):
+    """``(family, locale)`` of an alias tag NAME, or ``("", "")``.
+
+    The ONE answer to "is this tag an alias, of what, and for which locale",
+    asked by the grade (``mlo.grader``: a needed alias's presence, and the
+    excess check that fails a spelling for a locale the app does not write),
+    the strip passes and the writer's own "is it already there" probe — a file
+    may hold the family bare or with the locale MusicBrainz states for it
+    (``TITLEALIAS-JA``, ``ARTISTALIAS-EN_PH``), as a vorbis comment or behind a
+    ``TXXX:`` / freeform wrapper, and the locale set is open-ended
+    (:data:`_ALIAS_TAG_PREFIXES`). The locale comes back as the FILE spells it
+    (underscores and all), which is what a report has to name.
+    """
+    text = str(name or "").strip()
+    if ":" in text:
+        # "TXXX:titlealias-ja" / "----:com.apple.iTunes:ARTISTALIAS-JA"
+        text = text.rsplit(":", 1)[-1].strip()
+    # The fold `mlo.grader._tag_key_norm` applies (case, spaces and
+    # underscores dropped), done by hand: mlo/audio.py carries no `re`.
+    folded = "".join(ch for ch in text.upper() if ch not in " _\t")
+    for base in ALIAS_TAG_BASES:
+        if not folded.startswith(base):
+            continue
+        rest = folded[len(base):]
+        if not rest:
+            return (base, "")
+        if rest.startswith("-"):
+            # The locale tail comes from the RAW name (its own spelling kept,
+            # underscores included: en_PH). The family itself carries no dash,
+            # so the first one is the separator however the name is spaced.
+            return (base, text.split("-", 1)[1].strip())
+    return ("", "")
+
+
+def alias_family_of(name):
+    """The alias family a tag NAME belongs to (bare or locale-suffixed, in any
+    container spelling), or "" — see :func:`alias_tag_parts`."""
+    return alias_tag_parts(name)[0]
+
+
+def alias_locale_fold(value):
+    """The language part of a locale code: ``"ja-Latn"``/``"en_PH"`` ->
+    ``"ja"``/``"en"`` — the SAME fold `server.integrations._alias_ladder`
+    applies, so a variant of the configured language counts as that locale."""
+    text = str(value or "").strip()
+    for sep in ("-", "_"):
+        text = text.split(sep, 1)[0]
+    return text.lower()
+
+
+def alias_spelling_ok(name, locale):
+    """Whether an alias tag NAME is a spelling the app WRITES for *locale*.
+
+    The ONE answer to "may this alias tag be on the file": the bare family
+    (what `mlo.autotag` writes), or the family suffixed with the configured
+    locale or a variant of its language. Every other suffix names a locale the
+    app does not write, which is what makes it excess — so the writer's own
+    presence probe (`mlo.autotag._alias_slot_open`), the grade that requires
+    the tag (`grade_check_alias_needed`), the grade and strip that delete the
+    wrong spelling (`mlo.grader.alias_keys_excess`) and the strip pass all ask
+    this one predicate instead of comparing suffixes each their own way.
+    """
+    family, got = alias_tag_parts(name)
+    if not family:
+        return False
+    if not got:
+        return True
+    return alias_locale_fold(got) == alias_locale_fold(locale)
 
 
 def _alias_tag_spec(name):

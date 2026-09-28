@@ -744,7 +744,15 @@ def _add_expected_tracks(res, album_dir):
     on_disk = {(tr.get("discnumber") or 1, tr.get("tracknumber"))
                for tr in res.get("tracks", [])}
     names = [tr.get("file") for tr in res.get("tracks", []) if tr.get("file")]
-    rows = expected_tracks_state(tracks, on_disk, names)
+    # The same rows as the file walk would produce (disc, position, TITLE), for
+    # the discs whose manifest and files are numbered in different conventions
+    # (see `expected_tracks_state`): a 2-CD release numbered 14-26 against a
+    # manifest numbered 1-13 read as "not imported" for the whole second disc.
+    rows_on_disk = [{"disc": int(tr.get("discnumber") or 1),
+                     "position": tr.get("tracknumber"),
+                     "title": str((tr.get("tags") or {}).get("TITLE") or "").strip()}
+                    for tr in res.get("tracks", [])]
+    rows = expected_tracks_state(tracks, on_disk, names, rows_on_disk)
     res["expected_tracks"] = rows
     res["expected_release_id"] = exp.get("release_id")
     present = sum(1 for r in rows if not r["missing"])

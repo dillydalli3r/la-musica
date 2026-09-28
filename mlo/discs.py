@@ -108,6 +108,177 @@ TOC_TOLERANCE_S = 4.0
 TOC_UNIQUE_MARGIN_S = 4.0
 
 
+# --------------------------------------------------------------------------- #
+# ONE disc vocabulary
+# --------------------------------------------------------------------------- #
+# Every reading of "which disc does this name state" lives here: the search's
+# candidate trees, the importer's mover and the layout scan all call these, so
+# a folder one of them takes for a disc cannot be an album to another (which is
+# how one multi-disc release used to import as two albums named after its
+# discs). Three near-identical local regex sets used to spell this, each
+# slightly different — never again; add a spelling HERE.
+
+# The decoration a share wraps its folder names in: "CD1 [FLAC]" -> "CD1",
+# "Album (1994)" -> "Album".
+DECOR_RE = re.compile(r"[\s._-]*[\(\[]([^\)\]]*)[\)\]][\s._-]*$")
+
+# A disc WORD plus its index: "CD1", "CD 1", "CD-1", "CD_1", "Disc 2",
+# "Disk1", "Volume 1", "DVD 2", "BD1" — the spelling a rip's own folder uses.
+DISC_DIR_WORD_RE = re.compile(r"(?:cd|disc|disk|dvd|bd|volume|vol)[\s._-]?\d{1,2}",
+                              re.IGNORECASE)
+# ...and the bare index a plain rip numbers its folders with: "1", "02".
+DISC_DIR_INDEX_RE = re.compile(r"\d{1,2}")
+
+# The loose token a FILE (or folder) name can state a disc with, anywhere in
+# the name: "CD1", "Disc 2 [FLAC]", "Album CD2".
+DISC_TOKEN_RE = re.compile(r"(?:^|[^A-Za-z0-9])(?:cd|disc|disk|dvd|bd|volume|vol)"
+                           r"\s*[-_.]?\s*(\d{1,2})(?![0-9])", re.IGNORECASE)
+# "1-03 Title": the library's own D-TT convention — the first number names the
+# disc, and only when a track number follows it ("12 - Title" is a track, not
+# disc 12).
+DISC_LEAD_RE = re.compile(r"^(\d{1,2})\s*-\s*\d{1,3}(?:\D|$)")
+# "(2) 01 - Title": the disc in brackets in front of the track number.
+DISC_BRACKET_RE = re.compile(r"^[\(\[]\s*(\d{1,2})\s*[\)\]]\s*")
+
+
+def strip_decoration(name):
+    """"CD1 [FLAC]" -> "CD1"; "Album (1994)" -> "Album"."""
+    name = str(name or "")
+    while True:
+        m = DECOR_RE.search(name)
+        if not m:
+            return name.strip()
+        name = name[:m.start()]
+
+
+def disc_number_of_name(name):
+    """Disc number a folder or FILE name claims ("CD1", "Disc 2 [FLAC]",
+    "1-03 rip", "(2) 01 x"), or None when the name says nothing.
+
+    The loose reading, for names that carry the disc as a token: a file name
+    ("…/CD2/01 - x.flac", "1-03 x.flac") and a folder that states a disc in
+    words. A BARE index is deliberately not a disc here — "1.flac" is a track
+    name, not a statement that the track is disc 1, and a folder called "25"
+    may be the album — that spelling counts only with its siblings' evidence
+    (see :func:`is_disc_parent` and :func:`disc_number_of_path`)."""
+    base = os.path.basename(str(name or "").replace("\\", "/")).strip()
+    stem = strip_decoration(os.path.splitext(base)[0] or base)
+    m = DISC_TOKEN_RE.search(stem)
+    if m:
+        return _positive(int(m.group(1)))
+    m = DISC_LEAD_RE.match(stem)
+    if m:
+        return _positive(int(m.group(1)))
+    m = DISC_BRACKET_RE.match(stem)
+    return _positive(int(m.group(1))) if m else None
+
+
+def bare_disc_index(name):
+    """The disc a name states when the WHOLE name is its index — "1", "02" —
+    else None.
+
+    A bare index is weak evidence on its own: a rip that numbers its folders
+    "1"/"2" states its discs that way, and so does a folder holding the album
+    "25". It is read as a disc only where the sibling folders settle it
+    (:func:`is_disc_parent`, :func:`disc_number_of_path`)."""
+    base = os.path.basename(str(name or "").replace("\\", "/")).strip()
+    if not DISC_DIR_INDEX_RE.fullmatch(base):
+        return None
+    return _positive(int(base))
+
+
+def disc_dir_number(name):
+    """The disc a DIRECTORY name states, or None when the folder is not a disc
+    folder of its parent.
+
+    The ONE rule the search's candidate tree, the importer's mover and the
+    readiness check ask, for a folder that names its disc: "CD1", "CD 1",
+    "CD-1", "Disk1", "Disc 2", "Volume 1", "DVD 2", "CD1 [FLAC]" (the share's
+    decoration is stripped), plus the loose spellings disc_number_of_name
+    reads. Anything else — "Album [FLAC]", "Extras", "Log+Cue", "Scans" — is
+    not a disc folder whatever else it may be. The bare index ("1", "02") is
+    answered by :func:`bare_disc_index`, which needs the siblings to count."""
+    base = os.path.basename(str(name or "").replace("\\", "/")).strip()
+    bare = strip_decoration(base)
+    if not bare:
+        return None
+    if DISC_DIR_WORD_RE.fullmatch(bare):
+        m = re.search(r"\d{1,2}$", bare)
+        return _positive(int(m.group(0))) if m else None
+    if DISC_DIR_INDEX_RE.fullmatch(bare):
+        return None                    # bare index: see bare_disc_index
+    return disc_number_of_name(bare)
+
+
+def is_disc_dir(name):
+    """True when a directory name IS a disc folder of its parent — the
+    strict/loose split lives in :func:`disc_dir_number`, the one rule."""
+    return disc_dir_number(name) is not None
+
+
+def is_disc_parent(child_names):
+    """Whether a folder's album-bearing CHILD folders make it the parent of a
+    multi-disc release — ONE album, its discs below it — or not.
+
+    This is the rule the staging walk, the mover and the readiness check share
+    (server.soulseek.disc_parent), stated once here:
+
+      * a child that NAMES a disc — "CD1", "Disc 2", "Volume 1", "1-03 rip",
+        "CD1 [FLAC]" — makes the parent the album, and ANY other album-bearing
+        child rides along instead of splitting off as an album of its own (a
+        stray log/cue folder, an artwork or bonus folder). The album's own
+        files at the root win over this rule anyway: a folder holding an album
+        file directly is an album;
+      * a child that is only a BARE index ("1", "02") counts when the children
+        are a numbered set — "1"+"2" is a rip's disc split, while a lone "25"
+        is the album "25" and nothing else;
+      * no child names a disc -> not a disc parent: the children are albums of
+        their own (or the peer's own folder levels, which the walk descends).
+
+    `child_names` are the names of the children that carry album material
+    (.log/.cue/audio), as the caller has already established."""
+    names = [str(n) for n in child_names or []]
+    if any(disc_dir_number(n) for n in names):
+        return True
+    numbers = sorted(n for n in (bare_disc_index(c) for c in names) if n)
+    # a numbered SET, not two unrelated folders that happen to be numbers: the
+    # run must start at 1 and have no holes ("1","2","3" is a rip, "25","30"
+    # is two albums).
+    return len(numbers) >= 2 and numbers == list(range(1, len(numbers) + 1))
+
+
+def disc_number_of_path(path):
+    """The disc a FILE on disk belongs to, or None when nothing states one.
+
+    The file's own name first, then the folder it sits in — including a folder
+    that is only a bare index, which counts when its parent is a numbered set
+    of discs (:func:`is_disc_parent`). The parent is only READ when the folder
+    is a bare index, so this costs no directory listing for the ordinary
+    "…/CD2/01 - x.flac" and "…/Album/01 - x.flac" shapes."""
+    p = str(path).replace("\\", "/")
+    own = disc_number_of_name(os.path.basename(p))
+    if own:
+        return own
+    parent = os.path.dirname(p)
+    stated = disc_dir_number(os.path.basename(parent))
+    if stated:
+        return stated
+    if bare_disc_index(os.path.basename(parent)):
+        grand = os.path.dirname(parent)
+        try:
+            siblings = os.listdir(grand) if os.path.isdir(grand) else []
+        except OSError:
+            siblings = []
+        if is_disc_parent(siblings):
+            return bare_disc_index(os.path.basename(parent))
+    return None
+
+
+def _positive(value):
+    """A disc number is 1 or more ("CD0" states nothing)."""
+    return int(value) if int(value) >= 1 else None
+
+
 def disc_of_filename(name):
     """Disc number from the 'D-TT Title' filename convention, else None."""
     m = DISC_PREFIX_RE.match(os.path.basename(name))
@@ -411,29 +582,38 @@ def match_disc_row(rows, audio_path, duration=None):
     return None
 
 
-def disk_track_keys(album_dir, audio_paths=None):
-    """The album's audio as the two ways a manifest row can name it:
-    ({(disc, track number)}, {file names})."""
+def disk_rows(album_dir, audio_paths=None):
+    """The album's audio, one row per file: {"disc", "position", "title"}.
+
+    The same walk the old keys helper made, keeping what the manifest's rows
+    carry (a disc, a track number and a title) so the two can be compared — see
+    `mlo.paths.expected_tracks_state`, which aligns a disc's rows against its
+    files BY ORDER when the two are numbered in different conventions (a
+    release numbered continuously 14-26 against a manifest numbered per disc
+    1-13). A file whose TITLE is unreadable keeps "" rather than a guess.
+    """
     if audio_paths is None:
         try:
             audio_paths = [os.path.join(album_dir, f) for f in os.listdir(album_dir)
                            if f.lower().endswith(AUDIO_EXTS)]
         except OSError:
-            return set(), []
+            return []
     discs = album_discs(album_dir) or {}
     disc_of = {}
     for d, paths in discs.items():
         for p in paths:
             disc_of[os.path.normcase(os.path.abspath(p))] = d
-    keys, names = set(), []
+    out = []
     for p in audio_paths:
-        names.append(os.path.basename(p))
-        tn = _file_track_number(p)
-        if tn is None:
-            continue
         d = disc_of.get(os.path.normcase(os.path.abspath(p))) or disc_of_filename(p) or 1
-        keys.add((int(d), int(tn)))
-    return keys, names
+        title = ""
+        try:
+            title = str(AudioFile(p).get_tag("TITLE") or "").strip()
+        except Exception:
+            pass
+        out.append({"disc": int(d), "position": _file_track_number(p),
+                    "title": title, "file": os.path.basename(p)})
+    return out
 
 
 def album_expected_state(album_dir, audio_paths=None):
@@ -448,8 +628,11 @@ def album_expected_state(album_dir, audio_paths=None):
     tracks = load_expected_tracks(album_dir)["tracks"]
     if not tracks:
         return None
-    keys, names = disk_track_keys(album_dir, audio_paths)
-    rows = expected_tracks_state(tracks, keys, names)
+    rows_on_disk = disk_rows(album_dir, audio_paths)
+    keys = {(r["disc"], int(r["position"])) for r in rows_on_disk
+            if r["position"] is not None}
+    names = [r["file"] for r in rows_on_disk]
+    rows = expected_tracks_state(tracks, keys, names, rows_on_disk)
     present = sum(1 for r in rows if not r["missing"])
     return {"total": len(rows), "present": present,
             "missing": len(rows) - present, "rows": rows}
@@ -472,6 +655,22 @@ def _file_track_number(path):
     if m:
         return int(m.group(1))
     return None
+
+
+def _file_seconds(path):
+    """The file's own playtime in seconds, or None when unreadable.
+
+    The guard the log-to-file ORDER alignment uses (`log_crc_map`): a log
+    states a playtime per track in its TOC, and two rows that agree within
+    `TOC_TOLERANCE_S` are the same track. Reads through `AudioFile`, which the
+    tag cache already answers for a file the run has touched.
+    """
+    try:
+        tech = getattr(AudioFile(path), "tech", None) or {}
+        value = tech.get("length")
+        return float(value) if value else None
+    except Exception:
+        return None
 
 
 # PCM is fed to zlib.crc32 in chunks this size, so verifying a track never
@@ -578,6 +777,74 @@ def _audio_crc32(ffmpeg_exe, path):
     return got
 
 
+def log_crc_map(crcs, paths, seconds=None, durations=None, number_of=None):
+    """One disc's log checksums, keyed by the PATH each belongs to.
+
+    A rip log numbers a DISC's tracks 1..N (EAC's own running order), and the
+    files on that disc may be numbered RELEASE-wide — `2-14 … 2-26` for the
+    second disc of a 2-CD set, which is what the CD's TOC states and what this
+    app writes. The two then share no track number at all, and every track of
+    that disc graded "not covered by .log CRC (unverifiable CD rip)" beside a
+    log that covered every one of them (measured on the owner's The Wall, US
+    CD C2K 36183: 13 files, 13 CRC rows, 13 "unverifiable").
+
+    Matching is by track number first, and BY ORDER when the two share no
+    number — the i-th log row against the i-th file — guarded so a renumbering
+    is the only thing it can ever explain: the counts must be equal, every file
+    must state a number, and wherever both sides state a playtime (`seconds`
+    from the log's TOC, `durations` per path) the two must agree within
+    `TOC_TOLERANCE_S`. Otherwise {} — a file the log does not really
+    cover is not given somebody else's checksum.
+
+    *number_of* is the caller's own rule for "which track is this file", so a
+    caller that reads the position off the FILE NAME (`_track_num_of`, the
+    grader's rule) and one that reads it off the TAG (`_file_track_number`,
+    the verifier's) each keep what they had.
+    """
+    number_of = number_of or _file_track_number
+    by_track = {}
+    for k, v in (crcs or {}).items():
+        try:
+            track = int(k)
+        except (TypeError, ValueError):
+            continue
+        if v:
+            by_track[track] = v
+    if not by_track or not paths:
+        return {}
+    numbers = {}
+    for p in paths:
+        tn = number_of(p)
+        if tn is not None:
+            numbers[p] = int(tn)
+    if numbers and set(numbers.values()) & set(by_track):
+        return {p: by_track[tn] for p, tn in numbers.items() if tn in by_track}
+    if len(numbers) != len(paths):
+        return {}                      # a file that states no position: no order
+    log_rows = sorted(by_track)
+    file_rows = sorted(numbers.items(), key=lambda kv: kv[1])
+    if not file_rows or len(log_rows) != len(file_rows):
+        return {}
+    secs = {}
+    for k, v in (seconds or {}).items():
+        try:
+            secs[int(k)] = float(v)
+        except (TypeError, ValueError):
+            continue
+    if secs and durations:
+        for track, (p, _tn) in zip(log_rows, file_rows):
+            want = secs.get(track)
+            got = durations.get(p)
+            if want is None or got is None:
+                continue
+            try:
+                if abs(want - float(got)) > TOC_TOLERANCE_S:
+                    return {}
+            except (TypeError, ValueError):
+                continue
+    return {p: by_track[track] for track, (p, _tn) in zip(log_rows, file_rows)}
+
+
 def verify_album_checksums(ffmpeg_exe, album_dir, paths, config=None, workers=None):
     """Verify MEDIA=CD tracks against the CRC-32 checksums in the rip logs.
 
@@ -643,22 +910,38 @@ def verify_album_checksums(ffmpeg_exe, album_dir, paths, config=None, workers=No
             if not os.path.isfile(log_path):
                 entries.append((p, f"missing {_disc_expected_name(pattern, d, '.log')}", None))
                 continue
-            per_track = parse_log_checksums(read_log_text(log_path))
+            text = read_log_text(log_path)
+            per_track = parse_log_checksums(text)
             if not per_track:
                 entries.append((p, f"{_disc_expected_name(pattern, d, '.log')} has no per-track CRCs", None))
                 continue
+            # The log's own numbering may be per disc while the files are
+            # numbered release-wide (`2-14 …`): match by path, by number first
+            # and by order when the two share none (`mlo.discs.log_crc_map`).
+            mapped = log_crc_map(per_track, discs.get(d) or [p],
+                                 parse_log_track_seconds(text),
+                                 durations={q: _file_seconds(q) for q in (discs.get(d) or [p])})
+            crc = mapped.get(p)
+            if not crc:
+                entries.append((p, f"{os.path.basename(log_path)} has no CRC for this track", None))
+                continue
         else:
             per_track = {}
+            log_text = ""
             for log_path in logs:
-                per_track.update(parse_log_checksums(read_log_text(log_path)))
+                log_text += read_log_text(log_path)
+                per_track.update(parse_log_checksums(log_text))
             if not per_track:
                 entries.append((p, "log has no per-track CRCs", None))
                 continue
-        tn = _file_track_number(p)
-        crc = per_track.get(tn)
-        if not crc:
-            entries.append((p, f"log has no CRC for track {tn if tn else '?'}", None))
-            continue
+            mapped = log_crc_map(per_track, paths,
+                                 parse_log_track_seconds(log_text),
+                                 durations={q: _file_seconds(q) for q in paths})
+            crc = mapped.get(p)
+            if not crc:
+                tn = _file_track_number(p)
+                entries.append((p, f"log has no CRC for track {tn if tn else '?'}", None))
+                continue
         entries.append((p, None, crc))
 
     to_decode = [(p, crc) for p, reason, crc in entries if reason is None]

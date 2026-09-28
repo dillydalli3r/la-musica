@@ -199,7 +199,8 @@ else:
         fetched.append((artist, track, album, duration))
         return {"syncedLyrics": "x"} if "known" in track.lower() else None
 
-    def fake_publish(artist, track, album, duration, plain=None, synced=None):
+    def fake_publish(artist, track, album, duration, plain=None, synced=None,
+                     solver=None):
         published.append((artist, track, album, duration, plain, synced))
         return True, "published to LRCLIB — thank you for contributing!"
 

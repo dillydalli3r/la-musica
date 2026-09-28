@@ -44,6 +44,15 @@ from mlo.naming import is_derived_type
 # read as electronic). mlo.genre_vocab imports nothing from server/, so this is
 # no cycle, and it is the same vocabulary the writers and the grader use.
 from mlo.genre_vocab import parent_of as _genre_family
+# The script reading the alias rule is built on (mlo.lyrics_xlit): whether a
+# name is written in non-Latin script at all (`non_latin_ratio` /
+# `dominant_script`, the pair that decides a lyric transliteration) and the
+# threshold below which a text counts as already romanized. `alias_required`
+# is the ONE reader outside the grading/transliteration passes, so the alias
+# family cannot grow a second, disagreeing notion of "non-Latin".
+from mlo.lyrics_xlit import (
+    _LATIN_THRESHOLD, dominant_script, non_latin_ratio,
+)
 
 MB_BASE = "https://musicbrainz.org/ws/2"
 LRCLIB_BASE = "https://lrclib.net/api"
@@ -450,6 +459,56 @@ def _alias_ladder(rows, want, name):
         latin.sort(key=lambda a: 0 if "latn" in str(a.get("locale") or "").lower() else 1)
         return pick(latin)
     return ""
+
+
+# The locale whose own alias spelling is the one the app writes when the
+# config states none — `locale`'s shipped default (mlo.config.DEFAULT_CONFIG).
+DEFAULT_ALIAS_LOCALE = "en"
+
+
+def alias_locale(cfg=None):
+    """The locale the alias TAGS are written for — `locale`, folded, with the
+    shipped default when the config states none.
+
+    `_locale_preference` returns "" for "the reader asked for no particular
+    language", which is the right answer for `alias_for`'s ladder (it falls
+    back to MusicBrainz's own primary alias). A tag, though, is written for
+    SOME locale: the app has one (`en` when nothing is configured), and it is
+    what decides which suffix spelling a file may carry.
+    """
+    return _locale_preference(cfg) or DEFAULT_ALIAS_LOCALE
+
+
+def alias_required(name, cfg=None):
+    """Whether *name* needs its locale alias tag beside it (spec R16a).
+
+    The tagging half of `alias_for`'s readability rule, and the ONE answer the
+    writers (`mlo.autotag._alias_tag_values`, the importer's own stamp), script
+    8's prescan and the grade all ask — so what a page shows and what a file
+    holds can never disagree (R87). A name is annotated only when a reader of
+    the configured locale cannot read the script it is written in:
+
+      * a LATIN name never needs one, whatever the locale — "Radiohead" is
+        already readable, and a Latin reading of a Latin name is nothing,
+      * a name in another script needs one exactly when `locale` does not read
+        that script: `宇多田ヒカル` needs "Hikaru Utada" for `en` and needs
+        NOTHING for `ja`, where the reader reads the name already.
+
+    The script reading is `mlo.lyrics_xlit`'s (non_latin_ratio /
+    dominant_script — the same test that decides whether lyrics need a
+    transliteration), and "does the locale read it" is `_reads_natively`, the
+    table `alias_for` applies to the alias it picks. A name MusicBrainz states
+    no alias for is the writer's other half: nothing is written for nothing.
+    """
+    text = str(name or "").strip()
+    if not text:
+        return False
+    if (non_latin_ratio(text) < _LATIN_THRESHOLD
+            or dominant_script(text) == "latin"):
+        # Latin script, or nearly all of it (a stray CJK character in a Latin
+        # title is not a name a reader cannot find).
+        return False
+    return not _reads_natively(text, alias_locale(cfg))
 
 
 # The three entities a lyrics query is built from, and what MusicBrainz needs

@@ -31,7 +31,9 @@ import re
 from .audio import AudioFile
 from .lyrics import TIMESTAMP_RE, WORD_TS_RE, _lrc_for, has_lyrics_text
 from .lyrics_fetch import _search_aliases
-from .lyrics_providers import _alias_queries, lrclib_fetch, lrclib_publish
+from .lyrics_providers import (
+    PublishTokenPool, _alias_queries, lrclib_fetch, lrclib_publish,
+)
 from .paths import AUDIO_EXTS
 from .stats import (
     is_audio_file, new_stats, _collect_targets, _find_albums,
@@ -71,7 +73,7 @@ def local_lyrics(path, af=None):
     return sidecar if has_lyrics_text(sidecar) else ""
 
 
-def publish_one(path, config, force=False):
+def publish_one(path, config, force=False, solver=None):
     """Publish ONE track's lyrics if LRCLIB does not have them yet.
 
     Returns ``{path, status: "ok"|"skipped"|"failed", reason, message,
@@ -80,6 +82,11 @@ def publish_one(path, config, force=False):
     file's own ``(artist, title, album)`` first, then each alias pair the
     track's MusicBrainz ids provide. The status is ``ok`` when ANY pair
     published, ``skipped`` when every pair was already there, else ``failed``.
+
+    *solver* is the run's shared `PublishTokenPool`: LRCLIB's challenge per
+    submission is ~15 s of sha256, and the run's lanes are threads, so the
+    solve has to leave this process to have any width at all. A one-off
+    caller leaves it None and solves in its own thread.
     """
     result = {"path": path, "status": "skipped", "reason": "", "message": "",
               "synced": False, "names": []}
@@ -141,7 +148,8 @@ def publish_one(path, config, force=False):
                 names.append(entry)
                 continue
             ok, message = lrclib_publish(a, t, al, duration,
-                                         plain=plain, synced=synced_body)
+                                         plain=plain, synced=synced_body,
+                                         solver=solver)
             if ok:
                 entry["status"] = "ok"
             elif "already has this track" in message:
@@ -254,14 +262,21 @@ def run_publish_lyrics(config):
     # _request), so lanes overlap the network wait instead of paying it once
     # per track.
     workers = worker_count(config, maximum=8, items=len(files))
+    # The proof-of-work, on cores of its own: every submission's token is ~15 s
+    # of sha256 (see `PublishTokenPool`), the lanes below are threads, and
+    # threads do not scale a GIL-held hash loop — so an album paid that 15 s per
+    # track, one after another, which is what "stuck on Publish Lyrics for five
+    # minutes" measured. The pool starts on the FIRST token a run needs (a run
+    # that publishes nothing pays nothing) and is closed in the `finally`.
+    solver = PublishTokenPool(workers, announce=log)
     try:
         if len(files) == 1 or workers == 1:
             for path in files:
-                _finish(path, publish_one(path, config, force=force))
+                _finish(path, publish_one(path, config, force=force, solver=solver))
         else:
             from concurrent.futures import ThreadPoolExecutor, as_completed
             with ThreadPoolExecutor(max_workers=workers) as ex:
-                futures = {ex.submit(publish_one, p, config, force): p
+                futures = {ex.submit(publish_one, p, config, force, solver): p
                            for p in files}
                 for fut in as_completed(futures):
                     path = futures[fut]
@@ -271,6 +286,7 @@ def run_publish_lyrics(config):
                         got = {"status": "failed", "reason": str(e)}
                     _finish(path, got)
     finally:
+        solver.close()
         try:
             pbar.close()
         except Exception:

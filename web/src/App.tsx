@@ -91,9 +91,11 @@ import { EmptyState, PendingMark } from "./components/Badges";
  *  refetch, short enough that the page is live to the eye. */
 const LIVE_LIBRARY_MS = 1500;
 
-/** The tag families a locale alias rides on: the bare key (`TITLEALIAS`), or
- *  the family with a locale suffix (`TITLEALIAS-ja`) — the form the importer
- *  writes when the reader's own language has a name for the record. */
+/** The tag families a locale alias rides on: the bare key (`TITLEALIAS`) — the
+ *  ONE spelling every writer produces, for a name the configured locale cannot
+ *  read — and the same family with a locale suffix (`TITLEALIAS-ja`), which a
+ *  hand-tagged or older-format file may still carry. Both are searched: a
+ *  reader typing the name they know means the same record either way. */
 const ALIAS_TAG_FAMILIES = ["TITLEALIAS", "ARTISTALIAS", "ALBUMALIAS"];
 
 /** The event a sidebar re-press fires: one entry, pressed while its page is

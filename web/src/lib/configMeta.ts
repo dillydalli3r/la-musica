@@ -555,6 +555,7 @@ export const CONFIG_GROUPS: CfgGroup[] = [
         { k: "import_scripts", label: "Import script ids (e.g. 1, 3, 5, 7 — blank = built-in chain)", type: "text", pattern: "^(\\s*\\d+\\s*[,;]?)*$", patternHelp: "comma-separated script ids, e.g. 1, 3, 5, 7" },
         { k: "import_bulk_concurrency", label: "Bulk import concurrency", type: "number", min: 1, max: 8 },
         { k: "import_acoustid", label: "Fingerprint with AcoustID", type: "bool" },
+        { k: "import_acoustid_autofill", label: "Match the release from the fingerprint automatically", type: "bool" },
         { k: "acoustid_enabled", label: "AcoustID enabled", type: "bool" },
         { k: "acoustid_api_key", label: "AcoustID application key (free, acoustid.org)", type: "password" },
         {
@@ -677,7 +678,8 @@ export const CONFIG_GROUPS: CfgGroup[] = [
         { k: "grade_check_artist_description", label: "Artist description stored", type: "bool" },
         { k: "grade_check_replaygain", label: "ReplayGain tags present (only when a file already carries one)", type: "bool" },
         { k: "grade_check_acoustid", label: "AcoustID tags required (ACOUSTID_ID + ACOUSTID_FINGERPRINT)", type: "bool", help: "Every audio track must carry both halves; a track with neither fails naming both, a half pair naming the missing one. No API key is needed — script 21 Fix AcoustID pairs takes the fingerprint locally and reads the recording id off the file." },
-        { k: "grade_check_alias_needed", label: "Locale alias for non-Latin names (TITLEALIAS / ARTISTALIAS)", type: "bool", help: "A TITLE or ARTIST written in a non-Latin script must carry its locale alias tag, optionally locale-suffixed (TITLEALIAS-JA). A Latin-script name never needs one and is never counted." },
+        { k: "grade_check_alias_needed", label: "Locale alias for names the locale cannot read (TITLEALIAS / ARTISTALIAS / ALBUMALIAS)", type: "bool", help: "A TITLE, ARTIST or ALBUM written in a script the configured locale (Import & tags) cannot read must carry its locale alias tag, optionally locale-suffixed (TITLEALIAS-JA). A Latin name never needs one, and neither does a name in the locale's own script — a Latin library is never charged for it. Script 14 / the import write them from MusicBrainz's own aliases." },
+        { k: "grade_check_alias_excess", label: "No locale alias where none is needed (TITLEALIAS / ARTISTALIAS / ALBUMALIAS)", type: "bool", help: "An alias tag the configured locale does not need fails: a name that locale already reads carrying one (\"Radiohead\" with an ARTISTALIAS), a spelling for another locale (TITLEALIAS-JA in an `en` library), a second spelling of the same alias, or a value that is the name itself. The writers store at most ONE alias per entity; Optimize (3) / Format all (10) clear the rest." },
         { k: "grade_check_xlit_transliteration", label: "TRANSLITERATION tag on non-Latin lyrics", type: "bool", help: "A track whose lyrics are already Latin script must NOT carry a TRANSLITERATION tag (or a .romaji.lrc sidecar); non-Latin lyrics must have one. Instrumental tracks are never graded on it." },
         { k: "grade_check_xlit_translation", label: "TRANSLATION tag matches the translation language", type: "bool", help: "Computed against the first of the translation languages above: a track already in that language must not carry a TRANSLATION tag, and one that is not must have the right one." },
       ],

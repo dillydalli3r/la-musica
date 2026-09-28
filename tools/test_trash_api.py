@@ -340,7 +340,7 @@ def test_delete_deduped_entry():
 
 def test_delete_invalidates_caches():
     calls = []
-    mlo_main.tagcache.invalidate_all = lambda: calls.append("tags")
+    mlo_main.tagcache.invalidate_album = lambda *folders: calls.append(("tags", folders))
     mlo_main.mbresolve.invalidate = lambda: calls.append("mb")
     mlo_main._refresh_slskd_shares_soon = lambda: calls.append("shares")
     try:
@@ -351,10 +351,11 @@ def test_delete_invalidates_caches():
         res = mlo_main.trash_delete(mlo_main.TrashDelete(names=[ALBUM]))
         assert res["deleted"] == [ALBUM], res
         assert res["freed"] == ALBUM_BYTES, res["freed"]
-        assert calls == ["tags", "mb", "shares"], calls
+        # ONLY the bin's own folder is dropped — the library-wide clear is gone
+        assert calls == [("tags", (TRASH,)), "mb", "shares"], calls
     finally:
         from server import mbresolve, tagcache
-        mlo_main.tagcache.invalidate_all = tagcache.invalidate_all
+        mlo_main.tagcache.invalidate_album = tagcache.invalidate_album
         mlo_main.mbresolve.invalidate = mbresolve.invalidate
         mlo_main._refresh_slskd_shares_soon = _real_refresh
 
@@ -446,14 +447,14 @@ def with_cache_spies(fn):
     """Run fn(calls) with the three cache hooks replaced by recorders: the
     real slskd hook would spawn a daemon thread against the temp fixture."""
     calls = []
-    mlo_main.tagcache.invalidate_all = lambda: calls.append("tags")
+    mlo_main.tagcache.invalidate_album = lambda *folders: calls.append(("tags", folders))
     mlo_main.mbresolve.invalidate = lambda: calls.append("mb")
     mlo_main._refresh_slskd_shares_soon = lambda: calls.append("shares")
     try:
         fn(calls)
     finally:
         from server import mbresolve, tagcache
-        mlo_main.tagcache.invalidate_all = tagcache.invalidate_all
+        mlo_main.tagcache.invalidate_album = tagcache.invalidate_album
         mlo_main.mbresolve.invalidate = mbresolve.invalidate
         mlo_main._refresh_slskd_shares_soon = _real_refresh
 
@@ -528,7 +529,9 @@ def test_restore_returns_to_original_path():
         res = mlo_main.trash_restore(mlo_main.TrashRestore(names=[ORIG_ALBUM]))
         assert res == {"restored": [{"name": ORIG_ALBUM, "to": ORIG_DIR_API}],
                        "failed": []}, res
-        assert calls == ["tags", "mb", "shares"], calls
+        # restored to its ORIGINAL album folder: that folder's own cached tags
+        # are the ones that went stale — and only them, not the artist's
+        assert calls == [("tags", (ORIG_DIR,)), "mb", "shares"], calls
     with_cache_spies(body)
     assert os.path.isfile(os.path.join(ORIG_DIR, "01 - x.flac")), "album not back on disk"
     assert os.path.isdir(os.path.dirname(ORIG_DIR)), "artist folder not recreated"
@@ -644,7 +647,7 @@ def test_delete_prunes_manifest_and_stale_origin():
         res = mlo_main.trash_delete(mlo_main.TrashDelete(names=[STALE_ALBUM]))
         assert res["deleted"] == [STALE_ALBUM] and res["failed"] == [], res
         assert res["freed"] == 1234, res["freed"]
-        assert calls == ["tags", "mb", "shares"], calls
+        assert calls == [("tags", (TRASH,)), "mb", "shares"], calls
 
     with_cache_spies(body)
     assert STALE_ALBUM not in trash_names(), trash_names()

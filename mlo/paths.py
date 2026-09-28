@@ -811,7 +811,15 @@ def _same_name(a, b):
     return _norm_name(a) == _norm_name(b)
 
 
-def expected_tracks_state(tracks, disk_keys=(), disk_names=()):
+def _title_identity(text):
+    """A title compared for IDENTITY (a manifest row against a file's own
+    TITLE): case folded, everything that is not a letter or a digit dropped —
+    so "Is There Anybody Out There?" matches "Is There Anybody Out There_",
+    and a curly apostrophe matches a straight one."""
+    return "".join(ch for ch in str(text or "").casefold() if ch.isalnum())
+
+
+def expected_tracks_state(tracks, disk_keys=(), disk_names=(), disk_rows=()):
     """The recorded tracklist diffed against the album's own audio.
 
     The ONE completeness rule the library and the grader share (server
@@ -822,6 +830,20 @@ def expected_tracks_state(tracks, disk_keys=(), disk_names=()):
     tracklist usable: an album holding `track12.flac` with no TRACKNUMBER tag
     still lines up with the `.cue` entry that names it.
 
+    *disk_rows* (optional: one ``{"disc", "position", "title"}`` per audio
+    file, `mlo.discs.disk_rows`) is the third test, for a disc whose rows and
+    files are numbered in DIFFERENT conventions. A release numbered
+    continuously — disc 2 = tracks 14-26, which is what the CD's own TOC says
+    and what this app writes as `2-14 …` — against a manifest numbered per
+    disc (disc 2 = tracks 1-13, which is what MusicBrainz states; measured on
+    the owner's library: The Wall, C2K 36183, 13 rows ALL reported "not
+    imported" beside 13 files that were right there). The two sets share no
+    key on that disc, so the rows are aligned BY ORDER — the i-th row against
+    the i-th file — and only when there is nothing to disagree with: the same
+    COUNT on both sides and a TITLE that matches wherever both state one. A
+    different convention is a renumbering; a different title is a different
+    tracklist, and those rows stay missing.
+
     Returns [{**row, "missing": bool}] — the rows the album page and the grade
     both read.
     """
@@ -829,10 +851,40 @@ def expected_tracks_state(tracks, disk_keys=(), disk_names=()):
     names = [n for n in disk_names if n]
     rows = []
     for e in tracks or []:
-        present = (int(e["disc"]), int(e["position"])) in keys
-        if not present and e.get("file"):
-            present = any(_same_name(e["file"], n) for n in names)
-        rows.append({**e, "missing": not present})
+        rows.append({**e, "missing": (int(e["disc"]), int(e["position"])) not in keys})
+
+    if disk_rows:
+        row_positions = {}
+        for i, e in enumerate(rows):
+            row_positions.setdefault(int(e["disc"]), []).append((int(e["position"]), i))
+        file_positions = {}
+        for r in disk_rows:
+            try:
+                pos = int(r.get("position"))
+            except (TypeError, ValueError):
+                continue
+            file_positions.setdefault(int(r.get("disc") or 1), []).append(
+                (pos, str(r.get("title") or "")))
+        for disc, files in file_positions.items():
+            manifest = row_positions.get(disc) or []
+            if not manifest or len(manifest) != len(files):
+                continue
+            if {p for p, _ in manifest} & {p for p, _ in files}:
+                continue                     # the conventions agree: nothing to align
+            agreed = True
+            for (_, row_i), (_, file_title) in zip(sorted(manifest), sorted(files)):
+                want = _title_identity(rows[row_i]["title"])
+                if want and file_title and want != _title_identity(file_title):
+                    agreed = False
+                    break
+            if not agreed:
+                continue
+            for _, row_i in manifest:
+                rows[row_i]["missing"] = False
+
+    for e in rows:
+        if e["missing"] and e.get("file"):
+            e["missing"] = not any(_same_name(e["file"], n) for n in names)
     return rows
 
 

@@ -872,29 +872,74 @@ res = _grade_album(album, "EMBEDDED", alias_cfg)
 ok(res["pass_count"] == res["total_checks"]
    and not any("ALIAS" in i for i in res["tracks"][0]["issues"]),
    f"the alias tag satisfies it ({res['pass_count']}/{res['total_checks']})")
-# The Latin title keeps its own check: a Latin TITLE is never graded (only the
-# non-Latin ARTIST is, leaving exactly one alias check), and a locale-suffixed
-# alias satisfies it the same way a bare one does.
+# The Latin title keeps its own check: a Latin TITLE is never graded, so only
+# the non-Latin ARTIST is (exactly one needed check) — and the ALIAS spelling
+# is the second half of the rule (R16b): a tag suffixed for a locale the app
+# does not write (`en` is configured here) is excess even though it does
+# satisfy the missing half.
 set_tags(flac, dict(NO_MOOD, MOOD="melancholic", TITLE="Song",
                     ARTIST="宇多田ヒカル",
                     **{"ARTISTALIAS-JA": "Hikaru Utada"}))
+del_tags(flac, ["TITLEALIAS"])
+res = _grade_album(album, "EMBEDDED", alias_cfg)
+ok("ARTISTALIAS" in res["tracks"][0]["issues"]
+   and any("spelled for locale JA" in i for i in res["issues"]),
+   f"a Latin title is never counted and the artist alias spelled for another "
+   f"locale is excess ({res['pass_count']}/{res['total_checks']})")
+# The bare spelling — the one the writers produce — satisfies both halves.
+set_tags(flac, dict(NO_MOOD, MOOD="melancholic", TITLE="Song",
+                    ARTIST="宇多田ヒカル", ARTISTALIAS="Hikaru Utada"))
+del_tags(flac, ["ARTISTALIAS-JA", "TITLEALIAS"])
 res = _grade_album(album, "EMBEDDED", alias_cfg)
 ok(res["pass_count"] == res["total_checks"]
    and not any("ALIAS" in i for i in res["tracks"][0]["issues"]),
-   f"a Latin title is never counted and the suffixed artist alias satisfies "
-   f"the artist ({res['pass_count']}/{res['total_checks']})")
-off_alias = _grade_album(album, "EMBEDDED", cfg)
-res = _grade_album(album, "EMBEDDED", dict(cfg, grade_check_alias_needed=False))
+   f"the bare artist alias satisfies the needed half and is never excess "
+   f"({res['pass_count']}/{res['total_checks']}, "
+   f"{res['tracks'][0]['issues']} / {sorted(res['issues'])})")
+# The ALBUM's own alias is graded the same way (it is written by the import and
+# was graded by nothing before R16b): a non-Latin ALBUM without one fails, the
+# bare tag satisfies it, and a Latin album title carrying one is excess.
+set_tags(flac, dict(NO_MOOD, MOOD="melancholic", ALBUM="ファーストラブ"))
+del_tags(flac, ["ARTISTALIAS"])
+res = _grade_album(album, "EMBEDDED", alias_cfg)
+ok("ALBUMALIAS" in res["tracks"][0]["issues"]
+   and any("Missing ALBUMALIAS" in i for i in res["issues"]),
+   f"a non-Latin ALBUM without its alias fails (got {res['tracks'][0]['issues']})")
+set_tags(flac, dict(NO_MOOD, MOOD="melancholic", ALBUM="ファーストラブ",
+                    ALBUMALIAS="First Love"))
+res = _grade_album(album, "EMBEDDED", alias_cfg)
+ok(not any("ALIAS" in i for i in res["tracks"][0]["issues"]),
+   f"…and the album alias satisfies it (got {res['tracks'][0]['issues']})")
+set_tags(flac, dict(NO_MOOD, MOOD="melancholic", ALBUM="First Love",
+                    ALBUMALIAS="ファーストラブ"))
+res = _grade_album(album, "EMBEDDED", alias_cfg)
+ok("ALBUMALIAS" in res["tracks"][0]["issues"]
+   and any("Unneeded ALBUMALIAS" in i for i in res["issues"]),
+   f"a Latin album title carrying an alias is excess ({res['issues']})")
+# The excess half is its own toggle: with it off, an unneeded alias costs
+# nothing, and with `grade_check_alias_needed` off neither does a missing one.
+raw = _grade_album(album, "EMBEDDED", dict(alias_cfg,
+                                            grade_check_alias_excess=False))
+ok(not any("ALIAS" in i for i in raw["issues"]),
+   f"grade_check_alias_excess=False stops the excess half ({raw['issues']})")
+# The needed half is a toggle too: with it off a name that needs an alias is
+# neither failed nor counted. Back to a non-Latin title with no alias tags at
+# all, so the one check under test is the missing half.
+set_tags(flac, dict(NO_MOOD, MOOD="melancholic", TITLE=JA_TITLE))
+del_tags(flac, ["ALBUMALIAS", "ARTISTALIAS", "TITLEALIAS", "ARTISTALIAS-JA",
+                "TITLEALIAS-JA"])
+off_alias = _grade_album(album, "EMBEDDED", alias_cfg)
+res = _grade_album(album, "EMBEDDED", dict(alias_cfg, grade_check_alias_needed=False))
 ok(res["total_checks"] == off_alias["total_checks"] - 1
    and res["pass_count"] == res["total_checks"]
    and not any("ALIAS" in i for i in res["tracks"][0]["issues"]),
    f"grade_check_alias_needed=False stops the whole check "
    f"({res['pass_count']}/{res['total_checks']} vs "
    f"{off_alias['pass_count']}/{off_alias['total_checks']})")
-# Back to the fixture every block below grades: a Latin TITLE / ARTIST and no
-# alias tags (which the other cases' partial cfgs would otherwise fail).
+# Back to the fixture every block below grades: a Latin TITLE / ARTIST / ALBUM
+# and no alias tags (which the other cases' partial cfgs would otherwise fail).
 set_tags(flac, dict(NO_MOOD, MOOD="melancholic"))
-del_tags(flac, ["TITLEALIAS", "ARTISTALIAS-JA"])
+del_tags(flac, ["TITLEALIAS", "ARTISTALIAS-JA", "ARTISTALIAS", "ALBUMALIAS"])
 
 # ----------------------------------------------------------------------
 # COMMENT: the one allow-listed NAME whose VALUE is junk
@@ -1344,6 +1389,63 @@ ok(len(_crc_keys) == 1 and "1-02 Song B.flac" in res["issues"][_crc_keys[0]] and
    "2-01 Song C.flac" not in res["issues"][_crc_keys[0]],
    f"each disc is covered by ITS OWN log — disc 2's track 2 CRC cannot "
    f"cover disc 1's track 2 ({res['issues']})")
+
+# ...and a disc numbered RELEASE-wide against a PER-DISC log. The owner's own
+# library: The Wall (US CD C2K 36183) numbers its second disc's files 14-26 —
+# the CD's own continuous numbering, which is what the TOC states and what
+# this app writes — while CD-2.log numbers that disc 1-13. The two share no
+# track number, so the rows are aligned BY ORDER, guarded by the log's TOC
+# playtime: 13 of 13 matched on the real album where the old rule matched 0.
+cont_dir = os.path.join(music, "Artists", "Artist", "Continuous Discs (2020)")
+os.makedirs(cont_dir, exist_ok=True)
+for _name in ("1-01 Song A.flac", "2-05 Song B.flac", "2-06 Song C.flac"):
+    _p = os.path.join(cont_dir, _name)
+    make_flac(_p)
+    set_tags(_p, dict(FULL, MEDIA="CD", DISCNUMBER=_name[0], DISCTOTAL="2"))
+with open(os.path.join(cont_dir, "CD-1.log"), "w", encoding="utf-8") as fh:
+    fh.write("disc 1\n")
+with open(os.path.join(cont_dir, "CD-2.log"), "w", encoding="utf-8") as fh:
+    fh.write("disc 2\n")
+_orig_secs, _orig_fsecs = _discs.parse_log_track_seconds, _discs._file_seconds
+try:
+    _discs.read_log_text = lambda p: os.path.basename(p)
+    _discs.parse_log_checksums = lambda text: (
+        {1: "AAAAAAAA"} if "CD-1" in text else {1: "BBBBBBBB", 2: "CCCCCCCC"})
+    # The log's TOC and the files' own playtimes agree: the order is the same
+    # tracklist, so the alignment is allowed.
+    _discs.parse_log_track_seconds = lambda text: (
+        {1: 10.0} if "CD-1" in text else {1: 20.0, 2: 30.0})
+    _discs._file_seconds = lambda p: (
+        10.0 if "1-01" in p else (20.0 if "2-05" in p else 30.0))
+    res = _grade_album(cont_dir, "EMBEDDED", crc_cfg)
+finally:
+    _discs.read_log_text = _orig_read
+    _discs.parse_log_checksums = _orig_parse
+    _discs.parse_log_track_seconds, _discs._file_seconds = _orig_secs, _orig_fsecs
+_crc_keys = [k for k in res["issues"] if "not covered by .log CRC" in k]
+ok(not _crc_keys,
+   f"a disc numbered 2-05/2-06 is covered by the per-disc log's rows 1/2 "
+   f"({res['issues']})")
+
+# And the guard: the same shape with a TOC that names OTHER tracks stays
+# uncovered rather than taking a checksum that belongs to another track.
+try:
+    _discs.read_log_text = lambda p: os.path.basename(p)
+    _discs.parse_log_checksums = lambda text: (
+        {1: "AAAAAAAA"} if "CD-1" in text else {1: "BBBBBBBB", 2: "CCCCCCCC"})
+    _discs.parse_log_track_seconds = lambda text: (
+        {1: 10.0} if "CD-1" in text else {1: 300.0, 2: 400.0})
+    _discs._file_seconds = lambda p: (
+        10.0 if "1-01" in p else (20.0 if "2-05" in p else 30.0))
+    res = _grade_album(cont_dir, "EMBEDDED", crc_cfg)
+finally:
+    _discs.read_log_text = _orig_read
+    _discs.parse_log_checksums = _orig_parse
+    _discs.parse_log_track_seconds, _discs._file_seconds = _orig_secs, _orig_fsecs
+_crc_keys = [k for k in res["issues"] if "not covered by .log CRC" in k]
+ok(len(_crc_keys) == 1 and "2-05 Song B.flac" in res["issues"][_crc_keys[0]],
+   f"a TOC that names other tracks refuses the order alignment "
+   f"({res['issues']})")
 
 # ----------------------------------------------------------------------
 # beets config: directory: is the library root, not the music folder

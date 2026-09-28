@@ -364,6 +364,103 @@ check("and the next caller builds instead of waiting",
 tagcache.invalidate_all()
 
 # --------------------------------------------------------------------------- #
+# 7b) A tree that is merely OLD is served, and re-derived BEHIND the request.
+#     This is the difference between "the library page took 14.5 s once a
+#     minute" and a page load that never waits for a walk it did not ask for.
+#     The TTL is patched rather than slept through: the behaviour is the
+#     contract, not the number.
+# --------------------------------------------------------------------------- #
+section("library: an expired tree is served, not waited for")
+SWR = {"n": 0}
+SWR_KEY = ("swr-test", (), 0, False)
+
+
+def swr_builder():
+    SWR["n"] += 1
+    return {"folder": MUSIC, "artists": [], "build": SWR["n"]}
+
+
+check("the first paint builds it", swr_builder.__name__ and
+      tagcache.get_library(SWR_KEY, swr_builder).get("build") == 1, SWR["n"])
+_real_ttl = tagcache._LIB_TTL
+tagcache._LIB_TTL = 0.05
+try:
+    time.sleep(0.1)
+    t0 = time.time()
+    stale = tagcache.get_library(SWR_KEY, swr_builder)
+    served = time.time() - t0
+    check("an expired tree answers at once", served < 0.1, served)
+    check("with the tree that was already there", stale.get("build") == 1, stale)
+    for _ in range(250):
+        if SWR["n"] >= 2:
+            break
+        time.sleep(0.02)
+    check("and the refresh runs behind the request", SWR["n"] >= 2, SWR["n"])
+    fresh = tagcache.get_library(SWR_KEY, swr_builder)
+    check("the next request is the refreshed tree", fresh.get("build") == 2, fresh)
+finally:
+    tagcache._LIB_TTL = _real_ttl
+    tagcache.invalidate_all()
+
+# ...and neither does an in-app WRITE: `invalidate_album` is what an import,
+# a tag write and a script run fire, and the page that follows it must be
+# served from memory while the tree is re-derived.
+section("library: an in-app write refreshes behind the page")
+DIRTY = {"n": 0}
+DIRTY_KEY = ("dirty-test", (), 0, False)
+
+
+def dirty_builder():
+    DIRTY["n"] += 1
+    return {"folder": MUSIC, "artists": [], "build": DIRTY["n"]}
+
+
+tagcache.get_library(DIRTY_KEY, dirty_builder)
+tagcache.invalidate_album(ALBUM)
+t0 = time.time()
+after_write = tagcache.get_library(DIRTY_KEY, dirty_builder)
+waited = time.time() - t0
+check("a write does not make the next page wait", waited < 0.1, waited)
+check("it is served the tree from memory", after_write.get("build") == 1, after_write)
+for _ in range(250):
+    if DIRTY["n"] >= 2:
+        break
+    time.sleep(0.02)
+check("and the refresh behind it lands", DIRTY["n"] >= 2, DIRTY["n"])
+check("so the request after that is the fresh tree",
+      tagcache.get_library(DIRTY_KEY, dirty_builder).get("build") == 2)
+tagcache.invalidate_all()
+
+# --------------------------------------------------------------------------- #
+# 8) The library-state stamp is PER ALBUM. One album's audit run must not make
+#    every other album's row unreachable — that is what turned the library page
+#    after an import into a whole-library re-read (14.5 s measured on a
+#    170-file install whose warm reads are 40 ms).
+# --------------------------------------------------------------------------- #
+section("index: the state stamp is one album's own")
+import mlo.audit as auditmod  # noqa: E402
+
+OTHER_ARTIST = os.path.join(MUSIC, "Artists", "Artist Two")
+OTHER = os.path.join(OTHER_ARTIST, "Album Two")
+OTHER_TRACK = write(os.path.join(OTHER, "01 - Other.flac"))
+EVIDENCE = auditmod._evidence_path(CFG)
+os.makedirs(os.path.dirname(EVIDENCE), exist_ok=True)
+with open(EVIDENCE, "w", encoding="utf-8") as fh:
+    json.dump({}, fh)
+sig_before = tagindex.dir_signature(ALBUM, CFG)
+sig_other_before = tagindex.dir_signature(OTHER, CFG)
+with open(EVIDENCE, "w", encoding="utf-8") as fh:
+    json.dump({OTHER_TRACK: [1, 2, True, "x", "ok"]}, fh)
+check("another album's audit evidence leaves this album's identity alone",
+      tagindex.dir_signature(ALBUM, CFG) == sig_before)
+check("and it does change the album it is about",
+      tagindex.dir_signature(OTHER, CFG) != sig_other_before)
+with open(EVIDENCE, "w", encoding="utf-8") as fh:
+    json.dump({TRACK_1: [1, 2, True, "x", "ok"]}, fh)
+check("this album's own evidence changes it",
+      tagindex.dir_signature(ALBUM, CFG) != sig_before)
+
+# --------------------------------------------------------------------------- #
 print(f"\n{'FAILED: ' + ', '.join(FAILED) if FAILED else 'all checks passed'}")
 os.environ.pop("MLO_MUSIC_FOLDER", None)
 sys.exit(1 if FAILED else 0)
