@@ -371,14 +371,18 @@ check((EN_ARTIST, EN_TITLE) in [c[1:] for c in calls],
 check(AudioFile(path_alias).get_lyrics() == SYNCED_LRC.strip(),
       f"the alias-pass lyric is written: {AudioFile(path_alias).get_lyrics()!r}")
 
-# the RUN SUMMARY says the alias pass hit (and which kind was written)
+# the RUN SUMMARY says the alias pass hit (and which kind was written).
+# A FRESH track: the one above already holds the lyric it fetched, and script
+# 13 fills only what is missing (force included) — a second run over it is
+# booked as skipped, which is the behaviour `check_lyrics_fetch_never_replaces`
+# in tools/test_script_optimizations.py pins.
+path_alias_run = make_flac("alias-hit-run.flac", dict(JP_TAGS))
 with Patch(inst, detect_instrumental=lambda paths, cfg: {}), \
      Patch(si, mb_get_cached=fake_mb), \
      Patch(lp, _PROVIDERS={"lrclib": stub(answers, [])}):
     buf = io.StringIO()
     with contextlib.redirect_stdout(buf):
-        stats = lf.run_fetch_lyrics(dict(CFG, targets=[path_alias],
-                                         force_lyrics=True))
+        stats = lf.run_fetch_lyrics(dict(CFG, targets=[path_alias_run]))
 out = buf.getvalue()
 check(stats["alias_count"] == 1, f"the run counts the alias hit: {stats}")
 check(stats["by_kind"] == {"synced": 1, "plain": 0}, f"kind split: {stats['by_kind']}")

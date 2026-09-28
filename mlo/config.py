@@ -742,16 +742,27 @@ DEFAULT_CONFIG = {
     "force_accurip": False,
 
     # Encoder marker tags written per file type (ENCODER_PROGRAM /
-    # ENCODER_QUALITY / ENCODER_VERSION) — ENCODER_PROGRAM off by default
-    # (legacy, not needed for optimization gating), but can be re-enabled per
-    # format via Settings → Encoder Tags. QUALITY/VERSION remain on (they gate
-    # re-optimization: higher effort or newer version).
+    # ENCODER_QUALITY / ENCODER_VERSION). PROGRAM and VERSION are off by
+    # default and both can be re-enabled per format in Settings → Encoder
+    # Tags; QUALITY is the LEVEL and stays on, because it is the one marker
+    # the skip checks ask about: a file encoded at a lower effort than the
+    # setting asks for is the only thing that makes a re-encode worthwhile.
+    # VERSION named the encoder BINARY, so comparing it re-encoded the whole
+    # library after every tool upgrade (hours of CPU for a tag nothing reads
+    # once it matches) — off since v4.4.0, and a stored `true` from the old
+    # default follows it (see normalize_config's one-time move).
     "encoder_tags": {
-        "flac": {"ENCODER_PROGRAM": False, "ENCODER_QUALITY": True, "ENCODER_VERSION": True},
-        "jpeg": {"ENCODER_PROGRAM": False, "ENCODER_QUALITY": True, "ENCODER_VERSION": True},
-        "png": {"ENCODER_PROGRAM": False, "ENCODER_QUALITY": True, "ENCODER_VERSION": True},
-        "jxl": {"ENCODER_PROGRAM": False, "ENCODER_QUALITY": True, "ENCODER_VERSION": True},
+        "flac": {"ENCODER_PROGRAM": False, "ENCODER_QUALITY": True, "ENCODER_VERSION": False},
+        "jpeg": {"ENCODER_PROGRAM": False, "ENCODER_QUALITY": True, "ENCODER_VERSION": False},
+        "png": {"ENCODER_PROGRAM": False, "ENCODER_QUALITY": True, "ENCODER_VERSION": False},
+        "jxl": {"ENCODER_PROGRAM": False, "ENCODER_QUALITY": True, "ENCODER_VERSION": False},
     },
+    # One-time marker for the ENCODER_VERSION default move above: without it a
+    # stored `true` (written by every install that ever saved its config under
+    # the old default) is indistinguishable from a user's own choice, and a
+    # saved install would keep re-encoding the library forever. Not shown in
+    # Settings — it records that the rewrite already ran.
+    "encoder_tags_version_default_moved": False,
     # Per-filetype audio tag writes — which semantic tag families each audio
     # container receives. All True by default; ANDed with the global master
     # switches above (write_audit_tag etc.). Organized by filetype for
@@ -2341,6 +2352,19 @@ def normalize_config(user=None) -> dict:
 
     default_tags = DEFAULT_CONFIG["encoder_tags"]
     user_tags = cfg.get("encoder_tags") if isinstance(cfg.get("encoder_tags"), dict) else {}
+    # One-time move for ENCODER_VERSION's shipped default (v4.4.0, ON -> OFF).
+    # A stored `true` is what the OLD default itself wrote — the app persists
+    # the whole normalized config, so every install that ever saved has one —
+    # and comparing that marker is what re-encoded a whole library after each
+    # encoder upgrade. It is not a decision, so it follows the new default; the
+    # flag records that the move ran, which is what makes a later `true` (the
+    # user re-enabling the row in Settings → Encoder Tags) a decision that
+    # stays.
+    if not cfg.get("encoder_tags_version_default_moved"):
+        for file_type, values in list(user_tags.items()):
+            if isinstance(values, dict) and values.get("ENCODER_VERSION") is True:
+                user_tags[file_type] = dict(values, ENCODER_VERSION=False)
+        cfg["encoder_tags_version_default_moved"] = True
     merged_tags = {}
     for file_type, fields in default_tags.items():
         merged_tags[file_type] = dict(fields)

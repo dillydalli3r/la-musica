@@ -76,9 +76,11 @@ export const ALBUM_TRACK_COL_W: Record<string, string> = {
   // measured 283 px on the widest row of a real album — is carried INTO the
   // cell by `ColFloorHolder` instead of by a width here, because a width is
   // exactly what stops the column absorbing the free width. It has to be a
-  // floor the cell reports: an auto column contributes nothing to the table's
-  // `min-w-max` floor, so the fixed layout set to that floor hands the name
-  // 0 px — measured, a 66 px column with a 0 px name wrapped nine lines deep.
+  // floor the cell reports: the table's floor follows its columns' own widths
+  // (TABLE_FIT), an auto column is measured from its CONTENT, so without this
+  // box a name shorter than the floor would leave the column narrower than the
+  // row's own chrome needs and the name would be crushed (measured, a 66 px
+  // column with a 0 px name wrapped nine lines deep).
   // Below `md` the column is auto on purpose and takes whatever the phone fold
   // leaves: the measured 122 px at 390 is a readable column, while a 280 px
   // floor there would put a 280 px column in a 342 px row (which is why the
@@ -101,16 +103,36 @@ export const ALBUM_TRACK_COL_W: Record<string, string> = {
  *  fixed layout squares up to `w-full` by scaling every column down and
  *  handing the auto column whatever is left, so a table too narrow for its
  *  columns renders the name column one character per line — the library's
- *  track table measured a 0 px title at 580 px wide. `min-w-max` is the
- *  table's floor: max-content of a fixed layout is the sum of its columns, so
- *  the table stops at the columns' own widths and the `overflow-x-auto`
- *  wrapper scrolls from there instead. `md:` only, because below it the phone
- *  fold has already dropped the columns that do not fit and the couple left
- *  share the width with room to spare — same as before this floor existed. */
-export const TABLE_FIT = "w-full md:min-w-max";
+ *  track table measured a 0 px title at 580 px wide.
+ *
+ *  `md:w-max` + `md:min-w-full` is that floor: as wide as the table's own
+ *  columns need, never narrower than the box it sits in, so a table whose
+ *  columns do not fit stops at its own width and the `overflow-x-auto` wrapper
+ *  scrolls from there instead. `table-fit` is the marker index.css needs to
+ *  read that width off the HEADER row's cells — see the `table-fit` block
+ *  there, and the measurements below.
+ *
+ *  It was `md:min-w-max` — the same rule, but asked of the engine as an
+ *  intrinsic MINIMUM. Measured, that form is a Blink-only behaviour: a table
+ *  with `width: 100%` and `min-width: max-content` on a fixed layout came out
+ *  738 px in Chromium (the floor), **17,895,698 px in Firefox** — Gecko's
+ *  unconstrained sentinel (2^30 app units) leaking out of its intrinsic pass,
+ *  whatever the columns or the content are, fixed by nothing on the wrapper or
+ *  the cells (issue #71: every album page on Gecko, and with it every table
+ *  here) — and in WebKit it was not honoured at all: the album tracklist's
+ *  name column measured 188 px where its floor is 280, and 0 px at a 620 px
+ *  box, which is the crushed name this floor exists to prevent.
+ *  `width: max-content; min-width: 100%` is the same floor computed the same
+ *  way by all three engines (measured 738/738/738 at a 620 px box, 1400 at
+ *  1400), so the floor is stated as a width instead of as a minimum.
+ *
+ *  `md:` only, because below it the phone fold has already dropped the columns
+ *  that do not fit and the couple left share the width with room to spare —
+ *  same as before this floor existed. */
+export const TABLE_FIT = "table-fit w-full md:w-max md:min-w-full";
 
 /** The album tracklist's floor: the same column-driven rule every other table
- *  here uses (`TABLE_FIT`'s `min-w-max`), not a number picked by hand.
+ *  here uses (`TABLE_FIT`), not a number picked by hand.
  *
  *  It used to be `md:min-w-[814px]`, derived from the columns as they then
  *  were: the fixed ones plus the corner control took 272 px up front, the
@@ -123,20 +145,26 @@ export const TABLE_FIT = "w-full md:min-w-max";
  *  columns a phone can use, and a floor there is what put an 814 px table
  *  inside a 342 px screen).
  *
- *  Now it is the columns' own sum: every album-tracklist column carries its
- *  width (`ALBUM_TRACK_COL_W`, plus the corner control's own class), so
- *  max-content of the fixed layout IS that sum, and a table set to this floor
- *  stops at exactly the columns' widths and lets its `overflow-x-auto` wrapper
- *  scroll. The name column has a fixed width from `md` up for that reason — an
- *  auto column contributes nothing to the sum, so the one column that must
- *  never collapse would be the one column the floor forgot. */
-export const ALBUM_TRACK_MIN_W = "md:min-w-max";
+ *  What is left of that: every album-tracklist column carries its width
+ *  (`ALBUM_TRACK_COL_W`, plus the corner control's own class), and this is the
+ *  width-based form of `TABLE_FIT` — the table stops at its own columns'
+ *  width and lets its `overflow-x-auto` wrapper scroll. `md:min-w-max` said
+ *  the same thing but only Chromium implemented it (Gecko saturated it to
+ *  17,895,698 px, WebKit never honoured it — see TABLE_FIT for the
+ *  measurements), so the floor is a width now, read off the header row with
+ *  the help of `table-fit` (index.css).
+ *
+ *  The name column is `md:w-auto` on purpose: an auto column contributes
+ *  nothing to a width, so without the width the cell reports through
+ *  `ColFloorHolder` the one column that must never collapse — it was measured
+ *  at 0 px — would be the one the floor forgot. */
+export const ALBUM_TRACK_MIN_W = "table-fit md:w-max md:min-w-full";
 
 /** Floor for a user-added tag column (`tag:*` ids): the values are free text,
  *  so it gets a readable minimum — the width a single genre name holds (the
  *  genre column itself is sized to a two-name value, `ALBUM_TRACK_COL_W`).
  *  Without a width of its own such a column is auto, and TABLE_FIT's
- *  `min-w-max` would then grow the table to the longest tag value it can
+ *  `md:w-max` floor would then grow the table to the longest tag value it can
  *  find. */
 export const TAG_COL_W = "w-[96px]";
 
@@ -179,9 +207,9 @@ export const ALBUM_TRACK_PHONE_CLS: Record<string, string> = {
 };
 
 /** The track table's floors — one narrowest-usable width per column, in px,
- *  same rule as the album table's own map: they are also the table's floor,
- *  summed by TABLE_FIT's `min-w-max`, so a window wider than their sum shares
- *  the extra out in proportion.
+ *  same rule as the album table's own map: they are the columns the table's
+ *  floor (`TABLE_FIT`) is measured from, so a window wider than their sum
+ *  shares the extra out with the flexible name column.
  *
  *  Shared by every table that lists whole tracks in library order: the
  *  Library's Tracks view and the Export page's preview. They were two tables
@@ -204,11 +232,11 @@ export const TRACK_COL_W: Record<string, string> = {
   // one flexible column, and it must absorb the table's free width rather than
   // let the fixed layout grow every column of the row by the same proportion
   // (see ALBUM_TRACK_COL_W.title). The floor still has to be REPORTED by the
-  // cell, or the table's `min-w-max` floor forgets it and the fixed layout
-  // hands the name 0 px. What this replaced was 280: the same measurement taken
+  // cell, or the table's floor looks past it and the fixed layout hands the
+  // name 0 px. What this replaced was 280: the same measurement taken
   // once, rounded up, and then paid for by every other column — the table's
-  // floor (TABLE_FIT's `min-w-max`) sums the WIDTHS, so 40 px of headroom here
-  // pushed the whole table 40 px wider than its data and put a horizontal
+  // floor (`TABLE_FIT`) follows the columns' own widths, so 40 px of headroom
+  // here pushed the whole table 40 px wider than its data and put a horizontal
   // scroll under windows that would otherwise have fitted.
   // `md:` like the album table's name column: on a phone the title is the only
   // column left beside the cover, so it takes the whole row instead.
@@ -278,11 +306,11 @@ export const TRACK_TITLE_FLOOR = "w-[216px]";
  *  flexible column — see ALBUM_TRACK_COL_W.title), and a `table-layout: fixed`
  *  table reads an auto column's floor off its CONTENT: a `min-width` on the
  *  cell itself is ignored there (measured: a title cell asking for 280 px came
- *  out 66 px wide, and its name 0 px), while this empty zero-height box sets the
- *  cell's min-content to its own width. `hidden` below `md`, where no floor
- *  applies and the phone's own fold gives the name whatever is left. Drawn in
- *  the header cell — that is enough, since the fixed layout's floor takes the
- *  widest content of the column's cells. */
+ *  out 66 px wide, and its name 0 px), while this empty zero-height box carries
+ *  the floor's width into the cell's own content size. `hidden` below `md`,
+ *  where no floor applies and the phone's own fold gives the name whatever is
+ *  left. Drawn in the header cell — that is enough, since the floor takes the
+ *  widest content of the column's cells and the header is one of them. */
 export function ColFloorHolder({ className }: { className: string }) {
   return <span aria-hidden="true" className={`hidden md:block h-0 ${className}`} />;
 }
@@ -650,9 +678,14 @@ export function useColumnWidths(key: string): [Record<string, number>, (id: stri
  *  table draws, in the order it draws them (`defs.filter(visible).map(id)`), so
  *  each stored id pairs with its own header cell, and every reading is taken
  *  from the table itself inside one layout pass — the stored widths switched
- *  off and the table pinned to no width of its own, which makes a fixed
- *  layout's used width exactly the sum of the columns' floors. Nothing paints
- *  in between. */
+ *  off and the table asked for the width its own columns need, which is the
+ *  floor TABLE_FIT asks it for (`md:w-max`) with the reader's widths removed.
+ *  The floor's other half, `min-width: 100%`, comes off for that reading: left
+ *  on, it pins the table to the box instead of to its columns and the fit
+ *  would collapse every stored width to the box. Below `md` the floor is not
+ *  in play at all (`w-full`, the fold's own columns) so the reading stays the
+ *  zero-width one of old — the phone's own layout, measured the same way.
+ *  Nothing paints in between. */
 export function useFittedWidths(
   widths: Record<string, number>,
   drawn: string[]
@@ -673,7 +706,6 @@ export function useFittedWidths(
       if (!table) return;
       const ths = [...table.querySelectorAll<HTMLElement>("thead th")];
       const shown = ths.map((th) => th.style.width);
-      const own = table.style.width;
       // The columns the reader sized, in the order the table draws them.
       const sized = drawnKey ? drawnKey.split(",").filter((id) => (widths[id] ?? 0) > 0) : [];
       const drawnThs = ths.filter((th) => th.style.width !== "");
@@ -683,9 +715,17 @@ export function useFittedWidths(
         if (fitted) setFitted(null);
         return;
       }
-      // The floors: the stored widths off, the table pinned to nothing.
+      // The floors: the stored widths off, the table asked for the width its
+      // own columns need (the floor TABLE_FIT asks for at `md` and up; below
+      // `md` the fold's own columns are all there is, so the reading keeps the
+      // old pinned-to-zero one). `min-width: 100%` is the floor's fill half
+      // and would pin the table to the box instead — see the notes above.
+      const md = window.matchMedia("(min-width: 768px)").matches;
       ths.forEach((th) => { th.style.width = ""; });
-      table.style.width = "0px";
+      const own = table.style.width;
+      const ownMin = table.style.minWidth;
+      table.style.minWidth = "0px";
+      table.style.width = md ? "max-content" : "0px";
       const floors = ths.map((th) => Math.round(th.getBoundingClientRect().width));
       const floorsW = table.scrollWidth;
       // The table the reader asked for, at full size, and what it wants above
@@ -696,6 +736,7 @@ export function useFittedWidths(
         return { id, floor, excess: Math.max(0, widths[id] - floor) };
       });
       table.style.width = own;
+      table.style.minWidth = ownMin;
       ths.forEach((th, i) => { th.style.width = shown[i]; });
       const excess = asked.reduce((n, c) => n + c.excess, 0);
       const room = Math.max(0, el.clientWidth - floorsW);

@@ -319,6 +319,47 @@ def main():
     check("other containers always remuxed",
           ".vob" in remux.remux_input_exts({}) and ".avi" in remux.remux_input_exts({}))
 
+    print("\n== probe cache ==")
+    # Every album view asks /api/videos/scan, which probes each file, so the
+    # SAME file was one ffprobe PROCESS per request (and the library payload
+    # probes it again). `_ffprobe_json` caches a single file's probe on its own
+    # stat: unchanged file, no second process; changed file, probed again.
+    src = os.path.join(base, "in", "multi.mkv")
+    probe_asset = os.path.join(base, "probe.mkv")
+    shutil.copyfile(src, probe_asset)
+
+    real_run = remux.run_tool
+    calls = {"n": 0}
+
+    def counting(*args, **kwargs):
+        calls["n"] += 1
+        return real_run(*args, **kwargs)
+
+    remux._PROBE_CACHE.clear()
+    remux.run_tool = counting
+    try:
+        first = remux._stream_info(probe_asset, FP)
+        check("probe: one ffprobe process for the first read", calls["n"] == 1, calls["n"])
+        again = remux._stream_info(probe_asset, FP)
+        check("probe: an unchanged file is not probed again", calls["n"] == 1, calls["n"])
+        check("probe: and the cached answer is the same", again == first, (again, first))
+        with open(probe_asset, "ab") as fh:
+            fh.write(b"\0" * 4096)
+        after = remux._stream_info(probe_asset, FP)
+        check("probe: a changed file IS probed again", calls["n"] == 2, calls["n"])
+        check("probe: and still reads its streams", after and after[0] == "h264", after)
+        # A concat list is never cached: its own stat says nothing about the
+        # media it names.
+        os.utime(probe_asset, None)
+        before_concat = calls["n"]
+        remux._ffprobe_json(FP, probe_asset, concat=True)
+        remux._ffprobe_json(FP, probe_asset, concat=True)
+        check("probe: a concat list is probed every time",
+              calls["n"] == before_concat + 2, calls["n"])
+    finally:
+        remux.run_tool = real_run
+        remux._PROBE_CACHE.clear()
+
     shutil.rmtree(base, ignore_errors=True)
     print(f"\n{PASS} passed, {FAIL} failed")
     sys.exit(1 if FAIL else 0)

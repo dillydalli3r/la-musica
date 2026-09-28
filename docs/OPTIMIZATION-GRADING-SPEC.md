@@ -220,6 +220,9 @@ is what makes the script look at a file it has already processed:
 (5), `force_audit` (6), `force_dr_replaygain` (7), `force_auto_tag` (8),
 `force_accurip` (9), `force_audiometa` (12), `force_mood` (16), `force_xlit` (17),
 `force_publish` (18), `force_tracklist` (15). Grade (4) needs none — it re-reads.
+Fetch lyrics (13) has NO flag since v4.4.0: a run fills what is missing and
+never replaces stored words, so there is no "redo" for it to force (R330) —
+replacing one track's lyrics is the manual route's job.
 Optimize library layout (20) carries `layout_apply`, the ONE key that turns work OFF
 instead of forcing a redo: the scan always reports, and the key is what lets it
 rename, move and remove (see §2's row 20 and R185). A supplied force dict is authoritative AND
@@ -6256,6 +6259,140 @@ composition instead (R267). Above `lg` the pane sits beside the artwork.
   an import, are statements about that text, which is what those surfaces are
   for).
 
+### 7.68 The level decides the re-encode, and a run fills rather than replaces
+
+- **R329 — the encoder LEVEL decides a re-encode; the encoder's VERSION does
+  not (any more).** `ENCODER_VERSION` named the encoder BINARY, and the skip
+  checks compared it, so every tool upgrade re-encoded every track — hours of
+  CPU for a tag nothing reads once it matches, on a large library the whole
+  night. The shipped default is OFF for all four formats since v4.4.0 (it can
+  be turned back on per format in Settings → Encoder Tags), and the compare is
+  gated on the marker being ENABLED (`mlo.tools._version_meets`, the mirror of
+  `containers._quality_meets`), so a marker that is switched off can never
+  re-encode a file forever for a value nothing rewrites. A stored `true` —
+  what the old default itself wrote into every saved config — follows the new
+  default exactly once (`normalize_config`, keyed by
+  `encoder_tags_version_default_moved`), while a `true` written after that move
+  is the user's own choice and stays. The LEVEL is what the checks ask about:
+  a file encoded at a lower effort than `library_codec_quality` (or
+  `jpegxl_effort` / `images_jpeg_quality` / `png_optimization_level` for the
+  image passes) asks for is the only thing that makes a re-encode worthwhile.
+  Disabled markers are also removed from a file the re-encode rewrites
+  (`containers._clean_flac_tags` generalises the v1.4.2 ENCODER_PROGRAM rule),
+  so a later re-enable cannot compare a value written under other settings.
+  Pinned by `tools/test_script_optimizations.py`'s "level only" check (an old
+  version alone does not re-encode; enabling the marker does) and the PNG
+  identity check, which now asks for the marker it asserts.
+
+- **R330 — a maintenance run FILLS metadata; it never replaces what a file
+  already holds.** Script 13 (Fetch lyrics) has no force flag any more: a run
+  asks the whole chain for the tracks that hold no words (embedded or a real
+  `.lrc` sidecar) and re-tries what nobody could answer, while a stored text —
+  an import's answer, a provider hit from an earlier run, a person's own edit —
+  is a fact of the file and not a cache of the search that found it. This is
+  the owner-reported damage (issue #74: "sometimes, I've had lyric tags
+  overwritten"): `force_lyrics` on the fetch script re-asked every provider for
+  the whole library and overwrote what was there. `force_lyrics` still means
+  the FORMATTER (script 1, and script 10 last), which only writes when the
+  canonical text actually differs. Replacing one track's words is the manual
+  route's job — `POST /api/lyrics/auto` with `force`, which is `fetch_one`'s
+  `replace` parameter and the only caller that passes it. An `INSTRUMENTAL=1`
+  track is never fetched by ANY caller, force or not: the file states there are
+  no words, so a hit could only be written and deleted again by the very next
+  pass, churn that reported "ok" while the file stayed silent. Pinned by
+  `tools/test_script_optimizations.py` ("fills only": the stored text survives
+  a forced run byte for byte, only the track without lyrics is searched, and an
+  instrumental is never searched) and by `tools/test_import_corrections.py`,
+  which asserts the route passes its `force` through as `replace` while the
+  chain does not.
+
+- **R331 — a forced pass writes only what changes.** Force is "re-run this
+  pass", not "rewrite this file": a value already exactly what the pass would
+  write is left alone, so a forced *Run All* no longer rewrites — and with
+  `flac_no_padding` on, whole-file re-encodes — every track whose tags and
+  sidecars are already canonical. Script 10's tag pass and its `.lrc` cleaning
+  both compare before writing (`mlo/format_all.py`), which is what makes a
+  forced run of a library that needs nothing finish with "0 formatted, N
+  already correct" instead of N rewrites. The cost this removes is real on a
+  large library: every tag write on a padding-less FLAC is a full re-encode of
+  the file it was only going to trim.
+
+- **R332 — the ambience draws no straight lines the grain cannot dither.** Two
+  layers of the fullscreen background were drawing them, and neither is banding
+  of a soft gradient — which is what R273's grain covers — so the grain could
+  not remove either (measured on the shipped tree, Chromium 1440×900 at DPR 1,
+  white cover, every CSS clock paused): `.amb-sweep` is a CONIC gradient, whose
+  isophotes are straight rays from its own centre, and its 8-bit value ramp
+  turns that into a fan of 1-level ribs (one every 4–13 px along a circle
+  around the frame centre) plus an angle SINGULARITY in the middle that is the
+  hardest edge anywhere in the stack — 21.9 levels, where every other layer
+  measures ≤ 2.1; the fan is geometry, so a 30 px blur (past the rib pitch at
+  every radius the frame shows) is what removes it, and the band it belongs to
+  keeps its shape (angular span 41 → 39 levels at R=300). `.amb-cover`'s own
+  edges FADE, because `blur-3xl` samples nothing past the element's box, and
+  that ~64 px ramp quantized into a ladder of straight 1-level ribs parallel to
+  every frame edge (21 jumps over the first 160 px of the left edge — 1440 px
+  long lines meeting in the corners); the breathing scale meant to hide it only
+  covers 43 px of the ramp, so the layer is laid out past the frame instead
+  (`inset: -6rem`), which measures 0 jumps. `.amb-vignette` — the first
+  suspicion, since it is painted above the grain — is NOT one of these: alone
+  on all three cover polarities it steps by 0.0 levels, and neither is the bar
+  strip (at rest its ink sits inside its own baseline rows and grid columns).
+  `tools/check_viz_corners.cjs` asserts all four, from the pixels: 10/10 with
+  the fix, 5 FAIL without it.
+
+### 7.69 Pages draw the same in every engine, and a page load does not re-read the library
+
+- **R333 — the album page's column floor is a WIDTH, and it computes the same
+  in all three engines.** The floor idiom was `w-full md:min-w-max` on a
+  `table-layout: fixed` table — a definite width AND `min-width: max-content`.
+  Gecko's intrinsic pass for that pair returns its unconstrained sentinel
+  (measured in a five-element document: 17,895,698 px for `width: 100%|620px|
+  100vw|62em`, and 738 px — the real floor — with `width: auto`), so the album
+  page came out as a 17-million-pixel ribbon in Firefox with every column to
+  the right of the name sitting off screen; WebKit does not implement the floor
+  at all (the name column measured 188 px in an 860 px wrapper whose floor is
+  280 px, and 0 px at 620 px). Chromium was right, which is why every
+  measurement the repo had agreed with itself. The floor is now stated as
+  `width: max-content; min-width: 100%` (`table-fit`, carried by `TABLE_FIT`
+  and `ALBUM_TRACK_MIN_W`), with `.table-fit td { max-width: 0 }` at `md`+ so
+  the floor is read off the HEADER row rather than the widest body cell (a
+  no-op in all three engines: a fixed layout takes its column widths from the
+  first row), and `useFittedWidths` pins inline widths while it measures so the
+  fit cannot collapse a stored column. Pinned by
+  `tools/check_firefox_album.cjs`, which drives the album tracklist in Firefox,
+  Chromium AND WebKit and compares the geometry (59/59 on the fixed tree,
+  48/60 with the pre-fix constants). Every other table in the app shares the
+  same floor, so this one rule covers the Library, Browse, Export and Music
+  Brainz pages too.
+
+- **R334 — a page load does not re-read the library, and a write is never
+  served stale.** Reading an album (mutagen open + tag copy per track, the
+  cover decode, the log/sidecar reads, the grade verdicts derived from them) is
+  the expensive half of every page, and it was recomputed per request and
+  thrown away per process — a 170-file library in a container took **8.80 s
+  per `GET /api/storage`** (polled every 60 s by the Home page card) and
+  **5.59 s per cold `GET /api/grades/summary`**. The app now keeps:
+  `server/tagindex.py` (a persistent per-album payload store keyed on every
+  entry of the album folder as `relpath|mtime_ns|size`, plus a stamp of the
+  app-state stores whose content reaches a payload, plus the whole config),
+  single-flight + TTL for the library payload, a short-TTL memo for the album
+  and artist routes, a 60-second storage snapshot refreshed BEHIND the request
+  (stale-while-revalidate), and stat-keyed memos for ffprobe probes and the
+  cover colour. The contract these must keep: a row is served ONLY when its
+  identity matches exactly (a changed, added or deleted file misses; a settings
+  change is unreachable), every in-app write drops what it invalidated through
+  the existing `tagcache.invalidate_*` hooks (~60 call sites), and the index is
+  never a source of truth — an unreadable or locked database, a missing folder
+  or an error payload all fall back to building. Pinned by
+  `tools/test_tagindex.py` (36 checks: changed/added/deleted files, a config
+  change, a real tag write read back from the page) plus
+  `tools/test_storage.py`/`tools/test_remux.py` for the memos. Two costs stay,
+  and both are named: the FIRST run after this upgrade pays one full build (the
+  index is empty), and a change made outside the app is bounded by the TTL
+  (30 s on the album/artist pages, 60 s on the library payload) rather than
+  seen instantly.
+
 ## 8. Recommended runbook
 
 Nothing here is a substitute for the app's own Dependencies page: run it first
@@ -6356,7 +6493,7 @@ checks see or how they judge it.
 | `artist_image_aspect` / `artist_image_crop` | `1:1` / ON | the artist image's configured shape and whether it is enforced at all (off, or `cover_crop_enabled` off, means no aspect is graded; script 19 crops to the same value) |
 | `artist_image_target_size` | 0 | the artist image's size ceiling (0 = the provider's native size, bounded by the 2000 px `mlo.artistdata.DEFAULT_MAX_SIDE`); only OVERSIZED fails, undersized is a note |
 | `reencode_images` | ON | whether cover encoder tags are graded |
-| `encoder_tags` | per-format map | which `ENCODER_*` markers `grade_check_encoder` requires (`ENCODER_QUALITY` / `ENCODER_VERSION` on, `ENCODER_PROGRAM` off, per format) |
+| `encoder_tags` | per-format map | which `ENCODER_*` markers `grade_check_encoder` requires and the skip checks compare (`ENCODER_QUALITY` — the LEVEL — on; `ENCODER_VERSION` and `ENCODER_PROGRAM` off, per format; see R329) |
 | `strip_unknown_tags` | ON | whether `grade_check_excess_tags` reports junk tags |
 | `mb_genre_count` | 2 (max 3) | `grade_check_genre_count` ceiling, and what script 8/10 trim to |
 | `genre_autofill` / `genre_sources` | ON / `[rateyourmusic, musicbrainz, listenbrainz, itunes, lastfm, theaudiodb, wikidata, bandcamp, discogs, deezer, spotify]` | which writers can satisfy the genre checks. The list is a PRIORITY list, asked in order and stopped as soon as a track's list is complete, and the shipped default is every source the app knows (R39a) |

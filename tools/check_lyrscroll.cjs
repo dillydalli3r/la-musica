@@ -250,6 +250,31 @@ const check = (name, pass, detail) => results.push({ name, pass: !!pass, detail 
 }
 
 {
+  // The floor a press puts under the pane's clock (`lyricHold`). The press
+  // seeds the 60 fps clock with the pressed line's own timecode, and the very
+  // next tick overwrites it with the AUDIBLE clock — `currentTime` minus the
+  // WebAudio output latency — which the seek has not caught up with yet, so
+  // the pane fell back onto the line it had just left for a few frames while
+  // the emphasis transition was dropped: the owner's flash. Three halves: the
+  // hold covers the lag, it lapses on its own window, and it never drags a
+  // clock that is already at or past the pressed line (the clock's own
+  // advance, or a press BACKWARDS).
+  const at = 1_000_000, target = 42.5, behind = target - 0.08;
+  check("a press floors the clock on the pressed line for its window",
+    LYR.lyricHold(behind, target, at, at) === target &&
+      LYR.lyricHold(behind, target, at, at + LYR.LYRIC_HOLD_MS - 1) === target,
+    `at the press=${LYR.lyricHold(behind, target, at, at)} ` +
+      `${LYR.LYRIC_HOLD_MS - 1}ms later=${LYR.lyricHold(behind, target, at, at + LYR.LYRIC_HOLD_MS - 1)}`);
+  check("and the floor lapses when the window is over",
+    LYR.lyricHold(behind, target, at, at + LYR.LYRIC_HOLD_MS) === behind,
+    `after ${LYR.LYRIC_HOLD_MS}ms the clock reads ${LYR.lyricHold(behind, target, at, at + LYR.LYRIC_HOLD_MS)} again`);
+  check("a clock already at or past the pressed line is left alone",
+    LYR.lyricHold(target, target, at, at) === target &&
+      LYR.lyricHold(target + 0.02, target, at, at) === target + 0.02,
+    `at it=${LYR.lyricHold(target, target, at, at)} past it=${LYR.lyricHold(target + 0.02, target, at, at)}`);
+}
+
+{
   // The pads are what let the FIRST and LAST line reach the anchor; without
   // the tail one the pane runs out of travel and looks frozen at the outro.
   const top = parseFloat(LYR.LYRICS_PAD_TOP), bottom = parseFloat(LYR.LYRICS_PAD_BOTTOM);

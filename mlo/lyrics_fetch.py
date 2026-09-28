@@ -5,7 +5,9 @@ Downloads missing lyrics for every track from the configured provider chain
 them per the global ``lyrics_format`` (EMBEDDED / LRC / BOTH), canonicalized
 with the same formatting rules as script 1. Tracks tagged INSTRUMENTAL=1
 and tracks that already carry lyrics (embedded or an .lrc sidecar) are
-skipped unless the run is forced. Standard library only, so the runner
+skipped — always, force included: a run FILLS what is missing and never
+replaces words the file already holds (only the manual per-track route may,
+see ``fetch_one``). Standard library only, so the runner
 works in every install (no httpx dependency).
 
 A search that comes back with nothing is not the end of the track here: the
@@ -161,9 +163,23 @@ def _mark_lyrics_absent(path, config, result):
     result["reason"] = "no lyrics found — marked INSTRUMENTAL"
 
 
-def fetch_one(path, config, force=False):
+def fetch_one(path, config, replace=False):
     """Fetch + write lyrics for ONE track; the shared core of script 13 and
     the API's "auto-import lyrics" button.
+
+    *replace* is the MANUAL override (`POST /api/lyrics/auto` with force): the
+    one caller allowed to look up words for a track that already holds them,
+    because a person asked for THAT track. The bulk script and the import
+    chain never pass it — a run fills what is missing and re-tries what no
+    provider could answer, while a stored text (an import's answer, a
+    provider hit from an earlier run, a person's own edit) is a fact of the
+    file and not a cache of the search that found it. Script 13's force flag
+    used to re-fetch the whole library and does not any more (R#).
+
+    An INSTRUMENTAL=1 track is never fetched at all, by any caller: the file
+    itself states there are no words, so a search could only produce text the
+    very next pass deletes again (`_process_lyrics_for_audio` clears lyrics on
+    an instrumental) — churn that reported "ok" while the file stayed silent.
 
     Returns `{path, status: "ok"|"skipped"|"failed", provider,
     provider_label, kind: "synced"|"plain", synced, alias_pass, wrote:
@@ -201,8 +217,11 @@ def fetch_one(path, config, force=False):
                 has_sidecar = has_lyrics_text(_f.read())
         except OSError:
             has_sidecar = False
-        if not force and (instrumental or existing or has_sidecar):
-            result["reason"] = "instrumental" if instrumental else "lyrics already present"
+        if instrumental:
+            result["reason"] = "instrumental"
+            return result
+        if not replace and (existing or has_sidecar):
+            result["reason"] = "lyrics already present"
             return result
 
         artist = af.get_tag("ARTIST")
@@ -310,10 +329,10 @@ def run_fetch_lyrics(config):
 
     print_header("Fetch Lyrics")
     fmt = str(config.get("lyrics_format") or "EMBEDDED").upper()
-    force = bool(config.get("force_lyrics", False))
     log("sources: " + " → ".join(
         SOURCE_LABELS[p] for p in provider_order(config)))
-    log(f"write mode: {fmt}" + ("  (forced: re-fetch existing lyrics)" if force else ""))
+    log(f"write mode: {fmt}"
+        "  (fills what is missing; stored lyrics are never replaced)")
 
     if config.get("targets") is not None:
         files = sorted(_collect_targets(config["targets"], AUDIO_EXTS))
@@ -375,11 +394,11 @@ def run_fetch_lyrics(config):
     try:
         if len(files) == 1 or workers == 1:
             for path in files:
-                _finish(path, fetch_one(path, config, force=force))
+                _finish(path, fetch_one(path, config))
         else:
             from concurrent.futures import ThreadPoolExecutor, as_completed
             with ThreadPoolExecutor(max_workers=workers) as ex:
-                futures = {ex.submit(fetch_one, p, config, force): p
+                futures = {ex.submit(fetch_one, p, config): p
                            for p in files}
                 for fut in as_completed(futures):
                     path = futures[fut]

@@ -1671,23 +1671,31 @@ def get_album(path: str = Query(...), staged: bool = Query(False)):
     if not os.path.isdir(p):
         raise HTTPException(404, "album not found")
     _guard_folder(p, staged, "album")
-    res = lib_mod.build_album(p, load_config())
-    if res is None:
-        raise HTTPException(404, "no audio files")
-    # What an import could not supply for this album, if anything: the same
-    # entry the queue's own row and the bell carry (`server.import_autonomy`),
-    # in the same shape, so the page says "needs data" with the wizard link
-    # instead of leaving the reader to infer it from grading failures. Asked
-    # HERE and not inside `build_album`: the library page builds hundreds of
-    # albums through that one, and an entry asks the grader a question.
-    try:
-        from server import import_autonomy
-        entry = import_autonomy.for_album(p, load_config())
-        if entry:
-            res["needs"] = import_autonomy.warning(entry)
-    except Exception:
-        traceback.print_exc()
-    return res
+    cfg = load_config()
+
+    def _build():
+        res = lib_mod.build_album(p, cfg)
+        if res is None:
+            raise HTTPException(404, "no audio files")
+        # What an import could not supply for this album, if anything: the same
+        # entry the queue's own row and the bell carry (`server.import_autonomy`),
+        # in the same shape, so the page says "needs data" with the wizard link
+        # instead of leaving the reader to infer it from grading failures. Asked
+        # HERE and not inside `build_album`: the library page builds hundreds of
+        # albums through that one, and an entry asks the grader a question.
+        try:
+            from server import import_autonomy
+            entry = import_autonomy.for_album(p, cfg)
+            if entry:
+                res["needs"] = import_autonomy.warning(entry)
+        except Exception:
+            traceback.print_exc()
+        return res
+
+    # Memoized for a moment so a revisit does not re-grade the album it just
+    # showed; every write inside that album drops the entry (see
+    # `tagcache.cached_payload`).
+    return tagcache.cached_payload("album", p, cfg, _build)
 
 
 @app.get("/api/podcasts")
@@ -1720,6 +1728,17 @@ def get_artist(path: str = Query(...)):
     if not _in_music_folder(p, _music_folder()):
         raise HTTPException(400, "artist outside music folder")
     cfg = load_config()
+
+    def _build():
+        return _artist_payload(p, cfg)
+
+    # Same short memo as the album page: an artist page re-grades every one of
+    # its albums per request otherwise, and a write under the artist (a cover,
+    # a tag, an import) drops the entry.
+    return tagcache.cached_payload("artist", p, cfg, _build)
+
+
+def _artist_payload(p, cfg):
     dir_scan = {}
     albums = lib_mod._find_albums(p, dir_scan)
     direct = [alb for alb in sorted(albums)

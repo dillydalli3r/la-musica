@@ -186,6 +186,42 @@ export function lyricMove(now: number, jumpAt: number, window = LYRIC_JUMP_MS): 
   return now - jumpAt < window ? "snap" : "glide";
 }
 
+/** How long a press keeps the pane on the line it pressed even while the
+ *  clock still reads BEHIND that line. Long enough to outlast the output
+ *  latency the audible clock is corrected by (tens of ms) plus a starved
+ *  frame or two, short enough that it can never be mistaken for following. */
+export const LYRIC_HOLD_MS = 400;
+
+/** The floor a press puts under the clock: while `pressedAt` is inside the
+ *  window and the clock still reads EARLIER than the line that was pressed,
+ *  report the pressed line's own timecode instead.
+ *
+ *  The bug this exists for (owner report): a press on a line flashes the
+ *  PREVIOUS line before the pressed one. The surfaces seed the pane's 60 fps
+ *  clock with the LINE's timecode (`setSmoothTime(l.time)`), but the very next
+ *  tick overwrites that seed with the AUDIBLE clock — `currentTime` minus the
+ *  WebAudio output latency — which the seek has not caught up with yet, so
+ *  `activeLineRange` walks back to the line the pane had just left. It reads
+ *  as a hard cut rather than the transit it is, because a press also drops the
+ *  emphasis transition (`markJump` → `snapping` for `LYRIC_JUMP_MS`).
+ *
+ *  Clamping the clock itself is not enough: the panes quantize the tick to
+ *  20 Hz (`Math.round(t * 20) / 20`, up to 25 ms BELOW `t`), so the floor is
+ *  applied pane-side, after the quantize.
+ *
+ *  It self-expires on the window, in wall time, so a seek the element refuses
+ *  (or a press whose line the clock never reaches) cannot park the pane: the
+ *  hold lapses and following picks back up. A press BACKWARDS never engages it
+ *  — the audible clock is already at or past that line.
+ *
+ *  Pure on purpose, like `lyricMove`: tools/check_lyrscroll.cjs pins all three
+ *  halves (inside the window, just after it, and the clock already ahead)
+ *  without a DOM. */
+export function lyricHold(t: number, target: number, pressedAt: number, now: number,
+                          window = LYRIC_HOLD_MS): number {
+  return now - pressedAt < window && t < target ? target : t;
+}
+
 export interface LyricsFollowOptions {
   /** First line of the active cluster (row index); -1 = nothing sung yet. */
   active: number;

@@ -105,8 +105,10 @@ def lyrics_auto(req: LyricsPathsRequest):
     per `lyrics_format` exactly like script 13. A source's answer WITH
     timestamps wins; untimed text is written only when no source states any,
     and the track's result says which happened (`kind`). A track
-    that already has lyrics is left alone unless *force* is set, and an
-    INSTRUMENTAL track is never touched.
+    that already has lyrics is left alone unless *force* is set — this route
+    is the ONE place that replaces stored words, because a person asked for
+    those tracks (the bulk script never does) — and an INSTRUMENTAL track is
+    never touched, force or not.
 
     The manual counterpart of the chain's own script 13 — `fetch_one` is what
     both call — so the tags and the sidecar a click writes are the ones an
@@ -122,7 +124,7 @@ def lyrics_auto(req: LyricsPathsRequest):
     for path, error in rejected:
         results.append({"path": path, "status": "failed", "error": error})
     for path, full in resolved:
-        res = fetch_one(full, cfg, force=bool(req.force))
+        res = fetch_one(full, cfg, replace=bool(req.force))
         res["path"] = path
         results.append(res)
     if any(r.get("status") == "ok" for r in results):

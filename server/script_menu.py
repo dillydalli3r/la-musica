@@ -162,9 +162,8 @@ _MENU = {sid: (name, desc) for sid, name, desc in SCRIPTS}
 _ALIAS_OF = {cfg: alias for alias, cfg in _FORCE_ALIASES.items()}
 
 # The canonical owner of each force flag: the first script whose _FORCE_KEYS
-# names it. A flag two scripts share (force_lyrics is 1's formatter and 13's
-# fetcher) is labelled for the PASS it re-runs, so an option on any script says
-# what pressing it does.
+# names it. A flag two scripts share is labelled for the PASS it re-runs, so an
+# option on any script says what pressing it does.
 _OWNER_OF: Dict[str, int] = {}
 for _owner_sid in sorted(_FORCE_KEYS):
     for _owner_key in _FORCE_KEYS[_owner_sid]:

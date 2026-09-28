@@ -33,9 +33,12 @@ Modules:
 
 Audio is kept in `library_codec` — the codec the library is converted to —
 and converted by mlo.flac (script 3), which never re-encodes a lossy source
-into a lossless one: that can only lose quality. Encoder marker tags
-(ENCODER_PROGRAM / QUALITY / VERSION) are written to every processed FLAC so
-re-runs can skip finished files.
+into a lossless one: that can only lose quality. An `ENCODER_QUALITY` tag —
+the LEVEL the file was encoded at, per format, see `encoder_tags` — is written
+to every processed file so re-runs can skip the finished ones; the
+`ENCODER_PROGRAM` / `ENCODER_VERSION` markers exist per format but are OFF by
+default, because comparing the encoder's own version re-encoded the library
+after every tool upgrade (R329).
 """
 from .config import load_config, save_config, DEFAULT_CONFIG
 from .artistdata import run_optimize_artist_images
@@ -53,7 +56,7 @@ try:
 except ImportError:
     run_format_all = None
 
-__version__ = "4.3.3"
+__version__ = "4.4.0"
 __all__ = [
     "load_config", "save_config", "DEFAULT_CONFIG",
     "run_auto_tagging",

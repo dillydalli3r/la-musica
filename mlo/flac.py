@@ -10,11 +10,11 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from .config import DEFAULT_CONFIG
 from .containers import (
     CODECS, CODEC_KEEP, codec_extra_args, codec_is_lossless, encoder_args,
-    file_codec, _read_flac_tags, _write_flac_tags, _identity_missing, _enabled,
+    file_codec, _write_flac_tags, _identity_missing, _enabled,
 )
 from .subproc import run_tool
 from .paths import AUDIO_EXTS, tools_dir, trash_file
-from .tools import detect_all_tools, _version_is_older
+from .tools import detect_all_tools, _version_meets
 from .stats import (
     new_stats, _make_pbar, _pbar_skip, _pbar_update, _diff_bytes, _walk_files,
     _collect_targets, worker_count, tool_threads,
@@ -846,37 +846,55 @@ def _convert_lossless_source(args):
             except OSError:
                 pass
 
-def _should_reencode_flac(filepath, target_quality, target_version, force,
+def _should_reencode_flac(q, v, program, target_quality, target_version,
                           enabled=None):
-    """Return (should_reencode, reason, written_by_us).
+    """Whether one probed FLAC needs a re-encode, and the reason either way.
 
-    written_by_us is True when the ENCODER identity tags match this
-    pipeline's own marker, meaning the file was encoded with
-    --no-seektable and had foreign metadata blocks stripped already.
+    Pure: the ENCODER markers are handed in by `_flac_probe`, which reads
+    them (and the seektable state) from ONE mutagen open — the skip path used
+    to open the same file twice per track, once here and once for the
+    seektable, on every run of the script.
+
+    The LEVEL is the only marker that decides by default (see
+    DEFAULT_CONFIG["encoder_tags"]); the version compare runs only while
+    ENCODER_VERSION is switched on, because a marker nothing writes can never
+    converge — it would re-encode the file on every run.
     """
-    if force:
-        return True, "force re-encode", False
-
-    q, v, program = _read_flac_tags(filepath)
-
     if _identity_missing(enabled, q, v, program):
-        return True, "missing ENCODER tags", False
+        return True, "missing ENCODER tags"
 
     if _enabled(enabled, "ENCODER_QUALITY"):
         try:
             if int(q) < int(target_quality):
-                return True, f"quality {q} < {target_quality}", False
+                return True, f"quality {q} < {target_quality}"
         except (ValueError, TypeError):
-            return True, f"quality not numeric: {q}", False
+            return True, f"quality not numeric: {q}"
 
-    if _enabled(enabled, "ENCODER_VERSION") and _version_is_older(v, target_version):
-        # Like the quality compare above: with ENCODER_VERSION switched off the
-        # marker is never rewritten (containers._identity_missing), so an old
-        # version tag would re-encode this file on every run and never converge.
-        return True, f"encoder {v} older than {target_version}", False
+    if not _version_meets(enabled, v, target_version):
+        return True, f"encoder {v} older than {target_version}"
 
-    ours = str(program or "").strip() == "FLAC reference encoder"
-    return False, f"already at quality={q}, version={v}", ours
+    return False, f"already at quality={q}, version={v}"
+
+
+def _flac_probe(filepath):
+    """(quality, version, program, has_seektable) from ONE mutagen open.
+
+    The ENCODER markers decide whether the file is re-encoded, and the
+    SEEKTABLE block decides whether a skip still has to touch it — two
+    questions about the same metadata, asked once. A file mutagen cannot parse
+    reports no markers and a seektable (the old "assume the block is there"
+    behaviour, so a broken file is left alone rather than rewritten).
+    """
+    try:
+        from mutagen.flac import FLAC, SeekTable
+        audio = FLAC(filepath)
+        tags = audio.tags
+        read = (lambda key: (tags[key][0] if tags and key in tags else None))
+        return (read("ENCODER_QUALITY"), read("ENCODER_VERSION"),
+                read("ENCODER_PROGRAM"),
+                any(isinstance(b, SeekTable) for b in audio.metadata_blocks))
+    except Exception:
+        return None, None, None, True
 
 
 def _flac_has_seektable(filepath):
@@ -888,11 +906,7 @@ def _flac_has_seektable(filepath):
     keeps the caller's old "assume the block is there" behaviour instead of
     silently doing nothing.
     """
-    try:
-        from mutagen.flac import FLAC, SeekTable
-        return any(isinstance(b, SeekTable) for b in FLAC(filepath).metadata_blocks)
-    except Exception:
-        return True
+    return _flac_probe(filepath)[3]
 
 
 def _optimize_flac(args):
@@ -925,17 +939,21 @@ def _optimize_flac(args):
     filename = os.path.basename(filepath)
     temp_path = filepath + ".opttmp.flac"
 
-    should_reencode, reason, _ours = _should_reencode_flac(
-        filepath,
-        quality,
-        target_version,
-        force,
-        enabled,
-    )
+    # A forced run re-encodes without asking anything about the file, so it
+    # does not pay for the probe; every other run reads the markers and the
+    # seektable state in one open.
+    if force:
+        should_reencode, reason, has_seektable = True, "force re-encode", False
+    else:
+        q, v, program, has_seektable = _flac_probe(filepath)
+        should_reencode, reason = _should_reencode_flac(
+            q, v, program, quality, target_version, enabled,
+        )
 
-    # Only clean tags when we will re-encode or when file is already ours and
-    # needs tag cleanup; otherwise don't mutate a file we will skip.
-    # _clean_flac_tags is applied to the temp output after the flac re-encode.
+    # A skipped file is not rewritten: the tag clean-up
+    # (`containers._clean_flac_tags`) runs on the TEMP output of a re-encode,
+    # and the branch below only applies the seektable state the settings ask
+    # for (a block, not a tag).
     if not should_reencode:
         # Even when skipping the re-encode the seektable state has to be
         # applied: `add_seektables` is NOT part of the skip decision (the
@@ -950,7 +968,7 @@ def _optimize_flac(args):
         except OSError as e:
             return (filename, False, f"cannot stat file: {e}", 0, 0)
 
-        if metaflac_exe and _flac_has_seektable(filepath) != bool(add_seektables):
+        if metaflac_exe and has_seektable != bool(add_seektables):
             # "--add-seekpoint=10s", not "--add-seektable": metaflac has no
             # such option (flac 1.5 rejects it) — adding seekpoints IS how a
             # SEEKTABLE is created. 10 s is flac.exe's own default spacing, so

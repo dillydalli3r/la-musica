@@ -74,6 +74,7 @@ import os
 import tempfile
 import threading
 import traceback
+from collections import OrderedDict
 
 from . import videodisc
 from .paths import LIB_VIDEO_DISC_NAMES
@@ -150,12 +151,42 @@ def _input_args(src, concat=False):
     return flags + ["-i", src]
 
 
+# ffprobe results, keyed on (ffprobe exe, path, mtime_ns, size) — see
+# `_ffprobe_json` for why a probe is worth caching and why a concat list is not.
+_PROBE_MAX = 2048
+_PROBE_CACHE: "OrderedDict[tuple, dict]" = OrderedDict()
+_PROBE_LOCK = threading.Lock()
+
+
 def _ffprobe_json(ffprobe_exe, path, timeout=60, concat=False):
     """Probe a media file (format, streams and chapters), parsed JSON or None.
 
     *concat* probes a concat list file (see :func:`_input_args`) — the same
     probe ffprobe makes of the media, of the whole joined program.
+
+    A single file's probe is cached on its own (path, mtime_ns, size): it is
+    one ffprobe PROCESS per call (tens of milliseconds, growing with the file),
+    and the same video is probed again by every album view
+    (`GET /api/videos/scan`), by the library payload and by every step of a
+    remux. The result is a pure function of the bytes, and a rewritten file
+    changes the stat that keys it, so a remuxed or re-tagged video is probed
+    again. A CONCAT list is not cached: its own stat says nothing about the
+    media it names.
     """
+    key = None
+    if not concat:
+        try:
+            st = os.stat(path)
+            key = (os.path.normcase(ffprobe_exe or ""), os.path.normcase(path),
+                   st.st_mtime_ns, st.st_size)
+        except OSError:
+            key = None
+        if key is not None:
+            with _PROBE_LOCK:
+                hit = _PROBE_CACHE.get(key)
+                if hit is not None:
+                    _PROBE_CACHE.move_to_end(key)
+                    return hit
     try:
         proc = run_tool(
             [ffprobe_exe, "-v", "error", "-print_format", "json",
@@ -170,9 +201,16 @@ def _ffprobe_json(ffprobe_exe, path, timeout=60, concat=False):
     if proc.returncode != 0 or not proc.stdout:
         return None
     try:
-        return json.loads(proc.stdout)
+        data = json.loads(proc.stdout)
     except (ValueError, TypeError):
         return None
+    if key is not None:
+        with _PROBE_LOCK:
+            _PROBE_CACHE[key] = data
+            _PROBE_CACHE.move_to_end(key)
+            while len(_PROBE_CACHE) > _PROBE_MAX:
+                _PROBE_CACHE.popitem(last=False)
+    return data
 
 
 def _streams_from(data):

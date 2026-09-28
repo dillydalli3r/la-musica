@@ -330,10 +330,12 @@ auto_flac = make_flac("01 - auto.flac")
 
 # One recorder per entry point, keeping what the CALLER handed it: the point is
 # that the manual route and the automatic runner reach the SAME object with the
-# same arguments, not that two implementations agree today.
+# same arguments, not that two implementations agree today. `replace` is the
+# manual-only override (a run never replaces stored words — R#): the chain must
+# not pass it, the route passes its own `force` through it.
 def record_fetch(calls):
-    def fetch_one(path, config, force=False):
-        calls.append({"path": os.path.basename(path), "force": force})
+    def fetch_one(path, config, replace=False):
+        calls.append({"path": os.path.basename(path), "replace": replace})
         return {"path": path, "status": "skipped", "provider": None,
                 "provider_label": None, "synced": False,
                 "wrote": {"embedded": False, "lrc": None},
@@ -370,10 +372,11 @@ with patched(lyrics_fetch, fetch_one=fetch_recorder), patched(api_lyrics, fetch_
     fetch_calls.clear()
     route = call(lambda: CLIENT.post("/api/lyrics/auto", json={"paths": [manual_flac]}))
     ok(route.status_code == 200, "POST /api/lyrics/auto answers", str(route.status_code))
-    eq(fetch_calls, [{"path": os.path.basename(manual_flac), "force": False}],
+    eq(fetch_calls, [{"path": os.path.basename(manual_flac), "replace": False}],
        "the route hands fetch_one the track the caller named")
-    eq([c["force"] for c in fetch_calls], [c["force"] for c in chain],
-       "the route and script 13 fetch through one entry point, force included")
+    eq([c["replace"] for c in fetch_calls], [c["replace"] for c in chain],
+       "the route and script 13 fetch through one entry point (the route's "
+       "`force` IS `replace`; a run never replaces)")
     print(f"        cross-check: manual={fetch_calls} chain={chain}")
 
 with patched(lyrics_xlit, run_lyrics_xlit=record_xlit(xlit_calls)):

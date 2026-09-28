@@ -330,7 +330,7 @@ def _lrc_expected(original, cfg, is_lrc_file=True):
     )
 
 
-def _format_lrc_file(path, cfg, force=False):
+def _format_lrc_file(path, cfg):
     try:
         with open(path, "rb") as raw:
             data = raw.read()
@@ -348,9 +348,12 @@ def _format_lrc_file(path, cfg, force=False):
         if not original.strip():
             return (path, False, None)
         expected = _lrc_expected(original, cfg, is_lrc_file=True)
-        if not force and original == expected:
+        # A forced run re-runs the canonicalisation, but a sidecar that already
+        # holds exactly what this pass would write is left alone: rewriting it
+        # stored the same bytes under a new timestamp (and on a forced
+        # library-wide run, that was every sidecar).
+        if original == expected:
             return (path, False, None)
-        # If already canonical but force=False, skip. With force, rewrite anyway.
         tmp = None
         fd, tmp = tempfile.mkstemp(prefix=".lrc_fmt_", suffix=".lrc", dir=os.path.dirname(path))
         with os.fdopen(fd, "w", encoding="utf-8", newline="\n") as out:
@@ -414,11 +417,17 @@ def _format_audio_tags(path, cfg, force=False, af=None):
             if key.upper() in ("LYRICS", "UNSYNCEDLYRICS"):
                 # Same gate script 1 uses (mlo/lyrics.py:465) — Format All runs
                 # last, so it must not override optimize_embedded_lyrics.
+                # Forcing the script re-runs the canonicalisation, but a text
+                # that is ALREADY the text this pass would write is left
+                # alone: writing it back rewrote the whole file (with
+                # flac_no_padding on, every tag write is a full re-encode) to
+                # store the same bytes — and on a forced run that was every
+                # track of the library.
                 if not (force or cfg.get("optimize_embedded_lyrics", True)):
                     continue
                 try:
                     expected = _lrc_expected(raw, cfg, is_lrc_file=False)
-                    if force or expected != raw:
+                    if expected != raw:
                         if af.set_tag(key, expected):
                             changed = True
                         else:
@@ -441,7 +450,12 @@ def _format_audio_tags(path, cfg, force=False, af=None):
             fixed = [_format_tag_values(key, v) for v in values]
             canonicalized += sum(1 for before, after in zip(values, fixed)
                                  if before != after)
-            if force or fixed != values:
+            # `canonicalized` above still counts what a write WOULD fix, but
+            # only a real difference is written: a forced run re-runs the
+            # canonicalisation over the whole library and used to rewrite (and
+            # with flac_no_padding, whole-file re-encode) every track that was
+            # already canonical — the same value, byte for byte.
+            if fixed != values:
                 if af.set_tag(key, fixed if len(fixed) > 1 else fixed[0]):
                     changed = True
                 else:
@@ -591,11 +605,13 @@ def run_format_all(config):
     log(f"found {len(accurip_files)} .accurip, {len(cue_files)} .cue, {len(lrc_files)} .lrc, {len(audio_to_check)} audio files")
 
     # Per-family force switches (same keys the individual scripts use) — a
-    # forced family is rewritten even when it is already canonical.
+    # forced family is re-scanned even when the setting says skip it. (The
+    # .lrc family has no switch of its own any more: a forced run re-runs the
+    # canonicalisation and a sidecar already holding it is left as it is, so
+    # "rewrite anyway" had nothing to rewrite — see _format_lrc_file.)
     force = {
         "accurip": bool(config.get("force_accurip", False)),
         "cue": bool(config.get("force_cue", False)),
-        "lrc": bool(config.get("force_lyrics", False)),
         "tags": bool(config.get("force_auto_tag", False)),
     }
 
@@ -676,7 +692,7 @@ def run_format_all(config):
         # .lrc
         futures = {}
         for f in lrc_files:
-            fut = ex.submit(_format_lrc_file, f, config, force["lrc"])
+            fut = ex.submit(_format_lrc_file, f, config)
             futures[fut] = f
         for fut in as_completed(futures):
             fn, ok, err = fut.result()

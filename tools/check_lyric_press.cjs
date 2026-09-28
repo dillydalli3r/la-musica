@@ -19,6 +19,13 @@
  *     teleport is one frame with a new scrollTop, a glide is a run of them;
  *   * the clicked line is the emphasised one within a frame or two of the
  *     press (the surfaces seed the 60 fps clock with the target time);
+ *   * the pressed line STAYS the emphasised one through the pane's settle
+ *     window: seeding the clock is not enough on its own, because the next
+ *     rAF tick overwrites the seed with the AUDIBLE clock (`currentTime`
+ *     minus the output latency), which is still behind the pressed line — so
+ *     the pane rewound onto the line it had just left for a few frames and,
+ *     with the emphasis transition dropped for the press, that read as a
+ *     hard flash back to the previous line;
  *   * the pane really arrives: the pressed line ends up on the pane's anchor
  *     line, so "carries the reader" cannot be satisfied by moving somewhere.
  *
@@ -43,6 +50,20 @@ const ARGS = process.argv.slice(2);
 const BASE = ARGS.find((a) => !a.startsWith("--")) || process.env.BASE || "http://127.0.0.1:8011";
 const ROWS_BELOW = 12;          // far enough that a teleport is unmistakable
 const TRACE_MS = 1600;
+
+// The window the settle is judged over — the same constant the panes use for
+// the dropped emphasis transition. Read out of the shared source rather than
+// copied, so the check cannot drift from the app.
+const LYRIC_JUMP_MS = Number(
+  /export const LYRIC_JUMP_MS = (\d+)/.exec(
+    require("fs").readFileSync(
+      require("path").join(__dirname, "..", "web", "src", "lib", "lyrScroll.ts"), "utf8"))[1]);
+if (!Number.isFinite(LYRIC_JUMP_MS)) {
+  // A NaN window would empty every settle sample and pass the check by
+  // measuring nothing — better to refuse than to lie.
+  console.error("[check_lyric_press] LYRIC_JUMP_MS not found in web/src/lib/lyrScroll.ts");
+  process.exit(2);
+}
 
 let failures = 0;
 const check = (name, ok, detail) => {
@@ -70,7 +91,17 @@ const check = (name, ok, detail) => {
   }
   console.log(`[check_lyric_press] track: ${track.file}`);
 
-  const browser = await chromium.launch({ headless: true, args: ["--autoplay-policy=no-user-gesture-required"] });
+  // `--disable-frame-rate-limit`: the settle window this check judges is the
+  // OUTPUT LATENCY long (tens of ms), and headless Chromium's vsync starves
+  // rAF on the fullscreen player's blurred surfaces down to a handful of
+  // frames a second — under that cadence the window falls between two frames
+  // and the flash is unobservable, not absent. Uncapping makes the sampled
+  // frames the app's own commits; the window they span is wall-clock, so what
+  // is judged here is the same phenomenon a 60 Hz display shows.
+  const browser = await chromium.launch({
+    headless: true,
+    args: ["--autoplay-policy=no-user-gesture-required", "--disable-frame-rate-limit"],
+  });
   const ctx = await browser.newContext({ viewport: { width: 1600, height: 900 } });
   const page = await ctx.newPage();
   page.on("pageerror", (e) => console.log("  PAGE_ERR:", e.message));
@@ -154,6 +185,26 @@ const check = (name, ok, detail) => {
         `biggest step is ${Math.round((biggest / (total || 1)) * 100)}% of the ${total} px move`);
   check("the emphasis lands with the press", emphasisAt >= 0 && emphasisAt <= 1,
         `emphasised on frame ${emphasisAt}`);
+  // …and it does not fall BACK to the line before the pressed one while the
+  // pane settles. The first frames after the press are the ones that used to
+  // flash: the seed the surfaces write is immediately overwritten by the
+  // audible clock, which the seek has not caught up with yet, so the walk
+  // back through the lines between is exactly the bug the report named.
+  const settle = frames.filter((f) => f[0] > 0 && f[0] <= LYRIC_JUMP_MS);
+  const strays = settle.filter((f) => f[2] !== trace.target);
+  // A window with no frames in it proves nothing: the flash lasts as long as
+  // the audio output latency (tens of ms), so a renderer starved below that
+  // cadence would let it fall between two samples and report a pass.
+  check("the settle window was sampled densely enough to judge",
+        settle.length >= 12,
+        `${settle.length} frames in 0-${LYRIC_JUMP_MS} ms` +
+          (settle.length >= 12 ? "" : " — the renderer is too starved for this window to mean anything"));
+  check(`the pressed line holds the emphasis for the whole settle window`,
+        strays.length === 0,
+        strays.length
+          ? `${strays.length}/${settle.length} of the frames showed line ` +
+            `${strays[0][2]} at ${strays[0][0]} ms (first stray), pressed line ${trace.target}`
+          : `all ${settle.length} frames on line ${trace.target}`);
   check("and the pressed line really lands on the pane's anchor line", trace.closest <= 12,
         `closest approach ${trace.closest} px from the ${anchor} px lane`);
 

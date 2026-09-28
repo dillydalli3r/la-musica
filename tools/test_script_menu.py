@@ -120,8 +120,11 @@ EXPECTED_FOLDER_KINDS = {"album", "artist", "library"}
 EXPECTED_FILE_KINDS = {"track", "playlist"}
 # Every script whose own _FORCE_KEYS is non-empty, frozen. 10 is here because
 # it owns a COMPOSITE flag set (the four passes it re-runs) — and each of those
-# four must be reachable from the menu, one entry per flag.
-EXPECTED_FORCED = {1, 2, 3, 5, 6, 7, 8, 9, 10, 12, 13, 15, 16, 17, 18, 20}
+# four must be reachable from the menu, one entry per flag. 13 is NOT (since
+# v4.4.0): a lyrics run fills what is missing and never replaces stored words,
+# so it has no re-run to force (R330) — replacing one track's lyrics is
+# `POST /api/lyrics/auto` with force, not a library-wide script run.
+EXPECTED_FORCED = {1, 2, 3, 5, 6, 7, 8, 9, 10, 12, 15, 16, 17, 18, 20}
 
 FAILED: list = []
 
@@ -262,9 +265,12 @@ check("...and saying which pass it re-runs, in the registry's own words",
           for row in data["scripts"] for o in row["force"]["options"]),
       str([(row["id"], o) for row in data["scripts"] for o in row["force"]["options"]
            if o["owner"] not in RUNNERS or not str(o["owner_label"]).strip()]))
-check("a flag two scripts share is labelled with the pass it re-runs, not the presser",
-      next(o for o in next(r for r in data["scripts"] if r["id"] == 13)["force"]["options"])["owner"] == 1,
+check("script 13 offers NO forced twin — a lyrics run fills, it never replaces (R330)",
+      not next(r for r in data["scripts"] if r["id"] == 13)["force"]["options"],
       str(next(r for r in data["scripts"] if r["id"] == 13)["force"]))
+check("...and a script's own flag is labelled with the pass it re-runs",
+      next(o for o in next(r for r in data["scripts"] if r["id"] == 1)["force"]["options"])["owner"] == 1,
+      str(next(r for r in data["scripts"] if r["id"] == 1)["force"]))
 check("a composite script's options are all of its flags, in the registry's order",
       [o["config"] for o in next(r for r in data["scripts"] if r["id"] == 10)["force"]["options"]]
       == list(_FORCE_KEYS[10]), str(next(r for r in data["scripts"] if r["id"] == 10)["force"]))

@@ -25,6 +25,7 @@ import os
 import shutil
 import sys
 import tempfile
+import time
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
@@ -123,6 +124,19 @@ class Unreadable:
 _REAL_FS = api_storage.read_fs_usage
 
 
+def snap_fresh(cfg, folder):
+    """`storage_snapshot` with the memo dropped first.
+
+    The snapshot is MEMOIZED (`_STORAGE_TTL`, refreshed in the background —
+    see `storage_snapshot`), which is what keeps the once-a-minute card off the
+    request path. A suite that changes the tree and then reads must therefore
+    say "re-walk now", which is exactly what `invalidate_storage_snapshot` is
+    for; the memo's own behaviour is pinned in section 7 below.
+    """
+    api_storage.invalidate_storage_snapshot()
+    return api_storage.storage_snapshot(cfg, folder)
+
+
 def fs(total, free):
     """A stubbed volume: `None` means one the OS will not measure."""
     if total is None:
@@ -140,7 +154,7 @@ def fs(total, free):
 api_storage.read_fs_usage = lambda path: fs(1000, 400)
 try:
     with Unreadable(BAD):
-        snap = api_storage.storage_snapshot(CFG, MUSIC)
+        snap = snap_fresh(CFG, MUSIC)
 finally:
     api_storage.read_fs_usage = _REAL_FS
 
@@ -202,13 +216,13 @@ LINK_DIR = os.path.join(ALBUM_A, "linked-tree")
 LINK_FILE = os.path.join(ALBUM_A, "tool.bin")
 os.makedirs(LINK_DIR, exist_ok=True)
 make(LINK_FILE, 4096)
-base = api_storage.storage_snapshot(CFG, MUSIC)
+base = snap_fresh(CFG, MUSIC)
 
 _REAL_LINK = api_storage._is_link
 _FAKE_LINKS = {os.path.normcase(LINK_DIR), os.path.normcase(LINK_FILE)}
 api_storage._is_link = lambda entry: os.path.normcase(entry.path) in _FAKE_LINKS
 try:
-    after = api_storage.storage_snapshot(CFG, MUSIC)
+    after = snap_fresh(CFG, MUSIC)
 finally:
     api_storage._is_link = _REAL_LINK
 
@@ -232,7 +246,7 @@ try:
 except (OSError, NotImplementedError, AttributeError) as e:
     print(f"note: no real symlink here ({e}) — the walk's own link test is mlo.stats' case")
 else:
-    real = api_storage.storage_snapshot(CFG, MUSIC)
+    real = snap_fresh(CFG, MUSIC)
     assert real["skipped_links"] == 1 and real["skipped_unreadable"] == 0, real["skipped"]
     assert real["library"]["bytes"] == base["library"]["bytes"], real["library"]
 
@@ -253,7 +267,7 @@ assert snap["mount"] and snap["label"] == "Z:" and snap["type"] == "fixed", snap
 api_storage.read_fs_usage = lambda path: fs(None, None)
 try:
     with Unreadable(BAD):
-        unknown = api_storage.storage_snapshot(CFG, MUSIC)
+        unknown = snap_fresh(CFG, MUSIC)
 finally:
     api_storage.read_fs_usage = _REAL_FS
 
@@ -302,6 +316,7 @@ assert gone["type"] == "network" and gone["label"] == "Z:", gone
 # --------------------------------------------------------------------------- #
 api_storage.load_config = lambda: dict(CFG)
 api_storage.read_fs_usage = lambda path: fs(1000, 400)
+api_storage.invalidate_storage_snapshot()
 try:
     from server import main as mlo_main
 
@@ -336,6 +351,43 @@ assert body["app_total"]["files"] == (
     _n(body["app_data"], "files") + _n(body["trash"], "files")
     + _n(body["downloads"], "files") + _n(body["dependencies"], "files")), body["app_total"]
 assert body["app_total"]["measured"] is True, body["app_total"]
+
+# --------------------------------------------------------------------------- #
+# 7) The memo the card polls through: a repeat is answered WITHOUT a walk, an
+#    invalidation re-walks, and a stale entry is served at once while the walk
+#    happens behind the request (the Home page polls this every minute; a page
+#    render must never queue behind six directory walks).
+# --------------------------------------------------------------------------- #
+api_storage.read_fs_usage = lambda path: fs(1000, 400)
+try:
+    api_storage.invalidate_storage_snapshot()
+    first = api_storage.storage_snapshot(CFG, MUSIC)
+    again = api_storage.storage_snapshot(CFG, MUSIC)
+    assert again is first, "a repeat poll must not re-walk"
+    assert again["scanned_at"] == first["scanned_at"], again["scanned_at"]
+
+    # One more album file, then a poll: the memo answers with the old figures
+    # and the walk it kicked off lands behind the request.
+    EXTRA = make(os.path.join(ALBUM_A, "04 - Extra.flac"), 512)
+    _real_ttl = api_storage._STORAGE_TTL
+    api_storage._STORAGE_TTL = 0.0   # every entry is stale: the SWR path
+    try:
+        stale = api_storage.storage_snapshot(CFG, MUSIC)
+        assert stale["library"]["bytes"] == first["library"]["bytes"], \
+            "a stale poll is answered at once, not re-walked on the request"
+        deadline = time.time() + 10.0
+        fresh = stale
+        while time.time() < deadline and fresh["library"]["bytes"] == first["library"]["bytes"]:
+            time.sleep(0.05)
+            fresh = api_storage.storage_snapshot(CFG, MUSIC)
+        assert fresh["library"]["bytes"] == first["library"]["bytes"] + EXTRA, \
+            (fresh["library"]["bytes"], first["library"]["bytes"], EXTRA)
+        assert fresh["scanned_at"] >= first["scanned_at"], fresh
+    finally:
+        api_storage._STORAGE_TTL = _real_ttl
+        api_storage.invalidate_storage_snapshot()
+finally:
+    api_storage.read_fs_usage = _REAL_FS
 
 shutil.rmtree(ROOT, ignore_errors=True)
 

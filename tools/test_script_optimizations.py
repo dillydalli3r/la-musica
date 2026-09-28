@@ -512,6 +512,72 @@ def check_flac_convert_seektable(tmp):
 
 
 # --------------------------------------------------------------------------- #
+# Script 3 — the LEVEL decides; the encoder's own version does not (by default).
+# --------------------------------------------------------------------------- #
+def check_encoder_version_does_not_reencode(tmp):
+    """A library at the target level is not re-encoded for an old VERSION tag.
+
+    Issue #74: ENCODER_VERSION named the encoder BINARY, and the skip check
+    compared it — so every tool upgrade re-encoded every track (hours of CPU
+    for a tag nothing reads once it matches). The shipped default is OFF since
+    v4.4.0, the compare is gated on the marker being enabled, and a stored
+    `true` (what the old default itself wrote into every saved config) follows
+    the new default exactly once.
+    """
+    from mlo.config import DEFAULT_CONFIG, normalize_config
+
+    # 1. the shipped default: the level is on, the version is off
+    ok(DEFAULT_CONFIG["encoder_tags"]["flac"] ==
+       {"ENCODER_PROGRAM": False, "ENCODER_QUALITY": True,
+        "ENCODER_VERSION": False},
+       f"the shipped FLAC markers are level-only "
+       f"({DEFAULT_CONFIG['encoder_tags']['flac']})")
+
+    # 2. the one-time move: a stored `true` (the OLD default) becomes false,
+    #    and a `true` written AFTER the move is the user's own choice and stays
+    stored = {"encoder_tags": {"flac": {"ENCODER_VERSION": True}}}
+    moved = normalize_config(stored)
+    ok(moved["encoder_tags"]["flac"]["ENCODER_VERSION"] is False,
+       f"a stored pre-4.4 `true` follows the new default "
+       f"({moved['encoder_tags']['flac']})")
+    kept = normalize_config({**stored, "encoder_tags_version_default_moved": True})
+    ok(kept["encoder_tags"]["flac"]["ENCODER_VERSION"] is True,
+       "a later `true` (the user re-enabled the row) is kept")
+
+    # 3. the script itself: quality 8 >= target 5, an ancient VERSION
+    if not FLAC_EXE:
+        return skip("script 3: encoder version gate (no vendored flac.exe)")
+    from mlo.containers import _write_flac_tags
+    lib = os.path.join(tmp, "version_gate_lib")
+    album = os.path.join(lib, "A", "Album")
+    os.makedirs(album)
+    track = make_flac(os.path.join(album, "01 - Song.flac"), 1,
+                      {"TITLE": "Song", "ARTIST": "A", "ALBUM": "Album"})
+    _write_flac_tags(track, 8, "0.0.1", None)     # our level, an old encoder
+    stats = flac.run_optimize_flacs(cfg(music_folder=lib, targets=[track],
+                                        library_codec_quality=5))
+    # The markers say it: a re-encode would have rewritten QUALITY to the
+    # target (5) and — with the marker off — dropped ENCODER_VERSION entirely.
+    # (The file's mtime is NOT the witness: the skip path still applies the
+    # seektable state the settings ask for, which is a metadata-block edit.)
+    q, v, _p, _seek = flac._flac_probe(track)
+    ok(stats["modified_count"] == 0 and q == "8" and v == "0.0.1",
+       f"script 3: an old ENCODER_VERSION alone does not re-encode "
+       f"(modified={stats['modified_count']}, q={q}, v={v})")
+
+    # …and the same file WITH the marker enabled is re-encoded, so the gate is
+    # what changed and not the encoder
+    enabled = dict(DEFAULT_CONFIG["encoder_tags"]["flac"], ENCODER_VERSION=True)
+    stats = flac.run_optimize_flacs(cfg(music_folder=lib, targets=[track],
+                                        library_codec_quality=5,
+                                        encoder_tags={"flac": enabled}))
+    q2, v2, _p2, _s2 = flac._flac_probe(track)
+    ok(stats["modified_count"] == 1 and q2 == "5" and v2,
+       f"script 3: with ENCODER_VERSION enabled it re-encodes again "
+       f"(modified={stats['modified_count']}, q={q2}, v={v2})")
+
+
+# --------------------------------------------------------------------------- #
 # Script 5 — Process images: PNG alpha check decoded; progressive ignored.
 # --------------------------------------------------------------------------- #
 def check_images_alpha_probe(tmp):
@@ -623,8 +689,26 @@ def check_remux_single_probe(tmp):
         remux.run_tool = real_run
     ok(good, f"script 11: the remux still succeeds ({msg})")
     ok(dest and os.path.exists(dest), "script 11: the MKV really exists")
-    ok(len(probes) == 2,
-       f"script 11: 2 ffprobe spawns per remux (source + verification); was 4, "
+    # 2 was the count after the chapter double-probe was fixed; the source
+    # probe is now served from `mlo.remux._ffprobe_json`'s file-stat memo,
+    # which `probe_chapters(src)` above already filled, so only the OUTPUT's
+    # verification probe spawns. (Was 4 before either fix.)
+    ok(len(probes) == 1,
+       f"script 11: 1 ffprobe spawn left — the source is memoized on its own "
+       f"stat, the output is verified; was 4, measured {len(probes)}")
+
+    # …and the memo is not a path-keyed lie: a source that CHANGED is probed
+    # again. (A video rewritten in place — remuxed, retagged, re-downloaded.)
+    os.utime(src, (os.path.getmtime(src) + 10, os.path.getmtime(src) + 10))
+    probes.clear()
+    remux.run_tool = counting_run
+    try:
+        remux.remux_video(src, os.path.join(tmp, "out2.mkv"), FFMPEG_EXE,
+                          FFPROBE_EXE, cfg())
+    finally:
+        remux.run_tool = real_run
+    ok(len(probes) >= 2,
+       f"script 11: a changed source is probed again (source + verification), "
        f"measured {len(probes)}")
 
 
@@ -684,7 +768,8 @@ def check_lyrics_fetch_concurrency(tmp):
     import time
     from mlo import lyrics_fetch
 
-    lib, _album, files = _lyric_album(tmp, "fetch_lib", 4)
+    lib_seq, _album, _seq_files = _lyric_album(tmp, "fetch_lib_seq", 4)
+    lib_par, _album, _par_files = _lyric_album(tmp, "fetch_lib_par", 4)
     LATENCY = 0.15
 
     def fake_fetch(cfg, artist, title, album_name=None, duration=None, **kw):
@@ -695,28 +780,90 @@ def check_lyrics_fetch_concurrency(tmp):
     real = lyrics_fetch.fetch_lyrics
     lyrics_fetch.fetch_lyrics = fake_fetch
 
-    def run(worker_limit):
+    def run(lib, worker_limit):
+        # Each run gets its OWN library: script 13 fills what is missing and
+        # never touches a track that already holds lyrics (force included), so
+        # a second run over the same album would time a run that skips
+        # everything — a timing check, not a force-semantics check.
         c = cfg(music_folder=lib, lyrics_format="EMBEDDED",
-                force_lyrics=True, worker_limit=worker_limit)
+                worker_limit=worker_limit)
         t0 = time.perf_counter()
         st = lyrics_fetch.run_fetch_lyrics(c)
         return st, time.perf_counter() - t0
 
     try:
-        seq_stats, t_seq = run(1)
-        par_stats, t_par = run(0)
+        seq_stats, t_seq = run(lib_seq, 1)
+        par_stats, t_par = run(lib_par, 0)
     finally:
         lyrics_fetch.fetch_lyrics = real
 
-    ok(seq_stats["modified_count"] == par_stats["modified_count"] == len(files),
+    ok(seq_stats["modified_count"] == par_stats["modified_count"] == 4,
        f"script 13: both runs write every track ({seq_stats['modified_count']}"
-       f"/{par_stats['modified_count']} of {len(files)})")
+       f"/{par_stats['modified_count']} of 4)")
     ok(par_stats["by_provider"] == seq_stats["by_provider"],
        "script 13: the provider tally is the same either way")
     ok(t_par < t_seq * 0.6,
-       f"script 13: {len(files)} tracks x {LATENCY * 1000:.0f} ms of provider "
+       f"script 13: {len(_seq_files)} tracks x {LATENCY * 1000:.0f} ms of provider "
        f"wait take {t_par:.2f} s with lanes vs {t_seq:.2f} s one at a time "
        f"({t_seq / t_par:.1f}x)")
+
+
+def check_lyrics_fetch_never_replaces(tmp):
+    """Script 13 FILLS: a stored text is never replaced, force included.
+
+    This is the owner-reported damage (issue #74): `force_lyrics` on the fetch
+    script re-asked every provider for the whole library and overwrote the
+    words the files already held — an import's answer, a provider hit from an
+    earlier run, a person's own edit. A run now asks only for what is MISSING,
+    and the manual per-track route (`POST /api/lyrics/auto` with force) is the
+    one place that may replace words, because a person asked for that track.
+    """
+    from mlo import lyrics_fetch
+
+    lib, _album, files = _lyric_album(tmp, "fill_lib", 2)
+    mine = "[00:05.00] a line only I wrote"
+    af = mlo_audio.AudioFile(files[0])
+    af.set_lyrics(mine)
+
+    asked = []
+
+    def fake_fetch(cfg, artist, title, album_name=None, duration=None, **kw):
+        asked.append(title)
+        return {"provider": "lrclib", "provider_label": "LRCLIB",
+                "synced": "[00:01.00] provider text", "plain": "provider text",
+                "score": 0.99}
+
+    real = lyrics_fetch.fetch_lyrics
+    lyrics_fetch.fetch_lyrics = fake_fetch
+    try:
+        stats = lyrics_fetch.run_fetch_lyrics(cfg(
+            music_folder=lib, lyrics_format="EMBEDDED", force_lyrics=True))
+    finally:
+        lyrics_fetch.fetch_lyrics = real
+
+    ok(mlo_audio.AudioFile(files[0]).get_lyrics() == mine,
+       "script 13: the stored text survives a forced run byte for byte")
+    ok(len(asked) == 1 and "Song 2" in asked[0],
+       f"script 13: only the track without lyrics was searched ({asked})")
+    ok(stats["modified_count"] == 1 and stats["skipped_count"] == 1,
+       f"script 13: one filled, one skipped "
+       f"(modified={stats['modified_count']}, skipped={stats['skipped_count']})")
+
+    # …and an INSTRUMENTAL track is never searched at all: the file states
+    # there are no words, so a hit could only be written and then deleted
+    # again by the very next pass (`_process_lyrics_for_audio`).
+    lib2, _album2, files2 = _lyric_album(tmp, "fill_inst_lib", 1)
+    af2 = mlo_audio.AudioFile(files2[0])
+    af2.set_tag("INSTRUMENTAL", "1")
+    asked.clear()
+    lyrics_fetch.fetch_lyrics = fake_fetch
+    try:
+        lyrics_fetch.run_fetch_lyrics(cfg(
+            music_folder=lib2, lyrics_format="EMBEDDED", force_lyrics=True))
+    finally:
+        lyrics_fetch.fetch_lyrics = real
+    ok(not asked and not (mlo_audio.AudioFile(files2[0]).get_lyrics() or "").strip(),
+       f"script 13: an instrumental is never searched ({asked})")
 
 
 def check_publish_concurrency(tmp):
@@ -780,10 +927,15 @@ def check_images_converted_png_optimized(tmp):
     lib = os.path.join(tmp, "png_lib")
     os.makedirs(lib)
     src = make_image(os.path.join(lib, "01 - Art.bmp"), (600, 600), fmt="BMP")
+    # ENCODER_VERSION is OFF by default since v4.4.0 (it re-encoded whole
+    # libraries after every tool upgrade), so this check asks for it: the
+    # marker is what proves the pass really handed the file to oxipng instead
+    # of stamping it (Settings → Encoder Tags is where a user asks for it too).
+    version_on = dict(DEFAULT_CONFIG["encoder_tags"]["png"], ENCODER_VERSION=True)
     images.run_process_images(cfg(
         music_folder=lib, targets=[src], reencode_images=True,
         images_convert_to_jpeg=False, images_convert_lossless_to_png=True,
-        rename_to_cover=False))
+        rename_to_cover=False, encoder_tags={"png": version_on}))
 
     out = os.path.splitext(src)[0] + ".png"
     ok(os.path.exists(out), "script 5: the BMP was converted to PNG")
@@ -1441,12 +1593,14 @@ def main():
         ("script 10 Format all (.cue reads)", check_format_all_cue_single_read),
         ("script 10 Format all (cue repair)", check_format_all_cue_repair_once_per_album),
         ("script 3  Optimize FLACs", check_flac_convert_seektable),
+        ("script 3  Optimize FLACs (level only)", check_encoder_version_does_not_reencode),
         ("script 5  Process images (alpha probe)", check_images_alpha_probe),
         ("script 5  Process images (progressive)", check_images_progressive_honoured),
         ("script 5  Process images (artist art)", check_images_artist_art_kept),
         ("script 5  Process images (converted PNG)", check_images_converted_png_optimized),
         ("script 11 Remux videos", check_remux_single_probe),
         ("script 13 Fetch lyrics (lanes)", check_lyrics_fetch_concurrency),
+        ("script 13 Fetch lyrics (fills only)", check_lyrics_fetch_never_replaces),
         ("script 19 Artist images (lanes)", check_artist_image_lanes),
         ("script 18 Publish lyrics (lanes)", check_publish_concurrency),
         ("script 9  AccurateRip (lanes)", check_accurip_album_lanes),

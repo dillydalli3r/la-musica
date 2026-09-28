@@ -32,6 +32,22 @@ def _version_is_older(a, b):
     return va < vb
 
 
+def _version_meets(enabled, stored, target):
+    """`not _version_is_older(stored, target)`, gated by ENCODER_VERSION.
+
+    The mirror of `containers._quality_meets` for the version marker: with the
+    marker switched off nothing writes it, so a file processed since then
+    carries none and the compare is a no-op — but a file from before the flip
+    still states one, and comparing THAT re-optimized the whole library once
+    for a value the settings no longer track. A disabled marker therefore
+    means "skip the version comparison", never "fail" it.
+    """
+    from .containers import _enabled
+    if not _enabled(enabled, "ENCODER_VERSION"):
+        return True
+    return not _version_is_older(stored, target)
+
+
 def _detect_tool(prefix, deps_dir):
     if not os.path.isdir(deps_dir):
         return None, None

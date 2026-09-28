@@ -92,18 +92,6 @@ def _parse_xmp_tags(xmp_str):
     return (q.group(1) if q else None, v.group(1) if v else None, p.group(1) if p else None)
 
 
-def _read_flac_tags(filepath):
-    """Return (quality, version, program) from the ENCODER marker tags."""
-    try:
-        audio = FLAC(filepath)
-        q = audio.get("ENCODER_QUALITY", [None])[0]
-        v = audio.get("ENCODER_VERSION", [None])[0]
-        p = audio.get("ENCODER_PROGRAM", [None])[0]
-        return q, v, p
-    except Exception:
-        return None, None, None
-
-
 def _write_flac_tags(filepath, quality, version, enabled=None):
     audio = FLAC(filepath)
     if audio.tags is None:
@@ -135,8 +123,10 @@ def _clean_flac_tags(filepath, config=None, enabled=None):
       lyrics_format rule below instead of being removed unconditionally.
     * ``LYRICS`` is removed only when ``lyrics_format`` is ``LRC`` (embedded
       lyrics are not wanted) — otherwise it is kept.
-    * ``ENCODER_PROGRAM`` is removed when it is disabled per-format via
-      ``encoder_tags`` (off by default since v1.4.2).
+    * Any ``ENCODER_*`` marker switched OFF per-format via ``encoder_tags``
+      is removed (``ENCODER_PROGRAM`` off by default since v1.4.2,
+      ``ENCODER_VERSION`` since v4.4.0) — a marker the settings no longer
+      write is not kept on a file this pass rewrites anyway.
 
     Returns True if any tags were removed.
     """
@@ -162,11 +152,22 @@ def _clean_flac_tags(filepath, config=None, enabled=None):
             for k in list(audio.tags.keys()):
                 if str(k).lower() in ("lyrics", "unsyncedlyrics"):
                     to_remove.append(k)
-        # Remove ENCODER_PROGRAM when disabled per-format
-        if enabled is not None and not _enabled(enabled, "ENCODER_PROGRAM"):
-            for k in list(audio.tags.keys()):
-                if str(k).lower() == "encoder_program" and k not in to_remove:
-                    to_remove.append(k)
+        # ENCODER markers the config has switched OFF are removed rather than
+        # left behind: the file is rewritten here anyway, and a marker kept
+        # under a switch that says "not written" would be read back the moment
+        # the switch is turned on again (re-encoding the whole library off a
+        # value the app itself wrote under other settings). ENCODER_PROGRAM
+        # has been removed this way since v1.4.2; ENCODER_VERSION joined it in
+        # v4.4.0, when the shipped default moved it off — the compare it fed
+        # re-encoded every track after each encoder upgrade for a tag nothing
+        # reads.
+        if enabled is not None:
+            for key in ENCODER_KEYS:
+                if _enabled(enabled, key):
+                    continue
+                for k in list(audio.tags.keys()):
+                    if str(k).lower() == key.lower() and k not in to_remove:
+                        to_remove.append(k)
         # EXCESS TAGS — everything outside the shared vocabulary the grader
         # fails a track for ("Excess tags") and Format All's canonical pass
         # strips, plus the one NAME the vocabulary holds whose VALUE nothing

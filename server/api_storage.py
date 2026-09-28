@@ -26,6 +26,7 @@ reads drive space the same way, so the app has ONE reader for it, not two.
 from __future__ import annotations
 
 import os
+import threading
 import time
 from typing import Any, Dict, List, Optional
 
@@ -312,8 +313,86 @@ def _sum_rows(rows: List[Optional[Dict[str, Any]]]) -> Dict[str, int]:
     }
 
 
+# How long a snapshot is served before it is re-walked (in the background, so
+# the request that finds it stale still answers at once). The card on the Home
+# page polls every 60 s; the figures are a disk REPORT, not a meter, and the
+# walk itself already reports when it really ran (`scanned_at`, `took_ms`).
+_STORAGE_TTL = 60.0
+_SNAPSHOT_MAX = 8
+_snapshot_lock = threading.Lock()
+_snapshots: Dict[tuple, tuple] = {}   # key -> (built_at monotonic, payload)
+_refreshing: set = set()              # keys a background thread is re-walking
+
+
 def storage_snapshot(cfg, folder: Optional[str]) -> Dict[str, Any]:
-    """Everything GET /api/storage answers, given a resolved music folder."""
+    """Everything GET /api/storage answers, given a resolved music folder.
+
+    MEMOIZED for `_STORAGE_TTL`, and refreshed in the background once it is
+    older than that: the card polls this every minute from the Home page and
+    the answer costs one directory walk per root (six of them on a full
+    install), which a locally hosted app must not put in front of a page
+    render. A stale entry is served at once and the walk it needs happens
+    off-request, so a request either answers from memory or pays the walk
+    once — never both in a queue behind somebody else's.
+    """
+    key = _snapshot_key(cfg, folder)
+    now = time.monotonic()
+    with _snapshot_lock:
+        hit = _snapshots.get(key)
+        if hit is not None:
+            age = now - hit[0]
+            if age < _STORAGE_TTL:
+                return hit[1]
+            # Stale: answer with it now, re-walk behind the request.
+            if key not in _refreshing:
+                _refreshing.add(key)
+                threading.Thread(target=_refresh_snapshot, args=(key, cfg, folder),
+                                 name="storage-snapshot", daemon=True).start()
+            return hit[1]
+    return _store_snapshot(key, _build_snapshot(cfg, folder))
+
+
+def _snapshot_key(cfg, folder) -> tuple:
+    """What a snapshot is a function of: the folder, and the configured
+    download folder (the other root a config can move, see `_download_dirs`)."""
+    return (os.path.normcase(str(folder or "")),
+            os.path.normcase(str(cfg.get("soulseek_download_dir") or "")))
+
+
+def _store_snapshot(key, payload):
+    with _snapshot_lock:
+        _snapshots[key] = (time.monotonic(), payload)
+        _refreshing.discard(key)
+        while len(_snapshots) > _SNAPSHOT_MAX:
+            _snapshots.pop(next(iter(_snapshots)))
+    return payload
+
+
+def _refresh_snapshot(key, cfg, folder):
+    try:
+        _store_snapshot(key, _build_snapshot(cfg, folder))
+    except Exception:
+        # A refresh that fails leaves the previous answer in place; the next
+        # request tries again. Never raised into the background thread.
+        with _snapshot_lock:
+            _refreshing.discard(key)
+
+
+def invalidate_storage_snapshot() -> None:
+    """Forget every memoized snapshot (the next request walks again).
+
+    The storage figures are disk truth read by a timer, so they do not need a
+    hook on every write the app makes; this is for the tests — and for any
+    caller that just changed the tree and wants the very next answer to include
+    it.
+    """
+    with _snapshot_lock:
+        _snapshots.clear()
+        _refreshing.clear()
+
+
+def _build_snapshot(cfg, folder: Optional[str]) -> Dict[str, Any]:
+    """One real walk of every root the card measures (see `storage_snapshot`)."""
     started = time.monotonic()
     skips = _Skips()
     lib = library_root(folder)

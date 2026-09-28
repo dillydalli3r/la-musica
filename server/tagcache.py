@@ -17,11 +17,25 @@ from mlo.audio import AudioFile
 _TAG_MAX = 16384
 _LIB_TTL = 60.0  # seconds; tag writes/renames bust via invalidate calls
 _COVER_MAX = 512
+# A page payload (album, artist) is derived from the files AND from the app's
+# own state for them — the grade verdicts included — so it is memoized for a
+# short window only, and every `invalidate_*` clears it outright. The window is
+# what bounds a change made OUTSIDE the app (a script, a tag editor, another
+# machine on the share): an in-app write goes through an invalidate hook and is
+# never served stale.
+_PAYLOAD_TTL = 30.0
+_PAYLOAD_MAX = 128
 
 _lock = threading.Lock()
+# signalled when a library build finishes, so concurrent first-paint requests
+# share ONE build instead of each re-deriving the whole library
+_build_done = threading.Condition(_lock)
 _tag_cache = OrderedDict()
 _lib_cache = {}  # key -> (built_at, payload)
+_lib_building = set()  # keys a thread is currently building
+_payload_cache = {}  # (kind, path, config key) -> (built_at, payload)
 _cover_cache = OrderedDict()
+_color_cache = OrderedDict()  # cover stat key -> "#rrggbb"
 
 
 def _stat_key(path):
@@ -123,13 +137,39 @@ def invalidate_path(path):
             del _tag_cache[k]
         for key in list(_lib_cache):
             del _lib_cache[key]
+        _payload_cache.clear()
+    _drop_index([path])
+
+
+def _drop_index(paths):
+    """Drop the persistent index rows an in-app write made stale.
+
+    The same paths the in-memory caches are dropped for: `server.tagindex`
+    keys an album on its files' stats, so a write already misses there — but a
+    write that does NOT move a stat (a tag written back byte-identically, a
+    rename inside the folder, an evidence store rewritten for those files) must
+    not be left to a time window. Cheap: the index is a few hundred rows.
+    """
+    try:
+        from server import tagindex
+        tagindex.drop(paths)
+    except Exception:
+        pass
 
 
 def invalidate_all():
     with _lock:
         _tag_cache.clear()
         _cover_cache.clear()
+        _color_cache.clear()
         _lib_cache.clear()
+        _payload_cache.clear()
+        _build_done.notify_all()
+    try:
+        from server import tagindex
+        tagindex.drop_all()
+    except Exception:
+        pass
 
 
 def _inside(path, folder):
@@ -162,20 +202,81 @@ def invalidate_album(*folders):
             del _tag_cache[key]
         for key in [k for k in _cover_cache if any(_inside(k[0], r) for r in roots)]:
             del _cover_cache[key]
+        for key in [k for k in _color_cache if any(_inside(k[0], r) for r in roots)]:
+            del _color_cache[key]
         _lib_cache.clear()
+        _payload_cache.clear()
+        _build_done.notify_all()
+    _drop_index(roots)
 
 
 def get_library(key, builder):
-    """TTL-cached library payload. key = (music_folder, relevant config)."""
-    now = time.time()
-    with _lock:
-        hit = _lib_cache.get(key)
-        if hit and now - hit[0] < _LIB_TTL:
-            return hit[1]
-    payload = builder()
+    """TTL-cached library payload. key = (music_folder, relevant config).
+
+    SINGLE-FLIGHT. The first paint of every page asks for this tree — Home,
+    the Library page, its facets and query engine, the grade summary, the
+    discovery shelves — and they arrive at once, from several request threads.
+    Building the tree used to be done by whoever found the entry expired, so a
+    cold process paid the whole library once PER concurrent request (measured:
+    a restart made a small library take tens of seconds to answer, then the
+    same seconds again for the next tab). Now the first caller builds and the
+    others wait for that one result.
+
+    A builder that raises wakes the waiters and does not stamp the cache: the
+    next caller builds instead of waiting for a result that is not coming.
+    """
+    while True:
+        with _lock:
+            hit = _lib_cache.get(key)
+            if hit and time.time() - hit[0] < _LIB_TTL:
+                return hit[1]
+            if key not in _lib_building:
+                _lib_building.add(key)
+                break
+            _build_done.wait(timeout=300.0)
+    try:
+        payload = builder()
+    except BaseException:
+        with _lock:
+            _lib_building.discard(key)
+            _build_done.notify_all()
+        raise
     with _lock:
         # Stamp AFTER the build: a slow scan must not be born already stale.
         _lib_cache[key] = (time.time(), payload)
+        _lib_building.discard(key)
+        _build_done.notify_all()
+    return payload
+
+
+def cached_payload(kind, path, cfg, builder, ttl=_PAYLOAD_TTL):
+    """Short-TTL memo for a page payload derived from one folder.
+
+    The album and artist routes re-derive everything they serve per request —
+    the grade verdicts included — so revisiting a page re-graded the album it
+    had just shown. `kind` names the payload ("album", "artist"), *path* is the
+    folder it is about, and the config rides the key, so a settings change can
+    never serve a payload computed under other settings.
+
+    Cleared outright by every `invalidate_*` call, which is how every in-app
+    write (tag write, cover, import, script run) busts it — the TTL is only the
+    bound on a change made outside the app.
+    """
+    try:
+        from server import tagindex
+        key = (kind, os.path.normcase(str(path)), tagindex.config_key(cfg))
+    except Exception:
+        return builder()
+    now = time.time()
+    with _lock:
+        hit = _payload_cache.get(key)
+        if hit and now - hit[0] < ttl:
+            return hit[1]
+    payload = builder()
+    with _lock:
+        _payload_cache[key] = (time.time(), payload)
+        while len(_payload_cache) > _PAYLOAD_MAX:
+            _payload_cache.pop(next(iter(_payload_cache)))
     return payload
 
 
@@ -234,6 +335,15 @@ def cover_bytes(album, file=None):
 
 def cover_color(album, file=None):
     """Dominant cover color as '#rrggbb' (used for UI tinting), cached."""
+    p = cover_path(album, file)
+    if p is None:
+        return None
+    key = _stat_key(p)
+    with _lock:
+        hit = _color_cache.get(key)
+        if hit is not None:
+            _color_cache.move_to_end(key)
+            return hit
     data, _, _ = cover_bytes(album, file)
     if not data:
         return None
@@ -243,6 +353,12 @@ def cover_color(album, file=None):
         img = Image.open(io.BytesIO(data)).convert("RGB")
         img = img.resize((1, 1))
         r, g, b = img.getpixel((0, 0))
-        return "#%02x%02x%02x" % (r, g, b)
+        color = "#%02x%02x%02x" % (r, g, b)
     except Exception:
         return None
+    with _lock:
+        _color_cache[key] = color
+        _color_cache.move_to_end(key)
+        while len(_color_cache) > _COVER_MAX:
+            _color_cache.popitem(last=False)
+    return color

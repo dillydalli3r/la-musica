@@ -898,6 +898,12 @@ export const HIDDEN_KEYS: string[] = [
   "force_reencode_images",
   "force_tracklist",
   "force_xlit",
+  // The one-time move of the ENCODER_VERSION default (v4.4.0, ON -> OFF):
+  // `normalize_config` rewrites a stored `true` it finds while this flag is
+  // unset, then sets the flag, so a later `true` (the user re-enabling the row
+  // in Settings → Encoder Tags) is a decision and stays. Nothing to show: it
+  // records that the rewrite ran, and the rows it is about are visible.
+  "encoder_tags_version_default_moved",
 ];
 
 /** The controls' starting values: the saved config, so a field the user never

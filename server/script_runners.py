@@ -265,7 +265,12 @@ _FORCE_KEYS = {
     # Format all re-runs whatever is forced above; forcing it forces them.
     10: ("force_accurip", "force_cue", "force_lyrics", "force_auto_tag"),
     12: ("force_audiometa",),
-    13: ("force_lyrics",),
+    # 13 (Fetch lyrics) has NO force key any more (v4.4.0): a run fills what is
+    # missing and re-tries what no provider could answer, and a stored text is
+    # never replaced by a search — that is what "force" used to do to the
+    # whole library, and it is how lyric tags got overwritten. Replacing one
+    # track's words is the manual route's job (`POST /api/lyrics/auto` with
+    # `force`, which is the route's own `replace`).
     # 15 rewrites a manifest that already exists (otherwise it is left alone).
     15: ("force_tracklist",),
     # 16 re-analyses every track, tagged or not. Its OWN flag: script 8's mood

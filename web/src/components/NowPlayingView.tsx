@@ -27,7 +27,7 @@ import { MAX_DB, MIN_DB, activeAnalyser } from "../lib/analyser";
 import Visualizer from "./Visualizer";
 import { parsePlayerLrc, parseLrc, splitStoredLines, lyricsKindOf, activeLineRange, KaraokeWords, type LrcLine } from "./LyricsViewer";
 import type { Playlist } from "../types";
-import { useLyricsFollow, LYRICS_PAD_BOTTOM, LYRICS_PAD_TOP } from "../lib/lyrScroll";
+import { useLyricsFollow, lyricHold, LYRICS_PAD_BOTTOM, LYRICS_PAD_TOP } from "../lib/lyrScroll";
 import { nextSpeed, fmtSpeed } from "../lib/playback";
 import { fmtDuration } from "../lib/fmt";
 import useSubtitleTracks from "./SubtitledVideo";
@@ -764,6 +764,11 @@ export default function NowPlayingView(p: Props) {
   // even while the pane is throttled.
   const [smoothTime, setSmoothTime] = useState(0);
   const smoothTickRef = useRef(0);
+  // The line a press just asked for, and when — a floor under the clock while
+  // the audible one catches up to the seek (see `lyricHold`). Without it the
+  // tick's very next read rewinds the pane onto the line the press left, and
+  // with the emphasis transition dropped for the press that reads as a flash.
+  const pressHold = useRef<{ t: number; at: number } | null>(null);
   // True while a word / syllable sweep is on screen — the only consumer that
   // needs 60 fps. Line changes just have to flip on the beat, so everything
   // else ticks at 20 Hz and skips ~2/3 of the full-view re-renders the pane
@@ -775,7 +780,13 @@ export default function NowPlayingView(p: Props) {
     const tick = () => {
       const t = p.getAudioTime?.();
       if (typeof t === "number" && isFinite(t) && t >= 0) {
-        setSmoothTime(sweepRef.current ? t : Math.round(t * 20) / 20);
+        // The hold goes on AFTER the quantize, not on `t`: rounding to 20 Hz
+        // can sit up to 25 ms below the read, which would undo a floor
+        // applied to the raw value.
+        const q = sweepRef.current ? t : Math.round(t * 20) / 20;
+        setSmoothTime(pressHold.current
+          ? lyricHold(q, pressHold.current.t, pressHold.current.at, performance.now())
+          : q);
         smoothTickRef.current = performance.now();
       }
       raf = requestAnimationFrame(tick);
@@ -1340,10 +1351,13 @@ export default function NowPlayingView(p: Props) {
             ? () => {
                 // The 60 fps clock is seeded with the target time first, so
                 // the emphasis lands with the press rather than a frame
-                // behind it; then the seek, then the pane's own move, which
-                // "glide" makes a travel instead of a teleport (see
-                // `centerLine`).
+                // behind it; `pressHold` keeps the tick that follows from
+                // overwriting that seed with the audible clock, which is
+                // still behind the seek (`lyricHold`); then the seek, then
+                // the pane's own move, which "glide" makes a travel instead
+                // of a teleport (see `centerLine`).
                 setSmoothTime(l.time);
+                pressHold.current = { t: l.time, at: performance.now() };
                 p.onSeek(l.time);
                 centerLine(i, "glide");
               }

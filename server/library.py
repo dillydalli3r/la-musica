@@ -451,6 +451,24 @@ def pending_album_payload(folder, cfg, light=False):
 
 
 def build_album(album_dir, cfg, light=False):
+    """Grade + enrich a single album — from the persistent index when it matches.
+
+    Reading an album is the expensive half of every page in the app (mutagen
+    open + tag copy per track, the integrity evidence, cover decodes, the
+    naming/path checks), and `server.tagindex` holds the answer across
+    restarts, keyed on the album folder's own file stats, the app-state stamp
+    and the config — so a restart serves yesterday's payload instead of
+    re-reading the whole library (issue #70). Anything the index cannot vouch
+    for is built here, and `tagcache.invalidate_*` drops the rows an in-app
+    write made stale.
+    """
+    from server import tagindex
+
+    return tagindex.cached_album(album_dir, cfg, light,
+                                 lambda: _build_album(album_dir, cfg, light))
+
+
+def _build_album(album_dir, cfg, light=False):
     """Grade + enrich a single album. Returns the enriched dict or None."""
     res = _grade_album(album_dir, str(cfg.get("lyrics_format", "EMBEDDED")).upper(), cfg)
     if res is None:
@@ -892,6 +910,15 @@ def build_library(cfg, progress=None):
         # same directory scan mlo.grader's run fills).
         dir_scan = {}
         albums = _find_albums(folder, dir_scan)
+        # The index holds one row per album that ever had audio here; a folder
+        # that is gone (a deleted album, an organizer run) must not keep its
+        # row until the next sweep of the whole file. One pass over the index's
+        # own keys, and only rows whose folder really is not there go.
+        try:
+            from server import tagindex
+            tagindex.prune(cfg)
+        except Exception:
+            pass
         artists = {}
         for alb in albums:
             artists.setdefault(os.path.dirname(alb), []).append(alb)

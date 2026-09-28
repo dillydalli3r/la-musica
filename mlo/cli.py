@@ -229,7 +229,8 @@ def show_config_menu(config):
         print(f"      oxipng         v{ov}")
         print_separator()
 
-        print("  Encoder marker tags:")
+        print("  Encoder marker tags (QUALITY is on by default; PROGRAM and")
+        print("  VERSION are available per format but off unless enabled):")
         print("      FLAC: ENCODER_PROGRAM / ENCODER_QUALITY / ENCODER_VERSION")
         print("      JPEG: XMP enc:ENCODER_PROGRAM / QUALITY / VERSION")
         print("      PNG : tEXt ENCODER_PROGRAM / QUALITY / VERSION")

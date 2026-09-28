@@ -26,7 +26,7 @@ from .stats import (
     _existing_size, _safe_remove, _walk_files, _collect_targets, worker_count,
     tool_threads,
 )
-from .tools import detect_all_tools, _version_is_older
+from .tools import detect_all_tools, _version_meets
 from .ui import log, fmt_size, print_header, c, Color
 
 def _artist_image_stems():
@@ -805,7 +805,7 @@ def _process_image_to_jxl(args):
                 q, v, p = _read_jxl_tags(src_path)
                 if not _identity_missing(enabled, q, v, p):
                     try:
-                        if _quality_meets(enabled, q, effort) and not _version_is_older(v, jxl_version):
+                        if _quality_meets(enabled, q, effort) and _version_meets(enabled, v, jxl_version):
                             log(f"[jxl skip] {os.path.basename(src_path)} already at q={q} v={v} (need q>={effort} v>={jxl_version})")
                             return (
                                 src_path,
@@ -1160,7 +1160,7 @@ def _process_jpeg_in_place(args):
         q, v, p = _read_jpeg_xmp_tags(filepath)
         if not _identity_missing(enabled, q, v, p):
             try:
-                if _quality_meets(enabled, q, JPEG_QUALITY_MARKER) and not _version_is_older(v, ljt_version):
+                if _quality_meets(enabled, q, JPEG_QUALITY_MARKER) and _version_meets(enabled, v, ljt_version):
                     return (
                         filename,
                         "unchanged",
@@ -1364,7 +1364,7 @@ def _process_png_in_place(args):
 
         if not _identity_missing(enabled, q, v):
             try:
-                if _quality_meets(enabled, q, optimization_level) and not _version_is_older(v, oxipng_version):
+                if _quality_meets(enabled, q, optimization_level) and _version_meets(enabled, v, oxipng_version):
                     return (
                         filename,
                         "unchanged",
@@ -1605,7 +1605,7 @@ def _process_jxl_in_place(args):
             q, v, p = _read_jxl_tags(src_path)
             if not _identity_missing(enabled, q, v, p):
                 try:
-                    if _quality_meets(enabled, q, effort) and not _version_is_older(v, jxl_version):
+                    if _quality_meets(enabled, q, effort) and _version_meets(enabled, v, jxl_version):
                         return (
                             filename,
                             "unchanged",

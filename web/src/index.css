@@ -690,6 +690,26 @@ table td {
   white-space: normal;
   word-break: break-word;
 }
+/* A fitted table (`table-fit`: the floor columns.tsx's TABLE_FIT and
+   ALBUM_TRACK_MIN_W put on a table) takes its floor from its HEADER row — the
+   widths the columns were given, plus what the name column reports through
+   ColFloorHolder — and `max-width: 0` on the body cells is what makes every
+   engine read it that way. A cell's floor is otherwise read off the widest
+   thing in the column: an album with a 60-character track name drew a 1241 px
+   tracklist in a 1200 px box (Gecko), and behind that the fixed layout's
+   intrinsic pass in Firefox comes back as its unconstrained sentinel —
+   17,895,482 px on the album page (issue #71). The declaration is a no-op for
+   the LAYOUT in all three engines (a fixed layout takes its column widths from
+   the first row, so a later row's max-width does not move a column; measured
+   identical to the pixel against the shipped geometry), and it leaves Blink's
+   own numbers untouched, because Blink already read the floor off the header
+   row. `md` only, like every floor here: below it the phone fold has already
+   dropped the columns that cannot fit. */
+@media (min-width: 768px) {
+  .table-fit td {
+    max-width: 0;
+  }
+}
 .cell-ellipsis {
   overflow: hidden !important;
   text-overflow: ellipsis !important;
@@ -718,6 +738,21 @@ table td {
    of their travel per second, which is indistinguishable from a still image.
    These are slow enough to stay ambient and fast enough to see. */
 .amb-cover {
+  /* The blurred copy's own edge FADES: `blur-3xl` samples nothing past the
+     element's box, so the last ~64 px inside every edge of this layer ramp
+     from its full 34 % to zero. That ramp is 8-bit, and at 0.34 opacity over
+     the colour field it quantizes into a ladder of straight 1-level ribs
+     parallel to each frame edge — measured on the shipped tree, white cover,
+     1440x900: 21 adjacent-pixel jumps in the first 160 px of the left edge,
+     every one of them a straight line 1440 px long, and they are the SAME 21
+     jumps in the composite (the grain sits above them and cannot dither a
+     step that is a property of the layer's geometry, not of its banding).
+     The breathing scale below was already the anti-fade trick, but 1.06 of a
+     1440 px frame only covers 43 px of the ramp's 64, so the ribs survived.
+     Laid out past the frame instead, the whole ramp lands outside it and the
+     wash is flat to every edge (measured: 0 jumps, 0.1 level of range across
+     the same 160 px). */
+  inset: -6rem;
   animation: amb-breathe 32s ease-in-out infinite alternate;
   will-change: transform;
 }
@@ -727,9 +762,28 @@ table td {
 }
 
 /* 2) aurora sweep: one conic band turning a full circle a minute.
-   Transform-only, so it costs nothing to keep running. */
+   Transform-only, so it costs nothing to keep running — except the one blur
+   below, which is paid once per raster (the band's own content never changes;
+   only this element's transform does).
+   A CONIC gradient's isophotes are straight rays from its centre, and this
+   layer's alpha ramp is 8-bit: it quantizes into a fan of straight 1-level
+   ribs reaching every corner of the frame (measured: 1-level jumps every
+   4-13 px along a circle around the centre), and the angle singularity in the
+   middle — where all 360 degrees of the ramp collapse onto a couple of pixels —
+   is the HARDEST edge anywhere in the ambience (measured on a white cover:
+   21.9 levels, 14.9 on a mid-grey one, 4.0 on the darkest, and 4.9 in the
+   composite, where every other layer of the stack measures at most 2.1). That
+   fan IS the "straight lines" the fullscreen background
+   shows, and it is geometry, not banding, so the grain cannot dither it away:
+   the ribs are a real radial ladder and the point in the middle is a point.
+   A blur past the rib pitch is what removes it — at 30 px the 4-13 px ribs
+   become a ramp and the point becomes a soft spot, while the band itself
+   survives intact (its angular span measures 41 levels before and 39 after).
+   Flattening the stops instead would be the other cure, but the gradient is
+   built from the cover's own colour in NowPlayingView, not here. */
 .amb-sweep {
   opacity: 0.55;
+  filter: blur(30px);
   animation: amb-sweep 55s linear infinite;
   will-change: transform;
 }

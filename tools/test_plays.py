@@ -123,8 +123,8 @@ check(abs(rows[0]["started_at"] - NOW) < 0.001, "and the instant it started",
 rec(A1)
 rec(A1)
 check(plays.count() == 3, "a repeat play is another row", plays.count())
-check(plays.count(period="week") == 3,
-      "and lands in the window that contains it", plays.count(period="week"))
+check(plays.count(period="week", now=NOW) == 3,
+      "and lands in the window that contains it", plays.count(period="week", now=NOW))
 
 plays.record(A1.replace("/", "\\"), user="alice")
 check(plays.count() == 3, "another user's play is not the default user's",

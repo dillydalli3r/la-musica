@@ -2,7 +2,7 @@ import { useEffect, useMemo, useRef, useState, type CSSProperties } from "react"
 import { AudioLines, X } from "lucide-react";
 import { api } from "../api";
 import { parsePlayerLrc, parseLrc, splitStoredLines, hasLyricsText, activeLineRange, KaraokeWords, type LrcLine } from "./LyricsViewer";
-import { useLyricsFollow, LYRICS_PAD_BOTTOM, LYRICS_PAD_TOP } from "../lib/lyrScroll";
+import { useLyricsFollow, lyricHold, LYRICS_PAD_BOTTOM, LYRICS_PAD_TOP } from "../lib/lyrScroll";
 import { isInstrumental } from "./Badges";
 import Visualizer from "./Visualizer";
 import LyricZoom, { LYRIC_ZOOM_MAX, LYRIC_ZOOM_MIN } from "./LyricZoom";
@@ -155,6 +155,11 @@ export default function LyricsSidebar({
   // ticks go stale so following never freezes.
   const [smoothTime, setSmoothTime] = useState(0);
   const smoothTickRef = useRef(0);
+  // The line a press just asked for, and when — a floor under the clock while
+  // the audible one catches up to the seek (see `lyricHold`). Without it the
+  // tick's very next read rewinds the pane onto the line the press left, and
+  // with the emphasis transition dropped for the press that reads as a flash.
+  const pressHold = useRef<{ t: number; at: number } | null>(null);
   // Word / syllable sweeps are the only 60 fps consumer; line changes ride a
   // 20 Hz tick instead of re-rendering the whole panel every frame.
   const sweepRef = useRef(false);
@@ -164,7 +169,13 @@ export default function LyricsSidebar({
     const tick = () => {
       const t = getAudioTime();
       if (typeof t === "number" && isFinite(t) && t >= 0) {
-        setSmoothTime(sweepRef.current ? t : Math.round(t * 20) / 20);
+        // The hold goes on AFTER the quantize, not on `t`: rounding to 20 Hz
+        // can sit up to 25 ms below the read, which would undo a floor
+        // applied to the raw value.
+        const q = sweepRef.current ? t : Math.round(t * 20) / 20;
+        setSmoothTime(pressHold.current
+          ? lyricHold(q, pressHold.current.t, pressHold.current.at, performance.now())
+          : q);
         smoothTickRef.current = performance.now();
       }
       raf = requestAnimationFrame(tick);
@@ -324,8 +335,11 @@ export default function LyricsSidebar({
                         // 60 fps clock is seeded with the target time in the
                         // same breath: the emphasis lands with the press
                         // instead of one frame behind it, which is the flash
-                        // the report named.
+                        // the report named — and `pressHold` keeps the tick
+                        // that follows from overwriting that seed with the
+                        // still-behind audible clock (`lyricHold`).
                         setSmoothTime(l.time);
+                        pressHold.current = { t: l.time, at: performance.now() };
                         onSeek(l.time);
                         centerLine(i, "glide");
                       }
