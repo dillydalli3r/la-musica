@@ -226,7 +226,7 @@ hashes the library it produced (`12e30df9cc58cfd7aae35084e6944a89c734c1db`,
     one assertion now asks the window that contains the fixture (`now=NOW`);
     the fixture date and every other assertion are unchanged.
 
-R329 (the level decides), R330 (a run fills) and R331 (a forced pass writes
+R329 (the level decides), R330 (a lyrics run fills), R331 (a forced pass writes
 only what changes) are in `docs/OPTIMIZATION-GRADING-SPEC.md`, beside R332 (the
 ambience draws no straight lines the grain cannot dither) from the visualizer
 work, R333 (the album page's column floor is a width every engine computes the

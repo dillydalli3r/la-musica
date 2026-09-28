@@ -6284,8 +6284,8 @@ composition instead (R267). Above `lg` the pane sits beside the artwork.
   version alone does not re-encode; enabling the marker does) and the PNG
   identity check, which now asks for the marker it asserts.
 
-- **R330 — a maintenance run FILLS metadata; it never replaces what a file
-  already holds.** Script 13 (Fetch lyrics) has no force flag any more: a run
+- **R330 — a lyrics run FILLS; it never replaces words a file already holds.**
+  Script 13 (Fetch lyrics) has no force flag any more: a run
   asks the whole chain for the tracks that hold no words (embedded or a real
   `.lrc` sidecar) and re-tries what nobody could answer, while a stored text —
   an import's answer, a provider hit from an earlier run, a person's own edit —
@@ -6305,6 +6305,16 @@ composition instead (R267). Above `lg` the pane sits beside the artwork.
   instrumental is never searched) and by `tools/test_import_corrections.py`,
   which asserts the route passes its `force` through as `replace` while the
   chain does not.
+
+  The boundary, said out loud because force is not one thing: a force switch
+  whose SCRIPT IS the asking — 8 `force_auto_tag` ("AutoTag re-run"), 15
+  `force_tracklist`, 17 `force_xlit`, 18 `force_publish` — still asks again by
+  design, which is what its label names, and each writes only the families it
+  owns (genre/advisory/`INSTRUMENTAL` for 8, the manifest for 15, its own
+  transforms for 17, nothing local for 18). What no forced pass does any more
+  is write a value that would come out identical (R331), replace stored LYRICS
+  (here), or re-encode for an encoder VERSION the settings no longer track
+  (R329).
 
 - **R331 — a forced pass writes only what changes.** Force is "re-run this
   pass", not "rewrite this file": a value already exactly what the pass would
