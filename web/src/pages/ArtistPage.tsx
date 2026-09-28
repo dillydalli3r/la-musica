@@ -7,7 +7,7 @@ import {
 } from "lucide-react";
 import { api } from "../api";
 import { LinkChips, LinkEditorButton } from "../components/Links";
-import { EmptyState, GradeBadge, PageLoading } from "../components/Badges";
+import { EmptyState, PageLoading } from "../components/Badges";
 import AlbumCard from "../components/AlbumCard";
 import StarRating from "../components/StarRating";
 import { ratingOf, useRatings, useSetRating, FOLDER_RATING_NOTE } from "../lib/ratings";
@@ -26,7 +26,6 @@ import TagActionsMenu from "../components/TagActionsMenu";
 import { WatchArtistButton } from "../components/WatchDialog";
 import type { Album } from "../types";
 import { artistMbid } from "../lib/refs";
-import { auditFails } from "../lib/status";
 import { GRID_SIZE_MIN } from "../lib/fmt";
 import { invalidateLibrary } from "../lib/invalidate";
 import StatsPanel from "../components/StatsPanel";
@@ -710,25 +709,23 @@ export default function ArtistPage() {
                     style={{ gridTemplateColumns: `repeat(auto-fill, minmax(${GRID_SIZE_MIN[gridSize] ?? GRID_SIZE_MIN.m}px, 1fr))` }}
                   >
                     {albums.map((al) => (
-                      // the library's own album card (cover, title, artist,
-                      // year, verdict dot, play, heart) plus the one fact this
-                      // page states per release: the album's grade verdict.
-                      // The folder's track count is deliberately NOT printed —
-                      // it is noise on a grid of albums (and the track list is
-                      // one click away).
+                      // The library's own album card (cover, title, artist,
+                      // year, verdict dot, play, heart). The per-release grade
+                      // verdict is NOT repeated here any more: the card's own
+                      // status dot IS that verdict (`statusFor(al.pass,
+                      // al.audit_summary)`), so a failing album wore a red dot
+                      // and a red cross two lines apart, and a passing one a
+                      // green dot and a tick — one fact, twice, under every
+                      // cover. The dot's tooltip names it in words, and the
+                      // album page and the Library table state the score. The
+                      // folder's track count is deliberately not printed
+                      // either: noise on a grid of albums, one click away.
                       <AlbumCard
                         key={al.path}
                         al={al}
                         selectable={selectMode}
                         selected={selected.has(al.path)}
                         onSelect={toggleSel}
-                        extraMeta={
-                          <GradeBadge
-                              pass={!!al.pass && !auditFails(al.audit_summary)}
-                              score={al.grade_pct}
-                            size="sm"
-                          />
-                        }
                       />
                     ))}
                   </div>
