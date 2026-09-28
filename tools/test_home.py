@@ -613,4 +613,52 @@ finally:
     store.map_for = _real_map_for
     r.invalidate()
 
+# --------------------------------------------------------------------------- #
+# An OLD Home payload is served, and rebuilt BEHIND the request: this build
+# walks the library and every shelf, and the first one after a restart measured
+# 187.5 s on the owner's install with the Home page's "Loading your library…"
+# in front of it. No page waits for that again — the TTL is patched rather than
+# slept through, because the behaviour is the contract, not the number.
+# --------------------------------------------------------------------------- #
+import time as _time
+
+_lib_calls = {"n": 0}
+
+
+def _counted_library(cfg, progress=None):
+    _lib_calls["n"] += 1
+    return {"artists": []}
+
+
+_real_build_library = lib_mod.build_library
+_real_ttl = r._TTL
+try:
+    lib_mod.build_library = _counted_library
+    r.invalidate()
+    r._TTL = 0.05
+    first = r.build_home({"music_folder": "C:/M"})
+    _time.sleep(0.1)
+    t0 = _time.perf_counter()
+    stale = r.build_home({"music_folder": "C:/M"})
+    served = _time.perf_counter() - t0
+    assert served < 0.1, f"an expired payload answered in {served:.3f}s — it waited"
+    assert stale == first, "and it is the payload that was already there"
+    for _ in range(250):                     # the refresh lands behind it
+        if _lib_calls["n"] >= 2:
+            break
+        _time.sleep(0.02)
+    assert _lib_calls["n"] >= 2, f"no background refresh ran ({_lib_calls['n']})"
+    # ...and an explicit invalidation still DROPS it: the Refresh buttons ask
+    # for fresh rows, not for the rows they already have.
+    r._TTL = 900.0
+    r.invalidate()
+    before = _lib_calls["n"]
+    fresh = r.build_home({"music_folder": "C:/M"})
+    assert _lib_calls["n"] == before + 1, "invalidate() must rebuild in the call"
+    assert isinstance(fresh, dict), fresh
+finally:
+    lib_mod.build_library = _real_build_library
+    r._TTL = _real_ttl
+    r.invalidate()
+
 print("ok")

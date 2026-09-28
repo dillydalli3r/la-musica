@@ -19,6 +19,9 @@ from server import job_locks
 _lock = threading.Lock()
 _cache = {"t": 0.0, "key": None, "data": None}
 _TTL = 900.0
+# Keys with a background Home rebuild in flight (`_start_home_refresh`), so
+# ten pages asking at once still cost ONE walk.
+_refreshing: set = set()
 
 
 def _artist_of(alb, fallback=""):
@@ -568,22 +571,88 @@ def podcast_series_payload(cfg, series):
 
 
 def build_home(cfg, user=""):
-    """Full Home payload for the given config and user (TTL-cached).
+    """Full Home payload for the given config and user (TTL-cached, SWR).
 
     The cache key carries the user: the payload holds that person's favourites
     and their playlist count, so a shared entry would serve the first caller's
     rows to everyone else for the TTL.
-    """
-    from server import library as lib_mod
 
+    A payload that is merely OLD is served as it stands and rebuilt behind the
+    request (`_refresh_home_async`, single flight), exactly like the library
+    tree (R338): this build walks the library and every shelf, and on the
+    owner's install the first one after a restart measured **187.5 s** — with
+    the Home page's "Loading your library…" in front of it, every restart and
+    every Refresh (which drops the memo). No request waits for that again; the
+    only blocking build left is a cold process's first ask, and
+    `warm_home` (the lifespan's `home-warm` thread) works that one at startup.
+    """
     user = str(user or "")
     folder = str(cfg.get("music_folder") or "")
     recent_count = int(cfg.get("home_recent_count", 12) or 12)
     cache_key = (folder, recent_count, user)
     now = time.time()
     with _lock:
-        if _cache["data"] and _cache["key"] == cache_key and now - _cache["t"] < _TTL:
-            return _cache["data"]
+        hit = _cache
+        if hit["data"] is not None and hit["key"] == cache_key:
+            if now - hit["t"] < _TTL:
+                return hit["data"]
+            _start_home_refresh(cache_key, cfg, user)
+            return hit["data"]
+    data = _build_home_payload(cfg, user, recent_count)
+    with _lock:
+        if _cache["key"] == cache_key or _cache["data"] is None:
+            _cache.update({"t": now, "key": cache_key, "data": data})
+    return data
+
+
+def _start_home_refresh(cache_key, cfg, user) -> None:
+    """Rebuild ONE key's Home payload off the request path (single flight).
+
+    Called with `_lock` held; the thread it starts does the waiting, so the
+    caller returns the stale payload immediately. A refresh that fails leaves
+    the served payload in place and the next request tries again.
+    """
+    if cache_key in _refreshing:
+        return
+    _refreshing.add(cache_key)
+
+    def run():
+        try:
+            data = _build_home_payload(cfg, str(user or ""),
+                                       int(cfg.get("home_recent_count", 12) or 12))
+        except BaseException as e:
+            print(f"[mlo] home background refresh failed: {e}")
+            data = None
+        with _lock:
+            if data is not None:
+                _cache.update({"t": time.time(), "key": cache_key, "data": data})
+            _refreshing.discard(cache_key)
+
+    threading.Thread(target=run, daemon=True, name="home-refresh").start()
+
+
+def warm_home(cfg) -> None:
+    """Build the Home payload for every claimed user, before anyone asks.
+
+    One thread, at startup, beside the library warm-up: a process that has
+    just started has no Home memo, so the first visit pays the whole build —
+    the 187.5 s "Loading your library…" above. The users come from auth's own
+    list, so the warmed key is the one that person's page will ask for; an
+    install with no users warms the default ("") scope.
+    """
+    try:
+        from server import auth as auth_mod
+        users = [str(u).strip() for u in (auth_mod.list_users() or [])]
+    except Exception:
+        users = []
+    for user in [u for u in users if u] or [""]:
+        build_home(cfg, user)
+
+
+def _build_home_payload(cfg, user, recent_count):
+    """The shelves themselves — the one place that walks the library for
+    Home. `build_home` caches this; `warm_home` fills it at startup."""
+    from server import library as lib_mod
 
     lib = lib_mod.build_library(cfg)
     artists = lib.get("artists", [])
@@ -644,12 +713,17 @@ def build_home(cfg, user=""):
         # has no Home payload to read it from).
         "grade_warning": grade,
     }
-    with _lock:
-        _cache.update({"t": now, "key": cache_key, "data": data})
     return data
 
 
 def invalidate():
+    # DROPPED, not merely aged: every caller of this is an explicit ask for
+    # fresh rows — the Refresh buttons (`_refresh_library_caches`), a settings
+    # save, an import that just landed — so the next build is a real one. The
+    # TTL path is the other half of the contract and the one that used to hang
+    # a page: a payload that is merely OLD is served and rebuilt behind the
+    # request (`build_home`), and a cold process's first ask is worked at
+    # startup (`warm_home`).
     with _lock:
         _cache["t"] = 0.0
         _cache["data"] = None

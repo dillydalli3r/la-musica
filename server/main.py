@@ -187,6 +187,19 @@ async def _lifespan(app: FastAPI):
             print(f"[mlo] library warm-up failed: {e}")
     threading.Thread(target=_warm_library, daemon=True,
                      name="library-warm").start()
+    # …and the Home payload the landing page asks for: its build walks the
+    # library and every shelf, and a fresh process has no memo, so the first
+    # visit after a restart paid it IN the request — measured 187.5 s on the
+    # owner's install with "Loading your library…" in front of it. One thread,
+    # one walk, before anyone asks (server.recommendations.warm_home).
+    def _warm_home():
+        try:
+            from server import recommendations
+            recommendations.warm_home(load_config())
+        except Exception as e:
+            print(f"[mlo] home warm-up failed: {e}")
+    threading.Thread(target=_warm_home, daemon=True,
+                     name="home-warm").start()
     yield
     # Stop taking new work first (the two workers above are the app's own
     # source of new jobs), then the honest part: wait — bounded — for whatever
