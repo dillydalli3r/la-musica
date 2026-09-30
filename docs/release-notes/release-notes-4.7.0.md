@@ -34,7 +34,9 @@ the title as the heading, one label/value line per fact with its own copy
 button, the ids last and the path last of all, small and dimmed. Under it, EVERY
 row the payload carries, grouped by role in a sensible order (work and its
 authors, the people in the room, the studio, the packaging; a role the table
-does not know sorts last alphabetically rather than disappearing).
+does not know sorts last alphabetically rather than disappearing). A work row
+opens the work on MusicBrainz; every other credited person linked to their own
+page in the app (4.7.1 changed that — see its notes).
 
 The rows themselves are wider now, out of the one cached release response: an
 album request merges the release's own relations, **every track's recording

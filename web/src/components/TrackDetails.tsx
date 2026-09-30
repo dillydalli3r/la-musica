@@ -609,46 +609,23 @@ function RoleGroups({ rows }: { rows: CreditRow[] }) {
             {list.map((r, i) => (
               <li key={`${r.artist}-${i}`} className="flex flex-wrap items-center gap-1.5 text-xs">
                 {r.mbid ? (
-                  r.role === "work" ? (
-                    <a
-                      // A work row names a WORK: the app has no work pages, so
-                      // this one goes to MusicBrainz (the server names the
-                      // row's own kind in `role`, which is what keeps a work
-                      // id out of an /artist/ URL — #35).
-                      href={`https://musicbrainz.org/work/${r.mbid}`}
-                      target="_blank"
-                      rel="noreferrer"
-                      className="text-zinc-200 hover:text-accent-soft underline decoration-dotted"
-                      title="Open the work on MusicBrainz"
-                    >
-                      {r.artist}
-                    </a>
-                  ) : (
-                    <span className="inline-flex items-center gap-1 min-w-0">
-                      {/* The person's own page IN the app: the MBID half of the
-                          route lib/refs.ts `artistRef` builds, so a credit
-                          clicks through to the artist the app already has (and
-                          an artist it does not have says so on that page
-                          rather than nowhere). */}
-                      <Link
-                        to={`/artist/mb:${r.mbid}`}
-                        className="text-zinc-200 hover:text-accent-soft underline decoration-dotted"
-                        title={`Open ${r.artist} in the library`}
-                      >
-                        {r.artist}
-                      </Link>
-                      <a
-                        href={`https://musicbrainz.org/artist/${r.mbid}`}
-                        target="_blank"
-                        rel="noreferrer"
-                        className="text-zinc-600 hover:text-accent-soft shrink-0"
-                        title="Open the artist on MusicBrainz"
-                        aria-label="Open the artist on MusicBrainz"
-                      >
-                        <ExternalLink className="h-3 w-3" />
-                      </a>
-                    </span>
-                  )
+                  // EVERY credited name opens MUSICBRAINZ, never a page in the
+                  // app: a credit list is mostly people the library does not
+                  // hold — a session player, a conductor, an engineer — and
+                  // `/artist/mb:<id>` for one of them lands on a page that has
+                  // nothing to show (the owner's rule: credit links go to the
+                  // source of the credit). A work row names a WORK, so it takes
+                  // the work's own path — `role` is what keeps a work id out of
+                  // an /artist/ URL (#35).
+                  <a
+                    href={`https://musicbrainz.org/${r.role === "work" ? "work" : "artist"}/${r.mbid}`}
+                    target="_blank"
+                    rel="noreferrer"
+                    className="text-zinc-200 hover:text-accent-soft underline decoration-dotted"
+                    title={`Open ${r.artist} on MusicBrainz`}
+                  >
+                    {r.artist}
+                  </a>
                 ) : (
                   <span className="text-zinc-200">{r.artist}</span>
                 )}

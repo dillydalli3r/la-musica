@@ -1578,7 +1578,15 @@ export default function PlayerBar() {
   // existed.
   const infiniteFor = useRef<string | null>(null);
   useEffect(() => {
-    if (!infinite || loop || !current) return;
+    if (!infinite) return;
+    if (loop) {
+      // Repeat one's successor is itself, so nothing is ever appended. The
+      // diagnostics record it once per queue+row: "infinite playback is on and
+      // nothing happens" is otherwise indistinguishable from a failure here.
+      note("queue-extend", { added: 0, why: "repeat-one" });
+      return;
+    }
+    if (!current) return;
     if (index + 1 < queue.length) return;           // a row is already up next
     // Only while that row actually PLAYS: a restored session sitting paused on
     // the last row of a queue must not grow behind the reader's back.
@@ -1589,9 +1597,9 @@ export default function PlayerBar() {
     const key = `${queueId}:${current.path}`;
     if (infiniteFor.current === key) return;
     infiniteFor.current = key;
-    void fetchQueueRecommend(queue.map((t) => t.path))
+    const asked = queue.map((t) => t.path);
+    void fetchQueueRecommend(asked)
       .then((items) => {
-        if (!items.length) return;
         // The queue may have moved on while the answer was in flight (a row
         // added by hand, a reorder, an earlier batch): read it live, so nothing
         // already in it is ever added twice and a track recommended twice in
@@ -1603,9 +1611,23 @@ export default function PlayerBar() {
           have.add(item.path);
           rows.push(queueTrackOf(item));
         }
+        // Recorded on EVERY ask, not only the ones that grow the queue: the
+        // Settings → Playback diagnostics panel is the black box for "the
+        // switch does nothing", and an empty answer (a library with nothing
+        // similar left, every row of it already queued) is the one outcome a
+        // reader cannot tell apart from a broken feature.
+        note("queue-extend", {
+          seeds: asked.length, offered: items.length, added: rows.length,
+        });
         if (rows.length) queueAdd(rows, "end");
+        else toast("Infinite playback — nothing similar left in the library to add; the queue ends here");
       })
-      .catch(() => { /* nothing similar, or no server: the queue ends as always */ });
+      .catch((e) => {
+        // A failure used to be swallowed whole (the play ends as always), which
+        // is indistinguishable from the switch doing nothing at all.
+        note("queue-extend", { seeds: asked.length, added: 0, error: String(e).slice(0, 80) });
+        toast.error("Infinite playback — could not reach the library: " + String(e).slice(0, 80));
+      });
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [infinite, loop, current, index, queue, playing, queueId, queueAdd]);
 

@@ -6345,7 +6345,16 @@ composition instead (R267). Above `lg` the pane sits beside the artwork.
   /api/recommend/queue`, `recommend_for_queue`);
   (d) the scoring is LOCAL (`server/recommend.py` over the library's own tags) —
   no provider is consulted, so it works offline and cannot hang the music, and
-  a missing answer is an empty list that simply ends the queue;
+  a missing answer is an empty list that simply ends the queue; **and every ask
+  says what it did**: the outcome lands in the player's own diagnostics
+  (`note("queue-extend", {seeds, offered, added})`, read back in Settings →
+  Playback diagnostics, with `why: "repeat-one"` for the one by-design no-op and
+  the error text when the route refuses), the rows that were added are visible
+  in the queue pane as ordinary rows, and the two outcomes a reader cannot tell
+  apart from a broken switch SAY so — an answer with nothing new to add and a
+  failed request are a toast, because "the switch does nothing" was exactly this
+  silence (a queue whose last row is playing, a request the server answered with
+  nothing the queue did not already hold, or a route that refused);
   (e) the append happens as the last row STARTS, which is before the gapless
   preload arms for its successor, so the hand-over into the added set is the
   same one an album advance gets (the idle decoder holds the first added row);
@@ -6793,9 +6802,13 @@ composition instead (R267). Above `lg` the pane sits beside the artwork.
   last and the path last of all, small and dimmed — and then EVERY row the
   payload carries, grouped by `ROLE_RANK` (work and its authors, the people in
   the room, the studio, the packaging; a role the table does not name sorts
-  last, alphabetically, rather than disappearing). A work row links to
-  MusicBrainz (the app has no work pages); every other credited person links to
-  their own page in the app (`artistRef`). Both modals that mount the panel
+  last, alphabetically, rather than disappearing). A credit's NAME opens
+  MusicBrainz — `https://musicbrainz.org/artist/<mbid>`, or the work's own page
+  for a `work` row — and never a page in the app: a credit list is mostly people
+  and works the library itself does not hold (a session player, a conductor, an
+  engineer), and an in-app `/artist/mb:<id>` for one of them lands on a page
+  with nothing to show. A row with no MBID is plain text. Both modals that
+  mount the panel
   drop their old subtitle — it was the raw path — so the header is the one place
   the subject is named. Pinned by `tools/test_credits.py` (identity filled and
   offline, the work's own roles merged on both branches, the non-destructive
