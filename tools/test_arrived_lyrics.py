@@ -476,8 +476,13 @@ try:
         check(f"plain fallback (allow_plain={allow}): the grade follows the setting",
               verdict["flagged"] is want_flagged, repr(verdict))
         if want_flagged:
+            # The message NAMES the plain state (and says no script can add
+            # timing): a kept untimed arrival used to fail "Lyrics not optimally
+            # formatted (run Lyrics script)" — advice naming a script that
+            # leaves the file exactly as it is.
             check("plain fallback: the failing message names the plain state",
-                  any("not optimally formatted" in m for m in verdict["messages"]),
+                  any("no timestamps" in m and "no script can add timing" in m
+                      for m in verdict["messages"]),
                   repr(verdict))
 
     # ----------------------------------------------------------------------- #

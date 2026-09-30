@@ -1426,9 +1426,23 @@ def _dig_issues():
     return res.get("issues") or {}
 
 
+def _lyric_issues(issues=None):
+    """Every lyrics-format finding, whatever its wording.
+
+    The message NAMES its reason now ("not optimally formatted (run Lyrics
+    script) — …" for what the formatter repairs, "cannot be repaired by a
+    script: …" for the conditions no formatter can invent timing for), so a
+    case asserts the FINDING, not one of the two spellings.
+    """
+    found = issues if issues is not None else _dig_issues()
+    return [m for m in found
+            if m.startswith("Lyrics not optimally formatted")
+            or m.startswith("Lyrics cannot be repaired by a script")]
+
+
 _before = _dig_issues()
 assert "Missing SOURCE (required for Digital Media)" in _before, sorted(_before)
-assert "Lyrics not optimally formatted (run Lyrics script)" in _before, sorted(_before)
+assert _lyric_issues(_before), sorted(_before)
 assert "Album description missing — fetch one on the album page" in _before, sorted(_before)
 
 # the suggestion: nothing states a source, so it is ASKED, with the config's
@@ -1460,12 +1474,11 @@ assert imports.settle_digital_lyrics(DIG_ALBUM, DIG_CFG, chain=[1, 13], dry=True
     ["state"] == "would-clean"
 _no_fetch = imports.settle_digital_lyrics(DIG_ALBUM, DIG_CFG, chain=[1])
 assert _no_fetch["state"] == "no-fetch" and _no_fetch["dropped"] == 0, _no_fetch
-assert _dig_issues().get("Lyrics not optimally formatted (run Lyrics script)"), \
-    "a chain without the fetch leaves the lyrics alone"
+assert _lyric_issues(), "a chain without the fetch leaves the lyrics alone"
 _cleaned = imports.settle_digital_lyrics(DIG_ALBUM, DIG_CFG, chain=[1, 13])
 assert _cleaned["state"] == "cleaned" and _cleaned["dropped"] == 2, _cleaned
 assert _cleaned["unformatted"] == 1, _cleaned  # the merged one the formatter cannot fix
-assert "Lyrics not optimally formatted (run Lyrics script)" not in _dig_issues(), _dig_issues()
+assert not _lyric_issues(), _dig_issues()
 # …and with plain lyrics allowed by the install, nothing is theirs to remove
 from mutagen.flac import FLAC as _MFLAC2
 _MFLAC2(_dig_files[0])["LYRICS"] = DIG_PLAIN
@@ -1495,9 +1508,9 @@ try:
 finally:
     _dig_discovery.album_description = _real_album_description
 for _probe in ("Missing SOURCE (required for Digital Media)",
-               "Lyrics not optimally formatted (run Lyrics script)",
                "Album description missing — fetch one on the album page"):
     assert _probe not in _dig_issues(), (_probe, _dig_issues())
+assert not _lyric_issues(), _dig_issues()
 
 # the whole thing again through the import itself: a chain-less import still
 # settles both halves and reports them (there is no wizard-only path)

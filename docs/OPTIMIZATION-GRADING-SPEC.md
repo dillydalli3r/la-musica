@@ -440,7 +440,7 @@ group still renders (section *Other checks*).
 | `grade_check_lyrics_spaces` | Lyrics — no padding | ON | no leading/trailing space on a lyric line |
 | `grade_check_lyrics_blank_lines` | Lyrics — blank line rules | ON | blank lines match the formatter's canonical output |
 | `grade_check_lyrics_zero` | Lyrics — zero timestamp rule | ON | the `[00:00.00]` leader follows `lrc_add_zero_timestamp` / `lrc_zero_timestamp_blank` / `lrc_zero_timestamp_target` |
-| `grade_check_lyrics_format` | Lyrics — canonical formatting | ON | re-running the formatter would change nothing (timestamps at `lrc_timestamp_precision`, `lrc_strip_metadata`, `lrc_collapse_blank_lines`, no merged timestamps) — so a stored lyric still carrying a stray `[id:…]` frame descriptor, an `[ti:]`/`[ar:]`-style header, or a leading credit line that repeats the track's own `TITLE - ARTIST` fails, while `[offset:…]` (an instruction, not a header) passes |
+| `grade_check_lyrics_format` | Lyrics — canonical formatting | ON | re-running the formatter would change nothing (timestamps at `lrc_timestamp_precision`, `lrc_strip_metadata`, `lrc_collapse_blank_lines`, no merged timestamps) — so a stored lyric still carrying a stray `[id:…]` frame descriptor, an `[ti:]`/`[ar:]`-style header, or a leading credit line that repeats the track's own `TITLE - ARTIST` fails, while `[offset:…]` (an instruction, not a header) passes. The finding names its reason and offers the Lyrics script only for what the formatter repairs (R347) |
 | `grade_check_cue_spaces` / `grade_check_cue_blank_lines` / `grade_check_cue_format` | CUE — no padding / no blank lines / canonical formatting | ON | CUE lines are trimmed, blank lines absent, and the sheet is byte-equivalent to the canonical formatter's output (`keep_empty_cue_lines`, `keep_other_cue_lines`, `cue_file_type`, `append_final_newline`) |
 | `grade_check_accurip_format` | `.accurip` — canonical formatting | ON | each line trimmed, outer blank lines handled (`keep_empty_accurip_lines`) |
 | `grade_check_cue_files` | CUE — referenced files exist | ON | every `FILE` line names a file that is in the album |
@@ -6122,6 +6122,40 @@ composition instead (R267). Above `lg` the pane sits beside the artwork.
   reported), script 1 removes both and keeps `INSTRUMENTAL=1`, and the same
   leftover on an `INSTRUMENTAL=0` track still fails the format check and is
   NOT cleared by the script.
+
+- **R347 — the lyrics verdict names its reason, and it names a script only when
+  a script can fix it.** `grade_check_lyrics_format` fails for several different
+  reasons, and the message used to be one string for all of them —
+  "Lyrics not optimally formatted (run Lyrics script)" — which was advice that
+  could not work for two of the families: a file whose stored words carry NO
+  timestamps (an untimed arrival the install keeps because it is not in
+  `import_review_families`, `lyrics_allow_plain` off) and a file whose timing is
+  coarser than `lrc_sync_level` are both conditions no formatter can invent
+  timing for — script 1 rewrites what is stored and never adds a timestamp
+  (R330's own boundary). Running it left the failure exactly where it was (the
+  owner's report: "Running format lyrics script doesn't fix this error"). The
+  verdict now collects the failing condition per branch and says what it was:
+  - the reasons the formatter REPAIRS keep the script's name and carry the list
+    ("Lyrics not optimally formatted (run Lyrics script) — the stored text is
+    not in the configured form"; "the first line does not match the [00:00.00]
+    rule"); `_lyrics_formatted` is the formatter's own idempotency predicate, so
+    "the formatter would change this text" IS "this is repairable";
+  - the reasons nothing can repair are said as such ("Lyrics cannot be repaired
+    by a script: …") with the way out named instead: an untimed lyric (no
+    timestamps, `lyrics_allow_plain` off) points at fetching a synced version
+    (clear the words, then Fetch lyrics) or turning on "Accept plain (unsynced)
+    lyrics" in Settings → Lyrics & CUEs; a line-synced lyric under a WORD or
+    SYLLABLE `lrc_sync_level` at fetching a word-synced version; stacked
+    timestamps under Extended LRC at a version with one line per stamp; and
+    out-of-order word timestamps at fetching again (no formatter re-orders
+    words — an invalid word-timestamp line the formatter WOULD change is
+    still the repairable half).
+  Both halves are one issue and one `LYRICS` code, as before. Pinned by
+  `tools/test_lyrics_fix.py` (an untimed leftover on an `INSTRUMENTAL=0` track
+  fails with the plain reason and is left alone by script 1), `tools/test_arrived_lyrics.py`
+  (a kept untimed arrival's message names the plain state) and
+  `tools/test_import_pipeline.py` (the finding is asserted as a FINDING — either
+  wording — never as one spelling).
 
 ### 7.61 The AI answers what every other source was silent on
 

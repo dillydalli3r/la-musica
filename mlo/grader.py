@@ -2731,6 +2731,16 @@ def _grade_album(album_dir, lyrics_format, cfg=None):
                     except OSError:
                         lrc_text = None
                 fmt_ok = True
+                # WHY it failed, per condition, so the message can name the
+                # reason and — the half that matters — tell a reason no script
+                # can repair apart from one script 1 fixes. The two lists are
+                # the verdict's own vocabulary: `repairs` are what the Lyrics
+                # script's formatter changes (it is idempotent, so "the
+                # formatter would change this text" IS "this is repairable"),
+                # `stuck` are the conditions no formatter can invent timing for.
+                repairs = []
+                stuck = []
+                _level = str(cfg.get("lrc_sync_level", "LINE") or "LINE").upper()
                 # Check formatting (trailing/leading spaces, blank lines) if enabled
                 if cfg.get("grade_check_lyrics_spaces", True) or cfg.get("grade_check_lyrics_blank_lines", True):
                     # Each toggle gates its own comparison: turning off just
@@ -2742,36 +2752,56 @@ def _grade_album(album_dir, lyrics_format, cfg=None):
                             check_spaces=_ly_spaces, check_blank_lines=_ly_blanks,
                             track_title=_ly_title, track_artist=_ly_artist):
                         fmt_ok = False
+                        repairs.append("the stored text is not in the configured form")
                     if lrc_text and not _lyrics_formatted(
                             lrc_text, cfg, is_for_lrc=True,
                             check_spaces=_ly_spaces, check_blank_lines=_ly_blanks,
                             track_title=_ly_title, track_artist=_ly_artist):
                         fmt_ok = False
+                        repairs.append("the stored text is not in the configured form")
                 # Zero timestamp check if enabled
                 if cfg.get("grade_check_lyrics_zero", True):
                     if lyr_text and not _lyrics_zero_timestamp_ok(lyr_text, cfg, is_for_lrc=False):
                         fmt_ok = False
+                        repairs.append("the first line does not match the [00:00.00] rule")
                     if lrc_text and not _lyrics_zero_timestamp_ok(lrc_text, cfg, is_for_lrc=True):
                         fmt_ok = False
+                        repairs.append("the first line does not match the [00:00.00] rule")
                 if (lyr_text and _lyrics_merged_timestamps(lyr_text, cfg)) or \
                    (lrc_text and _lyrics_merged_timestamps(lrc_text, cfg)):
                     fmt_ok = False
+                    # Extended LRC is exactly what keeps stacked stamps on one
+                    # line: the formatter splits them only with it OFF, and the
+                    # grader only flags them with it ON, so this pair can never
+                    # be repaired by the script it is named beside.
+                    stuck.append("two timestamps share one line (Extended LRC keeps them together, "
+                                 "so no script splits them — fetch a version with one line per timestamp)")
                 # Enhanced LRC word timestamp validity (order / formatting)
                 if cfg.get("lrc_enhanced_enabled", True) and cfg.get("lrc_enhanced_word_sync", True):
-                    if lyr_text and not _lyrics_word_timestamps_valid(lyr_text, cfg):
-                        fmt_ok = False
-                    if lrc_text and not _lyrics_word_timestamps_valid(lrc_text, cfg):
-                        fmt_ok = False
-                    # Sync-level REQUIREMENT: synced lyrics must carry at
-                    # least the configured granularity (LINE default —
-                    # plain line tags; WORD — per-word tags; SYLLABLE — glued per-syllable tags).
-                    _level = cfg.get("lrc_sync_level", "LINE")
-                    if lyr_text and TIMESTAMP_RE_GRADE.search(lyr_text) \
-                            and not text_meets_sync_level(lyr_text, _level):
-                        fmt_ok = False
-                    if lrc_text and TIMESTAMP_RE_GRADE.search(lrc_text) \
-                            and not text_meets_sync_level(lrc_text, _level):
-                        fmt_ok = False
+                    for _txt, _is_lrc in ((lyr_text, False), (lrc_text, True)):
+                        if not _txt:
+                            continue
+                        if not _lyrics_word_timestamps_valid(_txt, cfg):
+                            fmt_ok = False
+                            # Misformatting the formatter would fix (padding,
+                            # precision, a space after the stamp) shows up as
+                            # "the formatter would change this text"; an OUT OF
+                            # ORDER run does not, and no formatter re-orders
+                            # words — only a fresh fetch can.
+                            if _lyrics_formatted(_txt, cfg, is_for_lrc=_is_lrc,
+                                                 check_spaces=True, check_blank_lines=True,
+                                                 track_title=_ly_title, track_artist=_ly_artist):
+                                stuck.append("word timestamps are out of order — "
+                                             "no script re-orders them; fetch the lyrics again")
+                            else:
+                                repairs.append("word timestamps are misformatted")
+                        # Sync-level REQUIREMENT: synced lyrics must carry at
+                        # least the configured granularity (LINE default —
+                        # plain line tags; WORD — per-word tags; SYLLABLE — glued per-syllable tags).
+                        if TIMESTAMP_RE_GRADE.search(_txt) and not text_meets_sync_level(_txt, _level):
+                            fmt_ok = False
+                            stuck.append(f"the lyrics are line-synced where the required sync level is {_level} — "
+                                         f"no script can add word timing; fetch a word-synced version")
                 # Unsynced lyrics fail — plain text with no [mm:ss.xx] is not
                 # synced — UNLESS the user opted into plain lyrics
                 # (lyrics_allow_plain). The provider chain is then allowed to
@@ -2780,12 +2810,31 @@ def _grade_album(album_dir, lyrics_format, cfg=None):
                 if not cfg.get("lyrics_allow_plain", False):
                     if lyr_text and not TIMESTAMP_RE_GRADE.search(lyr_text):
                         fmt_ok = False
+                        stuck.append("the lyrics have no timestamps and plain lyrics are not accepted "
+                                     "(lyrics_allow_plain is off) — no script can add timing; fetch a synced "
+                                     "version (clear these words and run Fetch lyrics) or turn on "
+                                     "\"Accept plain (unsynced) lyrics\" in Settings → Lyrics & CUEs")
                     if lrc_text and not TIMESTAMP_RE_GRADE.search(lrc_text):
                         fmt_ok = False
+                        stuck.append("the lyrics have no timestamps and plain lyrics are not accepted "
+                                     "(lyrics_allow_plain is off) — no script can add timing; fetch a synced "
+                                     "version (clear these words and run Fetch lyrics) or turn on "
+                                     "\"Accept plain (unsynced) lyrics\" in Settings → Lyrics & CUEs")
                 if not fmt_ok:
                     failed_checks += 1
-                    add_issue("Lyrics not optimally formatted "
-                              "(run Lyrics script)", basename)
+                    # The message names the reason, and it only offers the
+                    # Lyrics script for the half the Lyrics script can do: a
+                    # plain-text file kept failing "run Lyrics script" for a
+                    # reason the script cannot touch (the owner's report).
+                    if repairs:
+                        _head = ("Lyrics not optimally formatted (run Lyrics script) — "
+                                 + "; ".join(dict.fromkeys(repairs)))
+                        if stuck:
+                            _head += ". Also, " + "; ".join(dict.fromkeys(stuck))
+                    else:
+                        _head = ("Lyrics cannot be repaired by a script: "
+                                 + "; ".join(dict.fromkeys(stuck)))
+                    add_issue(_head, basename)
                     track["issues"].append("LYRICS")
 
         # Transform tags must carry their language — TRANSLATION-EN,

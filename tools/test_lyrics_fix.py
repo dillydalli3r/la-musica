@@ -330,13 +330,16 @@ finally:
     shutil.rmtree(tmp_i, ignore_errors=True)
 
 # INSTRUMENTAL=0: the very same leftover is a lyrics problem, script 1 leaves
-# it alone, and the format check keeps failing it as before.
+# it alone, and the format check keeps failing it — now saying WHY: the leftover
+# is untimed text, which no formatter can add timing to (the message used to
+# name script 1, a script this very case proves leaves the file alone).
 tmp_z = tempfile.mkdtemp(prefix="mlo_lyr_noninst_")
 try:
     album, track, lrc = _inst_fixture(tmp_z, "0")
     res = _grade_album(album, "EMBEDDED", ISO)
-    assert any(i.startswith("Lyrics not optimally formatted") for i in res["issues"]), \
-        f"a non-instrumental track with the leftover still fails ({res['issues']})"
+    assert any(i.startswith("Lyrics cannot be repaired by a script")
+               and "no timestamps" in i for i in res["issues"]), \
+        f"a non-instrumental track with the untimed leftover fails, and the message says why ({res['issues']})"
 
     _process_lyrics_for_audio(track, dict(DEFAULT_CONFIG, music_folder=""))
     assert str(AudioFile(track).get_lyrics() or "").strip(), \
