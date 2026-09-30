@@ -15,8 +15,10 @@ export interface QueueTrack {
   albumCover?: string | null;
   /** ITUNESADVISORY as the row that queued the track knew it ("1" explicit,
    *  "2" clean edition). Carried in the entry so the E/C mark paints on the
-   *  same frame as the title — the per-track tags fetch lands later, and the
-   *  mark must not wait for it. Refreshed by that fetch when it has a value. */
+   *  same frame as the title: the title, the mark and the art are committed as
+   *  ONE record (`lib/nowPlaying`), so the mark rides that frame instead of
+   *  arriving with the per-track tags fetch a moment later. Refreshed by that
+   *  fetch when it has a value. */
   advisory?: string | null;
 }
 

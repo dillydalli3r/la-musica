@@ -27,6 +27,15 @@
  * tracks elsewhere in the library, and says so instead of failing when there
  * is none.
  *
+ * Section 11 pins the now-playing block's ONE record (web/src/lib/nowPlaying):
+ * the bar's title, its sub-lines and its art are all drawn from the record the
+ * bar has COMMITTED, so they must land in ONE paint. A frame sampler takes the
+ * frame the strings change and the frame the decoded cover appears and
+ * requires them within one 60 Hz frame of each other, with no frame in
+ * between in which a committed block went back to empty. It needs an album
+ * with 4+ tracks whose cover the server serves, and says so instead of failing
+ * when there is none.
+ *
  * Needs a live backend serving the built app (`web/dist`):
  *   npm --prefix web run build
  *   python -m uvicorn server.main:app --host 127.0.0.1 --port 8010
@@ -757,6 +766,181 @@ function assertConsistent(label, p, expectedFile) {
       page.off("request", infWatch);
       await setInfinite(infWas === true);
       await page.reload({ waitUntil: "domcontentloaded" });
+    }
+
+    // 11. The metadata block is ONE record: its title, its sub-lines and its
+    //     art all come from the record the bar has COMMITTED (see
+    //     lib/nowPlaying), so they land in ONE paint. Until the track's tags
+    //     have settled, the cover's address is known and the image is DECODED,
+    //     the block keeps painting the record it last committed — the
+    //     stale-hold — or draws EMPTY when there is none. Measured on this
+    //     machine against a scratch server, entering a track from an album
+    //     page with nothing playing: the block's strings and the decoded cover
+    //     landed 0.1 ms apart (94.7 ms and 94.8 ms after the press).
+    //
+    //     The measurement is a frame sampler, not a stopwatch: `tNew` is the
+    //     first frame the block's text is non-empty AND different from the
+    //     text at the press, `tCover` the first frame the bar's art exists,
+    //     decoded, at a DIFFERENT address than at the press, and the two must
+    //     land in the SAME sampled frame — that is what one paint means — and
+    //     within one 60 Hz frame of each other (17 ms: the feature's own
+    //     number, where a one-paint commit measures ~0.1 ms and one frame of
+    //     separation measures ~16.7 ms). `tBlank` is the first frame the block
+    //     went EMPTY after `tNew`, and must never come: a committed record is
+    //     never dropped back to blank.
+    //
+    //     The album's LAST row is pressed, so the queue has to resolve a track
+    //     it has never loaded, and the album must carry 4+ tracks — which by
+    //     itself excludes the two-track pair section 10 uses — with a cover
+    //     the server can serve. A library that offers no such album skips the
+    //     case by name. Nothing is asserted about the OUTGOING strings while
+    //     the new record is pending: painting them is the stale-hold, by
+    //     design.
+    const BLOCK_FRAME_MS = 17;                    // one frame at 60 Hz
+    const BLOCK_SEL = '[class*="ml-[76px]"]';
+    const BLOCK_ART_SEL = 'button[title^="Album art"] img';
+    /** Arm the block's own frame sampler. Every stamp is `performance.now()`
+     *  read inside the page, on a `requestAnimationFrame` tick — and the block
+     *  is read with `textContent`, not `innerText`: reading layout once per
+     *  frame would perturb the very timing being measured. The clock (`t0`) is
+     *  started by the press below, in the same task as the row's click. */
+    const armBlockSampler = () => page.evaluate(([blockSel, artSel]) => {
+      const blockText = () => {
+        const el = document.querySelector(blockSel);
+        return el ? (el.textContent || "").replace(/\s+/g, " ").trim() : "";
+      };
+      const artSrc = () => {
+        const img = document.querySelector(artSel);
+        return img && img.complete && img.naturalWidth > 0 ? (img.currentSrc || img.src) : null;
+      };
+      const before = { text: blockText(), src: artSrc() };
+      const st = { before, t0: null, tNew: null, tCover: null, tBlank: null, tNewFrame: null, tCoverFrame: null, frames: 0, done: false };
+      window.__mloBlockRecord = st;
+      const tick = () => {
+        if (st.done) return;
+        const t = performance.now();
+        if (st.t0 !== null) {
+          st.frames++;
+          const now = blockText();
+          if (st.tNew === null && now && now !== before.text) { st.tNew = t; st.tNewFrame = st.frames; }
+          if (st.tNew !== null && st.tBlank === null && !now) st.tBlank = t;
+          if (st.tCover === null) {
+            const src = artSrc();
+            if (src && src !== before.src) { st.tCover = t; st.tCoverFrame = st.frames; }
+          }
+        }
+        requestAnimationFrame(tick);
+      };
+      requestAnimationFrame(tick);
+      return before;
+    }, [BLOCK_SEL, BLOCK_ART_SEL]);
+    /** The album row press the sections above use, with the sampler's clock
+     *  started in the SAME task: `t0` is the moment of the press. */
+    const pressRowSampled = (i) => page.evaluate((n) => {
+      const st = window.__mloBlockRecord;
+      if (st) st.t0 = performance.now();
+      const tr = [...document.querySelectorAll('tr[title="Click to play"]')][n];
+      if (tr) tr.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+      return !!tr;
+    }, i);
+    /** The block's text once it has STOPPED moving — and is not empty. The
+     *  restored bar's own record commits within the record hook's wait (1.5 s)
+     *  of the load, and the sampler must not latch onto that commit: the only
+     *  record it is meant to see is the one the press brings. A record still
+     *  resolving draws NOTHING (that is the feature), so an empty, unmoving
+     *  block is not "settled" — it is a commit still on its way. */
+    const settleBlock = async () => {
+      let prev = null;
+      for (let i = 0; i < 20; i++) {
+        const now = await page.evaluate((sel) => {
+          const el = document.querySelector(sel);
+          return el ? (el.textContent || "").replace(/\s+/g, " ").trim() : "";
+        }, BLOCK_SEL);
+        if (now && now === prev) return now;
+        prev = now;
+        await sleep(300);
+      }
+      return prev;
+    };
+    /** An album with 4+ tracks whose cover the server really serves, plus the
+     *  file of its LAST track (what the press must land on). Walked the way
+     *  this script's own album discovery walks the library, and the album the
+     *  bar is already holding is skipped: its record's strings cannot CHANGE
+     *  and its cover's address cannot change either, and a change is what
+     *  starts the sampler.
+     *
+     *  The art is named at whichever level the folder declares it: a per-track
+     *  sidecar (`tracks[].cover_file`) or the album-level name the library row
+     *  and the album payload both carry (`cover.jpg` in test libraries). The
+     *  bar's own resolution falls back through exactly these
+     *  (`current.coverFile ?? … ?? albumCover ?? libCover`), so an album whose
+     *  cover answers here is one whose `<img>` will be rendered. */
+    const blockAlbum = await page.evaluate(async (base) => {
+      const lib = await (await fetch(base + "/api/library")).json();
+      let heldDir = "";
+      try {
+        const held = (JSON.parse(localStorage.getItem("mlo.player.state.v1") || "null") || {}).path || "";
+        heldDir = held.replace(/\\/g, "/").replace(/\/[^/]*$/, "").toLowerCase();
+      } catch { /* storage disabled: nothing to skip */ }
+      for (const a of lib.artists || []) {
+        for (const al of a.albums || []) {
+          if ((al.track_count ?? (al.tracks || []).length) < 4) continue;
+          if (heldDir && al.path.replace(/\\/g, "/").toLowerCase() === heldDir) continue;
+          const full = await (await fetch(base + "/api/album?path=" + encodeURIComponent(al.path))).json();
+          const tracks = full.tracks || [];
+          if (tracks.length < 4) continue;
+          const last = tracks[tracks.length - 1];
+          const art = full.cover_file || al.cover_file || tracks.map((t) => t.cover_file).find(Boolean) || "";
+          if (!last) continue;
+          // The address the bar itself asks for (`w` = CoverImg's ROW_COVER_W).
+          const r = await fetch(base + "/api/cover?album=" + encodeURIComponent(al.path) +
+            (art ? "&file=" + encodeURIComponent(art) : "") + "&w=160");
+          if (r.ok) return { path: al.path, rows: tracks.length, lastFile: last.file, art };
+        }
+      }
+      return null;
+    }, BASE);
+
+    if (!blockAlbum) {
+      check("block record: the library offers an album with art and 4+ tracks", true,
+        "skipped — no album with 4+ tracks whose cover the server can serve");
+    } else {
+      await page.goto(`${BASE}/album/${encodeURIComponent(blockAlbum.path)}`, { waitUntil: "domcontentloaded" });
+      await page.waitForSelector('tr[title="Click to play"]');
+      const held = await settleBlock();
+      const armed = await armBlockSampler();
+      const blockRows = await page.locator('tr[title="Click to play"]').count();
+      const pressed = await pressRowSampled(blockRows - 1);           // the album's LAST row
+      check("block record: the album's LAST row took the press", pressed,
+        `rows=${blockRows}(payload ${blockAlbum.rows}) art=${JSON.stringify(blockAlbum.art)} ` +
+        `last=${blockAlbum.lastFile} held-before-press=${JSON.stringify((held || armed.text).slice(0, 60))}`);
+      await sleep(1000);
+      const landing = await probe(page);
+      check("block record: the press landed on the album's LAST row",
+        landing.pos === blockRows, `pos=${landing.pos}/${landing.len} want=${blockRows}`);
+      await sleep(5000);                                              // the commit, well past the hook's own wait
+      const st = await page.evaluate(() => {
+        const s = window.__mloBlockRecord;
+        return s ? { before: s.before, t0: s.t0, tNew: s.tNew, tCover: s.tCover, tBlank: s.tBlank, tNewFrame: s.tNewFrame, tCoverFrame: s.tCoverFrame, frames: s.frames } : null;
+      });
+      await page.evaluate(() => { if (window.__mloBlockRecord) window.__mloBlockRecord.done = true; });
+      const rel = (v) => (v === null || !st || st.t0 === null ? "null" : `+${(v - st.t0).toFixed(1)}ms`);
+      const stamps = st
+        ? `tNew=${rel(st.tNew)} tCover=${rel(st.tCover)} tBlank=${rel(st.tBlank)} over ${st.frames} frames`
+        : "sampler not installed";
+      const delta = st && st.tNew !== null && st.tCover !== null ? Math.abs(st.tNew - st.tCover) : null;
+      // The two must land in the SAME sampled frame: that is what one paint
+      // means, and the millisecond tolerance below is the feature's own (a
+      // one-paint commit measures ~0.1 ms, one frame of separation ~16.7 ms —
+      // which the 17 ms tolerance alone would only just allow).
+      const sameFrame = !!st && st.tNewFrame !== null && st.tNewFrame === st.tCoverFrame;
+      check("block record: the new record's strings and its decoded art land in ONE paint",
+        sameFrame && delta !== null && delta <= BLOCK_FRAME_MS,
+        `${stamps} Δ=${delta === null ? "n/a" : `${delta.toFixed(1)}ms`} sameFrame=${sameFrame} ` +
+        `(one 60 Hz frame = ${BLOCK_FRAME_MS}ms; before-press=${JSON.stringify((st ? st.before.text : "").slice(0, 40))})`);
+      check("block record: a committed record is never dropped back to an empty block",
+        !!st && st.tBlank === null,
+        `${stamps} before-press=${JSON.stringify((st ? st.before.text : "").slice(0, 40))}`);
     }
 
     check("no uncaught page errors", errs.length === 0, errs.join(" | "));

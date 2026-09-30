@@ -275,6 +275,39 @@ const CANNED_REPORT = {
     await page.unroute("**/api/favorites");
   }
 
+  /* ---- Refresh means the WHOLE library, not just the page's own payload ----
+   * Both Refresh buttons re-walk the music folder SERVER-side (`?refresh=1`
+   * drops the library, home and recommendation caches), but the grading strip
+   * reads its own summary (`GET /api/grades/summary`, `useGradesSummary`), so
+   * a press that only refetched the page's payload left the strip quoting the
+   * counts from before the walk for its whole 5-minute staleTime — reported as
+   * "even after pressing Refresh this warning doesn't get updated". The claim
+   * is a request claim, and that is how it is measured: after the press, the
+   * summary is asked again, on both pages that carry the strip. */
+  for (const [route, payload, button] of [["/library", "/api/library", /^Refresh$/], ["/", "/api/home", /^Refresh$/]]) {
+    await goto(route);
+    await sleep(1200);                       // the page's own first reads settle
+    const asked = { payload: 0, summary: 0 };
+    const watch = (r) => {
+      const u = r.url();
+      if (u.includes(payload) && u.includes("refresh=1")) asked.payload++;
+      if (u.includes("/api/grades/summary")) asked.summary++;
+    };
+    page.on("request", watch);
+    const trigger = page.getByRole("button", { name: button }).first();
+    const present = (await trigger.count()) > 0;
+    if (present) await trigger.click();
+    await sleep(2500);
+    page.off("request", watch);
+    check(`${route}: the Refresh button re-walks the server (${payload}?refresh=1)`,
+      present && asked.payload >= 1, `present=${present} refresh requests=${asked.payload}`);
+    // The strip's own read. A poll or a mount inside the window cannot fake
+    // this: those are the same request, and the point is that the press
+    // produces one at all.
+    check(`${route}: the same press re-asks the grading summary`, asked.summary >= 1,
+      `summary requests=${asked.summary}`);
+  }
+
   check("no uncaught page errors", errs.length === 0, errs.join(" | "));
   await browser.close();
   console.log(`\n${fail ? "FAIL" : "PASS"} — ${fail} problem(s)`);

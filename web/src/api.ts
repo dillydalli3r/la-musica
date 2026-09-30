@@ -532,6 +532,34 @@ export interface CreditRow {
   mbid: string;
 }
 
+/** The `identity` block `/api/credits` carries beside the rows: everything the
+ *  panel's header may print — what the track or release IS, read from the
+ *  files' own tags plus the MusicBrainz ids the route resolved. Always present
+ *  in a fresh reply, with "" wherever the files state nothing (an album leaves
+ *  the recording ids blank: they would name one of its tracks). `path` is the
+ *  file or folder the panel was opened on — the raw path the header prints
+ *  LAST and dimmed, never as a heading. */
+export interface CreditIdentity {
+  title: string;
+  artist: string;
+  album: string;
+  album_artist: string;
+  catalog_number: string;
+  label: string;
+  barcode: string;
+  date: string;
+  original_date: string;
+  country: string;
+  release_type: string;
+  media: string;
+  track_mbid: string;
+  release_mbid: string;
+  release_group_mbid: string;
+  artist_mbid: string;
+  recording_mbid: string;
+  path: string;
+}
+
 /** `/api/credits` reply. `source` must be shown next to the rows: a tag
  *  fallback is not MusicBrainz data and must never read as if it were. */
 export interface Credits {
@@ -539,6 +567,8 @@ export interface Credits {
   album: string;
   rows: CreditRow[];
   source: "musicbrainz" | "tags";
+  /** What the panel's header draws — see CreditIdentity. */
+  identity: CreditIdentity;
   track_mbid?: string;
   release_mbid?: string;
 }

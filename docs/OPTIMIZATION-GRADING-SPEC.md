@@ -213,8 +213,16 @@ is what puts "23 · Optimize tags" in an album's menu and in a track row's: one
 album's junk tags are cleared without a lossless re-encode (3) or a
 whole-library format pass (10), which is why the excess and alias failures now
 name it FIRST in their own instruction ("run Optimize tags (script 23) on the
-album, or …", `mlo/grader.py`). It writes files and nothing else, and drops the
-tag cache of exactly the folders it rewrote (`server.tagcache.invalidate_album`,
+album, or …", `mlo/grader.py`). Every library item's flyout therefore offers it
+— the registry-generated menus an album, a track row, an artist and a playlist
+mount (`web/src/lib/scriptMenu.ts` over `GET /api/script-menu`), the library
+page's selection dropdown, AND the album page's hand-written "All album
+actions" flyout, which lists a curated subset of scripts and is the one place
+that had to be told: its "Tags & scripts" section ran 1/2/3/5/6/7/8/4 and now
+carries 23 beside them, so the entry point the grade failures name is in the
+menu a reader who just saw that failure opens. It writes files and nothing
+else, and drops the tag cache of exactly the folders it rewrote
+(`server.tagcache.invalidate_album`,
 never `invalidate_all` — the scoped drop `/api/run` and an import already make
 for the folders a run names).
 
@@ -1068,7 +1076,25 @@ rating.
     `zinc-500`/`zinc-600` it used to pin suited only the dark one (the volume
     box read 1.64:1 on a mid cover: invisible). Over a music video the top bar
     keeps light greys, because the picture is the field there and the ink's
-    polarity says nothing about it.
+    polarity says nothing about it. **The two hairline separators are chrome
+    too** (`ink.divider`, the transport row's and the seek row's): a fixed
+    `bg-white/15` reads 1.19:1 on a white cover and 1.02:1 on the mid-grey one
+    — the separators the owner reported as fading into the background while
+    the icons either side of them had already flipped — so the dark table keeps
+    that white and the light table draws the same weight in near-black
+    (`rgba(9,9,11,0.60)`, >= 3:1 on every field the light table produces). The
+    video path is the exception the top bar already has: those rows sit on the
+    player's own black gradient, so both separators keep the white hairline.
+    **A LIT toggle on those rows takes the same care**: the like heart's
+    favourite state and the open add-to-playlist button light with `--accent`,
+    which is the app's ONE "on" colour — but the shipped accent is white, so on
+    a bright cover the LIT state was the invisible one (~1.1:1, the owner's
+    "the like / playlist button should stay the same colour even when
+    clicked"). `litInk` (`NowPlayingView.tsx`) keeps the accent whenever it can
+    be seen on the chosen table and falls back to that table's full ink
+    (`litFallback`) when it cannot, so a custom dark accent still lights the
+    glyph over a bright cover. `FavHeart` gained one `likedClass` override for
+    it; every other heart in the app still lights `text-accent`.
   * **the sliders take the table too, and the lyric chips with them**: the ink
     table (`LyricInk`, `NowPlayingView.tsx`) carries four more fields for the
     seek and volume sliders — `seekTrack`, `seekFill`, `seekThumb`, `seekRing` —
@@ -4826,7 +4852,15 @@ composition instead (R267). Above `lg` the pane sits beside the artwork.
   at 12 with the rest as a `+N` link into the Library's existing Failing
   filter, and
   `["gradesSummary"]` is in `invalidateLibrary`'s list — a run that graded,
-  tagged or imported just changed the very checks the strip reports. **A long
+  tagged or imported just changed the very checks the strip reports. **The
+  Refresh buttons are held to the same rule**: they re-walk the music folder
+  SERVER-side (`?refresh=1` drops the library, home and recommendation caches),
+  so the reads derived from that walk are re-asked with it — the page's own
+  payload AND `["gradesSummary"]`, whose 5-minute staleTime otherwise left the
+  strip quoting the counts from before the press (the owner's "even after
+  pressing Refresh this warning doesn't get updated"). `tools/check_page_states.cjs`
+  pins it as the request claim it is: after each press, both the payload with
+  `?refresh=1` and the summary have been asked. **A long
   list opens folded**: past three findings the strip shows the first three and a
   real button (`aria-expanded`) reading *Read more — N findings*, and *Show
   less* folds it back, so seven failing albums cannot push the page's own
@@ -5875,6 +5909,65 @@ composition instead (R267). Above `lg` the pane sits beside the artwork.
   whole canvas, so no stale edge column survives a frame — the "lines coming in
   from the edges" of the owner's report.
 
+- **R344 — the now-playing metadata block is ONE record, committed in ONE
+  paint.** The bar's title, its two sub-lines (the year included) and the art
+  beside them, and the fullscreen player's block and compact header alike, are
+  drawn from the record `web/src/lib/nowPlaying.ts` commits — the SAME object
+  feeds the title, the marks that ride that row, the sub-lines, the links, the
+  rating and the cover URL, so no piece can land on a frame of its own (the
+  owner's "title, then artist, then album, then the cover image"). A record is
+  ready when the track's own tags payload has answered (the title/artist/album
+  fallbacks and the year that rides the album line), the cover's ADDRESS is
+  known — a queue row carrying its own cover filenames answers at once, while a
+  row built from an album card waits for the library tree in the bar and the
+  album payload in the pane — and, when there is art, that image is DECODED, so
+  the `<img>`/`CoverImg` that follows paints the same cached bytes instead of
+  arriving a round trip after the words. Until then the block keeps painting the
+  record it last committed (the stale-hold the lyrics pane and the tech readout
+  already use), and a surface with no record yet draws its rows EMPTY rather
+  than a filename stem, a folder name, a "—" or a disc the real values then
+  replace; `NOW_PLAYING_WAIT_MS` caps the wait, so a source that STALLS (a tags
+  read that is retrying, a cover that never comes back) ends in the previous
+  behaviour rather than in a permanently empty block. The next track's tags
+  payload is prefetched with the cover warm in `PlayerBar`, so a sequential
+  handover's pieces are all in hand and commit in the change's own paint. The
+  bar's sub-lines read the per-track tags exactly as the pane's already did,
+  which is what makes one record complete for a queue row the library does not
+  list (a playlist or .m3u8 entry, a previewed download). Pinned by
+  `tools/check_player_state.cjs` §11, whose sampler records the frame each
+  stamp latched on: the new record's strings and its DECODED art must be the
+  same frame (measured 0.1 ms apart), and a committed record must never be
+  observed dropping back to a blank block.
+
+- **R346 — the bar's controls share only the room each of them can hold, and
+  the seek bar answers while a menu is open.** The player bar's grid is three
+  columns (`grid-cols-[minmax(0,1fr)_auto_minmax(0,1fr)]`) whose cells contain
+  `shrink-0` controls, and a column that cannot shrink spills BOTH ways instead
+  of overflowing one — measured at 1024 px: the Download button (x 966..998)
+  painted exactly over the Lyrics button (x 963..995) and won the hit test, so
+  the Lyrics control was dead, while the same row spilled left over the seek
+  row. Two things keep that from recurring: the full grid is used from `lg` only
+  (below it the bar has its own phone-shaped row, which carries the same
+  transport, the like and the way into the fullscreen player), and the
+  readouts inside the right flank are gated on the FLANK's own width
+  (`[container-type:inline-size]` + `@container`), never the window's — the
+  sidebar takes 192 px out of the bar, so one window width hands the flank two
+  different shares (collapsing the sidebar brings a readout back on its own).
+  A sweep of every visible control's rects at 768/834/900/1024/1180/1280/1440/
+  1600/1920 px, with the sidebar open and collapsed, must find no two of them
+  intersecting and nothing past the bar's right edge. The second half is the
+  same class of dead control: the bar's flyouts (queue, sleep timer, playlist)
+  render a full-viewport click catcher so a press elsewhere closes them
+  (`components/Popover.tsx`), and that catcher sits INSIDE the bar's grid — it
+  swallowed presses on the seek bar underneath, which is why a seek while the
+  queue pane was open did nothing (`tools/check_player_state.cjs` §10 opens that
+  pane before it scrubs, and the track then never reached its preload window).
+  The scrub is the one bar control that answers while a menu is open — reaching
+  for the playhead means moving the track, not dismissing a pane — so the seek
+  input sits above the catcher and below the menu itself; dismissal is
+  unchanged (an outside click still closes the menu, and the shield still
+  covers the viewport).
+
 ### 7.55 The acquisition queue: one chain, one row, and a notice only when it ends
 
 - **R307 — one chain per album.** An album the pipeline is already on (a
@@ -6226,8 +6319,15 @@ composition instead (R267). Above `lg` the pane sits beside the artwork.
 
 - **R324 — infinite playback extends the queue the listener can see, and every
   way it could is bounded.** `infinite_playback` (`mlo/config.py`, shipped
-  **off**, one Settings row in `Downloads & playback`) makes the player ask the
-  local scorer for the batch that continues a queue which has run out, and
+  **off**, one Settings row in `Downloads & playback`, and the switch the QUEUE
+  itself carries: the player bar's queue popover is a checkbox and the
+  fullscreen player's queue drawer is an `∞` chip, both writing the same key
+  through the same config POST, so a listener who wonders whether the queue
+  keeps going finds the answer where the queue is rather than in Settings —
+  neither surface is drawn at all while the server does not ship the key, so an
+  install on an older server cannot write a setting it would drop) makes the
+  player ask the local scorer for the batch that continues a queue which has
+  run out, and
   append it — `web/src/lib/recommend.ts`'s `fetchQueueRecommend`/
   `QUEUE_BATCH`, called from `PlayerBar`'s own effect when the row that is
   playing is the queue's LAST row. Five properties make that safe, and each one
@@ -6648,6 +6748,59 @@ composition instead (R267). Above `lg` the pane sits beside the artwork.
   writes 8 files in 40 ms. Pinned by `tools/test_tagindex.py` (the tree's
   serve-and-refresh behaviour, the per-album stamp) and
   `tools/test_genres.py`/`test_genre_format.py`/`test_tag_hygiene.py`.
+
+### 7.72 The credits panel names what it is, and lists every relation
+
+- **R345 — a release's credits are the release's, and the panel says WHICH
+  release.** `GET /api/credits` (`server/main.py`, built from
+  `server/integrations.py`) answers for a track (`?path=`) or a whole album
+  (`?album=`) in one shape: `{artist, album, rows, source, identity}` plus the
+  resolved id (`track_mbid` on the path branch, `release_mbid` on the album
+  one). **`rows` are as complete as the sources allow.** An ALBUM request merges
+  three relation families out of the ONE cached release response: the release's
+  own relations, every track's recording relations
+  (`recording-level-rels` — the album is not a second request per track) and
+  every work node's own relations (`work-rels` names the work,
+  `work-level-rels` inlines its composer/lyricist/writer, walked inside
+  `_credit_rows`) — so a conductor stated on the release, an engineer stated on
+  one recording and a lyricist stated only on the work all reach the panel. A
+  TRACK request asks its recording with
+  `artist-rels+work-rels+work-level-rels` and merges the same two families it
+  can see, again with no second request. `tidy_credit_rows` **drops nothing but
+  empty rows**: it strips and lower-cases the role, strips the name, the
+  attributes and the mbid, drops a row with an empty role or an empty name,
+  dedupes on (role, case-folded name, mbid, attributes) and sorts by (role,
+  name) — never a curated role list and never a cap (the collectors' own
+  500-row guard is the only bound). The files' own credit tags are the
+  FALLBACK and only the fallback: `source` flips to `"tags"` when the MB side
+  answers no rows at all (no MBID, or a release MusicBrainz describes with no
+  relation), and a tag fallback is never mixed into an MB answer, so the badge
+  beside the rows always says which kind of evidence they are. **The identity
+  block is what the panel is titled by** — `title`, `artist`, `album`,
+  `album_artist`, `catalog_number`, `label`, `barcode`, `date`, `original_date`,
+  `country`, `release_type`, `media`, the five MBIDs and `path`, every key
+  always present and `""` where nothing states it. An album request blanks
+  `track_mbid`/`recording_mbid` (a file's TITLE names ONE of its recordings) and
+  sets `title` to the release's own name; a track request carries
+  `track_mbid == recording_mbid` from `MUSICBRAINZ_TRACKID`. **An empty row
+  list is an ANSWER, not a 404**: the only refusals are "no such file/folder",
+  "outside the music folder" and "an album holding no audio", because a file
+  with no MBID and no credit tag still has a title, an artist and an album to
+  name itself by — the 404 that used to answer it is what left the panel's
+  header printing a raw path. The panel itself
+  (`web/src/components/TrackDetails.tsx`) draws that header — the title as the
+  heading, then one label/value line per fact with its own copy button, the ids
+  last and the path last of all, small and dimmed — and then EVERY row the
+  payload carries, grouped by `ROLE_RANK` (work and its authors, the people in
+  the room, the studio, the packaging; a role the table does not name sorts
+  last, alphabetically, rather than disappearing). A work row links to
+  MusicBrainz (the app has no work pages); every other credited person links to
+  their own page in the app (`artistRef`). Both modals that mount the panel
+  drop their old subtitle — it was the raw path — so the header is the one place
+  the subject is named. Pinned by `tools/test_credits.py` (identity filled and
+  offline, the work's own roles merged on both branches, the non-destructive
+  tidy) and `tools/test_mb_search.py` (the tag fallback, and empty rows as a
+  200).
 
 
 ## 8. Recommended runbook

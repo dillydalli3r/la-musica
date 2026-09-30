@@ -42,6 +42,15 @@
  *     it was — appended-when-dirty, those two widened the strip by 58 px the
  *     instant the offset was dialled and the reader's next press landed on
  *     Save, a write into the track's own lyrics (issue #56 again).
+ *   - the control rows' two hairline separators (transport/track-actions and
+ *     duration/volume): two of them, 1 x 24 px each, and their own ink against
+ *     the field BESIDE them. The fixed `bg-white/15` hairline they replaced
+ *     measured ~1.2:1 on the white cover and ~1.0:1 on the mid-grey one — the
+ *     separators the owner reported as fading into the background.
+ *   - the two LIT control-row toggles, the like heart and the add-to-playlist
+ *     trigger: pressed for real, then 3:1 against the field AND not the accent
+ *     where the field cannot show it. The shipped white accent lit a ~1.1:1
+ *     glyph on a bright cover — the clicked state was the invisible one.
  *
  * Four covers are stubbed: dark (#101014), the mid-grey one the old polarity
  * rule used to flip on (#808080), the bright-grey boundary case (#b4b4b4) and
@@ -261,8 +270,11 @@ async function inkStats(page, clip, thresh = 14) {
 }
 
 /** The fullscreen player's chrome as the DOM reports it: the two sliders (with
- *  the ink variables the player sets on them), the top bar's icon buttons, and
- *  the two lyric chips (the pane's top-right corner) with every child rect. */
+ *  the ink variables the player sets on them), the top bar's icon buttons, the
+ *  two lyric chips (the pane's top-right corner) with every child rect, the
+ *  control rows' two hairline separators, and the two LIT control-row toggles
+ *  — the like heart and the add-to-playlist trigger — with their state
+ *  attributes. */
 const readChrome = (page) => page.evaluate(() => {
   const overlay = document.querySelector("div.fixed.inset-0.z-50");
   if (!overlay) return null;
@@ -334,7 +346,36 @@ const readChrome = (page) => page.evaluate(() => {
       kids: [...chip.children].map(kid),
     })),
   } : null;
-  return { sliders, icons, chips };
+  // The control rows' two separators, read as a whole family (`span.w-px`
+  // inside the overlay — the pair is the only two in it) because "exactly two
+  // 1 px hairlines" is itself part of the claim below: a third, or a stray
+  // one, would mean the check measured something other than the pair.
+  const dividers = [...overlay.querySelectorAll("span.w-px")].map((el) => {
+    const cs = getComputedStyle(el);
+    return { rect: rect(el), bg: cs.backgroundColor, opacity: Number(cs.opacity) };
+  });
+  // The two controls whose LIT state is measured (the like heart and the
+  // add-to-playlist trigger). The heart's own label flips with the state
+  // (`likeLabels`: "Like this track" / "Unlike"), so both are matched, and the
+  // live `--accent` is read here too: "the lit control must not be the accent
+  // where the field cannot show it" is a claim about that token, and that token
+  // is what `litInk` reads.
+  const litOf = (el) => {
+    if (!el) return null;
+    const cs = getComputedStyle(el);
+    return {
+      rect: rect(el), color: cs.color, opacity: Number(cs.opacity),
+      pressed: el.getAttribute("aria-pressed"), expanded: el.getAttribute("aria-expanded"),
+    };
+  };
+  const lit = {
+    like: litOf(overlay.querySelector('button[aria-label="Like this track"], button[aria-label="Unlike"]')),
+    playlist: litOf(overlay.querySelector('button[aria-label="Add this track to a playlist"]')),
+  };
+  return {
+    sliders, icons, chips, dividers, lit,
+    accent: getComputedStyle(document.documentElement).getPropertyValue("--accent").trim(),
+  };
 });
 
 /** Reveal the lyric chips before measuring them (issue #63).
@@ -364,8 +405,17 @@ async function revealChips(page) {
   const rest = await probe();
   if (!rest) return null;
   await page.mouse.move(rest.point.x, rest.point.y);   // over the pane
-  await sleep(350);
-  const shown = await probe();
+  // The reveal is a CSS transition, so a fixed sleep samples whatever the ease
+  // happened to be at (measured 0.990418 once — mid-transition, not a pass).
+  // Wait for the SETTLED value instead: poll until the strip is fully revealed,
+  // up to a couple of seconds. Polling for "two readings agree" was the first
+  // version of this and it exited on two zeros — the transition has a delay, so
+  // the first pair of reads matched before it had started.
+  let shown = await probe();
+  for (let i = 0; i < 25 && (shown?.opacity ?? 0) < 0.999; i++) {
+    await sleep(100);
+    shown = await probe();
+  }
   return { restOpacity: rest.opacity, opacity: shown.opacity };
 }
 
@@ -505,11 +555,27 @@ const settleIcons = (page) => page.evaluate(async () => {
   return { settled: false, value: prev };
 });
 
+/** Wait for the shell's toast column to empty.
+ *
+ *  The like toggle answers with a toast (`lib/favs` `likeToasts`), and the
+ *  shell stacks those over the control rows' OWN band (`App.tsx`:
+ *  `fixed bottom-20 left-1/2` — that is where the transport row and its two
+ *  separators live). A read taken while one is up samples the toast's paint,
+ *  not the player's field, so the queue has to drain first. Polled rather than
+ *  slept: the toast lands when the favourite write settles, so its 3 s life
+ *  (store.ts TOAST_TTL_MS) does not begin at the press. An empty match list
+ *  counts as drained, so a shell that renamed that column degrades this to a
+ *  no-op instead of a stuck wait. */
+const toastFree = (page) => page.waitForFunction(
+  () => [...document.querySelectorAll('div.fixed.bottom-20[aria-live="polite"]')]
+    .every((n) => n.children.length === 0),
+  null, { timeout: 15000 }).then(() => true).catch(() => false);
+
 /** The fullscreen player's CHROME, per cover polarity — the other half of the
  *  same rule the metadata tiers above are held to: nothing the player draws
  *  over the artwork may be the same tone as the artwork.
  *
- *  Three families, each measured from the pixels rather than from the class
+ *  Five families, each measured from the pixels rather than from the class
  *  list, because a computed colour says nothing about the field it lands on:
  *
  *   - the SLIDERS (the seek bar and the volume bar). The unplayed run, the
@@ -527,6 +593,17 @@ const settleIcons = (page) => page.evaluate(async () => {
  *     one geometry (the `−` and `+` at the same offset from either chip's own
  *     edges, the value box the same width, the same cy) and their own
  *     contrast at rest, on both polarities.
+ *   - the two HAIRLINE SEPARATORS on the control rows: exactly two of them,
+ *     1 x 24 px each, each read against the field BESIDE it (a 2 px column one
+ *     pixel to its right, inside its own margin — never over its own 1 px box,
+ *     where a clip would average the field into the ink). A light table's
+ *     separator must be DARKER than that field and hold 3:1 there; a dark
+ *     table's must be LIGHTER and is unchanged at >= 1.3:1.
+ *   - the two LIT control-row toggles, the like heart and the add-to-playlist
+ *     trigger: each pressed for real, then its painted glyph against the field
+ *     at a corner of its own box — 3:1 on EVERY cover, the polarity the cover
+ *     asks for, and NOT the accent while the live accent is too light for a
+ *     light table (the shipped white one is).
  */
 async function measureChrome(page, label, hex) {
   const coverLum = relLum(hexRgb(hex));
@@ -592,6 +669,51 @@ async function measureChrome(page, label, hex) {
       `run=rgb(${unfilled.map((v) => Math.round(v))}) field=rgb(${field.map((v) => Math.round(v))}) coverLum=${coverLum.toFixed(3)}`);
   }
   console.log(`  ${label}: ${sliderReport.join(" | ")}`);
+
+  // ---- the control rows' two hairline separators -------------------------
+  // Chrome, and held to the same rule as everything else the player draws over
+  // the artwork: the separator must be the tone that READS on the field it sits
+  // on. It used to be a fixed `bg-white/15` — chrome that did not follow the
+  // cover — which measured 1.19:1 on the white cover's washed field and 1.02:1
+  // on the mid-grey one: the "separators fade into the background" report, a
+  // hairline invisible right beside the near-black icons the ink table had
+  // already flipped for that field. The light table now draws
+  // `rgba(9,9,11,0.60)`; the dark table's white hairline is unchanged, so its
+  // floor below only has to catch a regression rather than pin the fix.
+  //
+  // Measured from the PIXELS BESIDE the separator, never over its own box: the
+  // hairline is 1 px wide, so a clip on it averages the field in with the ink
+  // (the same trap the chips' glyphs below are read around) and reports a
+  // contrast no reader sees. The field is a 2 px column one pixel to the RIGHT
+  // of the separator — inside the separator's own margin (`mx-0.5 sm:mx-1` on
+  // the transport row, `mx-2` on the seek row), which is field by construction,
+  // whatever glyph the next control paints there.
+  const dividerReport = [];
+  check(`${label}: the control rows carry two hairline separators`,
+    chrome.dividers.length === 2, JSON.stringify(chrome.dividers.map((d) => d.rect)));
+  for (const [n, d] of chrome.dividers.entries()) {
+    check(`${label}: separator ${n + 1} is a 1 x 24 px hairline`,
+      d.rect.w === 1 && Math.abs(d.rect.h - 24) <= 1, `${d.rect.w}x${d.rect.h} @${d.rect.x},${d.rect.y}`);
+    const field = await clipAvg(page, clipOf(d.rect.x + d.rect.w + 1, d.rect.y, 2, d.rect.h));
+    const ink = painted(d.bg, d.opacity, field);
+    const c = contrast(ink, field);
+    dividerReport.push(`#${n + 1} ${c.toFixed(2)}:1 ${d.bg} over rgb(${field.map((v) => Math.round(v))})`);
+    // POLARITY first — the cover answers, like every other ink here: the light
+    // table's separator is DARKER than its field, the dark table's LIGHTER.
+    // The fixed white hairline inverts this on both bright covers, which is
+    // the whole bug in one line.
+    check(`${label}: separator ${n + 1} is ${lightCover ? "darker" : "lighter"} than the field it splits (${lightCover ? "bright" : "dark"} cover)`,
+      (relLum(ink) < relLum(field)) === lightCover,
+      `ink=${d.bg}→rgb(${ink.map((v) => Math.round(v))}) field=rgb(${field.map((v) => Math.round(v))}) coverLum=${coverLum.toFixed(3)}`);
+    // …and the floor: 3:1 for non-text chrome on the light table — the fix's
+    // own number, two steps above the ~1.2:1 the fixed hairline it replaced
+    // measured on the white cover — and 1.3:1 on the dark table, where the
+    // white hairline has always been a deliberately soft one.
+    check(`${label}: separator ${n + 1} holds ${lightCover ? 3 : 1.3}:1 on the field`,
+      c >= (lightCover ? 3 : 1.3),
+      `${c.toFixed(2)}:1 (need ${lightCover ? 3 : 1.3}) bg=${d.bg} over field=rgb(${field.map((v) => Math.round(v))})`);
+  }
+  console.log(`  ${label}: dividers ${dividerReport.join(" | ")}`);
 
   // ---- the two lyric chips (pane's top-right corner) ---------------------
   // In the pane's top-right CORNER now, and held back until the pointer is
@@ -810,7 +932,118 @@ async function measureChrome(page, label, hex) {
   // a reader gets to them.
   await revealChips(page);
   await page.screenshot({ path: path.join(SHOTS, `${label}-chips.png`), clip: { x: 900, y: 56, width: 460, height: 140 } }).catch(() => {});
-  return { sliderReport, icons: idle.map((i) => `${i.label}=${i.color}@${i.opacity}`) };
+
+  // ---- the LIT control-row toggles (like heart, add-to-playlist) ---------
+  // The owner's other report on these rows: the clicked state was the INVISIBLE
+  // one. Both toggles light with the app's one "this is on" colour,
+  // `text-accent` — and `--accent` ships WHITE, so a lit heart over a bright
+  // cover drew ~1.1:1 (white on white). `litInk` keeps the accent where the
+  // field can show it (the dark table, the shipped white included) and falls
+  // back to the table's own full ink where it cannot (the light table's
+  // near-black zinc-950), so the lit glyph must clear 3:1 on EVERY cover and
+  // must NOT be the accent on the two light-table covers.
+  //
+  // The glyph is the element's own colour at its own opacity over the field
+  // sampled at a corner of its own box — the top-bar idiom, kept: both controls
+  // are `p-1.5 sm:p-2` around an 18 px glyph, so a 6 px corner clip is padding
+  // and therefore field (the buttons draw no background of their own; only
+  // their hover half does, and the pointer is parked before every read).
+  //
+  // This half PRESSES for real — a favourite write and an opened menu — so it
+  // runs LAST: every pixel read and screenshot above is taken on the surface
+  // the run found. Both are put back afterwards (the heart unliked, the menu
+  // closed), and the toast the like raises is awaited first: the shell stacks
+  // toasts over this very band (`App.tsx` `fixed bottom-20`), and a field
+  // sample taken under one would be the toast's paint.
+  const litBefore = await readChrome(page);
+  check(`${label}: the like heart and the add-to-playlist trigger are both on the control row`,
+    !!(litBefore && litBefore.lit.like && litBefore.lit.playlist),
+    JSON.stringify(litBefore && litBefore.lit));
+  const litReport = [];
+  const accent = (litBefore && litBefore.accent) || "255 255 255";
+  const accentRgb = parseRgb(accent);
+  const accentLum = relLum(accentRgb);
+  const isAccent = (css) => JSON.stringify(parseRgb(css)) === JSON.stringify(accentRgb);
+  const overlaySel = "div.fixed.inset-0.z-50";
+  /** One lit control: its painted glyph over the field at a corner of its own
+   *  box, then the three floors — 3:1 on every cover, the ink answering the
+   *  cover like everything else here, and the shipped white accent refused
+   *  where the field cannot show it. The last one is stated on the token: while
+   *  the live `--accent` is too light for a light table (> 0.35 relative
+   *  luminance, `litInk`'s own line), a light-table control must not wear it. */
+  const litCheck = async (who, el) => {
+    if (!el) { check(`${label}: the ${who} is on the control row`, false, "not in the DOM"); return; }
+    const field = await clipAvg(page, clipOf(el.rect.x + 1, el.rect.y + 1, 6, 6));
+    const ink = painted(el.color, el.opacity, field);
+    const c = contrast(ink, field);
+    litReport.push(`${who}=${el.color}@${el.opacity} ${c.toFixed(2)}:1`);
+    check(`${label}: the ${who} holds 3:1 on the field`, c >= 3,
+      `${c.toFixed(2)}:1 colour=${el.color}@${el.opacity} over field=rgb(${field.map((v) => Math.round(v))}) `
+      + `painted=rgb(${ink.map((v) => Math.round(v))})`);
+    check(`${label}: the ${who} inks against the cover (${lightCover ? "bright" : "dark"})`,
+      (relLum(ink) < relLum(field)) === lightCover,
+      `painted=rgb(${ink.map((v) => Math.round(v))}) field=rgb(${field.map((v) => Math.round(v))}) coverLum=${coverLum.toFixed(3)}`);
+    check(`${label}: the ${who} is not the accent a light field cannot show`,
+      !(lightCover && accentLum > 0.35) || !isAccent(el.color),
+      `colour=${el.color} accent=${accent} accentLum=${accentLum.toFixed(3)} coverLum=${coverLum.toFixed(3)}`);
+  };
+  const heart = page.locator(`${overlaySel} button[aria-label="Like this track"], ${overlaySel} button[aria-label="Unlike"]`).first();
+  /** Wait (bounded) for one of the two controls to reach the state its press
+   *  asked for, read the same way `readChrome` reads it. The like press is a
+   *  SERVER write — `useFav` flips `fav` in `onSuccess`, not on the click — so
+   *  "press, then sample" would race the round trip and call a correct app
+   *  broken; a write that never lands returns null after ~6 s and fails the
+   *  check below rather than stalling the run. */
+  const untilLit = async (key, want) => {
+    for (let i = 0; i < 40; i++) {
+      const raw = await readChrome(page);
+      const el = raw && raw.lit[key];
+      if (el && want(el)) return el;
+      await sleep(150);
+    }
+    return null;
+  };
+  if (await heart.count()) {
+    // Normalise first: a run that died with the heart lit must not hand the
+    // next one a state it never pressed.
+    if ((await heart.getAttribute("aria-pressed")) === "true") { await heart.click(); await sleep(500); }
+    await heart.click();          // unlike → like: the LIT state, the accent's own
+    const lit = await untilLit("like", (el) => el.pressed === "true");
+    await sleep(400);             // the toast mounts a frame after the state it reports
+    await toastFree(page);        // the "Liked — <track>" toast lands on this band
+    await park();
+    const now = await readChrome(page);
+    const heartLit = now && now.lit.like;
+    check(`${label}: pressing the heart lights it (aria-pressed)`,
+      !!heartLit && heartLit.pressed === "true", JSON.stringify(lit) + " → " + JSON.stringify(heartLit));
+    await litCheck("lit heart", heartLit);
+    await heart.click();          // …and back to the unliked state
+    await sleep(400);             // its own "Unliked — <track>" toast mounts…
+    await toastFree(page);        // …and has to leave: the playlist read below
+                                  // samples this same band
+  }
+  const plBtn = page.locator(`${overlaySel} button[aria-label="Add this track to a playlist"]`).first();
+  if (await plBtn.count()) {
+    await plBtn.click();          // opens the menu: the other lit state, `litInk`'s own
+    const lit = await untilLit("playlist", (el) => el.expanded === "true");
+    await park();
+    const now = await readChrome(page);
+    const plLit = now && now.lit.playlist;
+    check(`${label}: pressing the playlist trigger opens its menu (aria-expanded)`,
+      !!plLit && plLit.expanded === "true", JSON.stringify(lit) + " → " + JSON.stringify(plLit));
+    await litCheck("open add-to-playlist", plLit);
+    // One Escape closes the menu and only the menu: the player's own Escape
+    // handler defers to `plOpen` while this popover is up (NowPlayingView).
+    await page.keyboard.press("Escape");
+    await sleep(350);
+    const shut = await readChrome(page);
+    check(`${label}: Escape closes the add-to-playlist menu`,
+      !!(shut && shut.lit.playlist) && shut.lit.playlist.expanded === "false",
+      JSON.stringify(shut && shut.lit.playlist));
+  }
+  console.log(`  ${label}: lit ${litReport.join(" | ")}`);
+
+  return { sliderReport, litReport, icons: idle.map((i) => `${i.label}=${i.color}@${i.opacity}`) };
 }
 
 async function measure(page, hex, label, pick) {

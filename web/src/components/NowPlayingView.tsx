@@ -21,6 +21,7 @@ import StarRating from "./StarRating";
 import ScrollingText from "./ScrollingText";
 import { ratingOf, useRatings, useSetRating } from "../lib/ratings";
 import CoverImg, { ROW_COVER_W, PANE_COVER_W } from "./CoverImg";
+import { useNowPlayingMeta } from "../lib/nowPlaying";
 import Popover, { MenuItem } from "./Popover";
 import ScrubSeek from "./ScrubSeek";
 import { MAX_DB, MIN_DB, activeAnalyser } from "../lib/analyser";
@@ -262,6 +263,22 @@ interface LyricInk {
    *  "Up next" chip's own label are text: the readout keeps `chromeText`. */
   chromeOn: string;
   chromeOff: string;
+  /** A lit TOGGLE on the control rows — the like heart's favourite state and
+   *  the add-to-playlist button while its menu is open.
+   *
+   *  Their lit state is the app's ONE "this is on" colour, `text-accent`
+   *  (every heart from a library row to the OS's lock screen). `--accent`
+   *  ships WHITE, so on this table the accent can vanish into the cover: a lit
+   *  heart measured ~1.1:1 on a white one — the owner's "the like / playlist
+   *  button should stay the same colour even when clicked", where the clicked
+   *  state was the invisible one. `chromeLit` is therefore the accent ONLY
+   *  when the accent is dark enough to read here, and `litFallback` (this
+   *  table's own full ink) otherwise; `litInk(accent)` below makes that
+   *  choice from the live token, so a custom dark accent still lights the
+   *  glyph on a bright cover while the shipped white one does not. */
+  litFallback: string;
+  /** The hover half of a lit control: it still answers the pointer. */
+  litHover: string;
   /** The SLIDERS' ink — the seek bar and the volume bar, the two controls
    *  that paint a track rather than a glyph. They are four values because a
    *  track is four surfaces (the unplayed run, the played run, the thumb and
@@ -278,6 +295,17 @@ interface LyricInk {
   seekFill: string;
   seekThumb: string;
   seekRing: string;
+  /** The two hairline separators on the control rows (between the transport
+   *  and the track actions, and between the duration and the volume group).
+   *  They are chrome and they take the table's polarity like every other
+   *  control: a fixed `bg-white/15` measured 1.19:1 on the white cover and
+   *  1.02:1 on the mid-grey one — i.e. the separators the owner reported
+   *  "fading into the background" while the icons either side of them were
+   *  painted for the field. `currentColor` (a Tailwind `bg-current`) is what
+   *  keeps them inheritance-driven, so a cover that flips the table flips
+   *  them with it and the two rows cannot drift apart: the value here is the
+   *  ink COLOUR, and the alpha that softens it is the class's own. */
+  divider: string;
   /** The frequency strip's ink, when the visualizer is shown over the artwork.
    *  Same rule as the chrome above, and the same table: a canvas cannot wear a
    *  Tailwind class, so it takes the polarity itself and picks its own
@@ -302,6 +330,10 @@ const INK_ON_DARK: LyricInk = {
   chromeText: "text-zinc-300",
   chromeOn: "text-accent hover:bg-white/10",
   chromeOff: "text-zinc-300 hover:text-white hover:bg-white/10 opacity-60 hover:opacity-100",
+  // The dark field reads the accent as it always has — a white icon on a dark
+  // cover is never the problem — so the fallback is not reached here.
+  litFallback: "text-white",
+  litHover: "hover:bg-white/10",
   // White at two strengths for the two runs, so the played run is told from
   // the unplayed one by more than the thumb's position, and a solid white
   // thumb with a dark ring so the dot reads as a knob on both runs.
@@ -309,6 +341,8 @@ const INK_ON_DARK: LyricInk = {
   seekFill: "rgb(255 255 255)",
   seekThumb: "rgb(255 255 255)",
   seekRing: "rgb(0 0 0 / 0.45)",
+  // The white hairline the dark field has always drawn, unchanged.
+  divider: "rgba(255,255,255,0.15)",
   viz: "light",
   scrim: "",
 };
@@ -331,6 +365,12 @@ const INK_ON_LIGHT: LyricInk = {
   // "not the same brightness" AND as blending into the artwork. 0.65 of the
   // solid ink clears the 3:1 non-text floor on every measured field.
   chromeOff: "text-zinc-950 opacity-65 hover:opacity-100 hover:bg-black/5",
+  // The light table is where the accent has to earn its place: full ink
+  // carries the lit state when the accent is too light to read on the cover
+  // (see the field's own note), and the hover wash is the dark one this table
+  // already uses everywhere else.
+  litFallback: "text-zinc-950",
+  litHover: "hover:bg-black/5",
   // Near-black at two strengths, the same rule as the dark table above: the
   // unplayed run at 0.50 alpha (3.8:1 on the white cover's washed field) and
   // the played run solid, with a white ring so the dark dot reads as a knob.
@@ -338,6 +378,17 @@ const INK_ON_LIGHT: LyricInk = {
   seekFill: "rgb(9 9 11)",
   seekThumb: "rgb(9 9 11)",
   seekRing: "rgb(255 255 255 / 0.5)",
+  // The near-black twin of the dark table's white hairline. It cannot be the
+  // same 15 %: a hairline reads by the gap between itself and the field, and
+  // the light table's field is near the TOP of the range (a white cover's wash
+  // measured ~rgb(230) in tools/check_np_metadata_contrast.cjs), so 15 % of
+  // black over it is 1.03:1 — the separator the owner reported as fading away
+  // while the icons either side of it were already flipped to near-black.
+  // 0.60 is the same optical weight as the dark table's 0.15 white on its own
+  // fields (both land in the 1.5:1 band at the dark end), and it clears 3:1
+  // from the mid-grey cover up — two full steps above the 1.6:1 a 0.30
+  // hairline produced there.
+  divider: "rgba(9,9,11,0.60)",
   viz: "dark",
   scrim: "",
 };
@@ -349,6 +400,44 @@ export function npLuminance(rgb: [number, number, number]): number {
     return s <= 0.03928 ? s / 12.92 : ((s + 0.055) / 1.055) ** 2.4;
   };
   return 0.2126 * lin(rgb[0]) + 0.7152 * lin(rgb[1]) + 0.0722 * lin(rgb[2]);
+}
+
+/** A LIT control-row toggle's ink — the like heart and the open
+ *  add-to-playlist button — against *table*'s field.
+ *
+ *  The app lights these with `--accent`, and that is what the owner asked for
+ *  ("stay the same colour even when clicked"). The accent is the listener's own
+ *  colour, though, and the shipped one is white: over a bright cover a
+ *  `text-accent` glyph measured ~1.1:1, i.e. the clicked state was the
+ *  invisible one. So the accent is used only when it can actually be seen on
+ *  this field — its own contrast against the table's BASE ink is the tell, and
+ *  the comparison is the same one `lib/accent.inkFor` makes for a fill — and
+ *  otherwise the table's `litFallback` carries the state in full ink. Nothing
+ *  here reads a cover colour: the table already decided the polarity, and a
+ *  light table's full ink is near-black, which is exactly the substitute
+ *  `wordNow` and `chromeOn` make for the same reason.
+ *
+ *  The accent is read through `--accent` at render (so a preset changed in
+ *  Settings lands on the next paint) and edited here is impossible — this is a
+ *  display decision, never a write. */
+export function litInk(table: LyricInk): string {
+  const accent = accentTriplet();
+  const l = accent ? npLuminance(accent) : 1;
+  // On the dark table the field is dark, so a LIGHT accent reads; on the light
+  // table only a DARK one does. The table says which by its own base ink.
+  const lightTable = table.active === "text-zinc-950";
+  const visible = lightTable ? l <= 0.35 : l >= 0.12;
+  return `${visible ? "text-accent" : table.litFallback} ${table.litHover}`;
+}
+
+/** The live `--accent` as an RGB triple, or null before the shell has written
+ *  it (or in a renderer with no document, e.g. a check's SSR import). */
+function accentTriplet(): [number, number, number] | null {
+  if (typeof document === "undefined") return null;
+  const raw = getComputedStyle(document.documentElement).getPropertyValue("--accent").trim();
+  const parts = raw.split(/[\s,]+/).map(Number);
+  if (parts.length < 3 || parts.some((n) => !Number.isFinite(n))) return null;
+  return [parts[0], parts[1], parts[2]];
 }
 
 /** Where the two tables swap: the cover's own average luminance, in relative
@@ -662,6 +751,18 @@ export default function NowPlayingView(p: Props) {
   // setting must not claim a refusal the app has not verified (`allowPlainOf`).
   const { data: cfg } = useQuery({ queryKey: ["config"], queryFn: api.config, staleTime: 5 * 60 * 1000 });
   const allowPlain = allowPlainOf(cfg);
+  // The queue drawer's own infinite-playback switch (`infinite_playback`): the
+  // same ["config"] cache the player bar reads, so one flip lands on both
+  // surfaces. `null` = the server does not ship the key — no switch is drawn
+  // (the bar's append effect treats a missing key as off, the shipped default).
+  const infinite = cfg?.infinite_playback === true ? true : cfg && "infinite_playback" in cfg ? false : null;
+  const saveInfinite = (v: boolean) => {
+    if (!cfg) return;
+    api
+      .saveConfig({ ...cfg, infinite_playback: v })
+      .then(() => qc.invalidateQueries({ queryKey: ["config"] }))
+      .catch((e) => toast.error(String(e)));
+  };
   // ---- the phone's compact header ------------------------------------------
   // Reported on a phone: the cover art, the title + format readout, the
   // album · artist row and the star row together took the whole screen before
@@ -800,7 +901,7 @@ export default function NowPlayingView(p: Props) {
   // cover file + dominant color for the ambient background — the album
   // payload also supplies the canonical album artist / album name shown
   // under the cover.
-  const { data: album } = useQuery({
+  const { data: album, isPending: albumPending } = useQuery({
     queryKey: ["album", p.current.albumPath],
     queryFn: () => api.album(p.current.albumPath),
     staleTime: 5 * 60 * 1000,
@@ -816,6 +917,15 @@ export default function NowPlayingView(p: Props) {
   // Per-track sidecar art wins; the album cover is the fallback — the
   // now-playing art must match the track, not just the album.
   const coverFile = p.current.coverFile ?? album?.cover_file ?? p.current.albumCover ?? null;
+  // Whether the art's ADDRESS is known at all: a library queue row carries its
+  // own cover filenames, while a row built from an album card carries none and
+  // waits for the album payload above (whose own `CoverImg` adds a Cache
+  // Storage hop on top of the fetch). The metadata block's record waits for
+  // both, and for this URL's bytes, so the picture is never a piece that lands
+  // a round trip after the words (see lib/nowPlaying).
+  const coverNamed = !!(p.current.coverFile || p.current.albumCover) || !albumPending;
+  const paneCoverUrl =
+    coverNamed && coverFile ? api.coverUrl(p.current.albumPath, coverFile, { w: PANE_COVER_W }) : null;
   const { data: colorData } = useQuery({
     queryKey: ["coverColor", p.current.albumPath],
     queryFn: () => api.coverColor(p.current.albumPath),
@@ -957,6 +1067,16 @@ export default function NowPlayingView(p: Props) {
   // Same query key as the <video>'s own hook, so the <track> list the picker
   // shows is the one the element actually carries — no second fetch.
   const captionTracks = useSubtitleTracks(videoPath);
+  /** The control rows' separators (the transport/track-actions divider and
+   *  the duration/volume one). Over the artwork they ride the ink table, on
+   *  the same rule as the chrome around them: a fixed `bg-white/15` hairline
+   *  measured ~1.2:1 on a white cover and ~1.0:1 on the mid-grey one — the
+   *  "separators fade into the background" report — while the icons either
+   *  side of them had already flipped with the cover. Over a VIDEO the row
+   *  sits on the player's own black gradient rather than on the artwork, so it
+   *  keeps the white hairline that chrome has always drawn (the same rule as
+   *  `barOn`/`barOff`). */
+  const dividerInk = videoPath ? "rgba(255,255,255,0.15)" : ink.divider;
 
   // ---- auto-hiding chrome (video mode) ------------------------------------
   // Like every serious video player: any mouse movement / key / touch shows
@@ -1445,6 +1565,41 @@ export default function NowPlayingView(p: Props) {
   const techStr = fmtPair(tech);
   const techTip = fmtTech(tech);
 
+  // ---- The metadata block: one record, one paint -------------------------
+  // The title, the marks beside it, the album · artist line (the release year
+  // included) and the art are committed as ONE record, so a track change is
+  // one paint instead of the four the pieces used to arrive in: the queue
+  // row's own strings, the per-track payload that rewrites them, the payload
+  // that names the cover files and the image's own bytes (see lib/nowPlaying).
+  // `block` is null until the first track's record is ready — the block's rows
+  // are always rendered and keep their heights, so that wait is an empty block
+  // for one round trip rather than the stem / folder name / "—" the payload
+  // would then replace.
+  const blockRecord = {
+    path: p.current.path,
+    albumPath: p.current.albumPath,
+    coverFile,
+    title,
+    albumLine,
+    artistLine,
+    releaseYear,
+    techStr,
+    techTip,
+    advisory: freshTags?.ITUNESADVISORY ?? p.current.advisory,
+    trackHref,
+    albumHref,
+    artistHref,
+  };
+  const block = useNowPlayingMeta(blockRecord, !tagsStale, coverNamed ? paneCoverUrl : undefined);
+  // The art the block draws — the committed record's own cover, and NOTHING
+  // while no record is committed yet. The picture is one of the pieces that
+  // must not land ahead of the words, and the surfaces draw no placeholder that
+  // the art then replaces: the slot keeps its box (and so its size) and simply
+  // stays empty for the round trip the first record takes (see lib/nowPlaying).
+  const artAlbumPath = block?.albumPath ?? p.current.albumPath;
+  const artCoverFile = block ? block.coverFile : null;
+  const artPending = !block;
+
   // What the options menu says about the gain the player is applying right now
   // — the same three cases the bar's chip covers: tags, measured on demand,
   // and unity (nothing shown in the bar).
@@ -1488,21 +1643,25 @@ export default function NowPlayingView(p: Props) {
   const textBlock = (
     /* Every text row keeps a fixed height and is ALWAYS rendered —
        blanking a row while the next track's tags load is what made
-       the block (and the title itself) shake on next/previous. */
+       the block (and the title itself) shake on next/previous. The
+       strings come from the block's own committed record, so the rows
+       hold still and simply FILL with the new track in one paint; the
+       empty rows below are the one round trip it takes that record's
+       first commit to arrive (see lib/nowPlaying). */
     <div className={`text-center w-[26rem] max-w-full min-w-0 ${ink.shade}`}>
-      <div className="h-8 flex items-center justify-center gap-2 min-w-0" title={title}>
+      <div className="h-8 flex items-center justify-center gap-2 min-w-0" title={block?.title}>
         {/* The title DRIFTS when it does not fit — the same marquee the player
             bar's own title uses (components/ScrollingText), so a long track
             name is READ here instead of cut at "…" (reported). A short one
             never moves: the shift is measured, not guessed. It also opens the
             track's own page (see MetaLink). */}
-        <MetaLink href={trackHref} text={title} className={`text-2xl font-bold ${ink.active}`} onOpen={p.onClose} />
-        <AdvisoryMark value={freshTags?.ITUNESADVISORY ?? p.current.advisory} />
+        <MetaLink href={block?.trackHref ?? null} text={block?.title ?? ""} className={`text-2xl font-bold ${ink.active}`} onOpen={p.onClose} />
+        <AdvisoryMark value={block?.advisory ?? null} />
         {/* bit depth/sample rate rides beside the title, same as the
             player bar; tooltip carries the full codec/bitrate detail */}
-        {techStr && (
-          <span className={`text-[11px] font-mono shrink-0 ${ink.dim}`} title={techTip || undefined}>
-            {techStr}
+        {block?.techStr && (
+          <span className={`text-[11px] font-mono shrink-0 ${ink.dim}`} title={block.techTip || undefined}>
+            {block.techStr}
           </span>
         )}
         {/* The refused-plain mark. This install does not accept untimed lyrics
@@ -1520,8 +1679,12 @@ export default function NowPlayingView(p: Props) {
             text on screen, which is deliberately the PREVIOUS track's while
             the next one loads, so an ungated mark claimed "plain" from lyrics
             the new track may not even have — an instrumental reached by next /
-            previous wore it for the length of the fetch (reported). */}
-        {lyricsState === "plain-refused" && !staleLyrics && (
+            previous wore it for the length of the fetch (reported). It also
+            waits for the BLOCK to have committed to that track: while the
+            record is held, the row still reads the outgoing track's title, so
+            a mark derived from the incoming lyrics would sit beside the wrong
+            name (see lib/nowPlaying). */}
+        {lyricsState === "plain-refused" && !staleLyrics && block?.path === p.current.path && (
           <LyricsKindChip kind="plain" allowPlain={false} size="sm" />
         )}
       </div>
@@ -1532,43 +1695,47 @@ export default function NowPlayingView(p: Props) {
           its own page; the row keeps its fixed height either way. */}
       <div
         className="h-5 mt-1 flex items-center justify-center gap-2 min-w-0"
-        title={[albumLine, artistLine, releaseYear].filter(Boolean).join(" · ")}
+        title={[block?.albumLine, block?.artistLine, block?.releaseYear].filter(Boolean).join(" · ")}
       >
-        <MetaLink href={albumHref} text={albumLine} className={`text-sm ${ink.dim}`} onOpen={p.onClose} />
-        {albumLine && artistLine ? <span className={`shrink-0 text-sm ${ink.dim}`}>·</span> : null}
-        {artistLine ? <MetaLink href={artistHref} text={artistLine} className={`text-sm ${ink.dim}`} onOpen={p.onClose} /> : null}
+        <MetaLink href={block?.albumHref ?? null} text={block?.albumLine ?? ""} className={`text-sm ${ink.dim}`} onOpen={p.onClose} />
+        {block?.albumLine && block?.artistLine ? <span className={`shrink-0 text-sm ${ink.dim}`}>·</span> : null}
+        {block?.artistLine ? <MetaLink href={block.artistHref} text={block.artistLine} className={`text-sm ${ink.dim}`} onOpen={p.onClose} /> : null}
         {/* The original release year rides THIS row rather than a line of its
             own (issue #66): the block is a fixed-height stack, and the year is
             part of the same fact pair the row already states. Absent tags draw
             nothing at all — no separator, no dash — so a release with no date
             reads exactly as it did before. */}
-        {releaseYear ? (
+        {block?.releaseYear ? (
           <>
             <span className={`shrink-0 text-sm ${ink.dim}`}>·</span>
-            <span className={`shrink-0 text-sm ${ink.dim}`}>{releaseYear}</span>
+            <span className={`shrink-0 text-sm ${ink.dim}`}>{block.releaseYear}</span>
           </>
         ) : null}
       </div>
       {/* Fixed height and always rendered, like the rows above, so the block
-          never jumps on next/previous. The control's own tooltip carries the
-          rest: half stars on a star's left half, the value already set clears
-          it, and the keyboard works (← / →, Delete). */}
+          never jumps on next/previous; the control itself is the BLOCK's track,
+          so it appears with the rest of the record rather than a round trip
+          ahead of the name it belongs to (see lib/nowPlaying). The control's
+          own tooltip carries the rest: half stars on a star's left half, the
+          value already set clears it, and the keyboard works (← / →, Delete). */}
       <div className={`h-7 mt-1 flex items-center justify-center ${ink.chromeText}`}>
-        <StarRating
-          size="md"
-          label="Track rating"
-          value={ratingOf(ratingsData?.ratings, p.current.path)}
-          onChange={(v) => setRating(p.current.path, v)}
-          pending={pending(p.current.path)}
-          /* The two colours are the INK's, not the control's defaults: this row
-             sits straight on the artwork, where a zinc-600 outline and a white
-             accent fill both blend into a bright cover. The outline keeps a
-             little air (the scale should not shout) while the filled half takes
-             the ink at full strength — the same polarity rule the lyrics, the
-             chrome and the frequency strip follow (R52c). */
-          emptyClass="text-current opacity-45"
-          fillClass="fill-current"
-        />
+        {block && (
+          <StarRating
+            size="md"
+            label="Track rating"
+            value={ratingOf(ratingsData?.ratings, block.path)}
+            onChange={(v) => setRating(block.path, v)}
+            pending={pending(block.path)}
+            /* The two colours are the INK's, not the control's defaults: this row
+               sits straight on the artwork, where a zinc-600 outline and a white
+               accent fill both blend into a bright cover. The outline keeps a
+               little air (the scale should not shout) while the filled half takes
+               the ink at full strength — the same polarity rule the lyrics, the
+               chrome and the frequency strip follow (R52c). */
+            emptyClass="text-current opacity-45"
+            fillClass="fill-current"
+          />
+        )}
       </div>
     </div>
   );
@@ -1594,6 +1761,7 @@ export default function NowPlayingView(p: Props) {
       mbid={freshTags?.MUSICBRAINZ_TRACKID}
       boxClass="tap-hit rounded-lg transition-colors"
       unlikedClass={ink.chromeButton}
+      likedClass={videoPath ? "text-accent hover:bg-white/10" : litInk(ink)}
       iconClass="h-[18px] w-[18px]"
       likeLabels
       className={className}
@@ -1645,8 +1813,13 @@ export default function NowPlayingView(p: Props) {
       </button>
       {/* the divider belongs to the row's CONTROL line, not the row box:
           self-center + a fixed height keep it on the same axis as the icons
-          either side of it, whatever heights they have */}
-      <span className="w-px h-6 bg-white/15 mx-0.5 sm:mx-1 self-center shrink-0" />
+          either side of it, whatever heights they have. Its ink is the table's
+          (`ink.divider`), not a fixed white: a `bg-white/15` hairline is
+          chrome that does NOT follow the cover, which is exactly the
+          "separators fade into the background" report — 1.19:1 on a white
+          cover, 1.02:1 on the mid-grey one, invisible beside the near-black
+          icons the table had already flipped for that field. */}
+      <span className="w-px h-6 self-center shrink-0 mx-0.5 sm:mx-1" style={{ background: dividerInk }} />
       {/* The favourite's ONE home now, at every width (R267): it used to be a
           lone row pinned to the bottom-left of the player below `lg`, drawn
           outside the scrolling body — which is where a reader had to go
@@ -1662,7 +1835,7 @@ export default function NowPlayingView(p: Props) {
         <button
           aria-label="Add this track to a playlist"
           aria-expanded={plOpen}
-          className={`p-1.5 sm:p-2 rounded-lg transition-colors ${plOpen ? "text-accent" : ink.chromeButton}`}
+          className={`p-1.5 sm:p-2 rounded-lg transition-colors ${plOpen ? (videoPath ? "text-accent hover:bg-white/10" : litInk(ink)) : ink.chromeButton}`}
           onClick={() => setPlOpen(!plOpen)}
           title="Add this track to a playlist"
         >
@@ -1724,7 +1897,9 @@ export default function NowPlayingView(p: Props) {
           slack would otherwise push the divider visibly off-centre towards
           the volume group. */}
       <span className="w-10 text-right font-mono tabular-nums">{fmtDuration(duration)}</span>
-      <span className="w-px h-6 bg-white/15 self-center shrink-0 mx-2" />
+      {/* same ink as the transport row's divider (see the note there): one
+          table, so the two separators cannot disagree about the field */}
+      <span className="w-px h-6 self-center shrink-0 mx-2" style={{ background: dividerInk }} />
       <VolumeControl />
     </div>
   );
@@ -1837,7 +2012,12 @@ export default function NowPlayingView(p: Props) {
           enough to stay a backdrop. */}
       <div ref={ambRef} className="absolute inset-0 overflow-clip" aria-hidden>
         <div className="amb-cover absolute inset-0 blur-3xl opacity-[0.34]">
-          <CoverImg albumPath={p.current.albumPath} coverFile={coverFile} w={PANE_COVER_W} wrapperClass="w-full h-full" />
+          <CoverImg
+            albumPath={artAlbumPath}
+            coverFile={artCoverFile}
+            w={PANE_COVER_W}
+            wrapperClass={`w-full h-full ${artPending ? "invisible" : ""}`}
+          />
         </div>
         <div className="amb-sweep absolute -inset-1/2">
           <div
@@ -2361,10 +2541,13 @@ export default function NowPlayingView(p: Props) {
             {compactHeader && (
               <div className="md:hidden w-[26rem] max-w-full min-w-0 flex items-center gap-3 px-1">
                 <CoverImg
-                  albumPath={p.current.albumPath}
-                  coverFile={coverFile}
+                  albumPath={artAlbumPath}
+                  coverFile={artCoverFile}
                   w={ROW_COVER_W}
-                  wrapperClass="shrink-0 w-12 h-12 rounded-lg shadow-lg bg-raise overflow-hidden"
+                  // The block's stand-in below `md` takes the block's own cover
+                  // and its wait (see lib/nowPlaying): an empty box, never a
+                  // disc the committed art then replaces.
+                  wrapperClass={`shrink-0 w-12 h-12 rounded-lg shadow-lg bg-raise overflow-hidden ${artPending ? "invisible" : ""}`}
                 />
                 {/* min-w-0 + truncate down the whole chain, and the readout is
                     the ONE box allowed to keep its width: at 390px a long
@@ -2376,28 +2559,28 @@ export default function NowPlayingView(p: Props) {
                     carries the same marquee — measured, so a line that fits
                     stays still — over the fixed `h-6` / `h-5` rows. */}
                 <div className="flex-1 min-w-0">
-                  <div className={`h-6 flex items-center gap-2 min-w-0 ${ink.shade}`} title={title}>
-                    <MetaLink href={trackHref} text={title} className={`text-base font-bold ${ink.active}`} onOpen={p.onClose} />
-                    {techStr && (
-                      <span className={`shrink-0 text-[11px] font-mono ${ink.dim}`} title={techTip || undefined}>
-                        {techStr}
+                  <div className={`h-6 flex items-center gap-2 min-w-0 ${ink.shade}`} title={block?.title}>
+                    <MetaLink href={block?.trackHref ?? null} text={block?.title ?? ""} className={`text-base font-bold ${ink.active}`} onOpen={p.onClose} />
+                    {block?.techStr && (
+                      <span className={`shrink-0 text-[11px] font-mono ${ink.dim}`} title={block.techTip || undefined}>
+                        {block.techStr}
                       </span>
                     )}
                   </div>
                   <div
                     className={`h-5 flex items-center gap-1 min-w-0 ${ink.shade}`}
-                    title={[albumLine, artistLine, releaseYear].filter(Boolean).join(" · ")}
+                    title={[block?.albumLine, block?.artistLine, block?.releaseYear].filter(Boolean).join(" · ")}
                   >
-                    <MetaLink href={albumHref} text={albumLine} className={`text-xs ${ink.dim}`} onOpen={p.onClose} />
-                    {albumLine && artistLine ? <span className={`shrink-0 text-xs ${ink.dim}`}>·</span> : null}
-                    {artistLine ? <MetaLink href={artistHref} text={artistLine} className={`text-xs ${ink.dim}`} onOpen={p.onClose} /> : null}
+                    <MetaLink href={block?.albumHref ?? null} text={block?.albumLine ?? ""} className={`text-xs ${ink.dim}`} onOpen={p.onClose} />
+                    {block?.albumLine && block?.artistLine ? <span className={`shrink-0 text-xs ${ink.dim}`}>·</span> : null}
+                    {block?.artistLine ? <MetaLink href={block.artistHref} text={block.artistLine} className={`text-xs ${ink.dim}`} onOpen={p.onClose} /> : null}
                     {/* The same original release year the block shows — the
                         phone's header IS the block below `md`, so the two must
                         not disagree about the release. */}
-                    {releaseYear ? (
+                    {block?.releaseYear ? (
                       <>
                         <span className={`shrink-0 text-xs ${ink.dim}`}>·</span>
-                        <span className={`shrink-0 text-xs ${ink.dim}`}>{releaseYear}</span>
+                        <span className={`shrink-0 text-xs ${ink.dim}`}>{block.releaseYear}</span>
                       </>
                     ) : null}
                   </div>
@@ -2412,8 +2595,8 @@ export default function NowPlayingView(p: Props) {
                 />
               )}
               <CoverImg
-                albumPath={p.current.albumPath}
-                coverFile={coverFile}
+                albumPath={artAlbumPath}
+                coverFile={artCoverFile}
                 w={PANE_COVER_W}
                 // One size per breakpoint per LAYOUT: the art never jumps when a
                 // track's lyrics load or finish, and above lg the pane sits
@@ -2422,9 +2605,11 @@ export default function NowPlayingView(p: Props) {
                 // compact header takes its place, and without them (`w-72`,
                 // 288 px) the cover is the phone composition's centrepiece, so
                 // a track with no lyrics is not a bare strip on a whole screen.
+                // `invisible` only while the block's first record is still
+                // resolving: the box keeps its size and shows nothing.
                 wrapperClass={`relative rounded-2xl shadow-2xl bg-raise overflow-hidden lg:w-[min(28rem,48vh)] lg:h-[min(28rem,48vh)] ${
                   paneOpen ? "w-32 h-32" : "w-72 h-72"
-                }`}
+                } ${artPending ? "invisible" : ""}`}
               />
             </div>
             {/* the block the compact header stands in for; `hidden md:block`
@@ -2630,6 +2815,18 @@ export default function NowPlayingView(p: Props) {
               {queue.length > index + 1 ? ` · ${queue.length - index - 1} up next` : ""}
             </div>
             <div className="flex items-center shrink-0">
+              {infinite !== null && (
+                <button
+                  className={`px-1.5 py-1 rounded-md text-[10px] font-mono tracking-widest border ${
+                    infinite ? "text-accent border-accent/40 bg-accent/10" : "text-zinc-500 border-white/10 hover:text-white hover:bg-white/10"
+                  }`}
+                  onClick={() => saveInfinite(!infinite)}
+                  title={infinite ? "Infinite playback is ON — a few similar tracks are appended when the queue runs out. Click to turn it off." : "Infinite playback is OFF — the queue ends after its last track. Click to keep playing past the end."}
+                  aria-pressed={infinite}
+                >
+                  ∞
+                </button>
+              )}
               {queue.length > index + 1 && (
                 <button
                   className="px-1.5 py-1 rounded-md text-[10px] font-mono tracking-widest text-zinc-500 hover:text-white hover:bg-white/10"

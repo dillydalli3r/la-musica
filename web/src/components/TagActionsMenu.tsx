@@ -562,7 +562,9 @@ export default function TagActionsMenu({
           onClose={() => setView(null)}
           icon={Users}
           title="Credits"
-          subtitle={albumPath || singleTrack}
+          // No subtitle: this used to be the raw path, and the panel's own
+          // identity header (title, artist, album, label…) now says what this
+          // is, from the tags rather than from where the file happens to sit.
           width="max-w-lg"
           bodyClass="px-5 py-5"
         >

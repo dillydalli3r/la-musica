@@ -245,6 +245,7 @@ export default function LibraryPage() {
   // background refetch (a remount, a save's invalidation) keeps using the
   // cache instead of forcing a re-walk every time.
   const forceRefresh = useRef(false);
+  const qc = useQueryClient();
   const { data: lib, isLoading, error, isFetching, refetch } = useQuery({
     queryKey: ["library"],
     queryFn: () => {
@@ -255,6 +256,17 @@ export default function LibraryPage() {
   });
   const refresh = () => {
     forceRefresh.current = true;
+    // The walk is SERVER-side (`?refresh=1` drops the library, home and
+    // recommendation caches), so every read DERIVED from it has to be re-asked
+    // too. This page's own payload comes back with the refetch below, but the
+    // grading strip reads its own summary (`GET /api/grades/summary`,
+    // `useGradesSummary`) and kept quoting the counts from before the walk for
+    // its whole 5-minute staleTime — the "Refresh does not update the warning"
+    // report. Just that key: `invalidateLibrary` would also invalidate
+    // ["library"], and the refetch below is the one that must carry
+    // `?refresh=1` — a second, flagless refetch would answer from the very
+    // cache this press just dropped.
+    qc.invalidateQueries({ queryKey: ["gradesSummary"] });
     void refetch();
   };
   const { data: config } = useQuery({ queryKey: ["config"], queryFn: api.config });
@@ -267,7 +279,6 @@ export default function LibraryPage() {
   const runAllIds = Array.isArray(config?.run_all_order) && config.run_all_order.length
     ? config.run_all_order.filter((n: number) => isScriptId(n))
     : DEFAULT_RUN_ALL;
-  const qc = useQueryClient();
   const navigate = useNavigate();
   const query = useStore((s) => s.query);
   // The Library's own search box edits the SAME store value the top bar does:

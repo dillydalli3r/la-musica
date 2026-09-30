@@ -749,8 +749,17 @@ const revealCorner = async (page) => {
   const rest = await probe();
   if (!rest) return null;
   await page.mouse.move(rest.point.x, rest.point.y);
-  await sleep(350);
-  const shown = await probe();
+  // The reveal is a CSS transition, so a fixed sleep samples whatever the ease
+  // happened to be at — measured on a loaded machine as 0.990516 against the
+  // assertion's exact 1, a "held back" failure that says nothing about the
+  // reveal (0 at rest, ~1 when pointed at, both correct). Poll until the strip
+  // is fully revealed, up to a couple of seconds; the assertions below keep
+  // their exact thresholds, they just read the settled state.
+  let shown = await probe();
+  for (let i = 0; i < 25 && (shown?.opacity ?? 0) < 0.999; i++) {
+    await sleep(100);
+    shown = await probe();
+  }
   return { restOpacity: rest.opacity, opacity: shown.opacity };
 };
 

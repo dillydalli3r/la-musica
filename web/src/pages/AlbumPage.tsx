@@ -1,7 +1,7 @@
 ﻿import { Fragment, useRef, useState } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { Link, useNavigate, useParams } from "react-router-dom";
-import { ChevronDown, ChevronRight, CircleAlert, Play, Wand2, Trash2, FolderSync, FolderOpen, BarChart3, ImageUp, Image as ImageIcon, FileVideo, Film, Disc3, CloudDownload, Sparkles, ListPlus, ListStart, ShieldCheck, FileMusic, ListChecks, Info as InfoIcon, Loader2, Pencil, RefreshCw, Users } from "lucide-react";
+import { ChevronDown, ChevronRight, CircleAlert, Play, Wand2, Trash2, FolderSync, FolderOpen, BarChart3, ImageUp, Image as ImageIcon, FileVideo, Film, Disc3, CloudDownload, Sparkles, ListPlus, ListStart, ShieldCheck, FileMusic, ListChecks, Info as InfoIcon, Loader2, Pencil, RefreshCw, Tags, Users } from "lucide-react";
 import { api } from "../api";
 import { LinkChips, LinkEditorButton } from "../components/Links";
 import { SubtitledVideo } from "../components/SubtitledVideo";
@@ -1086,6 +1086,14 @@ export default function AlbumPage() {
                     { label: SCRIPT_LABEL[7], icon: FileMusic, onClick: () => runScripts([7]) },
                     { label: SCRIPT_LABEL[8], icon: FileMusic, onClick: () => runScripts([8]) },
                     { label: SCRIPT_LABEL[4], icon: FileMusic, onClick: () => runScripts([4]) },
+                    // 23 · Optimize tags: the scoped excess-tag strip, right
+                    // behind 3 (the other "clean this album up without a
+                    // whole-library pass" entry). The excess-tag and alias
+                    // grade failures name it as the fixer, so the album's own
+                    // actions menu is where a reader who just saw that failure
+                    // looks for it — it was reachable from the "…" menu before
+                    // this list remembered it.
+                    { label: SCRIPT_LABEL[23], icon: Tags, onClick: () => runScripts([23]) },
                     { label: "Remux videos", icon: FileVideo, hidden: rawVideos.length === 0, onClick: convertVideos, disabled: remuxing },
                   ],
                 },
@@ -1280,7 +1288,8 @@ export default function AlbumPage() {
           onClose={() => setCreditsOpen(false)}
           icon={Users}
           title="Credits"
-          subtitle={data.meta?.ALBUM ?? data.path.split("/").pop() ?? "album"}
+          // No subtitle: it repeated the album name the panel's own identity
+          // header draws from the tags (and the two could disagree).
           width="max-w-lg"
           bodyClass="px-5 py-5"
         >

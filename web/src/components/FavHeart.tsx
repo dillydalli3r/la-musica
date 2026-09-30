@@ -33,6 +33,7 @@ export default function FavHeart({
   revealOnHover = false,
   boxClass = "tap-hit p-1.5 rounded-md hover:bg-raise shrink-0 transition-colors",
   unlikedClass = "text-zinc-500 hover:text-zinc-200",
+  likedClass = "text-accent",
   likeLabels = false,
   disabled = false,
   onToggled,
@@ -56,10 +57,17 @@ export default function FavHeart({
    *  player's 18-px one are not the same object). */
   boxClass?: string;
   /** The colour the heart wears while the entity is NOT favourited. The
-   *  favourited colour is deliberately not configurable: a lit heart is
-   *  `text-accent` everywhere, which is what makes the lit state readable at a
-   *  glance across the app. */
+   *  favourited colour is `text-accent` everywhere by default — a lit heart is
+   *  what makes the state readable at a glance across the app — with ONE
+   *  override: the fullscreen player draws its chrome over the artwork, where
+   *  the shipped white accent vanishes into a bright cover, so it passes the
+   *  ink its own field can carry (`NowPlayingView`'s `litInk`). Every other
+   *  site keeps the accent. */
   unlikedClass?: string;
+  /** Overrides the LIT colour (the default `text-accent`). Withheld from every
+   *  site but the fullscreen player, whose field is the album's own cover —
+   *  see the note on `unlikedClass`. */
+  likedClass?: string;
   /** The player's hearts talk about LIKING THIS TRACK, the library's about
    *  favorites — the two vocabularies the app already used at each site, kept
    *  so this de-duplication changes no user-visible string. */
@@ -85,7 +93,7 @@ export default function FavHeart({
       aria-pressed={fav}
       disabled={disabled}
       className={`${boxClass} ${
-        fav ? "text-accent" : `${unlikedClass}${revealOnHover ? " row-hover" : ""}`
+        fav ? likedClass : `${unlikedClass}${revealOnHover ? " row-hover" : ""}`
       } ${className}${disabled ? " opacity-40 pointer-events-none" : ""}`}
       onClick={(e) => {
         e.preventDefault();

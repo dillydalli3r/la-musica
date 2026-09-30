@@ -1,4 +1,4 @@
-import { useQuery } from "@tanstack/react-query";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { useMemo, useRef, useState } from "react";
 import { Link } from "react-router-dom";
 import { AlertTriangle, ArrowDownUp, BarChart3, Clock, Disc3, Heart, ListChecks, Loader2, Radio, RefreshCw, Sparkles, Star, Users } from "lucide-react";
@@ -212,6 +212,7 @@ export default function HomePage() {
   // rather than a query key, so an ordinary background refetch (window focus)
   // keeps using the cache instead of forcing a rebuild every time.
   const forceRefresh = useRef(false);
+  const qc = useQueryClient();
   const { data, isLoading, isError, isFetching, refetch } = useQuery({
     queryKey: ["home"],
     queryFn: () => {
@@ -236,6 +237,15 @@ export default function HomePage() {
   });
   const refresh = () => {
     forceRefresh.current = true;
+    // The walk is SERVER-side (`?refresh=1` drops the library, home and
+    // recommendation caches), so the reads DERIVED from it must be re-asked
+    // too. This payload carries `grade_warning`, but the strip and the dot read
+    // their own summary (`GET /api/grades/summary`, `useGradesSummary`), whose
+    // cache this page only ever SEEDS from that field — so a re-walk left the
+    // strip quoting the counts from before it for a whole staleTime. One key,
+    // not `invalidateLibrary`: that helper also invalidates ["home"], and the
+    // refetch below is the one that must carry `?refresh=1`.
+    qc.invalidateQueries({ queryKey: ["gradesSummary"] });
     void refetch();
   };
   const [gridSize, pickGridSize] = useGridSize();

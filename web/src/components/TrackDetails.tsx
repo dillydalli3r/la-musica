@@ -1,11 +1,11 @@
-import { useState, type ReactNode } from "react";
+import { Fragment, useState, type ReactNode } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
-import { ShieldCheck, CircleAlert, Info, ExternalLink, Loader2, RefreshCw, ChevronDown, ChevronRight, Users, FileText } from "lucide-react";
+import { ShieldCheck, CircleAlert, Info, ExternalLink, Loader2, RefreshCw, ChevronDown, ChevronRight, Users, FileText, Copy } from "lucide-react";
 import type { LucideIcon } from "lucide-react";
 import { Link } from "react-router-dom";
 import { api, answerSources, checkTrackValues, replyFor } from "../api";
 import { toast } from "../store";
-import type { AdvisoryFetchResult, CreditRow, InstrumentalFetchResult } from "../api";
+import type { AdvisoryFetchResult, CreditIdentity, CreditRow, InstrumentalFetchResult } from "../api";
 import type { Track } from "../types";
 import { fmtDuration, fmtTech } from "../lib/fmt";
 import { trackRef } from "../lib/refs";
@@ -399,7 +399,8 @@ export function creditTagsFrom(tags: Record<string, unknown> | null | undefined)
 }
 
 /** Role-grouped credits for one track (`path`) or a whole album (`album`),
- *  labelled with the source they came from.
+ *  under the identity header that names what they belong to, labelled with the
+ *  source they came from.
  *
  *  Mounted only when its caller opens it — that is what keeps the lookup off
  *  the modal's own mount — and it never blocks: while waiting it renders one
@@ -420,9 +421,19 @@ export function CreditsPanel({ path, album, tags }: { path?: string; album?: str
       </div>
     );
   const rows = data?.rows ?? [];
+  /* What the header draws. Read through a cast rather than typed optional: a
+     payload the OFFLINE copy saved before this field existed has no block, and
+     the panel then keeps the source badge and the rows alone instead of
+     crashing on a header it cannot draw. */
+  const identity = data ? (data.identity as CreditIdentity | undefined) : undefined;
   return (
     <div className="space-y-2.5">
-      {data && <CreditSource source={data.source} />}
+      {data &&
+        (identity ? (
+          <CreditHeader identity={identity} source={data.source} />
+        ) : (
+          <CreditSource source={data.source} />
+        ))}
       {rows.length ? (
         <RoleGroups rows={rows} />
       ) : (
@@ -453,7 +464,133 @@ function CreditSource({ source }: { source: "musicbrainz" | "tags" }) {
   );
 }
 
-/** Rows grouped under their role, in the order the server sent them. */
+/** Copy one header value, with the app's own fallback for a plain-http origin:
+ *  the Clipboard API needs a secure context and this app is normally served
+ *  over plain http on the LAN, where it is undefined — so the value goes into
+ *  the toast instead of being lost (the same fallback the copy buttons on
+ *  Setup, Settings and Optimization make). */
+async function copyCreditValue(label: string, value: string) {
+  try {
+    await navigator.clipboard.writeText(value);
+    toast.success(`${label} copied`);
+  } catch {
+    toast(`${label}: ${value}`);
+  }
+}
+
+/** A value with the copy affordance the app already gives its ids and paths. */
+function CopyValue({ label, value }: { label: string; value: string }) {
+  return (
+    <span className="inline-flex items-center gap-1 min-w-0">
+      <span className="text-zinc-200 break-all">{value}</span>
+      <button
+        type="button"
+        className="text-zinc-500 hover:text-accent-soft shrink-0"
+        title={`Copy ${label.toLowerCase()}`}
+        aria-label={`Copy ${label.toLowerCase()}`}
+        onClick={() => void copyCreditValue(label, value)}
+      >
+        <Copy className="h-3 w-3" />
+      </button>
+    </span>
+  );
+}
+
+/** The panel's header: what this credit list IS.
+ *
+ *  The title is the HEADING — the report that prompted this was a raw path
+ *  printed where the title belongs — then one line per fact the files state
+ *  (artist, album, label + catalogue number, barcode, date, country, type,
+ *  medium, and every MusicBrainz id), each with its own copy button, and the
+ *  path LAST, small and dimmed: it is still the one thing that tells two
+ *  editions of the same release apart, but it is not what the release is. */
+function CreditHeader({ identity, source }: { identity: CreditIdentity; source: "musicbrainz" | "tags" }) {
+  const heading = identity.title || identity.album;
+  /* One label/value per fact, built in the order a release is read. Facts that
+     would repeat the heading or the line above them are left out: an album
+     panel's "album" IS the heading, and an original date equal to the date
+     says nothing. */
+  const facts: { label: string; value: string }[] = [];
+  if (identity.artist) facts.push({ label: "Artist", value: identity.artist });
+  if (identity.album && identity.album !== heading)
+    facts.push({ label: "Album", value: identity.album });
+  if (identity.album_artist && identity.album_artist !== identity.artist)
+    facts.push({ label: "Album artist", value: identity.album_artist });
+  // Label and catalogue number are one fact on a release — "XL · XLCD 780" is
+  // how they are printed together on the thing itself.
+  const label = [identity.label, identity.catalog_number].filter(Boolean).join(" · ");
+  if (label) facts.push({ label: "Label", value: label });
+  if (identity.barcode) facts.push({ label: "Barcode", value: identity.barcode });
+  if (identity.date) {
+    const original = identity.original_date && identity.original_date !== identity.date
+      ? `${identity.date} · original ${identity.original_date}` : identity.date;
+    facts.push({ label: "Date", value: original });
+  } else if (identity.original_date) {
+    facts.push({ label: "Original date", value: identity.original_date });
+  }
+  if (identity.country) facts.push({ label: "Country", value: identity.country });
+  if (identity.release_type) facts.push({ label: "Type", value: identity.release_type });
+  if (identity.media) facts.push({ label: "Media", value: identity.media });
+  // The ids last among the facts: they are what another program needs, not
+  // what a reader wants first. An album has no track id (its block blanks it),
+  // so a track panel is the only one that shows one.
+  const ids: [string, string][] = [
+    ["Release MBID", identity.release_mbid],
+    ["Track MBID", identity.recording_mbid || identity.track_mbid],
+    ["Release group MBID", identity.release_group_mbid],
+    ["Artist MBID", identity.artist_mbid],
+  ];
+  for (const [idLabel, value] of ids) if (value) facts.push({ label: idLabel, value });
+
+  return (
+    <div className="space-y-1 border-b border-border pb-2">
+      <div className="flex items-start gap-2">
+        {heading && (
+          <h3 className="min-w-0 flex-1 text-sm font-medium text-zinc-100 break-words">{heading}</h3>
+        )}
+        <CreditSource source={source} />
+      </div>
+      {facts.length > 0 && (
+        <div className="grid grid-cols-[auto_1fr] gap-x-2 gap-y-0.5 text-[11px]">
+          {facts.map((f) => (
+            <Fragment key={f.label}>
+              <span className="text-zinc-500 whitespace-nowrap">{f.label}</span>
+              <CopyValue label={f.label} value={f.value} />
+            </Fragment>
+          ))}
+        </div>
+      )}
+      {identity.path && (
+        <div
+          className="text-[10px] text-zinc-600 font-mono break-all"
+          title="The file or folder this panel was opened on"
+        >
+          {identity.path}
+        </div>
+      )}
+    </div>
+  );
+}
+
+/** The order roles are read in: the work and its authors first (the song
+ *  itself), then the people in the room, then the studio, then the packaging.
+ *  A role this table does not name sorts AFTER those, alphabetically — every
+ *  row is drawn either way, so a role MusicBrainz has and the app has never
+ *  seen is the last group rather than a group that never appears. */
+const ROLE_RANK: Record<string, number> = {
+  work: 0, composer: 1, writer: 2, lyricist: 3, librettist: 4, arranger: 5,
+  orchestrator: 6, conductor: 7, instrument: 8, vocal: 9, performer: 10,
+  "performing orchestra": 11, "chorus master": 12, concertmaster: 13,
+  producer: 14, engineer: 15, mix: 16, mastering: 17, remixer: 18,
+  design: 19, artwork: 20, illustration: 21, photography: 22,
+  publisher: 23, copyright: 24, license: 25,
+};
+
+/** Every rank this table names — where an unranked role sorts. */
+const UNRANKED = Object.keys(ROLE_RANK).length;
+
+/** Rows grouped under their role, in ROLE_RANK. EVERY row the payload carries
+ *  is drawn: the group decides where a row appears, never whether it does. */
 function RoleGroups({ rows }: { rows: CreditRow[] }) {
   const byRole = new Map<string, CreditRow[]>();
   for (const r of rows) {
@@ -461,29 +598,57 @@ function RoleGroups({ rows }: { rows: CreditRow[] }) {
     if (list) list.push(r);
     else byRole.set(r.role, [r]);
   }
+  const groups = [...byRole].sort(([a], [b]) =>
+    (ROLE_RANK[a] ?? UNRANKED) - (ROLE_RANK[b] ?? UNRANKED) || a.localeCompare(b));
   return (
     <div className="space-y-2.5">
-      {[...byRole].map(([role, list]) => (
+      {groups.map(([role, list]) => (
         <div key={role}>
           <div className="text-[10px] font-semibold uppercase tracking-wider text-zinc-500 mb-0.5">{role}</div>
           <ul className="space-y-0.5">
             {list.map((r, i) => (
               <li key={`${r.artist}-${i}`} className="flex flex-wrap items-center gap-1.5 text-xs">
                 {r.mbid ? (
-                  <a
-                    // A work row's MBID is a WORK id, not an artist id: linking
-                    // it as /artist/<mbid> opened a 404 for every writing and
-                    // composition credit (#35). The server names the row's own
-                    // kind (`role`), so the URL is built from it instead of
-                    // assuming every credit is a performer.
-                    href={`https://musicbrainz.org/${r.role === "work" ? "work" : "artist"}/${r.mbid}`}
-                    target="_blank"
-                    rel="noreferrer"
-                    className="text-zinc-200 hover:text-accent-soft underline decoration-dotted"
-                    title={`Open the ${r.role === "work" ? "work" : "artist"} on MusicBrainz`}
-                  >
-                    {r.artist}
-                  </a>
+                  r.role === "work" ? (
+                    <a
+                      // A work row names a WORK: the app has no work pages, so
+                      // this one goes to MusicBrainz (the server names the
+                      // row's own kind in `role`, which is what keeps a work
+                      // id out of an /artist/ URL — #35).
+                      href={`https://musicbrainz.org/work/${r.mbid}`}
+                      target="_blank"
+                      rel="noreferrer"
+                      className="text-zinc-200 hover:text-accent-soft underline decoration-dotted"
+                      title="Open the work on MusicBrainz"
+                    >
+                      {r.artist}
+                    </a>
+                  ) : (
+                    <span className="inline-flex items-center gap-1 min-w-0">
+                      {/* The person's own page IN the app: the MBID half of the
+                          route lib/refs.ts `artistRef` builds, so a credit
+                          clicks through to the artist the app already has (and
+                          an artist it does not have says so on that page
+                          rather than nowhere). */}
+                      <Link
+                        to={`/artist/mb:${r.mbid}`}
+                        className="text-zinc-200 hover:text-accent-soft underline decoration-dotted"
+                        title={`Open ${r.artist} in the library`}
+                      >
+                        {r.artist}
+                      </Link>
+                      <a
+                        href={`https://musicbrainz.org/artist/${r.mbid}`}
+                        target="_blank"
+                        rel="noreferrer"
+                        className="text-zinc-600 hover:text-accent-soft shrink-0"
+                        title="Open the artist on MusicBrainz"
+                        aria-label="Open the artist on MusicBrainz"
+                      >
+                        <ExternalLink className="h-3 w-3" />
+                      </a>
+                    </span>
+                  )
                 ) : (
                   <span className="text-zinc-200">{r.artist}</span>
                 )}

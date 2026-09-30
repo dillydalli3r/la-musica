@@ -26,6 +26,7 @@ import { eqApplyRefusal } from "../lib/eqNodes";
 import FavHeart from "./FavHeart";
 import NowPlayingView from "./NowPlayingView";
 import { ROW_COVER_W } from "./CoverImg";
+import { useNowPlayingMeta } from "../lib/nowPlaying";
 import ScrollingText from "./ScrollingText";
 import LyricsSidebar from "./LyricsSidebar";
 import TrackDownloadExport from "./TrackDownloadExport";
@@ -709,6 +710,14 @@ export default function PlayerBar() {
   const libCover = current && !current.coverFile && !current.albumCover ? (coverByPath.get(current.path) ?? null) : null;
   const coverFile = current?.coverFile ?? libCover?.track ?? current?.albumCover ?? libCover?.album ?? null;
   const coverAlbumPath = current?.albumPath ?? "";
+  // Whether the art's ADDRESS is known at all: a row that carries its own
+  // cover filenames answers on the spot, while an album card's queue rows
+  // carry none and must wait for the library payload above. That in-flight
+  // wait, and the bytes after it, are two of the moments the metadata block's
+  // own record exists to collapse into one paint (see lib/nowPlaying).
+  const coverNamed = !current || !!(current.coverFile || current.albumCover) || !!lib;
+  const blockCoverUrl =
+    current && coverNamed && coverFile ? api.coverUrl(coverAlbumPath, coverFile, { w: ROW_COVER_W }) : null;
 
   // The NEXT track's cover, resolved by the same rule as the current one (a
   // queue row carries its own filenames; a playlist/.m3u8 row gets them from
@@ -741,6 +750,24 @@ export default function PlayerBar() {
     img.src = nextCover;
     img.decode?.().catch(() => {});
   }, [playing, nextCover]);
+  // The same warm, for the next track's TAGS payload: the metadata block's
+  // record waits for that payload (its title/artist/album fallbacks and the
+  // year that rides the album line — see lib/nowPlaying), so fetching it a
+  // track early is what makes a sequential handover commit in the change's own
+  // paint instead of a round trip after it. One key, the bar's own `["tags",
+  // path]` query below: the handover then reads it from the cache, and nothing
+  // is ever fetched twice.
+  const warmedTags = useRef<string | null>(null);
+  useEffect(() => {
+    const nx = queue[index + 1];
+    if (!playing || !nx || warmedTags.current === nx.path) return;
+    warmedTags.current = nx.path;
+    void qc.prefetchQuery({
+      queryKey: ["tags", nx.path],
+      queryFn: () => api.tags(nx.path),
+      staleTime: 5 * 60 * 1000,
+    });
+  }, [playing, queue, index, qc]);
 
   // The album and artist lines open their own pages, and a queue row carries
   // only the folder it came from — while the routes prefer a MusicBrainz ID
@@ -774,19 +801,26 @@ export default function PlayerBar() {
   const displayTitle =
     current?.title || currentTags?.tags?.TITLE || (current ? current.file.replace(/\.[^.]+$/, "") : "");
   // The bar's two sub-lines, shared by both layouts so they cannot drift: the
-  // album's own line falls back to a dash, while the phone's joined row drops
-  // the half it does not have.
-  const albumText = current?.album ?? "—";
-  const artistText = current?.artist ?? current?.albumPath.split("/").pop() ?? "";
+  // queue row answers first (every library queue carries them), and a row that
+  // does not — a playlist or .m3u8 entry the library does not list — reads the
+  // per-track tags the block already waits for, exactly as the fullscreen
+  // player's own lines do. Only a track with neither keeps the fallbacks the
+  // bar always had: the folder name for the artist, a dash for the album. The
+  // frame in which those fallbacks painted and were then REPLACED by the tagged
+  // values is one of the pops the block's record removes (see lib/nowPlaying).
+  const albumName = current?.album || currentTags?.tags?.ALBUM || "";
+  const albumText = albumName || "—";
+  const artistText = current?.artist || currentTags?.tags?.ARTIST || current?.albumPath.split("/").pop() || "";
   // The ORIGINAL release year of what is playing (`ORIGINALDATE`, falling back
   // to `DATE`): a remaster keeps the year the work came out, which is the one a
   // reader recognises. Rendered inside the album line, where the album pages
   // and the library's own rows put it too — and only when there is an album for
-  // it to belong to, so the "—" of a folder-less queue row stays a dash. The
-  // tags land a beat after the queue row does, which is why this can appear
-  // once the per-track fetch answers (the line re-measures and drifts then).
+  // it to belong to, so the "—" of a folder-less queue row stays a dash. It
+  // rides the album line, so it is read from the same payload as those strings
+  // and committed by the same record: the line no longer re-measures a beat
+  // after it painted.
   const releaseYear = originalYear(currentTags?.tags);
-  const albumLine = current?.album && releaseYear ? `${current.album} · ${releaseYear}` : albumText;
+  const albumLine = albumName && releaseYear ? `${albumName} · ${releaseYear}` : albumText;
   // A job claiming the file that is PLAYING never stops it: the stream already
   // has its handle, and cutting the listener off mid-track would be a worse bug
   // than the lock. The state is said out loud instead — once per track — so
@@ -820,8 +854,44 @@ export default function PlayerBar() {
     | undefined;
   const techStr = fmtPair(techInfo);
   const techTip = fmtTech(techInfo);
+  // ---- The metadata block: one record, one paint -------------------------
+  // Everything the block DRAWS, in one object: the title, the marks beside it,
+  // its two sub-lines and the art's URL. The record is held back while a piece
+  // of it is still resolving — the tags that feed the strings above, the
+  // payload that names the cover, the image's own bytes — and until it is
+  // ready the block keeps painting the record it last committed, so a track
+  // change is ONE paint with no placeholder in between (see lib/nowPlaying for
+  // why the four used to arrive separately, and for the wait's own cap).
+  const blockRecord = current
+    ? {
+        path: current.path,
+        title: displayTitle,
+        album: albumName,
+        artist: artistText,
+        albumLine,
+        artistText,
+        coverUrl: blockCoverUrl,
+        advisory: currentTags?.tags?.ITUNESADVISORY ?? current.advisory,
+        techStr,
+        techTip,
+        trackHref: trackRef({
+          path: current.path,
+          tags: { MUSICBRAINZ_TRACKID: currentTags?.tags?.MUSICBRAINZ_TRACKID },
+        }),
+        albumHref,
+        artistHref,
+      }
+    : null;
+  const block = useNowPlayingMeta(
+    blockRecord,
+    current !== null && currentTags !== undefined,
+    coverNamed ? blockCoverUrl : undefined
+  );
   const [thumbFailed, setThumbFailed] = useState(false);
-  useEffect(() => setThumbFailed(false), [current?.path]);
+  // Keyed on the RECORD's path, not the queue's: the block describes the track
+  // it committed, and a cover that failed earlier must not yet be holding the
+  // next track's art in the disc placeholder.
+  useEffect(() => setThumbFailed(false), [block?.path]);
   // What plays after this track (meaningful only without shuffle) — shown
   // as a compact "UP NEXT" readout in the actions row.
   const upNextTrack = !shuffle ? queue[index + 1] : undefined;
@@ -833,13 +903,17 @@ export default function PlayerBar() {
   // OS-level media controls (lockscreen / media keys) — guarded, best effort.
   useEffect(() => {
     const ms = (navigator as any).mediaSession;
-    if (!ms || !current) return;
+    // The record, not the row: the OS panel is the app's own metadata block
+    // painted elsewhere, so it must show the track the block is showing (and
+    // the artwork URL that block already drew) rather than jumping a round
+    // trip ahead of it on a track change.
+    if (!ms || !block) return;
     try {
       if (typeof (window as any).MediaMetadata === "function") {
         ms.metadata = new (window as any).MediaMetadata({
-          title: displayTitle,
-          artist: current.artist ?? "",
-          album: current.album ?? "",
+          title: block.title,
+          artist: block.artist,
+          album: block.album,
           // The OS overlay asks for this URL itself, so it must be the one
           // the bar already has: the SAME width, hence the same bytes and the
           // same cache entry. Asking for a bigger bucket here would add a
@@ -847,7 +921,9 @@ export default function PlayerBar() {
           // — competing with the audio stream for the very seconds this fix
           // exists to protect — and a second fetch is also what a cover
           // replaced in place would have to be waited on twice for.
-          artwork: [{ src: api.coverUrl(coverAlbumPath, coverFile, { w: ROW_COVER_W }), sizes: "160x160", type: "image/jpeg" }],
+          artwork: block.coverUrl
+            ? [{ src: block.coverUrl, sizes: "160x160", type: "image/jpeg" }]
+            : [],
         });
       }
       ms.setActionHandler("play", () => {
@@ -931,7 +1007,7 @@ export default function PlayerBar() {
       /* media session unsupported — ignore */
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [current, displayTitle, coverFile, coverAlbumPath]);
+  }, [current, block?.path, block?.title, block?.artist, block?.album, block?.coverUrl]);
 
   // The lock screen, the car stereo and the OS's own play/pause button read
   // `playbackState`, never the app's store: a session that never sets it shows
@@ -1041,8 +1117,11 @@ export default function PlayerBar() {
   // is appended to it as ordinary rows, scored locally so the play needs no
   // network to continue. Read strictly: a server too old to ship the key (or a
   // missing value) is OFF, which is the shipped default and exactly the
-  // behaviour every install had before this existed.
-  const infinite = cfg?.infinite_playback === true;
+  // behaviour every install had before this existed. `infinite !== null` is
+  // the "this server ships the key" test the queue pane's toggle reads: an
+  // install behind the release must not render a switch that writes a key the
+  // server would drop.
+  const infinite = cfg?.infinite_playback === true ? true : cfg && "infinite_playback" in cfg ? false : null;
   // The equalizer the config names (`playback_eq_profile`, owned by the
   // Equalizer page): its bands go onto the SAME WebAudio graph as the gain —
   // installed once per profile change, and inherited by any element attached
@@ -1611,10 +1690,11 @@ export default function PlayerBar() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [current?.path, rgMode, rgPreamp]);
 
-  // Mode/preamp edits from the fullscreen options menu — persisted into the
-  // config (a whole-document POST, hence the spread); the refetched config
-  // feeds rgMode/rgPreamp above, which re-fetches the gain for this track.
-  const saveRg = (patch: { replaygain_mode?: RgMode; replaygain_preamp_db?: number }) => {
+  // Config edits from the player's own menus — the ReplayGain mode/preamp and
+  // the queue pane's infinite-playback switch — persisted into the config (a
+  // whole-document POST, hence the spread); the refetched config feeds
+  // rgMode/rgPreamp above and the append effect below.
+  const saveCfg = (patch: { replaygain_mode?: RgMode; replaygain_preamp_db?: number; infinite_playback?: boolean }) => {
     if (!cfg) return;
     api
       .saveConfig({ ...cfg, ...patch })
@@ -1953,10 +2033,19 @@ export default function PlayerBar() {
           onWaiting={(e) => noteBuffering("waiting", e.currentTarget, pathOf(e.currentTarget))}
           onPlay={(e) => { attachAnalyser(e.currentTarget); applyElGain(e.currentTarget); countPlay(e.currentTarget); handlePlay(e.currentTarget); }} />
 
-        {/* full layout from tablet width up: cover+title / centered seek /
+        {/* full layout from LAPTOP width up: cover+title / centered seek /
             actions+volume, balanced 1fr-auto-1fr so the seek bar sits dead
-            center */}
-        <div className="hidden md:grid h-full grid-cols-[minmax(0,1fr)_auto_minmax(0,1fr)] items-center gap-3 [container-type:inline-size]">
+            center. It starts at `lg`, not `md`, because its three cells have a
+            floor of their own and they must not share pixels: the centre's
+            transport row is 270 px wide (what its 34cqw only reaches at ~1012
+            px of window), the right flank's six icon buttons + the
+            lyrics/fullscreen stack ~226 px (the flank's own share at 1024 is
+            238 px of content), and neither cell is allowed to paint outside
+            itself. Between 768 and 1023 px the window cannot hold that sum, so
+            the thumb row below — which carries the same transport, the like
+            and the way into the fullscreen player — is the layout that fits;
+            it is the same row a phone has always used. */}
+        <div className="hidden lg:grid h-full grid-cols-[minmax(0,1fr)_auto_minmax(0,1fr)] items-center gap-3 [container-type:inline-size]">
         {/* left flank of the grid: cover + title block — its 1fr track
             balances the right cluster so the seek bar sits dead center.
             The cover is absolutely positioned so its image's INTRINSIC
@@ -1970,20 +2059,29 @@ export default function PlayerBar() {
           title={idle ? "Nothing playing" : "Album art — click for the fullscreen player"}
           disabled={idle}
         >
-          {current && !thumbFailed ? (
+          {block?.coverUrl && !thumbFailed ? (
             <img
-              src={api.coverUrl(coverAlbumPath, coverFile, { w: ROW_COVER_W })}
+              src={block.coverUrl}
               alt=""
               onError={() => setThumbFailed(true)}
               className="h-full w-full object-cover"
             />
-          ) : (
+          ) : block || !current ? (
+            /* Either the track has no art at all (the disc is its FINAL state)
+               or nothing is playing. While a track's record is still resolving
+               the slot stays empty rather than wearing a disc the art is about
+               to replace — see lib/nowPlaying. */
             <Disc3 className={`h-5 w-5 ${idle ? "text-zinc-700" : "text-zinc-600"}`} />
-          )}
+          ) : null}
         </button>
 
-        <div className="min-w-0 flex-1 ml-[76px] pl-3" title={current ? [current.artist, current.album].filter(Boolean).join(" · ") : undefined}>
-          {current ? (
+        <div className="min-w-0 flex-1 ml-[76px] pl-3" title={block ? [block.artist, block.album].filter(Boolean).join(" · ") : undefined}>
+          {/* Three states, not two: the COMMITTED record, the idle player, and
+              the one round trip in which a track's record is still resolving —
+              which draws nothing rather than a name the tags may rewrite or a
+              "Nothing playing" the bar would have to take back a frame later
+              (see lib/nowPlaying). */}
+          {block ? (
             <>
               {/* badge, tech readout, stars: the title keeps the flexible
                   width and drifts (marquee) when the name is too long, and the
@@ -1994,39 +2092,39 @@ export default function PlayerBar() {
               <div className="flex items-baseline gap-2 min-w-0">
                 {/* title opens the track's own page (tag editing, links, lyrics) */}
                 <Link
-                  to={trackRef({ path: current.path, tags: { MUSICBRAINZ_TRACKID: currentTags?.tags?.MUSICBRAINZ_TRACKID } })}
+                  to={block.trackHref}
                   className="min-w-0 hover:[&>span]:text-accent-soft transition-colors"
                   title="Open the track page"
                 >
-                  <ScrollingText text={displayTitle} />
+                  <ScrollingText text={block.title} />
                 </Link>
-                <AdvisoryMark value={currentTags?.tags?.ITUNESADVISORY ?? current.advisory} />
-                {techStr && (
-                  <span className="text-[10px] font-mono text-zinc-500 shrink-0" title={techTip || "Bit depth/sample rate"}>
-                    {techStr}
+                <AdvisoryMark value={block.advisory} />
+                {block.techStr && (
+                  <span className="text-[10px] font-mono text-zinc-500 shrink-0" title={block.techTip || "Bit depth/sample rate"}>
+                    {block.techStr}
                   </span>
                 )}
                 <StarRating
                   size="sm"
                   className="self-center"
-                  value={ratingOf(ratings, current.path)}
-                  onChange={(v) => setRating(current.path, v)}
-                  pending={pending(current.path)}
+                  value={ratingOf(ratings, block.path)}
+                  onChange={(v) => setRating(block.path, v)}
+                  pending={pending(block.path)}
                 />
               </div>
               {/* the album and the artist open their own pages, and each drifts
                   like the title when it does not fit (see MetaLine) */}
-              <MetaLine href={albumHref} text={albumLine} className="text-[11px] text-zinc-500" title="Open the album page" />
-              <MetaLine href={artistHref} text={artistText} className="text-[11px] text-zinc-500" title="Open the artist page" />
+              <MetaLine href={block.albumHref} text={block.albumLine} className="text-[11px] text-zinc-500" title="Open the album page" />
+              <MetaLine href={block.artistHref} text={block.artistText} className="text-[11px] text-zinc-500" title="Open the artist page" />
             </>
-          ) : (
+          ) : !current ? (
             <>
               <div className="text-sm truncate font-semibold text-zinc-500">Nothing playing</div>
               <div className="text-[11px] text-zinc-600 truncate">
                 Play an album, artist or playlist to start
               </div>
             </>
-          )}
+          ) : null}
         </div>
         </div>
 
@@ -2061,7 +2159,18 @@ export default function PlayerBar() {
                 if (a && dragFrom.current !== null) noteJump(a, dragFrom.current, a.currentTime);
                 dragFrom.current = null;
               }}
-              className="flex-1 min-w-0 seek-fat"
+              /* The scrub is the one bar control that answers while a bar
+                 flyout is open. Every popover in this bar drops a
+                 full-viewport outside-click catcher (components/Popover's z-40
+                 shield, rendered inside this grid — so both it and this input
+                 live in the grid's stacking context), which is right for "a
+                 click anywhere else dismisses the pane" but wrong for the
+                 playhead: a listener who reaches for the bar's own scrub means
+                 to move the track, not to dismiss the pane, and the pane's own
+                 panel (z-50) still paints over this. `relative` + a z-index
+                 above the shield is what puts that click on the track instead
+                 of on the catcher. */
+              className="flex-1 min-w-0 seek-fat relative z-[45]"
               disabled={idle}
               title="Seek — ← / → nudge 5s · Ctrl+Z undoes a jump"
             />
@@ -2128,15 +2237,42 @@ export default function PlayerBar() {
         </div>
 
         {/* right flank of the grid: actions row + volume, then lyrics /
-            fullscreen stacked on the far right */}
-        <div className="flex items-center gap-2 shrink min-w-0 justify-self-end w-full justify-end pr-4">
+            fullscreen stacked on the far right. It is its own CONTAINER, so
+            the two readouts in the row below can be gated on the width the
+            flank actually has. The flank is a `1fr` grid track: the grid
+            decides its width and the content never feeds back into it, so a
+            query against this box cannot be circular. A viewport breakpoint
+            would be the wrong ruler for exactly that width — the sidebar takes
+            192 px out of the bar, so the same window hands the flank two very
+            different shares — and the flank is where the overlap happened: its
+            content overflowed the cell, centered, over the lyrics/fullscreen
+            stack beside it and over the seek row on its left. The six icon
+            buttons + that stack are the mandatory part of the row and fit the
+            narrowest desktop flank: four of the icons are `px-1.5` (28 px wide
+            at the same height) rather than the transport's `p-2`, and the
+            download/export pair keeps the 32 px its own component draws. Each
+            readout below appears only once the flank is wide enough to hold it
+            whole. */}
+        <div className="flex items-center gap-2 shrink min-w-0 justify-self-end w-full justify-end pr-4 [container-type:inline-size]">
           <div className="flex flex-col items-center gap-0.5 min-w-0 shrink">
-            <div className="flex items-center gap-0.5">
+            {/* The row fills the cluster (`w-full`) and packs its controls to
+                the RIGHT (`justify-end`): the slack the flank leaves sits on
+                the row's left, and a row that ever outgrows its box runs left
+                — into the seek row's own slack — rather than centered over the
+                lyrics/fullscreen stack beside it, which is the overlap this
+                flank used to paint. */}
+            <div className="flex items-center gap-0.5 w-full justify-end">
               {/* up next — mirrors the fullscreen player's top-bar readout;
-                  opens the same queue popover. Always on the bar: inert
-                  (like the rest) when there is nothing queued. */}
+                  opens the same queue popover; inert (like the rest) when
+                  there is nothing queued. Shown only once the flank can hold
+                  the whole row WITH it: it is the widest readout here, and
+                  before this gate it was what pushed the row out of the cell
+                  (the icon row kept its width, the column shrank, and the
+                  overflow painted over the lyrics/fullscreen stack). The row
+                  is `justify-end` in the flank, so hiding it moves nothing
+                  else. */}
               <button
-                className={`hidden lg:flex items-center gap-1.5 px-1.5 py-1 rounded-md font-mono text-[10px] tabular-nums shrink-0 ${
+                className={`hidden [@container(min-width:370px)]:flex items-center gap-1.5 px-1.5 py-1 rounded-md font-mono text-[10px] tabular-nums min-w-[5.5rem] shrink ${
                   upNextTrack
                     ? "text-zinc-500 hover:text-white hover:bg-raise"
                     : "text-zinc-600 opacity-40 pointer-events-none"
@@ -2149,21 +2285,31 @@ export default function PlayerBar() {
                 }
               >
                 <span className="uppercase tracking-widest text-zinc-600 shrink-0">Up next</span>
-                {/* A FIXED slot for the value, and the title drifts inside it
+                {/* The title drifts inside its own slot
                     (components/ScrollingText): the readout used to size itself
                     to whatever the next track was called, so a longer name
                     pushed the queue position, the queue button and the whole
                     action row along with it — and a title past the old 13 rem
-                    cap was simply cut. The slot holds the longest title the row
-                    can show before it starts drifting, and never resizes. */}
-                <span className="block w-[6.5rem] shrink-0 min-w-0">
+                    cap was simply cut. The slot therefore still does not follow
+                    the TITLE (the row cannot re-flow under a drifting value);
+                    it follows the ROOM the flank has, from a 1.5 rem floor up
+                    to the 6.5 rem the row draws at full size — the slack of a
+                    narrower flank lands here, so the row can never overflow
+                    its cell and paint over the stack beside it. A WIDTH, not a
+                    flex-basis: a basis-only flexible slot feeds nothing into
+                    the row's own intrinsic size, so the readout collapsed to
+                    its floor at every width, however wide the window was. */}
+                <span className="block w-[6.5rem] min-w-[1.5rem] shrink">
                   <ScrollingText text={upNextTitle || "—"} />
                 </span>
               </button>
               {/* queue position — the fraction lives here, left of the playlist
-                  button; clicking it (or the queue button) opens the queue */}
+                  button; clicking it (or the queue button) opens the queue.
+                  Gated on the flank's own width like the up-next readout, with
+                  room for a three-digit fraction (the readout is wider on a
+                  long queue, and the gate has to cover the widest it can be). */}
               <button
-                className={`px-1.5 py-1 rounded-md font-mono text-[10px] tabular-nums shrink-0 transition-colors ${
+                className={`hidden [@container(min-width:280px)]:block px-1.5 py-1 rounded-md font-mono text-[10px] tabular-nums shrink-0 transition-colors ${
                   queueOpen ? "text-accent bg-raise" : "text-zinc-500 hover:text-white hover:bg-raise"
                 } ${current && queue.length > 1 ? "" : "opacity-40 pointer-events-none"}`}
                 onClick={() => setQueueOpen(!queueOpen)}
@@ -2179,7 +2325,7 @@ export default function PlayerBar() {
               {/* queue popover: upcoming tracks, click to jump, ✕ to remove */}
               <div className="relative">
                 <button
-                  className={`p-2 rounded-lg hover:bg-raise shrink-0 ${
+                  className={`px-1.5 py-2 rounded-lg hover:bg-raise shrink-0 ${
                     queueOpen ? "text-accent bg-raise" : "text-zinc-400 hover:text-white"
                   } ${idle ? "opacity-40 pointer-events-none" : ""}`}
                   onClick={() => setQueueOpen(!queueOpen)}
@@ -2209,6 +2355,26 @@ export default function PlayerBar() {
                           </button>
                         )}
                       </div>
+                      {/* Infinite playback (the Settings switch
+                          `infinite_playback`, read AND written here): the chip
+                          sits in the queue pane because that is the thing the
+                          switch extends — a listener wondering whether the
+                          queue keeps going looks here, not into Settings. The
+                          bar's own effect below reads the same config query,
+                          so a flip here arms the append the moment it lands. */}
+                      {infinite !== null && (
+                        <label className="flex items-center gap-2 mx-2 pt-1 pb-0.5 cursor-pointer select-none">
+                          <input
+                            type="checkbox"
+                            className="accent-[var(--accent)]"
+                            checked={infinite}
+                            onChange={(e) => saveCfg({ infinite_playback: e.target.checked })}
+                          />
+                          <span className="text-[11px] text-zinc-400 flex-1" title="Append a few similar tracks when the queue runs out — Settings → Downloads &amp; playback has the full description">
+                            Keep playing past the end of the queue
+                          </span>
+                        </label>
+                      )}
                       {current && (
                         <div className="px-2 py-1.5 rounded-md bg-raise/60 flex items-center gap-2">
                           <Play className="h-3 w-3 text-accent shrink-0" />
@@ -2300,7 +2466,7 @@ export default function PlayerBar() {
               {/* sleep timer */}
               <div className="relative">
                 <button
-                  className={`p-2 rounded-lg hover:bg-raise shrink-0 flex items-center gap-1 ${
+                  className={`px-1.5 py-2 rounded-lg hover:bg-raise shrink-0 flex items-center gap-1 ${
                     sleepAt !== null || sleepStopNext
                       ? "text-accent bg-raise"
                       : "text-zinc-400 hover:text-white"
@@ -2335,7 +2501,7 @@ export default function PlayerBar() {
 
               <div className="relative">
                 <button
-                  className={`p-2 rounded-lg hover:bg-raise shrink-0 ${
+                  className={`px-1.5 py-2 rounded-lg hover:bg-raise shrink-0 ${
                     plOpen ? "text-accent bg-raise" : "text-zinc-400 hover:text-white"
                   } ${idle ? "opacity-40 pointer-events-none" : ""}`}
                   onClick={() => setPlOpen(!plOpen)}
@@ -2383,7 +2549,7 @@ export default function PlayerBar() {
                   carries the same entry in its own options menu, so the info
                   button a listener reaches for exists on both surfaces. */}
               <button
-                className={`p-2 rounded-lg hover:bg-raise shrink-0 ${
+                className={`px-1.5 py-2 rounded-lg hover:bg-raise shrink-0 ${
                   detailsOpen ? "text-accent bg-raise" : "text-zinc-400 hover:text-white"
                 } ${idle ? "opacity-40 pointer-events-none" : ""}`}
                 onClick={() => setDetailsOpen(true)}
@@ -2458,46 +2624,51 @@ export default function PlayerBar() {
 
         {/* phone layout: cover · title · like/play/next/fullscreen — the
             transport that fits a thumb, no seek row (drag in the fullscreen
-            player); cover is a plain flex item here, not absolute */}
-        <div className="flex md:hidden h-full items-center gap-1 pr-2">
+            player); cover is a plain flex item here, not absolute. From `lg`
+            down this is the layout the bar uses — see the desktop grid's note
+            above for why the three-cell row cannot start at `md`. */}
+        <div className="flex lg:hidden h-full items-center gap-1 pr-2">
           <button
             className="self-stretch aspect-square rounded-l-[5px] overflow-hidden bg-raise shrink-0 flex items-center justify-center"
             onClick={() => !idle && openFullscreen()}
             title={idle ? "Nothing playing" : "Album art — tap for the fullscreen player"}
             disabled={idle}
           >
-            {current && !thumbFailed ? (
-              <img src={api.coverUrl(coverAlbumPath, coverFile, { w: ROW_COVER_W })} alt="" onError={() => setThumbFailed(true)} className="h-full w-full object-cover" />
-            ) : (
+            {block?.coverUrl && !thumbFailed ? (
+              <img src={block.coverUrl} alt="" onError={() => setThumbFailed(true)} className="h-full w-full object-cover" />
+            ) : block || !current ? (
+              /* No art at all (the disc is the final state) or nothing
+                 playing; a record still resolving leaves the slot empty —
+                 see the desktop copy above and lib/nowPlaying. */
               <Disc3 className={`h-5 w-5 ${idle ? "text-zinc-700" : "text-zinc-600"}`} />
-            )}
+            ) : null}
           </button>
-          <div className="min-w-0 flex-1 pl-2" title={current ? [current.artist, current.album].filter(Boolean).join(" · ") : undefined}>
-            {current ? (
+          <div className="min-w-0 flex-1 pl-2" title={block ? [block.artist, block.album].filter(Boolean).join(" · ") : undefined}>
+            {block ? (
               <>
                 <div className="flex items-baseline gap-1.5 min-w-0">
                   <Link
-                    to={trackRef({ path: current.path, tags: { MUSICBRAINZ_TRACKID: currentTags?.tags?.MUSICBRAINZ_TRACKID } })}
+                    to={block.trackHref}
                     className="min-w-0 hover:[&>span]:text-accent-soft transition-colors"
                     title="Open the track page"
                   >
-                    <ScrollingText text={displayTitle} />
+                    <ScrollingText text={block.title} />
                   </Link>
-                  <AdvisoryMark value={currentTags?.tags?.ITUNESADVISORY ?? current.advisory} />
+                  <AdvisoryMark value={block.advisory} />
                 </div>
                 {/* artist · album, the same pair the block above shows — each
                     half opens its own page (see MetaLine). A missing tag drops
                     its half, so only a row with neither keeps the dash. */}
                 <div className="flex items-baseline gap-1.5 min-w-0 text-[11px] text-zinc-500">
-                  {artistText ? <MetaLine href={artistHref} text={artistText} title="Open the artist page" /> : null}
-                  {artistText && current.album ? <span className="shrink-0">·</span> : null}
-                  {current.album ? <MetaLine href={albumHref} text={albumLine} title="Open the album page" /> : null}
-                  {!artistText && !current.album ? <span>—</span> : null}
+                  {block.artistText ? <MetaLine href={block.artistHref} text={block.artistText} title="Open the artist page" /> : null}
+                  {block.artistText && block.album ? <span className="shrink-0">·</span> : null}
+                  {block.album ? <MetaLine href={block.albumHref} text={block.albumLine} title="Open the album page" /> : null}
+                  {!block.artistText && !block.album ? <span>—</span> : null}
                 </div>
               </>
-            ) : (
+            ) : !current ? (
               <div className="text-sm truncate font-semibold text-zinc-500">Nothing playing</div>
-            )}
+            ) : null}
           </div>
           <FavHeart
             kind="track"
@@ -2667,8 +2838,8 @@ export default function PlayerBar() {
                   rgGain === null
                     ? null
                     : { gain: rgGain, source: rgRes?.source ?? null, analyzed: !!rgRes?.analyzed, album: !!rgRes?.album },
-                onMode: (m) => saveRg({ replaygain_mode: m }),
-                onPreamp: (db) => saveRg({ replaygain_preamp_db: db }),
+                onMode: (m) => saveCfg({ replaygain_mode: m }),
+                onPreamp: (db) => saveCfg({ replaygain_preamp_db: db }),
               }}
             />,
             document.body

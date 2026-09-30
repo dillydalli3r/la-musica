@@ -18,7 +18,10 @@
  *   trackmenu — the track-only entries of the details ("…") menu: "Open track
  *              page" lands on that track's own page, "Download music video"
  *              makes the request the album row's removed film button made, and
- *              a menu that is NOT on one track offers neither */
+ *              a menu that is NOT on one track offers neither
+ *   credits  — the Credits popout's identity header: its heading is the
+ *              release's (or recording's) NAME and the facts the files state
+ *              ride BELOW it, never a raw path in the title slot */
 let chromium;
 try {
   // Plain require resolves from this file's folder up to the repo root's
@@ -931,6 +934,217 @@ async function trackMenuChecks(page, check) {
   await page.waitForTimeout(250);
 }
 
+/* ---- the Credits popout's identity header -------------------------------
+ * The report this pins: the Credits modal printed the raw PATH where a name
+ * belongs — the file's own location sitting in the title slot, saying what
+ * the panel was opened ON rather than what the credits ARE. The panel draws
+ * an identity HEADER now: an <h3> carrying the release's (or the recording's)
+ * NAME, then one label/value line per fact the files state (Artist, Album,
+ * label · catalogue number, barcode, date, country, type, media, and the
+ * MusicBrainz ids), every value with its own copy button, and the raw path
+ * LAST — small and dimmed, below the heading, never as it.
+ *
+ * What is asserted, and why it is the right thing to look at: a NAME has no
+ * path separator and does not end in an audio extension, so a path handed to
+ * the heading fails the shape check by itself; and the ORDER is the other
+ * half — whatever path-shaped string is still drawn has to sit BELOW the
+ * heading, with the grid's facts and a copy button drawn with it.
+ *
+ * Two entry points, because the same panel is mounted from both: the album
+ * page's own actions menu ("All album actions" → "Credits", the whole
+ * release) and a listed row's "…" (TrackActionsMenu → "Credits (this
+ * track)…"). The track half skips itself, with a note, when no file in the
+ * library carries a MUSICBRAINZ_TRACKID — there is no id for it to expect. */
+
+/** The extensions a raw-path title ends in — the shape a heading must never
+ *  have (the old subtitle was always one of these files, or the folder above
+ *  it). */
+const AUDIO_EXTS = [".flac", ".mp3", ".m4a", ".ogg", ".opus", ".wav"];
+
+/** Whether a heading reads as a NAME: something there at all, no path
+ *  separator, and no audio extension at its end. */
+const nameShaped = (s) => !!s && !/[\\/]/.test(s) &&
+  !AUDIO_EXTS.some((ext) => s.toLowerCase().endsWith(ext));
+
+/** The open Credits dialog's identity header, read out of the DOM: the
+ *  heading, the label/value rows of the grid under it, where the raw path
+ *  line sits, and every path-shaped string drawn ABOVE the heading (exactly
+ *  the shape the old subtitle had). */
+const creditHeader = (page) => page.evaluate(() => {
+  const dialog = document.querySelector('[role="dialog"][aria-label="Credits"]');
+  if (!dialog) return null;
+  const h3 = dialog.querySelector("h3");
+  // The header block the heading opens: the h3's flex row and the bordered
+  // container around it, which holds the fact grid and the path line.
+  const header = h3 && h3.parentElement ? h3.parentElement.parentElement : null;
+  const grid = header ? header.querySelector("div.grid") : null;
+  const rows = [];
+  if (grid) {
+    // The grid is label/value PAIRS, one element each.
+    const kids = [...grid.children];
+    for (let i = 0; i + 1 < kids.length; i += 2)
+      rows.push({ label: kids[i].textContent.trim(), value: kids[i + 1].textContent.trim() });
+  }
+  const top = h3 ? h3.getBoundingClientRect().top : null;
+  const above = [...dialog.querySelectorAll("*")]
+    .filter((el) => !el.children.length && /[\\/]/.test(el.textContent || ""))
+    .map((el) => ({ text: el.textContent.trim(), top: Math.round(el.getBoundingClientRect().top) }))
+    .filter((p) => top !== null && p.top < top - 1);
+  const pathEl = header ? header.querySelector(".font-mono") : null;
+  return {
+    heading: h3 ? h3.textContent.trim() : "",
+    rows, above,
+    path: pathEl ? pathEl.textContent.trim() : "",
+    pathTop: pathEl ? pathEl.getBoundingClientRect().top : null,
+    copies: dialog.querySelectorAll('button[aria-label^="Copy"]').length,
+    top,
+  };
+});
+
+async function creditsChecks(page, check) {
+  await page.setViewportSize({ width: 1440, height: 900 });
+  const lib = await (await fetch(`${BASE}/api/library`)).json();
+  // The album the pass works on: the library's first one with tracks, and one
+  // whose files carry a MUSICBRAINZ_TRACKID is preferred, so the track half
+  // below has a row to open the panel on (and its own "Track MBID" row to
+  // find).
+  let album = null;
+  let identified = null;
+  for (const ar of lib.artists ?? []) {
+    for (const al of ar.albums ?? []) {
+      if (!(al.tracks ?? []).length) continue;
+      if (!album) album = al;
+      if (al.tracks.some((t) => String(t.tags?.MUSICBRAINZ_TRACKID ?? "").trim())) {
+        identified = al;
+        break;
+      }
+    }
+    if (identified) break;
+  }
+  album = identified ?? album;
+  if (!album) {
+    console.log("  --   credits: skipped, no album with tracks in this library");
+    return;
+  }
+  // The facts the FILES state, straight from the library payload — what the
+  // header is supposed to draw a row for. A name the panel already draws as
+  // the heading is asserted in whichever slot it lands.
+  const tagOf = (k) => String(album.meta?.[k] ?? "").trim();
+  const albumName = tagOf("ALBUM") || album.path.split("/").pop();
+  const url = BASE + albumRoute(album);
+
+  // ---- the album page's own Credits entry --------------------------------
+  const tag = `credits (album "${albumName}")`;
+  await page.goto(url, { waitUntil: "networkidle", timeout: 60000 });
+  await page.waitForTimeout(1000);
+  const opener = page.locator('button[title="All album actions"]').first();
+  if ((await opener.count()) === 0) {
+    console.log(`  --   ${tag}: skipped, the album page offers no "All album actions" menu`);
+    return;
+  }
+  await opener.click();
+  await page.waitForTimeout(350);
+  const menuLabels = (await page.locator('[role="menu"] [role="menuitem"]').allInnerTexts())
+    .map((s) => s.trim());
+  const entry = page.locator('[role="menu"] [role="menuitem"]', { hasText: /^Credits$/ }).first();
+  check(`${tag}: the page's actions menu offers "Credits"`,
+    (await entry.count()) === 1, JSON.stringify(menuLabels.slice(0, 14)));
+  if ((await entry.count()) === 0) return;
+  await entry.click();
+  const dialog = page.locator('[role="dialog"][aria-label="Credits"]');
+  await dialog.waitFor({ state: "visible", timeout: 10000 }).catch(() => {});
+  check(`${tag}: the entry opens a dialog titled "Credits"`,
+    await dialog.isVisible().catch(() => false));
+  // The panel renders a spinner until the lookup lands; the header is what
+  // this pass reads, so that is what it waits for.
+  await dialog.locator("h3").first().waitFor({ timeout: 60000 }).catch(() => {});
+  const h = await creditHeader(page);
+  if (!h || !h.heading) {
+    check(`${tag}: the panel drew an identity header (an <h3> heading)`, false,
+      h ? "the open dialog has no heading" : "no Credits dialog in the DOM");
+    await page.keyboard.press("Escape");
+    return;
+  }
+  check(`${tag}: the heading is a NAME, not a path`,
+    nameShaped(h.heading), JSON.stringify(h.heading));
+  check(`${tag}: the heading is not the raw path line`,
+    h.heading !== h.path,
+    `heading ${JSON.stringify(h.heading)} vs path ${JSON.stringify(h.path)}`);
+  const labels = h.rows.map((r) => r.label);
+  check(`${tag}: the header grid drew its label/value facts`,
+    h.rows.length > 0, JSON.stringify(h.rows.slice(0, 8)));
+  // `Artist` the files state, plus a `Release MBID` row exactly when they
+  // carry that id. The release's own NAME is normally the heading on an album
+  // panel (CreditHeader leaves out a fact that would only repeat it), so it is
+  // checked in whichever slot is drawn.
+  const wantFacts = [];
+  if (tagOf("ARTIST") || tagOf("ALBUMARTIST")) wantFacts.push("Artist");
+  if (tagOf("MUSICBRAINZ_ALBUMID")) wantFacts.push("Release MBID");
+  const missing = wantFacts.filter((l) => !labels.includes(l));
+  check(`${tag}: the grid lists the facts the files state (${wantFacts.join(", ") || "none"})`,
+    wantFacts.length > 0 && missing.length === 0,
+    `missing ${JSON.stringify(missing)} of ${JSON.stringify(labels)}`);
+  check(`${tag}: the release's name is drawn — the Album row, or the heading itself`,
+    labels.includes("Album") || h.heading === albumName,
+    `heading ${JSON.stringify(h.heading)} vs ${JSON.stringify(albumName)}; labels ${JSON.stringify(labels)}`);
+  check(`${tag}: nothing path-shaped is drawn ABOVE the heading`,
+    h.above.length === 0, JSON.stringify(h.above));
+  check(`${tag}: the raw path rides below the heading (or is not drawn at all)`,
+    h.pathTop === null || (h.top !== null && h.pathTop > h.top),
+    `path ${JSON.stringify(h.path)} @ ${h.pathTop} vs heading @ ${h.top}`);
+  check(`${tag}: the header gives its facts and ids a copy button`,
+    h.copies >= 1, `${h.copies} button[aria-label^="Copy"]`);
+  await page.keyboard.press("Escape");
+  await page.waitForTimeout(250);
+
+  // ---- the same header on a TRACK ----------------------------------------
+  // TagActionsMenu mounts the very same panel for one file (`path`, not
+  // `album`), so the header has to read the same way there — with the one row
+  // only a track can carry.
+  const track = (album.tracks ?? [])
+    .find((t) => String(t.tags?.MUSICBRAINZ_TRACKID ?? "").trim());
+  if (!track) {
+    console.log(`  --   ${tag} (track): skipped, no file in this album carries a MUSICBRAINZ_TRACKID`);
+    return;
+  }
+  const ttag = `credits (track "${track.tags.TITLE ?? track.file}")`;
+  await page.goto(url, { waitUntil: "networkidle", timeout: 60000 });
+  await page.waitForTimeout(1200);
+  const row = page.locator("table tbody tr").filter({ hasText: track.tags.TITLE ?? track.file }).first();
+  if ((await row.count()) === 0) {
+    console.log(`  --   ${ttag}: skipped, the tracklist has no row naming it`);
+    return;
+  }
+  await row.hover(); // the row's own controls are revealed on hover
+  await row.locator('button[title^="Track actions"]').first().click();
+  await page.waitForTimeout(350);
+  const rowLabels = (await page.locator('[role="menu"] [role="menuitem"]').allInnerTexts())
+    .map((s) => s.trim());
+  const trackEntry = page.locator('[role="menu"] [role="menuitem"]',
+    { hasText: /^Credits \(this track\)/ }).first();
+  check(`${ttag}: the row's "…" offers "Credits (this track)…"`,
+    (await trackEntry.count()) === 1, JSON.stringify(rowLabels.slice(0, 14)));
+  if ((await trackEntry.count()) === 0) return;
+  await trackEntry.click();
+  await dialog.waitFor({ state: "visible", timeout: 10000 }).catch(() => {});
+  check(`${ttag}: the entry opens a dialog titled "Credits"`,
+    await dialog.isVisible().catch(() => false));
+  await dialog.locator("h3").first().waitFor({ timeout: 60000 }).catch(() => {});
+  const th = await creditHeader(page);
+  if (!th || !th.heading) {
+    check(`${ttag}: the panel drew an identity header (an <h3> heading)`, false,
+      th ? "the open dialog has no heading" : "no Credits dialog in the DOM");
+    await page.keyboard.press("Escape");
+    return;
+  }
+  check(`${ttag}: the heading is a NAME, not a path`,
+    nameShaped(th.heading), JSON.stringify(th.heading));
+  check(`${ttag}: the file's MUSICBRAINZ_TRACKID is drawn as a "Track MBID" row`,
+    th.rows.some((r) => r.label === "Track MBID"), JSON.stringify(th.rows.map((r) => r.label)));
+  await page.keyboard.press("Escape");
+  await page.waitForTimeout(250);
+}
+
 (async () => {
   const browser = await chromium.launch({ executablePath: process.env.CHROME, headless: true });
   const page = await browser.newContext({ viewport: { width: 1440, height: 900 } }).then((c) => c.newPage());
@@ -953,6 +1167,7 @@ async function trackMenuChecks(page, check) {
   if (want("lyrics")) await lyricsChecks(page, check);
   if (want("sheet")) await sheetChecks(browser, page, check, errs);
   if (want("pagemenu")) await pageMenuChecks(page, check);
+  if (want("credits")) await creditsChecks(page, check);
   if (want("trackmenu")) { await trackMenuChecks(page, check); return finish(); }
   if (!want("nav")) return finish();
 

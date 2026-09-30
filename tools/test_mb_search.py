@@ -480,12 +480,20 @@ assert performer["mbid"] == "", performer
 kaye = next(row for row in body["rows"] if row["artist"] == "Lenny Kaye")
 assert kaye["attributes"] == ["guitar"], kaye
 
-# --- and with no MB ID and no credit tags, the 404 is the honest answer ----
+# --- and with no MB ID and no credit tags, the identity block still names
+# --- the file: the panel's header comes from the tags, so this is an answer
 TAGS_BACKUP = dict(TAGS[TRACK_FILES[0]])
 TAGS[TRACK_FILES[0]] = {k: v for k, v in TAGS_BACKUP.items()
                         if k not in ("MUSICBRAINZ_TRACKID", "PERFORMER")}
 mb = _install(FakeMB())
-assert _client.get("/api/credits", params={"path": TRACK_FILES[0]}).status_code == 404
+r = _client.get("/api/credits", params={"path": TRACK_FILES[0]})
+assert r.status_code == 200, (r.status_code, r.text)
+body = r.json()
+assert body["source"] == "tags", body
+assert body["rows"] == [], body                  # nothing credited anybody…
+assert body["identity"]["title"] == "01 Track1", body["identity"]
+assert body["identity"]["artist"] == "Test Artist", body["identity"]
+assert body["identity"]["album"] == "Test Album", body["identity"]
 TAGS[TRACK_FILES[0]] = TAGS_BACKUP
 
 

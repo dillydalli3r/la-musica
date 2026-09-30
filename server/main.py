@@ -4858,12 +4858,25 @@ def credits(path: str = Query(""), album: str = Query("")):
     instrument or vocal part in its attributes, and the person's own name and
     MBID — and one cached RELEASE request covers every track of an album. A
     file with no MusicBrainz ID, or a release MB reports no relation for, is
-    answered from the files' own credit tags (`source: "tags"`) so the panel
-    is never empty. Rows are `{role, attributes[], artist, mbid}`.
+    answered from the files' own credit tags (`source: "tags"`). NOTHING is
+    filtered out of the rows: whatever role MusicBrainz states is one here —
+    a release's credits are not only its performers — and the release's
+    relations, each recording's AND each of their works' are merged (a work
+    states the composer / lyricist / writer).
+
+    The reply also carries an `identity` block: title, artist, album, album
+    artist, label, catalog number, barcode, dates, country, release type,
+    medium, every MusicBrainz id it resolved and the path that was asked for,
+    read from the same tag set the lookup already loaded. The panel prints THAT
+    as its header — the title is the heading and the raw path only rides along
+    at the bottom — and the block is always present ("" where the files state
+    nothing), which is why an empty `rows` is an answer here rather than a 404.
+    Rows are `{role, attributes[], artist, mbid}`.
     """
     folder = _music_folder()
     source = "musicbrainz"
     rows, artist, album_name, track_mbid, release_mbid = [], "", "", "", ""
+    identity = intg.identity_from_tags({})
     if path:
         p = os.path.normpath(mbresolve.resolve_track(path) or path)
         if not os.path.isfile(p):
@@ -4871,10 +4884,15 @@ def credits(path: str = Query(""), album: str = Query("")):
         if not _in_music_folder(p, folder):
             raise HTTPException(400, "file outside music folder")
         tags = tagcache.read_track(p, None)[0] or {}
+        identity = intg.identity_from_tags(tags, p)
         artist = str(tags.get("ARTIST") or tags.get("ALBUMARTIST") or "").strip()
         album_name = (str(tags.get("ALBUM") or "").strip()
                       or os.path.basename(os.path.dirname(p)))
         track_mbid = intg._mbid(tags.get("MUSICBRAINZ_TRACKID")) or ""
+        # The block names the id the route resolved — the same one the reply
+        # already carries as `track_mbid` — so the header never shows the tag's
+        # spelling beside the route's answer.
+        identity["track_mbid"] = identity["recording_mbid"] = track_mbid
         if track_mbid:
             rows = _mb_credit_rows(intg.recording_credits, track_mbid)
         if not rows:
@@ -4890,6 +4908,13 @@ def credits(path: str = Query(""), album: str = Query("")):
             raise HTTPException(404, "no audio files in this album")
         tagsets = [tagcache.read_track(f, None)[0] or {} for f in files]
         album_name = os.path.basename(d)
+        identity = intg.identity_from_tags(tagsets, d)
+        # An album is not a track: a file's TITLE and MB recording id name ONE
+        # of its recordings, so the block's title is the release's own name
+        # (the folder it is filed under when no file states an ALBUM) and the
+        # recording ids stay blank rather than claim the first file.
+        identity["title"] = identity["album"] or album_name
+        identity["track_mbid"] = identity["recording_mbid"] = ""
         for t in tagsets:
             artist = artist or str(t.get("ALBUMARTIST") or t.get("ARTIST")
                                    or "").strip()
@@ -4897,6 +4922,7 @@ def credits(path: str = Query(""), album: str = Query("")):
                             or intg._mbid(t.get("MUSICBRAINZ_ALBUMID")) or "")
             if artist and release_mbid:
                 break
+        identity["release_mbid"] = release_mbid
         if release_mbid:
             rows = _mb_credit_rows(intg.release_credits, release_mbid)
         if not rows:
@@ -4906,11 +4932,14 @@ def credits(path: str = Query(""), album: str = Query("")):
     else:
         raise HTTPException(404, "path or album is required")
     rows = intg.tidy_credit_rows(rows)
-    if not rows and not (track_mbid or release_mbid):
-        raise HTTPException(404, "no MusicBrainz id and no credit tags on "
-                                 + ("this track" if path else "these files"))
+    # An empty row list is an ANSWER, not a 404: the identity block names the
+    # file or release from the tags themselves, so the panel always has the
+    # header the report was about to draw — a track MusicBrainz states no
+    # relation for and no tagger credited anybody on still shows what it IS.
+    # The refusals above (no such file/folder, outside the music folder, an
+    # album holding no audio) are the only errors this route has.
     return {"artist": artist, "album": album_name, "rows": rows,
-            "source": source,
+            "source": source, "identity": identity,
             "track_mbid" if path else "release_mbid": track_mbid or release_mbid}
 
 

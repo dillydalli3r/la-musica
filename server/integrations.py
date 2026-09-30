@@ -26,6 +26,11 @@ import httpx
 # server/httpclient.py. Those helpers stay the call sites' spelling on purpose:
 # they are the seam the provider suites replace.
 from . import httpclient  # noqa: F401
+# The tag vocabulary's own home: the credits module below names the tags its
+# identity block and its tag fallback read FROM the registry rather than
+# spelling them again, so a renamed tag fails loudly there instead of printing
+# an empty header (see IDENTITY_TAG_FIELDS).
+from . import tags_registry as _tags_registry
 
 from mlo import cover_choice as _cover_choice
 from mlo import release_choice
@@ -4560,17 +4565,69 @@ def _mb_recording_ids(recording_mbid):
 # conductor, remixer, …), the instrument or vocal part rides in `attributes`
 # ("double bass", "lead vocals"), and the person's name + MBID come along in
 # the same relation, so no second request is needed to name them. `work-rels`
-# says which WORK the recording performs. ONE request per recording, ONE per
-# release (`recording-level-rels` + `work-level-rels` bring each track's own
-# relations with the release, VERIFIED against MB while writing this), both
-# through mb_get_cached so the cache and the 1 req/s etiquette apply like any
-# other MB call.
+# names the WORK the recording performs, and `work-level-rels` inlines that
+# work's OWN relations — where MusicBrainz keeps a work's composer, lyricist
+# and writer — into the same response, so the songwriting half of a track's
+# credits (and of EVERY recording's work of an album) costs no extra request.
+# ONE request per recording, ONE per release (`recording-level-rels` +
+# `work-level-rels` bring each track's own relations with the release, VERIFIED
+# against MB while writing this), both through mb_get_cached so the cache and
+# the 1 req/s etiquette apply like any other MB call.
 CREDITS_MAX_RECORDINGS = 200   # a box set must not become 200 requests' worth
-CREDITS_MAX_ROWS = 500         # …and the UI gets a capped list either way
-# The tags a tagger writes when MB has nothing (Vorbis PERFORMER is the
-# common one, per player, as "Name (instrument)").
-CREDIT_TAG_ROLES = ("PERFORMER", "COMPOSER", "LYRICIST", "ARRANGER",
-                    "CONDUCTOR", "REMIXER", "ENGINEER", "PRODUCER")
+CREDITS_MAX_ROWS = 500         # …and one reply stays a sane size either way
+# The tags a tagger writes when MB has nothing (Vorbis PERFORMER is the common
+# one, per player, as "Name (instrument)"). Every name is one a MusicBrainz
+# relation states AND one the tag registry knows, so the fallback covers the
+# whole credit table rather than the two tags a Vorbis writer happens to fill.
+CREDIT_TAG_ROLES = ("PERFORMER", "COMPOSER", "LYRICIST", "WRITER", "ARRANGER",
+                    "CONDUCTOR", "REMIXER", "ENGINEER", "PRODUCER", "MIXER",
+                    "DJMIXER", "DIRECTOR")
+
+
+# --------------------------------------------------------------------------- #
+# The identity block: everything the panel's header may print
+# --------------------------------------------------------------------------- #
+# One row per identity FIELD and the canonical tag it reads. The tag names are
+# the registry's own (`server/tags_registry.py`, which derives them from
+# `mlo.audio.TAG_MAP` — the same keys `AudioFile.all_tags` hands back): this
+# module decides what each field MEANS, the registry owns what its tag is
+# called, and `_unknown_identity_tags` below fails loudly if a name moves
+# instead of printing an empty header.
+IDENTITY_TAG_FIELDS = (
+    ("title", "TITLE"),
+    ("artist", "ARTIST"),
+    ("album", "ALBUM"),
+    ("album_artist", "ALBUMARTIST"),
+    ("catalog_number", "CATALOGNUMBER"),
+    ("label", "LABEL"),
+    ("barcode", "BARCODE"),
+    ("date", "DATE"),
+    ("original_date", "ORIGINALDATE"),
+    ("country", "RELEASECOUNTRY"),
+    ("release_type", "RELEASETYPE"),
+    ("media", "MEDIA"),
+    ("track_mbid", "MUSICBRAINZ_TRACKID"),
+    ("release_mbid", "MUSICBRAINZ_ALBUMID"),
+    ("release_group_mbid", "MUSICBRAINZ_RELEASEGROUPID"),
+    ("artist_mbid", "MUSICBRAINZ_ARTISTID"),
+)
+# The block's whole key set: the fields above plus the two that read no tag of
+# their own — `recording_mbid` is MusicBrainz's name for the id the
+# MUSICBRAINZ_TRACKID tag holds, `path` is the file/folder the panel was
+# opened on. EVERY key is always present ("" where nothing states it), so the
+# header reads the block without a null check.
+IDENTITY_FIELDS = tuple(field for field, _ in IDENTITY_TAG_FIELDS) + (
+    "recording_mbid", "path",
+)
+# The registry is the source of truth for a tag's SPELLING, so a name it does
+# not know is a typo — caught here at import, the same loud rule
+# tags_registry._assert_known applies to a renamed check.
+_unknown_identity_tags = sorted(
+    ({tag for _, tag in IDENTITY_TAG_FIELDS} | set(CREDIT_TAG_ROLES))
+    - set(_tags_registry.TAG_FAMILY))
+if _unknown_identity_tags:
+    raise ValueError("integrations: unknown credit tag name(s) "
+                     f"{_unknown_identity_tags} — not in server.tags_registry")
 
 
 def _credit_rows(relations, rows=None):
@@ -4582,7 +4639,10 @@ def _credit_rows(relations, rows=None):
     era) and `instrument` (current schema), so filtering by type would drop
     half of them. A relation pointing at a WORK becomes a `work` row whose
     `artist` is the work's title (its own type, usually "performance", rides
-    in `attributes`), which is how the recording's work stays visible.
+    in `attributes`). AND that work node's OWN relations are appended with it:
+    `work-level-rels` inlines them into the very same response, and there
+    MusicBrainz states the composer / lyricist / writer — the half of the
+    credits a recording's own relations never carry.
     """
     rows = [] if rows is None else rows
     for rel in relations or []:
@@ -4597,6 +4657,7 @@ def _credit_rows(relations, rows=None):
                 rows.append({"role": "work", "attributes": attributes or
                              [str(rel.get("type") or "").strip()],
                              "artist": title, "mbid": work.get("id") or ""})
+            _credit_rows(work.get("relations"), rows)
             continue
         artist = rel.get("artist") or {}
         name = str(artist.get("name") or rel.get("target-credit") or "").strip()
@@ -4609,23 +4670,83 @@ def _credit_rows(relations, rows=None):
 
 
 def tidy_credit_rows(rows):
-    """De-duplicated, role-grouped, capped credit rows — what the UI renders.
+    """Normalised, de-duplicated, role-grouped credit rows — what the UI renders.
 
-    Albums repeat the same player on every track and the fallback repeats the
-    same tag on every file, so the same (role, person, instrument) is kept
-    once; sorting by role groups the list the way it is displayed.
+    Normalising is ALL this does: a role is lower-cased and trimmed, an empty
+    name is dropped (a row nobody is credited on says nothing), and a row
+    already seen — same role, person, id and attributes — is kept once, because
+    an album repeats the same player on every track and the tag fallback
+    repeats the same tag on every file. Sorting by role groups the list the way
+    it is displayed. NO role and NO attribute is ever filtered out: MusicBrainz
+    states the vocabulary and the panel groups by whatever arrives, so a
+    curated subset here would be a credit the user cannot see.
     """
     seen = set()
     out = []
     for row in rows or []:
-        key = (row.get("role"), row.get("artist", "").lower(), row.get("mbid"),
-               tuple(row.get("attributes") or []))
+        role = str(row.get("role") or "").strip().lower()
+        artist = str(row.get("artist") or "").strip()
+        if not role or not artist:
+            continue
+        attributes = [str(a).strip() for a in row.get("attributes") or []
+                      if str(a).strip()]
+        mbid = str(row.get("mbid") or "").strip()
+        key = (role, artist.lower(), mbid, tuple(attributes))
         if key in seen:
             continue
         seen.add(key)
-        out.append(row)
-    out.sort(key=lambda r: (r.get("role") or "", r.get("artist", "").lower()))
-    return out[:CREDITS_MAX_ROWS]
+        out.append({"role": role, "attributes": attributes, "artist": artist,
+                    "mbid": mbid})
+    out.sort(key=lambda r: (r["role"], r["artist"].lower()))
+    return out
+
+
+def identity_from_tags(tags, path=""):
+    """The `identity` block `/api/credits` answers with: what the panel's
+    header may print, read off the files' own tags.
+
+    `tags` is ONE tag dump (a track) or a LIST of them (an album's files) — the
+    callers hand over exactly what `tagcache.read_track` already returned, so
+    the header costs no extra read and no extra request. The FIRST non-empty
+    value wins per field, so a fact only some files carry (a CATALOGNUMBER on
+    one track, a RELEASECOUNTRY on another) still prints for the whole release.
+    Every field is present — "" where nothing states it — and `path` is the
+    file or folder the panel was opened on: the raw path the header prints LAST
+    and dimmed, never as the heading it used to be.
+    """
+    sets = tags if isinstance(tags, (list, tuple)) else [tags]
+    by_key = [{str(k).strip().upper(): v for k, v in (t or {}).items()}
+              if isinstance(t, dict) else {} for t in sets]
+
+    def value(tag):
+        for dump in by_key:
+            v = dump.get(tag)
+            text = (v if isinstance(v, str) else str(v or "")).strip()
+            if text:
+                return text
+        return ""
+
+    out = {field: "" for field in IDENTITY_FIELDS}
+    for field, tag in IDENTITY_TAG_FIELDS:
+        raw = value(tag)
+        # An id field holds a MusicBrainz id and nothing else: some taggers
+        # store a musicbrainz.org URL, which is the same id, and the header is
+        # meant to copy and link what MusicBrainz itself uses (integrations.
+        # _mbid is the one reader of both shapes).
+        out[field] = (_mbid(raw) or "") if field.endswith("_mbid") else raw
+    # MusicBrainz calls the id the MUSICBRAINZ_TRACKID tag holds a RECORDING
+    # id, so both fields of the block answer from that one tag.
+    out["recording_mbid"] = out["track_mbid"]
+    # The header names ONE artist: the file's own ARTIST, or the album artist
+    # when that is all it states (the same fallback the route's legacy `artist`
+    # field makes), with one artist id to go beside it.
+    out["artist"] = out["artist"] or out["album_artist"]
+    out["artist_mbid"] = (out["artist_mbid"]
+                          or _mbid(value("MUSICBRAINZ_ALBUMARTISTID")) or "")
+    # Payload paths are forward-slashed everywhere else in the app (the library
+    # tree, the album page), and this one is drawn on screen.
+    out["path"] = str(path or "").replace("\\", "/")
+    return out
 
 
 def credit_rows_from_tags(tags):
@@ -4634,14 +4755,16 @@ def credit_rows_from_tags(tags):
     `tags` is a raw tag dump (mlo.audio all_tags, keys already canonicalised to
     PERFORMER/COMPOSER/… when the container maps them). Vorbis writes
     `PERFORMER=Name (instrument)` once per player and some taggers join several
-    names with "; ", so both shapes are split back apart. ponytail: a
+    names with "; ", so both shapes are split back apart. Every tag in
+    CREDIT_TAG_ROLES is read — the whole credit table, not just the performers,
+    so a file that names its engineer and its mixer shows them too. ponytail: a
     multi-value Vorbis tag collapses to its first value in all_tags — enough
     for a fallback, read af.audio.tags directly if every player must show.
     """
     rows = []
     if not isinstance(tags, dict):
         return rows
-    by_key = {str(k).upper(): v for k, v in tags.items()}
+    by_key = {str(k).strip().upper(): v for k, v in tags.items()}
     for role in CREDIT_TAG_ROLES:
         for part in re.split(r"\s*;\s*", str(by_key.get(role) or "")):
             part = part.strip()
@@ -4657,21 +4780,29 @@ def credit_rows_from_tags(tags):
 
 
 def recording_credits(recording_mbid):
-    """Credit rows for ONE recording (its players, plus its work).
+    """Credit rows for ONE recording — its players AND its work's songwriters.
 
-    Raises MusicBrainzError (or httpx's own error) when MB cannot answer — the
-    caller reports that reason rather than an empty result.
+    Two relation families from the one request: the recording's own artist
+    relations (players, producer, engineer, mix…), and the relations of the
+    work the recording performs (`work-rels` names it, `work-level-rels` inlines
+    its composer / lyricist / writer). Raises MusicBrainzError (or httpx's own
+    error) when MB cannot answer — the caller reports that reason rather than
+    an empty result.
     """
     data = mb_get_cached(f"recording/{recording_mbid}",
-                         {"inc": "artist-rels+work-rels", "fmt": "json"})
+                         {"inc": "artist-rels+work-rels+work-level-rels",
+                          "fmt": "json"})
     return tidy_credit_rows(_credit_rows((data or {}).get("relations")))
 
 
 def release_credits(release_mbid):
-    """Credit rows for a whole RELEASE — every track's recording.
+    """Credit rows for a whole RELEASE — every track's recording and work.
 
-    The release request carries each track's own relations, so this stays ONE
-    request per album; only the aggregate is capped, not the request count.
+    The release request carries each track's own relations (`recording-level-
+    rels`) AND the relations of every work those recordings perform
+    (`work-level-rels`), so this stays ONE request per album and still merges
+    three families: the release's own relations, each recording's, and each
+    work's. Only the aggregate is capped, not the request count.
     """
     data = mb_get_cached(
         f"release/{release_mbid}",
