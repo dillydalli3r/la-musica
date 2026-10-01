@@ -161,7 +161,7 @@ def _stored_genres(af):
     return names, stored
 
 
-def genre_plan(af, names, count):
+def genre_plan(af, names, count, stored=None):
     """What GENRE this file should hold, and whether it already does.
 
     Returns ``(want, changed)``: *want* is the list to store through
@@ -179,6 +179,10 @@ def genre_plan(af, names, count):
     `mb_genre_count` means the same thing to every writer. ``count == 0`` is
     "keep none", the convention `trim_genres` documents (not
     `normalize_genres`' own 0, which means "no cap", for rendering).
+
+    *stored* is the verbatim list `_stored_genres` returned to the caller:
+    `trim_genres` has already read the container for it, and handing it in is
+    what stops ONE decision from reading the file's GENRE twice.
     """
     try:
         count = max(0, int(count))
@@ -188,7 +192,8 @@ def genre_plan(af, names, count):
     # What the tag should hold: repeated fields for a list, one plain value for
     # a single genre — the shapes `genre_apply` writes.
     want = [kept[0]] if len(kept) == 1 else kept
-    _, stored = _stored_genres(af)
+    if stored is None:
+        _, stored = _stored_genres(af)
     return want, want != stored
 
 
@@ -229,7 +234,7 @@ def trim_genres(af, count):
         if stored:
             af.delete_tag("GENRE")
         return 0
-    want, changed = genre_plan(af, names, count)
+    want, changed = genre_plan(af, names, count, stored=stored)
     if not changed:
         # Nothing to remove, nothing to clean and nothing re-spelled: never
         # rewrite a container for nothing.

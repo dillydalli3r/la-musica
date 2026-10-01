@@ -16,6 +16,7 @@ import os
 import subprocess
 import sys
 import threading
+from concurrent.futures import ThreadPoolExecutor
 
 from mlo.config import load_config
 from mlo.fetchdeps import pip_package_path
@@ -310,6 +311,21 @@ def _gather_orphaned_artifacts(pre, post_dirs, music_folder):
     from mlo.stats import is_audio_file
 
     moved_from = []
+    states = {}   # candidate dir -> its state, read at most once per call
+
+    def _candidate_state(cand):
+        # Every orphan used to re-open every candidate's audio for itself —
+        # k orphan dirs each read up to f fresh albums (k×f album scans, each
+        # an AudioFile per track) to answer a question whose answer cannot
+        # change while the loop runs: carry_album_files moves only NON-audio
+        # names, so a candidate's audio basenames and tags are the same for
+        # every orphan. Memoised per candidate, and still only read up to the
+        # first match (the early break below is preserved).
+        st = states.get(cand)
+        if st is None:
+            st = states[cand] = _album_audio_state(cand)
+        return st
+
     for old_dir, state in pre.items():
         if not os.path.isdir(old_dir):
             continue
@@ -318,7 +334,7 @@ def _gather_orphaned_artifacts(pre, post_dirs, music_folder):
         # find the destination: fresh dir with matching MBIDs / basenames
         dest = None
         for cand in post_dirs:
-            cb, cm = _album_audio_state(cand)
+            cb, cm = _candidate_state(cand)
             if (state[1] and cm and (state[1] & cm)) or (state[0] and (state[0] & cb)):
                 dest = cand
                 break
@@ -385,7 +401,7 @@ def run_beets_tagging(config=None):
     when beets isn't installed, so Run All works on every machine."""
     import time
 
-    from mlo.stats import _find_albums, new_stats
+    from mlo.stats import _find_albums, new_stats, worker_count
     from mlo.ui import Color, c, log, print_header
 
     config = config or load_config()
@@ -409,17 +425,30 @@ def run_beets_tagging(config=None):
 
     # Pre-import snapshot: which album dirs hold which audio (by name and
     # MusicBrainz IDs), so artifacts left behind by a move can be gathered.
+    # It has to be taken BEFORE the import — the state is the moved-away
+    # audio's own names and IDs, and beets takes the audio with it, so a dir
+    # that ends up audio-less has nothing left to read afterwards. Each dir
+    # is an independent container read (mutagen parses every track, ffprobe
+    # probes every video), so the snapshot runs in lanes — the same
+    # per-file pool mlo.lyrics_fetch/autotag use — instead of one album at a
+    # time on the runner thread front of the beets subprocess.
+    pre = {}
     try:
         scan_before = folder if os.path.isdir(folder) else os.path.commonpath(paths)
     except ValueError:
         scan_before = ""
-    pre = {}
     try:
         dirs = _find_albums(scan_before) if os.path.isdir(scan_before) else []
         if targets:
             dirs = sorted(set(dirs) | set(paths))
-        for d in dirs:
-            pre[d] = _album_audio_state(d)
+        if dirs:
+            workers = worker_count(config, items=len(dirs))
+            with ThreadPoolExecutor(max_workers=workers) as ex:
+                # map yields in input order, so `list(pre)` — the progress
+                # denominator below — is the same list of dirs, in the same
+                # order, as the serial loop produced.
+                for d, state in zip(dirs, ex.map(_album_audio_state, dirs)):
+                    pre[d] = state
     except Exception:
         pre = {}
 

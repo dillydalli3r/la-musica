@@ -117,6 +117,28 @@ Every one of the 24 scripts was audited for wasted work. What was measured:
   for a mixed-tempo track, which is a regression, not an optimization.
 - **AccurateRip** — the MEDIA=CD filter opened one container per file, serially,
   album after album; it runs in lanes now.
+- **Format CUEs** — the per-album rename/repair pass ran serially on the runner
+  thread while the formatting pass below it was pooled, and one process-wide
+  lock made the pooled albums queue behind each other. A 120-album library:
+  **1,000 album folder listings → 880** and `run_format_cues` **3.70 s → 1.68 s**
+  (the repair pass itself ~4x), with all 480 file hashes and the stats dict
+  unchanged.
+- **Format all** — the tag-write gate rebuilt a 13-entry map and re-split the
+  path on *every* call, once per tag per file (~1.5 M times on a 50k-track
+  library), and one global cover lock stopped two albums' covers being prepared
+  at once. The map is module-level and the filetype is resolved once per file;
+  the cover lock is per album.
+- **Remux videos** — the pre-pool disc classification recognized every DVD/BD
+  structure one after another on the runner thread (one `ffprobe` per VOB part).
+  Recognition runs in lanes now: **48 part probes 1.94 s → 0.24 s** (8x), with
+  the same disc/derivative/plain lists in the same order and the same probe
+  count.
+- **Beets tagging** — the beets side was already one `beet import` for the whole
+  run; the pre-import snapshot re-opened every audio file of every album
+  serially (~15x in lanes now), and the orphan gather re-scanned the same
+  candidate albums once per orphan. Both are computed once.
+- **Release tracklist** was checked and left alone: it is paced by MusicBrainz's
+  own one-request-per-second etiquette, so there is no local work worth pooling.
 
 **Writing MusicBrainz metadata during an import runs its files in lanes.** Each
 file costs a full container rewrite (the app copies it, then mutagen rewrites

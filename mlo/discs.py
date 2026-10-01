@@ -1680,11 +1680,30 @@ def _ref_track_numbers(ref_base, disc):
     return [lead]
 
 
-# One cue at a time: a conversion (script 3) fixes the sheet from several
+# One ALBUM at a time: a conversion (script 3) fixes the sheet from several
 # worker threads as it walks an album's files, and two writers computing
 # different texts for the same sheet would let the last one win with a
 # half-converted view of the folder.
-_CUE_FIX_LOCK = threading.Lock()
+#
+# Per folder, not global: nothing here crosses an album boundary — a repair
+# reads and rewrites only the sheets it finds in the folder it was handed — so
+# one process-wide lock also made scripts that repair many albums queue behind
+# one another. Script 2's rename/repair pass runs its albums in lanes now, and
+# a folder with a sheet to rewrite would otherwise hold every other lane up
+# for the length of its own I/O. Same exclusion where it is needed, none where
+# it is not. Locks are created on first use, as in mlo.fetchdeps.install_lock.
+_cue_fix_locks = {}
+_cue_fix_locks_guard = threading.Lock()
+
+
+def _cue_fix_lock(album_dir):
+    """The lock guarding cue repair of ONE album folder."""
+    key = os.path.normcase(os.path.abspath(album_dir))
+    with _cue_fix_locks_guard:
+        lock = _cue_fix_locks.get(key)
+        if lock is None:
+            lock = _cue_fix_locks[key] = threading.Lock()
+        return lock
 
 
 def fix_cue_filenames(album_dir, log_fn=None, config=None):
@@ -1713,7 +1732,7 @@ def fix_cue_filenames(album_dir, log_fn=None, config=None):
     """
     if config is not None and not config.get("cue_fix_filenames", True):
         return []
-    with _CUE_FIX_LOCK:
+    with _cue_fix_lock(album_dir):
         return _fix_cue_filenames_locked(album_dir, log_fn, config)
 
 

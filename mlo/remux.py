@@ -515,7 +515,7 @@ def _disc_owner(path):
     return None
 
 
-def _split_discs(files, probe, explicit=()):
+def _split_discs(files, probe, explicit=(), config=None):
     """``(discs, derivatives, plain)`` for one run's file list.
 
     *discs* is ``{folder: (Disc, (its files))}`` — ONE entry per structure,
@@ -535,30 +535,74 @@ def _split_discs(files, probe, explicit=()):
     in the caller; with that off this function is not called at all.
     """
     found, derivatives, plain = {}, [], []
+
+    # Every folder this run needs recognized, resolved BEFORE the loop below
+    # decides anything. Recognition is a pure read of a folder's own files — a
+    # DVD's titles are its VOB parts and each part's duration is its own
+    # ffprobe process, a Blu-ray's come from its playlists — and one folder's
+    # answer cannot depend on another's, so the folders go out in lanes. A
+    # library pass holding several structures used to spawn every part probe
+    # one after another on the runner thread, before the remux pool below could
+    # start on any file at all.
+    folders = {}
+    for f in files:
+        if f.lower().endswith(videodisc.ISO_EXT):
+            folders.setdefault(os.path.normcase(f), f)
+            continue
+        owner = _disc_owner(f)
+        folder = owner if owner is not None else os.path.dirname(f)
+        folders.setdefault(os.path.normcase(folder), folder)
+
     seen = {}
+
+    def _recognized(key, folder):
+        """The structure at *folder* — prefetched, else read now.
+
+        The prefetch knows every folder a file in *files* names; the fallback
+        covers a folder reached only through the loop below (a file whose own
+        recognition came back None and whose parent was not otherwise asked).
+        """
+        if key not in seen:
+            seen[key] = videodisc.recognize(folder, probe)
+        return seen[key]
+
+    def _recognize(item):
+        key, folder = item
+        return key, videodisc.recognize(folder, probe)
+
+    if len(folders) > 1:
+        from concurrent.futures import ThreadPoolExecutor
+        lanes = worker_count(config, maximum=8, items=len(folders))
+        with ThreadPoolExecutor(max_workers=lanes) as ex:
+            # map yields in input order; only the memo is built here, so no
+            # ordering of the lists below depends on it.
+            for key, disc in ex.map(_recognize, folders.items()):
+                seen[key] = disc
+    else:
+        for key, disc in map(_recognize, folders.items()):
+            seen[key] = disc
+
     for f in files:
         if f.lower().endswith(videodisc.ISO_EXT):
             # A disc image is a structure this app cannot read inside (and a
             # Blu-ray one is usually encrypted): recognized so the app can say
             # it must be mounted first, never so it can be remuxed.
-            disc = videodisc.recognize(f)
+            disc = seen.get(os.path.normcase(f))
             if disc is not None:
                 found.setdefault(os.path.normcase(f), [disc, []])[1].append(f)
                 continue
         owner = _disc_owner(f)
         if owner is not None:
             key = os.path.normcase(owner)
-            if key not in seen:
-                seen[key] = videodisc.recognize(owner, probe)
-            if seen[key] is not None:
-                found.setdefault(key, [seen[key], []])[1].append(f)
+            disc = _recognized(key, owner)
+            if disc is not None:
+                found.setdefault(key, [disc, []])[1].append(f)
                 continue
         # Not inside a structure: a derivative when its own folder holds one.
         d = os.path.dirname(f)
         key = os.path.normcase(d)
-        if key not in seen:
-            seen[key] = videodisc.recognize(d, probe)
-        if seen[key] is not None and os.path.normcase(f) not in explicit:
+        disc = _recognized(key, d)
+        if disc is not None and os.path.normcase(f) not in explicit:
             derivatives.append(f)
         else:
             plain.append(f)
@@ -668,7 +712,7 @@ def run_remux_videos(config):
     probe = _duration_probe(ffprobe)
     if prefer_disc:
         named = {os.path.normcase(t) for t in (targets or []) if os.path.isfile(t)}
-        disc_jobs, derivatives, files = _split_discs(files, probe, named)
+        disc_jobs, derivatives, files = _split_discs(files, probe, named, config)
     else:
         # The preference is the ONLY thing that gives a disc structure its own
         # treatment: with it off, its files are ordinary video files again (and

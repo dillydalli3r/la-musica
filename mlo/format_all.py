@@ -30,7 +30,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from .accurip import _canonical_accurip_text
 from .audio import AudioFile
 from .autotag import genre_count, trim_genres
-from .config import should_write_audio_tag
+from .config import _ext_to_audio_type, should_write_audio_tag
 from .cue import canonical_cue_text
 from .deps import HAS_PIL, Image
 from .images import _exif_transposed
@@ -168,14 +168,30 @@ def _prepare_embedded_cover(album_dir, cfg):
 
 # One album cover is prepared once per run and reused by every track of that
 # album (`cover_cache`, built per run in run_format_all). An album's tracks are
-# formatted by DIFFERENT pool threads, so without a lock several of them read
-# and prepare the same cover before any of them publishes the entry — the read
-# and the Pillow work paid up to `worker_count` times per album — and the cache
-# is a plain dict mutated from all of them. One lock for the whole cache, not
-# one per album: the critical section is a MISS, every track after the first
-# only takes it to read, and holding it across the prepare is what makes a miss
-# single-flight.
-_cover_cache_lock = threading.Lock()
+# formatted by DIFFERENT pool threads, so the cache is a plain dict mutated
+# from all of them and needs a guard — and two tracks of one album can miss
+# together, so a miss is single-flight through a per-ALBUM lock: the second
+# thread in finds the entry already published rather than reading and preparing
+# the same cover again.
+#
+# The single-flight lock is per album, not one for the whole cache. The
+# critical section is a MISS — a cover read plus the Pillow decode/resize/encode,
+# the most expensive thing this pass does besides the audio I/O itself — and one
+# process-wide lock held across it made every other album's tracks queue behind
+# it, so the pool's lanes could never prepare two albums' covers at once. Two
+# albums share no cover file; only the same-album case needs exclusion. Locks
+# are created on first use, as in mlo.fetchdeps.install_lock.
+_cover_cache_lock = threading.Lock()   # guards cover_cache and _cover_load_locks
+_cover_load_locks = {}                 # album_dir -> that album's prepare lock
+
+
+def _cover_load_lock(album_dir):
+    """The single-flight lock for ONE album's cover preparation."""
+    with _cover_cache_lock:
+        lock = _cover_load_locks.get(album_dir)
+        if lock is None:
+            lock = _cover_load_locks[album_dir] = threading.Lock()
+        return lock
 
 
 def _format_embedded_covers(path, cfg, cover_cache, af=None):
@@ -203,13 +219,22 @@ def _format_embedded_covers(path, cfg, cover_cache, af=None):
             return (path, True, None)
 
         album_dir = os.path.dirname(path)
-        # Single-flight per album (see _cover_cache_lock): the other tracks of
+        # Single-flight per album (see _cover_load_lock): the other tracks of
         # this album are being formatted right now, and each of them asked for
         # this same cover before any of them had it.
         with _cover_cache_lock:
-            if album_dir not in cover_cache:
-                cover_cache[album_dir] = _prepare_embedded_cover(album_dir, cfg)
-            prep = cover_cache[album_dir]
+            hit = album_dir in cover_cache
+            prep = cover_cache.get(album_dir)
+        if not hit:
+            with _cover_load_lock(album_dir):
+                with _cover_cache_lock:
+                    if album_dir in cover_cache:
+                        hit = True
+                        prep = cover_cache[album_dir]
+                if not hit:
+                    prep = _prepare_embedded_cover(album_dir, cfg)
+                    with _cover_cache_lock:
+                        cover_cache[album_dir] = prep
         if not prep:
             return (path, False, None)  # no on-disk cover — leave audio untouched
         data, mime = prep
@@ -316,11 +341,14 @@ def _format_cue_file(path, cfg, force=False):
 
 def _lrc_expected(original, cfg, is_lrc_file=True):
     """Compute canonical expected text for LRC sidecar or embedded lyrics."""
-    from mlo.lyrics import format_lyrics_text as flt, _canonical_lyrics as cl
+    # format_lyrics_text / _canonical_lyrics are already bound at module scope
+    # (see the imports at the top): the local re-import that used to sit here
+    # ran on every lyrics-bearing file of the library, for two names it could
+    # not make cheaper.
     target = "LRC" if is_lrc_file else "EMBEDDED"
     eff_zero = bool(cfg.get("lrc_add_zero_timestamp", False)) and cfg.get("lrc_zero_timestamp_target", "BOTH") in (target, "BOTH")
-    return cl(
-        flt(
+    return _canonical_lyrics(
+        format_lyrics_text(
             original,
             precision=int(cfg.get("lrc_timestamp_precision", 2) or 2),
             strip_metadata=cfg.get("lrc_strip_metadata", True),
@@ -466,6 +494,10 @@ def _format_audio_tags(path, cfg, force=False, af=None):
         af = af or AudioFile(path)
         if af.audio is None:
             return (path, False, None, 0, 0)
+        # The filetype the write gate derives from `path` is the same for every
+        # tag of this file — the gate used to re-split the path on each of the
+        # ~20-30 calls the loop below makes, and once more for GENRE.
+        ftype = _ext_to_audio_type(os.path.splitext(path)[1])
         changed = False
         # How many values this pass rewrote INTO canonical form (spelling or
         # spacing) — the count the run reports, the way genres_trimmed counts
@@ -478,7 +510,7 @@ def _format_audio_tags(path, cfg, force=False, af=None):
             raw = str(val)
             # Skip tags that the config says must not be written — and also not graded —
             # so leaving them unformatted is consistent with grading, and avoids wasted writes.
-            if not should_write_audio_tag(cfg, key, filepath=path):
+            if not should_write_audio_tag(cfg, key, filepath=path, filetype=ftype):
                 continue
             if key.upper() in ("LYRICS", "UNSYNCEDLYRICS"):
                 # Same gate script 1 uses (mlo/lyrics.py:465) — Format All runs
@@ -535,7 +567,7 @@ def _format_audio_tags(path, cfg, force=False, af=None):
         # config key. GENRE goes through the write gate the loop above applies
         # to it.
         trimmed = 0
-        if should_write_audio_tag(cfg, "GENRE", filepath=path):
+        if should_write_audio_tag(cfg, "GENRE", filepath=path, filetype=ftype):
             try:
                 trimmed = trim_genres(af, genre_count(cfg))
             except Exception:
@@ -783,14 +815,18 @@ def run_format_all(config):
             tag_ok, tag_err = tag_res
             cover_ok, cover_err = cover_res
             err = tag_err or cover_err
-            rel = (os.path.relpath(fn, folder)
-                   if os.path.commonpath([folder, fn]) == folder else fn)
             if err:
                 counts["fail"] += 1
                 stats["error_count"] += 1
                 stats["errors"].append((fn, err))
                 log(c(f"  ✕ {os.path.basename(fn)}: {err}", Color.RED))
             elif tag_ok or cover_ok:
+                # Only the success line names the file RELATIVE to the folder,
+                # so only the success branch pays the two path operations —
+                # this used to be computed for every file, error path included,
+                # where the log only ever uses the basename.
+                rel = (os.path.relpath(fn, folder)
+                       if os.path.commonpath([folder, fn]) == folder else fn)
                 counts["ok"] += 1
                 stats["modified_count"] += 1
                 actions = []

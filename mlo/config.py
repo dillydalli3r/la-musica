@@ -3,6 +3,7 @@ import copy
 import json
 import os
 import tempfile
+from functools import lru_cache
 
 from .paths import (CONFIG_FILE, REPO_CONFIG_FILE, DEFAULT_DIGITAL_SOURCE, app_data_dir,
                     downloads_dir, legacy_state_dirs, read_music_folder_guess, trash_dir,
@@ -238,8 +239,41 @@ def _audio_tag_family(tag_name):
 # and the refused run replied exactly like "no provider knew this track".
 _TAG_WRITE_SWITCH = {"ITUNESADVISORY": "advisory_auto_fetch"}
 
+# family -> the config key that is its master switch (None where two keys or a
+# separate gate handle it; see the branches in should_write_audio_tag). Hoisted
+# to module scope: the function is called once per TAG per file of the library,
+# and it used to rebuild this thirteen-entry literal on every one of those calls.
+_FAMILY_GLOBAL = {
+    "AUDIT": "write_audit_tag",
+    "LOG_GRADE": "write_log_grade",
+    "REPLAYGAIN": "write_replaygain_tags",
+    "DYNAMIC_RANGE": "write_dynamic_range_tags",
+    "MEDIA_SOURCE": "normalize_media_source",
+    "INSTRUMENTAL": None,  # gated by two keys; handle below
+    "ADVISORY": "auto_advisory",
+    "GENRE": "genre_autofill",
+    "MOOD": "mood_enabled",
+    # RATING is the user's own star rating (server.ratings): the API writes
+    # it the moment a star is clicked, so its master switch is what turns
+    # writing the TAG off while keeping the rating in the app.
+    "RATING": "write_rating_tags",
+    # The web rating's own feature switch is its master switch: with
+    # `web_ratings_enabled` off the script is skipped by the chain
+    # (server.script_runners._DISABLED) and nothing writes the tags
+    # either, so "off" means off in both halves.
+    "WEBRATING": "web_ratings_enabled",
+    # ENERGY is written by the same analysis pass as MOOD, so it answers
+    # to the same switch; the grader requires it when it is on.
+    "ENERGY": "mood_enabled",
+    "LYRICS": None,  # lyrics_format gates this separately
+}
 
+
+@lru_cache(maxsize=None)
 def _ext_to_audio_type(ext):
+    # Pure ext -> filetype, and the SAME ext comes back for every tag of every
+    # file of the library (should_write_audio_tag resolves it per call), so the
+    # scan runs once per distinct extension instead of once per tag.
     ext = (ext or "").lower().lstrip(".")
     if ext == "flac":
         return "flac"
@@ -272,34 +306,9 @@ def should_write_audio_tag(config, tag_name, filepath=None, filetype=None):
     family = _audio_tag_family(tag_name)
     if not family:
         return True
-    # Global master switches (map family -> config key).
-    family_global = {
-        "AUDIT": "write_audit_tag",
-        "LOG_GRADE": "write_log_grade",
-        "REPLAYGAIN": "write_replaygain_tags",
-        "DYNAMIC_RANGE": "write_dynamic_range_tags",
-        "MEDIA_SOURCE": "normalize_media_source",
-        "INSTRUMENTAL": None,  # gated by two keys; handle below
-        "ADVISORY": "auto_advisory",
-        "GENRE": "genre_autofill",
-        "MOOD": "mood_enabled",
-        # RATING is the user's own star rating (server.ratings): the API writes
-        # it the moment a star is clicked, so its master switch is what turns
-        # writing the TAG off while keeping the rating in the app.
-        "RATING": "write_rating_tags",
-        # The web rating's own feature switch is its master switch: with
-        # `web_ratings_enabled` off the script is skipped by the chain
-        # (server.script_runners._DISABLED) and nothing writes the tags
-        # either, so "off" means off in both halves.
-        "WEBRATING": "web_ratings_enabled",
-        # ENERGY is written by the same analysis pass as MOOD, so it answers
-        # to the same switch; the grader requires it when it is on.
-        "ENERGY": "mood_enabled",
-        "LYRICS": None,  # lyrics_format gates this separately
-    }
     # A tag whose own writer has a switch of its own wins over its family's
     # (see _TAG_WRITE_SWITCH).
-    gkey = _TAG_WRITE_SWITCH.get(str(tag_name).upper()) or family_global.get(family)
+    gkey = _TAG_WRITE_SWITCH.get(str(tag_name).upper()) or _FAMILY_GLOBAL.get(family)
     if gkey is not None and not config.get(gkey, True):
         return False
     # INSTRUMENTAL has two globals; require at least one path to be enabled.

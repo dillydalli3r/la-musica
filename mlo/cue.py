@@ -234,18 +234,53 @@ def run_format_cues(config):
     if targets is None:
         cues = sorted(_walk_files(target, (".cue",)))
 
-    from .discs import rename_cues_for_discs, rename_logs_for_discs, fix_cue_filenames
-    renamed_any = False
-    for album_dir in sorted({os.path.dirname(c) for c in cues}):
-        for old, new in rename_cues_for_discs(album_dir, config=config):
-            renamed_any = True
-            log(f"cue renamed: {old} -> {new}")
-        for old, new in rename_logs_for_discs(album_dir, config=config):
-            renamed_any = True
-            log(f"log renamed: {old} -> {new}")
+    from .discs import (
+        album_discs, rename_cues_for_discs, rename_logs_for_discs,
+        fix_cue_filenames,
+    )
+
+    def _repair_album(album_dir):
+        """Rename + repair ONE album folder's sidecars -> (renamed, lines).
+
+        The lines come back in the order this album's own pass produced them;
+        the caller logs whole albums in album order, so the stream is the same
+        one the old album-at-a-time loop printed (nothing else writes between
+        these lines: the formatting pass and its progress bar come after).
+
+        The album's disc mapping is derived ONCE and handed to both renaming
+        helpers: each of them used to call `album_discs` for itself — a
+        listing plus a `disc_of_filename` per audio file — so a library-wide
+        run paid for the same mapping three times per album.
+        """
+        lines = []
+        renamed = False
+        discs = album_discs(album_dir)
+        for old, new in rename_cues_for_discs(album_dir, discs, config=config):
+            renamed = True
+            lines.append(f"cue renamed: {old} -> {new}")
+        for old, new in rename_logs_for_discs(album_dir, discs, config=config):
+            renamed = True
+            lines.append(f"log renamed: {old} -> {new}")
         for note in fix_cue_filenames(album_dir, config=config):
-            log(note)
-            renamed_any = True if "->" in note else renamed_any
+            lines.append(note)
+            renamed = renamed or "->" in note
+        return renamed, lines
+
+    # One album folder is independent of every other (the rename/repair
+    # helpers only ever touch the folder they are handed), so the pass that
+    # used to walk the library folder by folder on the runner thread runs in
+    # lanes now — the same pool the canonicalisation pass below already uses.
+    album_dirs = sorted({os.path.dirname(c) for c in cues})
+    renamed_any = False
+    if album_dirs:
+        lanes = worker_count(config, maximum=16, items=len(album_dirs))
+        with ThreadPoolExecutor(max_workers=lanes) as ex:
+            # ex.map yields in album order, so the log lines below land in the
+            # order the serial pass emitted them (same lines, same order).
+            for renamed, lines in ex.map(_repair_album, album_dirs):
+                for line in lines:
+                    log(line)
+                renamed_any = renamed_any or renamed
     if renamed_any:
         # Re-collect by walking each original album folder: explicit
         # targets may have pointed at a now-renamed .cue file. Capture the
