@@ -1188,12 +1188,12 @@ export default function SettingsPage() {
         {
           k: "web_ratings_sources", label: "Web rating sources — priority order, asked top to bottom", type: "multi",
           options: [
+            ["rateyourmusic", "RateYourMusic — the widest public verdict; needs the cookie above, or an archived page"],
             ["musicbrainz", "MusicBrainz — the release group for the album, the recording (then its work) for a track"],
-            ["rateyourmusic", "RateYourMusic — needs the cookie above, or an archived page"],
             ["albumoftheyear", "Album of the Year — read from an archived capture; the site refuses automated clients"],
             ["discogs", "Discogs — needs the discogs token above"],
           ],
-          help: "Only these four ids are understood; anything else is ignored. Only MusicBrainz ships — it needs no credential and no archive leg, it answers for the album AND for each track, and it costs one throttled request. The other three are archive-backed and cost roughly 20 seconds per album (measured), so add them deliberately. Each source's own vote count weights the average, so a score from 49,000 ratings counts for more than one from 16. A value is written only when at least one source answered, and the album's score and a track's are separate facts — neither is invented from the other.",
+          help: "Only these four ids are understood; anything else is ignored. All four ship, RateYourMusic first — it leads because it is the widest verdict the app can read (one score from tens of thousands of ratings) and its rating rides the same page fetch its genres already make. The three archive-backed sources (RYM when its live page refuses, Album of the Year, Discogs) cost roughly 20 seconds per album against ~1 second for MusicBrainz alone, cached 30 days, so that is a first-run cost per album rather than a per-run one. Keep MusicBrainz on unless you only want album scores: it is the only source that answers for a TRACK. Each source's own vote count weights the average, so a score from 49,000 ratings counts for more than one from 16. A value is written only when at least one source answered, and the album's score and a track's are separate facts — neither is invented from the other.",
         },
         {
           k: "aoty_archive_fallback", label: "Album of the Year: read archived pages", type: "bool",

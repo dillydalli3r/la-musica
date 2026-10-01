@@ -6010,19 +6010,23 @@ composition instead (R267). Above `lg` the pane sits beside the artwork.
   `server/tags_registry.py`, `server/library.py`), and the whole family is
   gated by `web_ratings_enabled` (`SCRIPT_GATES[24]` and the write-gate family
   switch both read it, so an install with it off neither asks nor writes).
-- **R358a — MusicBrainz alone ships as a source, and the rest are opt-in.**
-  `web_ratings_sources` ships `["musicbrainz"]`. It is the only source with no
-  credential and no archive leg, it answers for the album (the RELEASE GROUP's
-  rating) and for each track (the recording's rating, the WORK's as a fallback
-  — work ratings are usually empty, so the recording leads), and it costs one
-  throttled request: measured, one album takes 1.2 s with MusicBrainz alone and
-  23 s with RateYourMusic and Album of the Year enabled, because those two read
-  the Wayback Machine (the live pages are behind Cloudflare) on top of the live
-  fetch. A Run All over a library pays that per album, so the archive-backed
-  three are a deliberate opt-in rather than a shipped default. RateYourMusic's
-  rating rides the SAME page fetch its genres already make (one request, one
-  cache entry, one refusal latch); Discogs needs `discogs_token` and skips
-  cleanly without one.
+- **R358a — RateYourMusic leads the shipped sources, and MusicBrainz stays on
+  because it is the only source that rates a TRACK.** `web_ratings_sources`
+  ships `["rateyourmusic", "musicbrainz", "albumoftheyear", "discogs"]`. RYM
+  leads because it is the widest public verdict the app can read — one score
+  from tens of thousands of ratings — and its rating rides the SAME page fetch
+  its genres already make (one request, one cache entry, one refusal latch); the
+  list's order is also the order the names appear in `WEBRATING_SOURCE`. RYM,
+  Album of the Year and Discogs are all ARCHIVE-backed when their live pages
+  refuse (RYM's live page needs a `cf_clearance` matching the configured
+  `rym_user_agent`), so an album costs ~23 s against ~1 s for MusicBrainz alone
+  — measured, and cached 30 days, so it is a first-run cost per album rather
+  than a per-run one. Dropping MusicBrainz is a real choice with a real
+  consequence, not a speed knob: it is the only source that answers per track
+  (the recording's rating, the WORK's as a fallback — work ratings are usually
+  empty, so the recording leads), so an all-archive list writes
+  `ALBUMWEBRATING` and no `WEBRATING` at all. Discogs needs `discogs_token` and
+  skips cleanly without one.
 - **R359 — the star field says which rating it is drawing.** `StarRating`
   renders the web value in its own dimmer tone only while the reader has rated
   nothing there, and reduces it to a small readout beside the user's stars once

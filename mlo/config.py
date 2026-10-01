@@ -1280,16 +1280,19 @@ DEFAULT_CONFIG = {
     # it fixes the asking order and therefore the order the names appear in
     # WEBRATING_SOURCE / ALBUMWEBRATING_SOURCE. An empty list, or one naming
     # nothing real, falls back to mlo.web_ratings.SOURCES (the same ids).
-    # MusicBrainz alone SHIPS: it is the only source that needs no credential
-    # and no archive leg, it answers for the album (the release group) AND for
-    # each track (the recording, then its work), and it costs one throttled
-    # request. The other three are opt-in because they are ARCHIVE-backed —
-    # measured, one album costs ~23 s with RateYourMusic and Album of the Year
-    # enabled and ~1 s with MusicBrainz alone — and a Run All over a library
-    # would pay that per album. Add them when you want the wider average:
-    # RateYourMusic (needs the rym_cookie, or its archived page),
-    # albumoftheyear and Discogs (needs the discogs_token).
-    "web_ratings_sources": ["musicbrainz"],
+    # RateYourMusic SHIPS FIRST: it is the widest public verdict the app can
+    # read (one score from tens of thousands of ratings) and it rides the SAME
+    # page fetch its genres already make — one request, one cache entry, one
+    # refusal latch. It is ARCHIVE-backed whenever the live page refuses (a
+    # rym_cookie without a matching cf_clearance is refused today), and so are
+    # albumoftheyear and Discogs, so an album costs ~23 s against ~1 s for
+    # MusicBrainz alone; the fetch is cached 30 days, so that is a first-run
+    # cost per album, not a per-run one. MusicBrainz stays ON because it is the
+    # only source that answers for a TRACK at all (the recording's rating, the
+    # work's as a fallback): with it off, a track gets no WEBRATING and only
+    # the album carries a score. Discogs skips cleanly without a
+    # discogs_token.
+    "web_ratings_sources": ["rateyourmusic", "musicbrainz", "albumoftheyear", "discogs"],
     # Album of the Year refuses every automated client (measured — plain HTTP,
     # headless and headed Chromium and a reader proxy all got Cloudflare 403),
     # so its page is read from the newest ARCHIVED capture (Wayback), resolved
