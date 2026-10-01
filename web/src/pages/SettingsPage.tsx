@@ -82,13 +82,6 @@ const CFG_DEFAULTS: Record<string, unknown> = {
   advisory_auto_fetch: true,
   metadata_auto_fetch: true,
   metadata_review: false,
-  soulseek_download_slots: 9,
-  soulseek_candidate_slots: 3,
-  soulseek_upload_slots: 2,
-  soulseek_upload_limit_kib: 0,
-  soulseek_download_limit_kib: 0,
-  soulseek_web_https: false,
-  soulseek_cache_cap_gb: 5,
   trash_cap_gb: 5,
   youtube_enabled: true,
   youtube_max_height: 0,
@@ -973,101 +966,24 @@ export default function SettingsPage() {
       ],
     },
     {
-      title: "Soulseek (managed slskd)",
-      blurb: "Shares = the library folder (<music folder>/Artists). Downloads land in the download dir below; use the Soulseek page to search and download. Install slskd from the Dependencies tab.",
-      fields: [
-        { k: "soulseek_username", label: "Soulseek username", type: "text" },
-        { k: "soulseek_password", label: "Soulseek password", type: "password" },
-        { k: "soulseek_description", label: "Profile description (shown to other users)", type: "text" },
-        { k: "soulseek_listen_port", label: "Listen port", type: "number", min: 1024, max: 65535 },
-        {
-          k: "soulseek_upnp", label: "Open the listen port on the router automatically", type: "bool",
-          help: "Asks the router to forward the listen port to this machine whenever slskd starts, replaces the mapping when the port changes, and removes it when this is turned off. Without a router that answers UPnP or NAT-PMP it does nothing at all — the Soulseek page's port state names which it was: mapped, refused (with the router's own reason), or no gateway answered. Turn it off when you forward the port yourself.",
-        },
-        {
-          k: "soulseek_router_ip", label: "Router IP for port mapping (blank = auto-detect)", type: "text",
-          help: "UPnP finds its gateway by multicast and NAT-PMP by the machine's default gateway — inside a container that address is Docker's bridge, not the router, so neither method reaches the box that forwards the port. Naming the router here makes the app send the UPnP search and the NAT-PMP requests straight to it. Blank keeps auto-detect.",
-        },
-        { k: "soulseek_web_port", label: "Web/API port", type: "number", min: 1024, max: 65535 },
-        { k: "soulseek_up_limit", label: "Upload speed limit (kB/s, 0 = unlimited)", type: "number", min: 0, max: 100000 },
-        { k: "soulseek_down_limit", label: "Download speed limit (kB/s, 0 = unlimited)", type: "number", min: 0, max: 100000 },
-        {
-          k: "soulseek_download_slots", label: "Concurrent download slots (slskd)", type: "number", min: 1, max: 20,
-          help: "How many transfers slskd runs at once — the OUTER ceiling, and the only one of the three numbers that is slskd's rather than this app's. The app enforces `Releases … at once` × `Candidate downloads per release` (Wishes tab) itself; at the shipped defaults that product is 3 × 3 = 9, which is why this defaults to 9. Set it below the product and the app narrows each release's batch to fit (`slots ÷ releases`), so nothing you configure here ends up queued inside slskd.",
-        },
-        { k: "soulseek_upload_slots", label: "Concurrent upload slots (empty/0 = slskd's own default, 10)", type: "number", min: 0, max: 20 },
-        { k: "soulseek_upload_limit_kib", label: "Per-transfer upload limit (KiB/s, 0 = unlimited)", type: "number", min: 0, max: 1000000 },
-        { k: "soulseek_download_limit_kib", label: "Per-transfer download limit (KiB/s, 0 = unlimited)", type: "number", min: 0, max: 1000000 },
-        {
-          k: "soulseek_web_https", label: "Serve the slskd web UI over HTTPS (extra listener, self-signed)", type: "bool",
-        },
-        { k: "soulseek_download_dir", label: "Download dir (blank = <music folder>/.mlo/downloads)", type: "text" },
-        {
-          k: "soulseek_clear_downloads", label: "Delete the downloaded copy after a successful import", type: "bool",
-          help: "The album is moved into the library first, so the downloaded folder is only staging — deleting it avoids a second full copy of everything you acquire. Only ever the folder the job itself downloaded into, and only after the import reported success: a FAILED import keeps its files so it can be retried without downloading them again.",
-        },
-        { k: "soulseek_autostart", label: "Start slskd with the app backend", type: "bool" },
-        { k: "soulseek_share_library", label: "Share the library folder on the network", type: "bool" },
-        { k: "soulseek_share_dirs", label: "Extra shared folders (; separated, blank = the library folder <music>/Artists)", type: "text" },
-        { k: "soulseek_share_exclude", label: "Never share these paths (; separated)", type: "text" },
-      ],
-    },
-    {
       title: "Storage & cleanup",
       blurb:
-        "What the app may keep on disk in the two folders it fills by itself. Both are scratch space — downloads/staging holds transfers until they are imported, the trash holds what was removed from the library — so neither may grow without end: over its cap, one is emptied OLDEST FIRST until it fits, and nothing in use is ever touched (a transfer still running, a folder an import or a script run is working on). The two caps are separate numbers; they never share a total.",
+        "What the app may keep on disk in the folders it fills by itself. The trash holds what was removed from the library — scratch space that may not grow without end: over its cap it is emptied OLDEST FIRST until it fits, and nothing in use is ever touched (a folder an import or a script run is working on).",
       fields: [
         {
-          k: "soulseek_cache_cap_gb", label: "Soulseek download cache cap (GB, 0 = no cap)", type: "number", min: 0, max: 1000, step: 0.1,
-          help: "The download folder plus the staging sibling slskd writes partials into (<music folder>/.mlo/downloads and its `incomplete`), measured together. Over this size the app deletes from them, oldest entry first, until they are back under — the copy a successful import already removes is not what this is for. An entry a transfer is still running in, or one an import / script run holds, is skipped and reported instead. 0 = no cap.",
-        },
-        {
           k: "trash_cap_gb", label: "Trash cap (GB, 0 = no cap)", type: "number", min: 0, max: 1000, step: 0.1,
-          help: "The remove-from-library bin (<music folder>/.mlo/trash), capped on its own — filling the download cache never eats the bin's room. Over this size the app deletes the OLDEST trashed entries for good (exactly like Delete on the Trash page; what is left stays restorable) until the bin is under again, and an entry being restored is skipped. 0 = the bin keeps everything.",
+          help: "The remove-from-library bin (<music folder>/.mlo/trash). Over this size the app deletes the OLDEST trashed entries for good (exactly like Delete on the Trash page; what is left stays restorable) until the bin is under again, and an entry being restored is skipped. 0 = the bin keeps everything.",
         },
       ],
     },
     {
-      title: "Auto-import (MusicBrainz → Soulseek)",
-      blurb: "Search terms are templates of release fields (artist album year date country catalognumber barcode label). CD rips are found by catalog number, digital media by title + year; every disc's .log must reach the score threshold before the album downloads.",
+      title: "Release choice",
+      blurb: "Which edition of a release group an \"Add to library\" picks, and why — releases are ranked by these rules before one is added.",
       fields: [
+        { k: "auto_import_avoid_promo", label: "Never pick promotional / bootleg editions", type: "bool" },
         {
-          k: "soulseek_auto_physical_queries", label: "Physical query templates (; separated)", type: "text",
-          help: "A physical pressing — a CD included — is searched by its catalog number and barcode by default, the traits that name the exact pressing. Add templates (semicolon-separated) to widen the search; a pressing that states neither falls back to its label and country, never to an artist/title query (which asks the network for every other pressing of the album).",
-        },
-        {
-          k: "soulseek_auto_cd_queries", label: "CD query templates (; separated)", type: "text",
-          help: "Wins for a CD you set it for: this CD is searched by these templates instead of the physical ones above. Blank follows the physical defaults (catalog number + barcode) — the shipped default here (the catalog number alone) was a catalog-number-only search, which the physical default already covers.",
-        },
-        {
-          k: "soulseek_auto_digital_queries", label: "Digital query templates (; separated)", type: "text",
-          help: "Digital Media is searched by these — artist, album and year by default — because it carries no pressing trait to be identified by.",
-        },
-        {
-          k: "soulseek_auto_mbid_queries", label: "Also search by MBIDs", type: "bool",
-          help: "On by default. Adds the release's own MusicBrainz id, its tracks' recording ids and each of those tracks' own artist + title to the SAME parallel batch as the templates above, so a peer folder that names the ids — or holds exactly the album's tracks under a name the templates never match — is found too. One search window either way.",
-        },
-        {
-          k: "soulseek_auto_mbid_tracks", label: "Tracks chased by MBID / name (1–10)", type: "number", min: 1, max: 10,
-          help: "How many of the release's tracks are chased that way, first track first (disc/position order). Each one is asked for by its recording MBID and by its own artist + title.",
-        },
-        { k: "soulseek_auto_log_min_score", label: "Min .log score (0–100)", type: "number", min: 0, max: 100 },
-        { k: "soulseek_auto_complete_ratio", label: "Required track completeness (0.5–1)", type: "number", min: 0.5, max: 1, step: 0.05 },
-        { k: "soulseek_auto_search_wait", label: "Fallback search window (seconds of quiet on a rare album)", type: "number", min: 5, max: 300 },
-        { k: "soulseek_fallback_candidates", label: "Candidates tried per release (best first)", type: "number", min: 1, max: 10,
-          help: "How many of a release group's ranked editions one search walks: the best first, then the next. The release-choice policy ranks them (status, medium, completeness, original date), so a rare pressing no longer costs you the album — the search moves on to the next edition instead. 1 turns the walk off (the best edition only). A group with fewer eligible editions than this simply ends at the end of its own list." },
-        { k: "soulseek_search_fast_seconds", label: "Fast search window (seconds)", type: "number", min: 2, max: 60,
-          help: "The window the FIRST search pass asks with, and the reason a good find starts downloading in seconds. slskd only serves a search's results once the search has ENDED, so a quiet window this short is what makes a low-traffic release readable straight away — the moment one complete lossless folder is readable its download is enqueued and the job moves on. Default 5." },
-        { k: "soulseek_search_timeout_seconds", label: "Top-up search window per candidate (seconds)", type: "number", min: 5, max: 300,
-          help: "The budget for a candidate the fast pass above did NOT answer for: the job keeps reading the searches that are still running at slskd for up to this long, then walks on to the next ranked edition — per candidate, so a walk of five may wait up to five of these. It is the same kind of quiet window as the fallback search window above (slskd ends a search when the network stops answering, plus the app's own response grace), and a usable folder still ends it in seconds. A walk whose candidates all come back empty is not dropped: the release stays in the Background list and keeps being searched." },
-        {
-          k: "soulseek_auto_response_limit", label: "Responses before a search is scored (5–500)", type: "number", min: 5, max: 500,
-          help: "slskd only hands back a search's results once it has ENDED, and a popular album never goes quiet — this ends the search early instead of waiting out the whole window. Lower = faster and fewer peers; higher = slower and more candidates.",
-        },
-        { k: "auto_import_avoid_promo", label: "Never auto-import promotional / bootleg editions", type: "bool" },
-        {
-          k: "auto_import_require_country", label: "Only auto-import editions with a release country", type: "bool",
-          help: "A MusicBrainz release without RELEASECOUNTRY is usually an unsorted import, and the CD query templates are built from that field — such editions are skipped, and a group whose only editions lack one is reported as ineligible instead.",
+          k: "auto_import_require_country", label: "Only pick editions with a release country", type: "bool",
+          help: "A MusicBrainz release without RELEASECOUNTRY is usually an unsorted import — such editions are skipped, and a group whose only editions lack one is reported as ineligible instead.",
         },
         {
           k: "prefer_release_country", label: "Preferred release country (ISO code, blank = none)", type: "text",
@@ -1085,57 +1001,6 @@ export default function SettingsPage() {
           k: "auto_import_medium_order", label: "Medium preference (comma-separated, best first)", type: "csv",
           help: "Editions are ranked by this media order first, then by how close the edition is to the release group's original date; a format not named here ranks after every configured one. Blank = the built-in order (CD, Vinyl, Cassette, Other, DVD, Blu-ray, VHS, Video CD, LaserDisc, Digital Media) — CD first, the other physical media next (the video carriers included, so a music video on a disc beats the same video published as a download), digital last.",
         },
-      ],
-    },
-    {
-      title: "Wishes (auto-fill)",
-      blurb:
-        "Releases saved to the library without downloading them. The background worker re-searches Soulseek for every open wish on the interval below and imports a release the moment a verified match appears.",
-      fields: [
-        { k: "wishes_enabled", label: "Run the wishes worker", type: "bool" },
-        {
-          k: "soulseek_candidate_slots", label: "Candidate downloads per release", type: "number", min: 1, max: 20,
-          help: "How many candidate peers of ONE release may download at the same time (3 by default). The first that verifies good becomes the import and the others are cancelled and swept, and the NEXT candidate is only asked for when one of them lands or fails — so however many candidates a search turns up, one release never talks to more peers than this. Enforced by the app's own enqueueing; slskd's download slots (Soulseek tab) are only the outer ceiling on the transfers it produces.",
-        },
-        {
-          k: "soulseek_search_concurrency", label: "Releases searched / downloaded at once", type: "number", min: 1, max: 8,
-          help: "Over this ceiling a release is NOT refused: it takes its place in the queue (Queue → Waiting, with its position) and starts by itself the moment one of the running releases finishes. The wishes worker fills up to this many wishes per pass, and a bulk auto-import run keeps this many jobs in flight. What it does not do on its own is open more connections: that is what `Candidate downloads per release` (per release) and slskd's own download slots add up to.",
-        },
-        {
-          k: "wishes_interval_hours", label: "Search interval (hours)", type: "number", min: 1, max: 168,
-          help: "How long to wait between two searches of ONE release — an hour by default. The gap is between two ATTEMPTS: one attempt already asks every ranked edition of the release, each with its own bounded search window, and stops at the first that lands.",
-        },
-        { k: "wishes_max_attempts", label: "Max attempts per wish (0 = forever)", type: "number", min: 0, max: 1000 },
-        {
-          k: "wishes_not_found_attempts", label: "Empty searches before a wish is 'not found' (0 = never give up)", type: "number", min: 0, max: 1000,
-          help: "A search that finds nothing is not a failure to try harder: it spends one of these. When they are used up the wish ends as 'not found' — terminal, announced once, and searched again only when you press retry on its queue row (or Search on the wish). The album is still unfillable by hand: importing it yourself resolves the wish on the next reconcile.",
-        },
-        {
-          k: "wishes_retry_backoff_minutes", label: "Wait before retrying a failed wish (minutes, doubles per attempt)", type: "number", min: 0, max: 1440,
-          help: "A TRANSIENT failure — slskd refused or absent, a MusicBrainz outage, a download that failed verification — waits this long before the next attempt, doubling each time (capped at 24 h). 0 retries on the next interval instead.",
-        },
-        { k: "wishes_auto_import", label: "Auto-import when a verified match is found", type: "bool" },
-        { k: "soulseek_auto_wish_prompt", label: "Keep searching wishes automatically while the app runs", type: "bool" },
-        {
-          k: "soulseek_auto_lossy_policy", label: "When only lossy copies exist (a wish, a watched artist)", type: "select",
-          options: [
-            ["never", "Never take one — keep searching (default)"],
-            ["best", "Take the best one, and say so"],
-          ],
-          help: "An unattended download (a wish, an artist watch) that finds only MP3/AAC folders. Never is the shipped behaviour: the release stays on the wish list and keeps being searched, never quietly turning up as lossy audio. Best takes the top-ranked lossy folder the ranking already offers — the fastest, most complete copy of the album — and names the format in the job's log, its queue row and the notification it ends with. The Soulseek page always ASKS you either way, so this can never overrule an answer you gave by hand.",
-        },
-      ],
-    },
-    {
-      title: "Artist watch",
-      blurb:
-        "Follow an artist instead of re-checking them by hand: the worker asks MusicBrainz for releases after the watch was created and queues what matches. Nothing is queued twice, an undated release group is never 'new', and the per-cycle cap is what keeps a first check from dumping a back catalogue into the queue.",
-      fields: [
-        { k: "artist_watch_enabled", label: "Watch artists for new releases", type: "bool" },
-        { k: "artist_watch_interval_hours", label: "Check interval (hours)", type: "number", min: 1, max: 720, help: "How long between two checks of the SAME artist; the worker itself ticks far more often." },
-        { k: "artist_watch_max_per_cycle", label: "Releases queued per artist per check", type: "number", min: 1, max: 50, help: "The hard anti-dump cap. One is the shipped default: a watch that queued a hundred at once is the discography dump this feature exists to avoid." },
-        { k: "artist_watch_types", label: "Release types a watch may queue", type: "multi", options: [["album","Album"],["ep","EP"],["single","Single"],["broadcast","Broadcast"],["other","Other"],["compilation","Compilation"],["soundtrack","Soundtrack"],["spokenword","Spoken word"],["interview","Interview"],["audiobook","Audiobook"],["live","Live"],["remix","Remix"],["dj-mix","DJ mix"],["mixtape/street","Mixtape / street"],["demo","Demo"],["audio drama","Audio drama"],["field recording","Field recording"],["podcast","Podcast"]], help: "MusicBrainz's own type names, plus the app's derived one: Podcast (a podcast is a MusicBrainz SERIES, and an episode is a Broadcast release group linked to it — not a release-group type MusicBrainz publishes). A release group matches when its primary type is ticked or ANY secondary type is (a live album is Album + Live, so ticking Live finds it); Podcast matches only a group whose series relation the app read. A watch can narrow this per artist." },
-        { k: "artist_watch_auto_add", label: "Queue a matched release into the library automatically", type: "bool", help: "Off, a watch only reports what it found (the notification is the whole output) — which is what you want if you pick the edition by hand." },
       ],
     },
     {
@@ -1250,11 +1115,11 @@ export default function SettingsPage() {
     {
       title: "Import pipeline",
       blurb:
-        "What happens after an album lands in the library (Soulseek downloads, Drag & drop, Finish import). The script chain below runs in order; leaving it blank runs the built-in chain: dedupe → sort → tag → covers → lyrics → audit → ReplayGain → AccurateRip. AcoustID fingerprints the audio to identify the exact release — it needs a free application key from acoustid.org; without one, matching falls back to title/artist/genre against MusicBrainz.",
+        "What happens after an album lands in the library (Drag & drop, Finish import). The script chain below runs in order; leaving it blank runs the built-in chain: dedupe → sort → tag → covers → lyrics → audit → ReplayGain → AccurateRip. AcoustID fingerprints the audio to identify the exact release — it needs a free application key from acoustid.org; without one, matching falls back to title/artist/genre against MusicBrainz.",
       fields: [
         {
           k: "auto_acquisition_enabled", label: "Automatic acquisition (searching and downloading on their own)", type: "bool",
-          help: "Off, nothing the app starts by itself searches or downloads: the wishes worker stops its passes, an artist watch queues nothing, and \"Add to library\" records the album and its wish without starting a download. What you asked for is still recorded and a check says the switch is off rather than \"nothing found\" — the wish's own Search now, the wizard and the Soulseek page still work, because those are you acting, not the app.",
+          help: "Off, nothing the app starts by itself searches or downloads. What you asked for is still recorded, and the wizard and every import path still work, because those are you acting, not the app.",
         },
         {
           k: "manual_import_enabled", label: "Manual importing (the wizard and POST /api/import/*)", type: "bool",
@@ -1285,10 +1150,13 @@ export default function SettingsPage() {
         { k: "import_acoustid", label: "Fingerprint with AcoustID", type: "bool" },
         { k: "import_acoustid_autofill", label: "Match the release from the fingerprint automatically", type: "bool" },
         { k: "acoustid_enabled", label: "AcoustID enabled", type: "bool" },
-        { k: "acoustid_api_key", label: "AcoustID application key (free, acoustid.org)", type: "password" },
         {
-          k: "acoustid_user_key", label: "AcoustID user key (fingerprint submissions)", type: "password",
-          help: "The USER key of your own acoustid.org account (AcoustID → your account → API keys), a different key from the application one above. It is needed ONLY to submit fingerprints: a submission gives AcoustID one fingerprint TOGETHER WITH the MusicBrainz recording id it is (MusicBrainz itself never receives a fingerprint), and it comes from the wizard's AcoustID step, the details menus' 'Submit fingerprints (AcoustID)' entry or Run All once you tick it. A pair AcoustID already links — or one this app already sent — is never re-sent, and a blank or refused key comes back in AcoustID's own words. Looking a release up never uses it — the application key alone can do that. The Test button in Settings → Sources proves the key with one probe submission.",
+          k: "acoustid_api_key", label: "AcoustID application key (free at acoustid.org; every lookup sends it)", type: "password",
+          help: "AcoustID's API takes TWO keys, and they are not two spellings of one — a single field could not work, which is why this one and the user key below are asked separately. The APPLICATION key (this one) identifies the app: every fingerprint LOOKUP sends it alone. The USER key identifies your account: a fingerprint SUBMISSION sends BOTH (POST /v2/submit carries \"client\" and \"user\"; the API has no single-key form). Register an application at acoustid.org for it (free). Blank, the lookups cannot run at all and answer \"no application key\", which the user key cannot stand in for.",
+        },
+        {
+          k: "acoustid_user_key", label: "AcoustID user key (submissions only; your acoustid.org account)", type: "password",
+          help: "The USER key of your own acoustid.org account (AcoustID → your account → API keys) — the other half of AcoustID's pair, and a different key from the application one. It is needed ONLY to submit fingerprints: a submission gives AcoustID one fingerprint TOGETHER WITH the MusicBrainz recording id it is (MusicBrainz itself never receives a fingerprint), and it comes from the wizard's AcoustID step, the details menus' 'Submit fingerprints (AcoustID)' entry or Run All once you tick it. A pair AcoustID already links — or one this app already sent — is never re-sent, and a blank or refused key comes back in AcoustID's own words. Looking a release up never uses it — the application key alone can do that. The Test button in Settings → Sources proves the key with one probe submission.",
         },
         {
           k: "acoustid_fpcalc_path", label: "fpcalc path (blank = bundled/next to the app)", type: "text",
@@ -1312,6 +1180,24 @@ export default function SettingsPage() {
           // row says whether it can answer per track or only for the release.
           options: genreOptions,
           help: "The genres the sources answer with are merged, deduped and capped at the count above, per track. MusicBrainz is the app's own identity anchor — it also supplies the family every list ends with — so leave it on in most setups.",
+        },
+        {
+          k: "web_ratings_enabled", label: "Web ratings (script 24)", type: "bool",
+          help: "Asks the public sources below for an album's and each track's score and writes them beside your own stars as WEBRATING / ALBUMWEBRATING (plus a _SOURCE tag naming who answered). Your own RATING is never touched — the star field always prefers it, and a web value is drawn in its own dimmer tone. Folded in fill-only, so nothing already on a file is overwritten unless force_web_ratings is set by hand.",
+        },
+        {
+          k: "web_ratings_sources", label: "Web rating sources — priority order, asked top to bottom", type: "multi",
+          options: [
+            ["musicbrainz", "MusicBrainz — the release group for the album, the recording (then its work) for a track"],
+            ["rateyourmusic", "RateYourMusic — needs the cookie above, or an archived page"],
+            ["albumoftheyear", "Album of the Year — read from an archived capture; the site refuses automated clients"],
+            ["discogs", "Discogs — needs the discogs token above"],
+          ],
+          help: "Only these four ids are understood; anything else is ignored. Only MusicBrainz ships — it needs no credential and no archive leg, it answers for the album AND for each track, and it costs one throttled request. The other three are archive-backed and cost roughly 20 seconds per album (measured), so add them deliberately. Each source's own vote count weights the average, so a score from 49,000 ratings counts for more than one from 16. A value is written only when at least one source answered, and the album's score and a track's are separate facts — neither is invented from the other.",
+        },
+        {
+          k: "aoty_archive_fallback", label: "Album of the Year: read archived pages", type: "bool",
+          help: "On (the default), albumoftheyear.org is read from its newest archived capture. The site answers every automated client with a Cloudflare 403 — plain HTTP, headless and headed browsers alike, all measured — so the archive is the only route that works. Off, the source contributes nothing.",
         },
         {
           k: "rym_archive_fallback", label: "RateYourMusic: fall back to archived pages", type: "bool",
@@ -1338,8 +1224,8 @@ export default function SettingsPage() {
       fields: [
         { k: "locale", label: "Locale for names and aliases (e.g. en, ja, de)", type: "text",
           help: "The ONE locale the app writes and shows names in: the MusicBrainz"
-            + " pages' aliases, the beets import's alias translations and the"
-            + " Soulseek alias searches all read this value." },
+            + " pages' aliases and the beets import's alias translations both"
+            + " read this value." },
         { k: "beets_translations", label: "Translate titles/names to preferred locale", type: "bool" },
         { k: "beets_work_movement", label: "Write WORK / MOVEMENT from work relationships", type: "bool" },
         { k: "beets_release_type_caps", label: "Capitalize release types (EP uppercased)", type: "bool" },
@@ -1441,8 +1327,7 @@ export default function SettingsPage() {
     // not part of any field group, so they are seeded explicitly — without
     // that they render unchecked while the server has them on (the default),
     // and the first click would set the value to true instead of false.
-    .concat("ui_locale", "notify_wish_found", "notify_download_done", "notify_import_ready",
-            "notify_soulseek_download_start", "notify_soulseek_upload_start");
+    .concat("ui_locale", "notify_import_start", "notify_import_done");
   const [scriptCfg, setScriptCfg] = useState<Record<string, unknown>>({});
   const setCfg = (k: string, v: unknown) => setScriptCfg((c) => ({ ...c, [k]: v }));
 
@@ -1558,13 +1443,8 @@ export default function SettingsPage() {
    *  publishes (server/events.py). These decide what is published at all; each
    *  client still asks for its own OS permission below. */
   const NOTIFY_KEYS = [
-    { k: "notify_wish_found", label: "Wish found on Soulseek" },
-    { k: "notify_download_done", label: "Download finished" },
-    { k: "notify_import_ready", label: "Album ready to import" },
     { k: "notify_import_start", label: "Import started (moving in, then the chain)" },
     { k: "notify_import_done", label: "Import finished (with the chain's summary)" },
-    { k: "notify_soulseek_download_start", label: "Soulseek download started" },
-    { k: "notify_soulseek_upload_start", label: "A peer started downloading from you" },
   ];
 
   const NAV: { id: string; label: string; section?: string }[] = [
@@ -1580,10 +1460,7 @@ export default function SettingsPage() {
     { id: "tagwrites", label: "Tagging" },
     { id: "grading", label: "Grading" },
     { id: "beets", label: "Beets", section: "Integrations" },
-    { id: "soulseek", label: "Soulseek", section: "Integrations" },
-    { id: "autoimport", label: "Auto-import", section: "Integrations" },
-    { id: "wishes", label: "Wishes", section: "Integrations" },
-    { id: "artistwatch", label: "Artist watch", section: "Integrations" },
+    { id: "releasechoice", label: "Release choice", section: "Integrations" },
     { id: "deps", label: "Dependencies", section: "Integrations" },
     { id: "discovery", label: "Discovery", section: "Providers" },
     { id: "sources", label: "Sources", section: "Providers" },
@@ -1796,8 +1673,7 @@ export default function SettingsPage() {
       ["grading", "Grading"], ["cdrips", "CD Rips"], ["videos", "Videos"],
       ["audiometa", "Key & BPM"], ["beets", "Beets tagging"],
       ["storage", "Storage & cleanup"],
-      ["soulseek", "Soulseek (managed slskd)"], ["autoimport", "Auto-import"],
-      ["wishes", "Wishes"], ["artistwatch", "Artist watch"], ["remote", "Server & remote access"],
+      ["releasechoice", "Release choice"], ["remote", "Server & remote access"],
       ["downloads", "Downloads & playback"],
       ["home", "Home"], ["deps", "Dependencies"],
       ["discovery", "Discovery"], ["artistimages", "Artist images"], ["ai", "AI lyric transforms"], ["import", "Import pipeline"],
@@ -2210,7 +2086,7 @@ export default function SettingsPage() {
                 <div className="text-xs text-zinc-400">Setup wizard</div>
                 <div className="text-[11px] text-zinc-600 leading-relaxed">
                   Re-runs the first-run walkthrough — music folder, dependencies, sources, AI &amp;
-                  RateYourMusic, Soulseek sharing. Every step is skippable, and nothing on this page is
+                  RateYourMusic. Every step is skippable, and nothing on this page is
                   reset by it: it only writes what you enter there.
                 </div>
                 <button

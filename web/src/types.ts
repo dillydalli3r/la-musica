@@ -100,6 +100,17 @@ export interface TrackTags {
   REMIXER?: string | null;
   COPYRIGHT?: string | null;
   ISRC?: string | null;
+  /** What the "Web ratings" script (id 24) fetched and wrote, on Picard's own
+   *  0-100 scale — the same scale the file's `RATING` tag uses, which this app
+   *  never reads (its rating lives in its own store, lib/ratings). `WEBRATING`
+   *  is the TRACK's; `ALBUMWEBRATING` is the ALBUM's, written to every file of
+   *  the album; each carries the names of the sources that contributed beside
+   *  it. Absent on every file the script has not touched — an absence is not a
+   *  rating of zero, which is what a surface has to be able to tell apart. */
+  WEBRATING?: string | null;
+  WEBRATING_SOURCE?: string | null;
+  ALBUMWEBRATING?: string | null;
+  ALBUMWEBRATING_SOURCE?: string | null;
 }
 
 export interface Track {
@@ -239,15 +250,8 @@ issues?: Record<string, string[]>;
    *  page must say it is pending rather than complete, and the placeholder
    *  cover is the only artwork it has until the import writes a real one. */
   pending?: boolean;
-  /** What the album is waiting for ("a verified Soulseek download"). */
+  /** What the album is waiting for (the server's own sentence). */
   pending_reason?: string;
-  /** The wish searching for its audio (the queue row it belongs to). */
-  wish_id?: number | null;
-  /** The wish's own state, for a framework album: `status`/`attempts`/the
-   *  reason a run left behind, plus when it is next searched (`due_at` /
-   *  `due_in` seconds, `terminal` once the queue will not try again) — decided
-   *  by the worker's own policy, so the page states it rather than guessing. */
-  wish?: AlbumWish | null;
   /** What "Add to library" already fetched for this folder before its audio
    *  existed: the artist image / descriptions and the album description it
    *  wrote (their paths), the links it resolved and the cover candidates it
@@ -256,29 +260,6 @@ issues?: Record<string, string[]>;
   /** The album folder's stored description (see mlo/artistdata). The library
    *  payload only reports whether one exists; the album page carries the text. */
   artwork?: AlbumArtwork;
-}
-
-/** The wish filling a framework album, as the album page reads it
- *  (`server/library.py::_wish_state`). */
-export interface AlbumWish {
-  id: number;
-  /** "wanted" | "searching" | "imported" | "failed" | "not_found". */
-  status: string;
-  attempts: number;
-  retry_at: number;
-  last_search: number;
-  /** Epoch seconds of the next search the worker will run, null once it will
-   *  not run one again. */
-  due_at: number | null;
-  /** Seconds until that search, null when `due_at` is null. */
-  due_in: number | null;
-  /** No further automatic search is coming (see server.wishes.is_terminal). */
-  terminal: boolean;
-  /** The last error the queue recorded, or the note the wish was added with. */
-  reason: string;
-  note: string;
-  source: string;
-  queries: string[];
 }
 
 /** What "Add to library" pre-fetched for a folder whose audio has not arrived
@@ -302,30 +283,6 @@ export interface ExpectedTrack {
   recording_mbid?: string | null;
   /** Not present on disk — greyed out on the album page. */
   missing: boolean;
-}
-
-/** One entry of <music>/.mlo/downloads — slskd's staging area. */
-export interface DownloadEntry {
-  name: string;
-  /** A folder (an album) rather than a loose file. */
-  dir: boolean;
-  bytes: number;
-  files: number;
-  audio: number;
-  images: number;
-  /** Holds audio, so it can be imported into the library as an album. */
-  album: boolean;
-  /** slskd's own in-flight leftover — not a completed result. */
-  partial: boolean;
-}
-
-export interface DownloadsPayload {
-  folder: string;
-  exists: boolean;
-  count: number;
-  bytes: number;
-  entries: DownloadEntry[];
-  music_folder: string;
 }
 
 /** One place the music folder does not match
@@ -704,7 +661,8 @@ export interface StreamingImportRow {
   duplicate: boolean;
   /** Why it did not match ("" when it did). */
   reason: string;
-  /** "album" or "wish" when this row queued something, "" otherwise. */
+  /** What this row queued ("album" | "track") when it queued something,
+   *  "" otherwise. */
   queued: string;
 }
 
@@ -717,7 +675,6 @@ export interface StreamingQueueRow {
   queued: boolean;
   matched: boolean;
   by_name: boolean;
-  wish_id: number | null;
   mbid: string;
   note: string;
   error: string;
@@ -1096,88 +1053,6 @@ export interface GenreCascade {
   levels: { track: boolean; release: boolean; release_group: boolean; artist: boolean };
 }
 
-/** A release's own identity — the ONE block every surface that knows a
- *  release carries (server/wishes.py RELEASE_KEYS): the two facts that
- *  identify a PRESSING first (its catalog number, the medium it is on), then
- *  where and when it came out and how much it carries, then the edition's own
- *  disambiguation and the status MusicBrainz gives it (Official / Promotion /
- *  Bootleg / …).
- *
- *  Every key is present on the server's rows; a fact nobody could resolve is
- *  empty (or 0) and renders as absent — never invented, never a placeholder
- *  that looks like data. Optional here only because a client may be reading a
- *  payload from an older server. */
-export interface SlskReleaseIdentity {
-  id: string;
-  title: string;
-  artist: string;
-  date: string;
-  /** MusicBrainz's FIRST release event — the singular code `country` has
-   *  always been. `countries` below is the release's whole event set. */
-  country: string;
-  /** Every country the release came out in, in MusicBrainz's own event order
-   *  (first = `country`). It is what an import writes to RELEASECOUNTRY as a
-   *  "; "-joined list — a release out in several countries is not one that
-   *  came out in the first of them. Optional: a payload from a server or a job
-   *  summary predating the field states only the singular one. */
-  countries?: string[];
-  status: string;
-  media: string[];
-  track_count: number;
-  disambiguation: string;
-  catalog_number: string;
-  label: string;
-}
-
-export interface Wish {
-  id: number;
-  release_mbid: string;
-  title: string;
-  artist: string;
-  year: string;
-  /** `not_found` is terminal: the searches came back empty
-   *  `wishes_not_found_attempts` times, so the worker stops searching it and
-   *  the row waits for the user's own retry (server/wishes' retry policy). */
-  status: "wanted" | "searching" | "imported" | "failed" | "available" | "not_found";
-  note: string;
-  target_dir: string;
-  queries: string[];
-  attempts: number;
-  /** Empty searches so far, and when the next AUTOMATIC one may run (0 = none
-   *  will: a terminal row is re-armed only by the queue's retry). */
-  not_found: number;
-  retry_at: number;
-  added_at: number;
-  updated_at: number;
-  last_search: number;
-  last_error: string;
-  album_path: string;
-  /** The store's own verdict: the worker will never search this wish again on
-   *  its own (imported, nothing was found, or failed for good — see
-   *  server/wishes' retry policy). This is what makes it safe to take off the
-   *  list; a wish that is still wanted or being searched is not terminal, and
-   *  clearing it is refused. */
-  terminal?: boolean;
-  /** WHICH pressing this wish is waiting for (server/wishes' release
-   *  identity). Present on every row the server builds; empty facts mean the
-   *  release was never looked up (or MusicBrainz could not answer). */
-  release?: SlskReleaseIdentity;
-}
-
-export interface WishesPayload {
-  wishes: Wish[];
-  worker: {
-    running: boolean;
-    enabled: boolean;
-    current: string | null;
-    last_cycle: number;
-    last_result: string;
-    next_run: number;
-    interval_hours: number;
-  };
-  log: { t: number; level: string; msg: string }[];
-}
-
 /** Home page payload: library highlights. */
 export interface HomeData {
   stats: {
@@ -1201,7 +1076,6 @@ export interface HomeData {
    *  Empty (and so the shelf is not drawn) unless the library has a podcast:
    *  the identity comes from the episodes' own tags, never from MusicBrainz. */
   podcasts?: HomePodcast[];
-  wanted: HomeAlbum[];
   needs_attention: HomeAlbum[];
   /** Every album added but not downloaded yet, newest first — the one shelf a
    *  user can read to see everything still waiting. */
@@ -1242,8 +1116,8 @@ export interface HomeArtist {
  *  it, and the framework album's marker rides along as it does in the library
  *  payload.
  *
- *  A row the library does NOT hold (`owned: false` — a Soulseek wish, or a
- *  favourite whose folder moved away) carries identity only: the title, artist
+ *  A row the library does NOT hold (`owned: false` — a favourite whose folder
+ *  moved away) carries identity only: the title, artist
  *  and year it is known by in `meta`, an empty track list, and nothing that
  *  reads as a grade. The card draws those without a status dot, a play button
  *  or a link. */
@@ -1742,7 +1616,7 @@ export interface ImportPrompt {
 
 /** One album POST /api/library/add created (or found already there): the
  *  framework album on disk. `created` is false for a folder that was already
- *  a real album; `wish_id` is the queue entry searching for its audio. */
+ *  a real album. */
 export interface LibraryAddAlbum {
   album_path: string;
   title: string;
@@ -1750,7 +1624,6 @@ export interface LibraryAddAlbum {
   year: string;
   release_id: string;
   release_group_id: string;
-  wish_id: number | null;
   cover?: string | null;
   created: boolean;
   already_in_library: boolean;

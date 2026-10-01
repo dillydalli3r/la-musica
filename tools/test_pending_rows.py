@@ -7,12 +7,11 @@ album is listed — the library tree, the artist page, Home, a query's album row
 — and it has to stop saying so the moment the import fills the folder. This
 pins the payloads, because that is what every surface draws from:
 
-  * the library row carries `pending` + WHY it waits + the wish filling it;
+  * the library row carries `pending` + WHY it waits;
   * the artist page lists it at all (its own walk looks for AUDIO, so a
     framework folder is invisible there unless the payload adds it);
-  * Home has a shelf that shows EVERYTHING still waiting, the album also rides
-    along in "recently added", and the same release is not drawn twice (once as
-    an album card, once as a wish card);
+  * Home has a shelf that shows EVERYTHING still waiting, and the album also
+    rides along in "recently added";
   * a query's album rows carry the marker, and `library.pending` is a field a
     user can filter on;
   * a COMPLETE album carries no marker at all — not false-but-present on the
@@ -85,7 +84,7 @@ from fastapi.testclient import TestClient                      # noqa: E402
 from mlo import naming                                         # noqa: E402
 from mlo.config import load_config                             # noqa: E402
 from server import api_query as aq                             # noqa: E402
-from server import artcache, pending_albums, tagcache, wishes   # noqa: E402
+from server import artcache, pending_albums, tagcache           # noqa: E402
 from server import integrations as intg_mod                    # noqa: E402
 from server import library as lib_mod                          # noqa: E402
 from server import main as mlo_main                            # noqa: E402
@@ -217,26 +216,19 @@ def album_query(conditions=None):
 # 1. a framework album: the folder exists, the audio does not
 # --------------------------------------------------------------------------- #
 print("\nthe framework album")
-wishes.delete_wish(0)                                    # no-op, schema warm-up
 created = pending_albums.create(RELEASE, CFG, prefetch=False)
 folder = created["album_path"].replace("/", os.sep)
 ok(created["created"] and os.path.isdir(folder), "framework folder created", folder)
 reason = (pathmod.load_pending(folder) or {}).get("waiting_for")
-eq(reason, "a verified Soulseek download", "the marker says what it waits for")
+eq(reason, "the audio for this release", "the marker says what it waits for")
 
 lib_payload, rows = library_rows(CFG)
 row = rows.get(norm(folder))
 ok(row is not None, "the library lists it at all")
 if row:
     eq(row.get("pending"), True, "library row: pending")
-    eq(row.get("pending_reason"), "a verified Soulseek download",
+    eq(row.get("pending_reason"), "the audio for this release",
        "library row: why it is pending")
-    eq(row.get("wish_id"), created["wish_id"], "library row: the wish that fills it")
-    wish = row.get("wish") or {}
-    eq(wish.get("id"), created["wish_id"], "library row: the wish's own state rides along")
-    ok("status" in wish and "attempts" in wish and "due_in" in wish,
-       "library row: the wish block carries the state a sentence needs",
-       sorted(wish))
     eq(row.get("track_count"), 0, "library row: 0 tracks — nothing to play")
     eq(row.get("tracks") or [], [], "library row: no playable track")
 
@@ -249,7 +241,7 @@ entry = find(artist_albums, folder)
 ok(entry is not None, "the artist page lists it", [a.get("path") for a in artist_albums])
 if entry:
     eq(entry.get("pending"), True, "artist page: pending")
-    eq(entry.get("pending_reason"), "a verified Soulseek download",
+    eq(entry.get("pending_reason"), "the audio for this release",
        "artist page: why it is pending")
 
 # Home: the shelf that shows everything waiting, plus the album where it would
@@ -261,16 +253,11 @@ ok(shelf_row is not None, "home: the 'waiting for its audio' shelf lists it",
    [(r.get("meta") or {}).get("ALBUM") for r in shelf])
 if shelf_row:
     eq(shelf_row.get("pending"), True, "home shelf: pending")
-    eq(shelf_row.get("pending_reason"), "a verified Soulseek download",
+    eq(shelf_row.get("pending_reason"), "the audio for this release",
        "home shelf: why it is pending")
-    eq((shelf_row.get("wish") or {}).get("id"), created["wish_id"],
-       "home shelf: the wish's own state rides along")
     eq(shelf_row.get("owned"), True, "home shelf: it links to the album page")
 ok(find(home_rows(home_payload, "recent"), folder) is not None,
    "home: it is in 'recently added' too — its folder is the newest thing there")
-ok(all(norm(r.get("path")) != norm(folder)
-       for r in home_rows(home_payload, "wanted")),
-   "home: the wish shelf does not draw the same release a second time")
 ok(all(norm(r.get("path")) != norm(folder)
        for r in home_rows(home_payload, "discover")),
    "home: 'rediscover' stays the albums whose audio is here")
@@ -283,10 +270,8 @@ query_row = find(query_rows, folder)
 ok(query_row is not None, "the query's album rows list it")
 if query_row:
     eq(query_row.get("pending"), True, "query row: pending")
-    eq(query_row.get("pending_reason"), "a verified Soulseek download",
+    eq(query_row.get("pending_reason"), "the audio for this release",
        "query row: why it is pending")
-    eq((query_row.get("wish") or {}).get("id"), created["wish_id"],
-       "query row: the wish's own state rides along")
 filtered = album_query([{"field": "library.pending", "op": "eq", "value": True}])
 eq([norm(r.get("path")) for r in filtered], [norm(folder)],
    "library.pending is a field a query can filter on")
@@ -341,7 +326,7 @@ tags = pending_albums.release_tags(RELEASE)
 eq(tags.get("RELEASECOUNTRY"), "GB",
    "a release with one country previews that code")
 # The same release out in three countries: the preview carries all of them,
-# ";"-joined exactly as the tags will be stamped (server.soulseek_auto's own
+# ";"-joined exactly as the tags will be stamped (the import's own identity
 # stamper writes the same value), so the folder previewed here is the folder
 # the tags name.
 MULTI = dict(RELEASE, countries=[{"code": "GB", "date": "1997-05-06"},
@@ -360,40 +345,33 @@ eq(pending_albums.folder_for_release(MULTI, CFG),
    "…so the folder preview does not move when a release gains countries")
 
 # --------------------------------------------------------------------------- #
-# 5. a framework album whose acquisition ENDED: the placeholder goes, its audio
-#    never does
+# 5. CANCELLING a framework album: the placeholder goes, its audio never does
 # --------------------------------------------------------------------------- #
-print("\na framework album whose acquisition ended")
+print("\na cancelled framework album")
 ended = pending_albums.create(dict(RELEASE, id="99999999-1111-1111-1111-111111111111",
                                    release_group_id="99999999-2222-2222-2222-222222222222",
                                    title="Ended Album"), CFG, prefetch=False)
 ended_folder = ended["album_path"].replace("/", os.sep)
 ok(os.path.isdir(ended_folder) and bool(pathmod.load_pending(ended_folder)),
    "the framework album and its marker are on disk")
-# What a TERMINAL wish runs: server.wishes_worker._drop_framework_album calls
-# exactly this. Nothing searches that wish again by itself, so the folder the
-# ADD created is the add's to take back — while the wish row that says what
-# happened stays in the queue with its retry.
-ok(pending_albums.remove_for_wish(ended["wish_id"], CFG),
-   "the terminal cleanup removes the folder the add created")
+# What cancelling runs (server.api_add's own cancel route, and the sweep):
+# `remove_folder` takes the folder the ADD created back.
+ok(pending_albums.remove_folder(ended_folder),
+   "cancelling removes the folder the add created")
 ok(not os.path.isdir(ended_folder), "the folder is gone")
 ok(pathmod.load_pending(ended_folder) is None, "and its marker went with it")
-ok(wishes.get_wish(ended["wish_id"]) is not None,
-   "the wish row stays — it is the queue's own row, with the retry")
 
 # A folder that HOLDS audio is a real album by then (a download landed in it):
-# no outcome may delete it.
+# cancelling may never delete it.
 kept = pending_albums.create(dict(RELEASE, id="99999999-3333-3333-3333-333333333333",
                                   release_group_id="99999999-4444-4444-4444-444444444444",
                                   title="Landed Album"), CFG, prefetch=False)
 kept_folder = kept["album_path"].replace("/", os.sep)
 write_audio(kept_folder)
-ok(not pending_albums.remove_for_wish(kept["wish_id"], CFG),
-   "a folder holding audio is never removed by the terminal cleanup")
+ok(not pending_albums.remove_folder(kept_folder),
+   "a folder holding audio is never removed by cancelling")
 ok(os.path.isfile(os.path.join(kept_folder, "1-01 One.flac")),
    "and its audio is still there")
-wishes.delete_wish(ended["wish_id"])          # the rows are this test's, in the
-wishes.delete_wish(kept["wish_id"])           # developer's own wish store
 
 print()
 if FAILED:

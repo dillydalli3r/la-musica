@@ -105,7 +105,7 @@ def _sweep_roots(cfg=None) -> list:
     ``in_state_dir`` widens the rule to the suffix-only temps (``x.tmp``,
     ``x.part``) the app writes inside its OWN folders. Those are never applied
     to the library, where a file of the user's could legitimately end in
-    ``.tmp``, and never to the download folders, which belong to slskd.
+    ``.tmp``, and never to the download folders, which a transfer owns.
     """
     mf = _music_folder(cfg)
     out = []
@@ -125,11 +125,10 @@ def _staging_report(cfg=None, log=None) -> list:
     """Folders waiting in the download area, and in-flight ones, reported.
 
     A completed transfer sits in ``.mlo/downloads`` until an import moves it
-    in, and slskd keeps its unfinished transfers in ``.mlo/incomplete`` — a
-    kill can land with either present. Both are REPORTED, never touched: the
-    first is an album a queued import still has to pick up, the second is a
-    download that resumes where it stopped (deleting it would throw away
-    everything already downloaded).
+    in, and an unfinished one may sit in ``.mlo/incomplete`` — a kill can land
+    with either present. Both are REPORTED, never touched: the first is an
+    album an import still has to pick up, the second is a download the user may
+    still want (deleting it would throw away everything already downloaded).
     """
     out = []
     for label, folder in (("staging", downloads_dir(_music_folder(cfg))),
@@ -150,37 +149,32 @@ def _staging_report(cfg=None, log=None) -> list:
         _say(log, f"{len(names)} {label} item(s) in {folder}: {shown}"
                   + (" — left as they are: an import still owns these"
                      if label == "staging" else
-                     " — left as they are: slskd resumes them"))
+                     " — left as they are: the download may still be wanted"))
     return out
 
 
 def _pending_report(cfg=None, log=None) -> list:
     """Framework albums left in an impossible state by a kill.
 
-    Cases, all read through the modules that own the state:
+    Cases, all read through the module that owns the state:
 
-    * a marker whose folder HOLDS AUDIO — the download landed and the process
+    * a marker whose folder HOLDS AUDIO — the audio landed and the process
       died before the marker was cleared, so the library would list a
       fully-populated album as PENDING forever. Cleared through the owner's
       own :func:`server.pending_albums.clear_if_filled` (placeholder cover
       and all); the log says the script chain did not run, because that is
       the one thing the sweep cannot know and the user may still want;
-    * a marker whose WISH has ENDED (imported / nothing found / a spent failure)
-      while the folder holds NO audio — nothing searches a terminal wish again
-      by itself, so the framework album would stand in the library for good as
-      an album nobody has. The wish is RE-ARMED (`wishes.rearm`: counters and
-      backoff cleared, due now) and the folder stays as its placeholder: the
-      request the user made is real, and the search is what was missing. A
-      terminal wish whose release IS in the library (audio, ``owned_mbids``) is
-      the other end of the same state: the placeholder is then torn down
-      (`remove_folder`, marker and folder both), because the real album is what
-      the library should show;
-    * a marker whose WISH is gone — nothing will ever fill that folder, so it
-      is logged as an orphan for the user to cancel. It is NOT deleted: this
-      app does not remove an album folder from the library at startup on its
-      own.
+    * a marker whose folder holds NO audio and whose release IS in the
+      library (``library.owned_mbids`` — which never counts a folder with no
+      audio, so the framework folder itself can never answer for itself):
+      the real album is what the library should show, so the placeholder is
+      torn down (`remove_folder`, marker and folder both);
+    * a marker whose folder holds NO audio and whose release is NOT in the
+      library — a placeholder the user asked for and has not filled yet. It
+      is logged for the user, NOT deleted: this app does not remove an album
+      folder from the library at startup on its own.
     """
-    from server import pending_albums, wishes
+    from server import library, pending_albums
 
     out = []
     root = library_root(_music_folder(cfg))
@@ -207,32 +201,13 @@ def _pending_report(cfg=None, log=None) -> list:
                           " — its script chain did not finish, so finish the"
                           " album from its page")
             continue
-        wid = info.get("wish_id")
-        if wid is None:
-            continue
-        wish = _wish_of(wid)
-        if not wish:
-            out.append({"kind": "orphan_pending", "folder": folder,
-                        "wish_id": wid})
-            _say(log, f"framework album {name!r} waits on wish {wid}, which is"
-                      " gone — nothing is searching for it; cancel it from the"
-                      " queue to remove the folder")
-            continue
-        if not wishes.is_terminal(wish, cfg or {}):
-            continue                  # a live request owns this folder
         if owned is None:
             try:
-                owned = wishes.owned_mbids(cfg)
+                owned = library.owned_mbids(cfg)
             except Exception:
                 owned = {}
-        # The release ids the wish and its marker carry, matched against the
-        # albums the library has on disk with their own MBID tags
-        # (`wishes.owned_mbids`, which never counts a folder with no audio — the
-        # framework folder this very marker belongs to can never answer for
-        # itself).
-        where = wishes.owned_path(owned, wish.get("release_mbid"),
-                                  info.get("release_id"),
-                                  info.get("release_group_id"))
+        where = library.owned_path(owned, info.get("release_id"),
+                                   info.get("release_group_id"))
         if where:
             removed = False
             try:
@@ -245,31 +220,12 @@ def _pending_report(cfg=None, log=None) -> list:
                 _say(log, f"framework album {name!r} duplicates the album the"
                           f" library already has ({where}): placeholder"
                           " removed")
-            try:
-                wishes.update_wish(wid, {"album_path": where})
-            except Exception:
-                traceback.print_exc()
             continue
-        try:
-            wishes.rearm(wid)
-        except Exception:
-            traceback.print_exc()
-            continue
-        out.append({"kind": "pending_rearmed", "folder": folder, "wish_id": wid})
-        _say(log, f"framework album {name!r} had a wish that had STOPPED"
-                  " (nothing found, failed, or imported with no audio on disk):"
-                  " it is back in the queue and searched again")
+        out.append({"kind": "pending", "folder": folder})
+        _say(log, f"framework album {name!r} holds no audio yet and its"
+                  " release is not in the library: left as it is — add its"
+                  " audio or cancel it")
     return out
-
-
-def _wish_of(wish_id):
-    """The wish row *wish_id* names, or None."""
-    from server import wishes
-
-    try:
-        return wishes.get_wish(int(wish_id))
-    except Exception:
-        return None
 
 
 def _read_journal(cfg=None, log=None) -> list:
@@ -362,10 +318,9 @@ def _short(path, root) -> str:
 def running_jobs() -> list:
     """Every in-flight job, from the one registry that holds them.
 
-    ``server.job_locks`` is where a script run, an import (single or queued)
-    and every mutating route record what they hold, and ``server.import_queue``
-    reports its own row for the queue view — the two sources
-    ``GET /api/jobs/locks`` already merges.
+    ``server.job_locks`` is where a script run, an import and every mutating
+    route record what they hold — the one registry ``GET /api/jobs/locks``
+    reads.
     """
     jobs = []
     try:
@@ -381,22 +336,6 @@ def running_jobs() -> list:
             })
     except Exception:
         traceback.print_exc()
-    try:
-        from server import import_queue
-        state = import_queue.status() or {}
-        if (state.get("state") or state.get("status")) == "running":
-            current = str(state.get("current") or "")
-            jobs.append({
-                "kind": "import_queue",
-                "job": "import-queue",
-                "label": f"import queue ({state.get('done', 0)}/"
-                         f"{state.get('total', 0)})",
-                "started_at": state.get("started_at"),
-                "paths": [current] if current else [],
-                "status": "running",
-            })
-    except Exception:
-        pass
     return jobs
 
 

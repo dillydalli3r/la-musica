@@ -490,10 +490,14 @@ os.makedirs(ALBUM, exist_ok=True)
 
 
 def noise(path, level_db, seconds=4.0):
-    """A pink-noise FLAC at *level_db* below the generated noise's own level."""
+    """A pink-noise FLAC at *level_db* below the generated noise's own level.
+
+    The source is seeded so the fixture — and every band measurement taken
+    from it — is byte-identical run to run (`anoisesrc` draws a random seed by
+    default, which made the EQ assertions a coin flip)."""
     subprocess.run(
         [FFMPEG, "-y", "-v", "error", "-f", "lavfi", "-i",
-         f"anoisesrc=color=pink:amplitude=1.0:duration={seconds}:sample_rate=44100",
+         f"anoisesrc=color=pink:amplitude=1.0:duration={seconds}:sample_rate=44100:seed=1",
          "-af", f"volume={level_db}dB", "-c:a", "flac", path],
         check=True, capture_output=True)
     af = AudioFile(path)

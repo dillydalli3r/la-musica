@@ -1,11 +1,9 @@
 import { useSyncExternalStore } from "react";
 
-import type { SlskAutoProgress } from "../api";
-
 /** The notification tray's store: what the bell's panel lists.
  *
  *  One record per OUTCOME the server announced on `/ws/events` (see
- *  server/events.py) — a found wish, a finished download, an import short of a
+ *  server/events.py) — a finished import, an import short of a
  *  family (a warning on an album already in the library, spec R166), a script
  *  run, a grade, a newer release. The event socket
  *  pushes them in (lib/notify.ts); nothing here polls, and nothing here
@@ -18,11 +16,11 @@ import type { SlskAutoProgress } from "../api";
  *    everything read, which is what puts the bell's light out.
  *  * the record itself — the log. Dismissing removes one, "clear all" empties
  *    it. Reading the tray must never erase it (that would lose the only place
- *    a "download failed" note exists).
+ *    a failed import's note exists).
  *
  *  A notification carries a subject as well as words: `link` is the in-app
- *  route the outcome is about (`/album/<path>`, `/soulseek`,
- *  `/import?album=<path>`), `url` an outside page (the release notes of a
+ *  route the outcome is about (`/album/<path>`, `/import?album=<path>`),
+ *  `url` an outside page (the release notes of a
  *  newer version). Clicking an entry opens it; `openNotification` is the one
  *  place that decides how (see `registerNavigator`).
  *
@@ -60,10 +58,8 @@ export interface NotificationRecord {
 }
 
 /** Kinds that deserve an operating-system notification — the ones about
- *  something happening while the user was looking elsewhere (a wish landing
- *  hours later, a download starting or finishing, a peer taking files from
- *  you, an import waiting for a decision, a finished import, a watched artist
- *  releasing something, a store the server pruned on its own).
+ *  something happening while the user was looking elsewhere (an import waiting
+ *  for a decision, a finished import, a store the server pruned on its own).
  *  A script run or a grade is the user's own foreground job: the tray and a
  *  toast say so, and an OS popup for it would be noise. So are the two
  *  "your add is on its way" kinds (`library_add`, `album_pending`) — an
@@ -74,17 +70,8 @@ export interface NotificationRecord {
  *  decision about the kind, not about the client, so it holds for the web,
  *  the desktop shell and the phone alike. */
 export const OS_KINDS: Record<string, true> = {
-  wish_found: true,
-  wish_failed: true,
-  wish_not_found: true,
-  download_started: true,
-  download_done: true,
-  download_failed: true,
-  upload_started: true,
-  import_ready: true,
   import_done: true,
   import_needs_data: true,
-  "watch.new_release": true,
   storage_pruned: true,
 };
 
@@ -108,31 +95,17 @@ function str(v: unknown): string {
 
 /** The in-app route a kind's `data` points at, when the emit did not name one.
  *
- *  Derived rather than required of every emit site (the wish worker and the
- *  auto-importer were publishing entity ids long before the tray existed), and
- *  always a route the router really mounts (web/src/App.tsx). An unknown kind
- *  answers "" — a notification with no subject is still a notification, and
- *  clicking it then just dismisses the panel instead of navigating nowhere. */
+ *  Derived rather than required of every emit site, and always a route the
+ *  router really mounts (web/src/App.tsx). An unknown kind answers "" — a
+ *  notification with no subject is still a notification, and clicking it then
+ *  just dismisses the panel instead of navigating nowhere. */
 export function linkFor(kind: string, data?: Record<string, unknown>): string {
   const album = str(data?.album_path);
   const track = str(data?.track_path);
   switch (kind) {
-    case "download_done":
-    case "wish_found":
-    case "wish_failed":
-    case "wish_not_found":
+    case "import_done":
       if (track) return `/track/${encodeURIComponent(track)}`;
-      return album ? `/album/${encodeURIComponent(album)}` : kind.startsWith("wish") ? "/soulseek" : "/library";
-    case "download_failed":
-      // A job that gave up: its subject is the row in the queue (there is no
-      // album to open — nothing landed), which is where its retry is.
-      return album ? `/album/${encodeURIComponent(album)}` : "/soulseek";
-    case "download_started":
-    case "upload_started":
-      // A transfer that is running RIGHT NOW: its subject is the queue page
-      // that shows it (a download has no album yet, an upload never will).
-      return "/soulseek";
-    case "import_ready":
+      return album ? `/album/${encodeURIComponent(album)}` : "/library";
     case "import_needs_data":
       return album ? `/import?album=${encodeURIComponent(album)}` : "/import";
     case "script_done":
@@ -247,6 +220,44 @@ export function clearAll() {
   commit();
 }
 
+/** The tray's kind for a WARNING the app derived from a payload it reads
+ *  (see `ingestDerived`): the grade findings the Home and Library strips show.
+ *  Deliberately NOT in OS_KINDS/PUSH_KINDS — this is a datapoint re-read from a
+ *  page, not an outcome the server announced, so it must never pop a banner on
+ *  a phone. */
+export const GRADE_WARNING_KIND = "grade_warning";
+
+/** Record a WARNING the app derived from a payload it already reads, rather
+ *  than one the server announced on `/ws/events`.
+ *
+ *  The grade strip is the case: the server has nothing to announce — its
+ *  findings are computed per request, and they change when a script writes a
+ *  tag rather than when an event fires — so a tray that only listened to the
+ *  socket would never carry "Tool — Lateralus: Unrecognized MEDIA value: HDCD".
+ *  `id` is the caller's own stable key for the finding, so a re-render, a poll
+ *  or a second page reading the same summary cannot log it twice, while a NEW
+ *  or CHANGED finding becomes a new entry. Nothing here raises an OS
+ *  notification (that stays in lib/notify.ts). */
+export function ingestDerived(rec: {
+  id: string; kind: string; title: string; body: string; link?: string;
+}): NotificationRecord | null {
+  const id = str(rec.id);
+  if (!id || items.some((n) => n.id === id)) return null;
+  const record: NotificationRecord = {
+    id,
+    kind: str(rec.kind),
+    title: str(rec.title),
+    body: str(rec.body),
+    at: Date.now(),
+    link: str(rec.link),
+    url: "",
+    read: false,
+  };
+  items = [record, ...items].slice(0, MAX_ITEMS);
+  commit();
+  return record;
+}
+
 /** Where a click should take the user. The bell registers the router's
  *  navigate (it is the only surface with one); the fallback is a real
  *  navigation, so a click still works if nothing registered. */
@@ -289,78 +300,4 @@ export function useNotifications(): { items: NotificationRecord[]; unread: numbe
   return { items: snapshot, unread: snapshot.filter((n) => !n.read).length };
 }
 
-/* ------------------------------------------------------------------------- *
- * Live transfer progress
- *
- * A second, deliberately separate store: the shell's own socket (App.tsx)
- * hands every `{"type":"transfers"}` frame from the progress relay here, and
- * the Soulseek page's bars are drawn from the frame instead of its own 3 s
- * poll (server/main.py pushes the same rows /api/soulseek/downloads returns).
- *
- * It lives beside the tray because both are the client end of the server's
- * push channels, and because the separation has to be visible in one place: a
- * progress tick is NOT an outcome. `publishTransfers` never touches `ingest`,
- * so a byte count that changes four times a second can never raise a toast,
- * an OS notification or a tray row.
- * ------------------------------------------------------------------------- */
 
-/** One slskd transfer, as pushed — slskd's own field names, because the frame
- *  carries slskd's own rows verbatim. */
-export interface LiveTransfer {
-  id?: string;
-  state?: string;
-  size?: number;
-  bytesTransferred?: number;
-  percentComplete?: number;
-  averageSpeed?: number;
-}
-
-/** One live job, as its module publishes it — `progress` is the same block
- *  /api/soulseek/auto serves, handed over verbatim. */
-export interface LiveJob {
-  id?: number;
-  state?: string;
-  stage?: string;
-  stage_key?: string;
-  progress?: SlskAutoProgress | null;
-}
-
-/** One frame from the progress relay. `files` carries only the transfers
- *  whose bytes or state changed (a slskd tree holds the whole history), and
- *  `resync` says the list changed shape — a transfer appeared or was dropped
- *  — which is the one case that needs a real refetch. */
-export interface TransfersFrame {
-  type: "transfers";
-  files?: LiveTransfer[];
-  jobs?: LiveJob[];
-  resync?: boolean;
-}
-
-let liveFrame: TransfersFrame | null = null;
-const liveListeners = new Set<() => void>();
-
-/** Hand one frame to the live-progress store. Called by the shell's socket
- *  handler; a frame with nothing in it is still a frame (the page decides
- *  what changed). */
-export function publishTransfers(frame: TransfersFrame) {
-  liveFrame = frame;
-  for (const fn of liveListeners) fn();
-}
-
-function subscribeLive(fn: () => void): () => void {
-  liveListeners.add(fn);
-  return () => {
-    liveListeners.delete(fn);
-  };
-}
-
-/** The newest frame, or null before the first one. The identity changes once
- *  per frame, which is what the page's merge effect keys on. */
-export function liveTransfers(): TransfersFrame | null {
-  return liveFrame;
-}
-
-/** The hook a live progress surface renders from. */
-export function useLiveTransfers(): TransfersFrame | null {
-  return useSyncExternalStore(subscribeLive, liveTransfers, liveTransfers);
-}

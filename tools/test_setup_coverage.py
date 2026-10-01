@@ -9,7 +9,7 @@ hides), and every key and group SettingsPage renders must exist there too. Add a
 setting on either side and this fails until the module accounts for it.
 
 A first run, though, is deliberately SHORT: the step list may render only the
-groups nothing has a default for (folder, login, tools, credentials, Soulseek),
+groups nothing has a default for (folder, login, tools, credentials),
 and every other group is the Settings page's. So the step list is not held to
 "renders every group" — it is held to "renders each group at most once, and
 every group it gave up is rendered somewhere else in the UI", which is what
@@ -74,6 +74,17 @@ covered = set(FIELD_KEY.findall(groups_src))
 managed = quoted_keys(array_body(meta_src, "export const WIZARD_MANAGED_KEYS"))
 hidden = quoted_keys(array_body(meta_src, "export const HIDDEN_KEYS"))
 
+# Config keys the app still READS but that no screen offers a control for any
+# more — the wizard control was removed, the key was kept so an existing
+# config.json keeps loading. None of them is a group field a page renders, so
+# the two reachability checks below name them rather than failing:
+#   * the notification switches for the download/import-queue pipeline, still
+#     honoured by `server/events.py`, and
+#   * the streaming import's unmatched-track selector, now a one-option report
+#     the import dialog states in words instead.
+KEYS_WITHOUT_A_CONTROL = {"notify_download_done", "notify_import_ready",
+                          "playlist_import_unmatched"}
+
 # The groups the steps render: `groups: [...]` entries plus every group title in
 # the module, so a group no step names (a tab nothing reaches) fails below.
 step_groups = set()
@@ -98,7 +109,10 @@ def check(condition, message):
 
 # 1. Every key the app can configure is either a field of a group, a key the
 #    wizard writes itself, or explicitly hidden — no key may be simply absent.
-uncovered = config_keys - covered - managed - hidden
+check(KEYS_WITHOUT_A_CONTROL <= config_keys,
+      "KEYS_WITHOUT_A_CONTROL names keys the config does not have: "
+      + ", ".join(sorted(KEYS_WITHOUT_A_CONTROL - config_keys)))
+uncovered = config_keys - covered - managed - hidden - KEYS_WITHOUT_A_CONTROL
 check(
     not uncovered,
     "config keys no setup step can reach and no allowlist names: " + ", ".join(sorted(uncovered)),
@@ -165,7 +179,9 @@ for title in sorted(group_titles):
             f'OFF_WIZARD names a file that does not exist for "{title}": {owner}',
         )
         continue
-    lost = [k for k in group_fields[title] if not re.search(r"\b%s\b" % re.escape(k), ui_text)]
+    lost = [k for k in group_fields[title]
+            if k not in KEYS_WITHOUT_A_CONTROL
+            and not re.search(r"\b%s\b" % re.escape(k), ui_text)]
     check(
         not lost,
         f'group "{title}" left the wizard with nothing in the UI rendering it: '

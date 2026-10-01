@@ -1,6 +1,7 @@
 """CUE sheet formatter."""
 import os
 import re
+import subprocess
 import tempfile
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
@@ -9,7 +10,19 @@ from .stats import (
     new_stats, _make_pbar, _pbar_skip, _pbar_update, _walk_files, _diff_bytes,
     _collect_targets, worker_count,
 )
+from .subproc import run_tool
 from .ui import print_header, log
+
+# INDEX lines with their NUMBER kept. mlo.discs' own CUE_INDEX_RE reads only
+# INDEX 01 — the app's canonical "where a track starts", which is all a
+# tracklist needs. A SPLIT needs INDEX 00 as well, because the two index
+# points are what decide which side of a pregap the gap audio lands on, so the
+# number is captured here rather than widening that module's regex (every
+# other caller in the app would inherit a second group it does not want).
+_CUE_INDEX_RE = re.compile(
+    r"^\s*INDEX\s+(\d{1,2})\s+(\d{1,3}):(\d{2}):(\d{2})",
+    re.MULTILINE | re.IGNORECASE,
+)
 
 def canonical_cue_text(content, keep_empty_lines, keep_other_lines,
                        file_type, append_final_newline):
@@ -292,4 +305,250 @@ def run_format_cues(config):
             pbar.close()
 
     return stats
+
+
+# --------------------------------------------------------------------------- #
+# Image rips — one .flac for a whole disc, split into one file per track
+# --------------------------------------------------------------------------- #
+
+def _index_seconds(match):
+    """A cue INDEX position (mm:ss:ff, 75 frames to the second) in seconds."""
+    return int(match.group(2)) * 60 + int(match.group(3)) + int(match.group(4)) / 75.0
+
+
+def _cue_sheet(text):
+    """A cue sheet's FILE references and TRACK rows, in sheet order.
+
+    -> (files, tracks), where a track is
+    {position, title, file, start, pregap}: `file` is the FILE reference the
+    track sits in, and `start`/`pregap` are its INDEX 01/00 in seconds (None
+    when the sheet states none). Read with the same per-line regexes
+    `mlo.discs.cue_track_rows` uses, so the two cannot disagree about what a
+    sheet says — only the INDEX number is captured (see _CUE_INDEX_RE).
+    """
+    from .discs import CUE_FILE_RE, CUE_TRACK_LINE_RE, CUE_TITLE_LINE_RE
+    files, tracks = [], []
+    for line in text.splitlines():
+        m = CUE_FILE_RE.match(line)
+        if m:
+            files.append(m.group(1))
+            continue
+        m = CUE_TRACK_LINE_RE.match(line)
+        if m:
+            tracks.append({"position": int(m.group(1)), "title": "",
+                           "file": files[-1] if files else "",
+                           "start": None, "pregap": None})
+            continue
+        m = _CUE_INDEX_RE.match(line)
+        if m and tracks:
+            num = int(m.group(1))
+            key = "start" if num == 1 else ("pregap" if num == 0 else None)
+            if key and tracks[-1][key] is None:
+                tracks[-1][key] = _index_seconds(m)
+            continue
+        m = CUE_TITLE_LINE_RE.match(line)
+        if m and tracks and not tracks[-1]["title"]:
+            # A TITLE after a TRACK line is that track's; one before any TRACK
+            # line is the album's, which belongs to no row (see cue_track_rows).
+            tracks[-1]["title"] = m.group(1).strip()
+    return files, tracks
+
+
+def _image_for(folder, audio, tracks):
+    """The one audio file a sheet's tracks all sit in — the image rip.
+
+    None when the sheet names more than one FILE (that is a per-track rip
+    already, nothing to split), names none, or names something that matches no
+    file while the folder holds more than one candidate to spend.
+    """
+    from .naming import cue_ref_names, name_key
+    refs = {str(t.get("file") or "") for t in tracks}
+    refs.discard("")
+    if len(refs) != 1:
+        return None
+    wanted = set(cue_ref_names(next(iter(refs))))
+    for name in audio:
+        if name_key(name) in wanted:
+            return os.path.join(folder, name)
+    # A sheet whose FILE name no longer matches anything — the image was
+    # renamed after the rip — is usable only when there is exactly one audio
+    # file it could mean.
+    if len(audio) == 1:
+        return os.path.join(folder, audio[0])
+    return None
+
+
+def _track_name(track, stem, prefix=""):
+    """The file name one split track is written as.
+
+    `stem` (the image's own name) is the fallback when the sheet states no
+    TITLE; `prefix` is the image stem with a "-" when the folder holds more
+    than one image, which is what tells two discs' "01 …" apart — and, being
+    a "CD1-"/"disc1-" shape, it is also what the naming script's own disc
+    reader picks the disc number out of.
+    """
+    from .naming import sanitize_segment
+    title = sanitize_segment(str(track.get("title") or "")).strip(" ._")
+    head = f"{prefix}{int(track['position']):02d}"
+    return f"{head} {title}.flac" if title else f"{head} {stem}_{int(track['position']):02d}.flac"
+
+
+def _split_one(args):
+    """Write ONE track of an image rip -> (path, error); path "" on failure."""
+    ffmpeg, image, dest, start, dur, tags = args
+    cmd = [
+        ffmpeg, "-y", "-v", "error", "-nostdin",
+        # -ss BEFORE -i so ffmpeg seeks instead of decoding the disc from the
+        # top once per track. Input seeking is sample-accurate (accurate_seek
+        # is the default), which is also why this is a decode/re-encode and
+        # never a "-c:a copy": a stream copy cuts at a frame boundary and can
+        # shift a track by up to one frame (~93 ms at 44.1 kHz). FLAC -> FLAC
+        # is lossless either way, so nothing is lost but a little CPU.
+        "-ss", f"{start:.3f}", "-i", image,
+        "-t", f"{dur:.3f}", "-map", "0:a:0", "-c:a", "flac",
+    ]
+    for key, value in tags.items():
+        cmd += ["-metadata", f"{key}={value}"]
+    cmd.append(dest)
+    try:
+        run_tool(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE,
+                 text=True, encoding="utf-8", errors="replace", timeout=1800)
+    except Exception as e:  # noqa: BLE001 — any failure is "this track failed"
+        return "", f"{os.path.basename(dest)}: {e}"
+    if not os.path.isfile(dest) or not os.path.getsize(dest):
+        return "", f"{os.path.basename(dest)}: ffmpeg wrote no file"
+    return dest, ""
+
+
+def split_image_rip(folder, config=None, log_fn=None):
+    """Split every whole-disc image rip in *folder* into one FLAC per track.
+
+    An IMAGE RIP is one audio file for a whole disc plus the .cue describing
+    it: a single FILE reference and one TRACK per song. Most CD rips arrive
+    that way, and until now the app kept the image whole, so every later step
+    (the naming script, per-track tags, the grader's per-track checks and
+    AccurateRip) saw one file where it expected an album.
+
+    Boundaries are the sheet's own INDEX 01 points, the convention every CD
+    splitter uses: track N runs from its INDEX 01 to track N+1's, so a pregap
+    belongs to the track in front of it. Track 1 always starts at 0, so a
+    hidden track before its INDEX 01 stays with track 1. A sheet stating no
+    INDEX 01s, or ones that do not increase, is left alone — there is nothing
+    to cut it up with.
+
+    All or nothing, per image: if any track fails to write, the tracks already
+    written are removed and the image stays, because a half-split album is
+    worse than an intact one. On success the image itself goes to the app's
+    Trash (never a bare delete) and the .cue is left exactly as it is — the
+    app already reads an image-style sheet whose FILE no longer exists
+    (`mlo.discs.fix_cue_filenames` patches that reference, and
+    `_cue_matches_disc` is pregap-tolerant by design).
+
+    Returns the paths written; [] when the folder holds no image rip, or none
+    could be split (no INDEX 01s, no ffmpeg, unreadable durations).
+    """
+    from .audio import AudioFile
+    from .discs import read_cue_text
+    from .paths import LIB_AUDIO_EXTS, trash_file
+    from .tools import detect_all_tools
+
+    def say(line):
+        if log_fn is not None:
+            try:
+                log_fn(line)
+            except Exception:
+                pass
+
+    if not folder or not os.path.isdir(folder):
+        return []
+    try:
+        entries = sorted(os.listdir(folder))
+    except OSError:
+        return []
+    cues = [e for e in entries if e.lower().endswith(".cue")]
+    audio = [e for e in entries
+             if os.path.splitext(e)[1].lower() in LIB_AUDIO_EXTS
+             and os.path.isfile(os.path.join(folder, e))]
+    if not cues or not audio:
+        return []
+    ffmpeg = str((detect_all_tools().get("ffmpeg") or {}).get("ffmpeg_exe") or "")
+    if not ffmpeg or not os.path.isfile(ffmpeg):
+        return []
+
+    albums = []   # (image path, tracks, starts)
+    claimed = set()
+    for cue in cues:
+        _files, tracks = _cue_sheet(read_cue_text(os.path.join(folder, cue)))
+        if len(tracks) < 2:
+            continue
+        starts = [t["start"] for t in tracks]
+        if any(s is None for s in starts):
+            continue
+        if any(b <= a for a, b in zip(starts, starts[1:])):
+            continue
+        image = _image_for(folder, audio, tracks)
+        if not image or image in claimed:
+            continue
+        claimed.add(image)
+        albums.append((image, tracks, starts))
+    if not albums:
+        return []
+
+    multi = len(albums) > 1
+    written, failures = [], []
+    for image, tracks, starts in albums:
+        try:
+            total = float(AudioFile(image).audio.info.length)
+        except Exception:
+            total = 0.0
+        if total <= starts[-1]:
+            say(f"image rip not split: {os.path.basename(image)} — its cue's "
+                "last track starts past the end of the audio")
+            continue
+        stem = os.path.splitext(os.path.basename(image))[0]
+        prefix = f"{stem}-" if multi else ""
+        jobs = []
+        for i, track in enumerate(tracks):
+            start = 0.0 if i == 0 else starts[i]
+            end = starts[i + 1] if i + 1 < len(starts) else total
+            if end <= start:
+                continue
+            tags = {"TRACKNUMBER": str(track["position"])}
+            if track["title"]:
+                tags["TITLE"] = track["title"]
+            jobs.append((ffmpeg, image, os.path.join(folder, _track_name(track, stem, prefix)),
+                         start, end - start, tags))
+        if not jobs:
+            continue
+        lanes = worker_count(config, maximum=4, items=len(jobs))
+        with ThreadPoolExecutor(max_workers=lanes) as ex:
+            results = list(ex.map(_split_one, jobs))
+        errs = [e for _p, e in results if e]
+        made = [p for p, _e in results if p]
+        if errs:
+            for p in made:
+                try:
+                    os.remove(p)
+                except OSError:
+                    pass
+            failures.extend(errs)
+            say(f"image rip not split: {os.path.basename(image)} — {errs[0]}")
+            continue
+        moved = trash_file(image, music_folder=(config or {}).get("music_folder") or "",
+                           user=(config or {}).get("auth_username") or "")
+        if not moved:
+            # The image outlives its split, so undoing the split is the only
+            # way to leave the folder as it was found.
+            for p in made:
+                try:
+                    os.remove(p)
+                except OSError:
+                    pass
+            failures.append(f"{os.path.basename(image)}: could not be moved to the Trash")
+            say(f"image rip not split: {os.path.basename(image)} — it could not "
+                "be moved to the Trash, so the split was undone")
+            continue
+        written.extend(made)
+        say(f"image rip split: {os.path.basename(image)} -> {len(made)} track(s)")
+    return written
 

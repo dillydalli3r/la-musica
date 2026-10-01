@@ -1,12 +1,11 @@
-"""Home-page payload: library highlights and the open Soulseek wishlist.
+"""Home-page payload: library highlights.
 
 Everything is built from the library itself — stats, recent additions, best
 grades, the user's own rated releases, favorites, a random rediscovery shelf,
-most-collected artists and albums failing their checks — plus the wishes the
-background worker is hunting, and the ratings store for the one shelf that is
-the caller's own verdict rather than the library's. Best-effort and
-TTL-cached: a failing sub-source degrades to a missing shelf rather than
-failing the Home page.
+most-collected artists and albums failing their checks — and the ratings store
+for the one shelf that is the caller's own verdict rather than the library's.
+Best-effort and TTL-cached: a failing sub-source degrades to a missing shelf
+rather than failing the Home page.
 """
 import os
 import random
@@ -233,55 +232,6 @@ def _rated(albums, user, limit):
     return rated[:limit]
 
 
-_WISH_REASON = {"wanted": "Wishlist", "searching": "Searching Soulseek",
-                "failed": "Search failed", "available": "Available now"}
-
-
-def _wanted(limit, skip_paths=()):
-    """Open Soulseek wishes — releases the background worker is hunting.
-
-    A wish whose album is ALREADY in the library as a framework album is left
-    out: that release is a library card of its own now (`_pending`, and the
-    shelf it would appear on), and listing its wish here as well would draw the
-    same album twice on one page — once with a link and once without.
-    """
-    try:
-        from server import wishes
-        items = wishes.list_wishes() or []
-    except Exception:
-        return []
-    out = []
-    for w in items:
-        if str(w.get("status") or "") == "imported":
-            continue
-        path = str(w.get("album_path") or "")
-        if path and os.path.normcase(os.path.normpath(path)) in skip_paths:
-            continue
-        out.append({
-            # A wish is NOT a library album: no folder, no tags, nothing
-            # graded. The row carries the identity the card draws — title,
-            # artist and year in the album-tag shape the card already reads —
-            # and nothing that reads as a library fact: no tracks to play, no
-            # pass / audit for a status dot. `owned` false is what the card
-            # keys that on.
-            "path": "",
-            "owned": False,
-            "reason": _WISH_REASON.get(str(w.get("status") or ""), "Wishlist"),
-            "mbid": str(w.get("release_mbid") or "").strip() or None,
-            "mb_kind": "release",
-            "tracks": [],
-            "cover_file": None,
-            "meta": {
-                "ALBUM": str(w.get("title") or "").strip() or "Untitled release",
-                "ARTIST": str(w.get("artist") or "").strip(),
-                "DATE": str(w.get("year") or "")[:4] or None,
-            },
-        })
-        if len(out) >= limit:
-            break
-    return out
-
-
 def _needs_attention(albums, limit):
     """Owned albums that fail at least one check — lowest grade first."""
     bad = [a for a in albums
@@ -317,7 +267,7 @@ def grade_warning(lib):
     - a PENDING framework album (the release the user added whose audio has
       not arrived): nothing was graded, because there was nothing to grade,
       and its row's failed check is the empty-folder placeholder — listing it
-      would report a wish as a broken album;
+      would report a pending album as a broken album;
     - an album with NO checks (`total_checks` 0): it PASSES by the rule above
       (0 == 0), which is how an album whose checks are all switched off stops
       disagreeing with the Grade script;
@@ -704,8 +654,6 @@ def _build_home_payload(cfg, user, recent_count):
         # Every album still waiting for its audio, in one place.
         "pending": pending,
         "top_artists": _top_artists(artists, 6),
-        "wanted": _wanted(8, {os.path.normcase(os.path.normpath(a.get("path") or ""))
-                              for a in albums if a.get("pending")}),
         "needs_attention": _needs_attention(albums, max(4, recent_count // 2)),
         # Whether the library passes its own checks, and what fails — the SAME
         # object `GET /api/grades/summary` answers with, so Home's strip and

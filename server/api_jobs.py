@@ -9,16 +9,16 @@ Mounted by ``server.main`` (``include_router``). One route:
 The sidebar page under MAINTAIN ("In progress") polls it: which job is running,
 what it is doing, which folders it holds and how far it has got. The registry
 behind it is :mod:`server.job_locks` — script runs
-(:mod:`server.script_runners`), the download import queue
-(:mod:`server.import_queue`), single-album imports and every mutating route
+(:mod:`server.script_runners`), the download import pipeline, single-album
+imports and every mutating route
 claim their paths there, so this is the one place that answers what the library
 is busy with right now.
 
 Nothing here offers a "force release": a claim belongs to the work holding it,
 and dropping it early would only mean the files are unprotected while the job
 is still writing to them. A job that has no reason to keep running is stopped
-through its own surface (the import queue's cancel, the shim in front of a
-script run) — this list only reports.
+through its own surface (a job's own cancel, the shim in front of a script
+run) — this list only reports.
 """
 from fastapi import APIRouter
 

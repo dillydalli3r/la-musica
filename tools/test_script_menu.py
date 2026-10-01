@@ -114,6 +114,7 @@ EXPECTED_FOLDER_SCOPED = {
     15,  # one release manifest per album               (server/script_runners.py)
     19,  # the artist folder's image                    (mlo/artistdata.py)
     20,  # the layout of a subtree                      (mlo/layout.py)
+    24,  # one album's public rating, and each track's  (mlo/web_ratings.py)
 }
 # Kinds whose menu holds folders; the other two hold files.
 EXPECTED_FOLDER_KINDS = {"album", "artist", "library"}

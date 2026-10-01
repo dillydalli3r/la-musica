@@ -59,46 +59,6 @@ services:
     container_name: la-musica
     ports:
       - "8000:8000"
-      # Soulseek listen port. Sharing is not just the web UI: other users
-      # BROWSE and DOWNLOAD from this share by connecting to the port the
-      # Soulseek network publishes for you, which slskd opens inside the
-      # container (Settings -> Soulseek -> Listen port, default 50000). Not
-      # publishing it means your library is searchable but downloads from it
-      # fail, which is the one thing a share is for.
-      #
-      # The two numbers must be the SAME port. The variable is the source of
-      # truth for BOTH sides: the app reads MLO_SOULSEEK_LISTEN_PORT at startup
-      # and writes it into its own config (server/main.py), which is what slskd
-      # is then told to listen on — so changing it here is enough, and a
-      # mismatch cannot be introduced from Settings (the app refuses a port
-      # that the environment pins, and says where the pin lives). On the host,
-      # forward that port to this machine as well if a router sits in front of
-      # it — that is the half no publish line can do.
-      #
-      # ...AND A FORWARD IS ONLY WORTH THE ADDRESS IT SERVES. Peers are given
-      # the address the Soulseek server sees your LOGIN come from, which is the
-      # HOST's own route out — so when the host sends its traffic through a VPN
-      # or a Tailscale exit node, that address is the VPN's egress and a forward
-      # on the home router points at nothing anyone dials: the share's file count
-      # still shows on other clients and browsing it fails. Nothing in the
-      # container can read the host's routing table; compare the host's own
-      # egress ("what is my IP" there, or curl https://api.ipify.org) with the
-      # WAN address the router's admin page shows, and turn the exit node off for
-      # the host while sharing (or split-route it so this app's traffic leaves by
-      # the ISP line) when the two differ.
-      #
-      # ONE TCP PORT IS ALL OF IT. slskd's inbound side is a single TCP listener,
-      # UDP is only ever outbound, and there is no second "obfuscated" port to
-      # publish — an obfuscated route is a SoulseekQt feature slskd does not
-      # implement, so a peer that tries one falls back to this port rather than
-      # needing another. The app does not have to be trusted about this line
-      # either: on a container it MEASURES it (a published port is accepted on
-      # Docker's gateway from inside, an unpublished one is not, with the app's
-      # own published port as the control) and says so as the *Published by the
-      # host* row of Test port and, when it is wrong, as `listen_unpublished` on
-      # the sharing card — so a missing or renumbered publish line is reported as
-      # itself instead of as a router that will not answer.
-      - "${MLO_SOULSEEK_LISTEN_PORT:-50000}:${MLO_SOULSEEK_LISTEN_PORT:-50000}"
     environment:
       # Folder inside the container to treat as the music library.
       - MLO_MUSIC_FOLDER=/music
@@ -111,26 +71,15 @@ services:
       # password until a phone or another computer connects — set one under
       # Settings -> Security when it does.
       - MLO_SERVER_HOST=0.0.0.0
-      # The Soulseek listen port, when you need a different one. Set it here
-      # (or in a .env beside this file) and the publish line above follows the
-      # same value, while the app seeds its own `soulseek_listen_port` from it —
-      # one number on both sides. Uncomment and change both places in one move:
-      #   - MLO_SOULSEEK_LISTEN_PORT=50000
     volumes:
-      # ALL app state (config.json, playlists.db + wishes.db, slskd.yaml,
-      # the beets config + beets-library.db, and the ReplayGain / RYM /
-      # metadata caches) lives in /music/.mlo/data, beside the transient
+      # ALL app state (config.json, playlists.db, the beets config +
+      # beets-library.db, and the ReplayGain / RYM / metadata caches) lives in
+      # /music/.mlo/data, beside the transient
       # /music/.mlo/downloads and /music/.mlo/trash AND the tools the
       # Dependencies page installs (/music/.mlo/tools), so this one mount
       # persists everything across rebuilds — the dependency volume this file
       # used to declare is gone: a tool now travels with the library, not with
       # the image.
-      #
-      # This IS the Soulseek share as well: slskd - the Soulseek client this
-      # app runs - is configured with /music as its shared folder, so whatever
-      # this mount points at is what other users search and browse. Point it at
-      # the library, nothing narrower (a mount holding only part of the library
-      # shares only that part) and never at the download folder.
       #
       # EDIT THIS LINE. The committed value is the repo-relative ./music (the
       # folder this template ships beside), which is a placeholder, not a
@@ -174,9 +123,7 @@ services:
     # Mirrors the image's HEALTHCHECK so `docker compose ps` and watchtower
     # see readiness. The container runs as uid 1000; if your library is owned
     # by someone else, rebuild the image with matching build args or chown the
-    # host folder to 1000 - otherwise the app cannot write /music/.mlo, and
-    # slskd cannot READ the library it is supposed to share (an unreadable
-    # subfolder is skipped silently, so the share just comes up short).
+    # host folder to 1000 - otherwise the app cannot write /music/.mlo.
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/api/health', timeout=4)"]
       interval: 30s

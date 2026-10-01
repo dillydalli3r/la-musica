@@ -41,10 +41,10 @@ The import is two phases, both of them the user's to see:
 
 The queue is only ever touched for a track whose album is not already in the
 library, and only when ``playlist_import_parent_albums`` is on: the PARENT
-ALBUM is queued through the existing add-by-name path
-(``server.api_add.library_add`` — MusicBrainz match, then a wish / framework
-album, whichever that path picks) — albums, never tracks. Off, the import is
-informational: the playlist holds the matched paths and nothing is queued.
+ALBUM is added through the existing add-by-name path
+(``server.api_add.library_add`` — a MusicBrainz match, then a framework album)
+— albums, never tracks. Off, the import is informational: the playlist holds
+the matched paths and nothing is queued.
 """
 import json
 import os
@@ -736,27 +736,25 @@ def _album_in_library(index, album, artist):
 # Queueing — the app's existing add-by-name path, never a second one
 # --------------------------------------------------------------------------- #
 def _queue_album(title, artist, source, page_url):
-    """Queue ONE album through the existing add-by-name path.
+    """Add ONE album through the existing add-by-name path.
 
     `server.api_add.library_add` with a name-only request is exactly the
     semantics this needs — MusicBrainz is searched for the album, and whatever
-    that path decides (a release/edition added, or a name-keyed wish the queue
-    searches) is what happens. This function is the seam the suite stubs.
+    that path decides (a release/edition added) is what happens. This function
+    is the seam the suite stubs.
     """
     from server import api_add
 
     return api_add.library_add(api_add.AddToLibraryRequest(
-        kind="album", title=title, artist=artist, source=source,
-        page_url=page_url))
+        kind="album", title=title, artist=artist))
 
 
 def _queue_track(title, artist, source, page_url):
-    """Queue ONE track by name (the same path, kind="track")."""
+    """Add ONE track by name (the same path, kind="track")."""
     from server import api_add
 
     return api_add.library_add(api_add.AddToLibraryRequest(
-        kind="track", title=title, artist=artist, source=source,
-        page_url=page_url))
+        kind="track", title=title, artist=artist))
 
 
 def _queue_row(kind, title, artist, source, page_url, album=""):
@@ -768,8 +766,8 @@ def _queue_row(kind, title, artist, source, page_url, album=""):
     from fastapi import HTTPException
 
     row = {"kind": kind, "title": title, "artist": artist, "album": album,
-           "queued": False, "matched": False, "by_name": False,
-           "wish_id": None, "mbid": "", "note": "", "error": ""}
+           "queued": False, "matched": False,
+           "mbid": "", "note": "", "error": ""}
     try:
         answer = (_queue_album if kind == "album" else _queue_track)(
             title, artist, source, page_url) or {}
@@ -781,9 +779,7 @@ def _queue_row(kind, title, artist, source, page_url, album=""):
         return row
     row["note"] = str(answer.get("note") or "")
     row["matched"] = bool(answer.get("matched", True))
-    row["by_name"] = bool(answer.get("by_name"))
-    row["wish_id"] = answer.get("wish_id")
-    row["queued"] = bool(answer.get("queued")) or bool(answer.get("wish_id"))
+    row["queued"] = bool(answer.get("queued"))
     albums = answer.get("albums") or []
     if albums:
         row["mbid"] = str((albums[0] or {}).get("mbid") or "")
@@ -856,7 +852,11 @@ def import_playlist(url, name="", cfg=None, service="", user="",
         if want_albums:
             _queue_parent_albums(report, payload, index)
         if unmatched_mode == "wish":
-            _queue_unmatched_tracks(report, payload, index)
+            # A config saved as "wish" now behaves as "skip": there is no wish
+            # queue to put the unmatched tracks on any more, so they are
+            # REPORTED here (the same rows the "skip" path leaves in `tracks`)
+            # instead of being queued.
+            _report_unmatched_tracks(report)
 
     created = False
     playlist = None
@@ -915,7 +915,7 @@ def _queue_parent_albums(report, payload, index):
             report["parent_albums"]["queued"].append({
                 "kind": "album", "title": row["title"], "artist": artist,
                 "album": "", "queued": False, "matched": False,
-                "by_name": False, "wish_id": None, "mbid": "", "error": "",
+                "mbid": "", "error": "",
                 "note": "", "reason": "the playlist row names no album"})
             continue
         key = (album.strip().lower(), artist.strip().lower())
@@ -929,8 +929,8 @@ def _queue_parent_albums(report, payload, index):
             done[key] = False
             report["parent_albums"]["queued"].append({
                 "kind": "album", "title": album, "artist": artist,
-                "queued": False, "matched": True, "by_name": False,
-                "wish_id": None, "mbid": "", "error": "", "note": "",
+                "queued": False, "matched": True,
+                "mbid": "", "error": "", "note": "",
                 "reason": "already in the library", "album": album})
             continue
         queued = _queue_row("album", album, artist, payload["service_label"],
@@ -940,24 +940,29 @@ def _queue_parent_albums(report, payload, index):
         row["queued"] = "album" if queued["queued"] else ""
 
 
-def _queue_unmatched_tracks(report, payload, index):
-    """`playlist_import_unmatched: "wish"` — queue every unmatched track by
-    name, unless the parent-album pass already queued the album it is on."""
+def _report_unmatched_tracks(report):
+    """Report every unmatched track — the "wish" mode's half of the unmatched
+    set, now that there is no wish queue to put them on.
+
+    A config saved as ``playlist_import_unmatched: "wish"`` has nothing to
+    queue them on any more, so the tracks the import could not place are listed
+    here for the user instead. A track whose album the parent-album pass
+    already added is left out: it is covered, and listing it twice would read
+    as two missing songs.
+    """
     seen = set()
+    rows = []
     for row in report["tracks"]:
         if row["matched"] or not row["title"]:
             continue
         if row["queued"] == "album":
             # The album this track is missing from is already on its way: the
-            # track is covered, and queueing it by name as well would be two
-            # searches for one missing song.
+            # track is covered.
             continue
         key = (row["title"].strip().lower(), row["artist"].strip().lower())
         if key in seen:
             continue
         seen.add(key)
-        queued = _queue_row("track", row["title"], row["artist"],
-                            payload["service_label"], row["url"],
-                            album=row["album"])
-        report["unmatched_tracks"]["queued"].append(queued)
-        row["queued"] = "wish" if queued["queued"] else ""
+        rows.append({"title": row["title"], "artist": row["artist"],
+                     "album": row["album"], "url": row["url"]})
+    report["unmatched_tracks"]["tracks"] = rows

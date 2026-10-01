@@ -278,17 +278,12 @@ def _music_folder(cfg) -> Optional[str]:
         return None
 
 
-def _download_dirs(cfg, folder) -> List[str]:
-    """The download pair transfers really land in: slskd's configured folder
-    (``soulseek_download_dir``, else ``<music>/.mlo/downloads``) and the
-    staging sibling of it. Both are read out of ``server.soulseek``, which
-    derives them, so the card measures the folders the client uses rather than
+def _download_dirs(folder) -> List[str]:
+    """The download pair transfers land in: the completed folder
+    (``<music>/.mlo/downloads``) and the staging sibling of it, both derived by
+    ``mlo.paths``, so the card measures the folders the client uses rather than
     a second guess at their names."""
-    try:
-        from server import soulseek as slsk
-        pairs = [slsk.download_dir(cfg), slsk._incomplete_dir(cfg)]
-    except Exception:
-        pairs = [downloads_dir(folder), incomplete_dir(folder)]
+    pairs = [downloads_dir(folder), incomplete_dir(folder)]
     out: List[str] = []
     for p in pairs:
         if p and p not in out:
@@ -335,7 +330,7 @@ def storage_snapshot(cfg, folder: Optional[str]) -> Dict[str, Any]:
     off-request, so a request either answers from memory or pays the walk
     once — never both in a queue behind somebody else's.
     """
-    key = _snapshot_key(cfg, folder)
+    key = _snapshot_key(folder)
     now = time.monotonic()
     with _snapshot_lock:
         hit = _snapshots.get(key)
@@ -352,11 +347,10 @@ def storage_snapshot(cfg, folder: Optional[str]) -> Dict[str, Any]:
     return _store_snapshot(key, _build_snapshot(cfg, folder))
 
 
-def _snapshot_key(cfg, folder) -> tuple:
-    """What a snapshot is a function of: the folder, and the configured
-    download folder (the other root a config can move, see `_download_dirs`)."""
-    return (os.path.normcase(str(folder or "")),
-            os.path.normcase(str(cfg.get("soulseek_download_dir") or "")))
+def _snapshot_key(folder) -> tuple:
+    """What a snapshot is a function of: the music folder (the root a config
+    can move, see `_download_dirs`)."""
+    return (os.path.normcase(str(folder or "")),)
 
 
 def _store_snapshot(key, payload):
@@ -410,7 +404,7 @@ def _build_snapshot(cfg, folder: Optional[str]) -> Dict[str, Any]:
     trash_res = scan(trash)
     skips.add(trash_res)
 
-    dl_roots = _download_dirs(cfg, folder)
+    dl_roots = _download_dirs(folder)
     staging = dl_roots[1] if len(dl_roots) > 1 else None
     dl_rows: List[Dict[str, Any]] = []
     dl_bytes = dl_files = stage_bytes = stage_files = 0
@@ -426,7 +420,7 @@ def _build_snapshot(cfg, folder: Optional[str]) -> Dict[str, Any]:
         if p == staging:
             stage_bytes, stage_files = row["bytes"], row["files"]
 
-    # The app's own tools (ffmpeg, slskd, the analysers) live under the music
+    # The app's own tools (ffmpeg, the analysers) live under the music
     # folder now — <music>/.mlo/tools — and are measured in BOTH places they can
     # be: that folder, and the pre-move <app folder>/.dependencies (see
     # mlo.paths.tools_dirs), because an install that has not updated a tool

@@ -91,7 +91,7 @@ def write_stub(folder):
 
 def sqlite_db(path, rows=()):
     """A real SQLite database (one table, *rows* in it) — stands in for the
-    app's playlists.db/wishes.db."""
+    app's playlists.db / beets-library.db."""
     os.makedirs(os.path.dirname(path), exist_ok=True)
     con = sqlite3.connect(path)
     try:
@@ -161,7 +161,6 @@ try:
           json.dumps({"music_folder": s1_old, "seed": 1}, indent=2, sort_keys=True) + "\n")
     carried = {
         "playlists.db": b"playlists",
-        "wishes.db": b"wishes",
         "beets-library.db": b"beets",
         os.path.join("lyrics_cache", "a.json"): b"{}",
     }
@@ -264,8 +263,8 @@ try:
     write_stub(s4)
     sqlite_db(os.path.join(state(s4), "playlists.db"))
     sqlite_db(os.path.join(s4, "Data", "playlists.db"), ["from-the-old-folder"])
-    sqlite_db(os.path.join(state(s4), "wishes.db"), ["destination"])
-    sqlite_db(os.path.join(s4, "Data", "wishes.db"), ["source"])
+    sqlite_db(os.path.join(state(s4), "beets-library.db"), ["destination"])
+    sqlite_db(os.path.join(s4, "Data", "beets-library.db"), ["source"])
     write(os.path.join(state(s4), "beets-config.yaml"), b"destination")
     write(os.path.join(s4, "Data", "beets-config.yaml"), b"source")
     write(os.path.join(state(s4), "lyrics_cache", "kept.json"), b"destination")
@@ -279,9 +278,9 @@ try:
         "an empty app-created destination DB blocked the user's real state"
     assert not os.path.exists(os.path.join(s4, "Data", "playlists.db")), \
         "the superseded source DB was left behind"
-    assert db_rows(os.path.join(state(s4), "wishes.db")) == ["destination"], \
+    assert db_rows(os.path.join(state(s4), "beets-library.db")) == ["destination"], \
         "migration overwrote a destination DB that holds rows"
-    assert db_rows(os.path.join(s4, "Data", "wishes.db")) == ["source"], \
+    assert db_rows(os.path.join(s4, "Data", "beets-library.db")) == ["source"], \
         "refused move lost the source DB"
     with open(os.path.join(state(s4), "beets-config.yaml"), "rb") as f:
         assert f.read() == b"destination", "migration overwrote a destination file"
@@ -331,7 +330,7 @@ try:
     write(os.path.join(s6_old, "Data", "config.json"),
           json.dumps({"music_folder": s6_old, "locale": "ja"},
                      indent=2, sort_keys=True) + "\n")
-    write(os.path.join(s6_old, "Data", "wishes.db"), b"wish")
+    write(os.path.join(s6_old, "Data", "playlists.db"), b"playlists")
     write(os.path.join(s6_old, ".mlo_downloads", ".incomplete", "u", "z.flac"), b"Z")
     write(os.path.join(s6_old, ".mlo_trash", "A", "01.flac"), b"T")
     write(os.path.join(s6_old, ".mlo_trash", ".mlo_manifest.json"), b"{\"version\": 1}")
@@ -346,8 +345,8 @@ try:
         f"save clobbered the new folder: {read_json(s6_cfg)['music_folder']}"
     assert read_json(s6_cfg)["locale"] == "de", \
         f"saved values lost: {read_json(s6_cfg).get('beets_locale')}"
-    assert os.path.isfile(os.path.join(state(s6_new), "wishes.db")), \
-        "wishes.db did not follow the folder change"
+    assert os.path.isfile(os.path.join(state(s6_new), "playlists.db")), \
+        "the playlists database did not follow the folder change"
     partial = os.path.join(downloads(s6_new), ".incomplete", "u", "z.flac")
     assert os.path.isfile(partial), f"partial download did not follow to {partial}"
     with open(partial, "rb") as f:
@@ -372,10 +371,10 @@ try:
     s7 = make_folder("S7Music")
     write_stub(s7)
     os.environ["MLO_MUSIC_FOLDER"] = s7
-    for name in ("server.playlists", "server.wishes"):
+    for name in ("server.playlists",):
         sys.modules.pop(name, None)
         importlib.import_module(name)
-    for name in ("playlists.db", "wishes.db"):
+    for name in ("playlists.db",):
         assert not os.path.exists(os.path.join(state(s7), name)), \
             f"importing the app created {name} before the migration ran"
     # a destination DB that already exists but holds nothing must not win
@@ -400,7 +399,7 @@ try:
     write(os.path.join(state(s8_other), "config.json"),
           json.dumps({"music_folder": s8_other, "keep": True}, indent=2, sort_keys=True) + "\n")
     sqlite_db(os.path.join(state(s8_other), "playlists.db"), rows=("liked",))
-    sqlite_db(os.path.join(legacy_mlo_data(s8_other), "wishes.db"), rows=("wished",))
+    sqlite_db(os.path.join(legacy_mlo_data(s8_other), "beets-library.db"), rows=("carried",))
     os.environ["MLO_MUSIC_FOLDER"] = s8_scope      # ...but run against the scope
     migrate()
     carried = os.path.join(state(s8_scope), "config.json")
@@ -409,13 +408,13 @@ try:
     assert read_json(carried)["keep"] is True, "the carried config lost fields"
     assert db_rows(os.path.join(state(s8_scope), "playlists.db")) == ["liked"], \
         "the other install's .mlo/data did not carry into the scope"
-    assert db_rows(os.path.join(state(s8_scope), "wishes.db")) == ["wished"], \
+    assert db_rows(os.path.join(state(s8_scope), "beets-library.db")) == ["carried"], \
         "the other install's .mlo_data did not carry into the scope"
     assert os.path.isfile(os.path.join(state(s8_other), "config.json")), \
         "the other install lost its config to the scope"
     assert db_rows(os.path.join(state(s8_other), "playlists.db")) == ["liked"], \
         "the other install lost its playlists to the scope"
-    assert db_rows(os.path.join(legacy_mlo_data(s8_other), "wishes.db")) == ["wished"], \
+    assert db_rows(os.path.join(legacy_mlo_data(s8_other), "beets-library.db")) == ["carried"], \
         "the other install's intermediate state was moved, not copied"
     # a legacy dir of the scope's OWN folder is still moved, not copied
     s8_music = make_folder("S8Music")

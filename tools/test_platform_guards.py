@@ -16,9 +16,9 @@ GitHub helpers stubbed so nothing touches the network:
 
 The regression this file exists for: on Linux, "Install / update all" attempted
 every one of the sixteen tools and failed on twelve — the distro-provided ones
-and the Windows-only ones — while oxipng and slskd, which upstream DOES publish
-Linux builds for, were refused for ever and stayed "missing" behind an Install
-button that could not work.
+and the Windows-only ones — while oxipng, which upstream DOES publish a Linux
+build for, was refused for ever and stayed "missing" behind an Install button
+that could not work.
 
 Both branches are simulated rather than read off the host (see
 simulated_platform).
@@ -158,9 +158,9 @@ for key in fetchdeps.DISPLAY_NAMES:
 
 with runners(True):
     # EVERY tool the app knows, on Linux: upstream's native build (oxipng,
-    # slskd, AudioAuditor, CUETools through mono, and the rsgain/fpcalc pair),
-    # the pip/source/phar set, or the distro package. There is no "cannot
-    # install this here" row left for a 64-bit host.
+    # AudioAuditor, CUETools through mono, and the rsgain/fpcalc pair), the
+    # pip/source/phar set, or the distro package. There is no "cannot install
+    # this here" row left for a 64-bit host.
     for key in LINUX_NATIVE_ARM_TOO + PLATFORM_FREE:
         check(f"Linux installs {key} from its own release",
               fetchdeps.install_kind(key, platform="linux", machine="x86_64") == "deps")
@@ -234,11 +234,9 @@ check("an installable tool carries no refusal",
 # Markers follow the platform: the Windows install must still look for .exe
 # names, the Linux one for the bare binaries a machine here can exec.
 check("Windows markers are the .exe names",
-      fetchdeps.markers("oxipng", platform="windows") == ("oxipng.exe",)
-      and fetchdeps.markers("slskd", platform="windows") == ("slskd.exe",))
+      fetchdeps.markers("oxipng", platform="windows") == ("oxipng.exe",))
 check("Linux markers are the bare names",
-      fetchdeps.markers("oxipng", platform="linux") == ("oxipng",)
-      and fetchdeps.markers("slskd", platform="linux") == ("slskd",))
+      fetchdeps.markers("oxipng", platform="linux") == ("oxipng",))
 
 # Asset selection per platform: the Windows pin must never be picked on Linux,
 # and the Linux build must never be picked on Windows.
@@ -270,21 +268,19 @@ check("oxipng's one static tarball serves every libc",
       picks("oxipng", LINUX_ASSETS, platform="linux", machine="aarch64")
       == "oxipng-10.2.0-aarch64-unknown-linux-musl.tar.gz")
 
-# slskd ships both libcs and they are not interchangeable: its musl apphost
-# names a loader a glibc host does not have (it exits 127, "not found"), so the
-# host's libc has to decide.
-SLSKD_ASSETS = ["slskd-0.26.0-win-x64.zip", "slskd-0.26.0-linux-x64.zip",
-                "slskd-0.26.0-linux-musl-x64.zip"]
+# A tool published for one libc only must not lose its build to the other one:
+# `_linux_pattern` tries the host's libc first and the plain `<arch>` key is the
+# fallback, so oxipng's static musl tarball is still picked on a musl host.
 real_musl = fetchdeps.musl_libc
 try:
     fetchdeps.musl_libc = lambda: False
-    check("a glibc host picks slskd's glibc build",
-          picks("slskd", SLSKD_ASSETS, platform="linux", machine="x86_64")
-          == "slskd-0.26.0-linux-x64.zip")
+    check("a glibc host picks oxipng's static tarball",
+          picks("oxipng", LINUX_ASSETS, platform="linux", machine="x86_64")
+          == "oxipng-10.2.0-x86_64-unknown-linux-musl.tar.gz")
     fetchdeps.musl_libc = lambda: True
-    check("a musl host picks slskd's musl build",
-          picks("slskd", SLSKD_ASSETS, platform="linux", machine="x86_64")
-          == "slskd-0.26.0-linux-musl-x64.zip")
+    check("a musl host still gets it through the arch fallback",
+          picks("oxipng", LINUX_ASSETS, platform="linux", machine="x86_64")
+          == "oxipng-10.2.0-x86_64-unknown-linux-musl.tar.gz")
 finally:
     fetchdeps.musl_libc = real_musl
 
@@ -426,7 +422,7 @@ with simulated_platform("posix"), tempfile.TemporaryDirectory() as tmp:
           fetchdeps.archive_suffix("oxipng-10.2.0-x86_64-unknown-linux-musl.tar.gz")
           == ".tar.gz")
     check("a zip asset keeps its own",
-          fetchdeps.archive_suffix("slskd-0.26.0-linux-musl-x64.zip") == ".zip")
+          fetchdeps.archive_suffix("CUETools_2.2.6.zip") == ".zip")
     check("a bare-exe asset still gets its name",
           fetchdeps.archive_suffix("yt-dlp.exe") == ".exe")
 
@@ -449,13 +445,13 @@ with simulated_platform("posix"), tempfile.TemporaryDirectory() as tmp:
           fetchdeps._locate_binaries(out, "oxipng") == os.path.dirname(landed))
 
     # zipfile restores no file modes, so a binary unpacked from a .zip lands
-    # unexecutable — slskd, the one tool this app RUNS, included.
+    # unexecutable, whatever tool ships it.
     os.chmod(landed, 0o644)
     fetchdeps._make_executable(os.path.dirname(landed), ("oxipng",))
     if not HOST_WINDOWS:
         check("the installed binary is executable", os.access(landed, os.X_OK))
     check("the marker lookup ignores a folder without the markers",
-          fetchdeps._locate_binaries(out, "slskd") is None)
+          fetchdeps._locate_binaries(out, "rsgain") is None)
 
 
 # --------------------------------------------------------------------------- #
@@ -483,12 +479,12 @@ with simulated_platform("posix"), tempfile.TemporaryDirectory() as tmp:
 
         # The Windows folders this folder can also hold (a shared volume, a
         # desktop install) must never be taken for a native one.
-        win = os.path.join(tmp, "slskd v0.26.0")
+        win = os.path.join(tmp, "rsgain v3.8")
         os.makedirs(win)
-        with open(os.path.join(win, "slskd.exe"), "w", encoding="utf-8") as f:
+        with open(os.path.join(win, "rsgain.exe"), "w", encoding="utf-8") as f:
             f.write("MZ\n")
         check("an .exe folder is not a native install",
-              "slskd" not in tools._detect_deps_native())
+              "rsgain" not in tools._detect_deps_native())
     finally:
         tools.tools_dirs = real_dirs
 

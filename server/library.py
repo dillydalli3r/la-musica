@@ -52,6 +52,10 @@ TRACK_TAGS = [
     # query engine filters on all three, so they have to reach the payload the
     # browser filters — three more cached tag reads per track, no extra decode.
     "RATING", "BPM", "INITIALKEY",
+    # The public web rating pair (mlo.web_ratings, script 24): the track's own
+    # score and the album-wide one that rides on every track, so a track row
+    # and an album header can show "what the web thinks" without a second read.
+    "WEBRATING", "WEBRATING_SOURCE", "ALBUMWEBRATING",
     # read on every track so _album_meta can lift the album-level value
     "ALBUM DYNAMIC RANGE",
 ]
@@ -73,6 +77,10 @@ ALBUM_LEVEL_TAGS = [
     # track is what an album-level value is read from).
     "PODCASTSERIES", "PODCASTSERIESMBID", "PODCASTEPISODE",
     "ALBUM DYNAMIC RANGE",
+    # Album-level like every other release fact, and read from the first
+    # readable track exactly the same way: the web rating written to every
+    # file of the release, with the sources behind it.
+    "ALBUMWEBRATING", "ALBUMWEBRATING_SOURCE",
 ]
 
 TECH_ATTRS = ("length", "bitrate", "sample_rate", "bits_per_sample", "channels")
@@ -337,96 +345,6 @@ def _album_artwork(album_dir, light=False):
     }
 
 
-def _wish_state(wish_id, cfg):
-    """The wish filling a framework album, as the album page reads it.
-
-    `status`, `attempts` and the reason a run left behind come straight from
-    the queue row; `due_at`/`due_in`/`terminal` answer "when will it be tried
-    again" the way the worker itself decides it (`server.wishes.due_at`), so a
-    page can say "searching — attempt 2, next try in 12 min" without owning a
-    second copy of the retry policy. None when there is no wish to report.
-
-    One folder's wish — the album page's own read. A payload that lists EVERY
-    pending album takes `_wish_lookup` instead, which reads the queue once.
-    """
-    if not wish_id:
-        return None
-    try:
-        from server import wishes
-        w = wishes.get_wish(int(wish_id))
-    except Exception:
-        return None
-    return _wish_state_of(w, cfg)
-
-
-def _wish_lookup(cfg):
-    """``wish_id -> that wish's state``, reading the queue ONCE per payload.
-
-    Every album-shaped payload (library tree, album page, Home shelves, the
-    query's album rows — they all read this same row) carries the pending
-    album's wish through this one map, so a page listing every pending album
-    never asks the queue per row: `server.wishes.list_wishes` is one query, and
-    it is not even run until a row actually has a wish to report.
-    """
-    rows = None
-
-    def state(wish_id):
-        nonlocal rows
-        if not wish_id:
-            return None
-        if rows is None:
-            try:
-                from server import wishes
-                rows = {w.get("id"): w for w in (wishes.list_wishes() or [])}
-            except Exception:
-                rows = {}
-        return _wish_state_of(rows.get(int(wish_id)), cfg)
-
-    return state
-
-
-def _wish_state_of(w, cfg):
-    """The state block for ONE queue row (None when there is none)."""
-    if not w:
-        return None
-    try:
-        from server import wishes
-        due = wishes.due_at(w, cfg)
-        terminal = wishes.is_terminal(w, cfg)
-        walk = wishes.candidate_state(w, cfg)
-    except Exception:
-        due, terminal, walk = 0.0, False, None
-    import math
-    import time as _time
-    due_in = None if (terminal or not math.isfinite(due)) else max(0, int(due - _time.time()))
-    return {
-        "id": w.get("id"),
-        "status": str(w.get("status") or ""),
-        "attempts": int(w.get("attempts") or 0),
-        "retry_at": float(w.get("retry_at") or 0.0),
-        "last_search": float(w.get("last_search") or 0.0),
-        "due_at": None if (terminal or not math.isfinite(due)) else float(due),
-        "due_in": due_in,
-        "terminal": bool(terminal),
-        "reason": str(w.get("last_error") or w.get("note") or ""),
-        "note": str(w.get("note") or ""),
-        "source": str(w.get("source") or ""),
-        "queries": list(w.get("queries") or []),
-        # WHICH ranked candidate the search is on (spec R150-R154): the album a
-        # pending row links to says where its acquisition is ("Release 2 of 3")
-        # from the SAME block the queue row reads, so the tile and the queue row
-        # can never disagree about it. None for a wish with one candidate.
-        "walk": walk,
-        # The release identity the wish was recorded with (its own
-        # `release_json` column, read once by `wishes._row`): the pressing's
-        # medium, countries, catalogue number and label. A FRAMEWORK album has
-        # no tags to carry them yet, so `_pending_album_row` takes the facts it
-        # shows from HERE — one block already in the row, no second query and
-        # no MusicBrainz request for a payload the app itself wrote down.
-        "release": dict(w.get("release") or {}),
-    }
-
-
 def pending_album_payload(folder, cfg, light=False):
     """The ALBUM PAGE's payload for a framework album, or None when *folder*
     is not one (`server.pending_albums`: the folder "Add to library" created
@@ -435,17 +353,15 @@ def pending_album_payload(folder, cfg, light=False):
     The same row the library tree lists (`_pending_album_row`) — the release's
     own tracklist, every entry missing, the placeholder cover, the marker's
     identity — enriched the way `build_album` enriches a real album: the
-    artwork the add pre-fetched (the description's text unless `light`) and the
-    wish that is filling the folder. A folder the app created on purpose is
-    never a 404 on a page that was linked to it.
+    artwork the add pre-fetched (the description's text unless `light`). A
+    folder the app created on purpose is never a 404 on a page that was linked
+    to it.
     """
     if not load_pending(folder):
         return None
     from mlo.paths import library_root
     root = library_root(str(cfg.get("music_folder") or ""))
-    # One folder: read that one wish (`_wish_state`), not the whole queue.
-    row = _pending_album_row(folder, root,
-                             lambda wid: _wish_state(wid, cfg))
+    row = _pending_album_row(folder, root)
     row["artwork"] = _album_artwork(folder, light=light)
     return row
 
@@ -478,8 +394,8 @@ def _build_album(album_dir, cfg, light=False):
     if res is None:
         # No audio to grade — but a FRAMEWORK album is one the app itself put
         # in the library before its audio arrived, so its page renders what
-        # exists (identity, pre-fetched artwork, the release tracklist, the
-        # wish filling it) instead of "not found". Any other audio-less folder
+        # exists (identity, pre-fetched artwork, the release tracklist)
+        # instead of "not found". Any other audio-less folder
         # keeps answering None.
         return pending_album_payload(album_dir, cfg, light=light)
     if "error" in res:
@@ -507,10 +423,10 @@ def _build_album(album_dir, cfg, light=False):
     # Every row carries the flag, so no reader has to treat "absent" as a case
     # of its own. A folder whose audio HAS arrived is a normal album: the
     # import that filled it cleared the framework marker on its way through.
-    # A folder with NO audio is never a normal album, whatever its wish says —
-    # a wish wrongly marked "imported" (or a marker lost to an interrupted
-    # import) left a framework row rendering as a playable album with a play
-    # button over nothing, which is exactly what the owner saw on screen.
+    # A folder with NO audio is never a normal album, whatever else claims it
+    # is — a marker lost to an interrupted import would otherwise leave a
+    # framework row rendering as a playable album with a play button over
+    # nothing, which is exactly what the owner saw on screen.
     res["pending"] = not res.get("tracks")
     res["artwork"] = _album_artwork(album_dir, light=light)
     tc = res.get("total_checks", 0)
@@ -575,16 +491,15 @@ def pending_album_dirs(artist_dir, dir_scan=None):
                   if os.path.dirname(d).lower() == low)
 
 
-def _pending_release_identity(info, wish):
+def _pending_release_identity(info):
     """The release identity tags a FRAMEWORK album's own record already states.
 
     The marker (`server.pending_albums`) names the release, its artist and its
-    date; the WISH the folder was created with carries the identity block the
-    add resolved (`server.wishes.RELEASE_KEYS`: medium, countries, catalogue
-    number, label, status…). Between the two, a folder whose audio has not
-    arrived can say which pressing it is getting — the same facts the import
-    then writes into the files, so the tile does not change its mind once the
-    download lands.
+    date, and carries the identity block the add resolved
+    (`info["release"]`: medium, countries, catalogue number, label, status…).
+    From those, a folder whose audio has not arrived can say which pressing it
+    is getting — the same facts the import then writes into the files, so the
+    tile does not change its mind once the download lands.
 
     A value nobody resolved is ABSENT, never guessed: an identity that states
     no country contributes no country, and the slot stays empty for a reader to
@@ -594,7 +509,7 @@ def _pending_release_identity(info, wish):
     file's tag can never read differently.
     """
     out = {}
-    rel = (wish or {}).get("release") if isinstance(wish, dict) else None
+    rel = info.get("release") if isinstance(info, dict) else None
     if not isinstance(rel, dict):
         rel = {}
     codes = [str(c).strip() for c in (rel.get("countries") or []) if str(c).strip()]
@@ -618,7 +533,7 @@ def _pending_release_identity(info, wish):
     return out
 
 
-def _pending_album_row(folder, root, wish_state=None):
+def _pending_album_row(folder, root):
     """Library row for a FRAMEWORK album (see ``server.pending_albums``): the
     folder "Add to library" created before any audio arrived.
 
@@ -627,14 +542,8 @@ def _pending_album_row(folder, root, wish_state=None):
     file on disk to play) and ``pending`` says why the album is here and empty.
     The track list the album page renders comes from the release manifest the
     framework album was created with, so the page greys out exactly the tracks
-    the search is still filling, and the placeholder cover is the album's cover
+    the import is still filling, and the placeholder cover is the album's cover
     until the import writes a real one.
-
-    *wish_state* is `_wish_lookup(cfg)` when the payload lists more than one
-    album (library tree, Home, a query — all of them read this same row): the
-    queue is then read ONCE for the whole payload. A caller with a single
-    folder to answer for (the album page) leaves it out and reads that one
-    wish itself, in `pending_album_payload`.
     """
     row = _empty_folder_result(folder, root)
     info = load_pending(folder) or {}
@@ -649,12 +558,6 @@ def _pending_album_row(folder, root, wish_state=None):
     row["audit_summary"] = None
     row["pending"] = True
     row["pending_reason"] = str(info.get("waiting_for") or "")
-    wid = info.get("wish_id")
-    row["wish_id"] = wid
-    # The wish filling this folder, in the payload's own row: a reader states
-    # "searching — attempt 2, next try in 12 min" / "nothing is searching for
-    # it right now" from HERE rather than asking the queue again per row.
-    row["wish"] = wish_state(wid) if wish_state else None
     cover = info.get("cover") or {}
     row["cover_file"] = str(cover.get("file") or "")
     row["cover_ok"] = bool(row["cover_file"])
@@ -681,17 +584,17 @@ def _pending_album_row(folder, root, wish_state=None):
     # THE RELEASE'S OWN FACTS, while it is still arriving (the owner's ask:
     # an album being imported must not read as a blank cell). The pressing's
     # medium, its release countries, its catalogue number and label are facts
-    # the ADD already resolved — the wish row the framework album was created
-    # with carries the release identity (`server.wishes.release_identity`),
-    # and the SAME values are what the import then writes into the files
-    # (`server.imports._stamp_release_identity`), so the tile shows the
-    # pressing it is getting and keeps showing it after the audio lands.
+    # the ADD already resolved — the marker carries the release identity
+    # (`info["release"]`), and the SAME values are what the import then writes
+    # into the files (`server.imports._stamp_release_identity`), so the tile
+    # shows the pressing it is getting and keeps showing it after the audio
+    # lands.
     #
     # Nothing here is invented: an identity nobody resolved states nothing and
     # the slots stay empty, exactly like the technical readout — no file is on
     # disk to probe, so the codec/bitrate half of the card cannot be known and
     # is left for the audio (`albumTech` reads the tracks' own tech).
-    identity = _pending_release_identity(info, row.get("wish"))
+    identity = _pending_release_identity(info)
     for tag, value in identity.items():
         if not meta.get(tag):
             meta[tag] = value
@@ -864,7 +767,8 @@ def _release_identity(row):
     The ONE identity a framework row and the album it becomes have in common:
     both carry the release id in their album-level tags (a placeholder from its
     marker, a real album from its files). The release GROUP is the fallback,
-    for a wish keyed by the group and an album whose tracks state only that.
+    for a placeholder keyed by the group and an album whose tracks state only
+    that.
     """
     meta = row.get("meta") or {}
     for key in ("MUSICBRAINZ_ALBUMID", "MUSICBRAINZ_RELEASEGROUPID"):
@@ -966,10 +870,6 @@ def _library_builder(folder, cfg):
             artists.setdefault(parent, [])
             pending_rows.setdefault(parent, []).append(d)
 
-        # One queue read for the whole payload, so the pending rows' wish
-        # state costs no lookup per album (`_wish_lookup`).
-        wish_state = _wish_lookup(cfg)
-
         # EVERY album, ONE pool — not one pool per artist inside the loop
         # below. Grading overlaps I/O across albums, and a folder-per-artist
         # library (the common shape) got a single-worker pool per album from
@@ -979,7 +879,7 @@ def _library_builder(folder, cfg):
         result = []
         for artist_dir, alb_list in sorted(artists.items()):
             albums_data = [built[a] for a in sorted(alb_list)] if alb_list else []
-            albums_data.extend(_pending_album_row(d, folder, wish_state)
+            albums_data.extend(_pending_album_row(d, folder)
                                for d in pending_rows.get(artist_dir, []))
             albums_data.extend(_empty_album_row(d, folder)
                                for d in empty_rows.get(artist_dir, []))
@@ -1048,3 +948,50 @@ def build_library_document(cfg):
         return tagcache.json_document(
             {"folder": folder, "artists": [], "error": "music_folder not set or not found"})
     return tagcache.get_library_document(library_cache_key(cfg), _library_builder(folder, cfg))
+
+
+def owned_mbids(cfg=None):
+    """{mbid: album path} for every MusicBrainz release/release-group the
+    library already holds (matched on the album's MBID tags). Used by
+    artist-level bulk import to skip what is owned."""
+    from mlo.config import load_config
+
+    cfg = cfg or load_config()
+    try:
+        from server import library as lib_mod
+        lib = lib_mod.build_library(cfg)
+    except Exception:
+        return {}
+    owned = {}
+    for artist in lib.get("artists", []):
+        for alb in artist.get("albums", []):
+            count = alb.get("track_count")
+            if alb.get("pending") or (count is not None and not count):
+                # A row that STATES zero tracks is a REQUEST on disk, not the
+                # album — it covers a payload whose rows predate the `pending`
+                # flag. Counting it as owned would refuse the very download
+                # that is meant to fill it. A row that states nothing is left
+                # alone: guessing there would refuse a real album its own
+                # download.
+                continue
+            meta = alb.get("meta") or {}
+            for key in ("MUSICBRAINZ_ALBUMID", "MUSICBRAINZ_RELEASEGROUPID"):
+                val = str(meta.get(key) or "").strip().lower()
+                if val:
+                    owned.setdefault(val, alb.get("path"))
+    return owned
+
+
+def owned_path(owned, *mbids):
+    """The library folder that holds one of *mbids*, or "".
+
+    The question every caller of `owned_mbids` ends up asking — "is this
+    release here, and where?" — answered once, so an id list and the map are
+    the only things a caller needs. Empty ids are skipped (a request that names
+    no release has no folder to find) and the first id the library knows wins.
+    """
+    for mbid in mbids:
+        key = str(mbid or "").strip().lower()
+        if key and key in (owned or {}):
+            return str(owned[key] or "")
+    return ""

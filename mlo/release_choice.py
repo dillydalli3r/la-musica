@@ -92,6 +92,7 @@ from dataclasses import dataclass, replace
 from typing import Mapping, Optional
 
 from mlo.naming import DERIVED_RELEASE_TYPES, RELEASE_TYPES
+from mlo.tagtext import CD_MEDIA_VALUES, canonical_text
 
 # Editions a response may list. A group with more is still ranked in full —
 # only the response is capped, so a page never carries hundreds of rows.
@@ -319,6 +320,38 @@ def media_formats(rel):
             return _summary_formats(value)
     single = str(rel.get("medium") or "").strip()
     return [single] if single else []
+
+
+# The MusicBrainz FORMAT names of a CD-DA disc: "CD", and the "HDCD" a CD
+# carrying the extra HDCD encoding is stated as. One disc to every rule that
+# reads a format, and the same pair mlo.tagtext.CD_MEDIA_VALUES names for a
+# MEDIA tag — derived from it so the two vocabularies cannot drift apart.
+_CD_FORMATS = frozenset(v.casefold() for v in CD_MEDIA_VALUES)
+
+
+def is_cd_format(name):
+    """Whether a MusicBrainz format NAME is a CD-DA pressing ("CD", "HDCD").
+
+    The format-name half of mlo.tagtext.is_cd_media: a release MusicBrainz
+    states this way is searched by its pressing traits, verified against its
+    rip log's CRCs and required to carry its .log/.cue sheets exactly as its
+    plain-CD sibling is.
+    """
+    return str(name or "").strip().casefold() in _CD_FORMATS
+
+
+def cd_media_value(rel):
+    """The MEDIA value a release's own formats state for its CD, or None.
+
+    The FIRST CD-DA format it names, in the canonical spelling (mlo.tagtext),
+    so a download is stamped with the medium MusicBrainz actually states — an
+    HDCD is not written down as a plain "CD" — and a release with no CD among
+    its formats answers None.
+    """
+    for f in media_formats(rel):
+        if is_cd_format(f):
+            return canonical_text("MEDIA", str(f).strip())
+    return None
 
 
 def _summary_formats(text):

@@ -36,7 +36,7 @@ from .paths import (AUDIO_EXTS, fsync_dir, expected_tracks_state,
                     load_expected_tracks)
 from .stats import is_audio_file
 from .subproc import run_tool
-from .tagtext import canonical_text
+from .tagtext import is_cd_media
 
 # Optional: EAC checksum verifier (pypi eac-logchecker)
 try:
@@ -870,10 +870,11 @@ def verify_album_checksums(ffmpeg_exe, album_dir, paths, config=None, workers=No
     for pp in paths:
         try:
             af2 = AudioFile(pp)
-            # The canonical spelling is the comparison (mlo.tagtext): "cd" is
-            # the same medium as "CD", and a disc this engine must audit is
-            # not a case variant away from being missed.
-            if af2.audio is not None and canonical_text("MEDIA", af2.get_tag("MEDIA")) == "CD":
+            # mlo.tagtext.is_cd_media is the one rule for "is this medium a
+            # CD": "cd" is the same medium as "CD", and an HDCD is a CD too, so
+            # neither is a case variant (or a variant disc) away from being
+            # audited by its rip log's CRCs here.
+            if af2.audio is not None and is_cd_media(af2.get_tag("MEDIA")):
                 is_cd = True
                 break
         except Exception:
@@ -947,6 +948,27 @@ def verify_album_checksums(ffmpeg_exe, album_dir, paths, config=None, workers=No
     to_decode = [(p, crc) for p, reason, crc in entries if reason is None]
     actuals = {}
     if to_decode:
+        # A CRC is a property of the AUDIO, and computing it costs a full
+        # decode of the track. The album page rebuilds this verdict whenever
+        # anything in the folder moved — a script that rewrote every file's
+        # tags moves every stamp while the samples stay put — so a file some
+        # earlier pass already decoded is answered from mlo.audit's evidence
+        # record (the same record the stream-MD5 verdict lives in) instead of
+        # paying for the same decode again. Anything it cannot answer for is
+        # decoded here and filed back for the next reader.
+        try:
+            from .audit import note_crc, recorded_crc
+        except Exception:
+            note_crc = recorded_crc = None
+        todo = []
+        for p, crc in to_decode:
+            got = recorded_crc(p, config) if recorded_crc else ""
+            if got:
+                actuals[p] = got
+            else:
+                todo.append((p, crc))
+        to_decode = todo
+    if to_decode:
         from concurrent.futures import ThreadPoolExecutor
         # Decoders allowed at once, from the run's own worker budget. This
         # function is called once PER ALBUM from audit's album pool, so a
@@ -962,6 +984,8 @@ def verify_album_checksums(ffmpeg_exe, album_dir, paths, config=None, workers=No
         with ThreadPoolExecutor(max_workers=workers) as ex:
             for (p, _), actual in zip(to_decode, ex.map(lambda pc: _audio_crc32(ffmpeg_exe, pc[0]), to_decode)):
                 actuals[p] = actual
+                if note_crc:
+                    note_crc(p, actual, config)
 
     for p, reason, crc in entries:
         if reason is not None:
@@ -2302,7 +2326,8 @@ def grade_album_logs(cli_exe, album_dir, force=False, log_fn=None,
         else:
             return {}, notes, unscorable
 
-    # MEDIA=CD only - check all discs first file, not arbitrary order
+    # CD-DA only (mlo.tagtext.is_cd_media: CD and its HDCD variant) — check
+    # all discs first file, not arbitrary order
     first = None
     for d in sorted(discs.keys()):
         if discs[d]:
@@ -2313,8 +2338,8 @@ def grade_album_logs(cli_exe, album_dir, force=False, log_fn=None,
     af = AudioFile(first)
     if af.audio is None:
         return {}, notes, unscorable
-    # Canonical spelling, same rule as every other MEDIA comparison here.
-    if canonical_text("MEDIA", af.get_tag("MEDIA")) != "CD":
+    # The same one rule as every other MEDIA comparison here.
+    if not is_cd_media(af.get_tag("MEDIA")):
         return {}, notes, unscorable
 
     # Fix FILE entries first (conservative) so the subsequent

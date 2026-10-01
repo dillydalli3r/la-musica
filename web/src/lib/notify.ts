@@ -1,5 +1,5 @@
 import { IN_TAURI, getToken, onAuthLost, serverUrl } from "../api";
-import { t, type MessageKey } from "./i18n";
+import { t } from "./i18n";
 import { toast } from "../store";
 import {
   OS_KINDS,
@@ -12,17 +12,16 @@ import {
 
 /** Desktop notifications for the events the server publishes.
  *
- *  The backend already knows when a wished-for release shows up on Soulseek, a
- *  download finishes, an album is ready to import, an import finished short of
- *  something is left to announce, a script run ends, a grade lands and a newer
- *  release exists — it announces
+ *  The backend already knows when an import finishes, when an import is left
+ *  short of something and needs a decision, when an album is added to the
+ *  library, when a script run ends, when a grade lands, when the server pruned
+ *  a cache on its own and when a newer release exists — it announces
  *  each one on `/ws/events` (see server/events.py). This module is the client
  *  half: it keeps that socket open and hands every frame to the notification
  *  tray (lib/notifications.ts), which is what the bell's panel lists. The kinds
  *  that happen while the user is looking elsewhere (`OS_KINDS`) additionally
  *  raise an operating-system notification, so the news reaches them with the
- *  app in the background — which is the entire point, since a wish can be found
- *  hours after it was saved.
+ *  app in the background.
  *
  *  What this deliberately is NOT: remote push (Web Push / APNs / FCM). Those
  *  need a public server with VAPID keys (or an Apple/Google developer account)
@@ -38,19 +37,12 @@ import {
  */
 
 export type EventKind =
-  | "wish_found"
-  | "wish_failed"
-  /** A wish whose searches found nothing: it stops being searched and waits
-   *  for the user's own retry (see server/wishes' retry policy). */
-  | "wish_not_found"
-  | "download_started"
-  | "download_done"
-  | "download_failed"
-  /** A peer started downloading from us: our files are being shared. */
-  | "upload_started"
-  | "import_ready"
+  | "library_add"
+  | "album_pending"
+  | "import_started"
   | "import_done"
   | "import_needs_data"
+  | "storage_pruned"
   | "script_done"
   | "script_failed"
   | "grade_done"
@@ -435,24 +427,12 @@ export async function sendTestPush(): Promise<PushTestResult> {
   };
 }
 
-/** Fallback wording for a frame the server sent without a title. Every emitter
- *  in this app composes its own (the server owns the wording: it knows the
- *  artist and the album), so this is the safety net for an older server or a
- *  kind a newer one grew. */
-const FALLBACK_TITLE: Partial<Record<EventKind, MessageKey>> = {
-  wish_found: "notify.wish_found",
-  download_started: "notify.download_started",
-  download_done: "notify.download_done",
-  upload_started: "notify.upload_started",
-  import_ready: "notify.import_ready",
-};
-
 /** Show one notification, wherever this client can. The tray already holds
  *  `rec` (see lib/notifications.ts); this raises the OS popup for the kinds
  *  that deserve one and falls back to a toast otherwise — a toast is not a
  *  downgrade the user should have to discover. */
 export async function showNotification(ev: AppEvent, rec: NotificationRecord): Promise<void> {
-  const title = ev.title || t(FALLBACK_TITLE[ev.event as EventKind] ?? "notify.event");
+  const title = ev.title || t("notify.event");
   const body = ev.body || "";
   if (!OS_KINDS[ev.event]) {
     // The user's own foreground work (a script run, a grade, a newer release):
@@ -501,7 +481,7 @@ export async function showNotification(ev: AppEvent, rec: NotificationRecord): P
     }
   }
   // No permission (or no platform API): the toast is not a downgrade the user
-  // should have to discover — they still learn that the wish landed.
+  // should have to discover — they still learn what happened.
   toast(body ? `${title} — ${body}` : title);
 }
 
@@ -571,7 +551,7 @@ function handle(raw: string) {
   // replayed ring), which is what keeps one outcome to one entry.
   // A frame the server sent no title for still gets words: the tray must never
   // list a blank row.
-  if (!frame.title) frame.title = t(FALLBACK_TITLE[frame.event as EventKind] ?? "notify.event");
+  if (!frame.title) frame.title = t("notify.event");
   const rec = ingest(frame);
   if (!rec) return;
   for (const fn of eventListeners) {

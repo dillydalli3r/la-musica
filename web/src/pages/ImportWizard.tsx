@@ -3,7 +3,7 @@ import type { ReactNode } from "react";
 import { useSearchParams, Link } from "react-router-dom";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import {
-  UploadCloud, ExternalLink, Check, ChevronLeft, ChevronRight, ChevronDown, Wand2,
+  UploadCloud, ExternalLink, Check, ChevronLeft, ChevronRight, ChevronDown, ChevronUp, Wand2,
   Plus, Trash2, Disc3, FolderOpen, X, Search, Loader2, Image as ImageIcon, AlertTriangle,
   Languages, FileArchive, Fingerprint,
 } from "lucide-react";
@@ -502,6 +502,12 @@ export default function ImportWizard() {
   // Outcome of the Advisory step's own auto-import: the per-track value and
   // who stated it (`values`/`sources`/`answers`), or the server's error text.
   const [advReply, setAdvReply] = useState<AdvisoryFetchResult | null>(null);
+  /** Whether the per-track outcome rows below the button are open. `null`
+   *  means "follow the size": a 28-track album's rows are a screenful nobody
+   *  asked to scroll past, so they start folded and one press opens them,
+   *  while a handful of tracks just shows. Once the user presses the toggle
+   *  their choice sticks for that album. */
+  const [advRowsOpen, setAdvRowsOpen] = useState<boolean | null>(null);
   const [advError, setAdvError] = useState<string | null>(null);
   const [instrumental, setInstrumental] = useState<Record<string, string>>({});
   const [lyricsDrafts, setLyricsDrafts] = useState<Record<string, string>>({});
@@ -2807,7 +2813,13 @@ export default function ImportWizard() {
     }
     setBusy(true);
     setAdvError(null);
-    setAct({ label: `Re-rating ${targets.length} track(s)…` });
+    // Not "Re-rating": the fetch writes what the sources state for EVERY one
+    // of these tracks, and most of them usually carry nothing yet — an album
+    // being imported has never been rated, so half the label was a claim the
+    // action does not make. What it does is ask the sources and write the
+    // answer, which is what this says. (A track that DID carry a value is
+    // re-asked and can move down — the button's own title says so.)
+    setAct({ label: `Importing advisory for ${targets.length} track(s)…` });
     try {
       const res = await api.mbAdvisoryFetch({ paths: targets, staged, force: true });
       setAdvReply(res);
@@ -2924,7 +2936,7 @@ export default function ImportWizard() {
   // decision the user still has to make. This used to be cfg.run_all_order,
   // which is the LIBRARY-WIDE Run All order the Optimization page runs: the
   // scripts this step ran on the album just imported were a different, wider
-  // list than every other import path (the bulk queue, the Soulseek import,
+  // list than every other import path (the bulk queue
   // and the "Run the import chain" button beside it), so an album finished
   // here came out of the wizard carrying scripts a plain import would not have
   // run — and missing none of its own, because Run All is not what an import
@@ -3067,7 +3079,7 @@ const finish = async () => {
     // Same targets as the chain: an album opened via ?album= is just as real
     // an import, it simply has nothing "uploaded". The ids are the import
     // chain (the ticked boxes, which ARE the chain until changed), so Finish
-    // runs what a bulk or Soulseek import would have run on this album —
+    // runs what a bulk import would have run on this album —
     // nothing wider, and nothing narrower.
     const targets = albumTargets();
     if (runAfterImportIds.length && targets.length) {
@@ -4933,25 +4945,53 @@ const finish = async () => {
                 </div>
               )}
               {advReply && (
-                <div className="space-y-0.5">
-                  {stepTracks.map((t) => (
-                    <div key={t.path} className="flex items-center gap-2 text-[11px]">
-                      <TrackNoBadge disc={discNoOf(t.path)} track={trackNoOf(t.path)} />
-                      <span className="flex-1 truncate text-zinc-400">{displayTitle(t.path)}</span>
-                      {/* The line carries what happened to THIS track's value
-                          (`status`): a re-check the sources agreed with and a
-                          gate refusal are not a write, and a bare "0 written"
-                          would blur all three. */}
-                      <span className="text-zinc-300" title="what the sources said, who said it, and what this run did with the value">
-                        {advisoryLine(
-                          replyFor(advReply.values, t.path),
-                          answerSources(replyFor(advReply.answers, t.path), replyFor(advReply.sources, t.path)),
-                          replyFor(advReply.status, t.path)
-                        )}
-                      </span>
+                <>
+                  {/* A big album's outcomes are a screenful, and the reader
+                      came for the two buttons above — so the rows fold, and
+                      one press unfolds them. Small albums start open: hiding
+                      four lines would cost more than it saves. */}
+                  <button
+                    type="button"
+                    className="tap inline-flex items-center gap-1 text-[11px] text-zinc-400 hover:text-zinc-100 underline underline-offset-2"
+                    aria-expanded={advRowsOpen ?? stepTracks.length <= 8}
+                    onClick={() => setAdvRowsOpen(!(advRowsOpen ?? stepTracks.length <= 8))}
+                    title={(advRowsOpen ?? stepTracks.length <= 8)
+                      ? "Hide what each track's advisory became"
+                      : "Show what each track's advisory became"}
+                  >
+                    {(advRowsOpen ?? stepTracks.length <= 8)
+                      ? <ChevronUp className="h-3 w-3" />
+                      : <ChevronDown className="h-3 w-3" />}
+                    {(advRowsOpen ?? stepTracks.length <= 8)
+                      ? "Hide per-track results"
+                      : `Show ${stepTracks.length} track result${stepTracks.length === 1 ? "" : "s"}`}
+                  </button>
+                  {(advRowsOpen ?? stepTracks.length <= 8) && (
+                    // Condensed on wide screens: one-line rows in up to three
+                    // columns, so a 28-track album is ~10 rows tall instead of
+                    // 28. Each row still carries its own disc/track badge, so
+                    // the reader matches on the number they know.
+                    <div className="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-3 gap-x-4 gap-y-0.5">
+                      {stepTracks.map((t) => (
+                        <div key={t.path} className="flex items-center gap-1.5 text-[11px] min-w-0">
+                          <TrackNoBadge disc={discNoOf(t.path)} track={trackNoOf(t.path)} />
+                          <span className="flex-1 truncate text-zinc-400">{displayTitle(t.path)}</span>
+                          {/* The line carries what happened to THIS track's value
+                              (`status`): a re-check the sources agreed with and a
+                              gate refusal are not a write, and a bare "0 written"
+                              would blur all three. */}
+                          <span className="text-zinc-300 shrink-0" title="what the sources said, who said it, and what this run did with the value">
+                            {advisoryLine(
+                              replyFor(advReply.values, t.path),
+                              answerSources(replyFor(advReply.answers, t.path), replyFor(advReply.sources, t.path)),
+                              replyFor(advReply.status, t.path)
+                            )}
+                          </span>
+                        </div>
+                      ))}
                     </div>
-                  ))}
-                </div>
+                  )}
+                </>
               )}
             </div>
           </MinBlock>
@@ -5090,8 +5130,8 @@ const finish = async () => {
               ))}
             </div>
             <div className="text-[10px] text-zinc-600 mt-2">
-              Ticked by default: the import chain (Settings → Import) — the same scripts, in the same order, a bulk
-              or Soulseek import runs. Untick one to leave it out of this album's Finish, or tick one the chain does
+              Ticked by default: the import chain (Settings → Import) — the same scripts, in the same order, every
+              import runs. Untick one to leave it out of this album's Finish, or tick one the chain does
               not run. Progress shows at the top of the window. Scripts can also be run individually anytime from the
               album page.
             </div>
@@ -5291,7 +5331,7 @@ function ActionBar({
 }
 
 /** Exactly which optimizer scripts the import chain runs — the same chain the
- *  bulk queue and the Soulseek import use, configured in Settings → Import. */
+ *  bulk queue uses, configured in Settings → Import. */
 function ScriptChainNote({ preview }: { preview?: ImportScriptsPreview }) {
   if (!preview) return <div className="text-[11px] text-zinc-600">Reading the import chain…</div>;
   const chain = preview.chain ?? [];

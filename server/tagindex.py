@@ -49,6 +49,31 @@ from collections import OrderedDict
 
 DB_NAME = "tagindex.sqlite"
 _SCHEMA_VERSION = 1
+
+
+def payload_stamp() -> str:
+    """The BUILD whose payloads this index may serve: shape + app version.
+
+    The stamp has two halves because a payload can go wrong in two ways. The
+    SCHEMA half catches a payload whose FIELDS this build no longer understands
+    (a shape change, which `_SCHEMA_VERSION` states by hand). The VERSION half
+    catches the other one: a payload written by an older build whose RULES have
+    since changed — the media vocabulary, a check's verdict, an issue's words.
+    A grade is a verdict, not a fact about the bytes, so the index is not
+    allowed to outlive the build that filled it. The owner's case: 4.8.0's
+    stored payload kept reporting "Unrecognized MEDIA value: HDCD" on Home and
+    the Library page after the fix landed, because the album's own files had
+    not moved. An upgrade now drops every payload once and the warm-up
+    re-grades the library (which the persisted audit evidence makes cheap:
+    mlo.audit's records answer the stream MD5 and the decoded CRC).
+    """
+    try:
+        from mlo import __version__ as version
+    except Exception:
+        version = ""
+    return f"{_SCHEMA_VERSION}:{version}"
+
+
 # A row nobody has had any use for in a year is dropped by `prune`: it is the
 # growth bound for entries written under a config the user has since changed
 # (unreachable, still on disk) and for albums that were browsed once, long ago.
@@ -115,12 +140,13 @@ def _connect(cfg):
                          "(key TEXT PRIMARY KEY, sig TEXT NOT NULL, "
                          " payload TEXT NOT NULL, built_at REAL NOT NULL)")
             row = conn.execute("SELECT v FROM meta WHERE k = 'schema'").fetchone()
-            if row and str(row[0]) != str(_SCHEMA_VERSION):
-                # A payload shape this build does not understand is not a
-                # payload: drop it rather than serve it wrong.
+            if row and str(row[0]) != payload_stamp():
+                # A payload written by another build is not this build's
+                # payload: drop it rather than serve a verdict from other
+                # rules (see `payload_stamp`).
                 conn.execute("DELETE FROM album_payload")
             conn.execute("INSERT OR REPLACE INTO meta (k, v) VALUES ('schema', ?)",
-                         (str(_SCHEMA_VERSION),))
+                         (payload_stamp(),))
             conn.commit()
         except Exception:
             _conn, _conn_path = None, path     # disabled for this folder
@@ -348,7 +374,7 @@ def cached_album(album_dir, cfg, light, builder, cfg_key=None):
         return copy.deepcopy(payload)
     payload = builder()
     if payload is None or payload.get("error") or payload.get("pending"):
-        # No audio (a framework album's row is read from its wish queue, not
+        # No audio (a framework album's row is read from its marker, not
         # from any file), or an unreadable folder: cheap to build and not worth
         # pinning to a signature that says nothing about the queue.
         return payload

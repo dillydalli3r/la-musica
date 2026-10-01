@@ -192,7 +192,6 @@ _VERSION_ARGS = {
     "rsgain": ("--version",),
     "ffmpeg": ("-version",),
     "chromaprint": ("-version",),    # fpcalc
-    "slskd": ("--version",),
     "yt-dlp": ("--version",),
     "php": ("-v",),                  # "PHP 8.4.11 (cli) …"
 }
@@ -283,13 +282,6 @@ def _detect_system_tools():
     if fpcalc:
         tools["chromaprint"] = _system_entry("chromaprint", fpcalc_exe=fpcalc)
 
-    # slskd is the one dependency this app RUNS rather than invokes; the
-    # Soulseek page starts it, and the capability report has to see the same
-    # install (server/soulseek.py resolves it from the tools folder on its own).
-    slskd = shutil.which("slskd")
-    if slskd:
-        tools["slskd"] = _system_entry("slskd", slskd_exe=slskd)
-
     # PHP: the Logchecker phar's runtime, and nothing else's. The distro
     # package (Debian/Ubuntu: php-cli) is the Linux counterpart of the
     # Windows php zip the installer fetches - without it the phar below is
@@ -327,8 +319,7 @@ def _detect_system_tools():
 
     # A native install in a tools folder LAST, so it wins over a copy on
     # PATH: it is the versioned one the Dependencies page reports and updates,
-    # and without this the app could install oxipng or slskd and still call
-    # them missing.
+    # and without this the app could install oxipng and still call it missing.
     tools.update(_detect_deps_native())
 
     return tools
@@ -343,7 +334,6 @@ def _detect_system_tools():
 # one, so what callers execute is what is detected.
 _DEPS_NATIVE_FIELDS = {
     "oxipng": ("oxipng_exe", ()),
-    "slskd": ("slskd_exe", ()),
     "audioauditor": ("cli_exe", ()),
     "cuetools": ("arcue_exe", ()),
     # rsgain, chromaprint, libjxl and libjpeg-turbo became installable here when
@@ -364,7 +354,7 @@ def _detect_deps_native():
     """Tools installed as native binaries under a tools folder (POSIX only).
 
     fetchdeps installs native Linux builds there (see fetchdeps.LINUX_BINARIES:
-    oxipng, slskd, AudioAuditor, CUETools through its mono launcher, upstream's
+    oxipng, AudioAuditor, CUETools through its mono launcher, upstream's
     rsgain, fpcalc, libjxl and libjpeg-turbo) and the .exe scan above cannot
     see them. A Windows host sharing this folder must never pick one up: an
     .exe-less folder is a file it cannot execute.
@@ -524,18 +514,6 @@ def detect_all_tools():
                 "fpcalc_exe": os.path.join(d, "fpcalc.exe"),
             }
 
-    # slskd is a folder of its own in the tools folder (server/soulseek.py
-    # looks for the same slskd.exe through fetchdeps.installed_path), and the
-    # capability report reads the detected tools, so it is detected here too.
-    sv, sf, deps_root = _detect_tool_dirs("slskd")
-    if sf:
-        d = os.path.join(deps_root, sf)
-        if os.path.isfile(os.path.join(d, "slskd.exe")):
-            tools["slskd"] = {
-                "version": sv,
-                "slskd_exe": os.path.join(d, "slskd.exe"),
-            }
-
     lc_v, lc_f, deps_root = _detect_tool_dirs("logchecker")
     if lc_f:
         d = os.path.join(deps_root, lc_f)
@@ -591,7 +569,7 @@ def detect_all_tools():
     # category resolves even when no tool has been downloaded yet.
     system = _detect_system_tools()
     for key in ("flac", "libjxl", "libjpeg_turbo", "oxipng", "ffmpeg",
-                "rsgain", "chromaprint", "slskd", "yt-dlp", "php", "logchecker"):
+                "rsgain", "chromaprint", "yt-dlp", "php", "logchecker"):
         if key not in tools and key in system:
             tools[key] = system[key]
 

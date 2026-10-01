@@ -24,14 +24,12 @@
         { "name": "Spotify", "license": "service", "url": "https://developer.spotify.com", "use": "catalogue search (own client credentials)" },
         { "name": "Bandcamp", "license": "service", "url": "https://bandcamp.com", "use": "release links" },
         { "name": "Musichoarders covers", "license": "community service", "url": "https://covers.musichoarders.xyz", "use": "cover search" },
-        { "name": "YouTube", "license": "service", "url": "https://www.youtube.com", "use": "music videos and their captions" },
-        { "name": "Soulseek", "license": "trademark of Soulseek LLC", "url": "https://www.slsknet.org", "use": "the file-sharing network this app searches (via slskd)" }
+        { "name": "YouTube", "license": "service", "url": "https://www.youtube.com", "use": "music videos and their captions" }
       ]
     },
     {
       "title": "Vendored tools",
       "items": [
-        { "name": "slskd", "license": "AGPL-3.0", "url": "https://github.com/slskd/slskd", "use": "Soulseek client daemon (search / download / share)" },
         { "name": "beets", "license": "MIT", "url": "https://beets.io", "use": "MusicBrainz imports with Picard-parity tagging" },
         { "name": "FFmpeg", "license": "LGPL-2.1+ / GPL-2.0+ (GPL build bundled)", "url": "https://ffmpeg.org", "use": "remuxing, transcoding, decode verification" },
         { "name": "flac", "license": "BSD-3 (libFLAC) / GPL-2+ (tools)", "url": "https://github.com/xiph/flac", "use": "FLAC encode / decode / verify" },

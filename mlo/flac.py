@@ -506,7 +506,7 @@ def _trash_converted(path, cfg):
                       user=(cfg or {}).get("auth_username") or "")
 
 
-def _lossless_identity(src, dst, spec, ffmpeg_exe, src_stream):
+def _lossless_identity(src, dst, spec, ffmpeg_exe, src_stream, flac_exe=None):
     """(ok, message, note) for a conversion whose target is lossless.
 
     The identity across a conversion is the decoded MD5 (requirement: the
@@ -517,6 +517,11 @@ def _lossless_identity(src, dst, spec, ffmpeg_exe, src_stream):
     construction, or a bit depth with no comparable PCM representation). A
     note is NOT a failure: it says the pass has no proof either way, and the
     run says so instead of claiming one.
+
+    *flac_exe* is the reference decoder the RUN already detected (see
+    run_optimize_flacs). It was re-detected here, once per converted file,
+    which is one tool lookup per file for an answer that cannot change inside
+    a run; None still detects on demand, for a caller that has no run.
     """
     src_bits, src_rate, src_ch = src_stream
     out_bits, out_rate, out_ch = pcm_format(dst)
@@ -548,7 +553,8 @@ def _lossless_identity(src, dst, spec, ffmpeg_exe, src_stream):
 
     if spec["codec"] == "flac":
         from .accurip import stream_md5 as _stated
-        flac_exe = (detect_all_tools().get("flac") or {}).get("flac_exe")
+        if flac_exe is None:
+            flac_exe = (detect_all_tools().get("flac") or {}).get("flac_exe")
         stated = _stated(dst)
         if stated and stated != digest:
             detail = (f"the converted file states {stated}, the source "
@@ -592,7 +598,11 @@ def _convert_lossless_source(args):
     (
         ffmpeg_exe, ffprobe_exe, metaflac_exe, filepath,
         quality, target_version, enabled, config, threads,
-    ) = args
+    ) = args[:9]
+    # The 10th is the run's already-detected flac.exe (see run_optimize_flacs),
+    # handed to the lossless identity check so it does not re-detect the tool
+    # once per converted file. Older 9-argument callers keep working.
+    flac_exe = args[9] if len(args) > 9 else None
     filename = os.path.basename(filepath)
     codec = target_codec(config)
     spec = CODECS[codec]
@@ -790,7 +800,7 @@ def _convert_lossless_source(args):
         audio_note = ""
         if spec["lossless"]:
             identity_ok, identity_msg, audio_note = _lossless_identity(
-                filepath, tmp, spec, ffmpeg_exe, src_stream)
+                filepath, tmp, spec, ffmpeg_exe, src_stream, flac_exe)
             if not identity_ok:
                 return (filename, False, identity_msg, 0, 0)
             if audio_note:
@@ -1284,11 +1294,14 @@ def run_optimize_flacs(config):
             )
 
             # Deduplicate (Select All checks album + tracks -> duplicates) + normcase for Windows
-            if len(flac_files) != len(set(os.path.normcase(p) for p in flac_files)):
-                log(c(f"WARNING: flac_files has duplicates: {len(flac_files)} vs {len(set(os.path.normcase(p) for p in flac_files))} unique", Color.YELLOW))
-                seen = {}
-                for p in flac_files:
-                    seen[os.path.normcase(p)] = p
+            # One normcase pass builds the answer the check and the fix both
+            # need; before, the log line and the condition each built the same
+            # set again.
+            seen = {}
+            for p in flac_files:
+                seen[os.path.normcase(p)] = p
+            if len(flac_files) != len(seen):
+                log(c(f"WARNING: flac_files has duplicates: {len(flac_files)} vs {len(seen)} unique", Color.YELLOW))
                 flac_files = sorted(seen.values())
 
             if not flac_files:
@@ -1392,6 +1405,10 @@ def run_optimize_flacs(config):
                         (config.get("encoder_tags") or {}).get("flac") or {},
                         config,
                         conv_threads,
+                        # The run's own flac.exe: the lossless identity check
+                        # needs it and used to detect the tool again for every
+                        # converted file.
+                        flac_exe,
                     )
                     for fp in conv_files
                 ]

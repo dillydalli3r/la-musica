@@ -11,6 +11,7 @@ over, answer.
 import asyncio
 import os
 import tempfile
+from concurrent.futures import ThreadPoolExecutor
 from typing import Optional
 
 from fastapi import APIRouter, HTTPException, Query
@@ -18,6 +19,7 @@ from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 
 from mlo import autotag as _autotag
+from mlo.stats import worker_count
 from server import integrations as intg
 from server import job_locks
 from server import library as lib_mod
@@ -324,25 +326,32 @@ def mb_assign(req: AssignTagsRequest):
     # GENRE can be assigned through this route (the wizard's tag step writes
     # it here), so the canonicalization cap comes from mb_genre_count once for
     # the whole request.
-    genre_cap = _autotag.genre_count(load_config())
-    errors = []
-    changed = 0
+    cfg = load_config()
+    genre_cap = _autotag.genre_count(cfg)
     folder = _music_folder()
-    # Video writes are full lossless rewrites, so a raw container (VOB/AVI/…)
-    # comes back as a same-stem MKV: report the files that were re-emitted.
-    swapped = []
-    for p, tag_map in req.tracks.items():
+
+    def assign_one(item):
+        """Write ONE file's tags -> (errors, changed, swapped path or None).
+
+        Split out of the route body so an album's files can be written across
+        lanes: each file costs a FULL container rewrite — mlo.atomic copies it
+        and mutagen rewrites the copy, two passes over every byte — and a
+        28-track write ran 28 of those back to back, which is the wait the
+        wizard's own label sits in front of. The files share nothing (one
+        path, one temp, one mutagen object each) and `genre_cap` is read-only,
+        so the pool is safe by construction. Errors keep request order because
+        the pool is drained in submission order.
+        """
+        p, tag_map = item
+        errs = []
         fp = os.path.normpath(p)
         if not os.path.isfile(fp):
-            errors.append(f"{p}: not found")
-            continue
+            return [f"{p}: not found"], 0, None
         if not _in_music_folder(fp, folder) and not _allow_staged(fp, req.staged):
-            errors.append(f"{p}: outside music folder")
-            continue
+            return [f"{p}: outside music folder"], 0, None
         af = AudioFile(fp)
         if af.audio is None:
-            errors.append(f"{p}: {af.error or 'unreadable'}")
-            continue
+            return [f"{p}: {af.error or 'unreadable'}"], 0, None
         # Advisory values: only 0/1/2 exist (0 clean, 1 clean/explicit-clean,
         # 2 explicit) and a blank means "delete the tag" — an invalid value
         # written here would only surface as a grading failure later.
@@ -350,8 +359,7 @@ def mb_assign(req: AssignTagsRequest):
                if k.upper() in ("ITUNESADVISORY", "ALBUMITUNESADVISORY")
                and str(v or "").strip() not in ("", "0", "1", "2")]
         if bad:
-            errors.append(f"{p}: {', '.join(sorted(bad))} must be 0, 1, 2 or empty")
-            continue
+            return [f"{p}: {', '.join(sorted(bad))} must be 0, 1, 2 or empty"], 0, None
         if getattr(af, "is_video", False):
             # Video containers: batch all tags into ONE lossless ffmpeg
             # rewrite (a per-tag rewrite remuxes the whole file each time).
@@ -370,16 +378,13 @@ def mb_assign(req: AssignTagsRequest):
                     clean[k] = v
             deletes = [k for k, v in tag_map.items() if not str(v or "").strip()]
             if deletes and not clean:
-                errors.append(f"{p}: video containers cannot delete tags — overwrite instead")
-                continue
+                return [f"{p}: video containers cannot delete tags — overwrite instead"], 0, None
             if clean and not af.set_video_tags(clean):
-                errors.append(f"{p}: {af.error or 'tag write failed'}")
-                continue
-            if af.container_changed:
-                swapped.append((af.tag_output_path or fp).replace("\\", "/"))
-            changed += 1
+                return [f"{p}: {af.error or 'tag write failed'}"], 0, None
             tagcache.invalidate_path(fp)
-            continue
+            if af.container_changed:
+                return [], 1, (af.tag_output_path or fp).replace("\\", "/")
+            return [], 1, None
         af.defer_save(True)
         for k, v in tag_map.items():
             try:
@@ -393,9 +398,9 @@ def mb_assign(req: AssignTagsRequest):
                     names = _genre_names(v, genre_cap)
                     if names:
                         if not af.set_tag("GENRE", names):
-                            errors.append(f"{p} GENRE: {af.error or 'write failed'}")
+                            errs.append(f"{p} GENRE: {af.error or 'write failed'}")
                     elif not af.delete_tag("GENRE"):
-                        errors.append(f"{p} GENRE: {af.error or 'delete failed'}")
+                        errs.append(f"{p} GENRE: {af.error or 'delete failed'}")
                     continue
                 if isinstance(v, (list, tuple)):
                     # Several values for one field: set_tag() writes each as a
@@ -403,20 +408,41 @@ def mb_assign(req: AssignTagsRequest):
                     # one value (the GENRE case above, for every other tag).
                     values = [str(x).strip() for x in v if str(x).strip()]
                     if values and not af.set_tag(k, values):
-                        errors.append(f"{p} {k}: {af.error or 'write failed'}")
+                        errs.append(f"{p} {k}: {af.error or 'write failed'}")
                     elif not values and not af.delete_tag(k):
-                        errors.append(f"{p} {k}: {af.error or 'delete failed'}")
+                        errs.append(f"{p} {k}: {af.error or 'delete failed'}")
                     continue
                 if v is None or str(v) == "":
                     if not af.delete_tag(k):
-                        errors.append(f"{p} {k}: {af.error or 'delete failed'}")
+                        errs.append(f"{p} {k}: {af.error or 'delete failed'}")
                 elif not af.set_tag(k, str(v)):
-                    errors.append(f"{p} {k}: {af.error or 'write failed'}")
+                    errs.append(f"{p} {k}: {af.error or 'write failed'}")
             except Exception as e:
-                errors.append(f"{p} {k}: {e}")
+                errs.append(f"{p} {k}: {e}")
         af.defer_save(False)
-        changed += 1
         tagcache.invalidate_path(fp)
+        return errs, 1, None
+
+    items = list((req.tracks or {}).items())
+    # A lane per file, capped at 8: this is disk work on ONE album folder, so
+    # a lane per core on a big box would just queue at the disk. Same ceiling
+    # the other I/O-bound scripts take (mlo/lyrics_fetch).
+    lanes = worker_count(cfg, maximum=8, items=len(items))
+    if lanes > 1:
+        with ThreadPoolExecutor(max_workers=lanes) as pool:
+            results = list(pool.map(assign_one, items))
+    else:
+        results = [assign_one(it) for it in items]
+    errors = []
+    changed = 0
+    # Video writes are full lossless rewrites, so a raw container (VOB/AVI/…)
+    # comes back as a same-stem MKV: report the files that were re-emitted.
+    swapped = []
+    for errs, n, sw in results:
+        errors.extend(errs)
+        changed += n
+        if sw:
+            swapped.append(sw)
     # Partial success is the norm (one unreadable file must not discard the
     # rest): always 200 with the capped list, never 500 — callers show `errors`.
     return {"ok": not errors, "changed": changed, "errors": errors[:20],

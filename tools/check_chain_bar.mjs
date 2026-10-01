@@ -75,7 +75,7 @@ const check = (name, pass, detail = "") => {
 // Everything else stays PENDING (the route handler simply never answers), which
 // is what the wizard's other steps do with an unanswered query anyway.
 const ALBUM = "F:/Music/Artists/Daft Punk - Homework";
-const CONFIG = { music_folder: "F:/Music", mb_genre_count: 2, manual_import_enabled: true };
+const CONFIG = { music_folder: "F:/Music", first_run_done: true, mb_genre_count: 2, manual_import_enabled: true };
 const LIBRARY = { artists: [{ name: "Daft Punk", albums: [{ path: ALBUM, tracks: [] }] }] };
 const PREVIEW = { chain: [3, 5], labels: { 3: "Optimize FLACs", 5: "Process images" }, count: 2 };
 
@@ -116,7 +116,12 @@ const readBar = (handle) => handle.evaluate((el) => {
 
 const browser = await chromium.launch();
 try {
-  const page = await browser.newPage();
+  // A service worker would answer fetches on its own and Playwright's page
+  // routes would not see them, so the app's `/api/config` (first_run_done) and
+  // the rest could reach the scratch server/proxy behind the harness instead of
+  // the fixtures below. Block it: every request must go through `page.route`.
+  const context = await browser.newContext({ serviceWorkers: "block" });
+  const page = await context.newPage();
   await page.route("**/sw.js", (route) => route.abort());
   await page.route("**/api/**", (route) => {
     const url = route.request().url();

@@ -3,6 +3,7 @@ import os
 import re
 import subprocess
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from functools import lru_cache
 
 from .audio import (AudioFile, TAG_MAP, ALIAS_TAG_SUBJECTS,
                     alias_family_of, alias_spelling_ok, alias_tag_parts)
@@ -39,7 +40,9 @@ from .genres import display_name as genre_display_name
 # write (mlo.audio), so grade_check_tag_case / grade_check_tag_spaces can only
 # ever fail what those writers would have fixed — and the case check is the
 # SAME function, not a second opinion about what canonical means.
-from .tagtext import MEDIA_VALUES as _MEDIA_VALUES, canonical_value, spacing_problem
+from .tagtext import (
+    MEDIA_VALUES as _MEDIA_VALUES, canonical_value, is_cd_media, spacing_problem,
+)
 from .lyrics_xlit import (
     XLIT_SIDECAR, dominant_script, primary_translation_lang, xlit_needs,
 )
@@ -60,9 +63,10 @@ from .deps import HAS_PIL, Image
 from .ui import print_header, log, c, Color, print_separator, _short_val
 
 # Media formats the library understands (MusicBrainz-style MEDIA values).
-# Everything outside CD / Digital Media in this set is graded like any other
-# release — the CUE/LOG/AccurateRip expectations are already gated on
-# _is_cd(media_summary) — while unknown values still fail grading.
+# Everything outside the CD family and Digital Media in this set is graded
+# like any other release — the CUE/LOG/AccurateRip expectations are already
+# gated on _is_cd(media_summary), which mlo.tagtext.is_cd_media answers for
+# CD and its HDCD variant alike — while unknown values still fail grading.
 #
 # Folded from mlo.tagtext.MEDIA_VALUES, the table the writers canonicalize
 # against: the value this grader accepts is exactly the value a writer stores,
@@ -73,11 +77,13 @@ KNOWN_MEDIA = frozenset(v.lower() for v in _MEDIA_VALUES)
 def _is_cd(media_summary):
     """Whether the album's MEDIA summary is a CD-DA release.
 
-    MEDIA is user-written tag data, so the test is case-insensitive:
-    MEDIA=cd is the same medium as CD (the unknown-value check against
-    KNOWN_MEDIA lowercases too, so "cd" is accepted as known either way).
+    mlo.tagtext.is_cd_media is the ONE rule for that question: it accepts
+    "cd" as it accepts "CD" (MEDIA is user-written tag data) and it accepts
+    the CD variants — an HDCD is a CD, so every CD check in this module (the
+    .log/.cue requirements, the log CRC legs and the AccurateRip verdict)
+    applies to it exactly as it does to a plain CD.
     """
-    return str(media_summary or "").strip().lower() == "cd"
+    return is_cd_media(media_summary)
 
 
 def _library_codec_spec(cfg):
@@ -337,8 +343,20 @@ BEETS_ID3_FRAMES = {"TCMP", "TSOC", "TSSE", "TENC"}
 def _tag_key_norm(key):
     """Uppercase key with spaces/underscores removed, so the file-side
     spellings of a name ("MusicBrainz Album Id", MUSICBRAINZ_ALBUM_ID,
-    musicbrainz_albumid) all compare equal to the allowlist entry."""
-    return re.sub(r"[\s_]+", "", str(key)).upper()
+    musicbrainz_albumid) all compare equal to the allowlist entry.
+
+    Memoised: this is a pure function of the key, and a grade asks it for the
+    SAME handful of names once per file — the excess-tag sweep, the alias scan
+    and every `_tag_value` fallback walk a file's whole tag set — so the
+    spellings are normalized once per process instead of once per tag per
+    check (it was the most-called regex in a grade).
+    """
+    return _tag_key_norm_cached(str(key))
+
+
+@lru_cache(maxsize=8192)
+def _tag_key_norm_cached(key):
+    return re.sub(r"[\s_]+", "", key).upper()
 
 
 # The locale-alias family: the name a release, an artist or a track is ALSO
@@ -424,7 +442,19 @@ def stored_alias_tags(af, base):
     base = str(base).upper()
     return [(str(key), value)
             for key, value in (af.all_tags() or {}).items()
-            if alias_family_of(key) == base]
+            if _alias_family(key) == base]
+
+
+@lru_cache(maxsize=4096)
+def _alias_family(name):
+    """`mlo.audio.alias_family_of` memoised — a pure function of the name.
+
+    Every tag of every file is tested against each alias family (the grade
+    walks the whole tag set once per family twice over, and the strip pass
+    once more), so the same few dozen names are classified once per process
+    instead of once per tag per family.
+    """
+    return alias_family_of(name)
 
 
 def _stored_alias(af, base, cfg=None):
@@ -1512,22 +1542,41 @@ def _naming_mismatch(ap, folder, script, release_type, tags):
     def _match(value):
         variables = track_variables(tags or {}, release_type=value)
         full = eval_script(script, variables, shorter_ids=False) + ext
-        short = eval_script(script, variables, shorter_ids=True) + ext
-        shown = (full or short).replace(UNKNOWN_RELEASE_TYPE, "?")
+        # The 8-char-truncated spelling only differs when the path carries a
+        # MusicBrainz id, and it is only ever CONSULTED after the full one has
+        # failed to match — so the script is evaluated a second time only for a
+        # file whose name is genuinely wrong (or for the wildcard branch below,
+        # which needs both spellings as patterns). On an organized library —
+        # the case this check runs over and PASSES — that is one evaluation per
+        # track instead of two. The comparisons below are therefore spelled
+        # out rather than looped over a tuple: `(full, short_text())` would
+        # evaluate the second spelling eagerly and defeat the point.
+        state = {"short": None}
+
+        def short_text():
+            if state["short"] is None:
+                state["short"] = eval_script(script, variables,
+                                             shorter_ids=True) + ext
+            return state["short"]
+
+        shown = (full or short_text()).replace(UNKNOWN_RELEASE_TYPE, "?")
         if value == UNKNOWN_RELEASE_TYPE:
-            patterns = [_wildcard_re(e) for e in (full, short) if e]
-            if any(re.fullmatch(p, actual_slash) for p in patterns):
-                return ("ok", None)
-            if any(re.fullmatch(p, actual_slash, re.IGNORECASE) for p in patterns):
-                return ("case", shown)
+            for e in (full, short_text()):
+                if e and _wildcard_rx(e).fullmatch(actual_slash):
+                    return ("ok", None)
+            for e in (full, short_text()):
+                if e and _wildcard_rx(e, True).fullmatch(actual_slash):
+                    return ("case", shown)
             return ("path", shown)
-        for e in (full, short):
-            if e and _seps(e) == _seps(actual):
-                return ("ok", None)
-        for e in (full, short):
-            if e and _norm_path_case(e) == _norm_path_case(actual):
-                return ("case", full or short)
-        return ("path", full or short)
+        if full and _seps(full) == _seps(actual):
+            return ("ok", None)
+        if short_text() and _seps(state["short"]) == _seps(actual):
+            return ("ok", None)
+        if full and _norm_path_case(full) == _norm_path_case(actual):
+            return ("case", full or short_text())
+        if short_text() and _norm_path_case(state["short"]) == _norm_path_case(actual):
+            return ("case", full or short_text())
+        return ("path", full or short_text())
 
     best_kind, best_expected = "path", ""
     for value in _release_type_candidates(release_type):
@@ -1546,6 +1595,22 @@ def _wildcard_re(expected):
     stands for whatever token the folder currently spells there (empty
     included, so an album organized before the tag existed still matches)."""
     return "[^/\\\\]*".join(re.escape(p) for p in str(expected).split(UNKNOWN_RELEASE_TYPE))
+
+
+@lru_cache(maxsize=4096)
+def _wildcard_rx(expected, ignorecase=False):
+    """`_wildcard_re(expected)` as a COMPILED pattern, memoised.
+
+    A wildcard expectation is built once per track and matched twice (exact,
+    then case-folded), and the same album is graded again by the next page that
+    reads it — the library payload, the album page, the artist page — so the
+    pattern is compiled once and reused instead of paying a full path's regex
+    compile per track per pass. Bounded like this module's other memos: a long
+    session over a churning library drops the map rather than growing without
+    limit.
+    """
+    return re.compile(_wildcard_re(expected),
+                      re.IGNORECASE if ignorecase else 0)
 
 
 def _multi_disc_album(album_dir, all_files):
@@ -1699,7 +1764,7 @@ _PODCAST_MUSIC_ONLY_CHECKS = (
 )
 
 
-def _podcast_effective_cfg(cfg, audio_paths):
+def _podcast_effective_cfg(cfg, audio_paths, first_af=None):
     """*cfg* with the MUSIC-only checks off for a podcast episode's folder.
 
     The marker is the PODCASTSERIES tag (`mlo.autotag` writes it to every file
@@ -1707,12 +1772,19 @@ def _podcast_effective_cfg(cfg, audio_paths):
     folder's first audio file — the same file `_album_meta` reads album-level
     facts from. A folder without the tag, or one whose first file cannot be
     opened, returns *cfg* unchanged.
+
+    *first_af* is that first file ALREADY OPEN by the caller: `_grade_album`
+    parses every track anyway, so probing with a second handle re-read the
+    same container for a value the track loop has the tags for. It is used
+    only for the first path; a first file that cannot answer still falls
+    through to the next one, exactly as before.
     """
     if not any(cfg.get(key, True) for key in _PODCAST_MUSIC_ONLY_CHECKS):
         return cfg
-    for path in audio_paths or ():
+    for index, path in enumerate(audio_paths or ()):
         try:
-            af = AudioFile(path)
+            af = (first_af if index == 0 and first_af is not None
+                  else AudioFile(path))
             marked = bool(str(af.get_tag("PODCASTSERIES") or "").strip())
         except Exception:
             continue
@@ -1741,8 +1813,16 @@ def _grade_album(album_dir, lyrics_format, cfg=None):
 
     # A podcast episode is graded as what it is — see
     # _PODCAST_MUSIC_ONLY_CHECKS. One tag read of the first file decides, and
-    # a folder that is not an episode gets its cfg back untouched.
-    cfg = _podcast_effective_cfg(cfg, audio_paths)
+    # a folder that is not an episode gets its cfg back untouched. The file is
+    # opened HERE and handed to both the probe and the track loop below: the
+    # probe used to parse it a second time, for tags that loop reads anyway.
+    first_af = None
+    if any(cfg.get(key, True) for key in _PODCAST_MUSIC_ONLY_CHECKS):
+        try:
+            first_af = AudioFile(audio_paths[0])
+        except Exception:
+            first_af = None
+    cfg = _podcast_effective_cfg(cfg, audio_paths, first_af)
 
     total_checks = 0
     failed_checks = 0
@@ -1841,8 +1921,11 @@ def _grade_album(album_dir, lyrics_format, cfg=None):
     # verification runs (see the deferred resolution further down).
     deferred_audit = {}
 
-    for ap in audio_paths:
-        af = AudioFile(ap)
+    for index, ap in enumerate(audio_paths):
+        # The first file was already opened for the podcast probe — reuse that
+        # handle instead of parsing the same container twice.
+        af = (first_af if index == 0 and first_af is not None
+              else AudioFile(ap))
         basename = os.path.basename(ap)
         if not multi_disc:
             # The album-wide DISCNUMBER requirement (see _multi_disc_album):
@@ -2722,14 +2805,13 @@ def _grade_album(album_dir, lyrics_format, cfg=None):
                 # does (same predicate, same real tags).
                 _ly_title = af.get_tag("TITLE")
                 _ly_artist = af.get_tag("ARTIST")
-                lrc_text = None
-                if lrc:
-                    try:
-                        with open(_lrc_for(ap), "r", encoding="utf-8",
-                                  errors="replace") as _f:
-                            lrc_text = _f.read()
-                    except OSError:
-                        lrc_text = None
+                # `lrc_text` still holds the sidecar the lyrics-status read
+                # above made — the file is not opened a second time for the
+                # same bytes. `lrc` is the same `has_lyrics_text` answer on
+                # those bytes, so a sidecar that exists but carries no lyrics
+                # is still excluded from this check.
+                if not lrc:
+                    lrc_text = None
                 fmt_ok = True
                 # WHY it failed, per condition, so the message can name the
                 # reason and — the half that matters — tell a reason no script
@@ -2865,12 +2947,9 @@ def _grade_album(album_dir, lyrics_format, cfg=None):
         # lyrics by definition — the app's own marker excludes it either way.
         xlit_text = str(lyr or "") if embedded else ""
         if not xlit_text.strip() and lrc:
-            try:
-                with open(_lrc_for(ap), "r", encoding="utf-8",
-                          errors="replace") as _f:
-                    xlit_text = _f.read()
-            except OSError:
-                xlit_text = ""
+            # The same sidecar text the lyrics-status read above already
+            # holds — never a second read of the same file.
+            xlit_text = lrc_text or ""
         xlit_text = xlit_text.strip()
         if xlit_text and inst_val != "1" \
                 and should_write_audio_tag(cfg, "LYRICS", filepath=ap):
@@ -3238,8 +3317,12 @@ def _grade_album(album_dir, lyrics_format, cfg=None):
                     except Exception:
                         return None
 
+                # Each log is decoded ONCE: the checksum table and the TOC
+                # playtimes below are two readings of the same bytes, and a
+                # multi-disc rip's log is not small.
+                log_text = {lp: read_log_text(lp) for lp in sorted(log_paths)}
                 for lp in sorted(log_paths):
-                    got = parse_log_checksums(read_log_text(lp))
+                    got = parse_log_checksums(log_text[lp])
                     if not got:
                         continue
                     d = _disc_for_log(lp)
@@ -3274,7 +3357,7 @@ def _grade_album(album_dir, lyrics_format, cfg=None):
                     for lp in sorted(log_paths):
                         dd = _disc_for_log(lp) or 1
                         log_seconds_by_disc.setdefault(dd, {}).update(
-                            parse_log_track_seconds(read_log_text(lp)))
+                            parse_log_track_seconds(log_text[lp]))
                     for dd, disc_paths in paths_by_disc.items():
                         crcs = per_disc_crc.get(dd)
                         seconds = log_seconds_by_disc.get(dd) or {}
@@ -3331,14 +3414,19 @@ def _grade_album(album_dir, lyrics_format, cfg=None):
                     # verifiable here and are left to the coverage verdict.
                     # ponytail: decoding is the cost of proof; the memo in
                     # discs._audio_crc32 means an album grades on the same
-                    # decode the audit pass already paid for.
+                    # decode the audit pass already paid for, and a decode any
+                    # EARLIER pass paid for is answered from mlo.audit's
+                    # evidence record — the CRC is a property of the audio, so
+                    # a rebuild after a tag write (every stamp moves, no
+                    # sample changes) must not decode the whole album again.
                     try:
                         from .discs import _audio_crc32 as _crc_of, \
                             LOSSLESS_CRC_EXTS as _crc_exts
                         from .tools import detect_all_tools as _detect
-                        ffmpeg_exe = (_detect().get("ffmpeg") or {}).get("ffmpeg_exe")
+                        from .audit import note_crc as _note_crc, \
+                            recorded_crc as _recorded_crc
                         pairs = [(ap, want) for ap, want in stated
-                                 if want and ffmpeg_exe
+                                 if want
                                  and os.path.splitext(ap)[1].lower() in _crc_exts]
                         if pairs:
                             # Decoded SERIALLY: this runs inside the run's own
@@ -3347,7 +3435,22 @@ def _grade_album(album_dir, lyrics_format, cfg=None):
                             # a 16-way grade) and the decodes spent their time
                             # queueing for CPU. The album pool is what keeps
                             # the cores busy; this pass only has to be right.
-                            actuals = [_crc_of(ffmpeg_exe, ap) for ap, _ in pairs]
+                            # The tool probe is paid only by a file that really
+                            # has to be decoded — a page whose album is fully
+                            # recorded never asks which ffmpeg to use.
+                            ffmpeg_exe = None
+                            actuals = []
+                            for ap, _want in pairs:
+                                actual = _recorded_crc(ap, cfg)
+                                if not actual:
+                                    if ffmpeg_exe is None:
+                                        ffmpeg_exe = ((_detect().get("ffmpeg")
+                                                       or {}).get("ffmpeg_exe"))
+                                    actual = (_crc_of(ffmpeg_exe, ap)
+                                              if ffmpeg_exe else None)
+                                    if actual is not None:
+                                        _note_crc(ap, actual, cfg)
+                                actuals.append(actual)
                             for (ap, want), actual in zip(pairs, actuals):
                                 if actual is None:
                                     # undecodable: the coverage check speaks
@@ -4466,12 +4569,13 @@ def _grade_album(album_dir, lyrics_format, cfg=None):
 
     audit_summary = _realtime_audit_for_album()
 
-    # Whatever grade_check_flac_md5 verified about this album's audio is filed
-    # back into the audit's own evidence (a no-op when an audit had already
-    # answered, or when nothing was recorded), so a later audit or grade over
-    # the same audio does not decode it again. Only a scope that HAS a music
-    # folder owns evidence — a bare cfg (a helper call) must not write one
-    # into the legacy data folder.
+    # Whatever grade_check_flac_md5 verified about this album's audio — and
+    # every decoded PCM CRC the CD checksum leg computed — is filed back into
+    # the audit's own evidence (a no-op when an audit had already answered, or
+    # when nothing was recorded), so a later audit or grade over the same audio
+    # does not decode it again. Only a scope that HAS a music folder owns
+    # evidence — a bare cfg (a helper call) must not write one into the legacy
+    # data folder.
     if cfg.get("music_folder"):
         save_evidence(cfg)
 
@@ -4769,7 +4873,7 @@ def format_grade_report(res, lyrics_format, track_file=None):
             "green" if audit == "REAL"
             else ("red" if audit in ("FAKE", "Mix") else None),
         ))
-    if res.get("media") == "CD":
+    if is_cd_media(res.get("media")):
         grades = sorted({
             tr.get("log_grade") for tr in res["tracks"]
             if tr.get("log_grade")})

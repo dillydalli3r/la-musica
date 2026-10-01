@@ -23,7 +23,7 @@ What an import must guarantee end to end:
     in the import's own result and its one-line note instead of quietly
     importing without it — and the shipped defaults skip none of them.
 
-No network, no slskd, no real scripts: the chain is switched off or
+No network, no real scripts: the chain is switched off or
 monkeypatched everywhere a real run would happen.
 
 Run:  python tools/test_import_pipeline.py
@@ -121,7 +121,7 @@ assert imports.chain_for({"import_auto_scripts": False}) == []
 # --------------------------------------------------------------------------- #
 # Registry + one script
 # --------------------------------------------------------------------------- #
-assert sorted(script_runners.RUNNERS) == list(range(1, 24)), sorted(script_runners.RUNNERS)
+assert sorted(script_runners.RUNNERS) == list(range(1, 25)), sorted(script_runners.RUNNERS)
 assert script_runners.RUNNERS[2][0] == "Format CUEs", script_runners.RUNNERS[2]
 assert script_runners.RUNNERS[2][1].__name__ == "run_format_cues", script_runners.RUNNERS[2]
 assert all(label for label, _ in script_runners.RUNNERS.values())
@@ -192,40 +192,6 @@ assert missing["chain_off"] is False and missing["chained"] is False, missing
 # a result that says nothing about a chain claims nothing about one
 assert imports.chain_summary({"path": album}) == "", imports.chain_summary({"path": album})
 
-# ...and an import that ran NO chain still has to tell slskd to re-index the
-# library: the album just moved in and its files changed, while slskd serves
-# its boot-time view until it re-scans. A chain's own script runs do that
-# (server.script_runners refreshes once per run) — and they are the ONLY thing
-# that did, so with `import_auto_scripts` off (or a review stop) the album was
-# never indexed and never shared.
-import server.soulseek as _soulseek
-
-_refresh_calls = []
-_real_refresh = _soulseek.refresh_shares_soon
-_soulseek.refresh_shares_soon = lambda *a, **k: _refresh_calls.append(1)
-_REAL_RUNNERS_NOW = dict(script_runners.RUNNERS)
-script_runners.RUNNERS.update({5: ("Process images", _fine)})
-try:
-    imports.finish_album(staging_album("Refresh Off Album"), dict(CFG))
-    assert len(_refresh_calls) == 1, f"a no-chain import asked for a rescan once: {_refresh_calls}"
-    # the review stop is the other exit that runs no chain, and the album is in
-    # the library by then as well
-    _refresh_calls.clear()
-    imports.finish_album(staging_album("Refresh Review Album"),
-                         dict(CFG, import_autonomy="review"), force=True)
-    assert len(_refresh_calls) == 1, f"a review stop asked for a rescan once: {_refresh_calls}"
-    # ...and an import whose chain RAN does not ask a second time on top of the
-    # run's own refresh (that one call is script_runners' — see its own block)
-    _refresh_calls.clear()
-    imports.finish_album(staging_album("Refresh Chained Album"),
-                         dict(CFG, import_auto_scripts=True, import_scripts=[5]))
-    assert len(_refresh_calls) == 1, (
-        f"exactly the run's own refresh, not the finish's as well: {_refresh_calls}")
-finally:
-    _soulseek.refresh_shares_soon = _real_refresh
-    script_runners.RUNNERS.clear()
-    script_runners.RUNNERS.update(_REAL_RUNNERS_NOW)
-
 # --------------------------------------------------------------------------- #
 # EVERY path runs the chain on the album — the auto-import included
 # --------------------------------------------------------------------------- #
@@ -292,49 +258,6 @@ assert full["note"] == ("the script chain did not run — " + imports.SKIPPED_LY
 assert full["skipped_families"] == [imports.SKIPPED_LYRICS], full["skipped_families"]
 assert imports.chain_summary(full) == full["note"], full
 
-# the auto-import's own seam hands the album to the SAME call, with nothing
-# deferred — this is the path the user's downloads take
-from server import soulseek_auto as _auto
-
-_auto_calls = []
-_real_finish_album = imports.finish_album
-
-
-def _capture(album_dir, cfg=None, progress=None, force=None, **kwargs):
-    _auto_calls.append((os.path.normpath(album_dir), dict(kwargs)))
-    return {"path": os.path.normpath(album_dir), "scripts": [], "chain": [4],
-            "errors": [], "chained": True, "chain_off": False,
-            "note": "the script chain ran 1 script"}
-
-
-imports.finish_album = _capture
-try:
-    _auto._start_import_chain(DF_PATH, DF_CFG)
-    for t in threading.enumerate():          # it stages in a daemon thread
-        if t.name == "mlo-soulseek-import-chain":
-            t.join(30)
-finally:
-    imports.finish_album = _real_finish_album
-_deadline = time.time() + 10
-while not _auto_calls and time.time() < _deadline:
-    time.sleep(0.01)
-assert _auto_calls == [(DF_PATH, {"release": None})], _auto_calls
-# a second call carries the release the auto-import just resolved: that is what
-# lets finish_album fetch genres without looking the identity up again
-_auto_calls.clear()
-imports.finish_album = _capture
-try:
-    _auto._start_import_chain(DF_PATH, DF_CFG, {"id": "rel-1"})
-    for t in threading.enumerate():
-        if t.name == "mlo-soulseek-import-chain":
-            t.join(30)
-finally:
-    imports.finish_album = _real_finish_album
-_deadline = time.time() + 10
-while not _auto_calls and time.time() < _deadline:
-    time.sleep(0.01)
-assert _auto_calls == [(DF_PATH, {"release": {"id": "rel-1"}})], _auto_calls
-
 # --------------------------------------------------------------------------- #
 # AcoustID: unusable says why, and says nothing about matching
 # --------------------------------------------------------------------------- #
@@ -352,61 +275,8 @@ try:
     res = imports.acoustid_match([album], {"acoustid_enabled": True,
                                            "acoustid_api_key": "k"})
     assert res["available"] is False and res["note"] == "fpcalc not installed", res
-    # the Soulseek download check: a conflict is a WARNING in the job log, and
-    # the release the job matched goes in as the cross-check candidate
-    from server import soulseek_auto
-    soulseek_auto._job["log"] = []
-    _acoustid.available = lambda cfg=None: True
-    SEEN = {}
-
-    def _match(paths, cfg=None, progress=None, expect=None):
-        SEEN["expect"] = expect
-        return {"available": True, "note": "", "ok": True, "code": "conflict",
-                "albums": [{
-                    "path": paths[0], "release_group_id": "rg-OTHER",
-                    "release_group_title": "Other Pressing", "matched": 9,
-                    "total": 9, "status": "matched", "conflict": True,
-                    "conflicts": [{"kind": "release_group",
-                                   "reason": "the audio is release group rg-OTHER "
-                                             "but the tags say rg-WANT"}]}]}
-
-    WANT = {"release_group_id": "rg-WANT"}
-    _real_match = imports.acoustid_match
-    imports.acoustid_match = _match
-    try:
-        soulseek_auto._verify_acoustid(os.path.normpath(album), WANT,
-                                       {"import_acoustid": True})
-    finally:
-        imports.acoustid_match = _real_match
-    assert SEEN["expect"] == WANT, SEEN
-    msgs_conflict = " | ".join(line["msg"] for line in soulseek_auto.job_state()["log"])
-
-    # a check that could not RUN says so: never dressed up as "no match"
-    def _error_match(paths, cfg=None, progress=None, expect=None):
-        return {"available": True, "note": "AcoustID lookup timed out after 30s",
-                "ok": False, "code": "lookup_failed",
-                "albums": [{"path": paths[0], "status": "error",
-                            "code": "lookup_failed", "reason": "AcoustID lookup "
-                            "timed out after 30s", "matched": 0, "total": 4}]}
-
-    soulseek_auto._job["log"] = []
-    imports.acoustid_match = _error_match
-    try:
-        soulseek_auto._verify_acoustid(os.path.normpath(album), WANT,
-                                       {"import_acoustid": True})
-    finally:
-        imports.acoustid_match = _real_match
 finally:
     _acoustid.fpcalc_path, _acoustid.available = _real_fpcalc, _real_available
-
-msgs = " | ".join(line["msg"] for line in soulseek_auto.job_state()["log"])
-assert "WARNING" in msgs and "could not answer" in msgs, msgs
-assert "timed out" in msgs and "unverified, not rejected" in msgs, msgs
-assert "no release group matched" not in msgs, msgs
-assert "rg-OTHER" not in msgs, msgs
-# the conflict pass named both release groups, as a warning
-assert "WARNING" in msgs_conflict and "rg-OTHER" in msgs_conflict, msgs_conflict
-assert "rg-WANT" in msgs_conflict and "pressing or edition" in msgs_conflict, msgs_conflict
 
 # ...and the earlier conflict pass is the one that named both release groups
 assert imports.release_group_mismatch(
@@ -1197,46 +1067,6 @@ assert imports._skipped_families(imports.DEFAULT_CHAIN, DEFAULT_CONFIG, ()) == [
     imports._skipped_families(imports.DEFAULT_CHAIN, DEFAULT_CONFIG, ())
 
 # --------------------------------------------------------------------------- #
-# soulseek.import_completed(finish=...): the chain is opt-in per album
-# --------------------------------------------------------------------------- #
-from server import soulseek as _slsk
-
-SL_FILES = tempfile.mkdtemp(prefix="mlo_import_pipeline_slsk_")
-SL_MF, SL_DD = os.path.join(SL_FILES, "music"), os.path.join(SL_FILES, "downloads")
-os.makedirs(SL_MF)
-
-
-def put_flac(rel):
-    """soulseek.py classifies an import by library extensions (.flac, not
-    .wav) — nothing decodes it here, the chain is off."""
-    p = os.path.join(SL_DD, rel)
-    os.makedirs(os.path.dirname(p), exist_ok=True)
-    with open(p, "wb") as f:
-        f.write(b"fLaC" + b"\0" * 64)
-    return p
-
-
-put_flac(os.path.join("Peer Album", "01 - a.flac"))
-SL_CFG = {"music_folder": SL_MF, "soulseek_download_dir": SL_DD,
-          "import_auto_scripts": False, "import_scripts": [],
-          "rym_links_auto": False}      # no network in this suite
-_real_downloads_state = _slsk.downloads_state
-_slsk.downloads_state = lambda cfg=None: []
-try:
-    quiet = _slsk.import_completed(SL_CFG)                     # default: unchanged
-    assert _slsk.last_import_scripts() == [], _slsk.last_import_scripts()
-    assert os.path.isdir(os.path.join(SL_MF, "Artists", "Peer Album")), os.listdir(SL_MF)
-    put_flac(os.path.join("Second Album", "01 - b.flac"))
-    finished = _slsk.import_completed(SL_CFG, finish=True)
-finally:
-    _slsk.downloads_state = _real_downloads_state
-
-assert finished == [os.path.join(SL_MF, "Artists", "Second Album")], finished
-rows = _slsk.last_import_scripts()
-assert len(rows) == 1 and rows[0]["path"] == finished[0], rows
-assert rows[0]["chain"] == [] and rows[0]["scripts"] == [] and rows[0]["errors"] == [], rows
-
-# --------------------------------------------------------------------------- #
 # The mover's report is where the album is WHEN THE SCRIPT RETURNS, and the
 # album's own files travel with it
 # --------------------------------------------------------------------------- #
@@ -1339,7 +1169,6 @@ assert not os.path.exists(MOVE_STAGING), sorted(os.listdir(MOVE_LIB))
 shutil.rmtree(MOVE_MF, ignore_errors=True)
 
 shutil.rmtree(ROOT, ignore_errors=True)
-shutil.rmtree(SL_FILES, ignore_errors=True)
 print("import pipeline: all assertions passed")
 
 # --------------------------------------------------------------------------- #
@@ -1695,7 +1524,7 @@ assert ident_tags(wide_files[0])["RELEASECOUNTRY"] == "US; CA", \
 # ---- (3) the pressing that LANDED, not the one that was asked for ------------
 # The add recorded a framework album for the US CD ("Add to library"), the walk
 # landed a different pressing, and the import is handed THE RELEASE IT FETCHED
-# (`server.soulseek_auto._import` → `finish_album(release=…)`). The album's own
+# (`finish_album(release=…)`). The album's own
 # record still names the asked-for edition — the framework marker and the
 # release manifest — so a writer reading those instead of the payload in hand
 # would stamp the wrong pressing.
@@ -1705,8 +1534,7 @@ landed_dir, landed_files = ident_album("Remain in Light (landed)")
 mlo_paths.save_pending(landed_dir, {
     "pending": True, "release_id": ASKED["id"], "release_group_id": ASKED["release_group_id"],
     "title": ASKED["title"], "artist": "Talking Heads", "year": "1980",
-    "date": ASKED["date"], "release_type": "Album", "wish_id": 11,
-    "waiting_for": "a verified Soulseek download"})
+    "date": ASKED["date"], "release_type": "Album"})
 mlo_paths.save_expected_tracks(landed_dir, ASKED["id"], [
     {"disc": 1, "position": i, "title": f"Track {i}",
      "recording_mbid": f"asked-rec-{i}"} for i in (1, 2)])
@@ -1934,8 +1762,8 @@ print("aliases: all assertions passed")
 # --------------------------------------------------------------------------- #
 print("== a second import of an album that is already being imported ==")
 # The owner's report: "the scripts in auto-importing seem to be run twice". Two
-# autonomous paths can reach ONE album (a download's own finish and the import
-# queue, a page download and a wish), and the second must not queue behind the
+# autonomous paths can reach ONE album (a download's own finish and a page
+# download), and the second must not queue behind the
 # first and then run the whole pipeline again — that is the repeat, and both
 # halves of it (the six look-ups and every script) are what the album's second
 # import is refused for. The rule lives in `finish_album` and is about the

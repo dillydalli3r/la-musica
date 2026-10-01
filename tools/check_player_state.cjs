@@ -20,7 +20,10 @@
  * Section 10 measures infinite playback (`infinite_playback`, shipped OFF):
  * on the library's smallest queue (two rows) the last row has to gain the
  * batch of similar rows the server's local scorer answers for it — appended as
- * ordinary rows, preloaded before its own end, and handed over to gaplessly —
+ * ordinary queue rows — and on a LONGER queue the same batch has to land while
+ * rows are still up next (the runway: at 31/36, then 32/37 — never 31/32
+ * jumping to 32/37 when the reader presses next) — appended as ordinary rows,
+ * preloaded before its own end, and handed over to gaplessly —
  * while the switch off, or Repeat one armed, appends nothing and ends the queue
  * exactly as it did before (and Shuffle, which is not exempt, still gets the
  * seeds' similar set). It needs a two-track album and at least two similar
@@ -728,6 +731,48 @@ function assertConsistent(label, p, expectedFile) {
           && infLooped.pos === 2 && infLooped.playing,
         `len ${infLoopStart.len} -> ${infLooped?.len} pos=${infLooped?.pos} playing=${infLooped?.playing}`);
       await infLoopBtn.click();                          // Repeat one off
+
+      // 10b2. The RUNWAY: a queue longer than the batch tops itself up while
+      //       rows are still up next, so its count never jumps in the same
+      //       breath as a press — the owner's report was exactly that jump (at
+      //       31/32, pressing next showed 32/37; with a runway it reads 31/36,
+      //       then 32/37). A six-row album is played from its THIRD row: two
+      //       rows are up next, fewer than the runway, so the batch must be in
+      //       the store while that row plays — with the album's own rows still
+      //       leading the queue and the playing row still the third.
+      const infLong = await page.evaluate(async (base) => {
+        const lib = await (await fetch(base + "/api/library")).json();
+        for (const a of lib.artists || []) {
+          for (const al of a.albums || []) {
+            if ((al.track_count ?? (al.tracks || []).length) < 6) continue;
+            const full = await (await fetch(base + "/api/album?path=" + encodeURIComponent(al.path))).json();
+            const tracks = (full.tracks || []).map((t) => t.path);
+            if (tracks.length < 6) continue;
+            const q = new URLSearchParams();
+            for (const p of tracks) q.append("paths", p);
+            const r = await fetch(base + "/api/recommend/queue?" + q.toString());
+            if (!r.ok) continue;
+            const items = ((await r.json()).items || []).map((i) => i.path);
+            if (items.length >= 2) return { path: al.path, tracks, added: items };
+          }
+        }
+        return null;
+      }, BASE);
+      if (!infLong) {
+        check("infinite: the library offers a six-row queue that scores a batch", true,
+          "skipped — no six-row album with a scored batch in this library");
+      } else {
+        await page.goto(`${BASE}/album/${encodeURIComponent(infLong.path)}`, { waitUntil: "domcontentloaded" });
+        await page.waitForSelector('tr[title="Click to play"]');
+        await pressRow(2);                               // its THIRD row: two up next
+        const infRunway = await infStored(infLong.tracks.length + infLong.added.length);
+        check(`infinite: row 3 of 6 tops the queue up to ${infLong.tracks.length + infLong.added.length} `
+              + `while it still plays (the runway)`,
+          !!infRunway && infRunway.index === 2
+            && infRunway.paths.length === infLong.tracks.length + infLong.added.length
+            && JSON.stringify(infRunway.paths.slice(0, infLong.tracks.length)) === JSON.stringify(infLong.tracks),
+          `len=${infRunway ? infRunway.paths.length : "?"} index=${infRunway ? infRunway.index : "?"}`);
+      }
 
       // 10c. OFF (the shipped default): the same queue ends exactly as it did
       //      before this feature existed — nothing is appended and no batch is

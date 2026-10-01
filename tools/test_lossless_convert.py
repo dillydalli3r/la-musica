@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """Conversion-to-library-codec contract (mlo.flac).
 
-The auto-importer and the Soulseek import button convert whatever codec a
-download arrived in into the configured library codec target, and take the
-original out of the library once the conversion verified. Two things must
+The import pipeline converts whatever codec a download arrived in into the
+configured library codec target, and takes the original out of the library
+once the conversion verified. Two things must
 never break: an AAC file must NOT be touched under the default policy (it is
 lossy — rewriting it as "lossless" would launder it), and the tags must
 survive the conversion.

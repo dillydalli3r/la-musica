@@ -18,7 +18,7 @@ import LyricsEditorModal from "./../components/LyricsEditorModal";
 import OverflowMenu from "../components/OverflowMenu";
 import PageHeader from "../components/PageHeader";
 import StarRating from "../components/StarRating";
-import { ratingOf, useRatings, useSetRating } from "../lib/ratings";
+import { ratingOf, useRatings, useSetRating, trackWebRating, webStarProps } from "../lib/ratings";
 import TagActionsMenu from "../components/TagActionsMenu";
 import Modal from "../components/Modal";
 import MoreLikeThis from "../components/MoreLikeThis";
@@ -307,6 +307,7 @@ export default function TrackPage() {
           value={ratingOf(ratings, realPath)}
           onChange={(v) => setRating(realPath, v)}
           pending={pending(realPath)}
+          {...webStarProps(trackWebRating(tags))}
         />
             <Link to={tags.MUSICBRAINZ_ALBUMID ? `/album/mb:${tags.MUSICBRAINZ_ALBUMID}` : `/album/${encodeURIComponent(albumDir)}`} className="hover:text-accent-soft">
               {tags.ALBUM || albumDir.split("/").pop()}

@@ -36,12 +36,11 @@ import Segmented from "../components/Segmented";
 import PageHeader from "../components/PageHeader";
 import GradeWarning, { GradeDot } from "../components/GradeWarning";
 import StarRating from "../components/StarRating";
-import { ratingOf, useRatings, useSetRating, FOLDER_RATING_NOTE } from "../lib/ratings";
+import { ratingOf, useRatings, useSetRating, FOLDER_RATING_NOTE, albumWebRating, trackWebRating, webStarProps } from "../lib/ratings";
 import CoverImg, { TrackCover } from "../components/CoverImg";
 import FavHeart from "../components/FavHeart";
 import TrackTitleCell from "../components/TrackTitleCell";
 import AlbumCard from "../components/AlbumCard";
-import { useAcquisitions, type Acquisition } from "../lib/acquisition";
 import AlbumRow, { type AlbumRowCell } from "../components/AlbumRow";
 import StatsPanel from "../components/StatsPanel";
 import TrackDetails from "../components/TrackDetails";
@@ -1060,14 +1059,6 @@ export default function LibraryPage() {
     [view, albumsSorted, artistsSorted, tracksSorted, azGroupedAlbums, azNeedle]
   );
 
-  // Where everything still being acquired is, from the queue's own rows and
-  // the pushed job frames (lib/acquisition) — the SAME cache entry and the
-  // same frames the Soulseek page draws, so one album cannot read as two
-  // different stages. The queue is asked only while this page has something
-  // pending; a settled library asks it nothing.
-  const pendingHere = useMemo(() => flat.albums.some((al) => al.pending), [flat]);
-  const acquisition = useAcquisitions(pendingHere);
-
   // Compact rows re-render on every selection toggle and their tracklist is
   // built inside a .map (no hook allowed there) — order each album's tracks
   // once here instead of re-sorting them on every render. Only the COMPACT view
@@ -1663,7 +1654,6 @@ export default function LibraryPage() {
                         selectable={selectMode}
                         selected={sel}
                         onSelect={toggleAlbum}
-                        extraMeta={al.pending ? <AcquisitionChip acq={acquisition(al.path, al.wish_id)} /> : null}
                       />
                     </div>
                   );
@@ -1736,7 +1726,6 @@ export default function LibraryPage() {
                           count. `label` — the compact list has room to say
                           it outright rather than only on hover. */}
                       <PendingMark album={al} label />
-                      <AcquisitionChip acq={al.pending ? acquisition(al.path, al.wish_id) : null} />
                       <span className="text-[11px] text-zinc-500 truncate">
                         {al.artist}
                         {al.meta?.ORIGINALDATE || al.meta?.DATE ? ` · ${originalYear(al.meta)}` : ""}
@@ -1750,7 +1739,11 @@ export default function LibraryPage() {
                   </span>
                   {/* the album's OWN rating, like the star row a track holds one
                       level down — a verdict on the album, not the average of its
-                      tracks (and never a tag: a folder has none) */}
+                      tracks (and never a tag: a folder has none). The web
+                      rating script 24 fetched for the RELEASE rides the same
+                      control, labelled as the album's: it is written to every
+                      file of the album, and it is a different fact from any
+                      track's own WEBRATING. */}
                   <StarRating
                     size="sm"
                     label="Album rating"
@@ -1758,6 +1751,8 @@ export default function LibraryPage() {
                     value={al.rating}
                     onChange={(v) => setAlbumRating(al.path, v)}
                     pending={albumPending(al.path)}
+                    {...webStarProps(albumWebRating(al.tracks))}
+                    webKind="album"
                   />
                   <span className="text-[10px] text-zinc-600 shrink-0 w-8 text-right">{al.track_count}t</span>
                   <div className="opacity-0 group-hover:opacity-100 [@media(hover:none)]:opacity-100 flex gap-1 shrink-0 transition-opacity" onClick={(e) => e.stopPropagation()}>
@@ -1808,7 +1803,7 @@ export default function LibraryPage() {
                                 <span className="row-hover shrink-0" onClick={(e) => e.stopPropagation()}>
                                   <TrackActionsMenu path={t.path} releaseMbid={t.tags.MUSICBRAINZ_ALBUMID} />
                                 </span>
-                                <StarRating size="sm" value={ratingOf(ratings, t.path)} onChange={(v) => setRating(t.path, v)} pending={pending(t.path)} />
+                                <StarRating size="sm" value={ratingOf(ratings, t.path)} onChange={(v) => setRating(t.path, v)} pending={pending(t.path)} {...webStarProps(trackWebRating(t.tags))} />
                                 <span className="text-[10px] text-zinc-600 font-mono w-10 text-right shrink-0 cell-nowrap">{fmtDuration(t.tech.length)}</span>
                               </>
                             }
@@ -1908,7 +1903,6 @@ export default function LibraryPage() {
                     <AlbumRowGroup
                       key={row.album.path}
                       album={row.album}
-                      acq={row.album.pending ? acquisition(row.album.path, row.album.wish_id) : null}
                       expanded={expanded.has(row.album.path)}
                       onToggle={() => toggleExpand(row.album.path)}
                       visibleCols={albumCols}
@@ -2214,6 +2208,16 @@ export default function LibraryPage() {
                             value={ratingOf(ratings, tr.path)}
                             onChange={(v) => setRating(tr.path, v)}
                             pending={pending(tr.path)}
+                            {...webStarProps(trackWebRating(tr.tags))}
+                            /* This cell IS a fixed column (TRACK_COL_W.rating is
+                               104 px: five `sm` stars and their gutter), so the
+                               web value cannot print a text readout beside the
+                               user's stars without painting over Duration. The
+                               dot says the file HAS a web rating and its
+                               tooltip carries the number and the sources; the
+                               two roomy surfaces — an album's tracklist and
+                               the Export preview — print it in full. */
+                            webReadout="mark"
                           />
                         </td>
                       )}
@@ -2286,27 +2290,6 @@ export default function LibraryPage() {
   );
 }
 
-/** Where an added album is in its acquisition: the queue's own word for the
- *  stage and its own percentage while bytes are moving (lib/acquisition).
- *
- *  The Pending dot beside it says WHY a folder is empty; this says how far
- *  along the thing filling it is, so a library row answers "what is happening
- *  to this album" without opening the Soulseek page. Nothing is drawn for an
- *  album with no acquisition on its way — a settled library looks exactly as
- *  it did before this existed. */
-function AcquisitionChip({ acq, className = "" }: { acq: Acquisition | null; className?: string }) {
-  if (!acq) return null;
-  const pct = acq.percent === null ? "" : ` · ${Math.round(acq.percent)}%`;
-  return (
-    <span
-      className={`chip text-[9px] bg-sky-900/40 text-sky-300 border border-sky-800 shrink-0 ${className}`}
-      title={`This album's acquisition: ${acq.label}${pct}`}
-    >
-      {acq.label}{pct}
-    </span>
-  );
-}
-
 /** One labelled block of the filter menu. The note rides under the group's
  *  label rather than in a tooltip: `RATED_NOTE` and the advisory ladder are the
  *  definitions of what the options below them mean, and a definition nobody can
@@ -2344,7 +2327,6 @@ function FilterRow({ label, hint, count, active, onClick }: {
 
 function AlbumRowGroup({
   album,
-  acq,
   expanded,
   onToggle,
   visibleCols,
@@ -2391,9 +2373,6 @@ function AlbumRowGroup({
   trackWidths: Record<string, number>;
   onTrackWidth: (id: string, px: number) => void;
   onResetTrackWidths: () => void;
-  /** Where this album is in its acquisition, when it is still arriving (see
-   *  `AcquisitionChip`). */
-  acq: Acquisition | null;
 }) {
   // The rows this component renders are their own tree: same hooks as the
   // page, and react-query serves them from one GET /api/ratings per scope.
@@ -2445,6 +2424,8 @@ function AlbumRowGroup({
           value={ratingOf(albumRatings, album.path)}
           onChange={(v) => setAlbumRating(album.path, v)}
           pending={albumPending(album.path)}
+          {...webStarProps(albumWebRating(album.tracks))}
+          webKind="album"
         />
       ),
     });
@@ -2499,7 +2480,6 @@ function AlbumRowGroup({
             {/* the same marker the compact rows and the cards carry — the
                 albums table is one more album-shaped surface */}
             <PendingMark album={album} />
-            <AcquisitionChip acq={acq} />
           </>
         }
         coverPath={album.path}
@@ -2617,7 +2597,7 @@ function AlbumRowGroup({
                                         and out of the 80 px Dur column beside
                                         it, which cannot hold both */}
                                     <span className="shrink-0" onClick={(e) => e.stopPropagation()}>
-                                      <StarRating size="sm" value={ratingOf(ratings, t.path)} onChange={(v) => setRating(t.path, v)} pending={pending(t.path)} />
+                                      <StarRating size="sm" value={ratingOf(ratings, t.path)} onChange={(v) => setRating(t.path, v)} pending={pending(t.path)} {...webStarProps(trackWebRating(t.tags))} />
                                     </span>
                                   </>
                                 }

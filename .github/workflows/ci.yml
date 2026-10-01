@@ -37,7 +37,7 @@ jobs:
   python:
     runs-on: ubuntu-latest
     # Four shards, dealt by index. The suites are independent scripts, and the
-    # slow ones (soulseek, grading, import) dominate the total, so a fixed
+    # slow ones (grading, import) dominate the total, so a fixed
     # split keeps every leg within a few minutes of the others without
     # maintaining a per-suite list: a new tools/test_*.py file lands in a
     # shard by itself.

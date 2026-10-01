@@ -1,7 +1,7 @@
 """The 23 library scripts, in one place every caller shares.
 
 Extracted from ``server/main.py``'s ``RUNNERS`` table so the import pipeline
-(:mod:`server.imports`), the bulk queue and the Soulseek importer run exactly
+(:mod:`server.imports`) and the bulk queue run exactly
 the same scripts with exactly the same force-flag semantics as ``/api/run`` —
 ``RunRequest``'s docstring there is the contract (a *supplied* force dict is
 authoritative and complete; an omitted one falls back to the saved Settings).
@@ -242,6 +242,13 @@ RUNNERS: dict[int, tuple[str, "callable"]] = {
     # re-encode (3) or a whole-library format pass (10). It only DELETES (never
     # writes a value), and a file with nothing excess is not written at all.
     23: ("Optimize tags", _optional("mlo.taghygiene", "run_tag_hygiene")),
+    # 24 fills the four web-rating tags (mlo.web_ratings) from the configured
+    # public sources: the album's score on every track, and each track's own.
+    # Album-scoped, one provider chain per album, and it only ever FILLS — a
+    # value the file already holds is left alone unless `force_web_ratings` is
+    # set (a config key, not a UI force switch: no web change accompanies this
+    # script). Its feature switch is `web_ratings_enabled`.
+    24: ("Web ratings", _optional("mlo.web_ratings", "run_web_ratings")),
 }
 
 # Scripts the Run All order deliberately does NOT carry. Every other script
@@ -342,6 +349,12 @@ _DISABLED = {
     # in this app is "excess" — the grade's excess check stands down with it
     # too — so a chain would be running a pass with no subject.
     23: "strip_unknown_tags",
+    # 24 writes the web-rating tags and the same key is the family's master
+    # switch in `should_write_audio_tag` (mlo.config): with `web_ratings_enabled`
+    # off, the runner is a no-op at best, so a chain skips it instead — and the
+    # writer would refuse the same tags anyway, which is what "off means off in
+    # both halves" means.
+    24: "web_ratings_enabled",
 }
 
 
@@ -737,7 +750,7 @@ class RunBusy(RuntimeError):
     album (a UI Run All and an import chain, or two imports of one release)
     must never touch it at once: one would re-encode while the other renames
     or deletes. Every entry point — `/api/run`, `imports.finish_album`, the
-    bulk queue, the Soulseek importer — funnels through `run_chain`, and the
+    bulk queue — funnels through `run_chain`, and the
     gate there is the run's own path claim (:func:`held_paths`): the same
     album-level claim the registry already makes against a delete, a move or a
     tag write. Two chains over DISJOINT albums therefore run at the same time
@@ -799,15 +812,31 @@ def _scope_album(targets):
 
     A run whose scope is a single folder is that album's run: an import
     finishing the album it just downloaded, a details-menu press on one album.
-    The folder's own name is the identity the user filed it under (it is what
-    the library shows, and a download folder is named after the release).
-    Anything else — several folders, a single file, a library-wide run — has no
-    one album to name, and the caller falls back to naming the first script.
+    The name is the album's OWN identity — artist, album and year off its tags
+    (server.imports.album_identity_label), which is what a reader can match to
+    the album on screen. It used to be the folder's name, on the reasoning
+    that the folder IS what the user filed the album under; the owner's report
+    was the row that produced — "[Album; Compilation] 197…", a naming-script
+    path truncated to the point of naming nothing. The folder name is still
+    the fallback, and it is all `album_identity_label` has left when a folder
+    states no identity at all (nothing has been tagged yet). Anything else —
+    several folders, a single file, a library-wide run — has no one album to
+    name, and the caller falls back to naming the first script.
     """
     paths = [str(t) for t in (targets or ()) if str(t).strip()]
     if len(paths) != 1 or not os.path.isdir(paths[0]):
         return ""
-    return os.path.basename(os.path.normpath(paths[0]).rstrip("\\/")) or ""
+    folder = os.path.normpath(paths[0])
+    try:
+        # Imported lazily: server.imports imports THIS module, so a module-level
+        # import would be a cycle.
+        from server.imports import album_identity_label
+        name = str(album_identity_label(folder) or "").strip()
+        if name:
+            return name
+    except Exception:
+        pass
+    return os.path.basename(folder.rstrip("\\/")) or ""
 
 def run_label(ids, targets=None):
     """The run's name in MAINTAIN → In progress.
@@ -1542,14 +1571,6 @@ def _run_chain_locked(cfg, ids, targets=None, force=None, progress=None,
         if removed:
             log(f"Removed {len(removed)} empty folder(s) left by the run: "
                 + ", ".join(removed))
-        # The run is over: whatever it did to tags, filenames or folders, the
-        # Soulseek network is still serving its boot-time view of them until
-        # slskd re-indexes. Debounced there, so a chain of scripts asks once.
-        try:
-            from server import soulseek
-            soulseek.refresh_shares_soon()
-        except Exception:
-            traceback.print_exc()
     # Where the chain ended up, for a caller that handed it an album folder:
     # `_follow_moved_targets` re-points `cfg["targets"]` when a script moved it
     # (beets does, on every import), and the copy made at the top of this

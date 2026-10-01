@@ -13,7 +13,6 @@ export default {
   "nav.favorites": "Favoris",
   "nav.downloads": "Téléchargements",
   "nav.import": "Importer",
-  "nav.soulseek": "Soulseek",
   "nav.discover": "Découvrir",
   "nav.recommended": "Recommandés",
   "nav.charts": "Classements",
@@ -22,7 +21,6 @@ export default {
   "nav.optimize": "Optimisation",
   "nav.inProgress": "En cours",
   "nav.checks": "Contrôles",
-  "nav.watched": "Artistes surveillés",
   "nav.grading": "Évaluation",
   "nav.dependencies": "Dépendances",
   "nav.equalizer": "Égaliseur",
@@ -72,16 +70,10 @@ export default {
   "menu.runAll": "Exécuter les {count} scripts",
   "menu.runAllTitle": "Exécuter les {count} scripts ?",
   "menu.runAllHint": "Ils s’exécutent sur la sélection actuelle, dans cet ordre :",
-  "menu.searchTrackSoulseek": "Chercher ce titre sur Soulseek",
-  "menu.searchTrackSoulseekHint": "Cherche ce seul morceau sur le réseau par son id d’enregistrement MusicBrainz — rien n’est mis en file sauf si vous téléchargez un fichier",
-  "menu.searchTrackNoMbid": "Ce titre ne porte pas d’id d’enregistrement MusicBrainz — taguez-le d’abord, ou cherchez par texte sur la page Soulseek",
-  "soulseek.mbid.chip": "Chercher par MBID",
-  "soulseek.mbid.hint": "Cela ressemble à un id MusicBrainz — Chercher cherche ce seul titre : son artiste et son titre, son album et l’id lui-même, tout à la fois.",
-  "soulseek.mbid.label": "Recherche par MBID : {label}",
   "menu.openTrackPage": "Ouvrir la page du titre",
   "menu.openTrackPageHint": "Ouvre la page propre à ce titre — métadonnées, données techniques et paroles",
   "menu.downloadVideo": "Télécharger le clip",
-  "menu.downloadVideoHint": "Cherche le clip de ce titre sur YouTube (Soulseek si YouTube n’en a pas) et l’enregistre à côté de l’album",
+  "menu.downloadVideoHint": "Cherche le clip de ce titre sur YouTube et l’enregistre à côté de l’album",
   "player.locked_playing": "« {name} » est utilisé par {label} — la lecture continue, mais la relancer peut échouer.",
 
   "favorites.kind.tracks": "Pistes aimées",
@@ -89,14 +81,6 @@ export default {
   "favorites.kind.artists": "Artistes",
   "favorites.kind.playlists": "Listes de lecture",
 
-  "queue.step": "Maintenant : {text}",
-  "queue.asking": "Interrogation de {label} : {title}",
-  "queue.peer": "{user} · {dir}",
-  "queue.rejected": "Candidats rejetés ({count})",
-  "queue.wait_next": "Prochaine recherche dans {when}",
-  "queue.wait_retry": "Nouvelle tentative dans {when}",
-  "queue.chain_running": "Dans la bibliothèque — la chaîne d'importation tourne encore",
-  "queue.chain_running_brief": "la chaîne d'importation tourne encore",
 
   "account.header": "Compte",
   "account.title": "Connecté en tant que {user}",
@@ -119,7 +103,6 @@ export default {
 
   "notify.enable": "Activer les notifications",
   "notify.blocked": "Notifications bloquées",
-  "notify.wish_found": "Souhait trouvé",
   "notify.download_started": "Téléchargement démarré",
   "notify.download_done": "Téléchargement terminé",
   "notify.upload_started": "Partage démarré",
@@ -190,7 +173,7 @@ export default {
   "settings.user_remove": "Supprimer l'utilisateur",
   "settings.user_remove_self": "Vous ne pouvez pas supprimer l'utilisateur avec lequel vous êtes connecté",
   "settings.notifications": "Notifications",
-  "settings.notifications_help": "Notifications de bureau pour les envies trouvées, les téléchargements terminés et les albums prêts à importer. Chaque client demande sa propre autorisation.",
+  "settings.notifications_help": "Notifications de bureau pour les imports en attente d’une décision, les imports terminés et les stockages que le serveur a purgés lui-même. Chaque client demande sa propre autorisation.",
 
   "page.home": "Accueil",
   "page.library": "Bibliothèque",
@@ -222,7 +205,6 @@ export default {
   "plimport.report_queued_albums": "Albums mis en file : {n}",
   "plimport.report_queued_tracks": "Pistes mises en file par nom : {n}",
   "plimport.queued": "en file",
-  "plimport.hint.wish": "Les pistes non trouvées sont aussi mises en file par nom (Réglages → Import de playlist de streaming).",
   "plimport.hint.create_empty": "Un import sans résultat ne crée aucune playlist (Réglages → Import de playlist de streaming).",
   "plimport.open_playlist": "Ouvrir la playlist",
   "plimport.origin": "Importée depuis {service}",
@@ -230,7 +212,6 @@ export default {
   "page.favorites": "Favoris",
   "page.downloads": "Téléchargements",
   "page.import": "Importer",
-  "page.soulseek": "Soulseek",
   "page.export": "Exporter",
   "page.optimize": "Optimisation",
   "page.grading": "Évaluation",
@@ -254,8 +235,6 @@ export default {
   "home.shelf.recent": "Ajouts récents",
   "home.shelf.pending": "En attente de son audio",
   "home.shelf.pending_blurb": "Ajouté à la bibliothèque — l'audio n'est pas encore arrivé",
-  "home.shelf.wanted": "Recherchés sur Soulseek",
-  "home.shelf.wanted_blurb": "Recherche en arrière-plan",
   "home.shelf.best": "Mieux notés",
   "home.shelf.rated": "Vos notes",
   "home.shelf.attention": "À vérifier",
@@ -328,7 +307,7 @@ export default {
   "credits.issues": "Signaler un problème",
   "credits.more": "Crédits · {n} de plus",
   "credits.open": "Crédits, licences et les projets sur lesquels cette application est bâtie",
-  "credits.legal": "Les textes complets des licences se trouvent dans THIRD-PARTY-NOTICES.md, dans le dépôt. Soulseek™ est une marque de Soulseek LLC — ce projet n'est affilié ni à elle ni à slskd.",
+  "credits.legal": "Les textes complets des licences se trouvent dans THIRD-PARTY-NOTICES.md, dans le dépôt.",
 
   "settings.language": "Langue",
   "settings.language_help": "S'applique à ce navigateur — aux libellés de l'application, jamais à vos noms de fichiers ni à vos étiquettes audio.",
@@ -405,7 +384,7 @@ export default {
   "mb.actions_groups": "{n} groupe(s) de sorties",
   "mb.add_to_library": "Ajouter à la bibliothèque",
   "mb.actions_working": "En cours…",
-  "mb.actions_add_hint": "Ajoute un album par groupe de sorties de ce type. Soulseek est interrogé pour chacun dès son ajout, et continue de chercher jusqu'à ce qu'il soit trouvé ou que vous annuliez.",
+  "mb.actions_add_hint": "Ajoute un album par groupe de sorties de ce type. Chacun est créé dans votre bibliothèque dès son ajout.",
   "mb.actions_queued": "En file : {n}",
   "mb.actions_skipped": "{n} ignorés",
   "mb.actions_failed": "{n} en échec",
@@ -438,13 +417,9 @@ export default {
   "cover.missing.release": "un identifiant de release MusicBrainz",
   // —— Album cadre : ajouté, pas encore téléchargé ——————————————————————————
   "pending.title": "En attente de son audio",
-  "pending.note": "Le dossier existe et son contenu — image et descriptions de l'artiste, description de l'album et pochettes candidates classées — est déjà récupéré. C'est la recherche de l'audio qui continue.",
-  "pending.attempt": "recherche — tentative {n}, prochain essai dans {m} min",
+  "pending.note": "Le dossier existe et son contenu — image et descriptions de l'artiste, description de l'album et pochettes candidates classées — est déjà récupéré. L'audio n'est pas encore arrivé.",
   "pending.no_search": "rien ne le recherche pour l'instant",
   "pending.short": "pas encore téléchargé",
-  "pending.queued": "en attente de son tour dans la file des souhaits",
-  "pending.not_found": "pas encore trouvé — relancez-le depuis Soulseek",
-  "pending.failed": "la dernière recherche a échoué",
 
   // —— Lyrics kind: synced (timed) or plain ————————————————————————————
   "lyrics.kind.synced": "Synchronisée",
@@ -515,4 +490,17 @@ export default {
   "settings.playback_diag_copied": "{n} événements copiés.",
   "settings.playback_diag_copy_failed": "Presse-papiers injoignable — le rapport suit dans ce message :",
   "settings.playback_diag_cleared": "Rapport de lecture effacé.",
+
+  // —— Notes web : la paire WEBRATING / ALBUMWEBRATING écrite par le script
+  // 24, et la seconde lecture, plus sourde, que le champ d'étoiles en dessine
+  // (StarRating). La valeur suit l'échelle 0-100 de Picard ; l'affichage est
+  // en 0-5.
+  "rating.webReadout": "{value} web",
+  "rating.webAlbumReadout": "{value} album web",
+  "rating.webTitle": "Note web {value} sur 5 — de {sources}",
+  "rating.webTitleNoSources": "Note web {value} sur 5 — le script n'a enregistré aucune source",
+  "rating.webAlbumTitle": "Note web de l'album {value} sur 5 — de {sources}",
+  "rating.webAlbumTitleNoSources": "Note web de l'album {value} sur 5 — le script n'a enregistré aucune source",
+  "rating.webAria": "Note web : {value} sur 5",
+  "rating.webAlbumAria": "Note web de l'album : {value} sur 5",
 } as const;

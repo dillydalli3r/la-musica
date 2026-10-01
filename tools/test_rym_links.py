@@ -18,6 +18,13 @@ What this pins, with the HTTP layer stubbed (no network at all):
     is ONE navigation to RYM's home page (`_rym_warm`), which is what makes
     the WAF hand those cookies over — once per paste, never per call, and the
     next paste starts from a jar with nothing left of the old one;
+  * the User-Agent is configurable (`rym_user_agent`): blank — or a cfg with
+    no such key — sends RYM_HEADERS byte for byte, and a set value is the
+    exact User-Agent on the warm-up and the page alike, because Cloudflare
+    binds `cf_clearance` to the UA that earned it;
+  * a 403 whose BODY is Cloudflare's interstitial is the challenge, not a
+    network block (`_rym_reason` names `cf_clearance` and `rym_user_agent`
+    when the stored cookie lacks the former);
   * what went wrong is recorded, not guessed: `rym_last_response()` says the
     status, whether the challenge marker was in the body, the URL and when,
     so the Sources panel can tell a stale cookie from a blocked network;
@@ -771,6 +778,78 @@ try:
     intg.rym_links("Rihanna", "Loud 3", cfg=CFG)
     assert fake.calls.count(f"{BASE}/") == 2, fake.calls
     assert fake.jars[-1] == {"cf_clearance": "new", "__cf_bm": "waf"}, fake.jars
+
+    # ----------------------------------------------------------------------- #
+    # 16) the User-Agent is configurable (`rym_user_agent`) — the value
+    #     Cloudflare's `cf_clearance` is bound to. A cfg that does not set it
+    #     sends today's header set byte for byte; a cfg that does sends exactly
+    #     that string (warm-up and page alike, or the clearance cannot match)
+    # ----------------------------------------------------------------------- #
+    def nirvana_fake():
+        return run({"/artist/nirvana": ok(artist_page("Nirvana"))},
+                   mb=FakeMusicBrainz(entities={
+                       f"release-group/{NIRVANA_GROUP}": mb_payload(
+                           UNPLUGGED, artist_mbid=NIRVANA)}))
+
+    fake = nirvana_fake()
+    intg._rym_cookie = lambda cfg=None: "cf_clearance=abc"
+    intg.rym_links("Nirvana", "MTV Unplugged in New York",
+                   cfg={"rym_links_auto": True}, mbid=NIRVANA_GROUP)
+    # the page request's headers ARE RYM_HEADERS, unchanged: blank (or absent)
+    # `rym_user_agent` is byte-for-byte the built-in Chrome UA
+    assert fake.headers[1] == dict(intg.RYM_HEADERS), fake.headers[1]
+    assert "Chrome/124.0.0.0" in fake.headers[1]["User-Agent"], fake.headers[1]
+    assert fake.headers[0]["User-Agent"] == intg.RYM_HEADERS["User-Agent"], \
+        fake.headers[0]
+
+    fake = nirvana_fake()
+    intg._rym_cookie = lambda cfg=None: "cf_clearance=abc"
+    UA = ("Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+          "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 "
+          "Safari/537.36")
+    got = intg.rym_links("Nirvana", "MTV Unplugged in New York",
+                         cfg={"rym_links_auto": True, "rym_user_agent": UA},
+                         mbid=NIRVANA_GROUP)
+    assert got["artist"] == f"{BASE}/artist/nirvana", got
+    assert len(fake.headers) == 2, fake.headers
+    for sent in fake.headers:                    # warm-up AND the page
+        assert sent["User-Agent"] == UA, sent
+    # nothing ELSE moved with it: the rest of the header set is still the
+    # built-in one (only the UA is the caller's to override)
+    assert fake.headers[1]["Accept"] == intg.RYM_HEADERS["Accept"], \
+        fake.headers[1]
+
+    # ----------------------------------------------------------------------- #
+    # 17) the refusal the live site actually serves: HTTP 403 whose BODY is
+    #     Cloudflare's interstitial. That is a challenge, not a network block —
+    #     and when the stored cookie has no `cf_clearance`, the sentence names
+    #     it and `rym_user_agent` as the two things that must match the browser
+    #     that passed it
+    # ----------------------------------------------------------------------- #
+    interstitial = ("<html><head><title>Just a moment...</title></head>"
+                    "<body>Enable JavaScript and cookies to continue"
+                    "</body></html>")
+    fake = run({"/release/album/rihanna/loud/": status(403, interstitial)})
+    intg._rym_cookie = lambda cfg=None: "session=xyz"   # signed in, no clearance
+    log = io.StringIO()
+    with contextlib.redirect_stdout(log):
+        got = intg.rym_links("Rihanna", "Loud", cfg=CFG)
+    assert got["album"] is None, got
+    last = intg.rym_last_response()
+    assert last["status"] == 403 and last["challenge"] is True, last
+    assert "cf_clearance" in last["reason"], last["reason"]
+    assert "rym_user_agent" in last["reason"], last["reason"]
+    # pre-fix this 403 was reported as a challenge-free network block
+    assert "without a Cloudflare challenge" not in last["reason"], last["reason"]
+
+    # with the clearance present it is the session/network sentence, never the
+    # missing-pair one: the two are different fixes and must not be conflated
+    run({"/release/album/rihanna/loud/": status(403, interstitial)})
+    intg._rym_cookie = lambda cfg=None: "session=xyz; cf_clearance=abc"
+    with contextlib.redirect_stdout(io.StringIO()):
+        intg.rym_links("Rihanna", "Loud", cfg=CFG)
+    reason = intg.rym_last_response()["reason"]
+    assert "HTTP 403" in reason and "cf_clearance" not in reason, reason
 finally:
     intg.httpx = _real_httpx
     intg.mb_get_cached = _real_mb_get_cached

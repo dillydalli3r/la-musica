@@ -83,12 +83,12 @@ function policyLine(p: MBReleaseChoicePolicy): string {
  *  server re-ranks with it.
  *
  *  The component decides nothing itself: it renders what
- *  `/api/mb/release-choice` answered (the same policy the auto-import and the
- *  watch run) and hands a forced release id up through `onOverride`. The
+ *  `/api/mb/release-choice` answered (the same policy an "Add to library"
+ *  runs) and hands a forced release id up through `onOverride`. The
  *  caller owns `override` because the add call needs the same id — passing it
  *  back to the server as `prefer` is what makes the server explain the forced
  *  pick in its own words instead of the UI explaining it. Without
- *  `onOverride` it is a read-only statement of intent (the watch dialog's
+ *  `onOverride` it is a read-only statement of intent (the album page's
  *  candidate rows use it that way). */
 export default function ReleaseChoice({
   releaseGroupMbid,
@@ -263,8 +263,8 @@ export default function ReleaseChoice({
     );
   }
 
-  // eligible === false is a hard verdict, not a hint: an unattended download
-  // (the watch, the bulk import) will not take this edition. Forcing one with
+  // eligible === false is a hard verdict, not a hint: an unattended pick
+  // (a bulk add) will not take this edition. Forcing one with
   // an override is a different route — the add call uses the id as given — so
   // the panel must not promise this edition until the user has forced it.
   const refused = chosen.eligible === false;

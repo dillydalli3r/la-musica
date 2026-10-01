@@ -65,23 +65,22 @@ assert row["mbid"] is None and row["mb_kind"] == "rg", row
 # two pages draw the same album differently.
 assert {"album", "year", "cover"}.isdisjoint(row), sorted(row)
 
-from server import wishes as wishes_mod
-
-wishes_mod.list_wishes = lambda: [
-    {"status": "searching", "title": "T", "artist": "Ar", "year": "1999",
-     "release_mbid": "abc-123"},
-    {"status": "imported", "title": "Done", "release_mbid": "zzz"},
+# The shelf of albums still waiting for their audio — the framework albums the
+# library lists as PENDING. The row IS the library's own album row plus the
+# shelf's reason, exactly like every other shelf; an album whose audio has
+# arrived is not on it.
+_pending_rows = [
+    {"path": "C:/M/A/New", "pending": True, "tracks": [],
+     "meta": {"ALBUM": "New", "ARTIST": "Ar", "DATE": "1999"}},
+    {"path": "C:/M/A/Done", "pending": False, "tracks": [{"title": "x"}],
+     "meta": {"ALBUM": "Done"}},
 ]
-wanted = r._wanted(5)
-assert len(wanted) == 1, wanted
-assert wanted[0]["mbid"] == "abc-123" and wanted[0]["mb_kind"] == "release"
-assert wanted[0]["reason"] == "Searching Soulseek" and wanted[0]["owned"] is False
-# A wish is NOT a library album: the row carries the identity a card draws and
-# nothing that reads as a library fact, so no surface can claim the release was
-# graded or has audio to play (the card keys that on `owned`).
-assert wanted[0]["tracks"] == [], wanted[0]
-assert wanted[0]["meta"] == {"ALBUM": "T", "ARTIST": "Ar", "DATE": "1999"}, wanted[0]
-assert {"pass", "audit_summary", "grade_pct", "media"}.isdisjoint(wanted[0]), sorted(wanted[0])
+pending = r._pending(_pending_rows, 5)
+assert len(pending) == 1, pending
+assert pending[0]["path"] == "C:/M/A/New" and pending[0]["owned"] is True
+assert pending[0]["reason"] == "Waiting for its audio", pending[0]
+assert pending[0]["tracks"] == [], pending[0]
+assert pending[0]["meta"] == {"ALBUM": "New", "ARTIST": "Ar", "DATE": "1999"}, pending[0]
 # ------------------------------------------------------------------------- #
 # The recommendation shelves are GONE: the Home payload carries library-derived
 # data only, and no provider chain is consulted for it any more.
@@ -89,7 +88,7 @@ assert {"pass", "audit_summary", "grade_pct", "media"}.isdisjoint(wanted[0]), so
 _home = r.build_home({"music_folder": "C:/definitely-not-a-library"})
 assert {"recommended", "popular", "rec_source"}.isdisjoint(_home), sorted(_home)
 assert {"stats", "recent", "top_rated", "favorites", "discover", "top_artists",
-        "wanted", "needs_attention", "rated"} <= set(_home), sorted(_home)
+        "pending", "needs_attention", "rated"} <= set(_home), sorted(_home)
 assert _home["stats"]["albums"] == 0 and _home["recent"] == [], _home["stats"]
 
 # --------------------------------------------------------------------------- #
@@ -232,12 +231,12 @@ assert inner_gw["albums_importing"] == 0, inner_gw
 # import listed as "1 album falls short … missing dynamic range, audit, cover,
 # early energy, initialkey, log, lyrics, mood, path, tags, tag case", while its
 # chain was filling exactly those tags. `server.imports._importing_now` is the
-# app's own answer for that (the three kinds `server.api_queue` reads too), and
-# the strip both leaves the album out AND says how many it left out, so a
-# reader whose album just left the list is told where it went.
+# app's own answer for that (the claim kinds `server.imports.IMPORT_CLAIM_KINDS`
+# reads), and the strip both leaves the album out AND says how many it left
+# out, so a reader whose album just left the list is told where it went.
 # --------------------------------------------------------------------------- #
 def _with_import_claim(paths, fn):
-    """Run *fn* while a FOREIGN auto-import claim holds *paths*.
+    """Run *fn* while a FOREIGN import claim holds *paths*.
 
     On its own thread, because a claim held by the CALLER's job is deliberately
     not a conflict to `job_locks.holder` (see job_locks.busy) — which is the
@@ -246,7 +245,7 @@ def _with_import_claim(paths, fn):
     ready, release = threading.Event(), threading.Event()
 
     def _hold():
-        with jl.holding(list(paths), kind="auto-import", label="Import Tool — Ænima"):
+        with jl.holding(list(paths), kind="import", label="Import Tool — Ænima"):
             ready.set()
             release.wait(10)
 
@@ -436,18 +435,23 @@ try {
   // The strip with its answer already in hand (Home's own `grade_warning`, which
   // is what the pages pass as `initial`), rendered to text: React's text-node
   // markers and the markup itself are not content, so both go.
-  const flat = (summary) => renderToString(
+  const render = (summary) => renderToString(
     React.createElement(QueryClientProvider, {
       client: new QueryClient({ defaultOptions: { queries: { retry: false } } }),
     },
       React.createElement(MemoryRouter, { initialEntries: ["/"] },
         React.createElement(GradeWarning, { initial: summary })))
-  )
+  );
+  // The markup, and the same markup with React's text-node markers and the
+  // tags themselves removed — the row's hover `title` is not visible text, so
+  // the names it carries are asserted against the markup and never against
+  // what a reader sees.
+  const raw = Object.fromEntries(Object.entries(payload).map(([k, v]) => [k, render(v)]));
+  const flatten = (html) => html
     .replace(/<!-- -->/g, "").replace(/<[^>]*>/g, "")
     .replace(/&#x27;/g, "'").replace(/&quot;/g, '"').replace(/&amp;/g, "&")
     .replace(/\s+/g, " ").trim();
-
-  const text = Object.fromEntries(Object.entries(payload).map(([k, v]) => [k, flat(v)]));
+  const text = Object.fromEntries(Object.entries(raw).map(([k, v]) => [k, flatten(v)]));
 
   // The owner's rule, asked of every shape: a strip that lists a finding cannot
   // contain a perfect-pass claim anywhere, and the percentage it prints beside
@@ -475,10 +479,14 @@ try {
      && !text.importing.includes("albums being imported are left out"));
   ok("…and two of them read as two",
      text.importing_two.includes("2 albums being imported are left out"));
-  // The reason a reader is given for the half pair is the step that completes
-  // it, not the bare code the strip used to open up ("acoustid fingerprint").
-  ok("the AcoustID half pair names the step that completes it",
-     text.acoustid.includes("AcoustID fingerprint missing (run Fix AcoustID pairs)")
+  // A finding's row says HOW MANY checks are wrong (the owner's ask: the
+  // amount, not every name); the half pair's own step-completing words are one
+  // hover away in the row's `title`, and never leak into the visible text as
+  // the bare code the strip used to open up ("acoustid fingerprint").
+  ok("the AcoustID half pair's finding counts its failing check",
+     text.acoustid.includes("1 check failing"));
+  ok("…and names the step that completes it in the row's title",
+     raw.acoustid.includes("AcoustID fingerprint missing (run Fix AcoustID pairs)")
      && !text.acoustid.includes("acoustid fingerprint"));
 } finally {
   await server.close();
@@ -488,7 +496,7 @@ if (failed.length) {
   for (const label of failed) console.error(`[grade-strip] MISSING: ${label}`);
   process.exit(1);
 }
-console.log("ok  the strip's own words (6 payloads, 17 checks)");
+console.log("ok  the strip's own words (6 payloads, 18 checks)");
 '''
 
 _strip_dir = tempfile.mkdtemp(prefix="mlo-grade-strip-")

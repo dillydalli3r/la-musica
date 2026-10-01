@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import { useNavigate } from "react-router-dom";
-import { Bell, BellOff, BellRing, Send, X } from "lucide-react";
+import { AlertTriangle, Bell, BellOff, BellRing, Send, X } from "lucide-react";
 import {
   disablePush,
   enablePush,
@@ -19,6 +19,7 @@ import {
 import {
   clearAll,
   dismiss,
+  GRADE_WARNING_KIND,
   markAllRead,
   openNotification,
   registerNavigator,
@@ -48,7 +49,8 @@ import { toast } from "../store";
  *  settings).
  *
  *  Clicking an entry goes to what it is about — the album, the track, the
- *  Soulseek page, the wizard for an album that needs data. `useNavigate` comes
+ *  wizard for an album that needs data, the import page for a finished one.
+ *  `useNavigate` comes
  *  from THIS component (it sits inside the router in App.tsx), and is handed to
  *  the store so the store itself needs no react-router dependency.
  */
@@ -260,8 +262,14 @@ export default function NotificationBell() {
                   openNotification(n);
                 }}
               >
-                <div className="text-xs text-zinc-200 truncate flex items-center gap-1.5">
-                  {!n.read && <span className="h-1.5 w-1.5 rounded-full bg-accent shrink-0" />}
+                <div className={`text-xs truncate flex items-center gap-1.5 ${n.kind === GRADE_WARNING_KIND ? "text-amber-200" : "text-zinc-200"}`}>
+                  {/* A grade warning reads as a WARNING (the strip's own amber
+                      and triangle), not as another outcome: it is derived from
+                      a page's payload rather than announced, and the reader
+                      should be able to tell the two apart at a glance. */}
+                  {n.kind === GRADE_WARNING_KIND
+                    ? <AlertTriangle className="h-3 w-3 shrink-0 text-amber-400" />
+                    : !n.read && <span className="h-1.5 w-1.5 rounded-full bg-accent shrink-0" />}
                   <span className="truncate">{n.title}</span>
                 </div>
                 {n.body && <div className="text-[11px] text-zinc-500 leading-snug">{n.body}</div>}

@@ -1,7 +1,9 @@
 import { useEffect, useMemo, useRef, useState, type CSSProperties } from "react";
-import { AudioLines, X } from "lucide-react";
+import { useQueryClient } from "@tanstack/react-query";
+import { AudioLines, PenLine, Save, X } from "lucide-react";
 import { api } from "../api";
-import { parsePlayerLrc, parseLrc, splitStoredLines, hasLyricsText, activeLineRange, KaraokeWords, type LrcLine } from "./LyricsViewer";
+import { toast, useLyricsEditLock } from "../store";
+import LyricsViewer, { parsePlayerLrc, parseLrc, splitStoredLines, hasLyricsText, activeLineRange, KaraokeWords, type LrcLine } from "./LyricsViewer";
 import { useLyricsFollow, lyricHold, LYRICS_PAD_BOTTOM, LYRICS_PAD_TOP } from "../lib/lyrScroll";
 import { isInstrumental } from "./Badges";
 import Visualizer from "./Visualizer";
@@ -40,6 +42,7 @@ export default function LyricsSidebar({
   current,
   playing,
   time,
+  duration,
   onSeek,
   getAudioTime,
   onClose,
@@ -48,6 +51,8 @@ export default function LyricsSidebar({
   current: { path: string; title?: string; file: string; albumPath: string; artist?: string; album?: string } | null;
   playing: boolean;
   time: number;
+  /** The playing track's length, for the editor's seek bar (see below). */
+  duration?: number;
   onSeek: (t: number) => void;
   getAudioTime: () => number;
   onClose: () => void;
@@ -75,6 +80,18 @@ export default function LyricsSidebar({
     localStorage.setItem(VIZ_KEY, v ? "1" : "0");
   };
 
+  // The integrated lyric editor: Edit swaps this pane's reader for the SAME
+  // editor the track page mounts (`LyricsViewer`) — no second implementation —
+  // which is why the words being read and the words being edited can never
+  // drift apart. `editText` is the draft it hands up on every change;
+  // `editDirty` guards the discard prompt. While the editor is open the queue
+  // is held on this track (`useLyricsEditLock`).
+  const [editing, setEditing] = useState(false);
+  const [editText, setEditText] = useState("");
+  const [editDirty, setEditDirty] = useState(false);
+  useLyricsEditLock(editing);
+  const qc = useQueryClient();
+
   // Esc closes the pane, like the queue drawer and every dialog in the app.
   // An inner surface gets first refusal: a dialog (or the nav drawer) on top
   // owns the key while it is open, so the pane stands down rather than closing
@@ -83,13 +100,67 @@ export default function LyricsSidebar({
     const onKey = (e: KeyboardEvent) => {
       if (e.key !== "Escape" || e.defaultPrevented) return;
       if (document.querySelector('[aria-modal="true"]')) return;
+      // The editor is the innermost surface here: one Esc leaves it, the next
+      // closes the pane (`[data-lrc-editor]`'s capture fields preventDefault
+      // before this runs, exactly as on the fullscreen player).
+      if (editing) {
+        // Leaving with unsaved edits asks first: the draft is dropped.
+        if (!editDirty || window.confirm("Discard the unsaved lyric edits?")) {
+          setEditing(false);
+          setEditDirty(false);
+        }
+        return;
+      }
       onClose();
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [onClose]);
+  }, [onClose, editing, editDirty]);
 
   const path = current?.path ?? null;
+
+  // A track change unmounts the editor's subject: the draft belonged to the
+  // file that just left, so the editor closes rather than retargeting the new
+  // one (`useLyricsEditLock` releases with it).
+  useEffect(() => {
+    setEditing(false);
+    setEditDirty(false);
+  }, [path]);
+
+  /** Open the editor on the stored text; the reader's draft is what the pane
+   *  then holds. */
+  const openEditor = () => {
+    setEditText(payload?.lyrics ?? "");
+    setEditDirty(false);
+    setEditing(true);
+  };
+
+  const closeEditor = () => {
+    if (editDirty && !window.confirm("Discard the unsaved lyric edits?")) return;
+    setEditing(false);
+    setEditDirty(false);
+  };
+
+  /** Write the editor's draft to the targets the track page's Save writes —
+   *  the select INSIDE the editor persists the shared key (`mlo.lyricsSaveTarget`)
+   *  — then show the result in the reader behind it. */
+  const saveLyricsEdit = async () => {
+    if (!path) return;
+    const target = localStorage.getItem("mlo.lyricsSaveTarget") ?? "embedded";
+    try {
+      if (target === "embedded" || target === "both") await api.lyricsEmbed(path, editText);
+      if (target === "sidecar" || target === "both") await api.lyricsWrite(path, editText);
+      toast(target === "sidecar" ? "Lyrics saved to .lrc sidecar" : target === "both" ? "Lyrics saved (tag + .lrc sidecar)" : "Lyrics saved");
+      setEditDirty(false);
+      setPayload((p) => (p ? { ...p, lyrics: editText } : p));
+      qc.invalidateQueries({ queryKey: ["library"] });
+      // Saving leaves the editor: the reader behind it now shows the words
+      // that were just written, and the playback lock releases with the close.
+      setEditing(false);
+    } catch (e) {
+      toast.error(String(e));
+    }
+  };
   useEffect(() => {
     if (!path) {
       setPayload(null);
@@ -274,6 +345,16 @@ export default function LyricsSidebar({
           <div className="text-xs font-semibold truncate">{title}</div>
           {album && <div className="text-[10px] text-zinc-500 truncate">{album}</div>}
         </div>
+        {path && (
+          <button
+            className={`p-1.5 rounded-lg transition-colors ${editing ? "text-accent hover:text-accent-soft" : "text-zinc-500 hover:text-white"} hover:bg-raise`}
+            onClick={() => (editing ? closeEditor() : openEditor())}
+            title={editing ? "Close the lyrics editor" : "Edit these lyrics — timestamped lines, raw text, add/remove line"}
+            aria-pressed={editing}
+          >
+            <PenLine className="h-4 w-4" />
+          </button>
+        )}
         <button
           className={`p-1.5 rounded-lg transition-colors ${viz ? "text-accent hover:text-accent-soft" : "text-zinc-500 hover:text-white"} hover:bg-raise`}
           onClick={toggleViz}
@@ -291,8 +372,51 @@ export default function LyricsSidebar({
       </div>
       {/* The reading surface and its own corner strip. The strip is a SIBLING
           of the scroller (inside this relative wrapper), not a child of it:
-          it must stay put while the lyrics scroll under it. */}
+          it must stay put while the lyrics scroll under it. While the editor
+          is open it takes the reader's place in the same box — what is being
+          edited is the very text this pane reads — and `LyricsViewer` is the
+          track page's own editor reused whole (timestamped rows, raw mode and
+          add/remove line included), never a second implementation. */}
       <div className="relative flex-1 min-h-0 flex flex-col">
+      {editing && path ? (
+        <div className="flex-1 min-h-0 flex flex-col gap-2 px-3 py-3">
+          {/* The editor brings no Save of its own (the track page's own button
+              is the host's), so this bar carries the one the reader needs —
+              same targets, same `mlo.lyricsSaveTarget` key, same API calls. */}
+          <div className="flex items-center justify-between gap-2 shrink-0">
+            <span className="text-[11px] font-semibold uppercase tracking-wider text-zinc-500">Editing lyrics</span>
+            <div className="flex gap-1.5">
+              <button
+                className="btn-primary !py-1 text-xs"
+                onClick={saveLyricsEdit}
+                disabled={!editDirty}
+                title="Save lyrics per the chosen save target"
+              >
+                <Save className="h-3.5 w-3.5" /> Save
+              </button>
+              <button className="btn-ghost !py-1 text-xs" onClick={closeEditor}>
+                <X className="h-3.5 w-3.5" /> Done
+              </button>
+            </div>
+          </div>
+          <div className="flex-1 min-h-0 overflow-y-auto">
+            <LyricsViewer
+              path={path}
+              initialLyrics={editText}
+              onChange={(v) => {
+                setEditText(v);
+                setEditDirty(true);
+              }}
+              onSave={saveLyricsEdit}
+              artist={current?.artist}
+              track={payload?.title ?? current?.title}
+              album={payload?.album ?? current?.album}
+              duration={duration}
+            />
+          </div>
+        </div>
+      ) : (
+      <>
       <div
         ref={scrollRef}
         className="relative flex-1 min-h-0 overflow-y-auto overscroll-contain px-5 py-4 no-scrollbar lyr-fade"
@@ -441,6 +565,8 @@ export default function LyricsSidebar({
           }}
         />
       </div>
+      </>
+      )}
       </div>
       {viz && (
         <div className="border-t border-border/60 px-4 py-2">

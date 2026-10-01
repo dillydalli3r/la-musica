@@ -208,24 +208,6 @@ eq(release_choice.derived_types({"tags": {"PODCASTSERIES": "X"}}), ("podcast",),
    "…or off a library row's own tag")
 eq(release_choice.derived_types({"meta": {"ALBUM": "X"}}), (), "a music album carries none")
 
-# The watch gate applies it (server.artist_watch delegates to the one rule), so
-# a watch may ask for podcasts and a Broadcast radio play does not fall in.
-from server import artist_watch  # noqa: E402
-
-_ep_rg = {"id": "rg-1", "title": "Episode 1", "primary_type": "Broadcast",
-          "secondary_types": [], "first_release_date": "2026-09-01",
-          "podcast": {"name": "New Sounds", "number": "2515"}}
-_play_rg = {"id": "rg-2", "title": "A Play", "primary_type": "Broadcast",
-            "secondary_types": [], "first_release_date": "2026-09-02"}
-_watch = {"added_at": 0, "release_types": ["podcast"], "exclude": [], "include": [],
-          "policy": "new"}
-eq(artist_watch.evaluate(_ep_rg, _watch)["allowed"], True, "a watch may queue an episode")
-eq(artist_watch.evaluate(_play_rg, _watch)["allowed"], False,
-   "…and leaves a broadcast that is no episode alone")
-_watch_b = dict(_watch, release_types=["broadcast"])
-eq(artist_watch.evaluate(_ep_rg, _watch_b)["allowed"], True,
-   "an episode is still a Broadcast to a broadcast selection")
-
 # --------------------------------------------------------------------------- #
 print("\n== the tagging chain writes the identity ==")
 _release = {"title": "Episode 1", "release_type": "broadcast", "primary_type": "Broadcast",

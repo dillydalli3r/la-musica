@@ -59,15 +59,12 @@ from server import api_query
 from server import api_ratings
 from server import api_plays
 from server import api_recommend
-from server import api_watch
-from server import api_queue
 from server import api_add
 from server import api_choice
 from server import api_stack
 from server import script_menu
 from server import api_storage
 from server import api_streaming
-from server import api_soulseek
 from server import api_youtube
 from server import api_rym
 from server import api_cookies
@@ -81,15 +78,13 @@ from server import ws as ws_mod
 from server import api_cover
 from server import api_common
 from server.api_common import (_allow_staged, _guard_folder, _in_music_folder,
-                               _music_folder, _refresh_slskd_shares_soon,
+                               _music_folder,
                                _skip_names, is_audio_file, re_safe_filename)
 from server.api_run import RunRequest, _announce_run, _invalidate_run, _run_scripts
 from server.api_mb import (_genre_names, _scan_album_tracks)
 from server.api_trash import _dir_stats
-from server.ws import _broadcast, _progress_lock, progress_clients
 from server.api_cover import _cover_url_bytes
 from server import auth as auth_mod
-from server import events as events_mod
 from server import job_locks
 from server import discovery
 from server import artcache
@@ -121,46 +116,6 @@ async def _lifespan(app: FastAPI):
         interrupt_recovery.install_signal_grace()
     except Exception as e:
         print(f"[mlo] interrupted-run recovery failed: {e}")
-    # Optionally bring up the managed slskd process with the backend.
-    if load_config().get("soulseek_autostart", False):
-        def _autostart_slskd():
-            try:
-                from server import soulseek
-                ok, msg = soulseek.start()
-                if ok:
-                    soulseek.wait_until_ready()
-                else:
-                    print(f"[mlo] slskd autostart skipped: {msg}")
-            except Exception as e:
-                print(f"[mlo] slskd autostart failed: {e}")
-        threading.Thread(target=_autostart_slskd, daemon=True).start()
-    # Wishlist worker: periodically re-searches Soulseek for saved releases.
-    try:
-        from server import wishes_worker
-        wishes_worker.start()
-    except Exception as e:
-        print(f"[mlo] wishes worker failed to start: {e}")
-    # Artist watches: periodically looks for NEW releases from followed artists
-    # (never their back catalogue — see server/artist_watch).
-    try:
-        from server import artist_watch_worker
-        artist_watch_worker.start()
-    except Exception as e:
-        print(f"[mlo] artist watch worker failed to start: {e}")
-    # Soulseek status watcher: pushes a frame the moment the login state,
-    # daemon state or port conflict changes (see _soulseek_watch).
-    threading.Thread(target=_soulseek_watch, daemon=True).start()
-    # Soulseek UPLOADS watcher: announces a peer starting to download from us
-    # (see _soulseek_uploads_watch) — nothing else in the app watches uploads.
-    threading.Thread(target=_soulseek_uploads_watch, daemon=True).start()
-    # Soulseek TRANSFER watcher: pushes the Downloads tab's own rows the moment
-    # slskd's byte counts move (see _soulseek_transfers_watch) — the page used
-    # to draw those bars from a 3 s poll of its own.
-    threading.Thread(target=_soulseek_transfers_watch, daemon=True).start()
-    # Downloads the user started from the Soulseek page: the album imports
-    # itself (and runs its chain) once it lands, so asking for a download is
-    # the only press it needs (see _soulseek_page_downloads_watch).
-    threading.Thread(target=_soulseek_page_downloads_watch, daemon=True).start()
     # Size caps: prunes the download/staging/trash caches down to their
     # configured ceilings (see server/cache_caps).
     try:
@@ -193,6 +148,15 @@ async def _lifespan(app: FastAPI):
     # (the tree is stale-while-revalidate after this — `tagcache.get_library`).
     def _warm_library():
         try:
+            # Which tools this install has, before any page asks: every probe
+            # runs a binary (`ffmpeg -version` …), the set is memoized for the
+            # process, and a page that wins the race against this thread paid
+            # the 0.3 s itself. Cheap here, and it rides ahead of the walk.
+            from mlo.tools import detect_all_tools
+            detect_all_tools()
+        except Exception as e:
+            print(f"[mlo] tool probe warm-up failed: {e}")
+        try:
             from server import library
             library.build_library(load_config())
         except Exception as e:
@@ -216,23 +180,13 @@ async def _lifespan(app: FastAPI):
     threading.Thread(target=_warm_home, daemon=True,
                      name="home-warm").start()
     yield
-    # Stop taking new work first (the two workers above are the app's own
+    # Stop taking new work first (the cache-caps worker above is the app's own
     # source of new jobs), then the honest part: wait — bounded — for whatever
     # is still running, say what it is waiting for, and record what had to be
     # abandoned so the next start can reconcile it. Every write is atomic, so
     # the worst case for a job that does not finish in time is a repeated
     # album, never a torn file. GRACE_SECONDS stays below the container's stop
     # grace (docker-compose.yml) so this ordered abort always beats SIGKILL.
-    try:
-        from server import wishes_worker
-        wishes_worker.stop()
-    except Exception:
-        pass
-    try:
-        from server import artist_watch_worker
-        artist_watch_worker.stop()
-    except Exception:
-        pass
     try:
         from server import cache_caps
         cache_caps.stop()
@@ -279,34 +233,6 @@ if _MLO_ENV_HOST or _MLO_ENV_PORT:
             changed = True
     if changed:
         save_config(_cfg)
-
-# The Soulseek listen port, from the same place and for a harder reason:
-# docker-compose.yml PUBLISHES this port, and the publish is written as
-# `${MLO_SOULSEEK_LISTEN_PORT:-50000}:${MLO_SOULSEEK_LISTEN_PORT:-50000}` —
-# one number on both sides, which only stays true if the daemon inside the
-# container listens on the number the host publishes. slskd takes its port
-# from the config the app writes (`soulseek_listen_port`), so an environment
-# that published 51000 while the app still said 50000 gave a share that peers
-# could see the size of and never connect to — the exact "it just doesn't
-# work" shape of a forward pointing at a closed port. The variable therefore
-# SEEDS the config key, like MLO_MUSIC_FOLDER and MLO_SERVER_PORT above it: an
-# install in a container cannot be made to disagree with its own publish line.
-# (Setting the key in the UI is refused while the pin is present — see
-# `/api/config`'s pin check.)
-_MLO_ENV_SLSK_PORT = os.environ.get("MLO_SOULSEEK_LISTEN_PORT")
-if _MLO_ENV_SLSK_PORT:
-    try:
-        _slsk_port = int(_MLO_ENV_SLSK_PORT)
-    except ValueError:
-        _slsk_port = None
-    if _slsk_port and 1024 <= _slsk_port <= 65535:
-        _cfg = load_config()
-        if int(_cfg.get("soulseek_listen_port") or 0) != _slsk_port:
-            _cfg["soulseek_listen_port"] = _slsk_port
-            save_config(_cfg)
-    else:
-        print("[mlo] MLO_SOULSEEK_LISTEN_PORT is not a usable port number "
-              "(1024-65535) — ignoring it")
 
 # The login gate (v3). Registered BEFORE the CORS middleware on purpose:
 # Starlette applies the most recently added middleware outermost, and CORS
@@ -429,8 +355,6 @@ app.include_router(api_ratings.router)
 app.include_router(api_plays.router)
 app.include_router(api_query.router)
 app.include_router(api_discover.router)
-app.include_router(api_watch.router)
-app.include_router(api_queue.router)
 app.include_router(api_add.router)
 app.include_router(api_choice.router)
 app.include_router(api_jobs.router)
@@ -439,7 +363,6 @@ app.include_router(api_stack.router)
 app.include_router(script_menu.router)
 app.include_router(api_storage.router)
 app.include_router(api_streaming.router)
-app.include_router(api_soulseek.router)
 app.include_router(api_youtube.router)
 app.include_router(api_rym.router)
 app.include_router(api_cookies.router)
@@ -471,212 +394,6 @@ from mlo import autotag as _autotag  # noqa: E402
 def _path_locked(request, exc):
     """409 for a path another job is using (message names that job)."""
     return JSONResponse({"detail": str(exc)}, status_code=409)
-
-
-# --------------------------------------------------------------------------- #
-# Soulseek status push
-# --------------------------------------------------------------------------- #
-# The dot on the Soulseek tab is drawn from /api/soulseek/status, which the UI
-# only re-fetched on its own timer: a login that landed, a logout, or a slskd
-# that died left the dot stale until the next poll (up to 20 seconds) — or
-# until a page reload. This watcher re-derives the SAME payload and pushes a
-# frame the moment anything in it changes, so the browser repaints the dot
-# immediately. One payload definition, so the push can never disagree with a
-# refresh.
-_SLSK_SIG = None
-_SLSK_INTERVAL_S = 2.0
-
-
-def _slsk_signature(payload):
-    return (
-        bool(payload.get("installed")), bool(payload.get("running")),
-        payload.get("logged_in"), payload.get("error") or "",
-        payload.get("conflict") or "", payload.get("account") or "",
-    )
-
-
-def _soulseek_check():
-    """One watcher pass: push a frame when the status changed.
-
-    Returns True when a frame was pushed. Split from the loop so the push
-    rule itself is testable without a socket or a timer."""
-    global _SLSK_SIG
-    with _progress_lock:
-        if not progress_clients:
-            # Nobody to tell: skip the daemon query entirely, and leave the
-            # memo alone so the next client gets a fresh comparison.
-            return False
-    sig = _slsk_signature(soulseek_status_payload())
-    if sig == _SLSK_SIG:
-        return False
-    _SLSK_SIG = sig
-    _broadcast({"type": "soulseek"})
-    return True
-
-
-def _soulseek_watch():
-    while True:
-        try:
-            _soulseek_check()
-        except Exception:
-            pass
-        time.sleep(_SLSK_INTERVAL_S)
-
-
-# --------------------------------------------------------------------------- #
-# Nothing in the app ever looked at slskd's UPLOAD tree: what others take from
-# us only showed up in the Shares page's own history, when the user went
-# looking. This watcher announces a peer that STARTS downloading from us — one
-# frame per user, the moment they go from quiet to taking files, and nothing
-# more while they are still taking the same ones.
-_ULSK_INTERVAL_S = 5.0     # uploads change slowly: one poll per 5 s is plenty
-_ULSK_STATE = {}           # {username: active uploads} from the last pass
-
-
-def _soulseek_uploads_check(cfg=None):
-    """One uploads pass: announce every user that just started downloading
-    from us. Returns the frames emitted — the loop ignores them, a test does
-    not have to.
-
-    Skipped entirely when slskd is not up (and before the config is read):
-    there is no upload tree to look at, and a daemon that is not running must
-    not cost a request — or a config read — every 5 seconds."""
-    from server import soulseek
-
-    global _ULSK_STATE
-    if not (soulseek.is_running() or soulseek.web_up()):
-        return []
-    cfg = cfg or load_config()
-    _ULSK_STATE, frames = soulseek.upload_start_frames(
-        _ULSK_STATE, soulseek.uploads_state(cfg))
-    for f in frames:
-        events_mod.emit("upload_started", f"Sharing started: {f['files']} file(s)",
-                        f"{f['username']} is downloading from you",
-                        {"link": "/soulseek", "username": f["username"],
-                         "files": f["files"]}, config=cfg)
-    return frames
-
-
-def _soulseek_uploads_watch():
-    while True:
-        try:
-            _soulseek_uploads_check()
-        except Exception:
-            pass
-        time.sleep(_ULSK_INTERVAL_S)
-
-
-# --------------------------------------------------------------------------- #
-# Live transfer progress push
-# --------------------------------------------------------------------------- #
-# The Downloads tab's bars were drawn from the page's own 3 s poll of
-# /api/soulseek/downloads. Measured on a scratch instance with a real 2 MB/s
-# transfer (fake slskd, see the report), the bar moved every 3.02 s and what it
-# showed sat on average 1.48 s — p90 2.79 s — behind the bytes slskd had
-# already counted, because a poll only ever reports the instant it ran. Bytes
-# move continuously, so the reader watches a bar that jumps and then sits
-# still. This watcher pushes the SAME rows the route returns the moment they
-# change, and the page draws those bars from the frame instead of its timer.
-#
-# Two cadences, because only moving bytes deserve 2.5 frames a second: while a
-# transfer is InProgress (or a job is running) slskd's tree is read every 0.4 s,
-# otherwise every 5 s — a queue slskd has not started yet costs the idle one. A
-# frame goes out only when something in it changed, and a pass with no UI socket
-# open costs no request at all. Measured after this landed, with a real 2 MB/s
-# transfer: the bar moved every 0.40 s and showed a value 0.17 s old on average
-# (p90 0.31 s), against 3.02 s and 1.48 s for the poll it replaced; 2.5 frames
-# of ~370 bytes a second, and 0 frames when nothing moved.
-_LIVE_INTERVAL_S = 0.4
-_LIVE_IDLE_INTERVAL_S = 5.0
-_LIVE = {"sig": None, "ids": frozenset(), "rows": {}}
-
-
-def _live_transfer_files(tree):
-    """Every file in slskd's transfer tree — the rows a bar is drawn from."""
-    return [f
-            for entry in (tree or [])
-            for d in (entry.get("directories") or [])
-            for f in (d.get("files") or [])]
-
-
-def _live_job_rows():
-    """Every live job's own progress, as its module publishes it.
-
-    The `progress` block is handed over verbatim: it is the same one
-    /api/soulseek/auto serves and the queue rows are built from, so a pushed
-    frame can never disagree with a refresh."""
-    from server import soulseek_auto
-    return [{
-        "id": job.get("id"),
-        "state": job.get("state"),
-        "stage": job.get("stage"),
-        "stage_key": job.get("stage_key"),
-        "progress": job.get("progress"),
-    } for job in soulseek_auto.jobs()]
-
-
-def _live_signature(files, jobs):
-    """What a frame is worth sending for: each transfer's own byte count and
-    state, plus each job's state and progress numbers."""
-    sig = [(f.get("id"), f.get("bytesTransferred"), f.get("state")) for f in files]
-    for job in jobs:
-        p = job.get("progress") or {}
-        sig.append((job["id"], job["state"], job["stage"], p.get("bytes"),
-                    p.get("files_done"), p.get("files_arrived")))
-    return tuple(sig)
-
-
-def _live_transfers_check():
-    """One push pass. Returns True when the caller should tick again quickly.
-
-    Fast is for bytes that are actually moving, plus the one pass after
-    anything changed — that extra pass is what carries a FINISHED transfer's
-    state flip out at 0.4 s instead of waiting out the idle tick. A queue full
-    of transfers slskd has not started yet has no bytes to report, so it costs
-    the idle cadence; a stalled InProgress one keeps it, because it is the
-    thing the page is showing."""
-    global _LIVE
-    with _progress_lock:
-        if not progress_clients:
-            # Nobody is watching: no daemon query at all, and the memo is left
-            # alone so the next client gets a fresh comparison (the same rule
-            # _soulseek_check follows for the status dot).
-            return False
-    from server import soulseek
-    try:
-        files = _live_transfer_files(soulseek.downloads_state())
-    except Exception:
-        # A daemon that is down has no transfers to report. That is not worth
-        # a frame of its own — the status watcher already tells the page the
-        # daemon went away — and it must not make this loop loud.
-        files = []
-    jobs = _live_job_rows()
-    moving = any("InProgress" in str(f.get("state") or "") for f in files)
-    busy = any(j["state"] in ("running", "confirm") for j in jobs)
-    sig = _live_signature(files, jobs)
-    if sig == _LIVE["sig"]:
-        return moving or busy
-    ids = frozenset(f.get("id") for f in files)
-    rows = {f.get("id"): (f.get("bytesTransferred"), f.get("state")) for f in files}
-    # Only the rows that moved, plus one flag for the list changing shape: a
-    # slskd tree holds the whole history, and shipping every completed
-    # transfer 2.5 times a second would be paid for by a phone on Wi-Fi.
-    changed = [f for f in files if _LIVE["rows"].get(f.get("id")) != rows[f.get("id")]]
-    resync = ids != _LIVE["ids"]
-    _LIVE = {"sig": sig, "ids": ids, "rows": rows}
-    _broadcast({"type": "transfers", "files": changed, "jobs": jobs,
-                "resync": resync})
-    return True
-
-
-def _soulseek_transfers_watch():
-    while True:
-        live = False
-        try:
-            live = _live_transfers_check()
-        except Exception:
-            pass
-        time.sleep(_LIVE_INTERVAL_S if live else _LIVE_IDLE_INTERVAL_S)
 
 
 # --------------------------------------------------------------------------- #
@@ -729,14 +446,6 @@ class DownloadsImport(BaseModel):
     names: List[str] = []
 
 
-class StagingRequest(BaseModel):
-    """One slskd staging root, and (for delete) the entry inside it.
-
-    `root` is "downloads" or "incomplete" — the two staging folders slskd
-    writes to. It is a NAME, never a path: the server resolves it from the
-    config, so a client can never aim a delete at an arbitrary directory."""
-    root: str = ""
-    name: Optional[str] = None
 
 
 class AlbumRemove(BaseModel):
@@ -817,66 +526,10 @@ def set_config(cfg: dict):
             f"the music folder is pinned to {pinned} by MLO_MUSIC_FOLDER "
             f"(docker-compose.yml or the environment this server runs in) — "
             f"change it there and restart, or remove the variable to pick one here")
-    folder_before = ""
-    try:
-        folder_before = _music_folder()
-    except HTTPException:
-        folder_before = ""
-    # The Soulseek listen port is pinned the same way, and the failure it
-    # prevents is worse than a reverted setting: docker-compose.yml publishes
-    # `${MLO_SOULSEEK_LISTEN_PORT:-50000}` in the host's port list while slskd
-    # listens on whatever `soulseek_listen_port` says. A port changed HERE while
-    # the compose line still names the old one is a forward pointing at a closed
-    # port — a share peers can see the size of and never connect to, which is
-    # the owner's "clients can detect the number of shared files" report. The
-    # environment wins when it is set; say so instead of storing a number that
-    # will not survive the next start.
-    pinned_port = (os.environ.get("MLO_SOULSEEK_LISTEN_PORT") or "").strip()
-    port_before = 0
-    try:
-        port_before = int(load_config().get("soulseek_listen_port") or 0)
-    except (TypeError, ValueError):
-        port_before = 0
-    if pinned_port and cfg.get("soulseek_listen_port") not in (None, ""):
-        try:
-            same_port = int(cfg.get("soulseek_listen_port")) == int(pinned_port)
-        except (TypeError, ValueError):
-            same_port = False
-        if not same_port:
-            raise HTTPException(
-                400,
-                f"the Soulseek listen port is pinned to {pinned_port} by "
-                f"MLO_SOULSEEK_LISTEN_PORT (docker-compose.yml or the "
-                f"environment this server runs in) — change it there and "
-                f"restart, or remove the variable to set one here")
     ok = save_config(cfg)
     if not ok:
         reason = getattr(save_config, "last_error", "") or ""
         raise HTTPException(500, f"Failed to save config{(': ' + reason) if reason else ''}")
-    # The library folder is baked into slskd's generated config (its share root
-    # and its download dir), so a change has to reach a RUNNING daemon — or the
-    # share index keeps publishing the tree the library just left. A daemon that
-    # is not running picks the new folder up at its next start.
-    try:
-        if folder_before and _music_folder() != folder_before:
-            from server import soulseek as _soulseek
-            if _soulseek.is_running():
-                _soulseek.restart()
-                tagcache.invalidate_all()
-    except Exception:
-        pass
-    # The listen port is baked into slskd's generated config too, and it is the
-    # one setting whose staleness is invisible: the daemon keeps serving the old
-    # port while every surface in the app says the new one, and peers simply
-    # fail to connect. A change therefore reaches a running daemon at once.
-    try:
-        port_after = int(load_config().get("soulseek_listen_port") or 0)
-        if port_before and port_after and port_after != port_before:
-            from server import soulseek as _soulseek
-            if _soulseek.is_running():
-                _soulseek.restart()
-    except Exception:
-        pass
     # A settings change can alter what the recommendation shelf and the
     # discovery chains return (source order, counts, providers on/off), and
     # the library payload carries grading results that depend on the grader
@@ -1054,7 +707,7 @@ def log_report_route(path: str = Query(...), disc: Optional[int] = Query(None),
 @app.get("/api/home")
 def home(request: Request, refresh: int = Query(0)):
     """Home page: stats, recent additions, top grades, favorites, a random
-    rediscovery shelf, most-collected artists, open wishes and albums failing
+    rediscovery shelf, most-collected artists and albums failing
     their checks.
 
     Scoped by the session's user: the shelves carry that person's favourites
@@ -1300,7 +953,7 @@ def sources_health(kind: str = Query(None), probe: int = Query(0)):
     The `credentials` rows are not sources: they are the saved logins the
     other kinds need, each asked through its provider's own credential
     endpoint (Discogs `/oauth/identity`, Last.fm `chart.gettoptags`, Spotify
-    `POST /api/token`, an AcoustID lookup, slskd's live state, this server's own
+    `POST /api/token`, an AcoustID lookup, this server's own
     stored password). A source row cannot answer that question — Discogs
     browses anonymously, so its row stays green with a discarded token.
     """
@@ -1391,7 +1044,6 @@ def dependencies_install(req: DepsInstallRequest):
     unchanged.
     """
     from mlo import fetchdeps
-    from server import soulseek as slsk
 
     # `null` is "every tool" (the page's Install all); an EMPTY list is "the
     # caller found nothing to do" (the wizard's Install missing with nothing
@@ -1409,11 +1061,12 @@ def dependencies_install(req: DepsInstallRequest):
     #
     # It also means only the rows with something TO DO — missing, or behind
     # upstream — the same rule the auto-update pass uses. Re-fetching tools
-    # that are already at the newest release downloaded slskd's 118 MB again on
-    # every press and changed nothing, which is what made the button look like
-    # it was doing something mysterious. (An installer that skipped a download
-    # this way reports the version it found: `changed: false`.) To force a
-    # fresh copy, delete the tool's folder — the page opens it — and the row
+    # that are already at the newest release downloaded hundreds of megabytes
+    # again on every press and changed nothing, which is what made the button
+    # look like it was doing something mysterious. (An installer that skipped
+    # a download this way reports the version it found: `changed: false`.) To
+    # force a fresh copy, delete the tool's folder — the page opens it — and
+    # the row
     # reads missing again.
     if req.keys is None:
         try:
@@ -1436,53 +1089,25 @@ def dependencies_install(req: DepsInstallRequest):
     except Exception:
         before = {}
 
-    # slskd is the one dependency this app RUNS. Windows refuses to replace a
-    # file another process is executing, so installing it while the managed
-    # daemon is up failed with a bare "used by another process" — which is what
-    # "dependency installs are broken" turned out to be: 15 of 16 tools install
-    # fine, and that one always failed. Stop it around the install and put it
-    # back the way it was, so an update is a single press again.
-    slskd_was_running = False
-    if "slskd" in keys:
-        try:
-            slskd_was_running = bool(slsk.is_running())
-            if slskd_was_running:
-                slsk.stop()
-        except Exception:
-            slskd_was_running = False
-
     results = []
-    try:
-        for key in keys:
-            name = fetchdeps.DISPLAY_NAMES[key]
-            try:
-                version = fetchdeps.install_dependency(key, log=lambda m: None)
-                results.append({
-                    "key": key,
-                    "name": name,
-                    "ok": True,
-                    "version": version,
-                    # The version did not move: either the tool was already at
-                    # the newest release or the pin is what upstream has. The
-                    # page says so instead of a bare "installed", because a
-                    # press that changes nothing and says nothing is what reads
-                    # as "the button does not work".
-                    "changed": not fetchdeps.same_version(version, before.get(key)),
-                })
-            except Exception as e:
-                results.append({"key": key, "name": name, "ok": False, "error": str(e)})
-    finally:
-        restarted = False
-        if slskd_was_running:
-            try:
-                slsk.start()
-                restarted = True
-            except Exception:
-                restarted = False
-        if restarted:
-            for row in results:
-                if row["key"] == "slskd":
-                    row["restarted"] = True
+    for key in keys:
+        name = fetchdeps.DISPLAY_NAMES[key]
+        try:
+            version = fetchdeps.install_dependency(key, log=lambda m: None)
+            results.append({
+                "key": key,
+                "name": name,
+                "ok": True,
+                "version": version,
+                # The version did not move: either the tool was already at
+                # the newest release or the pin is what upstream has. The
+                # page says so instead of a bare "installed", because a
+                # press that changes nothing and says nothing is what reads
+                # as "the button does not work".
+                "changed": not fetchdeps.same_version(version, before.get(key)),
+            })
+        except Exception as e:
+            results.append({"key": key, "name": name, "ok": False, "error": str(e)})
 
     try:
         fetchdeps.refresh_tool_cache()
@@ -2225,26 +1850,15 @@ class YoutubeDownloadRequest(BaseModel):
 
 @app.post("/api/videos/download-youtube")
 def videos_download_youtube(req: YoutubeDownloadRequest):
-    """Grab this artist+title's music video: YouTube first, Soulseek second.
+    """Grab this artist+title's music video from YouTube.
 
-    The YouTube candidate is picked by server/youtube.py (duration window,
-    lyric / cover / tribute filtering) and downloaded here. When that half is
-    not available — youtube_enabled off, yt-dlp missing, no acceptable
-    candidate, or a download it could not deliver — the track is looked for on
-    the NETWORK before the answer is "no": a music video nobody put on YouTube
-    is often a plain file on a peer's share.
+    The candidate is picked by server/youtube.py (duration window, lyric /
+    cover / tribute filtering) and downloaded here. When that is not available
+    — youtube_enabled off, yt-dlp missing, no acceptable candidate, or a
+    download it could not deliver — the request answers with the reason.
 
-    A Soulseek download takes minutes, so this route does NOT wait for one: it
-    searches briefly and QUEUES the transfer as the app's own download (the
-    Downloads page shows it from then on) by the same helper the release path
-    downloads with (server.soulseek_auto.fetch_video_on_soulseek).
-
-    Returns {ok, file, candidate} for a YouTube download,
-    {ok, source: "soulseek", queued, candidate} for a queued one, and
-    {ok: false, candidate: null, error} naming BOTH sources when neither has
-    this video."""
-    from server import soulseek
-    from server import soulseek_auto
+    Returns {ok, file, candidate} for a download, or {ok: false,
+    candidate: null, error} naming why no video was fetched."""
     from server import youtube
 
     cfg = load_config()
@@ -2299,34 +1913,8 @@ def videos_download_youtube(req: YoutubeDownloadRequest):
                     "candidate": candidate, "container": got.get("container"),
                     "height": got.get("height"), "abr": got.get("abr")}
 
-    # Nothing from YouTube: ask the network for the plain video file and hand
-    # the transfer to the app's own download queue. `dest` is deliberately not
-    # passed — slskd decides where a transfer lands (under the download dir,
-    # where the Downloads page and the importer already look), and waiting for
-    # it here would hold this request open for the whole download.
-    if not (soulseek.is_running() or soulseek.web_up(cfg)):
-        slsk_why = "Soulseek is not running — start slskd to search the network too"
-    elif not (soulseek.server_state(cfg) or {}).get("isLoggedIn"):
-        # Signed out is not "the network has nothing": slskd is running and
-        # cannot search, and saying otherwise would read as "not out there".
-        slsk_why = ("Soulseek is not logged in — set your username and password "
-                    "in Settings → Soulseek, then restart slskd")
-    else:
-        try:
-            queued = soulseek_auto.fetch_video_on_soulseek(
-                artist, title, dest=None, cfg=cfg, seconds=req.duration)
-        except Exception as e:
-            # slskd's own refusal (an offline peer, a file it will not take)
-            # is the user's answer to "why did nothing queue" — the same
-            # reading _queue_downloads gives the page's own download routes.
-            raise HTTPException(502, f"slskd did not queue the download: {e}")
-        if queued:
-            return {"ok": True, "source": "soulseek", "queued": True,
-                    "candidate": {"user": queued["user"],
-                                  "filename": queued["filename"],
-                                  "size": queued["size"]}}
-        slsk_why = "no Soulseek copy either"
-    return {"ok": False, "candidate": None, "error": f"{yt_why}; {slsk_why}"}
+    return {"ok": False, "candidate": None,
+            "error": yt_why or "no acceptable YouTube match found"}
 
 
 class VideoMatchAssignment(BaseModel):
@@ -2638,11 +2226,6 @@ def tags_bulk(req: BulkTagsRequest):
         except Exception as e:
             failed += 1
             errors.append(f"{os.path.basename(rp)}: {e}")
-    # Tag writes change file sizes and mtimes, which is what the network's
-    # file list shows — refresh the share index once the batch is done
-    # (debounced: a 500-track batch asks slskd once, a few seconds later).
-    if removed or added:
-        _refresh_slskd_shares_soon()
     return {"ok": failed == 0, "removed": removed, "added": added,
             "failed": failed, "errors": errors[:20]}
 
@@ -2812,7 +2395,6 @@ def album_remove(req: AlbumRemove, request: Request = None):
             f"in use (stop playback and retry)")
     tagcache.invalidate_album(p)
     mbresolve.invalidate()
-    _refresh_slskd_shares_soon()
     return {"ok": True, "trash": dest.replace("\\", "/")}
 
 
@@ -2900,1077 +2482,47 @@ def beets_import(req: BeetsImportRequest):
     return {"ok": True, "output": output[-4000:], "organized": organized}
 
 
-class SoulseekSearchRequest(BaseModel):
-    """A manual search: free text, or a MusicBrainz id.
-
-    `query` is what the search box carries; `mbid` (a recording id — what the
-    library stores per track — or a release/release-group id) asks for ONE
-    track (or release) by identity instead, which is what a user who is missing
-    a single song has. Either may be given; `mbid` wins when it is set."""
-    query: str = ""
-    mbid: str = ""
-
-
-class SoulseekDownloadRequest(BaseModel):
-    username: str
-    files: List[dict]  # [{filename, size}]
-
-
-@app.get("/api/soulseek/status")
-def soulseek_status():
-    """Managed slskd availability, running state, login and download dir."""
-    return soulseek_status_payload()
-
-
-def soulseek_status_payload():
-    """The status the tab's dot is drawn from (one definition for the route
-    and the change watcher below, so the pushed frame can never drift from
-    what a refresh would fetch)."""
-    from server import soulseek
-    cfg = load_config()
-    # `live_user` is whoever slskd is signed in as — ours or a foreign
-    # instance's (see instance_owner) — so the tab can name the account.
-    owns, live_user, conflict = soulseek.instance_owner(cfg)
-    running = soulseek.is_running() or owns
-    logged_in = None
-    server = None
-    if running:
-        try:
-            server = soulseek.server_state()
-            logged_in = bool(server and server.get("isLoggedIn"))
-        except Exception:
-            logged_in = False
-    return {
-        "installed": soulseek.slskd_installed(),
-        "running": running,
-        "logged_in": logged_in,
-        # the daemon's own words for a failed login (INVALIDPASS, empty
-        # credentials, a port it could not bind). Without it the UI can only
-        # guess "not logged in" and show a generic cooldown hint.
-        "error": soulseek.login_error(cfg) if running and logged_in is False else None,
-        # set when slskd's web port is held by ANOTHER app's slskd (default
-        # port 5030 is shared). The UI must explain that instead of the
-        # misleading "running, not logged in".
-        "conflict": conflict or None,
-        "conflict_username": live_user,
-        "server": server,
-        "download_dir": soulseek.download_dir(cfg),
-        "web_port": int(cfg.get("soulseek_web_port") or 5030),
-        "listen_port": int(cfg.get("soulseek_listen_port") or 50000),
-        # saved credentials — the Soulseek tab prefills the login form and
-        # slskd auto-connects with them at every start
-        "username": str(cfg.get("soulseek_username") or ""),
-        # the account slskd is ACTUALLY signed in as (GET /application's
-        # user.username, else GET /options' soulseek.username). A saved
-        # username and a live one drift apart the moment the login is
-        # corrected on slskd's own page, and the tab must show what the
-        # network sees, not what the config file remembers.
-        "account": live_user or "",
-        "password": str(cfg.get("soulseek_password") or ""),
-        "has_credentials": bool(str(cfg.get("soulseek_username") or "").strip()
-                                and cfg.get("soulseek_password")),
-        "autostart": bool(cfg.get("soulseek_autostart", True)),
-        "share_dirs": soulseek.share_dirs(cfg),
-        # The LISTEN port's real state: whether anything accepts on it here,
-        # who holds it, and what the router was actually told (mlo.portmap).
-        # A mapping is only reported as made when a router confirmed it, so
-        # the tab can say "opened" only when that is true.
-        "listen_port_state": soulseek.port_status_payload(cfg),
-    }
-
-
-@app.post("/api/soulseek/start")
-def soulseek_start():
-    """Spawn slskd and return quickly — the UI polls /status (1s) for the
-    web API / network login instead of this request blocking for the whole
-    boot (first boot re-scans the whole shared library, which takes a while).
-
-    Saved credentials (from a previous login) make slskd connect to the
-    Soulseek network automatically — no login form needed."""
-    from server import soulseek
-    ok, msg = soulseek.start()
-    if not ok:
-        raise HTTPException(400, msg)
-    ready = soulseek.wait_until_ready(timeout=6.0)
-    cfg = load_config()
-    return {
-        "ok": True,
-        "ready": ready,
-        "message": msg,
-        "has_credentials": bool(str(cfg.get("soulseek_username") or "").strip()
-                                and cfg.get("soulseek_password")),
-    }
-
 
-@app.post("/api/soulseek/restart")
-def soulseek_restart():
-    """Restart slskd (e.g. to apply new ports) and wait until it answers."""
-    from server import soulseek
-    if not (soulseek.is_running() or soulseek.web_up(load_config())):
-        raise HTTPException(400, "slskd is not running")
-    if not soulseek.restart():
-        raise HTTPException(504, "slskd did not become ready in time")
-    return {"ok": True}
-
-
-@app.get("/api/soulseek/shares")
-def soulseek_shares(probe: int = 0):
-    """Share configuration (la musica settings are the source of truth —
-    the slskd yaml is regenerated from them) plus slskd's live scan state.
-
-    `audit` says what other users can actually see right now, and `probe=1`
-    additionally pulls slskd's own share index (a large library's index is tens
-    of megabytes) and looks for a file that is on disk.
-
-    503 when slskd is down, exactly like the transfer routes below: the daemon's
-    own state is part of this answer (`shares_state`, the audit's scan rows), and
-    asking a port nothing listens on used to escape as a 500 — `httpx`'s
-    ConnectError out of the route, which reads as a broken app rather than as
-    "start slskd". The app's own share SETTINGS are not lost by that refusal:
-    they live in the config (`dirs`/`exclude` above are read from it, not from
-    the daemon), and Settings → Soulseek is where they are edited."""
-    from server import soulseek
-    cfg = load_config()
-    if not (soulseek.is_running() or soulseek.web_up(cfg)):
-        raise HTTPException(503, "slskd is not running — start it first")
-    return {
-        "dirs": soulseek.share_dirs(cfg),
-        "exclude": [x.strip("'") for x in soulseek.share_exclude(cfg)],
-        "share_library": bool(cfg.get("soulseek_share_library", True)),
-        "autostart": bool(cfg.get("soulseek_autostart", True)),
-        "slskd": soulseek.shares_state(cfg),
-        "audit": soulseek.share_audit(cfg, probe=bool(probe)),
-    }
-
-
-class SoulseekSharesRequest(BaseModel):
-    dirs: List[str] = []
-    autostart: Optional[bool] = None
-    apply: bool = True
-
-
-@app.post("/api/soulseek/shares")
-def soulseek_shares_update(req: SoulseekSharesRequest):
-    """Save the shared-folder list (and autostart flag). Restarting slskd
-    re-indexes the shares — share changes only apply after a restart."""
-    from server import soulseek
-    cfg = load_config()
-    dirs = sorted({os.path.normpath(str(d).strip()) for d in req.dirs if str(d).strip()})
-    for d in dirs:
-        if not os.path.isdir(d):
-            raise HTTPException(400, f"not a folder: {d}")
-    cfg["soulseek_share_dirs"] = dirs
-    if req.autostart is not None:
-        cfg["soulseek_autostart"] = req.autostart
-    save_config(cfg)
-    restarted = False
-    if req.apply and (soulseek.is_running() or soulseek.web_up(cfg)):
-        restarted = soulseek.restart()
-        if not restarted:
-            raise HTTPException(504, "slskd did not become ready in time")
-    return {"ok": True, "dirs": dirs, "autostart": cfg["soulseek_autostart"],
-            "restarted": restarted}
-
-
-@app.post("/api/soulseek/shares/rescan")
-def soulseek_shares_rescan():
-    """Ask slskd to rescan its share index (picks up library changes).
-
-    slskd's own reason is republished instead of a bare 500: a rescan it
-    refused (409, one is already running) or an API that failed must not look
-    like a scan that started."""
-    from server import soulseek
-    if not (soulseek.is_running() or soulseek.web_up(load_config())):
-        raise HTTPException(400, "slskd is not running")
-    try:
-        soulseek.rescan_shares()
-    except soulseek.SlskdError as e:
-        raise HTTPException(409, str(e))
-    except soulseek.SlskdHTTPError as e:
-        raise HTTPException(502, str(e))
-    return {"ok": True}
-
-
-@app.post("/api/soulseek/stop")
-def soulseek_stop():
-    from server import soulseek
-    stopped = soulseek.stop()
-    if not stopped:
-        return {"ok": True, "message": "not running"}
-    return {"ok": True, "message": "stopped"}
-
-
-@app.post("/api/soulseek/search")
-def soulseek_search(req: SoulseekSearchRequest):
-    """Start a Soulseek search; returns an id to poll for results.
-
-    An MBID (`req.mbid`) is resolved to the queries for ONE track — its artist
-    and title, its album, and its own id (`soulseek_auto.mbid_search_queries`)
-    — and every one of them is POSTed as its OWN slskd search AT ONCE, the same
-    "all at once, poll them in one loop" shape the auto-importer uses: the wall
-    time is one window, not one per query. The answer's `id` is those ids
-    comma-joined, and `GET /api/soulseek/search/{id}` merges their results, so a
-    caller polls ONE key either way. Nothing is added to the wishes or the
-    queue: this is a search, and the user downloads what they choose from it."""
-    from server import soulseek, soulseek_auto
-    if not (soulseek.is_running() or soulseek.web_up(load_config())):
-        raise HTTPException(400, "slskd is not running — start it first")
-    mbid = str(req.mbid or "").strip()
-    if mbid:
-        found = soulseek_auto.mbid_search_queries(mbid, load_config())
-        if not found.get("ok"):
-            raise HTTPException(404, str(found.get("error") or "unknown MusicBrainz id"))
-        queries = list(found["queries"])
-        ids, errors = soulseek.search_many(queries)
-        if not ids:
-            raise HTTPException(502, errors[0] if errors else "the search could not start")
-        return {"id": ",".join(ids), "ids": ids, "queries": queries,
-                "label": found.get("label") or "", "kind": found.get("kind") or "",
-                "errors": errors}
-    full = req.query.strip()
-    if not full:
-        raise HTTPException(400, "empty query")
-    return {"id": soulseek.search(full), "queries": [full]}
-
-
-@app.get("/api/soulseek/search/{search_id}")
-def soulseek_search_results(search_id: str):
-    from server import soulseek
-    # adopted slskd (spawned by an earlier run) answers on the web port even
-    # though no child handle exists — it must keep serving searches
-    if not (soulseek.is_running() or soulseek.web_up(load_config())):
-        raise HTTPException(400, "slskd is not running")
-    ids = soulseek.search_ids(search_id)
-    if not ids:
-        raise HTTPException(400, "search id is required")
-    if len(ids) > 1:
-        # ONE track asked several ways: the results of every search, merged
-        # (deduped by peer + file) and complete only when they all are.
-        return soulseek.search_results_many(ids)
-    return soulseek.search_results(ids[0])
-
-
-class SoulseekSearchCancelRequest(BaseModel):
-    id: str
-
-
-@app.post("/api/soulseek/search/cancel")
-def soulseek_search_cancel(req: SoulseekSearchCancelRequest):
-    """Cancel a running search (slskd DELETE /searches/{id}).
-
-    Without this the app is committed to the whole search window plus the
-    grace tail; the UI's "stop" only stopped polling. An id that names SEVERAL
-    searches (the manual MBID search's comma-joined key) cancels every one of
-    them — the user pressed stop on the search, not on one of its queries."""
-    from server import soulseek
-    if not (soulseek.is_running() or soulseek.web_up(load_config())):
-        raise HTTPException(503, "slskd is not running")
-    ids = soulseek.search_ids(req.id)
-    if not ids:
-        raise HTTPException(400, "search id is required")
-    cancelled, failed = 0, []
-    for sid in ids:
-        try:
-            soulseek.cancel_search(sid)
-            cancelled += 1
-        except Exception as e:
-            failed.append(f"{sid}: {e}")
-    if not cancelled:
-        raise HTTPException(502, f"search cancel failed: {'; '.join(failed)}")
-    return {"ok": True, "cancelled": cancelled, "ids": ids}
-
-
-def _clear_settled_in_background():
-    """Take the queue's COMPLETED rows off the LIST when a download that will
-    import starts — on its own thread (see
-    api_queue.clear_completed_for_new_import for what it takes and why),
-    because the queue payload asks slskd for its finished downloads and a
-    request the user is waiting on must not wait for that.
-
-    The CUT is stamped before the thread starts: only rows that were already
-    settled when the request arrived are cleared, so a job that fails while the
-    clear is still on its way to the registry is not swallowed by it."""
-    import threading
-    before = time.time()
-
-    def work():
-        try:
-            from server import api_queue
-            api_queue.clear_completed_for_new_import(before=before)
-        except Exception:
-            pass
-    threading.Thread(target=work, name="mlo-queue-autoclear", daemon=True).start()
-
-
-def _queue_downloads(soulseek, username, files):
-    """Queue files, turning slskd's own refusal into a readable 502.
-
-    slskd answers the enqueue with 500 plus the reason in the body (`User
-    <name> appears to be offline`) or with a 201 whose `Failed` list names the
-    files the peer would not take. Both are the user's answer — "why did
-    nothing queue" — so they must not arrive as a bare "Internal Server Error"
-    from this app.
-    """
-    try:
-        out = soulseek.enqueue_download(username, files)
-    except soulseek.SlskdError as e:
-        raise HTTPException(502, f"slskd did not queue the download: {e}")
-    except Exception as e:
-        # SlskdHTTPError is an httpx.HTTPStatusError; its str() now carries
-        # slskd's own message (see soulseek._error_text).
-        raise HTTPException(502, f"slskd did not queue the download: {e}")
-    # A download the user just asked for IS a new run: the queue's COMPLETED
-    # rows come off the list (`api_queue.clear_completed_for_new_import`, the
-    # automatic rule — completed only, never failed or needs-attention), so the
-    # page's own search→download does not push the previous run's Completed
-    # history in front of the work it just started. Live rows stay, and a
-    # download that finishes later still shows. After the enqueue, never
-    # before: a refused press must not clear anything. Only reached when files
-    # were really queued (the callers filter to non-empty lists).
-    _clear_settled_in_background()
-    return out
-
-
-def _active_downloads(soulseek, username):
-    """The filenames this user ALREADY has queued or downloading in slskd.
-
-    slskd's enqueue is per-user and does not dedupe: asking again for a file a
-    live transfer already covers starts a SECOND batch for it, so the album
-    comes down twice — and, since the page's own downloads import themselves,
-    is imported and chained twice. The identity is slskd's own transfer row:
-    the full remote filename, exactly as it appears in the queue, in any state
-    that is not finished (`soulseek.finished_transfer`, the same rule the rest
-    of the app drops transfers by). No second notion of identity lives here.
-
-    slskd unreachable -> empty: the press is then queued exactly as before,
-    because a duplicate is the smaller harm next to refusing a download the
-    user asked for (and a route whose daemon is down 503s before this)."""
-    active = set()
-    try:
-        for entry in soulseek.downloads_state() or []:
-            if not isinstance(entry, dict):
-                continue
-            if str(entry.get("username") or "").lower() != str(username or "").lower():
-                continue
-            for d in entry.get("directories") or []:
-                for f in (d or {}).get("files") or []:
-                    if not isinstance(f, dict):
-                        continue
-                    if not soulseek.finished_transfer(f.get("state")):
-                        active.add(str(f.get("filename") or ""))
-    except Exception:
-        return set()
-    return active
-
-
-# --------------------------------------------------------------------------- #
-# A download queued from the Soulseek page imports itself
-# --------------------------------------------------------------------------- #
-# The page's Download button used to be the end of the app's involvement: the
-# bytes landed in the download folder and the album waited for somebody to
-# press Import, a SECOND decision for an act the user had already taken. The
-# page's three download routes now record what was asked for, and the pass
-# below imports the album it produced — `_import_one_album` through
-# `import_queue`, i.e. exactly what the Import button runs, so the chain, the
-# claims and the notifications are the same ones and there is no second import
-# pipeline to keep in step.
-#
-# Only those three routes record an intent: the auto-importer's own downloads
-# go through `server.soulseek_auto` and import themselves under their own job,
-# so recording there would import the same album twice.
-#
-# Nothing here decides when a download is done — the pass asks
-# `soulseek.ready_albums`, the ONE readiness rule the Import button itself
-# works from, so an album whose transfers are still running is simply not ready
-# yet and an album a player still holds open is reported by the import exactly
-# as a press would report it.
-_PAGE_LOCK = threading.Lock()
-_PAGE_DOWNLOADS: list = []
-_PAGE_INTENTS_NAME = "page_downloads.json"
-# Where the records above are kept between runs, and whether they have been
-# read back yet. A backend restart (a config save, an update, a crash) between
-# the press and the arrival must not silently drop the "a download queued HERE
-# is mine" knowledge: the transfer keeps arriving, and an album nobody imports
-# is exactly the second press this feature exists to remove.
-_PAGE_STORE = {"path": "", "loaded": False}
-# How long a recorded intent is worth honouring. An intent is only ever matched
-# against the very files it queued (see `_page_download_albums`), so this is a
-# bound on a list that must not grow for ever, not a staleness rule — a
-# download can sit queued behind a peer overnight.
-_PAGE_INTENT_TTL_S = 24 * 3600
-_PAGE_IMPORT_INTERVAL_S = 5.0
-
-
-def _page_store_path(cfg=None):
-    """Where the recorded page downloads live between runs.
-
-    Beside the rest of the app's state — `<music folder>/.mlo/data`, the folder
-    the notification log is kept in (see mlo.paths.app_data_dir) — and not in a
-    store of its own: these are a handful of small records whose only job is to
-    outlive the process."""
-    from mlo.paths import app_data_dir
-    cfg = cfg if isinstance(cfg, dict) else load_config()
-    mf = str((cfg or {}).get("music_folder") or "").strip()
-    return os.path.join(app_data_dir(mf or None), _PAGE_INTENTS_NAME)
-
-
-def _read_page_intents(path):
-    """The intents a previous run wrote to `path` ([] when there are none).
-
-    Every record is validated on the way in: the file is on the disk a user can
-    reach, and a truncated or hand-edited one must not put a malformed record
-    into a background pass (a missing size or filename is dropped, not
-    defaulted)."""
-    try:
-        with open(path, encoding="utf-8") as fh:
-            data = json.load(fh)
-    except (OSError, ValueError):
-        return []
-    out = []
-    for item in (data if isinstance(data, list) else []):
-        if not isinstance(item, dict):
-            continue
-        who = str(item.get("username") or "").strip()
-        rows = [{"filename": str((r or {}).get("filename") or ""),
-                 "size": int((r or {}).get("size") or 0)}
-                for r in (item.get("files") or []) if isinstance(r, dict)]
-        rows = [r for r in rows if r["filename"]]
-        if not who or not rows:
-            continue
-        out.append({"username": who, "files": rows,
-                    "at": float(item.get("at") or 0)})
-    return out
-
-
-def _load_page_intents():
-    """Read the persisted intents back, once per process, on first use.
-
-    Lazily and not at import time: the store lives under the music folder of
-    whatever config is live (see `_page_store_path`), which a test or a scoped
-    install moves before the first press. Expired records are dropped here, so
-    a store left behind by a run that died keeps nothing stale."""
-    if _PAGE_STORE["loaded"]:
-        return
-    _PAGE_STORE["loaded"] = True
-    _PAGE_STORE["path"] = _page_store_path()
-    cutoff = time.time() - _PAGE_INTENT_TTL_S
-    with _PAGE_LOCK:
-        _PAGE_DOWNLOADS[:] = [i for i in _read_page_intents(_PAGE_STORE["path"])
-                              if i["at"] >= cutoff]
-
-
-def _save_page_intents():
-    """Write the live intents out; a failure never loses the download.
-
-    Best effort on purpose: the pass works from memory exactly as before, so a
-    read-only or missing data folder costs the restart survival, not the
-    import."""
-    path = _PAGE_STORE["path"]
-    if not path:
-        return
-    with _PAGE_LOCK:
-        payload = [{"username": i["username"],
-                    "files": [dict(r) for r in i["files"]],
-                    "at": i["at"]} for i in _PAGE_DOWNLOADS]
-    try:
-        from mlo import atomic
-        os.makedirs(os.path.dirname(path), exist_ok=True)
-        atomic.write_bytes(path, json.dumps(payload, ensure_ascii=False)
-                           .encode("utf-8"))
-    except OSError:
-        pass
-
-
-def _remember_page_download(username, files):
-    """Record what the page just queued, so its album imports itself.
-
-    Only the INTENT is kept: which of this peer's files the user asked for.
-    Which folder they became is decided later, from where those files really
-    landed (`_local_download_candidates`/`_index_download_tree`, the mapping
-    the auto-importer itself uses), so nothing here has to know slskd's
-    staging layout. It is written out as well (see `_save_page_intents`), so a
-    restart mid-download does not forget it."""
-    _load_page_intents()
-    rows = [{"filename": str((f or {}).get("filename") or ""),
-             "size": int((f or {}).get("size") or 0)}
-            for f in (files or [])]
-    rows = [r for r in rows if r["filename"]]
-    if not rows or not str(username or "").strip():
-        return
-    with _PAGE_LOCK:
-        _PAGE_DOWNLOADS.append({"username": str(username), "files": rows,
-                                "at": time.time()})
-    _save_page_intents()
-
-
-def _page_intents():
-    """The live intent records, oldest first, with anything expired dropped.
-
-    The records themselves are handed back, not copies: the pass marks the
-    files an import has taken over ON them and prunes what is left empty."""
-    _load_page_intents()
-    cutoff = time.time() - _PAGE_INTENT_TTL_S
-    with _PAGE_LOCK:
-        _PAGE_DOWNLOADS[:] = [i for i in _PAGE_DOWNLOADS if i["at"] >= cutoff]
-        return list(_PAGE_DOWNLOADS)
-
-
-def _page_file_arrived(f, path):
-    """True when the bytes on this disk are the file the intent asked for.
-
-    The intent carries the size the press asked for (slskd's/browse's own), so
-    a local file of a different size is a different file — or this one, still
-    half written — and the album it lies in is a download that has not arrived
-    yet."""
-    want = int(f.get("size") or 0)
-    if not want:
-        return True        # the press had no size to compare against
-    try:
-        return os.path.getsize(path) == want
-    except OSError:
-        return False       # gone/renamed under us: not present yet
-
-
-def _page_intent_files(intent, ddir):
-    """`[(this intent's file, where it is on disk)]` — arrived files only.
-
-    The lookup is the auto-importer's own, in the same two steps: one index of
-    this peer's tree for the leaves this intent queued
-    (`_index_download_tree`), then the candidate locations per file
-    (`_local_download_candidates`). That is what makes a batch-dir download, an
-    older leaf-shaped one and a slskd-sanitised share name all resolve the way
-    the pipeline resolves them, instead of this module growing a second idea of
-    where a transfer lands. A file that is there at another SIZE is skipped
-    (see `_page_file_arrived`), and the next candidate for it is tried."""
-    from server import soulseek_auto
-    leaves = sorted({os.path.basename(str(f["filename"]).replace("\\", "/"))
-                     for f in intent["files"]})
-    index = soulseek_auto._index_download_tree(ddir, intent["username"], leaves)
-    out = []
-    for f in intent["files"]:
-        for p in soulseek_auto._local_download_candidates(
-                ddir, intent["username"], f["filename"], f["size"], index=index):
-            if os.path.isfile(p) and _page_file_arrived(f, p):
-                out.append((f, os.path.abspath(p)))
-                break
-    return out
-
-
-def _page_download_albums(cfg, ddir):
-    """`[(ready folder, [(intent, its files inside it)])]`.
-
-    Only folders that hold a file the user queued from the page are returned:
-    an album somebody else is downloading (a wish's job, a bulk run) is not
-    this pass's business — those import themselves under their own job, and a
-    second import of the same folder is the duplicate this scoping prevents.
-
-    An intent is only ever considered WHOLE: it is the record of what the press
-    asked slskd for, and a folder holding only part of that set is a download
-    still coming (slskd reports each transfer on its own, so the rest can
-    arrive minutes later). Importing it would chain and grade an album from a
-    partial set, and the files that land afterwards would arrive into a folder
-    nothing is watching any more — `_consume_page_intents` has already spent
-    the intent. The whole set at the sizes that were asked for is what makes
-    the album ready, and nothing less."""
-    from server import soulseek, soulseek_auto
-    intents = _page_intents()
-    if not intents:
-        return []
-    try:
-        ready = soulseek.ready_albums(cfg)
-    except Exception:
-        # slskd unreachable or no download dir: nothing can be ready, and the
-        # intents stay for the tick that answers.
-        return []
-    if not ready:
-        return []
-    where = []
-    for intent in intents:
-        files = _page_intent_files(intent, ddir)
-        if len(files) < len(intent["files"]):
-            continue       # part of what was queued is still on its way
-        where.append((intent, files))
-    out = []
-    for root in ready:
-        held = [(intent, [fp for fp in files if soulseek_auto._under(fp[1], root)])
-                for intent, files in where]
-        held = [(intent, files) for intent, files in held if files]
-        if held:
-            out.append((root, held))
-    return out
-
-
-def _consume_page_intents(held):
-    """Take the files an import just took over out of their own intent.
-
-    An intent that queued a whole share loses only the album that just started
-    importing; its other albums stay and import when their own folder is
-    ready."""
-    with _PAGE_LOCK:
-        taken = {id(f) for _intent, files in held for f, _local in files}
-        for intent, _files in held:
-            intent["files"] = [f for f in intent["files"] if id(f) not in taken]
-        _PAGE_DOWNLOADS[:] = [i for i in _PAGE_DOWNLOADS if i["files"]]
-    _save_page_intents()
-
-
-def _drop_page_intents(note=""):
-    """Forget every recorded page download, saying why ONCE.
-
-    Used when the install does not want imports to run by themselves (see
-    `mlo.import_policy.page_download_auto_import`): the album keeps its row in
-    the download folder — "ready to import" — and the press that imports it is
-    the review those settings asked for. Forgetting is written out too: the
-    next run must not pick these records back up."""
-    _load_page_intents()
-    with _PAGE_LOCK:
-        count = len(_PAGE_DOWNLOADS)
-        _PAGE_DOWNLOADS.clear()
-    _save_page_intents()
-    if count and note:
-        print(f"[mlo] {count} download(s) queued from the Soulseek page: {note}")
-
-
-def _page_download_pass():
-    """One pass: import the albums the user's own page downloads finished.
-
-    Returns True when an import was started. One album per pass on purpose —
-    `import_queue` takes each album all the way through before the next one, so
-    the rest are simply taken by the following ticks."""
-    from mlo import import_policy
-    from server import import_queue, soulseek
-
-    if not _page_intents():
-        return False
-    cfg = load_config()
-    if not import_policy.page_download_auto_import(cfg):
-        _drop_page_intents(
-            "left in the download folder for you to import — automatic import "
-            "is off (import_autonomy = review, or manual_import_enabled off)")
-        return False
-    if import_queue.running():
-        return False      # one import at a time: the next tick takes it
-    ddir = soulseek.download_dir(cfg)
-    if not ddir or not os.path.isdir(ddir):
-        return False
-    for root, held in _page_download_albums(cfg, ddir):
-        res = import_queue.start(paths=[root])
-        if not res.get("ok"):
-            # An import run started between the two checks (or the importer is
-            # not wired up yet): the album stays where it is and the next tick
-            # tries again, with its intent intact.
-            continue
-        _consume_page_intents(held)
-        print(f"[mlo] {os.path.basename(root)}: the download queued from the "
-              f"Soulseek page finished — importing it and running its chain")
-        return True
-    return False
-
-
-def _soulseek_page_downloads_watch():
-    """Import the albums the user's own page downloads produced.
-
-    Its own thread, not a step of the transfer watcher: that one pushes the
-    page's live bars and deliberately does nothing while no client is watching
-    (`_live_transfers_check`), while a download somebody asked for has to
-    finish by itself whether or not a page is open. This loop costs nothing
-    while nothing was queued from the page — the first thing a pass does is
-    look at an (almost always empty) list."""
-    while True:
-        try:
-            _page_download_pass()
-        except Exception:
-            traceback.print_exc()
-        time.sleep(_PAGE_IMPORT_INTERVAL_S)
-
-
-@app.post("/api/soulseek/download")
-def soulseek_download(req: SoulseekDownloadRequest):
-    """Queue files from a user for download into the download dir.
-
-    A download queued HERE is imported by itself once it lands (see the
-    page-download section above): the user has already said the album belongs
-    in the library by asking for it, and a second press for the same act was
-    the queue's own "and now import it".
-
-    A file slskd is already fetching for this user is not asked for a second
-    time (see `_active_downloads`): slskd would open a NEW batch for it and
-    download the album over again, and the page's own auto-import would import
-    and chain it a second time. `skipped` says how many of the asked-for files
-    were already on their way."""
-    from server import soulseek
-    if not (soulseek.is_running() or soulseek.web_up()):
-        raise HTTPException(400, "slskd is not running — start it first")
-    files = [{"filename": str((f or {}).get("filename") or ""),
-              "size": int((f or {}).get("size") or 0)}
-             for f in (req.files or [])]
-    files = [f for f in files if f["filename"]]
-    if not req.username or not files:
-        raise HTTPException(400, "username and files required")
-    active = _active_downloads(soulseek, req.username)
-    queue = [f for f in files if f["filename"] not in active]
-    if queue:
-        _queue_downloads(soulseek, req.username, queue)
-        # Only what THIS press queued: a file a live transfer already covers was
-        # not asked for again, and its album is already on its way with the
-        # intent of the press that did queue it.
-        _remember_page_download(req.username, queue)
-    return {"ok": True, "queued": len(queue),
-            "skipped": len(files) - len(queue)}
-
-
-@app.get("/api/soulseek/downloads")
-def soulseek_downloads():
-    """Download transfer tree (per user / directory / file with state).
-
-    503 when slskd is down: an empty list would read as "nothing queued"
-    while the queue is really unreachable."""
-    from server import soulseek
-    if not (soulseek.is_running() or soulseek.web_up(load_config())):
-        raise HTTPException(503, "slskd is not running — start it first")
-    return {"downloads": soulseek.downloads_state()}
-
-
-class SoulseekBulkDownloadRequest(BaseModel):
-    """Queue an arbitrary file list from ONE user (multi-folder / whole-share)."""
-    username: str
-    files: List[dict]  # [{filename, size}]
-
-
-class SoulseekUserDownloadRequest(BaseModel):
-    """Queue every shared file of ONE user (optionally under one folder)."""
-    username: str
-    folder: Optional[str] = None
-
-
-@app.post("/api/soulseek/download-bulk")
-def soulseek_download_bulk(req: SoulseekBulkDownloadRequest):
-    """Queue a list of files from one user in a single POST.
-
-    slskd's enqueue route is per-user, so several folders (or a whole share)
-    are one call — the UI sends what the user selected. Returns
-    {queued, skipped}, and a file slskd is already fetching for this user is
-    skipped rather than queued a second time (see `_active_downloads` — the
-    same rule /api/soulseek/download-user applies)."""
-    from server import soulseek
-    if not (soulseek.is_running() or soulseek.web_up()):
-        raise HTTPException(503, "slskd is not running — start it first")
-    files = [{"filename": str(f.get("filename") or ""), "size": int(f.get("size") or 0)}
-             for f in (req.files or []) if str(f.get("filename") or "").strip()]
-    if not str(req.username or "").strip() or not files:
-        raise HTTPException(400, "username and a non-empty files list are required")
-    active = _active_downloads(soulseek, req.username)
-    queue = [f for f in files if f["filename"] not in active]
-    if queue:
-        _queue_downloads(soulseek, req.username, queue)
-        _remember_page_download(req.username, queue)
-    return {"queued": len(queue), "skipped": len(files) - len(queue)}
-
-
-@app.post("/api/soulseek/download-user")
-def soulseek_download_user(req: SoulseekUserDownloadRequest):
-    """Queue a remote user's whole share, or one folder of it.
-
-    The share tree is browsed first (that is where the file list comes from),
-    then every file is queued in ONE per-user call. Returns
-    {queued, scanned, skipped} — `scanned` is every file the share listed,
-    `skipped` those left out because a transfer for them is already queued
-    or downloading, so pressing the button twice does not double-queue."""
-    from server import soulseek
-    if not (soulseek.is_running() or soulseek.web_up()):
-        raise HTTPException(503, "slskd is not running — start it first")
-    username = str(req.username or "").strip()
-    if not username:
-        raise HTTPException(400, "username is required")
-    try:
-        dirs = soulseek.browse(username, use_cache=False) or []
-    except Exception as e:
-        raise HTTPException(502, f"browse failed: {e}")
-
-    folder = str(req.folder or "").strip().replace("\\", "/").rstrip("/")
-    wanted = []
-    scanned = 0
-    for d in dirs:
-        dpath = str(d.get("directory") or "")
-        if folder and not (dpath.replace("\\", "/").rstrip("/").lower() == folder.lower()
-                           or dpath.replace("\\", "/").rstrip("/").lower().startswith(folder.lower() + "/")):
-            continue
-        for f in d.get("files") or []:
-            name = str(f.get("filename") or "").strip()
-            if not name:
-                continue
-            scanned += 1
-            wanted.append({"filename": name, "size": int(f.get("size") or 0)})
-    if not wanted:
-        raise HTTPException(404, "no files to queue (folder not found in the share?)")
-
-    active = _active_downloads(soulseek, username)
-
-    queue = [f for f in wanted if f["filename"] not in active]
-    if queue:
-        _queue_downloads(soulseek, username, queue)
-        # Only what was really queued: the files skipped because a transfer for
-        # them is already running were not asked for by THIS press, and their
-        # album is already on the way (with its own intent from the press that
-        # did queue them).
-        _remember_page_download(username, queue)
-    return {"queued": len(queue), "scanned": scanned,
-            "skipped": len(wanted) - len(queue)}
-
-
-class SoulseekCancelRequest(BaseModel):
-    """Transfers to drop in slskd, or QUEUE ROWS to cancel (see the route)."""
-    username: str = ""
-    transfer_ids: List[str] = []
-    # Queue-row ids in the shape GET /api/queue publishes: "pipeline:<key>" for
-    # a release still waiting and "job:<id>" for a running one. What the Queue
-    # tab's selection sends; `username`/`transfer_ids` keep working untouched.
-    ids: Optional[List[str]] = None
-
-
-@app.post("/api/soulseek/downloads/cancel")
-def soulseek_downloads_cancel(req: SoulseekCancelRequest):
-    """Drop transfers from slskd's list (per-file or whole-queue cancel), or
-    cancel exactly the queue rows named.
-
-    With `ids` (the Queue tab's selection — `cancel_rows`), the call acts on
-    those rows and NOTHING else: a WAITING release is dropped from the pipeline
-    queue before it ever starts, a RUNNING one is cancelled, and the answer says
-    how many of each went (`cancelled`, `ids`) and which of the given ids were
-    already gone (`missed`). slskd is not consulted at all for these: a release
-    that has not started has no transfers to drop.
-
-    The transfer form is unchanged: `username` + `transfer_ids` drop those
-    transfers in slskd, and 400s when either is missing. The underlying DELETE
-    carries ?remove=true because a cancelled transfer otherwise stays queued and
-    slskd keeps re-requesting the very files the review step just deleted."""
-    from server import soulseek, soulseek_auto
-    ids = [str(i) for i in (req.ids or []) if str(i).strip()]
-    if ids:
-        cancelled, missed = soulseek_auto.cancel_rows(ids)
-        return {"ok": True, "cancelled": len(cancelled),
-                "ids": cancelled, "missed": missed}
-    if not (soulseek.is_running() or soulseek.web_up(load_config())):
-        raise HTTPException(400, "slskd is not running")
-    transfer_ids = [str(t) for t in req.transfer_ids if str(t).strip()]
-    if not req.username or not transfer_ids:
-        raise HTTPException(400, "username and transfer_ids required")
-    try:
-        # best effort per transfer: ids already gone must not fail the call
-        soulseek.cancel_downloads(req.username, transfer_ids)
-    except Exception as e:
-        raise HTTPException(502, f"cancel failed: {e}")
-    return {"ok": True, "cancelled": len(transfer_ids)}
-
-
-class SoulseekClearRequest(BaseModel):
-    scope: Optional[str] = None
-    username: Optional[str] = None
-    states: Optional[List[str]] = None
-
-
-# Scopes the clear route accepts. "failed" lives here rather than in a route
-# of its own because a second "Clear failed" button is a filter over the same
-# transfer list, not a different operation. "queued" is the odd one out and
-# says why in the route: it is not about slskd's transfers at all, it is the
-# pipeline's own waiting queue (what a release does while the running ones hold
-# the slots), so it needs no daemon and drops nothing that has started.
-_CLEAR_SCOPES = ("finished", "failed", "incomplete", "all", "queued")
-
-
-@app.post("/api/soulseek/downloads/clear")
-def soulseek_downloads_clear(req: SoulseekClearRequest):
-    """Clear transfers from slskd's history + their local partial bytes, by
-    scope (see _CLEAR_SCOPES):
-
-    - `finished` (the default) — the terminal transfers that SUCCEEDED. Their
-      bytes stay: a completed download IS the album the app imports.
-    - `failed` — the terminal ones that did not succeed (errored, cancelled,
-      rejected, timed out…), plus the partials they staged.
-    - `incomplete` — everything still in flight: dropped in slskd with
-      `?remove=true` and its staged partial deleted (the queue is the only
-      record of what is still coming, so this is what the UI must confirm).
-    - `all` — finished + failed + incomplete.
-    - `queued` — the pipeline's WAITING RELEASES (the Queue tab's "Clear all"):
-      every release queued behind the ones already running is dropped before it
-      ever starts, and nothing else is touched — a RUNNING release keeps its
-      transfers (that is a cancel, one row at a time), and no settled row, no
-      library album and no slskd transfer is affected. It needs no daemon, so
-      it does not require slskd to be up like the transfer scopes do.
-
-    `username` narrows any scope; `states` still narrows by substring within
-    what the scope selected. A request WITHOUT `scope` keeps the old behaviour
-    exactly — every finished transfer (failures included), no local deletes —
-    and answers with the old {"ok", "cleared"} body.
-
-    Best effort per transfer: one slskd refusal or one undeletable partial is
-    reported in `failed`, never a 500."""
-    from server import soulseek, soulseek_auto
-    legacy = not str(req.scope or "").strip()
-    scope = str(req.scope or "finished").strip().lower()
-    if scope not in _CLEAR_SCOPES:
-        raise HTTPException(400, f"unknown scope {req.scope!r} — expected one of "
-                                 f"{', '.join(_CLEAR_SCOPES)}")
-    if scope == "queued":
-        # Checked BEFORE the daemon check: the waiting queue is this app's own
-        # list, and clearing it must work with slskd down.
-        got = soulseek_auto.clear_queued()
-        return {"ok": True, "cleared": got["cleared"],
-                "ids": [f"pipeline:{k}" for k in got["keys"]]}
-    if not (soulseek.is_running() or soulseek.web_up(load_config())):
-        raise HTTPException(400, "slskd is not running")
-    wanted = [str(s).strip().lower() for s in (req.states or []) if str(s).strip()]
-    try:
-        tree = soulseek.downloads_state()
-    except Exception as e:
-        raise HTTPException(502, f"downloads lookup failed: {e}")
-    ddir = soulseek.download_dir(load_config())
-
-    targets: dict = {}
-    for user in tree or []:
-        who = str(user.get("username") or "")
-        if req.username and who != req.username:
-            continue
-        for d in (user.get("directories") or []):
-            for f in (d.get("files") or []):
-                st = str(f.get("state") or "")
-                done = soulseek.finished_transfer(st)
-                ok = soulseek.successful_transfer(st)
-                if legacy:
-                    sel = done          # old callers: every finished transfer
-                elif scope == "all":
-                    sel = True
-                elif scope == "finished":
-                    sel = done and ok
-                elif scope == "failed":
-                    sel = done and not ok
-                else:                   # incomplete
-                    sel = not done
-                if not sel or not f.get("id"):
-                    continue
-                # `states` narrows INSIDE the finished ones, so a client asking
-                # for "InProgress" clears nothing instead of killing a live
-                # download
-                if wanted and not any(w in st.lower() for w in wanted):
-                    continue
-                targets.setdefault(who, []).append(
-                    (str(f["id"]), str(f.get("filename") or ""),
-                     int(f.get("size") or 0), done and ok))
-
-    cleared = 0
-    files_deleted = 0
-    bytes_freed = 0
-    failed: list = []
-    for who, items in targets.items():
-        refused: list = []
-        try:
-            # one user's failure must not abort the rest (cancel_downloads is a
-            # best-effort loop over one DELETE per transfer)
-            soulseek.cancel_downloads(who, [t[0] for t in items], failed=refused)
-        except Exception as e:
-            failed.append({"username": who, "filename": "",
-                           "reason": f"could not be dropped in slskd: {e}"})
-        cleared += len(items)
-        if legacy:
-            continue                # old callers never had local bytes touched
-        for tid, name, size, complete in items:
-            if tid in refused:
-                failed.append({"username": who, "filename": name,
-                               "reason": "slskd did not confirm the transfer was dropped"})
-            if complete:
-                continue            # a succeeded transfer's bytes are the album
-            res = soulseek.clear_transfer_files(ddir, who, name, size)
-            files_deleted += res["files_deleted"]
-            bytes_freed += res["bytes_freed"]
-            for p in res["problems"]:
-                failed.append({"username": who, "filename": name, "reason": p})
-
-    if legacy:
-        return {"ok": True, "cleared": cleared}
-    return {"cleared": cleared, "files_deleted": files_deleted,
-            "bytes_freed": bytes_freed, "failed": failed}
-
-
-@app.get("/api/soulseek/uploads")
-def soulseek_uploads():
-    """Upload transfer tree — the shared-history view (per user / file).
-
-    503 when slskd is down (an empty list would read as "nothing shared yet")."""
-    from server import soulseek
-    if not (soulseek.is_running() or soulseek.web_up(load_config())):
-        raise HTTPException(503, "slskd is not running — start it first")
-    return {"uploads": soulseek.uploads_state()}
-
-
-def _review_file_info(p, ffprobe=None):
-    """Tech + tags for one completed download file (review panel row)."""
-    from mlo.audio import AudioFile
-    from mlo.paths import LIB_VIDEO_EXTS
-
-    name = os.path.basename(p)
-    ext = os.path.splitext(name)[1].lower()
-    is_video = ext in LIB_VIDEO_EXTS
-    af = AudioFile(p)
-    tags = af.all_tags() if af.audio is not None else {}
-    tech = getattr(af, "tech", None)
-    if not tech and af.audio is not None:
-        tech = tagcache.read_track(p)[1]
-    return {
-        "path": p.replace("\\", "/"),
-        "file": name,
-        "ext": ext.lstrip(".").upper(),
-        "is_video": is_video,
-        "size": os.path.getsize(p),
-        "mtime": os.path.getmtime(p),
-        "tags": {k: v for k, v in (tags or {}).items()
-                 if k in ("TITLE", "ARTIST", "ALBUM", "DISCNUMBER", "TRACKNUMBER", "DATE", "GENRE")},
-        "tech": tech or {},
-    }
-
-
-@app.get("/api/soulseek/review")
-def soulseek_review():
-    """Completed downloads on disk, ready for the review workflow:
-    preview locally, tag them (VOB → tagged MKV), then import."""
-    from mlo.paths import AUDIO_EXTS, LIB_VIDEO_EXTS
-
-    from server import soulseek
-
-    cfg = load_config()
-    ddir = soulseek.download_dir(cfg)
-    out = []
-    if os.path.isdir(ddir):
-        wanted = set(AUDIO_EXTS) | set(LIB_VIDEO_EXTS) | {".log", ".cue", ".jpg", ".jpeg", ".png", ".pdf", ".txt"}
-        for root, dirs, files in os.walk(ddir):
-            dirs[:] = [d for d in dirs if not d.startswith(".")]
-            for f in sorted(files):
-                if os.path.splitext(f)[1].lower() not in wanted:
-                    continue
-                p = os.path.join(root, f)
-                try:
-                    entry = _review_file_info(p)
-                except Exception:
-                    continue
-                entry["user"] = os.path.relpath(root, ddir).split(os.sep)[0]
-                out.append(entry)
-    return {"dir": ddir.replace("\\", "/"), "files": out}
-
-
-@app.get("/api/soulseek/local-file")
-def soulseek_local_file(path: str = Query(...)):
-    """Stream a completed download straight from the download dir for
-    in-app preview (guarded to the download dir — the library stream
-    endpoint only serves the music folder)."""
-    from server import soulseek
-
-    p = os.path.normpath(path)
-    ddir = os.path.abspath(soulseek.download_dir(load_config()))
-    if not _in_music_folder(p, ddir):
-        raise HTTPException(400, "path outside the download dir")
-    if not os.path.isfile(p):
-        raise HTTPException(404, "file not found")
-    ctype = _CTYPES.get(os.path.splitext(p)[1].lower(), "application/octet-stream")
-    return FileResponse(p, media_type=ctype, headers={"Accept-Ranges": "bytes"})
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 
 
 # Containers Chromium can decode in a <video> element. Everything else —
@@ -3979,107 +2531,10 @@ def soulseek_local_file(path: str = Query(...)):
 _NATIVE_VIDEO_EXTS = {".mp4", ".m4v", ".webm", ".mkv", ".mov", ".ogv", ".3gp", ".3g2"}
 
 
-@app.get("/api/soulseek/preview-stream")
-def soulseek_preview_stream(path: str = Query(...), native: int = Query(0)):
-    """Playable preview of a downloaded video. ?native=1 streams the file
-    as-is; the default pipes it through ffmpeg into a fragmented MP4
-    (H.264/AAC, 480p) so browsers can play DVD/Blu-ray rips they cannot
-    decode. Preview only — the stream never touches the file on disk;
-    import/remux always uses the original bytes."""
-    import subprocess
-    from server import soulseek
-    from mlo.tools import detect_all_tools
-
-    p = os.path.normpath(path)
-    ddir = os.path.abspath(soulseek.download_dir(load_config()))
-    if not _in_music_folder(p, ddir):
-        raise HTTPException(400, "path outside the download dir")
-    if not os.path.isfile(p):
-        raise HTTPException(404, "file not found")
-    ext = os.path.splitext(p)[1].lower()
-
-    if native or ext in _NATIVE_VIDEO_EXTS:
-        ctype = _CTYPES.get(ext, "application/octet-stream")
-        return FileResponse(p, media_type=ctype, headers={"Accept-Ranges": "bytes"})
-
-    ffmpeg = (detect_all_tools().get("ffmpeg") or {}).get("ffmpeg_exe")
-    if not ffmpeg:
-        raise HTTPException(503, "ffmpeg not installed — install it under Dependencies for video previews")
-    cmd = [
-        ffmpeg, "-hide_banner", "-loglevel", "error", "-nostdin",
-        "-i", tool_path(p),
-        "-map", "0:v:0", "-map", "0:a:0?",
-        "-c:v", "libx264", "-preset", "veryfast", "-crf", "27",
-        "-vf", "scale=-2:min(480\\,ih)",
-        "-c:a", "aac", "-b:a", "128k", "-ac", "2",
-        "-movflags", "frag_keyframe+empty_moov+default_base_moof",
-        "-f", "mp4", "pipe:1",
-    ]
-    try:
-        # CREATE_NO_WINDOW — same reason as videos_stream above.
-        # stderr DEVNULL: undrained PIPE blocks ffmpeg, hangs stream.
-        proc = subprocess.Popen(
-            cmd, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
-            creationflags=0x08000000 if os.name == "nt" else 0)
-    except Exception as e:
-        raise HTTPException(500, f"ffmpeg failed to start: {e}")
-
-    from starlette.responses import StreamingResponse
-    from mlo.subproc import _kill_tree
-
-    def _gen():
-        try:
-            if proc.stdout is None:
-                return
-            while True:
-                chunk = proc.stdout.read(256 * 1024)
-                if not chunk:
-                    break
-                yield chunk
-        finally:
-            # Runs on client disconnect, read error and normal end alike.
-            # ffmpeg holds the previewed file open for as long as it lives,
-            # and a killed-but-unreaped child keeps that handle — so the
-            # import move that follows a preview hits a sharing violation.
-            # Kill the tree, then WAIT for it to actually die.
-            try:
-                if proc.poll() is None:
-                    _kill_tree(proc)
-                if proc.stdout is not None:
-                    proc.stdout.close()
-            except Exception:
-                pass
-            finally:
-                try:
-                    proc.wait()
-                except Exception:
-                    pass
-
-    return StreamingResponse(_gen(), media_type="video/mp4")
 
 
-class LocalFileDeleteRequest(BaseModel):
-    path: str
 
 
-@app.post("/api/soulseek/local-file/delete")
-def soulseek_local_file_delete(req: LocalFileDeleteRequest):
-    """Discard a previewed download (removes the file, not the library)."""
-    from server import soulseek
-
-    p = os.path.normpath(req.path)
-    ddir = os.path.abspath(soulseek.download_dir(load_config()))
-    if not _in_music_folder(p, ddir):
-        raise HTTPException(400, "path outside the download dir")
-    if os.path.isfile(p):
-        os.remove(p)
-        try:
-            for root, dirs, files in os.walk(ddir, topdown=False):
-                if os.path.abspath(root).startswith(os.path.abspath(ddir)) and not os.listdir(root) and root != ddir:
-                    os.rmdir(root)
-        except OSError:
-            pass
-    return {"ok": True}
 
 
 # DVD / Blu-ray disc-image markers used to classify a downloaded rip.
@@ -4127,6 +2582,7 @@ def _tag_media_for_albums(album_dirs):
     who turned the family off got it back on the next download."""
     from mlo.audio import AudioFile
     from mlo.config import should_write_audio_tag
+    from mlo.paths import DEFAULT_DIGITAL_SOURCE
 
     cfg = load_config()
     tagged = 0
@@ -4149,7 +2605,7 @@ def _tag_media_for_albums(album_dirs):
                     if (media == "Digital Media"
                             and not str(af.get_tag("SOURCE") or "").strip()
                             and should_write_audio_tag(cfg, "SOURCE", filepath=path)):
-                        af.set_tag("SOURCE", "Soulseek")
+                        af.set_tag("SOURCE", DEFAULT_DIGITAL_SOURCE)
                     tagged += 1
                 except Exception:
                     continue
@@ -4159,15 +2615,15 @@ def _tag_media_for_albums(album_dirs):
 def _stamp_import_identity(album_dirs):
     """Canonicalize the MusicBrainz identity of hand-downloaded albums.
 
-    The auto-import path stamps the release it verified; a folder downloaded
-    by hand carries whatever the uploader tagged — often another pressing's
-    IDs, and never RELEASECOUNTRY/RELEASESTATUS/RELEASETYPE (the naming
-    script's $releasecountry reads RELEASECOUNTRY). When such an album names
-    a MusicBrainz release, resolve it and reuse the auto-import stamping.
+    A folder downloaded by hand carries whatever the uploader tagged — often
+    another pressing's IDs, and never RELEASECOUNTRY/RELEASESTATUS/RELEASETYPE
+    (the naming script's $releasecountry reads RELEASECOUNTRY). When such an
+    album names a MusicBrainz release, resolve it and reuse the import
+    pipeline's own stamping (`server.imports._stamp_mb_tags`).
     Best effort: a MusicBrainz outage never fails the import."""
     from mlo.audio import AudioFile
+    from server import imports as imports_svc
     from server import integrations as intg
-    from server import soulseek_auto
 
     stamped = 0
     for d in album_dirs:
@@ -4188,7 +2644,7 @@ def _stamp_import_identity(album_dirs):
             continue
         try:
             release = intg.release_lookup(mbid)
-            stamped += soulseek_auto._stamp_mb_tags(d, release)
+            stamped += imports_svc._stamp_mb_tags(d, release)
         except Exception:
             traceback.print_exc()
     return stamped
@@ -4202,9 +2658,8 @@ def _stamp_import_identity(album_dirs):
 # MusicBrainz identity, record the disc a disc-subfolder release arrived in,
 # organize with the naming script, then run the configured import chain. Every
 # entry point that imports — the classic
-# one-click route, the per-album row, the sequential "import all completed"
-# runner, and a wish whose download has landed — goes through here, so what an
-# album ends up as cannot depend on which button was pressed.
+# one-click route, the per-album row and the bulk queue — goes through here,
+# so what an album ends up as cannot depend on which button was pressed.
 #
 # The album folder is claimed in server.job_locks for the whole of that trip
 # (convert, tag, organize, chain), so nothing else deletes, moves or retags it
@@ -4228,6 +2683,18 @@ def _import_one_album(album, cfg, chain_async=True, progress=None):
            "media_tagged": 0, "identity_stamped": 0, "discs_recorded": 0,
            "organized": False,
            "chain_started": False, "chain": None, "errors": []}
+    try:
+        # An image rip (one whole-CD .flac + its .cue) is split into one file
+        # per track FIRST, so the codec conversion, the media tags, the naming
+        # script and the organizer below all see a real tracklist instead of
+        # one 400 MB file. `imports._finish_album` asks again at the end of
+        # this path; the call is idempotent (there is no image left to split),
+        # which is what lets the funnel and this pre-pass both keep it.
+        from mlo.cue import split_image_rip
+        split_image_rip(album, cfg, log_fn=lambda line: print(f"[mlo] {line}"))
+    except Exception:
+        traceback.print_exc()
+        out["errors"].append("image-rip split failed (the rip was imported whole)")
     try:
         # Everything that is not already in the configured library codec
         # (library_codec, WAV/APE/ALAC/… and — under the "all" policy — lossy
@@ -4312,884 +2779,26 @@ def _import_one_album(album, cfg, chain_async=True, progress=None):
     return out
 
 
-def _folder_size(path):
-    """`(bytes, file count)` below `path` — the readout the Downloads page
-    shows beside an album waiting to be imported."""
-    total = 0
-    files = 0
-    for base, _dirs, names in os.walk(path):
-        for n in names:
-            try:
-                total += os.path.getsize(os.path.join(base, n))
-                files += 1
-            except OSError:
-                continue
-    return total, files
 
 
-def _importable_paths(paths, cfg):
-    """Keep the paths that really are albums inside the music folder.
 
-    A client-supplied path must never aim an import (which moves and renames
-    files) at an arbitrary directory, so every candidate is resolved and
-    checked against the download dir and the library root before use. The
-    returned list also drops anything that is not a directory.
-    """
-    from server import soulseek
-    allowed = [os.path.abspath(p) for p in
-               (soulseek.download_dir(cfg), str(cfg.get("music_folder") or ""))
-               if p]
-    out = []
-    for p in paths or []:
-        if not p:
-            continue
-        ap = os.path.abspath(str(p))
-        if not os.path.isdir(ap):
-            continue
-        if not any(_in_music_folder(ap, root) for root in allowed if os.path.isdir(root)):
-            continue
-        out.append(ap)
-    return out
 
 
-def _ready_download_albums():
-    """The folders ``POST /api/soulseek/import`` is about to touch.
 
-    ``server.soulseek.ready_albums`` is the list ``import_completed()`` itself
-    works from, and each of those albums lands in ``<library>/<its folder
-    name>`` (a " (n)" suffix only when that name is taken), so BOTH ends of the
-    move are claimed before the body runs. The per-album import that follows
-    claims the album again the moment it exists and hands that claim to its
-    background chain. An unreadable download dir claims nothing: the route
-    reports that in its own words.
-    """
-    from server import soulseek
-    cfg = load_config()
-    try:
-        albums = list(soulseek.ready_albums(cfg) or [])
-    except Exception:
-        return []
-    root = library_root(cfg.get("music_folder"))
-    out = list(albums)
-    if root and os.path.isdir(root):
-        for src in albums:
-            name = os.path.basename(str(src).rstrip("\\/"))
-            if name:
-                out.append(os.path.join(root, name))
-    return out
 
 
-@app.post("/api/soulseek/import")
-@job_locks.holds(_ready_download_albums, kind="import", label="Import downloads")
-def soulseek_import():
-    """Move completed downloads from the download dir into the library, one
-    album folder per shared folder, then immediately organize each imported
-    album with the naming script and start its import chain — one click takes
-    a download from slskd to a graded-library-ready album folder.
 
-    Albums whose transfers are still running stay in the download dir and are
-    reported in `skipped`, so the UI can say "still downloading".
 
-    A folder a player (or slskd) still holds open is not fatal: the albums
-    that did move are kept and organized, and the one that could not is
-    reported in `failed` as {"path", "reason"} so the UI can name it and tell
-    the user to stop playback. The per-album chain runs in the background
-    (see `/api/soulseek/import-all` for the "run every album through to the
-    end, one after another" behaviour)."""
-    from server import soulseek
-    try:
-        moved = soulseek.import_completed()
-    except ValueError as e:
-        raise HTTPException(400, str(e))
-    skipped = soulseek.last_import_skipped()
-    failed = soulseek.last_import_failed()
-    cfg = load_config()
-    results = [_import_one_album(a, cfg, chain_async=True) for a in moved]
-    moved = [r["album_root"] for r in results]
-    media_tagged = sum(r["media_tagged"] for r in results)
-    converted = sum(r["converted"] for r in results)
-    identity_stamped = sum(r["identity_stamped"] for r in results)
-    # `organized` must report what actually happened, per album: the UI
-    # branches on it ("organize failed: …"), and a batch where one album
-    # failed to organize is not a successful batch. The error text is handed
-    # back the same way the pre-per-album route handed its own back.
-    organize_errors = [e for r in results for e in r["errors"] if e.startswith("organize failed")]
-    tagcache.invalidate_album(*moved)
-    mbresolve.invalidate()
-    return {"ok": True, "moved": moved, "skipped": skipped,
-            "failed": failed,
-            "organized": all(r["organized"] for r in results) if results else False,
-            "organize_error": "; ".join(organize_errors) or None,
-            "media_tagged": media_tagged, "converted": converted,
-            "identity_stamped": identity_stamped,
-            "tagging_started": bool(moved),
-            "albums": results}
 
 
-@app.get("/api/soulseek/ready")
-def soulseek_ready():
-    """Every album sitting in the download dir that finished downloading and
-    is waiting to be imported, with its size.
 
-    The Downloads page polls this to offer the per-album Import button and
-    the "Import all completed" run; it is the same question
-    `import_completed()` asks (see `soulseek.ready_albums`), so an album
-    listed here is exactly one the import would move."""
-    from server import soulseek
-    cfg = load_config()
-    try:
-        paths = soulseek.ready_albums(cfg)
-    except Exception as e:
-        raise HTTPException(502, f"could not read the download dir: {e}")
-    ddir = soulseek.download_dir(cfg)
-    albums = []
-    for p in paths:
-        size, files = _folder_size(p)
-        try:
-            rel = os.path.relpath(p, ddir) if ddir else p
-        except ValueError:
-            rel = p  # different drive (Windows): a relative path does not exist
-        albums.append({"path": p, "name": os.path.basename(p.rstrip("\\/")) or p,
-                       "rel": rel, "files": files, "bytes": size})
-    return {"ok": True, "albums": albums, "download_dir": ddir}
 
 
-class ImportPathRequest(BaseModel):
-    path: str
 
 
-@app.post("/api/soulseek/import-one")
-def soulseek_import_one(req: ImportPathRequest):
-    """Import ONE album folder, all the way through, in the background.
 
-    The path must sit inside the download dir or the library — see
-    `_importable_paths`; anything else is refused rather than imported."""
-    from server import import_queue
-    cfg = load_config()
-    paths = _importable_paths([req.path], cfg)
-    if not paths:
-        raise HTTPException(400, "that path is not an album inside your music "
-                                 "folder or download folder")
-    res = import_queue.start(paths=paths)
-    if not res.get("ok"):
-        raise HTTPException(409, res.get("error") or "could not start the import")
-    return res
 
 
-@app.post("/api/soulseek/import-all")
-def soulseek_import_all():
-    """Import every album that finished downloading — one at a time.
-
-    Deliberately NOT one batch: each album is taken through the whole
-    pipeline (convert → tag → organize → chain) before the next one starts,
-    so a failure half way through leaves the albums after it untouched and
-    the UI can name exactly which one broke. Progress lives at
-    `/api/soulseek/import-all/status`."""
-    from server import import_queue
-    res = import_queue.start()
-    if not res.get("ok"):
-        raise HTTPException(409, res.get("error") or "could not start the import run")
-    return res
-
-
-@app.get("/api/soulseek/import-all/status")
-def soulseek_import_all_status():
-    from server import import_queue
-    return import_queue.status()
-
-
-@app.post("/api/soulseek/import-all/cancel")
-def soulseek_import_all_cancel():
-    """Stop after the album currently being imported (never mid-album: a
-    half-imported album is worse than a slow one)."""
-    from server import import_queue
-    return {"ok": import_queue.cancel(), "status": import_queue.status()}
-
-
-@app.post("/api/wishes/{wid}/import")
-def wishes_import(wid: int):
-    """Import the download a wish is waiting on.
-
-    A wish can be holding an album that has already landed (the pipeline
-    imported it, `album_path` is set) or one that finished downloading while
-    auto-import was off. Both cases end in the same place — the album goes
-    through `_import_one_album`, exactly like a manual import — and the wish
-    is marked imported with the resulting path when it lands, which is also
-    what raises the "wish found" notification the other clients show.
-
-    Runs in the background (the chain takes minutes); the caller polls
-    `/api/soulseek/import-all/status` or the wish list."""
-    from server import import_queue, wishes
-    wish = wishes.get_wish(wid)
-    if wish is None:
-        raise HTTPException(404, "wish not found")
-    cfg = load_config()
-    candidates = []
-    album_path = str(wish.get("album_path") or "").strip()
-    if album_path and os.path.isdir(album_path):
-        from server import pending_albums
-        # A framework album is not an album to import: the folder "Add to
-        # library" created holds a marker, a placeholder cover and NO audio, so
-        # an import aimed at it would run the chain over nothing and then mark
-        # this wish imported — the empty folder would stand in the library as
-        # the album that wish was waiting for. Nothing has arrived yet, which is
-        # what the 409 below says.
-        if not pending_albums.is_placeholder(album_path):
-            candidates.append(album_path)
-    # Anything in the download dir that names this wish's release: the artist
-    # and the title, in either order, is what a peer's folder is called.
-    from server import soulseek
-    want = {t for t in
-            (str(wish.get("artist") or "").lower().split()
-             + str(wish.get("title") or "").lower().split()) if len(t) > 2}
-    if want:
-        for p in soulseek.ready_albums(cfg):
-            name = os.path.basename(p.rstrip("\\/")).lower()
-            hits = sum(1 for t in want if t in name)
-            if hits >= min(2, len(want)):
-                candidates.append(p)
-    paths = _importable_paths(candidates, cfg)
-    if not paths:
-        raise HTTPException(
-            409,
-            "nothing downloaded for this wish yet — search for it (Search now) "
-            "or import the album from Downloads once it arrives")
-
-    def _landed(results):
-        """Mark the wish imported once its album really is in the library."""
-        ok = [r for r in (results or []) if r.get("ok")]
-        if not ok:
-            return
-        for r in ok:
-            try:
-                wishes.mark_imported(wid, r.get("album_root") or "")
-            except Exception:
-                traceback.print_exc()
-            try:
-                events_mod.emit("wish_found", f"Wish imported: {wish.get('artist') or '?'} — {wish.get('title') or '?'}",
-                                "The album is in your library now.",
-                                {"wish_id": wid, "album_path": r.get("album_root") or ""})
-            except Exception:
-                pass
-            break
-
-    res = import_queue.start(paths=paths, on_done=_landed)
-    if not res.get("ok"):
-        raise HTTPException(409, res.get("error") or "could not start the import")
-    return res
-
-
-# Wired here, after both sides exist: the queue asks these for what to import
-# and for how to import one album, instead of importing server.main (which
-# would be a cycle). Inline chains only — the runner's whole contract is that
-# one album is finished before the next starts.
-from server import import_queue as _import_queue  # noqa: E402
-_import_queue.set_importer(lambda path: _import_one_album(path, load_config(), chain_async=False))
-_import_queue.set_ready_provider(lambda: __import__(
-    "server.soulseek", fromlist=["soulseek"]).ready_albums())
-@app.get("/api/soulseek/user/{username}")
-def soulseek_user(username: str):
-    """Remote user profile info (speed, slots, shared file count)."""
-    from server import soulseek
-    if not soulseek.is_running():
-        raise HTTPException(400, "slskd is not running")
-    try:
-        return soulseek.user_info(username)
-    except Exception as e:
-        raise HTTPException(502, f"user info failed: {e}")
-
-
-# What a browse of this app's OWN account answers with, and why it is read
-# locally: the peer network cannot answer it from inside this network. The
-# Soulseek server hands every client the address it published for the account —
-# this network's own public address — and a router without NAT loopback refuses
-# exactly that dial (the port check's `self-connect` row measures the wall).
-# slskd's own index is the tree a peer is served, so the answer is the same one
-# a browse over the internet would bring back (R297).
-LOCAL_SHARE_NOTE = (
-    "Read from this app's own share — the same folders and files a peer is "
-    "served. Browsing your own account over the peer network needs your router "
-    "to reflect its own public address (NAT loopback); this answer does not."
-)
-
-
-def _browse_rows(dirs):
-    """The browse answer's own shape: {directory, files:[{filename, size}]}."""
-    return [{"directory": str(d.get("directory") or ""),
-             "files": [{"filename": str(f.get("filename") or ""),
-                        "size": int(f.get("size") or 0)}
-                       for f in (d.get("files") or [])]}
-            for d in (dirs or [])]
-
-
-@app.get("/api/soulseek/browse/{username}")
-def soulseek_browse(username: str, refresh: int = Query(0)):
-    """Every shared folder of a remote user — the manual-pick view: what else
-    does this uploader have before queueing individual files?
-
-    Our OWN username is answered from this app's own share (LOCAL_SHARE_NOTE,
-    R297): that browse cannot be served over the peer network from inside this
-    network, so it is read from the index slskd serves and carries
-    `local: true`.
-
-    Otherwise slskd does the browsing over the peer network and we only
-    normalize its payload to {username, directories:[…]}: an offline user
-    (slskd 404) answers 5xx — an upstream failure carrying slskd's own
-    explanation, hence 502. `refresh=1` bypasses the 120 s in-process cache
-    (the modal's Refresh button used to re-issue the same cached answer)."""
-    from server import soulseek
-    if not (soulseek.is_running() or soulseek.web_up(load_config())):
-        raise HTTPException(404, "slskd is not running")
-    cfg = load_config()
-    if soulseek.is_own_username(username, cfg):
-        try:
-            rows = soulseek.local_browse(cfg, use_cache=not refresh)
-        except Exception as e:
-            raise HTTPException(502, f"browse failed: {e}")
-        return {"username": username, "local": True,
-                "note": LOCAL_SHARE_NOTE, "directories": _browse_rows(rows)}
-    try:
-        dirs = soulseek.browse(username, use_cache=not refresh) or []
-    except Exception as e:
-        raise HTTPException(502, f"browse failed: {e}")
-    return {"username": username, "directories": _browse_rows(dirs)}
-
-
-class SoulseekMessageRequest(BaseModel):
-    message: str
-
-
-@app.get("/api/soulseek/messages")
-def soulseek_messages():
-    """Conversations with their unread counts, unread first then alphabetical.
-
-    slskd hands the list back unordered and carries no last-message preview,
-    so this sort is the only ordering the UI gets (a preview line would cost
-    one request per conversation)."""
-    from server import soulseek
-    if not (soulseek.is_running() or soulseek.web_up(load_config())):
-        raise HTTPException(400, "slskd is not running")
-    try:
-        convs = soulseek.conversations() or []
-    except Exception as e:
-        raise HTTPException(502, f"conversation list failed: {e}")
-    out = [{"username": str(c.get("username") or ""),
-            "is_active": bool(c.get("isActive", True)),
-            "unread": int(c.get("unAcknowledgedMessageCount") or 0)}
-           for c in convs]
-    out.sort(key=lambda c: (not c["unread"], c["username"].lower()))
-    return {"ok": True, "unread": sum(c["unread"] for c in out),
-            "conversations": out}
-
-
-@app.get("/api/soulseek/messages/{username}")
-def soulseek_conversation(username: str):
-    """One conversation's messages, oldest first (slskd's own order).
-
-    FastAPI decodes {username} on the way in (Soulseek usernames contain
-    spaces) and the wrapper re-encodes it for slskd. slskd answers 404 for a
-    conversation it does not know — the wrapper maps that to None, which is
-    NOT an upstream failure: an existing conversation with no messages comes
-    back as an empty list."""
-    from server import soulseek
-    if not (soulseek.is_running() or soulseek.web_up(load_config())):
-        raise HTTPException(400, "slskd is not running")
-    try:
-        msgs = soulseek.messages(username)
-    except Exception as e:
-        raise HTTPException(502, f"conversation lookup failed: {e}")
-    if msgs is None:
-        raise HTTPException(404, f"no conversation with {username}")
-    return {"ok": True, "username": username,
-            "messages": [{"id": int(m.get("id") or 0),
-                          "direction": str(m.get("direction") or ""),
-                          "message": str(m.get("message") or ""),
-                          "timestamp": str(m.get("timestamp") or ""),
-                          "acknowledged": bool(m.get("isAcknowledged")),
-                          "replayed": bool(m.get("wasReplayed"))}
-                         for m in msgs]}
-
-
-@app.post("/api/soulseek/messages/{username}")
-def soulseek_send_message(username: str, req: SoulseekMessageRequest):
-    """Send a private message; sending to an unknown user creates the
-    conversation server-side.
-
-    slskd answers 201 when the message went out and 200 when the peer
-    blacklisted/ignored us — both are HTTP successes, so the status is what
-    separates "sent" from "silently dropped" for the UI."""
-    from server import soulseek
-    if not (soulseek.is_running() or soulseek.web_up(load_config())):
-        raise HTTPException(400, "slskd is not running")
-    message = str(req.message or "").strip()
-    if not message:
-        raise HTTPException(400, "empty message")
-    try:
-        status = soulseek.send_message(username, message)
-    except Exception as e:
-        raise HTTPException(502, f"send failed: {e}")
-    return {"ok": True, "sent": int(status) == 201}
-
-
-@app.post("/api/soulseek/messages/{username}/read")
-def soulseek_messages_read(username: str):
-    """Acknowledge every message of a conversation (clears its unread count).
-
-    slskd answers 404 for a conversation it does not know; the wrapper maps
-    that to False and the route reports it as an ordinary `acknowledged:
-    false` — a thread that vanished between two polls is not an upstream
-    failure worth an error toast in the UI."""
-    from server import soulseek
-    if not (soulseek.is_running() or soulseek.web_up(load_config())):
-        raise HTTPException(400, "slskd is not running")
-    try:
-        acked = soulseek.acknowledge_conversation(username)
-    except Exception as e:
-        raise HTTPException(502, f"acknowledge failed: {e}")
-    return {"ok": True, "acknowledged": bool(acked)}
-
-
-@app.delete("/api/soulseek/messages/{username}")
-def soulseek_messages_close(username: str):
-    """Close (hide) a conversation — slskd answers 204, which the wrapper
-    turns into True. An unknown (or already closed) conversation comes back
-    as False and is reported as `closed: false`, not as an error."""
-    from server import soulseek
-    if not (soulseek.is_running() or soulseek.web_up(load_config())):
-        raise HTTPException(400, "slskd is not running")
-    try:
-        closed = soulseek.close_conversation(username)
-    except Exception as e:
-        raise HTTPException(502, f"close failed: {e}")
-    return {"ok": True, "closed": bool(closed)}
-
-
-class SoulseekAutoRequest(BaseModel):
-    release_mbid: Optional[str] = None
-    # Manual overrides: custom query templates for this run, or an exact
-    # user/folder (from a manual search) to download without searching.
-    queries: Optional[List[str]] = None
-    username: Optional[str] = None
-    target_dir: Optional[str] = None
-
-
-# --------------------------------------------------------------------------- #
-# Wishes — save MusicBrainz releases now, auto-fill them from Soulseek later
-# --------------------------------------------------------------------------- #
-class WishAddRequest(BaseModel):
-    release_mbid: str
-    title: Optional[str] = None
-    artist: Optional[str] = None
-    year: Optional[str] = None
-    note: Optional[str] = None
-    target_dir: Optional[str] = None
-    queries: Optional[List[str]] = None
-
-
-class WishUpdateRequest(BaseModel):
-    note: Optional[str] = None
-    target_dir: Optional[str] = None
-    status: Optional[str] = None
-    queries: Optional[List[str]] = None
-
-
-@app.get("/api/wishes")
-def wishes_list():
-    """Saved releases + the background worker's status and recent log."""
-    from server import wishes, wishes_worker
-    return {"wishes": wishes.list_wishes(), "worker": wishes_worker.status(),
-            "log": wishes.read_log(60)}
-
-
-@app.post("/api/wishes")
-def wishes_add(req: WishAddRequest):
-    """Save a MusicBrainz release to the wishlist without downloading it.
-    Missing display fields are filled from MusicBrainz."""
-    from server import wishes
-    title, artist, year = req.title, req.artist, req.year
-    if not title:
-        try:
-            from server import integrations as intg
-            rel = intg.release_lookup(req.release_mbid)
-            title = rel.get("title")
-            artist = artist or ((rel.get("artists") or [{}])[0].get("name"))
-            year = year or str(rel.get("date") or "")[:4]
-        except Exception:
-            pass
-    w = wishes.add_wish(req.release_mbid, title=title or "", artist=artist or "",
-                        year=year or "", note=req.note or "",
-                        target_dir=req.target_dir or "", queries=req.queries)
-    return {"ok": True, "wish": w}
-
-
-@app.patch("/api/wishes/{wid}")
-def wishes_update(wid: int, req: WishUpdateRequest):
-    from server import wishes
-    w = wishes.update_wish(wid, req.model_dump(exclude_unset=True))
-    if w is None:
-        raise HTTPException(404, "wish not found")
-    return {"ok": True, "wish": w}
-
-
-@app.delete("/api/wishes/{wid}")
-def wishes_delete(wid: int):
-    """Drop a wish. A FRAMEWORK album is that wish's own folder (it was created
-    for it, before the download existed), so it goes with it — a placeholder
-    the user no longer wants is not a library album. A folder whose audio has
-    already arrived is a real album and stays."""
-    from server import pending_albums, wishes
-    pending_albums.remove_for_wish(wid)
-    return {"ok": wishes.delete_wish(wid)}
-
-
-@app.post("/api/wishes/{wid}/search")
-def wishes_search(wid: int):
-    """Search Soulseek for one wish right now."""
-    from server import wishes, wishes_worker
-    if wishes.get_wish(wid) is None:
-        raise HTTPException(404, "wish not found")
-    return wishes_worker.trigger(wid)
-
-
-@app.post("/api/wishes/search-all")
-def wishes_search_all():
-    """Run a full wishes cycle now (every due wish, newest attempted first)."""
-    from server import wishes_worker
-    return wishes_worker.trigger()
-
-
-@app.post("/api/wishes/reconcile")
-def wishes_reconcile():
-    """Flip wishes already present in the library (manual download) to
-    imported. Returns how many were resolved."""
-    from server import wishes
-    n = wishes.reconcile_with_library()
-    return {"ok": True, "resolved": n}
-
-
-class SoulseekTestLogRequest(BaseModel):
-    username: str
-    files: List[dict]  # [{filename, size}] — the .log entries of one folder
-
-
-@app.get("/api/soulseek/auto")
-def soulseek_auto_status():
-    """Current auto-import job state (poll this from the Soulseek page)."""
-    from server import soulseek_auto
-    return soulseek_auto.job_state()
-
-
-@app.post("/api/soulseek/auto/cancel")
-def soulseek_auto_cancel():
-    from server import soulseek_auto
-    return {"ok": soulseek_auto.cancel()}
-
-
-class SoulseekAutoConfirmRequest(BaseModel):
-    accept: bool
-
-
-@app.post("/api/soulseek/auto/confirm")
-def soulseek_auto_confirm(req: SoulseekAutoConfirmRequest):
-    """Answer the running auto-import's pending prompt.
-
-    A job parks in state `confirm` rather than deciding for the user: it found
-    only lossy copies, or it found no usable folder at all and the release
-    could be handed to the wishes list instead. Both questions are answered
-    here because the job waits on one event either way — which question was
-    asked is `job_state()["confirm"]["reason"]`. This releases the job:
-    accept=true takes the lossy copy (or adds the wish),
-    accept=false ends the job without doing either."""
-    from server import soulseek_auto
-    ok = soulseek_auto.confirm(req.accept)
-    if not ok:
-        raise HTTPException(409, "no confirmation is pending")
-    if req.accept:
-        # Answering "yes" RESUMES the job on the lossy copy it found: that is
-        # new work starting, so the queue's finished rows come off the list
-        # (the same clear the per-section buttons run). A "no" ends the job and
-        # clears nothing.
-        _clear_settled_in_background()
-    return {"ok": True, "accepted": bool(req.accept)}
-
-
-def _resolve_release(mbid):
-    """(release, release_id) for a release OR release-group MBID/URL.
-
-    One resolution path for every caller in this file: the edition is picked
-    by the release-choice policy in `mlo.release_choice` (Official above
-    promotional/bootleg, the configured medium order with physical before
-    digital — the video carriers DVD, Blu-ray, VHS, Video CD and LaserDisc
-    named ahead of Digital Media, so a music video on a disc beats the same
-    video published as a download — the most complete tracklist, then the
-    earliest date; the preferred country and the original-over-reissue rule
-    break ties), and its
-    reasons are reported next to the pick by `/api/mb/release-choice`. Raises
-    502 when MusicBrainz cannot resolve the id at all."""
-    try:
-        return intg.resolve_release(mbid)
-    except Exception as e:
-        raise HTTPException(502, f"MusicBrainz release lookup failed: {e}")
-
-
-@app.post("/api/soulseek/auto")
-def soulseek_auto_start(req: SoulseekAutoRequest):
-    """Find → verify → download → audit → import a specific MusicBrainz
-    release from Soulseek (see server/soulseek_auto.py for the pipeline).
-
-    Accepts a release OR release-group MBID (a group resolves to its best
-    edition by the release-choice policy).
-
-    With `soulseek_search_concurrency` releases already running this does NOT
-    fail with a 409: the release takes its place in the pipeline's waiting
-    queue and the answer says so ({"ok": true, "waiting": true, "position": n,
-    "queue_key": …}, no `job`) — it starts by itself when one of the running
-    releases finishes, and the Queue tab lists it in its Waiting group until
-    then (or until it is cancelled there)."""
-    from server import soulseek_auto
-    if not req.release_mbid and not (req.username and req.target_dir):
-        raise HTTPException(400, "release_mbid or username+target_dir required")
-    release = None
-    release_mbid = req.release_mbid
-    if release_mbid:
-        release, release_mbid = _resolve_release(release_mbid)
-        if not release_mbid:
-            raise HTTPException(
-                502, "MusicBrainz release not found, or it has no edition "
-                     "eligible for auto-import (promotional/bootleg editions "
-                     "are skipped while auto_import_avoid_promo is on, and "
-                     "editions without a release country while "
-                     "auto_import_require_country is on)")
-    r = soulseek_auto.start_job(release_mbid=release_mbid, release=release,
-                                queries=req.queries, username=req.username,
-                                target_dir=req.target_dir,
-                                # the user asked for this release by hand: a
-                                # lossy-only match is offered, never silent
-                                confirm_lossy=True)
-    if not r.get("ok"):
-        raise HTTPException(409, r.get("error", "job refused"))
-    return r
-
-
-class MBAutoImportRequest(BaseModel):
-    """Bulk auto-import: a release, a release group, or a whole artist.
-
-    kind "auto" detects the entity from the ID; mode "best" queues one release
-    per release group (the edition chosen by the auto-import policy), "all"
-    queues every edition of a release group."""
-    mbid: str
-    kind: Optional[str] = None   # auto | release | release_group | artist
-    mode: Optional[str] = None   # best | all
-
-
-# How long the auto-import route may spend resolving an ID inline before it
-# queues the item unresolved and lets the JOB do the lookup. MusicBrainz is
-# throttled to 1 req/s, so a quick answer is a bonus — never a reason to hold
-# the request open (a 503ing MusicBrainz used to sit here for minutes with the
-# page's Auto-import button disabled, i.e. "nothing happens").
-_MB_QUICK_RESOLVE_S = 3.0
-
-
-def _quick(fn, seconds):
-    """`fn()`'s result, or None when it did not answer within `seconds`.
-
-    Runs on a daemon thread so a resolver stuck on a MusicBrainz outage cannot
-    hold the request; the abandoned thread finishes on its own and only ever
-    writes its own box (a late answer is simply not used)."""
-    box = {}
-    t = threading.Thread(target=lambda: box.setdefault("v", fn()), daemon=True)
-    t.start()
-    t.join(seconds)
-    return box.get("v")
-
-
-@app.post("/api/mb/auto-import")
-def mb_auto_import(req: MBAutoImportRequest):
-    """Queue Soulseek auto-import jobs for a release, a release group, or an
-    artist's whole discography (one job at a time; the rest wait in the
-    pipeline's queue). Groups already in the library are skipped.
-
-    mode "all" only widens a RELEASE GROUP (every edition instead of the best
-    one); for an artist it stays one release per release group, because
-    downloading every pressing of a discography is never what "download the
-    artist" means.
-
-    The request resolves WHICH releases to queue in at most
-    `_MB_QUICK_RESOLVE_S` seconds: an ID that does not resolve inside that
-    budget is queued anyway (status "queued (resolving)") and the job looks it
-    up — the button must come back whatever MusicBrainz is doing."""
-    from server import soulseek_auto
-
-    mbid = intg._mbid(req.mbid)
-    if not mbid:
-        raise HTTPException(400, "a MusicBrainz ID or URL is required")
-    mode = (req.mode or "best").strip().lower()
-    if mode not in ("best", "all"):
-        raise HTTPException(400, "mode must be 'best' or 'all'")
-    kind = (req.kind or "auto").strip().lower()
-    if kind not in ("auto", "release", "release_group", "artist"):
-        raise HTTPException(400, "kind must be release, release_group or artist")
-
-    # kind "auto" needs a lookup of its own; the job does it when this does
-    # not answer in time, so an unresolved kind is queued, never dropped.
-    resolved = _quick(lambda: intg.auto_import_targets(mbid, kind, mode),
-                      _MB_QUICK_RESOLVE_S)
-    deferred = resolved is None
-    targets, skipped = ([{"mbid": mbid, "title": ""}], []) if deferred else resolved
-
-    items = []
-    for t in targets:
-        # kind/mode ride along ONLY for a deferred item: the ones the quick
-        # pass resolved are concrete releases, and the job must not resolve
-        # them a second time (a release id is not a release group).
-        depth = soulseek_auto.enqueue(release_mbid=t["mbid"],
-                                      kind=kind if deferred else None,
-                                      mode=mode if deferred else None)
-        items.append({
-            "mbid": t["mbid"], "title": t.get("title") or "",
-            "status": ("queued (resolving)" if deferred
-                       else "queued" if depth else "running"),
-        })
-    return {"queued": len(items), "items": items, "skipped": skipped}
-
-
-@app.post("/api/soulseek/test-log")
-def soulseek_test_log(req: SoulseekTestLogRequest):
-    """Download ONLY a folder's .log file(s), grade them with Logchecker,
-    then clean up — a quality preview before committing to the album.
-
-    Returns {logs: [{file, score, checksum, detail}], ok} where ok means
-    every log reached the configured grade_log_score_threshold (100)."""
-    from server import soulseek
-    from mlo.discs import score_disc_log
-
-    if not (soulseek.is_running() or soulseek.web_up()):
-        raise HTTPException(400, "slskd is not running — start it first")
-    logs = [f for f in req.files
-            if str(f.get("filename") or "").lower().endswith(".log")]
-    if not logs:
-        raise HTTPException(400, "this folder has no .log files")
-
-    cfg = load_config()
-    ddir = soulseek.download_dir(cfg)
-    # req.username is unvalidated client input used as a path segment; without
-    # this check a username of "../.." aims the empty-folder cleanup below at
-    # directories anywhere up the tree.
-    user = str(req.username or "").strip()
-    if (not user or user != req.username or user != os.path.basename(user)
-            or user in (".", "..")):
-        raise HTTPException(400, "invalid username")
-    upath = os.path.join(ddir, user)
-    if not _in_music_folder(upath, ddir):
-        raise HTTPException(400, "username escapes the download dir")
-    _queue_downloads(soulseek, req.username,
-                     [{"filename": f["filename"], "size": f.get("size") or 0}
-                      for f in logs])
-    from server.soulseek_auto import _wait_for_files, _remote_rel
-    got = _wait_for_files(soulseek, ddir, req.username, logs, timeout_s=180)
-
-    threshold = int(cfg.get("grade_log_score_threshold", 100) or 100)
-    out = []
-    for f in logs:
-        local = got.get(f["filename"])
-        if not local:
-            out.append({"file": os.path.basename(f["filename"]), "score": None,
-                        "checksum": None, "detail": "download timed out"})
-            continue
-        score = score_disc_log(local)
-        from mlo.discs import check_log_checksum
-        state, detail = check_log_checksum(local)
-        out.append({"file": os.path.basename(f["filename"]), "score": score,
-                    "checksum": state, "detail": detail})
-        try:
-            os.remove(local)
-        except OSError:
-            pass
-    # drop now-empty user folders left by the log test
-    try:
-        for root, dirs, files in os.walk(upath, topdown=False):
-            if not os.listdir(root):
-                os.rmdir(root)
-    except OSError:
-        pass
-    # An UNGRADED log (download or grade timed out) is not a pass: the verdict
-    # is about every log in the folder reaching the threshold, and the auto
-    # importer already treats an unscorable log as a failure.
-    ok = bool(out) and all(
-        e["score"] is not None and (e["score"] or 0) >= threshold for e in out
-    )
-    return {"ok": ok, "threshold": threshold, "logs": out}
-
-
-@app.post("/api/soulseek/shares/refresh")
-def soulseek_shares_refresh():
-    """Restart slskd so the share index picks up added/removed/moved files."""
-    from server import soulseek
-    if not (soulseek.is_running() or soulseek.web_up(load_config())):
-        return {"ok": False, "message": "slskd is not running"}
-    ok = soulseek.restart()
-    return {"ok": ok, "message": "share index refreshed" if ok else "restart failed"}
-
-
-class SoulseekLoginRequest(BaseModel):
-    username: str
-    password: str
-
-
-@app.post("/api/soulseek/login")
-def soulseek_login(req: SoulseekLoginRequest):
-    """Save Soulseek credentials, restart slskd with them, and wait for the
-    network login. The Soulseek server registers brand-new usernames on
-    first login, so the same call covers signing in AND creating an
-    account; failure means the credentials were rejected (wrong password
-    for an existing account)."""
-    from server import soulseek
-
-    cfg = load_config()
-    _ours, _who, conflict = soulseek.instance_owner(cfg)
-    if conflict:
-        return {"ok": False, "logged_in": False,
-                "message": f"{conflict} — only one slskd can run at a time, so "
-                           f"stop the other app's slskd first"}
-    username = req.username.strip()
-    if not username or not req.password:
-        raise HTTPException(400, "username and password are required")
-    same = (username == str(cfg.get("soulseek_username") or "").strip()
-            and req.password == str(cfg.get("soulseek_password") or ""))
-    if not same:
-        cfg["soulseek_username"] = username
-        cfg["soulseek_password"] = req.password
-        save_config(cfg)
-
-    # When the submitted credentials MATCH the saved ones and slskd is
-    # already up, do NOT restart: restarting aborts slskd's own reconnect
-    # attempts and resets the Soulseek server's cooldown — which is what
-    # made stop → start → login loops stop working. Just wait for login.
-    if not same or not (soulseek.is_running() or soulseek.web_up(cfg)):
-        soulseek.restart()
-    deadline = time.time() + 40.0
-    logged_in = False
-    while time.time() < deadline:
-        try:
-            state = soulseek.server_state() or {}
-        except Exception:
-            state = {}
-        logged_in = bool(state.get("isLoggedIn"))
-        if logged_in:
-            break
-        time.sleep(1.0)
-    if logged_in:
-        _refresh_slskd_shares_soon()
-        return {"ok": True, "logged_in": True,
-                "message": f"Logged in to Soulseek as {username}"}
-    # the daemon's verdict beats any guess this endpoint could make
-    detail = soulseek.login_error()
-    return {"ok": False, "logged_in": False,
-            "message": detail or (
-                "The Soulseek server did not accept these credentials "
-                "— if this username already exists, the password may "
-                "be wrong; otherwise try again in a minute (new "
-                "accounts can take a moment to register)")}
 
 
 @app.get("/api/track/download")
@@ -5312,7 +2921,7 @@ def _write_album_genres(files, names, per_track=None, limit=None):
     from mlo.autotag import genre_apply, genre_plan
     from mlo.genres import DEFAULT_GENRE_COUNT
     from mlo.stats import worker_count
-    from server import soulseek_auto
+    from server import imports as imports_svc
 
     per_track = per_track or {}
     count = limit or DEFAULT_GENRE_COUNT
@@ -5323,7 +2932,7 @@ def _write_album_genres(files, names, per_track=None, limit=None):
             af = AudioFile(p)
             if af.audio is None:
                 return (0, 0, 0)
-            wanted = list(per_track.get(soulseek_auto._parse_trackno(p)) or [])
+            wanted = list(per_track.get(imports_svc._parse_trackno(p)) or [])
             if wanted or names:
                 # The chain answered: its list REPLACES the file's own.
                 want, changed = genre_plan(af, wanted + list(names or []), count)
@@ -5382,8 +2991,8 @@ class GenreChainImportRequest(BaseModel):
 def _run_genre_chain(paths, limit=None, progress=None, sources=None, staged=False):
     """Import GENRE from EVERY configured genre source, per track.
 
-    The chain runs in the order of `genre_sources` (RateYourMusic → Soulseek
-    signals → Discogs/Last.fm/TheAudioDB → Deezer/iTunes → MusicBrainz), merges
+    The chain runs in the order of `genre_sources` (RateYourMusic →
+    Discogs/Last.fm/TheAudioDB → Deezer/iTunes → MusicBrainz), merges
     what each source answers, dedupes case-insensitively and caps them at
     `mb_genre_count` — the requested `limit` (the wizard's per-run "Max
     genres") may only LOWER it, through the one helper that reads the setting
@@ -5394,8 +3003,8 @@ def _run_genre_chain(paths, limit=None, progress=None, sources=None, staged=Fals
     specific genre plus its derived family is the whole answer, and the sources
     below the one that supplied it are not asked at all (`asked`,
     `stopped_after`). A source that cannot answer is skipped before any request
-    — unconfigured (Discogs/Last.fm/Spotify), known-blocked (RateYourMusic), or
-    a documented no-op (Soulseek) — and named in `skipped`. MusicBrainz
+    — unconfigured (Discogs/Last.fm/Spotify), known-blocked (RateYourMusic) —
+    and named in `skipped`. MusicBrainz
     recording genres refine each track when the album names a release.
 
     The report is what the wizard and the Settings panel render: `per_source`
@@ -5937,7 +3546,7 @@ def organize(req: OrganizeRequest):
             rel += os.path.splitext(t["path"])[1].lower()
             # The library itself is <music folder>/Artists (contract A): the
             # script only names the path INSIDE it, so every album lands under
-            # Artists/ and the music-folder root stays the Soulseek share root.
+            # Artists/ and the music-folder root is left as it is.
             dst = os.path.normpath(os.path.join(library_root(folder), rel))
             if not _in_music_folder(dst, folder):
                 errors.append(f"{t['file']}: destination outside music folder")
@@ -6213,8 +3822,6 @@ def organize(req: OrganizeRequest):
     if touched:
         tagcache.invalidate_album(*touched)
     mbresolve.invalidate()
-    if any(r.get("moved") for r in results):
-        _refresh_slskd_shares_soon()
     return {"results": results}
 
 
@@ -6930,7 +4537,7 @@ def import_expected(req: ImportExpected):
 
 
 # --------------------------------------------------------------------------- #
-# .mlo/downloads — slskd's staging area
+# .mlo/downloads — the download staging area
 # --------------------------------------------------------------------------- #
 def _downloads_dir(folder):
     """<music>/.mlo/downloads, or None when no music folder is set."""
@@ -6983,7 +4590,7 @@ def _downloads_entry(root, name):
     """One downloads entry: size, file counts and whether it is an album.
 
     `album` is what the page keys the Import button off — a folder holding
-    audio. `partial` marks slskd's own in-flight leftovers, which must never
+    audio. `partial` marks an in-flight transfer's leftovers, which must never
     look like something safe to import or delete by accident."""
     from mlo.paths import LIB_AUDIO_EXTS, LIB_VIDEO_EXTS, IMAGE_EXTS
     p = os.path.join(root, name)
@@ -7016,7 +4623,7 @@ def _staging_listing(path):
     entries, each in `_downloads_entry`'s shape minus its private `_mtime`.
 
     A missing or unreadable folder is reported as empty and never as an
-    error: slskd creates both roots on its own schedule, so the page polls
+    error: a transfer creates the roots on its own schedule, so the page polls
     this and must not see a failure just because nothing is staged yet."""
     out = {"folder": (os.path.abspath(path) if path else "").replace("\\", "/"),
            "exists": False, "count": 0, "bytes": 0, "entries": []}
@@ -7040,10 +4647,10 @@ def _staging_listing(path):
 def downloads_list():
     """Contents of <music_folder>/.mlo/downloads, newest first.
 
-    This is slskd's staging area: everything it pulls down lands here and
-    stays until it is imported into the library or deleted. Enough is reported
-    per entry (size, file counts, whether it holds audio) for the page to
-    offer Import only where it is meaningful."""
+    This is the download staging area: everything a download pulls down lands
+    here and stays until it is imported into the library or deleted. Enough is
+    reported per entry (size, file counts, whether it holds audio) for the page
+    to offer Import only where it is meaningful."""
     folder = load_config().get("music_folder") or ""
     out = _staging_listing(_downloads_dir(folder))
     out["music_folder"] = folder.replace("\\", "/")
@@ -7087,7 +4694,6 @@ def downloads_delete(req: DownloadsDelete = DownloadsDelete()):
             deleted.append(name)
     if deleted:
         tagcache.invalidate_album(ddir)
-        _refresh_slskd_shares_soon()
     return {"deleted": deleted, "failed": failed, "freed": freed}
 
 
@@ -7135,137 +4741,7 @@ def downloads_import(req: DownloadsImport = DownloadsImport()):
     if moved:
         tagcache.invalidate_album(ddir, *[m["path"] for m in moved])
         mbresolve.invalidate()
-        _refresh_slskd_shares_soon()
     return {"moved": moved, "failed": failed}
-
-
-# --------------------------------------------------------------------------- #
-# /api/soulseek/staging — both of slskd's staging folders, by NAME
-# --------------------------------------------------------------------------- #
-# slskd writes finished files to the download dir and partials to its sibling
-# `incomplete` dir (see soulseek._incomplete_dir). The app manages both from
-# the Soulseek page, but the client only ever names a root — the path is
-# resolved here from the config, so no request can aim a delete elsewhere.
-def _staging_root(cfg, root):
-    """The configured path of the staging root NAMED `root`, else None.
-
-    Both come from soulseek.download_dir / _incomplete_dir, NOT from
-    _downloads_dir(music_folder): slskd is configured with the former pair, so
-    a custom `soulseek_download_dir` (and the `incomplete` sibling derived from
-    it) is where the bytes actually are — the music-folder-derived path would
-    show the page a folder slskd never writes to, or miss one it does."""
-    from server import soulseek
-    if root == "downloads":
-        return soulseek.download_dir(cfg)
-    if root == "incomplete":
-        return soulseek._incomplete_dir(cfg)
-    return None
-
-
-def _staging_remove(root, name):
-    """Delete one entry under *root*. Returns (error, bytes freed).
-
-    Size is measured BEFORE the bytes go, since after rmtree they are gone.
-    A symlink is unlinked, never followed: the name guard only cleared the
-    link's own segment, so following it would delete a target that may live
-    outside the root entirely."""
-    import shutil
-    p = os.path.join(root, name)
-    try:
-        if os.path.islink(p):
-            os.remove(p)
-            return None, 0
-        if os.path.isdir(p):
-            # _dir_stats reports an unreadable part as 0 rather than raising,
-            # so a locked subfolder cannot turn the count into a failure.
-            size = _dir_stats(p)[1]
-            shutil.rmtree(p)
-        else:
-            size = os.path.getsize(p)
-            os.remove(p)
-        return None, size
-    except OSError as e:
-        return (str(e) or "delete failed"), 0
-
-
-@app.get("/api/soulseek/staging")
-def soulseek_staging():
-    """Both slskd staging folders: `downloads` (finished, waiting to be
-    imported) and `incomplete` (in-flight partials).
-
-    Each root is reported on its own — a missing one is `exists: false` with
-    empty totals, never an error, because slskd creates them on its own
-    schedule and the page polls this."""
-    cfg = load_config()
-    from server import soulseek
-    return {"downloads": _staging_listing(soulseek.download_dir(cfg)),
-            "incomplete": _staging_listing(soulseek._incomplete_dir(cfg))}
-
-
-@app.post("/api/soulseek/staging/delete")
-def soulseek_staging_delete(req: StagingRequest):
-    """Delete ONE entry (file or folder tree) from a named staging root.
-
-    Unlike POST /api/downloads/delete this is a single all-or-nothing action:
-    the page deletes what the user picked, so the outcome is either "gone"
-    (with the bytes it freed) or a status the UI can explain."""
-    cfg = load_config()
-    path = _staging_root(cfg, (req.root or "").strip().lower())
-    if path is None:
-        raise HTTPException(400, "unknown staging root")
-    if not os.path.isdir(path):
-        raise HTTPException(404, "staging folder not found")
-    root = os.path.realpath(path)
-    # Same guard the downloads routes use: basename-only, and anything whose
-    # realpath leaves the root (traversal, absolute path, symlink) is refused.
-    err = _downloads_name_error(req.name, root)
-    if err:
-        raise HTTPException(400, err)
-    if not os.path.lexists(os.path.join(root, req.name)):
-        raise HTTPException(404, "entry not found in staging")
-    err, freed = _staging_remove(root, req.name)
-    if err:
-        raise HTTPException(502, err)
-    tagcache.invalidate_album(root)
-    _refresh_slskd_shares_soon()
-    return {"ok": True, "freed": freed}
-
-
-@app.post("/api/soulseek/staging/clear")
-def soulseek_staging_clear(req: StagingRequest):
-    """Empty a named staging root: every entry in it, nothing else.
-
-    One entry that will not delete (a file slskd still holds open is expected
-    while a transfer is running) is reported in `failed` and the rest are
-    still removed. The root itself is never removed — slskd validates it at
-    boot and would refuse to start without it."""
-    cfg = load_config()
-    path = _staging_root(cfg, (req.root or "").strip().lower())
-    if path is None:
-        raise HTTPException(400, "unknown staging root")
-    if not os.path.isdir(path):
-        raise HTTPException(404, "staging folder not found")
-    root = os.path.realpath(path)
-    try:
-        names = os.listdir(root)
-    except OSError as e:
-        raise HTTPException(502, str(e) or "could not read the staging folder")
-    cleared, freed, failed = 0, 0, []
-    for name in names:
-        err = _downloads_name_error(name, root)
-        if err is None and not os.path.lexists(os.path.join(root, name)):
-            err = "not found in staging"
-        if err is None:
-            err, size = _staging_remove(root, name)
-            if err is None:
-                cleared += 1
-                freed += size
-        if err:
-            failed.append({"name": name, "reason": err})
-    if cleared:
-        tagcache.invalidate_album(root)
-        _refresh_slskd_shares_soon()
-    return {"ok": True, "cleared": cleared, "freed": freed, "failed": failed}
 
 
 # --------------------------------------------------------------------------- #
@@ -7373,7 +4849,6 @@ def library_layout_remove_empty_artist(req: AlbumRemove, request: Request = None
             f"file inside it is still in use (stop playback and retry)")
     tagcache.invalidate_album(p)
     mbresolve.invalidate()
-    _refresh_slskd_shares_soon()
     return {"ok": True, "trash": dest.replace("\\", "/")}
 
 
@@ -7421,7 +4896,6 @@ def library_layout_apply(request: Request = None):
     # The library moved under both caches, exactly as a removal does.
     tagcache.invalidate_all()
     mbresolve.invalidate()
-    _refresh_slskd_shares_soon()
     return report
 
 
@@ -7440,7 +4914,7 @@ if WEB_DIST.is_dir():
             raise HTTPException(404)
         # full_path is attacker-controlled: a ".." segment would otherwise read
         # any file on disk (e.g. /../../server/tagcache.py, or the config file
-        # holding the Soulseek credentials).
+        # holding saved credentials).
         if ".." in full_path.replace("\\", "/").split("/"):
             raise HTTPException(404)
         file = WEB_DIST / full_path

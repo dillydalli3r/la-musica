@@ -26,9 +26,9 @@ ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, ROOT)
 
 # --------------------------------------------------------------------------- #
-# hermeticity: the app's playlists/wishes databases resolve their path
-# through app_data_dir() — i.e. the live install — the moment they are first
-# touched. The scope is redirected to a temp folder BEFORE server.main is
+# hermeticity: the app's database paths resolve through app_data_dir() —
+# i.e. the live install — the moment they are first touched. The scope is
+# redirected to a temp folder BEFORE server.main is
 # imported, so no state file is ever created (or migrated) in the developer's
 # real music folder or its .mlo/data.
 # --------------------------------------------------------------------------- #
@@ -78,12 +78,6 @@ def _patch_config(fn):
     """
     mlo_main.load_config = fn
     trash_api.load_config = fn
-
-
-def _patch_refresh(fn):
-    """The same for the slskd share hook the trash routes call."""
-    mlo_main._refresh_slskd_shares_soon = fn
-    trash_api._refresh_slskd_shares_soon = fn
 
 
 # --------------------------------------------------------------------------- #
@@ -361,7 +355,6 @@ def test_delete_invalidates_caches():
     calls = []
     mlo_main.tagcache.invalidate_album = lambda *folders: calls.append(("tags", folders))
     mlo_main.mbresolve.invalidate = lambda: calls.append("mb")
-    _patch_refresh(lambda: calls.append("shares"))
     try:
         # a refused name must not invalidate anything
         res = trash_api.trash_delete(trash_api.TrashDelete(names=["..", "nope"]))
@@ -371,12 +364,11 @@ def test_delete_invalidates_caches():
         assert res["deleted"] == [ALBUM], res
         assert res["freed"] == ALBUM_BYTES, res["freed"]
         # ONLY the bin's own folder is dropped — the library-wide clear is gone
-        assert calls == [("tags", (TRASH,)), "mb", "shares"], calls
+        assert calls == [("tags", (TRASH,)), "mb"], calls
     finally:
         from server import mbresolve, tagcache
         mlo_main.tagcache.invalidate_album = tagcache.invalidate_album
         mlo_main.mbresolve.invalidate = mbresolve.invalidate
-        _patch_refresh(_real_refresh)
 
 
 def test_album_gone_but_trash_survives():
@@ -463,19 +455,17 @@ ORIG_DIR_API = ORIG_DIR.replace("\\", "/")
 
 
 def with_cache_spies(fn):
-    """Run fn(calls) with the three cache hooks replaced by recorders: the
-    real slskd hook would spawn a daemon thread against the temp fixture."""
+    """Run fn(calls) with the cache hooks replaced by recorders, so the real
+    invalidations never touch the developer's live caches."""
     calls = []
     mlo_main.tagcache.invalidate_album = lambda *folders: calls.append(("tags", folders))
     mlo_main.mbresolve.invalidate = lambda: calls.append("mb")
-    _patch_refresh(lambda: calls.append("shares"))
     try:
         fn(calls)
     finally:
         from server import mbresolve, tagcache
         mlo_main.tagcache.invalidate_album = tagcache.invalidate_album
         mlo_main.mbresolve.invalidate = mbresolve.invalidate
-        _patch_refresh(_real_refresh)
 
 
 def make_album(album_dir, size=1234):
@@ -550,7 +540,7 @@ def test_restore_returns_to_original_path():
                        "failed": []}, res
         # restored to its ORIGINAL album folder: that folder's own cached tags
         # are the ones that went stale — and only them, not the artist's
-        assert calls == [("tags", (ORIG_DIR,)), "mb", "shares"], calls
+        assert calls == [("tags", (ORIG_DIR,)), "mb"], calls
     with_cache_spies(body)
     assert os.path.isfile(os.path.join(ORIG_DIR, "01 - x.flac")), "album not back on disk"
     assert os.path.isdir(os.path.dirname(ORIG_DIR)), "artist folder not recreated"
@@ -666,7 +656,7 @@ def test_delete_prunes_manifest_and_stale_origin():
         res = trash_api.trash_delete(trash_api.TrashDelete(names=[STALE_ALBUM]))
         assert res["deleted"] == [STALE_ALBUM] and res["failed"] == [], res
         assert res["freed"] == 1234, res["freed"]
-        assert calls == [("tags", (TRASH,)), "mb", "shares"], calls
+        assert calls == [("tags", (TRASH,)), "mb"], calls
 
     with_cache_spies(body)
     assert STALE_ALBUM not in trash_names(), trash_names()
@@ -821,8 +811,6 @@ def test_cap_keeps_in_use():
     assert set(trash_api._manifest_read(CAP_BIN)) == {"Held Album", "Also Held"}, \
         trash_api._manifest_read(CAP_BIN)
 
-
-_real_refresh = mlo_main._refresh_slskd_shares_soon
 
 # state-mutating checks: order matters
 for label, fn in [

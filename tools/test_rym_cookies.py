@@ -16,7 +16,9 @@ Every claim below is about the real code, not a copy of it:
     cookie — so an import reaches the request RYM is actually asked with;
   * the HttpOnly `session` cookie survives the import (the reason this route
     exists) and is reported as such; a jar with RYM cookies but no `session`
-    is stored AND warned about;
+    is stored AND warned about, and a signed-in paste with no `cf_clearance`
+    is warned about by name (that cookie and `rym_user_agent` are what the
+    live challenge checks);
   * a well-formed export with no rateyourmusic.com cookie in it stores
     NOTHING and says why — the credential that was working is left exactly as
     it was; junk and an empty paste are refused with the parser's own
@@ -224,6 +226,19 @@ try:
     # `session` is HttpOnly: the panel must say a guest RYM is what answers.
     assert "guest" in api_rym.rym_cookies_get()["warnings"][0], \
         api_rym.rym_cookies_get()["warnings"]
+
+    # A paste that IS signed in but carries no `cf_clearance` is the state the
+    # live site answers with a challenge: the panel must name that cookie AND
+    # `rym_user_agent` (the User-Agent it is bound to), instead of calling the
+    # credential complete just because `session` is there.
+    saved = post("# Netscape HTTP Cookie File\n"
+                 ".rateyourmusic.com\tTRUE\t/\tTRUE\t1893456000\t"
+                 "session\tSESS-ONLY\n")
+    assert saved["names"] == ["session"] and saved["session"] is True, saved
+    warned = " ".join(saved["warnings"])
+    assert "cf_clearance" in warned and "rym_user_agent" in warned, \
+        saved["warnings"]
+    assert_no_values(saved, "the no-clearance import")
 
     # A subdomain of RYM's own host is RYM's cookie.
     saved = post(SUBDOMAIN_JAR)

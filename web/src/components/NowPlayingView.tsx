@@ -2,8 +2,8 @@ import { useEffect, useMemo, useRef, useState, type CSSProperties } from "react"
 import { Link } from "react-router-dom";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import {
-  AudioLines, Captions, ChevronDown, Info, ListMusic, ListPlus, Maximize2, Mic2, Minimize2, Pause, Play,
-  Repeat, Settings2, Shuffle, SkipBack, SkipForward, Volume1, Volume2, VolumeX, X,
+  AudioLines, Captions, ChevronDown, Info, ListMusic, ListPlus, Maximize2, Mic2, Minimize2, Pause, PenLine, Play,
+  Repeat, Save, Settings2, Shuffle, SkipBack, SkipForward, Volume1, Volume2, VolumeX, X,
 } from "lucide-react";
 import { api } from "../api";
 import VolumePct from "./VolumePct";
@@ -13,20 +13,20 @@ import LyricZoom from "./LyricZoom";
 import LyricOffset from "./LyricOffset";
 import { DetailsDialog } from "./AlbumDetails";
 import { parseHexColor } from "../lib/accent";
-import { toast, useStore } from "../store";
+import { toast, useStore, useLyricsEditLock } from "../store";
 import { fmtTech, fmtPair, isVideoFile, originalYear } from "../lib/fmt";
 import { albumRef, artistRef, libraryRow, trackRef } from "../lib/refs";
 import { AdvisoryMark, allowPlainOf, isInstrumental } from "./Badges";
 import StarRating from "./StarRating";
 import ScrollingText from "./ScrollingText";
-import { ratingOf, useRatings, useSetRating } from "../lib/ratings";
+import { ratingOf, useRatings, useSetRating, trackWebRating, webStarProps } from "../lib/ratings";
 import CoverImg, { ROW_COVER_W, PANE_COVER_W } from "./CoverImg";
 import { useNowPlayingMeta } from "../lib/nowPlaying";
 import Popover, { MenuItem } from "./Popover";
 import ScrubSeek from "./ScrubSeek";
 import { MAX_DB, MIN_DB, activeAnalyser } from "../lib/analyser";
 import Visualizer from "./Visualizer";
-import { parsePlayerLrc, parseLrc, splitStoredLines, lyricsKindOf, activeLineRange, KaraokeWords, type LrcLine } from "./LyricsViewer";
+import LyricsViewer, { parsePlayerLrc, parseLrc, splitStoredLines, lyricsKindOf, activeLineRange, KaraokeWords, type LrcLine } from "./LyricsViewer";
 import type { Playlist } from "../types";
 import { useLyricsFollow, lyricHold, LYRICS_PAD_BOTTOM, LYRICS_PAD_TOP } from "../lib/lyrScroll";
 import { nextSpeed, fmtSpeed } from "../lib/playback";
@@ -810,6 +810,15 @@ export default function NowPlayingView(p: Props) {
   // where wrong info would matter (title fallback, instrumental, BPM).
   const [tagsFor, setTagsFor] = useState<string | null>(null);
   const [transforms, setTransforms] = useState<Record<string, string[]>>({});
+  // The integrated lyric editor, exactly as the sidebar carries it: Edit swaps
+  // this pane's reader for the SAME `LyricsViewer` the track page mounts, so
+  // there is no second editor to keep in step. `editText` is the draft handed
+  // up on every change; `editDirty` guards the discard prompt. While the
+  // editor is open the queue is held on this track (`useLyricsEditLock`).
+  const [editing, setEditing] = useState(false);
+  const [editText, setEditText] = useState("");
+  const [editDirty, setEditDirty] = useState(false);
+  useLyricsEditLock(editing);
   // The PRIMARY text line of each block — with translations/romanization the
   // outer block also carries sub-lines, and centering the block would push
   // the sung line off the middle. The scroller centers this element.
@@ -1319,7 +1328,9 @@ export default function NowPlayingView(p: Props) {
   // one-character-wide layout — a write from there would park the pane deep in
   // the song, and it is the reopen below that re-centres it instead.
   const { centerLine, jump, snapping, takeOver } = useLyricsFollow({
-    active: paneOpen ? activeLine : -1,
+    // While the editor is up the reader is not on screen at all (the scroller
+    // is unmounted), so following stands down with it.
+    active: paneOpen && !editing ? activeLine : -1,
     time: dispTime,
     playing: p.playing,
     scroll: lyricsScrollRef,
@@ -1346,6 +1357,18 @@ export default function NowPlayingView(p: Props) {
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
       if (e.key !== "Escape") return;
+      // The editor is the innermost surface: one Esc leaves it, the next does
+      // what Esc does here (see the `data-lrc-editor` guard below — it would
+      // otherwise swallow the key entirely while the editor is up).
+      if (editing && !e.defaultPrevented) {
+        // Leaving with unsaved edits asks first: the draft is dropped, and
+        // the reader would otherwise lose it to a stray keypress.
+        if (!editDirty || window.confirm("Discard the unsaved lyric edits?")) {
+          setEditing(false);
+          setEditDirty(false);
+        }
+        return;
+      }
       // An inner surface gets first refusal: something that already consumed
       // the key (a capture field), or the add-to-playlist popover.
       if (e.defaultPrevented || document.querySelector("[data-lrc-editor]")) return;
@@ -1360,7 +1383,7 @@ export default function NowPlayingView(p: Props) {
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [plOpen]);
+  }, [plOpen, editing, editDirty]);
 
   // Some browsers swallow Esc themselves while in native fullscreen — the page
   // never sees a keydown, only the resulting fullscreenchange. Treating that
@@ -1398,6 +1421,55 @@ export default function NowPlayingView(p: Props) {
       const v = !showTrans;
       setShowTrans(v);
       persist(TRANS_KEY, v ? "1" : "0");
+    }
+  };
+
+  // ---- the integrated lyric editor -----------------------------------------
+  // Closing the pane and changing the track both take the editor with them: a
+  // draft belongs to the file it was typed against, never to the next one.
+  useEffect(() => {
+    if (!paneOpen) setEditing(false);
+  }, [paneOpen]);
+  useEffect(() => {
+    setEditing(false);
+    setEditDirty(false);
+  }, [p.current.path]);
+
+  /** Open the editor on the stored text, with the offset preview cleared: the
+   *  editor edits the FILE's words, and a pending shift is a view of them, so
+   *  the two must not be mixed into one draft. */
+  const openLyricsEditor = () => {
+    setEditText(lyricsText ?? "");
+    setOffsetMs(0);
+    setEditDirty(false);
+    setEditing(true);
+  };
+
+  const closeLyricsEditor = () => {
+    if (editDirty && !window.confirm("Discard the unsaved lyric edits?")) return;
+    setEditing(false);
+    setEditDirty(false);
+  };
+
+  /** Write the draft to the targets the track page's Save writes — the select
+   *  inside the editor persists the shared `mlo.lyricsSaveTarget` key — then
+   *  show the result behind it. The offset is zeroed above, so what is saved
+   *  is exactly what the editor holds. */
+  const saveLyricsEdit = async () => {
+    const target = localStorage.getItem("mlo.lyricsSaveTarget") ?? "embedded";
+    try {
+      if (target === "embedded" || target === "both") await api.lyricsEmbed(p.current.path, editText);
+      if (target === "sidecar" || target === "both") await api.lyricsWrite(p.current.path, editText);
+      toast(target === "sidecar" ? "Lyrics saved to .lrc sidecar" : target === "both" ? "Lyrics saved (tag + .lrc sidecar)" : "Lyrics saved");
+      setEditDirty(false);
+      setLyricsText(editText);
+      setLyricsFor(p.current.path);
+      qc.invalidateQueries({ queryKey: ["library"] });
+      // Saving leaves the editor: the reader behind it now shows the words
+      // that were just written, and the playback lock releases with the close.
+      setEditing(false);
+    } catch (e) {
+      toast.error(String(e));
     }
   };
 
@@ -1589,6 +1661,12 @@ export default function NowPlayingView(p: Props) {
     trackHref,
     albumHref,
     artistHref,
+    // The web rating script 24 wrote for this track — off the SAME freshness-
+    // gated tags as the strings above, and part of the record because it is a
+    // fact about the track the block is painting: while the next track's
+    // payload loads, the block still shows the previous record's value rather
+    // than blanking it (undefined here would say "the web never rated it").
+    web: trackWebRating(freshTags),
   };
   const block = useNowPlayingMeta(blockRecord, !tagsStale, coverNamed ? paneCoverUrl : undefined);
   // The art the block draws — the committed record's own cover, and NOTHING
@@ -1718,6 +1796,18 @@ export default function NowPlayingView(p: Props) {
                chrome and the frequency strip follow (R52c). */
             emptyClass="text-current opacity-45"
             fillClass="fill-current"
+            {...webStarProps(block.web)}
+            /* The web reading is the SAME ink, ghosted further: the sky tone
+               the control defaults to is a fixed colour, and this row sits on
+               the artwork, where "one cover photo away from illegible" is the
+               whole reason the two overrides above exist. The fill keeps a
+               little over half the ink, under the user's full-strength stars —
+               dim enough to be nobody's verdict of their own, solid enough to
+               read on a cover — and the readout word is what actually says
+               whose number it is. */
+            webEmptyClass="text-current opacity-30"
+            webFillClass="fill-current opacity-60"
+            webTextClass="text-current opacity-70"
           />
         )}
       </div>
@@ -2679,6 +2769,48 @@ export default function NowPlayingView(p: Props) {
                 else if (lyricsScrollRef.current) lyricsScrollRef.current.scrollTop = 0;
               }}
             >
+              {editing ? (
+                /* The editor takes the reader's place inside the same column:
+                   `LyricsViewer` is the track page's editor reused whole
+                   (timestamped rows, raw mode, add/remove line), so the words
+                   being edited ARE the words this pane reads. It brings no
+                   close of its own, so the bar above it carries one — Esc
+                   would otherwise be the only way back to the reader. */
+                <div className="relative flex-1 min-h-0 flex flex-col gap-1.5 px-1 py-1">
+                  <div className="flex items-center justify-between gap-2 px-1 shrink-0">
+                    <span className="text-[11px] font-semibold uppercase tracking-wider text-zinc-400">Editing lyrics</span>
+                    <div className="flex gap-1.5">
+                      <button
+                        className="btn-primary !py-1 text-xs"
+                        onClick={saveLyricsEdit}
+                        disabled={!editDirty}
+                        title="Save lyrics per the chosen save target"
+                      >
+                        <Save className="h-3.5 w-3.5" /> Save
+                      </button>
+                      <button className="btn-ghost !py-1 text-xs" onClick={closeLyricsEditor}>
+                        <X className="h-3.5 w-3.5" /> Done
+                      </button>
+                    </div>
+                  </div>
+                  <div className="flex-1 min-h-0 overflow-y-auto">
+                    <LyricsViewer
+                      path={p.current.path}
+                      initialLyrics={editText}
+                      onChange={(v) => {
+                        setEditText(v);
+                        setEditDirty(true);
+                      }}
+                      onSave={saveLyricsEdit}
+                      artist={tags?.ARTIST}
+                      track={tags?.TITLE}
+                      album={tags?.ALBUM || undefined}
+                      duration={duration}
+                      allowPlain={allowPlain}
+                    />
+                  </div>
+                </div>
+              ) : (
               <div
                 ref={lyricsScrollRef}
                 /* No panel and no tint on the reading surface: what separates
@@ -2713,6 +2845,7 @@ export default function NowPlayingView(p: Props) {
                   </div>
                 )}
               </div>
+              )}
               {/* The two lyric controls, in the pane's OWN top-right corner:
                   the corner is the one place over the words that is never a
                   lyric line, and it is where `LyricsSidebar` carries them too
@@ -2742,13 +2875,25 @@ export default function NowPlayingView(p: Props) {
                   The stale fade stays where it was: that is a state, not the
                   resting tone.
 
-                  Rendered only while the pane is OPEN: collapsed, there is
-                  nothing on screen to size or to shift. */}
-              {paneOpen && (
+                  Rendered only while the pane is OPEN and the reader is in
+                  it: collapsed, there is nothing on screen to size or to
+                  shift, and the editor carries its own toolbar. */}
+              {paneOpen && !editing && (
                 <div className="lyr-corner absolute top-0 right-0 z-10 px-5 pt-2 pb-1 text-[11px]">
                   <div className={`flex items-center justify-end gap-4 transition-opacity duration-300 ${ink.shade} ${ink.chromeStrong} ${
                     staleLyrics ? "opacity-40" : "opacity-100"
                   }`}>
+                    {/* The pane's own way into the editor, in the corner the
+                        reader already uses — so the words on screen can be
+                        fixed where they are read. */}
+                    <button
+                      className="p-0.5 rounded hover:text-white transition-colors"
+                      onClick={openLyricsEditor}
+                      title="Edit these lyrics — timestamped lines, raw text, add/remove line"
+                      aria-label="Edit these lyrics"
+                    >
+                      <PenLine className="h-4 w-4" />
+                    </button>
                     <LyricZoom
                       pct={Math.round((lyricZoom / LYRIC_ZOOM_BASE) * 100)}
                       onChange={(p) => {

@@ -185,10 +185,6 @@ type AddReply = {
    *  replies never state either flag. */
   matched?: boolean;
   resolving?: boolean;
-  /** A name-only add that matched NOTHING: the wish the search was queued
-   *  under (nothing is on disk yet, and the row must not read as "added"). */
-  by_name?: boolean;
-  wish_id?: number;
   queued?: number;
   /** The server's own summary of what it just queued. */
   note?: string;
@@ -205,10 +201,10 @@ type AddReply = {
  *  skips the server's own resolution), else the id itself with `kind: "auto"`,
  *  which means "look up what this id names". A row WITHOUT one is still
  *  addable: it is sent by name, and the server searches MusicBrainz for
- *  artist+title, adopts the id it finds, and — finding none — records a
- *  name-keyed wish so the auto-import's own search can run. `kind: "auto"` is
+ *  artist+title and adds the release it finds — a name that matches nothing
+ *  adds nothing, and says so. `kind: "auto"` is
  *  NEVER sent for a name-only row: with no id there is nothing to look up, and
- *  the row's own kind is what the search and the wish are made of.
+ *  the row's own kind is what the search is made of.
  *
  *  `null` when the row names neither a title nor an artist: there is nothing
  *  for the server to search, which is the one case it answers 400 to. */
@@ -226,7 +222,7 @@ function addRequest(item: DiscoverItem): { body: Record<string, unknown>; nameOn
       title,
       artist,
       // A soft preference for the search, never a filter, and the provider's
-      // own page for the row — the wish's note keeps it as the source link.
+      // own page for the row.
       year: item.year,
       source: item.source_label || item.source || "",
       page_url: item.page_url || "",
@@ -284,13 +280,13 @@ async function requestAdd(req: { body: Record<string, unknown>; nameOnly: boolea
  *  point: an added release is a download job, so "Add to library" becomes
  *  "queued, pending" IN THE ROW and stays there — a toast would be gone while
  *  the album is still on its way. */
-type AddPhase = "idle" | "busy" | "unavailable" | "queued" | "adding" | "byname" | "already" | "nothing";
+type AddPhase = "idle" | "busy" | "unavailable" | "queued" | "adding" | "already" | "nothing";
 
 /** The unowned row's action.
  *
  *  A row the server CAN add offers the button however little the row knows: an
  *  id when it has one, else artist+title, which the server searches
- *  MusicBrainz for and — finding nothing — turns into a name-keyed wish. The
+ *  MusicBrainz for. The
  *  one row that gets no button is the one with no name to search AT ALL (not
  *  even an artist), because there the add could only ever fail; that chip is
  *  informational grey, not an error. Permanently disabled once the server has
@@ -314,8 +310,8 @@ function AddButton({ item }: { item: DiscoverItem }) {
   }
 
   const tip = req.nameOnly
-    ? `Add ${item.title || "this"} to the library — the server searches MusicBrainz for it by artist and title, and queues a name search when it finds no match`
-    : `Add ${item.title || "this"} to the library — the server resolves it on MusicBrainz and queues the download`;
+    ? `Add ${item.title || "this"} to the library — the server searches MusicBrainz for it by artist and title`
+    : `Add ${item.title || "this"} to the library — the server resolves it on MusicBrainz`;
 
   const run = async () => {
     setPhase("busy");
@@ -342,11 +338,10 @@ function AddButton({ item }: { item: DiscoverItem }) {
         setPhase("adding");
         toast.success(`Adding ${item.title || "it"} — the albums arrive as MusicBrainz resolves them`);
       } else if (out.nameOnly && !out.matched) {
-        // The server found no MusicBrainz match and queued a name-keyed wish:
-        // nothing is on disk, but a search IS running, so this is neither
-        // "nothing to add" nor a plain queue — the server's own note says it.
-        setPhase("byname");
-        toast.success(out.note || `Added ${item.title || "it"} — no MusicBrainz match, searching by name`);
+        // The server found no MusicBrainz match by name, so nothing was
+        // added: say that rather than implying a download is running.
+        setPhase("nothing");
+        toast(`Nothing to add for ${item.title || "this row"}${out.why ? ` — ${out.why}` : ""}`);
       } else if (!out.added) {
         setPhase("nothing");
         toast(`Nothing to add for ${item.title || "this row"}${out.why ? ` — ${out.why}` : ""}`);
@@ -378,15 +373,13 @@ function AddButton({ item }: { item: DiscoverItem }) {
       </span>
     );
   }
-  if (phase === "queued" || phase === "adding" || phase === "byname") {
+  if (phase === "queued" || phase === "adding") {
     const label =
-      phase === "queued" ? "Queued — pending" : phase === "adding" ? "Adding — pending" : "Queued — searching by name";
+      phase === "queued" ? "Queued — pending" : "Adding — pending";
     const why =
       phase === "queued"
-        ? "Queued into the library: the download is running, and the album appears there when it lands"
-        : phase === "adding"
-          ? "Queued into the library: MusicBrainz is being read one release group at a time, and each album appears as it resolves"
-          : "Queued into the library by NAME: MusicBrainz had no match for this row, so a name-keyed wish is searching for it by artist and title";
+        ? "Queued into the library: the album appears there when it lands"
+        : "Queued into the library: MusicBrainz is being read one release group at a time, and each album appears as it resolves";
     return (
       <span className="chip bg-sky-950/40 border border-sky-900/60 text-sky-300 shrink-0" title={detail ? `${why} — ${detail}` : why}>
         {label}

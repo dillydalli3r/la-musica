@@ -11,8 +11,6 @@ into `.dependencies/`, and `mlo/fetchdeps.py` copies each archive's
 the licence text travels with the tool (GPL-2.0 §1 and LGPL-2.1 §1 ask for
 exactly that).
 
-- **slskd** — <https://github.com/slskd/slskd> — the Soulseek™ client daemon
-  (searching, downloading, sharing). **AGPL-3.0**.
 - **beets** — <https://beets.io> — MusicBrainz-tagged imports with
   Picard-parity tagging. **MIT**.
 - **FFmpeg** — <https://ffmpeg.org> (BtbN GPL builds) — media remuxing,
@@ -197,8 +195,6 @@ Apache-2.0 option.
 
 - **MusicBrainz** — <https://musicbrainz.org> — metadata (data licensed
   CC-BY-SA / CC0). **LRCLIB** — <https://lrclib.net> — synced lyrics.
-  Soulseek™ is a trademark of Soulseek LLC; this project is not affiliated
-  with it or with slskd.
 
 External services queried by the discovery provider layer (no SDK or code of
 theirs is bundled — results are fetched over their public HTTP APIs and cached
@@ -227,9 +223,6 @@ locally):
   <https://bandcamp.com> — release links.
 - **covers.musichoarders.xyz** — <https://covers.musichoarders.xyz> — the
   community cover search the app meta-searches.
-- **Soulseek** — <https://www.slsknet.org> — the file-sharing network this app
-  searches through slskd. Soulseek™ is a trademark of Soulseek LLC; this
-  project is not affiliated with it or with slskd.
 - **NetEase Cloud Music** (<https://music.163.com>), **QQ Music**
   (<https://y.qq.com>), **Kugou** (<https://www.kugou.com>), **Kuwo**
   (<https://www.kuwo.cn>) — additional lyrics sources in the provider chain;

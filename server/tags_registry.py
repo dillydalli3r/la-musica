@@ -128,6 +128,18 @@ TAG_FAMILY = {
     "ENCODER_VERSION": "provenance", "ENCODEDBY": "provenance",
     # The listener's own stars — see FAMILIES above.
     "RATING": "opinion",
+    # The PUBLIC score for the track and its album (mlo.web_ratings, script
+    # 24), grouped with the listener's stars because it is the same kind of
+    # fact: a rating nobody grades, nobody recomputes and no pass overwrites
+    # (the writer fills only). It is NOT the listener's own opinion, which is
+    # why its label says "web" — but a separate family would put a second
+    # rating group in the (registry-driven) tag editor for one tag pair, and
+    # the family's own rule is what makes the grouping right: a rating is an
+    # opinion, and nothing here grades it.
+    "WEBRATING": "opinion",
+    "WEBRATING_SOURCE": "opinion",
+    "ALBUMWEBRATING": "opinion",
+    "ALBUMWEBRATING_SOURCE": "opinion",
 }
 
 # A tag added to TAG_MAP without a family above lands here instead of in a
@@ -147,8 +159,8 @@ TAG_INFO = {
                                   "Latin title never gets one. Locale-suffixed when it is for "
                                   "one in particular: TITLEALIAS-JA."),
     "ARTISTALIAS": ("Artist alias", "The artist's name for a reader whose configured locale does "
-                                    "not read the script it is written in — the romanised name on "
-                                    "Soulseek folders, say. AT MOST ONE value, written only when "
+                                    "not read the script it is written in — the romanised name a "
+                                    "release may be filed under, say. AT MOST ONE value, written only when "
                                     "the name needs one (\"Radiohead\" never has one in an `en` "
                                     "library). Locale-suffixed when it is for one: "
                                     "ARTISTALIAS-JA."),
@@ -258,6 +270,22 @@ TAG_INFO = {
     "RATING": ("Rating", "Your own stars — 0-5 with halves — stored in the file as Picard's RATING, "
                           "0-100 (one half-star = 10). An opinion, so nothing grades it; the app keeps "
                           "its own copy and heals it after a rename."),
+    "WEBRATING": ("Web rating", "The PUBLIC score for this track (0-100), the weighted mean of "
+                                "the web sources that stated one. Sources vote-count weighted, so a "
+                                "score thousands of people rated outweighs one with a handful of "
+                                "votes; the sources that answered are named in WEBRATING_SOURCE. "
+                                "Album-wide scores are never copied here — they live in "
+                                "ALBUMWEBRATING."),
+    "WEBRATING_SOURCE": ("Web rating sources", "A LIST: the \"; \"-joined names of the sources that "
+                                               "contributed to WEBRATING (MusicBrainz, RateYourMusic, …), "
+                                               "the convention RELEASECOUNTRY uses."),
+    "ALBUMWEBRATING": ("Album web rating", "The PUBLIC score for the whole release (0-100), repeated on "
+                                           "every track of the album — the same album-level slot "
+                                           "ALBUMITUNESADVISORY uses. Written beside WEBRATING, never in "
+                                           "place of it: a track no source rated still states what the "
+                                           "album did."),
+    "ALBUMWEBRATING_SOURCE": ("Album web rating sources", "A LIST: the names of the sources behind "
+                                                          "ALBUMWEBRATING, in the configured order."),
 }
 
 # --------------------------------------------------------------------------- #
@@ -330,6 +358,15 @@ TAG_WRITER = {
     # The ratings API (server.ratings) is the only writer, and it writes on the
     # click itself — no script pass touches an opinion.
     "RATING": "the ratings API (server.ratings) — the star you clicked",
+    # The web rating has one writer and it only ever FILLS: a value the file
+    # already holds is left exactly as it is unless the run is forced
+    # (`force_web_ratings`), which is why nothing else in the pipeline needs to
+    # touch these tags — and every strip pass keeps them, since they are in
+    # TAG_MAP (TAG_ALLOWLIST is built from it).
+    "WEBRATING": _script(24),
+    "WEBRATING_SOURCE": _script(24),
+    "ALBUMWEBRATING": _script(24),
+    "ALBUMWEBRATING_SOURCE": _script(24),
     # MusicBrainz credits and the release facts no naming script reads: both
     # MusicBrainz paths write them through one helper (mlo.autotag), the beets
     # import per album and Auto Tagging when it already asks about a release.
@@ -378,6 +415,11 @@ _TAG_ENUM = {
 # tag with no entry here states its range in its meaning line instead.
 _TAG_RANGE = {
     "RATING": (0, 100),
+    # The web ratings use the same Picard scale (mlo.web_ratings.RATING_MAX),
+    # so the editor marks a value outside 0-100 the same way it marks a bad
+    # RATING — one scale, one rule.
+    "WEBRATING": (0, 100),
+    "ALBUMWEBRATING": (0, 100),
 }
 
 
@@ -402,8 +444,8 @@ def _enum_for(tag: str):
     # than from the grader / mlo.moods' internal label list, so the option a
     # filter offers is the spelling a file will actually hold.
     #
-    # SOURCE is deliberately ABSENT: only two of its values are this app's
-    # (Soulseek, Digital — see mlo.tagtext), the rest is the user's own source
+    # SOURCE is deliberately ABSENT: only one of its values is this app's
+    # (Digital — see mlo.tagtext), the rest is the user's own source
     # word or a video id, and the client must not flag those as wrong.
     if tag in _CANONICAL_ENUM_TAGS:
         return list(CANONICAL_VALUES[tag])

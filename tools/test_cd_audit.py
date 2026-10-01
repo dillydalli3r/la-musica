@@ -367,6 +367,71 @@ else:
        f"a log that predates EAC checksums is REAL on its matching CRCs "
        f"({verdict!r})")
 
+print("== an HDCD is a CD, not an unknown medium ==")
+# The owner's report, verbatim: a rip whose files carry MEDIA=HDCD — the
+# format MusicBrainz states for a CD with the extra HDCD encoding on it —
+# failed as "Unrecognized MEDIA value: HDCD" AND read "AUDIT tag is FAKE":
+# the medium was unknown, so no CD gate ran and the .log's CRCs, the rip's own
+# evidence, were never asked. `mlo.tagtext.is_cd_media` (CD_MEDIA_VALUES) is
+# the ONE rule for that question and every CD gate reads it now, so HDCD is
+# graded, audited and verified exactly like the CD it is.
+from mutagen.flac import FLAC as MF  # noqa: E402
+
+
+def graded_as(media):
+    """The fixture graded with its track tagged *media*, under ONE config —
+    so the only difference between two results is the medium value."""
+    f = MF(TRACK)
+    f["MEDIA"] = [media]
+    f.save()
+    return _grade_album(ALBUM, "EMBEDDED", _cfg(
+        grade_check_media=True, grade_check_cd_log=True, grade_check_cd_cue=True,
+        grade_check_cd_format=True, audit_log_score_threshold=0))
+
+
+# The log's own EAC checksum is stubbed to "ok" for the pair — the same stub
+# the section above uses, so the comparison is about the MEDIUM and nothing
+# else (a real 0.99-era log claims no checksum at all).
+_dm.check_log_checksum = lambda _p: ("ok", None)
+try:
+    cd_run = graded_as("CD")
+    hcd_run = graded_as("HDCD")
+finally:
+    _dm.check_log_checksum = _real_check
+tr = hcd_run["tracks"][0]
+ok(not any("Unrecognized MEDIA" in i for i in hcd_run["issues"]),
+   f"MEDIA=HDCD is a known medium value ({hcd_run['issues']})")
+ok(hcd_run["media"] == "HDCD",
+   f"…and the album reports the medium it states ({hcd_run['media']!r})")
+ok(hcd_run["pass_count"] == cd_run["pass_count"]
+   and hcd_run["total_checks"] == cd_run["total_checks"]
+   and set(hcd_run["issues"]) == set(cd_run["issues"]),
+   f"graded by the SAME checks as MEDIA=CD, to the same result "
+   f"(HDCD {hcd_run['pass_count']}/{hcd_run['total_checks']} vs "
+   f"CD {cd_run['pass_count']}/{cd_run['total_checks']}; "
+   f"issues={sorted(hcd_run['issues'])[:2]})")
+if FFMPEG and real_crc:
+    ok(tr.get("checksum_status") == "REAL"
+       and tr.get("audit") == "REAL" and tr.get("audit_verified") == "log-checksum",
+       f"its .log's CRCs are the evidence that verifies it and decides its "
+       f"AUDIT ({tr.get('checksum_status')} / {tr.get('audit')} / "
+       f"{tr.get('audit_verified')})")
+else:
+    print("  skipped: no ffmpeg — the log-CRC verdict is not exercised here")
+if HAS_AA and FFMPEG and real_crc:
+    # …and script 6 writes that verdict itself, the way it does for a CD.
+    write_log(f"{real_crc:0>8}".upper())
+    hcd_verdict, hcd_lines = audit_once()
+    ok(hcd_verdict == "REAL",
+       f"script 6 writes AUDIT=REAL for a log-verified MEDIA=HDCD rip "
+       f"({hcd_verdict!r}, {[l for l in hcd_lines if 'MEDIA=CD' in l][:1]})")
+else:
+    print("  skipped: needs AudioAuditorCLI and ffmpeg to drive script 6")
+# The fixture's medium goes back to CD for the sections below.
+_restore = MF(TRACK)
+_restore["MEDIA"] = ["CD"]
+_restore.save()
+
 print("== the CD verdict is the AND of its three legs ==")
 # One row per combination (Requirements 3): the rip log's SCORE
 # (audit_log_score_threshold / Logchecker), the disc's CHECKSUMS (the .log's

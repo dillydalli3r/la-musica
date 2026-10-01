@@ -3,8 +3,8 @@
 The one answer the UI cannot work out for itself: the release-choice policy
 (``mlo.release_choice``) ranks MusicBrainz's editions of a release group and
 says WHY, so every place that offers "add this album" can show the pick, the
-alternatives and the reasons — the same pick the wish queue, the auto-import
-and the artist watch will make, because they all call that one policy.
+alternatives and the reasons — the same pick the add path will make, because
+it calls that one policy.
 
 One browse per release group (``integrations.release_group_browse``: cached and
 throttled by the app's shared MusicBrainz access), never one request per

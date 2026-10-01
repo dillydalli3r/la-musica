@@ -2,7 +2,7 @@ import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { useNavigate, useParams } from "react-router-dom";
 import { useState } from "react";
 import {
-  BarChart3, BookmarkPlus, ChevronDown, ChevronRight, Disc3, Download, FileDown, ImagePlus,
+  BarChart3, ChevronDown, ChevronRight, Disc3, FileDown, ImagePlus,
   ListChecks, Loader2, Music2, Pencil, Play, RefreshCw, Square, SquareCheck, Trash2,
 } from "lucide-react";
 import { api } from "../api";
@@ -23,7 +23,6 @@ import OnlineRecommendations from "../components/OnlineRecommendations";
 import OverflowMenu from "../components/OverflowMenu";
 import PageHeader from "../components/PageHeader";
 import TagActionsMenu from "../components/TagActionsMenu";
-import { WatchArtistButton } from "../components/WatchDialog";
 import type { Album } from "../types";
 import { artistMbid } from "../lib/refs";
 import { GRID_SIZE_MIN } from "../lib/fmt";
@@ -242,71 +241,6 @@ export default function ArtistPage() {
     setSelected(new Set<string>()); // leaving (or re-entering) select mode drops the selection
   };
 
-  /** "Auto-import best release" over the selection: one queue call per album,
-   *  summed into a single toast so a 20-album batch is not 20 toasts. Albums
-   *  with no MusicBrainz id at all count as skipped. */
-  const autoImportBest = async () => {
-    setBusy("batch-import");
-    let queued = 0;
-    let skipped = 0;
-    try {
-      for (const al of selectedAlbums) {
-        // The release group when the tags carry one, else the release itself:
-        // the release-group endpoint 502s when handed a release id.
-        const rg = al.tracks[0]?.tags?.MUSICBRAINZ_RELEASEGROUPID ?? al.meta?.MUSICBRAINZ_RELEASEGROUPID;
-        const release = al.meta?.MUSICBRAINZ_ALBUMID;
-        const mbid = rg ?? release;
-        if (!mbid) {
-          skipped += 1;
-          continue;
-        }
-        const r = await api.mbAutoImport({
-          mbid,
-          kind: rg ? "release_group" : "release",
-          mode: "best",
-        });
-        queued += r.queued;
-        skipped += r.skipped.length;
-      }
-      toast(`Queued ${queued} release${queued === 1 ? "" : "s"}${skipped ? ` · ${skipped} skipped` : ""}`);
-      refresh();
-    } catch (e) {
-      toast.error(String(e));
-    } finally {
-      setBusy(null);
-    }
-  };
-
-  /** "Add to the queue" over the selection. The acquisition is filled by
-   *  looking a RELEASE up, so the release id wins over the release group when
-   *  both are tagged. */
-  const addWishes = async () => {
-    setBusy("batch-wish");
-    let added = 0;
-    let skipped = 0;
-    try {
-      for (const al of selectedAlbums) {
-        const rg = al.tracks[0]?.tags?.MUSICBRAINZ_RELEASEGROUPID ?? al.meta?.MUSICBRAINZ_RELEASEGROUPID;
-        const mbid = al.meta?.MUSICBRAINZ_ALBUMID ?? rg;
-        if (!mbid) {
-          skipped += 1;
-          continue;
-        }
-        await api.wishAdd({
-          release_mbid: mbid,
-          title: al.meta?.ALBUM ?? al.path.split("/").pop() ?? "",
-          artist: name,
-        });
-        added += 1;
-      }
-      toast(`Added ${added} wish${added === 1 ? "" : "es"}${skipped ? ` · ${skipped} skipped (no MBID)` : ""}`);
-    } catch (e) {
-      toast.error(String(e));
-    } finally {
-      setBusy(null);
-    }
-  };
-
   return (
     <div className="p-6 space-y-5 mx-auto max-w-[1600px]">
       <div className="hero-flat relative overflow-hidden">
@@ -453,11 +387,6 @@ export default function ArtistPage() {
                   onDone={refresh}
                   buttonTitle="Tag actions on every track of this artist"
                 />
-                {/* The library artist page is the other place a user meets an
-                    artist they care about, so it carries the same control the
-                    MusicBrainz artist page does. The MBID comes from the tags;
-                    an artist that carries none cannot be watched. */}
-                <WatchArtistButton artistMbid={artistMb ?? ""} artist={name} />
                 <button
                   className="btn-ghost"
                   onClick={() => setReviewOpen(true)}
@@ -638,24 +567,6 @@ export default function ArtistPage() {
               Clear
             </button>
             <span className="ml-auto flex items-center gap-1.5 flex-wrap">
-              <button
-                className="btn-primary !py-1 text-xs"
-                onClick={autoImportBest}
-                disabled={!!busy}
-                title="Queue the best Soulseek edition of each selected album (release groups already in the library are skipped)"
-              >
-                {busy === "batch-import" ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Download className="h-3.5 w-3.5" />}
-                Auto-import best release
-              </button>
-              <button
-                className="btn-ghost !py-1 text-xs"
-                onClick={addWishes}
-                disabled={!!busy}
-                title="Put each selected album on the queue — Soulseek is searched for it until it is found or you cancel it"
-              >
-                {busy === "batch-wish" ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <BookmarkPlus className="h-3.5 w-3.5" />}
-                Add to the queue
-              </button>
               <TagActionsMenu
                 paths={selectedTrackPaths}
                 artist={decoded}

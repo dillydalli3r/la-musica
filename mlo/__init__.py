@@ -44,7 +44,7 @@ from __future__ import annotations
 
 import importlib
 
-__version__ = "4.8.0"
+__version__ = "4.9.0"
 
 # The engine's entry points and config helpers, re-exported LAZILY (PEP 562).
 #

@@ -13,7 +13,7 @@ from .stats import (
     _walk_files, is_audio_file, _clean_set, _summarize_values,
     _collect_targets, worker_count,
 )
-from .tagtext import canonical_text
+from .tagtext import canonical_text, is_cd_media
 from .ui import print_header, log, c, Color
 import tempfile
 
@@ -700,8 +700,13 @@ def _format_for_storage(text, cfg, optimize=True, is_for_lrc=False):
     )
 
 
-def _process_lyrics_for_audio(audio_path, cfg, media_source=None):
-    af = AudioFile(audio_path)
+def _process_lyrics_for_audio(audio_path, cfg, media_source=None, af=None):
+    # *af* is a caller's already-open handle for this same file — script 13's
+    # fetch_one just wrote the lyrics through it and would otherwise pay a
+    # second container parse to read back what it wrote. Only ever passed
+    # while it still names *audio_path*.
+    if af is None:
+        af = AudioFile(audio_path)
 
     if af.audio is None:
         return ("fail", 0, 0, f"load: {af.error}")
@@ -714,6 +719,23 @@ def _process_lyrics_for_audio(audio_path, cfg, media_source=None):
     cfg = dict(cfg)
     cfg["lrc_track_title"] = af.get_tag("TITLE")
     cfg["lrc_track_artist"] = af.get_tag("ARTIST")
+
+    # One formatter call per distinct (text, target) for THIS track. The
+    # cleaning pass, the canonical-form read-back and the conversion branch
+    # below all ask the same question about the same string, and on an
+    # already-formatted track (the common re-run) the answer was bought twice:
+    # a full LRC/ELRC re-normalisation of text already in hand. The formatter
+    # is pure given this cfg — its result is only compared and written — so
+    # serving the second ask from the first changes no byte; it just stops
+    # paying for the answer again.
+    _fmt_cache = {}
+
+    def _fmt(text, optimize=True, is_for_lrc=False):
+        key = (text, bool(optimize), bool(is_for_lrc))
+        if key not in _fmt_cache:
+            _fmt_cache[key] = _format_for_storage(
+                text, cfg, optimize=optimize, is_for_lrc=is_for_lrc)
+        return _fmt_cache[key]
 
     # What the album-level MEDIA/SOURCE pass needs (see
     # _normalize_album_media_source), read here WHILE THE CONTAINER IS OPEN:
@@ -735,9 +757,12 @@ def _process_lyrics_for_audio(audio_path, cfg, media_source=None):
     force = cfg.get("force_lyrics", False)
 
     # set_lyrics / delete_lyrics mutate the in-memory tag even when the
-    # save fails; remember to re-open the file from disk before the
-    # INSTRUMENTAL decision below reflects anything but persisted state.
+    # save fails, and a video write can REMUX the container to a new path;
+    # both are what the re-open below exists for. A write that LANDED leaves
+    # the handle's tags equal to the file's, so the INSTRUMENTAL decision
+    # reads persisted state without parsing the container a second time.
     lyrics_touched = False
+    lyrics_save_failed = False
 
     # Clean embedded lyrics (no trailing newline / blank lines).
     can_write_lyrics = should_write_audio_tag(cfg, "LYRICS", filepath=audio_path)
@@ -756,8 +781,11 @@ def _process_lyrics_for_audio(audio_path, cfg, media_source=None):
     if str(af.get_tag("INSTRUMENTAL") or "").strip() == "1" and can_write_lyrics:
         _lyr_keys = {str(k).upper().rsplit(":", 1)[-1]
                      for k in (af.all_tags() or {})}
-        if _lyr_keys & {"LYRICS", "UNSYNCEDLYRICS"} and af.delete_lyrics():
-            modified = True
+        if _lyr_keys & {"LYRICS", "UNSYNCEDLYRICS"}:
+            if af.delete_lyrics():
+                modified = True
+            else:
+                lyrics_save_failed = True
         if lrc_exists:
             try:
                 os.remove(lrc_path)
@@ -769,11 +797,13 @@ def _process_lyrics_for_audio(audio_path, cfg, media_source=None):
     if (force or cfg.get("optimize_embedded_lyrics", True)) and can_write_lyrics:
         cur = af.get_lyrics()
         if cur:
-            cleaned = _format_for_storage(cur, cfg, optimize=True, is_for_lrc=False)
+            cleaned = _fmt(cur, True, False)
             if cleaned != cur:
                 lyrics_touched = True
                 if af.set_lyrics(cleaned):
                     modified = True
+                else:
+                    lyrics_save_failed = True
 
     # Clean existing LRC file (no trailing newline / blank lines).
     lrc_cleaned = None
@@ -782,9 +812,7 @@ def _process_lyrics_for_audio(audio_path, cfg, media_source=None):
             with open(lrc_path, "r", encoding="utf-8", errors="replace") as f:
                 lrc_content = f.read()
 
-            final = _format_for_storage(
-                lrc_content, cfg, optimize=cfg.get("optimize_lrc", True), is_for_lrc=True
-            )
+            final = _fmt(lrc_content, cfg.get("optimize_lrc", True), True)
             # What the sidecar holds now: the text just read, or the canonical
             # text just written over it.
             lrc_cleaned = final
@@ -802,7 +830,7 @@ def _process_lyrics_for_audio(audio_path, cfg, media_source=None):
     # check passes afterwards.
     embedded_raw = af.get_lyrics()
     embedded_canonical = (
-        _format_for_storage(embedded_raw, cfg, optimize=True, is_for_lrc=False)
+        _fmt(embedded_raw, True, False)
         if embedded_raw and str(embedded_raw).strip() else None
     )
 
@@ -831,7 +859,7 @@ def _process_lyrics_for_audio(audio_path, cfg, media_source=None):
                 pass
 
     lrc_canonical = (
-        _format_for_storage(lrc_raw, cfg, optimize=True, is_for_lrc=True)
+        _fmt(lrc_raw, True, True)
         if lrc_raw and has_lyrics_text(lrc_raw) else None
     )
 
@@ -841,7 +869,7 @@ def _process_lyrics_for_audio(audio_path, cfg, media_source=None):
     if lyrics_format == "EMBEDDED" and lrc_canonical:
         if can_write_lyrics:
             # Destination is embedded tag — format lrc_raw for embedded target
-            dest_for_embedded = _format_for_storage(lrc_raw, cfg, optimize=True, is_for_lrc=False)
+            dest_for_embedded = _fmt(lrc_raw, True, False)
             if embedded_canonical != dest_for_embedded:
                 # Embed first; only delete the sidecar once the lyrics are
                 # safely inside the tag (a failed write must never destroy
@@ -861,7 +889,7 @@ def _process_lyrics_for_audio(audio_path, cfg, media_source=None):
 
     elif lyrics_format == "LRC" and embedded_canonical:
         # Destination is .lrc sidecar — format embedded_raw for LRC target
-        dest_for_lrc = _format_for_storage(embedded_raw, cfg, optimize=True, is_for_lrc=True)
+        dest_for_lrc = _fmt(embedded_raw, True, True)
         # .lrc file write is always allowed (sidecar), but embedded delete is gated
         try:
             _atomic_write_text(lrc_path, dest_for_lrc)
@@ -881,7 +909,7 @@ def _process_lyrics_for_audio(audio_path, cfg, media_source=None):
         try:
             if lrc_canonical and not embedded_canonical:
                 if can_write_lyrics:
-                    dest_for_embedded = _format_for_storage(lrc_raw, cfg, optimize=True, is_for_lrc=False)
+                    dest_for_embedded = _fmt(lrc_raw, True, False)
                     lyrics_touched = True
                     if not af.set_lyrics(dest_for_embedded):
                         return ("fail", 0, 0, f"embed lyrics: {af.error}")
@@ -891,14 +919,14 @@ def _process_lyrics_for_audio(audio_path, cfg, media_source=None):
                 # Write embedded's text formatted for LRC target — only
                 # when it actually differs from what the sidecar holds
                 # (rewriting an identical file churns mtime for nothing).
-                dest_for_lrc = _format_for_storage(embedded_raw, cfg, optimize=True, is_for_lrc=True)
+                dest_for_lrc = _fmt(embedded_raw, True, True)
                 if dest_for_lrc != lrc_raw:
                     _atomic_write_text(lrc_path, dest_for_lrc)
                     modified = True
                 lrc_exists = True
 
             elif embedded_canonical and not lrc_canonical:
-                dest_for_lrc = _format_for_storage(embedded_raw, cfg, optimize=True, is_for_lrc=True)
+                dest_for_lrc = _fmt(embedded_raw, True, True)
                 if dest_for_lrc != lrc_raw:
                     _atomic_write_text(lrc_path, dest_for_lrc)
                     modified = True
@@ -910,8 +938,13 @@ def _process_lyrics_for_audio(audio_path, cfg, media_source=None):
     notes = []
 
     # set_lyrics / delete_lyrics mutate the in-memory tag even when the
-    # save fails, so re-read from disk before deciding on INSTRUMENTAL.
-    if lyrics_touched:
+    # save fails, and a video lyric write rewrites the container (possibly
+    # under a new name), so re-read from disk before deciding on
+    # INSTRUMENTAL whenever a write failed or the handle no longer names the
+    # file this pass was handed. When every write LANDED the handle's tags
+    # are the persisted ones already — this re-open used to re-parse the
+    # whole container for an answer that was already in hand.
+    if lyrics_touched and (lyrics_save_failed or af.kind == "video"):
         af = AudioFile(audio_path)
         if af.audio is None:
             return ("fail", 0, 0, f"reload: {af.error}")
@@ -1083,8 +1116,10 @@ def _normalize_album_media_source(args):
                         bytes_removed += b_rem
                         bytes_added += b_add
 
-        elif media_summary == "CD" and cfg is not None and cfg.get("strip_source_on_cd", True):
-            # CD must never carry SOURCE (per user request, on by default) — strip it
+        elif is_cd_media(media_summary) and cfg is not None and cfg.get("strip_source_on_cd", True):
+            # A CD — and its HDCD variant, which is the same disc
+            # (mlo.tagtext.is_cd_media) — must never carry SOURCE (per user
+            # request, on by default): strip it
             for path, af, source_clean in entries:
                 if source_clean:
                     if not should_write_audio_tag(cfg, "SOURCE", filepath=path):
@@ -1107,8 +1142,8 @@ def _normalize_album_media_source(args):
                     bytes_removed += b_rem
                     bytes_added += b_add
 
-        elif media_summary == "CD":
-            # CD with strip_source_on_cd off — leave SOURCE as-is (grading will still fail it if present)
+        elif is_cd_media(media_summary):
+            # A CD with strip_source_on_cd off — leave SOURCE as-is (grading will still fail it if present)
             pass
 
         else:

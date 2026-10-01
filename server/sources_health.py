@@ -143,8 +143,6 @@ _CREDENTIAL_PROVIDES = {
                 "fingerprint.",
     "acoustid-user": "proves the user key with a real probe SUBMISSION — the "
                      "one lookup a user key can answer.",
-    "soulseek": "reads slskd's own live state and the daemon's recorded "
-                "verdict on the login.",
     "ai": "one tiny /chat/completions round trip with the key as a Bearer — "
           "can cost money.",
     "login": "this server's own gate: is anyone being asked to sign in, and "

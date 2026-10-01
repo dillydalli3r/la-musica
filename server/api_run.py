@@ -52,7 +52,7 @@ def _run_scripts(req: RunRequest):
     """Run the requested scripts (ids in request order) against the library.
 
     The id → runner registry lives in `server.script_runners` so the import
-    pipeline, the bulk queue and the Soulseek auto-importer run the exact same
+    pipeline and the bulk queue run the exact same
     scripts; this handler is the HTTP shell around it (target scoping, force
     semantics, cache invalidation, progress).
     """

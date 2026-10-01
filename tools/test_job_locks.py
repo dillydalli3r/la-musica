@@ -756,159 +756,6 @@ check("an album-scoped run over an album the sweep walks is refused",
       stray_busy)
 check("nothing is left claimed afterwards", jl.jobs() == [], str(jl.jobs()))
 
-print("== an auto-import's chain holds its album for the WHOLE chain ==")
-
-# The hole the owner reported: `_start_import_chain` handed the album to a plain
-# daemon thread and the job's own claim (the release's album folder, taken by
-# `_AlbumClaim` before the search) was released by `_finish` the moment the
-# download job settled — while the chain still had every look-up and every
-# script to run. A press on that album found no holder, so it started a second
-# chain over the same folder.
-
-from server import soulseek_auto          # noqa: E402
-
-auto_album = os.path.join(music, "Artists", "Other", "Auto Album")
-shutil.rmtree(auto_album, ignore_errors=True)
-os.makedirs(auto_album, exist_ok=True)
-with open(os.path.join(auto_album, "01 - Track.flac"), "w", encoding="utf-8") as fh:
-    fh.write("not really audio")
-
-auto_gate, auto_in, auto_seen = threading.Event(), threading.Event(), {}
-
-
-def gated_finish(album, cfg, **kwargs):
-    """The chain's own entry point, held open while the probes run."""
-    auto_seen["album_reached"] = album
-    auto_in.set()
-    auto_gate.wait(20)
-    return {"chained": True}
-
-
-auto_real = {
-    "finish": imports_mod.finish_album,
-    "metadata": soulseek_auto._account_metadata,
-    "claim": soulseek_auto._job.get("_claim"),
-}
-auto_claim = soulseek_auto._AlbumClaim(auto_album, "Import Auto Album")
-imports_mod.finish_album = gated_finish
-soulseek_auto._account_metadata = lambda *a, **k: None
-try:
-    auto_claim.start()
-    claim_job = auto_claim.wait(lambda: False)
-    check("the job's own claim on the album is taken", bool(claim_job),
-          str(soulseek_auto._job))
-    soulseek_auto._job["_claim"] = auto_claim
-    soulseek_auto._start_import_chain(auto_album, {"music_folder": music})
-    # What `_finish` does the moment the download job settles — the hand-off the
-    # chain has to have taken over by then.
-    auto_claim.release()
-    check("the background chain is running", auto_in.wait(10))
-    # Let the job's own claim actually go: the release above only asks its
-    # keeper thread to stop, and that is exactly the moment the hole was in.
-    # Post-fix the chain is holding a reference of its own by now, so this loop
-    # never sees the album free — which IS the property under test, hence the
-    # bounded wait instead of a hang.
-    deadline = time.time() + 2.0
-    while other(auto_album) is not None and time.time() < deadline:
-        time.sleep(0.05)
-    # The live query, from outside any claim: who holds the album NOW, while
-    # the chain is inside its first step?
-    auto_holder = other(auto_album) or {}
-    check("the album is still claimed while its chain runs",
-          bool(auto_holder), str(auto_holder))
-    check("...under the job that claimed it (not a second one)",
-          auto_holder.get("job") == claim_job, f"{auto_holder} vs {claim_job}")
-    # What the user's own press does: `finish_album(wait=False)` claims with
-    # this rule and the route answers 409 with this very sentence.
-    auto_press = ""
-    try:
-        with jl.holding([auto_album], job="someone-else", kind="import",
-                        label="Import Auto Album", wait=False):
-            auto_press = ""
-    except jl.PathLocked as e:
-        auto_press = str(e)
-    check("the user's own press is refused, naming the holder",
-          "in use by" in auto_press and "Auto Album" in auto_press
-          and claim_job in auto_press,
-          f"{auto_press!r} {auto_holder}")
-    auto_gate.set()
-    for _ in range(200):
-        if other(auto_album) is None:
-            break
-        time.sleep(0.05)
-    check("the claim ends with the chain",
-          other(auto_album) is None and jl.jobs() == [],
-          f"{other(auto_album)} {jl.jobs()}")
-finally:
-    auto_gate.set()
-    auto_claim.release()
-    imports_mod.finish_album = auto_real["finish"]
-    soulseek_auto._account_metadata = auto_real["metadata"]
-    soulseek_auto._job["_claim"] = auto_real["claim"]
-
-print("== a release's download folder is claimed while its chain runs ==")
-
-# The album has moved into the library by then, but what is left in the folder
-# the download came from is still this release's: a second import of it (the
-# downloads page's one-click import, the bulk queue) must queue behind the chain
-# that is finishing it instead of importing — or clearing — it underneath.
-
-auto_dl = os.path.join(music, "Downloads", "Auto Release")
-auto_dl_album = os.path.join(music, "Artists", "Other", "Auto Download Album")
-for _d in (auto_dl, auto_dl_album):
-    shutil.rmtree(_d, ignore_errors=True)
-    os.makedirs(_d, exist_ok=True)
-    with open(os.path.join(_d, "01 - Track.flac"), "w", encoding="utf-8") as fh:
-        fh.write("not really audio")
-
-dl_gate, dl_in, dl_seen = threading.Event(), threading.Event(), {}
-
-
-def gated_finish_dl(album, cfg, **kwargs):
-    dl_seen["album_held"] = other(album) is not None
-    dl_seen["download_held"] = other(auto_dl) is not None
-    dl_seen["download_holder"] = other(auto_dl) or {}
-    dl_in.set()
-    dl_gate.wait(20)
-    return {"chained": True}
-
-
-dl_real = {"finish": imports_mod.finish_album,
-           "metadata": soulseek_auto._account_metadata,
-           "claim": soulseek_auto._job.get("_claim")}
-imports_mod.finish_album = gated_finish_dl
-soulseek_auto._account_metadata = lambda *a, **k: None
-soulseek_auto._job["_claim"] = None
-dl_error = ""
-try:
-    soulseek_auto._start_import_chain(auto_dl_album, {"music_folder": music},
-                                      None, download_dir=auto_dl)
-except TypeError as e:
-    # BEFORE the fix the seam had no download folder at all: nothing claimed the
-    # release's own folder, so a second import of it could run — and clear it —
-    # under the chain that was still finishing it.
-    dl_error = f"{type(e).__name__}: {e}"
-    dl_gate.set()
-dl_in.wait(10)
-dl_busy = refused_for(auto_dl)
-dl_gate.set()
-for _ in range(200):
-    if other(auto_dl) is None:
-        break
-    time.sleep(0.05)
-imports_mod.finish_album = dl_real["finish"]
-soulseek_auto._account_metadata = dl_real["metadata"]
-soulseek_auto._job["_claim"] = dl_real["claim"]
-
-check("the chain went in with the album AND the download folder claimed",
-      dl_seen.get("album_held") is True and dl_seen.get("download_held") is True,
-      str(dl_seen) if dl_seen else dl_error)
-check("a foreign job cannot take the download folder while it runs",
-      dl_busy is True, f"busy={dl_busy} {dl_error}")
-check("no claim is left behind once the chain ends",
-      other(auto_dl) is None and other(auto_dl_album) is None and jl.jobs() == [],
-      f"{other(auto_dl)} {other(auto_dl_album)} {jl.jobs()}")
-
 print("== two chains never mix their numbers in one bar ==")
 
 # The header bar is ONE process-wide hook (`mlo.stats.progress_hook`) and a
@@ -1386,7 +1233,7 @@ try:
     import httpx                                # noqa: E402  (TestClient's own client)
     from fastapi.testclient import TestClient  # noqa: E402  (heavy import)
 
-    from server import beetscfg, main as mlo_main, soulseek  # noqa: E402
+    from server import beetscfg, main as mlo_main            # noqa: E402
     from server import api_cover as cover_api                # noqa: E402
 except Exception as e:                                   # pragma: no cover
     print(f"  SKIP  TestClient unavailable ({e})")
@@ -1398,8 +1245,6 @@ if mlo_main is not None:
         "beets": beetscfg.run_beets_import,
         "export": mlo_main.exporter.export_tracks,
         "import_one": mlo_main._import_one_album,
-        "pending": soulseek._pending_album_folders,
-        "completed": soulseek.import_completed,
     }
     mlo_main.load_config = lambda: {**_real["config"](), "music_folder": music,
                                     "first_run_done": True, "beets_organize_after": False}
@@ -1553,24 +1398,6 @@ if mlo_main is not None:
                   _second.status_code == 409, f"{_second.status_code} {_second.text[:160]}")
             check("and its refusal names the write holding the album",
                   "in use by" in _second.json().get("detail", ""), _second.text[:160])
-
-        # The downloads import claims the albums it is about to move, so a
-        # second import (or a run over the library) cannot take them first.
-        # `import_completed` (soulseek's own mover) is stubbed to report the
-        # album this temp tree holds: the mover itself is that module's test,
-        # what is pinned here is that the guarded route proceeds with it.
-        ready = os.path.join(music, ".mlo", "downloads", "Ready Album")
-        os.makedirs(ready, exist_ok=True)
-        with open(os.path.join(ready, "01 - Track.flac"), "w", encoding="utf-8") as fh:
-            fh.write("not really audio")
-        soulseek._pending_album_folders = lambda cfg=None: set()
-        soulseek.import_completed = lambda *a, **k: [ready]
-        mlo_main._import_one_album = lambda a, cfg, **k: {
-            "album_root": a, "errors": [], "organized": True,
-            "media_tagged": 0, "converted": 0, "identity_stamped": 0}
-        r = probe("the downloads import", [ready], lambda: client.post("/api/soulseek/import"))
-        check("the downloads import went on to import the album it holds",
-              r.json().get("moved") == [ready], str(r.json())[:200])
 
         # ---- the wizard's own "Run the import chain" press ------------------
         # The report this class of check exists for: an album another job is
@@ -1778,8 +1605,6 @@ if mlo_main is not None:
         beetscfg.run_beets_import = _real["beets"]
         mlo_main.exporter.export_tracks = _real["export"]
         mlo_main._import_one_album = _real["import_one"]
-        soulseek._pending_album_folders = _real["pending"]
-        soulseek.import_completed = _real["completed"]
         shutil.rmtree(dest_drive, ignore_errors=True)
 
 shutil.rmtree(music, ignore_errors=True)

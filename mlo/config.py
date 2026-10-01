@@ -7,7 +7,7 @@ import tempfile
 from .paths import (CONFIG_FILE, REPO_CONFIG_FILE, DEFAULT_DIGITAL_SOURCE, app_data_dir,
                     downloads_dir, legacy_state_dirs, read_music_folder_guess, trash_dir,
                     trash_root)
-from .naming import DEFAULT_NAMING_SCRIPT, RELEASE_TYPES
+from .naming import DEFAULT_NAMING_SCRIPT
 # The genre-list ceiling, so `mb_genre_count`'s validated range below and the
 # value mlo.genres enforces can never drift apart: one number, one home.
 from .genres import GENRE_COUNT_MAX
@@ -84,26 +84,14 @@ LEGACY_DEFAULT_GENRE_SOURCES = (
     ],
 )
 
-# The auto-import query templates previous releases shipped. Settings writes
-# the whole list into the config, so an untouched install holds a copy — and
-# would keep searching with three broad templates after the default narrowed
-# to the catalog number alone. A list the user actually edited is theirs and is
-# kept; the exact old defaults are swapped for the current ones.
-LEGACY_DEFAULT_CD_QUERIES = (
-    ["catalognumber", "artist album catalognumber", "artist album"],
-)
-
 # Genres-per-track defaults this app shipped BEFORE the current one (2: one
 # specific genre and its family). A config still holding one of these was
 # never a decision — Settings carried the shipped default — so it follows the
-# new value, the same rule the naming script, the genre-source order and the
-# query templates above already use. A number the user actually chose is any
+# new value, the same rule the naming script and the genre-source order
+# already use. A number the user actually chose is any
 # other value and is kept. (3 was the shipped default up to 2.8.x, back when
 # the slots were parent / main / sub.)
 LEGACY_DEFAULT_GENRE_COUNTS = (3,)
-LEGACY_DEFAULT_DIGITAL_QUERIES = (
-    ["artist album year", "artist album"],
-)
 
 # The medium order previous releases shipped, before the video carriers were
 # named ahead of Digital Media (DVD, Blu-ray, VHS, Video CD, LaserDisc — see
@@ -119,7 +107,9 @@ LEGACY_DEFAULT_MEDIUM_ORDER = (
 # beets, whose generated config sets `move: yes`), then the sidecar namers
 # that must see final audio names (15 manifest → 2 CUEs → 1 lyrics format),
 # then content: 13 fetch lyrics → 18 publish → 17 AI transforms, 8 auto
-# tagging (mood/genre/advisory), 5 images → 19 artist images (the two image
+# tagging (mood/genre/advisory), 24 web ratings (the public album/track score,
+# which needs the MBIDs 14/8 have just settled and must be on the file before
+# 10's canonical trim and 4's grade), 5 images → 19 artist images (the two image
 # passes together: covers then the artwork stored beside them), 6 audit, 7 DR
 # & ReplayGain, 9 AccurateRip, 12 key & BPM, 16 mood & energy, then 10
 # Format all (the canonical trim) with 23, the tag strip that deletes the
@@ -157,7 +147,7 @@ LEGACY_DEFAULT_MEDIUM_ORDER = (
 # is idempotent, and it is the same move `beets_organize_after` already makes
 # for 14.
 # Keep in step with web/src/lib/scripts.ts (tests/test_script_menus).
-DEFAULT_RUN_ALL_ORDER = [11, 3, 14, 15, 2, 1, 13, 18, 17, 8, 5, 19, 6, 7, 9, 12, 16, 10, 23, 20, 21, 4]
+DEFAULT_RUN_ALL_ORDER = [11, 3, 14, 15, 2, 1, 13, 18, 17, 8, 24, 5, 19, 6, 7, 9, 12, 16, 10, 23, 20, 21, 4]
 
 # The genre-source order that shipped before the two-source default: recognizing
 # it lets normalize_config treat it as "never customized" (see below).
@@ -183,6 +173,9 @@ AUDIO_TAG_FAMILIES = [
     "MOOD",           # MOOD (audio/provider classification, script 8/16)
     "ENERGY",         # ENERGY (0-100, audio analysis, written with MOOD)
     "RATING",         # RATING (0-100 Picard scale, the listener's own stars)
+    "WEBRATING",      # WEBRATING/ALBUMWEBRATING + their _SOURCE twins
+                      # (mlo.web_ratings: the aggregated PUBLIC score, same
+                      # 0-100 scale; gated by `web_ratings_enabled`)
 ]
 AUDIO_TAG_TYPES = ["flac", "mp3", "mp4", "ogg", "opus", "aac"]
 
@@ -209,6 +202,14 @@ _TAG_TO_FAMILY = {
     "MOOD": "MOOD",
     "ENERGY": "ENERGY",
     "RATING": "RATING",
+    # The public web rating (mlo.web_ratings, script 24) is a family of its
+    # own: it is not the listener's stars, so it must not follow RATING's
+    # master switch, and it is one unit — the value tags and their _SOURCE
+    # twins are written together and are on/off together.
+    "WEBRATING": "WEBRATING",
+    "WEBRATING_SOURCE": "WEBRATING",
+    "ALBUMWEBRATING": "WEBRATING",
+    "ALBUMWEBRATING_SOURCE": "WEBRATING",
     # integrity tags follow AUDIT family (written alongside audit when present)
     "AUDIO_MD5": "AUDIT",
     "INTEGRITY": "AUDIT",
@@ -286,6 +287,11 @@ def should_write_audio_tag(config, tag_name, filepath=None, filetype=None):
         # it the moment a star is clicked, so its master switch is what turns
         # writing the TAG off while keeping the rating in the app.
         "RATING": "write_rating_tags",
+        # The web rating's own feature switch is its master switch: with
+        # `web_ratings_enabled` off the script is skipped by the chain
+        # (server.script_runners._DISABLED) and nothing writes the tags
+        # either, so "off" means off in both halves.
+        "WEBRATING": "web_ratings_enabled",
         # ENERGY is written by the same analysis pass as MOOD, so it answers
         # to the same switch; the grader requires it when it is on.
         "ENERGY": "mood_enabled",
@@ -1055,25 +1061,21 @@ DEFAULT_CONFIG = {
 
     # The two switches over the whole acquisition surface. Both default on,
     # which is how the app has always behaved. `auto_acquisition_enabled` is
-    # the MASTER switch for everything the app does on its own: the wishes
-    # worker searching the queue, an artist watch queueing a new release, and
-    # an "Add to library" request starting a download. Off, the request is
-    # still RECORDED — the wish, the watch's row, the framework album — and
-    # reported honestly ("nothing searched: automatic acquisition is off"),
-    # but nothing is searched or downloaded until the user acts on it (the
-    # wish's own Search now, the wizard, the Soulseek page). It is not the
-    # same switch as `wishes_auto_import`, which keeps searching and only
-    # stops the download. `manual_import_enabled` is the switch over the
-    # user-driven import path: the wizard and every POST /api/import/* route.
-    # Off, those routes answer 409 naming this setting instead of importing,
-    # so a user can hand the whole importer over to the automatic pipeline (or
-    # stop imports entirely) without anything importing behind their back.
+    # the MASTER switch for everything the app does on its own: an "Add to
+    # library" request starting a download. Off, the request is still
+    # RECORDED and reported honestly ("nothing searched: automatic acquisition
+    # is off"), but nothing is searched or downloaded until the user acts on
+    # it. `manual_import_enabled` is the switch over the user-driven import
+    # path: the wizard and every POST /api/import/* route. Off, those routes
+    # answer 409 naming this setting instead of importing, so a user can hand
+    # the whole importer over to the automatic pipeline (or stop imports
+    # entirely) without anything importing behind their back.
     "auto_acquisition_enabled": True,
     "manual_import_enabled": True,
 
-    # Import — drag & drop, the import wizard and the Soulseek pipelines all
-    # run the same script chain, so a freshly imported album leaves the
-    # pipeline complete instead of half-tagged. Empty `import_scripts` = the
+    # Import — drag & drop and the import wizard all run the same script
+    # chain, so a freshly imported album leaves the pipeline complete
+    # instead of half-tagged. Empty `import_scripts` = the
     # built-in chain: 2 CUEs → 3 FLACs → 11 videos → 1 lyrics format →
     # 13 fetch lyrics → 8 auto tagging (mood/genre/advisory) → 5 images →
     # 6 audit → 7 DR & ReplayGain → 9 AccurateRip → 12 key & BPM → 14 beets →
@@ -1097,8 +1099,8 @@ DEFAULT_CONFIG = {
     # the opt-in that lets the fingerprint fill it anyway — off by default, in
     # the owner's words, because "it actually shouldn't auto-fill purely based
     # on the AcoustID": a fingerprint is evidence about the AUDIO and never
-    # about which EDITION the user wants. Unattended imports (a Soulseek
-    # auto-import) match under `import_acoustid` and are not affected by this.
+    # about which EDITION the user wants. Unattended imports match under
+    # `import_acoustid` and are not affected by this.
     "import_acoustid_autofill": False,
     "acoustid_enabled": True,
     "acoustid_api_key": "",
@@ -1113,220 +1115,16 @@ DEFAULT_CONFIG = {
     "acoustid_fpcalc_path": "",
     "acoustid_min_score": 0.75,
 
-    # Soulseek via managed slskd (shares = the library folder <music>/Artists).
-    "soulseek_username": "",
-    "soulseek_password": "",
-    "soulseek_description": "",
-    "soulseek_listen_port": 50000,
-    "soulseek_web_port": 5030,
-    "soulseek_up_limit": 0,
-    "soulseek_down_limit": 0,
-    # slskd transfer slots (concurrent transfers) and speed limits in KiB/s.
-    # A SPEED limit of 0 is "unlimited" (emitted as slskd's int.MaxValue); a
-    # SLOT count of 0 is not a number of slots — slskd refuses a count below 1,
-    # so a blank/0 slots value is left to slskd's own default.
-    #
-    # What these slots are FOR: the app runs `soulseek_search_concurrency`
-    # releases at once, each downloading up to `soulseek_candidate_slots`
-    # candidates, and the app's own enqueueing is what holds those two limits
-    # (see server.soulseek_auto). slskd then takes the transfers they produce
-    # off the network, and it can only have this many in flight — so the
-    # shipped default is exactly that product, 3 × 3 = 9. A config with fewer
-    # slots than its other two settings need still gets the guarantee: the
-    # per-release width is narrowed to fit (`_batch_width`), so the app never
-    # asks slskd for more than it will serve.
-    "soulseek_download_slots": 9,
-    "soulseek_upload_slots": 2,
-    "soulseek_upload_limit_kib": 0,
-    "soulseek_download_limit_kib": 0,
-    # slskd's HTTPS listener binds an extra port (5031) with a self-signed
-    # cert by default. The app talks plain HTTP to the loopback port, so the
-    # second listener is disabled unless explicitly wanted.
-    "soulseek_web_https": False,
-    # Ask the router to open the listen port (UPnP IGD, then NAT-PMP) so peers
-    # can reach this client without a manual port-forward. slskd has no such
-    # option — upstream closed the request unimplemented — so the mapping is
-    # made by the app itself (mlo/portmap.py). On by default because an
-    # unreachable listen port is what makes a client look offline to the
-    # network; it is a no-op when no gateway answers, and the status says so.
-    "soulseek_upnp": True,
-    # Which address to ask for that mapping. Both methods need the ROUTER:
-    # UPnP's IGD search is multicast (routers routinely drop it, and multicast
-    # never leaves Docker's bridge) and NAT-PMP has no discovery at all, so
-    # each one falls back to whatever the machine calls its default gateway.
-    # In a container that is Docker's bridge — a peer, not the router — so
-    # auto-detection finds the bridge and never the box that forwards the
-    # port, and the panel reports "no device answered". Naming the router here
-    # makes the app ask IT, by unicast, from inside the container. Empty keeps
-    # auto-detection; it is up to the user, who is the only one who knows the
-    # router's LAN address.
-    "soulseek_router_ip": "",
-    # After a downloaded release imports successfully, delete the copy that was
-    # downloaded — the library now holds the album and the download folder is
-    # only a staging area. ON by default: the alternative is a second full copy
-    # of everything you acquire. It is only ever the folder the job itself
-    # downloaded into, only inside the configured download dir, and only after
-    # the import reported success — a failed import keeps its files so it can
-    # be retried without downloading them again.
-    "soulseek_clear_downloads": True,
-    # Completed downloads leave the queue's LIST by themselves when the next
-    # import/chain starts (a job start, a bulk add, a page download, "import
-    # everything downloaded") — the queue is a view of what is happening now,
-    # not a log. ON by default. It takes ONLY the completed section: a failed
-    # or needs-attention row stays until the user clears it, a restart of a
-    # SEARCH never clears anything, and nothing on disk is ever deleted (see
-    # server.api_queue.clear_completed_for_new_import).
-    "soulseek_clear_completed_on_import": True,
-    "soulseek_download_dir": "",
-    # Size caps on the app's two TRANSIENT stores: the download/staging pair
-    # above (finished transfers waiting to be imported, plus slskd's in-flight
-    # partials in the sibling `incomplete`) and the remove-from-library bin
-    # (<music>/.mlo/trash). Two INDEPENDENT caps, never a shared total — one
-    # store filling up must not eat the other's room — and both ship at 5 GB
-    # because nothing else bounded them: `soulseek_clear_downloads` only
-    # removes the copy an import actually landed, so a cancelled job, a
-    # rejected candidate and a failed import all leave their bytes where they
-    # are, and a bin nothing ever empties keeps every album ever removed.
-    # 0 (or negative) = that store's cap is off; a store over its cap is
-    # pruned oldest first until it fits, never touching anything in use (see
-    # server/cache_caps.py, which owns both numbers and the pass).
-    "soulseek_cache_cap_gb": 5,
+    # Size cap on the app's remove-from-library bin (<music>/.mlo/trash),
+    # which nothing else bounds: a bin nothing ever empties keeps every album
+    # ever removed. Ships at 5 GB. 0 (or negative) = the cap is off; a store
+    # over its cap is pruned oldest first until it fits, never touching
+    # anything in use (see server/cache_caps.py, which owns the number and
+    # the pass).
     "trash_cap_gb": 5,
-    # ON by default: the Soulseek client should be up whenever the app is.
-    "soulseek_autostart": True,
-    # Share the library with the network on the configured listen port.
-    "soulseek_share_library": True,
-    # Auto-import (MusicBrainz release → Soulseek). Each template is a
-    # space-separated list of release fields: artist album year date country
-    # catalognumber barcode label.
-    # Query templates per release kind. A PHYSICAL release — CD, vinyl,
-    # cassette, SACD, SHM-CD, CD-R, Blu-spec CD: every medium mlo.tagtext
-    # .MEDIA_VALUES names except Digital Media — is searched by the traits that
-    # identify THAT pressing: the catalog number and the barcode are what rip
-    # folders carry, and neither of them asks the network for every other
-    # pressing of the same album the way artist/title does. A pressing with
-    # neither falls back to its label and country. Digital Media has no
-    # pressing trait at all, so it keeps the broader `artist album year`
-    # wording. Add templates (Settings → Auto-import) to widen a search again.
-    # `soulseek_auto_cd_queries` is the key the physical one grew out of: a CD
-    # is a physical release, so a config that still sets that key keeps using
-    # its templates (its own shipped default is superseded — it named the
-    # catalog number alone, which the physical default already covers).
-    "soulseek_auto_physical_queries": ["catalognumber", "barcode"],
-    "soulseek_auto_cd_queries": ["catalognumber"],
-    "soulseek_auto_digital_queries": ["artist album year"],
-    # MBID-DRIVEN QUERIES — ON by default (the owner's ask): a release is
-    # searched by what a PEER's folder can literally carry, not only by its
-    # pressing traits — the release's own MusicBrainz id, the recording ids
-    # MusicBrainz states for its tracks, and each of those tracks' own
-    # "artist title". A peer that names the ids, or that holds exactly the
-    # album's tracks under a title the traits never match, is otherwise
-    # unreachable from a catalog-number query. They go out in the SAME parallel
-    # batch as the configured templates (one search window, never a second
-    # wait), and the scoring is unchanged: a query that turns up a folder with
-    # the whole album wins like any other.
-    "soulseek_auto_mbid_queries": True,
-    # How many of the release's tracks are chased that way — each one by its
-    # recording MBID and by its own artist + title, in disc/position order.
-    # Four covers what this exists for (the top of the tracklist, which is what
-    # a folder named after the album's own track order will hold) without
-    # asking the network one question per track of a thirty-track box set.
-    "soulseek_auto_mbid_tracks": 4,
-    # Every disc's .log must score at least this (Logchecker 0-100) before
-    # the full album is downloaded.
-    "soulseek_auto_log_min_score": 100,
-    # Fraction of the release track list a candidate folder must contain.
-    "soulseek_auto_complete_ratio": 1.0,
-    # Every candidate the search turns up is tried in score order (there is no
-    # rejection cap: a rejected peer costs only its own attempt, and stopping
-    # early throws away candidates that would have verified).
-    # Quiet seconds before slskd ends a search with too few replies to score.
-    "soulseek_auto_search_wait": 10,
-    # THE FALLBACK WALK (spec R150-R153). An acquisition of a release GROUP
-    # starts on the edition the release-choice policy ranks best; when the
-    # network does not have it, the walk asks the next ranked edition, then the
-    # next, so a rare pressing no longer sinks an album the network does have.
-    #
-    # How many of the ranked editions one walk may ask, best first. 1 is
-    # exactly the behaviour before the walk existed (the best edition, nothing
-    # behind it); a group with fewer eligible editions than this simply ends the
-    # walk at the end of its own list. Clamped to the list by the walk itself.
-    # Five, not three: a rank is a guess about WHICH PRESSING is best, and the
-    # walk exists because the network disagrees with it often enough — each
-    # candidate costs one quiet window and nothing else, and the walk stops the
-    # moment a usable folder appears.
-    "soulseek_fallback_candidates": 5,
-    # How long ONE candidate's search is given before it counts as not found and
-    # the walk moves on — its TOP-UP window. The same QUIET window
-    # `soulseek_auto_search_wait` is (slskd ends a search when the network stops
-    # answering, with the app's own response grace tail on top), but per
-    # candidate: a walk of three may therefore wait up to three of these, and a
-    # usable folder still ends a candidate's search in seconds.
-    #
-    # It is NOT the time before anything can start. slskd serves a search's
-    # responses only once the search has ENDED, so a window this long used to
-    # mean a perfect folder found at t≈2 s was first readable at t≈60 s. The
-    # FIRST pass now asks with `soulseek_search_fast_seconds` below; this window
-    # is what is left when that pass found nothing usable — it keeps reading the
-    # searches still running at slskd (and the broad second pass still runs
-    # after it).
-    "soulseek_search_timeout_seconds": 60,
-    # The FIRST pass's quiet window, and the reason a good find starts
-    # downloading in seconds: every configured query template is POSTed with
-    # this timeout, so a release the network answers for (or does not answer for
-    # at all) goes quiet and ENDS in seconds and its responses become readable —
-    # the moment one complete lossless folder is readable its download is
-    # enqueued and the job moves on. The long window above is only spent when
-    # this pass found nothing usable. Never longer than the window it precedes.
-    "soulseek_search_fast_seconds": 5,
-    # Peers that must answer before the search is scored instead of waiting on
-    # slskd's quiet timer: a popular album never goes quiet, and slskd only
-    # hands back its responses once a search has ENDED — this is what stops a
-    # good copy from sitting behind a full search window. Measured through this
-    # client: a popular query with a 10 s quiet window and no limit became
-    # readable after 32 s; with a 5-response limit after 0.5 s, with 40 after
-    # ~11 s (peers arrive in a burst, then trickle). 15 keeps the wait to a
-    # few seconds while still scoring fifteen whole folders.
-    "soulseek_auto_response_limit": 15,
-    # How many releases the auto-importer works on AT THE SAME TIME — the
-    # wishes worker fills up to this many wishes in one pass, a bulk
-    # "download all" run keeps this many jobs in flight, and a release over the
-    # ceiling WAITS in the queue (it keeps its place, it is cancellable there,
-    # and it starts by itself when one of the running ones finishes) instead of
-    # being refused. Searching is mostly waiting on the network, so one album
-    # at a time left the page showing a queue that only ever moved one item.
-    "soulseek_search_concurrency": 3,
-    # How many candidate downloads of ONE release run at the same time — three
-    # peers of one album transfer side by side, the first that verifies good
-    # becomes the import and the others are cancelled and swept, and the NEXT
-    # candidate is only asked for when one of them lands or fails. Enforced by
-    # the app's own enqueueing; `soulseek_download_slots` is only the outer
-    # ceiling slskd puts on the transfers it produces (see that key).
-    "soulseek_candidate_slots": 3,
-    # Park an interactive job that found no usable folder and ask the user
-    # whether to add the release to the wishes list, instead of failing the job
-    # outright: a rare album is worth watching for, and the background wishes
-    # worker keeps searching with the queries the job already used. The
-    # background path itself never asks (a wish must not be turned into a wish).
-    "soulseek_auto_wish_prompt": True,
-    # What an UNATTENDED acquisition (a wish, an artist watch) does when the
-    # only complete folders the network offers are lossy — MP3/AAC, which
-    # `_rank` already puts behind every lossless copy and which the download
-    # would put in the library for good. "never" (the default) is the
-    # behaviour this key documents: a background download is never allowed to
-    # take lossy audio, so the release stays in the wish list and keeps being
-    # searched, with that sentence as its reason. "best" takes the best lossy
-    # candidate the ranking ALREADY offers (the list `_rank` sorted, so the
-    # fastest complete copy of the album) and says so out loud — in the job's
-    # own log, in its queue row and in the notification it ends with, because a
-    # lossy album that arrives silently is exactly the surprise this key exists
-    # to prevent. The INTERACTIVE path (the Soulseek page, the search box) asks
-    # the user whichever value this holds: a person who asked for a release by
-    # hand is offered the lossy copy, never handed it.
-    "soulseek_auto_lossy_policy": "never",
     # Release-choice policy (mlo.release_choice — the ONE policy every
-    # acquisition path ranks editions with: "Add to library", the bulk
-    # auto-import, the wish worker and the artist watch). It prefers
+    # acquisition path ranks editions with: "Add to library" and the bulk
+    # auto-import). It prefers
     # status=Official, never auto-picks a Promotion / Bootleg / Pseudo-Release
     # while avoid-promo is on, requires a RELEASECOUNTRY while require-country
     # is on, and ranks the rest by the caller's release-group TYPE filter
@@ -1344,7 +1142,7 @@ DEFAULT_CONFIG = {
     # preferred over the same video published as a download (issue #53: a
     # physical release is the one worth archiving) — and digital is last: a
     # digital edition carries no catalog number and no pressing to match
-    # against, so it is the edition a Soulseek folder matches least reliably.
+    # against, so it is the edition a download folder matches least reliably.
     # A format the list does not name ranks after every configured one.
     "auto_import_medium_order": ["CD", "Vinyl", "Cassette", "Other", "DVD",
                                  "Blu-ray", "VHS", "Video CD", "LaserDisc",
@@ -1386,76 +1184,6 @@ DEFAULT_CONFIG = {
     # 700 MB re-encode keeps the disc's feature, not the re-encode). On by
     # default — a re-encode cannot be undone — and off leaves the choice to
     # the rest of the policy, exactly as before this rule existed.
-    # Explicit shared folders (empty = the library folder <music>/Artists).
-    "soulseek_share_dirs": [],
-    # Extra share filters — substrings/paths slskd must NOT share.
-    "soulseek_share_exclude": [],
-
-    # Wishes — MusicBrainz releases saved to the library WITHOUT downloading.
-    # A background worker re-searches Soulseek for each wish on an interval
-    # and auto-imports the release the moment a verified match appears.
-    "wishes_enabled": True,
-    # ONE HOUR between the searches of ONE release (the owner's own cadence for
-    # "add to library" / best-pick release groups): often enough that a copy
-    # that shows up today is taken today, quiet enough that a release the
-    # network has nothing for is not hammered. The interval is the gap between
-    # two ATTEMPTS, not between two searches of the network: one attempt walks
-    # EVERY ranked candidate of the release (spec R150-R152), each with its own
-    # bounded search window, so an hour between attempts is not an hour between
-    # editions.
-    "wishes_interval_hours": 1,
-    # The retry policy (one place: server/wishes' "Retry policy" section).
-    # TRANSIENT failures — a refused/absent slskd, a MusicBrainz outage, a
-    # failed verification — are retried with backoff: the wait doubles per
-    # attempt, up to `wishes_max_attempts` attempts (0 = retry forever).
-    # A search that found NOTHING is not a failure to try harder: it spends a
-    # not-found attempt instead, and after `wishes_not_found_attempts` empty
-    # searches (0 = never give up) the wish ends 'not_found' — terminal and
-    # announced once, with the queue's retry button as the way back.
-    # Both ends record why, and neither is retried by the timer again.
-    # SHIPPED AS "KEEP LOOKING": a release the user asked for keeps being
-    # searched on its interval until it is found or the user cancels it. The
-    # network is not a fixed catalogue — a share that is offline today is
-    # online next week, and stopping after three quiet searches threw away
-    # requests the user had already made. A finite cap is still there for
-    # anyone who wants one.
-    "wishes_max_attempts": 0,       # 0 = retry forever
-    "wishes_not_found_attempts": 0,  # empty searches before 'not_found' (0 = never)
-    "wishes_retry_backoff_minutes": 30,  # extra wait per retry, doubled (0 = off)
-    "wishes_auto_import": True,
-
-    # Artist watches — follow an artist and add what it releases from NOW on.
-    # The whole point is what a watch refuses to do: a fresh watch never
-    # enumerates a back catalogue, so "new" is a release group whose FIRST
-    # release date is after the watch was created (an undated group is never
-    # new), and one cycle queues at most `artist_watch_max_per_cycle` albums
-    # whatever the watch's own policy is ("backfill" only widens the date rule,
-    # per watch, on purpose). The worker that runs the cycles is
-    # server/artist_watch_worker; the policy itself is server/artist_watch.
-    "artist_watch_enabled": True,
-    # How long between two checks of the SAME artist (a watch has its own
-    # timer; the worker ticks far more often than this).
-    "artist_watch_interval_hours": 24,
-    # The hard per-cycle cap — the anti-dump rule. One album is the shipped
-    # default: a watch that queued a hundred at once is the discography dump
-    # this feature exists to avoid.
-    "artist_watch_max_per_cycle": 1,
-    # Which release-group TYPES a watch may queue. MusicBrainz's own type names
-    # (lowercase) plus the app's DERIVED one ("podcast", read from the group's
-    # series relation — see mlo.naming.DERIVED_RELEASE_TYPES): the vocabulary is
-    # mlo.naming.RELEASE_TYPES, and the rule is server.artist_watch's: a
-    # secondary type is a QUALIFIER and decides the match (a live album is
-    # Album + Live, so "album" alone must not queue it and ticking "live"
-    # must), otherwise the group's primary type has to be selected. Album + EP
-    # is the shipped default, so a watch sweeps up new studio records and EPs
-    # and leaves the live records, compilations and scores alone. A watch may
-    # override the set per artist.
-    "artist_watch_types": ["album", "ep"],
-    # Queue a matched release into the library automatically. Off means a watch
-    # only reports what it found (the notification is the whole output), which
-    # is what a user who wants to choose the edition by hand wants.
-    "artist_watch_auto_add": True,
-
     # Genres imported per release/track (top voted first). Sources are tried
     # in this order and merged, and EVERY source is asked for EVERY track
     # (server.integrations._genre_source_answers). The registry of every
@@ -1463,8 +1191,7 @@ DEFAULT_CONFIG = {
     # the SHIPPED default (what an empty saved list falls back to) and it
     # follows that list's own order — RateYourMusic first, MusicBrainz
     # second — with the rationale for each position documented there and in
-    # `server/integrations.py` above GENRE_SOURCES. `soulseek` is deliberately
-    # absent (peers advertise folders, not genres). An install that never
+    # `server/integrations.py` above GENRE_SOURCES. An install that never
     # touched the Settings list follows this change: the previous two-source
     # default is in `LEGACY_DEFAULT_GENRE_SOURCES` (see normalize_config).
     # GENRES PER TRACK — one knob for three places, so they can never
@@ -1486,8 +1213,7 @@ DEFAULT_CONFIG = {
     # chain is a priority list that STOPS once a track's list is complete
     # (`_genre_complete`), so shipping all of them costs nothing on a release
     # the first two can answer and is what makes a rare pressing still get a
-    # genre. `soulseek` is the one source deliberately absent (peers advertise
-    # folders, not genres). Every position's rationale is documented above
+    # genre. Every position's rationale is documented above
     # `server.integrations.GENRE_SOURCES`; `tools/test_genres.py` asserts the
     # two lists are equal.
     "genre_sources": [
@@ -1507,6 +1233,12 @@ DEFAULT_CONFIG = {
     "discogs_token": "",
     "lastfm_api_key": "",
     "rym_cookie": "",
+    # The User-Agent RYM's requests are sent with. Cloudflare binds the
+    # `cf_clearance` cookie it hands out to the EXACT User-Agent (and network)
+    # that earned it, so a paste exported from any browser that is not the
+    # built-in Chrome UA cannot validate without this set to that browser's
+    # own UA string. Empty = the built-in Chrome UA (`integrations.RYM_HEADERS`).
+    "rym_user_agent": "",
     # The per-cookie notes for the cookie logins (server/api_cookies.py): one
     # JSON object per source, one entry per cookie identity
     # ("domain\tpath\tname"), holding the comment the user wrote against an
@@ -1529,6 +1261,36 @@ DEFAULT_CONFIG = {
     # Auto-resolve RateYourMusic album + artist links during import; off =
     # links are only ever set by hand in the link editor.
     "rym_links_auto": True,
+    # Web ratings (script 24, mlo.web_ratings): the aggregated public score for
+    # an album and for each track, stored beside RATING on the same 0-100
+    # Picard scale as WEBRATING / ALBUMWEBRATING (+ their _SOURCE tags). OFF =
+    # the chain skips the script (SCRIPT_GATES/_DISABLED) AND the WEBRATING tag
+    # family refuses to write (should_write_audio_tag -> family_global).
+    "web_ratings_enabled": True,
+    # The sources asked, in order — a PRIORITY list exactly like genre_sources:
+    # it fixes the asking order and therefore the order the names appear in
+    # WEBRATING_SOURCE / ALBUMWEBRATING_SOURCE. An empty list, or one naming
+    # nothing real, falls back to mlo.web_ratings.SOURCES (the same ids).
+    # MusicBrainz alone SHIPS: it is the only source that needs no credential
+    # and no archive leg, it answers for the album (the release group) AND for
+    # each track (the recording, then its work), and it costs one throttled
+    # request. The other three are opt-in because they are ARCHIVE-backed —
+    # measured, one album costs ~23 s with RateYourMusic and Album of the Year
+    # enabled and ~1 s with MusicBrainz alone — and a Run All over a library
+    # would pay that per album. Add them when you want the wider average:
+    # RateYourMusic (needs the rym_cookie, or its archived page),
+    # albumoftheyear and Discogs (needs the discogs_token).
+    "web_ratings_sources": ["musicbrainz"],
+    # Album of the Year refuses every automated client (measured — plain HTTP,
+    # headless and headed Chromium and a reader proxy all got Cloudflare 403),
+    # so its page is read from the newest ARCHIVED capture (Wayback), resolved
+    # through the same archive machinery the RYM readers use. OFF = the source
+    # contributes nothing and the chain reports it as skipped. Ships ON.
+    "aoty_archive_fallback": True,
+    # Manual override for script 24: fill-only is the contract, so a value
+    # already on the file survives every run unless this is set. Set by hand
+    # (a config edit), never by a menu — the same shape script 13 has.
+    "force_web_ratings": False,
     # Advisory (ITUNESADVISORY) auto-fetch on import: EVERY applicable source
     # is asked in one pass and cross-referenced — Deezer by ISRC, Spotify by
     # ISRC when configured below, Apple's explicit-edition album route and
@@ -1801,23 +1563,19 @@ DEFAULT_CONFIG = {
     # is right for the browser and the desktop shell.
     "server_public_url": "",
     # Desktop/mobile/web notifications for the events the app already has:
-    # a wish found on Soulseek, a download finished, an album ready to
-    # import — plus the two "it began" halves of a Soulseek transfer, a
-    # download whose first bytes moved and a peer taking files from us. Each
-    # client asks for its own OS permission; these switches are the
-    # server-side half (what gets published at all). That half now covers both
-    # transports: the live /ws/events socket and Web Push for a device that is
-    # closed (see server/events.py) — switching a kind off here silences it on
-    # every device, which is what "do not tell me about this" has to mean.
-    "notify_wish_found": True,
+    # a download finished, an album ready to import, and the import phase's
+    # own start/done pair. Each client asks for its own OS permission; these
+    # switches are the server-side half (what gets published at all). That
+    # half now covers both transports: the live /ws/events socket and Web Push
+    # for a device that is closed (see server/events.py) — switching a kind
+    # off here silences it on every device, which is what "do not tell me
+    # about this" has to mean.
     "notify_download_done": True,
     "notify_import_ready": True,
     # The import phase itself: started when the chain picks the album up, done
     # when it has been over it (the chain's own one-line summary rides along).
     "notify_import_start": True,
     "notify_import_done": True,
-    "notify_soulseek_download_start": True,
-    "notify_soulseek_upload_start": True,
     # UI language for the web app and the client shells. English is the
     # shipped language and the fallback for every key a locale does not
     # translate (web/src/locales). The library's own tag language — the one
@@ -1846,14 +1604,6 @@ _BOOL_KEYS = {
 }
 _INT_RANGES = {
     "video_crf": (0, 51),
-    "soulseek_listen_port": (1024, 65535),
-    "soulseek_web_port": (1024, 65535),
-    "soulseek_up_limit": (0, 100000),
-    "soulseek_down_limit": (0, 100000),
-    "soulseek_download_slots": (1, 20),
-    "soulseek_upload_slots": (0, 20),
-    "soulseek_upload_limit_kib": (0, 1000000),
-    "soulseek_download_limit_kib": (0, 1000000),
     "youtube_max_height": (0, 4320),
     "video_flac_level": (0, 8),
     "jpegxl_effort": (1, 10),
@@ -1876,36 +1626,6 @@ _INT_RANGES = {
     "cover_jpeg_target_size": (0, 4000),
     "cover_png_target_size": (0, 4000),
     "cover_jxl_target_size": (0, 4000),
-    "soulseek_auto_log_min_score": (0, 100),
-    "soulseek_auto_search_wait": (2, 300),
-    # The walk's own two numbers (see the DEFAULT_CONFIG block): at least one
-    # candidate, at most ten ranked editions asked before the release settles
-    # into the background, and a search window in the same range the shared
-    # search window allows.
-    "soulseek_fallback_candidates": (1, 10),
-    "soulseek_search_timeout_seconds": (5, 300),
-    # The first pass's own window: short by definition (the whole point is a
-    # readable answer in seconds), and never longer than the top-up window it
-    # precedes.
-    "soulseek_search_fast_seconds": (2, 60),
-    "soulseek_auto_response_limit": (5, 500),
-    # How many of a release's tracks the MBID-driven queries chase (see the key
-    # in DEFAULT_CONFIG): at least one, and never one per track of a box set.
-    "soulseek_auto_mbid_tracks": (1, 10),
-    "soulseek_search_concurrency": (1, 8),
-    "soulseek_candidate_slots": (1, 20),
-    "wishes_interval_hours": (1, 168),
-    "wishes_max_attempts": (0, 1000),
-    # The not-found budget and the retry backoff's step (see the wishes block
-    # in DEFAULT_CONFIG): both 0 = off, and a backoff longer than a day is
-    # pointless because retry_delay caps there anyway.
-    "wishes_not_found_attempts": (0, 1000),
-    "wishes_retry_backoff_minutes": (0, 1440),
-    # A watch may not be checked more than hourly (MusicBrainz etiquette), and
-    # a longer gap than a month is not a watch any more. The per-cycle cap's
-    # floor is 1: a watch that may queue nothing would never add anything.
-    "artist_watch_interval_hours": (1, 720),
-    "artist_watch_max_per_cycle": (1, 50),
     "home_recent_count": (4, 60),
     "artist_image_target_size": (0, 4000),
     "discovery_timeout_s": (3, 30),
@@ -1932,10 +1652,6 @@ _CHOICES = {
     # Import autonomy: the whole chain, or the wizard's stop-at-each-step
     # behaviour applied to the pipeline (see DEFAULT_CONFIG).
     "import_autonomy": {"automatic", "review"},
-    # Whether an unattended acquisition may take a lossy copy at all (see the
-    # key's own comment): "never" is the shipped behaviour, "best" the one that
-    # says out loud that it did.
-    "soulseek_auto_lossy_policy": {"never", "best"},
     "auth_mode": {"auto", "required", "off"},
     "advisory_fallback": {"0", "2", "none"},
     # What a streaming playlist import does with a track the library does not
@@ -2029,11 +1745,11 @@ def normalize_config(user=None) -> dict:
 
     # The locale that decides what names and aliases are WRITTEN in used to be
     # the beets import's own key (`beets_locale`). It is the app's ONE locale
-    # now — the MusicBrainz pages, the beets import and the Soulseek alias
-    # searches all read `locale` — so a saved value is carried over and the old
-    # key dropped. A value here is a DECISION, which is why it is carried
-    # whatever it says: "en" was the old shipped default and is the new one, so
-    # there is no default to tell apart from a choice.
+    # now — the MusicBrainz pages and the beets import all read `locale` — so
+    # a saved value is carried over and the old key dropped. A value here is a
+    # DECISION, which is why it is carried whatever it says: "en" was the old
+    # shipped default and is the new one, so there is no default to tell apart
+    # from a choice.
     if "locale" not in saved and str((saved or {}).get("beets_locale") or "").strip():
         cfg["locale"] = saved["beets_locale"]
     cfg.pop("beets_locale", None)
@@ -2149,12 +1865,11 @@ def normalize_config(user=None) -> dict:
         ("grader_strict_square_threshold", 0.005, 0.0, 0.05),
         ("acoustid_min_score", 0.75, 0.0, 1.0),
         ("replaygain_preamp_db", 0.0, -24.0, 24.0),
-        # The two transient-store caps: GB, and a negative is the same OFF the
+        # The transient-store cap: GB, and a negative is the same OFF the
         # Settings row documents as 0 (a floor, so a hand-edited "-1" can never
         # become a cap of minus one byte). The ceiling is the row's own max —
         # kept in step with it the way the genre ceiling is with mb_genre_count
         # — because a config is a text file a person types into.
-        ("soulseek_cache_cap_gb", 5.0, 0.0, 1000.0),
         ("trash_cap_gb", 5.0, 0.0, 1000.0),
     ):
         try:
@@ -2181,24 +1896,8 @@ def normalize_config(user=None) -> dict:
         pat = "CD-{n}"
     cfg["discs_rename_pattern"] = pat
 
-    try:
-        ratio = float(cfg.get("soulseek_auto_complete_ratio", 1.0))
-        cfg["soulseek_auto_complete_ratio"] = max(0.5, min(1.0, ratio))
-    except (TypeError, ValueError):
-        cfg["soulseek_auto_complete_ratio"] = 1.0
-    for k in ("soulseek_auto_physical_queries", "soulseek_auto_cd_queries",
-              "soulseek_auto_digital_queries"):
-        v = cfg.get(k)
-        if isinstance(v, str):
-            # the settings UI edits templates as one ";"-separated line
-            v = [t for t in v.split(";") if t.strip()]
-        if not isinstance(v, list):
-            v = list(DEFAULT_CONFIG[k])
-        clean = [str(t).strip()[:120] for t in v if str(t).strip()]
-        cfg[k] = clean[:6] or list(DEFAULT_CONFIG[k])
-
-    # Release-choice medium order: unknown labels are kept (slskd/MB may add
-    # formats), an empty list falls back to the default.
+    # Release-choice medium order: unknown labels are kept (MusicBrainz may
+    # add formats), an empty list falls back to the default.
     v = cfg.get("auto_import_medium_order")
     if isinstance(v, str):
         v = [t for t in v.replace("\n", ";").split(";") if t.strip()]
@@ -2233,27 +1932,6 @@ def normalize_config(user=None) -> dict:
         saved = []
     cfg["genre_sources"] = saved or list(DEFAULT_CONFIG["genre_sources"])
 
-    # Release-group types a watch may queue: a CLOSED vocabulary (MusicBrainz's
-    # own names plus the app's DERIVED ones — "podcast", which is read from
-    # the series relation rather than a release-group type — compared
-    # case-insensitively), so an unknown name is dropped rather than kept as a
-    # filter that could never match anything — and a list left with nothing
-    # selectable falls back to the shipped default (album+EP) instead of
-    # leaving every watch type-less.
-    v = cfg.get("artist_watch_types")
-    if isinstance(v, str):
-        v = [t for t in v.replace("\n", ";").split(";") if t.strip()]
-    if not isinstance(v, (list, tuple)):
-        v = []
-    known = {t.lower() for t in RELEASE_TYPES}
-    picked = []
-    for t in v:
-        name = str(t).strip().lower()
-        if name in known and name not in picked:
-            picked.append(name)
-    cfg["artist_watch_types"] = (picked[:len(known)]
-                                 or list(DEFAULT_CONFIG["artist_watch_types"]))
-
     # An untouched install holds the old shipped genres-per-track count (see
     # LEGACY_DEFAULT_GENRE_COUNTS) and follows the new one.
     if cfg.get("mb_genre_count") in LEGACY_DEFAULT_GENRE_COUNTS:
@@ -2267,34 +1945,12 @@ def normalize_config(user=None) -> dict:
     if cfg.get("auto_zero_advisory_for_instrumental") is False:
         cfg["auto_zero_advisory_for_instrumental"] = True
 
-    # Auto-import query templates: the old shipped defaults narrow to the
-    # catalog-number-only (CD) / artist-album-year (digital) wording. The
-    # physical key is newer than any of them, so the lists a physical release
-    # WAS searched with before it existed — a CD by the cd key, every other
-    # pressing by the digital one, which is exactly the fall-through the
-    # physical key ends — are no more a decision about it than the others are:
-    # a config holding one of them follows the shipped default.
-    legacy_physical = (["catalognumber"], *LEGACY_DEFAULT_DIGITAL_QUERIES,
-                       *LEGACY_DEFAULT_CD_QUERIES)
-    for key, legacy in (("soulseek_auto_cd_queries", LEGACY_DEFAULT_CD_QUERIES),
-                        ("soulseek_auto_digital_queries", LEGACY_DEFAULT_DIGITAL_QUERIES),
-                        ("soulseek_auto_physical_queries", legacy_physical)):
-        stored = cfg.get(key)
-        if isinstance(stored, str):
-            stored = [t for t in stored.replace("\n", ";").split(";") if t.strip()]
-        if isinstance(stored, (list, tuple)) and [str(t).strip() for t in stored] in [
-                [str(t) for t in old] for old in legacy]:
-            stored = list(DEFAULT_CONFIG[key])
-        if isinstance(stored, (list, tuple)):
-            cfg[key] = [str(t).strip() for t in stored if str(t).strip()]
-
     # Keys that no longer drive anything (the recommendation shelves, the
     # catalogue-search source order, the MusicBrainz browser's search mode):
     # dropped here so a saved config stops carrying them around.
     for dead in ("home_recommendations", "home_rec_count", "home_popular_count",
                  "home_rec_source", "discovery_rec_sources",
-                 "discovery_search_sources", "mb_search_source",
-                 "soulseek_auto_max_attempts"):
+                 "discovery_search_sources", "mb_search_source"):
         cfg.pop(dead, None)
 
     # The same rule for the ADVISORY family, applied by PREFIX instead of by
@@ -2316,16 +1972,6 @@ def normalize_config(user=None) -> dict:
     name = str(cfg.get("auth_username") or "").strip()
     if name and user_segment(name) != name:
         cfg["auth_username"] = ""
-
-    # Shared-folder lists (Settings → Soulseek, Soulseek → Sharing). Accept a
-    # ";"/newline separated string from hand-edited config files.
-    for k in ("soulseek_share_dirs", "soulseek_share_exclude"):
-        v = cfg.get(k)
-        if isinstance(v, str):
-            v = [t for t in v.replace("\n", ";").split(";") if t.strip()]
-        if not isinstance(v, (list, tuple)):
-            v = []
-        cfg[k] = [str(t).strip() for t in v if str(t).strip()][:64]
 
     # Provider preference lists (discovery, lyrics, artist images, artwork
     # text). Empty means "use the built-in order"; unknown ids are dropped so
@@ -2436,13 +2082,15 @@ def normalize_config(user=None) -> dict:
             # 23 (tag strip) are KEPT instead: they are the newest ids and have
             # never meant anything else, so a saved order that holds one holds
             # the user's own position for it, and shedding it would silently
-            # undo that. An order written before they existed simply has none
-            # and gets them from the same anchor rule below — except 22, which
-            # is deliberately never anchored: it submits to a PUBLIC database,
-            # so it runs when a person put it in their chain (or pressed it in
-            # a menu), never because an install was upgraded
+            # undo that. 24 (web ratings) joins them: it is new, it never meant
+            # anything else, and a user who has put it in their order means it.
+            # An order written before they existed simply has none and gets
+            # them from the same anchor rule below — except 22, which is
+            # deliberately never anchored: it submits to a PUBLIC database, so
+            # it runs when a person put it in their chain (or pressed it in a
+            # menu), never because an install was upgraded
             # (server.script_runners.OPT_IN_SCRIPTS).
-            if ((1 <= script_id <= 14 or script_id in (20, 21, 22, 23))
+            if ((1 <= script_id <= 14 or script_id in (20, 21, 22, 23, 24))
                     and script_id not in clean_order):
                 clean_order.append(script_id)
     # Migrate legacy sequential default [1..8] to systematic pipeline
@@ -2498,6 +2146,11 @@ def normalize_config(user=None) -> dict:
         # deletes by: the final tag passes together, then the read-outs (20,
         # 21) and the grader, which is where the shipped order puts it.
         _insert_script(clean_order, 23, [10, 16, 12])
+        # 24 web ratings — right behind 8 (Auto tagging), where the shipped
+        # order puts it: both are tag-filling fetches that want the release
+        # identity 14/beets has settled, and both must land before 10's trim
+        # and 4's grade.
+        _insert_script(clean_order, 24, [8, 14, 13])
     cfg["run_all_order"] = clean_order or list(DEFAULT_RUN_ALL_ORDER)
     return cfg
 
@@ -2537,8 +2190,8 @@ _MIGRATED = False
 def _migrate_to_data_dir():
     """One-time move of ALL app state into the new layout:
     <music folder>/.mlo/data (config.json plus everything from the legacy
-    state dirs: beets library + config, playlists/likes database, slskd.yaml
-    and any other app-written state) and the transient dirs into
+    state dirs: beets library + config, playlists/likes database and any
+    other app-written state) and the transient dirs into
     <music folder>/.mlo —
     .mlo_downloads -> .mlo/downloads (incl. .incomplete/) and .mlo_trash ->
     .mlo/trash (incl. .mlo_manifest.json). The old top-level .mlo_data is one
@@ -2669,8 +2322,8 @@ def _is_empty_db(path):
     """True when *path* is a SQLite file with no row in any of its tables.
 
     Safety net for the no-clobber rule: an empty database can already sit at
-    the destination when the migration runs (an older build opened its
-    playlists/wishes database during startup, or an interrupted run left a
+    destination when the migration runs (an older build opened its playlists
+    database during startup, or an interrupted run left a
     freshly created file behind). Treating that as 'existing data' would
     skip the user's real database and orphan it in the old folder — an empty
     app-created DB never outranks pre-migration state."""
@@ -2729,8 +2382,8 @@ def _move_state_dir(src, dst, copy=False):
 
     Used by the legacy-state migration, by the transient dirs
     (.mlo_downloads/.mlo_trash) and by a music-folder change, so playlists,
-    the beets DB, wishes, slskd.yaml and the download/trash contents follow
-    the library. ``copy=True`` leaves the source untouched — used when the
+    the beets DB and the download/trash contents follow the library.
+    ``copy=True`` leaves the source untouched — used when the
     source belongs to a DIFFERENT install (a scope set by MLO_MUSIC_FOLDER),
     where moving would strand that install. The one exception to no-clobber:
     an empty database the app itself created at the destination (see
@@ -2800,8 +2453,8 @@ def save_config(cfg: dict) -> bool:
     """Validate and atomically replace the persisted configuration."""
     global _MIGRATED
     try:
-        # Merge onto the live config: callers may POST a partial dict (e.g. the
-        # Soulseek port form sends two keys), and an omitted key must keep its
+        # Merge onto the live config: callers may POST a partial dict (e.g. a
+        # Settings form sends two keys), and an omitted key must keep its
         # saved value instead of reverting to the factory default.
         current = load_config()
         current.update(cfg or {})

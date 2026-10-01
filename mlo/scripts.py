@@ -40,6 +40,8 @@ SCRIPTS = (
      "give AcoustID the fingerprint + MusicBrainz recording each track states"),
     (23, "Optimize tags",
      "delete excess tags: junk names, a valued COMMENT, unneeded aliases"),
+    (24, "Web ratings",
+     "aggregated public album + track scores (MusicBrainz / RYM / Discogs)"),
 )
 SCRIPT_LABELS = {sid: name for sid, name, _ in SCRIPTS}
 
@@ -49,4 +51,5 @@ SCRIPT_LABELS = {sid: name for sid, name, _ in SCRIPTS}
 SCRIPT_GATES = {7: "dr_replaygain_enabled", 12: "audiometa_enabled",
                 16: "mood_enabled", 17: ("lyrics_xlit_enabled", "lyrics_translate_enabled"),
                 18: "lrclib_auto_publish", 21: "acoustid_enabled",
-                22: "acoustid_enabled", 23: "strip_unknown_tags"}
+                22: "acoustid_enabled", 23: "strip_unknown_tags",
+                24: "web_ratings_enabled"}

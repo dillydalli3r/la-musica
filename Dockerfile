@@ -24,7 +24,7 @@ ENV PYTHONUNBUFFERED=1 \
 # Core audio/image tools for the optimization pipeline. These are the Linux
 # counterparts of the downloads in mlo/fetchdeps.py: the in-app installer
 # fetches the native Linux builds where upstream ships one (LINUX_BINARIES:
-# oxipng, slskd, AudioAuditor, CUETools through the mono runtime, and upstream's
+# oxipng, AudioAuditor, CUETools through the mono runtime, and upstream's
 # rsgain, fpcalc, libjxl and libjpeg-turbo) and points at the system package for
 # everything the distro provides (LINUX_PACKAGES), so every tool the app knows
 # is installable and runnable in this image.
@@ -37,11 +37,11 @@ ENV PYTHONUNBUFFERED=1 \
 # fetchable Linux build of their own and are ONLY this.
 #
 # libsndfile1 / libgomp1 / libicu76 back the runtime-installed tools — librosa's
-# soundfile and numba imports; slskd's and AudioAuditor's .NET runtimes, which
-# dlopen ICU at startup and refuse to boot without it (a dependency no `ldd`
-# shows, since it is loaded by name). php-cli is the Logchecker phar's runtime
-# and mono-runtime runs CUETools' console tool (both verified here: the phar
-# scores a log, CUETools.ARCUE.exe prints its usage under mono).
+# soundfile and numba imports; AudioAuditor's .NET runtime, which dlopens ICU
+# at startup and refuses to boot without it (a dependency no `ldd` shows, since
+# it is loaded by name). php-cli is the Logchecker phar's runtime and
+# mono-runtime runs CUETools' console tool (both verified here: the phar scores
+# a log, CUETools.ARCUE.exe prints its usage under mono).
 #
 # System.Drawing is the part mono-runtime does NOT bring: CUETools' ARCUE pass
 # loads it to verify a disc, so without libgdiplus and mono's own
@@ -99,7 +99,7 @@ ENV HOME=/home/mlo
 # leaves it empty, and the server then reports its own code version instead of
 # claiming to be a release it is not. `tools/check_versions.py` keeps the
 # ARG default in step with mlo/__init__.py.
-ARG MLO_VERSION=4.8.0
+ARG MLO_VERSION=4.9.0
 ENV MLO_VERSION=${MLO_VERSION}
 # The commit the image was built from, and when. The release workflow passes
 # both; a plain `docker build` leaves them empty and the server then reports
@@ -122,15 +122,9 @@ LABEL org.opencontainers.image.version="${MLO_VERSION}" \
 # A pre-move install's /app/.dependencies is still READ when it is mounted (see
 # mlo.paths.legacy_tools_dir); nothing writes there any more.
 VOLUME ["/music"]
-# 8000 is the web UI. 50000 is the SOULSEEK LISTEN PORT — the one peers
-# connect to in order to browse and download from this share, and the one
-# docker-compose.yml publishes beside 8000. EXPOSE is documentation (it
-# publishes nothing by itself), and it is here so `docker inspect`, a
-# port-mapping UI and anyone reading this file all name the port that has to
-# be reachable for sharing to work at all. If MLO_SOULSEEK_LISTEN_PORT moves
-# it, the compose file's publish line moves with it — the variable seeds the
-# app's own setting for exactly that reason.
-EXPOSE 8000 50000
+# 8000 is the web UI, the one port this image serves. EXPOSE is documentation
+# (it publishes nothing by itself); docker-compose.yml maps it too.
+EXPOSE 8000
 
 # No curl/wget in the slim image - probe with the Python that is already there.
 HEALTHCHECK --interval=30s --timeout=5s --start-period=30s --retries=3 \

@@ -7,7 +7,7 @@ opened, a queue is built or a seek happens — so the store answers "what have I
 really listened to", which is the only thing a chart can be built from.
 
 The store is `<music>/.mlo/data/plays.db`, the same shape and the same rules as
-`server.ratings`/`server.wishes`: additive schema on first use, user-scoped
+`server.ratings`: additive schema on first use, user-scoped
 rows (`""` is the default/admin scope written before users existed), one row per
 event, no ORM. A path is stored in the API's own forward-slash form
 (`api_path`), and every row carries the track's ALBUM FOLDER as a derived

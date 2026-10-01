@@ -68,7 +68,7 @@ const KEY_INFO: Record<string, { label: string; hint: string; url?: string; link
     hint:
       "Two ways in: a cookies.txt in Netscape format — what a browser-extension exporter like \"Get cookies.txt\" writes — is imported by the cookie box below, or by the same box on Settings' Discovery tab (paste it or drop the file; only its rateyourmusic.com cookies are kept), " +
       "or sign in to rateyourmusic.com in your browser → F12 (dev tools) → Network → reload the page → click any request to rateyourmusic.com → Headers → Request Headers → copy everything after \"Cookie:\" and paste it in the field above. " +
-      "Either way take the WHOLE value — every name=value pair it shows, not just one token like cf_clearance: RYM checks the session cookies together, and the app normalises the paste for you (newlines, a stray \"Cookie:\" label). " +
+      "Either way take the WHOLE value — every name=value pair it shows. Cloudflare's `cf_clearance` must be one of them: it is the pair the challenge hands the browser that solved it, and RYM honours it only alongside the same `rym_user_agent` (Settings → Discovery) and the same network, so export from one signed-in tab and set that browser's User-Agent if it is not the built-in Chrome one. The app normalises the paste for you (newlines, a stray \"Cookie:\" label). " +
       "Its `session` cookie is HttpOnly, so a browser extension's export is the only way to hand that one over at all. " +
       "It is a session credential: keep it to yourself, and set a fresh one when RYM starts refusing — signing out or clearing cookies invalidates it, and Test asks RYM again even after a refusal. " +
       "MusicBrainz already states the RYM page for many releases, so this is only needed for the rest.",
@@ -126,8 +126,6 @@ const KEY_NAMES = Object.keys(KEY_INFO);
  *  name keys the panel never had to prompt for before). The chip says where
  *  to set it, so a row that cannot be filled in here is not a dead end. */
 const KEY_HOME: Record<string, string> = {
-  soulseek_username: "the Soulseek tab",
-  soulseek_password: "the Soulseek tab",
   ai_base_url: "Settings → AI",
   ai_model: "Settings → AI",
   ai_api_key: "Settings → AI",
@@ -311,8 +309,8 @@ export default function SourcesPanel({ only, askKeys }: { only?: SourceKind | So
   const wanted = only === undefined ? null : Array.isArray(only) ? only : [only];
   const rows = mergeRoles((data?.sources ?? []).filter((r) => !wanted || wanted.includes(r.kind)))
     // The Keys step wants the rows that ASK for something: the credential list
-    // also carries rows whose keys live elsewhere (the Soulseek account, the AI
-    // provider, this server's login), and a row with no field is a status line
+    // also carries rows whose keys live elsewhere (the AI provider, this
+    // server's login), and a row with no field is a status line
     // — those belong to Settings → Sources, not to the step that asks for keys.
     .filter((r) => !askKeys || promptKeysOf(r).length > 0);
   const groups = (Object.keys(KIND_LABEL) as SourceKind[])

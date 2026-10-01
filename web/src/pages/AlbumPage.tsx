@@ -16,7 +16,6 @@ import TrackTitleCell from "../components/TrackTitleCell";
 import { trackRef, entityLinkClick } from "../lib/refs";
 import { invalidateLibrary } from "../lib/invalidate";
 import { auditFails } from "../lib/status";
-import { useAcquisitions } from "../lib/acquisition";
 import { isVideoFile } from "../lib/fmt";
 import { downloadTrackVideo } from "../lib/videoDownload";
 import { SCRIPT_LABEL } from "../lib/scripts";
@@ -29,7 +28,7 @@ import { useLockWhy } from "../lib/locks";
 import OverflowMenu from "../components/OverflowMenu";
 import PageHeader from "../components/PageHeader";
 import StarRating from "../components/StarRating";
-import { ratingOf, useRatings, useSetRating, FOLDER_RATING_NOTE } from "../lib/ratings";
+import { ratingOf, useRatings, useSetRating, FOLDER_RATING_NOTE, albumWebRating, trackWebRating, webStarProps } from "../lib/ratings";
 import TagActionsMenu, { TrackActionsMenu } from "../components/TagActionsMenu";
 import StatsPanel from "../components/StatsPanel";
 import TrackDetails, { CreditsPanel, creditTagsFrom } from "../components/TrackDetails";
@@ -172,10 +171,6 @@ export default function AlbumPage() {
   // Whether the album-description check grades this folder (Settings →
   // Grading). The config is already in the app-wide cache, so this is free.
   const { data: config } = useQuery({ queryKey: ["config"], queryFn: api.config });
-  // Where this album's acquisition is, from the shared queue row and the
-  // pushed job frames (lib/acquisition) — the queue is asked only while this
-  // IS a framework album waiting for its audio.
-  const acquisition = useAcquisitions(!!data?.pending)(data?.path ?? "", data?.wish_id);
   // One GET /api/ratings per scope for the whole page (react-query dedupes it
   // across every row) and the optimistic setters the star controls share. The
   // header needs the ALBUM scope beside the track one: the user's verdict on
@@ -299,7 +294,7 @@ export default function AlbumPage() {
     }
   };
 
-  /** Download the music video for one track: YouTube, else Soulseek (web/
+  /** Download the music video for one track from YouTube (web/
    *  digital releases only — see `digitalMedia`), then tag it as THAT track's
    *  video.
    *
@@ -307,11 +302,7 @@ export default function AlbumPage() {
    *  details menu's own entry on a single track runs the SAME one, so the two
    *  entry points cannot drift in what they ask for or in what they report.
    *  This wrapper is only the album page's own refreshing — its payloads are
-   *  the ones that went stale — and it answers whether a video was fetched.
-   *
-   *  A track YouTube does not have comes back QUEUED from Soulseek instead:
-   *  the transfer runs in the app's own downloads for minutes, so there is no
-   *  file to tag yet and the answer says so — nothing here can wait for it. */
+   *  the ones that went stale — and it answers whether a video was fetched. */
   const downloadVideo = async (tr: Track): Promise<boolean> =>
     downloadTrackVideo(
       {
@@ -323,7 +314,6 @@ export default function AlbumPage() {
         discnumber: tr.discnumber,
       },
       {
-        onQueued: () => qc.invalidateQueries({ queryKey: ["soulseekDownloads"] }),
         onSaved: () => {
           qc.invalidateQueries({ queryKey: ["videos", decoded] });
           qc.invalidateQueries({ queryKey: ["album", decoded] });
@@ -414,6 +404,11 @@ export default function AlbumPage() {
   const trackAverage = ratedTracks.length
     ? Math.round((ratedTracks.reduce((a, b) => a + b, 0) / ratedTracks.length) * 2) / 2
     : 0;
+  // The ALBUM's WEB rating — script 24's ALBUMWEBRATING, read off the album's
+  // own tracks (it writes it to every one of them). A third fact beside the
+  // two above, and a different one from the tracks' own WEBRATING: it belongs
+  // to the release, so it is drawn where the album verdict is.
+  const webAlbum = albumWebRating(data?.tracks);
 
   const queueTracks = data.tracks.map((t) => ({
     path: t.path, file: t.file, albumPath: data.path,
@@ -799,6 +794,8 @@ export default function AlbumPage() {
                       value={albumVerdict}
                       onChange={(v) => setAlbumRating(data.path, v)}
                       pending={albumPending(data.path)}
+                      {...webStarProps(webAlbum)}
+                      webKind="album"
                     />
                     <span className="text-[11px] text-zinc-500">Album rating</span>
                   </span>
@@ -862,10 +859,8 @@ export default function AlbumPage() {
                 )}
                 {/* A FRAMEWORK album: "Add to library" created this folder
                     before its audio existed, so the page must say what is
-                    happening to it rather than read as an empty album. The
-                    wish's own state (attempts, the reason a run left, when the
-                    next search is due) comes from the queue's policy, and the
-                    content the ADD already fetched is named with it. */}
+                    happening to it rather than read as an empty album — and
+                    the content the ADD already fetched is named with it. */}
                 {data.pending && (
                   <div className="rounded-lg border border-amber-900/60 bg-amber-950/20 px-3 py-2 space-y-1">
                     <div className="flex items-center gap-2 flex-wrap text-xs text-amber-200">
@@ -879,39 +874,8 @@ export default function AlbumPage() {
                       {pendingNote && (
                         <span className="text-amber-200/70">{pendingNote.state}</span>
                       )}
-                      {/* WHERE the acquisition is: the queue's own stage and,
-                          while bytes are moving, slskd's own share of them —
-                          pushed at 2.5 Hz, so this reads as live rather than
-                          as the last poll's snapshot. */}
-                      {acquisition && (
-                        <span className="text-amber-100 inline-flex items-center gap-1.5">
-                          <span className="font-medium">{acquisition.label}</span>
-                          {acquisition.percent !== null && (
-                            <>
-                              <span className="inline-block w-24 h-1 rounded-sm bg-amber-900/50 overflow-hidden align-middle">
-                                <span
-                                  className="block h-full bg-amber-300"
-                                  style={{ width: `${Math.max(0, Math.min(100, acquisition.percent))}%` }}
-                                />
-                              </span>
-                              <span className="tabular-nums">{Math.round(acquisition.percent)}%</span>
-                            </>
-                          )}
-                        </span>
-                      )}
-                      {data.wish_id != null && (
-                        <Link
-                          to="/soulseek"
-                          className="text-amber-200/80 underline underline-offset-2 hover:text-amber-100"
-                        >
-                          queue
-                        </Link>
-                      )}
                     </div>
                     <div className="text-[11px] text-amber-200/60">{t("pending.note")}</div>
-                    {data.wish?.reason && data.wish.reason !== data.pending_reason && (
-                      <div className="text-[11px] text-amber-200/60">{data.wish.reason}</div>
-                    )}
                     {data.prefetched && (
                       <div className="text-[11px] text-zinc-500">
                         {[
@@ -1568,7 +1532,7 @@ export default function AlbumPage() {
                             <TrackActionsMenu path={tr.path} releaseMbid={tr.tags.MUSICBRAINZ_ALBUMID} buttonClass="!p-1 text-zinc-500 hover:text-white tap-hit" />
                           </span>
                           <span className="shrink-0" onClick={(e) => e.stopPropagation()}>
-                            <StarRating size="sm" value={ratingOf(ratings, tr.path)} onChange={(v) => setRating(tr.path, v)} pending={pending(tr.path)} />
+                            <StarRating size="sm" value={ratingOf(ratings, tr.path)} onChange={(v) => setRating(tr.path, v)} pending={pending(tr.path)} {...webStarProps(trackWebRating(tr.tags))} />
                           </span>
                         </>
                       }

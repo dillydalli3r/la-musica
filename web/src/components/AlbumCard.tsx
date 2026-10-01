@@ -11,7 +11,7 @@ import { PendingMark, pendingSummary } from "./Badges";
 import { useI18n } from "../lib/i18n";
 import { albumArtistRef, albumRef } from "../lib/refs";
 import { originalYear } from "../lib/fmt";
-import { ratingOf, useRatings } from "../lib/ratings";
+import { ratingOf, useRatings, albumWebRating, webStarProps } from "../lib/ratings";
 import StarRating from "./StarRating";
 import type { ReactNode } from "react";
 import type { GridSize } from "../lib/libraryView";
@@ -51,8 +51,8 @@ function storedGridSize(): GridSize {
  * one album can never look like two. The library payload enriches albums with
  * an `artist` display name; elsewhere it falls back to the album-artist tag. */
 export default function AlbumCard({ al, artistName, selectable, selected, onSelect, href, actions, extraMeta, size }: {
-  /** `owned: false` marks a row the library does not hold (Home's Soulseek
-   *  wishes, a favourite whose folder moved away): nothing has graded it and
+  /** `owned: false` marks a row the library does not hold (a favourite whose
+   *  folder moved away): nothing has graded it and
    *  there is no audio to play or favourite yet, so the card draws identity
    *  only — no status dot, no play button, no heart — instead of reading its
    *  own missing fields as verdicts. */
@@ -292,8 +292,7 @@ export default function AlbumCard({ al, artistName, selectable, selected, onSele
           {/* The artist OPENS its page: the caption named an artist a reader
               could not follow, while the title beside it was already a link.
               Same rule as the title (MBID when the album carries one, the
-              containing folder otherwise — lib/refs), and a wish links too:
-              its artist may well be in the library. */}
+              containing folder otherwise — lib/refs). */}
           <Link
             to={albumArtistRef(al)}
             className="truncate min-w-0 hover:text-accent-soft"
@@ -321,7 +320,7 @@ export default function AlbumCard({ al, artistName, selectable, selected, onSele
             nothing about how the user had judged them. Read-only here — the
             table row and the album page are where a rating is EDITED — and
             drawn for library albums only, like the status dot above it: a row
-            the library does not hold (`owned: false`, a wish) has no album to
+            the library does not hold (`owned: false`) has no album to
             have a verdict about. */}
         {inLibrary && (
           <div className="mt-0.5">
@@ -332,7 +331,7 @@ export default function AlbumCard({ al, artistName, selectable, selected, onSele
                 reader left to work out which one was theirs. One row, on the
                 card, with the number in it: every surface that draws a card
                 gets the same thing. */}
-            <StarRating size="sm" readOnly showValue label="Album rating" value={rating} />
+            <StarRating size="sm" readOnly showValue label="Album rating" value={rating} {...webStarProps(albumWebRating(al.tracks))} webKind="album" />
           </div>
         )}
         {/* The caller's own bits sit on a line of their OWN: sharing this one

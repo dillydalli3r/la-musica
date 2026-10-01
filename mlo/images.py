@@ -1192,16 +1192,28 @@ def _process_jpeg_in_place(args):
                 thr_cov = float(config.get("cover_crop_threshold", DEFAULT_CONFIG["cover_crop_threshold"]) or 0.05)
                 tgt_cov = _get_cover_target_size(ext_cov, config) if re_en else 0
                 if (re_en and tgt_cov > 0) or cr_en:
+                    # The temp path is swept either way — a crashed run can
+                    # leave one behind — but the resize itself only runs when
+                    # the cover policy can act on this file: the JPEG skip check
+                    # above already asked the SAME question of the SAME file
+                    # (`_cover_needs`, from its own Pillow size read), and when
+                    # it answered "nothing to do", `_resize_and_crop_image` can
+                    # only decode the image again and agree — a full decode per
+                    # file, thrown away. `force` bypassed that probe, which is
+                    # the one case with no answer to reuse.
                     _cover_resized_tmp = _side_temp(filepath, "cover_resized", ".jpg")
                     _safe_remove(_cover_resized_tmp)
-                    did = _resize_and_crop_image(filepath, _cover_resized_tmp, tgt_cov if re_en else 0, cr_en, thr_cov, config)
-                    if did and os.path.exists(_cover_resized_tmp) and os.path.getsize(_cover_resized_tmp) > 0:
-                        _input_for_jpegtran = _cover_resized_tmp
-                        log(f"[cover] resized/cropped {os.path.basename(filepath)} -> {tgt_cov}x{tgt_cov}" if re_en and tgt_cov else f"[cover] cropped {os.path.basename(filepath)}")
+                    if force or _cover_needs:
+                        did = _resize_and_crop_image(filepath, _cover_resized_tmp, tgt_cov if re_en else 0, cr_en, thr_cov, config)
+                        if did and os.path.exists(_cover_resized_tmp) and os.path.getsize(_cover_resized_tmp) > 0:
+                            _input_for_jpegtran = _cover_resized_tmp
+                            log(f"[cover] resized/cropped {os.path.basename(filepath)} -> {tgt_cov}x{tgt_cov}" if re_en and tgt_cov else f"[cover] cropped {os.path.basename(filepath)}")
+                        else:
+                            _safe_remove(_cover_resized_tmp)
+                            _cover_resized_tmp = None
+                            _input_for_jpegtran = filepath
                     else:
-                        _safe_remove(_cover_resized_tmp)
                         _cover_resized_tmp = None
-                        _input_for_jpegtran = filepath
         except Exception as e:
             log(f"[cover warn] {filepath}: {e}")
             if _cover_resized_tmp:
@@ -1410,19 +1422,29 @@ def _process_png_in_place(args):
                 thr_cov = float(config.get("cover_crop_threshold", DEFAULT_CONFIG["cover_crop_threshold"]) or 0.05)
                 tgt_cov = _get_cover_target_size(ext_cov, config) if re_en else 0
                 if (re_en and tgt_cov > 0) or cr_en:
+                    # As in the JPEG worker: the temp is swept either way (a
+                    # crashed run can leave one behind), but the resize only
+                    # runs when this file's own `_cover_needs` answer — taken by
+                    # the skip check above, from the same policy and the same
+                    # Pillow size read — says the cover policy can act. A False
+                    # there can only make the helper decode the image a second
+                    # time to return False. `force` bypassed the probe.
                     _cover_resized_tmp = _side_temp(filepath, "cover_resized", ".png")
                     _safe_remove(_cover_resized_tmp)
-                    did = _resize_and_crop_image(_input_for_oxipng, _cover_resized_tmp, tgt_cov if re_en else 0, cr_en, thr_cov, config)
-                    if did and os.path.exists(_cover_resized_tmp) and os.path.getsize(_cover_resized_tmp) > 0:
-                        _input_for_oxipng = _cover_resized_tmp
-                        log(f"[cover] resized/cropped {os.path.basename(filepath)} -> {tgt_cov}x{tgt_cov}" if re_en and tgt_cov else f"[cover] cropped {os.path.basename(filepath)}")
-                    else:
-                        _safe_remove(_cover_resized_tmp)
-                        _cover_resized_tmp = None
-                        if _flat_alpha_tmp:
-                            _input_for_oxipng = _flat_alpha_tmp
+                    if force or _cover_needs:
+                        did = _resize_and_crop_image(_input_for_oxipng, _cover_resized_tmp, tgt_cov if re_en else 0, cr_en, thr_cov, config)
+                        if did and os.path.exists(_cover_resized_tmp) and os.path.getsize(_cover_resized_tmp) > 0:
+                            _input_for_oxipng = _cover_resized_tmp
+                            log(f"[cover] resized/cropped {os.path.basename(filepath)} -> {tgt_cov}x{tgt_cov}" if re_en and tgt_cov else f"[cover] cropped {os.path.basename(filepath)}")
                         else:
-                            _input_for_oxipng = filepath
+                            _safe_remove(_cover_resized_tmp)
+                            _cover_resized_tmp = None
+                            if _flat_alpha_tmp:
+                                _input_for_oxipng = _flat_alpha_tmp
+                            else:
+                                _input_for_oxipng = filepath
+                    else:
+                        _cover_resized_tmp = None
                 elif _flat_alpha_tmp:
                     _input_for_oxipng = _flat_alpha_tmp
                 else:
@@ -2616,9 +2638,10 @@ def run_process_images(config):
 
             else:
                 # Other convertible types (BMP, GIF, TIFF, WEBP, AVIF, etc.)
-                # Handle convert-to-JPEG (lossy) and convert-lossless-to-PNG per config
-                convert_to_jpeg = bool(config.get("images_convert_to_jpeg", DEFAULT_CONFIG["images_convert_to_jpeg"]))
-                convert_to_png = bool(config.get("images_convert_lossless_to_png", False))
+                # Handle convert-to-JPEG (lossy) and convert-lossless-to-PNG per
+                # config. The two switches were read AGAIN here, per file, a
+                # second time for the same run-wide answer the scan above
+                # already holds (`convert_to_jpeg`/`convert_to_png`).
                 # Determine if this file should be converted
                 is_lossless_src = ext in LOSSLESS_IMAGE_EXTS
                 target_ext = None

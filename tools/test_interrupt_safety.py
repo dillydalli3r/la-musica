@@ -46,7 +46,7 @@ if ROOT not in sys.path:
     sys.path.insert(0, ROOT)
 
 # BEFORE the app's modules import: every state path this app resolves without
-# an explicit music folder (wishes.db, artcache, the config) comes from this
+# an explicit music folder (the databases, artcache, the config) comes from this
 # env var first (mlo.paths.read_music_folder_guess), so the whole run is
 # isolated inside the temp library below.
 music = tempfile.mkdtemp(prefix="mlo-interrupt-")
@@ -425,7 +425,7 @@ os.makedirs(data_dir, exist_ok=True)
 make_track(os.path.join(staging, "01 - Arrived.flac"), 2) if FFMPEG else None
 with open(os.path.join(staging, "notes.txt"), "w", encoding="utf-8") as fh:
     fh.write("user file\n")
-# a slskd transfer that resumes by itself — must never be deleted
+# a transfer that resumes by itself — must never be deleted
 partial = os.path.join(inflight, "other.album.01.flac.part")
 with open(partial, "wb") as fh:
     fh.write(b"\x00" * 2048)
@@ -448,15 +448,16 @@ for path, blob in user_files.items():
         fh.write(blob)
 
 # a framework album whose audio HAS arrived (the download landed, the process
-# died before the marker was cleared) — and one whose wish is gone
+# died before the marker was cleared) — and a placeholder the library has no
+# album for
 framework = os.path.join(music, "Artists", "Pending Artist", "Pending Album")
 os.makedirs(framework, exist_ok=True)
 make_track(os.path.join(framework, "01 - Filled.flac"), 2) if FFMPEG else None
-save_pending(framework, {"pending": True, "wish_id": 424242,
+save_pending(framework, {"pending": True,
                          "title": "Filled", "artist": "Pending Artist"})
 orphan = os.path.join(music, "Artists", "Pending Artist", "Orphan Album")
 os.makedirs(orphan, exist_ok=True)
-save_pending(orphan, {"pending": True, "wish_id": 9999999,
+save_pending(orphan, {"pending": True,
                       "title": "Orphan", "artist": "Pending Artist"})
 
 # what a shutdown records when it has to give up on a running job
@@ -464,8 +465,8 @@ journal = os.path.join(data_dir, interrupt_recovery.JOURNAL_NAME)
 with open(journal, "w", encoding="utf-8") as fh:
     json.dump({"version": 1, "at": "2026-01-01T00:00:00",
                "reason": "container stopped while jobs were running",
-               "jobs": [{"kind": "import_queue", "job": "import-queue",
-                         "label": "import queue (1/3)", "status": "running",
+               "jobs": [{"kind": "import", "job": "import-1",
+                         "label": "bulk import (1/3)", "status": "running",
                          "paths": [staging]}]}, fh)
 
 lines = []
@@ -499,8 +500,8 @@ check("...and the log says its script chain still has to run",
 check("an orphan framework album is reported, not deleted",
       load_pending(orphan) is not None and os.path.isdir(orphan)
       and any("Orphan Album" in line for line in lines), said)
-check("the abandoned job from the journal is reported, with the queue row named",
-      any("import_queue" in line and "Half Imported Album" in line
+check("the abandoned job from the journal is reported, with the job named",
+      any("an update interrupted import" in line and "Half Imported Album" in line
           for line in lines), said)
 check("...and the journal is cleared, so it is reported once",
       not os.path.exists(journal))
@@ -540,11 +541,7 @@ def hold_a_job():
         stop_holding.wait(timeout=30)
 
 
-# a queue row that a kill would leave running, and a real claimed job
-real_status = __import__("server.import_queue", fromlist=["x"]).status
-q = __import__("server.import_queue", fromlist=["x"])
-q.status = lambda: {"state": "running", "done": 1, "total": 3,
-                    "current": staging, "started_at": time.time()}
+# a real claimed job that a kill would leave running
 try:
     worker = threading.Thread(target=hold_a_job, daemon=True)
     worker.start()
@@ -558,8 +555,6 @@ try:
           any(j["kind"] == "scripts" for j in running), str(running))
     check("...with the paths it holds", any(held in j["paths"] for j in running),
           str(running))
-    check("a running import-queue row is seen too",
-          any(j["kind"] == "import_queue" for j in running), str(running))
 
     during = interrupt_recovery.shutdown(grace=2, log=lines.append)
     said = "\n".join(lines)
@@ -634,13 +629,11 @@ try:
     check("...and returns no result for them", results == [], str(results))
 
     # nothing running: the same shutdown waits zero time and records nothing
-    q.status = real_status
     again = interrupt_recovery.shutdown(grace=2, log=lambda _l: None)
     check("with nothing running it records nothing",
           again["abandoned"] == [] and not os.path.exists(journal),
           str(again))
 finally:
-    q.status = real_status
     interrupt_recovery._shutting_down.clear()
     stop_holding.set()
 

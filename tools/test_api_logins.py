@@ -22,10 +22,9 @@ Per credential it proves four things:
                 does not report a rejected credential as ok, whichever source
                 happens to use the same key.
 
-The keys that never travel over our HTTP are proved where they DO travel:
-Soulseek's credentials are the `soulseek:` block of slskd's generated YAML
-(slskd performs the handshake), and this server's own login is the JSON body
-of POST /api/auth/login, driven through the real FastAPI app.
+The keys that never travel over our HTTP are proved where they DO travel: this
+server's own login is the JSON body of POST /api/auth/login, driven through the
+real FastAPI app.
 
 Runs offline and in a few seconds. The optional live pass at the end asks the
 real providers, prints SKIP for every key that is not configured, and never
@@ -51,7 +50,6 @@ from server import auth as auth_mod  # noqa: E402
 from server import credential_checks as cc  # noqa: E402
 from server import discovery  # noqa: E402
 from server import integrations as intg  # noqa: E402
-from server import soulseek as sk  # noqa: E402
 from server import sources_health as sh  # noqa: E402
 
 FAILED = []
@@ -583,95 +581,7 @@ check("acoustid-user: the credential row for a refused key is a fail",
 
 
 # --------------------------------------------------------------------------- #
-# 6. Soulseek — soulseek_username + soulseek_password
-# --------------------------------------------------------------------------- #
-print("== Soulseek: soulseek_username + soulseek_password ==")
-# The credential does not travel over HTTP: it is written into slskd's YAML
-# and slskd performs the network handshake. The YAML is therefore the wire.
-SK_CFG = {"soulseek_username": "night-owl", "soulseek_password": "p@ss:with#chars",
-          "music_folder": tempfile.mkdtemp(prefix="mlo-slsk-")}
-text, api_key = sk.generate_yaml(SK_CFG)
-lines = [ln.rstrip() for ln in text.splitlines()]
-
-
-def _section_of(all_lines, name):
-    """The indented block under a top-level `name:` key."""
-    out, inside = [], False
-    for line in all_lines:
-        line = line.rstrip()
-        if line.startswith(f"{name}:"):
-            inside = True
-            continue
-        if inside and line and not line.startswith(" "):
-            break
-        if inside:
-            out.append(line)
-    return out
-
-
-soulseek_block = _section_of(lines, "soulseek")
-check("soulseek: the username is written into slskd's `soulseek:` block",
-      '  username: "night-owl"' in soulseek_block, str(soulseek_block))
-check("soulseek: the password goes with it, quoted as slskd needs",
-      '  password: "p@ss:with#chars"' in soulseek_block, str(soulseek_block))
-check("soulseek: the two halves are sent together, never one without the other",
-      any(ln.strip().startswith("username:") for ln in soulseek_block)
-      and any(ln.strip().startswith("password:") for ln in soulseek_block))
-empty_text, _key = sk.generate_yaml({"music_folder": SK_CFG["music_folder"]})
-empty_block = _section_of(empty_text.splitlines(), "soulseek")
-check("soulseek: with no credentials, slskd gets empty strings, not a guess",
-      '  username: ""' in empty_block and '  password: ""' in empty_block,
-      str(empty_block))
-
-check("soulseek: an empty pair is 'not configured', never a pass",
-      cc.check("soulseek", {})[0] == "skipped"
-      and cc.check("soulseek", {})[1] == "needs soulseek_username, soulseek_password",
-      str(cc.check("soulseek", {})))
-check("soulseek: a username without a password is still not configured",
-      cc.check("soulseek", {"soulseek_username": "night-owl"})[0] == "skipped",
-      str(cc.check("soulseek", {"soulseek_username": "night-owl"})))
-
-# The live verdict is slskd's: it is the process that signs in. Stub the daemon
-# rather than spawn it — the point here is what the ROW says, not slskd itself.
-_saved = (sk.slskd_installed, sk.instance_owner, sk.is_running, sk.server_state,
-          sk.login_error)
-try:
-    sk.slskd_installed = lambda: True
-    sk.instance_owner = lambda cfg=None: (True, "night-owl", "")
-    sk.is_running = lambda: True
-    sk.server_state = lambda: {"isLoggedIn": True}
-    sk.login_error = lambda cfg=None: ""
-    st, detail = cc.check("soulseek", SK_CFG)
-    check("soulseek: a signed-in daemon is ok, naming the live account",
-          st == "ok" and "night-owl" in detail, f"{st}: {detail}")
-
-    sk.server_state = lambda: {"isLoggedIn": False}
-    sk.login_error = lambda cfg=None: ("[ERR] Login failed: INVALIDPASS - check "
-                                       "your Soulseek username and password")
-    st, detail = cc.check("soulseek", SK_CFG)
-    check("soulseek: a refused login republishes the daemon's own sentence",
-          st == "fail" and "INVALIDPASS" in detail, f"{st}: {detail}")
-
-    sk.is_running = lambda: False
-    st, detail = cc.check("soulseek", SK_CFG)
-    check("soulseek: a daemon that is not running says so instead of passing",
-          st == "skipped" and "not running" in detail, f"{st}: {detail}")
-
-    sk.is_running = lambda: True
-    sk.instance_owner = lambda cfg=None: (False, "someone-else",
-                                          "another application's slskd is "
-                                          "already using port 5030 (signed in "
-                                          "as someone-else)")
-    st, detail = cc.check("soulseek", SK_CFG)
-    check("soulseek: another app's slskd is reported as that, not as our failure",
-          st == "skipped" and "someone-else" in detail, f"{st}: {detail}")
-finally:
-    (sk.slskd_installed, sk.instance_owner, sk.is_running, sk.server_state,
-     sk.login_error) = _saved
-
-
-# --------------------------------------------------------------------------- #
-# 7. This server's own login — auth_username + the stored password
+# 6. This server's own login — auth_username + the stored password
 # --------------------------------------------------------------------------- #
 print("== this server's own login ==")
 auth_tmp = tempfile.mkdtemp(prefix="mlo-api-logins-")
@@ -757,7 +667,7 @@ except ImportError as e:  # pragma: no cover
 
 
 # --------------------------------------------------------------------------- #
-# 8. the route the Settings page and the setup wizard actually call
+# 7. the route the Settings page and the setup wizard actually call
 # --------------------------------------------------------------------------- #
 print("== /api/sources/health surfaces the credential kind ==")
 # Every credential configured, every one of them REFUSED by the capture server
@@ -770,7 +680,6 @@ BAD_CFG = {
     "acoustid_user_key": "ac-user-key-654",
     "ai_base_url": cap.base + "/v1", "ai_model": "gpt-test",
     "ai_api_key": "sk-stored-value-123", "ai_effort": "minimal",
-    "soulseek_username": "night-owl", "soulseek_password": "pw",
 }
 try:
     from fastapi.testclient import TestClient
@@ -829,7 +738,7 @@ except ImportError as e:  # pragma: no cover
 
 
 # --------------------------------------------------------------------------- #
-# 9. the health payload the UI reads must never go green on a bad key
+# 8. the health payload the UI reads must never go green on a bad key
 # --------------------------------------------------------------------------- #
 print("== the health payload reports a rejected credential as a failure ==")
 # The login row reads this machine's real config, which is not what this
@@ -865,15 +774,6 @@ try:
         check(f"payload: the {cid} row explains itself in the provider's words",
               bool(row["detail"].strip()) and row["detail"] != "configured",
               row["detail"])
-    # Soulseek's handshake is slskd's, so the row can only ever report that
-    # daemon's state. With nothing signed in the honest answers are "not
-    # running" or the daemon's refusal — never ok (the ok/fail branches are
-    # proved above with the daemon stubbed).
-    check("payload: a soulseek row never goes green on an unverified login",
-          rows["soulseek"]["status"] in ("skipped", "fail")
-          and rows["soulseek"]["status"] != "ok"
-          and bool(rows["soulseek"]["detail"].strip()),
-          f"{rows['soulseek']['status']}: {rows['soulseek']['detail']}")
     check("payload: the login row is unaffected by the others",
           rows["login"]["status"] == "skipped", str(rows["login"]))
 finally:
@@ -887,12 +787,12 @@ rows = {r["id"]: r for r in
 check("payload: an unconfigured install is skipped, not failed",
       all(rows[cid]["status"] == "skipped"
           for cid in ("discogs", "lastfm", "spotify", "acoustid",
-                      "acoustid-user", "soulseek", "ai")),
+                      "acoustid-user", "ai")),
       str({k: v["status"] for k, v in rows.items()}))
 check("payload: and each says which key it wants",
       all(rows[cid]["detail"].startswith("needs ")
           for cid in ("discogs", "lastfm", "spotify", "acoustid",
-                      "acoustid-user", "soulseek", "ai")),
+                      "acoustid-user", "ai")),
       str({k: v["detail"] for k, v in rows.items()}))
 check("payload: probing an unconfigured credential sends no request at all",
       not cap.sent(), str([(r["method"], r["path"]) for r in cap.sent()]))
@@ -929,8 +829,6 @@ _live("lastfm", ["lastfm_api_key"], lambda cfg: cc.check("lastfm", cfg))
 _live("spotify", ["spotify_client_id", "spotify_client_secret"],
       lambda cfg: cc.check("spotify", cfg))
 _live("acoustid", ["acoustid_api_key"], lambda cfg: cc.check("acoustid", cfg))
-_live("soulseek", ["soulseek_username", "soulseek_password"],
-      lambda cfg: cc.check("soulseek", cfg))
 _live("login", [], lambda cfg: cc.check("login", cfg))
 
 cap.close()

@@ -1317,13 +1317,33 @@ def submit_files(cfg, files, progress=None):
 
     # What AcoustID already has: one lookup per candidate, at every score (a
     # question about the DATABASE, not about the app's display threshold).
-    sending = []
-    for index, row in enumerate(rows):
-        if row is not None:
-            continue
+    #
+    # The questions are independent of each other and each one waits on the
+    # network inside the module's shared 3 req/s throttle, so they run in the
+    # same bounded lanes every other multi-file runner uses and the answers
+    # are booked in candidate order. Serially the pass slept the round trip ON
+    # TOP of the throttle interval once per candidate; laned, the waits
+    # overlap — and the throttle, not this loop, is still what paces the
+    # requests to the service.
+    pending = [index for index, row in enumerate(rows) if row is None]
+
+    def _ask(index):
         item, _key = plan[index]
-        asked = pair_known(cfg, item["fingerprint"], item["duration"],
-                           item["recording_id"])
+        return pair_known(cfg, item["fingerprint"], item["duration"],
+                          item["recording_id"])
+
+    lanes = worker_count(cfg, maximum=8, items=len(pending))
+    if lanes > 1 and len(pending) > 1:
+        from concurrent.futures import ThreadPoolExecutor
+
+        with ThreadPoolExecutor(max_workers=lanes) as ex:
+            answers = list(ex.map(_ask, pending))
+    else:
+        answers = [_ask(index) for index in pending]
+
+    sending = []
+    for index, asked in zip(pending, answers):
+        item, _key = plan[index]
         if not asked["ok"]:
             # The question could not be asked, so "it is new" could not be
             # established either: the track is skipped with the reason rather

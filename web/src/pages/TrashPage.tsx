@@ -85,7 +85,7 @@ function coverOf(e: Entry): string | null {
   );
 }
 
-/** Bytes → "12.4 MB" (same buckets as the Soulseek wish list). */
+/** Bytes → "12.4 MB" (the same buckets the library's storage readout uses). */
 function fmtSize(n: number): string {
   if (!n) return "0 B";
   if (n > 1024 ** 3) return `${(n / 1024 ** 3).toFixed(2)} GB`;

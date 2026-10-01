@@ -45,7 +45,7 @@ except ImportError:
 # The app has two kinds of feature. Tagging, the API, library browsing,
 # streaming and playlists run inside this Python process and work wherever
 # Python runs. Everything else — transcoding, video, the audits, ReplayGain,
-# beets, AcoustID, Soulseek — is another program started by this one, and a
+# beets, AcoustID — is another program started by this one, and a
 # mobile sandbox may forbid that outright: iOS refuses to exec anything, even
 # a binary the app itself ships. Those two cases need different words in the
 # UI. "Not installed yet" offers an Install button; "this device cannot start
@@ -82,8 +82,6 @@ _TOOL_FEATURES = (
     ("images", "Image conversion (JXL / JPEG / PNG)",
      (("libjxl",), ("libjpeg_turbo",), ("oxipng",)),
      "install libjxl, libjpeg-turbo or oxipng from Dependencies"),
-    ("soulseek", "Soulseek downloads (slskd)",
-     (("slskd",),), "install slskd from Dependencies"),
     ("keybpm", "Key & BPM detection (librosa)",
      (("librosa",),), "install librosa from Dependencies"),
 )

@@ -5,7 +5,7 @@ import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { Disc3, Info, ListMusic, ListPlus, Maximize2, Mic2, Play, Pause, SkipBack, SkipForward, Shuffle, Repeat, Timer, Volume2, X } from "lucide-react";
 import { api, isOffline } from "../api";
 import { notePlayerPosition, startPlayerPersistence, toast, useStore, type QueueTrack } from "../store";
-import { fetchQueueRecommend, queueTrackOf } from "../lib/recommend";
+import { fetchQueueRecommend, queueTrackOf, QUEUE_RUNWAY } from "../lib/recommend";
 import { fmtDuration } from "../lib/fmt";
 import { fmtPair, fmtTech, isVideoFile, originalYear } from "../lib/fmt";
 import { nextSpeed, fmtSpeed } from "../lib/playback";
@@ -19,7 +19,7 @@ import { note, shortPath } from "../lib/pbDiag";
 import LockedChip from "./LockedChip";
 import { AdvisoryMark } from "./Badges";
 import StarRating from "./StarRating";
-import { ratingOf, useRatings, useSetRating } from "../lib/ratings";
+import { ratingOf, useRatings, useSetRating, trackWebRating, webStarProps } from "../lib/ratings";
 import VolumePct from "./VolumePct";
 import { applyEq, applyReplayGain, applyVolume, attachAnalyser, audibleLatencySec, resumeAnalyser } from "../lib/analyser";
 import { eqApplyRefusal } from "../lib/eqNodes";
@@ -889,6 +889,12 @@ export default function PlayerBar() {
         advisory: currentTags?.tags?.ITUNESADVISORY ?? current.advisory,
         techStr,
         techTip,
+        // The web rating script 24 wrote for this track, off the same
+        // per-track tags as the marks above and part of the record for the
+        // same reason they are: the block keeps painting the record it last
+        // committed, so a track change cannot blank the value for a round trip
+        // and then pop it back in.
+        web: trackWebRating(currentTags?.tags),
         trackHref: trackRef({
           path: current.path,
           tags: { MUSICBRAINZ_TRACKID: currentTags?.tags?.MUSICBRAINZ_TRACKID },
@@ -1582,15 +1588,18 @@ export default function PlayerBar() {
   // the row that is playing has nothing after it, so the queue's OWN set is
   // handed to the server's local scorer and a bounded batch of similar tracks
   // is APPENDED — ordinary queue rows, so the queue pane, its count,
-  // drag-reorder and remove all treat them like any other row. It runs as that
-  // row starts, which is what puts the batch in place BEFORE the gapless
-  // preload arms for its successor: the handover into the recommended set is
-  // then the same handover any album advance gets, instead of the queue
-  // running dry and stopping. Repeat one is the one mode that appends nothing
-  // (that row's successor is itself), and nothing here can interrupt the
-  // music: an empty answer, a library with nothing similar or an unreachable
-  // server leaves the queue ending exactly where it did before the switch
-  // existed.
+  // drag-reorder and remove all treat them like any other row. It runs while
+  // QUEUE_RUNWAY rows are still UP NEXT, which is what keeps the queue ahead
+  // of the reader instead of growing under the cursor: asking only once the
+  // last row played made the count jump in the same breath as the next press
+  // (at 31/32, pressing next showed 32/37), where the runway keeps the count
+  // where the reader expects it (31/36, then 32/37). The append still lands
+  // BEFORE the gapless preload arms for the successor, so the handover into
+  // the recommended set is the same handover any album advance gets. Repeat
+  // one is the one mode that appends nothing (that row's successor is itself),
+  // and nothing here can interrupt the music: an empty answer, a library with
+  // nothing similar or an unreachable server leaves the queue ending exactly
+  // where it did before the switch existed.
   const infiniteFor = useRef<string | null>(null);
   useEffect(() => {
     if (!infinite) return;
@@ -1602,7 +1611,12 @@ export default function PlayerBar() {
       return;
     }
     if (!current) return;
-    if (index + 1 < queue.length) return;           // a row is already up next
+    // The runway: rows still up next after the playing one. A batch is asked
+    // for while fewer than QUEUE_RUNWAY remain, so the queue is topped up
+    // while there is still music to cover — one batch per row at most (the
+    // per-row key below), never a loop when the answer is short.
+    const remaining = queue.length - index - 1;
+    if (remaining >= QUEUE_RUNWAY) return;
     // Only while that row actually PLAYS: a restored session sitting paused on
     // the last row of a queue must not grow behind the reader's back.
     if (playing !== current.path) return;
@@ -1633,6 +1647,7 @@ export default function PlayerBar() {
         // reader cannot tell apart from a broken feature.
         note("queue-extend", {
           seeds: asked.length, offered: items.length, added: rows.length,
+          runway: remaining,
         });
         if (rows.length) queueAdd(rows, "end");
         else toast("Infinite playback — nothing similar left in the library to add; the queue ends here");
@@ -1948,6 +1963,17 @@ export default function PlayerBar() {
       toast("Sleep timer — playback paused");
       return;
     }
+    // A lyric editor open on THIS track owns the queue: the words being edited
+    // belong to this file, so an automatic advance — the gapless handover
+    // below included — would swap it out from under the reader mid-edit. Hold
+    // (pause) here instead. The reader's own Next still steps (`step()`), and
+    // the flag is cleared when the editor closes or its save lands.
+    if (useStore.getState().lyricsEditing) {
+      pauseApp(media(), "lyrics-edit");
+      setPlaying(null);
+      toast("Lyrics editor open — holding on this track");
+      return;
+    }
     if (loop) {
       const m = media();
       if (m) {
@@ -2148,6 +2174,7 @@ export default function PlayerBar() {
                   value={ratingOf(ratings, block.path)}
                   onChange={(v) => setRating(block.path, v)}
                   pending={pending(block.path)}
+                  {...webStarProps(block.web)}
                 />
               </div>
               {/* the album and the artist open their own pages, and each drifts
@@ -2911,6 +2938,7 @@ export default function PlayerBar() {
               current={current}
               playing={!!playing}
               time={time}
+              duration={duration}
               onSeek={(t) => {
                 const a = media();
                 if (!a) return;

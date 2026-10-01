@@ -23,8 +23,9 @@ Outputs written to tags:
              audio decoded, nothing verifies it). Written only when it says
              something other than what the file already carries.
   LOG_GRADE  0-100 rip-log score (AudioAuditor/cambia) - written to the
-             tracks of MEDIA=CD releases only, one score per disc, with
-             logs/cues deterministically named CD-N.log / CD-N.cue
+             tracks of CD releases only (MEDIA=CD, and the HDCD variant that
+             is the same disc - mlo.tagtext.is_cd_media), one score per disc,
+             with logs/cues deterministically named CD-N.log / CD-N.cue
              first (see discs.py).
 """
 import json
@@ -41,7 +42,7 @@ from .stats import (
     _diff_bytes, worker_count,
 )
 from .subproc import run_tool
-from .tagtext import canonical_text, canonical_value
+from .tagtext import canonical_value, is_cd_media
 from .tools import detect_all_tools
 from .ui import print_header, log, c, Color
 
@@ -165,8 +166,15 @@ def verify_integrity(filepath, ffmpeg_exe=None, flac_exe=None):
         return False, str(e)[:200]
 
 
-def _audit_batch(cli, paths, config):
-    """Run one AudioAuditorCLI analyze batch; returns parsed items."""
+def _audit_batch(cli, paths, config, fallback_width=None):
+    """Run one AudioAuditorCLI analyze batch; returns parsed items.
+
+    *fallback_width* is the width the per-file `info` fallback may use when
+    the batch times out. None keeps this call's own share of the budget (what
+    a caller on the runner thread had); the spectral pass below passes the
+    share left to ONE batch instead, because its batches run in lanes and N
+    lanes must not each start N × 16 CLI processes.
+    """
     cmd = [
         cli, "analyze", "--json",
         "--no-fun", "--no-tips", "--no-update-check", "--no-config",
@@ -222,7 +230,9 @@ def _audit_batch(cli, paths, config):
                 return {"filePath": p, "fileName": os.path.basename(p), "status": "Unknown",
                         "errorMessage": str(e)[:200], "statusOnly": True}
 
-        workers = worker_count(config, maximum=16, items=len(paths))
+        workers = (worker_count(config, maximum=16, items=len(paths))
+                   if fallback_width is None
+                   else max(1, min(int(fallback_width), len(paths))))
         with ThreadPoolExecutor(max_workers=workers) as ex:
             return list(ex.map(_info_one, paths))
 
@@ -346,9 +356,11 @@ def _read_audit_tags(path, write_tags=True, config=None):
         raw_media = str(got.get("MEDIA") or "")
         raw_audit = str(got.get("AUDIT") or "").strip()
 
-    # Through the canonical spelling (mlo.tagtext), so a "cd" a different
-    # tagger wrote is the same MEDIA this audit expects.
-    is_cd = canonical_text("MEDIA", raw_media) == "CD"
+    # mlo.tagtext.is_cd_media is the ONE rule for "is this medium a CD": a
+    # "cd" a different tagger wrote is the same MEDIA this audit expects, and
+    # an HDCD is a CD — its rip log's per-track CRCs verify it, and its
+    # verdict is written, exactly as they are for a plain CD.
+    is_cd = is_cd_media(raw_media)
     # mlo.tagtext owns the spelling rule; an unknown value (a word that is
     # neither verdict) comes back unchanged and is reported as no verdict,
     # exactly as the old .upper() did.
@@ -380,12 +392,16 @@ def _write_audit_value(path, value):
 # and shape as the on-demand ReplayGain cache, mlo.loudness), and a file the
 # record no longer describes is audited again instead of skipped.
 #
-# A record is [size, mtime_ns, verified, identity]: the size and mtime it was
-# written for, the integrity test's own answer for that audio (True/False, or
-# None when the run never tested it), and the audio identity a tag write
-# cannot move. All four are read through _evidence_state, which is the only
-# thing that decides whether a stored verdict is trusted — see there for why
-# the identity has to be part of it.
+# A record is [size, mtime_ns, verified, identity, state, crc]: the size and
+# mtime it was written for, the integrity test's own answer for that audio
+# (True/False, or None when the run never tested it), the audio identity a tag
+# write cannot move, WHAT the test found, and the decoded PCM CRC-32 some pass
+# computed for these bytes (mlo.discs' `_audio_crc32`, the value a rip log's
+# `Copy CRC` is compared against; "" when nothing decoded the file). The first
+# five are read through _evidence_state, which is the only thing that decides
+# whether a stored verdict is trusted — see there for why the identity has to
+# be part of it — and the CRC through :func:`recorded_crc`, which asks the same
+# question of the same record.
 #
 # ponytail: one JSON file rewritten once per run, entries dropped only when
 # their file is gone; move it to sqlite if a huge library ever makes that hurt.
@@ -423,9 +439,9 @@ def _file_stamp(path):
         return None
 
 
-def _record_evidence(path, verified=_UNSET, identity=None, state=None):
+def _record_evidence(path, verified=_UNSET, identity=None, state=None, crc=_UNSET):
     """Store the evidence record for *path*:
-    [size, mtime_ns, verified, identity, state].
+    [size, mtime_ns, verified, identity, state, crc].
 
     *verified* is the integrity test's own answer for these bytes (True/False)
     when this run ran it over the file, and None when it did not — the config
@@ -444,6 +460,13 @@ def _record_evidence(path, verified=_UNSET, identity=None, state=None):
     tag — learns "verified" apart from "the stream states no MD5 at all"
     without decoding the file again. Absent from an older record, and "" for a
     file whose container states no digest (every non-FLAC).
+
+    The sixth is the decoded PCM CRC-32 of these bytes (uppercase hex, the
+    value mlo.discs compares a rip log's `Copy CRC` against), when some pass
+    has decoded the file. It is kept when the caller does not state one and the
+    record still describes this audio — a re-filing under a new stamp, or an
+    audit that re-ran the MD5 test, must not throw away a CRC that cost a
+    decode — and cleared when the audio really changed.
     """
     stamp = _file_stamp(path)
     if stamp is None:
@@ -469,7 +492,17 @@ def _record_evidence(path, verified=_UNSET, identity=None, state=None):
             if (isinstance(rec, (list, tuple)) and len(rec) >= 5
                     and _record_stamp(rec) == stamp):
                 state = str(rec[4] or "")
-    _EVIDENCE[key] = [stamp[0], stamp[1], verified, identity, state]
+    if crc is _UNSET:
+        # Keep a stored CRC only while it describes THIS audio: the same
+        # stamp, or the same identity under a moved stamp (a tag write). A
+        # record whose identity moved is a different audio and its CRC is not
+        # an answer about these bytes.
+        crc = ""
+        rec = _EVIDENCE.get(key)
+        if isinstance(rec, (list, tuple)) and len(rec) >= 6:
+            if _record_stamp(rec) == stamp or (identity and str(rec[3]) == identity):
+                crc = str(rec[5] or "")
+    _EVIDENCE[key] = [stamp[0], stamp[1], verified, identity, state, crc]
 
 
 def _record_stamp(rec):
@@ -804,6 +837,45 @@ def note_integrity(path, state, config=None):
         from .flac import MD5_ABSENT, MD5_OK
         _INTEGRITY_PASSED[key] = state in (MD5_OK, MD5_ABSENT)
         _record_evidence(path)
+        with _EVIDENCE_LOCK:
+            _EVIDENCE_DIRTY = True
+    except Exception:
+        pass
+
+
+def recorded_crc(path, config=None):
+    """The decoded PCM CRC-32 on record for *path*, or "" when none describes it.
+
+    The same contract `recorded_integrity` keeps for the stream-MD5 verdict,
+    asked about the other expensive decode: a CRC is a property of the AUDIO
+    (mlo.discs._audio_crc32), a file whose tags were rewritten is still the
+    same audio, and a rebuilt album page must not decode every track again to
+    compare against the same rip log. A record that no longer describes these
+    bytes answers "" and the caller decodes.
+    """
+    try:
+        _ensure_evidence(config or {})
+        current, _verified, _state = _evidence_state(path)
+        if not current:
+            return ""
+        rec = _EVIDENCE.get(_ev_key(path)) or []
+        return str(rec[5] or "") if len(rec) >= 6 else ""
+    except Exception:
+        return ""
+
+
+def note_crc(path, crc, config=None):
+    """File a CRC this caller just decoded, for the next reader.
+
+    Recorded with the same stamp and audio identity as every other evidence
+    (see _record_evidence) and saved on the way out of the caller's pass
+    (`save_evidence`), never per file."""
+    global _EVIDENCE_DIRTY
+    if not crc:
+        return
+    try:
+        _ensure_evidence(config or {})
+        _record_evidence(path, crc=str(crc))
         with _EVIDENCE_LOCK:
             _EVIDENCE_DIRTY = True
     except Exception:
@@ -1378,10 +1450,54 @@ def run_audit_library(config):
     file_severity_map = {}
     file_status_map = {}
 
+    # ONE BATCH PER LANE. The spectral pass is this script's slow half — a
+    # separate CLI process per batch, each analyzing up to `batch_size` files
+    # — and it ran strictly one batch at a time on the runner thread, which
+    # left the whole worker budget unused for the longest phase of a library
+    # audit. The batches are independent (a batch is distinct paths and its
+    # own stdin/stdout); the lanes are the same `worker_count` knob every
+    # other pool here uses, and each batch's answer is booked by the runner in
+    # BATCH ORDER, so counters, error strings and the progress bar still read
+    # exactly as the serial pass wrote them.
+    batches = [todo[s:s + batch_size] for s in range(0, len(todo), batch_size)]
+    lanes = worker_count(config, maximum=8, items=len(batches))
+    # The per-file `info` fallback inside a timed-out batch is its own pool;
+    # its width is the SAME budget divided among the batch lanes (never one
+    # width per lane — mlo.accurip divides the WAV transport the same way),
+    # so eight batches timing out cannot start eight × sixteen CLI processes.
+    fallback_width = max(1, worker_count(config, maximum=16) // lanes)
+
+    def _audit_one(batch):
+        """One batch's CLI pass: (items, error) — never raises."""
+        try:
+            return _audit_batch(cli, batch, config, fallback_width), None
+        except Exception as e:
+            return None, e
+
+    def _batch_outcomes():
+        """(items, error) per batch, in batch order, in bounded lanes.
+
+        The pool lives exactly as long as this generator is consumed: the
+        `with` shuts it down when the loop below is done, and when that loop
+        unwinds (a batch's exception is re-raised on the runner, never from a
+        lane) the generator is closed with the frame — a pool merely dropped
+        would leave its workers blocked on a queue nothing closes.
+        """
+        with ThreadPoolExecutor(max_workers=lanes) as ex:
+            yield from ex.map(_audit_one, batches)
+
+    outcomes = (_batch_outcomes() if lanes > 1 and len(batches) > 1
+                else (_audit_one(b) for b in batches))
+
     for start in range(0, len(todo), batch_size):
         batch = todo[start:start + batch_size]
+        items, _lane_error = next(outcomes)
         try:
-            items = _audit_batch(cli, batch, config)
+            if _lane_error is not None:
+                # Re-raise the lane's own exception here so the block below
+                # books it as this batch's failure, number and all — exactly
+                # the failure the serial pass raised from the same call.
+                raise _lane_error
         except Exception as e:
             stats["total_scanned"] += len(batch)
             stats["error_count"] += len(batch)

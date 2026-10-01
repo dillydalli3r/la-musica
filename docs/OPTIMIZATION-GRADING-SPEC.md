@@ -107,7 +107,7 @@ An issue is `{code, label, where, reason}` for album-level and artist problems
 
 ---
 
-## 2. The 23 optimization scripts
+## 2. The 24 optimization scripts
 
 Ids, titles and the shipped order are `mlo/scripts.py:SCRIPTS` and
 `mlo/config.py:DEFAULT_RUN_ALL_ORDER`; the runners are
@@ -115,10 +115,10 @@ Ids, titles and the shipped order are `mlo/scripts.py:SCRIPTS` and
 chain both call).
 
 **R8 — Run All runs `run_all_order`**, shipped as
-`[11, 3, 14, 15, 2, 1, 13, 18, 17, 8, 5, 19, 6, 7, 9, 12, 16, 10, 23, 20, 21,
-4]`: everything that moves a file first, everything that reads it last. A saved
-order is honoured as saved (ids outside 1–23 are dropped; legacy 8/9-id orders
-are migrated).
+`[11, 3, 14, 15, 2, 1, 13, 18, 17, 8, 24, 5, 19, 6, 7, 9, 12, 16, 10, 23, 20,
+21, 4]`: everything that moves a file first, everything that reads it last. A
+saved order is honoured as saved (ids outside 1–24 are dropped; legacy 8/9-id
+orders are migrated).
 **R9 — the import chain is DERIVED from the run order, minus a declared
 exception.** `import_scripts` replaces it outright; an empty list means the
 default, which is `DEFAULT_RUN_ALL_ORDER` minus `LIBRARY_WIDE_SCRIPTS` — one
@@ -135,7 +135,7 @@ it per album — after 14 (beets has put the folder in its canonical place) and
 before 4 (so the grade reads the fixed layout). A library-wide Run All still
 gets the whole-folder pass and the stored report. `import_auto_scripts` (ON) off
 still means "run nothing after import". **Every path that finishes an import
-runs this chain and no wider one** — the bulk queue, the Soulseek import, and
+runs this chain and no wider one** — the bulk queue and
 the wizard's Finish step, whose script boxes ARE the chain (the ticked ids it
 runs) rather than the library-wide Run All order; unticking a box is the user's
 own override for that one album. A script the configured chain leaves out keeps
@@ -282,7 +282,7 @@ short keys are the only accepted spelling, and
 chain applies force once), which is what `run_chain(..., force=True)` means.
 A caller that has no force selection of its own OMITS the dict rather than
 sending `{}`: every import path — the wizard's chain re-run, the row menu, the
-bulk queue, the Soulseek auto-importer — passes `force=None`, so the saved
+bulk queue — passes `force=None`, so the saved
 switches apply, while `{}` would clear them all (`layout_apply` included, which
 left an import's layout pass a read-only report on the album it had just
 imported).
@@ -513,11 +513,17 @@ pressed, which clears one album's aliases without the library-wide pass (10) or 
 re-encode (3, whose rewrite strip follows the vocabulary half only, `mlo.containers`).
 `ALBUMALIAS` is graded by both halves like the other two; it is written by the import
 and the tagging stage and was graded by nothing before this rule.
-**R17 — CD vs Digital Media vs other.** `_is_cd()` is exactly `MEDIA == "cd"`
-(case-insensitive); the CUE/LOG/AccurateRip/CRC/`LOG_GRADE` expectations are
-gated on it. `MEDIA == "digital media"` requires `SOURCE`. Any other value in
-`KNOWN_MEDIA` is graded like Digital Media without the `SOURCE` requirement, and a
-value outside `KNOWN_MEDIA` fails `grade_check_media`. Two interactions follow
+**R17 — CD vs Digital Media vs other.** `_is_cd()` is `mlo.tagtext.is_cd_media`:
+`MEDIA == "cd"` or `"hdcd"`, case-insensitively. An **HDCD is a CD** — the same
+disc with the extra High Definition Compatible Digital encoding on it, ripped
+and logged the same way — so the CUE/LOG/AccurateRip/CRC/`LOG_GRADE`
+expectations, the `.log`-CRC audit legs (R21) and the `SOURCE` stripping a CD
+gets all apply to `MEDIA=HDCD` exactly as they do to `MEDIA=CD`; the two are one
+vocabulary value each (`mlo.tagtext.CD_MEDIA_VALUES`), and `HDCD` is a value of
+`MEDIA_VALUES` rather than an unknown one. `MEDIA == "digital media"` requires
+`SOURCE`. Any other value in `KNOWN_MEDIA` is graded like Digital Media without
+the `SOURCE` requirement, and a value outside `KNOWN_MEDIA` fails
+`grade_check_media`. Two interactions follow
 from the library target (`library_codec`): `grade_check_lossless_source` stands
 down when the target is itself an uncompressed container (`wav`/`aiff`) or the
 library is kept as it is, and `grade_check_cd_format` exempts a file that already
@@ -560,7 +566,8 @@ The audit verdict is the one grade input that is *derived*, and the order of
 evidence matters.
 
 - **R21 — a CD's verdict is its rip's OWN evidence, and only that.** For
-  `MEDIA=CD`, script 6 writes `AUDIT=REAL` exactly when every enabled leg
+  `MEDIA=CD` — and for its `HDCD` variant, the same disc to every rule here
+  (R17) — script 6 writes `AUDIT=REAL` exactly when every enabled leg
   passes: **(1) log score** — the disc's rip-log score (fresh from Logchecker,
   else the `LOG_GRADE` the tracks already carry) is at least
   `audit_log_score_threshold`; **(2) checksums** — the `.log`'s per-track
@@ -630,7 +637,8 @@ evidence matters.
   matched is exempt from those *log-file* gates. The grade has its own checksum
   checks (R30) that stand on their own terms.
 - **R28 — `audit_cd_require_both`** (ON) decides whether AudioAuditor is run over
-  `MEDIA=CD` at all; it can no longer downgrade a verified disc.
+  a CD — `MEDIA=CD` and the `HDCD` variant that is the same disc (R17) — at
+  all; it can no longer downgrade a verified disc.
 - **R29 — an unverified log-checker is not a bad rip.** A missed log-checker in
   a container is reported as unavailable, never as a failed rip
   (`audit_fail_on_unscorable_log`, ON, applies only where a scorer exists).
@@ -1537,8 +1545,8 @@ rating.
   carrying a newline is never judged and never collapsed: its whitespace is the
   text.
 - **R60** — the rule is applied ON THE WRITE (`AudioFile.set_tag`,
-  `set_any_tag`, `set_video_tags`), so the beets import, the import wizard, the
-  auto-import chain, every script and a manual edit all land canonical; script
+  `set_any_tag`, `set_video_tags`), so the beets import, the import wizard,
+  every script and a manual edit all land canonical; script
   10 (Format all) re-applies it over an existing library; and
   `grade_check_tag_case` fails a value the writers would have fixed. One rule
   in one place — the grader can never fail what a writer produces.
@@ -1805,9 +1813,8 @@ user asked for, in the order they asked for it. `server/exporter.py` owns both.
   STRUCTURE; `_run` applies it to every substituted tag value, so a `/` inside
   a TAG ("AC/DC" in a TITLE) becomes `_` and can never invent a directory
   level. The subfolder under the export root (`safe_subfolder`), the CUE
-  sheet's own name (`re_safe_filename`), the Soulseek import folder
-  (`_safe_component`) and the organizer (`eval_script` → `sanitize_path`) all
-  call this one function: a second spelling of the character set is how a path
+  sheet's own name (`re_safe_filename`) and the organizer (`eval_script` →
+  `sanitize_path`) all call this one function: a second spelling of the character set is how a path
   the app WROTE stops being a path the app can FIND again.
 - **R101 — the tags keep the truth; only the NAME on disk changes.** A `TITLE`
   of `AC/DC` is written to the file as `AC_DC.flac` and the tag inside stays
@@ -2010,7 +2017,7 @@ user asked for, in the order they asked for it. `server/exporter.py` owns both.
   with them (an `Artist.jpg` sitting INSIDE an album folder, and a numbered
   `description (2).txt`).
 
-### 7.10 YouTube, cookies and the Soulseek port
+### 7.10 YouTube and cookies
 
 - **R76 — the app's yt-dlp calls honour ONE cookie setting.**
   `youtube_cookies_mode` is `none`, `file` (the jar at
@@ -2073,97 +2080,8 @@ user asked for, in the order they asked for it. `server/exporter.py` owns both.
   a 404). One React panel (`web/src/components/CookieJarPanel.tsx`) draws it
   wherever a cookie credential is offered — Settings → Sources, the setup
   wizard's Keys step, Settings → Videos and Settings → Discovery.
-- **R82 — the download queue has exactly two limits, and the overflow WAITS.**
-  `soulseek_search_concurrency` (3) is how many RELEASES run at once and
-  `soulseek_candidate_slots` (3) is how many candidates of one release download
-  at once; both are enforced by the app itself, never delegated to slskd. A
-  release that arrives at the ceiling is NOT refused: it takes its place in the
-  pipeline's waiting queue (the Queue tab's **Waiting** group, one row per
-  release, with its 1-based `position` and its `waiting` flag on the polled
-  payload), is cancellable there without ever starting, and starts by itself
-  from the finish path of whichever release frees the slot
-  (`soulseek_auto._finish → _start_next`) — so it never depends on a second
-  user action. `POST /api/soulseek/downloads/cancel` takes `ids` (the
-  `pipeline:<key>` / `job:<id>` rows of one selection) and answers `cancelled`
-  + `ids` + `missed`; `POST /api/soulseek/downloads/clear` with
-  `scope: "queued"` is **Clear all**: it removes exactly the queued/waiting
-  releases, needs no running slskd, and leaves a RUNNING release alone (that is
-  a per-row cancel). slskd's own `soulseek_download_slots` is the OUTER ceiling
-  on the transfers this product creates and is shipped as the product itself
-  (3 × 3 = 9); a config whose slots are narrower than its other two settings
-  gets the per-release batch narrowed to fit (`slots ÷ releases`,
-  `soulseek_auto._batch_width`), so the app never asks slskd for more than it
-  will serve. The Queue tab reads all three numbers back in its header.
-- **R77 — the Soulseek port check states what it proves.** `GET
-  /api/soulseek/port-check` returns seven rows — `listen` (a real TCP connect
-  plus a bind test), `publish` (whether the HOST publishes the very port the
-  daemon holds, read from inside a container against the container's gateway
-  with the app's own served port as the control — R290), `mapping` (what the
-  router itself lists, with its own words
-  and the lease), `address` (the LAN address the mapping points at vs the WAN
-  address the gateway states, so CGNAT is named as CGNAT; inside a container
-  the two addresses are SUPPOSED to differ — the mapping must point at the HOST
-  — so that shape is judged by whether the address answers on the port and never
-  reported as another device holding it, R292; R294 adds the shape no peer
-  address can survive, read from the routes: a 100.64.0.0/10 address on this
-  machine's OWN internet-bound interface is a tunnel, not the carrier's CGNAT),
-  `self-connect`
-  (refused ⇒ `unknown`, never `fail`: a router without hairpinning refuses it
-  while the port may still be open — which is also what a Soulseek client on the
-  SAME network gets, since it is handed the public address and dials it from
-  inside; that reader's remedy is a client on another network, or the router's
-  NAT loopback),
-  `peers_told` (the one row that asks the NETWORK: slskd browses this account's
-  own username, which makes the Soulseek server state the address it publishes
-  for it — the address is read out of slskd's own words, so a wording change
-  leaves the row saying it could not be read rather than naming a wrong one; an
-  address whose PORT differs from the configured listen port is a `fail` with
-  "restart slskd" as its remedy, an address that matches and refuses is
-  `unknown` and says what a client on the same network gets. Measured on the
-  owner's install: `peers are told 216.212.53.255:50000`, three external nodes
-  connected to that address in 0.002–0.17 s, and SoulseekQt on their LAN hung on
-  "Requesting file list…" against it), and
-  `network` (slskd's signed-in state) —
-  each carrying `proves` and `cannot`. A definitive "open to the internet"
-  answer needs a probe from OUTSIDE the network, which this app does not ship,
-  and the payload says so. Nothing runs on its own: the probe is fired by the
-  page's *Test port* action.
-- **R297 — a browse of your OWN account is answered from your own share, and
-  says so.** That is the one browse the peer network cannot serve from inside
-  this network: the Soulseek server hands every client the address it published
-  for the account — this network's own public address — and a router without
-  NAT loopback refuses exactly that dial, which is the wall R77's `self-connect`
-  row measures, and why the Browse modal used to end in slskd's "cannot connect
-  to itself" 500. When `GET /api/soulseek/browse/<username>` names the
-  configured `soulseek_username` (case-insensitively), the app answers from the
-  index slskd serves (`GET /shares/contents` — the very tree a peer receives),
-  makes no round trip, marks the answer `local: true`, and carries a `note`
-  the page shows: it is this app's own share, and a peer-network browse of it
-  needs the router's NAT loopback. The sharing card opens it with **Browse my
-  share**, disabled only until the account is known — so what a peer is served
-  is one press away on a stock install, with no router setting and no host
-  setup. Nothing is walked from disk and nothing is
-  invented. Every other username still goes to slskd's peer browse, 502 and its
-  own words unchanged; an index that cannot be read is that 502, never an empty
-  share. Bounded and cached like a browse: 48 MB of index at most, 60 s of
-  reuse, `refresh=1` bypasses it.
 
-### 7.11 MusicBrainz browsing and the watch dialog
-
-- **R83 — the release-type picker is chips, and it holds every type
-  MusicBrainz can state.** The watch dialog
-  (`web/src/components/WatchDialog.tsx`, feeding `server/artist_watch.py`)
-  draws the five primary types — `album`, `ep`, `single`, `broadcast`, `other`
-  — and the eleven secondary ones — `compilation`, `soundtrack`, `spokenword`,
-  `interview`, `audiobook`, `live`, `remix`, `dj-mix`, `mixtape/street`, `demo`,
-  `field recording` — each a toggle carrying its own `aria-pressed` state and
-  MusicBrainz's own capitalization. Nothing is paged through: there is no "load
-  more" and no hidden tail. What the dialog ticks is what the watch stores, as a
-  CLOSED vocabulary compared case-insensitively — a name MusicBrainz does not
-  publish is dropped rather than kept as a filter that could never match
-  anything. The artist pages themselves keep loading their release lists as the
-  reader scrolls, and the fallback button stays for the two cases where the
-  observer cannot run (no `IntersectionObserver`, or a stalled fetch).
+### 7.11 MusicBrainz browsing
 
 - **R177 — an entity page's genre chips are drawn in the app's own
   capitalization, and the cascade keeps MusicBrainz's.** MusicBrainz publishes
@@ -2211,8 +2129,8 @@ user asked for, in the order they asked for it. `server/exporter.py` owns both.
   app names this one thing once. Nothing had to be added at the source: the
   number already rides every row of the payload the page holds —
   `integrations.release_group_browse` reads each release's own `label-info`
-  through `mlo.release_choice.catalog_numbers`, the same reader the release
-  choice fills a candidate from and dedupes by (R169), so a row and the ranking
+  through `mlo.release_choice.catalog_numbers`, the release
+  choice's own reader for a candidate's catalog numbers, so a row and the ranking
   cannot disagree about which number an edition carries — and it publishes both
   `catalog_numbers` (every one, MusicBrainz's order) and `catalog_number` (the
   first, the key a search hit carries). The cell prints the LIST joined with
@@ -2237,7 +2155,7 @@ user asked for, in the order they asked for it. `server/exporter.py` owns both.
   Cassette, Other, DVD, Blu-ray, VHS, Video CD, LaserDisc, Digital Media — the
   video carriers ABOVE digital so a music video published on a disc outranks the
   same video published as a download, and digital last because a digital edition
-  carries no catalog number to match a peer's folder against; a format the list
+  carries no catalog number and no pressing to match against; a format the list
   does not name ranks after every configured one — see R246), the **box-set**
   rule (an edition carrying video media BESIDE the album's own medium, or three
   or more discs, sorts below the album's own CD/digital media, so a 3-CD
@@ -2268,8 +2186,8 @@ user asked for, in the order they asked for it. `server/exporter.py` owns both.
   never by chance, and `_deciding_reason` names the tier that decided
   (`"the disc-versus-re-encode rule"`). The SAME module serves the release-group
   page's ranking, `group_targets`, `resolve_release`, `auto_import_targets`,
-  `pick_releases`, the artist watch and `GET /api/mb/release-choice`, so a page
-  and the downloader cannot disagree about which edition "this album" means.
+  `pick_releases` and `GET /api/mb/release-choice`, so a page
+  and the add cannot disagree about which edition "this album" means.
 - **R85 — a compressed derivative of a disc sorts below the disc's own streams**
   (`prefer_disc_streams`, shipped **ON**; Settings → Import & tags). A `BDRip`,
   a `DVDRip` or an `x264` re-encode is somebody's lossy derivative of a source
@@ -2285,81 +2203,16 @@ user asked for, in the order they asked for it. `server/exporter.py` owns both.
   before the rule existed. It is not a grade key: it decides which file the
   grade is computed on, and the same switch decides the disc-folder case of
   §7.13.
-- **R86 — a music-video release published as Digital Media or Web is fetched
-  from YouTube, inside the same auto-import job.** `server.soulseek_auto` routes by
-  the release itself (`acquisition_route`, reading `video_tracks` — the
-  recordings' own MusicBrainz `video` flag, carried on each track of the payload
-  `server.integrations.release_lookup` returns): video recordings on Digital
-  Media or **Web** (`server.soulseek_auto._is_digital`, BOTH spellings) take the
-  YouTube branch, video recordings on a DISC (what
-  `mlo.release_choice.is_video_format` classifies: DVD, Blu-ray, VHS, Video CD,
-  LaserDisc…) and EVERY audio release keep the Soulseek path — the disc's own
-  dead end is R245's YouTube pass — and an unstated or unknown medium is never
-  guessed at. The route is read before
-  the "slskd is not running" precondition, so a YouTube release needs no
-  Soulseek at all, and the branch starts after the album-folder claim, re-check
-  and queue row the Soulseek path already had. One `youtube.best_candidate`
-  search per track (the length filter and the lyric/cover/tribute rejection),
-  downloaded into `<downloads>/YouTube/<Artist - Album>`, renamed to
-  `<disc>-<NN> <title>.<ext>` — the shape `_parse_trackno` reads disc and
-  position back out of, and the naming script writes itself; nothing is named
-  after an upload title. Then the SAME `_import` the Soulseek path calls: MB
-  stamping, `MEDIA=Digital Media`, `SOURCE=YouTube` (the closed vocabulary of
-  `mlo.tagtext.SOURCE_VALUES`, so the Digital Media SOURCE rule of §3 is
-  satisfied rather than dodged), the naming script and the configured
-  post-import chain in the background. A collection that is a dozen separate
-  uploads imports from what came back — every missing track is named in the log
-  and counted in the job's result — and a run that finds NOTHING ends on the
-  same wish offer an empty search does (`source="youtube"`), never as a silent
-  success. YouTube disabled (`youtube_enabled`) or yt-dlp missing fails the job
-  with that sentence, not with an empty album.
-
-- **R245 — a music video's route is a PREFERENCE, and each network is exhausted
-  before the release is called not found.** `acquisition_route`
-  (`server/soulseek_auto.py:1291`) answers which network fetches first, and both
-  sides of the answer fall through to the other one at their own dead end:
-  * **a Web/Digital-Media music video**: YouTube first (`_run_youtube`), and a
-    track YouTube has no usable upload for — or one yt-dlp failed to deliver —
-    is asked of the NETWORK per track (`fetch_video_on_soulseek`, R241) before
-    it is given up on. A track NEITHER source served is reported with both
-    names, and the album's dead end stays in the wish vocabulary ("Nothing
-    usable found for “…” on YouTube or Soulseek — no usable upload for any of
-    its N track(s)"), so `wishes.outcome_of` still classifies the attempt
-    `not_found`.
-  * **a music video on a DISC**: Soulseek first, and a search that came back
-    with nothing (or that slskd itself refused) is followed by
-    `_youtube_after_empty_search` — the same per-track fetch, before the job
-    parks on the wish offer. It answers `(handled, result)` and only a VIDEO
-    release is looked up there; an audio album's dead end is unchanged.
-  * **the YouTube half may not be able to run at all**: `youtube_enabled` off,
-    or yt-dlp missing, is reported as THAT reason (`_youtube_unavailable`) and a
-    Web release is searched for on Soulseek instead of failing before any fetch
-    — which is what "a Web release with YouTube disabled still gets its attempt"
-    means. `_youtube_ready` is read where the route becomes a branch.
-  * **the Soulseek half may not be able to run either, and that is never
-    reported as "no copy".** The per-track fallback asks the network REGARDLESS
-    of slskd's state (slskd can come up mid-album, and skipping the request is
-    exactly what turned "we never asked" into "nobody has it"); the state is
-    read once for the album (`soulseek_auto._youtube_fetch`'s `slsk_why`) and
-    becomes the miss's own reason — `Soulseek is not running`, or `Soulseek is
-    not logged in` — where a live search that found nothing says "no Soulseek
-    copy either". `_require_slskd` is the ONE gate both entry points raise
-    through, in the app's own words.
-  Each job reports which network served which FILE (`_file_origins`, stamped as
-  the SOURCE tag), because a collection is routinely part YouTube, part peers.
-  Pinned by `tools/test_video_release_routing.py`: the route per medium, a
-  YouTube miss the network serves, peer copies that are NOT the track (still a
-  miss), the disc's YouTube pass, a Web release with YouTube off, a signed-out
-  slskd, and the route's own queued answer in `POST
-  /api/videos/download-youtube`.
 
 - **R246 — one medium vocabulary, and an untouched install follows its new
-  order.** `mlo.tagtext.MEDIA_VALUES` (20 value sets, `mlo/tagtext.py:67`) is
+  order.** `mlo.tagtext.MEDIA_VALUES` (21 value sets, `mlo/tagtext.py:67`) is
   the closed vocabulary every writer canonicalizes a `MEDIA` tag against, and it
   gained **`Web`** — MusicBrainz's own spelling for a release published online
-  only, as `Digital Media` is for a download. The two are the SAME medium to
-  every rule that reads one: `_is_digital` (the broad digital search wording and
-  the acquisition route), `mlo.grader`'s known-medium test and the tag writers
+  only, as `Digital Media` is for a download — and **`HDCD`**, MusicBrainz's
+  spelling for a CD carrying the extra HDCD encoding, which every CD rule reads
+  as the CD it is (`mlo.tagtext.CD_MEDIA_VALUES`, R17). The `Web`/`Digital
+  Media` pair is the SAME medium to every rule that reads one:
+  `mlo.grader`'s known-medium test and the tag writers
   all treat the pair alike, so a Web release is not left as an unknown value.
   `auto_import_medium_order`'s shipped default now names the video carriers
   (CD, Vinyl, Cassette, Other, DVD, Blu-ray, VHS, Video CD, LaserDisc, Digital
@@ -2390,131 +2243,38 @@ user asked for, in the order they asked for it. `server/exporter.py` owns both.
   in the reader's own script always passes. The alias rides along in the MusicBrainz request that was already
   being made — no second call, ever — and the browser, entity and release-group
   pages and the credits panel show it (`宇多田ヒカル (Hikaru Utada)`), while the
-  SAME setting is what translates non-Latin names for the Soulseek searches and
-  the beets import.
+  SAME setting is what translates non-Latin names for the beets import.
 - **R95 — "Add to library" records the request, and a request is not the
-  album.** Four things follow, and the library, the queue and the wish store
-  have to agree about all of them (`server/api_add.py`, `server/pending_albums.py`,
-  `server/api_queue.py`, `server/wishes.py`, `server/interrupt_recovery.py`):
+  album.** Three things follow, and the library and interrupt recovery have to
+  agree about all of them (`server/api_add.py`, `server/pending_albums.py`,
+  `server/interrupt_recovery.py`):
 
   * **The button answers before MusicBrainz does.** A request that already
-    carries the title and the artist has given everything a framework album and
-    a wish need, so the folder, the marker and the wish are written from the
+    carries the title and the artist has given everything a framework album
+    needs, so the folder and its marker are written from the
     request (`pending_albums.create_from_request`), the reply says
     `"background": true` + `"resolving": true`, and the release lookup
     (`integrations.auto_import_targets` + the rest of the add) runs on a daemon
     thread (`api_add._prepare_add`). A caller that gave only an id (a bare MBID
     or URL) keeps the synchronous resolution — there is nothing to name a folder
     with until MusicBrainz answers — and its reply says `"resolving": true` for
-    the same reason: the server, not the caller, named the release. The one
-    difference the user sees is the queue row: while the identity is being
-    resolved it carries `pending_albums.STAGE_RESOLVING`
-    (`searching_musicbrainz`), which the queue view draws as *Searching
-    MusicBrainz…* — a wish in that state is waiting for the SERVER, and calling
-    it `queued` would read as a download nothing has searched for. The flag is
-    cleared when the lookup lands, and a marker whose lookup never landed is
-    believed only for `pending_albums.RESOLVING_MAX_AGE`, after which the row
-    falls back to the wish's own state.
+    the same reason: the server, not the caller, named the release.
   * **A framework album is never the album.** A folder holding a
     `.mlo_pending.json` marker and NO audio is a REQUEST on disk: its marker
-    carries the release's MBIDs, so `wishes.owned_mbids` and
-    `wishes.reconcile_with_library` refuse it (`pending_albums.is_placeholder`)
-    — counting it as "already in your library" is what left a wish terminal,
-    nothing searching it and an empty album standing in the library for ever —
-    and `POST /api/wishes/{id}/import` refuses to aim an import at it (409, the
-    same sentence as any un-downloaded wish). Only a folder with audio satisfies
-    "already in your library".
-  * **A fresh add is a fresh request.** Re-adding a release whose wish has ENDED
-    (`not_found`, a spent `failed`, or `imported` with no audio anywhere) re-arms
-    it (`wishes.rearm`: counters and backoff cleared, due now) before the reply
-    claims the search has started; a wish whose album really IS here answers
-    "It is already in your library." instead, with no framework album created
-    for it. An add that names its release instead of identifying it (no MBID,
-    `title` + `artist`, from a streaming recommendation) searches MusicBrainz
-    once: a hit continues as an ordinary add (`matched: true`), and no hit
-    records a NAME-keyed wish (`name:<artist> — <album>`, `matched: false`,
-    `by_name: true`) the queue's own name search fills — never an id, and never
-    a framework album nothing could tie an import back to.
+    carries the release's MBIDs, so the library's own "already in your library"
+    check (`library.owned_mbids`) refuses to count it
+    (`pending_albums.is_placeholder`) — counting a placeholder as the album is
+    what left an empty album standing in the library for ever. Only a folder
+    with audio satisfies "already in your library".
   * **One release is one album folder, and an import ends the placeholder.** An
     import that lands somewhere else (its own name disagreed with the naming
     script, or it was aimed at a folder by hand) is tied back to the placeholder
-    by release identity — `pending_albums.adopt_root` asks the release's own
-    wish after its own folder scan, and `pending_albums.clear_if_filled` takes
-    the placeholder down when the album really arrived elsewhere
+    by release identity — `pending_albums.adopt_root` writes into the
+    placeholder's folder, and `pending_albums.clear_if_filled` takes the
+    placeholder down when the album really arrived elsewhere
     (`_drop_other_placeholder`, matched by `imports._album_mbids`, never by
-    name) — and the startup sweep (`server.interrupt_recovery`) re-arms a
-    framework album whose wish has STOPPED while its release is nowhere in the
-    library, and removes the placeholder whose album IS there.
-
-- **R150 — an acquisition walks its release group's ranked editions, best first,
-  and the walk is FINITE.** "Add to library" on a release group resolves ONE
-  edition through the release-choice policy and queues it (R84); the group's
-  OTHER eligible editions are ranked behind it by that same policy, and that
-  ordered list rides on the request the album was created from
-  (`integrations.group_targets`' `candidates`, recorded on the wish by
-  `server.pending_albums.create` → `wishes.set_candidates`). The search asks
-  them in order — the best first, then the next — until one lands, and it does
-  so INSIDE the one wish (`server.wishes_worker._run_one`): one release group is
-  still ONE album folder (R142) and ONE queue row, never a row per edition. The
-  list costs no request: its entries are the editions the release-group browse
-  already returned, and no candidate costs a fresh search to decide what to try
-  next. `mode: "best"` is what starts a walk (one target row carrying the ranked
-  list); `mode: "all"` keeps its meaning — every eligible edition queued as its
-  own album, each with itself as its only candidate, because the user asked for
-  all of them.
-
-  What "best" MEANS is `mlo/release_choice.py` and nothing else. The ten tiers,
-  in the order they are scored (`_TIER_NAMES`, `_evaluate`):
-  `status` (official → an unstated status → withdrawn/expired/cancelled →
-  promotion → bootleg), `medium` (`auto_import_medium_order`, CD first, a format
-  the order does not name last), `set` (an edition carrying DVD/Blu-ray media,
-  or one disc after another, sorts below the album's own media), `compressed`
-  (R85), `tracks` (short of the release group's own count is penalised),
-  `date` (the EARLIEST edition the group offers wins; the penalty for being
-  later is strictly decreasing and NEVER flat, so two reissues a decade apart
-  are never a tie), `precision` (a fully-dated edition beats a year-only one
-  when the two could be the same day), `edition` (a clean/edited edition sorts
-  below the original while `prefer_original_edition` is on), `disambiguation`
-  (a title with no MusicBrainz disambiguation comment beats one with it) and
-  `country` (`prefer_release_country` — a TIE-BREAKER and nothing else, which is
-  why it is last). The score is that tier tuple encoded positionally in base 8
-  (`_score`), so a bigger score IS a better pick and no lower tier can ever
-  outvote a higher one; equal scores are broken by the order MusicBrainz listed
-  the editions in — never by chance — and `_deciding_reason` names the tier that
-  decided, with the two rules a reader cannot see on the loser said out loud
-  (`_TIER_NOTES`: "the earliest release date offered wins", "a title with no
-  MusicBrainz disambiguation comment ranks above one with it").
-  `rank_releases` returns EVERY edition in that order, and
-  `group_targets` truncates the ROWS to the first while `mode` is "best" — the
-  ranking itself is never truncated, which is exactly what the walk walks.
-
-  **THE STORED LIST IS A SNAPSHOT, NEVER AN AUTHORITY.** What `candidates`
-  records is the editions an add resolved and the facts each of them stated
-  (date, status, country, medium, track count, disambiguation and the catalog
-  numbers) — NOT an order that outlives the policy that produced it. Every read
-  of that list re-derives the order with the policy in force then
-  (`mlo.release_choice.rank_stored`, called from `wishes.walked_rows`, which the
-  walk, the row's `walk` block and `wishes.advance_candidate` all go through),
-  so a release queued before a rule changed is searched by the new rule on its
-  next attempt instead of by the order captured at add time. The re-rank is
-  offline — each row carries its own facts, so it costs no MusicBrainz request
-  and never re-asks the release group — it is pure and deterministic over those
-  facts (the readers therefore cannot disagree about the position), it is NEVER
-  persisted on read, and it never drops a row. A list whose rows state no facts
-  at all (every list written before the facts travelled with them) comes back
-  exactly as stored: there is nothing to rank by, and dropping or reordering on
-  nothing would be the silent shortcut the walk exists to avoid.
-
-  There is ONE such policy. `integrations.ranked_releases`, `pick_releases`,
-  `pick_release`, `resolve_release`, `group_targets`, `auto_import_targets`, the
-  artist watch, the album page's ranking and `GET /api/mb/release-choice` all
-  reach this module, so a page and the search that fills it cannot disagree about
-  which edition "this album" is. The only other ranking in the acquisition path
-  ranks a different thing: `soulseek_auto._rank` over `find_candidates` ranks the
-  PEER FOLDERS of one already-chosen edition (which peer has the complete,
-  lossless, log-verified copy), so a walk of five editions contains up to five
-  of those — a downloads ranking inside a candidate, never a second opinion about
-  which edition the album is.
+    name) — and the startup sweep (`server/interrupt_recovery`) removes the
+    placeholder whose album IS there.
 
 ### 7.13 Disc rips: a DVD or Blu-ray structure is one title, not a pile of parts
 
@@ -2545,8 +2305,8 @@ user asked for, in the order they asked for it. `server/exporter.py` owns both.
   clip twice or plays only PART of one (the concat demuxer could not reproduce
   that title, so the app asks instead of shipping something else). A refusal
   touches nothing on disk. The question is stored as one row per album — the
-  same shape the wizard's family questions use, so the notification bell,
-  `GET /api/import/prompts` and the queue's "Needs you" row show it — and
+  same shape the wizard's family questions use, so the notification bell
+  and `GET /api/import/prompts` show it — and
   `prompts` RE-DERIVES it from the structure itself, so it stands while the app
   would still refuse and withdraws itself once the user has resolved the disc.
 
@@ -2578,7 +2338,7 @@ user asked for, in the order they asked for it. `server/exporter.py` owns both.
 ### 7.14 What an import promises: one release, one album folder, one run
 
 - **R89 — a release is imported ONCE, into ONE album folder, and its chain is
-  scoped to that album.** The queue reports "two separate releases" when any of
+  scoped to that album.** The import queue reports "two separate releases" when any of
   these leaks, so all three are rules:
 
   * **The destination is identity-checked.** An import moves the album to
@@ -2594,17 +2354,16 @@ user asked for, in the order they asked for it. `server/exporter.py` owns both.
     a silent `(2)` is the bug, not the escape.
   * **A release cannot start twice.** `start_job` refuses a release already
     waiting in the bulk queue (`_queued_keys`, under the queue lock) and one
-    already in the library (`wishes.owned_mbids`), and it RE-CHECKS the running
+    already in the library (`library.owned_mbids`), and it RE-CHECKS the running
     set inside the same critical section that registers the job
     (`_running_keys_locked` under `_lock`): two requests arriving together — a
-    double press, the wishes worker and a manual grab — used to both find the
+    double press and a manual grab — used to both find the
     release "not running" and register two jobs, which the album-folder claim
-    only made WAIT, after which the second searched, downloaded and imported the
-    same album again.
+    only made WAIT, after which the second imported the same album again.
   * **Two jobs heading for one folder serialize, and the chain stays in its
     album.** `job_locks` holds the folder `_import` names (before any `(2)`
-    suffix) for the job's whole life — search, download, verify, import — so two
-    editions of one album cannot move their files in at once; and the chain runs
+    suffix) for the job's whole life — the whole import — so two
+    albums cannot move their files in at once; and the chain runs
     as `script_runners.run_chain(targets=[album])`, which sets `cfg["targets"]`
     for every script, so nothing in an import ever walks the library (`mlo/cli`'s
     own Run All is the explicit, user-started library-wide path and is not what
@@ -2624,8 +2383,8 @@ user asked for, in the order they asked for it. `server/exporter.py` owns both.
   `ACOUSTID_ID`/`ACOUSTID_FINGERPRINT` pair. `import_acoustid_autofill`
   (Settings → Import, **off by default**) is the opt-in that lets that same
   match run automatically at the Links step — it is the ONLY automatic route
-  from a fingerprint to a release. Unattended imports are unaffected: a
-  Soulseek auto-import matches under `import_acoustid` on its own.
+  from a fingerprint to a release. Unattended imports are unaffected: a bulk
+  import matches under `import_acoustid` on its own.
 
 - **R164 — a script that moves an album reports the folder the album is in
   WHEN THE SCRIPT RETURNS, and the chain follows it.** A script that takes an
@@ -2724,8 +2483,8 @@ user asked for, in the order they asked for it. `server/exporter.py` owns both.
     the owner read as "nothing happens for ages". The wait itself is unchanged:
     an import still waits for that album's claim rather than skipping its chain,
     and a timed-out or refused wait releases the row it made, so no ghost is
-    left in MAINTAIN. What waits: the AUTONOMOUS paths — the bulk queue, the
-    one-click downloads import, the Soulseek importer, a wish or a watch landing
+    left in MAINTAIN. What waits: the AUTONOMOUS paths — the bulk queue and the
+    one-click downloads import
     (`server.imports.finish_album`'s `wait`, default ON).
   * **The user's own press is answered at once.** `POST /api/import/finish` is
     the press a person makes (the album page's tag-actions entry for a
@@ -2765,7 +2524,7 @@ user asked for, in the order they asked for it. `server/exporter.py` owns both.
     album only from its chain onwards, so the steps before the first script —
     dropping the arrived values, the links, the genres, the metadata, the cover
     art, all of it network work — ran unclaimed: two presses on one album wrote
-    those files at the same time, and an auto-import's background chain was
+    those files at the same time, and a background chain was
     unlocked for its whole look-up phase. `server.imports.finish_album` now
     claims the album for the length of the call (the same `wait` rule and the
     same refusal sentence as the chain) and announces the import only once that
@@ -2783,20 +2542,6 @@ user asked for, in the order they asked for it. `server/exporter.py` owns both.
     folder was unclaimed under its new name (a folder that has just appeared is
     exactly what a second import, a re-download or a fresh run claims) while the
     empty shell it left stayed "in use" until the run ended.
-  * **An auto-import's background chain carries the job's claim — and the
-    release's download folder with it.** `_start_import_chain` used a plain
-    daemon thread, so the job's claim on the release's album folder
-    (`_AlbumClaim`, taken before the search) was released by `_finish` the
-    moment the download settled, while the chain still had every look-up and
-    every script to run: a press on that album found no holder and started a
-    second chain over the same files. The chain thread now takes a reference of
-    the SAME job, so the album is never unclaimed across the hand-off and
-    MAINTAIN keeps ONE row for the job; the folder the download came FROM is
-    claimed for the chain's length as well, so a second import of it (the
-    downloads page's one-click import, the bulk queue) queues instead of
-    importing — or clearing — it underneath. `_account_metadata` (the artist
-    image and the descriptions, written into the album) runs inside that claim
-    too.
   * **A library-wide run claims what it walks.** The sweeps start at
     `config["music_folder"]` (`mlo.grader.run_grade_library`, `mlo.loudness`,
     `mlo.autotag`, the lyric fetch) while the claim was the library ROOT
@@ -2814,9 +2559,8 @@ user asked for, in the order they asked for it. `server/exporter.py` owns both.
   * Pinned by `tools/test_job_locks.py`, one case per bullet — each one failing
     on the code before this rule: the claim following a moved album (and the
     old folder free), a sweep versus an album-scoped run over an album outside
-    the library root, an auto-import's chain versus the user's press (refused,
-    naming the holder), and the release's download folder claimed while its
-    chain runs.
+    the library root, and a second press on an album already being imported
+    (refused, naming the holder).
 
 - **R160 — `automatic` finishes an import WITHOUT a person.** The shipped mode
   (`import_autonomy: "automatic"`, `mlo.import_policy`) means the pipeline does
@@ -2879,11 +2623,8 @@ user asked for, in the order they asked for it. `server/exporter.py` owns both.
   album page's own banner (`GET /api/album`'s `needs`, `AlbumPage.tsx`) — all
   three from ONE payload (`server.import_autonomy.warning`), so a gap cannot be
   described one way in the list and another on the page it links to. It is NOT
-  a row in the section for work holding on the user, and `server.api_queue
-  .build_queue` attaches the warning to the row the album already has rather
-  than emitting a second one: one album is one row, and a released album was
-  read as *both* "Completed" and "Needs you" — the exact shape that made a
-  finished import look like a stall. The only entries that still belong in that
+  a hold on the user — a released album read as *both* "Completed" and
+  "Needs you" is the exact shape that made a finished import look like a stall. The only entries that still belong in that
   section are the ones that really are waits: a **review** import
   (`reason == "stopped"` — the person is mid-decision and the chain has not
   run) and a **video prompt** (a disc structure whose main feature is unpicked,
@@ -2928,8 +2669,8 @@ user asked for, in the order they asked for it. `server/exporter.py` owns both.
 - **R140 — an add writes the record and answers; its provider work happens
   AFTER the reply.** `POST /api/library/add` answers from what the request
   itself holds — the framework album (the folder the naming script names, its
-  manifest, the release-group placeholder cover), its wish, and the kick of the
-  one queue — and everything the reply does not need runs off-request: the
+  manifest, the release-group placeholder cover) — and everything the reply
+  does not need runs off-request: the
   release resolution on the daemon thread the deferred path already had
   (`server/api_add._prepare_add`, `_prepare_artist`), and the album's PAGE
   content on `pending_albums.prefetch_content(folder, cfg, background=True)`.
@@ -2939,7 +2680,7 @@ user asked for, in the order they asked for it. `server/exporter.py` owns both.
   10.0–13.1 s was `prefetch_content`'s provider work in the request path —
   `cover_search` 3.4–8.5 s, the RateYourMusic link lookup 2.7 s, the
   MusicBrainz metadata step 3.0–5.3 s — for content only an OPENED album page
-  reads, while the album row, its manifest, its wish and its cover were already
+  reads, while the album row, its manifest and its cover were already
   on disk. The same add answers in **1.3 s** with that content fetched behind
   the reply, and the remainder is the two MusicBrainz lookups that DO name the
   folder (0.6 s) — the case that legitimately pays a resolution inside the
@@ -2947,193 +2688,28 @@ user asked for, in the order they asked for it. `server/exporter.py` owns both.
   reply's own `background`/`resolving` flags say which case it was, and a
   caller that already holds a title and an artist pays neither (0.2 s,
   deferred). The reply vocabulary — `ok`, `queued`, `albums`, `skipped`,
-  `errors`, `note`, `matched`, `by_name`, `wish_id`, `resolving`, `background`
-  — keeps its meanings, and a `note` must be true at the instant it is shown:
+  `errors`, `note`, `matched`, `resolving`, `background` —
+  keeps its meanings, and a `note` must be true at the instant it is shown:
   it must not claim a search that has not started (`_deferred_note`'s own
   standard).
 
-- **R141 — the acquisition search is a QUEUED wish, never work inside the
-  request.** There is one queue (`server.wishes_worker` →
-  `server.soulseek_auto`) and one search path; an add records a wish and ends
-  with `wishes_worker.trigger()`, which starts the worker's OWN pass on a
-  daemon thread (`wid=None`: the pass reads the wish store itself and searches
-  each wish that is due by its own policy). Nothing in the add awaits a search,
-  and no add has a second lane for one: what the pass searches, and what it
-  leaves to its own retry/backoff, is the STORE's decision. This is what makes
-  the reply's note ("Soulseek is searching for them now.") true when it is
-  written — the kick has already happened when the note is composed, and a
-  brand-new wish is due immediately (`wishes.due_at`), while a wish already
-  waiting out a backoff keeps that wait. A wish the pass cannot search yet (no
-  slskd, no login) keeps its place and its reason: the queue row, not the
-  reply, is where that shows up.
-
 - **R142 — one release is one album folder, from the press to the grade.** The
-  framework album an add creates IS the import's destination:
-  `server.soulseek_auto._import` asks `pending_albums.framework_for_release`
-  first and moves the finished download's ENTRIES into that folder
-  (`_adopt_into` — `os.replace` cannot merge two directories) instead of moving
-  the album to `<library root>/<Artist - Album>` and leaving organize to
-  redirect it afterwards. The old detour was not only a wasted move: the
+  framework album an add creates IS the import's destination: an import that
+  would land beside it is re-pointed INTO it (`pending_albums.adopt_root` —
+  `os.replace` cannot merge two directories, so the album writes into the
+  placeholder's folder), and the folder then takes the name the naming script
+  gives it (`pending_albums.rename_placeholder`), so an add-time name never
+  outlives the tags. Landing beside it was not only a wasted move: the
   intermediate folder is an ALBUM to the library walker — one level too shallow
   to sit under its artist — so the grid drew it with the library root's own
   folder name as its artist ("Artists") and the folder name as its title,
-  BESIDE the album it was about to become, and the download's own cover ended
-  up renamed to `cover (2).jpg` next to the placeholder's `cover.jpg`, which
-  the import then removed as its own placeholder — leaving the album with NO
-  cover at all. Which framework album is this release's is identity, not name:
-  the wish that created it (`wishes.find_for_release`, the job's own
-  `wish_id` first) names it, its marker must agree about the release, it must
-  hold no audio, and it must be inside THIS scope's library root. The
-  placeholder still appears at the instant of the press (that is the feature)
-  and it still ends the moment the album really lands
-  (`pending_albums.clear_if_filled`), so one release shows one tile for the
-  whole acquisition.
-
-- **R151 — each candidate's search is BOUNDED, and the walk stops at the end of
-  its own list.** A walk asks at most `soulseek_fallback_candidates` editions
-  (shipped **5**, clamped to 1–10; **1** is the pre-walk behaviour — the best
-  edition and nothing behind it), and each candidate's search is asked in TWO
-  passes. The FIRST (`soulseek_search_fast_seconds`, shipped **5**, clamped to
-  2–60 and never longer than the window below) is the window every configured
-  query template is POSTed with: slskd serves a search's responses only once it
-  has ENDED, so a short quiet window is what makes a low-traffic release
-  READABLE in seconds — the moment one complete lossless folder is readable its
-  download is enqueued and the job moves on. `soulseek_search_timeout_seconds`
-  of quiet (shipped **60**) is the TOP-UP window, spent only when the fast pass
-  found nothing usable: it keeps reading the searches that are still running at
-  slskd (never re-asking the network the same question) before the candidate
-  counts as not found and the walk moves on — **per candidate**, and then plus
-  the broad second pass a digital release gets. A usable folder ends either pass
-  in seconds, and a transfer already started is never cancelled for a
-  marginally better copy that turns up later. That top-up window is the app's
-  EXISTING one, not a second timer:
-  it is the quiet time `soulseek_auto_search_wait` means, plus the response grace
-  tail `_search_queries` adds (`wait_s + _SEARCH_GRACE_S`), now passed per job
-  (`start_job(search_seconds=…)`). It bounds the SEARCH only — a candidate that
-  finds a usable folder downloads, verifies and imports on the pipeline's own
-  ceilings, because nothing here may cut a transfer short. A release group with
-  fewer eligible editions than the cap simply ends the walk at the end of its own
-  list: no error, no empty slot, and nothing waiting for a candidate that does
-  not exist. A candidate that answers with nothing usable ends ITS search and the
-  walk moves on; a candidate that fails for a TRANSIENT reason (a refused slskd,
-  a MusicBrainz outage) stops the walk and goes through
-  the store's retry/backoff policy unchanged — one policy, asked per candidate,
-  and the walk invents no schedule of its own. The walk only ever moves FORWARD
-  inside an attempt, and the next attempt starts at the BEST candidate again
-  (`wishes.restart_walk`), so a release whose third edition was empty last time
-  is not asked for a third edition first next time.
-
-- **R152 — a walk says where it is, and one that landed says WHICH edition
-  arrived.** The wish row carries `walk` — `{index, total, label, mbid, title,
-  tried}` from `wishes.candidate_state`, the ONE block the queue row
-  (`server/api_queue._wish_rows`), the album's pending payload
-  (`library._wish_state_of`, which reads the same block) and the announcement all
-  read, so no surface re-derives a position and none of them can disagree. Its
-  `note` says `release 2 of 3: <title>` while a candidate is being asked,
-  `next: release 1 of 3: <title>` between attempts (the next pass starts at the
-  best edition, which is what that row is really about to ask) and, in the
-  background phase, `tried 3 of 3 · no usable copy yet · searched again
-  automatically around 14:20`. A search that lands an edition other than its best
-  says so in its own notification — "the best edition was not available, so this
-  is release 2 of 3" — because an album that arrived from a different pressing
-  must never read as the one the user asked for. All of it is data the store
-  already holds — the ORDER included, re-derived from each row's own facts at
-  every read and never written back (R150) — so a row still costs no MusicBrainz
-  request of its own.
-
-- **R153 — a spent walk is not a give-up: the release goes to the BACKGROUND.**
-  When every edition the walk may ask has answered with nothing, the wish does
-  NOT end and its framework album is NOT taken down (`wishes.mark_background`,
-  status `background`, `server/wishes_worker._settle_attempt`): the editions are
-  all still editions, so the release keeps its place in the pipeline, is
-  re-walked on the worker's own ticks (`wishes_interval_hours`: a background wish
-  is not terminal, so the pass picks it up exactly as it picks up any other open
-  wish) and ends only when one of its candidates lands or the user cancels it.
-  Every re-walk re-derives its order from the policy in force then (R150), so a
-  wish that settled into the background before a rule changed is walked by the
-  new rule — the background phase is not a frozen snapshot either.
-  What still ends `not_found` — terminal, announced once, framework album removed
-  — is a wish that carries NO ranked list at all: a name-keyed wishlist row
-  (R95), which has nothing left to ask. The background phase is its own
-  subsection of the Soulseek page — "Background", a `SECTIONS` name of the ONE
-  queue (`server/api_queue.py`) rendered between what is running and what needs a
-  person, with its own count and its own scope for "clear" — and a release in it
-  is ONE row whatever the size of its walk: the candidates are asked one at a
-  time inside the one wish, so there is never a row (or a second job) per
-  candidate to merge away, and the row is cancellable (the standing request goes)
-  and retryable (its "Search now" re-arms the wish and re-walks it immediately).
-  `wishes_not_found_attempts` (shipped 3, 0 = never) keeps its meaning and its
-  units — empty searches — now counted per WALK: the number of empty walks the
-  release may have before it settles into the background.
-
-- **R214 — a candidate whose copies were REFUSED is spent, not fatal, and the
-  walk moves on.** "Every candidate was rejected (…)" — a batch every peer of
-  which the pipeline refused on grading, on the `.log` a CD folder must carry,
-  or on a verification that did not pass — is its own classification
-  (`wishes.outcome_of` answers `"rejected"` beside `"not_found"` and
-  `"transient"`), because the network HAVING copies this app will not take is a
-  different fact from a network that has none, and only one of them is worth
-  retrying unchanged. `wishes_worker._try_candidate` returns `empty` for it, so
-  the walk advances to the next ranked edition exactly as it does after a miss,
-  and `_settle_attempt` sends a walk whose every edition was refused to the
-  BACKGROUND (R153) WITHOUT spending a not-found attempt — the refusal was not
-  a miss. What this fixes: the sentence classified as `transient`, the one
-  classification that STOPS a walk, so the wish was re-marked `wanted` with the
-  backoff, `wishes.restart_walk` put it back on edition 1, and a release group
-  whose best edition scores below `soulseek_auto_log_min_score` (or whose
-  rip logs never reach it) looped on that edition for ever — the reported "won't
-  move on to the next best release", with a "Retrying in 28m 55s" that never
-  named another edition. `tools/test_wishes_pipeline.py` now drives a
-  three-edition wish through `_run_one` and asserts every edition is asked in
-  ranking order, that the walk's own record moves with it, and that the end is
-  `background` with the not-found counter still zero.
-
-- **R178 — a failure retries on ITS OWN clock, and a walk that keeps failing
-  stays quiet.** Two halves of one report ("Retrying after a failure at 12:10",
-  five hours after the download started; a fallback release landing in the
-  queue's *Failed* section):
-
-  - **the cadence.** `wishes.due_at` was `max(last_search + interval, retry_at)`,
-    so a transient failure's backoff (`wishes_retry_backoff_minutes`, shipped 30,
-    doubling to a day) was swallowed whole by the periodic interval
-    (`wishes_interval_hours`, shipped 6 then and an HOUR now — the owner's own
-    cadence for "add to library" / best-pick release groups, and the gap is
-    between two ATTEMPTS while one attempt still walks every ranked edition):
-    a peer that was simply down was re-asked at the periodic interval, and the
-    time the row showed had nothing to do with the failure it followed. Now the
-    two clocks are separate and each
-    governs its own case — a wish whose last attempt FAILED is due at
-    `retry_at` (the backoff), and a wish that merely found nothing is due at the
-    interval. `retry_at` is only ever stamped by that failure path, so its
-    presence IS "the last attempt failed"; with the backoff turned off (0
-    minutes) nothing stamps it and the interval remains the floor, which is what
-    keeps a disabled backoff from turning every tick into a retry.
-  - **the silence.** A wish that carries a ranked walk never ends `failed`
-    (`wishes_worker._settle_attempt`): spending `wishes_max_attempts` on a
-    release EVERY edition of which the network refused sends it to the
-    BACKGROUND instead — `mark_background` with the walk's own report, the same
-    non-terminal state R153 defines — so the row stays where it was, keeps its
-    framework album, and is re-walked from the best edition on the worker's
-    ticks. *Failed* is the section for things a person has to deal with, and
-    "the network did not have it yet" is not one of them for a release the app
-    was asked to find by name. A wish with NO ranked list (a name-keyed
-    wishlist row) keeps the terminal `failed` outcome it always had, because
-    nothing is left to re-ask.
-
-- **R215 — one spent candidate of a walk is not an outcome and announces
-  nothing.** A settled auto-import job that fills a wish is ONE step of that
-  wish's search: its failure means another ranked edition is about to be asked,
-  or the release is resting in the background (R153) — not that the request
-  gave up. `soulseek_auto._wish_keeps_looking()` reads the job's `wish_id` and
-  the store's own verdict (`wishes.is_terminal`), and `_notify_finish` returns
-  BEFORE the `download_failed` frame when the store will search again; the ends
-  that ARE outcomes are announced by the layer that owns them (`wish_failed`,
-  `wish_not_found` from `server/wishes`), and R153's background phase stays
-  silent. A job with no wish behind it — the interactive search, a bulk add —
-  keeps its own `download_failed`, because nothing else will ever say it gave
-  up, and so does a wish-keyed job whose wish HAS given up. Before this, a
-  release the app had not given up on announced "Download failed" once per
-  abandoned candidate.
+  BESIDE the album it was about to become. Which framework album is this
+  release's is identity, not name: its marker must carry the release's own
+  MBIDs, it must hold no audio, and it must be inside THIS scope's library
+  root. The placeholder appears at the instant of the press (that is the
+  feature) and ends the moment the album really lands
+  (`pending_albums.clear_if_filled`), so one release shows one album folder for
+  the whole import.
 
 - **R179 — ONE RELEASE IS ONE TILE, even mid-import.** A framework album is a
   row of its own (a folder with a marker and no audio) and the album the audio
@@ -3155,11 +2731,11 @@ user asked for, in the order they asked for it. `server/exporter.py` owns both.
   then run the whole pipeline again — the six pre-chain lookups and every
   script, over an album the first caller had just finished. `imports.finish_album`
   answers `already_importing` instead (`_importing_now` reads the ONE registry,
-  `server.job_locks`, and takes only a claim whose kind is `auto-import`,
-  `import` or `scripts` — the same three `server.api_queue` reads for its In
-  progress section). A job importing its OWN claim is never a duplicate: the
-  download job holds the album from its first byte and then runs this very
-  import under that claim, and a caller with no job of its own keeps the old
+  `server.job_locks`, and takes only a claim whose kind is `import`
+  or `scripts` — the same two the In progress page reads). A job
+  importing its OWN claim is never a duplicate: an autonomous import holds the
+  album and then runs this very import under that claim, and a caller with no
+  job of its own keeps the old
   wait-then-run behaviour, because skipping there could leave an album
   unimported. The user's own press (`wait=False`) keeps its 409, whose sentence
   names the holder.
@@ -3240,97 +2816,19 @@ user asked for, in the order they asked for it. `server/exporter.py` owns both.
   writes tags on every track, so the second grade of an album paid for twelve
   decodes it had already done.
 
-- **R169 — the walk asks DISTINCT PRESSINGS: two editions that state the same
-  catalog number are ONE search.** Separate MusicBrainz releases really do share
-  one — the same CD issued under two labels (DGC's `GED 24425` beside Geffen's
-  `GED24425`, both catalogued releases of one pressing), a reissue catalogued
-  twice, a country variant printed with the number unchanged — and the catalog
-  number is what a CD search is keyed on, so the next edition in the walk can
-  only find the folders the previous one already found. That is a whole search
-  window (R151) spent for nothing. `mlo.release_choice.catalog_key` is the ONE
-  folding — letters and digits, case, spaces, dashes and dots removed, because
-  a number's spelling is whoever printed it — and
-  `mlo.release_choice.distinct_pressings` is the ONE rule: an entry sharing a
-  folded number with one already in the walk is dropped, and the dropped entries
-  are RETURNED rather than swallowed. An edition stating NO catalog number is
-  always kept (there is nothing to compare it by, and a pressing with no number
-  may still be a different upload — its search is built from artist, title, date
-  and label instead), and the first entry is always kept, so a walk never comes
-  back empty. The numbers cost no request: the release-group browse fetches them
-  with `inc=…+labels`, the same call that already returned those editions. The
-  rule is applied where the list is BUILT (`integrations.group_targets`, so the
-  count a row shows is the walk it will really take) and again where the walk is
-  built (`server.wishes_worker._walk_candidates`, so a list stored before the
-  rule existed is deduplicated on its next attempt) — the same place, and the
-  same read, that re-derives the walk's ORDER from the policy in force (R150) —
-  and the walk LOGS what it
-  skipped — naming the editions — because a fallback that quietly loses a ranked
-  edition is exactly the kind of shortcut nobody notices until an album never
-  lands.
-
-- **R170 — the queue's add takes ANY MusicBrainz entity.** The bar above the
-  queue accepts a release, release-group, artist or recording **URL** (or a bare
+- **R170 — an add takes ANY MusicBrainz entity.** `POST /api/library/add`
+  accepts a release, release-group, artist or recording **URL** (or a bare
   MBID) and turns it into exactly what the MusicBrainz pages' own *Add to
-  library* makes, because it calls the same route: `POST /api/library/add` with
-  the entity's own `kind` — parsed off the URL path
-  (`web/src/pages/SoulseekPage.tsx`'s `mbRef`, `release` / `release_group` /
-  `artist` / `recording`) — and `kind: "auto"` for a bare MBID, which
-  `server.api_add._intended_kind` resolves through `integrations._kind_for`.
-  The two paths therefore cannot disagree about what a pasted id is: a
-  release-group walks the group's ranked editions (R150), an artist queues its
-  discography in the background (`background: true`, the albums appearing as
-  each is created), a recording resolves to the release that carries it, and a
-  release is added as itself. What the bar used to do was parse ANY MBID as a
-  RELEASE — an artist or release-group link was queued as if the artist's UUID
-  named a pressing, which created a framework album that could never be found —
-  and a link to an entity the queue cannot look for (a label, a work, a place)
-  is now refused with the list of what it does take, rather than having its UUID
-  read as a release.
-
-- **R175 — every add RECORDS the walk it will take, or the walk is one edition
-  and a spent search ends the release.** The ranked list R150 walks is only ever
-  as good as who writes it: `server.api_add._create_all` resolves its targets
-  through `integrations.auto_import_targets` (whose rows already carry
-  `candidates`, best first, deduped by catalog number per R169) and had dropped
-  that field on the floor, so every ordinary add — the MusicBrainz pages' *Add
-  to library*, the queue bar (R170), a deferred add's background resolution, an
-  artist's prepared rows — recorded a wish with NO list. With no list the wish
-  is a single-candidate acquisition: a pressing whose peer folders hold nothing
-  usable ends `not_found` (terminal, framework album taken down) instead of
-  moving on to the next edition, and `wishes.candidate_state` has nothing to
-  report, so no surface can say where the search is. The list is passed straight
-  through to `pending_albums.create(candidates=…)`, which is the ONE writer of
-  `wishes.set_candidates`: it fills an EMPTY list only (a wish already walking
-  keeps its ROWS — their ORDER is re-derived at every read, R150, so a re-add can
-  never freeze a search into a stale ranking — while `rearm` starts a fresh
-  walk), it accepts a ONE-entry list as readily as three — that single entry is
-  what tells the store this wish carries
-  the ranked editions of an album request, and therefore keeps a spent walk in
-  the BACKGROUND (R153) instead of ending it — and it keeps each entry's catalog
-  numbers (what the walk dedupes by) AND the edition's own facts — date, status,
-  country, medium formats, track count and disambiguation comment — which is what
-  the walk ranks its order by, so the order a queued release is walked in is the
-  policy's NOW rather than the one captured when it was added.
-  `integrations.group_targets` puts those facts on each `candidates` entry.
-  Every other writer of that list (the artist watch's `queue_release`) already
-  did this; the add path is the one that did not.
-
-- **R176 — a walk is ONE row, and that row says which edition it is asking.**
-  The candidates are asked one at a time INSIDE the one wish
-  (`wishes_worker._run_one`), so a release is one queue entry however many
-  editions it tries — never a row (or a job) per edition — and the row carries
-  the position as its own badge: `SlskQueueItem.walk`
-  (`{index, total, label, mbid, title, tried}`, built by
-  `wishes.candidate_state`) renders beside the stage and source chips, labelled
-  with the server's own wording (`release 2 of 3`) so the row, the album page
-  and the notification cannot disagree, with a tooltip naming the edition being
-  asked and the ones that already came back empty. `walk` is null — and the
-  badge is absent — when there is nothing to walk: no list, or one entry, where
-  "release 1 of 1" would be noise. The row's `note` keeps the sentence
-  (`release 2 of 3: <title>` while a job is asking it, `next: …` between
-  attempts, `tried N of M · no usable copy yet · searched again automatically
-  around HH:MM` in the background phase); the badge is the at-a-glance form of
-  the same fact, and it is the ONLY new UI a walk needs.
+  library* makes, because it is the same route: the entity's own `kind`, and
+  `kind: "auto"` for a bare MBID, which `server.api_add._intended_kind` resolves
+  through `integrations._kind_for`. The paths therefore cannot disagree about
+  what a pasted id is: a release-group resolves the group's best edition through
+  the release-choice policy (R84), an artist records its discography in the
+  background (`background: true`, the albums appearing as each is created), a
+  recording resolves to the release that carries it, and a release is added as
+  itself. A link to an entity the app cannot add (a label, a work, a place) is
+  refused with the list of what it does take, rather than having its UUID read
+  as a release.
 
 - **R154 — an import USES what the add already fetched, where the add's record
   is an IDENTITY.** The add path resolves the album's page content before the
@@ -3403,33 +2901,23 @@ user asked for, in the order they asked for it. `server/exporter.py` owns both.
   it is lazy, while a run that renamed a folder must not keep resolving the old
   paths to it.
 
-
-- **R110 — the app's two transient stores have two INDEPENDENT size caps, and
-  a store over its cap is emptied oldest first.** `soulseek_cache_cap_gb` and
-  `trash_cap_gb` (both 5 GB shipped, Settings → Storage, one decimal; 0 or
-  negative = that store's cap off, never a shared total) are enforced by
-  `server/cache_caps.py` against the LIVE folders, so a leftover from an older
-  version counts like anything else: the Soulseek cap measures the configured
-  download dir (`soulseek_download_dir`, else `<music folder>/.mlo/downloads`)
-  plus the `incomplete` sibling slskd stages into, and the trash cap measures
+- **R110 — the app's trash bin has a size cap, and a store over its cap is
+  emptied oldest first.** `trash_cap_gb` (5 GB shipped, Settings → Storage,
+  one decimal; 0 or negative = the cap off) is enforced by
+  `server/cache_caps.py` against the LIVE folder, so a leftover from an older
+  version counts like anything else: it measures
   `<music folder>/.mlo/trash` across every per-user bin. The unit of deletion is
-  the one the app's own routes delete — a top-level entry of a staging root
-  (`/api/soulseek/staging/delete`, the Downloads page) and a child of a
-  per-user bin (`/api/trash/delete`, the Trash page), dot-entries under a
-  staging root excepted because they are slskd's own staging tree — and the
+  the one the app's own route deletes — a child of a
+  per-user bin (`/api/trash/delete`, the Trash page) — and the
   pass stops the moment the store fits, so an entry that alone would overshoot
   by far is taken only when the store is still over without it.
-- **R110a — a prune never takes what is in use, and says what it took.** Two
-  questions decide, both asked of state the app already trusts: is a path held
+- **R110a — a prune never takes what is in use, and says what it took.** One
+  question decides, asked of state the app already trusts: is the path held
   in `server.job_locks` (the registry every route is refused against, so the
-  report carries that job's own sentence), and does a running slskd transfer
-  own the name — its peer's username, the leaf of the remote folder it is
-  writing into, and, for a LOOSE entry, its file name, read from
-  `soulseek.downloads_state()`: the same evidence `import_completed()` refuses
-  to move an unfinished album on. Such an entry is skipped WHOLE, named in the
-  report, and the cap stands above its limit until the transfer or the job is
-  done; an entry the filesystem refuses to give up (a file slskd still holds
-  open) is kept and reported the same way, never worked around. A trash entry
+  report carries that job's own sentence). Such an entry is skipped WHOLE,
+  named in the report, and the cap stands above its limit until the job is
+  done; an entry the filesystem refuses to give up is kept and reported the
+  same way, never worked around. A trash entry
   is deleted exactly as `/api/trash/delete` deletes one — the entry first, then
   its origin record dropped from the bin's `.mlo_manifest.json` — so every
   entry a prune KEPT is still restorable to the path it came from. What a prune
@@ -3438,7 +2926,7 @@ user asked for, in the order they asked for it. `server/exporter.py` owns both.
   only what could not be deleted is reported as a problem. The pass runs from
   its own worker thread started with the app (`server/main.py` lifespan, tick
   300 s, first pass after a 60 s settle), so an install nobody has opened a page
-  on still holds its caps.
+  on still holds its cap.
 
 - **R247 — one song of a rip is imported INTO the album that rip is, and the
   album says what is missing.** An import bringing exactly ONE audio file is a
@@ -3516,17 +3004,14 @@ user asked for, in the order they asked for it. `server/exporter.py` owns both.
     holds, so an import and script 8 can never spell a value differently.
   * **the source is the pressing that LANDED.** The payload handed to
     `finish_album` is the edition the wizard's user picked or the release the
-    job downloaded and verified — never the release a wish was saved for, and
-    never the album's manifest or framework marker (which can name the edition
-    the fallback walk moved past). No lookup is made when the payload is in
+    import resolved — never the album's manifest or framework marker when it
+    names a different edition. No lookup is made when the payload is in
     hand; with none handed in, the one `integrations.resolve_release(album_mbid)`
     the genres step already makes is reused — one cached request for the album,
     never one per track.
   * **fill-only, like every writer here.** A `MEDIA`/`RELEASECOUNTRY`/
-    `CATALOGNUMBER` the user typed survives an import, and so does the coarse
-    `CD`/`Digital Media` the Soulseek importer's own detection wrote
-    (`soulseek_auto._stamp_media` is fill-only too) — so an album the app
-    mis-detected keeps the wrong word until that step states the release's
+    `CATALOGNUMBER` the user typed survives an import — so an album the app
+    mis-detected keeps the word it had until this step states the release's
     medium itself. The only two values an import may change without them being
     empty are the ones the app already sharpens:
     `DATE`/`ORIGINALDATE` (a year gains its day) and `RELEASECOUNTRY` (a strict
@@ -3543,10 +3028,10 @@ user asked for, in the order they asked for it. `server/exporter.py` owns both.
     album has no tags to carry anything, so `server.library._pending_album_row`
     fills `meta.MEDIA`, `RELEASECOUNTRY`, `CATALOGNUMBER`, `LABEL` and
     `RELEASESTATUS` (and the row's own `media`) from the identity block the ADD
-    recorded — `server.pending_albums.create` now hands the release payload it
-    resolved to `wishes.add_wish(release=…)`, which writes the wish's own
-    `release_json` column with no extra request, and the worker's identity pass
-    remains the fallback for wishes that predate it. `track_count` stays 0 and
+    recorded on the framework marker — `server.pending_albums.create` writes the
+    release payload it resolved into the marker's own `release` block
+    (`library._pending_release_identity` reads it), with no extra request.
+    `track_count` stays 0 and
     the tracklist stays `expected_tracks` (the release's own, every row
     missing): a placeholder never claims a file it does not have, and the
     format/bitrate cell stays empty until audio exists.
@@ -3554,25 +3039,31 @@ user asked for, in the order they asked for it. `server/exporter.py` owns both.
     country + medium + the release's identity; a value already there is kept; a
     landing of a different pressing writes the LANDED pressing's facts and the
     asked-for one appears nowhere; the readout then shows the pressing and the
-    measured format), `tools/test_chain_after_acquire.py` (the verified
-    auto-import's album carries the downloaded release's medium/country/catalogue)
-    and `tools/test_add_to_library.py` (the pending tile's readout).
+    measured format) and `tools/test_add_to_library.py` (the pending tile's
+    readout).
 
 ### 7.15 Notifications and the player's own immediacy
 
 - **R90 — every import announces itself, and the switches are yours.**
   `server/imports.finish_album` is the single call every import path makes (the
-  wizard's finish, the downloads panel, the sequential import queue, the bulk
-  queue, the Soulseek auto-importer and the wish/artist-watch pipeline behind
-  it), and it emits two events through `server.events`: `import_started` on the
+  wizard's finish, the downloads panel, the sequential import queue and the bulk
+  queue), and it emits two events through `server.events`: `import_started` on the
   way in and `import_done` where every path ends (`_report_gaps`), carrying the
   chain's own one-line summary (`chain_summary`). Both are switchable
   (`notify_import_start` / `notify_import_done`, Settings → Notifications, ON by
-  default), like the download phase's `notify_soulseek_download_start` and
-  `notify_download_done` and the add-time `album_pending`; a kind with no key in
+  default), like `notify_download_done`, `notify_import_ready` and the add-time
+  `album_pending`; a kind with no key in
   `events._notify_configured` is unconditional by design (an outcome the user
   must be able to see). Notifications go to the persisted tray for every kind,
   and an OS notification for the kinds in `notifications.ts`'s `OS_KINDS`.
+  The tray ALSO carries the grade findings the Home and Library strips write
+  out — the one case where a warning is DERIVED from a payload rather than
+  announced (`notifications.ts`'s `ingestDerived`): one entry per finding, kind
+  `grade_warning`, drawn with the strip's own amber and triangle, idempotent by
+  a key built from the subject and the finding's own words so re-reading the
+  same summary never logs it twice while a finding that changes is a new entry.
+  It is deliberately outside `OS_KINDS`/`PUSH_KINDS`: a datapoint re-read from
+  a page must never pop a banner on a phone. Pinned by `tools/test_notifications.cjs`.
 - **R91 — selecting a track silences the outgoing one at once.** The player's
   load effect (`web/src/components/PlayerBar.tsx`) pauses the ACTIVE element the
   moment the index changes, before the new source is fetched and decoded — a
@@ -3809,10 +3300,10 @@ user asked for, in the order they asked for it. `server/exporter.py` owns both.
 
 ### 7.17 The first-run setup wizard asks only what is required
 
-- **R107 — the wizard's steps are the ones that need an answer.** Six:
+- **R107 — the wizard's steps are the ones that need an answer.** Five:
   Folder (the music library), Account (the login gate), Tools (the dependency
   download), Keys (the source credentials and cookies: Spotify, Discogs,
-  Last.fm, RYM, AcoustID), Soulseek (the managed slskd login and sharing) and
+  Last.fm, RYM, AcoustID) and
   Done. Every quality/check knob — the grading switches, the audit and
   verification options, the script chain, the naming script, the interface
   preferences — is NOT asked here: those are `mlo/config.py` defaults, editable
@@ -3832,42 +3323,9 @@ user asked for, in the order they asked for it. `server/exporter.py` owns both.
   one documented exemption, the export defaults the Export page's own form
   writes). A key may never lose its only editor to a shorter wizard.
 
-### 7.18 Transfer progress is pushed, and it is as live as the bytes
+### 7.18 An import that needs a hand is an outcome, and it reaches the user
 
-- **R120 — a bar that tracks moving bytes is drawn from a PUSHED row, and the
-  push is paced by the bytes, not by a timer.** The Soulseek page's transfer
-  rows (`GET /api/soulseek/downloads`) and every live job's progress block
-  (`server/soulseek_auto.py`'s own `progress`, the same one
-  `GET /api/soulseek/auto` serves and the queue rows are built from) are also
-  sent over the progress WebSocket as `{"type":"transfers"}` frames
-  (`server/main.py`'s `_soulseek_transfers_watch`), and the page draws those
-  bars from the frame (`web/src/pages/SoulseekPage.tsx`, via
-  `web/src/lib/notifications.ts`'s `publishTransfers`/`useLiveTransfers`).
-  Three things this pins down:
-  - **Cadence.** 0.4 s while a transfer is `InProgress` or a job is running —
-    2.5 frames a second, roughly 370 bytes each — and 5 s otherwise, including
-    for a queue slskd has not started yet. Nothing is sent when nothing
-    changed, and with no UI socket open the watcher reads slskd not at all.
-    Measured on a scratch instance against a 2 MB/s transfer (see the README's
-    measurement note): the bar moved every **0.40 s** and showed a value
-    **0.17 s** old on average (p90 0.31 s), where the 3 s poll it replaced gave
-    **3.02 s** and **1.48 s** (p90 2.79 s); a state flip reaches the screen in
-    **0.38 s**; and once a queue has settled, 12 s of it send **0 frames** and
-    cost 0.5 slskd reads a second.
-  - **Accuracy.** A frame carries slskd's own `bytesTransferred`,
-    `percentComplete`, `size`, `state` and `averageSpeed`, so the percentage
-    stays byte-exact and a bar moves BACKWARDS only when slskd really reports
-    less (a retried transfer, or a partial deleted under it). Nothing is
-    interpolated: a frame says what the wire says.
-  - **One source per bar.** The page's own poll of the same query stays as a
-    **30 s** fallback for a dead socket, not as the cadence; a frame that says
-    the list changed shape (`resync`) triggers the one refetch a patch cannot
-    express.
-  Progress is a STATUS, never an outcome: frames ride the progress socket only
-  and never reach the notification tray — `publishTransfers` is deliberately
-  not `ingest`, so a byte count changing four times a second can raise neither
-  a toast nor an OS notification.
-- **R121 — an import that needs a HAND stays an outcome, in three places.** An
+- **R121 — an import that needs a HAND stays an outcome, in two places.** An
   album an import could not finish raises `import_needs_data`
   (`server/imports.py`'s `_report_gaps` → `server/import_autonomy.py`'s
   `raise_prompt`, over `mlo/import_policy.py`'s `gaps`, i.e. the grader's own
@@ -3877,13 +3335,10 @@ user asked for, in the order they asked for it. `server/exporter.py` owns both.
     `OS_KINDS` (`web/src/lib/notifications.ts`), so the desktop/mobile shell
     raises a system notification and the bell's panel keeps the entry;
   - **the push** — the same frame on `/ws/events`, with `link`,
-    `album_path`, `reason` and the missing `families`;
-  - **the Soulseek page** — the queue's *Needs you* section carries a row that
-    NAMES the album and lists the families and the reason in the app's own
-    words ("Links — no source could supply it (MusicBrainz release link, …)"),
-    whose action (`action: "manual"`, `action_link`) opens the import wizard at
-    that album's first missing step (`/import?album=…&step=…&missing=…`) —
-    an item to press, not a line of text.
+    `album_path`, `reason` and the missing `families`; its `action: "manual"`,
+    `action_link` opens the import wizard at that album's first missing step
+    (`/import?album=…&step=…&missing=…`) — an item to press, not a line of
+    text.
   It fires on the manual-tagging state ONLY: never for progress, never for a
   finished import, and never twice for the same album — the same gaps, reason
   and mode are not a new outcome (`raise_prompt` compares them before it
@@ -3949,22 +3404,14 @@ user asked for, in the order they asked for it. `server/exporter.py` owns both.
   `URLSearchParams` would rewrite a space as `+` where `streamUrl` wrote `%20`,
   and the key would then miss the very request the service worker matches. The
   artwork warmed beside the audio is keyed the same way.
-- **R174 — the rip-log bar is 100, and it is the same number in all three
-  places it is asked.** `soulseek_auto_log_min_score` (the acquisition gate: a
-  CD candidate's `.log` must be scorable, score **>= 100** and not
-  checksum-invalid before its audio is even queued), `grade_log_score_threshold`
+- **R174 — the rip-log bar is 100, and it is the same number in both
+  places it is asked.** `grade_log_score_threshold`
   (the LOG_GRADE check) and `audit_log_score_threshold` (the AUDIT verdict's
   log-score leg) all ship **100** — a Logchecker-perfect log, by default, and
   `mlo/discs.score_disc_log` is what scores it (Logchecker's own
-  `Checksum: checksum_invalid` is a hard refusal, never a low score). The bar
-  applies to every candidate the app finds BY ITSELF. The three paths that do
-  not gate are the user's own hands, and each says so where it happens: a
-  MANUAL entry (a peer folder picked in the browse/manual flow) runs the gate
-  only for the logs it selected, so choosing a folder with no log is a choice
-  the user made; a CD candidate with no log at all on the searched path is
-  re-scored as Digital Media and offered through the `no_logs` confirm prompt
-  rather than silently refused; and a folder already on disk (the staging
-  imports) is graded after the fact, never refused. Lowering any of the three is
+  `Checksum: checksum_invalid` is a hard refusal, never a low score). A folder
+  already on disk (a staging import) is graded after the fact, never refused —
+  the grader's own wording says what it found. Lowering either threshold is
   a settings change, never a default.
 
 ### 7.20 The library layout: what it tolerates, and what the optimize pass removes
@@ -4259,21 +3706,6 @@ composition instead (R267). Above `lg` the pane sits beside the artwork.
   at Settings → Security rather than showing an empty list. Signing out is
   available from the same panel.
 
-### 7.25 A rejected download explains itself, and the explanation outlives the job
-
-- **R194 — the failure names the peers and the reasons, and the reasons are
-  written where the failure points.** A run whose candidates were all refused
-  ends in one sentence, and that sentence is what the user keeps: the wish row
-  persists it as `last_error`, and `wish_found`/the notification carry it. It
-  now carries the attempts themselves — the first three as `peer: reason`,
-  counted past three — because the reasons used to live only in the job's own
-  in-memory list, which the row's clearing discards, while the sentence told the
-  user to go read a LOG the attempts had never been written to ("see the log" was
-  a dead pointer, and a release stuck at 0 % explained nothing). `_reject`
-  writes each attempt to the wishes log as well, so the pointer is true. With no
-  reasons recorded the sentence is **byte-for-byte** the one it always was: this
-  grew a field, it did not change a wording.
-
 ### 7.26 The cover's play control, and the cascade behind it
 
 - **R195 — the play control is IN the overlay, at every width, and clear of the
@@ -4292,58 +3724,6 @@ composition instead (R267). Above `lg` the pane sits beside the artwork.
   offset. A cover too small for both — the S size, 147px, with a wrapped country
   list — keeps the button whole and clips the chip that does not fit, never the
   other way round.
-
-### 7.27 The queue says what is true, and one press takes a row off it
-
-- **R196 — a row IS the job's own state, field by field, and it says so while it
-  waits.** The row's progress block carries what the job is really doing: the
-  query being asked and slskd's own state for it (a search is a LIST of queries
-  asked one after another, so "which one now, and is it still being asked" is
-  the difference between a search that is working and one stuck on a query
-  nothing answers), the peer and folder arriving, the phase, `files_arrived`
-  counted APART from `files_done` (what the wait has accepted on disk versus
-  what slskd calls complete — a row must not claim a file arrived that has not),
-  the job's own last log line as `stage_text` (empty once the job has SETTLED: a
-  finished job's last line describes a step nobody is running), and the rejected
-  candidates with the reason each was refused (bounded to the last eight, so one
-  row's payload cannot grow without limit). A row whose step has stopped never
-  claims it is still running.
-- **R197 — a row still in the pipeline is CANCELLED, not cleared.** One action
-  takes ONE item off the list through whichever mechanism owns it — the wish
-  list, the running job, or the bulk queue — instead of making the user find the
-  page that started it; `clear` stays for rows whose work is over. The bug this
-  settles: the client had ONE cancel call but the server branched on the wish's
-  own status, so cancelling a wish that had moved past "searching" removed the
-  folder and the wish while the download kept running — and a job whose wish is
-  gone still draws a row of its own, so it settled later as a failure and left a
-  SECOND row needing its own clear. A cancelled row reports that it was
-  cancelled rather than looking like a failure of its own.
-- **R198 — the landing notice is the download's, and it says so.** "Imported … —
-  it is in your library" is emitted when the album LANDS; the import chain starts
-  after that (`_start_import_chain`) and runs on its own thread, so the sentence
-  used to imply a finished pipeline while the scripts had not run yet. Every
-  surface that announces the landing — the app-level toast, the Auto tab's own
-  and its panel line — appends `queue.chain_running_brief` while `chain.running`,
-  and the queue row keeps the long form. The row's stage already stays
-  "importing" until the chain settles; the sentence now agrees with it.
-
-- **R217 — the counters describe the list beside them, and count a peer
-  ONCE.** Two surfaces showed numbers that did not belong to the rows under
-  them. `soulseek.search_results` derived `responseCount`/`fileCount` from
-  slskd's SEARCH STATE, which only settles once a search has ended: a page
-  rendering those beside a file list served by `/responses` read "0 peer(s), 0
-  file(s)" over a list of hits, and a search ended early by `response_limit`
-  never settles at all. They are computed from the response list itself now —
-  `len({username})`, `len(responses)` — with the state's own counters only as
-  the fallback for the window where slskd has counted responses it will not
-  serve yet. `soulseek_auto._search_queries` SUMMED each template's counters
-  while asking every template at once: the templates of one album overlap by
-  design (catalog number, barcode, title all name the same release), so one peer
-  was counted once per template (15 "responses" for three peers) — it counts
-  DISTINCT usernames and distinct user+file across the responses in hand.
-  `tools/test_soulseek_candidates.py` pins both: two templates returning the
-  same peer's same two files read 1 peer / 2 files, and the counters travel with
-  the list they describe.
 
 ### 7.28 The import arrives complete: the name, the cover, and when the notice may speak
 
@@ -4372,9 +3752,8 @@ composition instead (R267). Above `lg` the pane sits beside the artwork.
   onto the path the naming script gives the tags
   (`pending_albums.rename_placeholder`), which is what it does with every album
   it lands (`_adopt_deferred` is the same move at add time). The marker is
-  inside the folder and travels with it, so it stays the same framework album,
-  and the wish that created it is re-pointed (`album_path`/`target_dir`) because
-  that path is what the queue links to and what `_revive` reads. Only a folder
+  inside the folder and travels with it, so it stays the same framework album.
+  Only a folder
   still carrying its marker is ever renamed, and never onto a name a real album
   already occupies: the album then keeps the folder it landed in rather than
   being merged into someone else's. Chosen over "make the grade tell the user to
@@ -4402,10 +3781,9 @@ composition instead (R267). Above `lg` the pane sits beside the artwork.
   everything else. Pinned in `tools/test_chain_after_acquire.py`.
 - **R202 — an import that cannot place every file is reported, not aborted, and
   "Imported" means the pipeline really finished.** A naming-script failure no
-  longer raises out of the auto-importer's `_import`: the album is in the
-  library, so its cover step, its chain and the rest of the pipeline still run
-  and the download is kept (`partial`), with the files that stayed in the
-  download folder named in the job's own line — a partial landing is a fact
+  longer raises out of an import: the album is in the
+  library, so its cover step, its chain and the rest of the pipeline still run,
+  with the files that stayed behind named in the report — a partial landing is a fact
   about the album, not a reason to lose it. And `import_done` is emitted where
   the pipeline is actually finished, after the gap phase and its prompt
   (`['import_started', 'gaps', 'prompt', 'import_done']` — the order the
@@ -4539,172 +3917,6 @@ composition instead (R267). Above `lg` the pane sits beside the artwork.
     container mutagen cannot read still falls back to the probe. The import's
     convert step measured 0.413 s → 0.302 s in the same pair.
 
-### 7.31 The unattended acquisition: what may be taken, and when it is asked for
-
-- **R209 — a download queued from the Soulseek page imports itself.** The page's
-  three Download routes (`POST /api/soulseek/download`, `-bulk`, `-user`) record
-  what they queued (`server.main._remember_page_download`: the peer and the
-  remote files, nothing else — a refused enqueue records nothing), and the pass
-  that watches them (`_page_download_pass`, its own thread
-  `_soulseek_page_downloads_watch`, 5 s) imports the folder those files became
-  through `import_queue` — i.e. `_import_one_album` → `imports.finish_album` →
-  the configured chain, the very call the Import button makes, so there is no
-  second import pipeline to keep in step. Readiness is `soulseek.ready_albums`,
-  the ONE rule the Import button works from, so nothing here re-decides what
-  "downloaded" means; the remote-file-to-folder mapping is the pipeline's own
-  (`_index_download_tree`/`_local_download_candidates`), so slskd's batch layout
-  and the older shapes resolve the same way. The still-downloading guard inside
-  that rule matches a running transfer by the peer AND the remote folder path it
-  carries (`_pending_album_folders`/`_still_downloading`), never by a folder's
-  leaf name alone: every peer and every batch has a folder of any given name, so
-  a leaf test let one peer's unfinished transfer hold back another peer's
-  complete album. Only folders holding a file THAT
-  press queued are taken, so the auto-importer's own downloads (which import
-  under their own job) are untouched. Two switches decide whether it runs at all
-  (`mlo.import_policy.page_download_auto_import`): `import_autonomy` "review" and
-  `manual_import_enabled` off each leave the album in the download folder with
-  its "ready to import" row and say so once — an install that wants to review
-  still reviews, and the press that imports it is the manual route, which keeps
-  working. `auto_acquisition_enabled` is deliberately not asked: the download was
-  the user's own action. An intent is imported WHOLE or not at all: the press's
-  own file set and the sizes it asked for are the record, so a folder holding
-  part of it — or one of its files still being written — is a download still
-  coming. The album is therefore never chained and graded from a partial set,
-  and the files that arrive later cannot be orphaned by an intent the first
-  import already spent. The records are kept beside the app's own state
-  (`<music folder>/.mlo/data/page_downloads.json`, written through
-  `mlo.atomic`), so a backend restart between the press and the arrival does not
-  forget which download was asked for here. A re-press merges instead of
-  duplicating: a file slskd is already queued or downloading for that peer is
-  skipped (`server.main._active_downloads` — the rule
-  `/api/soulseek/download-user` has always applied, now shared by all three
-  routes, because slskd's enqueue does not dedupe and a re-press would be a
-  second batch for the same album). The notification sequence is the pipeline's
-  own — `import_started`, `import_done`, then `import_queue`'s `download_done`.
-- **R210 — a background acquisition and a lossy-only album: the policy decides,
-  and either answer is said out loud.** `soulseek_auto_lossy_policy` ("never" —
-  the shipped default, and what every config written before the key existed
-  reads as; "best") is read only by the UNATTENDED path (`_run` with
-  `confirm_lossy` False: the wishes worker, the artist watch), which used to end
-  in a flat refusal — with it, a release that exists only as MP3 could never be
-  filled by either. "never" leaves that sentence untouched ("a lossless copy is
-  preferred, so nothing was downloaded", the line the wish row carries); "best"
-  takes the top-ranked candidate the ranking ALREADY offers (`candidates` is
-  `_rank`-sorted), and the departure is reported everywhere the job is: the log,
-  `result["lossy"]`, the completed queue row ("Imported into the library — a
-  lossy copy (MP3)") and `_notify_finish`'s body, which names the format and the
-  key. The INTERACTIVE path is unmoved: a person who asked for the release by
-  hand parks on the same question whatever the key says, so the key can never
-  overrule an answer given by hand. The same rule covers the other departure: a
-  completed job whose naming script could not move every file says where the
-  files are ("the naming script could not move every file, and what stayed
-  behind is still in the download folder"), with `partial`/`organize_error` on
-  the row — the old line named only the script and read as "the album is fine, a
-  script grumbled".
-- **R211 — a settle that is not a failure is scheduled by the interval, not by a
-  spent backoff.** `retry_at` is the transient-failure backoff and nothing else:
-  `wishes.due_at` reads its mere PRESENCE as "the last attempt failed" and
-  returns it in preference to `wishes_interval_hours`. The two settles that have
-  no backoff to give — an empty search and a spent walk
-  (`wishes_worker._settle_attempt`'s not-found branch and `mark_background`) —
-  pass none, and `wishes.mark_wanted` USED to skip the column when the argument
-  was None, so a stamp an earlier failure left behind (in the past by then)
-  survived: `due_at` returned it as "due now" on every tick and the wish was
-  re-searched every ~2 minutes instead of on its interval — the opposite of what
-  the function documents and of what `advance_candidate`/`rearm` do.
-  `mark_wanted` now always writes the column (its default 0 is "as soon as the
-  interval allows", exactly as documented) and `mark_background` writes it too,
-  so an empty search and a background pass both go back on the interval.
-  `tools/test_wishes_pipeline.py` asserts both, and fails (due_at in the past)
-  with the old guard.
-
-### 7.32 The sharing card tracks the scan it is reporting
-
-- **R212 — a scan in progress is polled until it settles, and a settled answer
-  is re-checked at the page's own cadence.** The card's own sentence is the
-  server's audit (`slskd is indexing the shared folders (x% done)` /
-  `slskd is sharing N files in M folders`), so its truth is only as good as how
-  often it is asked for. The bug this settles (the owner's screenshot): the
-  shares query had **no refresh of any kind**, so the single fetch a rescan's
-  invalidation caused landed while slskd had indexed a fraction of the folders —
-  the card then read "…(0.0% done)" for the rest of the session while the log
-  lines printed under it went on to "Scanned 100% … Found 88 files". It now asks
-  every 1.5 s while `scan.scanning`/`scan.pending` and every 15 s otherwise (the
-  cadence the rest of that page uses), so a scan started behind the card's back
-  — a save in another tab, slskd restarting, the share watcher — is noticed too.
-  Verified against a slskd reporting a live scan: the card went from "indexing
-  … (99.7% done)" to "sharing 88 files in 6 folders" with no user action, six
-  fetches in 45 seconds.
-- **R213 — the port probe answers on a network with no UPnP device.**
-  `mlo.portmap.read_port` called `pmp_external_address(gw, …, pmp_port=…)` — a
-  keyword that function does not take — so the read raised `TypeError` and
-  `GET /api/soulseek/port-check` (the Soulseek tab's **Test port**, and the
-  endpoint `README.md` sends a user to when a peer cannot reach the share)
-  answered **500 on every install**, gateway or no gateway — precisely at the
-  moment it is the only tool for the job. The call passes the parameter the
-  function declares, and the no-device path is pinned against the REAL discovery
-  and the REAL NAT-PMP client, nothing stubbed: the suite's other cases replace
-  `portmap.read_port` wholesale, which is how a broken read shipped in the first
-  place.
-
-- **R253 — an import that ran NO chain still asks slskd to re-index what
-  joined the library.** slskd serves the view it indexed at boot until it
-  re-scans, and a chain's own scripts already ask for that once per run — so
-  the exits that finish an import without running one had to ask for
-  themselves: `import_auto_scripts` off (or every id held for review), and a
-  review stop. `server/imports._refresh_shares_after_import` is that one call
-  (`soulseek.refresh_shares_soon`, debounced), placed on exactly those two
-  returns in `finish_album`, and it never raises: a share refresh must not fail
-  an import that has already happened. Without it an album that arrived into a
-  share configured to hold everything was simply not in it — a search for it
-  found nothing — until some later run happened to refresh.
-
-### 7.33 What a share that is served still cannot promise
-
-- **R226 — the sharing card never calls a share browsable while the forward it
-  asked for is missing.** Search, login and slskd's own index all work with the
-  listen port closed, so the card's sentence ("slskd is sharing N files in M
-  folders — other users can search, browse and download them") was exactly what
-  a peer's **Browse** request contradicts: a browse IS a connection BACK to the
-  listen port. `server.soulseek.share_audit` reports `listen_unconfirmed` (its
-  own status, ranked under `unbrowsable`) when automatic port opening is ON and
-  the gateway answered `no_gateway`/`unsupported`/`refused`/`error` — the app
-  asked for a mapping and did not get one. The row carries the port, the
-  gateway's own words, and a hint written for the install that is running:
-  a container is told the forward goes to the **HOST's** LAN address and that
-  automatic opening cannot reach the router from in there (the gateway this
-  process sees is Docker's bridge — the same sentence `soulseek_port.port_check`
-  now adds to its `mapping` row), while a bare-metal install is told to forward
-  TCP `<port>` on the router. A mapping the router CONFIRMED leaves the audit
-  `ok` — provided something accepts on the port, because the SAME status covers
-  a dead listener: with nothing accepting on `127.0.0.1:<port>` (or another
-  program holding it) the audit's verdict IS the port check's own listen row
-  (`soulseek_port._listen_check`, off the same `port_status_payload`), so a
-  share a peer cannot connect back to is never `ok` however green the index is.
-  Automatic opening turned OFF stays a note: the mapping state is about the
-  app's own request going unanswered, not about every install without UPnP.
-  The MAPPING case CLEARS on evidence: a transfer in slskd's upload tree is a
-  connection a peer opened TO this port, so once one exists the audit is `ok`
-  again and a note carries the count (`_served_uploads`) — without it, a
-  by-hand forward would leave a container install amber forever, since nothing
-  inside a container can read the router's mapping. A dead listener does NOT
-  clear that way: an upload served yesterday says a peer reached the port once,
-  not that anything accepts on it now.
-  The live failure it was written from: the owner's container served 104 files
-  in 7 folders (slskd's own `/shares`, `uploads: []`, and no inbound connection
-  line in `sklsd.log`) while the card read green and the summary promised
-  browsing. Pinned by `tools/test_soulseek_sharing.py`: the state and its
-  severity, the hint in both installs, both boundaries above, and the
-  dead-listener and held-port cases the verdict is now shared with. **R290 splits
-  that hint by measurement in a container**: a publish line the host demonstrably
-  does not have is its own problem code (`listen_unpublished`, naming the compose
-  line and the pin), and a measured pass clears the compose file and leaves only
-  the router. **R294 adds the third link to every one of those container hints**:
-  the HOST's own route out, which decides the address peers are handed, is named
-  as a check the owner makes on the host — a VPN or a Tailscale exit node carrying
-  the host's traffic makes a correct publish line and a correct forward equally
-  useless, and nothing inside the container can read the host's routing table.
-
 ### 7.34 The Browse sheet reads the payload's names and the store's ratings
 
 - **R227 — the sheet's columns are the app's own facts, never the disk's
@@ -4782,8 +3994,8 @@ composition instead (R267). Above `lg` the pane sits beside the artwork.
   log** section and from a track's readout, shows `available: false` as "no
   scorer installed" rather than a score of zero, and carries a disc switcher
   when the folder holds several logs.
-- **R231 — a rejected candidate names Logchecker's own note.** The auto-import's
-  reason was `score 60 is below the required 100`, seventeen times over, with
+- **R231 — a rejected candidate names Logchecker's own note.** The reason was
+  `score 60 is below the required 100`, seventeen times over, with
   nothing about the deduction and no way to look at the log: `_score_logs` now
   carries the phar's `Details:` lines (minus the "could not find EAC
   logchecker" notice, which is about this machine and already said by the
@@ -4835,10 +4047,9 @@ composition instead (R267). Above `lg` the pane sits beside the artwork.
   writes an album across its steps, so the tag a later step has not written yet
   is missing right up until that step runs, and a strip that named it would be
   reporting the run rather than the library. An album an **import** is on right
-  now — `server.imports._importing_now`, the same three claim kinds
-  (`auto-import`, `import`, `scripts`) `server.api_queue` reads to keep a
-  release in its In progress section, so the two surfaces agree about what
-  "being imported" is — is that same finding held back, and it is **counted
+  right now — `server.imports._importing_now`, the same two claim kinds
+  (`import`, `scripts`) — is that same finding held back, and it
+  is **counted
   apart** in `albums_importing`: the summary line says so in one clause (`1
   album being imported is left out` / `2 albums being imported are left out`)
   rather than leaving a reader whose failing album just left the list to wonder
@@ -4993,47 +4204,23 @@ composition instead (R267). Above `lg` the pane sits beside the artwork.
   midpoint of the two glyphs, the slot's width in both states, and a real press
   on the `+` that must leave every box in the strip where it was).
 
-### 7.39 A music video YouTube does not have comes from the network
+### 7.39 A music video is fetched from YouTube
 
-- **R241 — YouTube first, Soulseek second, and the answer names both.** A
-  music video is a single FILE, not a folder, so it is not looked for with the
-  album machinery (`find_candidates` scores candidate FOLDERS against a release
-  tracklist): one query of the track's own artist + title, ended early by
-  slskd's response limit, and a response file is this track's video when
-  `mlo.paths.is_video_file` accepts its container (the library's ONE container
-  vocabulary — never a second extension list) and its NAME carries both the
-  artist and the title (a response that states a length is held to the track's,
-  ±15 s, the slack `find_candidates` matches a track by). Candidates are
-  peer+folder groups ordered by the app's own `_rank`; a video ties on that
-  ranking's lossless/score fields, so the peer's speed, its queue and the names
-  decide — deterministically. `server.soulseek_auto.fetch_video_on_soulseek` is
-  the ONE call BOTH sites make: it searches, queues the best copy with
-  `soulseek.enqueue_download`, and — given a `dest` — waits the transfer out
-  with `_wait_for_files` (`_est_timeout` / `_queue_budget`, `_cancelled`) and
-  moves the arrived file into it. `None` is the answer for "the network has
-  nothing" (or a transfer that never landed), never an exception; only slskd's
-  refusal to QUEUE the file raises, and each caller reports that in its own
-  words. The auto-import's YouTube branch
-  (`_youtube_fetch` / `_run_youtube`) tries it per track after a YouTube miss or
-  a failed download, and reports a track NEITHER source served with both names
-  ("no usable YouTube upload found; no Soulseek copy either" — or "Soulseek is
-  not running", the same slskd gate `_run` searches behind, where the network
-  was never asked). Its dead end for "nothing from either source" keeps the
-  app's wish vocabulary ("Nothing usable found for … on YouTube or Soulseek")
-  so `wishes.outcome_of` still classifies the attempt `not_found`.
-  `POST /api/videos/download-youtube` does NOT hold a request open for a
-  transfer that takes minutes: it searches briefly and QUEUES the file as the
-  app's own download (the Downloads page shows it from then on), answering
-  `{ok: true, source: "soulseek", queued: true, candidate: {...}}` — and
-  `{ok: false, candidate: null, error}` naming both sources when neither has
-  it. The two halves stay gated by their OWN switches: `youtube_enabled` /
-  yt-dlp missing leaves the network as the source it always was (reported as
-  that reason, not as "not on YouTube"), and an unreachable slskd is reported
-  as "Soulseek is not running" rather than as "no copy". Pinned by
-  `tools/test_video_release_routing.py`: a YouTube miss the network serves (per
-  track, queued from the peer the search named, staged under the track's own
-  name), peer copies that are NOT the track (still a miss), the route's queued
-  answer, and an unreachable slskd reported as such.
+- **R241 — a music video is fetched from YouTube by artist and title, and the
+  answer names why when it cannot be.** `POST /api/videos/download-youtube`
+  takes `{artist, title, duration?, path?}`: `youtube.best_candidate` picks one
+  upload (the duration window the caller states, and the lyric/cover/tribute
+  filtering — the app's ONE candidate rule), and `youtube.download` fetches it.
+  `path` is the album folder to drop it into (or a track path whose folder is
+  used), else the file lands in the app's downloads dir for review; `duration`
+  is the expected length in seconds, which the search uses to reject
+  live/tribute/cover uploads. A candidate that downloads answers `{ok: true,
+  file, candidate, container, height, abr}`. When it cannot — `youtube_enabled`
+  off, yt-dlp missing, no acceptable candidate, or a download it could not
+  deliver — the request answers `{ok: false, candidate: null, error}` naming
+  THAT reason, and the two switches' own words are kept for it so the error
+  never reports "not on YouTube" about a lookup the app was never allowed (or
+  able) to make.
 
 ### 7.40 A playlist that comes from a streaming service
 
@@ -5073,12 +4260,15 @@ composition instead (R267). Above `lg` the pane sits beside the artwork.
     informational and nothing is queued. On, every imported track whose album
     the library does not already hold queues its PARENT ALBUM, one add per
     album, through the existing add-by-name path `server.api_add.library_add`
-    (MusicBrainz match, then a wish or a framework album, whichever that path
-    picks) — albums, never tracks.
+    (MusicBrainz match, then the framework album that path creates) — albums,
+    never tracks.
   * `playlist_import_unmatched` (`skip` | **`skip`**… the shipped default is
-    `skip`) — `wish` additionally queues each unmatched TRACK by name, skipping
-    one whose album the parent-album pass just queued (two searches for one
-    missing song is one too many) and deduplicating on title+artist.
+    `skip`) — `wish` was a second mode that queued each unmatched TRACK by name,
+    but there is no wish queue to put them on any more, so a config saved as
+    `wish` behaves as `skip`: the unmatched tracks are REPORTED instead
+    (`_report_unmatched_tracks`), skipping one whose album the parent-album pass
+    just queued (two reports for one missing song is one too many) and
+    deduplicating on title+artist.
   * `playlist_import_create_empty` (**true**) — an import that matched nothing
     still creates the playlist, with no tracks and a note saying so; off, it
     writes nothing and the report's note is "No track matched, and a playlist is
@@ -5110,7 +4300,7 @@ composition instead (R267). Above `lg` the pane sits beside the artwork.
     the same fact with no MusicBrainz request. `mlo.tagtext.RELEASE_TYPE_VALUES`
     also carries `Podcast` as the app's own **DERIVED** type
     (`mlo.naming.DERIVED_RELEASE_TYPES`, `_DERIVED_TYPE_CAPS`), which is what
-    the watch dialog's type chips and a hand-set `RELEASETYPE` compare against;
+    the naming script and a hand-set `RELEASETYPE` compare against;
     it is never sent to MusicBrainz as a query, because `primarytype:"podcast"`
     matches nothing by construction.
   * **the payload**: `server.library.podcast_info` reads the tags off the
@@ -5139,7 +4329,8 @@ composition instead (R267). Above `lg` the pane sits beside the artwork.
     album, and anything whose podcast identity nobody derived) is graded by the
     config UNCHANGED, so the rule cannot weaken one existing check for a music
     release, and the CD-rip expectations need nothing here because every one of
-    them is already gated on `MEDIA == "CD"`.
+    them is already gated on the CD medium (`mlo.tagtext.is_cd_media`: `CD`, and
+    the `HDCD` variant that is the same disc).
   Pinned by `tools/test_podcast.py`.
 
 ### 7.42 The accent colour is the device's, and a dialog on a phone is a sheet
@@ -5220,7 +4411,7 @@ composition instead (R267). Above `lg` the pane sits beside the artwork.
 
 ### 7.45 A digital-media import settles what the grader would otherwise report
 
-- **R262 — SOURCE, the lyrics format and the album description are settled by the import, which asks only for what it cannot know.** For a release whose medium is Digital Media: `SOURCE` is written from the release's own store URLs (the `purchase for download` / `download for free` / `streaming` relations, `mlo/digital_source.py`) or from the acquisition provider that produced the files, else **asked** through the import-policy family `source` (the wizard's Match step, `POST /api/import/source`, the unattended prompt) with `digital_media_source_value` as the suggested answer — and written fill-only, never over a stated value, and only where `should_write_audio_tag` allows. The lyrics formatter (script 1, `mlo.lyrics._process_lyrics_for_audio`) runs as part of the import, so "Lyrics not optimally formatted" cannot survive it; a lyric that arrives untimed (with `lyrics_allow_plain` off) or that the app's own grade still rejects after the formatter is removed together with its `.lrc` sidecar and derived translations, **with the count reported**, and only when the chain's fetch step will replace it (never when script 13 is not in the chain, never when the user keeps the lyrics family, never when `lyrics_allow_plain` is on). The album description is fetched by the import's own metadata step (the same machinery the album page uses), and when nothing is found or reachable the import says so and points at the album page rather than implying success.
+- **R262 — SOURCE, the lyrics format and the album description are settled by the import, which asks only for what it cannot know.** For a release whose medium is Digital Media: `SOURCE` is written from the release's own store URLs (the `purchase for download` / `download for free` / `streaming` relations, `mlo/digital_source.py`), else **asked** through the import-policy family `source` (the wizard's Match step, `POST /api/import/source`, the unattended prompt) with `digital_media_source_value` as the suggested answer — and written fill-only, never over a stated value, and only where `should_write_audio_tag` allows. The lyrics formatter (script 1, `mlo.lyrics._process_lyrics_for_audio`) runs as part of the import, so "Lyrics not optimally formatted" cannot survive it; a lyric that arrives untimed (with `lyrics_allow_plain` off) or that the app's own grade still rejects after the formatter is removed together with its `.lrc` sidecar and derived translations, **with the count reported**, and only when the chain's fetch step will replace it (never when script 13 is not in the chain, never when the user keeps the lyrics family, never when `lyrics_allow_plain` is on). The album description is fetched by the import's own metadata step (the same machinery the album page uses), and when nothing is found or reachable the import says so and points at the album page rather than implying success.
 
 ### 7.46 AcoustID submission is opt-in and follows the service's own rules
 
@@ -5475,8 +4666,7 @@ composition instead (R267). Above `lg` the pane sits beside the artwork.
   minimal wave) stay electronic, and the genre called "wave" is electronic too.
 
 - **R277 — Home keeps itself current.** The Home payload is a dashboard over a
-  library that changes while the reader is looking at it (a run, an import, a
-  wish landing), and the only way to see that was to press Refresh or navigate
+  library that changes while the reader is looking at it (a run, an import), and the only way to see that was to press Refresh or navigate
   away and back: the query now refetches on a 60 s interval with a matching
   `staleTime`, and the direction it polls is what makes that cheap — a plain
   poll reads the server's CACHED payload, and the `force` flag (the Refresh
@@ -5500,65 +4690,6 @@ composition instead (R267). Above `lg` the pane sits beside the artwork.
   the URL, and `*` (rather than echoing the caller) means no browser can pair
   that response with credentials. Both facts that make it safe are asserted in
   `tools/test_auth.py`'s media block and exercised against a live server.
-
-- **R279 — one port, one number: the container's Soulseek listen port.** 
-  docker-compose.yml publishes
-  `${MLO_SOULSEEK_LISTEN_PORT:-50000}` while slskd listens on whatever
-  `soulseek_listen_port` says, and a share peers can see the SIZE of and never
-  connect to is a forward pointing at a closed port — the owner's "clients can
-  detect the number of shared files" with "Requesting file list…" forever.
-  The variable therefore SEEDS the config key at startup (`server/main.py`, the
-  same way `MLO_MUSIC_FOLDER` and `MLO_SERVER_PORT` do), a save that
-  contradicts it is refused with the pin named (`POST /api/config`), a change
-  that gets through restarts the daemon, the image `EXPOSE`s both ports, and a
-  runtime port change reaches a RUNNING slskd at once — a stale daemon keeps
-  serving the old port while every surface in the app names the new one.
-
-- **R290 — the publish line is MEASURED, not assumed: the container's listen
-  port is the number the host actually publishes, and the two halves of the
-  remedy are told apart.** R279 keeps the compose file and the daemon from
-  disagreeing about the NUMBER; nothing measured the other half. No container can
-  read the host's port list, so a publish line that is missing — or on another
-  number — read exactly like "your router has no UPnP": the sharing card told the
-  owner to publish the port AND forward it, one of which was already done, and a
-  regression of the R279 class could not be told apart from a router that answers
-  nothing. The owner's report came back as that class once more, and the live
-  install was the witness: `docker port la-musica` printed `8000/tcp -> 0.0.0.0:8000`
-  and `50000/tcp -> 0.0.0.0:50000`, the generated `/music/.mlo/data/slskd.yaml`
-  says `listen_port: 50000`, slskd's own log line is `Listening for incoming
-  connections on 0.0.0.0:50000`, and `/proc/net/tcp` inside the container shows
-  `0.0.0.0:50000` — all three numbers agreed, and a browse still hung, because the
-  port was unreachable from OUTSIDE (four external nodes, check-host.net, timed out
-  on `187.14.57.175:50000`, the address slskd's egress presented, while their
-  control port answered). `server.soulseek_port._publish_check` is the measurement
-  the app can make of that half from in here: this container's gateway ACCEPTS a
-  port the host publishes (the host's proxy/DNAT hands it back) and refuses one it
-  does not, and the app's own served port (`_served_port`: `MLO_SERVER_PORT` →
-  `server_port`) is the CONTROL, so a refusal is only called a missing publish line
-  when the same gateway accepted another published port of this container —
-  otherwise the row says it could not be read from here and names
-  `docker port <container>` as the place that can. It is the sixth row of
-  `GET /api/soulseek/port-check`: `ok` published, `fail` demonstrably not published
-  (carrying the exact `ports: "<port>:<port>"` line and the pin), `warn` not
-  readable from here, `unknown` for a direct install (no publish line is involved)
-  or when nothing accepts inside the container, where a refusal on the gateway says
-  nothing. Its detail is the whole inbound requirement as a readout: **TCP `<port>`
-  only — no UDP port, and no second (obfuscated) port**, because slskd implements
-  no obfuscated route (its own config schema has no such key, and the app never
-  writes one), so a peer that tries one falls back to this port.
-  `server.soulseek.share_audit` consumes that row: a measured `fail` raises its own
-  problem code `listen_unpublished` (same `listen_unconfirmed` status, ranked with
-  it) whose hint names the compose line and the pin, and the summary says "the
-  container's host does not publish" instead of "no forward was confirmed"; a
-  measured `ok` clears the compose file by evidence and leaves the router, named at
-  the address the internet actually sees for this host — a VPN, a tunnel or a second
-  router in front changes which address peers dial, which is exactly the outside
-  half no row here can prove. Pinned by `tools/test_soulseek_port.py` §6 (all four
-  states, the control rule, and the port readout) and `tools/test_soulseek_sharing.py`
-  (the two hint/code cases): both fail against the pre-fix modules restored from
-  `git show HEAD:` and pass after. What the app still cannot do is ship the probe
-  from outside; the payload's note says so, and the row's `cannot` says the gateway
-  a container sees is Docker's bridge, never the owner's router.
 
 - **R298 — an artist's discography is four foldable sections, and its type
   filter is a menu that searches.** R275 put Album, EP and Single first, but
@@ -5592,90 +4723,7 @@ composition instead (R267). Above `lg` the pane sits beside the artwork.
   Album/EP/Single open, the `More` header folded with none of its rows drawn,
   and its types still one press away in the add panel.
 
-### 7.49 The acquisition pipeline: Failed means given up, and searches get faster
-
-- **R280 — a failed ATTEMPT is a Background row, and a settled job is never a
-  second row for a wish that still exists.** Two halves of one report (a failed
-  auto-import download showing up in the queue's *Failed* section while the app
-  was still searching the release): `api_queue._wish_rows` stages a wish whose
-  status is `failed` but which `wishes.is_terminal` says is NOT terminal
-  (`wishes_max_attempts` unspent, or no cap — the shipped policy) in the
-  **background** section, keeping the failure's own sentence ("failed this
-  attempt — searched again automatically at …", plus the walk's "tried N of M");
-  a TERMINAL failure keeps its *Failed* row. `api_queue.build_queue` also drops
-  every settled FAILED job row whose `wish_id` names a wish that exists — those
-  jobs are that wish's history, and `jobs_by_wish` claims only the last one, so
-  older settled jobs used to leak as standalone Failed rows. A job with NO wish
-  (an interactive run) and one whose wish is really gone keep their row, and
-  clearing a wish now forgets every settled job of it (`api_queue.queue_clear`).
-  Pinned by `tools/test_queue_view.py` §8 (both rules, and the two Fail cases).
-- **R281 — an hour between the searches of one release.** `wishes_interval_hours`
-  ships as **1** (was 6): the gap is between two ATTEMPTS, and one attempt
-  still walks every ranked candidate of the release (R150–R152), each with its
-  own bounded window — so the number is the pace of the RELEASE, not of one
-  edition. The clamp stays `(1, 168)`; `wishes.due_at`, `wishes_worker.status`
-  and the cycle's `next_run` carry the same fallback, and Settings shows the
-  same story (`web/src/lib/configMeta.ts`, `web/src/pages/SettingsPage.tsx`).
-- **R282 — the background only after EVERY ranked candidate was asked.** One
-  attempt asks the whole walk in ranking order and only its LAST candidate
-  settles the release: `tools/test_wishes_pipeline.py` reads the wish's status at
-  every poll of every candidate (it is never resting before the end), and pins
-  the two early ends that must NOT background anything — a TRANSIENT failure
-  (settled on its backoff, the rest of the walk never asked) and pipeline
-  CONTENTION (`skipped`, no attempt spent). The one dead wait on that path — a
-  fixed half-second "let the job transition to running" sleep in
-  `wishes_worker._wait_job`, paid per candidate although `start_job` registers
-  the job as running before it returns — is gone.
-- **R283 — a release is also searched by its MBIDs, ON by default.** With
-  `soulseek_auto_mbid_queries` (shipped true) the default query set of a release
-  also carries its own MusicBrainz id, the recording ids of its first
-  `soulseek_auto_mbid_tracks` tracks (shipped 4, clamped 1..10, disc/position
-  order) and each of those tracks' own "artist title" — deduped against
-  everything already rendered, and posted in the SAME parallel batch (one
-  window, never a second wait). The tracklist comes from the release payload the
-  app already holds (`integrations.resolve_release` asks for
-  `inc=recordings+artist-credits`), so no extra MusicBrainz request is made, and
-  an explicit template set a caller decided (a job's stored queries, its broad
-  second pass) is rendered exactly as given. Pinned by
-  `tools/test_soulseek_candidates.py`'s "MBID-driven queries" block.
-- **R284 — one track can be searched for by its MBID, from the Soulseek page and
-  from a library track.** `POST /api/soulseek/search` takes `mbid` (a recording
-  id — what the library stores per track — or a release/release-group id) and
-  resolves it with the cached MusicBrainz client into that track's queries
-  (`soulseek_auto.mbid_search_queries`: artist + title, its album, and the id
-  itself; a release id gets the release's own query set). Every query is POSTed
-  as its OWN slskd search at once (`soulseek.search_many`), the answer's `id`
-  names them all (comma-joined) so ONE poll key returns the MERGED, deduped
-  result (`soulseek.search_results_many`), and stop cancels every one of them.
-  The page offers it for a pasted UUID (auto-detected, with a chip and a
-  translated hint) and `?mbid=` runs it on arrival; a library track's own menu
-  sends its `MUSICBRAINZ_TRACKID` there ("Search Soulseek for this track").
-  Nothing is added to the wishes or the queue: the user downloads what the
-  results show. Pinned by `tools/test_soulseek_page_downloads.py`.
-- **R285 — the queue's finished sections do not survive into a new run.**
-  `api_queue.clear_settled_queue` takes the SETTLED rows of the two HISTORY
-  sections (completed, failed) off the list, through the per-section clear's own
-  path (`queue_clear`), and it is called where work is CREATED — a job start and
-  a bulk enqueue (`soulseek_auto`), a page download and an accepted confirm
-  prompt (`server/main.py`), and the wishes worker's own pass — on its own
-  thread, so a job start never waits on the queue payload's read of slskd. What
-  it leaves alone is the rule: `queued`/`in_progress`/`background`, a wish the
-  worker still searches, a retryable failure, and the whole `needs_attention`
-  section (a wish nothing was found for, a job parked on a question — those wait
-  for the USER, and only that section's own Clear may answer them). A job that
-  finishes AFTER the clear stays visible. Pinned by `tools/test_queue_view.py` §9.
-- **R286 — a cancel during the SEARCH stops the network work at once.** The
-  job's own cancel (`soulseek_auto.cancel`, the queue row's Cancel and the
-  Auto-import Stop) is now passed to the search batch as `cancel_check`:
-  `_search_queries` asks it before every poll and, on a cancel, drops every
-  outstanding search AT slskd (`DELETE /searches/{id}`, the teardown's own
-  route) and returns immediately with what it already read — instead of leaving
-  the network answering for up to the whole window plus the grace tail. Measured
-  on the suite's clock: one 0.75 s poll interval (pinned by
-  `tools/test_soulseek_candidates.py`'s "Cancelling DURING the search" block).
-  A cancelled search is also not reported as one that "did not finish".
-
-### 7.50 Two shelves carry one number, and a mapping reaches the router
+### 7.50 Two shelves carry one number
 
 - **R291 — the two recommendation shelves on a page carry the SAME number, and
   both print it (issue #54).** An album page drew 9 "Recommended (Local)"
@@ -5698,57 +4746,6 @@ composition instead (R267). Above `lg` the pane sits beside the artwork.
   `tools/check_library_az.mjs`, which keeps the request body the page sent
   (`limit: 12`) and reads the printed count off the shelf's heading line.
 
-- **R292 — the port mapping is aimed at the ROUTER, and a forward that already
-  holds the port is read, never replaced.** The Sharing card's
-  `port unconfirmed` came from a search that only ever spoke to
-  `239.255.255.250:1900` while the router in front of that install ignores
-  multicast searches entirely. Measured on it: multicast M-SEARCH from the host
-  AND from inside the container, both the IGD and the service target, 6-second
-  windows — 0 replies; the same search sent by UNICAST to `192.168.40.1:1900`
-  answered with its description ("OpenWRT router", UPnP **IGD v2**:
-  `InternetGatewayDevice:2` and service `WANIPConnection:2`); its
-  `GetExternalIPAddress` stated `216.212.53.255`, from inside the container; and
-  NAT-PMP (RFC 6886) answered an external-address request and GRANTED a mapping.
-  So: `mlo/portmap.py`'s `discover_igd(gateways=…)` searches each named gateway
-  by unicast after the multicast pass, the `gateway` argument that `upnp_open`,
-  `upnp_close`, `read_port`, `open_port` and `close_port` already took is now
-  actually searched, and `SEARCH_TARGETS` carries the v2 device target. The
-  setting `soulseek_router_ip` (Settings → Soulseek, "Router IP for port mapping
-  (blank = auto-detect)") names the router for the install that cannot see it —
-  inside a container the only gateway that process can reach is Docker's bridge
-  — and it wins over the stored gateway and over auto-detection in
-  `port_check`/`portmap_sync`. Two rules follow from the measurement, and both
-  are load-bearing:
-  - **Never tell the router to forward to an address it cannot dial.** Before
-    `AddPortMapping`, the address this process would name is compared with the
-    gateway's own network (/24); when they differ the app does NOT map, says so,
-    and lets NAT-PMP do the work — NAT-PMP carries no internal address at all,
-    the gateway maps the port to the requester's own source, which after Docker's
-    NAT is the HOST: the mapping that install wants. Reading an entry back
-    follows the same rule, so an entry naming the HOST is judged by whether that
-    address answers on the port instead of being dismissed as "another device
-    holds it".
-  - **Read before writing.** `portmap_sync` asks the router what it holds and
-    only requests a mapping when nothing holds the port. This is not caution for
-    its own sake: on that OpenWRT IGD a NAT-PMP map for the same external port
-    took over the standing forward and handed back a two-hour lease, and dropping
-    that lease closed a port that had been open — a re-map is a REPLACEMENT, not
-    an addition.
-  Verified with the app's own code against the live router from inside the
-  container (`natpmp_open` → `state: mapped, ok: True, verified: True`,
-  "external port 50000 is forwarded here for 7200s"; `natpmp_close` → released),
-  and the router's listing read back with `GetSpecificPortMappingEntry` before
-  and after (`50000 → 192.168.40.62:50000`, description "la musica Soulseek",
-  lease the router's own 7-day maximum). Reachability was proved from OUTSIDE
-  the network rather than inferred: `check-host.net` TCP checks against
-  `216.212.53.255:50000` answered from Tel Aviv and Tokyo before the work and
-  from Spain, Iran and Turkey after it. `tools/test_portmap.py` carries the new
-  cases: a multicast-silent router found only when named, the v2 target, the
-  behind-a-bridge refusal (no `AddPortMapping` is sent, `open_port` falls
-  through to NAT-PMP) and the bridged read-back verdicts both ways.
-
-
-
 ### 7.51 An album title wears the advisory its FILES state
 
 - **R293 — the boxed E/C mark is read from the strongest statement in the
@@ -5770,71 +4767,6 @@ composition instead (R267). Above `lg` the pane sits beside the artwork.
   Proven by `tools/check_library_az.mjs`, which serves a library carrying both
   shapes — one album explicit only through its tracks, one clean all the way
   down — and asserts the mark on the card in a real browser (54/54 checks).
-
-### 7.52 The address peers are handed: a tunnel is not a carrier's CGNAT
-
-- **R294 — a 100.64.0.0/10 address is read as the shape the ROUTES say, and each
-  shape carries its own remedy.** The range is one block with two opposite
-  meanings: what a carrier puts in front of the router (RFC 6598 — nothing a port
-  mapping anywhere can do, and only the ISP can), and what a routed tunnel puts on
-  this machine's OWN internet-bound interface (Tailscale hands its nodes 100.64/10
-  addresses, so a host using an exit node answers every public destination with
-  one). The `address` row of Test port (R77) named the carrier for both. The
-  owner's live install was the tunnel, and it is the shape that reads green
-  EVERYWHERE: `soulseek.share_audit(probe=True)` inside the container returned
-  status "ok" — share scan complete, 165 files in 14 directories served from
-  `/music/Artists`, `browse.ok` true, no mismatch — while compose published
-  50000, the router held a mapping for it, slskd was `Connected, LoggedIn` on
-  50000, and the host's own egress was 87.249.138.224 through a Tailscale exit
-  node, whose `0.0.0.0/0 → 100.64.0.1 via 100.72.6.55` route (metric 6) won over
-  the physical NIC's (metric 25) even though the router's own NAT-PMP WAN was
-  216.212.53.255. The Soulseek server learns a client's address from the LOGIN
-  connection, so peers were handed the exit node's egress, and their *Browse* —
-  a connection BACK to the listen port — could never land: the share's file count
-  showed on other clients and opening it did not, which is how the issue came in.
-  `soulseek_port._egress_fact` reads the shape from the routes, which a carrier's
-  CGNAT cannot imitate: `portmap.local_ip()` with NO hint is the interface the OS
-  itself picks for a public destination, and it is compared (`portmap._network24`)
-  with `portmap.local_ip(gateway)`, the address the router that would have to
-  forward the port reaches this machine on. The same network on both, with the
-  route's own next hop on it too, means the line hands this machine a CGNAT
-  address (a bridged modem): `fail`, "carrier-grade NAT", ask the ISP. Any other
-  reading — a different network toward the router, or a next hop inside the range
-  on a network of its own, which is what an exit node's route looks like — is a
-  TUNNEL: `fail`, naming the addresses it measured, the shape, and the fix that is
-  local (leave the exit node for this host, or split-route it so this app's traffic
-  leaves by the ISP line), with the row's `cannot` keeping the one thing it cannot
-  know (whether the tunnel's provider happens to forward the port anyway). Neither
-  remedy is ever offered for the other shape, and where the route to the router
-  cannot be read at all the row says the two cannot be told apart and claims
-  neither. A container is SKIPPED outright — the host's routing table is not
-  visible from in there — so the container-facing text carries the check instead
-  and states it as a check, never as something the app detected: the note on the
-  port check's `mapping` row (`soulseek_port.CONTAINER_NOTE`),
-  `soulseek._EGRESS_TRAP` on all three container branches of `_listen_hint`, and
-  the audit's own container note all say what the owner must do on the HOST —
-  compare the host's egress (a "what is my IP" page, or `curl
-  https://api.ipify.org` there) with the WAN address the router's admin page
-  shows (Test port's `address` row reports that same number for the router when a
-  gateway read answered, and the host's egress is the one number no read from
-  inside the container supplies), and turn the exit node off for the host while
-  sharing (or split-route it) when the two differ. The bare-metal hint points at
-  the Addresses row instead, which measures it there. `README.md` gained **"Soulseek
-  in Docker: the three links that have to line up"** — the compose publish line,
-  the router's forward
-  to the HOST's LAN address (a router cannot forward to a container address), and
-  this egress trap as the third, which makes the second irrelevant while it is on
-  — and `docker-compose.yml`'s port comment names the trap beside the forward.
-  What the row does NOT read is a VPN whose own interface holds an address outside
-  100.64.0.0/10 (a NordVPN-style tunnel takes a 10.x one), and its `cannot` says
-  so rather than passing as "no tunnel there".
-  Pinned by `tools/test_soulseek_port.py` §3 (the tunnel shape with the owner's
-  measured addresses and its own remedy and NOT the ISP's, the same block read as
-  the line's CGNAT when the router's route carries it, a default hop inside the
-  range, the unreadable-route warning that names neither remedy, and that a
-  container never claims a tunnel) and `tools/test_soulseek_sharing.py` (the trap
-  in all three container hints and in the audit's own note): both fail against the
-  pre-fix modules restored from `git show HEAD:` and pass after.
 
 ---
 
@@ -5972,39 +4904,25 @@ composition instead (R267). Above `lg` the pane sits beside the artwork.
   unchanged (an outside click still closes the menu, and the shield still
   covers the viewport).
 
-### 7.55 The acquisition queue: one chain, one row, and a notice only when it ends
+### 7.55 The import queue: one chain, one row, and a notice only when it ends
 
 - **R307 — one chain per album.** An album the pipeline is already on (a
-  `job_locks` claim of kind `auto-import`, `import` or `scripts`) is never
-  chained a second time: the download's own finish and the import queue both
+  `job_locks` claim of kind `import` or `scripts`) is never
+  chained a second time: the import queue and the manual finish both
   route through the same check, so the scripts run exactly once for one album
   (the owner's "the scripts seem to run twice"). `tools/test_import_pipeline.py`
   counts the invocations.
 
 - **R308 — a release that needs a music video to be complete is never the
-  default pick.** The Soulseek candidate rule ranks a video-carrying folder
-  below an audio-only one that covers the expected tracklist, and a video-only
-  folder below both; `mlo/release_choice` keeps the same rule for the edition
-  choice itself. A video RELEASE (a concert film) still ranks as what it is.
+  default pick.** `mlo/release_choice` ranks a video-carrying edition below an
+  audio-only one that covers the expected tracklist, and a video-only edition
+  below both. A video RELEASE (a concert film) still ranks as what it is.
 
-- **R309 — a notice means the work ended.** A finished download and the end of
-  a WHOLE import are the only two frames that reach a closed device
-  (`web/src/lib/notifications.ts`'s OS/push kind lists): a started transfer, a
-  download still being verified, one album of a bulk run and a chain still
-  running stay in the app. Every one of them names the album — artist, album,
-  year — never a folder name or a path with UUIDs in it.
-
-- **R310 — the queue's rows are exclusive, and its history is readable.**
-  `server/api_queue.py`'s stages and the page's own grouping agree: an item
-  whose chain is still running is drawn in In progress and NOT in Completed
-  (the owner's Ænima, shown in both), and a download only reaches Completed
-  when it really finished. Finished rows leave the list by themselves when the
-  next import starts (`soulseek_clear_completed_on_import`, ON; a failed or
-  needs-attention row stays). The Shared history rows name the album, the peer,
-  the file, when and how big — slskd's `p2p/<uuid>/<uuid>` levels are stripped
-  from the text and kept in the row's tooltip — and the sharing card carries the
-  three-links guide (publish line, router forward to the HOST's LAN address,
-  the host's own egress) with the Windows firewall command for the listen port.
+- **R309 — a notice means the work ended.** The end of a WHOLE import is the
+  only frame that reaches a closed device
+  (`web/src/lib/notifications.ts`'s OS/push kind lists): one album of a bulk run
+  and a chain still running stay in the app. Every one of them names the album —
+  artist, album, year — never a folder name or a path with UUIDs in it.
 
 - **R311 — the import's step is named for the work it is doing.** The chain's
   progress text is the album-scoped label (`Remux videos (MKV) + 20 more` for a
@@ -6018,7 +4936,7 @@ composition instead (R267). Above `lg` the pane sits beside the artwork.
 
 - **R312 — a mid-import album is left out of the verdict, and said so.**
   `GET /api/grades/summary` asks `server.imports._importing_now` (the same
-  `job_locks` claim the queue reads) and skips those albums before counting, so
+  `job_locks` claim the import path reads) and skips those albums before counting, so
   Home's strip and the Library banner cannot report an album as failing the
   checks its own import chain is still filling; the payload carries
   `albums_importing` and the banner prints that clause instead of silently
@@ -6365,11 +5283,16 @@ composition instead (R267). Above `lg` the pane sits beside the artwork.
   keeps going finds the answer where the queue is rather than in Settings —
   neither surface is drawn at all while the server does not ship the key, so an
   install on an older server cannot write a setting it would drop) makes the
-  player ask the local scorer for the batch that continues a queue which has
-  run out, and
+  player ask the local scorer for the batch that continues a queue which is
+  running out, and
   append it — `web/src/lib/recommend.ts`'s `fetchQueueRecommend`/
-  `QUEUE_BATCH`, called from `PlayerBar`'s own effect when the row that is
-  playing is the queue's LAST row. Five properties make that safe, and each one
+  `QUEUE_BATCH`/`QUEUE_RUNWAY`, called from `PlayerBar`'s own effect while
+  fewer than `QUEUE_RUNWAY` rows are still UP NEXT (the two are the same five:
+  one batch always restores the runway). The queue is therefore topped up
+  while there is still music to cover, and its count never jumps in the same
+  breath as a press — the owner's report was exactly that jump (at 31/32,
+  pressing next showed 32/37; with the runway the count reads 31/36 and then
+  32/37). Five properties make that safe, and each one
   is the reason the feature is not a "radio mode":
   (a) the switch is the whole feature — off, the app is byte-for-byte the app it
   was, which `tools/check_player_state.cjs` §10 proves by watching that not one
@@ -6386,23 +5309,26 @@ composition instead (R267). Above `lg` the pane sits beside the artwork.
   no provider is consulted, so it works offline and cannot hang the music, and
   a missing answer is an empty list that simply ends the queue; **and every ask
   says what it did**: the outcome lands in the player's own diagnostics
-  (`note("queue-extend", {seeds, offered, added})`, read back in Settings →
-  Playback diagnostics, with `why: "repeat-one"` for the one by-design no-op and
-  the error text when the route refuses), the rows that were added are visible
+  (`note("queue-extend", {seeds, offered, added, runway})`, read back in
+  Settings → Playback diagnostics, with `why: "repeat-one"` for the one
+  by-design no-op and the error text when the route refuses), the rows that
+  were added are visible
   in the queue pane as ordinary rows, and the two outcomes a reader cannot tell
   apart from a broken switch SAY so — an answer with nothing new to add and a
   failed request are a toast, because "the switch does nothing" was exactly this
-  silence (a queue whose last row is playing, a request the server answered with
-  nothing the queue did not already hold, or a route that refused);
-  (e) the append happens as the last row STARTS, which is before the gapless
-  preload arms for its successor, so the hand-over into the added set is the
+  silence (a queue with nothing similar left to add, a request the server
+  answered with nothing the queue did not already hold, or a route that
+  refused);
+  (e) the append happens while rows are still up next — before the queue runs
+  out, and so before the gapless preload arms for the end's successor — so the
+  hand-over into the added set is the
   same one an album advance gets (the idle decoder holds the first added row);
   Repeat one appends nothing (that row's successor is itself), and shuffle is
   not exempt — a shuffled queue's added rows are still the seeds' similar set.
   Pinned by `tools/test_recommendations.py` (seeds, exclusions, a duplicate seed
   list, the bounded batch, the two verbs, the web's batch number) and
-  `tools/check_player_state.cjs` §10 (the gained rows, the pane, the reorder,
-  the preload, the hand-over, and the off/Repeat-one cases).
+  `tools/check_player_state.cjs` §10 (the gained rows, the runway, the pane, the
+  reorder, the preload, the hand-over, and the off/Repeat-one cases).
 
 ### 7.66 A submission to LRCLIB is a token, a body, and LRCLIB's own words
 
@@ -6670,14 +5596,23 @@ composition instead (R267). Above `lg` the pane sits beside the artwork.
   cover colour. The contract these must keep: a row is served ONLY when its
   identity matches exactly (a changed, added or deleted file misses; a settings
   change is unreachable), every in-app write drops what it invalidated through
-  the existing `tagcache.invalidate_*` hooks (~60 call sites), and the index is
+  the existing `tagcache.invalidate_*` hooks (~60 call sites), a payload belongs
+  to the BUILD that wrote it — `tagindex.payload_stamp()` carries the app
+  version beside the payload's shape, so an upgrade that changes a grading rule
+  drops every row and re-grades instead of answering with the old verdict (the
+  owner's case: a fixed "Unrecognized MEDIA value: HDCD" stayed on Home and the
+  Library page because that album's own files had not moved) — and the index is
   never a source of truth — an unreadable or locked database, a missing folder
   or an error payload all fall back to building. Pinned by
-  `tools/test_tagindex.py` (36 checks: changed/added/deleted files, a config
-  change, a real tag write read back from the page) plus
+  `tools/test_tagindex.py` (51 checks: changed/added/deleted files, a config
+  change, a real tag write read back from the page, a payload written by another
+  build) plus
   `tools/test_storage.py`/`tools/test_remux.py` for the memos. Two costs stay,
-  and both are named: the FIRST run after this upgrade pays one full build (the
-  index is empty), and a change made outside the app is bounded by the TTL
+  and both are named: the FIRST run after an upgrade pays one full build — the
+  index stamp carries the app version, so another build's payloads are dropped
+  rather than served with other rules (`tagindex.payload_stamp`), and on this
+  feature's own first run the index is simply empty — and a change made outside
+  the app is bounded by the TTL
   (30 s on the album/artist pages, 60 s on the library payload) rather than
   seen instantly.
 
@@ -6689,15 +5624,15 @@ composition instead (R267). Above `lg` the pane sits beside the artwork.
   or a bare index), `bare_disc_index`+`is_disc_parent` (a bare `1`/`2` counts
   as a disc only as part of a numbered set starting at 1: `1`+`2` is a rip, a
   lone `25` is the album "25"), `disc_number_of_path` (a file on disk: its own
-  name, else its disc folder). The search's candidate trees, the download mover
-  and the layout scan all call these; no module keeps its own disc regex.
+  name, else its disc folder). The import mover and the layout scan all call
+  these; no module keeps its own disc regex.
 - **A disc-subfolder release is ONE album** (R336). When a folder's
   album-bearing children are its discs (`Album/CD1`+`Album/CD2`,
   `Album/1`+`Album/2`), the mover takes that folder whole: any other
   album-bearing child (a stray log/cue folder, art, a bonus folder) rides
   along instead of splitting off as an album of its own, and nothing is
-  imported as `CD1`/`CD2`. `server.soulseek.disc_parent` is that rule, once,
-  for the move and the readiness list.
+  imported as `CD1`/`CD2`. `mlo.discs.is_disc_parent` is that rule, once,
+  for the import move and the layout scan.
 - **Discs never share a track-number space** (R337). A file's DISCNUMBER is the
   disc its own path states, recorded fill-only at import
   (`server.imports.stamp_folder_discs`, before the naming script) so
@@ -6706,7 +5641,7 @@ composition instead (R267). Above `lg` the pane sits beside the artwork.
   may be renamed onto another's name (an untagged `CD1/`+`CD2/` release used to
   collapse into one flat list on organize, disc 2's audio overwriting disc 1's).
   Files: `mlo/discs.py`, `mlo/naming.py`, `mlo/layout.py`,
-  `server/soulseek.py`, `server/soulseek_auto.py`, `server/imports.py`
+  `server/imports.py`
   (`stamp_folder_discs`), `server/main.py` (organize passes the track path +
   records the disc).
 - **A disc's rows and its files may be numbered in different conventions**
@@ -6985,6 +5920,129 @@ composition instead (R267). Above `lg` the pane sits beside the artwork.
   file per everything; the route table is verified byte-identical across the
   split (279 routes, 273 OpenAPI paths, same handlers).
 
+- **R353 — a whole-disc image rip becomes one file per track before anything
+  reads the album.** A folder whose `.cue` describes many TRACKs but names a
+  single FILE is the shape most CD rips arrive in, and the app used to keep
+  the image whole — one 400 MB file where the naming script, the per-track
+  tags, the grader's per-track checks and AccurateRip all expect a tracklist.
+  `mlo.cue.split_image_rip` cuts it at the sheet's OWN INDEX 01 points, the
+  convention every CD splitter uses: track N runs to track N+1's INDEX 01, so
+  a pregap belongs to the track in front of it, and track 1 starts at 0 so a
+  hidden track before its INDEX 01 stays with track 1. The cut is a
+  decode/re-encode through ffmpeg and never a stream copy — a copy cuts at a
+  frame boundary and can shift a track by up to one frame (~93 ms at
+  44.1 kHz) — so every track's PCM is bit-identical to the image's own samples
+  at those offsets (`tools/test_cue_rename.py` pins it). ALL OR NOTHING per
+  image: a failed track removes the tracks already written and leaves the
+  image intact, and on success the image goes to the app's Trash (never a
+  bare delete) while the `.cue` stays exactly as written — an image-style
+  sheet whose FILE no longer exists is a shape the app already reads
+  (`mlo.discs.fix_cue_filenames` repoints it, `_cue_matches_disc` is
+  pregap-tolerant). It runs at BOTH doors into the import —
+  `main._import_one_album` before the codec conversion and the organizer, and
+  `imports._finish_album` before the tracklist is recorded — and is
+  idempotent, so the second call is a no-op.
+- **R353a — a sheet that cannot be cut is not cut.** No INDEX 01 for a track,
+  or INDEX 01s that do not strictly increase, or a last track starting past
+  the end of the audio: the folder imports as the image it is. A wrong cut is
+  worse than no cut.
+- **R354 — a grade finding reaches the notification tray from any page, and
+  the strip says HOW MUCH is wrong rather than everything.** The strip's own
+  rows (and the tray entry each one derives) print the failing CHECK COUNT for
+  the album or track plus the grader's sentence when there is one; the check
+  NAMES are one hover away (and full in the Library's Failing filter), because
+  a row that printed twenty names buried the album it was about. The derived
+  ingest is mounted ONCE in the app shell (`GradeTraySync`), not in the two
+  pages that draw the strip: a finding is in the tray whether or not the
+  reader ever opens Home or the Library, which is what "regardless of whether
+  it just happened" means. It stays OUT of `OS_KINDS`/`PUSH_KINDS` — it is a
+  datapoint re-read from a payload, not an outcome the server announced, so it
+  must never pop a banner on a phone.
+- **R355 — a run scoped to one album is named by the album's IDENTITY, never
+  by the folder.** `script_runners._scope_album` answers with
+  `imports.album_identity_label` (artist — album (year), off the album's own
+  tags, then a framework marker), and only falls back to the folder's name
+  when the folder states no identity at all. The folder was the old answer on
+  the reasoning that it is what the user filed the album under; the report
+  that killed it was a progress row titled "[Album; Compilation] 197…" — a
+  naming-script path truncated to the point of naming nothing.
+- **R356 — a bulk tag write runs its files in lanes.** `POST /api/mb/assign`
+  writes each file through `mlo.atomic.rewrite_via`, which copies the file and
+  lets mutagen rewrite the copy — two passes over every byte — so an album's
+  tracks are the one slow, independent thing in the request. The per-file body
+  is `assign_one` and the pool is
+  `worker_count(cfg, maximum=8, items=len(tracks))`: one lane per file, capped
+  at 8 because this is disk work on ONE album folder, and a lane per core on a
+  big box would only queue at the disk. Files share nothing (one path, one
+  temp, one mutagen object each) and `genre_cap` is read-only. `errors` and
+  `changed` are folded in submission order, so the reply is byte-identical to
+  the serial one, error order included.
+- **R357 — RYM's refusal names the cookie it needs, and a 403 is checked for
+  the challenge.** rateyourmusic.com sits behind Cloudflare, and only a
+  `cf_clearance` cookie gets past it — bound to the SAME User-Agent and the
+  SAME egress IP that earned it. So `rym_user_agent` (empty = the built-in
+  Chrome UA) sets the UA the requests are sent with, and a stored cookie with
+  no `cf_clearance` says so in `_rym_reason` and in the credential warnings
+  the Sources panel renders, naming both halves of the pair. The status check
+  reads the interstitial out of a NON-200 body too — the live site serves the
+  challenge as HTTP 403, and only 200s used to be checked, so every blocked
+  request was reported as "refused without a Cloudflare challenge" and the 403
+  branch never used the detector at all (caught live: a 27-pair signed-in
+  cookie, 403 + `<title>Just a moment...</title>`).
+- **R358 — a web rating is a SECOND opinion, kept apart from your own.** Script
+  24 (`mlo.web_ratings.run_web_ratings`) fetches the public score for an ALBUM
+  and for each TRACK and writes them to four tags on the same 0–100 Picard
+  scale as `RATING` (which stays yours): `WEBRATING` + `WEBRATING_SOURCE` per
+  track, `ALBUMWEBRATING` + `ALBUMWEBRATING_SOURCE` for the album — the album
+  value written to every track of the folder, the app's established way to
+  carry an album-level fact (`ALBUMITUNESADVISORY`), with the _SOURCE tag a
+  "; "-joined list in the order the sources were asked. The two are separate
+  facts and neither is invented from the other: a track whose recording has no
+  rating keeps no `WEBRATING` even when the album has one. Every source is
+  normalised to 0–100 (MusicBrainz and Discogs are 1–5 and ×20; Album of the
+  Year is already 0–100) and the aggregate is a weighted mean over the sources
+  that ANSWERED, weighted by each source's own vote count — so 49,000 ratings
+  outvote sixteen — rounded half-up. Nothing is folded in that a source did not
+  state, and a miss writes nothing at all: absence is not a zero. Writing is
+  FILL-ONLY (an existing value survives every run unless `force_web_ratings` is
+  set by hand), the four tags are registered everywhere a tag must be declared
+  (`mlo.audio.TAG_MAP`, the allow-list and tag family in `mlo/config.py`,
+  `server/tags_registry.py`, `server/library.py`), and the whole family is
+  gated by `web_ratings_enabled` (`SCRIPT_GATES[24]` and the write-gate family
+  switch both read it, so an install with it off neither asks nor writes).
+- **R358a — MusicBrainz alone ships as a source, and the rest are opt-in.**
+  `web_ratings_sources` ships `["musicbrainz"]`. It is the only source with no
+  credential and no archive leg, it answers for the album (the RELEASE GROUP's
+  rating) and for each track (the recording's rating, the WORK's as a fallback
+  — work ratings are usually empty, so the recording leads), and it costs one
+  throttled request: measured, one album takes 1.2 s with MusicBrainz alone and
+  23 s with RateYourMusic and Album of the Year enabled, because those two read
+  the Wayback Machine (the live pages are behind Cloudflare) on top of the live
+  fetch. A Run All over a library pays that per album, so the archive-backed
+  three are a deliberate opt-in rather than a shipped default. RateYourMusic's
+  rating rides the SAME page fetch its genres already make (one request, one
+  cache entry, one refusal latch); Discogs needs `discogs_token` and skips
+  cleanly without one.
+- **R359 — the star field says which rating it is drawing.** `StarRating`
+  renders the web value in its own dimmer tone only while the reader has rated
+  nothing there, and reduces it to a small readout beside the user's stars once
+  they have — the user's own rating always wins the field, and a web value is
+  never drawn as if it were theirs. The album's value and a track's value are
+  labelled as what they are (a track row never draws the album's), the sources
+  ride the control's `title`, and a track with no web rating draws nothing —
+  an empty star is not a zero.
+- **R360 — MusicBrainz genres are read at the level the entity is entitled
+  to.** Album-level genres come from the RELEASE GROUP (the album is the group,
+  not the pressing), and a track's come from its recording, with the WORK's
+  genres merged behind it — the work is the "release group" a track does not
+  have, and it is the same tiering R358a applies to ratings. The recording is
+  never dropped in the work's favour: measured, works carry no genres at all
+  for a mainstream album, so a work-first-without-fallback reading would have
+  LOST data the app already had. Album-of-the-Year is available as a genre
+  source on the same archive-only footing and is selected by adding
+  `albumoftheyear` to `genre_sources` (it is not in the shipped list, for the
+  cost reason in R358a).
+
 ## 8. Recommended runbook
 
 Nothing here is a substitute for the app's own Dependencies page: run it first
@@ -7130,10 +6188,11 @@ Two keys deliberately do **not** change a verdict on their own:
 `grade_check_accuraterip` (AUDIT-only, R5) and `show_sidecar_files` —
 deliberately NOT in the table above: it only makes the viewer list a file's
 sidecar siblings (`cue`/`log`/`lrc`/`.accurip`) and compute their grades, and it
-adds no check. The ACQUISITION keys are not grade keys either — they choose
+adds no check. The release-choice, YouTube and locale keys are not grade keys
+either — they choose
 which file a verdict is later computed on, never the verdict itself:
 `prefer_disc_streams` and the other release-choice keys (R84/R85, including
-`auto_import_medium_order` — R246), `soulseek_auto_*`, `wishes_*`, `youtube_*`
+`auto_import_medium_order` — R246), `youtube_*`
 (R76), and `locale` (R87).
 
 Three keys that write outside the grade are not in the table for the same
@@ -7192,13 +6251,6 @@ Settings row offers it).
 - Detection is heuristic where the evidence is: AudioAuditor's spectral
   detectors can disagree with a provably intact rip, which is why a verified CD
   rip outranks them (R21) and why `AUDIOAUDITOR_OVERRIDE` exists (R25).
-- **A ranked walk is bounded, and a spent one WAITS rather than giving up**
-  (R150/R153/R214): after `soulseek_fallback_candidates` editions have been asked
-  and none answered — or after every edition answered with copies the pipeline
-  REFUSED — the release keeps its place in Background and is searched again
-  on the worker's ticks. A release nobody on the network shares therefore stays
-  there until the user removes it — the app does not stop trying on its own, and
-  it does not pretend the album arrived.
 - **A lyrics-absent `INSTRUMENTAL` is the app's own conclusion, not a source's
   claim** (R162). The tag records what was actually done (every configured
   provider was asked and none had the track) under its own evidence key, so it

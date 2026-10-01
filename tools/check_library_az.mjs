@@ -1032,7 +1032,7 @@ try {
    * A DIGITAL release has no pressing, so the fact that takes that place is
    * where the files came from — the album's own `source_summary`, built by the
    * server from the tracks' SOURCE tags ("Bandcamp", "Qobuz", the reader's own
-   * shop word, "Soulseek"). The app's own default source is the word "Digital"
+   * shop word). The app's own default source is the word "Digital"
    * (mlo.paths.DEFAULT_DIGITAL_SOURCE): it repeats the medium and is dropped
    * rather than printed twice. The card and the album page print the same
    * words in the same order, because they are built by the same helper. */

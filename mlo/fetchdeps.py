@@ -8,7 +8,6 @@ auto-detection in tools.py expects:
     <music>/.mlo/tools/
         flac v1.5.0/           flac.exe, metaflac.exe      (Windows)
         oxipng v10.2.0/        oxipng.exe | oxipng        (Windows | Linux)
-        slskd v0.26.0/         slskd.exe | slskd + wwwroot
         libjpeg-turbo v3.2.0/  jpegtran.exe | jpegtran + bin/ + lib64/ (Linux)
 
 The tools used to live in <app folder>/.dependencies, next to the code. That
@@ -24,8 +23,6 @@ Asset sources:
                                        libjpeg-turbo-official_<v>_<arch>.deb
     oxipng          oxipng/oxipng      oxipng-<v>-x86_64-pc-windows-msvc.zip
                                        oxipng-<v>-x86_64-unknown-linux-musl.tar.gz
-    slskd           slskd/slskd        slskd-<v>-win-x64.zip
-                                       slskd-<v>-linux-musl-x64.zip
     AudioAuditor    Angel2mp3/...      AudioAuditorCLI-win-x64.exe (bare exe)
 
 The libjpeg-turbo release only ships NSIS installers for Windows; those are
@@ -35,7 +32,7 @@ the required binaries are copied out.
 
 Platforms: install_kind() is the single answer to how a tool installs here.
 Every tool has a Windows build; the ones upstream also ships a Linux build for
-(LINUX_BINARIES - oxipng, slskd, AudioAuditor, rsgain, fpcalc, libjxl and
+(LINUX_BINARIES - oxipng, AudioAuditor, rsgain, fpcalc, libjxl and
 libjpeg-turbo) install natively there too; the rest are distro packages
 (LINUX_PACKAGES: flac, ffmpeg, …) or have no build this app can use (CUETools
 and Logchecker need a runtime - see LINUX_RUNNERS). An install the platform
@@ -88,13 +85,11 @@ DISPLAY_NAMES = {
     "cuetools": "CUETools",
     "librosa": "librosa",
     "beets": "beets",
-    "slskd": "slskd",
     "chromaprint": "Chromaprint (fpcalc)",
     "yt-dlp": "yt-dlp",
 }
 
 REPOS = {
-    "slskd": "slskd/slskd",
     "flac": "xiph/flac",
     "libjxl": "libjxl/libjxl",
     "libjpeg_turbo": "libjpeg-turbo/libjpeg-turbo",
@@ -110,7 +105,6 @@ REPOS = {
 
 # Ordered asset-name preferences (regex, matched case-insensitively).
 ASSET_PATTERNS = {
-    "slskd": [r"^slskd-[\d.]+-win-x64\.zip$"],
     "flac": [r"^flac-[\d.]+-win\.zip$"],
     "libjxl": [r"^jxl-x64-windows-static\.zip$", r"^jxl-x64-windows\.zip$"],
     "libjpeg_turbo": [
@@ -142,7 +136,6 @@ INSTALL_PREFIX = {
     "cuetools": "CUETools",
     "librosa": "librosa",
     "beets": "beets",
-    "slskd": "slskd",
     "chromaprint": "chromaprint",
     "yt-dlp": "yt-dlp",
 }
@@ -154,9 +147,7 @@ INSTALL_PREFIX = {
 #
 # This table is what makes these installable at all in a container. Debian
 # bookworm has no oxipng package, so the Docker image cannot apt-install it and
-# its row sat "missing" for ever behind an Install button that refused - and
-# slskd, the one dependency this app RUNS, ships Linux binaries that make
-# Soulseek work in the Docker image.
+# its row sat "missing" for ever behind an Install button that refused.
 #
 # Each pattern key picks the build for one machine+libc: "x64"/"arm64" is the
 # host's libc as named there, "<arch>-musl" the musl one. A tool published for a
@@ -170,19 +161,6 @@ LINUX_BINARIES = {
             "arm64": r"^oxipng-[\d.]+-aarch64-unknown-linux-musl\.tar\.gz$",
         },
         "markers": ("oxipng",),
-    },
-    "slskd": {
-        # .NET apphost, and dynamically linked: the musl zip names
-        # /lib/ld-musl-x86_64.so.1 as its loader, which a glibc system does not
-        # have, so it exits "not found" instead of running. Both libcs exist
-        # upstream and the host's decides (see _linux_pattern).
-        "patterns": {
-            "x64": r"^slskd-[\d.]+-linux-x64\.zip$",
-            "arm64": r"^slskd-[\d.]+-linux-arm64\.zip$",
-            "x64-musl": r"^slskd-[\d.]+-linux-musl-x64\.zip$",
-            "arm64-musl": r"^slskd-[\d.]+-linux-musl-arm64\.zip$",
-        },
-        "markers": ("slskd",),
     },
     "audioauditor": {
         # Self-contained .NET builds, one bare executable per architecture (no
@@ -408,8 +386,7 @@ def musl_libc():
     Release assets come in both libcs and they are not interchangeable: the
     musl build names /lib/ld-musl-<arch>.so.1 as its ELF loader, and a glibc
     host has no such file — the install then "succeeds" and every run dies with
-    "not found" (exit 127), which is exactly how slskd's musl zip behaved in the
-    Debian-based image.
+    "not found" (exit 127).
     """
     if os.path.exists("/etc/alpine-release"):
         return True
@@ -604,8 +581,8 @@ def installed_path(key):
     """Return the actual versioned folder for an installed tool, or None.
 
     Every tools folder an install may live in is searched, the current one
-    first (see mlo.paths.tools_dirs): a slskd installed before the move is
-    still the slskd this app runs.
+    first (see mlo.paths.tools_dirs): a tool installed before the move is
+    still the tool this app uses.
     """
     prefix = INSTALL_PREFIX.get(key, key)
     for root in tools_dirs():
@@ -634,7 +611,6 @@ MARKER_EXES = {
     "logchecker": ("logchecker.phar",),
     "php": ("php.exe",),
     "cuetools": ("CUETools.exe",),
-    "slskd": ("slskd.exe",),
     "chromaprint": ("fpcalc.exe",),
     "yt-dlp": ("yt-dlp.exe",),
 }
@@ -706,11 +682,6 @@ PINNED = {
         "tag": "v2.4.0",
         "asset": "",
         "version": "2.4.0",
-    },
-    "slskd": {
-        "tag": "0.26.0",
-        "asset": "slskd-0.26.0-win-x64.zip",
-        "version": "0.26.0",
     },
     "chromaprint": {
         "tag": "v1.6.1",
@@ -1571,9 +1542,9 @@ def _make_executable(dest_dir, marker_names):
     """Give the installed binaries the exec bit (POSIX).
 
     zipfile does not restore file modes, so a Linux binary unpacked from a
-    .zip would land without it and every spawn - slskd is the one tool this
-    app RUNS - would fail with EACCES. A no-op on Windows, where the bit does
-    not exist; a tarball already carries its own.
+    .zip would land without it and every spawn would fail with EACCES. A
+    no-op on Windows, where the bit does not exist; a tarball already carries
+    its own.
     """
     if os.name == "nt":
         return
@@ -1919,7 +1890,7 @@ def _install_one(key, log=print, progress=None):
 
     # An install exists to replace a copy that is behind. There is nothing
     # behind when the installed version already IS the target (without this,
-    # "Install / update all" re-fetched slskd's 118 MB on every press), and
+    # "Install / update all" re-fetched every tool on every press), and
     # nothing to gain when the copy is NEWER than the target — a hand-pulled
     # release, or upstream yanking one — where installing would be a downgrade.
     if upstream and installed:
@@ -1997,8 +1968,7 @@ def _install_one(key, log=print, progress=None):
                 s = os.path.join(src, fname)
                 if os.path.isdir(s):
                     # A native Linux build carries a runtime tree beside its
-                    # binary (slskd ships wwwroot/ and etc/ and refuses to boot
-                    # without them), so the whole layout has to come along.
+                    # binary, so the whole layout has to come along.
                     shutil.copytree(s, os.path.join(dest_dir, fname),
                                     dirs_exist_ok=True)
                     continue
@@ -2006,13 +1976,10 @@ def _install_one(key, log=print, progress=None):
                     shutil.copy2(s, os.path.join(dest_dir, fname))
                 except OSError as e:
                     # Windows refuses to replace a file another process is
-                    # EXECUTING (WinError 32), and slskd is the one tool
-                    # this app runs — so "install all" used to end with a
-                    # bare "used by another process" and nothing explaining
-                    # it. The server stops the managed daemon around the
-                    # install (see server.main.dependencies_install); this
-                    # is the honest message for anything else holding a
-                    # file open.
+                    # EXECUTING (WinError 32), so "install all" used to end
+                    # with a bare "used by another process" and nothing
+                    # explaining it. This is the honest message for anything
+                    # holding a file open.
                     raise RuntimeError(
                         f"{display} is running — {fname} is in use by another "
                         f"process, so it cannot be replaced. Stop it and "

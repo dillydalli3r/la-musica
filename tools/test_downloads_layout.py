@@ -62,8 +62,8 @@ from server import main as mlo_main  # noqa: E402
 from server import library as mlo_library  # noqa: E402
 
 # --------------------------------------------------------------------------- #
-# fixture A: a music folder whose .mlo/downloads (one shared queue, where
-# slskd writes) is being triaged
+# fixture A: a music folder whose .mlo/downloads (the download staging area)
+# is being triaged
 # --------------------------------------------------------------------------- #
 MF = tempfile.mkdtemp(prefix="mlo-dl-test-")
 DOWNLOADS = os.path.join(MF, ".mlo", "downloads")
@@ -98,7 +98,7 @@ write(os.path.join(DOWNLOADS, ALBUM_DIR, "02 - b.flac"), 2000)
 write(os.path.join(DOWNLOADS, ALBUM_DIR, "cover.jpg"), 500)
 write(os.path.join(DOWNLOADS, "loose.flac"), 4000)
 write(os.path.join(DOWNLOADS, "notes.txt"), 100)
-# slskd's in-flight leftovers must not look like finished results
+# a download's in-flight leftovers must not look like finished results
 write(os.path.join(DOWNLOADS, ".incomplete", "half.flac"), 700)
 write(os.path.join(DOWNLOADS, "big.flac.part"), 300)
 

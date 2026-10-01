@@ -29,7 +29,7 @@ interface StoragePayload {
   library: StorageRow | null;
   app_data: StorageRow | null;
   trash: StorageRow | null;
-  /** The app's own tools folder (ffmpeg, slskd, the analysers) — the one part
+  /** The app's own tools folder (ffmpeg, yt-dlp, the analysers) — the one part
    *  of the app that does not live under the music folder. */
   dependencies: StorageRow | null;
   /** Everything the app itself occupies: state + bin + transfers + tools, with

@@ -57,7 +57,7 @@ from .naming import date_is_partial, fuller_date, mb_style_release_type
 from .paths import AUDIO_EXTS, load_expected_tracks
 from .stats import (
     new_stats, _make_pbar, _pbar_skip, _pbar_update, _collect_targets,
-    _find_albums, is_audio_file, worker_count,
+    _find_albums, is_audio_file, worker_count, bound_numeric_threads,
 )
 # the ONE multi-value separator (mlo.tagtext owns it): a writer that has to
 # know which values a file already states reads them apart with this, never
@@ -1835,6 +1835,11 @@ def run_auto_tagging(config):
         # to a single lane (the import case, exactly).
         track_workers = worker_count(config, maximum=8,
                                      items=len(track_work))
+        # Each lane decodes a whole track through librosa, whose numpy is a
+        # multi-threaded pool of its own: uncapped, the stage occupied
+        # track_workers × cores and the Worker threads setting bounded
+        # nothing (R79). Script 16 caps the identical work the same way.
+        bound_numeric_threads(config, track_workers)
         with ThreadPoolExecutor(max_workers=track_workers) as ex:
             futures = {ex.submit(mood_genre_for_track, item): item[0]
                        for item in track_work}

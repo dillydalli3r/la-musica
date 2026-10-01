@@ -180,7 +180,6 @@ for cid, needs in (("discogs", ["discogs_token"]),
                    ("lastfm", ["lastfm_api_key"]),
                    ("spotify", ["spotify_client_id", "spotify_client_secret"]),
                    ("acoustid", ["acoustid_api_key"]),
-                   ("soulseek", ["soulseek_username", "soulseek_password"]),
                    # The AI key is NOT a need: a local LM Studio answers with
                    # no key at all, so requiring one would call a working
                    # setup broken. Its absence is reported by the check.

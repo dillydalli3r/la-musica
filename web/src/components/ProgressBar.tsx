@@ -7,7 +7,7 @@ import { progressKey, type ProgressEntry, type ProgressSample } from "../store";
 
 /** What a producer is called on its row when its frames carry no label: the
  *  relay's own kinds (the export engine, a run, a script chain — and an import
- *  chain, which is a run the user started from Soulseek). */
+ *  chain, which is a run the user started from an import). */
 const KIND_LABEL: Record<string, string> = {
   export: "Exporting",
   run: "Run",

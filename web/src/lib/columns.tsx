@@ -86,15 +86,23 @@ export const ALBUM_TRACK_COL_W: Record<string, string> = {
   // floor there would put a 280 px column in a 342 px row (which is why the
   // holder is `hidden` there — see ColFloorHolder).
   title: "md:w-auto",
-  // 160, measured: "Rock; Garage Rock" — a two-name genre, which is what the
-  // app's own vocabulary writes — is 148 px at this table's font, so the old
-  // 96 wrapped it onto THREE lines and made every track row 80 px tall (the
-  // 32 px cover cell set 52; the wrapped genre set the row). The report is the
-  // one above this table's name column: "columns are way to long … rows seem
-  // too wide". Sized the way the rest of the floors are (widest value + a few
-  // px of slack); a three-name value still wraps, and the row still grows with
-  // it — a taller row is honest, but only for a value that really is long.
-  genre: "md:w-40",
+  // 208, measured the same way as every other floor here — "widest value + a
+  // few px of slack" — against the two-name VALUES the app's own vocabulary
+  // writes, which is what a genre cell shows: "Metal; Alternative Metal" is
+  // 178 px at this table's font, "Metal; Progressive Metal" 184, and the old
+  // 160 (sized to "Rock; Garage Rock", 148) wrapped the owner's own album —
+  // every row two lines tall (measured 60 px against the clean row's 52) for
+  // a value that fits as soon as the column has 184 px of content box. 208
+  // leaves the 24 px gutter and 6 px of slack, and the floor the table sums
+  // still fits a 1024 px window (1000 px of columns). A longer pair — "Hip
+  // Hop; East Coast Hip Hop" is 210 — and a three-name value (302) still wrap,
+  // and the row still grows with them: a taller row is honest, but only for a
+  // value that really is long. (The Library's own Tracks table keeps 96: it
+  // CLIPS with the whole value in the cell's title — cell-ellipsis — which is
+  // the shape a dense table may use, and it is the one table that cannot
+  // afford the width: measured, its columns are 1537 px in a 1200 px box at a
+  // 1440 window, so its wrapper already scrolls.)
+  genre: "md:w-52",
   dur: "w-20",
   bitrate: "md:w-[184px]",
   dr: "md:w-14",

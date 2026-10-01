@@ -38,7 +38,7 @@ const VIEWPORTS = [
 
 /* Every route the shell can reach WITHOUT any data in it, plus (below) the ones
  * a phone user reaches from a list. The tail of this list used to be missing —
- * `/equalizer`, `/charts`, `/recommended`, `/discover`, `/watched`, `/checks`,
+ * `/equalizer`, `/charts`, `/recommended`, `/discover`, `/checks`,
  * `/in-progress`, and every entity page (`/artist/:path`, `/album/:path`,
  * `/track/:path`, `/playlist/:id`) — and that blind spot is exactly where the
  * playlist hero shipped a row that never folded: 224 px of mosaic beside the
@@ -47,9 +47,9 @@ const VIEWPORTS = [
  * seen it. */
 const ROUTES = [
   "/", "/library", "/genres", "/favorites/tracks", "/downloads", "/trash",
-  "/playlists", "/soulseek", "/import", "/export", "/optimize", "/grading",
+  "/playlists", "/import", "/export", "/optimize", "/grading",
   "/dependencies", "/settings", "/donations", "/setup", "/equalizer", "/charts",
-  "/recommended", "/discover", "/watched", "/checks", "/in-progress",
+  "/recommended", "/discover", "/checks", "/in-progress",
 ];
 
 /* The entity routes only exist against a library that HAS the row, so they are

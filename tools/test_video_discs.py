@@ -276,19 +276,20 @@ def main():
     from mlo import layout, paths, remux, videodisc
     from server import events as events_mod
 
-def drain_events():
-    """Forget every frame so far, so a count is about THIS outcome.
+    def drain_events():
+        """Forget every frame so far, so a count is about THIS outcome.
 
-    BOTH stores go: `events.recent()` answers from the memory ring AND the
-    durable log beside the app state (spec R216) — the log outlives the
-    process, so clearing only the ring would count a previous run's frames (and
-    an earlier section of this one)."""
-    with events_mod._lock:
-        events_mod._events.clear()
-    try:
-        os.remove(events_mod._event_log_path())
-    except OSError:
-        pass
+        BOTH stores go: `events.recent()` answers from the memory ring AND the
+        durable log beside the app state (spec R216) — the log outlives the
+        process, so clearing only the ring would count a previous run's frames
+        (and an earlier section of this one)."""
+        with events_mod._lock:
+            events_mod._events.clear()
+        try:
+            os.remove(events_mod._event_log_path())
+        except OSError:
+            pass
+
     from server import import_autonomy
 
     # ================= 1. DVD-Video: the 3-part title wins =================
@@ -407,17 +408,8 @@ def drain_events():
           bool(frames) and str(frames[0]["data"]["link"]).startswith("/import?album=")
           and frames[0]["data"]["families"] == [import_autonomy.VIDEO_FAMILY],
           frames and frames[0].get("data"))
-    check("the queue row's own words come from the same body",
+    check("the notification's own words come from the same body",
           bool(frames) and frames[0]["body"] == body, frames and frames[0].get("body"))
-    from server.api_queue import _prompt_rows
-    row = _prompt_rows(mine)[0] if mine else {}
-    check("...and the queue's row is a Needs-you row carrying it",
-          row.get("stage") == "needs_attention" and row.get("kind") == "prompt"
-          and row.get("reason") == body and row.get("missing_labels") == ["Main feature"],
-          row)
-    check("...with the same link as the wizard action",
-          bool(mine) and row.get("action_link") == mine[0]["link"]
-          and row.get("wizard_link") == mine[0]["link"], row.get("action_link"))
 
     with Patched(fake, exe, probe):
         drain_events()

@@ -120,6 +120,12 @@ SCOPES: Dict[int, str] = {
                   # both clean exactly the files they hold — which is what
                   # makes "clean this album's tags" available without a
                   # re-encode (3) or a format pass (10).
+    24: "folder", # mlo/web_ratings.py: the ALBUM's public score is fetched once
+                  # and written to every track of the folder, and the track
+                  # answers are keyed to that album's identity — the work unit
+                  # is the album, exactly like 8. A file on its own has no
+                  # release-group id to ask about, so a track row is not a menu
+                  # this script can finish.
 }
 
 # One line per script, for the report and for the test's non-empty check.
@@ -147,6 +153,7 @@ BECAUSE: Dict[int, str] = {
     21: "completes one file's AcoustID pair",
     22: "submits one file's fingerprint with its MusicBrainz recording",
     23: "deletes one file's excess tags (unneeded aliases included)",
+    24: "fills one album's public rating, and each track's own",
 }
 
 # --------------------------------------------------------------------------- #

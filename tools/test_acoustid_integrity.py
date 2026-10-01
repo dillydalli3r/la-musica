@@ -417,23 +417,6 @@ check("all three paths wrote the SAME tags for the same input",
 check("…and the grader accepts every one of them",
       all(grade(os.path.dirname(p))[0] == [] for p in COPIES.values()))
 
-# The auto-import's own step runs the fingerprint/lookup for the same input
-# and must leave that pair alone (it is a check, not a second writer).
-from server import soulseek_auto  # noqa: E402
-
-stub_tools()
-seen = []
-acoustid.lookup = stub_lookup({os.path.basename(COPIES["auto"]): row(REC)},
-                              calls=seen)
-soulseek_auto._verify_acoustid(os.path.dirname(COPIES["auto"]),
-                               {"release_group_id": RG},
-                               dict(CFG, import_acoustid=True,
-                                    acoustid_api_key="stub-key"))
-check("the auto-import fingerprint step ran for the same input",
-      seen == [os.path.basename(COPIES["auto"])], f"{seen}")
-check("…and did not touch the pair the pipeline wrote",
-      pair(COPIES["auto"]) == (REC, LOCAL_FP), f"{pair(COPIES['auto'])}")
-
 # --------------------------------------------------------------------------- #
 # (a2) THE SPELLING BEETS WRITES: every reader agrees the pair is there
 # --------------------------------------------------------------------------- #

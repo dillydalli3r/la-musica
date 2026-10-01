@@ -34,18 +34,15 @@ export function trackFolder(path: string): string {
   return cut > 0 ? path.slice(0, cut) : path;
 }
 
-/** Download one track's music video: YouTube first, else Soulseek, then tag
- *  the file as this track's. Returns whether a video was fetched — a Soulseek
- *  QUEUE counts: the transfer runs in the app's own downloads and cannot be
- *  waited on here.
+/** Download one track's music video from YouTube, then tag the file as this
+ *  track's. Returns whether a video was fetched.
  *
- *  `hooks` says what the caller has to refresh: `onQueued` when a network
- *  transfer was queued (the Downloads page shows it) and `onSaved` when a file
- *  was downloaded and tagged (the surface's own video list is stale from that
- *  moment on). Both are called AFTER the toast that explains what happened. */
+ *  `hooks.onSaved` says what the caller has to refresh: the surface's own
+ *  video list is stale from the moment a file was downloaded and tagged on.
+ *  It is called AFTER the toast that explains what happened. */
 export async function downloadTrackVideo(
   req: TrackVideoRequest,
-  hooks?: { onQueued?: () => void; onSaved?: () => void },
+  hooks?: { onSaved?: () => void },
 ): Promise<boolean> {
   const title = (req.title ?? "").trim();
   if (!title) {
@@ -61,12 +58,6 @@ export async function downloadTrackVideo(
       title,
       duration: req.duration || undefined,
     });
-    if (r.ok && r.queued) {
-      const what = String(r.candidate?.filename ?? title);
-      toast(`Queued from Soulseek: ${what} — it downloads into Downloads`);
-      hooks?.onQueued?.();
-      return true;
-    }
     if (!r.ok || !r.file) {
       toast(r.error ? `No music video: ${r.error}` : "No matching music video found");
       return false;

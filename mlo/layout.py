@@ -361,7 +361,7 @@ def _scope(cfg, folder):
     return scope
 
 
-def _case_issues(artist, album, album_dir, folder, script, seen):
+def _case_issues(artist, album, album_dir, folder, script, seen, names=None):
     """`wrong_case` rows for one album folder, or [] when there is nothing
     trustworthy to compare against.
 
@@ -393,11 +393,15 @@ def _case_issues(artist, album, album_dir, folder, script, seen):
 
     `seen` holds the absolute paths this scan already reported, so an artist
     folder shared by ten albums produces one row, not ten.
+
+    *names* is the album folder's listing the caller already read for this
+    album (the scan's own walk lists it anyway); None lists it here, for a
+    caller with no listing in hand.
     """
     from .naming import eval_script, track_variables
 
     src = None
-    for f in _list(album_dir)[0]:
+    for f in (names if names is not None else _list(album_dir)[0]):
         if _is_audio(f):
             src = f
             break
@@ -660,6 +664,12 @@ def scan_library(cfg=None, stats=None):
             opened(sink)
             sink["albums"] += 1
             rows_before = len(rows)
+            # The album's directory is listed ONCE for its three readers below
+            # — the empty-album question, the wrong-case comparison and the
+            # strays walk. The wrong-case check used to read the folder for
+            # itself (`_list(album_dir)`), which made every album two directory
+            # scans on top of this one.
+            album_entries = entries(ap, sink)
             if not _has_audio(ap):
                 rows.append(_issue(
                     "empty_album", ap, folder,
@@ -673,10 +683,11 @@ def scan_library(cfg=None, stats=None):
             # not the way the naming script spells it. Reported next to the
             # shape problems because from here it is the same kind of answer:
             # "this is not the canonical library yet".
-            rows.extend(_case_issues(name, an, ap, folder, naming_script, case_seen))
+            rows.extend(_case_issues(name, an, ap, folder, naming_script,
+                                     case_seen, album_entries))
 
             # ---- 4. inside an album: strays and unexpected subfolders ------
-            for f in entries(ap, sink):
+            for f in album_entries:
                 fp = os.path.join(ap, f)
                 opened(sink)
                 if os.path.isdir(fp):

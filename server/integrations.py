@@ -839,12 +839,9 @@ def release_lookup(mbid):
                                     .get("artist") or {}).get("name") or ""),
                 "artist_aliases": list(((trk.get("artist-credit") or [{}])[0]
                                         .get("artist") or {}).get("aliases") or []),
-                # Whether MusicBrainz states this recording IS a video. The
-                # acquisition branch reads it to tell a music-video release
-                # from an album: with the medium (media[].format) it is what
-                # decides that a Digital Media video release is fetched from
-                # YouTube rather than searched for on the network — see
-                # server.soulseek_auto.acquisition_route.
+                # Whether MusicBrainz states this recording IS a video: with
+                # the medium (media[].format) it is what tells a music-video
+                # release from an album.
                 "video": bool(rec.get("video")),
                 "artist_mbids": [a["mbid"] for a in artists],
                 "artist_credit": "".join(
@@ -2174,6 +2171,102 @@ def recording_genres(recording_mbid):
         return []
 
 
+def release_group_rating(rg_mbid):
+    """The release GROUP's own rating node, or None.
+
+    The ALBUM-level MusicBrainz source the owner asked for: a release group is
+    what "the album" means to MusicBrainz, and its rating is the community's
+    score for the record rather than for one pressing (a release is an
+    edition; `inc=ratings` on the release itself states nothing). VERIFIED
+    live: `release-group/f5093c06…` answers
+    ``{"rating": {"value": 4.75, "votes-count": 105}, "genres": [...]}``.
+
+    The whole NODE is returned, not a number: ``mlo.web_ratings`` owns the
+    interpretation (the 0-5 to 0-100 conversion and the vote-count weight), and
+    one payload shape — MusicBrainz's own — keeps that parser identical for the
+    album and the track. Through `mb_get_cached`, so the rating, the genres and
+    any other reader of the same group share the one request.
+    """
+    if not rg_mbid:
+        return None
+    return mb_get_cached(f"release-group/{rg_mbid}", {"inc": "ratings", "fmt": "json"})
+
+
+def _recording_with_work(recording_mbid):
+    """``{"recording": node, "work": node|None}`` for one recording.
+
+    ONE request answers the recording's own rating, its genres and the WORK it
+    performs (``inc=ratings+genres+work-rels``, VERIFIED live: 4 of 4 Dark
+    Side of the Moon recordings came back rated AND with a work id). The work
+    is only fetched when the recording states NO rating of its own, because
+    that is the only case its answer matters in: measured on the same album,
+    the recording is rated 4/4 times and the work 1/4 (and no work stated any
+    genre), so asking every work up front would pay a second rate-limited
+    request per track for a fallback that almost never answers.
+
+    A recording that states no rating AND performs no work is a plain miss —
+    both halves stay None and the source contributes nothing.
+    """
+    if not recording_mbid:
+        return None
+    node = mb_get_cached(f"recording/{recording_mbid}",
+                         {"inc": "ratings+genres+work-rels", "fmt": "json"})
+    payload = {"recording": node, "work": None}
+    if not isinstance(node, dict):
+        return payload
+    if (node.get("rating") or {}).get("value") is not None:
+        return payload
+    work_id = ""
+    for rel in node.get("relations") or []:
+        work_id = str((rel.get("work") or {}).get("id") or "")
+        if work_id:
+            break
+    if work_id:
+        try:
+            payload["work"] = mb_get_cached(f"work/{work_id}",
+                                            {"inc": "ratings", "fmt": "json"})
+        except Exception:
+            payload["work"] = None
+    return payload
+
+
+def recording_work_genres(recording_mbid):
+    """The genres MusicBrainz states on the WORK a recording performs.
+
+    The owner asked the track tier to read the WORK's genres (the composition
+    is classified once for every recording of it), with the recording's own as
+    the fallback. The work is reached in the one request shape this module
+    already uses for a recording's identity (`_mb_recording_ids`,
+    `inc=url-rels+work-rels`), and its genres are a second cached request —
+    ``inc=genres`` — because MusicBrainz has no inline "work genres" include
+    (`work-level-rels` inlines a work's RELATIONS, not its genre votes).
+
+    MEASURED, live, on The Dark Side of the Moon (2026-10-01): 0 of 4 works
+    stated any genre, while all 4 recordings stated 5-9 of their own. The work
+    tier is therefore usually empty and the recording's own answer is what a
+    caller almost always gets — which is why the chain reads the work first but
+    MERGES the recording's names behind it rather than choosing between them,
+    and why the cost this adds (two rate-limited MusicBrainz requests per
+    track) is reported rather than hidden. Returns [] for a recording with no
+    work, no genres, or no answer at all.
+
+    The caller caches the RESULT (`_genre_cached`, keyed by recording), so the
+    two lookups below run once per recording per 30 days; this helper does not
+    add a second cache layer of its own.
+    """
+    if not recording_mbid:
+        return []
+    ids = _mb_recording_ids(recording_mbid) or {}
+    work = str(ids.get("work") or "")
+    if not work:
+        return []
+    try:
+        node = mb_get_cached(f"work/{work}", {"inc": "genres", "fmt": "json"})
+    except Exception:
+        return []
+    return _genres(node or {})
+
+
 def genre_cascade(release, limit=None):
     """Cascading genre import: track -> release -> release-group -> artist.
 
@@ -2238,10 +2331,16 @@ def genre_cascade(release, limit=None):
 # only because the order is the user's own preference.
 #
 # What a user must do to make it work: paste the `Cookie` header of a
-# logged-in rateyourmusic.com browser tab into Settings (`rym_cookie`); that
-# cookie carries Cloudflare's cf_clearance for their IP/session, and with it
-# the same requests below do return real pages. WITHOUT one the genre chain
-# does not even ask: a source with no credential is skipped before any request
+# logged-in rateyourmusic.com browser tab into Settings (`rym_cookie`). That
+# tab's cookie jar must include Cloudflare's `cf_clearance` — the pair the
+# challenge hands the browser that solved it — and it counts ONLY alongside
+# the same User-Agent and the same egress IP, which is why `rym_user_agent`
+# (Settings → Discovery) exists for a browser whose UA is not the built-in
+# Chrome one (`_rym_user_agent`); a paste that is missing `cf_clearance` looks
+# complete and still meets the interstitial, so `_rym_reason` names it rather
+# than calling the whole cookie stale. WITH a working paste the same requests
+# below return real pages. WITHOUT one the genre chain does not even ask: a
+# source with no credential is skipped before any request
 # (`_genre_source_skip`), and the report names `rym_cookie` as what is missing.
 # WITH a cookie that RYM then refuses — a stale paste, or a datacenter IP,
 # where Cloudflare blocks regardless — this module sends browser-like headers,
@@ -2297,6 +2396,12 @@ RYM_BASE = "https://rateyourmusic.com"
 # metadata and the wide Accept set that go with it — is what the WAF filters
 # on, and a request that succeeds with a good cookie must not be refused for
 # looking like an unattended scraper.
+#
+# The User-Agent here is only the DEFAULT. Cloudflare binds its `cf_clearance`
+# cookie to the exact User-Agent that passed the challenge, so when the browser
+# the user exported from sends a different UA than this Chrome build, the
+# stored clearance can never validate against it — `rym_user_agent` (Settings →
+# Discovery) is that override, applied in `_rym_headers`/`_rym_user_agent`.
 RYM_HEADERS = {
     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
                   "AppleWebKit/537.36 (KHTML, like Gecko) "
@@ -2511,6 +2616,42 @@ def _rym_cookie(cfg=None):
     return "; ".join(pairs)
 
 
+def _rym_user_agent(cfg=None):
+    """The User-Agent RYM requests go out with: `rym_user_agent`, or the
+    built-in Chrome one when it is blank.
+
+    Cloudflare hands out `cf_clearance` bound to the exact User-Agent (and the
+    same egress IP) that solved its challenge, so a clearance earned by another
+    Chrome build can never validate against RYM_HEADERS' built-in UA. Setting
+    this to the UA that browser sends is what lets the stored clearance count.
+    Read live, like the cookie, so it takes effect without a restart. Blank
+    (the shipped default) is byte-for-byte the built-in UA, so an install that
+    never sets it sends exactly what it always did."""
+    try:
+        if cfg is None:
+            from mlo.config import load_config
+            cfg = load_config()
+        ua = str((cfg or {}).get("rym_user_agent") or "").strip()
+    except Exception:
+        ua = ""
+    return ua or RYM_HEADERS["User-Agent"]
+
+
+def _rym_has_clearance(cfg=None):
+    """Whether the stored `rym_cookie` carries a `cf_clearance` pair.
+
+    It is the one cookie that answers Cloudflare's challenge, and it is only
+    honoured alongside the same User-Agent (and network) that earned it — see
+    `_rym_user_agent`. A paste without it looks complete (the signed-in session
+    cookies are all there) but still gets the interstitial, so the refusal has
+    to name what is missing rather than call the whole cookie stale."""
+    for pair in _rym_cookie(cfg).split(";"):
+        name, _sep, _value = pair.strip().partition("=")
+        if name.strip().lower() == "cf_clearance":
+            return True
+    return False
+
+
 def _rym_cookiejar(cfg=None):
     """The cookie jar for the current paste: the user's pairs, plus every
     Set-Cookie RYM has answered with since (see `_rym_warm`).
@@ -2534,7 +2675,7 @@ def _rym_cookiejar(cfg=None):
     return _rym_jar
 
 
-def _rym_headers(warm=False):
+def _rym_headers(cfg=None, warm=False):
     """The full Chrome header set — see RYM_HEADERS.
 
     The cookie is NOT part of this: it belongs to the jar (`_rym_jar`), which
@@ -2542,8 +2683,14 @@ def _rym_headers(warm=False):
     top-level navigation to RYM's home page, which a browser sends with no
     Referer, `Sec-Fetch-Site: none` and `Sec-Fetch-User: ?1` — a request that
     claims RYM referred it while asking for RYM's root is a shape no browser
-    produces."""
+    produces.
+
+    The User-Agent is the built-in Chrome one unless `rym_user_agent` overrides
+    it (`_rym_user_agent`): Cloudflare binds `cf_clearance` to the exact UA
+    that solved the challenge, so a clearance earned by another Chrome build
+    validates only when that build's UA is what is sent."""
     headers = dict(RYM_HEADERS)
+    headers["User-Agent"] = _rym_user_agent(cfg)
     if warm:
         headers.pop("Referer", None)
         headers["Sec-Fetch-Site"] = "none"
@@ -2587,7 +2734,7 @@ def _rym_warm(cfg=None):
     if not paste or _rym_warmed == paste:
         return
     try:
-        r = _rym_fetch(RYM_BASE + "/", None, _rym_headers(warm=True),
+        r = _rym_fetch(RYM_BASE + "/", None, _rym_headers(cfg, warm=True),
                        _rym_cookiejar(cfg))
     except httpx.HTTPError:
         # Marked warmed only AFTER the navigation comes back: latching first
@@ -2653,8 +2800,11 @@ def _rym_reason(cfg=None, status=None, challenge=False, tries=1):
     "403/challenge" sentence is not enough:
 
       * no cookie configured — nothing the WAF could accept was ever sent;
-      * a challenge page on a 200 — the cookie is stale (or belongs to another
-        network), and a fresh paste is what fixes it;
+      * a challenge page (the body carries Cloudflare's interstitial, whatever
+        status it arrives with — the live site answers it as a 403) — the
+        cookie is stale, belongs to another network, or is missing the
+        `cf_clearance` pair the challenge handed its solver, and a fresh paste
+        from the matching browser is what fixes it;
       * a 403 with NO challenge marker — the WAF refused the client outright:
         a datacenter/VPN network is blocked whatever the cookie says;
       * a 429 — RYM is throttling this network; and
@@ -2662,12 +2812,20 @@ def _rym_reason(cfg=None, status=None, challenge=False, tries=1):
         were already retried (RYM_RETRIES) before this sentence was written.
 
     The cookie advice is only appended where a cookie could help: telling a
-    user to paste one while RYM answers 503 sends them after the wrong thing."""
+    user to paste one while RYM answers 503 sends them after the wrong thing.
+    A challenge with no `cf_clearance` in the stored cookie says so by name:
+    it is the one pair that answers the challenge, and it counts only next to
+    the `rym_user_agent` (and network) of the browser that earned it."""
     cookie = _rym_cookie(cfg)
     if challenge:
-        why = "Cloudflare challenge instead of a page (HTTP 200) — " + \
+        why = ("Cloudflare challenge instead of a page (HTTP %s) — "
+               % (status if status is not None else 200)) + \
             ("the rym_cookie has expired or is not for this network" if cookie
              else "no rym_cookie is set")
+        if cookie and not _rym_has_clearance(cfg):
+            why += (", and it carries no `cf_clearance` — that cookie and "
+                    "`rym_user_agent` must BOTH match the browser (and "
+                    "network) that passed the challenge")
         return why + "; " + _RYM_HOWTO
     if status == 429:
         return ("HTTP 429 — RYM is throttling this network (retried %dx)"
@@ -3082,7 +3240,7 @@ def _rym_get(path, params=None, cfg=None, expect=None):
         return None
     url = f"{RYM_BASE}{path}"
     _rym_warm(cfg)
-    jar, headers = _rym_cookiejar(cfg), _rym_headers()
+    jar, headers = _rym_cookiejar(cfg), _rym_headers(cfg)
     reason = ""
     for attempt in range(RYM_RETRIES + 1):
         try:
@@ -3103,11 +3261,20 @@ def _rym_get(path, params=None, cfg=None, expect=None):
         # truer by being asked again, and the ladder spends several spellings
         # per album at 1 req/s, so without this every album whose title has
         # more than one word paid the same 404s on every run.
-        if r.status_code != 404:
-            _rym_unreachable(_rym_reason(cfg, r.status_code, tries=tried), cfg,
-                             status=r.status_code, url=url)
-        else:
+        if r.status_code == 404:
             _rym_cache_write(key, _RYM_MISS)
+            return None
+        # Cloudflare serves its interstitial with whatever status it decides,
+        # and the live site answers it as a 403 — so the body is checked for
+        # the challenge marker HERE too, not only on a 200. Reporting the 403
+        # every user meets as "refused without a Cloudflare challenge" would
+        # send them after the network instead of the cookie, and would hide the
+        # `cf_clearance`/`rym_user_agent` pair the challenge branch names.
+        challenge = bool(r.text and _RYM_CHALLENGE_RE.search(r.text[:4000]))
+        _rym_unreachable(_rym_reason(cfg, r.status_code, challenge=challenge,
+                                     tries=tried),
+                         cfg, status=r.status_code, challenge=challenge,
+                         url=url)
         return None
     if not r.text:
         _rym_unreachable("empty response", cfg, status=r.status_code, url=url)
@@ -3268,16 +3435,36 @@ def _rym_album_answer(html, url, archive=None):
     is recorded in the answer, and the URL it reports is the snapshot's, because
     a caller that shows the user where a genre came from must not point them at
     a live page that refused to serve it.
+
+    `rating` is the release's own community average — the same schema.org
+    microdata the page publishes for the genres' readers
+    (`mlo.web_ratings.rym_rating_from_html`, the ONE parser, so a live page and
+    an archived snapshot are read identically: VERIFIED live as
+    ``<meta itemprop="ratingValue" content="4.18" />`` beside
+    ``<meta itemprop="ratingCount" content="49366" />``). It is read from the
+    page with the TRACK ROWS REMOVED, for the same reason the genres are: a
+    row's own score must never be promoted to the release. A page that states
+    a rating but no classification is an answer too — before this, the whole
+    page was discarded and the rating with it.
     """
     rows = _rym_tracks_from(html)
     head = _RYM_TRACK_ROW_RE.sub("", html or "")
     genres = _rym_genres_from(head)
     descriptors = [] if genres else _rym_labels(_RYM_DESCRIPTOR_RE, head)
-    if not genres and not descriptors and not any(r.get("genres") for r in rows):
+    rating = None
+    try:
+        from mlo.web_ratings import rym_rating_from_html
+        rating = rym_rating_from_html(head)
+    except Exception:
+        rating = None
+    if (not genres and not descriptors and not rating
+            and not any(r.get("genres") for r in rows)):
         return None
     out = {"genres": genres or descriptors, "descriptors": descriptors,
            "level": "album", "tracks": rows,
            "source_url": f"{RYM_BASE}{url}", "source": "rym"}
+    if rating:
+        out["rating"] = rating
     if archive:
         out["archive"] = dict(archive)
         out["source_url"] = archive.get("url") or out["source_url"]
@@ -3472,6 +3659,256 @@ def rym_artist_genres(artist, cfg=None, archive=False):
         out["archive"] = dict(snapshot)
         out["source_url"] = snapshot.get("url") or out["source_url"]
     return out
+
+
+# --------------------------------------------------------------------------- #
+# Web ratings — the payloads `mlo.web_ratings` asks for
+# --------------------------------------------------------------------------- #
+# The rating layer lives in `mlo.web_ratings` (parsers, aggregation, writer,
+# script 24) and never imports this module: it is handed ONE callable —
+# `web_rating_fetchers()` — and calls it per source. Everything below is the
+# network half of that contract, and every function returns the source's RAW
+# payload (or None) so the interpretation stays in the one place that owns the
+# 0-100 scale.
+def rym_album_rating(artist, album, cfg=None, album_url="", rg_mbid=""):
+    """The RYM release answer for an album — its average rating and its other
+    album-level facts — or None when RYM cannot answer.
+
+    This is `rym_genres` on the album the caller names, and it answers the
+    rating question for free: the release page is the SAME page the genre chain
+    reads (`_rym_album_answer` now carries `rating`), so a run that asks both
+    pays one request, one cache entry and one refusal latch — never a second
+    HTTP path. The page MusicBrainz itself states is tried first when the
+    caller hands over the release-group id (`_mb_rym_links`, one cached MB
+    request), because an identity beats any guessed slug.
+
+    The dict carries `{"rating": {"value", "count"}}` when the page states its
+    community average, plus whatever it stated about the genres and the track
+    list.
+    """
+    artist = str(artist or "").strip()
+    album = str(album or "").strip()
+    if not artist or not album:
+        return None
+    stated = ""
+    if rg_mbid:
+        try:
+            stated = str((_mb_rym_links(artist, album, rg_mbid) or {}).get("album")
+                         or "")
+        except Exception:
+            stated = ""
+    return rym_genres(artist, album, cfg, album_url or stated, archive=True)
+
+
+def discogs_album_rating(artist, album, cfg=None):
+    """The Discogs release detail for an album, or None without a token.
+
+    Discogs' community rating lives on the release detail
+    (``community.rating = {"average": 4.72, "count": 3809}``, VERIFIED live on
+    release 1174296), which is the same document `server.discovery` already
+    fetches for the genre chain and the parental advisory — one cached pair of
+    requests, three readers. Without a `discogs_token` it answers None and this
+    source is skipped cleanly, exactly like the genre chain's.
+    """
+    if not str((cfg or {}).get("discogs_token") or "").strip():
+        return None
+    if not (artist or album):
+        return None
+    from server import discovery
+
+    return discovery._discogs_release(artist, album, cfg=cfg)
+
+
+def web_rating_fetchers():
+    """The ONE callable `mlo.web_ratings` drives: ``fetch(source, kind,
+    ident, cfg)``.
+
+    `ident` is the entity the source is asked about — ``{"artist", "album",
+    "mbid"}`` for an album, ``{"artist", "title", "mbid"}`` for a track — and
+    the answer is that source's raw payload or None. Every branch is a
+    best-effort call to machinery this module already has; a source with no
+    identity to work with (no MBID, no names) answers None WITHOUT a request.
+    """
+    def fetch(source, kind=None, ident=None, cfg=None):
+        source = str(source or "").strip().lower()
+        ident = ident or {}
+        mbid = str(ident.get("mbid") or "").strip()
+        if source == "musicbrainz":
+            if not mbid:
+                return None
+            if str(kind or "album") == "track":
+                return _recording_with_work(mbid)
+            return release_group_rating(mbid)
+        if source == "rateyourmusic":
+            if str(kind or "album") != "album":
+                return None
+            return rym_album_rating(ident.get("artist"), ident.get("album"),
+                                    cfg, str(ident.get("url") or ""), mbid)
+        if source == "albumoftheyear":
+            if str(kind or "album") != "album":
+                return None
+            return aoty_album_page(ident.get("artist"), ident.get("album"), cfg)
+        if source == "discogs":
+            if str(kind or "album") != "album":
+                return None
+            return discogs_album_rating(ident.get("artist"), ident.get("album"),
+                                        cfg)
+        return None
+
+    return fetch
+
+
+# --------------------------------------------------------------------------- #
+# Album of the Year (scraped — no API, and Cloudflare refuses automated clients)
+# --------------------------------------------------------------------------- #
+# VERIFIED, 2026-10-01: albumoftheyear.org answers Cloudflare's JS challenge to
+# every automated client this project can run — 403 "Just a moment…" to a plain
+# HTTP client, the same to a HEADED Chromium (not just headless), and the same
+# through a reader proxy. The live page is therefore NOT asked: the source is
+# read from the newest ARCHIVED CAPTURE of the album's own page, through the
+# same Wayback machinery the RYM readers use (`_rym_archive_fetch`,
+# `_rym_archive_pack`), which also keeps one 1 req/s lock and one 30-day disk
+# cache for both readers.
+#
+# The page's URL is /album/<id>-<artist-slug>-<album-slug>.php, and the numeric
+# id is AOTY's own — it cannot be derived from the names, so the Wayback INDEX
+# resolves it: a CDX prefix query filtered to `.*-<artist-slug>-<album-slug>
+# \.php$` (VERIFIED: "Neko Case / Middle Cyclone" → /album/1-neko-case-middle-
+# cyclone.php, "Radiohead / In Rainbows" → /album/363-radiohead-in-rainbows
+# .php). The slug pair matching BOTH names is the identity check — the same
+# rule `_rym_verified` applies by name — so a capture of a namesake album
+# cannot answer for this one.
+AOTY_BASE = "https://www.albumoftheyear.org"
+# How many index rows to read when resolving a page. CDX lists ascending, so
+# the newest capture is the LAST of them (`limit=-N`).
+_AOTY_INDEX_ROWS = 5
+# The album's genre anchors, primary and secondary together: AOTY renders the
+# finer ones as `<a href="/genre/70-americana/"><div class="secondary">
+# Americana</div></a>` and the headline ones as plain anchor text. Both are
+# genres for tagging purposes, which is why both are read — the JSON-LD block
+# would give only the two headline ones.
+_AOTY_GENRE_RE = re.compile(
+    r'href="/genre/[^"]*"[^>]*>\s*(?:<div[^>]*>\s*)?([^<]+?)\s*<', re.I)
+
+
+def _aoty_archive_on(cfg=None):
+    """Whether the archived-capture route may be used (`aoty_archive_fallback`).
+
+    The same contract as `_rym_archive_on`: the key ships True in
+    `mlo.config.DEFAULT_CONFIG`, is read live so unticking it takes effect on
+    the next run, and a cfg that OMITS it is read as OFF — such a caller can
+    only mean "ask the source and see", and for this source that would be a
+    request the site is known to refuse.
+    """
+    try:
+        if cfg is None:
+            from mlo.config import load_config
+            cfg = load_config()
+        return bool((cfg or {}).get("aoty_archive_fallback"))
+    except Exception:
+        return False
+
+
+def _aoty_index_rows(params):
+    """One CDX query -> its rows as dicts keyed by the column names it sends.
+
+    The index NAMES its columns in row 0 ("urlkey","timestamp","original",…),
+    so the fields are found by name instead of assumed to be positions — the
+    same rule `_rym_archive_captures` follows, and the reason a change in the
+    index's column order cannot silently make this read the wrong ones.
+    """
+    text, _final, answered = _rym_archive_fetch(RYM_ARCHIVE_INDEX, params)
+    if not text:
+        return [] if answered else None
+    try:
+        rows = json.loads(text) or []
+    except ValueError:
+        return None
+    if not rows:
+        return []
+    head = [str(c).strip().lower() for c in (rows[0] or [])]
+    out = []
+    for row in rows[1:]:
+        if len(row) < len(head):
+            continue
+        out.append(dict(zip(head, (str(c) for c in row))))
+    return out
+
+
+def aoty_album_page(artist, album, cfg=None):
+    """The AOTY album page's HTML for one album, or None.
+
+    Resolved and read entirely from the Wayback Machine (see the section
+    note): the index finds the page's own URL, and the newest capture of it is
+    replayed in its original bytes. The answer is cached 30 days with the rest
+    of the archived pages, INCLUDING the negative — "the archive holds no such
+    page" is an answer that does not get truer by being asked again, and without
+    it every run of an album AOTY has no page for would cost two archive.org
+    requests and two seconds of the 1 req/s walk.
+
+    Returns None for an unconfigured (or empty) identity, for a cfg with the
+    route switched off, and for an album the archive holds no page for. It never
+    raises: this is a best-effort source beside the others.
+    """
+    artist = str(artist or "").strip()
+    album = str(album or "").strip()
+    if not artist or not album or not _aoty_archive_on(cfg):
+        return None
+    slug = f"{_rym_slug(artist)}-{_rym_slug(album)}"
+    key = "aoty-" + hashlib.sha1(slug.encode("utf-8")).hexdigest()
+    cached = _rym_cache_read(key, RYM_CACHE_TTL)
+    if cached is not None:
+        html, _archive = _rym_archive_unpack(cached)
+        return html or None
+    rows = _aoty_index_rows([
+        ("url", f"{AOTY_BASE}/album/"), ("matchType", "prefix"),
+        ("output", "json"), ("filter", "statuscode:200"),
+        ("filter", f"original:.*-{slug}\\.php$"),
+        ("limit", f"-{_AOTY_INDEX_ROWS}")])
+    html = ""
+    if rows:
+        newest = max(rows, key=lambda r: str(r.get("timestamp") or ""))
+        target = str(newest.get("original") or "")
+        stamp = str(newest.get("timestamp") or "")
+        if target and stamp:
+            text, _final, _answered = _rym_archive_fetch(
+                f"{RYM_ARCHIVE_BASE}/{stamp}id_/{target}")
+            # The slug already names both the artist and the album, and the
+            # capture itself must still state them (`_rym_mentions`, the same
+            # name check `_rym_verified` runs on a RYM page): a namesake album's
+            # capture can never answer for this one.
+            if text and _rym_mentions(text, artist, album):
+                html = text
+    _rym_cache_write(key, _rym_archive_pack(html, {}))
+    return html or None
+
+
+def aoty_genres_from_html(html):
+    """The album's genre names on an AOTY page, headline ones first, or [].
+
+    Scoped to the Details row that carries the `Genre` label (the page also
+    links genres nowhere else, but a window is cheaper to defend than a claim
+    about the whole page): the anchors inside it are read in the order AOTY
+    prints them, primary then `secondary`, and the anchor TEXT is the name —
+    "Alt-Country", "Singer-Songwriter", "Americana", … No name is invented for
+    an anchor whose text is empty.
+    """
+    text = html or ""
+    if not text:
+        return []
+    marker = text.find("Genre</span>")
+    if marker < 0:
+        return []
+    window = text[max(0, marker - 2000):marker]
+    start = window.rfind('class="detailRow"')
+    if start >= 0:
+        window = window[start:]
+    names = []
+    for match in _AOTY_GENRE_RE.finditer(window):
+        name = _html.unescape(match.group(1)).strip()
+        if name and name not in names:
+            names.append(name)
+    return names
 
 
 # --------------------------------------------------------------------------- #
@@ -4274,10 +4711,6 @@ def bandcamp_album(artist="", album="", titles=None):
 # Every per-track source sits ABOVE every album-only one (bandcamp, discogs,
 # deezer, spotify), which is what keeps a track's own answer ahead of an
 # album-wide guess (`tools/test_genres.py` asserts that property of this list).
-#
-# `soulseek` is NOT in the default list: peers advertise folders and file
-# names, not genres, so it can never state one — it stays handled as a
-# documented no-op so a saved config listing it keeps working.
 GENRE_SOURCES = ["rateyourmusic", "musicbrainz", "listenbrainz", "itunes",
                  "lastfm", "theaudiodb", "wikidata", "bandcamp", "discogs",
                  "deezer", "spotify"]
@@ -4363,6 +4796,12 @@ def _genre_source_skip(source, cfg):
             return ("skipped: RateYourMusic refused this cookie — set a fresh "
                     "rym_cookie in Settings → Discovery")
         return None
+    if source == "albumoftheyear" and not _aoty_archive_on(cfg):
+        # The live site is a known refusal, so with the archived route switched
+        # off there is nothing left to ask: reported as a SKIP (a setting the
+        # user can turn on), never as "no data".
+        return ("skipped: aoty_archive_fallback is off — Album of the Year "
+                "refuses an automated client without it")
     if source == "lastfm" and not str(cfg.get("lastfm_api_key") or "").strip():
         return "skipped: no lastfm_api_key in Settings → Discovery"
     if source == "discogs" and not str(cfg.get("discogs_token") or "").strip():
@@ -4370,8 +4809,6 @@ def _genre_source_skip(source, cfg):
     if source == "spotify" and not _spotify_configured(cfg):
         return ("skipped: no spotify_client_id/spotify_client_secret in "
                 "Settings → Discovery")
-    if source == "soulseek":
-        return "skipped: Soulseek states no genres (folders and file names)"
     return None
 
 
@@ -4908,6 +5345,19 @@ def _genre_source_answers(source, artist, album, release, cfg, tracks):
                 answers[_genre_track_key(1, row.get("position"))] = own
         return answers
 
+    if source == "albumoftheyear":
+        # Album-level, and honest about it: AOTY classifies the RELEASE, and
+        # its genre row (headline names + the `secondary` ones) applies to
+        # every track of it. The page is the archived capture — the site
+        # refuses automated clients (see its section note) — and the answer is
+        # cached 30 days with the rest of this source's pages, so an album the
+        # chain asks about twice pays one archive lookup.
+        got = _genre_cached(
+            "album", f"albumoftheyear|{_norm_compare(artist)}|{_norm_compare(album)}",
+            lambda: aoty_album_page(artist, album, cfg))
+        row = _genre_row("album", aoty_genres_from_html(got or ""))
+        return {_ALL_TRACKS: row} if row else {}
+
     if source == "listenbrainz":
         answers = {}
         for track in tracks:
@@ -4943,17 +5393,47 @@ def _genre_source_answers(source, artist, album, release, cfg, tracks):
     if source == "musicbrainz":
         answers = {}
         for track in tracks:
-            row = _genre_row("track", track.get("genres"))
+            # The TRACK tier reads the WORK's genres first and the recording's
+            # own second — the owner's rule: the composition is what a genre
+            # vote is usually cast on, so it is the more general answer, and the
+            # recording's own classification is the fallback. The recording's
+            # names were already in hand (the release payload carries them), so
+            # only the work costs a request, and it is cached 30 days with the
+            # rest of this source's answers.
+            #
+            # MEASURED, live, on The Dark Side of the Moon (2026-10-01): the
+            # work stated genres for 0 of 4 tracks while the recording stated
+            # 5-9 for all 4, so on a mainstream album this tier changes nothing
+            # and costs one extra MusicBrainz request per track (rate-limited
+            # to 1 req/s — the price is real and the owner asked for the
+            # measurement). The fallback order is what keeps that cost from
+            # ever READING as a loss: the recording's genres are merged, not
+            # replaced.
+            recording = str(track.get("recording_mbid") or "").strip()
+            names = []
+            if recording:
+                names += _genre_cached(
+                    "recording", f"musicbrainz|work_genres|{recording}",
+                    lambda r=recording: recording_work_genres(r)) or []
+            names += list(track.get("genres") or [])
+            row = _genre_row("track", names)
             if row:
                 answers[_genre_track_key(track.get("disc"), track.get("position"))] = row
-        # The ALBUM tier: the release's own genres, then its release group's.
+        # The ALBUM tier: the release GROUP's genres first, then the release's
+        # own. A release group is what "the album" means to MusicBrainz and its
+        # genre votes are cast against the record, not one pressing — MEASURED
+        # live on The Dark Side of the Moon: the release group states 12 genres
+        # (ambient, art rock, classic rock, …) while the release states 1
+        # ("classic rock"). The release's names are still merged behind them
+        # rather than dropped, because a source's answer is never thrown away
+        # here — it only stops leading.
         wide, level = [], "album"
         if release:
-            wide += list(release.get("genres") or [])
             rg = release.get("release_group_id")
             if rg:
                 wide += _genre_cached("album", f"musicbrainz|release_group|{rg}",
                                       lambda r=rg: release_group_genres(r)) or []
+            wide += list(release.get("genres") or [])
         else:
             # No release in hand: the release group and the artist are what a
             # genre cascade normally falls back on, resolved from the names.
@@ -5126,11 +5606,6 @@ def _genre_source_answers(source, artist, album, release, cfg, tracks):
         row = _genre_row("artist", names)
         return {_ALL_TRACKS: row} if row else {}
 
-    if source == "soulseek":
-        # Peers advertise folders and file names, not genres. Nothing here can
-        # state a genre, so this source is a no-op by design — it stays in the
-        # order so a saved config listing it keeps working.
-        return {}
     return {}
 
 
@@ -5230,8 +5705,7 @@ def genre_chain(artist="", album="", release=None, limit=None, sources=None,
     source that cannot answer at all is skipped BEFORE any request —
     without its credential (RateYourMusic's `rym_cookie` and no archive to fall
     back on, Discogs' token, Last.fm's key, Spotify's id+secret), already
-    refused this run (RateYourMusic), or stating no genres by design
-    (Soulseek) — and reported by name in `skipped`.
+    refused this run (RateYourMusic) — and reported by name in `skipped`.
 
     `notes` carries one sentence per source that could not be used, and for
     RateYourMusic it carries more: that source has a second route (an archived
@@ -5478,8 +5952,8 @@ def genre_chain(artist="", album="", release=None, limit=None, sources=None,
     for path in files or []:
         key = None
         try:
-            from server import soulseek_auto
-            key = soulseek_auto._parse_trackno(str(path))
+            from server import imports
+            key = imports._parse_trackno(str(path))
         except Exception:
             key = None
         if key in per_track_sources:
@@ -6445,10 +6919,10 @@ def resolve_release(mbid):
     """(release, release_mbid) for a release id, a release-group id or a URL.
 
     Auto-import works on a *release* — a concrete pressing with a track list
-    — while the ids pasted into a wish or an import are usually release
-    GROUPS, and a group id passed to the release endpoint 404s. Group ids
-    are resolved to their best edition via the release-choice policy so no
-    caller (HTTP route, wishes worker, bulk import) can queue a group job.
+    — while the ids pasted into an import are usually release GROUPS, and a
+    group id passed to the release endpoint 404s. Group ids are resolved to
+    their best edition via the release-choice policy so no caller (HTTP
+    route, bulk import) can queue a group job.
     Returns (None, mbid) when the id is a group with no usable edition, and
     (None, None) when nothing matches at all. A MusicBrainz OUTAGE is not
     "nothing matches" — that raises MusicBrainzError so the caller reports
@@ -6680,8 +7154,8 @@ def auto_import_targets(mbid, kind=None, mode="best", types=None,
     # queuing a release or a group the library already holds downloaded the
     # same album a second time, and the duplicate then landed beside it.
     from mlo.config import load_config
-    from server import wishes
-    owned = wishes.owned_mbids(load_config())
+    from server import library
+    owned = library.owned_mbids(load_config())
     if kind == "release":
         rel, rid = resolve_release(mbid)
         if not rid:

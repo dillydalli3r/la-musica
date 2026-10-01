@@ -483,7 +483,7 @@ finally:
 # 8) MusicBrainz's tiers, labelled by where their names came from
 # --------------------------------------------------------------------------- #
 # The same release with MusicBrainz answering at every tier it has: the
-# recording's own genres, the release's, its release group's, and the artist's.
+# recording's own genres, its release group's, the release's, and the artist's.
 MB_RELEASE = dict(RELEASE, genres=["Rock"], media=[
     {"disc": 1, "position": 1, "title": "Track One", "recording_mbid": "rec-1",
      "genres": ["Alternative Metal"]},
@@ -494,13 +494,15 @@ clear()
 stub_mb({"release-group/rg-1": {"genres": [{"name": "Progressive Rock"}]},
          "artist/art-1": {"genres": [{"name": "Art Rock"}]}})
 got = chain(CFG, release=MB_RELEASE, sources=["musicbrainz"], limit=8)
-# recording → release → release group → artist, in that order, per track.
-assert got["per_track"][(1, 1)] == ["Alternative Metal", "Rock",
-                                    "Progressive Rock", "Art Rock"], got["per_track"]
+# recording → release group → release → artist, in that order, per track: the
+# release GROUP leads the album tier (a release group is what "the album"
+# means to MusicBrainz; the release's own names are merged behind it).
+assert got["per_track"][(1, 1)] == ["Alternative Metal", "Progressive Rock",
+                                    "Rock", "Art Rock"], got["per_track"]
 assert got["per_track_levels"][(1, 1)] == "track", got["per_track_levels"]
-# No recording genre on track 2: the release and its group answer it, and that
+# No recording genre on track 2: the group and the release answer it, and that
 # is the ALBUM tier (with the artist's genre behind it, not instead of it).
-assert got["per_track"][(1, 2)] == ["Rock", "Progressive Rock", "Art Rock"], \
+assert got["per_track"][(1, 2)] == ["Progressive Rock", "Rock", "Art Rock"], \
     got["per_track"]
 assert got["per_track_levels"][(1, 2)] == "album", got["per_track_levels"]
 # The artist tier only when nothing above it states anything — and then it is

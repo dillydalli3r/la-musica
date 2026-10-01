@@ -561,7 +561,7 @@ export function CachedMark({ path, size = "sm" }: { path: string; size?: "sm" | 
 
 /** The pending marker's fields — a framework album's own block, exactly as the
  *  server stamps it on every album-shaped row (`server/library.py`). */
-export type PendingFields = Pick<Album, "pending" | "pending_reason" | "wish" | "wish_id">;
+export type PendingFields = Pick<Album, "pending" | "pending_reason">;
 
 /** What a framework album's marker SAYS: the short label a row draws and the
  *  full sentence its tooltip carries.
@@ -569,40 +569,23 @@ export type PendingFields = Pick<Album, "pending" | "pending_reason" | "wish" | 
  *  One function, so the grid, the artist page, the query rows, Home and the
  *  album page can never describe the same album differently. Every part of it
  *  is the server's own data: `pending_reason` is what the folder is waiting
- *  for, and `wish` is the queue's state — how many attempts ran, the reason a
- *  run left behind, and whether another search is even coming. None for a
- *  complete album: there is no marker to draw and nothing to say.
+ *  for. None for a complete album: there is no marker to draw and nothing to
+ *  say.
  */
 export function pendingSummary(album: PendingFields, t: Translate): { short: string; state: string; full: string } | null {
   if (!album?.pending) return null;
-  const w = album.wish;
-  const state = !w
-    ? t("pending.no_search")
-    : w.status === "not_found"
-      ? t("pending.not_found")
-      : w.status === "failed"
-        ? (w.reason || t("pending.failed"))
-        : w.terminal || w.due_in == null
-          ? (w.reason || t("pending.no_search"))
-          : w.attempts === 0 && w.status === "wanted"
-            // Recorded and waiting its turn: nothing has searched it yet, so
-            // "attempt 1" would claim a run that has not happened.
-            ? t("pending.queued")
-            : t("pending.attempt", {
-                n: w.attempts + 1,
-                m: Math.max(1, Math.round((w.due_in ?? 0) / 60)),
-              });
+  const state = album.pending_reason || t("pending.no_search");
   return {
     short: t("pending.short"),
     state,
-    full: [t("pending.title"), album.pending_reason, state].filter(Boolean).join(" · "),
+    full: [t("pending.title"), album.pending_reason].filter(Boolean).join(" · "),
   };
 }
 
 /** A framework album's mark: the same shape the grading verdict uses (a small
  *  dot whose sentence is on hover and read out to a screen reader), amber
- *  while a search is still coming and red once nothing will search the folder
- *  again — "needs attention" in the app's own tokens, not a second palette.
+ *  while the folder has no audio yet — "needs attention" in the app's own
+ *  tokens, not a second palette.
  *
  *  It renders NOTHING for a complete album, so any row can mount it
  *  unconditionally, and it is a different fact from the lock chip beside it: a
@@ -617,7 +600,6 @@ export function PendingMark({ album, size = "sm", label = false }: {
   const { t } = useI18n();
   const note = pendingSummary(album, t);
   if (!note) return null;
-  const stuck = !album.wish || !!album.wish.terminal || album.wish.status === "failed";
   return (
     <span
       className="inline-flex items-center gap-1 shrink-0"
@@ -626,12 +608,10 @@ export function PendingMark({ album, size = "sm", label = false }: {
       title={note.full}
     >
       <span
-        className={`${size === "sm" ? "h-1.5 w-1.5" : "h-2 w-2"} rounded-full shrink-0 ${
-          stuck ? "bg-red-500/80" : "bg-amber-400/90 animate-pulse"
-        }`}
+        className={`${size === "sm" ? "h-1.5 w-1.5" : "h-2 w-2"} rounded-full shrink-0 bg-amber-400/90 animate-pulse`}
       />
       {label && (
-        <span className={`text-[10px] ${stuck ? "text-red-300/80" : "text-amber-300/80"}`}>
+        <span className="text-[10px] text-amber-300/80">
           {note.short}
         </span>
       )}

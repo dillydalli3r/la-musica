@@ -1,7 +1,7 @@
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { useMemo, useRef, useState } from "react";
 import { Link } from "react-router-dom";
-import { AlertTriangle, ArrowDownUp, BarChart3, Clock, Disc3, Heart, ListChecks, Loader2, Radio, RefreshCw, Sparkles, Star, Users } from "lucide-react";
+import { AlertTriangle, BarChart3, Clock, Disc3, Heart, ListChecks, Loader2, Radio, RefreshCw, Sparkles, Star, Users } from "lucide-react";
 import { api } from "../api";
 import { EmptyState, PageLoading } from "../components/Badges";
 import StorageCard from "../components/StorageCard";
@@ -21,7 +21,7 @@ import { useStore } from "../store";
 import type { ReactNode } from "react";
 import type { HomeAlbum, HomeArtist, HomePodcast, Track } from "../types";
 
-/** Shelf chip: why a row is here (a wish's status, a favorite's origin). */
+/** Shelf chip: why a row is here (a favourite's origin, a rediscovered pick). */
 function Chip({ text, title }: { text: string; title?: string }) {
   return (
     <span
@@ -77,14 +77,14 @@ function Shelf<T extends HomeAlbum>({
       >
         {items.map((a, i) => {
           // A shelf row is a library album (the server sends the library's own
-          // row) unless it is a wish the library does not hold: that one has
+          // row) unless it is a release the library does not hold: that one has
           // no page to open and nothing to tick.
           const inLibrary = a.owned !== false && !!a.path;
           return (
             <AlbumCard
               // Identity first: an index in the key remounts a card (and
               // replays its stagger animation) whenever the shelf order
-              // changes. A wish has neither a path nor always an MBID.
+              // changes. An unowned row has neither a path nor always an MBID.
               key={a.path || a.mbid || `shelf-${i}`}
               al={a}
               href={inLibrary ? albumRef(a) : null}
@@ -271,7 +271,7 @@ export default function HomePage() {
     const tracks: Track[] = [];
     const seen = new Set<string>();
     for (const row of [
-      ...(data?.recent ?? []), ...(data?.pending ?? []), ...(data?.wanted ?? []),
+      ...(data?.recent ?? []), ...(data?.pending ?? []),
       ...(data?.top_rated ?? []), ...(data?.rated ?? []), ...(data?.needs_attention ?? []),
       ...(data?.discover ?? []), ...(data?.favorites ?? []), ...(data?.podcasts ?? []),
     ]) {
@@ -452,13 +452,6 @@ export default function HomePage() {
         icon={Loader2}
         items={data.pending ?? []}
         blurb={t("home.shelf.pending_blurb")}
-        {...shelfProps}
-      />
-      <Shelf
-        title={t("home.shelf.wanted")}
-        icon={ArrowDownUp}
-        items={data.wanted ?? []}
-        blurb={t("home.shelf.wanted_blurb")}
         {...shelfProps}
       />
       <Shelf title={t("home.shelf.best")} icon={Star} items={data.top_rated} {...shelfProps} />

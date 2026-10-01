@@ -46,8 +46,8 @@ const GUTTER = 8;
 // the credits providers are not menu entries).
 const EXPECTED_NAV = [
   "Home", "Library", "Browse", "Genres", "Trash", "Playlists", "Favorites",
-  "Downloads", "Discover", "Recommended", "Charts", "Watched artists", "Import",
-  "Soulseek", "MusicBrainz", "Export", "Optimization", "Grading", "In progress",
+  "Downloads", "Discover", "Recommended", "Charts", "Import",
+  "MusicBrainz", "Export", "Optimization", "Grading", "In progress",
   "Checks & scripts", "Dependencies", "Equalizer", "Settings", "Donations",
 ];
 

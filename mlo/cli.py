@@ -554,6 +554,10 @@ def build_script_runners():
         # 23 deletes tags through the same stripper script 10 uses, so it is
         # resolved on first use like every other pass that opens a container.
         23: ("mlo.taghygiene", "run_tag_hygiene"),
+        # 24 downloads from the public rating sources, so its fetchers live
+        # with the rest of the network code (server.integrations) and the
+        # module is resolved on first use like every other fetching script.
+        24: ("mlo.web_ratings", "run_web_ratings"),
     }
     runners = {}
     for sid, name, _desc in SCRIPTS:

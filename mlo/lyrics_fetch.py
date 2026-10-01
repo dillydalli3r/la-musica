@@ -301,8 +301,13 @@ def fetch_one(path, config, replace=False):
                 raise RuntimeError(af.error or "lyrics write failed")
             result["wrote"]["embedded"] = True
         # Normalize with the exact script-1 code path so grading sees the
-        # canonical form (blank lines, zero stamps, …).
-        _process_lyrics_for_audio(path, config)
+        # canonical form (blank lines, zero stamps, …). The handle is handed
+        # over while it still names THIS file — a video lyric write remuxes
+        # the container to a new path, and the pass must then open the path
+        # it was given, not the handle's moved one.
+        _process_lyrics_for_audio(
+            path, config,
+            af=af if os.path.normcase(af.path) == os.path.normcase(path) else None)
         result["status"] = "ok"
         return result
     except Exception as e:

@@ -23,7 +23,6 @@ cheapest call each provider answers for a credential alone is the one used:
   Spotify   POST /api/token             — the grant the sources themselves need
   AcoustID  one lookup with a probe fingerprint (mlo.acoustid.verify_key)
   AcoustID  one probe SUBMISSION per user key (mlo.acoustid.verify_user_key)
-  Soulseek  slskd's own live state + the daemon's recorded verdict
   Login     what this server's own gate would accept
 
 Every check returns `(status, detail)` where status is `ok` | `skipped` |
@@ -61,8 +60,6 @@ CREDENTIALS = (
     # fingerprint-only entry, so nothing in it can attach wrong metadata).
     {"id": "acoustid-user", "label": "AcoustID user key (fingerprint submissions)",
      "needs": ["acoustid_user_key"], "free": True},
-    {"id": "soulseek", "label": "Soulseek account",
-     "needs": ["soulseek_username", "soulseek_password"], "free": True},
     {"id": "ai", "label": "AI provider (lyric translation)",
      "needs": ["ai_base_url", "ai_model"], "free": False},
     # Nothing to fill in: the point of this row is the ANSWER (is this server
@@ -176,52 +173,8 @@ def _check_acoustid_user(cfg):
 
 
 # --------------------------------------------------------------------------- #
-# Soulseek and this server's own login — no HTTP of ours involved
+# This server's own login — no HTTP of ours involved
 # --------------------------------------------------------------------------- #
-def _check_soulseek(cfg):
-    """slskd signs in to the Soulseek network, so its LIVE state is the check.
-
-    The credential itself never travels from this process: it is written into
-    slskd's YAML (server/soulseek.generate_yaml) and slskd performs the
-    handshake. That means the honest answer is one of three things, and the
-    third is not a pass: signed in (with the account the network sees), the
-    daemon's recorded refusal, or "slskd is not running, so nothing has been
-    tried yet"."""
-    from server import soulseek
-
-    if not (str(cfg.get("soulseek_username") or "").strip()
-            and str(cfg.get("soulseek_password") or "").strip()):
-        return "skipped", "needs soulseek_username, soulseek_password"
-    if not soulseek.slskd_installed():
-        return "skipped", ("slskd is not installed — it is the Soulseek client "
-                           "that signs in (Settings → Soulseek)")
-    _ours, who, conflict = soulseek.instance_owner(cfg)
-    if conflict:
-        return "skipped", conflict
-    if not soulseek.is_running():
-        return "skipped", ("slskd is not running — press Start on the Soulseek "
-                           "tab: the sign-in handshake is slskd's, and its "
-                           "verdict is what this row reports")
-    try:
-        state = soulseek.server_state() or {}
-    except Exception as e:
-        # The daemon answers our port but not its own API: either it is still
-        # booting (slskd re-scans the share on start) or something is wrong
-        # with it. Nothing here may guess which — the log's own line, when
-        # there is one, goes first.
-        why = soulseek.login_error(cfg)
-        return "fail", (
-            f"{why} (slskd's own API did not answer: {type(e).__name__})" if why
-            else f"slskd is running but its own API did not answer "
-                 f"({type(e).__name__}: {e}) — it may still be starting")
-    if state.get("isLoggedIn"):
-        return "ok", (f"signed in to the Soulseek network as {who} "
-                      if who else "signed in to the Soulseek network")
-    why = soulseek.login_error(cfg)
-    return "fail", (why or "slskd is running but is not signed in, and its log "
-                           "says nothing about the login")
-
-
 def _check_login(cfg):
     """What this server's own gate would accept.
 
@@ -267,7 +220,6 @@ _CHECKS = {
     "spotify": _check_spotify,
     "acoustid": _check_acoustid,
     "acoustid-user": _check_acoustid_user,
-    "soulseek": _check_soulseek,
     "login": _check_login,
 }
 

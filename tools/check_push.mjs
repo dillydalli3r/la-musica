@@ -439,7 +439,7 @@ try {
 
   for (const [name, payload, want] of [
     ["a bare `link` (what an older emitter sent)", { title: "T", link: "/library" }, "/library"],
-    ["a `url` (what the page's own notifications carry)", { title: "T", url: "/soulseek" }, "/soulseek"],
+    ["a `url` (what the page's own notifications carry)", { title: "T", url: "/library" }, "/library"],
     ["no subject at all", { title: "T" }, "/"],
   ]) {
     const w = loadWorker();

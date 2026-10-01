@@ -89,7 +89,7 @@ STAGED = make(os.path.join(MUSIC, ".mlo", "incomplete", "part.flac"), 555)
 # The app's tools, outside the music folder (see DEPS above).
 DEPS_BYTES = make(os.path.join(DEPS, "ffmpeg", "ffmpeg.exe"), 777)
 
-CFG = {"music_folder": MUSIC, "soulseek_download_dir": ""}
+CFG = {"music_folder": MUSIC}
 
 
 class Unreadable:

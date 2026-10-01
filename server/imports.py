@@ -1,16 +1,15 @@
 """The import service: what happens to an album once it is on disk.
 
 Every import path (the wizard's upload/ingest, the downloads page, the bulk
-queue, the sequential import queue, the Soulseek auto-importer and the wish /
-artist-watch pipeline behind it) ends in the same place — :func:`finish_album`
+queue and the one-click imports) ends in the same place — :func:`finish_album`
 runs the configured script chain over the new album folder, on the folder the
 organizer left it at, and :func:`bulk_import` is the queue that moves staging
 folders into the library first. There is no path that acquires an album and
 then leaves it without the optimization/tagging pass: the one that used to
 (auto-import "staged" the album and deferred every tag-writing script) is what
-this module's `chained`/`chain_off`/`note` result reports on now. The Soulseek
-auto-import additionally verifies the downloaded audio against the release it
-was looking for (:func:`acoustid_match`) before handing it to the same call.
+this module's `chained`/`chain_off`/`note` result reports on now. An import
+matched to a release can additionally verify the audio against it
+(:func:`acoustid_match`) before handing it to the same call.
 
 Config keys this module owns:
 
@@ -33,13 +32,17 @@ import re
 import threading
 import time
 import traceback
+import unicodedata
 import uuid
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 from mlo.config import DEFAULT_RUN_ALL_ORDER, load_config
-from mlo.discs import disk_rows, match_disc_row, sidecar_tracklist
-from mlo.paths import (AUDIO_EXTS, expected_tracks_state, library_root,
-                       load_expected_tracks, move_path, save_expected_tracks)
+from mlo.discs import (DISC_BRACKET_RE, disc_number_of_path, disk_rows,
+                       is_disc_dir, match_disc_row, sidecar_tracklist)
+from mlo.paths import (AUDIO_EXTS, LIB_AUDIO_EXTS, expected_tracks_state,
+                       library_root, load_expected_tracks, move_path,
+                       save_expected_tracks)
+from mlo.tagtext import _LIST_SEP
 # The shared worker-count policy (`worker_limit`): the per-track tag writes
 # below fan out to the same lane count every other multi-file runner uses.
 from mlo.stats import worker_count
@@ -50,6 +53,286 @@ from mlo import import_policy
 from server import import_autonomy
 from server import script_runners
 from server import tagcache
+
+# --------------------------------------------------------------------------- #
+# Track/disc parsing from file names, and the MB identity stamper
+# --------------------------------------------------------------------------- #
+# The download-side extension set: an import can be a folder of raw WAVs/APEs
+# that the chain converts afterwards, and the library sets in `mlo.paths` do
+# not cover those. `_LIB_AUDIO_EXTS` below is the library's own definition of
+# a track, which is what STAMPING reads back.
+_AUDIO_EXTS = frozenset({
+    ".flac", ".mp3", ".m4a", ".mp4", ".aac", ".ogg", ".oga", ".opus",
+    ".wav", ".wma", ".aiff", ".aif", ".alac", ".ape", ".wv", ".shn",
+    ".tta", ".mpc", ".mp2", ".mka", ".dsf", ".dff"})
+_LIB_AUDIO_EXTS = set(LIB_AUDIO_EXTS)
+
+_LEAD_NUM_RE = re.compile(r"^(\d{1,2})(?:\s*[-._]|\s+|\))\s*(\d{1,3})(?:\s*[-._]|\s+|\)|$)")  # 1-02 style
+_TRACKNO_RE = re.compile(r"^(\d{1,3})(?:\s*[-._]|\s+|\)|$)")
+# "Album - 01 - Title.flac": the flat share layout, track number mid-name.
+_MID_NUM_RE = re.compile(r"[-_.]\s*(\d{1,3})\s*[-_.]\s*\S")
+_TAIL_NUM_RE = re.compile(r"(\d{1,3})\s*$")   # "track01"
+
+
+def _norm_text(s):
+    s = unicodedata.normalize("NFKD", str(s or ""))
+    s = "".join(ch for ch in s if not unicodedata.combining(ch))
+    return re.sub(r"\s+", " ", s).strip()
+
+
+def _disc_of(path):
+    """Disc a file belongs to (1 when nothing names one). The reading is
+    ``mlo.discs.disc_number_of_path``, the one disc vocabulary."""
+    return disc_number_of_path(path) or 1
+
+
+def _parse_trackno(path):
+    """(disc, position) from a filename; the folder names the disc when the
+    file name does not ("01 - x.flac" inside …/CD2/ is disc 2, track 1)."""
+    p = str(path).replace("\\", "/")
+    disc = _disc_of(p)
+    base = os.path.basename(p)
+    m = DISC_BRACKET_RE.match(base)          # "(1) 01 - Title.flac"
+    if m:
+        disc = int(m.group(1))
+        base = base[m.end():]
+    m = _LEAD_NUM_RE.match(base)              # "1-02 Title" names the disc
+    if m:
+        return int(m.group(1)), int(m.group(2))
+    m = _TRACKNO_RE.match(base)               # "01 Title", "01.Title", "01_Title"
+    if m:
+        return disc, int(m.group(1))
+    m = _MID_NUM_RE.search(os.path.splitext(base)[0])    # "Album - 01 - Title"
+    if m:
+        return disc, int(m.group(1))
+    m = _TAIL_NUM_RE.search(os.path.splitext(base)[0])   # "track01.flac"
+    return (disc, int(m.group(1))) if m else (disc, None)
+
+
+def _mb_release_type(rel):
+    """'Album; Live' — MusicBrainz release types in Picard's casing.
+
+    Same rule as server/beets/mloplugin.py (EP uppercased, the rest Title
+    Case, '; '-joined) so the beets pass that may follow is a no-op."""
+    types = [rel.get("primary_type") or ""]
+    types += list(rel.get("secondary_types") or [])
+    if not any(str(t).strip() for t in types):
+        # a release dict built without the structured pair (e.g. a browsed
+        # folder) — fall back to the historical lowercase '+'-joined string
+        types = str(rel.get("release_type") or "").split("+")
+    out = []
+    for t in types:
+        t = str(t).strip()
+        if t:
+            out.append("EP" if t.lower() == "ep" else t.title())
+    return "; ".join(out)
+
+
+def _release_country_tag(release):
+    """Every ISO code the pressing was released in, "; "-joined.
+
+    MusicBrainz keeps a release's events as a LIST (``release['countries']`` —
+    each entry's own ``code``), while the entity's singular ``country`` is
+    only the FIRST of them: a worldwide digital reissue of a CD carries both,
+    and a tag written from the singular loses one. The singular leads the list
+    — it is the country the rest of the app stamps and the FIRST value of a
+    multi-value field is the one the naming script reads back for
+    $releasecountry. An event without a code (a historic area) states no
+    country and is skipped; a release dict carrying no list at all falls back
+    to the singular key, which is then all there is.
+    """
+    codes = []
+    for event in (release.get("countries") or []):
+        code = str((event or {}).get("code") or "").strip()
+        if code and code not in codes:
+            codes.append(code)
+    singular = str(release.get("country") or "").strip()
+    if singular in codes:
+        codes.remove(singular)
+        codes.insert(0, singular)
+    return _LIST_SEP.join(codes) or singular
+
+
+def _stamp_mb_tags(album_dir, release):
+    """Write the exact MusicBrainz release identity into the tags so beets /
+    grading work with the release the import is for.
+
+    Identity tags (release/group/artist IDs, date, country, status, type,
+    catalog number, label) are FORCE-written: an album that arrived carrying
+    another pressing's IDs would otherwise keep them and drive beets matching,
+    the naming script and grading off the wrong release. Per-track
+    number/title/artist tags are corrected only when they contradict the
+    chosen release, so a matching uploader's spelling survives.
+
+    Every track is ONE container rewrite, and the tracks are stamped side by
+    side — see `_stamp_one`."""
+    from mlo.audio import AudioFile
+
+    tracks_meta = release.get("media") or []
+    artists = release.get("artists") or []
+    artist_mbid = (artists[0].get("mbid") if artists else "") or ""
+    artist_name = (artists[0].get("name") if artists else "") or ""
+    album_title = str(release.get("title") or "")
+
+    identity = {
+        "MUSICBRAINZ_ALBUMID": release.get("id", ""),
+        "MUSICBRAINZ_RELEASEGROUPID": release.get("release_group_id", ""),
+        # the release's artist credit IS the album artist (Picard semantics)
+        "MUSICBRAINZ_ARTISTID": artist_mbid,
+        "MUSICBRAINZ_ALBUMARTISTID": artist_mbid,
+        "CATALOGNUMBER": release.get("catalog_number", ""),
+        "LABEL": release.get("label", ""),
+        "BARCODE": release.get("barcode", ""),
+        "DATE": release.get("date", ""),
+        "ORIGINALDATE": release.get("originaldate", ""),
+        # canonical spelling: mlo.audio maps RELEASECOUNTRY, and the naming
+        # script's $releasecountry reads it (COUNTRY is a raw container key).
+        # EVERY country of the pressing, not MusicBrainz' first release event:
+        # the singular `country` is one event of the list, and the app's own
+        # tag layer writes/reads a multi-value field "; "-joined.
+        "RELEASECOUNTRY": _release_country_tag(release),
+        "RELEASESTATUS": release.get("status", ""),
+        "RELEASETYPE": _mb_release_type(release),
+    }
+
+    audio = []
+    for root, _dirs, files in os.walk(album_dir):
+        for f in sorted(files):
+            # LIB_AUDIO_EXTS, not the download-side _AUDIO_EXTS: the list of
+            # files to STAMP is the library's definition of a track (audio +
+            # music-video containers), which is what organize, grading and MB
+            # matching read back. An album whose files nothing stamps is an
+            # album with no identity.
+            if os.path.splitext(f)[1].lower() in _LIB_AUDIO_EXTS:
+                audio.append(os.path.join(root, f))
+
+    # match release tracks -> files (position first, then title+duration)
+    assign = {}
+    used = set()
+    for t in tracks_meta:
+        hit = None
+        for p in audio:
+            if p in used:
+                continue
+            d, pos = _parse_trackno(p)
+            if d == int(t.get("disc") or 1) and pos == int(t.get("position") or 0):
+                hit = p
+                break
+        if hit is None:
+            title = _norm_text(t.get("title") or "")
+            for p in audio:
+                if p in used:
+                    continue
+                stem = _norm_text(os.path.splitext(os.path.basename(p))[0])
+                if title and title in stem:
+                    hit = p
+                    break
+        if hit is not None:
+            used.add(hit)
+            assign[hit] = t
+
+    def _missing(af, path):
+        """The tags THIS file is missing or contradicts, as one mapping.
+
+        A value the file already carries is left alone (a matching uploader's
+        spelling survives), an empty one is never written.
+        """
+        want = {}
+
+        def add(key, value):
+            value = "" if value is None else str(value).strip()
+            if not value:
+                return
+            if str(af.get_tag(key) or "").strip() == value:
+                return
+            want[key] = value
+
+        for k, v in identity.items():
+            add(k, v)
+        # LANGUAGE is the release's own TEXT REPRESENTATION (`language` off
+        # MusicBrainz's release lookup: `jpn`, `eng`, …), which script 17's
+        # transliteration/translation decision reads when the letters alone
+        # cannot say (two Latin-script languages is the case that matters).
+        # FILLED only, never forced: a tag the user set, or the script's own
+        # answer for this track, is a statement about the LYRICS and the
+        # release's language does not replace it — and a code that states
+        # nothing (`mul` on a compilation, `und`, `zxx`) is not written at all
+        # (`mlo.lyrics_xlit.normalize_lang` is the one place that decides what
+        # states nothing, and it also maps `jpn` -> `ja`).
+        from mlo.lyrics_xlit import normalize_lang
+
+        lang = normalize_lang(release.get("language"))
+        if lang and not normalize_lang(af.get_tag("LANGUAGE")):
+            want["LANGUAGE"] = lang
+        # Album-level spelling of the chosen release (corrected when the
+        # uploader's tags say something else).
+        add("ALBUM", album_title)
+        add("ALBUMARTIST", artist_name)
+        t = assign.get(path)
+        if t:
+            add("MUSICBRAINZ_TRACKID", t.get("recording_mbid"))
+            add("TRACKNUMBER", t.get("position"))
+            add("DISCNUMBER", t.get("disc"))
+            add("TITLE", t.get("title"))
+            add("ARTIST", t.get("artist_credit"))
+        return want
+
+    def _stamp_one(path):
+        """Stamp ONE track's tags and land them in a SINGLE rewrite.
+
+        Each of these tags used to be its own write, and every write was a
+        whole-file copy: mutagen saves beside the original and that temp is
+        renamed over it (mlo.atomic.rewrite_via), so ~18 tags meant ~18 copies
+        of the track, per track, one after another. The deferral holds them
+        for the one flush at the end instead. It is turned off even when a
+        write raised, so a file is never left holding changes nobody saved.
+
+        A VIDEO container has no deferral to lean on — every set_tag on one is
+        an ffmpeg stream copy of its own, eighteen of them for this stamp, on a
+        file that can be gigabytes — so its whole block goes through
+        set_video_tags, the one-pass writer the video pipeline uses. That path
+        can also re-emit a raw container as MKV (af.tag_output_path), which is
+        the file the album now holds.
+
+        True = this file carries the release identity now. The flush's own
+        verdict IS that answer: deferred, a write that cannot land (a full
+        disk, a read-only file) no longer raises out of set_tag, so calling it
+        stamped would report a tag the file does not have."""
+        try:
+            af = AudioFile(path)
+            if af.audio is None:
+                return False
+            want = _missing(af, path)
+            if not want:
+                return True
+            if str(getattr(af, "kind", "")) == "video":
+                return bool(af.set_video_tags(want))
+            # A stand-in for AudioFile (a test double) cannot defer: it writes
+            # per tag, exactly as it did before. Same guard mlo.autotag,
+            # mlo.audiometa and mlo.moods keep.
+            defer = hasattr(af, "defer_save")
+            if defer:
+                af.defer_save(True)
+            stamped = False
+            try:
+                for k, v in want.items():
+                    af.set_tag(k, v)
+                stamped = True
+            finally:
+                if defer and af.defer_save(False) is False:
+                    stamped = False
+            return stamped
+        except Exception:
+            return False
+
+    # Distinct FILES are independent — each rewrite_via works on a temp of its
+    # own beside its target and swaps it in with os.replace — so an album's
+    # tracks stamp side by side instead of one after another; nothing here is
+    # shared but the read-only identity above. Inside one file the writes stay
+    # strictly ordered.
+    workers = worker_count(load_config(), maximum=8, items=len(audio))
+    with ThreadPoolExecutor(max_workers=workers) as ex:
+        return sum(1 for ok in ex.map(_stamp_one, audio) if ok)
 
 # The import chain IS the Run All order, taken from the one place that keeps it
 # (`mlo.config.DEFAULT_RUN_ALL_ORDER`) — one order, one list, so a script added
@@ -188,11 +471,10 @@ def _phase(text):
 
 
 # The claim kinds that mean an album is being IMPORTED or FINISHED right now:
-# the download's own chain (`auto-import`), the import queue and every
-# single-album import (`import`), and a script run over the album (`scripts`).
-# The same three `server.api_queue` reads to keep such a release in the queue's
-# In progress section, so both surfaces agree about what "being imported" is.
-IMPORT_CLAIM_KINDS = ("auto-import", "import", "scripts")
+# every single-album import (`import`), and a script run over the album
+# (`scripts`). `server.job_locks` is the one registry that knows, so every
+# surface agrees about what "being imported" is.
+IMPORT_CLAIM_KINDS = ("import", "scripts")
 
 
 def _importing_now(album_dir):
@@ -228,17 +510,16 @@ def finish_album(album_dir, cfg=None, progress=None, force=None, release=None,
     the FIRST tag write, not from the first script. Claiming only at the chain
     left the network lookups before it unprotected: two presses on one album
     could drop arrived values and write metadata into the same files at the same
-    time, and an auto-import's background chain was unlocked for its whole
-    look-up phase. A script that MOVES the album takes the claim with it
+    time, and a background chain was unlocked for its whole look-up phase. A
+    script that MOVES the album takes the claim with it
     (:func:`_resolve_moved_album`'s folder, and the chain's own follow), so the
     steps after the chain — the pending marker, the cache invalidation, the
     gap report — hold the album where it is NOW.
 
     The single call every import path makes after an album is on disk — the
-    wizard's finish, the downloads page's one-click import, the sequential
-    import queue, the bulk queue, the Soulseek auto-importer and the wish /
-    artist-watch pipeline behind it, so what an album ends up as cannot depend
-    on which button was pressed. Returns ``{"path", "chain", "scripts",
+    wizard's finish, the downloads page's one-click import and the bulk queue
+    — so what an album ends up as cannot depend on which button was pressed.
+    Returns ``{"path", "chain", "scripts",
     "errors", "chained", "chain_off", "note", "autonomy", "dropped",
     "skipped_families", "settled", "release_identity"}``:
     ``scripts`` is one
@@ -330,7 +611,7 @@ def finish_album(album_dir, cfg=None, progress=None, force=None, release=None,
 
     *wait* decides what the chain does when another job already holds the
     album. ``True`` (every import path — the bulk queue, the one-click
-    downloads import, the Soulseek importer, a wish landing) queues behind it
+    downloads import) queues behind it
     and SAYS so while it waits (``script_runners.run_chain``): an import must
     not skip its chain, because the album is already on disk and the user asked
     for it to be finished. ``False`` is the user's own press of "Run the import
@@ -391,28 +672,6 @@ def finish_album(album_dir, cfg=None, progress=None, force=None, release=None,
                              release=release, wait=wait)
 
 
-def _refresh_shares_after_import():
-    """Ask slskd to re-index the library after an import that ran NO chain.
-
-    An import rewrites the library — the album moves in, its tags and files
-    change — and slskd keeps serving the view it indexed at boot until it
-    re-scans (`soulseek.refresh_shares_soon`, debounced). A chain's own script
-    runs already ask for that (`server.script_runners` refreshes once per run),
-    so the only exits that have to ask from here are the ones that finish an
-    import WITHOUT running a chain: `import_auto_scripts` off / every id held
-    for review, and a review stop. Without this those albums simply were not in
-    the share — a search for them found nothing — until some later run happened
-    to refresh.
-
-    Never raises: a share refresh must not fail an import that already
-    happened."""
-    try:
-        from server import soulseek
-        soulseek.refresh_shares_soon()
-    except Exception:
-        traceback.print_exc()
-
-
 def _finish_album(path, cfg, progress=None, force=None, release=None,
                   wait=True):
     """The body of :func:`finish_album`, already holding *path*.
@@ -434,6 +693,20 @@ def _finish_album(path, cfg, progress=None, force=None, release=None,
         out["errors"].append("album folder not found")
         out["note"] = "the album folder is not there"
         return out
+    # A whole-CD IMAGE RIP — one audio file plus the .cue that describes it —
+    # becomes one file per track before anything below reads the album. The
+    # tracklist recorded next, the tags, the naming script and the grader's
+    # per-track checks all assume one file per song; an album left as an image
+    # is a single file where the whole chain expects a tracklist. Idempotent:
+    # a folder already split, or never an image rip, is untouched, which is
+    # what makes this safe to call from every path into the funnel.
+    try:
+        from mlo.cue import split_image_rip
+        split_image_rip(path, cfg, log_fn=lambda line: print(f"[mlo] {line}"))
+    except Exception:
+        # A folder that cannot be split is imported as it always was — the
+        # image rip is a legitimate album, just a less useful one.
+        traceback.print_exc()
     # What the RIP itself says the album holds, recorded before anything reads
     # the album: a folder that arrived with part of a CD rip and its .cue/.log
     # has no other way to state that the rest of the disc is missing — the
@@ -485,9 +758,6 @@ def _finish_album(path, cfg, progress=None, force=None, release=None,
         out["chain"] = []
         out["note"] = (f"stopped for review at {policy['stop']} — the script "
                        "chain has not run")
-        # The album is in the library and no chain will run over it here, so
-        # this is the last word on the share (see _refresh_shares_after_import).
-        _refresh_shares_after_import()
         return _report_gaps(out, cfg, policy, path)
     # WHAT IT ARRIVED WITH goes now, before every writer below and before the
     # chain: the four families this import decides are the import's, and each
@@ -537,17 +807,16 @@ def _finish_album(path, cfg, progress=None, force=None, release=None,
     #
     # WHERE the values come from is the whole point: the release payload the
     # acquisition ALREADY resolved — the edition the user picked in the
-    # wizard, or the pressing the job downloaded and verified (never the
-    # release the wish was saved for: `_import` hands `finish_album` the
-    # release it actually fetched). Nothing is looked up when it is in hand,
+    # wizard, or the pressing a download resolved and verified (never an
+    # unrelated release: `finish_album` is handed the release the caller
+    # actually fetched). Nothing is looked up when it is in hand,
     # and when the caller handed none the one cached resolution below is the
     # same one the genres step would make.
     #
     # The medium (MEDIA) has no other writer on this path: script 1 only
     # normalizes SOURCE, `server.main._tag_media_for_albums` GUESSES the
     # medium from the folder's own files (log+cue -> CD, else Digital Media,
-    # nothing at all when it cannot classify the rip) and the Soulseek
-    # importer writes the coarse "CD"/"Digital Media" of its candidate — so a
+    # nothing at all when it cannot classify the rip) — so a
     # pressing MusicBrainz states as Vinyl, SACD, Cassette or Web read as a
     # blank cell or the wrong word until somebody typed it in. WRITE, DON'T
     # OVERWRITE: `fill_release_identity` keeps every value that is already
@@ -604,7 +873,7 @@ def _finish_album(path, cfg, progress=None, force=None, release=None,
         if not rel and album_mbid:
             # The identity the import just stamped is enough to ask for the
             # release the genres belong to — a release-GROUP id resolves to its
-            # best edition through the same choice policy the wish path uses,
+            # best edition through the same choice policy the import path uses,
             # and the lookup is cached. No identity at all skips the step.
             try:
                 from server import integrations as intg
@@ -776,9 +1045,6 @@ def _finish_album(path, cfg, progress=None, force=None, release=None,
         out["note"] = _with_families(_chain_off_note(cfg), out["skipped_families"])
         _invalidate_caches(path)        # the steps above wrote tags/files
         _clear_pending(path, cfg, chained=False, chain_off=True)
-        # Nothing will run over this album (no chain is configured), so nothing
-        # else asks slskd to index what just joined the library.
-        _refresh_shares_after_import()
         return out
 
     # The folder the chain ends on, filled by `run_chain` (`final`): a script
@@ -973,7 +1239,7 @@ def chain_summary(result):
     """The ONE honest line about what an import's script chain did.
 
     Every surface that reports an import the caller did not watch — the job
-    log, the wish notification, the queue row — says it with this, so the
+    log, the import notification — says it with this, so the
     claim is the same everywhere and a chain that did not run can never be
     reported as one that did. "" for a result that says nothing about a chain
     at all (a caller's own fallback dict, the auto-importer's job result before
@@ -1137,8 +1403,8 @@ def _resolve_moved_album(path, album_mbid, album_rgid=""):
     The chain's beets tagging / organize steps rename an album folder to its
     canonical layout, so the path a caller handed in can be gone by the time
     the chain returns. Callers build links from what they get back (the
-    wizard's "Open album", the bulk queue's row, the Soulseek importer's job
-    result), and a link to a folder that no longer exists is a dead end on a
+    wizard's "Open album", the bulk queue's row), and a link to a folder that
+    no longer exists is a dead end on a
     page that cannot say why. Resolution follows the album's own MusicBrainz
     id through the library index — the same self-repair the favorites and
     playlists use — and falls back to the stored path when the id is unknown
@@ -1176,11 +1442,10 @@ def _album_dir(path):
 def _audio_files(folder):
     """Every audio file under *folder*, dot-dirs pruned.
 
-    Uses the download-side extension set (``server.soulseek_auto``): an import
-    can be a folder of raw WAVs/APEs that the chain converts afterwards, and
+    Uses the download-side extension set (``_AUDIO_EXTS``): an import can be
+    a folder of raw WAVs/APEs that the chain converts afterwards, and
     ``mlo.paths``'s library sets do not cover those.
     """
-    from server.soulseek_auto import _AUDIO_EXTS
     out = []
     for root, dirs, files in os.walk(folder):
         dirs[:] = [d for d in dirs if not d.startswith(".")]
@@ -2890,8 +3155,6 @@ def acoustid_submit(paths, cfg=None):
                 "tracks": {"total": 0, "submitted": 0, "known": 0,
                            "skipped": 0, "failed": 0}}
 
-    from server.soulseek_auto import _AUDIO_EXTS
-
     files = []
     for p in paths or []:
         try:
@@ -2956,10 +3219,10 @@ def release_group_mismatch(match_row, release_group_id):
     The release-group id is what decides — the fingerprint names the group the
     audio is, the import was matched to *want* — and any further disagreement
     ``mlo.acoustid.cross_check`` found (a title or an artist only the tags
-    claim) is appended. Used by the Soulseek auto-import as a *verification* of
-    an already accepted download: a conflict is worth telling the user about,
-    never worth throwing the album away over, and it never overwrites the
-    release the import was matched to.
+    claim) is appended. Used as a *verification* of
+    an already accepted acquisition: a conflict is worth telling the user
+    about, never worth throwing the album away over, and it never overwrites
+    the release the import was matched to.
     """
     row = match_row or {}
     want = str(release_group_id or "").strip()
@@ -3252,7 +3515,7 @@ def stamp_album_source(album_dir, cfg=None, *, value="", release=None,
     order is evidence, never invention — *value* (a caller that already knows,
     i.e. the wizard's own answer), the RELEASE's own store URLs
     (`mlo.digital_source`, read from the payload or from MusicBrainz'
-    url-relations) and *provider* (the acquisition's own statement: "Soulseek",
+    url-relations) and *provider* (the acquisition's own statement, e.g.
     "YouTube"). Nothing states one → nothing is written, the state is
     ``asked``, and the import's own report hands the decision to the user (the
     ``source`` family in ``mlo.import_policy``).
@@ -3773,7 +4036,7 @@ def settle_digital_import(album_dir, cfg=None, *, release=None, provider="",
 # Identity tags for a release-driven import
 # --------------------------------------------------------------------------- #
 def _release_for_stamping(release):
-    """A release dict with the keys the Soulseek stamper reads.
+    """A release dict with the keys the MB identity stamper reads.
 
     Callers hand over what they have (``release_mbid``/``title``/``artists``
     from the wizard or the discovery providers); the stamper wants
@@ -3826,8 +4089,8 @@ def _stamp_release(album_dir, release, cfg):
     in neither number, as before).
 
     The MusicBrainz ids (+ per-track recording ids) come from
-    ``server.soulseek_auto._stamp_mb_tags`` — the same stamper the Soulseek
-    import uses, so a bulk import and an auto-import tag identically. On top:
+    ``_stamp_mb_tags`` — the one writer of the release identity, so every
+    import path tags identically. On top:
     GENRE from the full per-track genre chain (RateYourMusic → ListenBrainz →
     MusicBrainz → iTunes → Wikidata → Last.fm → Discogs → Deezer, see
     ``integrations.genre_chain``), already merged per track and capped at
@@ -3846,11 +4109,10 @@ def _stamp_release(album_dir, release, cfg):
     from mlo.autotag import genre_count, trim_genres
     from mlo.genres import normalize_genres
     from server import integrations as intg
-    from server import soulseek_auto
 
     rel = _release_for_stamping(release)
     try:
-        soulseek_auto._stamp_mb_tags(album_dir, rel)
+        _stamp_mb_tags(album_dir, rel)
     except Exception:
         traceback.print_exc()
     files = _audio_files(album_dir)
@@ -3900,7 +4162,7 @@ def _stamp_release(album_dir, release, cfg):
             ok = True
             try:
                 tags = {}
-                disc, pos = soulseek_auto._parse_trackno(path)
+                disc, pos = _parse_trackno(path)
                 names = genres.get((disc, pos)) or []
                 if names and not str(af.get_tag("GENRE") or "").strip():
                     # Canonical, and a LIST: `normalize_genres` resolves each
@@ -4116,7 +4378,7 @@ _job = {"id": None, "kind": None, "status": "idle", "started": None,
 
 
 def job_state():
-    """The bulk job the UI polls: same shape as ``soulseek_auto.job_state()``."""
+    """The bulk job the UI polls."""
     with _job_lock:
         return dict(_job, items=[dict(x) for x in _job["items"]])
 

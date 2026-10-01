@@ -358,7 +358,6 @@ function StreamingImportDialog({ onClose, onImported }: {
   const [error, setError] = useState("");
   const [busy, setBusy] = useState<"" | "check" | "import">("");
   const effectiveParentAlbums = parentAlbums ?? !!cfg?.playlist_import_parent_albums;
-  const queueTrackWishes = cfg?.playlist_import_unmatched === "wish";
   const createEmpty = cfg?.playlist_import_create_empty !== false;
 
   const run = async (dryRun: boolean) => {
@@ -451,9 +450,6 @@ function StreamingImportDialog({ onClose, onImported }: {
             <span className="block text-[11px] text-zinc-500 mt-0.5">{t("plimport.parent_albums_help")}</span>
           </span>
         </label>
-        {queueTrackWishes && (
-          <div className="text-[11px] text-zinc-500">{t("plimport.hint.wish")}</div>
-        )}
         {!createEmpty && (
           <div className="text-[11px] text-zinc-500">{t("plimport.hint.create_empty")}</div>
         )}

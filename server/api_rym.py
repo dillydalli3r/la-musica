@@ -68,6 +68,13 @@ SOURCE = "rym"
 # the whole reason this import exists.
 SESSION_COOKIE = "session"
 
+# The cookie Cloudflare hands the browser that passed its challenge, and which
+# RYM only honours alongside that browser's User-Agent and network. It is NOT
+# HttpOnly, but it is what a live request actually needs: a paste with every
+# session cookie and no `cf_clearance` still meets the interstitial, so the
+# panel has to name it instead of calling the signed-in cookie enough.
+CLEARANCE_COOKIE = "cf_clearance"
+
 
 def _is_rym_host(host: str) -> bool:
     """Is *host* rateyourmusic.com itself, or a subdomain of it?
@@ -122,21 +129,43 @@ def _save_notes(cfg: dict, text: str) -> None:
 def stored_warnings(names) -> List[str]:
     """What the stored credential is worth, in sentences worth acting on.
 
-    `session` is the pair rateyourmusic.com uses to recognise a signed-in
-    account: without it — or with nothing stored at all — RYM answers as a
-    guest, and a release it will not serve falls back to the archived page
-    instead of the live one. Empty when there is nothing to say.
+    Two independent ways a stored paste fails on the live site, so two
+    sentences:
+
+      * `session` is the pair rateyourmusic.com uses to recognise a signed-in
+        account — without it (or with nothing stored at all) RYM answers as a
+        guest, and a release it will not serve falls back to the archived page
+        instead of the live one; and
+      * `cf_clearance` is the pair Cloudflare hands the browser that passed
+        its challenge, and RYM honours it only alongside that browser's
+        `rym_user_agent` and network — a paste with every session cookie and
+        no clearance still meets the interstitial, so the warning says so by
+        name rather than implying the credential is complete.
+
+    Both are listed (a paste can be missing either or both), in that order.
+    Empty when there is nothing to say.
     """
     if not names:
         return ["no RateYourMusic cookie saved — rateyourmusic.com is asked as "
                 "a guest, so a release it will not serve is read from the "
                 "archived copy instead"]
+    out = []
     if SESSION_COOKIE not in names:
-        return [f"{len(names)} rateyourmusic.com cookie(s) saved, none named "
-                f"`{SESSION_COOKIE}` — that is the pair rateyourmusic.com uses "
-                "to recognise a signed-in account, so RYM still answers as a "
-                "guest; export cookies.txt again while signed in"]
-    return []
+        out.append(f"{len(names)} rateyourmusic.com cookie(s) saved, none "
+                   f"named `{SESSION_COOKIE}` — that is the pair "
+                   "rateyourmusic.com uses to recognise a signed-in account, "
+                   "so RYM still answers as a guest; export cookies.txt again "
+                   "while signed in")
+    if CLEARANCE_COOKIE not in names:
+        out.append("the saved cookies carry no `cf_clearance` — that is the "
+                   "pair Cloudflare hands the browser that passed its "
+                   "challenge, and it counts only alongside the "
+                   "`rym_user_agent` and network of THAT browser; export "
+                   "cookies.txt from it (a fresh, signed-in tab of the same "
+                   "browser), and set `rym_user_agent` to the User-Agent it "
+                   "sends if that is not the built-in Chrome one — otherwise "
+                   "RYM keeps answering with the challenge")
+    return out
 
 
 def file_warnings(cookies) -> List[str]:

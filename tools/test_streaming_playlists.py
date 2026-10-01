@@ -26,8 +26,8 @@ needs on top of the shared ground:
 
 Plus URL recognition (each service, a track/album link pasted where a playlist
 link belongs, and a URL pasted for the WRONG service), the report shape, the
-create/empty/duplicate rules, and the parent-album path queueing an ALBUM (never
-a track).
+create/empty/duplicate rules, the unmatched-track report (nothing is queued for
+it), and the parent-album path queueing an ALBUM (never a track).
 
 Run:  python tools/test_streaming_playlists.py   (exit 0 pass, 1 fail)
 """
@@ -169,8 +169,7 @@ sp._queue_album = lambda title, artist, source, page_url: (
     or {"ok": True, "matched": True, "queued": 1, "albums": [{"mbid": "rel-1"}]})
 sp._queue_track = lambda title, artist, source, page_url: (
     TRACKS_QUEUED.append({"title": title, "artist": artist, "source": source})
-    or {"ok": True, "matched": False, "by_name": True, "queued": 0,
-        "wish_id": 7, "note": "on the queue to be searched by name"})
+    or {"ok": True, "matched": False, "queued": 0, "note": "added by name"})
 
 
 def reset_queues():
@@ -696,10 +695,17 @@ sp._queue_album = _real_queue_album
 print("\n[8] unmatched / empty / dry run")
 reset_queues()
 wished = sp.import_playlist(DZ_URL, cfg=dict(BASE_CFG, playlist_import_unmatched="wish"))
-check("`unmatched: wish` queues each unmatched TRACK by name",
-      [q["title"] for q in TRACKS_QUEUED] == ["Missing Song"], TRACKS_QUEUED)
-check("...and the row says a wish was saved",
-      wished["report"]["tracks"][3]["queued"] == "wish",
+check("`unmatched: wish` queues nothing — there is no wish queue any more",
+      not TRACKS_QUEUED and not ALBUMS_QUEUED, (ALBUMS_QUEUED, TRACKS_QUEUED))
+check("...and the unmatched track is REPORTED instead, with its identity",
+      wished["report"]["unmatched_tracks"]["mode"] == "wish"
+      and wished["report"]["unmatched_tracks"]["queued"] == []
+      and [t["title"] for t in wished["report"]["unmatched_tracks"]["tracks"]]
+      == ["Missing Song"]
+      and wished["report"]["unmatched_tracks"]["tracks"][0]["artist"] == "Nobody",
+      wished["report"]["unmatched_tracks"])
+check("...and the row itself queues nothing",
+      wished["report"]["tracks"][3]["queued"] == "",
       wished["report"]["tracks"][3])
 
 reset_queues()
@@ -711,6 +717,9 @@ check("with both on, a track whose album was queued is not ALSO queued by name",
 check("...and the track row says the album was queued",
       both["report"]["tracks"][3]["queued"] == "album",
       both["report"]["tracks"][3])
+check("...and the track is NOT listed as an unmatched track: its album covers it",
+      both["report"]["unmatched_tracks"]["tracks"] == [],
+      both["report"]["unmatched_tracks"])
 
 ROUTES[DZ_API] = ({
     "title": "Nothing here",

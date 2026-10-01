@@ -1,3 +1,4 @@
+import { useEffect } from "react";
 import { create } from "zustand";
 
 import { heldBy } from "./lib/locks";
@@ -128,6 +129,14 @@ interface Store {
   pruneProgress: (live: string[], now: number) => void;
   playing: string | null;
   setPlaying: (p: string | null) => void;
+  /** True while a lyric editor is open on the playing track (the docked pane
+   *  or the fullscreen player set it through `useLyricsEditLock`). The player
+   *  bar's `handleEnded` reads it and holds the queue — pauses — instead of
+   *  advancing: the words being edited belong to THIS file, and an automatic
+   *  advance (the gapless handover included) would swap it out from under the
+   *  reader mid-edit. Cleared when the editor closes or its save lands. */
+  lyricsEditing: boolean;
+  setLyricsEditing: (v: boolean) => void;
   queue: QueueTrack[];
   setQueue: (q: QueueTrack[]) => void;
   /** Append to the queue without restarting the current track. */
@@ -390,6 +399,8 @@ export const useStore = create<Store>((set) => ({
     }),
   playing: null,
   setPlaying: (playing) => set({ playing }),
+  lyricsEditing: false,
+  setLyricsEditing: (lyricsEditing) => set({ lyricsEditing }),
   // The queue and the row are the bulk of a restored session (see
   // `PLAYER_STATE_KEY`): a reload comes back to the same list, on the same
   // track, paused. `playing` above stays null through every one of these.
@@ -519,6 +530,22 @@ export const useStore = create<Store>((set) => ({
     }, 250);
   },
 }));
+
+/** Hold the queue on the track a lyric editor is open on: while `open` the
+ *  store's `lyricsEditing` is set, which PlayerBar's `handleEnded` reads to
+ *  pause instead of advancing — a track change would swap the file being
+ *  edited out from under the reader, and the gapless handover would do it
+ *  without even a load gap. The surfaces that open an editor (LyricsSidebar
+ *  and NowPlayingView) call this; it is cleared when the editor closes or its
+ *  save lands — both close the editor. */
+export function useLyricsEditLock(open: boolean) {
+  useEffect(() => {
+    useStore.getState().setLyricsEditing(open);
+    // Leaving the surface (the pane closing, the track changing) releases the
+    // lock too: no render with `open === false` is guaranteed on unmount.
+    return () => useStore.getState().setLyricsEditing(false);
+  }, [open]);
+}
 
 let persistenceStarted = false;
 

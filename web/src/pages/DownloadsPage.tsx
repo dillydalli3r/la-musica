@@ -366,8 +366,8 @@ function CachedAlbumCard({ row, onPlay, onRemove, size }: {
  *
  *  Downloading happens where the music already is — the album, artist, playlist
  *  and player download buttons — so this page has no download control of its
- *  own. Saving a file to disk is Export's job, and the Soulseek page owns the
- *  staging folder downloads land in; neither is this. */
+ *  own: it lists what is already cached and is where a cached album is evicted.
+ *  Saving a file to disk is Export's job, not this. */
 export default function DownloadsPage() {
   const qc = useQueryClient();
   const [view, setView] = useState<DownloadView>("grid");

@@ -119,7 +119,7 @@ with open(payload_path, "w", encoding="utf-8") as fh:
 
 # The strip itself: node + Vite serve the real page on a scratch port, and the
 # frames above are pushed into the store it draws from. Exit 2 is this repo's
-# "the tooling is not installed" (see tools/check_queue_view.mjs).
+# "the tooling is not installed" (the exit-2 convention every tools/check_*.mjs follows).
 ui = subprocess.run(["node", os.path.join("tools", "check_chain_bar.mjs"), payload_path],
                     cwd=REPO, capture_output=True, text=True)
 if ui.returncode == 0:

@@ -11,8 +11,8 @@ this module is the HTTP surface:
 the moment a track actually starts (a resume or a seek is not a new play; a
 repeat is), and the mobile client calls the same route from its own play path,
 so there is one definition of "a play" for every client. It answers to the
-caller's own scope (`auth.current_user`), exactly like the ratings and wishes
-stores — two people on one server never see each other's history.
+caller's own scope (`auth.current_user`), exactly like the ratings store —
+two people on one server never see each other's history.
 
 `GET /api/top` is READ-ONLY and library-scoped: it returns the caller's own
 most-played tracks, albums or artists inside one closed window, with each row's

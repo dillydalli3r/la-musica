@@ -62,6 +62,17 @@ export function queueTrackOf(item: RecommendItem): QueueTrack {
  *  the two ends equal. */
 export const QUEUE_BATCH = 5;
 
+/** How many rows the queue keeps BETWEEN the playing one and its end.
+ *
+ *  The batch and the runway are the same number on purpose: the player asks
+ *  for one more batch while fewer than this many rows are still up next, so
+ *  the queue is topped up before the reader reaches its end — the count grows
+ *  while there is music to cover (31/36, then 32/37) instead of jumping in the
+ *  same breath as the next press (31/32 → 32/37). Keeping it equal to
+ *  QUEUE_BATCH means one batch is always enough to restore the runway, so the
+ *  ask cannot loop. */
+export const QUEUE_RUNWAY = QUEUE_BATCH;
+
 /** The batch that keeps a playing queue going: tracks similar to `paths` (the
  *  queue itself — the seed set AND the exclusion set), answered by the
  *  library's own tags with nothing fetched online.

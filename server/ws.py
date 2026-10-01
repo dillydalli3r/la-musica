@@ -9,7 +9,7 @@ pre-accept 403.
 
 This module also owns the frame plumbing: the client set, the end-of-job hook,
 and the ``_broadcast`` every producer pushes through (the script runners, and
-the Soulseek watchers in ``server.main``). The event loop that worker threads
+the watchers in ``server.main``). The event loop that worker threads
 relay onto is installed by ``server.main``'s lifespan via ``set_main_loop``.
 """
 import asyncio
@@ -156,14 +156,14 @@ async def ws_events(ws: WebSocket):
 
     Separate from /ws/progress because the two have different consumers and
     different lifetimes — the progress socket is the page that is running a
-    script, this one is every client that wants to know about wishes and
+    script, this one is every client that wants to know about imports and
     downloads, which may be a phone in another room. It is also the one route
     where the token travels in the query string: a browser WebSocket cannot
     set an Authorization header, and the desktop/mobile shell's origin is not
     the API's, so neither the header nor a same-site cookie is available.
 
     `?since=<unix seconds>` replays what the ring still holds, so a client
-    that was asleep or reconnecting does not miss the wish that landed while
+    that was asleep or reconnecting does not miss the event that landed while
     it was away.
     """
     token = (ws.query_params.get("token") or "").strip() or (ws.cookies.get("mlo_session") or "")

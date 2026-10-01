@@ -691,13 +691,19 @@ def optimize_artist_image(folder, cfg, path=None) -> dict:
         out["path"] = None
         out["reason"] = "no artist image"
         return out
+    # ONE open for the file's two questions: the pixel size the policy and the
+    # audit compare against, and — when the image actually has to be re-encoded
+    # — the pixels themselves. It used to open the file twice (decode_size for
+    # the size, then a second Image.open to decode), and this pass visits one
+    # image per artist folder across the whole library.
     try:
-        before = decode_size(src)
+        raw = Image.open(src)
     except Exception:
-        before = None
-    if before is None:
+        raw = None
+    if raw is None:
         out["error"] = "does not decode — re-fetch it"
         return out
+    before = raw.size
     out["before"] = before
 
     aspect, tolerance, _target, max_side = image_policy(cfg)
@@ -706,9 +712,17 @@ def optimize_artist_image(folder, cfg, path=None) -> dict:
     png = os.path.splitext(src)[1].lower() == ".png"
     ext = ".png" if png else ".jpg"
     try:
-        with Image.open(src) as raw:
-            raw.load()
-            img = raw.copy()
+        raw.load()
+        img = raw.copy()
+    except Exception as e:
+        out["error"] = f"could not be re-encoded: {e}"
+        return out
+    finally:
+        try:
+            raw.close()
+        except Exception:
+            pass
+    try:
         img = _prepare(img, aspect, ceiling, tolerance)
         if not png:
             img = _flatten(img)

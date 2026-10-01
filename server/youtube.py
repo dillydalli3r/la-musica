@@ -178,7 +178,7 @@ def ytdlp_available(config=None):
 def enabled(config):
     """Whether YouTube downloads are on (Settings → Videos).
 
-    The acquisition branch (server.soulseek_auto's YouTube route) asks this
+    The acquisition branch (the YouTube route in the import pipeline) asks this
     BEFORE it searches anything: with the switch off, `best_candidate` returns
     None for every track, and a caller that cannot see the switch would report
     "not found on YouTube" about a release it was never allowed to look for.

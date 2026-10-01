@@ -19,7 +19,6 @@ from mlo.paths import move_path, trash_dir
 from server import auth as auth_mod
 from server import mbresolve, tagcache
 from server.api_common import (_in_music_folder,
-                               _refresh_slskd_shares_soon,
                                is_audio_file,
                                load_config)
 
@@ -308,11 +307,10 @@ def trash_delete(req: TrashDelete = TrashDelete(), request: Request = None):
     if deleted:
         # The entries are gone for good, so their origin records go too.
         _manifest_forget(trash, deleted)
-        # Same invalidation the move endpoint does: the library, MB cache and
-        # slskd shares all still describe the deleted files.
+        # Same invalidation the move endpoint does: the library and MB cache
+        # still describe the deleted files.
         tagcache.invalidate_album(trash)
         mbresolve.invalidate()
-        _refresh_slskd_shares_soon()
     return {"deleted": deleted, "failed": failed, "freed": freed}
 
 
@@ -381,5 +379,4 @@ def trash_restore(req: TrashRestore = TrashRestore(), request: Request = None):
         _manifest_write(trash, origins)
         tagcache.invalidate_album(*restored_roots)
         mbresolve.invalidate()
-        _refresh_slskd_shares_soon()
     return {"restored": restored, "failed": failed}

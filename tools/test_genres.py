@@ -14,8 +14,7 @@ What this pins, with every HTTP seam stubbed (no network at all):
     asked (`asked`/`stopped_after`), and a source that cannot answer is skipped
     BEFORE any request — no credential (RateYourMusic's cookie, Discogs'
     token, Last.fm's key, Spotify's id+secret), a RateYourMusic that already
-    refused this cookie, or a documented no-op (Soulseek) — with the reason in
-    `notes`/`skipped`;
+    refused this cookie — with the reason in `notes`/`skipped`;
   * every source that IS asked answers at its best tier: the per-track tiers
     answer per track where the source has one (MusicBrainz recording,
     ListenBrainz recording, iTunes `primaryGenreName`, Last.fm
@@ -483,15 +482,16 @@ full_stack()
 got = chain(limit=20)
 
 # RateYourMusic's album genres first, then MusicBrainz's own per-recording
-# answer and its release/release-group/artist tiers, then ListenBrainz's
+# answer and its release-group/release/artist tiers, then ListenBrainz's
 # per-recording tags and its release-group / artist buckets, then iTunes,
 # TheAudioDB (its own per-track row, then the album row), Wikidata and
 # Bandcamp — the shipped order, source by source.
 assert got["per_track"][(1, 1)] == [
     "Heavy Metal", "Groove Metal",                    # rateyourmusic (album)
     "Alternative Metal",                              # musicbrainz (recording)
+    "Progressive Rock",                               # musicbrainz (release group)
     "Rock",                                           # musicbrainz (release)
-    "Progressive Rock", "Art Rock",                   # musicbrainz (rg → artist)
+    "Art Rock",                                       # musicbrainz (artist)
     "post-metal", "sludge metal",                     # listenbrainz (recording)
     "Hard Rock",                                      # itunes (per track)
     "Shoegaze", "Dream Pop",                          # theaudiodb (per track)
@@ -518,9 +518,9 @@ assert "sludge metal" in got["per_track"][(1, 1)]     # count 4 free tag kept
 # looks its entries up, so the route can hand it straight over. Every source
 # that answered here answered per track (TheAudioDB's row is the exception,
 # and it is the source's own album row, which its track row precedes).
-from server import soulseek_auto
+from server import imports
 
-assert soulseek_auto._parse_trackno(FILE_ONE) in got["per_track"]
+assert imports._parse_trackno(FILE_ONE) in got["per_track"]
 assert got["sources"][FILE_ONE] == ["rateyourmusic", "musicbrainz",
                                     "listenbrainz", "itunes", "theaudiodb",
                                     "wikidata", "bandcamp"], got["sources"]
@@ -548,7 +548,7 @@ reversed_got = intg.genre_chain(artist="Test Artist", album="Test Album",
                                 files=[FILE_ONE])
 assert reversed_got["per_track"][(1, 1)] == ["Space Rock", "Art Rock",
                                              "Hard Rock", "Alternative Metal",
-                                             "Rock", "Progressive Rock"], \
+                                             "Progressive Rock", "Rock"], \
     reversed_got["per_track"][(1, 1)]
 assert reversed_got["sources"][FILE_ONE] == ["wikidata", "itunes", "musicbrainz"], \
     reversed_got["sources"]

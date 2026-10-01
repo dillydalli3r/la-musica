@@ -20,7 +20,7 @@ live service before being wired in:
   through the entity's Wikidata URL relation.
 
 MusicBrainz stays the identity anchor for the whole app: anything that can be
-wished for or downloaded resolves to a release-group MBID through
+added or downloaded resolves to a release-group MBID through
 `resolve_release_group` (via the shared, rate-limited `integrations.search_mb`
 cache), and MusicBrainz is the final fallback for every chain here — so a
 discovery provider going dark degrades to "fewer, plainer results", never to
@@ -1728,7 +1728,7 @@ def resolve_release_group(artist, album, cfg=None, timeout=None):
     """Best MusicBrainz release-group for an artist+album pair.
 
     This is the bridge from a discovery row (Deezer/iTunes) to something the
-    app can actually wish for and download. Cached by integrations for 30 min;
+    app can actually add and download. Cached by integrations for 30 min;
     tries the strict fielded query first and relaxes to free text after.
     """
     artist = (artist or "").strip()

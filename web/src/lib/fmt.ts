@@ -1,7 +1,7 @@
 /** Shared display formatters: audio tech readouts, dates, durations, counts.
  *
  * Imported across cards, tables, player, and progress surfaces (see
- * AlbumCard, LibraryPage, PlayerBar, ProgressBar, SoulseekPage). */
+ * AlbumCard, LibraryPage, PlayerBar, ProgressBar). */
 
 /** Shared compact audio-format readout: "FLAC 16/44.1 · 1022 kbps" —
  * codec with its bit depth/sample rate first, bitrate last. */
@@ -184,7 +184,7 @@ export function fmtDuration(sec: number | undefined): string {
 
 /** A progress count: a whole number reads as itself, a measured fraction keeps
  *  one decimal ("12.4") — so a bar can show the sub-unit part of the work
- *  slskd/bytes/an LLM chunk actually reported instead of rounding it away.
+ *  a worker/bytes/an LLM chunk actually reported instead of rounding it away.
  *  Guards a float that arrives as a long expansion (0.30000000000000004). */
 export function fmtCount(n: number | null | undefined): string {
   if (n === null || n === undefined || !Number.isFinite(n)) return "0";
@@ -216,7 +216,7 @@ export function fmtSteps(steps: number[] | null | undefined): string | null {
 }
 
 /** A percentage readout: whole percent when it is one, one decimal when the
- *  measurement carries it (slskd's byte share does). */
+ *  measurement carries it (a byte share does). */
 export function fmtPercent(p: number | null | undefined): string {
   const v = Math.max(0, Math.min(100, Number(p ?? 0) || 0));
   return `${fmtCount(v)}%`;

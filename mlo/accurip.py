@@ -45,7 +45,7 @@ from .paths import AUDIO_EXTS, app_data_dir, fsync_dir
 from .stats import (is_audio_file, _collect_targets, new_stats,
                     _make_pbar, _pbar_skip, _pbar_update, worker_count)
 from .subproc import run_tool
-from .tagtext import canonical_text
+from .tagtext import is_cd_media
 from .ui import log, c, Color, print_header
 
 # ----------------------------------------------------------------------
@@ -885,28 +885,39 @@ def run_generate_accurip(config):
         log("No albums found.")
         return stats
 
-    # Filter to CD albums only (any track's MEDIA==CD)
-    cd_albums = []
-    for ad in album_dirs:
+    # Filter to CD albums only (any track's MEDIA==CD). This is a container
+    # parse per file until the first CD track answers — and an album that is
+    # NOT a CD pays for ALL of its files — which was the one serial tag-read
+    # pass left in this script. The albums are independent folders (each lane
+    # reads its own files and returns one bool), so they run in the same
+    # bounded lanes as everything else, and mapping the hits back over
+    # `album_dirs` keeps the album order the run was given.
+    def _album_is_cd(ad):
         try:
-            has_cd = False
             for f in os.listdir(ad):
                 if not f.lower().endswith(AUDIO_EXTS):
                     continue
                 try:
                     af = AudioFile(os.path.join(ad, f))
-                    # Compared through the canonical spelling: a library
-                    # another tagger wrote as "cd" names the same medium, and
-                    # mlo.tagtext is the one rule for what "CD" means.
-                    if canonical_text("MEDIA", af.get_tag("MEDIA")) == "CD":
-                        has_cd = True
-                        break
+                    # mlo.tagtext.is_cd_media is the one rule for "is this
+                    # medium a CD": a library another tagger wrote as "cd" names
+                    # the same medium, and an HDCD's AccurateRip data is the
+                    # same disc's data.
+                    if is_cd_media(af.get_tag("MEDIA")):
+                        return True
                 except Exception:
                     continue
-            if has_cd:
-                cd_albums.append(ad)
         except OSError:
-            continue
+            pass
+        return False
+
+    lanes = worker_count(config, maximum=8, items=len(album_dirs))
+    if lanes > 1 and len(album_dirs) > 1:
+        with ThreadPoolExecutor(max_workers=lanes) as ex:
+            cd_hits = list(ex.map(_album_is_cd, album_dirs))
+    else:
+        cd_hits = [_album_is_cd(ad) for ad in album_dirs]
+    cd_albums = [ad for ad, hit in zip(album_dirs, cd_hits) if hit]
 
     if not cd_albums:
         log("No CD albums (MEDIA=CD) found for AccurateRip.")

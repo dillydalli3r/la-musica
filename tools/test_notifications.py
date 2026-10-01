@@ -6,8 +6,6 @@ Every outcome the user asked to hear about is announced on the ONE bus
 entry (tools/test_notifications.cjs). This suite covers the server half for the
 sites that belong to this task:
 
-* a finished import run (`server/import_queue.py`) — success and failure, each
-  announced ONCE, carrying the route the tray should open;
 * a finished script run (`server/main.py` `/api/run`) — the grader's own kind
   for a grade, `script_failed` when a script errored, `script_done` otherwise,
   and NOTHING for a run where every script was skipped (nothing happened);
@@ -31,7 +29,6 @@ import os
 import struct
 import sys
 import tempfile
-import time
 from urllib.parse import quote
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -48,7 +45,6 @@ def check(name, ok, detail=""):
 
 
 from server import events as events_mod  # noqa: E402
-from server import import_queue  # noqa: E402
 from server import version as version_mod  # noqa: E402
 from server import main as main_mod  # noqa: E402
 
@@ -86,78 +82,6 @@ def shape_ok(frame, kind):
         and link.startswith("/")
     )
 
-
-print("== a finished import run ==")
-# The runner calls the injected importer (server.main wires the real one); a
-# stub is what makes this a unit of the RUN's own behaviour.
-import_queue.set_importer(lambda path: {"path": path, "album_root": path + "/linked",
-                                        "errors": []})
-import_queue.set_ready_provider(lambda: [])
-
-
-def run_import(paths, importer):
-    import_queue.set_importer(importer)
-    drain()
-    started = import_queue.start(paths=list(paths))
-    if not started.get("ok"):
-        return started
-    deadline = time.time() + 30
-    while import_queue.status()["state"] == "running" and time.time() < deadline:
-        time.sleep(0.02)
-    return import_queue.status()
-
-
-run_import([r"F:\dl\One"], lambda p: {"path": p, "album_root": r"F:\Music\A\One", "errors": []})
-one = frames("download_done")
-check("one album imported -> exactly one frame", len(one) == 1)
-check("...with the payload shape", shape_ok(one[0], "download_done") if one else False)
-check("...linking to the album itself",
-      bool(one) and one[0]["data"]["link"] == "/album/" + quote(r"F:\Music\A\One", safe=""),
-      (one[0]["data"] if one else {}).__str__())
-
-run_import([r"F:\dl\One", r"F:\dl\Two"],
-           lambda p: {"path": p, "album_root": p + "-in", "errors": []})
-many = frames("download_done")
-check("several albums imported -> exactly one frame", len(many) == 1)
-check("...pointing at the library, not at one album",
-      bool(many) and many[0]["data"]["link"] == "/library" and many[0]["data"]["imported"] == 2)
-
-run_import([r"F:\dl\Broken"], lambda p: {"path": p, "errors": ["tagging failed"]})
-bad = frames("download_done")
-check("a failed run -> exactly one frame", len(bad) == 1)
-check("...carrying the error and the wizard as its link",
-      bool(bad) and bad[0]["data"]["link"] == "/import" and bad[0]["data"]["errors"])
-
-# One run, one frame — never one per album. The runs above each cleared the
-# ring first, so this total is what the LAST outcome published.
-check("an import run publishes the frame and nothing else", len(frames()) == 1)
-
-print("== a wish that gives up ==")
-from server import wishes  # noqa: E402
-
-wish_dir = tempfile.mkdtemp(prefix="mlo-wish-")
-wishes.db_path = lambda: os.path.join(wish_dir, "wishes.db")
-wishes._initialized = False
-wish = wishes.add_wish("00000000-0000-0000-0000-000000000001",
-                       title="An Album", artist="An Artist", source="soulseek")
-drain()
-wishes.mark_wanted(wish["id"], error="no verified match yet", attempts=1)
-check("a wish that is only retried says nothing", frames() == [])
-wishes.mark_failed(wish["id"], "no verified match after 3 searches", 3)
-wish_failed = frames("wish_failed")
-check("a wish that gave up -> exactly one frame", len(wish_failed) == 1)
-check("...with the payload shape", shape_ok(wish_failed[0], "wish_failed") if wish_failed else False)
-check("...naming the wish and pointing at the queue",
-      bool(wish_failed) and wish_failed[0]["data"]["wish_id"] == wish["id"]
-      and wish_failed[0]["data"]["link"] == "/soulseek")
-check("...and the wish really is failed", wishes.get_wish(wish["id"])["status"] == "failed")
-wishes.mark_failed(wish["id"], "no verified match after 3 searches", 3)
-check("re-marking a failed wish does not repeat the news", len(frames("wish_failed")) == 1)
-wishes.mark_wanted(wish["id"], error="retry", attempts=4)
-wishes.mark_failed(wish["id"], "still nothing", 4)
-check("a fresh give-up after a retry is a new outcome", len(frames("wish_failed")) == 2)
-wishes.mark_failed(9999, "gone", 1)
-check("marking a wish that does not exist announces nothing", len(frames("wish_failed")) == 2)
 
 print("== an import that needs a human decision ==")
 from server import import_autonomy  # noqa: E402
@@ -431,7 +355,7 @@ if crypto:
         events_mod._push_queue.join()
 
     stub_push_service()
-    mine = Device(kinds=["import_done", "wish_found"])
+    mine = Device(kinds=["import_done", "grade_done"])
     posts.clear()
     # An import whose summary grew an error list is the realistic way a frame
     # gets big: the record declares `rs` 4096, and a payload past it is a frame
@@ -511,7 +435,7 @@ if crypto:
     events_mod.emit("script_done", "Scripts finished", "3 ran")
     settle()
     check("a kind this device did not ask for does not wake it", posts == [], str(posts))
-    events_mod.emit("wish_found", "Wish found: Kind of Blue", "", {})
+    events_mod.emit("grade_done", "Grade finished", "", {})
     settle()
     check("...one it did ask for does", len(posts) == 1)
     everything = Device(endpoint="https://push.example.invalid/send/two")
@@ -521,8 +445,8 @@ if crypto:
     check("a device that asked for everything gets everything",
           [p["url"] for p in posts] == [everything.endpoint], str(posts))
     posts.clear()
-    events_mod.emit("download_started", "Download started", "", {},
-                    config={"notify_soulseek_download_start": False})
+    events_mod.emit("download_done", "Downloaded", "", {},
+                    config={"notify_download_done": False})
     settle()
     check("a kind switched off in the config is published to nobody", posts == [], str(posts))
 
@@ -684,88 +608,6 @@ if crypto:
                   posts == [] and published.get("event") == "import_done")
         finally:
             events_mod._keys = live_keys
-
-# ── One spent candidate is not a dead end, and the log outlives the process
-#    (issue #49) ─────────────────────────────────────────────────────────────
-#
-# A job filling a wish is ONE step of that wish's own search: the walk has more
-# ranked editions to ask, or the release rests in the background. The layer that
-# owns the outcome announces the ends that are real (`wish_failed`,
-# `wish_not_found`); a `download_failed` per abandoned candidate is exactly the
-# noise that rule exists to avoid. A job with NO wish behind it — the
-# interactive search, a bulk add — keeps its own frame, because nothing else
-# will ever speak for it.
-print("== a failed candidate of a walk says nothing ==")
-from mlo import config as mlo_config  # noqa: E402
-from mlo import paths as mlo_paths  # noqa: E402
-from server import soulseek_auto as auto_mod  # noqa: E402
-
-# Everything this section writes goes to its own directory: the durable log
-# must never land in the library's own .mlo (the same reason the rest of this
-# suite patches app_data_dir).
-events_dir = tempfile.mkdtemp(prefix="mlo-events-")
-mlo_paths.app_data_dir = lambda *a, **k: events_dir
-walk_dir = tempfile.mkdtemp(prefix="mlo-walk-")
-wishes.db_path = lambda: os.path.join(walk_dir, "wishes.db")
-wishes._initialized = False
-
-WALKING_ID = "2b2b2b2b-0000-0000-0000-000000000049"
-walking = wishes.add_wish(WALKING_ID, title="Still Walking", artist="An Artist",
-                          source="soulseek")
-wishes.set_candidates(walking["id"], [
-    {"mbid": WALKING_ID, "title": "Still Walking"},
-    {"mbid": "2b2b2b2b-0000-0000-0000-000000000050", "title": "Still Walking (Japan)"}])
-WALK_RELEASE = {"id": WALKING_ID, "title": "Still Walking",
-                "artists": [{"name": "An Artist"}]}
-
-_real_load_config = mlo_config.load_config
-_real_notify_devices = events_mod.notify_devices
-_saved_job_wish = auto_mod._job.get("wish_id")
-# The retry policy reads the config for its attempt cap: pinned here, so the
-# checks below do not depend on the developer's own settings. Push is not what
-# is under test, and there is no push service to talk to.
-mlo_config.load_config = lambda: {"wishes_max_attempts": 3}
-events_mod.notify_devices = lambda payload: None
-try:
-    store = wishes.get_wish(walking["id"])
-    check("the wish under the job really is still being walked",
-          not wishes.is_terminal(store, {"wishes_max_attempts": 3})
-          and wishes.walk_length(store) == 2, json.dumps(store))
-
-    drain()
-    auto_mod._job["wish_id"] = walking["id"]
-    auto_mod._notify_finish("error", {"error": "slskd refused the queue"}, WALK_RELEASE)
-    check("a failed candidate of a wish's walk announces nothing",
-          frames("download_failed") == [], json.dumps(frames()))
-
-    # The same failure with no wish behind it: nothing else will ever say it
-    # gave up, so the frame stays.
-    drain()
-    auto_mod._job.pop("wish_id", None)
-    auto_mod._notify_finish("error", {"error": "slskd refused the queue"}, WALK_RELEASE)
-    failed = frames("download_failed")
-    check("...while the same failure with no wish behind it is announced once",
-          len(failed) == 1, json.dumps(frames()))
-    check("...with the payload shape the tray needs",
-          shape_ok(failed[0], "download_failed") if failed else False)
-    check("...and it is the only thing said", len(frames()) == 1, json.dumps(frames()))
-
-    # A wish whose search is OVER is announced by its own layer, so the job's
-    # frame comes back for it: the rule is the WISH's state, never the id.
-    drain()
-    wishes.mark_failed(walking["id"], "no verified match after 3 searches", 3)
-    auto_mod._job["wish_id"] = walking["id"]
-    auto_mod._notify_finish("error", {"error": "slskd refused the queue"}, WALK_RELEASE)
-    check("a job whose wish has given up announces again",
-          len(frames("download_failed")) == 1,
-          json.dumps([e.get("event") for e in frames()]))
-finally:
-    mlo_config.load_config = _real_load_config
-    events_mod.notify_devices = _real_notify_devices
-    if _saved_job_wish is None:
-        auto_mod._job.pop("wish_id", None)
-    else:
-        auto_mod._job["wish_id"] = _saved_job_wish
 
 # ── The durable replay log ──────────────────────────────────────────────────
 #

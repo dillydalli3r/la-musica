@@ -23,7 +23,6 @@ import PageHeader from "../components/PageHeader";
 import Popover from "../components/Popover";
 import ReleaseChoice from "../components/ReleaseChoice";
 import Segmented from "../components/Segmented";
-import { WatchArtistButton } from "../components/WatchDialog";
 import { useI18n } from "../lib/i18n";
 import { toast } from "../store";
 
@@ -127,8 +126,8 @@ const fmtLen = (ms?: number | null) => {
 /** The library album that already holds one of these MusicBrainz IDs, or null.
  *
  *  Matched on the album's own MB tags — the same evidence the server's
- *  auto-import skip and the wish reconciliation read, so the page never
- *  claims an album the importer would download a second time. The library
+ *  import skip reads, so the page never claims an album the importer would
+ *  add a second time. The library
  *  payload is the query key the library page already uses, so a visit that
  *  started there costs no extra request. */
 function useOwnedAlbum(ids: (string | null | undefined)[]) {
@@ -208,20 +207,11 @@ const IMPORT_MODES = [
 ] as const;
 type ImportMode = (typeof IMPORT_MODES)[number]["id"];
 
-/** The two actions every entity header carries: the MusicBrainz link and the
- *  Soulseek handoff (which searches the artist + title). */
-function MbHeaderActions({ href, query }: { href?: string; query: string }) {
-  const nav = useNavigate();
+/** The action every entity header carries: the MusicBrainz link. */
+function MbHeaderActions({ href }: { href?: string }) {
   return (
     <>
       {href ? <ExtLink href={href} title="Open on MusicBrainz" /> : null}
-      <button
-        className="btn-ghost !py-1.5 text-xs"
-        title="Search Soulseek for this"
-        onClick={() => nav(`/soulseek?q=${encodeURIComponent(query)}`)}
-      >
-        <Search className="h-3.5 w-3.5" /> Soulseek
-      </button>
     </>
   );
 }
@@ -232,8 +222,8 @@ function MbHeaderActions({ href, query }: { href?: string; query: string }) {
  *  10-20 s, because the route fetched the album page's provider content inside
  *  the request — and until this existed the only thing on screen for that whole
  *  time was the button's own spinner. It says exactly what is true at that
- *  instant: the press was TAKEN. What the add then did — the album, its wish,
- *  the search, the counts, the skips — is the REPLY's to report, and the reply
+ *  instant: the press was TAKEN. What the add then did — the album, the
+ *  counts, the skips — is the REPLY's to report, and the reply
  *  replaces this line when it lands (`toast.update`). */
 function addTaken(ids: string[], kind: string,
                   extra: { title?: string; artist?: string }): string {
@@ -247,14 +237,14 @@ function addTaken(ids: string[], kind: string,
 
 /** "Add to library" with a busy flag: the server creates the FRAMEWORK album
  *  (the folder the naming script names, with the release's own tracklist and
- *  the release-group cover) and starts the search for its audio, so the album
- *  is in the library and visibly pending the moment the button is pressed.
+ *  the release-group cover), so the album is in the library and visibly
+ *  pending the moment the button is pressed.
  *  Reports what the server ACTUALLY added (`albums[].created`), never what was
  *  asked for; `missing` is ids that had nothing to send (already counted).
  *  A call that fails toasts the reason instead of a bare "nothing added".
  *
  *  The press is acknowledged in the same tick (`addTaken`): the request it
- *  starts cannot answer before the server has written the album and its wish,
+ *  starts cannot answer before the server has written the album,
  *  and an add that answered nothing until then is the "shows NOTHING for ten
  *  seconds" this exists to end. The server's own answer REPLACES that toast
  *  (same toast, `toast.update`), so the accent stays on one line per press. */
@@ -303,10 +293,7 @@ function useAddToLibrary() {
       // payload is cached for a minute (`staleTime` 60 s) — so without this the
       // album the user just asked for can be missing from the grid for up to a
       // minute, which is what made a successful add look like it did nothing.
-      // The pending row, its stage and the wish it carries all hang off these
-      // two payloads; the search the add queued then shows up in the queue.
       qc.invalidateQueries({ queryKey: ["library"] });
-      qc.invalidateQueries({ queryKey: ["wishes"] });
     }
     const tail = `${have ? ` · ${have} already in the library` : ""}` +
       `${skipped ? ` · ${skipped} skipped` : ""}${reason ? ` · ${reason}` : ""}`;
@@ -1412,16 +1399,14 @@ interface TypeActionRow { label: string; types: string[]; count: number | null }
  *  the panel can add is a type the menu can show, and the counts agree. Each
  *  row sends its type as ONE selection ("Album + Live"), which the server
  *  matches against a group's WHOLE type (primary + exactly those secondaries)
- *  through `mlo.release_choice.type_matches`, and the server starts the search
- *  for each album as it records it, so one button is the whole action: the album
- *  is in the library and Soulseek is already looking for its audio. (There
+ *  through `mlo.release_choice.type_matches`, and the server records each
+ *  album as it goes, so one button is the whole action: the album is in the
+ *  library. (There
  *  used to be a second "Download all" button; it differed only in a flag that
  *  asked for exactly this, so it said the same thing twice.) Each row owns its
  *  own busy state (a running add disables that row, never the page), and the
- *  server's own answer — what it queued, what it skipped and why, or the
+ *  server's own answer — what it added, what it skipped and why, or the
  *  switch that stopped it — lands directly under the row that asked for it.
- *  The queue's own view is refetched on success, so the albums these buttons
- *  created show up there.
  *
  *  One row per release-group TYPE, in the SAME order as the sections above it
  *  (Album, EP, Single first, then the `More` bucket's types by size — see
@@ -1476,10 +1461,9 @@ function ArtistTypeActions({ artistId, mode, groups }: {
                    || t("mb.actions_nothing");
       setSaid((prev) => ({ ...prev, [row.label]: { ok: res.ok, text } }));
       toast.update(ack, text, res.ok ? "success" : "error");
-      // Those albums exist now, so the queue (and the library that lists a
-      // pending album) is stale — that is the "refetch after a successful
-      // action" the rows are judged by.
-      qc.invalidateQueries({ queryKey: ["wishes"] });
+      // Those albums exist now, so the library that lists a pending album is
+      // stale — that is the "refetch after a successful action" the rows are
+      // judged by.
       qc.invalidateQueries({ queryKey: ["library"] });
     } catch (e) {
       const text = e instanceof Error ? e.message : String(e);
@@ -1669,14 +1653,7 @@ export function MBArtistPage() {
             >
               <AddIcon busy={busy} /> {busy ? "Adding…" : "Add to library"}
             </button>
-            <MbHeaderActions
-              href={mbUrl("artist", a.id)}
-              query={a.name}
-            />
-            {/* Watching is the third way to get at an artist's releases —
-                alongside adding one album and adding the whole discography —
-                so it sits with them, on the artist page itself. */}
-            <WatchArtistButton artistMbid={String(a.id)} artist={a.name} />
+            <MbHeaderActions href={mbUrl("artist", a.id)} />
           </>
         }
       />
@@ -2105,10 +2082,7 @@ export function MBReleaseGroupPage() {
             >
               <AddIcon busy={busy} /> {busy ? "Adding…" : "Add to library"}
             </button>
-            <MbHeaderActions
-              href={mbUrl("release-group", rg.id)}
-              query={[rg.artist, rg.title].filter(Boolean).join(" ")}
-            />
+            <MbHeaderActions href={mbUrl("release-group", rg.id)} />
           </>
         }
       >
@@ -2392,10 +2366,7 @@ export function MBReleasePage() {
             <a className="btn-ghost !py-1.5 text-xs" href={cover} target="_blank" rel="noreferrer" title="Cover Art Archive">
               Cover art
             </a>
-            <MbHeaderActions
-              href={mbUrl("release", r.id)}
-              query={[r.artists?.[0]?.name, r.title].filter(Boolean).join(" ")}
-            />
+            <MbHeaderActions href={mbUrl("release", r.id)} />
           </>
         }
       />
@@ -2537,10 +2508,7 @@ export function MBRecordingPage() {
                 Artist page
               </Link>
             )}
-            <MbHeaderActions
-              href={mbUrl("recording", r.id)}
-              query={[r.artist, r.title].filter(Boolean).join(" ")}
-            />
+            <MbHeaderActions href={mbUrl("recording", r.id)} />
           </>
         }
       />

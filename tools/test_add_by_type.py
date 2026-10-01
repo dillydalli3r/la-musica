@@ -13,12 +13,8 @@ every assertion below is about this app's own behaviour:
     a live album is still not an album (a secondary type decides the match);
   * an empty `types` queues everything, which is the behaviour every caller
     had before the filter existed;
-  * `download=True` asks the existing wishes worker to search exactly the
-    wishes the call created, `download=False` leaves them to the queue's own
-    loop;
-  * with `auto_acquisition_enabled` off, Add records the album and says so in
-    that switch's own words, and Download all cannot start — it says the same
-    thing instead of silently doing nothing.
+  * the artist handover answers with what it is preparing and what the filter
+    left out, and the background prepare records the album and says so.
 
 Run: python tools/test_add_by_type.py
 """
@@ -78,9 +74,15 @@ for _t in (MF,):
         assert not _t.replace("\\", "/").lower().startswith(REAL.lower()), \
             f"temp fixture {_t} sits inside the real music folder {REAL}"
 
-from mlo import import_policy, release_choice  # noqa: E402
+from mlo import release_choice  # noqa: E402
 from server import api_add, artcache, integrations as intg, pending_albums  # noqa: E402
-from server import events, wishes, wishes_worker  # noqa: E402
+from server import events  # noqa: E402
+
+# The add writes the framework album for real, but its page content is only
+# ever read when the album's page is OPENED — the route prefetches it on a
+# background thread. Keep that thread out of this test: it is not what this
+# file pins, and it would reach providers.
+pending_albums.prefetch_content = lambda *a, **k: None
 
 FAILED = []
 
@@ -205,9 +207,6 @@ def fake_mb_get_cached(endpoint, params=None, timeout=30.0, retries=5):
 intg.mb_get_cached = fake_mb_get_cached
 intg.mb_get = lambda endpoint, params=None, **kw: fake_mb_get_cached(endpoint, params)
 
-triggered = []
-wishes_worker.trigger = lambda wid=None: (triggered.append(wid), {"ok": True})[1]
-
 emitted = []
 events.emit = lambda kind, title, body="", data=None, **kw: emitted.append(
     {"kind": kind, "title": title, "body": body, "data": data or {}})
@@ -311,9 +310,9 @@ finally:
     intg.artist_browse, intg.group_targets = _real_browse, _real_group
 
 # --------------------------------------------------------------------------- #
-# 2. "Add to library" records; "Download all" also starts the search now
+# 2. "Add to library" records the framework album, type filter and all
 # --------------------------------------------------------------------------- #
-print("\nAdd vs Download all")
+print("\nthe add route")
 try:
     from fastapi import FastAPI
     from fastapi.testclient import TestClient
@@ -331,26 +330,19 @@ def add(**body):
     return r.status_code, r.json()
 
 
-triggered.clear()
 status, body = add(mbid=rg_id(3), kind="release_group", types=["single"])
 eq(status, 200, "a type-filtered release-group add answers 200")
 eq([a["release_id"] for a in body["albums"]], [rel_id(3)], "its album was created")
-# Every add starts the search it recorded, on the worker's OWN pass (no wish
-# id: the pass reads the store and searches what is due). Waiting for the
-# loop's next tick was up to two minutes of nothing happening.
-eq(triggered, [None], "Add starts the search it recorded, on the worker's own pass")
-eq(body["note"], "Soulseek is searching for them now.",
-   "and says so, exactly as Download all does")
-wish_id = body["albums"][0]["wish_id"]
-ok(bool(wish_id) and wishes.get_wish(wish_id) is not None,
-   "the album's wish is on the existing queue")
+eq(body["note"], "Added to your library — add its audio when you have it.",
+   "and says the album is in the library, waiting for its audio")
+ok(body["albums"][0]["created"], "the framework album was recorded",
+   body["albums"][0])
 
-triggered.clear()
-status, body = add(mbid=rg_id(4), kind="release_group", types=["ep"], download=True)
-eq(status, 200, "a download ask answers 200")
-eq(body["note"], "Soulseek is searching for them now.",
-   "Download all says the search started")
-eq(triggered, [None], "Download all starts the same one pass")
+status, body = add(mbid=rg_id(4), kind="release_group", types=["ep"])
+eq(status, 200, "a second type-filtered add answers 200")
+eq([a["release_id"] for a in body["albums"]], [rel_id(4)], "its album was created")
+eq(body["note"], "Added to your library — add its audio when you have it.",
+   "with the same one sentence")
 
 status, body = add(mbid=rg_id(0), kind="release_group", types=["nope"])
 eq(status, 400, "a type outside MusicBrainz's vocabulary is refused")
@@ -366,7 +358,7 @@ print("\nthe artist handover")
 real_prepare = api_add._prepare_artist
 started = []
 api_add._prepare_artist = lambda mbid, mode, cfg, req, types=None: started.append(
-    {"mbid": mbid, "mode": mode, "types": types, "download": req.download})
+    {"mbid": mbid, "mode": mode, "types": types})
 
 before = len(mb_calls)
 status, body = add(mbid=ARTIST, kind="artist", types=["album", "album+compilation"])
@@ -380,7 +372,6 @@ ok(all("type not requested" in r["reason"] for r in body["skipped"]),
    "each with the type it actually is", body["skipped"][:2])
 eq(started[-1]["types"], ["album", "album + compilation"],
    "the background job got the rows' selections, the compound one kept WHOLE")
-eq(started[-1]["download"], False, "and the add's own download flag")
 ok("Album + Compilation" in body["note"],
    "the note names the type it is preparing", body["note"])
 ok(len(mb_calls) > before,
@@ -408,16 +399,15 @@ eq(started, [], "so nothing was started")
 eq(len(body["skipped"]), len(GROUPS), "while every group is reported, by type")
 
 started.clear()
-status, body = add(mbid=ARTIST, kind="artist", download=True)
+status, body = add(mbid=ARTIST, kind="artist")
 eq(body["queued"], None, "a whole-discography handover states no count")
 eq(body["note"], "Preparing the discography — each album appears in the "
-                 "library as it is added, and the search starts with it.",
-   "and its note says the search starts with each album")
-eq(started[-1]["download"], True, "which is what it was asked for")
+                 "library as it is added. Add its audio when you have it.",
+   "and its note says each album appears as it is added")
 api_add._prepare_artist = real_prepare
 
 # --------------------------------------------------------------------------- #
-# 4. the prepare itself: the type filter, the skipped reasons, the trigger
+# 4. the prepare itself: the type filter, the skipped reasons, the album
 # --------------------------------------------------------------------------- #
 print("\nthe discography prepare, called directly (no thread)")
 
@@ -428,12 +418,10 @@ class _Req:
     title = ""
     artist = ""
     year = ""
-    download = False
 
 
 def prepare(types=None, cfg=None):
     emitted.clear()
-    triggered.clear()
     api_add._prepare_artist(ARTIST, "best", cfg or set_cfg(), _Req(), types)
     return emitted[-1]
 
@@ -441,20 +429,11 @@ def prepare(types=None, cfg=None):
 event = prepare(types=["album"])
 album_paths = event["data"]["albums"]
 eq(len(album_paths), 1, "the one Album group's album was created")
-eq(len(triggered), 1, "which started ONE pass for the whole batch")
-# The kick names no wish (the pass reads the store and searches what is due),
-# so what matters is that the wish for THIS release is on the queue, is due
-# now, and owns the framework album the event reported.
-found = [w for w in wishes.list_wishes() if w["release_mbid"] == rel_id(0)]
-eq(len(found), 1, "and the album has exactly one wish on the existing queue")
-started_wish = found[0] if found else None
-ok(bool(started_wish) and wishes_worker._due(started_wish, set_cfg()),
-   "which is due for its own next search, so that pass picks it up", started_wish)
-ok(bool(started_wish) and os.path.normcase(started_wish["album_path"])
-   == os.path.normcase(album_paths[0]),
-   "and it owns the framework album the event reported")
-eq(event["body"], "Soulseek is searching for them now. 4 release group(s) skipped.",
-   "the event says the search started, and how many groups were left out")
+ok(album_paths and os.path.isdir(album_paths[0].replace("/", os.sep)),
+   "its framework folder is on disk", album_paths)
+eq(event["body"], "Each album is in your library — add its audio when you have "
+                  "it. 4 release group(s) skipped.",
+   "the event says the album is in the library, and how many groups were left out")
 eq(sorted(r["reason"] for r in event["data"]["errors"]),
    ["release-group type not requested (Album + Compilation)",
     "release-group type not requested (Album + Live)",
@@ -464,42 +443,9 @@ eq(sorted(r["reason"] for r in event["data"]["errors"]),
 eq(event["data"]["types"], ["album"], "the event names the type filter it ran with")
 
 event = prepare(types=["album"])
-eq(len(triggered), 1, "a second call starts its own pass too (one kick each)")
-eq(event["body"], "Soulseek is searching for them now. 4 release group(s) skipped.",
-   "and the event says the search started, and what the filter left out")
-
-# --------------------------------------------------------------------------- #
-# 5. auto_acquisition_enabled off: both buttons say the same thing
-# --------------------------------------------------------------------------- #
-print("\nautomation off")
-# The switch is read from the config the app loads, so it is the FILE that has
-# to say it — for the route (which loads its own config) exactly as for the
-# background prepare (which is handed one).
-off = set_cfg(auto_acquisition_enabled=False)
-
-triggered.clear()
-status, body = add(mbid=rg_id(1), kind="release_group",
-                  types=["album + compilation"], download=True)
-eq(status, 200, "Download all still answers 200")
-ok(body["albums"] and body["albums"][0]["created"],
-   "and the album IS recorded — the request was the user's")
-eq(triggered, [], "nothing was started")
-eq(body["note"], import_policy.AUTO_OFF_NOTE,
-   "and the reply is the switch's own sentence")
-ok("auto_acquisition_enabled" in body["note"],
-   "which names the switch", body["note"])
-
-triggered.clear()
-status, body = add(mbid=rg_id(2), kind="release_group", types=["album + live"])
-eq(triggered, [], "Add starts nothing either")
-eq(body["note"], import_policy.AUTO_OFF_NOTE,
-   "and reports the same switch")
-
-event = prepare(types=["single"], cfg=off)
-eq(triggered, [], "the background prepare starts nothing with the switch off")
-eq(event["body"], import_policy.AUTO_OFF_NOTE + " 4 release group(s) skipped.",
-   "and its event is that same wording")
-ok(import_policy.auto_acquisition_enabled(set_cfg()), "the switch is back on")
+eq(event["body"], "Each album is in your library — add its audio when you have "
+                  "it. 4 release group(s) skipped.",
+   "and the event says what the filter left out, call after call")
 
 print()
 if FAILED:

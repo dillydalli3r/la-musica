@@ -439,9 +439,10 @@ const check = (name, ok, detail) => {
 
   // Desktop and tablet are untouched: at `md` and up nothing folds and the
   // album table holds the floor its own columns sum to (ALBUM_TRACK_COL_W plus
-  // the corner control; 952 px, and 1144 with the owner's two 96 px tag
-  // columns this check sets up — the genre floor alone is 160 of that, sized to
-  // a two-name value). It used to be a pinned `md:min-w-[814px]`,
+  // the corner control; 1000 px, and 1192 with the owner's two 96 px tag
+  // columns this check sets up — the genre floor alone is 208 of that, sized to
+  // a two-name value ("Metal; Alternative Metal" is 178 at this font). It used
+  // to be a pinned `md:min-w-[814px]`,
   // which is why the bound below is the columns' own sum rather than the old
   // constant — the floor is DERIVED from the column spec now (see
   // ALBUM_TRACK_MIN_W in lib/columns), so what is pinned is that the table is
@@ -473,7 +474,7 @@ const check = (name, ok, detail) => {
    * exactly what the wrapper has after the fixed columns, measured as that
    * difference rather than as a number, since the floors themselves are
    * measurements of their own values and move when one is re-measured (the
-   * genre floor did: 96 → 160 px, "Rock; Garage Rock" is 148) — and the wrapper
+   * genre floor did: 96 → 160 → 208 px, "Metal; Alternative Metal" is 178) — and the wrapper
    * still does not scroll at this width, so the width it took WAS free.
    *
    * The second half is the reader's own outcome: of the album's titles, any
@@ -518,7 +519,7 @@ const check = (name, ok, detail) => {
   // AND the corner control, which is chrome but still holds width. Stated as
   // that difference rather than as a number, because the fixed columns' floors
   // are measurements of their own values and move when one of them is
-  // re-measured (the genre floor did: 96 → 160 px for a two-name value).
+  // re-measured (the genre floor did: 96 → 160 → 208 px, sized to a two-name value).
   const otherCols = wide.widths.filter((w) => w.w > 0 && w.label !== "Title")
     .reduce((n, w) => n + w.w, 0);
   const slack = wide.wrapClient - otherCols - wide.titleColW;

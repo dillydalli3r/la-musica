@@ -16,7 +16,6 @@ and respects the per-filetype audio_tag_writes gates (BPM / INITIALKEY).
 import math
 import os
 import sys
-import tempfile
 
 from .audio import AudioFile
 from .config import should_write_audio_tag
@@ -60,17 +59,32 @@ _OPENKEY_MINOR = ["10m", "5m", "12m", "7m", "2m", "9m", "4m", "11m", "6m", "1m",
 # ----------------------------------------------------------------------
 # Vendored librosa
 # ----------------------------------------------------------------------
+_LIBROSA_VERSION = None
+_LIBROSA_PROBED = False
+
+
 def _ensure_librosa():
     """Prepend the vendored librosa folder to sys.path; returns the version
-    string or None when the dependency is not installed."""
+    string or None when the dependency is not installed.
+
+    Answered once per process: the vendored folder the app ships never moves
+    while a run is in flight, and the probe is not free — it walks the tools
+    folder and reads a .dist-info. mlo.moods asks this from classify(), i.e.
+    once per track, where the walk added up to a second of directory I/O per
+    thousand tracks on top of work that had not started yet."""
+    global _LIBROSA_VERSION, _LIBROSA_PROBED
+    if _LIBROSA_PROBED:
+        return _LIBROSA_VERSION
+    _LIBROSA_PROBED = True
     path = python_pkg_path("librosa")
     if path and path not in sys.path:
         sys.path.insert(0, path)
     try:
         import librosa
-        return getattr(librosa, "__version__", "?")
+        _LIBROSA_VERSION = getattr(librosa, "__version__", "?")
     except Exception:
-        return None
+        _LIBROSA_VERSION = None
+    return _LIBROSA_VERSION
 
 
 def _load_signal(path, sr, max_seconds=None):
@@ -82,6 +96,16 @@ def _load_signal(path, sr, max_seconds=None):
     music-video containers (all first-class, graded tracks) are decoded with
     the DETECTED ffmpeg instead of being silently skipped. Both routes return
     (None, None) on failure, never raise.
+
+    The fallback decodes ONCE, straight to raw 16-bit PCM on a pipe. It used
+    to have ffmpeg write a temp WAV and then have librosa read that WAV back:
+    a second full copy of the track — ~160 MB for an hour of audio — through
+    the filesystem for every undecodable file, plus a `.decode_*` file left
+    behind when a run was killed mid-decode. The samples are the same ones
+    either way: the WAV route was int16 (ffmpeg's default for `-f wav`) and
+    libsndfile scales int16 by 1/32768, which is exactly what the conversion
+    below does. `-ar` already resampled, so there was never a second resample
+    to preserve.
     """
     import librosa
 
@@ -99,26 +123,27 @@ def _load_signal(path, sr, max_seconds=None):
     if not ffmpeg:
         return None, None
 
-    fd, tmp = tempfile.mkstemp(suffix=".wav", prefix=".decode_")
-    os.close(fd)
     try:
+        import numpy as np
+
         cmd = [ffmpeg, "-y", "-v", "error", "-nostdin", "-threads", "1",
                "-i", path, "-vn"]
         if max_seconds:
             cmd += ["-t", str(max_seconds)]
-        cmd += ["-ac", "1", "-ar", str(sr), "-f", "wav", tmp]
-        proc = run_tool(cmd, capture_output=True, text=True, encoding="utf-8",
-                        errors="replace", timeout=30 * 60)
-        if proc.returncode != 0:
+        cmd += ["-ac", "1", "-ar", str(sr), "-f", "s16le", "-"]
+        proc = run_tool(cmd, capture_output=True, timeout=30 * 60)
+        if proc.returncode != 0 or not proc.stdout:
             return None, None
-        return librosa.load(tmp, sr=sr, mono=True)
+        raw = proc.stdout
+        proc = None
+        # int16 -> float32 at libsndfile's own scale (what a temp-WAV read
+        # would have produced), then the 2-bytes-per-sample pipe buffer goes.
+        y = np.frombuffer(raw, dtype="<i2").astype(np.float32)
+        del raw
+        y /= np.float32(32768.0)
+        return y, sr
     except Exception:
         return None, None
-    finally:
-        try:
-            os.remove(tmp)
-        except OSError:
-            pass
 
 
 def _key_notation(tonic_idx, minor, notation):
@@ -255,6 +280,11 @@ def detect_key_bpm(path, min_seconds=10):
     import librosa
 
     sr = 22050
+    # The WHOLE track is decoded here, deliberately without mlo.moods'
+    # 120 s cap: the key comes from a chroma over the entire signal and the
+    # tempo from its full onset envelope, so the tag for a long DJ set or a
+    # concert recording is a different number from the one its first two
+    # minutes would give. A cap would change tags, not just timing.
     y, _ = _load_signal(path, sr)
     if y is None:
         return None, None
@@ -404,13 +434,32 @@ def run_analyze_audiometa(config):
     pbar = _make_pbar(len(paths), "Key & BPM", unit="file")
 
     def _task(path):
+        """Decode, measure and write ONE file — all on this file's own lane.
+
+        The write used to happen in _finish, on the runner thread, while the
+        pool's lanes waited behind it: every modified file is a full copy of
+        the container beside it plus one os.replace (mlo.atomic), and the
+        pass wrote them strictly one at a time with every decoder idle.
+        Nothing here is shared — each lane holds the one handle from the
+        pre-pass, and no other lane touches this path — so the write rides
+        along with the analysis exactly as mlo.moods already writes inside
+        its lane. Returns ``(path, bpm, key, error, changed)``.
+        """
         try:
             bpm, key = detect_key_bpm(path, min_seconds)
         except Exception as e:
-            return path, None, None, str(e)
-        return path, bpm, key, None
+            return path, None, None, str(e), False
+        if bpm is None and key is None:
+            return path, None, None, None, False
+        key_str = ""
+        if key:
+            tonic, minor = key
+            key_str = _key_notation(tonic, minor, notation)
+        changed = _write_tags(path, bpm, key_str, config,
+                              af=pending.get(path))
+        return path, bpm, key, None, changed
 
-    def _finish(path, bpm, key, err):
+    def _finish(path, bpm, key, err, changed):
         # Every file this pass looked at is SCANNED, whatever came of it —
         # the run's numbers have to add up (scanned == modified + skipped +
         # errors, README's R10a), and a file that was analysed and needed no
@@ -427,11 +476,7 @@ def run_analyze_audiometa(config):
             stats["skipped_count"] += 1
             _pbar_skip(pbar, counts)
             return
-        key_str = ""
-        if key:
-            tonic, minor = key
-            key_str = _key_notation(tonic, minor, notation)
-        if _write_tags(path, bpm, key_str, config, af=pending.get(path)):
+        if changed:
             stats["modified_count"] += 1
             _pbar_update(pbar, counts, kind="ok")
         else:

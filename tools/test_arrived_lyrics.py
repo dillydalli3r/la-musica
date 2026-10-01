@@ -20,9 +20,7 @@ This suite drives the REAL entry point every import path ends in
 
 and asserts, for each: what the import decided (its own report), what the file
 holds afterwards, and what the app's own grade says about it. Then the same
-through a chain that FETCHES (script 13), and finally the DOWNLOAD PATH: a
-folder that went through `server.soulseek_auto`'s own import hand-off must end
-in exactly the state a hand import of the same folder leaves.
+through a chain that FETCHES (script 13).
 
 Only two things are stubbed, and both are named where they are stubbed: the
 pre-chain lookups (network sources a test cannot call) and the provider chain
@@ -46,7 +44,6 @@ from mlo import lyrics_fetch                        # noqa: E402
 from mlo import lyrics_providers as lp              # noqa: E402
 from server import imports                          # noqa: E402
 from server import script_runners                   # noqa: E402
-from server import soulseek_auto                    # noqa: E402
 
 TMP = tempfile.mkdtemp(prefix="mlo-arrived-")
 MUSIC = os.path.join(TMP, "music")
@@ -130,16 +127,6 @@ def grade(album, cfg):
             "messages": msgs}
 
 
-def snapshot_lyrics(report):
-    """The lyric-relevant half of a `finish_album` result, so two paths can be
-    compared on what they DID and not only on what they left behind."""
-    report = report or {}
-    return {"dropped": (report.get("dropped") or {}).get("lyrics"),
-            "settled": {k: v for k, v in
-                        ((report.get("settled") or {}).get("lyrics") or {}).items()
-                        if k != "tracks"}}
-
-
 def canonical(text):
     """Script 1's own canonical form for an EMBEDDED write."""
     return L._canonical_lyrics(
@@ -217,7 +204,7 @@ def stub_step(**payload):
 
 
 def install_stubs():
-    global _real_resolve, _real_absent, _real_metadata_account
+    global _real_resolve, _real_absent
     imports.stamp_rym_links = stub_step(album=None, artist=None, note="")
     imports.fetch_advisories = stub_step(updated=0, values={}, sources={}, answers={})
     imports.fetch_instrumentals = stub_step(updated=0, values={}, evidence={})
@@ -231,8 +218,6 @@ def install_stubs():
     integrations.resolve_release = lambda mbid: (None, "")
     _real_absent = lyrics_fetch._mark_lyrics_absent
     lyrics_fetch._mark_lyrics_absent = _stub_absent
-    _real_metadata_account = soulseek_auto._account_metadata
-    soulseek_auto._account_metadata = lambda *a, **k: None
     for pid in list(lp._PROVIDERS):
         lp._PROVIDERS[pid] = _provider
 
@@ -244,7 +229,6 @@ def remove_stubs():
     from server import integrations
     integrations.resolve_release = _real_resolve
     lyrics_fetch._mark_lyrics_absent = _real_absent
-    soulseek_auto._account_metadata = _real_metadata_account
     lp._PROVIDERS.clear()
     lp._PROVIDERS.update(_real_providers)
 
@@ -520,106 +504,6 @@ try:
                   verdict["flagged"], repr(verdict))
     print("kept family: done")
 
-    # ----------------------------------------------------------------------- #
-    # 5) THE DOWNLOAD PATH — the auto-import's own hand-off must leave the same
-    #    album as a hand import of the same bytes. `soulseek_auto
-    #    ._start_import_chain` runs `finish_album` on a thread of its own; the
-    #    thread is made synchronous here so the end state can be compared, and
-    #    nothing else about its closure is stubbed.
-    # ----------------------------------------------------------------------- #
-    ANSWER["synced"] = ANSWER["plain"] = ""
-    print("== the download path == (manual import vs the auto-import hand-off)")
-    snapshots = {}
-    reports = {}
-    real_finish = imports.finish_album
-    for kind in ("manual", "download"):
-        album = os.path.join(MUSIC, f"cmp-{kind}")
-        write_track(album, name="01 - Track.mp3", tag=STACKED)          # unformattable
-        write_track(album, name="02 - Track.mp3", tag=TIMED)            # canonical synced
-        write_track(album, name="03 - Track.mp3", lrc=PLAIN)            # untimed sidecar
-        cfg = cfg_for(import_keep_synced_lyrics=True)
-        if kind == "manual":
-            res = real_finish(album, cfg)
-            check("download path: the manual import ran", bool(res),
-                  "finish_album returned nothing")
-        else:
-            # The chain's own thread, run where it is started — WITHOUT
-            # patching `threading.Thread` itself: that module object is global,
-            # so replacing its `Thread` would also replace the one
-            # `ThreadPoolExecutor` builds its workers from (which is how an
-            # import fans its per-file passes out), and the executor would run
-            # its worker loop inline forever. Only the name `soulseek_auto`
-            # looks up is swapped.
-            real_threading = soulseek_auto.threading
-
-            class _Inline:
-                def __init__(self, target=None, name=None, daemon=None, args=(), kwargs=None):
-                    self._t = target
-                    self._a = args
-                    self._k = kwargs or {}
-
-                def start(self):
-                    self._t(*self._a, **self._k)
-
-            class _Shim:
-                Thread = _Inline
-
-                def __getattr__(self, item):
-                    return getattr(real_threading, item)
-
-            soulseek_auto.threading = _Shim()
-            # What the auto-import's chain actually CALLED, recorded through the
-            # one entry point it uses: the same album must go through the same
-            # drop/settle/format work, not merely end up in the same shape.
-            captured = {}
-
-            def _rec(*a, **k):
-                out = real_finish(*a, **k)
-                captured.update(out or {})
-                return out
-
-            imports.finish_album = _rec
-            try:
-                soulseek_auto._start_import_chain(album, cfg, release=None,
-                                                  download_dir="")
-            finally:
-                imports.finish_album = real_finish
-                soulseek_auto.threading = real_threading
-            res = captured
-        snapshots[kind] = {
-            name: state(os.path.join(album, name))
-            for name in ("01 - Track.mp3", "02 - Track.mp3", "03 - Track.mp3")}
-        snapshots[kind]["grade"] = grade(album, cfg)
-        reports[kind] = res or {}
-
-    check("download path: the SAME states as a hand import",
-          snapshots["manual"] == snapshots["download"],
-          f"manual={snapshots['manual']}\ndownload={snapshots['download']}")
-    # …and by the same work: the family decision and the settle report the same
-    # numbers on both paths, so an auto-import that skipped either step would
-    # have to say so here.
-    for kind in ("manual", "download"):
-        report = reports[kind]
-        check(f"download path ({kind}): the family decision and the settle ran",
-              report.get("dropped", {}).get("lyrics") == 1
-              and report.get("settled", {}).get("lyrics", {}).get("checked") == 3,
-              repr(report.get("dropped")) + repr(report.get("settled")))
-    check("download path: the same counts on both paths",
-          snapshot_lyrics(reports["manual"]) == snapshot_lyrics(reports["download"]),
-          f"{snapshot_lyrics(reports['manual'])} != {snapshot_lyrics(reports['download'])}")
-    for name, got in snapshots["download"].items():
-        if name == "grade":
-            continue
-        print(f"  {name}: kind={got['kind']!r} tag={got['tag']!r} lrc={got['lrc']!r}")
-    print(f"  grade: {snapshots['download']['grade']}")
-    check("download path: the unformattable arrival went on both paths",
-          snapshots["manual"]["01 - Track.mp3"]["kind"] is None
-          and snapshots["download"]["01 - Track.mp3"]["kind"] is None,
-          repr(snapshots))
-    check("download path: the canonical synced arrival survived",
-          snapshots["download"]["02 - Track.mp3"]["kind"] == "synced", repr(snapshots))
-    check("download path: the untimed sidecar went",
-          snapshots["download"]["03 - Track.mp3"]["kind"] is None, repr(snapshots))
 finally:
     remove_stubs()
     shutil.rmtree(TMP, ignore_errors=True)
@@ -628,5 +512,4 @@ if failures:
     print(f"\narrived lyrics: {len(failures)} check(s) FAILED")
     raise SystemExit(1)
 print("arrived lyrics: the arrival table (kept / canonicalised / removed), the "
-      "fetch regime, the plain fallback, a kept family and the download path "
-      "— all assertions passed")
+      "fetch regime, the plain fallback and a kept family — all assertions passed")

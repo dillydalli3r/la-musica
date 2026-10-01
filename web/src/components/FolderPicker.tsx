@@ -27,8 +27,8 @@ type Listing = {
  *  sides.
  *
  *  Saving goes through POST /api/config, which validates that the folder
- *  exists, carries `<music>/.mlo` (config, playlists, auth, downloads, trash)
- *  to the new folder, and tells a running slskd to re-read its shares — so a
+ *  exists and carries `<music>/.mlo` (config, playlists, auth, downloads, trash)
+ *  to the new folder — so a
  *  switch here is complete, not just a stored string. */
 export default function FolderPicker({
   startPath,
@@ -198,8 +198,7 @@ export default function FolderPicker({
 
         <p className="text-[11px] text-zinc-600 leading-relaxed">
           Switching folders MOVES the app's own state (<code className="font-mono">&lt;music&gt;/.mlo</code>: config,
-          playlists, sessions, downloads, trash) into the new one, and a running Soulseek daemon is restarted so it
-          shares the new tree. Your music files themselves are not moved.
+          playlists, sessions, downloads, trash) into the new one. Your music files themselves are not moved.
         </p>
       </div>
     </Modal>

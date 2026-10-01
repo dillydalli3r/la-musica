@@ -41,15 +41,18 @@ the standard library is used.
 from __future__ import annotations
 
 import re
+from functools import lru_cache
 from typing import Callable, Dict, Optional, Tuple
 
 __all__ = [
     "CANONICAL_CASE",
     "CANONICAL_VALUES",
+    "CD_MEDIA_VALUES",
     "canonical_text",
     "canonical_value",
     "collapse_spacing",
     "has_internal_space_run",
+    "is_cd_media",
     "is_multiline",
     "join_list",
     "spacing_problem",
@@ -67,7 +70,8 @@ __all__ = [
 MEDIA_VALUES: Tuple[str, ...] = (
     '12" Vinyl', '10" Vinyl', '7" Vinyl', "8-Track", "Blu-ray", "Blu-spec CD",
     "Cassette", "CD", "CD-R", "Digital Media", "DVD", "DVD-Audio",
-    "DVD-Video", "LaserDisc", "Minidisc", "SACD", "SHM-CD", "VHS", "Vinyl",
+    "DVD-Video", "HDCD", "LaserDisc", "Minidisc", "SACD", "SHM-CD", "VHS",
+    "Vinyl",
     # "Web" is MusicBrainz's own spelling for a release published online only
     # (its release pages say "Web" where a download's says "Digital Media").
     # It is the SAME kind of medium to every rule that reads one — the
@@ -76,6 +80,15 @@ MEDIA_VALUES: Tuple[str, ...] = (
     # vocabulary rather than being dropped as an unknown value.
     "Web",
 )
+
+# The media values that name a CD-DA DISC. "HDCD" is a CD carrying the extra
+# High Definition Compatible Digital encoding — the same disc, the same
+# 16-bit/44.1 kHz audio and the same rip evidence — so every rule that asks
+# "is this album a CD?" (the grader's CD checks, the audit verdict's log CRC
+# legs, the .log/.cue passes and AccurateRip) answers yes for both. It is a
+# value of its own rather than a spelling of "CD" because MusicBrainz states
+# it as a format of its own, which is what an import writes.
+CD_MEDIA_VALUES: Tuple[str, ...] = ("CD", "HDCD")
 
 # MusicBrainz release types, primary and secondary, in MusicBrainz's own
 # casing (mlo.naming resolves the same vocabulary for the folder path — its
@@ -161,6 +174,21 @@ def _closed(values: Tuple[str, ...]) -> Callable[[str], str]:
     return lambda part: table.get(part.casefold(), part)
 
 
+# The CD values, folded once for the predicate every CD rule asks.
+_CD_MEDIA_FOLDED = frozenset(v.casefold() for v in CD_MEDIA_VALUES)
+
+
+def is_cd_media(value: Optional[str]) -> bool:
+    """Whether a MEDIA value names a CD-DA disc (CD, or a CD variant: HDCD).
+
+    The ONE place the question "is this medium a CD?" is answered. MEDIA is
+    user-written tag data, so the test is case-insensitive — "cd" a different
+    tagger wrote is the same medium this app means by "CD" — and callers pass
+    either one file's own value or an album's summary of them.
+    """
+    return str(value or "").strip().casefold() in _CD_MEDIA_FOLDED
+
+
 def _upper_code(part: str) -> str:
     """An ISO 3166-1 alpha-2 country code, upper-cased ("us" -> "US").
 
@@ -218,8 +246,18 @@ def _bare_tag(tag) -> str:
     The raw writers spell a tag with a container prefix ("TXXX:MEDIA",
     "----:com.apple.iTunes:MOOD"); the last ":"-separated segment is the name
     either way, so a raw key resolves to the same rule as the semantic one.
+
+    Memoised: it is a pure function of the key, and a grade asks it for every
+    tag of every file three times over (the value rule, the spacing rule and
+    the multiline test), so the same few dozen names are resolved once per
+    process rather than once per tag per check.
     """
-    return str(tag).rsplit(":", 1)[-1].strip().upper()
+    return _bare_tag_cached(str(tag))
+
+
+@lru_cache(maxsize=4096)
+def _bare_tag_cached(tag: str) -> str:
+    return tag.rsplit(":", 1)[-1].strip().upper()
 
 
 def is_multiline(tag, value) -> bool:

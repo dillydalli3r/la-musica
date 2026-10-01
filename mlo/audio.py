@@ -208,6 +208,35 @@ TAG_MAP = {
         "mp3": ("TXXX", "RATING"),
         "mp4": ("freeform", "com.apple.iTunes", "RATING"),
     },
+    # What the WEB thinks: the aggregated public score for the track and for
+    # its album (mlo.web_ratings, script 24), stored on the SAME 0-100 Picard
+    # scale RATING uses so a player showing the listener's stars beside the
+    # public score reads one number twice. Same freeform/TXXX shape as RATING,
+    # and — like RATING — an OPINION rather than a measured fact: nothing
+    # grades it. ALBUMWEBRATING is written to EVERY track of the album, the
+    # app's established way to carry an album-level value (see
+    # ALBUMITUNESADVISORY); the _SOURCE twins hold the "; "-joined names of
+    # the sources that contributed, the convention RELEASECOUNTRY uses.
+    "WEBRATING": {
+        "flac": "WEBRATING",
+        "mp3": ("TXXX", "WEBRATING"),
+        "mp4": ("freeform", "com.apple.iTunes", "WEBRATING"),
+    },
+    "WEBRATING_SOURCE": {
+        "flac": "WEBRATING_SOURCE",
+        "mp3": ("TXXX", "WEBRATING_SOURCE"),
+        "mp4": ("freeform", "com.apple.iTunes", "WEBRATING_SOURCE"),
+    },
+    "ALBUMWEBRATING": {
+        "flac": "ALBUMWEBRATING",
+        "mp3": ("TXXX", "ALBUMWEBRATING"),
+        "mp4": ("freeform", "com.apple.iTunes", "ALBUMWEBRATING"),
+    },
+    "ALBUMWEBRATING_SOURCE": {
+        "flac": "ALBUMWEBRATING_SOURCE",
+        "mp3": ("TXXX", "ALBUMWEBRATING_SOURCE"),
+        "mp4": ("freeform", "com.apple.iTunes", "ALBUMWEBRATING_SOURCE"),
+    },
     # AcoustID identity (Picard-compatible). Written during import when a
     # fingerprint match is accepted; required by grade_check_acoustid (script
     # 21 completes or creates the pair from the file itself). Two spellings

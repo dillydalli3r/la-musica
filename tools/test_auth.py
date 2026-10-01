@@ -123,7 +123,7 @@ check("/api/health public", auth_mod.is_public("/api/health"))
 check("/api/auth/status public", auth_mod.is_public("/api/auth/status"))
 check("/api/auth/login public", auth_mod.is_public("/api/auth/login"))
 check("/api/library gated", not auth_mod.is_public("/api/library"))
-check("/api/soulseek/import-all gated", not auth_mod.is_public("/api/soulseek/import-all"))
+check("/api/import/bulk gated", not auth_mod.is_public("/api/import/bulk"))
 check("the SPA shell is public", auth_mod.is_public("/") and auth_mod.is_public("/assets/x.js"))
 # The API's own docs sit OUTSIDE /api, so the shell rule would publish them:
 # /openapi.json is a full map of a password-protected server's routes.
@@ -158,12 +158,12 @@ try:  # the durable log too: recent() reads both (spec R216)
     os.remove(events_mod._event_log_path())
 except OSError:
     pass
-payload = events_mod.emit("wish_found", "Wish found: X", "body", {"wish_id": 1},
-                          config={"notify_wish_found": True})
-check("emit returns the frame", payload.get("event") == "wish_found" and payload.get("seq"))
-check("the frame is in the ring", any(e.get("event") == "wish_found" for e in events_mod.recent(0)))
+payload = events_mod.emit("download_done", "Imported X", "body", {"link": "/album/X"},
+                          config={"notify_download_done": True})
+check("emit returns the frame", payload.get("event") == "download_done" and payload.get("seq"))
+check("the frame is in the ring", any(e.get("event") == "download_done" for e in events_mod.recent(0)))
 check("recent(since=now) skips older frames", events_mod.recent(time.time() + 1) == [])
-events_mod.emit("wish_found", "Off", config={"notify_wish_found": False})
+events_mod.emit("download_done", "Off", config={"notify_download_done": False})
 check("a switched-off kind is not published",
       sum(1 for e in events_mod.recent(0) if e.get("title") == "Off") == 0)
 for i in range(events_mod._MAX_EVENTS + 20):
@@ -201,8 +201,7 @@ config_mod.load_config = lambda *a, **k: {"auth_password_hash": auth_mod.hash_pa
                                          "server_host": "0.0.0.0", "auth_mode": "auto",
                                          "auth_session_days": 30}
 # The stub above answers every READ. A WRITE still goes through `save_config`,
-# which uses the real `CONFIG_FILE` — and this suite now posts to /api/config
-# (the Soulseek listen-port pin below), so without this redirect the run wrote
+# which uses the real `CONFIG_FILE`, so without this redirect a write would put
 # `server_host: 0.0.0.0` and a password hash into whatever config the machine
 # happened to own. That is not a hypothetical: it turned the login gate ON for
 # every LATER suite in the same CI shard (they drive the app through TestClient,
@@ -215,13 +214,13 @@ path_mod.CONFIG_FILE = _STUB_CFG
 # ...and the app's OWN data directory, which is where a scoped config is
 # written (`<music folder>/.mlo/data/config.json`): `CONFIG_FILE` alone only
 # redirects the pointer file, so a write still landed in the real scope. Same
-# pair the queue suite redirects for its own stub config.
+# pair the other suites redirect for their own stub config.
 path_mod.app_data_dir = lambda *a, **k: tmp
 with open(_STUB_CFG, "w", encoding="utf-8") as fh:
     json.dump({"music_folder": tmp, "server_host": "127.0.0.1"}, fh)
 
-# Not a `with` block: the lifespan would start the wishes worker and the
-# slskd watcher, neither of which this suite is about.
+# Not a `with` block: the lifespan would start the app's background workers,
+# which this suite is not about.
 client = TestClient(main_mod.app)
 
 r = client.get("/api/health")
@@ -283,27 +282,6 @@ r = client.get("/api/health", headers={"Origin": "https://somewhere.example"})
 check("no other route was widened",
       r.headers.get("access-control-allow-origin") is None,
       f"got {r.headers.get('access-control-allow-origin')!r}")
-
-print("== HTTP: the Soulseek listen port is pinned by the environment (R279) ==")
-# docker-compose.yml publishes `${MLO_SOULSEEK_LISTEN_PORT:-50000}` while slskd
-# listens on whatever `soulseek_listen_port` says, so a port changed in the UI
-# while the compose line still names the old one is a forward pointing at a
-# closed port — a share peers can see the size of and never connect to. The
-# environment wins and the refusal names the pin.
-os.environ["MLO_SOULSEEK_LISTEN_PORT"] = "51023"
-try:
-    r = client.post("/api/config", json={"soulseek_listen_port": 50000},
-                    headers={"Authorization": f"Bearer {token}"})
-    check("a port that contradicts the pin is refused", r.status_code == 400,
-          f"got {r.status_code}")
-    check("...and the refusal names the variable",
-          "MLO_SOULSEEK_LISTEN_PORT" in r.text, r.text[:200])
-    r = client.post("/api/config", json={"soulseek_listen_port": 51023},
-                    headers={"Authorization": f"Bearer {token}"})
-    check("the pinned value itself saves cleanly", r.status_code == 200,
-          r.text[:200])
-finally:
-    os.environ.pop("MLO_SOULSEEK_LISTEN_PORT", None)
 
 r = client.post("/api/auth/logout", headers={"Authorization": f"Bearer {token}"})
 check("logout answers", r.status_code == 200)

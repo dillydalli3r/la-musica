@@ -14,6 +14,11 @@ is an ARGUMENT about invalidation, and the argument is what this suite pins:
     (the whole config is part of the key);
   * the app's own writes are never served stale — every `invalidate_*` hook
     that the write paths already call drops BOTH layers;
+  * a payload written by ANOTHER BUILD is not served at all: the index stamp
+    carries the app version beside the payload's shape, so an upgrade that
+    changes a grading rule re-grades instead of answering with the old verdict
+    (the HDCD case: 4.8.0's stored "Unrecognized MEDIA value: HDCD" kept
+    showing on Home and the Library page until the album's own files moved);
   * the first paint of several pages at once builds the library ONCE, and a
     builder that fails does not wedge the other waiters.
 
@@ -459,6 +464,36 @@ with open(EVIDENCE, "w", encoding="utf-8") as fh:
     json.dump({TRACK_1: [1, 2, True, "x", "ok"]}, fh)
 check("this album's own evidence changes it",
       tagindex.dir_signature(ALBUM, CFG) != sig_before)
+
+# --------------------------------------------------------------------------- #
+# 10) A payload belongs to the BUILD that wrote it
+# --------------------------------------------------------------------------- #
+# The owner's case: an upgrade changes the grading RULES (the HDCD fix, whose
+# 4.8.0 payload kept reporting "Unrecognized MEDIA value: HDCD" on Home and the
+# Library page because the album's own files never moved). The index stamp
+# therefore carries the app version beside the payload's shape, and a build
+# that finds a row from another one drops it and re-grades.
+section("index: another build's payload is not served")
+tagcache.invalidate_all()
+BUILDS["n"] = 0
+lib_mod.build_album(ALBUM, CFG, light=True)
+check("this build's payload is stored and served", BUILDS["n"] == 1, BUILDS["n"])
+_real_stamp = tagindex.payload_stamp
+tagindex.payload_stamp = lambda: _real_stamp() + "+other"
+try:
+    tagindex._MEM.clear()
+    tagindex._conn, tagindex._conn_path = None, None
+    BUILDS["n"] = 0
+    again = lib_mod.build_album(ALBUM, CFG, light=True)
+    check("a row stamped by another build is dropped, and the album is built again",
+          BUILDS["n"] == 1, BUILDS["n"])
+    check("…and the freshly built payload is the one served afterwards",
+          lib_mod.build_album(ALBUM, CFG, light=True) == again and BUILDS["n"] == 1,
+          BUILDS["n"])
+finally:
+    tagindex.payload_stamp = _real_stamp
+    tagindex._MEM.clear()
+    tagindex._conn, tagindex._conn_path = None, None
 
 # --------------------------------------------------------------------------- #
 print(f"\n{'FAILED: ' + ', '.join(FAILED) if FAILED else 'all checks passed'}")

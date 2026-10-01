@@ -11,7 +11,7 @@ import { EmptyState, MediaChip } from "../components/Badges";
 import { ExportOptionsPanel, useExportOptions } from "../components/ExportDialog";
 import TrackTitleCell from "../components/TrackTitleCell";
 import StarRating from "../components/StarRating";
-import { ratingOf, useRatings, useSetRating } from "../lib/ratings";
+import { ratingOf, useRatings, useSetRating, trackWebRating, webStarProps } from "../lib/ratings";
 import {
   TABLE_FIT, TRACK_COLS, TRACK_COL_W, TRACK_PHONE_CLS, PHONE_HIDE, phoneHide,
   ColFloorHolder, TRACK_TITLE_FLOOR, type Col,
@@ -716,6 +716,7 @@ export default function ExportPage() {
                                         value={ratingOf(ratings, p)}
                                         onChange={(v) => setRating(p, v)}
                                         pending={pending(p)}
+                                        {...webStarProps(trackWebRating(m?.tags))}
                                       />
                                     </span>
                                   }

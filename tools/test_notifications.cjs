@@ -80,16 +80,16 @@ function matchesRoute(pattern, link) {
   const at = 1_712_345_678.9;
   const frame = {
     type: "event",
-    event: "wish_found",
-    title: "Wish found: A — B",
+    event: "import_done",
+    title: "Imported: A — B",
     body: "It downloaded and imported into your library.",
-    data: { wish_id: 7, release_mbid: "abc", album_path: "F:/Music/A/B" },
+    data: { album_path: "F:/Music/A/B" },
     at,
     seq: 1_712_345_678_901,
   };
   const rec = ingest(frame);
   check("ingest returns the record", !!rec);
-  check("kind is the frame's event", rec.kind === "wish_found");
+  check("kind is the frame's event", rec.kind === "import_done");
   check("title and body are carried", rec.title === frame.title && rec.body === frame.body);
   check("the timestamp is the frame's own `at` (unix seconds -> ms)", rec.at === Math.round(at * 1000));
   check("the id is the server's event number", rec.id === "e1712345678901");
@@ -104,7 +104,7 @@ function matchesRoute(pattern, link) {
   check("a frame with no kind is refused", ingest({ type: "event", title: "x" }) === null);
   const second = ingest({
     type: "event",
-    event: "download_done",
+    event: "script_done",
     title: "Imported 2 albums",
     body: "all done",
     data: { link: "/library" },
@@ -128,23 +128,18 @@ function matchesRoute(pattern, link) {
       seq: 1_712_345_680_901,
     }).link,
     // derived from the entity ids the older emitters already publish
-    linkFor("download_done", { album_path: "F:/Music/A/B" }),
-    linkFor("import_ready", { album_path: "F:/Music/A/B" }),
+    linkFor("import_done", { album_path: "F:/Music/A/B" }),
     linkFor("import_needs_data", { album_path: "F:/Music/A/B" }),
-    linkFor("wish_failed", {}),
-    linkFor("wish_found", { album_path: "F:/Music/A/B" }),
     linkFor("script_done", {}),
+    linkFor("script_failed", {}),
     linkFor("grade_done", {}),
     linkFor("update_available", {}),
-    // the two "it began" kinds: a running transfer lives in the queue
-    linkFor("download_started", {}),
-    linkFor("upload_started", {}),
   ];
   for (const link of links) {
     const hit = [...routes].some((p) => matchesRoute(p, link));
     check(`${link} is a real route`, hit);
   }
-  check("an album path is one encoded segment", linkFor("download_done", { album_path: "F:/Music/A/B" }) === `/album/${encodeURIComponent("F:/Music/A/B")}`);
+  check("an album path is one encoded segment", linkFor("import_done", { album_path: "F:/Music/A/B" }) === `/album/${encodeURIComponent("F:/Music/A/B")}`);
   check("an unknown kind with no subject links nowhere", linkFor("something_new", {}) === "");
   check(
     "an emit site's own link wins over the derived one",
@@ -201,6 +196,38 @@ function matchesRoute(pattern, link) {
   check("...and their read state", reloaded.unreadCount() === unreadCount());
   reloaded.clearAll();
   check("clear all is what empties storage too", store.get("mlo.notify.log") === "[]");
+
+  // ---- a warning DERIVED from a page's payload ---------------------------
+  // The grade strip on Home and the Library page writes its findings out; the
+  // tray carries them too (the owner's ask), even though no server event
+  // announces them: `ingestDerived` is that path — idempotent by the caller's
+  // own key, and never an OS/push kind, because a datapoint re-read from a page
+  // must not pop a banner on a phone. loadNotifications() re-reads the log from
+  // storage, so this section starts from the clearAll() above.
+  console.log("\n== a warning derived from a page's payload ==");
+  const fresh = await import("../web/src/lib/notifications.ts?derived=1");
+  const warn = (over) => fresh.ingestDerived({
+    id: "grade:album:F:/Music/A/B:Missing album tag ALBUMITUNESADVISORY",
+    kind: fresh.GRADE_WARNING_KIND,
+    title: "Tool — Lateralus",
+    body: "Missing album tag ALBUMITUNESADVISORY",
+    link: "/album/" + encodeURIComponent("F:/Music/A/B"),
+    ...over,
+  });
+  const w1 = warn({});
+  check("a finding becomes an entry with its own words and subject", !!w1
+    && w1.title === "Tool — Lateralus" && w1.body.includes("ALBUMITUNESADVISORY")
+    && w1.read === false, JSON.stringify(w1));
+  check("…and links to the album it names, a route the app mounts",
+    !!w1 && matchesRoute("/album/:path", w1.link), w1 ? w1.link : "none");
+  check("re-reading the same finding logs nothing new", warn({}) === null);
+  check("a finding whose words changed is a new entry",
+    (warn({ id: "grade:album:F:/Music/A/B:Missing album tag ALBUMITUNESADVISORY (2)" }) || {}).id
+      !== (w1 && w1.id));
+  check("a derived warning is never an OS or push kind",
+    !fresh.OS_KINDS[fresh.GRADE_WARNING_KIND] && !fresh.PUSH_KINDS[fresh.GRADE_WARNING_KIND]);
+  check("an entry with no id is refused",
+    fresh.ingestDerived({ id: "", kind: fresh.GRADE_WARNING_KIND, title: "x", body: "" }) === null);
 
   if (problems.length) {
     console.log(`\nFAIL — ${problems.length} problem(s)`);

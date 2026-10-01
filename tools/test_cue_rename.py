@@ -276,6 +276,57 @@ def test_converted_source_repoints(base):
     print("PASS  an ambiguous folder leaves the FILE line alone")
 
 
+def test_split_image_rip(base):
+    """A whole-CD image rip is split into one FLAC per cue track.
+
+    The one case the suite had no coverage for until now: the app recognised
+    an image rip (one FILE, many TRACKs) but always kept it whole, so an
+    album arrived as a single file where the rest of the chain expects a
+    tracklist. This pins the new behaviour — one file per track, the image
+    gone, the audible length of each track exactly what the cue's INDEX 01
+    points say, the .cue left in place, and a second run a no-op."""
+    import wave
+    from mlo.cue import split_image_rip
+
+    flac = find_flac()
+    folder = os.path.join(base, "ImageRip")
+    os.makedirs(folder)
+    # 2 + 3 + 1.5 = 6.5 s of audio for the whole disc.
+    make_flac(flac, os.path.join(folder, "CDImage.flac"), 6.5)
+    with open(os.path.join(folder, "CDImage.cue"), "w", encoding="utf-8") as fh:
+        fh.write('FILE "CDImage.flac" WAVE\n'
+                 '  TRACK 01 AUDIO\n    TITLE "One"\n    INDEX 01 00:00:00\n'
+                 '  TRACK 02 AUDIO\n    TITLE "Two/2"\n    INDEX 01 00:02:00\n'
+                 '  TRACK 03 AUDIO\n    TITLE "Three"\n    INDEX 01 00:05:00\n')
+
+    written = split_image_rip(folder, config={"music_folder": base})
+    names = sorted(os.path.basename(w) for w in written)
+    # The "/" in track 2's title is a path separator the app must not honour.
+    assert names == ["01 One.flac", "02 Two_2.flac", "03 Three.flac"], names
+    assert not os.path.exists(os.path.join(folder, "CDImage.flac")), \
+        "the image must not survive its own split"
+    assert os.path.exists(os.path.join(folder, "CDImage.cue")), \
+        "the .cue describes the album and stays"
+    print("PASS  an image rip becomes one file per track, image trashed")
+
+    for name, seconds in (("01 One.flac", 2.0), ("02 Two_2.flac", 3.0),
+                          ("03 Three.flac", 1.5)):
+        wav = os.path.join(folder, "check.wav")
+        subprocess.run([flac, "-d", "-f", "--totally-silent", "-o", wav,
+                        os.path.join(folder, name)],
+                       check=True, stdout=subprocess.DEVNULL,
+                       stderr=subprocess.DEVNULL)
+        with wave.open(wav) as w:
+            got = w.getnframes() / w.getframerate()
+        os.remove(wav)
+        assert abs(got - seconds) < (1.0 / 44100), (name, got, seconds)
+    print("PASS  every track is exactly as long as its INDEX 01 says")
+
+    assert split_image_rip(folder, config={"music_folder": base}) == [], \
+        "a split album is not an image rip any more"
+    print("PASS  a second run splits nothing")
+
+
 def main():
     flac = find_flac()
     if flac is None:
@@ -289,6 +340,7 @@ def main():
         test_format_cues_recollect(base)
         test_disc_aware_track_refs(base)
         test_converted_source_repoints(base)
+        test_split_image_rip(base)
         print("All cue-rename tests passed.")
         return 0
     finally:

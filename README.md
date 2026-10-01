@@ -1,5 +1,5 @@
 # la musica
-**v4.8.0** — a self-hosted app that manages, optimizes, audits, grades and plays your music library, from a browser, a desktop window or a phone.
+**v4.9.0** — a self-hosted app that manages, optimizes, audits, grades and plays your music library, from a browser, a desktop window or a phone.
 
 FastAPI backend + React UI over the `mlo` engine: music and music videos, playlists, favourites, artist artwork and biographies, a multi-source lyrics chain, and MusicBrainz / Discogs / AcoustID identity. All app state — config, playlists, the beets library, caches, downloads, trash, runtime-installed tools — lives in one `.mlo` folder beside your music.
 
@@ -12,22 +12,21 @@ FastAPI backend + React UI over the `mlo` engine: music and music videos, playli
 docker compose up -d      # build from source; `docker compose pull` fetches the GHCR image instead
 docker compose logs -f    # follow the backend log
 ```
-Edit the committed `./music:/music` bind mount to a real absolute host path first, then open <http://localhost:8000>. `/music` holds the library **and** all app state, and the container runs as uid/gid **1000**, so the mount must be writable by that user. Image `ghcr.io/dillydalli3r/la-musica:latest`, container `la-musica`; `MLO_MUSIC_FOLDER=/music` and `MLO_SERVER_HOST=0.0.0.0` are the only env vars it needs. Tools (ffmpeg, flac, slskd, yt-dlp, …) install from **Settings → Dependencies**.
+Edit the committed `./music:/music` bind mount to a real absolute host path first, then open <http://localhost:8000>. `/music` holds the library **and** all app state, and the container runs as uid/gid **1000**, so the mount must be writable by that user. Image `ghcr.io/dillydalli3r/la-musica:latest`, container `la-musica`; `MLO_MUSIC_FOLDER=/music` and `MLO_SERVER_HOST=0.0.0.0` are the only env vars it needs. Tools (ffmpeg, flac, yt-dlp, …) install from **Settings → Dependencies**.
 
 **From source**:
 ```bash
 python -m pip install -r server/requirements.txt
 cd web && npm install && npm run build && cd ..
 python -m uvicorn server.main:app --host 127.0.0.1 --port 8000   # http://127.0.0.1:8000
-python -m mlo    # the console menu (scripts 1–23), run from the server's environment
+python -m mlo    # the console menu (scripts 1–24), run from the server's environment
 ```
 
 ## What it does
 - **Library** — artists → albums → tracks with grade/audit badges, five views (Grid, Compact, Albums, Artists, Tracks), sort/columns/presets, a query builder saved as smart playlists, bulk tag tools, half-star ratings, favourites, podcasts and music videos.
 - **Player** — a persistent bar and a fullscreen player: queue, gapless playback, `infinite_playback` similarity queue, ReplayGain (track/album/off), equalizer, sleep timer, visualizer, synced **or plain** lyrics, and a per-device accent colour. It remembers where you were.
-- **Import** — archives, folders, uploads, a watched folder and Soulseek downloads all run one pipeline through the eight-step wizard (Select → Links → Match → Covers → Genres → Lyrics → Advisory → Finish), then the import script chain. AcoustID matching, MBID assignment, and a framework album for every wish.
-- **Soulseek** — a managed slskd instance: search, download queue with live transfer progress, sharing (with a listen-port audit), wishes and watched artists. A download imports itself once it lands.
-- **Optimization** — 23 scripts, Run All or one at a time: lyrics, CUEs, FLAC re-encode, covers, audits, DR/ReplayGain, AccurateRip, key/BPM, beets tags, transliteration, LRCLIB publishing, artist images, layout, tag strip. Each script, its force flags and its order: the spec.
+- **Import** — archives, folders and uploads all run one pipeline through the eight-step wizard (Select → Links → Match → Covers → Genres → Lyrics → Advisory → Finish), then the import script chain. A whole-CD image rip (one `.flac` plus its `.cue`) is split into one file per track on the way in. AcoustID matching, MBID assignment, and a framework album for a release you add before its audio exists.
+- **Optimization** — 24 scripts, Run All or one at a time: lyrics, CUEs, FLAC re-encode, covers, audits, DR/ReplayGain, AccurateRip, key/BPM, beets tags, transliteration, LRCLIB publishing, artist images, layout, tag strip, web ratings. Each script, its force flags and its order: the spec.
 - **Grading** — 70 checks over tracks, albums, artist folders and folders, toggleable per check with Strict/Balanced/Relaxed presets; Home and the Library open with the verdict and what fails.
 - **Discover & export** — genre browse and recommendations from the library's own tags and from online providers; export as MP3/AAC/Opus/Vorbis/FLAC-copy in `zip` or server-side; offline downloads; notifications (including Web Push) in six languages.
 

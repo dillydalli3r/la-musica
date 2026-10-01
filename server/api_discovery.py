@@ -155,7 +155,7 @@ def _feature_gate(cfg, key, what):
 # The metadata step: artist image + artist/album descriptions
 # --------------------------------------------------------------------------- #
 # The three things an import has to find and account for. ONE implementation,
-# called by the auto-import chain (server.soulseek_auto) and by the import
+# called by the auto-import chain (server.imports) and by the import
 # menu's own route below: a second one would drift from this within a day.
 META_ITEMS = ("artist_image", "artist_description", "album_description")
 
@@ -181,7 +181,7 @@ def ensure_artist_album_metadata(album_dir, cfg=None, force=False, progress=None
     """Fetch and store an album's artist image and artist/album descriptions.
 
     THE step both the auto-import chain and the import menu's route call
-    (``server.soulseek_auto``, ``POST /api/album/metadata/fetch``): one place
+    (``server.imports``, ``POST /api/album/metadata/fetch``): one place
     decides what "already there" means, which provider answers, and what the
     honest outcome was.
 

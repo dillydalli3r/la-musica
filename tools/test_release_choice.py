@@ -1,7 +1,7 @@
 """The release-choice policy (`mlo/release_choice.py`) and the paths using it.
 
 One policy decides which MusicBrainz edition every acquisition path takes —
-"Add to library", the bulk auto-import, the wish worker and the artist watch —
+"Add to library" and the bulk auto-import —
 so the rules are pinned here once: status, medium, completeness, the EARLIEST
 date, the date's precision, the original edition, the plain title and the
 country tie-breaker, plus the order a stored candidate list is re-ranked into
@@ -26,8 +26,7 @@ sys.path.insert(0, ROOT)
 from mlo import config as mloconfig                      # noqa: E402
 from mlo.config import DEFAULT_CONFIG                     # noqa: E402
 from mlo import release_choice as rc                     # noqa: E402
-from server import artist_watch, integrations as intg    # noqa: E402
-from server import pending_albums, wishes                # noqa: E402
+from server import integrations as intg                 # noqa: E402
 
 
 def cfg(**over):
@@ -493,7 +492,7 @@ assert all(first[i].score >= first[i + 1].score for i in range(len(first) - 1)),
 single = group(id="rg-single", title="Song", primary_type="Single",
                first_release_date="2001-01-01")
 single_rows = [rel("s1", title="Song", date="2001-01-01")]
-# A watch (or a page) asking for albums is not answered with a single, however
+# A page asking for albums is not answered with a single, however
 # well the single ranks on medium.
 assert rc.choose_release(single, single_rows, cfg(), primary_type="album") is None
 assert rc.choose_release(single, single_rows, cfg(), primary_type="single").release_mbid == "s1"
@@ -520,11 +519,6 @@ assert body["release_group"]["primary_type"] == "Album"
 assert body["release_group"]["secondary_types"] == ["Live"]
 row_typed = dict(live_rows[0], primary_type="Album", secondary_types=["Live"])
 assert rc.choose_release({}, [row_typed], cfg(), wanted_types=["live"]) is not None
-# The watch's own matcher is this one (one implementation, two callers).
-for want in (["album"], ["live"], ["single"], [], ["nonsense"]):
-    for g in (group(), live, single):
-        assert artist_watch.type_matches(g["primary_type"], g["secondary_types"], want) == \
-            rc.type_matches(g["primary_type"], g["secondary_types"], want)
 
 # --------------------------------------------------------------------------- #
 # The strict rules the unattended paths apply (and only they)
@@ -576,7 +570,7 @@ assert empty["chosen"] is None and empty["candidates"] == []
 
 # A release_lookup payload (media = a flat track list, formats in
 # medium_formats) is read the same way as a browse row: this is the shape the
-# importer and the wish worker hold.
+# importer holds.
 lookup = {"id": "lk", "title": "Album", "status": "Official", "country": "US",
           "date": "1997-01-20", "medium_formats": ["CD"],
           "media": [{"position": i, "title": f"T{i}"} for i in range(1, 13)]}
@@ -622,7 +616,7 @@ SINGLE_RAW = [dict(rel(MBID["s1"], title="Song", date="2001-01-01"), title="Song
 # _release_cfg), so the fixture config is what they read — the test depends on
 # no user setting and writes no config file.
 _real = (intg.mb_get_cached, intg._browse_collect, intg.release_lookup,
-         intg.artist_browse, wishes.owned_mbids, mloconfig.load_config)
+         intg.artist_browse, mloconfig.load_config)
 mloconfig.load_config = lambda *a, **kw: cfg()
 
 
@@ -648,7 +642,6 @@ try:
     intg.artist_browse = lambda mbid, limit=500, offset=0: {
         "release_groups": [{"id": MBID["rg-1"], "title": "Album", "primary_type": "Album",
                             "secondary_types": [], "first_release_date": "1997-01-20"}]}
-    wishes.owned_mbids = lambda cfg=None: set()   # no library in this test
 
     # The release-group page lists the editions in the policy's own order, so
     # its FIRST row is the edition every path would queue: the 1997 CD, then
@@ -697,7 +690,7 @@ try:
     assert err_all is None and names([r["mbid"] for r in rows_all]) == \
         ["cd", "later", "vinyl"], names([r["mbid"] for r in rows_all])
 
-    # A watch's type filter rides INTO the choice: an album watch is never
+    # A caller's type filter rides INTO the choice: an album ask is never
     # answered with a single, whatever the medium says.
     _transport(SINGLE_PAYLOAD, SINGLE_RAW)
     intg.release_lookup = lambda mbid: dict(RELEASES.get(mbid, SINGLE_RAW[0]),
@@ -730,31 +723,6 @@ try:
     # best first, as the payloads they were handed.
     assert names([r["id"] for r in intg.pick_releases(RAW)]) == ["cd", "later", "vinyl"]
     assert NAME[intg.pick_release(RAW)["id"]] == "cd"
-
-    # The artist watch's one seam: the edition it queues is the policy's pick,
-    # WITH the watch's own type filter applied to the choice.
-    queued = []
-    real_create = pending_albums.create
-    pending_albums.create = lambda release, cfg, **kw: (
-        queued.append(NAME[release["id"]]) or {"wish_id": None, "created": False})
-    try:
-        release, err, chosen = artist_watch._release_for(MBID["rg-1"], cfg(), types=["album"])
-        assert err is None and NAME[release["id"]] == "cd", (release, err)
-        assert NAME[chosen["mbid"]] == "cd" and chosen["reasons"], chosen
-        assert artist_watch.queue_release(release, cfg(), title="Album") is not None
-        assert queued == ["cd"], queued
-        # The type filter is the watch's: an album watch is refused a single
-        # group outright, so nothing is queued from it.
-        _transport(SINGLE_PAYLOAD, SINGLE_RAW)
-        intg.release_lookup = lambda mbid: dict(RELEASES.get(mbid, SINGLE_RAW[0]),
-                                               release_group_id=MBID["rg-single"])
-        release, err, chosen = artist_watch._release_for(MBID["rg-single"], cfg(),
-                                                         types=["album"])
-        assert release is None and chosen is None and \
-            err == "release-group type not requested (Single)", (release, err)
-        assert queued == ["cd"], queued
-    finally:
-        pending_albums.create = real_create
 
     # GET /api/mb/release-choice: the route the UI reads. Mounted on its own
     # app here (server.main registers the router), so this is the module's own
@@ -830,7 +798,7 @@ try:
         intg.mb_get_cached = _real_get
 finally:
     (intg.mb_get_cached, intg._browse_collect, intg.release_lookup,
-     intg.artist_browse, wishes.owned_mbids, mloconfig.load_config) = _real
+     intg.artist_browse, mloconfig.load_config) = _real
 
 # --------------------------------------------------------------------------- #
 # Country lists: a release group is released in MANY countries at once
@@ -994,5 +962,5 @@ if shutil.which("node") and os.path.exists(_ui_checker):
 print("ok  release-choice policy: status/medium/completeness/original/plain/country "
       "ranked by one module, deterministic, type-filtered, and used by the "
       "release-group page, group_targets, resolve_release, auto_import_targets, "
-      "pick_releases, the artist watch and GET /api/mb/release-choice; UI: "
+      "pick_releases and GET /api/mb/release-choice; UI: "
       + _ui_note)

@@ -67,8 +67,8 @@ export default function PageHeader({
               {title}
             </span>
           </h1>
-          {/* `break-words`: a subtitle carrying a file path (Soulseek's download
-              dir, Dependencies' folder) has no space to wrap at, and an
+          {/* `break-words`: a subtitle carrying a file path (Dependencies'
+              folder, an album's) has no space to wrap at, and an
               unbreakable run of text scrolls the whole page sideways. */}
           {subtitle && <div className="mt-1 text-xs text-zinc-500 break-words">{subtitle}</div>}
           {chips && chips.length > 0 && (

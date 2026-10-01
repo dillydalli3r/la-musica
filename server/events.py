@@ -1,10 +1,9 @@
 """Server-side events: the one channel every client listens on.
 
 Three things happen in the background that a user wants to hear about even
-when the relevant page is not open — a wished-for release showed up on
-Soulseek, a download finished, an album is ready to import. Each of those
-already runs somewhere deep in a worker thread; what was missing is a place to
-*announce* it.
+when the relevant page is not open — a download finished, an album is ready to
+import, a run ended. Each of those already runs somewhere deep in a worker
+thread; what was missing is a place to *announce* it.
 
 `emit()` is that place. It:
 
@@ -29,44 +28,34 @@ running.
 
 Frames are JSON:
 
-    {"type": "event", "event": "wish_found", "title": "…", "body": "…",
+    {"type": "event", "event": "import_done", "title": "…", "body": "…",
      "data": {…}, "at": 1712345678.9}
 
 `data.link` is the SUBJECT of the event as a client route — the thing a
 notification about it should open (`/album/<path>`, `/track/<path>`,
-`/soulseek`, `/import?album=<path>`, `/in-progress`, `/library`, `/settings`).
+`/import?album=<path>`, `/in-progress`, `/library`, `/settings`).
 The client's tray (web/src/lib/notifications.ts) also derives one from the
 entity ids an emitter already publishes, so an emit site that knows its
 subject should set `link` and every other one still lands somewhere sensible.
 A `data.url` names an outside page instead (the release notes of a newer
 version).
 
-Kinds in use: wish_found / wish_failed / wish_not_found (the wish worker — the
-last one is a wish whose searches found NOTHING and which therefore stops being
-searched; see server/wishes' retry policy), download_done and import_ready (a
-settled Soulseek job: in the library, or in the download folder waiting to be
-imported), download_failed (a job that gave up — an absent/refused slskd, a
-MusicBrainz outage, a verification that failed, or a search that found nothing),
-download_done for a finished import run (server/import_queue.py),
-import_needs_data (an album an import could not supply a family for — the
-import FINISHED, the album is in the library and the gap is a warning on its own
-finished row, the bell and the album page; only a review stop's entry really is
-waiting on a person, see spec R166), script_done / script_failed and grade_done
-(a run of the library scripts, from `/api/run`), update_available (a newer
-release exists).
-download_started and upload_started are the two "it began" halves of a Soulseek
-transfer, announced the moment there is something to watch instead of only at
-the end: a download whose first bytes actually moved (the wait in
-server/soulseek_auto.py), and a peer starting to take files FROM us (the
-uploads watcher in server/main.py). Both are one frame per job/user, never one
-per poll.
+Kinds in use: download_done and import_ready (a settled acquisition: in the
+library, or in the download folder waiting to be imported), download_failed (a
+job that gave up — a MusicBrainz outage, a verification that failed, or a
+search that found nothing), download_done for a finished import run (the import
+pipeline), import_needs_data (an album an import could not supply a family for
+— the import FINISHED, the album is in the library and the gap is a warning on
+its own finished row, the bell and the album page; only a review stop's entry
+really is waiting on a person, see spec R166), script_done / script_failed and
+grade_done (a run of the library scripts, from `/api/run`), update_available (a
+newer release exists).
 
-The OUTCOME kinds — wish_failed, wish_not_found, download_failed and
-import_needs_data — are deliberately not switchable off in config: they are the
-only word the user gets that something they asked for did not happen, and the
-`notify_*` switches cover the "this is nice to know" ones (`notify_wish_found`,
-`notify_download_done`, `notify_import_ready` and the two Soulseek start
-kinds).
+The OUTCOME kinds — download_failed and import_needs_data — are deliberately
+not switchable off in config: they are the only word the user gets that
+something they asked for did not happen, and the `notify_*` switches cover the
+"this is nice to know" ones (`notify_download_done`, `notify_import_ready` and
+the import start/done kinds).
 
 Clients filter by `event`; unknown kinds must be ignored, not fatal, so a
 newer client can talk to an older server.
@@ -95,8 +84,8 @@ _events = []
 # client persists the last number it saw so a reconnect can replay what it
 # missed, and the backend restarts on every config save / dependency install.
 # A counter that restarted at 1 would make every post-restart event look older
-# than the client's stored value, i.e. silently dropped — a wish found after a
-# restart would never be announced. A clock-seeded number keeps the protocol's
+# than the client's stored value, i.e. silently dropped — an import finished
+# after a restart would never be announced. A clock-seeded number keeps the protocol's
 # "strictly newer" rule true across restarts, and doubles as the timestamp the
 # replay window (`?since=`) is expressed in.
 _seq = int(time.time() * 1000)
@@ -180,16 +169,13 @@ def _notify_configured(kind: str, cfg: dict) -> bool:
     """Is this event kind switched on in the config?
 
     Defaults are True: a server whose config predates these keys must still
-    announce a found wish, which is the whole point of the feature.
+    announce a finished import.
     """
     key = {
-        "wish_found": "notify_wish_found",
         "download_done": "notify_download_done",
         "import_ready": "notify_import_ready",
         "import_started": "notify_import_start",
         "import_done": "notify_import_done",
-        "download_started": "notify_soulseek_download_start",
-        "upload_started": "notify_soulseek_upload_start",
     }.get(kind)
     if not key:
         return True

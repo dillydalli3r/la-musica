@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Menu-consistency gate: every surface that lists the 23 scripts must agree.
+"""Menu-consistency gate: every surface that lists the 24 scripts must agree.
 
 Sources checked:
   * ``EXPECTED_SCRIPTS`` below — the frozen expected registry (number + name)
@@ -73,6 +73,10 @@ EXPECTED_SCRIPTS = {
     # track menus offer it, and an import runs it with the rest of the chain.
     # It only DELETES — a file with nothing excess is not written at all.
     23: "Optimize tags",
+    # 24 fills the four web-rating tags (mlo/web_ratings.py): the album's
+    # public score on every track and each track's own, from the configured
+    # sources. Album-scoped, fill-only, and gated on `web_ratings_enabled`.
+    24: "Web ratings",
 }
 
 
@@ -140,8 +144,8 @@ RUN_ALL_SURFACES = {
     "web/src/pages/CheckStackPage.tsx": "run_all_order",
     # The wizard's Finish step runs the IMPORT CHAIN, not the library Run All
     # order: the ids come from the chain preview (`imports.chain_for`, i.e.
-    # `import_scripts` or DEFAULT_CHAIN), the same list a bulk or Soulseek
-    # import runs. `check_wizard_finish_list` below holds that, and
+    # `import_scripts` or DEFAULT_CHAIN), the same list every import path runs.
+    # `check_wizard_finish_list` below holds that, and
     # tools/check_import_minimum.mjs renders the step and reads the ticked
     # boxes.
     "web/src/pages/ImportWizard.tsx": "importScriptsPreview",
@@ -149,8 +153,8 @@ RUN_ALL_SURFACES = {
     "web/src/pages/OptimizationPage.tsx": "run_all_order",
     "web/src/pages/SettingsPage.tsx": "run_all_order",
     # The first-run setup wizard is deliberately NOT here: its cut left it with
-    # no script surface at all (it asks for the folder, the account, the tools,
-    # the keys and the Soulseek login, and the import chain's own ids live in
+    # no script surface at all (it asks for the folder, the account, the tools
+    # and the keys, and the import chain's own ids live in
     # the import wizard, declared above). A first-run knob for the Run All
     # order was one of the 13 steps the owner asked to drop — Settings still
     # renders it (`run_all_order`, above).
@@ -249,8 +253,8 @@ def check_wizard_finish_list(check):
 
     The step used to read `cfg.run_all_order` — the order the Optimization page
     and the library's Run All run — so the album being finished got a wider,
-    differently ordered list than every other import path (the bulk queue, the
-    Soulseek import, and the wizard's own "Run the import chain" button, all of
+    differently ordered list than every other import path (the bulk queue
+    and the wizard's own "Run the import chain" button, all of
     them `imports.chain_for`). It now takes its ids from the chain preview, so
     `import_scripts` — or DEFAULT_CHAIN — decides what Finish runs; an empty
     chain (`import_auto_scripts` off) runs nothing, exactly as an import does.
@@ -271,7 +275,7 @@ def check_wizard_finish_list(check):
 
 
 def table_scripts():
-    """The 23 ids `mlo/scripts.py` declares, read from the FILE.
+    """The 24 ids `mlo/scripts.py` declares, read from the FILE.
 
     It is the one table the menus print (mlo.cli re-exports it, server/api_stack
     and server/script_menu include it, tags_registry's writer column names it),
@@ -392,7 +396,7 @@ def import_paths_do_not_send_an_empty_force():
     A supplied dict is authoritative and complete, so `{}` means "every force
     flag OFF" — `layout_apply` included, which left the import chain's layout
     pass a read-only report on the album it had just imported. The bulk queue
-    and the Soulseek import pass `force=None` (saved switches); the wizard's
+    passes `force=None` (saved switches); the wizard's
     re-run and the row menu were the two paths that disagreed, and a defaulted
     `force = {}` parameter is how that happened."""
     src = read("web/src/api.ts")
@@ -445,7 +449,7 @@ def check_run_all_migration(check):
     check("the stale script-15 entry is shed and 15 is re-anchored after beets",
           got.count(15) == 1 and got.index(15) == got.index(14) + 1, str(got))
     check("every script lands exactly once in a normalized order",
-          sorted(got) == [i for i in range(1, 24) if i != 22], str(sorted(got)))
+          sorted(got) == [i for i in range(1, 25) if i != 22], str(sorted(got)))
     # 17/18 were never in a saved order before they existed; the same
     # shed-and-anchor rule has to place them after the fetch they read from.
     check("18 (publish) lands after 13 (fetch lyrics) in a normalized order",
@@ -467,6 +471,11 @@ def check_run_all_migration(check):
           got.count(23) == 1 and got.index(23) == got.index(10) + 1
           and got.index(23) < got.index(20) and got.index(21) == got.index(20) + 1,
           str(got))
+    # 24 (web ratings) joins the same way: the shipped order puts it right
+    # behind 8 (Auto tagging), and an install upgrading into it is anchored
+    # there rather than having the script pushed to the end of its own chain.
+    check("24 (web ratings) lands right behind 8 for an existing install",
+          got.count(24) == 1 and got.index(24) == got.index(8) + 1, str(got))
     # ...and on a later load they are KEPT where the user put them: unlike 15,
     # their ids never meant anything else, so a saved position is a real choice
     # and re-anchoring them would silently undo the drag.
@@ -477,7 +486,7 @@ def check_run_all_migration(check):
 
     junk = cfg.normalize_config({"music_folder": "X", "run_all_order": [99, "a", 4, 4, -1]})
     check("unknown / duplicate run-all ids are dropped",
-          all(1 <= n <= 23 for n in junk["run_all_order"]) and len(set(junk["run_all_order"])) == len(junk["run_all_order"]),
+          all(1 <= n <= 24 for n in junk["run_all_order"]) and len(set(junk["run_all_order"])) == len(junk["run_all_order"]),
           str(junk["run_all_order"]))
 
     twice = cfg.normalize_config(cfg.normalize_config({"music_folder": "X"}))
@@ -575,8 +584,8 @@ def main():
     check("the web and the server declare the same opt-in scripts",
           opt_in_py == opt_in_web and bool(opt_in_py),
           f"server={sorted(opt_in_py)} web={sorted(opt_in_web)}")
-    check("canonical registry has 23 scripts", len(canon) == 23, str(sorted(canon)))
-    check("canonical numbers are 1..23", sorted(canon) == list(range(1, 24)))
+    check("canonical registry has 24 scripts", len(canon) == 24, str(sorted(canon)))
+    check("canonical numbers are 1..24", sorted(canon) == list(range(1, 25)))
     check("every opt-in script is a real script", opt_in_py <= set(canon),
           f"unknown={sorted(opt_in_py - set(canon))}")
     check("server RUNNERS == canonical numbers", runners == set(canon), f"server={sorted(runners)}")
@@ -598,13 +607,13 @@ def main():
     print("run-all order")
     py_run_all = python_default_run_all()
     check("DEFAULT_RUN_ALL covers every script that ships in the order",
-          sorted(run_all) == [i for i in range(1, 24) if i not in opt_in_py],
+          sorted(run_all) == [i for i in range(1, 25) if i not in opt_in_py],
           str(sorted(run_all)))
     check("…and leaves the opt-in scripts out of it",
           not (set(run_all) & opt_in_py), str(sorted(set(run_all) & opt_in_py)))
     check("DEFAULT_RUN_ALL has no duplicates", len(run_all) == len(set(run_all)), str(run_all))
     check("mlo/config.py DEFAULT_RUN_ALL_ORDER covers every script",
-          sorted(py_run_all) == [i for i in range(1, 24) if i not in opt_in_py],
+          sorted(py_run_all) == [i for i in range(1, 25) if i not in opt_in_py],
           str(sorted(py_run_all)))
     check("python and web run-all order agree", py_run_all == run_all,
           f"python={py_run_all} web={run_all}")

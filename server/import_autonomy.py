@@ -2,8 +2,8 @@
 
 One entry per album, in ONE file (`<music>/.mlo/data/import_prompts.json`), so
 a gap is announced exactly once however the album reached the library: the
-wizard's finish, the bulk queue, the downloads runner and the Soulseek importer
-all end in `server.imports.finish_album`, which raises the prompt here.
+wizard's finish, the bulk queue, the downloads runner and the auto-importer all
+end in `server.imports.finish_album`, which raises the prompt here.
 
 Two things happen, and both are the point of the feature:
 
@@ -181,7 +181,7 @@ def body(entry):
 def warning(entry):
     """One entry, in the shape EVERY surface carries it (the ONE vocabulary).
 
-    The queue's row (`server.api_queue`), the album page's own banner
+    The album page's own banner
     (`GET /api/album`) and the wizard's prompt banner all read this, so a gap
     can never be described one way in the list and another on the page it
     links to. ``families``/``labels`` are the wizard's own ids and labels in
@@ -663,7 +663,7 @@ def raise_video_prompt(folder, cfg, *, candidates=(), reason="", mode="automatic
     BDMV) holds more than one plausible feature — or none it can read — and it
     refuses to guess. Same table, same bus and same row shape as
     :func:`raise_prompt`, so the notification bell, ``GET /api/import/prompts``
-    and the Soulseek queue's "Needs you" row all carry the question: the
+    and the In progress "Needs you" row all carry the question: the
     single family's ``note`` names the candidates and their durations, which is
     what the reader needs to answer it.
 
