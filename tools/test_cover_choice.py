@@ -11,7 +11,7 @@ What this pins, rule by rule:
   * a candidate that cannot be a cover at all is REJECTED with the reason —
     an empty answer (0 bytes), bytes that are not a decodable image, a provider
     that stated an error, and one below the cover target (the minimum
-    `server.main._cover_metrics` reports and the grader enforces), whose
+    `server.api_cover._cover_metrics` reports and the grader enforces), whose
     rejection names that floor;
   * the release GROUP's front cover (the album's own art, and the reference the
     finder shows beside the candidates) beats one release's own cover, and a

@@ -109,7 +109,7 @@ An issue is `{code, label, where, reason}` for album-level and artist problems
 
 ## 2. The 23 optimization scripts
 
-Ids, titles and the shipped order are `mlo/cli.py:SCRIPTS` and
+Ids, titles and the shipped order are `mlo/scripts.py:SCRIPTS` and
 `mlo/config.py:DEFAULT_RUN_ALL_ORDER`; the runners are
 `server/script_runners.py:RUNNERS` (that table is what `/api/run` and the import
 chain both call).
@@ -3770,7 +3770,7 @@ user asked for, in the order they asked for it. `server/exporter.py` owns both.
   the registry does not classify fails a test.** `GET /api/script-menu`
   (`server/script_menu.py`, mounted in `server/main.py`) is the menu's one
   source: every script in `server.script_runners.RUNNERS` with its label and
-  description (`mlo.cli.SCRIPTS` — never a second copy of the names), its slot
+  description (`mlo.scripts.SCRIPTS` — never a second copy of the names), its slot
   in the Run All order (`order`, `in_order`), its feature switch (`gate`:
   the config keys that skip it and the run's own sentence, `enabled` false when
   all of them are off), and its force flags (the SHORT keys
@@ -4096,8 +4096,12 @@ composition instead (R267). Above `lg` the pane sits beside the artwork.
   one of five states: `synced` (timed text), `plain` (untimed text this install
   accepts), `plain-refused` (untimed text while `lyrics_allow_plain` — off by
   default — says untimed lyrics are not acceptable: the app's FAILING state, not
-  a reading state, which the player now says with the same red-crossed mark every
-  other surface wears, `Badges.LyricsKindChip`, reason on hover), `instrumental`
+  a reading state, and the player answers it SILENTLY by offering no pane and no
+  toggle. It used to wear the red-crossed `Badges.LyricsKindChip` beside the
+  title; the owner rejected that — lyrics formatting is not one of the facts the
+  fullscreen title row states (R261 carries the rule and the marks' homes), so
+  the state lives on in the layout decision alone: `drawable` is false for it,
+  and nothing on the player says "Plain"), `instrumental`
   (`INSTRUMENTAL=1`: stored lyrics, if any, stay hidden) and `none`. The pane may
   be drawn — and the toggle may be OFFERED — only for the two states with words
   this install shows (`drawable`: `synced` | `plain`), so no state of that
@@ -5212,7 +5216,7 @@ composition instead (R267). Above `lg` the pane sits beside the artwork.
 
 ### 7.44 The library says which kind the lyrics are
 
-- **R261 — `lyrics_kind` is `synced`, `plain` or absent, and it is the stored truth.** The library payload (and `GET /api/album/scan-tracks`, and the query field `library.lyrics_kind`) carries the kind, derived from what the file actually holds (`mlo.lyrics.stored_lyrics_kind` over the embedded lyrics and the `.lrc` — one source with timestamps makes it `synced`; no source makes it absent, and `lyrics_present` is exactly "the kind exists"). Every lyrics surface names the kind (Synced / Plain) instead of only "has lyrics". A **plain** lyric is a failing state — the red ✗ with the reason naming the setting — exactly while `lyrics_allow_plain` is off (the shipped default), neutral while it is on, and a setting that cannot be read never claims a failure. A missing lyric is its own state, not "plain". The mark appears where the surface is about ONE track — its page, its details row, its lyrics views and the import wizard's Lyrics step — and **never on a list of tracks** (an album's tracklist, the library's rows): there it was clutter from the day it shipped.
+- **R261 — `lyrics_kind` is `synced`, `plain` or absent, and it is the stored truth.** The library payload (and `GET /api/album/scan-tracks`, and the query field `library.lyrics_kind`) carries the kind, derived from what the file actually holds (`mlo.lyrics.stored_lyrics_kind` over the embedded lyrics and the `.lrc` — one source with timestamps makes it `synced`; no source makes it absent, and `lyrics_present` is exactly "the kind exists"). Every lyrics surface names the kind (Synced / Plain) instead of only "has lyrics". A **plain** lyric is a failing state — the red ✗ with the reason naming the setting — exactly while `lyrics_allow_plain` is off (the shipped default), neutral while it is on, and a setting that cannot be read never claims a failure. A missing lyric is its own state, not "plain". The mark appears where the surface is about ONE track — its page, its details row, its lyrics views and the import wizard's Lyrics step — and **never on a list of tracks** (an album's tracklist, the library's rows): there it was clutter from the day it shipped. And **never on the fullscreen player's title row**: the player wears no lyrics-kind mark at all — the owner's report ("doesn't say any extra text like 'X Plain' next to the title") — so `plain-refused` keeps its only effect there, which is that no pane and no toggle are offered (R267); the marks keep their homes on the track's own surfaces. Plain lyrics stay READABLE and editable where they land: the track page's lyrics pane opens its RAW editor for untimed words (`LyricsViewer` sets `rawMode` whenever the incoming text parses to no lines — the host hands the stored text straight in, so without that branch a plain track showed "No lyrics yet…" with its words right there, un-syncable), and the Raw/Lines toggle never wipes a plain text (`serializeLrc([])` is "", so the textarea is only re-seeded when there are lines to seed it with).
 
 ### 7.45 A digital-media import settles what the grader would otherwise report
 
@@ -6143,13 +6147,14 @@ composition instead (R267). Above `lg` the pane sits beside the artwork.
   - the reasons nothing can repair are said as such ("Lyrics cannot be repaired
     by a script: …") with the way out named instead: an untimed lyric (no
     timestamps, `lyrics_allow_plain` off) points at fetching a synced version
-    (clear the words, then Fetch lyrics) or turning on "Accept plain (unsynced)
-    lyrics" in Settings → Lyrics & CUEs; a line-synced lyric under a WORD or
-    SYLLABLE `lrc_sync_level` at fetching a word-synced version; stacked
-    timestamps under Extended LRC at a version with one line per stamp; and
-    out-of-order word timestamps at fetching again (no formatter re-orders
-    words — an invalid word-timestamp line the formatter WOULD change is
-    still the repairable half).
+    with the track's own **Find lyrics** — its "Use these lyrics" is the manual
+    route that DOES replace what is stored (`fetch_one(replace=True)`) — or at
+    turning on "Accept plain (unsynced) lyrics" in Settings → Lyrics & CUEs; a
+    line-synced lyric under a WORD or SYLLABLE `lrc_sync_level` at fetching a
+    word-synced version; stacked timestamps under Extended LRC at a version with
+    one line per stamp; and out-of-order word timestamps at fetching again (no
+    formatter re-orders words — an invalid word-timestamp line the formatter
+    WOULD change is still the repairable half).
   Both halves are one issue and one `LYRICS` code, as before. Pinned by
   `tools/test_lyrics_fix.py` (an untimed leftover on an `INSTRUMENTAL=0` track
   fails with the plain reason and is left alone by script 1), `tools/test_arrived_lyrics.py`
@@ -6443,6 +6448,21 @@ composition instead (R267). Above `lg` the pane sits beside the artwork.
   beside it — `mlo/lyrics_publish.to_plain` strips the stamps, the editor
   derives it for the paste it sends, and the endpoint derives it when a caller
   submits a synced text alone.
+  (c) **what may be submitted is decided by CONTENT, not presence.**
+  `mlo/lyrics_providers.lrclib_would_add(existing, synced)` is the ONE rule
+  script 18, the manual endpoint and the batch route read: a record whose
+  `syncedLyrics` is empty does not block a submission that carries TIMINGS —
+  LRCLIB keeps every revision (its publish docs say so), so this is the
+  upgrade that fills a plain-only entry from a library that holds the synced
+  text, which the app used to refuse ("LRCLIB already has this track" while
+  the database had no timings for it at all). A record that already carries
+  timings blocks a plain-only submission, and a like-for-like copy is the
+  duplicate the existence check exists for; a timed text is the only thing
+  that may upgrade (the stored-text fallback under `synced` is checked for
+  stamps before the gate, so untimed words are the plain submission they look
+  like). `force` overrides everything, unchanged; the manual endpoint answers
+  `upgraded: true` when the submission was that upgrade, and script 18 records
+  it per name pair.
   The reply is LRCLIB's own: `201` is the submission, and anything else is
   reported with the status and the response body (`400
   IncorrectPublishTokenError`, a 429 rate limit, a 409 duplicate from an older
@@ -6760,6 +6780,43 @@ composition instead (R267). Above `lg` the pane sits beside the artwork.
   same invalidation and rebuilt fresh — so the page in front of the user is
   never stale, only the list behind it can lag by one refresh. A change made
   OUTSIDE the app keeps its TTL bound.
+
+  * **Refresh keeps the ladder, and drops only the assembled trees.**
+    `tagcache.invalidate_library_payloads` is what the Library's and Home's
+    Refresh buttons call: the tree (and Home) is dropped so the press's answer
+    IS the fresh one, while every cache keyed on the files themselves stays —
+    the tag cache by `(path, mtime_ns, size)`, an album's indexed payload by
+    the folder's own signature, the grade inputs by the config and the state
+    stores' stamps. The rebuild therefore re-walks the folder and re-reads
+    every stat the payload depends on (verified: a file added outside the app
+    appears after one `?refresh=1`, and disappears again when removed), but
+    unchanged files are not re-parsed and unchanged albums are not re-graded —
+    measured 29-52 ms on the 144-file scratch library against a cold rebuild of
+    the whole ladder. `invalidate_all` stays for the cases that really
+    invalidate everything: a settings save and the "affected set is unknown"
+    fallback in `imports._invalidate_caches`.
+  * **`/api/library` is serialized once per build, and answers 304.** The
+    tree's own JSON bytes and ETag are derived where the tree is derived
+    (`tagcache._json_document`, stored beside the payload in `_lib_body`), so
+    FastAPI never re-runs `jsonable_encoder` + `json.dumps` over the app's
+    largest payload per request; the route sends `Cache-Control: no-cache` +
+    `ETag`, and a matching `If-None-Match` gets a 304 with no body. Measured:
+    437 KB tree, ~3 ms warm, 2.7 ms for the 304.
+  * **One album pool for the whole build, and one config dump.** `build_albums_map`
+    builds every album of a library on ONE `ThreadPoolExecutor`
+    (`worker_count(cfg, maximum=min(8, cores), items=len(albums))`); the
+    per-artist call it replaces gave a folder-per-artist library — the common
+    shape — a single-worker pool per album, i.e. a serial scan wearing a pool.
+    The `/api/artist` reader keeps an ordered list wrapper
+    (`build_albums_parallel`). The build also computes `tagindex.config_key(cfg)`
+    ONCE and threads it into every `cached_album`, so the canonical dump of the
+    whole config is not paid per album.
+  * **The startup warm-ups are CHAINED, one walk at a time.** The library
+    build runs first (`library-warm`); the storage snapshot — which walks the
+    same bind-mounted library, measured 6.97 s cold on the owner's install —
+    runs when that thread finishes, and Home's build waits on the library
+    single-flight it shares. Three walkers on one disk was contention, not
+    warming.
 - **R339 — the library-state stamp is PER ALBUM.** `tagindex.dir_signature`
   used to append one library-wide stamp of the four app-state stores (audit
   evidence, artwork provenance, AcoustID submissions, AccurateRip identities),
@@ -6774,7 +6831,12 @@ composition instead (R267). Above `lg` the pane sits beside the artwork.
   the whole file's stamp, which is written by the submit script alone and never
   by an import. Parsing is cached per (file, mtime, size), so a build parses
   each store once. Verified: another album's audit evidence leaves this album's
-  identity byte-identical, while the album it is about changes.
+  identity byte-identical, while the album it is about changes. The rows each
+  store contributes are prepared ONCE per file revision
+  (`tagindex._state_rows` — folded key, raw key, JSON-dumped-and-truncated
+  value, sorted), because sorting every key list and dumping every value per
+  ALBUM made one build JSON-encode each store once per album (the audit store
+  holds one record per audited file).
 - **A tag write happens only when the value CHANGES.** Writing a container is a
   whole-file rewrite on FLAC/MP3/MP4, and the genre import set the tag
   unconditionally: every run rewrote every track of the album (8 tracks: 2.0 s)
@@ -6849,6 +6911,79 @@ composition instead (R267). Above `lg` the pane sits beside the artwork.
   tidy) and `tools/test_mb_search.py` (the tag fallback, and empty rows as a
   200).
 
+
+### 7.73 Loading is near-instant: a bounded list, a small shell, and bytes the server already made
+
+- **R348 — the Library page draws a WINDOW, and grows it as the reader goes.**
+  Every view that repeats rows (Grid, Compact, Albums, Artists, Tracks) renders
+  at most `RENDER_CHUNK = 300` rows of its already-sorted, already-filtered list
+  and grows by 300 when the reader reaches the bottom (an `IntersectionObserver`
+  sentinel, 800 px early) or presses the *Show N more of M remaining* control
+  the sentinel row carries. What must NOT change: every count and label (the
+  toolbar's "N albums · M tracks", the facet counts, the A–Z counts, the header
+  checkboxes) reads the FULL filtered list, and *select all* still means every
+  filtered row, not the drawn window — the selection lives in Sets
+  (`selTrackSet`/`selAlbumSet`/`selArtistSet`) and the "all selected" flags
+  compare sizes, so a 50k-track library no longer does 50k×50k membership
+  scans. Changing the view, the search, a preset, a facet, the A–Z pick or the
+  sort RESETS the window to 300 (it is stored with the list key it was grown
+  for). The rows also carry `content-visibility: auto` +
+  `contain-intrinsic-size`, so the browser skips offscreen layout/paint work.
+  Measured on a synthetic 900-album / 1,800-track library: 300 cards drawn,
+  toolbar still "900 albums · 1800 tracks", one press → 600, scrolling to the
+  bottom → all 900; *select all* ticks the full list while 300 rows stay drawn.
+  Side work follows the same rule: `tracksByAlbum`, `gridSections` and the
+  albums-table rows are derived only for the view on screen, and the search
+  haystacks are built from a fixed tag-key list (the `key:value` aliases plus
+  the person tags) instead of every tag on every track.
+- **R349 — a cover is fetched at the size it is drawn.** Grid cards ask for a
+  bucket (`GRID_COVER_W`: S 160, M 320, L 640 — the user's grid size, the stored
+  `mlo.gridSize` when the caller has no size control), album table rows ask for
+  160, Home's shelves and the Downloads grid follow their own grid size, and
+  the server answers from its disk thumbnail cache with
+  `Cache-Control: private, max-age=300` (`artcache.THUMB_SIZES`). Before this,
+  a card asked for the 1200-3000 px master under `no-cache` and revalidated it
+  on every visit. Nothing upscales: heroes, lightboxes and the fullscreen pane
+  still ask for the full-size cover. The offline-artwork probe is gated too: a
+  `CoverImg` opens Cache Storage only when that album's artwork is known
+  downloaded (`useCachedArtwork`, off the shared `['cachedPaths']` snapshot) or
+  the client is actually offline, so a cold grid no longer runs one cache
+  transaction per image.
+- **R350 — an album card's artist name opens the artist page.** The caption's
+  artist line is a link (`albumArtistRef`: `/artist/mb:<MUSICBRAINZ_ALBUMARTISTID>`
+  when the album carries one, else the containing folder — the same
+  MBID-preferred rule as every other entity link, so it survives a move), on
+  every surface that draws the shared album card. The status dot, the text and
+  the year stay where they were, and the title keeps its own album link.
+- **R351 — the shell is small, and everything else arrives on first use.** The
+  entry chunk carries the shell only (React, the router, the query client, the
+  player bar's own controls); the fullscreen player (`NowPlayingView`), the
+  docked lyrics sidebar and every page are `lazy()` chunks, the fullscreen
+  toggle preloads its chunk on hover/focus/pointer-down, and the five
+  non-English locale bundles are their own chunks — `i18n` re-exports nothing
+  eagerly, and a locale whose chunk has not landed yet falls back to English
+  for the frame or two it takes, then re-renders in the reader's language
+  (measured: the entry chunk 696.7 KiB → 486.4 KiB, 190.8 → 149.4 KiB gzip).
+  The service worker precaches exactly the SHELL (the document, its static
+  import closure, the CSS, the font, the icons — 14 URLs), and every lazy route
+  chunk is cached on first use by the existing cache-first static path, instead
+  of activation downloading all ~2.2 MB of chunks a reader may never open.
+- **R352 — the server loads the engine on demand, and one script table serves
+  every menu.** `mlo/__init__.py` re-exports the engine's entry points LAZILY
+  (PEP 562 `__getattr__`), so `from mlo import __version__` — which the server
+  does before it can answer anything — no longer imports grader, images, flac,
+  autotag, audit, layout, loudness and their libraries (mutagen, Pillow, numpy)
+  at process start; `import mlo` is a 0.02 s no-op and the engine arrives with
+  the first call that needs it. The scripts' ONE table lives in `mlo/scripts.py`
+  (a stdlib-free leaf module), so `server.tags_registry` — imported by the
+  whole API — no longer pulls `mlo.cli`, which imported every script module for
+  a dict of strings; `mlo.cli` re-exports the table for the terminal. The
+  server's own route surface is split into `server/api_*.py` routers by
+  surface (cover, trash, push, WebSockets, MusicBrainz/LRCLIB/RYM, playlists,
+  export, run-scripts) over a shared `server/api_common.py`, so `main.py` is
+  the app wiring and the routes that have no home of their own rather than one
+  file per everything; the route table is verified byte-identical across the
+  split (279 routes, 273 OpenAPI paths, same handlers).
 
 ## 8. Recommended runbook
 

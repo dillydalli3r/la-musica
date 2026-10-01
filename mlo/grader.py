@@ -2239,7 +2239,7 @@ def _grade_album(album_dir, lyrics_format, cfg=None):
         # locally, so an empty `acoustid_api_key` skips only the LOOKUPS), and
         # a track the pair cannot be written for is exactly what the check is
         # for. It stands down with `acoustid_enabled` off: that switch makes
-        # script 21 a no-op (mlo.cli.SCRIPT_GATES), and demanding a tag no pass
+        # script 21 a no-op (mlo.scripts.SCRIPT_GATES), and demanding a tag no pass
         # could write would be a permanent FAIL.
         if cfg.get("grade_check_acoustid", True) \
                 and cfg.get("acoustid_enabled", True) and not is_video_track:
@@ -2812,14 +2812,16 @@ def _grade_album(album_dir, lyrics_format, cfg=None):
                         fmt_ok = False
                         stuck.append("the lyrics have no timestamps and plain lyrics are not accepted "
                                      "(lyrics_allow_plain is off) — no script can add timing; fetch a synced "
-                                     "version (clear these words and run Fetch lyrics) or turn on "
-                                     "\"Accept plain (unsynced) lyrics\" in Settings → Lyrics & CUEs")
+                                     "version with the track's own Find lyrics (its \"Use these lyrics\" "
+                                     "replaces what is stored), or turn on \"Accept plain (unsynced) "
+                                     "lyrics\" in Settings → Lyrics & CUEs")
                     if lrc_text and not TIMESTAMP_RE_GRADE.search(lrc_text):
                         fmt_ok = False
                         stuck.append("the lyrics have no timestamps and plain lyrics are not accepted "
                                      "(lyrics_allow_plain is off) — no script can add timing; fetch a synced "
-                                     "version (clear these words and run Fetch lyrics) or turn on "
-                                     "\"Accept plain (unsynced) lyrics\" in Settings → Lyrics & CUEs")
+                                     "version with the track's own Find lyrics (its \"Use these lyrics\" "
+                                     "replaces what is stored), or turn on \"Accept plain (unsynced) "
+                                     "lyrics\" in Settings → Lyrics & CUEs")
                 if not fmt_ok:
                     failed_checks += 1
                     # The message names the reason, and it only offers the

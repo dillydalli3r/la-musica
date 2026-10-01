@@ -656,9 +656,12 @@ const phoneState = (page) => page.evaluate(() => {
     !i.closest(".amb-cover") && !i.closest("div.md\\:hidden.w-\\[26rem\\]") && i.offsetParent !== null);
   const block = root.querySelector("div.text-center.w-\\[26rem\\]");
   const blockTitle = block ? block.querySelector("div[title]")?.getAttribute("title") ?? null : null;
-  // The refused-plain mark: this install does not accept untimed lyrics, so the
-  // player offers no pane for them and says so in the app's failing vocabulary.
-  const refused = root.querySelector("[data-lyrics-kind][data-lyrics-fail]");
+  // The metadata block NEVER wears a lyrics-kind mark: the fullscreen player
+  // states the track (title, advisory, tech readout), and lyrics formatting
+  // keeps to the track's own surfaces — the pane and its toggle simply are not
+  // offered for words this install refuses. Counted here so a regression that
+  // parks a "✕ Plain" chip beside the title fails loudly.
+  const kindMarks = block ? block.querySelectorAll("[data-lyrics-kind]").length : 0;
   // The lines the pane is actually showing, and how many of them are on screen
   // (the pane renders every line; the ones past the fold are only in the DOM).
   const rows = scroller
@@ -700,7 +703,7 @@ const phoneState = (page) => page.evaluate(() => {
     compactRow: compactRow ? { box: box(compactRow), visible: compactRow.offsetParent !== null, title: headerTitle } : null,
     cover: coverImg ? { ...box(coverImg), inViewport: inViewport(coverImg) } : null,
     block: block ? { box: box(block), visible: block.offsetParent !== null, title: blockTitle } : null,
-    refused: refused ? refused.textContent.trim() : null,
+    kindMarks,
     transport: transport ? { label: transport.getAttribute("aria-label"), inViewport: inViewport(transport) } : null,
     heart: heart ? { inViewport: inViewport(heart), hit: reachable(heart), inRow: !!(transportRow && transportRow.contains(heart)) } : null,
     transportRow: transportRow
@@ -961,6 +964,10 @@ const phoneLyricsPass = async (browser, albumPath, albumLyricText, w, h) => {
       `pane ${off.pane.w}×${off.pane.h} hidden=${off.pane.hidden} controls ${!!off.zoom}/${!!off.offset} pressed=${off.toggle.pressed} header ${off.compactRow?.visible} cover ${off.cover?.w}px @y=${off.cover?.y} block ${off.block?.visible} transport ${off.transport?.inViewport}`);
     check(`${tag}: that press is the persisted pick (the same key every width reads)`,
       persisted === "0", `localStorage mlo.np.lyrics = ${JSON.stringify(persisted)}`);
+    // …and with the whole composition on screen there is still NO lyrics-kind
+    // mark on it (the owner's report: no "✕ Plain" beside the title).
+    check(`${tag}: the full composition's title row carries no lyrics-kind mark`,
+      off.kindMarks === 0, `${off.kindMarks} lyrics-kind mark(s) in the metadata block`);
 
     // Closing and re-opening the player is where a phone-only mode used to die:
     // the pane state must come back from the READER's pick, and the same pick

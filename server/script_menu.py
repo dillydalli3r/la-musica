@@ -10,7 +10,7 @@ was looking at. The registry is :data:`server.script_runners.RUNNERS`; the
 order, the feature switches and the force flags come from the tables that
 already own them.
 
-GET /api/script-menu  every script, its label/description (``mlo.cli.SCRIPTS``,
+GET /api/script-menu  every script, its label/description (``mlo.scripts.SCRIPTS``,
     the names README.md and ``web/src/lib/scripts.ts`` mirror), its slot in the
     Run All order, the group the menu shows it in, its force flag, its feature
     switch — and ``applies_to``: the ENTITY KINDS a run of it makes sense from.
@@ -45,7 +45,7 @@ from typing import Dict, List, Optional
 
 from fastapi import APIRouter
 
-from mlo.cli import SCRIPTS
+from mlo.scripts import SCRIPTS
 from mlo.config import DEFAULT_RUN_ALL_ORDER, load_config
 from server.script_runners import (OPT_IN_SCRIPTS, RUNNERS, _DISABLED,
                                    _FORCE_ALIASES, _FORCE_KEYS)

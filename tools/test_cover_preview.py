@@ -49,6 +49,7 @@ except Exception as e:                                   # pragma: no cover
     raise SystemExit(2)
 
 from server import main as mlo_main                      # noqa: E402  (heavy)
+from server import api_cover as cover_api                # noqa: E402
 from server import tagcache                              # noqa: E402
 
 # --------------------------------------------------------------------------- #
@@ -69,14 +70,14 @@ CFG = {"music_folder": MUSIC, "cover_target_size": 8,
 mlo_main.load_config = lambda *a, **k: dict(CFG)
 
 # A cover write to a LIBRARY album also queues script 5 for that album
-# (server.main._schedule_cover_process, spec R56f): background work that holds
+# (server.api_cover._schedule_cover_process, spec R56f): background work that holds
 # the album's job_locks claim while it runs. Section 4 writes the same album
 # twice in a row, so the second write would be refused 409 by the first write's
 # own follow-up run ("… is in use by Process images"). What this suite pins is
 # the preview URL and the bytes it answers, so the follow-up is stubbed out
 # here; that it fires AND holds the album is `tools/test_track_covers.py`'s
 # check (and `tools/test_job_locks.py` stubs it for the same reason).
-mlo_main._schedule_cover_process = lambda alb: False
+cover_api._schedule_cover_process = lambda alb: False
 
 # A real (if silent) MP3 frame sequence: an album with no audio file is not an
 # album at all, and /api/album would 404 instead of naming its cover.

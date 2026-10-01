@@ -28,7 +28,10 @@ export function entityLinkClick(e: MouseEvent, open: () => void) {
 }
 
 type TrackLike = { path?: string; tags?: { MUSICBRAINZ_TRACKID?: string | null } };
-type AlbumLike = { path: string; meta?: { MUSICBRAINZ_ALBUMID?: string | null } };
+type AlbumLike = {
+  path: string;
+  meta?: { MUSICBRAINZ_ALBUMID?: string | null; MUSICBRAINZ_ALBUMARTISTID?: string | null };
+};
 type ArtistLike = {
   path: string;
   display_name?: string | null;
@@ -45,6 +48,20 @@ export function trackRef(t: TrackLike): string {
 export function albumRef(a: AlbumLike): string {
   const id = a.meta?.MUSICBRAINZ_ALBUMID;
   return id ? `/album/mb:${id}` : `/album/${encodeURIComponent(a.path)}`;
+}
+
+/** In-app route for the artist an ALBUM is filed under — what a card's artist
+ *  caption links to. The album's own album-artist ID is the identity that
+ *  survives a move (the same preference the routes above make), and the
+ *  fallback is the folder the album sits in: this library's layout keeps an
+ *  album at `<artist>/<album>`, so dropping the last segment names the artist
+ *  folder every artist route already uses. An album with no folder of its own
+ *  (a path with no separator) IS the artist's root, and is linked as itself. */
+export function albumArtistRef(a: AlbumLike): string {
+  const id = a.meta?.MUSICBRAINZ_ALBUMARTISTID;
+  if (id) return `/artist/mb:${id}`;
+  const cut = Math.max(a.path.lastIndexOf("/"), a.path.lastIndexOf("\\"));
+  return `/artist/${encodeURIComponent(cut > 0 ? a.path.slice(0, cut) : a.path)}`;
 }
 
 /** The library payload has no artist-level MBID — fall back to the first

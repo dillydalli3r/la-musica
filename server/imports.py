@@ -2406,7 +2406,7 @@ def run_cover_step(album_dir, cfg=None):
     does not clear the floor, and the note says so. A hand-applied cover
     (``POST /api/cover/fromurl``) is deliberately NOT gated: the user picked
     that exact image, and the picker lists below-floor rows for exactly that
-    reason (`server.main._cover_metrics` reports the shortfall as a warning).
+    reason (`server.api_cover._cover_metrics` reports the shortfall as a warning).
 
     A framework album's PLACEHOLDER cover does not count as "has a cover": it is
     the release group's own artwork, kept as a stand-in until this step finds
@@ -2491,7 +2491,7 @@ def run_cover_step(album_dir, cfg=None):
         rg = payload.get("release_group") or ""
         # main.py imports this module, so the cover writer is reached back into
         # lazily — exactly how server.api_discovery reaches `_in_music_folder`.
-        from server.main import _cover_url_bytes, _write_cover_bytes, _sniff_image_ext
+        from server.api_cover import _cover_url_bytes, _write_cover_bytes, _sniff_image_ext
 
         # `substitute=False`: the policy chose THIS candidate for the album, so
         # a provider that is not it must never answer — an image the ranking

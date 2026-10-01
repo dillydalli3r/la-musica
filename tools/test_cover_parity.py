@@ -77,6 +77,7 @@ from mlo import cover_choice as cc                        # noqa: E402
 from server import imports as imp                         # noqa: E402
 from server import integrations as intg                   # noqa: E402
 from server import main as mlo_main                       # noqa: E402
+from server import api_cover as cover_api                 # noqa: E402
 
 # --------------------------------------------------------------------------- #
 # A scratch library, the shipped cover numbers, and the album's identity
@@ -361,7 +362,7 @@ def fake_url_bytes(url, artist="", substitute=True):
     return image(1200, 1200, "png"), "image/png"
 
 
-mlo_main._cover_url_bytes = fake_url_bytes
+cover_api._cover_url_bytes = fake_url_bytes
 
 # --------------------------------------------------------------------------- #
 # Both paths, one scenario at a time

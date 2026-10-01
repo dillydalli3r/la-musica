@@ -23,7 +23,7 @@ read or written):
     ``script_runners.run_script`` answers for the same config — and 17's
     any-of rule (transliterate OR translate) is checked, not assumed.
   * the payload is ordered like the stack (run_all_order) and each label is
-    ``mlo.cli.SCRIPTS``', the table README.md and web/src/lib/scripts.ts mirror.
+    ``mlo.scripts.SCRIPTS``', the table README.md and web/src/lib/scripts.ts mirror.
   * GET /api/script-menu answers, and server/main.py mounts its router.
 
 Run: python tools/test_script_menu.py   (exit 0 pass, 1 fail, 2 skip)
@@ -86,7 +86,7 @@ except Exception as e:  # pragma: no cover - a missing extra is a SKIP
     print(f"SKIP: TestClient unavailable: {e}")
     raise SystemExit(2)
 
-from mlo.cli import SCRIPTS, SCRIPT_GATES  # noqa: E402
+from mlo.scripts import SCRIPTS, SCRIPT_GATES  # noqa: E402
 from mlo.config import DEFAULT_RUN_ALL_ORDER  # noqa: E402
 from server import script_menu, script_runners  # noqa: E402
 from server.script_menu import BECAUSE, KINDS, SCOPES  # noqa: E402
@@ -174,7 +174,7 @@ check("the endpoint's scripts are the registry, label for label",
       [r["id"] for r in data["scripts"]] == sorted(RUNNERS) or
       sorted(r["id"] for r in data["scripts"]) == sorted(RUNNERS),
       str([r["id"] for r in data["scripts"]]))
-check("every label is mlo.cli.SCRIPTS' own",
+check("every label is mlo.scripts.SCRIPTS' own",
       all(row["label"] == MENU[row["id"]][0] and
           row["description"] == MENU[row["id"]][1]
           for row in data["scripts"]))

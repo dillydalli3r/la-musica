@@ -865,6 +865,60 @@ export function useCachedPaths(): Set<string> {
   }, [tracks, lib]);
 }
 
+/** Fold a stored path into the spelling two sides of a comparison can share:
+ *  "/" separators, no trailing slash, no leading "./". Windows-shaped paths
+ *  are tolerated the way `parentDir` tolerates them. */
+function foldDir(path: string): string {
+  return path.replace(/\\/g, "/").replace(/^\.\//, "").replace(/\/+$/, "");
+}
+
+/** Stand-in for "no downloaded artwork at all", so a reader that has not seen
+ *  the snapshot yet gets a stable empty answer rather than a fresh Set. */
+const NO_ARTWORK_DIRS: ReadonlySet<string> = new Set<string>();
+
+/** The folders the offline cache holds ARTWORK for: for every downloaded track,
+ *  its album folder (the cover `artworkUrls` warms) and the artist folder above
+ *  it (the artist image warmed with it).
+ *
+ *  A surface that DRAWS art asks this instead of probing Cache Storage: on a
+ *  library of 50 000 rows the probe was one async `cache.match` AND one state
+ *  update per row just to decide whether a blob exists, while an in-memory Set
+ *  answers the same question on the first render.
+ *
+ *  Memoized against the snapshot's IDENTITY — react-query hands out one array
+ *  per answer — so a page's ten thousand cards share ONE derivation rather
+ *  than scanning the track list ten thousand times. */
+const artworkDirsBySnapshot = new WeakMap<readonly CachedTrack[], ReadonlySet<string>>();
+
+function artworkDirsOf(tracks: readonly CachedTrack[] | undefined): ReadonlySet<string> {
+  if (!tracks) return NO_ARTWORK_DIRS;
+  const seen = artworkDirsBySnapshot.get(tracks);
+  if (seen) return seen;
+  const dirs = new Set<string>();
+  for (const t of tracks) {
+    const album = foldDir(parentDir(t.path));
+    if (!album || album === t.path) continue;
+    dirs.add(album);
+    const artist = foldDir(parentDir(album));
+    if (artist && artist !== album) dirs.add(artist);
+  }
+  artworkDirsBySnapshot.set(tracks, dirs);
+  return dirs;
+}
+
+/** Whether the offline cache holds artwork for the folder `albumPath` names (an
+ *  album folder for a cover, an artist folder for an artist image).
+ *
+ *  Read off the SAME `['cachedPaths']` snapshot every download mark already
+ *  uses — one shared query, not a probe per image — and a download or a
+ *  removal invalidates that key, so a surface's answer follows the cache as it
+ *  changes. It is what lets `offlineArtworkUrl` be asked ONLY for art that can
+ *  actually be there. */
+export function useCachedArtwork(albumPath: string): boolean {
+  const { data } = useQuery({ queryKey: CACHED_PATHS_KEY, queryFn: cachedTracks });
+  return artworkDirsOf(data).has(foldDir(albumPath));
+}
+
 /* ------------------------------------------------------------------ *
  * The download queue
  * ------------------------------------------------------------------ */

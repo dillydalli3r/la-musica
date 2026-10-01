@@ -420,6 +420,27 @@ def lrclib_fetch(artist, track, album=None, duration=None):
     return None
 
 
+def lrclib_would_add(record, synced):
+    """Whether OUR text adds something the record LRCLIB already has lacks.
+
+    The publish API keeps every revision, so a record holding only untimed
+    words is not a reason to stay silent about the synced text this library
+    holds: the timed copy adds exactly what the community entry does not have.
+    The reverse is not true — an untimed submission adds nothing to a record
+    that already carries timings — and two texts of the same kind are
+    duplicates either way, which is what the caller's existence check is for.
+
+    `record` is what `lrclib_fetch`/`lrclib_get` returned (None when the
+    recording is not there at all: the submission IS the addition), `synced`
+    the TIMED text the submission would carry (None for a plain-only one).
+    """
+    if not isinstance(record, dict):
+        return True
+    if str(record.get("syncedLyrics") or "").strip():
+        return False
+    return bool(str(synced or "").strip())
+
+
 def solve_publish_challenge(prefix, target_hex, deadline_s=PUBLISH_SOLVE_DEADLINE):
     """The nonce that satisfies LRCLIB's challenge, or None if the deadline
     runs out first.

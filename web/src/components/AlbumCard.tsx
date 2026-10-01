@@ -9,18 +9,48 @@ import FavHeart from "./FavHeart";
 import LockedChip from "./LockedChip";
 import { PendingMark, pendingSummary } from "./Badges";
 import { useI18n } from "../lib/i18n";
-import { albumRef } from "../lib/refs";
+import { albumArtistRef, albumRef } from "../lib/refs";
 import { originalYear } from "../lib/fmt";
 import { ratingOf, useRatings } from "../lib/ratings";
 import StarRating from "./StarRating";
 import type { ReactNode } from "react";
+import type { GridSize } from "../lib/libraryView";
 import type { Album } from "../types";
+
+/** The server thumbnail bucket each cover size asks for (the buckets the
+ *  server keeps are 160/320/640/1200 — `artcache.THUMB_SIZES`).
+ *
+ *  A card DRAWS its cover at `GRID_SIZE_MIN[size]` px (126/164/214 — lib/fmt),
+ *  but a grid column is `minmax(min, 1fr)`: it stretches past that minimum
+ *  whenever the row has room to spare, and a hi-DPI display draws the box in
+ *  twice the pixels. The bucket is therefore the next one up from the box
+ *  rather than the box itself — big enough that the card is not upscaled in
+ *  ordinary use, small enough that a shelf is not downloading the 1200–3000 px
+ *  MASTER (which the server answers with `no-cache` and no thumbnail bucket)
+ *  for a 126 px square. The master stays what a surface that really draws it
+ *  large asks for: an album page's hero, the fullscreen player's pane. */
+export const GRID_COVER_W: Record<GridSize, number> = { s: 160, m: 320, l: 640 };
+
+/** The cover size the stored setting names, for the pages that draw a card
+ *  WITHOUT owning the cover-size control (Favorites, Artist, Playlists,
+ *  Podcast, Trash all read `mlo.gridSize` — lib/libraryView's own key for it —
+ *  and a card that ignored it would ask the wrong bucket there). A page that
+ *  DOES own the control passes the size it picked, so the click re-renders the
+ *  page and its cards in the same pass. */
+function storedGridSize(): GridSize {
+  try {
+    const v = localStorage.getItem("mlo.gridSize");
+    return v === "s" || v === "l" ? v : "m";
+  } catch {
+    return "m"; // no localStorage (private mode): the default size
+  }
+}
 
 /** The app's album grid card — the Library, Favorites, Artist, Trash,
  * "more like this" and every Home shelf draw an album with this one card, so
  * one album can never look like two. The library payload enriches albums with
  * an `artist` display name; elsewhere it falls back to the album-artist tag. */
-export default function AlbumCard({ al, artistName, selectable, selected, onSelect, href, actions, extraMeta }: {
+export default function AlbumCard({ al, artistName, selectable, selected, onSelect, href, actions, extraMeta, size }: {
   /** `owned: false` marks a row the library does not hold (Home's Soulseek
    *  wishes, a favourite whose folder moved away): nothing has graded it and
    *  there is no audio to play or favourite yet, so the card draws identity
@@ -43,6 +73,12 @@ export default function AlbumCard({ al, artistName, selectable, selected, onSele
    *  passes its shelf's reason chip here). Only rendered when given, so the
    *  library grid passes nothing and renders exactly as before. */
   extraMeta?: ReactNode;
+  /** The cover size this card is drawn at (lib/libraryView's shared setting).
+   *  It is what the card asks the server for (`GRID_COVER_W`): a page that
+   *  offers the control passes what the user picked, and a page that does not
+   *  is answered from the stored setting. Omitted, the card still never asks
+   *  for the master. */
+  size?: GridSize;
 }) {
   const st = statusFor(!!al.pass, al.audit_summary);
   const ref = href === undefined ? albumRef(al) : href;
@@ -63,6 +99,9 @@ export default function AlbumCard({ al, artistName, selectable, selected, onSele
   // ADR chip, the button and the chips as ONE column, in that order.
   const dr = al.meta?.["ALBUM DYNAMIC RANGE"] ?? null;
   const tech = albumTech(al.tracks, true);
+  // The server thumbnail this card's cover asks for: the caller's size when it
+  // owns the control, else the stored setting (see storedGridSize).
+  const coverW = GRID_COVER_W[size ?? storedGridSize()];
   const { t } = useI18n();
   // The album's OWN rating (the user's verdict on the album, never the average
   // of its tracks — lib/ratings owns that distinction), read here rather than
@@ -90,6 +129,7 @@ export default function AlbumCard({ al, artistName, selectable, selected, onSele
             <CoverImg
               albumPath={al.path}
               coverFile={al.cover_file}
+              w={coverW}
               wrapperClass="aspect-square w-full rounded-xl shadow-lg overflow-hidden"
             />
           </Link>
@@ -97,6 +137,7 @@ export default function AlbumCard({ al, artistName, selectable, selected, onSele
           <CoverImg
             albumPath={al.path}
             coverFile={al.cover_file}
+            w={coverW}
             wrapperClass="aspect-square w-full rounded-xl shadow-lg overflow-hidden"
           />
         )}
@@ -248,7 +289,18 @@ export default function AlbumCard({ al, artistName, selectable, selected, onSele
           {inLibrary && (
             <span className={`h-1.5 w-1.5 rounded-full ${st.edge} inline-block shrink-0`} title={st.label} />
           )}
-          <span className="truncate" title={artist}>{artist}</span>
+          {/* The artist OPENS its page: the caption named an artist a reader
+              could not follow, while the title beside it was already a link.
+              Same rule as the title (MBID when the album carries one, the
+              containing folder otherwise — lib/refs), and a wish links too:
+              its artist may well be in the library. */}
+          <Link
+            to={albumArtistRef(al)}
+            className="truncate min-w-0 hover:text-accent-soft"
+            title={artist}
+          >
+            {artist}
+          </Link>
           {(() => {
             const y = originalYear(al.meta);
             return y ? (

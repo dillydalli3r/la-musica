@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState, type SyntheticEvent } from "react";
+import { lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState, type SyntheticEvent } from "react";
 import { createPortal } from "react-dom";
 import { Link } from "react-router-dom";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
@@ -24,17 +24,32 @@ import VolumePct from "./VolumePct";
 import { applyEq, applyReplayGain, applyVolume, attachAnalyser, audibleLatencySec, resumeAnalyser } from "../lib/analyser";
 import { eqApplyRefusal } from "../lib/eqNodes";
 import FavHeart from "./FavHeart";
-import NowPlayingView from "./NowPlayingView";
 import { ROW_COVER_W } from "./CoverImg";
 import { useNowPlayingMeta } from "../lib/nowPlaying";
 import ScrollingText from "./ScrollingText";
-import LyricsSidebar from "./LyricsSidebar";
-import TrackDownloadExport from "./TrackDownloadExport";
 import { DetailsDialog } from "./AlbumDetails";
+import TrackDownloadExport from "./TrackDownloadExport";
 import Popover, { MenuItem } from "./Popover";
 import { albumRef, artistRef, libraryRow, trackRef } from "../lib/refs";
 import useSubtitleTracks from "./SubtitledVideo";
 import { ASPECT_FIT, readAspect, writeAspect, type VideoAspect } from "../lib/video";
+
+/* The two big player surfaces are code-split out of the entry chunk: the bar
+   shell (transport, title row, seek, volume) paints without downloading or
+   parsing them, and each panel's module arrives the first time it is actually
+   opened — the fullscreen overlay, the lyrics sidebar. The `lazy` identity is
+   module scope, so every re-render hands React the same component, and the
+   dynamic import is deduped by the module registry.
+
+   `preload*` warms the same import from hover/focus/pointer-down on the
+   control that opens the panel (and from the app-wide "F" shortcut), so the
+   one-time fetch is usually already in flight before the click lands; the
+   panels never depend on it — a cold click still renders the moment the
+   module resolves. */
+const NowPlayingView = lazy(() => import("./NowPlayingView"));
+const LyricsSidebar = lazy(() => import("./LyricsSidebar"));
+const preloadNowPlaying = () => { void import("./NowPlayingView"); };
+const preloadLyrics = () => { void import("./LyricsSidebar"); };
 
 /** Mirrors the `/api/replaygain` payload (see `api.replaygain`): `gain` is the
  * dB the player applies (null = unity), `analyzed` says the backend had to
@@ -1764,6 +1779,7 @@ export default function PlayerBar() {
         toast("Play a track first — the fullscreen viewer shows what is playing");
         return;
       }
+      preloadNowPlaying();
       openFullscreen();
     };
     window.addEventListener("mlo:fullscreen-toggle", toggle);
@@ -2562,6 +2578,14 @@ export default function PlayerBar() {
                 </Popover>
               </div>
 
+              {/* NOT code-split: TrackDetails (AlbumDetails → the entry graph,
+                  and three pages) imports it statically, so a dynamic import
+                  here cannot move the module out of the entry chunk — the
+                  bundler says so and inlines it — while the component renders
+                  its buttons on the bar from the first frame, i.e. there is no
+                  "first use" to defer to. Its own weight is a few KB and its
+                  mediaCache dependency is in the entry graph anyway (Badges),
+                  so it stays a static import. */}
               <TrackDownloadExport path={current?.path ?? ""} iconOnly disabled={!current} up />
 
               {/* Track details & credits, right where the track is: the same
@@ -2623,6 +2647,8 @@ export default function PlayerBar() {
                 lyricsOpen ? "text-accent bg-raise" : "text-zinc-400 hover:text-white"
               }`}
               onClick={() => setLyricsOpen(!lyricsOpen)}
+              onPointerEnter={preloadLyrics}
+              onFocus={preloadLyrics}
               title={lyricsOpen ? "Lyrics — close the sidebar" : "Lyrics — open the sidebar"}
               aria-label="Lyrics"
               aria-pressed={lyricsOpen}
@@ -2635,6 +2661,8 @@ export default function PlayerBar() {
                 idle ? "opacity-40 pointer-events-none" : ""
               }`}
               onClick={() => openFullscreen()}
+              onPointerEnter={preloadNowPlaying}
+              onFocus={preloadNowPlaying}
               disabled={idle}
               title="Fullscreen player with lyrics"
             >
@@ -2653,6 +2681,7 @@ export default function PlayerBar() {
           <button
             className="self-stretch aspect-square rounded-l-[5px] overflow-hidden bg-raise shrink-0 flex items-center justify-center"
             onClick={() => !idle && openFullscreen()}
+            onPointerDown={preloadNowPlaying}
             title={idle ? "Nothing playing" : "Album art — tap for the fullscreen player"}
             disabled={idle}
           >
@@ -2719,6 +2748,7 @@ export default function PlayerBar() {
           <button
             className={`tap-hit p-2 rounded-lg hover:bg-raise text-zinc-400 shrink-0 ${idle ? "opacity-40 pointer-events-none" : ""}`}
             onClick={() => openFullscreen()}
+            onPointerDown={preloadNowPlaying}
             disabled={idle}
             title="Fullscreen player"
           >
@@ -2744,6 +2774,7 @@ export default function PlayerBar() {
                 <button
                   className="p-1 rounded hover:bg-white/10 text-zinc-400 hover:text-white shrink-0"
                   onClick={() => openFullscreen()}
+                  onPointerDown={preloadNowPlaying}
                   title="Open fullscreen player"
                 >
                   <Maximize2 className="h-3.5 w-3.5" />
@@ -2819,70 +2850,79 @@ export default function PlayerBar() {
         {fullscreen &&
           current &&
           createPortal(
-            <NowPlayingView
-              current={current}
-              queuePos={`${index + 1}/${queue.length}`}
-              playing={!!playing}
-              time={time}
-              duration={effDuration}
-              shuffle={shuffle}
-              loop={loop}
-              onTogglePlay={togglePlay}
-              onSeek={(t) => {
-                const a = media();
-                if (!a) return;
-                const from = a.currentTime;
-                noteSeek("app", a, t);
-                a.currentTime = t;
-                setTime(t);
-                noteJump(a, from, t);
-              }}
-              onStep={step}
-              onToggleShuffle={() => setShuffle(!shuffle)}
-              onToggleLoop={() => setLoop(!loop)}
-              onClose={closeFullscreen}
-              getAudioTime={getAudioTime}
-              speed={speed}
-              onSpeedChange={setSpeed}
-              video={{
-                aspect: videoAspect,
-                captions,
-                onAspect: (a) => {
-                  setVideoAspect(a);
-                  writeAspect(a);
-                },
-                onCaptions: setCaptions,
-              }}
-              rg={{
-                mode: rgMode,
-                preamp: rgPreamp,
-                applied:
-                  rgGain === null
-                    ? null
-                    : { gain: rgGain, source: rgRes?.source ?? null, analyzed: !!rgRes?.analyzed, album: !!rgRes?.album },
-                onMode: (m) => saveCfg({ replaygain_mode: m }),
-                onPreamp: (db) => saveCfg({ replaygain_preamp_db: db }),
-              }}
-            />,
+            /* lazy chunk: the overlay body is fetched the first time the
+               viewer opens (warmed by the toggle's hover/focus) — the portal
+               target is stable, so the pane appears in place on that click */
+            <Suspense fallback={null}>
+              <NowPlayingView
+                current={current}
+                queuePos={`${index + 1}/${queue.length}`}
+                playing={!!playing}
+                time={time}
+                duration={effDuration}
+                shuffle={shuffle}
+                loop={loop}
+                onTogglePlay={togglePlay}
+                onSeek={(t) => {
+                  const a = media();
+                  if (!a) return;
+                  const from = a.currentTime;
+                  noteSeek("app", a, t);
+                  a.currentTime = t;
+                  setTime(t);
+                  noteJump(a, from, t);
+                }}
+                onStep={step}
+                onToggleShuffle={() => setShuffle(!shuffle)}
+                onToggleLoop={() => setLoop(!loop)}
+                onClose={closeFullscreen}
+                getAudioTime={getAudioTime}
+                speed={speed}
+                onSpeedChange={setSpeed}
+                video={{
+                  aspect: videoAspect,
+                  captions,
+                  onAspect: (a) => {
+                    setVideoAspect(a);
+                    writeAspect(a);
+                  },
+                  onCaptions: setCaptions,
+                }}
+                rg={{
+                  mode: rgMode,
+                  preamp: rgPreamp,
+                  applied:
+                    rgGain === null
+                      ? null
+                      : { gain: rgGain, source: rgRes?.source ?? null, analyzed: !!rgRes?.analyzed, album: !!rgRes?.album },
+                  onMode: (m) => saveCfg({ replaygain_mode: m }),
+                  onPreamp: (db) => saveCfg({ replaygain_preamp_db: db }),
+                }}
+              />
+            </Suspense>,
             document.body
           )}
 
         {lyricsOpen && (
-          <LyricsSidebar
-            current={current}
-            playing={!!playing}
-            time={time}
-            onSeek={(t) => {
-              const a = media();
-              if (!a) return;
-              const from = a.currentTime;
-              a.currentTime = t;
-              setTime(t);
-              noteJump(a, from, t);
-            }}
-            getAudioTime={getAudioTime}
-            onClose={() => setLyricsOpen(false)}
-          />
+          /* lazy chunk, same rule as the fullscreen pane: fetched on the
+             first toggle (warmed by the button's hover/focus) */
+          <Suspense fallback={null}>
+            <LyricsSidebar
+              current={current}
+              playing={!!playing}
+              time={time}
+              onSeek={(t) => {
+                const a = media();
+                if (!a) return;
+                const from = a.currentTime;
+                a.currentTime = t;
+                setTime(t);
+                noteJump(a, from, t);
+              }}
+              getAudioTime={getAudioTime}
+              onClose={() => setLyricsOpen(false)}
+            />
+          </Suspense>
         )}
       </div>
     </div>

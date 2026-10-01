@@ -55,6 +55,7 @@ except Exception as e:  # pragma: no cover - a missing extra is a SKIP
 from mlo.audio import AudioFile          # noqa: E402
 from server import exporter              # noqa: E402
 from server import main as mlo_main      # noqa: E402  (heavy import)
+from server import api_export            # noqa: E402  (ExportRequest lives here)
 
 # --------------------------------------------------------------------------- #
 # What the dialog posts
@@ -63,7 +64,7 @@ from server import main as mlo_main      # noqa: E402  (heavy import)
 # Fields of the request that are positional parts of the call, not run options
 # (the exporter's own declaration — same tuple the endpoint filters on).
 _FORM_FIELDS = set(exporter.FORM_FIELDS)
-_OPTION_FIELDS = set(mlo_main.ExportRequest.model_fields) - _FORM_FIELDS
+_OPTION_FIELDS = set(api_export.ExportRequest.model_fields) - _FORM_FIELDS
 
 # The dialog's BLANK_FORM is the server's table plus those positional fields,
 # so this equality is what makes "the button offers every option the API has".

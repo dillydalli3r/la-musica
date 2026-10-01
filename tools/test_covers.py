@@ -911,12 +911,13 @@ assert len(entry["covers"]["results"]) == 4, entry
 # --------------------------------------------------------------------------- #
 # 8) `cover_review` off: the best hit is written here; the two no-ops
 # --------------------------------------------------------------------------- #
-# The step reaches back into `server.main` for the cover page's own writer
+# The step reaches back into `server.api_cover` for the cover page's own writer
 # (download + normalise + store), so that is what gets stubbed here.
 from server import main as srv_main
+from server import api_cover as cover_api  # noqa: E402  (the cover routes' own module)
 # The genuine download the cover page itself uses — the last case in section 8
 # runs it against a stubbed HTTP seam, then puts the stub back.
-_REAL_URL_BYTES = srv_main._cover_url_bytes
+_REAL_URL_BYTES = cover_api._cover_url_bytes
 
 fetched = []
 written = []
@@ -933,9 +934,9 @@ def fake_write_cover(album_dir, stem, ext, data):
     return {"path": os.path.join(album_dir, stem + ext)}
 
 
-srv_main._cover_url_bytes = fake_url_bytes
-srv_main._write_cover_bytes = fake_write_cover
-srv_main._sniff_image_ext = lambda data, ctype=None: ".png"
+cover_api._cover_url_bytes = fake_url_bytes
+cover_api._write_cover_bytes = fake_write_cover
+cover_api._sniff_image_ext = lambda data, ctype=None: ".png"
 
 staged_before = copy.deepcopy(imp.staged_metadata(staged_album, REVIEW_ON))
 clear_caches()
@@ -1049,7 +1050,7 @@ _real_get = _artcache._get
 _art_cache = os.path.join(_TMP, "art_cache_write")
 _artcache.cache_dir = lambda music_folder=None: _art_cache
 _artcache._FAILS.clear()
-srv_main._cover_url_bytes = _REAL_URL_BYTES
+cover_api._cover_url_bytes = _REAL_URL_BYTES
 served = {}
 
 
@@ -1079,7 +1080,7 @@ try:
     assert written[-1]["data"] == b"\x89PNG\r\n\x1a\n" + live_url.encode(), written[-1]
 finally:
     imp.cover_candidates = real_candidates
-    srv_main._cover_url_bytes = fake_url_bytes
+    cover_api._cover_url_bytes = fake_url_bytes
     _artcache.cache_dir = _real_cache_dir
     _artcache._get = _real_get
     fetched.clear()
@@ -1211,7 +1212,7 @@ assert _pend.placeholder_cover_present(kept_album) is False, \
 wrote_album = framework_album("Massive Attack/Mezzanine", "Massive Attack",
                               "Mezzanine")
 assert _pend.placeholder_cover_present(wrote_album)
-_saved_write = srv_main._write_cover_bytes
+_saved_write = cover_api._write_cover_bytes
 
 
 def writing_cover_bytes(alb, stem, ext, data):
@@ -1220,7 +1221,7 @@ def writing_cover_bytes(alb, stem, ext, data):
     return {"path": os.path.join(alb, stem + ext)}
 
 
-srv_main._write_cover_bytes = writing_cover_bytes
+cover_api._write_cover_bytes = writing_cover_bytes
 try:
     clear_caches()
     stub_cov(cover_lines(3, width=1400, height=1400,
@@ -1229,7 +1230,7 @@ try:
     out = imp.run_cover_step(wrote_album, {"music_folder": MUSIC,
                                            "cover_review": False})
 finally:
-    srv_main._write_cover_bytes = _saved_write
+    cover_api._write_cover_bytes = _saved_write
 assert out["fetched"] is True, out
 assert not _pend.placeholder_cover_present(wrote_album), out
 assert sorted(f for f in os.listdir(wrote_album) if f.lower().startswith("cover")) \

@@ -17,7 +17,7 @@ import { sortRows, SortHeader } from "../lib/sort";
 import { ColumnResizer, ColumnsMenu, useColumnPrefs, useColumnWidths, useFittedWidths, type Col } from "../lib/columns";
 import { fmtDuration, fmtTech, GRID_SIZE_MIN, originalYear } from "../lib/fmt";
 import { albumRef } from "../lib/refs";
-import { GRID_SIZES, useGridSize, useLocalSort } from "../lib/libraryView";
+import { GRID_SIZES, useGridSize, useLocalSort, type GridSize } from "../lib/libraryView";
 import type { Album, Track } from "../types";
 import { CachedMark, EmptyState, PageLoading } from "../components/Badges";
 import AlbumCard from "../components/AlbumCard";
@@ -302,15 +302,19 @@ function CachedAlbumRow({
 /** One cached album as the library's own card. The album IS the library's
  *  album, so the card is too; what this view adds is how much of it is here,
  *  what that costs, and the one control that hands the space back. */
-function CachedAlbumCard({ row, onPlay, onRemove }: {
+function CachedAlbumCard({ row, onPlay, onRemove, size }: {
   row: CachedAlbum;
   onPlay: () => void;
   onRemove: () => void;
+  /** The cover size this view's grid draws at — the card turns it into the
+   *  server thumbnail it asks for. */
+  size: GridSize;
 }) {
   return (
     <AlbumCard
       al={row.album}
       artistName={row.artist}
+      size={size}
       /* The card's own play button queues the WHOLE album, and the tracks this
          browser did not download are exactly the ones that need the server —
          so the button here queues the cached ones. */
@@ -683,6 +687,7 @@ export default function DownloadsPage() {
                 <CachedAlbumCard
                   key={row.path}
                   row={row}
+                  size={gridSize}
                   onPlay={() => play(row)}
                   onRemove={() => remove(row.tracks)}
                 />

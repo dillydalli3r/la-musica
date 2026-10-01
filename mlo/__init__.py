@@ -40,31 +40,52 @@ to every processed file so re-runs can skip the finished ones; the
 default, because comparing the encoder's own version re-encoded the library
 after every tool upgrade (R329).
 """
-from .config import load_config, save_config, DEFAULT_CONFIG
-from .artistdata import run_optimize_artist_images
-from .autotag import run_auto_tagging
-from .cue import run_format_cues
-from .flac import run_optimize_flacs
-from .grader import run_grade_library
-from .images import run_process_images
-from .layout import run_optimize_layout
-from .loudness import run_calc_dr_replaygain
-from .lyrics import run_format_lyrics
-from .audit import run_audit_library
-try:
-    from .format_all import run_format_all
-except ImportError:
-    run_format_all = None
+from __future__ import annotations
 
-__version__ = "4.7.2"
-__all__ = [
-    "load_config", "save_config", "DEFAULT_CONFIG",
-    "run_auto_tagging",
-    "run_format_lyrics", "run_format_cues", "run_optimize_flacs",
-    "run_grade_library", "run_process_images", "run_audit_library",
-    "run_calc_dr_replaygain", "run_format_all",
-    "run_optimize_artist_images", "run_optimize_layout",
-]
+import importlib
+
+__version__ = "4.8.0"
+
+# The engine's entry points and config helpers, re-exported LAZILY (PEP 562).
+#
+# Importing the whole engine here made `from mlo import __version__` — which
+# `server.main` does before it can serve anything — pull in grader, images,
+# flac, autotag, audit, layout, loudness and their libraries (mutagen, Pillow,
+# numpy) at process start, for a server whose first paint needs none of them.
+# A re-export is a NAME, not a promise to have loaded its module: each one is
+# imported on first use, then memoized in the module globals exactly like an
+# eager import would have been.
+_LAZY = {
+    "DEFAULT_CONFIG": "config",
+    "load_config": "config",
+    "save_config": "config",
+    "run_optimize_artist_images": "artistdata",
+    "run_auto_tagging": "autotag",
+    "run_format_cues": "cue",
+    "run_optimize_flacs": "flac",
+    "run_grade_library": "grader",
+    "run_process_images": "images",
+    "run_optimize_layout": "layout",
+    "run_calc_dr_replaygain": "loudness",
+    "run_format_lyrics": "lyrics",
+    "run_audit_library": "audit",
+    "run_format_all": "format_all",
+}
+
+__all__ = ["__version__", *_LAZY]
+
+
+def __getattr__(name: str):
+    module = _LAZY.get(name)
+    if module is None:
+        raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+    value = getattr(importlib.import_module(f".{module}", __name__), name)
+    globals()[name] = value          # a real re-export, memoized like one
+    return value
+
+
+def __dir__():
+    return sorted(__all__)
 
 
 

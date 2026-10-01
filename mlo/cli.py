@@ -32,50 +32,11 @@ from .ui import (
     pause_for_input, log, fmt_size,
 )
 from .config import load_config, save_config, DEFAULT_CONFIG, DEFAULT_RUN_ALL_ORDER
+from .scripts import SCRIPTS, SCRIPT_GATES, SCRIPT_LABELS
 
 # Enable ANSI escape sequences on Windows 10+ consoles.
 if os.name == "nt":
     os.system("")
-
-# The one list every menu is built from: id -> (name, what the script does).
-# Names must equal server/script_runners.py RUNNERS (and web/src/lib/scripts.ts)
-# so the terminal can never claim a number means something the API does not.
-SCRIPTS = (
-    (1, "Format lyrics", "multi-format + MEDIA/SOURCE normalization"),
-    (2, "Format CUEs", "CD-N rename + FILE/INDEX layout"),
-    (3, "Optimize FLACs", "lossless re-encode"),
-    (4, "Grade", "per-album tag/lyrics/cover report"),
-    (5, "Process images", "JXL / lossless / JXL-back"),
-    (6, "Audit library", "AudioAuditor: fake lossless / upscaled / MQA"),
-    (7, "DR & ReplayGain", "in-process DR + rsgain ReplayGain tags"),
-    (8, "Auto tagging", "advisory / instrumental / mood / energy / genre"),
-    (9, "AccurateRip", "CUETools .accurip files"),
-    (10, "Format all", "final pass: .accurip / .cue / .lrc / tags"),
-    (11, "Remux videos (MKV)", "any video -> MKV, audio -> FLAC"),
-    (12, "Key & BPM", "musical key + tempo tags"),
-    (13, "Fetch lyrics", "LRCLIB synced/plain"),
-    (14, "Beets tagging", "MusicBrainz via beets"),
-    (15, "Release tracklist", ".mlo_expected.json manifests"),
-    (16, "Mood & Energy", "MOOD/ENERGY from the track's audio"),
-    (17, "Lyrics transliterate (AI)", "TRANSLITERATION/TRANSLATION tags + sidecars"),
-    (18, "Publish lyrics (LRCLIB)", "submit missing lyrics to the community DB"),
-    (19, "Optimize artist images", "crop/resize artist artwork to the configured aspect and size"),
-    (20, "Optimize library layout", "layout report + fixes (case, loose audio, empty artist, strays to the Trash)"),
-    (21, "Fix AcoustID pairs", "complete or create ACOUSTID_ID / ACOUSTID_FINGERPRINT pairs"),
-    (22, "Submit fingerprints (AcoustID)",
-     "give AcoustID the fingerprint + MusicBrainz recording each track states"),
-    (23, "Optimize tags",
-     "delete excess tags: junk names, a valued COMMENT, unneeded aliases"),
-)
-SCRIPT_LABELS = {sid: name for sid, name, _ in SCRIPTS}
-
-# Scripts whose feature has its own on/off switch (mirror of the server's
-# _DISABLED): with the switch off the runner is a no-op at best, so the CLI
-# skips the script instead of reporting an empty run.
-SCRIPT_GATES = {7: "dr_replaygain_enabled", 12: "audiometa_enabled",
-                16: "mood_enabled", 17: ("lyrics_xlit_enabled", "lyrics_translate_enabled"),
-                18: "lrclib_auto_publish", 21: "acoustid_enabled",
-                22: "acoustid_enabled", 23: "strip_unknown_tags"}
 
 
 def _print_script_list(with_desc=True):

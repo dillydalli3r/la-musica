@@ -16,7 +16,7 @@ import { parseHexColor } from "../lib/accent";
 import { toast, useStore } from "../store";
 import { fmtTech, fmtPair, isVideoFile, originalYear } from "../lib/fmt";
 import { albumRef, artistRef, libraryRow, trackRef } from "../lib/refs";
-import { AdvisoryMark, LyricsKindChip, allowPlainOf, isInstrumental } from "./Badges";
+import { AdvisoryMark, allowPlainOf, isInstrumental } from "./Badges";
 import StarRating from "./StarRating";
 import ScrollingText from "./ScrollingText";
 import { ratingOf, useRatings, useSetRating } from "../lib/ratings";
@@ -1277,7 +1277,7 @@ export default function NowPlayingView(p: Props) {
   // question parses the whole lyric text (`lyricsKindOf`). The answer only
   // moves when the lyrics, the track's own INSTRUMENTAL, the setting, the
   // reader's pick or the width does.
-  const { state: lyricsState, drawable: lyricsDrawable, paneOpen, compactHeader } = useMemo(
+  const { drawable: lyricsDrawable, paneOpen, compactHeader } = useMemo(
     () => npLyricsMode({ lyrics: lyricsText, instrumental, allowPlain, showLyrics, mdUp }),
     [lyricsText, instrumental, allowPlain, showLyrics, mdUp]
   );
@@ -1664,29 +1664,13 @@ export default function NowPlayingView(p: Props) {
             {block.techStr}
           </span>
         )}
-        {/* The refused-plain mark. This install does not accept untimed lyrics
-            (`lyrics_allow_plain` off), so the player offers no pane for them —
-            and this is where that is SAID, on the row that already carries the
-            track's other marks, in the same vocabulary every other surface
-            uses (Badges' `LyricsKindChip`: the red cross, the reason on hover,
-            which names the setting). One mark, one meaning, no second kind of
-            notice invented for the player. Nothing is reserved for it: the
-            state is a property of the TRACK, so a track change can take the
-            mark away — but the row is the player's fixed-height title row
-            either way, so nothing the block is made of moves when it does.
-            The mark waits for the track's OWN payload (`!staleLyrics`), the
-            same freshness gate `hasLyrics` uses: the state is derived from the
-            text on screen, which is deliberately the PREVIOUS track's while
-            the next one loads, so an ungated mark claimed "plain" from lyrics
-            the new track may not even have — an instrumental reached by next /
-            previous wore it for the length of the fetch (reported). It also
-            waits for the BLOCK to have committed to that track: while the
-            record is held, the row still reads the outgoing track's title, so
-            a mark derived from the incoming lyrics would sit beside the wrong
-            name (see lib/nowPlaying). */}
-        {lyricsState === "plain-refused" && !staleLyrics && block?.path === p.current.path && (
-          <LyricsKindChip kind="plain" allowPlain={false} size="sm" />
-        )}
+        {/* NO lyrics-kind mark rides this row. The fullscreen player states the
+            TRACK — its title, advisory and technical readout — and lyrics
+            formatting is not one of its facts: the refused-plain state keeps
+            its mark on the track's own surfaces (the track page's header and
+            readout, the wizard's Lyrics step, the lyrics manager), and here it
+            only decides that no pane is offered at all
+            (`npLyricsMode.drawable`). */}
       </div>
       {/* Album and artist on ONE row — "Hail to the Thief · Radiohead" is one
           fact pair, and the two stacked rows read as two unrelated lines

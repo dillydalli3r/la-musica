@@ -1,11 +1,13 @@
 #!/usr/bin/env python3
-"""Menu-consistency gate: every surface that lists the 20 scripts must agree.
+"""Menu-consistency gate: every surface that lists the 23 scripts must agree.
 
 Sources checked:
   * ``EXPECTED_SCRIPTS`` below — the frozen expected registry (number + name)
   * ``server/script_runners.py`` RUNNERS — the numbers /api/run accepts
   * ``web/src/lib/scripts.ts`` SCRIPTS    — the UI's single source of truth
-  * ``README.md``            the 19-script table
+  * ``mlo/scripts.py``       the ONE script table (the terminal menu, the API's
+    script menu and the tag registry's writer column all read it; the README
+    keeps prose only, so it is no longer a table this gate can read)
   * ``web/src/lib/force.ts`` FORCE_SCRIPTS, ``SettingsPage`` FORCE_KEYS —
     the one-shot force switches must map onto /api/run's force dict keys
 
@@ -268,9 +270,16 @@ def check_wizard_finish_list(check):
           senders == ["runAfterImportIds", "runAfterImportIds"], str(senders))
 
 
-def readme_scripts():
-    src = read("README.md")
-    return {int(m.group(1)) for m in re.finditer(r"^\|\s*(\d+)\s*\|", src, re.M)}
+def table_scripts():
+    """The 23 ids `mlo/scripts.py` declares, read from the FILE.
+
+    It is the one table the menus print (mlo.cli re-exports it, server/api_stack
+    and server/script_menu include it, tags_registry's writer column names it),
+    so a script that goes missing there is caught here even when every importer
+    silently keeps working.
+    """
+    src = read("mlo/scripts.py")
+    return {int(m.group(1)) for m in re.finditer(r"^\s*\((\d+), \"", src, re.M)}
 
 
 def force_keys():
@@ -552,7 +561,7 @@ def main():
     canon = EXPECTED_SCRIPTS
     runners = server_runners()
     web = web_scripts()
-    readme = readme_scripts()
+    table = table_scripts()
     run_all = web_default_run_all()
 
     def check(label, ok, detail=""):
@@ -572,7 +581,7 @@ def main():
           f"unknown={sorted(opt_in_py - set(canon))}")
     check("server RUNNERS == canonical numbers", runners == set(canon), f"server={sorted(runners)}")
     check("web SCRIPTS == canonical numbers", set(web) == set(canon), f"web={sorted(web)}")
-    check("README table == canonical numbers", readme == set(canon), f"readme={sorted(readme)}")
+    check("mlo/scripts.py table == canonical numbers", table == set(canon), f"table={sorted(table)}")
 
     print("labels")
     # The UI phrasing and the CLI phrasing differ on purpose ("Grade Library"

@@ -1,10 +1,5 @@
 import { useSyncExternalStore } from "react";
 import en from "../locales/en";
-import es from "../locales/es";
-import fr from "../locales/fr";
-import de from "../locales/de";
-import ja from "../locales/ja";
-import ptBR from "../locales/pt-BR";
 
 /** Every string the app can ask for. The English bundle is the source of
  *  truth, so a mistyped or missing key is a compile error here instead of a
@@ -32,14 +27,55 @@ export const LOCALES: { code: string; label: string }[] = [
 
 /** Partial: a locale may lag the English bundle (the type only promises the
  *  shape), and the runtime fallback below covers exactly that gap. */
-const BUNDLES: Record<string, Partial<Record<MessageKey, string>>> = {
-  en,
-  es,
-  fr,
-  de,
-  ja,
-  "pt-BR": ptBR,
+type Bundle = Partial<Record<MessageKey, string>>;
+
+/** The bundles this process HOLDS: English, always — it is the fallback every
+ *  `t()` reads through — plus any other locale that has been asked for.
+ *
+ *  The other five travel as their own chunks, fetched the moment the locale is
+ *  applied (`apply` → `ensureBundle`). Shipping all six inside this module put
+ *  ~150 KB of translations for languages the reader may not speak in front of
+ *  every first paint, in every language. Until a locale's chunk lands, `t()`
+ *  falls back to English — the same fallback a key missing from a lagging
+ *  locale already uses — and the listeners are notified when it arrives, so
+ *  the screen re-renders in the reader's language a frame later. */
+const BUNDLES: Record<string, Bundle> = { en };
+
+/** code -> the chunk that holds it. English is absent on purpose: it is the
+ *  fallback and rides the entry chunk. */
+const LOCALE_CHUNKS: Record<string, () => Promise<{ default: Bundle }>> = {
+  es: () => import("../locales/es"),
+  fr: () => import("../locales/fr"),
+  de: () => import("../locales/de"),
+  ja: () => import("../locales/ja"),
+  "pt-BR": () => import("../locales/pt-BR"),
 };
+
+/** Locales whose chunk is in flight, so a second `apply` for one of them (a
+ *  config arrival beside a stored pick, a quick double toggle) does not start
+ *  a second request. */
+const loading = new Set<string>();
+
+function ensureBundle(code: string) {
+  if (BUNDLES[code] || loading.has(code)) return;
+  const load = LOCALE_CHUNKS[code];
+  if (!load) return;
+  loading.add(code);
+  void load().then(
+    (mod) => {
+      BUNDLES[code] = mod.default;
+      loading.delete(code);
+      // Re-render only if it is STILL the language on screen: a chunk that
+      // lost the race with another pick must not repaint the old choice.
+      if (current === code) for (const fn of listeners) fn();
+    },
+    () => {
+      // A chunk that cannot load leaves the English fallback in place — the
+      // screen keeps working, in the one language that is always here.
+      loading.delete(code);
+    }
+  );
+}
 
 /** The shipped locale a tag asks for, or null when the app has no bundle for
  *  it — "zh-Hans" then falls through to English rather than to garbled
@@ -72,6 +108,11 @@ export function localeFromConfig(cfg: { ui_locale?: string } | undefined): strin
 
 let current = localeFromConfig(undefined);
 const listeners = new Set<() => void>();
+// The boot locale's bundle, if it is not English: `main.tsx` resolves the
+// locale before the first render, so this is where a stored or browser-derived
+// non-English pick starts its chunk fetch — beside the first paint, not after a
+// pick. Synchronous `t()` keeps answering from English until it lands.
+ensureBundle(current);
 
 /** The stored pick, or null.
  *
@@ -101,6 +142,10 @@ function apply(next: string, persist: boolean) {
   // voice — it is set even when the value does not change, so the boot call
   // still fixes it up from index.html's default.
   document.documentElement.lang = next;
+  // Fetch the bundle BEFORE the early return: the boot call for a stored pick
+  // is the one that must start the request, and it usually does not change
+  // `current` (it computed it from the same stored value).
+  ensureBundle(next);
   if (next === current) return;
   current = next;
   for (const fn of listeners) fn();

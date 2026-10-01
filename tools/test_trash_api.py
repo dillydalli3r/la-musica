@@ -66,6 +66,25 @@ atexit.register(_cleanup_redirect)
 from fastapi import HTTPException  # noqa: E402
 from server import main as mlo_main  # noqa: E402  (heavy import, only for this)
 from server import cache_caps, job_locks  # noqa: E402
+from server import api_trash as trash_api  # noqa: E402  (the trash routes' own module)
+
+
+def _patch_config(fn):
+    """Point the trash routes AND the app's own routes at *fn*.
+
+    The trash surface lives in `server.api_trash` now and reads its own
+    module-level `load_config`; a patch that only reached `server.main` would
+    leave the routes under test reading the developer's real config.
+    """
+    mlo_main.load_config = fn
+    trash_api.load_config = fn
+
+
+def _patch_refresh(fn):
+    """The same for the slskd share hook the trash routes call."""
+    mlo_main._refresh_slskd_shares_soon = fn
+    trash_api._refresh_slskd_shares_soon = fn
+
 
 # --------------------------------------------------------------------------- #
 # fixture: a temp music folder with a .mlo/trash/default inside it (the
@@ -109,7 +128,7 @@ os.utime(os.path.join(TRASH, ALBUM), (now - 300, now - 300))
 os.utime(os.path.join(TRASH, LOOSE), (now - 200, now - 200))
 os.utime(stray_path, (now - 100, now - 100))
 
-mlo_main.load_config = lambda: {"music_folder": MF}
+_patch_config(lambda: {"music_folder": MF})
 
 # safety: this suite must never point at the user's real library
 REAL = REAL_MUSIC_FOLDER.replace("\\", "/").rstrip("/")
@@ -136,7 +155,7 @@ def check(label, fn):
 
 
 def listing():
-    res = mlo_main.trash_list()
+    res = trash_api.trash_list()
     COVER["listing"] = res
     return res
 
@@ -227,7 +246,7 @@ def test_files_capped_but_file_count_true():
         write(os.path.join(entry, f"{i:03d}.flac"), 10)
     try:
         row = [e for e in listing()["entries"] if e["name"] == entry][0]
-        assert mlo_main._TRASH_FILES_CAP == 200, mlo_main._TRASH_FILES_CAP
+        assert trash_api._TRASH_FILES_CAP == 200, trash_api._TRASH_FILES_CAP
         assert row["file_count"] == 205, row["file_count"]
         assert len(row["files"]) == 200, len(row["files"])
         rels = [f["rel"] for f in row["files"]]
@@ -310,7 +329,7 @@ def test_symlink_escape_refused():
         print("skip escape-link delete check (no symlink/junction privilege)")
         return
     try:
-        res = mlo_main.trash_delete(mlo_main.TrashDelete(names=["escape-link"]))
+        res = trash_api.trash_delete(trash_api.TrashDelete(names=["escape-link"]))
         assert res["deleted"] == [], res
         assert len(res["failed"]) == 1, res
         assert "outside the trash folder" in res["failed"][0]["error"], res
@@ -321,7 +340,7 @@ def test_symlink_escape_refused():
 
 
 def test_delete_stray_file():
-    res = mlo_main.trash_delete(mlo_main.TrashDelete(names=[STRAY]))
+    res = trash_api.trash_delete(trash_api.TrashDelete(names=[STRAY]))
     assert res["deleted"] == [STRAY], res
     assert res["failed"] == [], res
     assert res["freed"] == 700, res["freed"]
@@ -331,7 +350,7 @@ def test_delete_stray_file():
 
 def test_delete_deduped_entry():
     assert LOOSE in [e["name"] for e in listing()["entries"]]
-    res = mlo_main.trash_delete(mlo_main.TrashDelete(names=[LOOSE]))
+    res = trash_api.trash_delete(trash_api.TrashDelete(names=[LOOSE]))
     assert res["deleted"] == [LOOSE], res
     assert res["freed"] == LOOSE_BYTES, res["freed"]
     assert not os.path.exists(loose_path), "deduped dir still on disk"
@@ -342,13 +361,13 @@ def test_delete_invalidates_caches():
     calls = []
     mlo_main.tagcache.invalidate_album = lambda *folders: calls.append(("tags", folders))
     mlo_main.mbresolve.invalidate = lambda: calls.append("mb")
-    mlo_main._refresh_slskd_shares_soon = lambda: calls.append("shares")
+    _patch_refresh(lambda: calls.append("shares"))
     try:
         # a refused name must not invalidate anything
-        res = mlo_main.trash_delete(mlo_main.TrashDelete(names=["..", "nope"]))
+        res = trash_api.trash_delete(trash_api.TrashDelete(names=["..", "nope"]))
         assert res["deleted"] == [], res
         assert calls == [], calls
-        res = mlo_main.trash_delete(mlo_main.TrashDelete(names=[ALBUM]))
+        res = trash_api.trash_delete(trash_api.TrashDelete(names=[ALBUM]))
         assert res["deleted"] == [ALBUM], res
         assert res["freed"] == ALBUM_BYTES, res["freed"]
         # ONLY the bin's own folder is dropped — the library-wide clear is gone
@@ -357,7 +376,7 @@ def test_delete_invalidates_caches():
         from server import mbresolve, tagcache
         mlo_main.tagcache.invalidate_album = tagcache.invalidate_album
         mlo_main.mbresolve.invalidate = mbresolve.invalidate
-        mlo_main._refresh_slskd_shares_soon = _real_refresh
+        _patch_refresh(_real_refresh)
 
 
 def test_album_gone_but_trash_survives():
@@ -370,7 +389,7 @@ def test_album_gone_but_trash_survives():
 
 
 def test_missing_entry_fails():
-    res = mlo_main.trash_delete(mlo_main.TrashDelete(names=["ghost"]))
+    res = trash_api.trash_delete(trash_api.TrashDelete(names=["ghost"]))
     assert res["deleted"] == [], res
     assert res["freed"] == 0, res
     assert len(res["failed"]) == 1 and res["failed"][0]["name"] == "ghost", res
@@ -378,11 +397,11 @@ def test_missing_entry_fails():
 
 
 def test_empty_request_is_not_an_error():
-    res = mlo_main.trash_delete(mlo_main.TrashDelete())
+    res = trash_api.trash_delete(trash_api.TrashDelete())
     assert res == {"deleted": [], "failed": [], "freed": 0}, res
-    res = mlo_main.trash_delete(mlo_main.TrashDelete(names=[]))
+    res = trash_api.trash_delete(trash_api.TrashDelete(names=[]))
     assert res == {"deleted": [], "failed": [], "freed": 0}, res
-    res = mlo_main.trash_delete()          # no body at all
+    res = trash_api.trash_delete()          # no body at all
     assert res == {"deleted": [], "failed": [], "freed": 0}, res
 
 
@@ -392,7 +411,7 @@ def test_escape_attempts_refused():
     keeper = write(os.path.join("keeper", "01 - keep.flac"), 900)
     attempts = ["../outside.txt", "..\\outside.txt", "/abs", "a/b",
                 ".", "..", "", "..\\..\\outside.txt", ALBUM + "/../outside.txt"]
-    res = mlo_main.trash_delete(mlo_main.TrashDelete(names=attempts))
+    res = trash_api.trash_delete(trash_api.TrashDelete(names=attempts))
     assert res["deleted"] == [], res
     assert res["freed"] == 0, res
     assert [f["name"] for f in res["failed"]] == attempts, res
@@ -408,30 +427,30 @@ def test_escape_attempts_refused():
 def test_missing_bin():
     empty = tempfile.mkdtemp(prefix="mlo-trash-empty-")
     try:
-        mlo_main.load_config = lambda: {"music_folder": empty}
-        res = mlo_main.trash_list()
+        _patch_config(lambda: {"music_folder": empty})
+        res = trash_api.trash_list()
         assert res["exists"] is False, res
         assert res["entries"] == [] and res["count"] == 0 and res["bytes"] == 0, res
         assert res["folder"] == os.path.join(empty, ".mlo", "trash", "default").replace("\\", "/"), res
         try:
-            mlo_main.trash_delete(mlo_main.TrashDelete(names=["x"]))
+            trash_api.trash_delete(trash_api.TrashDelete(names=["x"]))
         except HTTPException as e:
             assert e.status_code in (400, 404), e.status_code
         else:
             raise AssertionError("deleting from a missing bin should not report success")
         try:
-            mlo_main.trash_restore(mlo_main.TrashRestore(names=["x"]))
+            trash_api.trash_restore(trash_api.TrashRestore(names=["x"]))
         except HTTPException as e:
             assert e.status_code in (400, 404), e.status_code
         else:
             raise AssertionError("restoring from a missing bin should not report success")
         # unset music_folder must be just as quiet on the read path
-        mlo_main.load_config = lambda: {"music_folder": ""}
-        res = mlo_main.trash_list()
+        _patch_config(lambda: {"music_folder": ""})
+        res = trash_api.trash_list()
         assert res["exists"] is False and res["entries"] == [], res
         assert res["music_folder"] == "", res
     finally:
-        mlo_main.load_config = lambda: {"music_folder": MF}
+        _patch_config(lambda: {"music_folder": MF})
         shutil.rmtree(empty, ignore_errors=True)
 
 
@@ -449,14 +468,14 @@ def with_cache_spies(fn):
     calls = []
     mlo_main.tagcache.invalidate_album = lambda *folders: calls.append(("tags", folders))
     mlo_main.mbresolve.invalidate = lambda: calls.append("mb")
-    mlo_main._refresh_slskd_shares_soon = lambda: calls.append("shares")
+    _patch_refresh(lambda: calls.append("shares"))
     try:
         fn(calls)
     finally:
         from server import mbresolve, tagcache
         mlo_main.tagcache.invalidate_album = tagcache.invalidate_album
         mlo_main.mbresolve.invalidate = mbresolve.invalidate
-        mlo_main._refresh_slskd_shares_soon = _real_refresh
+        _patch_refresh(_real_refresh)
 
 
 def make_album(album_dir, size=1234):
@@ -470,7 +489,7 @@ def make_album(album_dir, size=1234):
 
 def manifest():
     """The raw manifest on disk — the API deliberately never exposes it."""
-    with open(mlo_main._manifest_path(TRASH), "r", encoding="utf-8") as f:
+    with open(trash_api._manifest_path(TRASH), "r", encoding="utf-8") as f:
         return json.load(f)
 
 
@@ -496,18 +515,18 @@ def test_move_records_origin():
 
 def test_manifest_never_listed_or_touched():
     res = listing()
-    assert mlo_main._TRASH_MANIFEST not in trash_names(), trash_names()
+    assert trash_api._TRASH_MANIFEST not in trash_names(), trash_names()
     assert res["count"] == len(res["entries"]), res
     assert res["bytes"] == sum(e["bytes"] for e in res["entries"]), res
-    d = mlo_main.trash_delete(mlo_main.TrashDelete(names=[mlo_main._TRASH_MANIFEST]))
+    d = trash_api.trash_delete(trash_api.TrashDelete(names=[trash_api._TRASH_MANIFEST]))
     assert d["deleted"] == [] and len(d["failed"]) == 1, d
     assert d["failed"][0]["error"], d
-    r = mlo_main.trash_restore(mlo_main.TrashRestore(names=[mlo_main._TRASH_MANIFEST]))
+    r = trash_api.trash_restore(trash_api.TrashRestore(names=[trash_api._TRASH_MANIFEST]))
     assert r["restored"] == [] and len(r["failed"]) == 1, r
-    r = mlo_main.trash_restore(mlo_main.TrashRestore(names=[mlo_main._TRASH_MANIFEST],
+    r = trash_api.trash_restore(trash_api.TrashRestore(names=[trash_api._TRASH_MANIFEST],
                                                      dest=MF))
     assert r["restored"] == [], r
-    assert os.path.isfile(mlo_main._manifest_path(TRASH)), "manifest was removed"
+    assert os.path.isfile(trash_api._manifest_path(TRASH)), "manifest was removed"
     assert manifest()["entries"], "manifest was emptied"
 
 
@@ -526,7 +545,7 @@ def test_dedup_move_records_right_origin():
 
 def test_restore_returns_to_original_path():
     def body(calls):
-        res = mlo_main.trash_restore(mlo_main.TrashRestore(names=[ORIG_ALBUM]))
+        res = trash_api.trash_restore(trash_api.TrashRestore(names=[ORIG_ALBUM]))
         assert res == {"restored": [{"name": ORIG_ALBUM, "to": ORIG_DIR_API}],
                        "failed": []}, res
         # restored to its ORIGINAL album folder: that folder's own cached tags
@@ -544,7 +563,7 @@ def test_occupied_destination_refused():
     dedup = ORIG_ALBUM + " (2)"
     occupant = os.path.join(ORIG_DIR, "01 - x.flac")
     before = open(occupant, "rb").read()
-    res = mlo_main.trash_restore(mlo_main.TrashRestore(names=[dedup]))
+    res = trash_api.trash_restore(trash_api.TrashRestore(names=[dedup]))
     assert res["restored"] == [], res
     assert len(res["failed"]) == 1, res
     assert res["failed"][0]["name"] == dedup, res
@@ -558,7 +577,7 @@ def test_occupied_destination_refused():
 def test_dedup_entry_restores_to_its_origin():
     dedup = ORIG_ALBUM + " (2)"
     shutil.rmtree(ORIG_DIR)               # the occupant is gone, origin is free again
-    res = mlo_main.trash_restore(mlo_main.TrashRestore(names=[dedup]))
+    res = trash_api.trash_restore(trash_api.TrashRestore(names=[dedup]))
     assert res == {"restored": [{"name": dedup, "to": ORIG_DIR_API}], "failed": []}, res
     assert os.path.isfile(os.path.join(ORIG_DIR, "01 - x.flac")), "deduped entry not restored"
     assert dedup not in trash_names(), trash_names()
@@ -574,7 +593,7 @@ def test_unknown_origin_needs_dest():
     write(os.path.join(LEGACY, "01 - legacy.flac"), 111)
     row = [e for e in listing()["entries"] if e["name"] == LEGACY][0]
     assert row["origin"] is None, row
-    res = mlo_main.trash_restore(mlo_main.TrashRestore(names=[LEGACY]))
+    res = trash_api.trash_restore(trash_api.TrashRestore(names=[LEGACY]))
     assert res["restored"] == [], res
     assert len(res["failed"]) == 1, res
     assert res["failed"][0]["error"] == "original location unknown — pass dest", res
@@ -583,7 +602,7 @@ def test_unknown_origin_needs_dest():
     # the same entry restores once a destination is supplied
     target = os.path.join(MF, "Restored")
     os.makedirs(target, exist_ok=True)
-    res = mlo_main.trash_restore(mlo_main.TrashRestore(names=[LEGACY], dest=target))
+    res = trash_api.trash_restore(trash_api.TrashRestore(names=[LEGACY], dest=target))
     to = os.path.join(target, LEGACY).replace("\\", "/")
     assert res == {"restored": [{"name": LEGACY, "to": to}], "failed": []}, res
     assert os.path.isfile(os.path.join(target, LEGACY, "01 - legacy.flac")), res
@@ -598,7 +617,7 @@ def test_bad_dest_is_400_and_moves_nothing():
     try:
         for bad in (outside, os.path.join(MF, "no-such-folder"), "", "relative-ish"):
             try:
-                mlo_main.trash_restore(mlo_main.TrashRestore(names=[entry], dest=bad))
+                trash_api.trash_restore(trash_api.TrashRestore(names=[entry], dest=bad))
             except HTTPException as e:
                 assert e.status_code == 400, (bad, e.status_code)
             else:
@@ -618,53 +637,53 @@ STALE_DIR = os.path.join(MF, "Artists", "Stale Artist", STALE_ALBUM)
 def test_refused_delete_keeps_manifest():
     """A delete that removed nothing must leave the manifest exactly alone —
     a refused name, an unknown name and the manifest itself included."""
-    assert mlo_main._manifest_read(TRASH) == {}, mlo_main._manifest_read(TRASH)
+    assert trash_api._manifest_read(TRASH) == {}, trash_api._manifest_read(TRASH)
     make_album(STALE_DIR)
     with_cache_spies(lambda _: mlo_main.album_remove(mlo_main.AlbumRemove(path=STALE_DIR)))
-    before = mlo_main._manifest_read(TRASH)
+    before = trash_api._manifest_read(TRASH)
     assert list(before) == [STALE_ALBUM], before
 
     def body(calls):
-        res = mlo_main.trash_delete(mlo_main.TrashDelete(
-            names=["..", "ghost", mlo_main._TRASH_MANIFEST, STALE_ALBUM + "/evil"]))
+        res = trash_api.trash_delete(trash_api.TrashDelete(
+            names=["..", "ghost", trash_api._TRASH_MANIFEST, STALE_ALBUM + "/evil"]))
         assert res["deleted"] == [] and res["freed"] == 0, res
         assert [f["name"] for f in res["failed"]] == [
-            "..", "ghost", mlo_main._TRASH_MANIFEST, STALE_ALBUM + "/evil"], res
+            "..", "ghost", trash_api._TRASH_MANIFEST, STALE_ALBUM + "/evil"], res
         assert calls == [], calls
 
     with_cache_spies(body)
-    assert mlo_main._manifest_read(TRASH) == before, mlo_main._manifest_read(TRASH)
-    assert os.path.isfile(mlo_main._manifest_path(TRASH)), "manifest file vanished"
+    assert trash_api._manifest_read(TRASH) == before, trash_api._manifest_read(TRASH)
+    assert os.path.isfile(trash_api._manifest_path(TRASH)), "manifest file vanished"
     assert STALE_ALBUM in trash_names(), trash_names()
 
 
 def test_delete_prunes_manifest_and_stale_origin():
     """Deleting an entry drops its record; a later entry with the same name —
     one that never went through the move endpoint — must not inherit it."""
-    assert list(mlo_main._manifest_read(TRASH)) == [STALE_ALBUM], mlo_main._manifest_read(TRASH)
+    assert list(trash_api._manifest_read(TRASH)) == [STALE_ALBUM], trash_api._manifest_read(TRASH)
 
     def body(calls):
-        res = mlo_main.trash_delete(mlo_main.TrashDelete(names=[STALE_ALBUM]))
+        res = trash_api.trash_delete(trash_api.TrashDelete(names=[STALE_ALBUM]))
         assert res["deleted"] == [STALE_ALBUM] and res["failed"] == [], res
         assert res["freed"] == 1234, res["freed"]
         assert calls == [("tags", (TRASH,)), "mb", "shares"], calls
 
     with_cache_spies(body)
     assert STALE_ALBUM not in trash_names(), trash_names()
-    assert mlo_main._manifest_read(TRASH) == {}, mlo_main._manifest_read(TRASH)
+    assert trash_api._manifest_read(TRASH) == {}, trash_api._manifest_read(TRASH)
     # nothing left to remember: the bin keeps no manifest at all
-    assert not os.path.exists(mlo_main._manifest_path(TRASH)), "empty manifest left behind"
+    assert not os.path.exists(trash_api._manifest_path(TRASH)), "empty manifest left behind"
 
     # the imposter: same name, dropped straight into the bin
     write(os.path.join(STALE_ALBUM, "01 - imposter.flac"), 7)
     try:
         row = [e for e in listing()["entries"] if e["name"] == STALE_ALBUM][0]
         assert row["origin"] is None, row
-        res = mlo_main.trash_restore(mlo_main.TrashRestore(names=[STALE_ALBUM]))
+        res = trash_api.trash_restore(trash_api.TrashRestore(names=[STALE_ALBUM]))
         assert res["restored"] == [], res
         assert res["failed"][0]["error"] == "original location unknown — pass dest", res
         assert os.path.isdir(os.path.join(TRASH, STALE_ALBUM)), "entry left the bin"
-        assert not os.path.exists(mlo_main._manifest_path(TRASH)), "failed restore wrote a manifest"
+        assert not os.path.exists(trash_api._manifest_path(TRASH)), "failed restore wrote a manifest"
     finally:
         shutil.rmtree(os.path.join(TRASH, STALE_ALBUM), ignore_errors=True)
         shutil.rmtree(os.path.join(MF, "Artists"), ignore_errors=True)
@@ -699,10 +718,10 @@ def cap_entry(name, size, age):
     with open(os.path.join(path, "track.flac"), "wb") as f:
         f.write(b"x" * size)
     os.utime(path, (time.time() - age, time.time() - age))
-    records = mlo_main._manifest_read(CAP_BIN)
+    records = trash_api._manifest_read(CAP_BIN)
     records[name] = {"origin": os.path.join(CAP_MF, "Artists", name).replace("\\", "/"),
                      "at": time.strftime("%Y-%m-%dT%H:%M:%S")}
-    mlo_main._manifest_write(CAP_BIN, records)
+    trash_api._manifest_write(CAP_BIN, records)
     return path
 
 
@@ -744,24 +763,24 @@ def test_cap_prunes_oldest_first():
     assert os.path.isdir(newer) and os.path.isdir(newest), "a recent entry was deleted"
     # the records of what went went with them; the survivors' records are
     # intact, so those entries can still be put back where they came from
-    assert set(mlo_main._manifest_read(CAP_BIN)) == {"Newer Album", "Newest Album"}, \
-        mlo_main._manifest_read(CAP_BIN)
+    assert set(trash_api._manifest_read(CAP_BIN)) == {"Newer Album", "Newest Album"}, \
+        trash_api._manifest_read(CAP_BIN)
 
     target = os.path.join(CAP_MF, "Artists", "Newest Album").replace("\\", "/")
 
     def body(calls):
-        r = mlo_main.trash_restore(mlo_main.TrashRestore(names=["Newest Album"]))
+        r = trash_api.trash_restore(trash_api.TrashRestore(names=["Newest Album"]))
         assert r == {"restored": [{"name": "Newest Album", "to": target}], "failed": []}, r
 
     real_cfg = mlo_main.load_config
-    mlo_main.load_config = lambda: {"music_folder": CAP_MF}
+    _patch_config(lambda: {"music_folder": CAP_MF})
     try:
         with_cache_spies(body)
     finally:
-        mlo_main.load_config = real_cfg
+        _patch_config(real_cfg)
     assert os.path.isfile(os.path.join(CAP_MF, "Artists", "Newest Album", "track.flac")), \
         "an entry the prune kept could not be restored"
-    assert set(mlo_main._manifest_read(CAP_BIN)) == {"Newer Album"}, mlo_main._manifest_read(CAP_BIN)
+    assert set(trash_api._manifest_read(CAP_BIN)) == {"Newer Album"}, trash_api._manifest_read(CAP_BIN)
 
 
 def test_cap_under_limit_deletes_nothing():
@@ -771,7 +790,7 @@ def test_cap_under_limit_deletes_nothing():
     assert res["removed"] == [] and res["freed_bytes"] == 0, res
     assert res["before_bytes"] == res["after_bytes"] == 400 * 1024, res
     assert os.path.isdir(kept), "an under-cap bin was pruned"
-    assert set(mlo_main._manifest_read(CAP_BIN)) == {"Kept Album"}, mlo_main._manifest_read(CAP_BIN)
+    assert set(trash_api._manifest_read(CAP_BIN)) == {"Kept Album"}, trash_api._manifest_read(CAP_BIN)
 
 
 def test_cap_zero_disables():
@@ -779,7 +798,7 @@ def test_cap_zero_disables():
     assert res["cap_bytes"] == 0, res
     assert res["removed"] == [] and res["freed_bytes"] == 0, res
     assert os.path.isdir(os.path.join(CAP_BIN, "Kept Album")), "0 = off deleted something"
-    assert set(mlo_main._manifest_read(CAP_BIN)) == {"Kept Album"}, mlo_main._manifest_read(CAP_BIN)
+    assert set(trash_api._manifest_read(CAP_BIN)) == {"Kept Album"}, trash_api._manifest_read(CAP_BIN)
 
 
 def test_cap_keeps_in_use():
@@ -799,8 +818,8 @@ def test_cap_keeps_in_use():
     assert not os.path.exists(free), "the free entry was left behind"
     # the cap is NOT met, and the records of what was kept are still there
     assert res["after_bytes"] == 1400 * 1024 > res["cap_bytes"], res
-    assert set(mlo_main._manifest_read(CAP_BIN)) == {"Held Album", "Also Held"}, \
-        mlo_main._manifest_read(CAP_BIN)
+    assert set(trash_api._manifest_read(CAP_BIN)) == {"Held Album", "Also Held"}, \
+        trash_api._manifest_read(CAP_BIN)
 
 
 _real_refresh = mlo_main._refresh_slskd_shares_soon

@@ -1,4 +1,6 @@
-import { Fragment, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
+import {
+  Fragment, useCallback, useEffect, useMemo, useRef, useState, type CSSProperties, type ReactNode,
+} from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { Link, useNavigate, useSearchParams } from "react-router-dom";
 import {
@@ -208,6 +210,115 @@ const TAG_QUERY_ALIASES: Record<string, string> = {
   person: "#person", people: "#person", involved: "#person",
   tag: "#any", any: "#any",
 };
+
+/** The tags a PLAIN WORD is matched against — the fixed list the search
+ *  haystack is built from, instead of every tag on every file.
+ *
+ *  Derived from the aliases themselves so a new `key:value` alias cannot add a
+ *  key the haystack does not carry: every canonical key TAG_QUERY_ALIASES
+ *  resolves to (`#person`/`#any` are sentinels, not tags), plus the person tags
+ *  `#person` expands to, plus the bare YEAR some taggers write beside DATE.
+ *  Nothing else is dropped that the UI can reach by name: a `tag:`/`any:` term
+ *  reads the whole tag record directly (`tagTermOK`), never this string. */
+const SEARCH_TAG_KEYS: string[] = Array.from(new Set([
+  ...Object.values(TAG_QUERY_ALIASES).filter((k) => !k.startsWith("#")),
+  ...PERSON_TAG_KEYS,
+  "YEAR",
+]));
+
+/** One tag record's contribution to a haystack: the fixed keys above, in a
+ *  fixed order. `Object.values(rec)` over a whole tag record was the page's
+ *  hottest per-track work, and most of it could never be searched by name. */
+function tagHay(rec: unknown): string {
+  if (rec == null) return "";
+  const tags = rec as Record<string, unknown>;
+  const parts: string[] = [];
+  for (const k of SEARCH_TAG_KEYS) {
+    const v = tags[k];
+    if (v != null && v !== "") parts.push(String(v));
+  }
+  return parts.join(" ");
+}
+
+/** How many rows a list view draws before the reader asks for more. The
+ *  Library is browsed by scanning the TOP of a sorted list, so one chunk is
+ *  more than a screenful on any display — and it is what keeps the DOM at
+ *  ~RENDER_CHUNK rows whether the library holds five hundred tracks or fifty
+ *  thousand. Reaching the bottom of the list (or pressing the control that
+ *  says how many rows are held back) draws the next chunk. */
+const RENDER_CHUNK = 300;
+
+/** The size a skipped row is LAID OUT at while it is offscreen
+ *  (`content-visibility: auto` + `contain-intrinsic-size`), so the scrollbar
+ *  stays honest and the page does not jump when a row comes into view. */
+const ROW_CV: CSSProperties = { contentVisibility: "auto", containIntrinsicSize: "48px" };
+/** The same for a grid card, which is one cover plus a caption. */
+const CARD_CV: CSSProperties = { contentVisibility: "auto", containIntrinsicSize: "240px" };
+
+/** How much of one list is drawn right now, and how to draw more.
+ *
+ *  `key` names every input that changes WHICH rows the list holds (the search
+ *  box, the presets, the facets, the A–Z pair, the view and the sort): when it
+ *  changes the cap goes back to the first chunk, so a new list always opens at
+ *  its own top instead of at a scroll depth that no longer means anything.
+ *  The cap bounds the DOM only — every count, facet, header checkbox and
+ *  select-all on the page still reads the FULL filtered list. */
+function useRenderCap(key: string, total: number): [number, () => void] {
+  /* The cap is stored WITH the list key it was grown for, and applies only to
+   * that key: a new key reads as "one chunk" on the very render that changes
+   * it (no effect, no stale paint), and a key the reader comes BACK to is
+   * reset by the effect below rather than inheriting the depth it had before. */
+  const [grown, setGrown] = useState<{ key: string; cap: number } | null>(null);
+  useEffect(() => {
+    // Nothing to do while the memo still describes the list on screen; once it
+    // does not, it is dropped, so the depth it remembers cannot follow the
+    // reader back.
+    setGrown((g) => (g && g.key === key ? g : null));
+  }, [key]);
+  const grow = useCallback(
+    () => setGrown((g) => (g && g.key === key ? { key, cap: g.cap + RENDER_CHUNK } : { key, cap: 2 * RENDER_CHUNK })),
+    [key],
+  );
+  const cap = grown && grown.key === key ? grown.cap : RENDER_CHUNK;
+  return [Math.min(cap, total), grow];
+}
+
+/** The foot of a capped list: how many rows the view is HOLDING BACK, and the
+ *  control that draws the next chunk. It draws itself into view (the sentinel
+ *  under the same button, watched by an IntersectionObserver), so scrolling to
+ *  the bottom of the list continues it without a click — the button is what a
+ *  reader who wants to know why the list stopped gets. */
+function ShowMore({ shown, total, onMore, className = "" }: {
+  shown: number; total: number; onMore: () => void; className?: string;
+}) {
+  const ref = useRef<HTMLButtonElement | null>(null);
+  const remaining = Math.max(0, total - shown);
+  useEffect(() => {
+    const el = ref.current;
+    if (!el || remaining <= 0) return;
+    const io = new IntersectionObserver(
+      (entries) => { if (entries.some((e) => e.isIntersecting)) onMore(); },
+      // A screenful early: by the time the reader gets there the next chunk is
+      // already drawn, so the list never shows a gap where rows are coming.
+      { rootMargin: "800px 0px" },
+    );
+    io.observe(el);
+    return () => io.disconnect();
+  }, [remaining, onMore]);
+  if (remaining <= 0) return null;
+  const next = Math.min(RENDER_CHUNK, remaining);
+  return (
+    <button
+      ref={ref}
+      type="button"
+      onClick={onMore}
+      className={`btn-ghost !py-1.5 text-xs tap w-full ${className}`}
+      title={`The list draws the first rows first. ${remaining.toLocaleString()} filtered row${remaining === 1 ? "" : "s"} are not drawn yet — the count above is the whole list.`}
+    >
+      Show {next.toLocaleString()} more of {remaining.toLocaleString()} remaining
+    </button>
+  );
+}
 
 interface QueryTerms { words: string[]; tags: { key: string; value: string }[] }
 
@@ -420,7 +531,10 @@ export default function LibraryPage() {
   const albumRatings = albumRatingsData?.ratings;
 
   // Haystacks precomputed once per payload: the filter memo then only
-  // does substring checks (no join/lowercase per keystroke).
+  // does substring checks (no join/lowercase per keystroke). Each one is the
+  // names the row shows, its file, and the FIXED search tag list
+  // (`SEARCH_TAG_KEYS`) — not every tag on the file, which is what made this
+  // the heaviest pass over a 50 000-track payload.
   const flat = useMemo(() => {
     const albums: FlatAlbum[] = [];
     const tracks: FlatTrack[] = [];
@@ -433,7 +547,8 @@ export default function LibraryPage() {
         const artistName = al.album_artist || a.display_name || a.name;
         const trackHays: string[] = [];
         for (const t of al.tracks ?? []) {
-          const hay = [artistName, al.meta?.ALBUM ?? "", t.file, ...Object.values(t.tags ?? {}).filter(Boolean).map(String)].join(" ").toLowerCase();
+          const hay = [artistName, al.meta?.ALBUM ?? "", t.file, tagHay(t.tags)]
+            .filter(Boolean).join(" ").toLowerCase();
           trackHays.push(hay);
           tracks.push({ ...t, artist: artistName, album: al.meta?.ALBUM ?? al.path.split("/").pop() ?? "", albumCover: al.cover_file ?? null, albumPath: al.path, hay });
         }
@@ -442,7 +557,7 @@ export default function LibraryPage() {
           artist: artistName,
           video_count: (al.tracks ?? []).filter((t) => t.is_video).length,
           inst_count: (al.tracks ?? []).filter((t) => t.tags.INSTRUMENTAL === "1").length,
-          hay: [artistName, al.meta?.ALBUM, al.meta?.DATE, al.meta?.ARTIST, al.meta?.LABEL, al.meta?.CATALOGNUMBER, ...trackHays].join(" ").toLowerCase(),
+          hay: [artistName, tagHay(al.meta), ...trackHays].filter(Boolean).join(" ").toLowerCase(),
         });
       }
     return { albums, tracks };
@@ -600,6 +715,18 @@ export default function LibraryPage() {
   }, [lib, debouncedQuery, preset, ratingFilter, advisoryFilter, ratings, albumRatings, flat, albumHay]);
 
   // ---- selection helpers ----
+  /* The store keeps the selection as path LISTS (it is `setSelection`'s own
+   * shape, shared with the rest of the app); every membership question on this
+   * page is asked through a Set built from them, because the per-row tests
+   * that used to run `Array.includes` across the library were the difference
+   * between 300 rows and 50 000 of them. `selTracks` below is the EXPANDED
+   * selection (an album or artist tick marks its tracks too) and is what the
+   * album tracklists and the batch actions read; the three sets are the raw
+   * ticks, which is what the row checkboxes draw. */
+  const selAlbumSet = useMemo(() => new Set(selection.albums), [selection.albums]);
+  const selArtistSet = useMemo(() => new Set(selection.artists), [selection.artists]);
+  const selTrackSet = useMemo(() => new Set(selection.tracks), [selection.tracks]);
+
   const selTracks = useMemo(() => {
     const s = new Set(selection.tracks);
     for (const p of selection.albums) {
@@ -623,6 +750,10 @@ export default function LibraryPage() {
     for (const p of selection.tracks) dirs.add(p.split("/").slice(0, -1).join("/"));
     return [...dirs];
   }, [selection, lib]);
+
+  /** The same dirs as a Set, for the one lookup that asks "is this album in the
+   *  selection" once per library album (the Stats panel's own filter). */
+  const selectionAlbumDirSet = useMemo(() => new Set(selectionAlbumDirs), [selectionAlbumDirs]);
 
   const selectionCount = selection.tracks.length + selection.albums.length + selection.artists.length;
 
@@ -759,14 +890,14 @@ export default function LibraryPage() {
   const playSelection = () => {
     const out: { path: string; file: string; albumPath: string; artist?: string; album?: string; title?: string; coverFile?: string | null; albumCover?: string | null; advisory?: string | null }[] = [];
     for (const al of sortedAlbums)
-      if (selection.albums.includes(al.path))
+      if (selAlbumSet.has(al.path))
         for (const t of al.tracks) out.push({ path: t.path, file: t.file, albumPath: al.path, artist: al.artist, album: al.meta?.ALBUM ?? undefined, title: t.tags.TITLE || undefined, coverFile: t.cover_file ?? null, albumCover: al.cover_file ?? null, advisory: t.tags.ITUNESADVISORY ?? null });
     for (const a of sortedArtists)
-      if (selection.artists.includes(a.path))
+      if (selArtistSet.has(a.path))
         for (const al of a.albums)
           for (const t of al.tracks) out.push({ path: t.path, file: t.file, albumPath: al.path, artist: al.album_artist || a.display_name || a.name, album: al.meta?.ALBUM ?? undefined, title: t.tags.TITLE || undefined, coverFile: t.cover_file ?? null, albumCover: al.cover_file ?? null, advisory: t.tags.ITUNESADVISORY ?? null });
     for (const tr of sortedTracks)
-      if (selection.tracks.includes(tr.path))
+      if (selTrackSet.has(tr.path))
         out.push({ path: tr.path, file: tr.file, albumPath: tr.path.split("/").slice(0, -1).join("/"), artist: tr.artist, album: tr.album, title: tr.tags.TITLE || undefined, coverFile: tr.cover_file ?? null, albumCover: tr.albumCover ?? null, advisory: tr.tags.ITUNESADVISORY ?? null });
     if (out.length) playNow(out);
   };
@@ -889,6 +1020,30 @@ export default function LibraryPage() {
     [tracksSorted, azNeedle, alphabet.letter]
   );
 
+  /* ---- how much of each list is DRAWN ----
+   *
+   * The DOM is bounded here and nowhere else: a view draws the first
+   * RENDER_CHUNK rows of its own sorted/filtered list and grows on demand (the
+   * sentinel at the foot of the list, or the "Show … more" control there). The
+   * `…Window` lists below are only what the views `.map` over — every count,
+   * facet, header checkbox and select-all on the page still reads the FULL
+   * list, which is why none of them can disagree with the toolbar.
+   *
+   * The key is everything that changes WHICH rows a list holds: a new search,
+   * filter, sort or view resets the cap to the first chunk (see `useRenderCap`). */
+  const listKey = [
+    debouncedQuery, preset, ratingFilter, advisoryFilter, azNeedle, alphabet.letter ?? "", groupByArtist,
+  ].join("\u0000");
+  const [shownAlbums, growAlbums] = useRenderCap(
+    `${view}\u0000${listKey}\u0000${albumSort?.key ?? ""}:${albumSort?.dir ?? ""}`, sortedAlbums.length);
+  const [shownArtists, growArtists] = useRenderCap(
+    `${view}\u0000${listKey}\u0000${artistSort?.key ?? ""}:${artistSort?.dir ?? ""}`, sortedArtists.length);
+  const [shownTracks, growTracks] = useRenderCap(
+    `${view}\u0000${listKey}\u0000${trackSort?.key ?? ""}:${trackSort?.dir ?? ""}`, sortedTracks.length);
+  const albumWindow = useMemo(() => sortedAlbums.slice(0, shownAlbums), [sortedAlbums, shownAlbums]);
+  const artistWindow = useMemo(() => sortedArtists.slice(0, shownArtists), [sortedArtists, shownArtists]);
+  const trackWindow = useMemo(() => sortedTracks.slice(0, shownTracks), [sortedTracks, shownTracks]);
+
   /** The rail's own numbers: counted off the list the VIEW on screen draws
    *  (the artist table counts artists, the track table tracks, the three album
    *  views albums), with the name field applied and the letter not. */
@@ -915,19 +1070,26 @@ export default function LibraryPage() {
 
   // Compact rows re-render on every selection toggle and their tracklist is
   // built inside a .map (no hook allowed there) — order each album's tracks
-  // once here instead of re-sorting them on every render.
+  // once here instead of re-sorting them on every render. Only the COMPACT view
+  // reads this map, so it is not built for the other four views: it is one copy
+  // + sort of every DRAWN album's tracks on every library change, and the
+  // drawing itself is what the window bounds.
   const tracksByAlbum = useMemo(() => {
     const out: Record<string, Track[]> = {};
-    for (const al of sortedAlbums) out[al.path] = [...(al.tracks ?? [])].sort(byDiscThenTrack);
+    if (view !== "compact") return out;
+    for (const al of albumWindow) out[al.path] = [...(al.tracks ?? [])].sort(byDiscThenTrack);
     return out;
-  }, [sortedAlbums]);
+  }, [albumWindow, view]);
 
-  // Grid sections: one flat list, or artist-headed groups.
+  // Grid sections: one flat list, or artist-headed groups — the GRID view's own
+  // shape, so it is built only while that view is the one on screen (the same
+  // rule the compact tracklists above follow).
   const gridSections = useMemo(() => {
-    if (!groupByArtist) return [{ artist: null as string | null, albums: sortedAlbums }];
+    if (view !== "grid") return [] as { artist: string | null; albums: FlatAlbum[] }[];
+    if (!groupByArtist) return [{ artist: null as string | null, albums: albumWindow }];
     const out: { artist: string | null; albums: FlatAlbum[] }[] = [];
     let cur: string | null = null;
-    for (const al of sortedAlbums) {
+    for (const al of albumWindow) {
       if (al.artist !== cur) {
         cur = al.artist;
         out.push({ artist: cur, albums: [] });
@@ -935,7 +1097,26 @@ export default function LibraryPage() {
       out[out.length - 1].albums.push(al);
     }
     return out;
-  }, [sortedAlbums, groupByArtist]);
+  }, [albumWindow, groupByArtist, view]);
+
+  // The rows the albums TABLE draws: artist-headed groups when the toggle is on,
+  // a flat list otherwise — over the drawn WINDOW (a header is furniture around
+  // its albums, never a row of its own), and built only while the albums view is
+  // the one on screen.
+  const albumTableRows = useMemo(() => {
+    const rows: ({ kind: "header"; artist: string } | { kind: "album"; album: FlatAlbum })[] = [];
+    if (view !== "albums") return rows;
+    if (!groupByArtist) return albumWindow.map((al) => ({ kind: "album" as const, album: al }));
+    let current: string | null = null;
+    for (const al of albumWindow) {
+      if (al.artist !== current) {
+        current = al.artist;
+        rows.push({ kind: "header", artist: current });
+      }
+      rows.push({ kind: "album", album: al });
+    }
+    return rows;
+  }, [albumWindow, groupByArtist, view]);
 
   if (error) return <EmptyState title="Backend unreachable" hint={String(error)} />;
   if (isLoading || !lib) return <PageLoading label="Scanning library…" />;
@@ -947,33 +1128,24 @@ export default function LibraryPage() {
   const layoutProblems = layout?.exists && !layout.stale ? layout.report?.total ?? 0 : 0;
   const layoutKinds = layout?.exists && !layout.stale ? Object.keys(layout.report?.counts ?? {}).length : 0;
 
-  const albumRows: ({ kind: "header"; artist: string } | { kind: "album"; album: FlatAlbum })[] = [];
-  if (groupByArtist) {
-    let current = "";
-    for (const al of sortedAlbums) {
-      if (al.artist !== current) {
-        current = al.artist;
-        albumRows.push({ kind: "header", artist: current });
-      }
-      albumRows.push({ kind: "album", album: al });
-    }
-  }
-
   const albumColSpan = 3 + albumCols.length + (selectMode ? 1 : 0); // checkbox?, chevron+cover, cols, actions
-  // The rows the albums table actually draws: artist-headed groups when the
-  // toggle is on, a flat list otherwise. Named because the table both renders
-  // them and has to know whether there are any.
-  const albumTableRows: ({ kind: "header"; artist: string } | { kind: "album"; album: FlatAlbum })[] =
-    groupByArtist ? albumRows : sortedAlbums.map((al) => ({ kind: "album" as const, album: al }));
   // The other two tables' widths, for the same reason the album one exists:
   // their "nothing matches" row has to span the table it sits in.
   const artistColSpan = 1 + artistCols.length + (selectMode ? 1 : 0);
   const trackColSpan =
     trackDefs.filter((c) => trackCols.includes(c.id)).length + (selectMode ? 1 : 0);
 
-  const allAlbumsSelected = sortedAlbums.length > 0 && sortedAlbums.every((a) => selection.albums.includes(a.path));
-  const allArtistsSelected = sortedArtists.length > 0 && sortedArtists.every((a) => selection.artists.includes(a.path));
-  const allTracksSelected = sortedTracks.length > 0 && sortedTracks.every((t) => selection.tracks.includes(t.path));
+  /* The three header checkboxes: "is every row of the FILTERED list selected" —
+   * the full list, never the drawn window, so ticking it still means all of
+   * what the toolbar says is there. Asked through the selection Sets, and the
+   * size test comes first so the everyday "not everything is selected" render
+   * costs one comparison instead of a pass over the whole library. */
+  const allAlbumsSelected =
+    selAlbumSet.size >= sortedAlbums.length && sortedAlbums.length > 0 && sortedAlbums.every((a) => selAlbumSet.has(a.path));
+  const allArtistsSelected =
+    selArtistSet.size >= sortedArtists.length && sortedArtists.length > 0 && sortedArtists.every((a) => selArtistSet.has(a.path));
+  const allTracksSelected =
+    selTrackSet.size >= sortedTracks.length && sortedTracks.length > 0 && sortedTracks.every((t) => selTrackSet.has(t.path));
 
   return (
     <div className="p-6 space-y-5 mx-auto max-w-[1600px]">
@@ -1419,7 +1591,7 @@ export default function LibraryPage() {
               ? `${selTracks.size} selected track${selTracks.size === 1 ? "" : "s"}`
               : "whole library"
           }
-          albums={selectionCount ? flat.albums.filter((a) => selectionAlbumDirs.includes(a.path)) : flat.albums}
+          albums={selectionCount ? flat.albums.filter((a) => selectionAlbumDirSet.has(a.path)) : flat.albums}
           tracks={selectionCount ? flat.tracks.filter((t) => selTracks.has(t.path)) : flat.tracks}
           /* The library's layout condition, only for the whole-library
              readout: a selection's grade says nothing about the music folder
@@ -1477,22 +1649,30 @@ export default function LibraryPage() {
                   </div>
                 )}
                 {sec.albums.map((al) => {
-                  const sel = selection.albums.includes(al.path);
+                  const sel = selAlbumSet.has(al.path);
                   return (
-                    <AlbumCard
-                      key={al.path}
-                      al={al}
-                      selectable={selectMode}
-                      selected={sel}
-                      onSelect={toggleAlbum}
-                      extraMeta={al.pending ? <AcquisitionChip acq={acquisition(al.path, al.wish_id)} /> : null}
-                    />
+                    // The card is the grid item's CONTENT: the wrapper is what
+                    // the grid places, and it is the repeated element the
+                    // browser may skip while it is offscreen
+                    // (`content-visibility`), so a deep grid costs a scroll
+                    // without laying out every card on the way.
+                    <div key={al.path} style={CARD_CV} className="min-w-0">
+                      <AlbumCard
+                        al={al}
+                        size={gridSize}
+                        selectable={selectMode}
+                        selected={sel}
+                        onSelect={toggleAlbum}
+                        extraMeta={al.pending ? <AcquisitionChip acq={acquisition(al.path, al.wish_id)} /> : null}
+                      />
+                    </div>
                   );
                 })}
               </Fragment>
             ))}
           </div>
           <div className="h-2" />
+          <ShowMore shown={albumWindow.length} total={sortedAlbums.length} onMore={growAlbums} />
         </div>
       )}
 
@@ -1506,13 +1686,15 @@ export default function LibraryPage() {
           {sortedAlbums.length === 0 && flat.albums.length > 0 && (
             <p className="text-xs text-zinc-500 py-1">{t("library.az.empty")}</p>
           )}
-          {sortedAlbums.map((al) => {
+          {albumWindow.map((al) => {
             const st = statusFor(!!al.pass, al.audit_summary);
-            const sel = selection.albums.includes(al.path);
+            const sel = selAlbumSet.has(al.path);
             const isExp = expanded.has(al.path);
             const tracks = tracksByAlbum[al.path] ?? [];
             return (
-              <div key={al.path}>
+              // The album's row (and its expanded tracklist) is one repeated
+              // wrapper: offscreen it costs a scroll, not a layout.
+              <div key={al.path} style={ROW_CV}>
                 <div
                   className={`group flex items-center gap-2.5 rounded-md px-2 py-1.5 cursor-pointer transition-colors ${st.tint} ${sel ? "bg-accent/10" : "hover:bg-white/[0.06]"}`}
                   onClick={() => (selectMode ? toggleAlbum(al.path) : toggleExpand(al.path))}
@@ -1592,7 +1774,7 @@ export default function LibraryPage() {
                   <div className="ml-8 border-l border-border pl-3 py-1 space-y-0.5">
                     {tracks.map((t) => {
                       const ts = statusFor(!!t.grade_pass, t.audit);
-                      const tSel = selection.tracks.includes(t.path);
+                      const tSel = selTrackSet.has(t.path);
                       return (
                         <div
                           key={t.path}
@@ -1665,6 +1847,7 @@ export default function LibraryPage() {
               </div>
             );
           })}
+          <ShowMore shown={albumWindow.length} total={sortedAlbums.length} onMore={growAlbums} />
         </div>
       )}
 
@@ -1698,14 +1881,16 @@ export default function LibraryPage() {
                 </tr>
               </thead>
               <tbody className="stagger">
-                {albumTableRows.length === 0 && flat.albums.length > 0 && (
+                {sortedAlbums.length === 0 && flat.albums.length > 0 && (
                   /* A filtered-to-nothing table used to render as a header row
                      over blank space, which reads as a broken view rather than
                      as an answer — this is the answer, and it names every
                      control that can be holding rows back (the top bar's search
                      box included: the table is the same filter's downstream).
                      An EMPTY library is not this case — the page-level panel
-                     above is the one that asks for a music folder. */
+                     above is the one that asks for a music folder. Read off the
+                     FILTERED list, not the drawn rows: a capped table is not an
+                     empty one. */
                   <tr>
                     <td colSpan={albumColSpan} className="td text-zinc-500">
                       {t("library.az.empty")}
@@ -1727,7 +1912,7 @@ export default function LibraryPage() {
                       expanded={expanded.has(row.album.path)}
                       onToggle={() => toggleExpand(row.album.path)}
                       visibleCols={albumCols}
-                      selected={selection.albums.includes(row.album.path)}
+                      selected={selAlbumSet.has(row.album.path)}
                       onToggleSel={() => toggleAlbum(row.album.path)}
                       selTracks={selTracks}
                       onToggleTrack={toggleTrack}
@@ -1746,6 +1931,15 @@ export default function LibraryPage() {
                       onResetTrackWidths={resetAlTrackW}
                     />
                   )
+                )}
+                {/* The cap's own row: the tables above it are what is DRAWN,
+                    and this says how much of the filtered list is waiting. */}
+                {albumWindow.length < sortedAlbums.length && (
+                  <tr>
+                    <td colSpan={albumColSpan} className="td">
+                      <ShowMore shown={albumWindow.length} total={sortedAlbums.length} onMore={growAlbums} />
+                    </td>
+                  </tr>
                 )}
               </tbody>
             </table>
@@ -1787,11 +1981,12 @@ export default function LibraryPage() {
                     </td>
                   </tr>
                 )}
-                {sortedArtists.map((a) => {
-                  const sel = selection.artists.includes(a.path);
+                {artistWindow.map((a) => {
+                  const sel = selArtistSet.has(a.path);
                   return (
                     <tr
                       key={a.path}
+                      style={ROW_CV}
                       className={`table-row group ${sel ? "bg-accent/15" : ""}`}
                       title={selectMode ? "Click to select" : "Open the artist page"}
                       /* `.table-row` promises a click — pointer cursor, hover
@@ -1864,6 +2059,13 @@ export default function LibraryPage() {
                     </tr>
                   );
                 })}
+                {artistWindow.length < sortedArtists.length && (
+                  <tr>
+                    <td colSpan={artistColSpan} className="td">
+                      <ShowMore shown={artistWindow.length} total={sortedArtists.length} onMore={growArtists} />
+                    </td>
+                  </tr>
+                )}
               </tbody>
             </table>
           </div>
@@ -1907,11 +2109,12 @@ export default function LibraryPage() {
                     </td>
                   </tr>
                 )}
-                {sortedTracks.map((tr) => {
-                  const sel = selection.tracks.includes(tr.path);
+                {trackWindow.map((tr) => {
+                  const sel = selTrackSet.has(tr.path);
                   return (
                     <tr
                       key={tr.path}
+                      style={ROW_CV}
                       className={`table-row group cursor-pointer ${sel ? "bg-accent/15" : ""}`}
                       title={selectMode ? "Click to select" : "Click to play"}
                       onClick={selectMode ? () => toggleTrack(tr.path) : () =>
@@ -2067,6 +2270,13 @@ export default function LibraryPage() {
                     </tr>
                   );
                 })}
+                {trackWindow.length < sortedTracks.length && (
+                  <tr>
+                    <td colSpan={trackColSpan} className="td">
+                      <ShowMore shown={trackWindow.length} total={sortedTracks.length} onMore={growTracks} />
+                    </td>
+                  </tr>
+                )}
               </tbody>
             </table>
           </div>

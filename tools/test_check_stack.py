@@ -6,7 +6,7 @@ written):
 
   * the description is DERIVED, not a second list: the script ids are
     ``server.script_runners.RUNNERS``, the labels/descriptions the menu table
-    ``mlo.cli.SCRIPTS``, the check ids ``server.tags_registry.registry()`` —
+    ``mlo.scripts.SCRIPTS``, the check ids ``server.tags_registry.registry()`` —
     itself built from DEFAULT_CONFIG — and the grader's own gate set
     (``mlo.grader.check_gates()``, read out of mlo/grader.py's source). The
     three sets must be equal, with no orphans on either side: a check the
@@ -83,7 +83,7 @@ except Exception as e:  # pragma: no cover - a missing extra is a SKIP
     print(f"SKIP: TestClient unavailable: {e}")
     raise SystemExit(2)
 
-from mlo.cli import SCRIPTS, SCRIPT_GATES  # noqa: E402
+from mlo.scripts import SCRIPTS, SCRIPT_GATES  # noqa: E402
 from mlo.config import DEFAULT_CONFIG, STRICT_DEFAULT_KEYS, load_config  # noqa: E402
 from mlo.grader import check_gates  # noqa: E402
 from server import api_stack, script_runners  # noqa: E402
@@ -197,7 +197,7 @@ cfg = load_config()
 scripts = stack["scripts"]
 ids = sorted(s["id"] for s in scripts)
 check("script ids == RUNNERS", ids == sorted(RUNNERS), f"{ids} vs {sorted(RUNNERS)}")
-check("script ids == mlo.cli.SCRIPTS", ids == sorted(MENU), f"{ids} vs {sorted(MENU)}")
+check("script ids == mlo.scripts.SCRIPTS", ids == sorted(MENU), f"{ids} vs {sorted(MENU)}")
 check("script ids cover the default Run All order",
       sorted(DEFAULT_CONFIG["run_all_order"]) == [i for i in ids
                                                   if i not in OPT_IN_SCRIPTS],
@@ -235,7 +235,7 @@ check("only the ids the app re-anchors are marked non-removable",
       == sorted(api_stack._anchored_ids())
       and 4 in [s["id"] for s in scripts if s["removable"]],
       [s["id"] for s in scripts if not s["removable"]])
-check("gates are mlo.cli.SCRIPT_GATES and match the server's own runner table",
+check("gates are mlo.scripts.SCRIPT_GATES and match the server's own runner table",
       SCRIPT_GATES == script_runners._DISABLED,
       f"{SCRIPT_GATES} vs {script_runners._DISABLED}")
 check("script 18 reports its feature switch",

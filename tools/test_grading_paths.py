@@ -824,7 +824,7 @@ ok(res["pass_count"] == res["total_checks"]
    and not any("ACOUSTID" in i for i in res["tracks"][0]["issues"]),
    f"a complete AcoustID pair passes ({res['pass_count']}/{res['total_checks']})")
 # `acoustid_enabled` off is the family's own switch: script 21 is then a no-op
-# (mlo.cli.SCRIPT_GATES), so the check stands down instead of failing every
+# (mlo.scripts.SCRIPT_GATES), so the check stands down instead of failing every
 # track for a tag no pass could write. The baseline carries the same tags, so
 # only the check itself differs.
 off_base = _grade_album(album, "EMBEDDED", cfg)

@@ -88,7 +88,7 @@ def _clean_file(path, cfg):
 def _drop_tag_cache(folders):
     """Drop the tag cache of the albums this run rewrote — and only those.
 
-    ``/api/run`` (server.main._invalidate_run) and the import pipeline already
+    ``/api/run`` (server.api_run._invalidate_run) and the import pipeline already
     do this for the folders a run names; a terminal run has no cache at all.
     Calling it here as well costs a dict drop per album and makes the runner
     correct for every entry point, while `invalidate_all` — the whole library
@@ -125,7 +125,7 @@ def run_tag_hygiene(config):
     if not config.get("strip_unknown_tags", True):
         # With the switch off nothing is excess anywhere in the pipeline, so
         # this pass would delete nothing: say it instead of reporting an empty
-        # run (mlo.cli.SCRIPT_GATES / script_runners._DISABLED skip it in a
+        # run (mlo.scripts.SCRIPT_GATES / script_runners._DISABLED skip it in a
         # chain for the same reason).
         log("strip_unknown_tags is off — nothing is excess (see Configuration).")
         return stats

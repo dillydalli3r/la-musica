@@ -16,7 +16,11 @@ case where this library's text is the better one.
 
 Skips, in order: unreadable file, INSTRUMENTAL=1, no lyric text, missing
 ARTIST/TITLE, no duration (LRCLIB requires one), and "LRCLIB already has it"
-(it answers 409 on a duplicate, which is reported as a skip too).
+(it answers 409 on a duplicate, which is reported as a skip too). A record
+LRCLIB holds WITHOUT timings is not a skip when this track carries the synced
+text: that submission is an upgrade, kept beside the old revision
+(``lrclib_would_add``), so the community's plain-only entries get their timed
+copy from this library.
 
 A track whose MusicBrainz ids give it another name (`宇多田ヒカル` / `Hikaru
 Utada`) is published under its own name pair AND each alias pair (see
@@ -33,6 +37,7 @@ from .lyrics import TIMESTAMP_RE, WORD_TS_RE, _lrc_for, has_lyrics_text
 from .lyrics_fetch import _search_aliases
 from .lyrics_providers import (
     PublishTokenPool, _alias_queries, lrclib_fetch, lrclib_publish,
+    lrclib_would_add,
 )
 from .paths import AUDIO_EXTS
 from .stats import (
@@ -143,10 +148,16 @@ def publish_one(path, config, force=False, solver=None):
             entry = {"artist": a, "title": t, "album": al, "status": "skipped"}
             # Independent per name: a duplicate or a refusal under one name
             # never stops the others from publishing.
-            if not force and lrclib_fetch(a, t, al or None, duration):
+            known = None if force else lrclib_fetch(a, t, al or None, duration)
+            if known is not None and not lrclib_would_add(known, synced_body):
                 entry["reason"] = "LRCLIB already has it"
                 names.append(entry)
                 continue
+            if known is not None:
+                # The name is there as a plain-only record and this track
+                # holds the synced text: the submission is the UPGRADE
+                # (`lrclib_would_add`), and the report says so.
+                entry["upgrade"] = "synced over plain"
             ok, message = lrclib_publish(a, t, al, duration,
                                          plain=plain, synced=synced_body,
                                          solver=solver)
@@ -200,7 +211,8 @@ def run_publish_lyrics(config):
 
     print_header("Publish Lyrics (LRCLIB)")
     force = bool(config.get("force_publish", False))
-    log("LRCLIB only receives tracks it does not already have"
+    log("LRCLIB only receives what it does not already have — a plain-only "
+        "entry still gets this library's synced text"
         + ("  (forced: re-submit existing)" if force else ""))
 
     if config.get("targets") is not None:

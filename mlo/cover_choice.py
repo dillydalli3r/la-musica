@@ -86,7 +86,7 @@ substituted by a worse one):
 * a row whose own release contradicts the album — a different artist, or a
   different album by the same artist (rule 2): the wrong album's art must
   never be the automatic pick, however big or pretty it is,
-* a shorter side below the FLOOR — the same number `server.main._cover_metrics`
+* a shorter side below the FLOOR — the same number `server.api_cover._cover_metrics`
   calls "the minimum" and the grader enforces: `cover_target_size` while
   `cover_resize_enabled` is on, and no floor at all when it is 0. That floor
   covers an UNKNOWN size too: while one is configured, a row whose image was
@@ -211,7 +211,7 @@ _RULES = (
     "a re-compressed thumbnail — and above all an upscaled one — ranks below "
     "a clean full-size image",
     "the provider's own order only ever breaks a tie",
-    "a candidate below the cover target (the minimum server.main._cover_metrics "
+    "a candidate below the cover target (the minimum server.api_cover._cover_metrics "
     "reports and the grader enforces) is rejected, not silently ranked last — "
     "and so is one whose size was never measured while that minimum is set",
 )

@@ -16,7 +16,7 @@ human label and the one-line meaning — and derives everything else:
   family            ``mlo.config._TAG_TO_FAMILY`` for the write-gate family;
                     the display family is the table below (it is the one thing
                     no other module states).
-  writer            the script table (``mlo.cli.SCRIPTS``) — never a raw "8".
+  writer            the script table (``mlo.scripts.SCRIPTS``) — never a raw "8".
   graded_by         ``mlo.grader``'s own tables (``PER_TRACK_TAGS``,
                     ``ALBUM_TAGS``, ``TAG_PRESENCE_CHECKS``) plus ``TAG_CHECKS``
                     below, for the tags graded by a named check rather than a
@@ -40,7 +40,7 @@ import re
 import threading
 
 from mlo.audio import TAG_MAP, _mp4_specs, _mp3_specs
-from mlo.cli import SCRIPT_LABELS
+from mlo.scripts import SCRIPT_LABELS
 from mlo.config import (AUDIO_TAG_TYPES, DEFAULT_CONFIG, _LYRICS_PREFIXES,
                         _audio_tag_family, should_write_audio_tag)
 from mlo.grader import (ALBUM_TAGS, ALIAS_TAGS, PER_TRACK_TAGS, TAG_ALLOWLIST,

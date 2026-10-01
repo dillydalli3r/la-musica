@@ -167,21 +167,26 @@ _STATE_STORES = (
     ("mlo.acoustid", "submissions_file", "whole"),
 )
 
-_state_cache = {}   # store path -> ((mtime_ns, size), parsed dict)
+_state_cache = {}   # store path -> ((mtime_ns, size), prepared rows)
 
 
-def _read_state(path):
-    """The parsed state store at *path*, re-read only when the file changes.
+def _state_rows(path):
+    """The store's records prepared ONCE per file revision, for `state_stamp`.
 
-    One album's signature asks for its share of four stores, and a library
-    build asks once per album: parsing each store once per (file, mtime) is
-    what keeps that cheap.
+    Rows are ``(folded_key, raw_key, value)`` — the folded key to match against
+    an album root, the raw key for the stamp text, and the JSON value already
+    dumped and truncated. Sorting and dumping belong to the STORE, not to the
+    album asking: doing them per album made one library build JSON-encode every
+    record of every store once per album (and the audit store holds one record
+    per audited file), then sort every key list the same number of times. Here
+    each store is prepared once per (path, mtime, size) and each album only
+    walks the rows.
     """
     try:
         st = os.stat(path)
         key = (st.st_mtime_ns, st.st_size)
     except OSError:
-        return {}
+        return []
     hit = _state_cache.get(path)
     if hit is not None and hit[0] == key:
         return hit[1]
@@ -192,23 +197,24 @@ def _read_state(path):
         data = {}
     if not isinstance(data, dict):
         data = {}
+    rows = []
+    for k in data:
+        low = os.path.normcase(os.path.normpath(str(k or "")))
+        if not low:
+            continue
+        try:
+            value = json.dumps(data[k], sort_keys=True, default=str)
+        except Exception:
+            value = str(data[k])
+        # Truncated: the stamp is an identity, not a copy — a store value big
+        # enough to dominate the signature (a fingerprint) only has to keep
+        # changing it when it changes.
+        rows.append((low, str(k), value[:200]))
+    rows.sort(key=lambda r: r[0])
     if len(_state_cache) > 8:
         _state_cache.clear()
-    _state_cache[path] = (key, data)
-    return data
-
-
-def _shares_folder(key, root) -> bool:
-    """Whether a state store's PATH key belongs to *root*'s view.
-
-    True when the key is inside the album, or when the album sits inside the
-    key: the stores hold artist- and library-level records (an artist's
-    artwork provenance, say) that every album beneath them reads, so a change
-    to one is a change to all of them — and to nothing else.
-    """
-    low = os.path.normcase(os.path.normpath(str(key or "")))
-    return bool(low) and (low == root or low.startswith(root + os.sep)
-                          or root.startswith(low + os.sep))
+    _state_cache[path] = (key, rows)
+    return rows
 
 
 def state_stamp(album_dir, cfg) -> str:
@@ -244,18 +250,12 @@ def state_stamp(album_dir, cfg) -> str:
         if how == "whole":
             parts.append(f"{name}={_entry_stamp(path)}")
             continue
-        data = _read_state(path)
-        for key in sorted(data, key=str):
-            if not _shares_folder(key, root):
-                continue
-            try:
-                value = json.dumps(data[key], sort_keys=True, default=str)
-            except Exception:
-                value = str(data[key])
-            # Truncated: the stamp is an identity, not a copy — a store value
-            # big enough to dominate the signature (a fingerprint) only has to
-            # keep changing it when it changes.
-            parts.append(f"{name}:{key}={value[:200]}")
+        # The store's share of THIS album: a key inside it, or one it sits
+        # under (artist- and library-level records every album beneath them
+        # reads). Both directions, exactly as `_shares_folder` states them.
+        for low, key, value in _state_rows(path):
+            if low == root or low.startswith(root + os.sep) or root.startswith(low + os.sep):
+                parts.append(f"{name}:{key}={value}")
     return ";".join(parts)
 
 
@@ -300,18 +300,23 @@ def _key(album_dir, light) -> str:
     return f"{os.path.normpath(os.path.abspath(album_dir))}\x00{1 if light else 0}"
 
 
-def cached_album(album_dir, cfg, light, builder):
+def cached_album(album_dir, cfg, light, builder, cfg_key=None):
     """`build_album`'s payload for *album_dir*, from the index when it matches.
 
     *builder* is called only when nothing matches (or when the index is
     unusable). A payload that is not there, or that reports an error, is built
     fresh and NOT stored: an absent album and a folder the OS refused to read
     are transient answers that must not be pinned.
+
+    *cfg_key* is the caller's `config_key(cfg)` when a whole build already
+    computed it: the key is a canonical dump of the whole config, and a build
+    asking for it per album would pay that dump a thousand times for one
+    answer that cannot change while the build runs.
     """
     sig = dir_signature(album_dir, cfg)
     if sig is None:
         return builder()
-    key = _key(album_dir, light) + "\x00" + config_key(cfg)
+    key = _key(album_dir, light) + "\x00" + (cfg_key or config_key(cfg))
     with _LOCK:
         hit = _MEM.get(key)
         if hit and hit[0] == sig:

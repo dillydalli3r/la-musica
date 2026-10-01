@@ -1387,13 +1387,14 @@ try:
     from fastapi.testclient import TestClient  # noqa: E402  (heavy import)
 
     from server import beetscfg, main as mlo_main, soulseek  # noqa: E402
+    from server import api_cover as cover_api                # noqa: E402
 except Exception as e:                                   # pragma: no cover
     print(f"  SKIP  TestClient unavailable ({e})")
 
 if mlo_main is not None:
     _real = {
         "config": mlo_main.load_config,
-        "cover_bytes": mlo_main._cover_url_bytes,
+        "cover_bytes": cover_api._cover_url_bytes,
         "beets": beetscfg.run_beets_import,
         "export": mlo_main.exporter.export_tracks,
         "import_one": mlo_main._import_one_album,
@@ -1479,16 +1480,16 @@ if mlo_main is not None:
             fh.write("not really audio")
         dest_drive = tempfile.mkdtemp(prefix="mlo-locks-dest-")
 
-        mlo_main._cover_url_bytes = lambda *a, **k: (png, "image/png")
+        cover_api._cover_url_bytes = lambda *a, **k: (png, "image/png")
         # A cover write to a LIBRARY album also queues script 5 for that album
-        # (server.main._schedule_cover_process, spec R56f): background work that
+        # (server.api_cover._schedule_cover_process, spec R56f): background work that
         # takes the album's job_locks claim, which would sit under these probes'
         # feet — the holder thread below would fail to claim and the route under
         # test would answer a foreign job's refusal. What this section pins is
         # the ROUTES' own claims, so the follow-up run is stubbed out here; that
         # it claims the album is `tools/test_track_covers.py`'s check.
-        _real_schedule_cover_process = mlo_main._schedule_cover_process
-        mlo_main._schedule_cover_process = lambda alb: False
+        _real_schedule_cover_process = cover_api._schedule_cover_process
+        cover_api._schedule_cover_process = lambda alb: False
         probe("the cover upload", [album],
               lambda: client.post(f"/api/cover?album={album}",
                                   files={"file": ("cover.png", png, "image/png")}))
@@ -1519,14 +1520,14 @@ if mlo_main is not None:
         # Scoping the job to the thread made the second JOIN the first and
         # write the same album unchallenged.
         _first_inside = threading.Event()
-        _quick_bytes = mlo_main._cover_url_bytes
+        _quick_bytes = cover_api._cover_url_bytes
 
         def _slow_bytes(*a, **k):
             _first_inside.set()
             time.sleep(0.5)
             return png, "image/png"
 
-        mlo_main._cover_url_bytes = _slow_bytes
+        cover_api._cover_url_bytes = _slow_bytes
 
         async def concurrent_covers():
             transport = httpx.ASGITransport(app=mlo_main.app)
@@ -1541,8 +1542,8 @@ if mlo_main is not None:
         try:
             _first, _second = asyncio.run(concurrent_covers())
         finally:
-            mlo_main._cover_url_bytes = _quick_bytes
-        mlo_main._schedule_cover_process = _real_schedule_cover_process
+            cover_api._cover_url_bytes = _quick_bytes
+        cover_api._schedule_cover_process = _real_schedule_cover_process
         if _first.status_code in (401, 428):
             print("  SKIP  the concurrent check (auth gate on)")
         else:
@@ -1773,7 +1774,7 @@ if mlo_main is not None:
             script_runners.RUNNERS.update(real_runners)
 
         mlo_main.load_config = _real["config"]
-        mlo_main._cover_url_bytes = _real["cover_bytes"]
+        cover_api._cover_url_bytes = _real["cover_bytes"]
         beetscfg.run_beets_import = _real["beets"]
         mlo_main.exporter.export_tracks = _real["export"]
         mlo_main._import_one_album = _real["import_one"]

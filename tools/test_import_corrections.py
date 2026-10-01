@@ -92,7 +92,7 @@ from fastapi.testclient import TestClient  # noqa: E402
 
 from mlo import import_policy, lyrics_fetch, lyrics_publish, lyrics_xlit  # noqa: E402
 from mlo.audio import AudioFile  # noqa: E402
-from mlo.cli import SCRIPT_LABELS  # noqa: E402
+from mlo.scripts import SCRIPT_LABELS  # noqa: E402
 from server import api_lyrics, script_runners  # noqa: E402
 import server.main as mlo_main  # noqa: E402
 

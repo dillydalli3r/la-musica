@@ -1,7 +1,7 @@
 import { useEffect, useState } from "react";
 import { Disc3 } from "lucide-react";
-import { api } from "../api";
-import { offlineArtworkUrl } from "../lib/mediaCache";
+import { api, isOffline } from "../api";
+import { offlineArtworkUrl, useCachedArtwork } from "../lib/mediaCache";
 
 /** The two widths the player's own surfaces ask the server for (bucketed
  *  server-side, see `artcache.THUMB_SIZES`). Declared here because this file
@@ -13,13 +13,21 @@ export const ROW_COVER_W = 160;
 export const PANE_COVER_W = 640;
 
 /** Cover thumbnail with a graceful fallback when the art is missing or
- * fails to load. `wrapperClass` sizes the box; the image fills it.
+ *  fails to load. `wrapperClass` sizes the box; the image fills it.
  *
  * When the image's bytes are in the offline cache (the album was downloaded),
  * the network URL paints first and the cached copy swaps in behind it — the
  * first paint MUST NOT wait on Cache Storage, so the online path looks and
  * times exactly as it does without the cache. Offline, that swap is what
- * keeps a downloaded album's art from collapsing to the Disc3 placeholder. */
+ * keeps a downloaded album's art from collapsing to the Disc3 placeholder.
+ *
+ * That swap is only worth ASKING for when the bytes can be there, though: the
+ * question costs a Cache Storage transaction and a state update, and a library
+ * of 50 000 rows asks it 50 000 times. So the probe runs only for an album the
+ * offline cache is known to hold (`useCachedArtwork`, off the shared
+ * `['cachedPaths']` snapshot) or while the client is actually offline, where
+ * every cover is a candidate. Online with nothing downloaded — the ordinary
+ * case — the network URL is the whole story. */
 export default function CoverImg({
   albumPath,
   coverFile,
@@ -51,18 +59,31 @@ export default function CoverImg({
   // without a reload.
   const networkUrl = coverFile ? api.coverUrl(albumPath, coverFile, { staged, w }) : null;
   const [offlineUrl, setOfflineUrl] = useState<string | null>(null);
+  // Answered from the cached-track snapshot (lib/mediaCache), never by opening
+  // Cache Storage here: it is the one question the probe below is gated on.
+  const artworkDownloaded = useCachedArtwork(albumPath);
 
   useEffect(() => {
     if (!networkUrl) return;
     let live = true;
     setOfflineUrl(null); // a different cover must not inherit the old blob
+    // Nothing to find when the album is not in the offline cache AND the
+    // client is on the network: the probe would open Cache Storage, miss, and
+    // re-render — per cover, per visit. Offline (the SW's own readout, or the
+    // browser's) every cover is a candidate again: `navigator.onLine` is false
+    // in a shell or a browser with no link at all, and `isOffline()` is what
+    // the API sets the moment it answers from its offline copy, which is the
+    // state a downloaded cover exists for. Both are read at run time rather
+    // than watched: a client that goes offline keeps the art it is already
+    // showing, and the next mount probes (see the doc comment above).
+    if (!artworkDownloaded && !isOffline() && navigator.onLine) return;
     offlineArtworkUrl(networkUrl).then((u) => {
       if (live) setOfflineUrl(u);
     });
     return () => {
       live = false;
     };
-  }, [networkUrl]);
+  }, [networkUrl, artworkDownloaded]);
 
   // A blob URL from Cache Storage still wins over a failed network load: the
   // request that failed was made precisely because the cached copy was not

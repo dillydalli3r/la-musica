@@ -9,8 +9,8 @@ Nothing in this module is a second copy of a list. Every fact is read out of
 the module that owns it:
 
   scripts   ``server.script_runners.RUNNERS`` — the ids /api/run accepts and
-            the labels a run prints — plus ``mlo.cli.SCRIPTS`` (the names and
-            one-line descriptions every menu shows), ``mlo.cli.SCRIPT_GATES``
+            the labels a run prints — plus ``mlo.scripts.SCRIPTS`` (the names and
+            one-line descriptions every menu shows), ``mlo.scripts.SCRIPT_GATES``
             (the feature switch that makes a chain skip a script) and the
             ``run_all_order`` key that decides membership and order.
   checks    ``server.tags_registry.registry()``, which itself is built from
@@ -42,7 +42,7 @@ from pydantic import BaseModel
 # so a check or an audit key with no table entry is named the same way here.
 from server.tags_registry import _humanize, registry
 
-from mlo.cli import SCRIPTS, SCRIPT_GATES
+from mlo.scripts import SCRIPTS, SCRIPT_GATES
 from mlo.config import (DEFAULT_CONFIG, DEFAULT_RUN_ALL_ORDER, STRICT_DEFAULT_KEYS,
                         load_config, normalize_config, save_config)
 from mlo.grader import check_gates

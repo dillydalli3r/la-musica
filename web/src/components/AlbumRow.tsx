@@ -1,7 +1,7 @@
 import type { MouseEvent, ReactNode } from "react";
 import { Link } from "react-router-dom";
 import { ChevronDown, ChevronRight } from "lucide-react";
-import CoverImg from "./CoverImg";
+import CoverImg, { ROW_COVER_W } from "./CoverImg";
 
 /** One extra `<td>` of an album row, in display order. `cls` defaults to the
  * standard table cell class; `title` sets the cell's `title` attribute. */
@@ -93,10 +93,10 @@ export default function AlbumRow({
         <td className="td">
           {titleHref ? (
             <Link to={titleHref} onClick={linkClick} title={coverTitle} className="inline-block">
-              <CoverImg albumPath={coverPath} coverFile={coverFile} />
+              <CoverImg albumPath={coverPath} coverFile={coverFile} w={ROW_COVER_W} />
             </Link>
           ) : (
-            <CoverImg albumPath={coverPath} coverFile={coverFile} />
+            <CoverImg albumPath={coverPath} coverFile={coverFile} w={ROW_COVER_W} />
           )}
         </td>
         {/* `title === null` only when the caller hides its name column — the

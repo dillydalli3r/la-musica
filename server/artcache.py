@@ -14,7 +14,7 @@ provider that does answer (Cover Art Archive by release-group MBID, then
 iTunes, then Deezer). Each answer is cached under THE URL THAT ANSWERED, so
 the second view of that row is instant and offline, and no cache entry ever
 holds a picture other than the one its own URL serves. `substitute=False` is
-what a cover WRITE asks for (see `server.main._cover_url_bytes`): the picked
+what a cover WRITE asks for (see `server.api_cover._cover_url_bytes`): the picked
 picture, or nothing — never a different cover standing in for it.
 
 Nothing here raises: a total failure is `(None, None, None)` and the UI keeps

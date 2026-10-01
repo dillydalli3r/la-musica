@@ -367,8 +367,16 @@ export default function LyricsViewer({
   const lastEmitted = useRef<string | null>(null);
   useEffect(() => {
     if (initialLyrics === lastEmitted.current) return;
-    setLines(parseLrc(initialLyrics));
+    const parsed = parseLrc(initialLyrics);
+    setLines(parsed);
     setRaw(initialLyrics);
+    // Plain (untimed) text parses into NO lines, and the host hands the stored
+    // text straight in (TrackPage seeds `initialLyrics` from its own
+    // /api/tags read). Without this the pane fell through to "No lyrics yet…"
+    // for a track whose plain lyrics were right there — uneditable, and
+    // impossible to sync or replace. The raw editor is where untimed words
+    // live until they are stamped.
+    if (initialLyrics.trim() && !parsed.length) setRawMode(true);
     historyRef.current = [];
   }, [initialLyrics]);
 
@@ -856,7 +864,12 @@ export default function LyricsViewer({
             className="btn-ghost !py-1 text-xs"
             onClick={() => {
               setRawMode(!rawMode);
-              setRaw(serializeLrc(lines, dec));
+              // Entering Raw from the line list seeds the textarea with that
+              // list. A plain (untimed) text has no lines — serializeLrc is
+              // "" — and reseeding would wipe the stored words the pane is
+              // showing, so the text is kept when there is no line text.
+              const text = serializeLrc(lines, dec);
+              if (text.trim()) setRaw(text);
             }}
           >
             {rawMode ? "Lines" : "Raw"}

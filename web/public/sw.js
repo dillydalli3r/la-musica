@@ -186,12 +186,24 @@ self.addEventListener("activate", (event) => {
   );
 });
 
-/** Cache the built app: the document plus every bundle it references.
+/** Cache the built app: the document, the shell it needs to run, and nothing
+ *  else.
  *
- *  The bundle names are content-hashed, so they cannot be listed in this file
- *  — they are discovered from the served index.html. Without this the UI is
+ *  The bundle names are content-hashed, so they cannot be listed in this file:
+ *  the document's own references ARE the shell (the entry chunk, the chunks it
+ *  imports statically, the stylesheet, the icons), and `/precache.json` — the
+ *  build's shell subset, see web/vite.config.ts — adds what the document does
+ *  not name, which is the font its stylesheet loads. Without this the UI is
  *  unreachable with the server down, which is the one moment the downloaded
- *  music is supposed to matter. */
+ *  music is supposed to matter.
+ *
+ *  The LAZY route chunks are deliberately not in either list any more. Pulling
+ *  every page's code in at activation (~2 MB) competed with the first paint for
+ *  routes the user had not opened; they come in on first use now, through the
+ *  cache-first static path below (`STATIC_RE`), which stores whatever the
+ *  browser fetches — so a visited page is cached exactly as before. A manifest
+ *  from an OLDER build that still lists every chunk is cached as it always was:
+ *  the list is only ever a list of URLs. */
 async function precacheShell() {
   const cache = await caches.open(SHELL_CACHE);
   const resp = await fetch(SHELL_URL, { cache: "reload" });
@@ -201,9 +213,6 @@ async function precacheShell() {
   const referenced = [...html.matchAll(/(?:src|href)="(\/assets\/[^"]+|\/[^"'/]+\.(?:js|css|png|svg|webmanifest|ico|woff2?))"/g)].map(
     (m) => m[1]
   );
-  // The build's own list adds the lazy route chunks, which index.html never
-  // mentions — without them an offline navigation to an unvisited page would
-  // wait on a chunk that can never arrive.
   let built = [];
   try {
     const manifest = await fetch("/precache.json", { cache: "reload" });
@@ -273,8 +282,14 @@ const API_PATHS = new Set([
 
 /** Build output never changes under a given name (the names are hashed), so
  *  these are served from the cache first — that is what makes a cold start
- *  with the server down instant instead of a white page. */
-const STATIC_RE = /^\/(assets\/|icon\.png|favicon|manifest|apple-touch)/;
+ *  with the server down instant instead of a white page.
+ *
+ *  `/fonts/` is here for the shell's own font: the STYLESHEET names it, not the
+ *  document, so the browser asks for it through this path — and without an
+ *  entry for it here the copy `precacheShell` stores would never be reachable
+ *  offline. The same path is what caches a lazy route chunk the first time a
+ *  page asks for it. */
+const STATIC_RE = /^\/(assets\/|fonts\/|icon\.png|favicon|manifest|apple-touch)/;
 
 self.addEventListener("fetch", (event) => {
   const req = event.request;

@@ -7,7 +7,7 @@ import { EmptyState, PageLoading } from "../components/Badges";
 import StorageCard from "../components/StorageCard";
 import GradeWarning, { GradeDot } from "../components/GradeWarning";
 import PageHeader from "../components/PageHeader";
-import AlbumCard from "../components/AlbumCard";
+import AlbumCard, { GRID_COVER_W } from "../components/AlbumCard";
 import CoverImg from "../components/CoverImg";
 import Segmented from "../components/Segmented";
 import StatsPanel from "../components/StatsPanel";
@@ -94,6 +94,9 @@ function Shelf<T extends HomeAlbum>({
               // The shelf's own words for why the row is here, under the
               // card's caption.
               extraMeta={extraOf ? extraOf(a) : a.reason ? <Chip text={a.reason} /> : undefined}
+              // The shelf's cover size, so the card asks the server for the
+              // thumbnail this grid actually draws instead of the master.
+              size={gridSize}
             />
           );
         })}
@@ -186,6 +189,10 @@ function PodcastShelf({ title, items, gridSize }: {
               <CoverImg
                 albumPath={row.path}
                 coverFile={row.cover_file}
+                // The same grid geometry as the shelves above, so the same
+                // bucket: this card draws a `GRID_SIZE_MIN[gridSize]` square,
+                // never the master.
+                w={GRID_COVER_W[gridSize]}
                 wrapperClass="aspect-square w-full rounded-lg bg-raise overflow-hidden"
               />
               <div className="mt-2 px-1 text-sm font-medium truncate w-full">{row.podcast_series}</div>

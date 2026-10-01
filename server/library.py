@@ -450,7 +450,7 @@ def pending_album_payload(folder, cfg, light=False):
     return row
 
 
-def build_album(album_dir, cfg, light=False):
+def build_album(album_dir, cfg, light=False, cfg_key=None):
     """Grade + enrich a single album — from the persistent index when it matches.
 
     Reading an album is the expensive half of every page in the app (mutagen
@@ -461,11 +461,15 @@ def build_album(album_dir, cfg, light=False):
     re-reading the whole library (issue #70). Anything the index cannot vouch
     for is built here, and `tagcache.invalidate_*` drops the rows an in-app
     write made stale.
+
+    `cfg_key` is a caller's precomputed `tagindex.config_key(cfg)` (see
+    `build_albums_map`).
     """
     from server import tagindex
 
     return tagindex.cached_album(album_dir, cfg, light,
-                                 lambda: _build_album(album_dir, cfg, light))
+                                 lambda: _build_album(album_dir, cfg, light),
+                                 cfg_key=cfg_key)
 
 
 def _build_album(album_dir, cfg, light=False):
@@ -763,43 +767,48 @@ def _add_expected_tracks(res, album_dir):
                                  f"album's tracklist are in this folder")
 
 
-def build_albums_parallel(album_dirs, cfg, light=False):
-    """Grade a list of album dirs concurrently, preserving order.
+def build_albums_map(album_dirs, cfg, light=False, cfg_key=None):
+    """Every album payload keyed by its folder, built on ONE thread pool.
 
-    Grading is mostly file I/O + image decode (Pillow releases the GIL),
-    so a small thread pool cuts full-library scan time roughly by the
-    worker count. Errors become {"path": ..., "error": ...} placeholders
-    so one bad folder never hides the rest of the library. `light` is passed
-    through to `build_album` (the library payload only needs to know whether
-    a description exists, not its text).
+    Grading is mostly file I/O + image decode (Pillow releases the GIL), so a
+    small thread pool cuts scan time roughly by the worker count. Errors become
+    {"path": ..., "error": ...} placeholders so one bad folder never hides the
+    rest of the library. `light` is passed through to `build_album` (the
+    library payload only needs to know whether a description exists, not its
+    text), and `cfg_key` is the caller's precomputed `tagindex.config_key(cfg)`
+    when a whole build already has one.
+
+    A MAP, not a list, because the library build asks for every album in the
+    library at once and then assembles per artist: calling a list builder once
+    per ARTIST gave a folder-per-artist library — the common shape — a
+    single-worker pool per album, so the "parallel" scan was serial.
     """
     workers = worker_count(cfg, maximum=min(8, os.cpu_count() or 1),
                            items=len(album_dirs))
-    if workers <= 1 or len(album_dirs) <= 1:
-        results = []
-        for alb in album_dirs:
-            try:
-                a = build_album(alb, cfg, light=light)
-                results.append(a if a is not None else
-                               {"path": alb.replace("\\", "/"), "error": "no audio files", "tracks": []})
-            except Exception as e:
-                results.append({"path": alb.replace("\\", "/"), "error": str(e), "tracks": []})
-        return results
+    results = {}
 
-    results = [None] * len(album_dirs)
-
-    def _one(i, alb):
+    def _one(alb):
         try:
-            a = build_album(alb, cfg, light=light)
-            results[i] = a if a is not None else {
+            a = build_album(alb, cfg, light=light, cfg_key=cfg_key)
+            results[alb] = a if a is not None else {
                 "path": alb.replace("\\", "/"), "error": "no audio files", "tracks": []}
         except Exception as e:
-            results[i] = {"path": alb.replace("\\", "/"), "error": str(e), "tracks": []}
+            results[alb] = {"path": alb.replace("\\", "/"), "error": str(e), "tracks": []}
 
+    if workers <= 1 or len(album_dirs) <= 1:
+        for alb in album_dirs:
+            _one(alb)
+        return results
     with ThreadPoolExecutor(max_workers=workers) as pool:
-        for i, alb in enumerate(album_dirs):
-            pool.submit(_one, i, alb)
+        for alb in album_dirs:
+            pool.submit(_one, alb)
     return results
+
+
+def build_albums_parallel(album_dirs, cfg, light=False):
+    """`build_albums_map` as a list in the given order (the `/api/artist` read)."""
+    built = build_albums_map(album_dirs, cfg, light=light)
+    return [built[alb] for alb in album_dirs]
 
 
 def _artist_display_name(artist_dir, albums_data):
@@ -905,13 +914,15 @@ def _drop_filled_placeholders(result):
             ar["aggregate"] = _aggregate_albums(kept)
 
 
-def build_library(cfg, progress=None):
-    """Full library tree with artist/album/track aggregates (TTL-cached)."""
-    folder = cfg.get("music_folder") or ""
-    if not folder or not os.path.isdir(folder):
-        return {"folder": folder, "artists": [], "error": "music_folder not set or not found"}
+def _library_builder(folder, cfg):
+    """The uncached build of the library tree — one walk, one album pool.
 
-    cfg_key = library_cache_key(cfg)
+    A builder FUNCTION because two entry points hand the same build to
+    `tagcache` — the dict the app reads (`build_library`) and the
+    pre-serialized document `/api/library` answers with
+    (`build_library_document`) — and both must share ONE cache entry: they are
+    the same tree.
+    """
 
     def _build():
         # One walk feeds the album list and the empty-folder sweep below (the
@@ -922,8 +933,10 @@ def build_library(cfg, progress=None):
         # that is gone (a deleted album, an organizer run) must not keep its
         # row until the next sweep of the whole file. One pass over the index's
         # own keys, and only rows whose folder really is not there go.
+        cfg_key = None
         try:
             from server import tagindex
+            cfg_key = tagindex.config_key(cfg)
             tagindex.prune(cfg)
         except Exception:
             pass
@@ -957,13 +970,15 @@ def build_library(cfg, progress=None):
         # state costs no lookup per album (`_wish_lookup`).
         wish_state = _wish_lookup(cfg)
 
+        # EVERY album, ONE pool — not one pool per artist inside the loop
+        # below. Grading overlaps I/O across albums, and a folder-per-artist
+        # library (the common shape) got a single-worker pool per album from
+        # the per-artist call, which is a serial scan wearing a pool.
+        built = build_albums_map(albums, cfg, light=True, cfg_key=cfg_key)
+
         result = []
-        total = len(artists)
-        for i, (artist_dir, alb_list) in enumerate(sorted(artists.items())):
-            if progress:
-                progress(i + 1, total, "Scanning library")
-            albums_data = (build_albums_parallel(sorted(alb_list), cfg, light=True)
-                           if alb_list else [])
+        for artist_dir, alb_list in sorted(artists.items()):
+            albums_data = [built[a] for a in sorted(alb_list)] if alb_list else []
             albums_data.extend(_pending_album_row(d, folder, wish_state)
                                for d in pending_rows.get(artist_dir, []))
             albums_data.extend(_empty_album_row(d, folder)
@@ -1008,4 +1023,28 @@ def build_library(cfg, progress=None):
         return {"folder": folder.replace("\\", "/"),
                 "artists": [ar for ar in result if ar["albums"]]}
 
-    return tagcache.get_library(cfg_key, _build)
+    return _build
+
+
+def build_library(cfg):
+    """Full library tree with artist/album/track aggregates (TTL-cached)."""
+    folder = cfg.get("music_folder") or ""
+    if not folder or not os.path.isdir(folder):
+        return {"folder": folder, "artists": [], "error": "music_folder not set or not found"}
+    return tagcache.get_library(library_cache_key(cfg), _library_builder(folder, cfg))
+
+
+def build_library_document(cfg):
+    """The same tree as `(etag, JSON bytes)` — serialized once per build.
+
+    What `GET /api/library` answers with. A plain dict return made FastAPI
+    re-encode the whole tree (jsonable_encoder + json.dumps, then gzip) on
+    every request, always to the same bytes for the same cached tree; deriving
+    them once per build lets every later request — and every conditional
+    revalidation — answer by hash (`tagcache.get_library_document`).
+    """
+    folder = cfg.get("music_folder") or ""
+    if not folder or not os.path.isdir(folder):
+        return tagcache.json_document(
+            {"folder": folder, "artists": [], "error": "music_folder not set or not found"})
+    return tagcache.get_library_document(library_cache_key(cfg), _library_builder(folder, cfg))

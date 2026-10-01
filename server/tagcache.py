@@ -7,6 +7,8 @@
 * Library payload cache: TTL cache of the assembled /api/library tree.
 * Cover cache: file bytes + dominant color, invalidated on mtime change.
 """
+import hashlib
+import json
 import os
 import threading
 import time
@@ -32,6 +34,9 @@ _lock = threading.Lock()
 _build_done = threading.Condition(_lock)
 _tag_cache = OrderedDict()
 _lib_cache = {}  # key -> (built_at, payload)
+# key -> (payload object, etag, json bytes): the tree's OWN serialization, so
+# `/api/library` does not re-encode it per request (and can answer 304).
+_lib_body = {}
 _lib_building = set()  # keys a thread is currently building
 # Keys whose cached tree an in-app write made stale, and the keys a background
 # thread is rebuilding right now. See `_refresh_library`.
@@ -171,6 +176,7 @@ def invalidate_all():
         _cover_cache.clear()
         _color_cache.clear()
         _lib_cache.clear()
+        _lib_body.clear()
         _payload_cache.clear()
         _build_done.notify_all()
     try:
@@ -178,6 +184,37 @@ def invalidate_all():
         tagindex.drop_all()
     except Exception:
         pass
+
+
+def invalidate_library_payloads():
+    """Drop the ASSEMBLED payloads, keep everything keyed on the files.
+
+    This is the Refresh button's own drop (`server.main._refresh_library_caches`).
+    Refresh asks the app to re-derive the library FROM THE FILES — and every
+    cache between the files and the tree is keyed on the files themselves: the
+    tag cache on ``(path, mtime_ns, size)``, an album's indexed payload on the
+    folder's own signature, the grade inputs on the config and the state
+    stores' stamps. A file added, removed, rewritten or retagged since the tree
+    was built is therefore DETECTED by the rebuild, never hidden by a cached
+    entry.
+
+    Clearing that whole ladder first (what `invalidate_all` does) proved
+    nothing extra and cost the point of Refresh: the rebuild re-opened every
+    container and re-graded every album — seconds to tens of seconds on the
+    owner's install — to arrive at the same rows for every unchanged file.
+    The tree itself IS dropped rather than marked dirty: the press promises the
+    rows it answers with are the fresh ones, and with the caches below it the
+    rebuild is stat-cheap.
+
+    `invalidate_all` stays for what really invalidates everything: a settings
+    change (the config rides every key) and a cold sweep.
+    """
+    with _lock:
+        _lib_cache.clear()
+        _lib_dirty.clear()
+        _lib_body.clear()
+        _payload_cache.clear()
+        _build_done.notify_all()
 
 
 def _inside(path, folder):
@@ -220,6 +257,26 @@ def invalidate_album(*folders):
     _drop_index(roots)
 
 
+def _json_document(payload):
+    """A payload's `(etag, json bytes)` — the one serialization of it.
+
+    Used for the library tree, the app's largest payload: FastAPI re-encodes a
+    returned dict on every request (`jsonable_encoder` + `json.dumps`, then
+    gzip), always to the same bytes for the same cached tree. The bytes are
+    derived where the tree is derived instead, so every request after the first
+    — and every conditional revalidation — costs a hash comparison.
+    """
+    body = json.dumps(payload, ensure_ascii=False, separators=(",", ":"),
+                      default=str).encode("utf-8")
+    return hashlib.sha1(body).hexdigest(), body
+
+
+def json_document(payload):
+    """`(etag, json bytes)` for a payload built OUTSIDE the library cache
+    (the "music folder not set" answer, which is never cached)."""
+    return _json_document(payload)
+
+
 def _refresh_library(key, builder):
     """Rebuild one cached tree OFF the request path (single-flight).
 
@@ -235,13 +292,17 @@ def _refresh_library(key, builder):
 
     def run():
         payload = None
+        document = None
         try:
             payload = builder()
         except BaseException as e:
             print(f"[mlo] library background refresh failed: {e}")
+        if payload is not None:
+            document = (payload, *_json_document(payload))
         with _lock:
             if payload is not None:
                 _lib_cache[key] = (time.time(), payload)
+                _lib_body[key] = document
                 _lib_dirty.discard(key)
             _lib_refreshing.discard(key)
             _build_done.notify_all()
@@ -302,13 +363,33 @@ def get_library(key, builder):
             _lib_building.discard(key)
             _build_done.notify_all()
         raise
+    document = (payload, *_json_document(payload))
     with _lock:
         # Stamp AFTER the build: a slow scan must not be born already stale.
         _lib_cache[key] = (time.time(), payload)
+        _lib_body[key] = document
         _lib_dirty.discard(key)
         _lib_building.discard(key)
         _build_done.notify_all()
     return payload
+
+
+def get_library_document(key, builder):
+    """`(etag, json bytes)` for the tree `get_library` serves.
+
+    The same cache entry — this is a second VIEW of one build, not a second
+    build — so the bytes stored when the tree was built are returned, and the
+    request path never serializes the tree (`_json_document`).
+    """
+    payload = get_library(key, builder)
+    with _lock:
+        hit = _lib_body.get(key)
+        if hit is not None and hit[0] is payload:
+            return hit[1], hit[2]
+    etag, body = _json_document(payload)
+    with _lock:
+        _lib_body[key] = (payload, etag, body)
+    return etag, body
 
 
 def cached_payload(kind, path, cfg, builder, ttl=_PAYLOAD_TTL):

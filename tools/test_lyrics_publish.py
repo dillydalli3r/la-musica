@@ -9,7 +9,10 @@ vendored flac.exe; the suite skips itself when that tool is missing.
 Pinned here:
 
   * a track LRCLIB already answers for is NEVER published — the rule the
-    script cannot override except through `force_publish`;
+    script cannot override except through `force_publish` — where "answers
+    for" means the record holds TIMINGS: a plain-only record still gets this
+    library's synced text (the upgrade the database keeps beside the old
+    revision), while an untimed text adds nothing and is skipped;
   * the submission carries the plain text BESIDE the synced one (LRCLIB's
     validator rejects a synced-only body), timestamps and `[ar:…]` headers
     stripped;
@@ -197,7 +200,11 @@ else:
 
     def fake_fetch(artist, track, album=None, duration=None):
         fetched.append((artist, track, album, duration))
-        return {"syncedLyrics": "x"} if "known" in track.lower() else None
+        if "known" in track.lower():
+            return {"syncedLyrics": "x"}
+        if "plainonly" in track.lower():
+            return {"plainLyrics": "one\ntwo"}
+        return None
 
     def fake_publish(artist, track, album, duration, plain=None, synced=None,
                      solver=None):
@@ -250,6 +257,28 @@ else:
         got = pub.publish_one(known, {"lrclib_auto_publish": True}, force=True)
         ok(got["status"] == "ok" and published, f"force_publish submits it anyway ({got['status']})")
 
+        # …but a PLAIN-ONLY record is not "already has it" when this track
+        # holds the synced text: the submission adds the timings the
+        # community entry lacks, and LRCLIB keeps both revisions.
+        upgrade = make("06 - Plainonly synced.flac")
+        af_up = AudioFile(upgrade)
+        af_up.set_tag("TITLE", "Plainonly synced")
+        published.clear()
+        pub.run_publish_lyrics({"music_folder": TMP, "targets": [upgrade],
+                                "lrclib_auto_publish": True, "force_publish": False})
+        ok(published and published[0][5] == "[00:01.00]Hello there"
+           and published[0][4] == "Hello there",
+           f"a plain-only record gets this library's synced text ({published[0][4:6]})")
+
+        # The same record and a PLAIN local text: nothing to add, still a skip.
+        plain_only = make("07 - Plainonly plain.flac", lyrics="Just words\nno timestamps")
+        af_pl = AudioFile(plain_only)
+        af_pl.set_tag("TITLE", "Plainonly plain")
+        published.clear()
+        got = pub.publish_one(plain_only, {"lrclib_auto_publish": True})
+        ok(got["status"] == "skipped" and not published,
+           f"a plain text adds nothing to a plain-only record ({got['status']})")
+
         # a duplicate answer is a skip, not a failure
         pub.lrclib_publish = lambda *a, **k: (False, "LRCLIB already has this track")
         got = pub.publish_one(unknown, {"lrclib_auto_publish": True})
@@ -298,6 +327,29 @@ try:
     ok(not _submitted, "and nothing was submitted")
     ok("already has lyrics" in (body.get("message") or ""),
        f"the refusal says why ({body.get('message')!r})")
+
+    # A PLAIN-ONLY record is not "already has it" when the editor's text is
+    # synced: the submission adds the timings, so it goes up (and is flagged).
+    srv_intg.lrclib_get = lambda *a, **k: {"plainLyrics": "Hello there"}
+    _submitted.clear()
+    r = _client.post("/api/lyrics/publish", json={
+        "artist": "Artist", "track": "Song", "album": "Album", "duration": 213,
+        "synced": "[00:01.00]Hello there", "plain": "Hello there"})
+    body = r.json()
+    ok(r.status_code == 200 and body.get("ok") is True and body.get("upgraded") is True
+       and len(_submitted) == 1,
+       f"a plain-only record gets the editor's synced text ({body})")
+    ok(_submitted and _submitted[0][5] == "[00:01.00]Hello there",
+       f"…and the submission carries the timings ({_submitted[0][5:] if _submitted else None})")
+
+    # …while an untimed post against the same record adds nothing: still refused.
+    _submitted.clear()
+    r = _client.post("/api/lyrics/publish", json={
+        "artist": "Artist", "track": "Song", "album": "Album", "duration": 213,
+        "plain": "Hello there"})
+    body = r.json()
+    ok(body.get("ok") is False and body.get("exists") is True and not _submitted,
+       f"an untimed text against a plain-only record is still refused ({body})")
 
     srv_intg.lrclib_get = lambda *a, **k: None
     r = _client.post("/api/lyrics/publish", json={

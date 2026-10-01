@@ -368,7 +368,7 @@ def _remove_entry(path) -> tuple:
 def _forget_trash_records(bin_dir, names) -> None:
     """Drop the origin records of trashed entries that were just deleted.
 
-    The same edit ``server.main._manifest_forget`` makes after
+    The same edit ``server.api_trash._manifest_forget`` makes after
     ``/api/trash/delete``, on the same file and the same schema
     (``{"version": 1, "entries": {name: {origin, at}}}``), because the Trash
     page restores an entry to the path recorded there. A record left behind is

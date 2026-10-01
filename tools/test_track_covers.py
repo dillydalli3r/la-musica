@@ -3,7 +3,7 @@
 
 Pins the storage contract in mlo/paths.py, the two consumers that resolve art
 through it (mlo/grader.py per-track grading + extra-artwork predicate,
-server/library.py `_enrich_track`), the HTTP surface in server/main.py
+server/library.py `_enrich_track`), the HTTP surface in server/api_cover.py
 (`tracks=` on the two write routes, `/api/cover/clear`, the
 width/height/megapixels/warning response) and the organize() manifest rewrite.
 
@@ -291,13 +291,14 @@ if not HAS_PIL:
 print("== endpoints ==")
 from fastapi import HTTPException  # noqa: E402
 from server import main as srv  # noqa: E402
+from server import api_cover as cover_api  # noqa: E402  (the cover routes' own module)
 
 CFG = {"music_folder": MUSIC, "cover_target_size": 1200, "naming_script": ""}
 srv.load_config = lambda: dict(CFG)
 
 # --------------------------------------------------------------------------- #
 # A manual cover write queues script 5 ("Process images") for that one album
-# (server.main._schedule_cover_process). Every write below IS such a write, so
+# (server.api_cover._schedule_cover_process). Every write below IS such a write, so
 # the RUN is stubbed for the whole endpoints section: a real Process images
 # would rewrite the very images these checks assert on, and hold the album
 # while the next check wrote it. The stub records exactly what the queued run
@@ -379,7 +380,7 @@ image(os.path.join(H, "cover.jpg"))
 
 
 def t_upload_tracks_writes_once():
-    res = asyncio.run(srv.upload_cover(
+    res = asyncio.run(cover_api.upload_cover(
         album=H, file=Upload(image_bytes()), track=None,
         tracks="07 - A.flac,08 - B.flac"))
     assert res["ok"] is True, res
@@ -397,19 +398,19 @@ def t_upload_tracks_writes_once():
 
 
 def t_upload_tracks_rejects_bad_selection():
-    expect_400(lambda: asyncio.run(srv.upload_cover(
+    expect_400(lambda: asyncio.run(cover_api.upload_cover(
         album=H, file=Upload(image_bytes()), track=None, tracks="07 - A.flac,nope.flac")),
         "unknown track")
-    expect_400(lambda: asyncio.run(srv.upload_cover(
+    expect_400(lambda: asyncio.run(cover_api.upload_cover(
         album=H, file=Upload(image_bytes()), track=None, tracks=",")),
         "empty selection")
-    expect_400(lambda: asyncio.run(srv.upload_cover(
+    expect_400(lambda: asyncio.run(cover_api.upload_cover(
         album=H, file=Upload(b"definitely not an image"), track=None, tracks=None)),
         "non-image upload")
 
 
 def t_upload_single_track_unchanged():
-    res = asyncio.run(srv.upload_cover(
+    res = asyncio.run(cover_api.upload_cover(
         album=H, file=Upload(image_bytes((1200, 1200))), track="09 - C.flac",
         tracks=None))
     assert res["ok"] is True and res["path"].endswith("/09 - C.png"), res
@@ -420,7 +421,7 @@ def t_upload_single_track_unchanged():
 
 
 def t_upload_album_cover_unchanged():
-    res = asyncio.run(srv.upload_cover(
+    res = asyncio.run(cover_api.upload_cover(
         album=H, file=Upload(image_bytes((1200, 1200)), filename="front.png"),
         track=None, tracks=None))
     assert res["ok"] is True and res["path"].endswith("/cover.png"), res
@@ -430,7 +431,7 @@ def t_upload_format_pillow_cannot_read():
     # JXL/HEIC covers reach the app as plain bytes; a Pillow build without the
     # plugin must not turn them into a 400.
     jxl = b"\xff\x0a" + b"\x00" * 64
-    res = asyncio.run(srv.upload_cover(
+    res = asyncio.run(cover_api.upload_cover(
         album=H, file=Upload(jxl, filename="art.jxl"), track=None, tracks=None))
     assert res["ok"] is True and res["path"].endswith("/cover.jxl"), res
     assert res["width"] is None and res["warning"] is None, res
@@ -440,7 +441,7 @@ def t_fromurl_tracks():
     orig = srv.intg.fetch_image_bytes
     srv.intg.fetch_image_bytes = lambda url: (image_bytes(), "image/png")
     try:
-        res = asyncio.run(srv.cover_from_url(
+        res = asyncio.run(cover_api.cover_from_url(
             album=H, url="http://example.invalid/x.png", track=None,
             tracks="08 - B.flac,09 - C.flac"))
     finally:
@@ -456,13 +457,13 @@ def t_fromurl_tracks():
 
 
 def t_clear_endpoint():
-    req = srv.CoverClearRequest(album=H, tracks=["08 - B.flac"])
-    assert srv.cover_clear(req) == {"ok": True}
+    req = cover_api.CoverClearRequest(album=H, tracks=["08 - B.flac"])
+    assert cover_api.cover_clear(req) == {"ok": True}
     m = load_track_covers(H)
     assert "08 - B.flac" not in m and m["07 - A.flac"] == "07 - A.png", m
     assert os.path.isfile(os.path.join(H, "08 - B.png")), "clearing must not delete art"
     # no tracks -> drop them all and remove the manifest, image still on disk
-    assert srv.cover_clear(srv.CoverClearRequest(album=H)) == {"ok": True}
+    assert cover_api.cover_clear(cover_api.CoverClearRequest(album=H)) == {"ok": True}
     assert load_track_covers(H) == {}
     assert not os.path.exists(os.path.join(H, TRACK_COVERS_FILE))
     assert os.path.isfile(os.path.join(H, "07 - A.png")), "clearing must not delete art"
@@ -491,7 +492,7 @@ def t_manual_pick_queues_one_run():
     srv.intg.fetch_image_bytes = lambda url: (image_bytes((1400, 1400)),
                                               "image/png")
     try:
-        res = asyncio.run(srv.cover_from_url(
+        res = asyncio.run(cover_api.cover_from_url(
             album=P, url="http://example.invalid/pick.png", track=None,
             tracks=None, staged=False))
     finally:
@@ -509,7 +510,7 @@ def t_manual_upload_queues_one_run():
     """The other manual route: an uploaded file (POST /api/cover)."""
     U = album("ManualUpload")
     make_flac(os.path.join(U, "01 - U.flac"), "Song U", 1)
-    res = asyncio.run(srv.upload_cover(
+    res = asyncio.run(cover_api.upload_cover(
         album=U, file=Upload(image_bytes((1400, 1400)), filename="front.png"),
         track=None, tracks=None, staged=False))
     assert res["ok"] is True, res
@@ -526,7 +527,7 @@ def t_double_press_queues_one_run():
     D = album("ManualTwice")
     make_flac(os.path.join(D, "01 - D.flac"), "Song D", 1)
     for _ in range(2):
-        res = asyncio.run(srv.upload_cover(
+        res = asyncio.run(cover_api.upload_cover(
             album=D, file=Upload(image_bytes((1400, 1400)), filename="front.png"),
             track=None, tracks=None, staged=False))
         assert res["ok"] is True, res
@@ -545,21 +546,21 @@ def t_importer_cover_step_queues_none():
     A = album("ManualAuto")
     make_flac(os.path.join(A, "01 - Z.flac"), "Song Z", 1)
     real_candidates = imports_mod.cover_candidates
-    real_bytes = srv._cover_url_bytes
+    real_bytes = cover_api._cover_url_bytes
     imports_mod.cover_candidates = lambda album_dir, cfg=None: {
         "chosen": {"source": "stub", "big": "http://example.invalid/big.jpg",
                    "reasons": ["stub"], "width": 1400, "height": 1400},
         "candidate_count": 1, "provider": "stub", "artist": "Cover Artist",
         "album": "Cover Album", "release_group": "", "notes": [],
         "rejected_count": 0}
-    srv._cover_url_bytes = lambda url, artist="", substitute=True: (
+    cover_api._cover_url_bytes = lambda url, artist="", substitute=True: (
         image_bytes((1400, 1400)), "image/png")
     try:
         out = imports_mod.run_cover_step(
             A, dict(CFG, cover_auto_fetch=True, cover_review=False))
     finally:
         imports_mod.cover_candidates = real_candidates
-        srv._cover_url_bytes = real_bytes
+        cover_api._cover_url_bytes = real_bytes
     assert out["fetched"] is True, out
     assert os.path.isfile(str(out["applied"].get("cover"))), out
     time.sleep(0.3)
@@ -571,7 +572,7 @@ def t_staged_write_queues_none():
     that album runs script 5, so the write queues nothing here."""
     W = os.path.join(TMP, "staged-wizard")      # outside the music folder
     os.makedirs(W, exist_ok=True)
-    res = asyncio.run(srv.upload_cover(
+    res = asyncio.run(cover_api.upload_cover(
         album=W, file=Upload(image_bytes((1400, 1400)), filename="front.png"),
         track=None, tracks=None, staged=True))
     assert res["ok"] is True, res
@@ -599,7 +600,7 @@ def t_queued_run_claims_the_album():
     runners_mod.run_chain = _REAL_RUN_CHAIN      # the real path, this once
     runners_mod.RUNNERS[5] = ("Process images", spy_images)
     try:
-        res = asyncio.run(srv.upload_cover(
+        res = asyncio.run(cover_api.upload_cover(
             album=Q, file=Upload(image_bytes((1400, 1400)), filename="front.png"),
             track=None, tracks=None, staged=False))
         assert res["ok"] is True, res
@@ -621,18 +622,18 @@ def t_second_pick_after_the_window_queues_again():
     album is a new intent and gets its own run."""
     L = album("ManualLater")
     make_flac(os.path.join(L, "01 - L.flac"), "Song L", 1)
-    orig = srv._COVER_PROCESS_COALESCE_S
-    srv._COVER_PROCESS_COALESCE_S = 0.05
+    orig = cover_api._COVER_PROCESS_COALESCE_S
+    cover_api._COVER_PROCESS_COALESCE_S = 0.05
     try:
         for _ in range(2):
-            res = asyncio.run(srv.upload_cover(
+            res = asyncio.run(cover_api.upload_cover(
                 album=L,
                 file=Upload(image_bytes((1400, 1400)), filename="front.png"),
                 track=None, tracks=None, staged=False))
             assert res["ok"] is True, res
             time.sleep(0.3)               # well past the shrunken window
     finally:
-        srv._COVER_PROCESS_COALESCE_S = orig
+        cover_api._COVER_PROCESS_COALESCE_S = orig
     runs = wait_for_runs(L, 2)
     assert len(runs) == 2, runs
     assert [r["targets"] for r in runs] == [[L], [L]], runs
