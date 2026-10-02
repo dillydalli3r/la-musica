@@ -125,7 +125,7 @@ EXPECTED_FILE_KINDS = {"track", "playlist"}
 # v4.4.0): a lyrics run fills what is missing and never replaces stored words,
 # so it has no re-run to force (R330) — replacing one track's lyrics is
 # `POST /api/lyrics/auto` with force, not a library-wide script run.
-EXPECTED_FORCED = {1, 2, 3, 5, 6, 7, 8, 9, 10, 12, 15, 16, 17, 18, 20}
+EXPECTED_FORCED = {1, 2, 3, 5, 6, 7, 8, 9, 10, 12, 15, 16, 17, 20}
 
 FAILED: list = []
 

@@ -248,45 +248,6 @@ def lyrics_offset(req: LyricsOffsetRequest):
     return {"ok": True, "lrc": text, "targets": targets}
 
 
-@router.post("/api/lyrics/publish-batch")
-def lyrics_publish_batch(req: LyricsPathsRequest):
-    """Give LRCLIB the lyrics these tracks carry and the database lacks.
-
-    Script 18's own per-track core (`publish_one`) over a selection — the
-    album-level counterpart of the editor's per-track "Publish to LRCLIB",
-    which submits through the same LRCLIB client with the same
-    exact-then-search existence check. Nothing is written locally: this is the
-    lyrics chain's only outward step, so publishing owns no tag and no file.
-
-    `lrclib_auto_publish` gates the AUTOMATIC submission (script 18 and every
-    chain that includes it); a person asking here is not the automation, so
-    this route runs whatever the switch says. Each track reports LRCLIB's own
-    answer ("LRCLIB already has this track" is the database refusing a
-    duplicate, not a failure of this app) and `force` re-submits anyway.
-    """
-    from mlo.lyrics_publish import publish_one
-
-    cfg = load_config()
-    if len(req.paths) > MAX_PATHS:
-        raise HTTPException(
-            413, f"too many paths in one request ({len(req.paths)} > {MAX_PATHS}) — "
-                 f"run script 18 (Publish lyrics) for a whole album or library")
-    resolved, rejected = _batch_paths(req.paths, cfg, req.staged)
-    results = []
-    for path, error in rejected:
-        results.append({"path": path, "status": "failed", "reason": error,
-                        "message": "", "synced": False})
-    for path, full in resolved:
-        res = publish_one(full, cfg, force=bool(req.force))
-        results.append({**res, "path": path})
-    return {
-        "results": results,
-        "ok": sum(1 for r in results if r.get("status") == "ok"),
-        "skipped": sum(1 for r in results if r.get("status") == "skipped"),
-        "failed": sum(1 for r in results if r.get("status") == "failed"),
-    }
-
-
 @router.get("/api/lyrics/find")
 def lyrics_find(artist: str = Query(""), title: str = Query(""),
                 album: str = Query(""), duration: float = Query(0.0)):

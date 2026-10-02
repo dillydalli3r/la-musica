@@ -217,7 +217,7 @@ class FakeAudio:
         return self.tags.get(name)
 
     def get_lyrics(self):
-        """The embedded LYRICS tag — what `mlo.lyrics_publish.local_lyrics`
+        """The embedded LYRICS tag — what `mlo.lyrics.local_lyrics`
         reads before it looks for an .lrc sidecar. None (no such tag) is what
         the tracks below carry unless a case puts words on one."""
         return self.tags.get("LYRICS")

@@ -32,7 +32,6 @@ SCRIPTS = (
     (15, "Release tracklist", ".mlo_expected.json manifests"),
     (16, "Mood & Energy", "MOOD/ENERGY from the track's audio"),
     (17, "Lyrics transliterate (AI)", "TRANSLITERATION/TRANSLATION tags + sidecars"),
-    (18, "Publish lyrics (LRCLIB)", "submit missing lyrics to the community DB"),
     (19, "Optimize artist images", "crop/resize artist artwork to the configured aspect and size"),
     (20, "Optimize library layout", "layout report + fixes (case, loose audio, empty artist, strays to the Trash)"),
     (21, "Fix AcoustID pairs", "complete or create ACOUSTID_ID / ACOUSTID_FINGERPRINT pairs"),
@@ -50,6 +49,6 @@ SCRIPT_LABELS = {sid: name for sid, name, _ in SCRIPTS}
 # skips the script instead of reporting an empty run.
 SCRIPT_GATES = {7: "dr_replaygain_enabled", 12: "audiometa_enabled",
                 16: "mood_enabled", 17: ("lyrics_xlit_enabled", "lyrics_translate_enabled"),
-                18: "lrclib_auto_publish", 21: "acoustid_enabled",
+                21: "acoustid_enabled",
                 22: "acoustid_enabled", 23: "strip_unknown_tags",
                 24: "web_ratings_enabled"}

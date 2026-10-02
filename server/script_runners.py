@@ -205,9 +205,6 @@ RUNNERS: dict[int, tuple[str, "callable"]] = {
     # TRANSLITERATION-*/TRANSLATION-* tags (and sidecars). No AI configured =
     # one log line, no failure.
     17: ("Lyrics transliterate (AI)", _optional("mlo.lyrics_xlit", "run_lyrics_xlit")),
-    # 18 gives back: this library's lyrics go to LRCLIB for recordings the
-    # database does not have yet. Off = `lrclib_auto_publish` is off.
-    18: ("Publish lyrics (LRCLIB)", _optional("mlo.lyrics_publish", "run_publish_lyrics")),
     # 19 re-fits the artist images already in the library to the configured
     # aspect/size (mlo.artistdata's own runner — the same policy the fetch and
     # the grading check use).
@@ -296,8 +293,6 @@ _FORCE_KEYS = {
     16: ("force_mood",),
     # 17 re-transforms tracks that already carry a stored transform.
     17: ("force_xlit",),
-    # 18 re-submits lyrics for tracks LRCLIB already answers for.
-    18: ("force_publish",),
     # 20's apply phase (mlo/layout.py) — the one force key that turns work OFF:
     # the scan always reports, and `layout_apply` is what lets it rename and
     # move. Clearing it is what a caller asks for when it wants the read-only
@@ -318,7 +313,6 @@ _FORCE_ALIASES = {
     "tracklist": "force_tracklist",
     "mood": "force_mood",
     "xlit": "force_xlit",
-    "publish": "force_publish",
     "layout": "layout_apply",
 }
 # Scripts whose feature has its own on/off switch: with it off the runner is a
@@ -330,7 +324,6 @@ _DISABLED = {
     12: "audiometa_enabled",
     16: "mood_enabled",
     17: ("lyrics_xlit_enabled", "lyrics_translate_enabled"),
-    18: "lrclib_auto_publish",
     # 21 writes ACOUSTID_* tags, and the switch is the app's own answer to
     # "should AcoustID do anything here" — the same one its lookup helper
     # refuses on. Without it a chain would keep fingerprinting files for a

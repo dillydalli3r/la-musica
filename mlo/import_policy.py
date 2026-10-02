@@ -164,20 +164,18 @@ FAMILIES = (
         "id": "lyrics",
         "label": "Lyrics",
         "step": "Lyrics",
-        # The family is the whole lyrics chain (fetch → transliterate →
-        # publish), so a lyrics review drops all of it from the chain rather
+        # The family is the whole lyrics chain (fetch → transliterate),
+        # so a lyrics review drops all of it from the chain rather
         # than letting a later script write what the user kept for themselves
         # (see `dropped_chain_ids`). No switch makes script 13 fetch, and
         # nothing gates 17 once lyrics exist.
         "chain": (13, 17),
         "codes": {"LYRICS": "lyrics",
                   "XLIT_MISSING": "lyric transliteration/translation"},
-        # The three halves of the chain, each with the option that runs the
+        # The two halves of the chain, each with the option that runs the
         # SAME entry point by hand — the fetch and the transliteration pass are
-        # per-track cores the route and the script both call, and the publish
-        # is the one core the editor's own route shares. `tags`/`files` are
-        # what each half owns: the fetch and the transforms write local data,
-        # publishing writes NOTHING locally (it is the only outward step).
+        # per-track cores the route and the script both call. `tags`/`files` are
+        # what each half owns: the fetch and the transforms write local data.
         "manual": (
             {"id": "lyrics-fetch",
              "surface": ("wizard", "tag-actions", "album-page", "track-page"),
@@ -195,14 +193,6 @@ FAMILIES = (
              "service": "mlo.lyrics_xlit:run_lyrics_xlit",
              "tags": ("TRANSLITERATION-<lang>", "TRANSLATION-<lang>"),
              "files": (".romaji.lrc", ".<lang>.lrc")},
-            {"id": "lyrics-publish",
-             "surface": ("wizard", "tag-actions", "track-page"),
-             "route": "/api/lyrics/publish-batch",
-             "method": "POST",
-             "auto": "mlo.lyrics_publish:publish_one",
-             "service": "mlo.lyrics_publish:publish_one",
-             "tags": (),
-             "files": ()},
         ),
     },
     {
@@ -287,8 +277,8 @@ FAMILY_IDS = tuple(f["id"] for f in FAMILIES)
 #            `service` where the button and the pipeline run ONE code path, which
 #            is the strongest form of "the two must not diverge"
 #   tags     the audio tags the step owns (a `<lang>` part is per-language)
-#   files    the sidecar files it owns ("" = none, e.g. publishing to LRCLIB
-#            writes nothing locally at all)
+#   files    the sidecar files it owns ("" = none, when the step writes
+#            nothing locally at all)
 #
 # `OTHER_STEPS` rows carry the same fields plus `family` (None there, since no
 # family names them).

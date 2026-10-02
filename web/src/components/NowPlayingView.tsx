@@ -2807,6 +2807,20 @@ export default function NowPlayingView(p: Props) {
                       album={tags?.ALBUM || undefined}
                       duration={duration}
                       allowPlain={allowPlain}
+                      /* The pane's OWN playback: `Preview`, the stamps and the
+                         seek act on the song the player is on, instead of
+                         loading a second copy of it (the owner's report). */
+                      player={{
+                        getTime: () => p.getAudioTime?.() ?? p.time,
+                        playing: p.playing,
+                        duration: p.duration,
+                        seek: p.onSeek,
+                        setPlaying: (on) => {
+                          if (on !== p.playing) p.onTogglePlay();
+                        },
+                        rate: p.speed,
+                        setRate: p.onSpeedChange,
+                      }}
                     />
                   </div>
                 </div>

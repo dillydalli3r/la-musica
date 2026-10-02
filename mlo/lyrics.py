@@ -451,6 +451,21 @@ def read_lyrics(audio_path):
     return embedded if has_lyrics_text(embedded) else None
 
 
+def local_lyrics(path, af=None):
+    """The track's own lyrics text: embedded LYRICS first, then the .lrc
+    sidecar — the same resolution order the player and grading use."""
+    af = af or AudioFile(path)
+    text = (af.get_lyrics() or "").strip()
+    if has_lyrics_text(text):
+        return text
+    try:
+        with open(_lrc_for(path), "r", encoding="utf-8", errors="replace") as fh:
+            sidecar = fh.read().strip()
+    except OSError:
+        return ""
+    return sidecar if has_lyrics_text(sidecar) else ""
+
+
 def write_lyrics_sidecar(audio_path, text):
     """Write *text* as the `.lrc` that belongs to *audio_path* — the one name
     rule (:func:`_lrc_for`: the track's own name) and the one atomic write the

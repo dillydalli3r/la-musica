@@ -107,7 +107,7 @@ An issue is `{code, label, where, reason}` for album-level and artist problems
 
 ---
 
-## 2. The 24 optimization scripts
+## 2. The 23 optimization scripts
 
 Ids, titles and the shipped order are `mlo/scripts.py:SCRIPTS` and
 `mlo/config.py:DEFAULT_RUN_ALL_ORDER`; the runners are
@@ -115,7 +115,7 @@ Ids, titles and the shipped order are `mlo/scripts.py:SCRIPTS` and
 chain both call).
 
 **R8 — Run All runs `run_all_order`**, shipped as
-`[11, 3, 14, 15, 2, 1, 13, 18, 17, 8, 24, 5, 19, 6, 7, 9, 12, 16, 10, 23, 20,
+`[11, 3, 14, 15, 2, 1, 13, 17, 8, 24, 5, 19, 6, 7, 9, 12, 16, 10, 23, 20,
 21, 4]`: everything that moves a file first, everything that reads it last. A
 saved order is honoured as saved (ids outside 1–24 are dropped; legacy 8/9-id
 orders are migrated).
@@ -156,8 +156,8 @@ never be reported as both written and skipped. Script 10 counted a file it had
 just formatted as *skipped* as well, which made a pass that changed nothing look
 like a pass that did something; a tag write that fails is now reported with its
 file (`stats["errors"]`) instead of only bumping a counter. Script 12 (every
-analysed file is scanned, whether or not the write changed anything) and script
-18 (a published track is scanned) follow the same rule, and **a missing tool is
+analysed file is scanned, whether or not the write changed anything) follows the
+same rule, and **a missing tool is
 said out loud**: script 7 with `write_replaygain_tags` on and no `rsgain` reports
 the missing tool as an error instead of passing a DR-only run that wrote no
 `REPLAYGAIN_*` tag at all. The rule covers the same three-way split every runner
@@ -182,7 +182,6 @@ publishes, including the ones that write nothing until they do.
 | 15 | Release tracklist | Writes `.mlo_expected.json` from the release's own tracklist | adds a manifest file | no | **yes** (MusicBrainz) |
 | 16 | Mood & Energy | The mood classifier alone | `MOOD`, `ENERGY` | no | no |
 | 17 | Lyrics transliterate (AI) | Romanization/translation tags and sidecars, re-synced at `lrc_sync_level`; the per-track work runs through the worker pool (one track's chunk requests used to be paid one after another) | `TRANSLITERATION-*`, `TRANSLATION-*`, sidecars | no | **yes** (configured AI endpoint) |
-| 18 | Publish lyrics (LRCLIB) | Submits missing lyrics to the community database (every examined track counts as scanned, published included) | nothing locally | no (external side effect) | **yes** (LRCLIB) |
 | 19 | Optimize artist images | Re-fits `Artists/<Artist>/artist.*` to `artist_image_aspect` / `artist_image_target_size`, re-encodes as `artist.jpg`/`artist.png` | the artist image in place (only when it has to move) | re-encodes in place; never deletes | no |
 | 20 | Optimize library layout | The music folder's shape against `<music>/Artists/<Artist>/<Album>/…`: audio at the root or in an artist folder, stray files, unexpected folders, empty albums, `wrong_case` rows. With `layout_apply` (ON) it SETTLES what the folder itself proves — a wrong-case name is renamed, audio outside an album folder is moved into the one its tags name, and what is excess goes to the Trash (a stray file, a folder inside an album that is neither a disc folder nor holds audio, an album folder with no audio, a foreign root folder holding no audio, an album-less artist folder, the `.mlo_*` leftovers) — and reports every other row with the reason it stayed, re-derived at the move (R185). Writes ONE report describing the whole library (plus a `fixes` list) to `<music>/.mlo/data/`, which the Library page warns from; scoped to `targets` when a run names them, and library-wide when it does not (R9) | one report file + the renamed/moved/removed paths | `layout_apply` (removals go to the Trash) | no |
 | 21 | Fix AcoustID pairs | Completes (or CREATES) a track's `ACOUSTID_ID`/`ACOUSTID_FINGERPRINT` pair — the failures `Missing ACOUSTID_ID and ACOUSTID_FINGERPRINT` and `Missing ACOUSTID_ID` / `Missing ACOUSTID_FINGERPRINT` (all `(run Fix AcoustID pairs)`). The recording the pair must name is a question the FILE answers itself (its own `ACOUSTID_ID`, its `MUSICBRAINZ_TRACKID`, or the recording MBID this app's naming script wrote into the file name), and the fingerprint is taken from the audio locally by fpcalc — so a CD rip AcoustID has never seen, or a run with no usable key, is repairable with no request at all. The service is asked only for a half pair whose file names no recording anywhere; a file carrying no AcoustID tag and naming no recording is skipped, never written from a guess | `ACOUSTID_ID`, `ACOUSTID_FINGERPRINT` | no | only for a half pair that names no recording |
@@ -257,7 +256,7 @@ is what makes the script look at a file it has already processed:
 `force_lyrics` (1), `force_cue` (2), `force_reencode_flac` (3), `force_reencode_images`
 (5), `force_audit` (6), `force_dr_replaygain` (7), `force_auto_tag` (8),
 `force_accurip` (9), `force_audiometa` (12), `force_mood` (16), `force_xlit` (17),
-`force_publish` (18), `force_tracklist` (15). Grade (4) needs none — it re-reads.
+`force_tracklist` (15). Grade (4) needs none — it re-reads.
 Fetch lyrics (13) has NO flag since v4.4.0: a run fills what is missing and
 never replaces stored words, so there is no "redo" for it to force (R330) —
 replacing one track's lyrics is the manual route's job.
@@ -288,12 +287,11 @@ left an import's layout pass a read-only report on the album it had just
 imported).
 **R12 — a switched-off feature skips its script** instead of running it as a
 no-op: `dr_replaygain_enabled` (7), `audiometa_enabled` (12), `mood_enabled` (16),
-`lyrics_xlit_enabled` / `lyrics_translate_enabled` (17), `lrclib_auto_publish`
-(18), `acoustid_enabled` (21 — the same switch the AcoustID lookup itself
+`lyrics_xlit_enabled` / `lyrics_translate_enabled` (17), `acoustid_enabled` (21 — the same switch the AcoustID lookup itself
 refuses on, so a run says WHY it did nothing instead of reporting an empty
 pass), `strip_unknown_tags` (23 — with that switch off nothing in this app is
 excess, since the excess-tag grade and script 10's strip read it too, so the
-hygiene pass would have no subject). Scripts 9/10/11/12/13/16/17/18 whose module is missing are reported
+hygiene pass would have no subject). Scripts 9/10/11/12/13/16/17 whose module is missing are reported
 unavailable rather than silently passing.
 **R13 — scripts clean up after themselves**: folders a run emptied are pruned
 bottom-up (never a folder that holds anything, never the music root), and the run
@@ -1582,7 +1580,7 @@ and records which stage answered (`source`).
   `advisory_ai_classify` (ON) and a provider configured, the model is asked ONE
   question about a track no source stated anything about (R63's step 3) and fed
   the track's own lyrics, read off the file (embedded first, else the `.lrc`
-  sidecar — the read `mlo/lyrics_publish.py::local_lyrics` does). Its rubric is
+  sidecar — the read `mlo/lyrics.py::local_lyrics` does). Its rubric is
   the song's subject and tone, not a keyword count: `1` is excessive profanity,
   a slur or a very strong word, or graphic sex/violence/drug use; a mild word in
   passing — a lone `ass`, `damn` or `hell`, an idiom, a quoted word, a word
@@ -3279,11 +3277,11 @@ user asked for, in the order they asked for it. `server/exporter.py` owns both.
   all of them are off), and its force flags (the SHORT keys
   `/api/run` accepts, from `_FORCE_KEYS` + `_FORCE_ALIASES`). What the menu may offer is DERIVED, not typed into it: `applies_to`
   follows the script's own work unit — a FILE-scoped script (1, 3, 6, 11, 12,
-  13, 16, 17, 18, 21, 22) applies from every kind of selection, a FOLDER-scoped one
+  13, 16, 17, 21, 22) applies from every kind of selection, a FOLDER-scoped one
   (2, 4, 5, 7, 8, 9, 10, 14, 15, 19, 20) only where a folder is in hand, which
   is album, artist and library (`KINDS` = album/track/artist/playlist/library,
-  `_FOLDER_KINDS` the three). So an album's menu offers **22** entries and a
-  track row or playlist selection offers the **11** file-scoped ones, computed
+  `_FOLDER_KINDS` the three). So an album's menu offers **21** entries and a
+  track row or playlist selection offers the **10** file-scoped ones, computed
   from the table rather than counted by hand — and the section is headed by a **Run all N scripts** entry (N is
   `ids.length`, so the label and the request cannot drift): the chain's own
   order scoped to the entity, posted as ONE `POST /api/run` over the menu's own
@@ -4995,7 +4993,7 @@ composition instead (R267). Above `lg` the pane sits beside the artwork.
 
 ### 7.59 An alias is a name
 
-- **R316 — aliases are imported, shown, searched, published and required, and
+- **R316 — aliases are imported, shown, searched and required, and
   only where they are needed (R16a/R16b).** MusicBrainz aliases arrive from the
   same release request as everything else (`inc=aliases`) and are written as
   `TITLEALIAS` / `ARTISTALIAS` / `ALBUMALIAS` — AT MOST ONE value per entity,
@@ -5007,9 +5005,7 @@ composition instead (R267). Above `lg` the pane sits beside the artwork.
   original (`track.alias`, `album.alias`, `_artist_display_name`), the search
   bar's haystack and the query catalogue both see the alias tags, the advisory
   and lyrics lookups ask the ORIGINAL name first and re-ask under the alias
-  only when the first states nothing, and `mlo/lyrics_publish` submits the
-  original pair AND each alias pair (independent outcomes; a 409 skips that one
-  name). Grading fails both directions: `grade_check_alias_needed` fails a name
+  only when the first states nothing. Grading fails both directions: `grade_check_alias_needed` fails a name
   that needs an alias and has none, `grade_check_alias_excess` fails an alias
   nothing needs (or a spelling the app does not write), and the family is in the
   tag allowlist so a legitimate alias is never an excess-tag failure.
@@ -5273,7 +5269,6 @@ composition instead (R267). Above `lg` the pane sits beside the artwork.
   | 15 | Release tracklist | — one rate-limited MusicBrainz request per album | serial |
   | 16 | Mood & Energy | track (tag scan, then librosa analysis) | ceiling 8, `bound_numeric_threads` |
   | 17 | Lyrics transliterate (AI) | file (own tags/sidecar) | ceiling 8 |
-  | 18 | Publish lyrics (LRCLIB) | track | ceiling 8 |
   | 19 | Optimize artist images | artist folder (its own `artist.jpg`) | ceiling 8 |
   | 20 | Optimize library layout | plan lane (scan), per artist | ceiling 16; the apply pass is serial (rename → move → trash rebases the paths the next row names) |
   | 21 | Fix AcoustID pairs | file (`fpcalc` + lookup + its own tags) | ceiling 8 |
@@ -5349,78 +5344,6 @@ composition instead (R267). Above `lg` the pane sits beside the artwork.
   list, the bounded batch, the two verbs, the web's batch number) and
   `tools/check_player_state.cjs` §10 (the gained rows, the runway, the pane, the
   reorder, the preload, the hand-over, and the off/Repeat-one cases).
-
-### 7.66 A submission to LRCLIB is a token, a body, and LRCLIB's own words
-
-- **R325 — the publish client speaks LRCLIB's CURRENT contract, and its
-  refusals are reported verbatim.** Publishing a lyric is the one thing this
-  app does that writes to somebody else's database, and it is a POST that is
-  refused unless it carries BOTH halves of that contract:
-  (a) **a publish token.** `POST /api/publish` demands a fresh, single-use
-  `X-Publish-Token`, obtained from `POST /api/request-challenge`: a `prefix`
-  and a `target`, and the client must find the smallest `nonce` (decimal, 0, 1,
-  2 …) whose `sha256(prefix + nonce)` compares at most that target byte by byte
-  from the front — the rule LRCLIB's docs point at (LRCGET's
-  `challenge_solver.rs`). `mlo/lyrics_providers.solve_publish_challenge` is
-  that solver, bounded by `PUBLISH_SOLVE_DEADLINE`; the current target is three
-  zero bytes (~1 in 16.7M, measured 1.1M hashes/s ⇒ ~15 s), and the web's
-  `lyricsPublish` timeout sits above the deadline. Every submission takes a
-  FRESH token: a token is spent by the request it authorized, so one is never
-  cached or reused, and a publish that cannot get one fails without sending an
-  unauthenticated submission.
-  The solve is sha256 in a tight loop over a 40-byte input, which HOLDS THE
-  GIL: measured on this machine, six threads reach **1.13x** the throughput of
-  one, so script 18's own lanes — threads — cannot overlap it. A 26-track album
-  is therefore ~6.5 minutes of wall clock at any lane count (the owner's "on
-  7/20 Publish Lyrics for five minutes"), and the fix is width across
-  processes: `mlo.lyrics_providers.PublishTokenPool` (a spawn-context
-  `multiprocessing.Pool`, one core per token, created once per run by
-  `mlo.lyrics_publish.run_publish_lyrics`) solves each challenge on a worker
-  while the lanes keep the network busy. Measured on ONE saved set of eight
-  challenges: **120.4 s with the lanes solving in-thread against 50.8 s
-  through an eight-process pool** — and the pooled floor is the HARDEST
-  challenge in the batch (LRCLIB's difficulty varies per challenge: recorded
-  samples run from 1.1 s to ~50 s of CPU), so the win is the batch, not one
-  token: a run's cost becomes max(hardest, sum / workers) instead of the sum,
-  which is what turns a 26-track album from ~6.5 minutes into about one. The
-  pool is never required: an environment that cannot spawn (a frozen
-  build without `freeze_support`, a sandbox) leaves `workers` at 0 and every
-  token is solved in the calling thread, which is the pre-existing path; a
-  one-off submission (the manual publish panel) has no pool at all.
-  (b) **the metadata in the BODY.** `trackName`, `artistName`, `albumName`,
-  `duration`, `plainLyrics`, `syncedLyrics` — LRCLIB's `PublishRequest` has no
-  query-string half, and a submission whose fields are on the query is a 422
-  however good its token is. A synced text still travels with its plain form
-  beside it — `mlo/lyrics_publish.to_plain` strips the stamps, the editor
-  derives it for the paste it sends, and the endpoint derives it when a caller
-  submits a synced text alone.
-  (c) **what may be submitted is decided by CONTENT, not presence.**
-  `mlo/lyrics_providers.lrclib_would_add(existing, synced)` is the ONE rule
-  script 18, the manual endpoint and the batch route read: a record whose
-  `syncedLyrics` is empty does not block a submission that carries TIMINGS —
-  LRCLIB keeps every revision (its publish docs say so), so this is the
-  upgrade that fills a plain-only entry from a library that holds the synced
-  text, which the app used to refuse ("LRCLIB already has this track" while
-  the database had no timings for it at all). A record that already carries
-  timings blocks a plain-only submission, and a like-for-like copy is the
-  duplicate the existence check exists for; a timed text is the only thing
-  that may upgrade (the stored-text fallback under `synced` is checked for
-  stamps before the gate, so untimed words are the plain submission they look
-  like). `force` overrides everything, unchanged; the manual endpoint answers
-  `upgraded: true` when the submission was that upgrade, and script 18 records
-  it per name pair.
-  The reply is LRCLIB's own: `201` is the submission, and anything else is
-  reported with the status and the response body (`400
-  IncorrectPublishTokenError`, a 429 rate limit, a 409 duplicate from an older
-  server) rather than turned into a generic failure. The client also identifies
-  itself the way LRCLIB requires — name, version and link — with the version
-  read from `mlo.__version__`, so a release cannot leave a stale copy behind.
-  Pinned by `tools/test_lyrics_publish.py` (the smallest nonce, the equality
-  boundary, an unsatisfiable target at its deadline, the token header, the body
-  fields, no query string, and the refusal wording) and
-  `tools/check_lrclib_publish.py`, which drives the real
-  `POST /api/lyrics/publish` against a stub that enforces the same rule and
-  verifies the submitted token itself.
 
 ### 7.67 A press on a lyric line carries the reader, and an instrumental has no lyrics verdict
 
@@ -5527,10 +5450,10 @@ composition instead (R267). Above `lg` the pane sits beside the artwork.
 
   The boundary, said out loud because force is not one thing: a force switch
   whose SCRIPT IS the asking — 8 `force_auto_tag` ("AutoTag re-run"), 15
-  `force_tracklist`, 17 `force_xlit`, 18 `force_publish` — still asks again by
+  `force_tracklist`, 17 `force_xlit` — still asks again by
   design, which is what its label names, and each writes only the families it
   owns (genre/advisory/`INSTRUMENTAL` for 8, the manifest for 15, its own
-  transforms for 17, nothing local for 18). What no forced pass does any more
+  transforms for 17). What no forced pass does any more
   is write a value that would come out identical (R331), replace stored LYRICS
   (here), or re-encode for an encoder VERSION the settings no longer track
   (R329).
@@ -6183,7 +6106,7 @@ and install what the platform supports.
 3. **Run the pipeline** — Optimization → *Run All* (`run_all_order`). It is
    designed to be the whole job: 11 moves video containers first, 3 re-encodes
    lossless sources, 14 tags and organizes, 15 writes the tracklist manifest,
-   2/1 canonicalize sidecars, 13/18 fetch and publish lyrics, 17 adds
+   2/1 canonicalize sidecars, 13 fetch lyrics, 17 adds
    transforms, 8 writes mood/energy/genre/advisory, 5 normalizes images, 19
    re-fits the artist image, 6 audits, 7 measures DR/ReplayGain, 9 writes
    `.accurip`, 12 writes key/BPM, 16
@@ -6223,9 +6146,6 @@ unless their force flags are set. **Needs a human decision**:
   incompatible video replaces the only copy, so it is opt-in.
 - `embed_covers` (default off), `strip_unknown_tags` (on) and
   `metadata_review` (off) — the last stages candidates instead of writing them.
-- **Script 18 publishes to LRCLIB**, a public database: it refuses when the
-  database already answers for the recording, and `force_publish` overrides that
-  refusal. Treat a `force_publish` run as an upload, not a local operation.
 - `grade_check_audit` (ON — `STRICT_DEFAULT_KEYS`) and `audit_cd_require_both` /
   `audit_verify_*` decide how much audit machinery runs; on a Docker or Linux
   server the AccurateRip, audit and logchecker paths run through the image's own
@@ -6293,7 +6213,6 @@ checks see or how they judge it.
 | `library_codec` | `flac` | the codec script 3 (and every import) converts to — `flac`/`alac`/`wav`/`aiff`/`mp3`/`aac`/`ogg`/`opus`/`keep`. It changes grading: `grade_check_lossless_source` fails any uncompressed source (WAV/AIFF/APE/WV/SHN/TTA) still in the library, but **stands down** when the target is itself such a container or is `keep`, and `grade_check_cd_format` exempts a file that already is the configured lossy target. `wav`/`aiff` are library audio extensions (`mlo/paths.py:AUDIO_EXTS`) |
 | `library_codec_quality` / `library_codec_bitrate` / `library_codec_args` | 5 / 0 / `""` | the conversion's compression level (FLAC `-0`..`-8`), its lossy rate (`0` = the codec's own default) and extra encoder arguments |
 | `library_codec_optimize` | `lossless_to_lossy` | what script 3 may convert: a lossless source to the target (`lossless_to_lossy`), lossy sources too (`all`), or nothing (`keep`) |
-| `lrclib_auto_publish` / `force_publish` | ON / off | whether script 18 publishes, and whether it overrides LRCLIB's refusal |
 | `run_all_order` / `import_scripts` / `import_auto_scripts` | see R8 / R9 | what runs, and in which order |
 | `digital_media_source_value` | `Digital` | the answer an import offers when nothing states where a Digital Media release came from (R262); the `SOURCE` it writes is what the source checks then read |
 

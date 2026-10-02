@@ -107,7 +107,7 @@ LEGACY_DEFAULT_MEDIUM_ORDER = (
 # Run All order — PATH-CHANGING SCRIPTS FIRST (11 videos → 3 FLACs → 14
 # beets, whose generated config sets `move: yes`), then the sidecar namers
 # that must see final audio names (15 manifest → 2 CUEs → 1 lyrics format),
-# then content: 13 fetch lyrics → 18 publish → 17 AI transforms, 8 auto
+# then content: 13 fetch lyrics → 17 AI transforms, 8 auto
 # tagging (mood/genre/advisory), 24 web ratings (the public album/track score,
 # which needs the MBIDs 14/8 have just settled and must be on the file before
 # 10's canonical trim and 4's grade), 5 images → 19 artist images (the two image
@@ -148,7 +148,7 @@ LEGACY_DEFAULT_MEDIUM_ORDER = (
 # is idempotent, and it is the same move `beets_organize_after` already makes
 # for 14.
 # Keep in step with web/src/lib/scripts.ts (tests/test_script_menus).
-DEFAULT_RUN_ALL_ORDER = [11, 3, 14, 15, 2, 1, 13, 18, 17, 8, 24, 5, 19, 6, 7, 9, 12, 16, 10, 23, 20, 21, 4]
+DEFAULT_RUN_ALL_ORDER = [11, 3, 14, 15, 2, 1, 13, 17, 8, 24, 5, 19, 6, 7, 9, 12, 16, 10, 23, 20, 21, 4]
 
 # The genre-source order that shipped before the two-source default: recognizing
 # it lets normalize_config treat it as "never customized" (see below).
@@ -1012,13 +1012,6 @@ DEFAULT_CONFIG = {
     # (tags-only lyrics formats never write stray sidecars).
     "lyrics_xlit_sidecars": True,
     "force_xlit": False,
-
-    # Auto-publish to LRCLIB (script 18): this library's own lyrics are
-    # submitted for tracks the community database does not answer for yet.
-    # Outward-facing and public, so it is a setting; a track LRCLIB already
-    # has is never touched (force_publish re-submits anyway).
-    "lrclib_auto_publish": True,
-    "force_publish": False,
 
     # Managed beets tagging (Picard parity).
     "locale": "en",
@@ -1958,6 +1951,14 @@ def normalize_config(user=None) -> dict:
     # form wrote the shipped value on the first save), so it follows the new
     # one — the same rule the naming script and the genre defaults use. A
     # config that genuinely wants the old behavior sets it off again.
+    # How many albums import at once: the shipped default was 2, then 4, and is
+    # 5 now. A stored value that is one of those old defaults was never a
+    # choice (the settings form writes the shipped value on its first save), so
+    # it follows the new default; any other number is the reader's own and is
+    # left exactly as it is.
+    if cfg.get("import_bulk_concurrency") in (2, 4):
+        cfg["import_bulk_concurrency"] = DEFAULT_CONFIG["import_bulk_concurrency"]
+
     if cfg.get("auto_zero_advisory_for_instrumental") is False:
         cfg["auto_zero_advisory_for_instrumental"] = True
 
@@ -1966,7 +1967,10 @@ def normalize_config(user=None) -> dict:
     # dropped here so a saved config stops carrying them around.
     for dead in ("home_recommendations", "home_rec_count", "home_popular_count",
                  "home_rec_source", "discovery_rec_sources",
-                 "discovery_search_sources", "mb_search_source"):
+                 "discovery_search_sources", "mb_search_source",
+                 # the LRCLIB publish feature (script 18, its switch and its
+                 # force flag) is gone: a saved config stops carrying them.
+                 "lrclib_auto_publish", "force_publish"):
         cfg.pop(dead, None)
 
     # The same rule for the ADVISORY family, applied by PREFIX instead of by
@@ -2144,11 +2148,9 @@ def normalize_config(user=None) -> dict:
         # 16 mood & energy — with the other librosa pass (12), after the
         # tagging that gives its genre prior something to work with
         _insert_script(clean_order, 16, [12, 13, 8])
-        # 18 publish — right after the lyrics it submits (13); 17 AI
-        # transforms — after the lyrics it reads, before the analysis passes
-        # and grading
-        _insert_script(clean_order, 18, [13, 12, 16])
-        _insert_script(clean_order, 17, [18, 13, 12, 16])
+        # 17 AI transforms — after the lyrics it reads, before the analysis
+        # passes and grading
+        _insert_script(clean_order, 17, [13, 12, 16])
         # 19 artist images — with script 5's image pass, whose policy it shares
         _insert_script(clean_order, 19, [5, 8, 16])
         # 20 layout scan — right before grading, so the report describes the

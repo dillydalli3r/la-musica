@@ -541,7 +541,6 @@ def build_script_runners():
         15: ("server.script_runners", "run_release_tracklist"),
         16: ("mlo.moods", "run_detect_mood_energy"),
         17: ("mlo.lyrics_xlit", "run_lyrics_xlit"),
-        18: ("mlo.lyrics_publish", "run_publish_lyrics"),
         19: run_optimize_artist_images,
         20: run_optimize_layout,
         # 21 writes ACOUSTID_* tags, so it is resolved on first use like the

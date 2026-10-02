@@ -14,7 +14,6 @@ export const FORCE_SCRIPTS: { key: string; label: string }[] = [
   { key: "tracklist", label: "15 · Release tracklist rewrite" },
   { key: "mood", label: "16 · Mood & Energy re-analysis" },
   { key: "xlit", label: "17 · Lyrics re-transliterate / re-translate" },
-  { key: "publish", label: "18 · Lyrics re-publish to LRCLIB" },
   // Script 20 is the one force key that turns work OFF rather than redoing it:
   // the layout pass always scans, and its apply (rename wrong-case names,
   // gather loose audio) is what an unticked box asks to skip for this run.

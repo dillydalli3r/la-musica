@@ -105,8 +105,6 @@ SCOPES: Dict[int, str] = {
     16: "file",   # mlo/moods.py: per-file MOOD/ENERGY from that track's audio.
     17: "file",   # mlo/lyrics_xlit.py: per-file transforms — the
                   # TRANSLITERATION/TRANSLATION tags and .romaji.lrc sidecar.
-    18: "file",   # mlo/lyrics_publish.py: per-file submission of the lyrics
-                  # that file already carries.
     19: "folder", # mlo/artistdata.py: the ARTIST folder's image is the subject
                   # (artist_folders resolves a target to the artist it sits in).
     20: "folder", # mlo/layout.py: the subject is the shape of a subtree; a run
@@ -147,7 +145,6 @@ BECAUSE: Dict[int, str] = {
     15: "writes one release manifest per album",
     16: "reads one file's mood and energy",
     17: "stores one file's transliteration/translation",
-    18: "submits one file's lyrics",
     19: "re-fits the artist folder's image",
     20: "fixes the layout of a whole subtree",
     21: "completes one file's AcoustID pair",

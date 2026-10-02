@@ -48,7 +48,7 @@
    "description": "per-album tag/lyrics/cover report",
    "in_order": true,
    "enabled": true,
-   "order": 20,
+   "order": 19,
    "gate": {
     "keys": [],
     "enabled": true
@@ -62,7 +62,7 @@
    "description": "JXL / lossless / JXL-back",
    "in_order": true,
    "enabled": true,
-   "order": 10,
+   "order": 9,
    "gate": {
     "keys": [],
     "enabled": true
@@ -76,7 +76,7 @@
    "description": "AudioAuditor: fake lossless / upscaled / MQA",
    "in_order": true,
    "enabled": true,
-   "order": 12,
+   "order": 11,
    "gate": {
     "keys": [],
     "enabled": true
@@ -90,7 +90,7 @@
    "description": "in-process DR + rsgain ReplayGain tags",
    "in_order": true,
    "enabled": true,
-   "order": 13,
+   "order": 12,
    "gate": {
     "keys": [
      "dr_replaygain_enabled"
@@ -106,7 +106,7 @@
    "description": "advisory / instrumental / mood / energy / genre",
    "in_order": true,
    "enabled": true,
-   "order": 9,
+   "order": 8,
    "gate": {
     "keys": [],
     "enabled": true
@@ -120,7 +120,7 @@
    "description": "CUETools .accurip files",
    "in_order": true,
    "enabled": true,
-   "order": 14,
+   "order": 13,
    "gate": {
     "keys": [],
     "enabled": true
@@ -134,7 +134,7 @@
    "description": "final pass: .accurip / .cue / .lrc / tags",
    "in_order": true,
    "enabled": true,
-   "order": 17,
+   "order": 16,
    "gate": {
     "keys": [],
     "enabled": true
@@ -162,7 +162,7 @@
    "description": "musical key + tempo tags",
    "in_order": true,
    "enabled": true,
-   "order": 15,
+   "order": 14,
    "gate": {
     "keys": [
      "audiometa_enabled"
@@ -220,7 +220,7 @@
    "description": "MOOD/ENERGY from the track's audio",
    "in_order": true,
    "enabled": false,
-   "order": 16,
+   "order": 15,
    "gate": {
     "keys": [
      "mood_enabled"
@@ -236,27 +236,11 @@
    "description": "TRANSLITERATION/TRANSLATION tags + sidecars",
    "in_order": true,
    "enabled": true,
-   "order": 8,
+   "order": 7,
    "gate": {
     "keys": [
      "lyrics_xlit_enabled",
      "lyrics_translate_enabled"
-    ],
-    "enabled": true
-   },
-   "removable": false,
-   "available": true
-  },
-  {
-   "id": 18,
-   "label": "Publish lyrics (LRCLIB)",
-   "description": "submit missing lyrics to the community DB",
-   "in_order": true,
-   "enabled": true,
-   "order": 7,
-   "gate": {
-    "keys": [
-     "lrclib_auto_publish"
     ],
     "enabled": true
    },
@@ -269,7 +253,7 @@
    "description": "crop/resize artist artwork to the configured aspect and size",
    "in_order": true,
    "enabled": true,
-   "order": 11,
+   "order": 10,
    "gate": {
     "keys": [],
     "enabled": true
@@ -283,7 +267,7 @@
    "description": "layout report + fixes (case, loose audio, empty artist, strays to the Trash)",
    "in_order": true,
    "enabled": true,
-   "order": 18,
+   "order": 17,
    "gate": {
     "keys": [],
     "enabled": true
@@ -297,7 +281,7 @@
    "description": "complete ACOUSTID_ID / ACOUSTID_FINGERPRINT pairs",
    "in_order": true,
    "enabled": true,
-   "order": 19,
+   "order": 18,
    "gate": {
     "keys": [
      "acoustid_enabled"
@@ -316,7 +300,6 @@
   2,
   1,
   13,
-  18,
   17,
   8,
   5,
@@ -338,7 +321,7 @@
    "default": true,
    "tags": [],
    "group": "categories",
-   "description": "decides whether audio tracks count toward the album grade \u00b7 toggle grade_include_music \u2014 on by default",
+   "description": "decides whether audio tracks count toward the album grade · toggle grade_include_music — on by default",
    "enabled": true,
    "issue_codes": [],
    "writers": [],
@@ -354,7 +337,7 @@
    "default": true,
    "tags": [],
    "group": "categories",
-   "description": "decides whether cover art count toward the album grade \u00b7 toggle grade_include_cover \u2014 on by default",
+   "description": "decides whether cover art count toward the album grade · toggle grade_include_cover — on by default",
    "enabled": true,
    "issue_codes": [],
    "writers": [],
@@ -370,7 +353,7 @@
    "default": true,
    "tags": [],
    "group": "categories",
-   "description": "decides whether cue sheets count toward the album grade \u00b7 toggle grade_include_cue \u2014 on by default",
+   "description": "decides whether cue sheets count toward the album grade · toggle grade_include_cue — on by default",
    "enabled": true,
    "issue_codes": [],
    "writers": [],
@@ -386,7 +369,7 @@
    "default": true,
    "tags": [],
    "group": "categories",
-   "description": "decides whether log files count toward the album grade \u00b7 toggle grade_include_log \u2014 on by default",
+   "description": "decides whether log files count toward the album grade · toggle grade_include_log — on by default",
    "enabled": true,
    "issue_codes": [],
    "writers": [],
@@ -402,7 +385,7 @@
    "default": true,
    "tags": [],
    "group": "categories",
-   "description": "decides whether lrc lyrics count toward the album grade \u00b7 toggle grade_include_lrc \u2014 on by default",
+   "description": "decides whether lrc lyrics count toward the album grade · toggle grade_include_lrc — on by default",
    "enabled": true,
    "issue_codes": [],
    "writers": [],
@@ -418,7 +401,7 @@
    "default": true,
    "tags": [],
    "group": "categories",
-   "description": "decides whether accuraterip files count toward the album grade \u00b7 toggle grade_include_accurip \u2014 on by default",
+   "description": "decides whether accuraterip files count toward the album grade · toggle grade_include_accurip — on by default",
    "enabled": true,
    "issue_codes": [],
    "writers": [],
@@ -434,7 +417,7 @@
    "default": true,
    "tags": [],
    "group": "categories",
-   "description": "decides whether other files count toward the album grade \u00b7 toggle grade_include_other \u2014 on by default",
+   "description": "decides whether other files count toward the album grade · toggle grade_include_other — on by default",
    "enabled": true,
    "issue_codes": [],
    "writers": [],
@@ -449,7 +432,7 @@
    "default": true,
    "tags": [],
    "group": "categories",
-   "description": "decides whether remuxed videos count toward the album grade \u00b7 toggle grade_include_video \u2014 on by default",
+   "description": "decides whether remuxed videos count toward the album grade · toggle grade_include_video — on by default",
    "enabled": true,
    "issue_codes": [],
    "writers": [],
@@ -461,11 +444,11 @@
   },
   {
    "key": "grade_check_tag_spaces",
-   "label": "Tags \u2014 no padding",
+   "label": "Tags — no padding",
    "default": true,
    "tags": [],
    "group": "formatting",
-   "description": "graded on the album folder and its files rather than on a tag \u00b7 toggle grade_check_tag_spaces \u2014 on by default",
+   "description": "graded on the album folder and its files rather than on a tag · toggle grade_check_tag_spaces — on by default",
    "enabled": true,
    "issue_codes": [],
    "writers": [],
@@ -476,7 +459,7 @@
   },
   {
    "key": "grade_check_tag_case",
-   "label": "Tags \u2014 canonical value case",
+   "label": "Tags — canonical value case",
    "default": true,
    "tags": [
     "AUDIT",
@@ -489,7 +472,7 @@
     "SOURCE"
    ],
    "group": "formatting",
-   "description": "grades AUDIT, MEDIA, MOOD, RELEASECOUNTRY, RELEASESTATUS, RELEASETYPE, SCRIPT, SOURCE \u00b7 toggle grade_check_tag_case \u2014 on by default",
+   "description": "grades AUDIT, MEDIA, MOOD, RELEASECOUNTRY, RELEASESTATUS, RELEASETYPE, SCRIPT, SOURCE · toggle grade_check_tag_case — on by default",
    "enabled": true,
    "issue_codes": [],
    "writers": [
@@ -505,11 +488,11 @@
   },
   {
    "key": "grade_check_lyrics_spaces",
-   "label": "Lyrics \u2014 no padding",
+   "label": "Lyrics — no padding",
    "default": true,
    "tags": [],
    "group": "formatting",
-   "description": "graded on the album folder and its files rather than on a tag \u00b7 toggle grade_check_lyrics_spaces \u2014 on by default",
+   "description": "graded on the album folder and its files rather than on a tag · toggle grade_check_lyrics_spaces — on by default",
    "enabled": true,
    "issue_codes": [],
    "writers": [],
@@ -520,11 +503,11 @@
   },
   {
    "key": "grade_check_cue_spaces",
-   "label": "CUE \u2014 no padding",
+   "label": "CUE — no padding",
    "default": true,
    "tags": [],
    "group": "formatting",
-   "description": "graded on the album folder and its files rather than on a tag \u00b7 toggle grade_check_cue_spaces \u2014 on by default",
+   "description": "graded on the album folder and its files rather than on a tag · toggle grade_check_cue_spaces — on by default",
    "enabled": true,
    "issue_codes": [],
    "writers": [],
@@ -539,7 +522,7 @@
    "default": true,
    "tags": [],
    "group": "covers",
-   "description": "graded on the album folder and its files rather than on a tag \u00b7 toggle grade_check_cover_crop \u2014 on by default",
+   "description": "graded on the album folder and its files rather than on a tag · toggle grade_check_cover_crop — on by default",
    "enabled": true,
    "issue_codes": [],
    "writers": [],
@@ -550,11 +533,11 @@
   },
   {
    "key": "grade_check_lyrics_zero",
-   "label": "Lyrics \u2014 zero timestamp rule",
+   "label": "Lyrics — zero timestamp rule",
    "default": true,
    "tags": [],
    "group": "formatting",
-   "description": "graded on the album folder and its files rather than on a tag \u00b7 toggle grade_check_lyrics_zero \u2014 on by default",
+   "description": "graded on the album folder and its files rather than on a tag · toggle grade_check_lyrics_zero — on by default",
    "enabled": true,
    "issue_codes": [],
    "writers": [],
@@ -565,11 +548,11 @@
   },
   {
    "key": "grade_check_tag_blank_lines",
-   "label": "Tags \u2014 no blank lines",
+   "label": "Tags — no blank lines",
    "default": true,
    "tags": [],
    "group": "formatting",
-   "description": "graded on the album folder and its files rather than on a tag \u00b7 toggle grade_check_tag_blank_lines \u2014 on by default",
+   "description": "graded on the album folder and its files rather than on a tag · toggle grade_check_tag_blank_lines — on by default",
    "enabled": true,
    "issue_codes": [],
    "writers": [],
@@ -580,11 +563,11 @@
   },
   {
    "key": "grade_check_lyrics_blank_lines",
-   "label": "Lyrics \u2014 blank line rules",
+   "label": "Lyrics — blank line rules",
    "default": true,
    "tags": [],
    "group": "formatting",
-   "description": "graded on the album folder and its files rather than on a tag \u00b7 toggle grade_check_lyrics_blank_lines \u2014 on by default",
+   "description": "graded on the album folder and its files rather than on a tag · toggle grade_check_lyrics_blank_lines — on by default",
    "enabled": true,
    "issue_codes": [],
    "writers": [],
@@ -595,11 +578,11 @@
   },
   {
    "key": "grade_check_cue_blank_lines",
-   "label": "CUE \u2014 no blank lines",
+   "label": "CUE — no blank lines",
    "default": true,
    "tags": [],
    "group": "formatting",
-   "description": "graded on the album folder and its files rather than on a tag \u00b7 toggle grade_check_cue_blank_lines \u2014 on by default",
+   "description": "graded on the album folder and its files rather than on a tag · toggle grade_check_cue_blank_lines — on by default",
    "enabled": true,
    "issue_codes": [],
    "writers": [],
@@ -614,7 +597,7 @@
    "default": true,
    "tags": [],
    "group": "auditing",
-   "description": "graded on the album folder and its files rather than on a tag \u00b7 toggle grade_check_log_checksum \u2014 on by default",
+   "description": "graded on the album folder and its files rather than on a tag · toggle grade_check_log_checksum — on by default",
    "enabled": true,
    "issue_codes": [],
    "writers": [],
@@ -630,7 +613,7 @@
    "default": true,
    "tags": [],
    "group": "auditing",
-   "description": "graded on the album folder and its files rather than on a tag \u00b7 toggle grade_check_accuraterip \u2014 on by default",
+   "description": "graded on the album folder and its files rather than on a tag · toggle grade_check_accuraterip — on by default",
    "enabled": true,
    "issue_codes": [],
    "writers": [],
@@ -646,7 +629,7 @@
    "default": true,
    "tags": [],
    "group": "tracks",
-   "description": "graded on the album folder and its files rather than on a tag \u00b7 toggle grade_check_unreadable \u2014 on by default",
+   "description": "graded on the album folder and its files rather than on a tag · toggle grade_check_unreadable — on by default",
    "enabled": true,
    "issue_codes": [],
    "writers": [],
@@ -673,7 +656,7 @@
     "TRACKNUMBER"
    ],
    "group": "tracks",
-   "description": "grades ALBUM, ALBUMARTIST, ARTIST, DATE, DISCNUMBER, DYNAMIC RANGE, INSTRUMENTAL, ITUNESADVISORY, TITLE, TRACKNUMBER \u00b7 toggle grade_check_missing_tags \u2014 on by default",
+   "description": "grades ALBUM, ALBUMARTIST, ARTIST, DATE, DISCNUMBER, DYNAMIC RANGE, INSTRUMENTAL, ITUNESADVISORY, TITLE, TRACKNUMBER · toggle grade_check_missing_tags — on by default",
    "enabled": true,
    "issue_codes": [],
    "writers": [
@@ -697,7 +680,7 @@
     "ENCODER_VERSION"
    ],
    "group": "tracks",
-   "description": "grades ENCODER_PROGRAM, ENCODER_QUALITY, ENCODER_VERSION \u00b7 toggle grade_check_encoder \u2014 on by default",
+   "description": "grades ENCODER_PROGRAM, ENCODER_QUALITY, ENCODER_VERSION · toggle grade_check_encoder — on by default",
    "enabled": true,
    "issue_codes": [],
    "writers": [
@@ -718,12 +701,12 @@
     "AUDIT"
    ],
    "group": "auditing",
-   "description": "grades AUDIOAUDITOR_OVERRIDE, AUDIT \u00b7 toggle grade_check_audit \u2014 on by default",
+   "description": "grades AUDIOAUDITOR_OVERRIDE, AUDIT · toggle grade_check_audit — on by default",
    "enabled": true,
    "issue_codes": [],
    "writers": [
     "Audit library (6)",
-    "the track editor (manual) \u2014 beats every verdict"
+    "the track editor (manual) — beats every verdict"
    ],
    "presets": [
     "strict",
@@ -738,7 +721,7 @@
     "INSTRUMENTAL"
    ],
    "group": "tracks",
-   "description": "grades INSTRUMENTAL \u00b7 toggle grade_check_instrumental \u2014 on by default",
+   "description": "grades INSTRUMENTAL · toggle grade_check_instrumental — on by default",
    "enabled": true,
    "issue_codes": [],
    "writers": [
@@ -759,7 +742,7 @@
     "UNSYNCEDLYRICS"
    ],
    "group": "lyrics",
-   "description": "grades LYRICS, UNSYNCEDLYRICS \u00b7 toggle grade_check_lyrics \u2014 on by default",
+   "description": "grades LYRICS, UNSYNCEDLYRICS · toggle grade_check_lyrics — on by default",
    "enabled": true,
    "issue_codes": [],
    "writers": [
@@ -773,13 +756,13 @@
   },
   {
    "key": "grade_check_lyrics_format",
-   "label": "Lyrics \u2014 canonical formatting",
+   "label": "Lyrics — canonical formatting",
    "default": true,
    "tags": [
     "LYRICS"
    ],
    "group": "formatting",
-   "description": "grades LYRICS \u00b7 toggle grade_check_lyrics_format \u2014 on by default",
+   "description": "grades LYRICS · toggle grade_check_lyrics_format — on by default",
    "enabled": true,
    "issue_codes": [],
    "writers": [
@@ -797,7 +780,7 @@
    "default": true,
    "tags": [],
    "group": "lyrics",
-   "description": "graded on the album folder and its files rather than on a tag \u00b7 toggle grade_check_lyrics_lang_tags \u2014 on by default",
+   "description": "graded on the album folder and its files rather than on a tag · toggle grade_check_lyrics_lang_tags — on by default",
    "enabled": true,
    "issue_codes": [],
    "writers": [],
@@ -813,7 +796,7 @@
    "default": true,
    "tags": [],
    "group": "covers",
-   "description": "graded on the album folder and its files rather than on a tag \u00b7 toggle grade_check_sidecar_cover \u2014 on by default",
+   "description": "graded on the album folder and its files rather than on a tag · toggle grade_check_sidecar_cover — on by default",
    "enabled": true,
    "issue_codes": [],
    "writers": [],
@@ -831,7 +814,7 @@
     "MEDIA"
    ],
    "group": "tracks",
-   "description": "grades MEDIA \u00b7 toggle grade_check_media \u2014 on by default",
+   "description": "grades MEDIA · toggle grade_check_media — on by default",
    "enabled": true,
    "issue_codes": [],
    "writers": [
@@ -851,7 +834,7 @@
     "SOURCE"
    ],
    "group": "tracks",
-   "description": "grades SOURCE \u00b7 toggle grade_check_source \u2014 on by default",
+   "description": "grades SOURCE · toggle grade_check_source — on by default",
    "enabled": true,
    "issue_codes": [],
    "writers": [
@@ -872,7 +855,7 @@
     "ALBUMITUNESADVISORY"
    ],
    "group": "tracks",
-   "description": "grades ALBUM DYNAMIC RANGE, ALBUMITUNESADVISORY \u00b7 toggle grade_check_album_tags \u2014 on by default",
+   "description": "grades ALBUM DYNAMIC RANGE, ALBUMITUNESADVISORY · toggle grade_check_album_tags — on by default",
    "enabled": true,
    "issue_codes": [],
    "writers": [
@@ -887,11 +870,11 @@
   },
   {
    "key": "grade_check_cd_log",
-   "label": "CD \u2014 .log present",
+   "label": "CD — .log present",
    "default": true,
    "tags": [],
    "group": "tracks",
-   "description": "graded on the album folder and its files rather than on a tag \u00b7 toggle grade_check_cd_log \u2014 on by default",
+   "description": "graded on the album folder and its files rather than on a tag · toggle grade_check_cd_log — on by default",
    "enabled": true,
    "issue_codes": [],
    "writers": [],
@@ -903,11 +886,11 @@
   },
   {
    "key": "grade_check_cd_cue",
-   "label": "CD \u2014 .cue present",
+   "label": "CD — .cue present",
    "default": true,
    "tags": [],
    "group": "tracks",
-   "description": "graded on the album folder and its files rather than on a tag \u00b7 toggle grade_check_cd_cue \u2014 on by default",
+   "description": "graded on the album folder and its files rather than on a tag · toggle grade_check_cd_cue — on by default",
    "enabled": true,
    "issue_codes": [],
    "writers": [],
@@ -923,7 +906,7 @@
    "default": true,
    "tags": [],
    "group": "tracks",
-   "description": "graded on the album folder and its files rather than on a tag \u00b7 toggle grade_check_disc_naming \u2014 on by default",
+   "description": "graded on the album folder and its files rather than on a tag · toggle grade_check_disc_naming — on by default",
    "enabled": true,
    "issue_codes": [],
    "writers": [],
@@ -941,7 +924,7 @@
     "LOG_GRADE"
    ],
    "group": "auditing",
-   "description": "grades LOG_GRADE \u00b7 toggle grade_check_log_grade \u2014 on by default",
+   "description": "grades LOG_GRADE · toggle grade_check_log_grade — on by default",
    "enabled": true,
    "issue_codes": [],
    "writers": [
@@ -959,7 +942,7 @@
    "default": true,
    "tags": [],
    "group": "tracks",
-   "description": "graded on the album folder and its files rather than on a tag \u00b7 toggle grade_check_crc \u2014 on by default",
+   "description": "graded on the album folder and its files rather than on a tag · toggle grade_check_crc — on by default",
    "enabled": true,
    "issue_codes": [],
    "writers": [],
@@ -971,11 +954,11 @@
   },
   {
    "key": "grade_check_cd_format",
-   "label": "CD \u2014 lossless format",
+   "label": "CD — lossless format",
    "default": true,
    "tags": [],
    "group": "tracks",
-   "description": "graded on the album folder and its files rather than on a tag \u00b7 toggle grade_check_cd_format \u2014 on by default",
+   "description": "graded on the album folder and its files rather than on a tag · toggle grade_check_cd_format — on by default",
    "enabled": true,
    "issue_codes": [],
    "writers": [],
@@ -991,7 +974,7 @@
    "default": true,
    "tags": [],
    "group": "covers",
-   "description": "graded on the album folder and its files rather than on a tag \u00b7 toggle grade_check_cover \u2014 on by default",
+   "description": "graded on the album folder and its files rather than on a tag · toggle grade_check_cover — on by default",
    "enabled": true,
    "issue_codes": [],
    "writers": [],
@@ -1003,11 +986,11 @@
   },
   {
    "key": "grade_check_cue_format",
-   "label": "CUE \u2014 canonical formatting",
+   "label": "CUE — canonical formatting",
    "default": true,
    "tags": [],
    "group": "formatting",
-   "description": "graded on the album folder and its files rather than on a tag \u00b7 toggle grade_check_cue_format \u2014 on by default",
+   "description": "graded on the album folder and its files rather than on a tag · toggle grade_check_cue_format — on by default",
    "enabled": true,
    "issue_codes": [],
    "writers": [],
@@ -1019,11 +1002,11 @@
   },
   {
    "key": "grade_check_cue_files",
-   "label": "CUE \u2014 referenced files exist",
+   "label": "CUE — referenced files exist",
    "default": true,
    "tags": [],
    "group": "formatting",
-   "description": "graded on the album folder and its files rather than on a tag \u00b7 toggle grade_check_cue_files \u2014 on by default",
+   "description": "graded on the album folder and its files rather than on a tag · toggle grade_check_cue_files — on by default",
    "enabled": true,
    "issue_codes": [],
    "writers": [],
@@ -1035,11 +1018,11 @@
   },
   {
    "key": "grade_check_accurip_format",
-   "label": ".accurip \u2014 canonical formatting",
+   "label": ".accurip — canonical formatting",
    "default": true,
    "tags": [],
    "group": "formatting",
-   "description": "graded on the album folder and its files rather than on a tag \u00b7 toggle grade_check_accurip_format \u2014 on by default",
+   "description": "graded on the album folder and its files rather than on a tag · toggle grade_check_accurip_format — on by default",
    "enabled": true,
    "issue_codes": [],
    "writers": [],
@@ -1055,7 +1038,7 @@
    "default": true,
    "tags": [],
    "group": "tracks",
-   "description": "graded on the album folder and its files rather than on a tag \u00b7 toggle grade_check_disallowed \u2014 on by default",
+   "description": "graded on the album folder and its files rather than on a tag · toggle grade_check_disallowed — on by default",
    "enabled": true,
    "issue_codes": [],
    "writers": [],
@@ -1071,7 +1054,7 @@
    "default": true,
    "tags": [],
    "group": "tracks",
-   "description": "graded on the album folder and its files rather than on a tag \u00b7 toggle grade_check_empty_folders \u2014 on by default",
+   "description": "graded on the album folder and its files rather than on a tag · toggle grade_check_empty_folders — on by default",
    "enabled": true,
    "issue_codes": [],
    "writers": [],
@@ -1087,7 +1070,7 @@
    "default": true,
    "tags": [],
    "group": "tracks",
-   "description": "graded on the album folder and its files rather than on a tag \u00b7 toggle grade_check_expected_tracks \u2014 on by default",
+   "description": "graded on the album folder and its files rather than on a tag · toggle grade_check_expected_tracks — on by default",
    "enabled": true,
    "issue_codes": [],
    "writers": [],
@@ -1103,7 +1086,7 @@
    "default": true,
    "tags": [],
    "group": "tracks",
-   "description": "graded on the album folder and its files rather than on a tag \u00b7 toggle grade_check_extra_images \u2014 on by default",
+   "description": "graded on the album folder and its files rather than on a tag · toggle grade_check_extra_images — on by default",
    "enabled": true,
    "issue_codes": [],
    "writers": [],
@@ -1119,7 +1102,7 @@
    "default": true,
    "tags": [],
    "group": "tracks",
-   "description": "graded on the album folder and its files rather than on a tag \u00b7 toggle grade_check_naming \u2014 on by default",
+   "description": "graded on the album folder and its files rather than on a tag · toggle grade_check_naming — on by default",
    "enabled": true,
    "issue_codes": [],
    "writers": [],
@@ -1135,7 +1118,7 @@
    "default": true,
    "tags": [],
    "group": "tracks",
-   "description": "graded on the album folder and its files rather than on a tag \u00b7 toggle grade_check_filename_case \u2014 on by default",
+   "description": "graded on the album folder and its files rather than on a tag · toggle grade_check_filename_case — on by default",
    "enabled": true,
    "issue_codes": [],
    "writers": [],
@@ -1150,7 +1133,7 @@
    "default": true,
    "tags": [],
    "group": "tracks",
-   "description": "graded on the album folder and its files rather than on a tag \u00b7 toggle grade_check_ext_case \u2014 on by default",
+   "description": "graded on the album folder and its files rather than on a tag · toggle grade_check_ext_case — on by default",
    "enabled": true,
    "issue_codes": [],
    "writers": [],
@@ -1168,7 +1151,7 @@
     "INITIALKEY"
    ],
    "group": "tracks",
-   "description": "grades BPM, INITIALKEY \u00b7 toggle grade_check_key_bpm \u2014 on by default",
+   "description": "grades BPM, INITIALKEY · toggle grade_check_key_bpm — on by default",
    "enabled": true,
    "issue_codes": [],
    "writers": [
@@ -1190,12 +1173,12 @@
     "LOG_CRC"
    ],
    "group": "tracks",
-   "description": "grades AUDIO_MD5, INTEGRITY, LOG_CRC \u00b7 toggle grade_check_excess_tags \u2014 on by default",
+   "description": "grades AUDIO_MD5, INTEGRITY, LOG_CRC · toggle grade_check_excess_tags — on by default",
    "enabled": true,
    "issue_codes": [],
    "writers": [
     "Audit library (6)",
-    "nothing \u2014 legacy, read only"
+    "nothing — legacy, read only"
    ],
    "presets": [
     "strict",
@@ -1208,7 +1191,7 @@
    "default": true,
    "tags": [],
    "group": "tracks",
-   "description": "graded on the album folder and its files rather than on a tag \u00b7 toggle grade_check_raw_video \u2014 on by default",
+   "description": "graded on the album folder and its files rather than on a tag · toggle grade_check_raw_video — on by default",
    "enabled": true,
    "issue_codes": [],
    "writers": [],
@@ -1226,7 +1209,7 @@
     "MUSICBRAINZ_ALBUMID"
    ],
    "group": "links",
-   "description": "grades MUSICBRAINZ_ALBUMID \u00b7 toggle grade_check_mb_links \u2014 on by default",
+   "description": "grades MUSICBRAINZ_ALBUMID · toggle grade_check_mb_links — on by default",
    "enabled": true,
    "issue_codes": [],
    "writers": [
@@ -1245,7 +1228,7 @@
     "RATEYOURMUSIC_ALBUM"
    ],
    "group": "links",
-   "description": "grades RATEYOURMUSIC_ALBUM \u00b7 toggle grade_check_rym_links \u2014 on by default",
+   "description": "grades RATEYOURMUSIC_ALBUM · toggle grade_check_rym_links — on by default",
    "enabled": true,
    "issue_codes": [],
    "writers": [
@@ -1262,7 +1245,7 @@
    "default": true,
    "tags": [],
    "group": "tracks",
-   "description": "graded on the album folder and its files rather than on a tag \u00b7 toggle grade_check_lossless_source \u2014 on by default",
+   "description": "graded on the album folder and its files rather than on a tag · toggle grade_check_lossless_source — on by default",
    "enabled": true,
    "issue_codes": [],
    "writers": [],
@@ -1280,7 +1263,7 @@
     "MOOD"
    ],
    "group": "tracks",
-   "description": "grades MOOD \u00b7 issue codes MOOD_MISSING \u00b7 toggle grade_check_mood \u2014 on by default",
+   "description": "grades MOOD · issue codes MOOD_MISSING · toggle grade_check_mood — on by default",
    "enabled": true,
    "issue_codes": [
     "MOOD_MISSING"
@@ -1302,7 +1285,7 @@
     "ENERGY"
    ],
    "group": "tracks",
-   "description": "grades ENERGY \u00b7 issue codes ENERGY_MISSING \u00b7 toggle grade_check_energy \u2014 on by default",
+   "description": "grades ENERGY · issue codes ENERGY_MISSING · toggle grade_check_energy — on by default",
    "enabled": true,
    "issue_codes": [
     "ENERGY_MISSING"
@@ -1324,7 +1307,7 @@
     "GENRE"
    ],
    "group": "tracks",
-   "description": "grades GENRE \u00b7 issue codes GENRE_MISSING \u00b7 toggle grade_check_genre \u2014 on by default",
+   "description": "grades GENRE · issue codes GENRE_MISSING · toggle grade_check_genre — on by default",
    "enabled": true,
    "issue_codes": [
     "GENRE_MISSING"
@@ -1346,7 +1329,7 @@
     "GENRE"
    ],
    "group": "tracks",
-   "description": "grades GENRE \u00b7 toggle grade_check_genre_count \u2014 on by default",
+   "description": "grades GENRE · toggle grade_check_genre_count — on by default",
    "enabled": true,
    "issue_codes": [],
    "writers": [
@@ -1366,7 +1349,7 @@
     "GENRE"
    ],
    "group": "tracks",
-   "description": "grades GENRE \u00b7 toggle grade_check_genre_order \u2014 on by default",
+   "description": "grades GENRE · toggle grade_check_genre_order — on by default",
    "enabled": true,
    "issue_codes": [],
    "writers": [
@@ -1386,7 +1369,7 @@
     "GENRE"
    ],
    "group": "tracks",
-   "description": "grades GENRE \u00b7 toggle grade_check_genre_vocab \u2014 on by default",
+   "description": "grades GENRE · toggle grade_check_genre_vocab — on by default",
    "enabled": true,
    "issue_codes": [],
    "writers": [
@@ -1400,13 +1383,13 @@
   },
   {
    "key": "grade_check_xlit_transliteration",
-   "label": "Transliteration \u2014 needed, never extra",
+   "label": "Transliteration — needed, never extra",
    "default": true,
    "tags": [
     "TRANSLITERATION"
    ],
    "group": "lyrics",
-   "description": "grades TRANSLITERATION \u00b7 toggle grade_check_xlit_transliteration \u2014 on by default",
+   "description": "grades TRANSLITERATION · toggle grade_check_xlit_transliteration — on by default",
    "enabled": true,
    "issue_codes": [],
    "writers": [
@@ -1420,13 +1403,13 @@
   },
   {
    "key": "grade_check_xlit_translation",
-   "label": "Translation \u2014 needed, never extra",
+   "label": "Translation — needed, never extra",
    "default": true,
    "tags": [
     "TRANSLATION"
    ],
    "group": "lyrics",
-   "description": "grades TRANSLATION \u00b7 toggle grade_check_xlit_translation \u2014 on by default",
+   "description": "grades TRANSLATION · toggle grade_check_xlit_translation — on by default",
    "enabled": true,
    "issue_codes": [],
    "writers": [
@@ -1449,7 +1432,7 @@
     "REPLAYGAIN_TRACK_PEAK"
    ],
    "group": "tracks",
-   "description": "grades REPLAYGAIN_ALBUM_GAIN, REPLAYGAIN_ALBUM_PEAK, REPLAYGAIN_TRACK_GAIN, REPLAYGAIN_TRACK_PEAK \u00b7 issue codes REPLAYGAIN_ALBUM_GAIN, REPLAYGAIN_ALBUM_PEAK, REPLAYGAIN_TRACK_GAIN, REPLAYGAIN_TRACK_PEAK \u00b7 toggle grade_check_replaygain \u2014 on by default",
+   "description": "grades REPLAYGAIN_ALBUM_GAIN, REPLAYGAIN_ALBUM_PEAK, REPLAYGAIN_TRACK_GAIN, REPLAYGAIN_TRACK_PEAK · issue codes REPLAYGAIN_ALBUM_GAIN, REPLAYGAIN_ALBUM_PEAK, REPLAYGAIN_TRACK_GAIN, REPLAYGAIN_TRACK_PEAK · toggle grade_check_replaygain — on by default",
    "enabled": true,
    "issue_codes": [
     "REPLAYGAIN_ALBUM_GAIN",
@@ -1474,7 +1457,7 @@
     "ACOUSTID_ID"
    ],
    "group": "tracks",
-   "description": "grades ACOUSTID_FINGERPRINT, ACOUSTID_ID \u00b7 toggle grade_check_acoustid \u2014 on by default",
+   "description": "grades ACOUSTID_FINGERPRINT, ACOUSTID_ID · toggle grade_check_acoustid — on by default",
    "enabled": true,
    "issue_codes": [],
    "writers": [
@@ -1492,7 +1475,7 @@
    "default": true,
    "tags": [],
    "group": "categories",
-   "description": "decides whether album description count toward the album grade \u00b7 toggle grade_include_description \u2014 on by default",
+   "description": "decides whether album description count toward the album grade · toggle grade_include_description — on by default",
    "enabled": true,
    "issue_codes": [],
    "writers": [],
@@ -1508,7 +1491,7 @@
    "default": true,
    "tags": [],
    "group": "tracks",
-   "description": "graded on the album folder and its files rather than on a tag \u00b7 toggle grade_check_album_description \u2014 on by default",
+   "description": "graded on the album folder and its files rather than on a tag · toggle grade_check_album_description — on by default",
    "enabled": true,
    "issue_codes": [],
    "writers": [],
@@ -1523,7 +1506,7 @@
    "default": true,
    "tags": [],
    "group": "artist",
-   "description": "graded on the album folder and its files rather than on a tag \u00b7 issue codes ARTIST_IMAGE_ASPECT, ARTIST_IMAGE_CORRUPT, ARTIST_IMAGE_FORMAT, ARTIST_IMAGE_MISSING, ARTIST_IMAGE_OVERSIZED, ARTIST_IMAGE_UNDERSIZED, ARTIST_IMAGE_UPSCALED \u00b7 toggle grade_check_artist_image \u2014 on by default",
+   "description": "graded on the album folder and its files rather than on a tag · issue codes ARTIST_IMAGE_ASPECT, ARTIST_IMAGE_CORRUPT, ARTIST_IMAGE_FORMAT, ARTIST_IMAGE_MISSING, ARTIST_IMAGE_OVERSIZED, ARTIST_IMAGE_UNDERSIZED, ARTIST_IMAGE_UPSCALED · toggle grade_check_artist_image — on by default",
    "enabled": true,
    "issue_codes": [
     "ARTIST_IMAGE_ASPECT",
@@ -1546,7 +1529,7 @@
    "default": true,
    "tags": [],
    "group": "artist",
-   "description": "graded on the album folder and its files rather than on a tag \u00b7 issue codes ARTIST_DESCRIPTION_MISSING \u00b7 toggle grade_check_artist_description \u2014 on by default",
+   "description": "graded on the album folder and its files rather than on a tag · issue codes ARTIST_DESCRIPTION_MISSING · toggle grade_check_artist_description — on by default",
    "enabled": true,
    "issue_codes": [
     "ARTIST_DESCRIPTION_MISSING"
@@ -1680,7 +1663,7 @@
   {
    "id": "strict",
    "label": "Strict",
-   "description": "Every check on (the file-category permissions keep their configured value \u2014 what counts toward a grade is the user's call)",
+   "description": "Every check on (the file-category permissions keep their configured value — what counts toward a grade is the user's call)",
    "keys": [
     "grade_include_music",
     "grade_include_cover",
@@ -1898,7 +1881,7 @@
     "enabled": true,
     "flag": null,
     "used": true,
-    "description": "toggle audit_thorough \u2014 on by default"
+    "description": "toggle audit_thorough — on by default"
    },
    {
     "key": "audit_cutoff_allow",
@@ -1908,7 +1891,7 @@
     "enabled": 0,
     "flag": null,
     "used": true,
-    "description": "value audit_cutoff_allow \u2014 0 by default"
+    "description": "value audit_cutoff_allow — 0 by default"
    },
    {
     "key": "audit_verify_cd_checksums",
@@ -1918,7 +1901,7 @@
     "enabled": true,
     "flag": null,
     "used": true,
-    "description": "toggle audit_verify_cd_checksums \u2014 on by default"
+    "description": "toggle audit_verify_cd_checksums — on by default"
    },
    {
     "key": "audit_cd_require_both",
@@ -1928,7 +1911,7 @@
     "enabled": true,
     "flag": null,
     "used": true,
-    "description": "toggle audit_cd_require_both \u2014 on by default"
+    "description": "toggle audit_cd_require_both — on by default"
    },
    {
     "key": "audit_integrity",
@@ -1938,7 +1921,7 @@
     "enabled": true,
     "flag": null,
     "used": true,
-    "description": "toggle audit_integrity \u2014 on by default"
+    "description": "toggle audit_integrity — on by default"
    },
    {
     "key": "audit_fail_on_unscorable_log",
@@ -1948,7 +1931,7 @@
     "enabled": true,
     "flag": null,
     "used": true,
-    "description": "toggle audit_fail_on_unscorable_log \u2014 on by default"
+    "description": "toggle audit_fail_on_unscorable_log — on by default"
    },
    {
     "key": "audit_verify_log_checksum",
@@ -1958,7 +1941,7 @@
     "enabled": true,
     "flag": null,
     "used": true,
-    "description": "toggle audit_verify_log_checksum \u2014 on by default"
+    "description": "toggle audit_verify_log_checksum — on by default"
    },
    {
     "key": "audit_require_accuraterip",
@@ -1968,7 +1951,7 @@
     "enabled": true,
     "flag": null,
     "used": true,
-    "description": "toggle audit_require_accuraterip \u2014 on by default"
+    "description": "toggle audit_require_accuraterip — on by default"
    },
    {
     "key": "audit_log_score_threshold",
@@ -1978,7 +1961,7 @@
     "enabled": 100,
     "flag": null,
     "used": true,
-    "description": "value audit_log_score_threshold \u2014 100 by default"
+    "description": "value audit_log_score_threshold — 100 by default"
    },
    {
     "key": "audit_check_cd_format",
@@ -1988,7 +1971,7 @@
     "enabled": true,
     "flag": null,
     "used": true,
-    "description": "toggle audit_check_cd_format \u2014 on by default"
+    "description": "toggle audit_check_cd_format — on by default"
    },
    {
     "key": "audit_batch_size",
@@ -1998,7 +1981,7 @@
     "enabled": 250,
     "flag": null,
     "used": true,
-    "description": "value audit_batch_size \u2014 250 by default"
+    "description": "value audit_batch_size — 250 by default"
    },
    {
     "key": "audit_batch_timeout_s",
@@ -2008,7 +1991,7 @@
     "enabled": 30,
     "flag": null,
     "used": true,
-    "description": "value audit_batch_timeout_s \u2014 30 by default"
+    "description": "value audit_batch_timeout_s — 30 by default"
    },
    {
     "key": "audit_per_file_timeout_s",
@@ -2018,7 +2001,7 @@
     "enabled": 30,
     "flag": null,
     "used": true,
-    "description": "value audit_per_file_timeout_s \u2014 30 by default"
+    "description": "value audit_per_file_timeout_s — 30 by default"
    },
    {
     "key": "audit_clipping",
@@ -2028,7 +2011,7 @@
     "enabled": true,
     "flag": "--no-clipping",
     "used": true,
-    "description": "toggle audit_clipping \u2014 on by default \u00b7 switching it off appends --no-clipping to the scan"
+    "description": "toggle audit_clipping — on by default · switching it off appends --no-clipping to the scan"
    },
    {
     "key": "audit_scaled_clipping",
@@ -2038,7 +2021,7 @@
     "enabled": true,
     "flag": null,
     "used": true,
-    "description": "toggle audit_scaled_clipping \u2014 on by default"
+    "description": "toggle audit_scaled_clipping — on by default"
    },
    {
     "key": "audit_mqa",
@@ -2048,7 +2031,7 @@
     "enabled": true,
     "flag": "--no-mqa",
     "used": true,
-    "description": "toggle audit_mqa \u2014 on by default \u00b7 switching it off appends --no-mqa to the scan"
+    "description": "toggle audit_mqa — on by default · switching it off appends --no-mqa to the scan"
    },
    {
     "key": "audit_ai",
@@ -2058,7 +2041,7 @@
     "enabled": true,
     "flag": "--no-ai",
     "used": true,
-    "description": "toggle audit_ai \u2014 on by default \u00b7 switching it off appends --no-ai to the scan"
+    "description": "toggle audit_ai — on by default · switching it off appends --no-ai to the scan"
    },
    {
     "key": "audit_fake_stereo",
@@ -2068,7 +2051,7 @@
     "enabled": true,
     "flag": "--no-fake-stereo",
     "used": true,
-    "description": "toggle audit_fake_stereo \u2014 on by default \u00b7 switching it off appends --no-fake-stereo to the scan"
+    "description": "toggle audit_fake_stereo — on by default · switching it off appends --no-fake-stereo to the scan"
    },
    {
     "key": "audit_silence",
@@ -2078,7 +2061,7 @@
     "enabled": true,
     "flag": "--no-silence",
     "used": true,
-    "description": "toggle audit_silence \u2014 on by default \u00b7 switching it off appends --no-silence to the scan"
+    "description": "toggle audit_silence — on by default · switching it off appends --no-silence to the scan"
    },
    {
     "key": "audit_dynamic_range",
@@ -2088,7 +2071,7 @@
     "enabled": true,
     "flag": "--no-dynamic-range",
     "used": true,
-    "description": "toggle audit_dynamic_range \u2014 on by default \u00b7 switching it off appends --no-dynamic-range to the scan"
+    "description": "toggle audit_dynamic_range — on by default · switching it off appends --no-dynamic-range to the scan"
    },
    {
     "key": "audit_true_peak",
@@ -2098,7 +2081,7 @@
     "enabled": true,
     "flag": "--no-true-peak",
     "used": true,
-    "description": "toggle audit_true_peak \u2014 on by default \u00b7 switching it off appends --no-true-peak to the scan"
+    "description": "toggle audit_true_peak — on by default · switching it off appends --no-true-peak to the scan"
    },
    {
     "key": "audit_lufs",
@@ -2108,7 +2091,7 @@
     "enabled": true,
     "flag": "--no-lufs",
     "used": true,
-    "description": "toggle audit_lufs \u2014 on by default \u00b7 switching it off appends --no-lufs to the scan"
+    "description": "toggle audit_lufs — on by default · switching it off appends --no-lufs to the scan"
    },
    {
     "key": "audit_bpm",
@@ -2118,7 +2101,7 @@
     "enabled": true,
     "flag": "--no-bpm",
     "used": true,
-    "description": "toggle audit_bpm \u2014 on by default \u00b7 switching it off appends --no-bpm to the scan"
+    "description": "toggle audit_bpm — on by default · switching it off appends --no-bpm to the scan"
    }
   ]
  },

@@ -121,7 +121,10 @@ assert imports.chain_for({"import_auto_scripts": False}) == []
 # --------------------------------------------------------------------------- #
 # Registry + one script
 # --------------------------------------------------------------------------- #
-assert sorted(script_runners.RUNNERS) == list(range(1, 25)), sorted(script_runners.RUNNERS)
+# Every script id the app ships, less the retired 18 (its slot stays empty:
+# a stored force flag or config references ids, so numbers do not move).
+assert sorted(script_runners.RUNNERS) == [i for i in range(1, 25) if i != 18], \
+    sorted(script_runners.RUNNERS)
 assert script_runners.RUNNERS[2][0] == "Format CUEs", script_runners.RUNNERS[2]
 assert script_runners.RUNNERS[2][1].__name__ == "run_format_cues", script_runners.RUNNERS[2]
 assert all(label for label, _ in script_runners.RUNNERS.values())

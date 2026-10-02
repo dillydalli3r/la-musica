@@ -1,8 +1,7 @@
 import { useEffect, useMemo, useState } from "react";
-import { CloudDownload, Loader2, PenLine, Search, ChevronDown, ChevronUp, ClipboardPaste, Upload } from "lucide-react";
+import { CloudDownload, Loader2, PenLine, Search, ChevronDown, ChevronUp, ClipboardPaste } from "lucide-react";
 import { api } from "../api";
 import { toast } from "../store";
-import LrclibPublishPanel from "./LrclibPublish";
 import LyricsEditorModal from "./LyricsEditorModal";
 import { LyricsKindChip } from "./Badges";
 import { lyricsKindOf } from "./LyricsViewer";
@@ -89,7 +88,6 @@ export default function LyricsManagerModal({
   const [preview, setPreview] = useState<number | null>(null);
   const [manual, setManual] = useState("");
   const [manualOpen, setManualOpen] = useState(false);
-  const [pubOpen, setPubOpen] = useState(false);
   const [editorOpen, setEditorOpen] = useState(false);
 
   const search = useMemo(
@@ -183,27 +181,7 @@ export default function LyricsManagerModal({
         >
           <PenLine className="h-3.5 w-3.5" /> Enhanced editor
         </button>
-        {currentText?.trim() && (
-          <button
-            className={`btn-ghost !py-1.5 text-xs ${pubOpen ? "!text-accent" : ""}`}
-            onClick={() => setPubOpen(!pubOpen)}
-            title="Give these lyrics back to the community database"
-          >
-            <Upload className="h-3.5 w-3.5" /> Publish to LRCLIB
-          </button>
-        )}
       </div>
-
-      {pubOpen && currentText?.trim() && (
-        <LrclibPublishPanel
-          artist={artist}
-          track={track}
-          album={album}
-          duration={duration}
-          text={currentText}
-          onDone={() => setPubOpen(false)}
-        />
-      )}
 
       {manualOpen && (
         <div>

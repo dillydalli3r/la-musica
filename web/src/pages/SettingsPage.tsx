@@ -732,14 +732,6 @@ export default function SettingsPage() {
           help: t("settings.lyrics_search_aliases_help"),
         },
         {
-          k: "lrclib_auto_publish", label: "Auto-publish missing lyrics to LRCLIB", type: "bool",
-          help: "Script 18 (and every import chain that includes it) submits this library's own lyrics to LRCLIB for tracks the database does not have yet — artist, title, album and duration decide that, and a track LRCLIB already answers for is never touched. Outward-facing: with it off, nothing is ever submitted automatically (the manual 'Publish to LRCLIB' button on the lyrics editor still works).",
-        },
-        {
-          k: "force_publish", label: "Force: re-submit lyrics LRCLIB already has", type: "bool",
-          help: "One-shot per run — re-publishes even when LRCLIB answers for the track, e.g. when this library's text is the better one. LRCLIB may still reject the duplicate.",
-        },
-        {
           k: "lyrics_youtube_captions", label: "Use YouTube captions (yt-dlp)", type: "bool",
           help: "Time-synced captions, but only for tracks that carry a YouTube id — the id the video download records — so this never searches YouTube for a track. Automatic captions are used when a video has no typed subtitles and can mishear; needs yt-dlp under Dependencies, otherwise the provider is skipped.",
         },
@@ -1428,7 +1420,6 @@ export default function SettingsPage() {
     { k: "force_tracklist", label: "15 · Release tracklist rewrite" },
     { k: "force_mood", label: "16 · Mood & Energy re-analysis" },
     { k: "force_xlit", label: "17 · Lyrics re-transliterate / re-translate" },
-    { k: "force_publish", label: "18 · Lyrics re-publish to LRCLIB" },
     // Script 20 is the one force key that turns work OFF rather than redoing
     // it: the layout scan always reports, and this is what lets it rename and
     // move. It belongs in this list all the same — it is a per-library-script

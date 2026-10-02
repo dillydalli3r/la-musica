@@ -1,12 +1,11 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
-import { CloudDownload, PenLine, Play, Square, Plus, Trash2, Undo2, Keyboard, Upload } from "lucide-react";
+import { CloudDownload, PenLine, Play, Square, Plus, Trash2, Undo2, Keyboard } from "lucide-react";
 import { api, isOffline } from "../api";
 import { toast, useStore } from "../store";
 import { LyricsKindChip } from "./Badges";
 import { playbackSource } from "../lib/mediaCache";
 import { fmtDuration } from "../lib/fmt";
-import LrclibPublishPanel from "./LrclibPublish";
 import Popover from "./Popover";
 import { nextSpeed, fmtSpeed } from "../lib/playback";
 import { useLyricsFollow } from "../lib/lyrScroll";
@@ -272,6 +271,25 @@ export function KaraokeWords({
   );
 }
 
+/** The app's own playback, handed in by a surface that ALREADY owns it — the
+ *  fullscreen player. An editor embedded there must drive the SONG: this pane
+ *  used to load its own copy, so it played a second audio beside the one the
+ *  player was on (the owner's report), and "Preview" meant "start this other
+ *  copy". With this, Preview, the space bar's stamps, the seek and the speed
+ *  all act on the track the app is playing. */
+export interface LyricsPlayer {
+  /** Seconds into the track. */
+  getTime: () => number | undefined;
+  playing: boolean;
+  /** Whole-track length, when the surface knows one. */
+  duration?: number;
+  seek: (seconds: number) => void;
+  setPlaying: (on: boolean) => void;
+  /** Playback rate, when the surface exposes one (the player bar does). */
+  rate?: number;
+  setRate?: (rate: number) => void;
+}
+
 export function serializeLrc(lines: LrcLine[], decimals = 2): string {
   return lines
     .map((l) => {
@@ -301,6 +319,7 @@ export default function LyricsViewer({
   staged = false,
   allowPlain,
   onEnhancedEditor,
+  player,
 }: {
   path: string;
   initialLyrics: string;
@@ -319,8 +338,13 @@ export default function LyricsViewer({
    *  Undefined while the config is unread — the neutral chip, no failure. */
   allowPlain?: boolean;
   /** Opens the full-screen enhanced editor (syllable tap-sync, playback
-   * speed) when provided. */
+   *  speed) when provided. */
   onEnhancedEditor?: () => void;
+  /** The song's own playback, when the host owns it (the fullscreen player).
+   *  Given, this pane drives THAT and loads nothing itself — see
+   *  `LyricsPlayer`. Absent, it is standalone (the track page) and runs its
+   *  own preview element. */
+  player?: LyricsPlayer;
 }) {
   const [lines, setLines] = useState<LrcLine[]>(() => parseLrc(initialLyrics));
   const [rawMode, setRawMode] = useState(false);
@@ -336,7 +360,6 @@ export default function LyricsViewer({
   const [selIdx, setSelIdx] = useState(0);
   const [loading, setLoading] = useState(false);
   const [keysMenu, setKeysMenu] = useState(false);
-  const [pubOpen, setPubOpen] = useState(false);
   const [capturing, setCapturing] = useState<LyricsAction | null>(null);
   const [keys, setKeys] = useState(() => loadLyricsKeys());
   // Where the host page's Save writes: embedded tag, .lrc sidecar, or both.
@@ -352,6 +375,44 @@ export default function LyricsViewer({
   const pendingWords = useRef<{ idx: number; parts: string[]; times: number[]; done: number } | null>(null);
   const [searchHits, setSearchHits] = useState<{ id: number; artist: string; track: string; duration?: number }[] | null>(null);
   const audioRef = useRef<HTMLAudioElement>(null);
+  /** Embedded in a surface that already plays the song (the fullscreen
+   *  player): the pane then drives THAT playback, and the preview element
+   *  below is not rendered at all. */
+  const embedded = !!player;
+  // The tick below reads the LIVE accessor without resubscribing on every
+  // parent render (a new object each render would cancel and re-request the
+  // frame every time).
+  const playerRef = useRef(player);
+  playerRef.current = player;
+  const nowTime = () => {
+    if (player) {
+      const t = player.getTime();
+      return typeof t === "number" && isFinite(t) && t >= 0 ? t : 0;
+    }
+    return audioRef.current?.currentTime ?? 0;
+  };
+  // The pane's own `playing`/`playTime` stay the one vocabulary the rest of
+  // the code reads; embedded, they mirror the player's transport.
+  useEffect(() => {
+    if (player) setPlaying(!!player.playing);
+  }, [player, player?.playing]);
+  useEffect(() => {
+    if (!player) return;
+    let raf = 0;
+    let last = 0;
+    const tick = (now: number) => {
+      // 4 Hz: enough for the readout and a stamp, and nothing like the 60 fps
+      // follow clock a few hundred lines down (which reads the same source).
+      if (now - last > 250) {
+        last = now;
+        const t = playerRef.current?.getTime();
+        setPlayTime(typeof t === "number" && isFinite(t) && t >= 0 ? t : 0);
+      }
+      raf = requestAnimationFrame(tick);
+    };
+    raf = requestAnimationFrame(tick);
+    return () => cancelAnimationFrame(raf);
+  }, [player]);
   // The track the preview element's source was last (or is being) resolved
   // for: a cache lookup that lands after a track change must not overwrite
   // the newer one's src.
@@ -436,10 +497,10 @@ export default function LyricsViewer({
   // (and the speed bindings) itself.
   useEffect(() => {
     const a = audioRef.current;
-    if (!a) return;
+    if (!a || embedded) return;   // embedded: the player owns the song's volume
     a.playbackRate = speed;
     a.volume = vol;
-  }, [speed, vol, playing]);
+  }, [speed, vol, playing, embedded]);
 
   // A track change abandons a source still resolving for the old one.
   useEffect(() => {
@@ -520,6 +581,19 @@ export default function LyricsViewer({
   };
 
   const togglePlay = () => {
+    if (player) {
+      // Embedded: this button is the SONG's transport. Starting it from the
+      // selected line is the editor's whole point ("play from here"), which is
+      // also what the sidebar's own preview does.
+      if (player.playing) {
+        player.setPlaying(false);
+        return;
+      }
+      const at = lines[Math.max(0, Math.min(selIdx, lines.length - 1))]?.time;
+      if (typeof at === "number" && at > 0) player.seek(Math.max(0, at - 0.15));
+      player.setPlaying(true);
+      return;
+    }
     const audio = audioRef.current;
     if (!audio) return;
     if (playing) {
@@ -548,16 +622,26 @@ export default function LyricsViewer({
     }
   };
 
-  /** Step the PREVIEW's rate — the hotkeys advertised in the keys menu are
-   * the editor's, not the main player's. */
+  /** Step the playback rate — embedded, the SONG's rate (the same one the
+   *  player bar cycles), standalone the preview's. */
   const stepSpeed = (dir: 1 | -1) => {
-    const next = nextSpeed(speed, dir);
+    const next = nextSpeed(embedded && player?.rate ? player.rate : speed, dir);
+    if (embedded) {
+      player?.setRate?.(next);
+      toast(`Playback speed ${fmtSpeed(next)}`);
+      return;
+    }
     setSpeed(next);
     if (audioRef.current) audioRef.current.playbackRate = next;
     toast(`Preview speed ${fmtSpeed(next)}`);
   };
 
   const seekTo = (time: number) => {
+    if (player) {
+      player.seek(time);
+      setPlayTime(time);
+      return;
+    }
     const audio = audioRef.current;
     if (!audio) return;
     audio.currentTime = time;
@@ -569,8 +653,7 @@ export default function LyricsViewer({
   // word list is only attached once every word has a timestamp, so partial
   // stamping never serializes zeros into the saved lyrics.
   const stampWord = () => {
-    const audio = audioRef.current;
-    if (!audio) return;
+    if (!embedded && !audioRef.current) return;
     if (!playing) {
       toast("Press Play first, then stamp words while the song plays");
       return;
@@ -595,7 +678,7 @@ export default function LyricsViewer({
       toast("All words stamped — select the next line");
       return;
     }
-    const t = Math.max(0, audio.currentTime - 0.05);
+    const t = Math.max(0, nowTime() - 0.05);
     pending.times[pending.done] = t;
     pending.done += 1;
     setPlayTime(t);
@@ -612,12 +695,11 @@ export default function LyricsViewer({
   };
 
   const stampLine = () => {
-    const audio = audioRef.current;
-    if (!audio || !playing) {
+    if ((!embedded && !audioRef.current) || !playing) {
       toast("Press Play first, then stamp each line's time");
       return;
     }
-    const t = Math.max(0, audio.currentTime - 0.05);
+    const t = Math.max(0, nowTime() - 0.05);
     const target = activeLine >= 0 ? activeLine : selIdx;
     const idx = Math.min(target, Math.max(0, lines.length - 1));
     const next = lines.map((l, j) => (j === idx ? { ...l, time: t, ts: fmtTs(t, dec) } : l));
@@ -764,10 +846,22 @@ export default function LyricsViewer({
   };
 
   return (
-    <div data-lrc-editor className="bg-card rounded-lg border border-border p-4 flex flex-col">
+    <div
+      data-lrc-editor
+      className={
+        embedded
+          // Embedded (the fullscreen player): the host's own pane IS the
+          // surface, so this draws none of its own — a second card inside the
+          // player's column was the "inconsistent" half of the owner's report.
+          ? "flex flex-col min-h-0 flex-1"
+          : "bg-card rounded-lg border border-border p-4 flex flex-col"
+      }
+    >
       <div className="flex items-center justify-between mb-3 flex-wrap gap-1.5">
         <div className="flex items-center gap-2 min-w-0">
-          <div className="text-xs font-semibold uppercase tracking-wider text-zinc-500">Lyrics</div>
+          {!embedded && (
+            <div className="text-xs font-semibold uppercase tracking-wider text-zinc-500">Lyrics</div>
+          )}
           {/* Which KIND the text in this pane is — live, so stamping a line
               turns it into "Synced" before anything is saved. The track's own
               stored kind is the payload's (`lyrics_kind`), shown by the page
@@ -775,9 +869,15 @@ export default function LyricsViewer({
           <LyricsKindChip kind={lyricsKindOf(rawMode ? raw : serializeLrc(lines, dec))} allowPlain={allowPlain} size="sm" />
         </div>
         <div className="flex gap-1.5 flex-wrap">
-          <button className="btn-ghost !py-1 text-xs" onClick={togglePlay}>
+          <button
+            className={`btn-ghost !py-1 text-xs ${embedded ? "!py-1.5" : ""}`}
+            onClick={togglePlay}
+            title={embedded
+              ? "Play the song from the selected line (the same playback as the player below)"
+              : "Preview these lyrics against a copy of the track"}
+          >
             {playing ? <Square className="h-3.5 w-3.5" /> : <Play className="h-3.5 w-3.5" />}
-            {playing ? "Stop" : "Preview"}
+            {playing ? "Stop" : embedded ? "Play from here" : "Preview"}
           </button>
           <button className="btn-ghost !py-1 text-xs" onClick={importFromProviders} disabled={loading}>
             <CloudDownload className="h-3.5 w-3.5" /> Auto-import
@@ -791,13 +891,6 @@ export default function LyricsViewer({
               <PenLine className="h-3.5 w-3.5" /> Enhanced
             </button>
           )}
-          <button
-            className={`btn-ghost !py-1 text-xs ${(rawMode ? raw : serializeLrc(lines, dec)).trim() ? "" : "opacity-40"} ${pubOpen ? "!text-accent" : ""}`}
-            onClick={() => setPubOpen(!pubOpen)}
-            title="Submit these lyrics to the LRCLIB community database"
-          >
-            <Upload className="h-3.5 w-3.5" /> Publish
-          </button>
           {onSave && (
             <select
               className="input !py-1 !px-1.5 text-xs w-auto"
@@ -877,26 +970,16 @@ export default function LyricsViewer({
         </div>
       </div>
 
-      <audio
-        ref={audioRef}
-        onTimeUpdate={(e) => setPlayTime(e.currentTarget.currentTime)}
-        onLoadedMetadata={(e) => setDur(e.currentTarget.duration || 0)}
-        onEnded={() => setPlaying(false)}
-        className="hidden"
-      />
-
-      {pubOpen && (
-        <div className="rounded-md border border-border bg-panel p-3 mb-2 space-y-2">
-          <div className="text-[11px] text-zinc-400 font-medium">Publish to LRCLIB</div>
-          <LrclibPublishPanel
-            artist={artist ?? ""}
-            track={track ?? ""}
-            album={album}
-            duration={Math.round(dur || duration || 0)}
-            text={rawMode ? raw : serializeLrc(lines, dec)}
-            onDone={() => setPubOpen(false)}
-          />
-        </div>
+      {/* Standalone only: embedded in the player, the SONG is the audio and a
+          second element would be a second decoder of the same file. */}
+      {!embedded && (
+        <audio
+          ref={audioRef}
+          onTimeUpdate={(e) => setPlayTime(e.currentTarget.currentTime)}
+          onLoadedMetadata={(e) => setDur(e.currentTarget.duration || 0)}
+          onEnded={() => setPlaying(false)}
+          className="hidden"
+        />
       )}
 
       {searchHits && (

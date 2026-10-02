@@ -2948,6 +2948,7 @@ export default function PlayerBar() {
                 noteJump(a, from, t);
               }}
               getAudioTime={getAudioTime}
+              onTogglePlay={togglePlay}
               onClose={() => setLyricsOpen(false)}
             />
           </Suspense>

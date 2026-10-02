@@ -44,6 +44,7 @@ export default function LyricsSidebar({
   time,
   duration,
   onSeek,
+  onTogglePlay,
   getAudioTime,
   onClose,
 }: {
@@ -54,6 +55,8 @@ export default function LyricsSidebar({
   /** The playing track's length, for the editor's seek bar (see below). */
   duration?: number;
   onSeek: (t: number) => void;
+  /** Play/pause the SONG — what the embedded editor's transport drives. */
+  onTogglePlay?: () => void;
   getAudioTime: () => number;
   onClose: () => void;
 }) {
@@ -412,6 +415,18 @@ export default function LyricsSidebar({
               track={payload?.title ?? current?.title}
               album={payload?.album ?? current?.album}
               duration={duration}
+              /* The panel's OWN playback (the player bar's element): the
+                 editor used to load a second copy of the track, so editing in
+                 the sidebar played something else than the bar did. */
+              player={{
+                getTime: () => getAudioTime(),
+                playing,
+                duration,
+                seek: onSeek,
+                setPlaying: (on) => {
+                  if (on !== playing) onTogglePlay?.();
+                },
+              }}
             />
           </div>
         </div>

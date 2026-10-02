@@ -7699,65 +7699,6 @@ def _lrclib_get(endpoint, params, timeout=15, retries=3):
     return r
 
 
-def lrclib_search(artist, track, album=None, duration=None):
-    params = {"track_name": track, "artist_name": artist}
-    if album:
-        params["album_name"] = album
-    if duration:
-        params["duration"] = duration
-    r = _lrclib_get("search", params)
-    if r.status_code == 200:
-        return r.json()
-    if r.status_code in (400, 404):
-        return []
-    raise httpx.HTTPStatusError(f"lrclib search {r.status_code}", request=r.request, response=r)
-
-
-def lrclib_get(artist, track, album=None, duration=None):
-    """Exact-match lyrics lookup with a search fallback.
-
-    Falls back to /search (preferring synced lyrics, then closest duration)
-    when the exact /get comes back empty; 400/404 are treated as not-found.
-    """
-    params = {"artist_name": artist, "track_name": track}
-    if album:
-        params["album_name"] = album
-    if duration:
-        params["duration"] = duration
-    r = _lrclib_get("get", params)
-    if r.status_code == 200:
-        return r.json()
-    if r.status_code in (400, 404):
-        # retry the search without the album filter — it can hurt matches
-        for album_filter in (None, album):
-            try:
-                hits = lrclib_search(artist, track, album_filter, duration)
-            except Exception:
-                hits = []
-            if isinstance(hits, list) and hits:
-                synced = [h for h in hits if h.get("syncedLyrics")]
-                pool = synced or hits
-                if duration:
-                    pool = sorted(pool, key=lambda h: abs(int(h.get("duration") or 0) - int(duration)))
-                return pool[0]
-        return None
-    raise httpx.HTTPStatusError(f"lrclib get {r.status_code}", request=r.request, response=r)
-
-def lrclib_publish(artist, track, album, duration, plain=None, synced=None):
-    """Submit lyrics to LRCLIB (POST /api/publish).
-
-    Delegates to `mlo.lyrics_providers.lrclib_publish` — the engine client
-    script 18 publishes with — so the request body, the required User-Agent
-    and the throttle that keeps this IP out of LRCLIB's rate limit exist once
-    for both the automatic and the manual path. Returns (ok, message);
-    "LRCLIB already has this track" is the duplicate answer, not an error.
-    """
-    from mlo.lyrics_providers import lrclib_publish as _publish
-
-    return _publish(artist, track, album, duration, plain=plain, synced=synced)
-
-
-
 # --------------------------------------------------------------------------- #
 # RateYourMusic (no public API — link helpers only)
 # --------------------------------------------------------------------------- #

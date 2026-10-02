@@ -2688,7 +2688,7 @@ export default function ImportWizard() {
    *  A pass that changed files is re-read so the step's "Lyrics" marks come
    *  from what it wrote, and a pass that wrote nothing says why (both
    *  switches off, no AI configured) instead of looking like it did. */
-  const runLyricsPass = async (kind: "xlit" | "publish") => {
+  const runLyricsPass = async (kind: "xlit") => {
     // Neither pass has anything to do with an instrumental — the runner skips
     // them too, so they are not even sent.
     const targets = stepTracks
@@ -2701,13 +2701,10 @@ export default function ImportWizard() {
     setBusy(true);
     setLyrPass(null);
     setAct({
-      label:
-        kind === "xlit"
-          ? `Transliterating / translating lyrics for ${targets.length} track(s)…`
-          : `Publishing lyrics to LRCLIB for ${targets.length} track(s)…`,
+      label: `Transliterating / translating lyrics for ${targets.length} track(s)…`,
     });
     try {
-      if (kind === "xlit") {
+      {
         const res = await api.lyricsXlit(targets, false, staged);
         const detail = [
           `${res.ok} file(s) updated`,
@@ -2721,24 +2718,6 @@ export default function ImportWizard() {
         // The tags changed on disk: re-read them so the step shows what the
         // pass actually wrote (an unchanged run costs nothing).
         await rescanTracks();
-      } else {
-        const res = await api.lyricsPublishBatch(targets, false, staged);
-        const reasons = new Map<string, number>();
-        for (const r of res.results) {
-          if (r.status === "skipped") {
-            const why = r.reason || "skipped";
-            reasons.set(why, (reasons.get(why) ?? 0) + 1);
-          }
-        }
-        const fails = res.results.filter((r) => r.status === "failed");
-        const detail = [
-          `${res.ok} submitted`,
-          ...[...reasons].map(([why, n]) => `${n} × ${why}`),
-          fails.length ? `${fails.length} failed — ${fails[0].reason || fails[0].message || "no message"}` : "",
-        ].filter(Boolean).join(" · ");
-        setLyrPass({ kind, text: detail, failed: fails.length > 0 });
-        if (fails.length) toast.error(`LRCLIB publish — ${fails[0].reason || fails[0].message || "failed"}`);
-        else toast(detail);
       }
     } catch (e) {
       setLyrPass({ kind, text: String(e), failed: true });
@@ -4757,17 +4736,8 @@ const finish = async () => {
                 >
                   <Languages className="h-3.5 w-3.5" /> Transliterate / translate lyrics
                 </button>
-                <button
-                  className="btn-ghost !py-1 text-xs tap"
-                  onClick={() => runLyricsPass("publish")}
-                  disabled={busy || !stepTracks.length}
-                  title="Script 18 on this album's tracks: submit the lyrics LRCLIB does not have yet. Nothing is written to the files — this is the one outward lyrics step."
-                >
-                  <UploadCloud className="h-3.5 w-3.5" /> Publish lyrics to LRCLIB
-                </button>
                 <span className="text-[11px] text-zinc-500">
-                  The chain's other two lyrics steps, by hand: what LRCLIB lacks in the database is what
-                  publishing gives it, and both run over the same {stepTracks.length} track(s).
+                  The chain's own lyrics step, by hand, over the same {stepTracks.length} track(s).
                 </span>
               </div>
               {lyrPass && (
@@ -4775,7 +4745,7 @@ const finish = async () => {
                   className={`text-[11px] ${lyrPass.failed ? "text-red-300" : "text-zinc-400"}`}
                   role={lyrPass.failed ? "alert" : undefined}
                 >
-                  {lyrPass.kind === "xlit" ? "Transliteration" : "LRCLIB publish"} — {lyrPass.text}
+                  Transliteration — {lyrPass.text}
                 </div>
               )}
             </div>

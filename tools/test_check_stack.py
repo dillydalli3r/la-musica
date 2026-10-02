@@ -238,8 +238,8 @@ check("only the ids the app re-anchors are marked non-removable",
 check("gates are mlo.scripts.SCRIPT_GATES and match the server's own runner table",
       SCRIPT_GATES == script_runners._DISABLED,
       f"{SCRIPT_GATES} vs {script_runners._DISABLED}")
-check("script 18 reports its feature switch",
-      any(s["id"] == 18 and s["gate"]["keys"] == ["lrclib_auto_publish"]
+check("script 7 reports its feature switch",
+      any(s["id"] == 7 and s["gate"]["keys"] == ["dr_replaygain_enabled"]
           for s in scripts))
 
 checks = stack["checks"]
@@ -350,7 +350,7 @@ check("the toggle survives a re-read", row(put({}).json(), "grade_check_mood")
 # anchor-consistent order: normalize_config re-inserts every registry id the
 # saved order does not name (20, 21 and 23 among them, at their anchors), and
 # the check below is that a full order survives verbatim.
-order_new = [4, 1, 11, 3, 14, 15, 2, 13, 18, 17, 8, 24, 5, 19, 6, 7, 9, 12, 16,
+order_new = [4, 1, 11, 3, 14, 15, 2, 13, 17, 8, 24, 5, 19, 6, 7, 9, 12, 16,
              10, 23, 20, 21]
 r = put({"order": order_new})
 check("a new chain order is accepted", r.status_code == 200, r.text[:200])
@@ -396,13 +396,13 @@ check("a script can be positioned", r.status_code == 200
       and load_config()["run_all_order"][0] == 4,
       load_config()["run_all_order"][:3])
 
-r = put({"scripts": {"18": {"gate_enabled": False}}})
+r = put({"scripts": {"7": {"gate_enabled": False}}})
 check("a script's feature switch is writable",
-      r.status_code == 200 and load_config()["lrclib_auto_publish"] is False,
+      r.status_code == 200 and load_config()["dr_replaygain_enabled"] is False,
       r.text[:200])
-put({"scripts": {"18": {"gate_enabled": True}}})
+put({"scripts": {"7": {"gate_enabled": True}}})
 check("and the script is no longer gated off",
-      load_config()["lrclib_auto_publish"] is True)
+      load_config()["dr_replaygain_enabled"] is True)
 r = put({"scripts": {"4": {"gate_enabled": False}}})
 check("a script with no feature switch refuses the edit", r.status_code == 400,
       r.text[:200])

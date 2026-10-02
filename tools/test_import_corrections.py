@@ -13,16 +13,15 @@ Pinned here:
   * every family in the registry names at least one manual option, every row's
     route is a route the app really serves (the app's own OpenAPI table, method
     included), and every `auto`/`service` entry point resolves;
-  * the lyrics family covers its WHOLE chain — fetch (script 13),
-    transliterate/translate (17) and publish to LRCLIB (18) — and each of the
-    three options runs the same entry point its own script runs, so a click and
-    an import cannot write different things;
+  * the lyrics family covers its chain — fetch (script 13) and
+    transliterate/translate (17) — and each of the two options runs the same
+    entry point its own script runs, so a click and an import cannot write
+    different things;
   * the tag targets are the same, proven on real files rather than argued: the
     manual fetch and script 13 write the same `LYRICS`/`USLT` tag and/or the
-    same `.lrc` sidecar under each `lyrics_format`; the manual transliteration
-    pass and script 17 write the same `TRANSLITERATION-<lang>` tag and
-    `.romaji.lrc` sidecar; and the publish writes NO local tag at all — it is
-    the chain's only outward step;
+    same `.lrc` sidecar under each `lyrics_format`; and the manual
+    transliteration pass and script 17 write the same `TRANSLITERATION-<lang>`
+    tag and `.romaji.lrc` sidecar;
   * a provider that fails surfaces its own message, and a path the app may not
     touch is refused with the sentence the fetch has always used.
 
@@ -90,7 +89,7 @@ import importlib  # noqa: E402
 from fastapi import FastAPI  # noqa: E402
 from fastapi.testclient import TestClient  # noqa: E402
 
-from mlo import import_policy, lyrics_fetch, lyrics_publish, lyrics_xlit  # noqa: E402
+from mlo import import_policy, lyrics_fetch, lyrics_xlit  # noqa: E402
 from mlo.audio import AudioFile  # noqa: E402
 from mlo.scripts import SCRIPT_LABELS  # noqa: E402
 from server import api_lyrics, script_runners  # noqa: E402
@@ -172,11 +171,7 @@ CFG = {
 
 def make_flac(name, artist="System of a Down", title="Suite-Pee",
               album="System of a Down", lyrics=None, seconds=1.2):
-    """One real FLAC track with the tags the lyrics chain reads.
-
-    A second long, well past the whole-second duration LRCLIB insists on — a
-    0.1 s fixture has `duration 0` and publishing skips it as "no track
-    duration", which is true but not what these cases are about."""
+    """One real FLAC track with the tags the lyrics chain reads."""
     assert FLAC_EXE, "flac.exe not found under .dependencies"
     path = os.path.join(MF, "Album", name)
     os.makedirs(os.path.dirname(path), exist_ok=True)
@@ -284,8 +279,8 @@ ok(len(flat) == len(seen_ids) + len(others),
 # --------------------------------------------------------------------------- #
 print("== the lyrics family is the whole chain ==")
 lyric_rows = {row["id"]: row for row in import_policy.manual_options("lyrics")}
-eq(sorted(lyric_rows), ["lyrics-fetch", "lyrics-publish", "lyrics-xlit"],
-   "the lyrics family offers fetch, transliterate and publish")
+eq(sorted(lyric_rows), ["lyrics-fetch", "lyrics-xlit"],
+   "the lyrics family offers fetch and transliterate")
 for row in lyric_rows.values():
     eq(row["service"], row["auto"],
        f"{row['id']} runs the pipeline's own entry point")
@@ -297,9 +292,9 @@ eq(tuple(family["chain"]), (13, 17),
    "a lyrics review drops the fetch and the transliteration pass")
 eq(sorted(import_policy.dropped_chain_ids({"import_autonomy": "review"})), [13, 17],
    "review mode drops exactly those scripts")
-eq([SCRIPT_LABELS[13], SCRIPT_LABELS[17], SCRIPT_LABELS[18]],
-   ["Fetch lyrics", "Lyrics transliterate (AI)", "Publish lyrics (LRCLIB)"],
-   "the three scripts are the ones the options name")
+eq([SCRIPT_LABELS[13], SCRIPT_LABELS[17]],
+   ["Fetch lyrics", "Lyrics transliterate (AI)"],
+   "the two scripts are the ones the options name")
 
 # The scripts the chain runs ARE the entry points the table claims — the same
 # object, so "the manual option calls what the import calls" is not a promise
@@ -308,12 +303,8 @@ ok(script_runners.RUNNERS[13][1] is lyrics_fetch.run_fetch_lyrics,
    "script 13 is mlo.lyrics_fetch.run_fetch_lyrics")
 ok(script_runners.RUNNERS[17][1] is lyrics_xlit.run_lyrics_xlit,
    "script 17 is mlo.lyrics_xlit.run_lyrics_xlit")
-ok(script_runners.RUNNERS[18][1] is lyrics_publish.run_publish_lyrics,
-   "script 18 is mlo.lyrics_publish.run_publish_lyrics")
 ok(lyrics_fetch.run_fetch_lyrics.__globals__["fetch_one"] is lyrics_fetch.fetch_one,
    "script 13 books every track through fetch_one")
-ok(lyrics_publish.run_publish_lyrics.__globals__["publish_one"] is lyrics_publish.publish_one,
-   "script 18 books every track through publish_one")
 # The fetch route holds `fetch_one` itself (the module-level import every
 # `from mlo.lyrics_fetch import fetch_one` shares), so a click and script 13
 # are not two implementations that agree: they are one function.
@@ -352,15 +343,7 @@ def record_xlit(calls):
     return run_lyrics_xlit
 
 
-def record_publish(calls):
-    def publish_one(path, config, force=False, solver=None):
-        calls.append({"path": os.path.basename(path), "force": force})
-        return {"path": path, "status": "skipped", "reason": "recorded",
-                "message": "", "synced": False}
-    return publish_one
-
-
-fetch_calls, xlit_calls, publish_calls = [], [], []
+fetch_calls, xlit_calls = [], []
 
 fetch_recorder = record_fetch(fetch_calls)
 # Both bindings of the one function: the route holds its own reference, script
@@ -390,19 +373,6 @@ with patched(lyrics_xlit, run_lyrics_xlit=record_xlit(xlit_calls)):
     eq([c["force"] for c in xlit_calls], [c["force"] for c in chain],
        "the route and script 17 run one implementation")
     print(f"        cross-check: manual={xlit_calls} chain={chain}")
-
-with patched(lyrics_publish, publish_one=record_publish(publish_calls)):
-    lyrics_publish.run_publish_lyrics({**CFG, "targets": [auto_flac]})
-    chain = list(publish_calls)
-    publish_calls.clear()
-    route = call(lambda: CLIENT.post("/api/lyrics/publish-batch",
-                                     json={"paths": [manual_flac]}))
-    ok(route.status_code == 200, "POST /api/lyrics/publish-batch answers", str(route.status_code))
-    eq(publish_calls, [{"path": os.path.basename(manual_flac), "force": False}],
-       "the publish route calls script 18's per-track core")
-    eq([c["force"] for c in publish_calls], [c["force"] for c in chain],
-       "the route and script 18 publish through one implementation")
-    print(f"        cross-check: manual={publish_calls} chain={chain}")
 
 
 # --------------------------------------------------------------------------- #
@@ -478,37 +448,6 @@ for fmt, expect_tag, expect_sidecar in (("EMBEDDED", True, False), ("LRC", False
     else:
         print(f"        after : {os.path.basename(romaji)}={open(romaji, encoding='utf-8').read()!r}")
 
-a = make_flac("04 - publish auto.flac", lyrics=LYRIC_TEXT)
-m = make_flac("04 - publish manual.flac", lyrics=LYRIC_TEXT)
-before = tags_of(m)
-sent = []
-
-
-def fake_publish(artist, title, album, duration, plain=None, synced=None,
-                 solver=None):
-    sent.append({"artist": artist, "title": title, "album": album,
-                 "duration": duration, "plain": plain, "synced": synced})
-    return True, "Published"
-
-
-with patched(lyrics_publish,
-             lrclib_fetch=lambda *a_, **kw: None,     # LRCLIB does not have it
-             lrclib_publish=fake_publish):
-    auto_res = lyrics_publish.run_publish_lyrics({**CFG, "targets": [a]})
-    auto_sent = list(sent)
-    sent.clear()
-    resp = call(lambda: CLIENT.post("/api/lyrics/publish-batch",
-                                    json={"paths": [m]})).json()
-    manual_sent = list(sent)
-ok(auto_res.get("published") == 1 and resp.get("ok") == 1,
-   "both paths submitted the track", f"{auto_res} / {resp}")
-eq(len(manual_sent), 1, "the route submitted exactly one track")
-eq(manual_sent, auto_sent, "the submit payload is the same on both paths")
-if manual_sent:
-    eq(manual_sent[0]["synced"], LYRIC_TEXT, "publishing sends the stored lyrics unchanged")
-    eq(manual_sent[0]["title"], "Suite-Pee", "the submission is keyed by the file's own tags")
-eq(tags_of(m), before, "publishing writes NO local tag (the one outward step)")
-
 
 # --------------------------------------------------------------------------- #
 # 5) failures and refusals say what happened
@@ -528,16 +467,6 @@ eq(failed["status"], "failed", "a provider that raises is a failed track")
 ok("LRCLIB said 500" in failed["error"],
    "the provider's own message reaches the reply", failed["error"])
 print(f"        reported: {failed['error']}")
-
-with patched(lyrics_publish,
-             lrclib_fetch=lambda *a_, **kw: None,
-             lrclib_publish=lambda *a_, **kw: (False, "LRCLIB already has this track")):
-    resp = call(lambda: CLIENT.post("/api/lyrics/publish-batch",
-                                    json={"paths": [make_flac("05 - dup.flac", lyrics=LYRIC_TEXT)]})).json()
-got = resp["results"][0]
-eq(got["status"], "skipped", "a duplicate is the database's answer, not a failure")
-ok("already has this track" in got["reason"],
-   "LRCLIB's own words are reported", got["reason"])
 
 with patched(lyrics_xlit,
              ai_ready=lambda cfg: True,

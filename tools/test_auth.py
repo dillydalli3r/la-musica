@@ -206,7 +206,7 @@ config_mod.load_config = lambda *a, **k: {"auth_password_hash": auth_mod.hash_pa
 # happened to own. That is not a hypothetical: it turned the login gate ON for
 # every LATER suite in the same CI shard (they drive the app through TestClient,
 # which is not a local address), and the release run failed on
-# `test_lyrics_publish.py`'s 401s because of it. A test may not write outside
+# another suite's 401s because of it. A test may not write outside
 # its own sandbox — one temp file, redirected before the app is built.
 _STUB_CFG = os.path.join(tmp, "config.json")
 config_mod.CONFIG_FILE = _STUB_CFG

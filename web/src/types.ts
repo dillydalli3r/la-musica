@@ -1331,20 +1331,6 @@ export interface LyricsXlitResult {
  *  submission LRCLIB accepted, "skipped" for a no-op (`reason` says which:
  *  "LRCLIB already has it", "no lyrics stored", "instrumental", …) and
  *  "failed" for a refusal or an error, `message` carrying LRCLIB's own words. */
-export interface LyricsPublishResult {
-  path: string;
-  status: "ok" | "skipped" | "failed";
-  reason: string;
-  message: string;
-  synced: boolean;
-}
-
-export interface LyricsPublishBatchResult {
-  results: LyricsPublishResult[];
-  ok: number;
-  skipped: number;
-  failed: number;
-}
 
 /** A lyrics lookup that wrote nothing (`/api/lyrics/find`). */
 export interface LyricsHit {

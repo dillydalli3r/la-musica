@@ -713,7 +713,7 @@ def check_remux_single_probe(tmp):
 
 
 # --------------------------------------------------------------------------- #
-# Script 13 / 18 — the network loops ran one track at a time.
+# Script 13 — the network loop ran one track at a time.
 # --------------------------------------------------------------------------- #
 def _lyric_album(tmp, name, count):
     from mlo.paths import library_root
@@ -864,54 +864,6 @@ def check_lyrics_fetch_never_replaces(tmp):
         lyrics_fetch.fetch_lyrics = real
     ok(not asked and not (mlo_audio.AudioFile(files2[0]).get_lyrics() or "").strip(),
        f"script 13: an instrumental is never searched ({asked})")
-
-
-def check_publish_concurrency(tmp):
-    """Script 18: the same bounded-lane treatment for the LRCLIB loop."""
-    import time
-    from mlo import lyrics_publish
-
-    lib, _album, files = _lyric_album(tmp, "publish_lib", 4)
-    for p in files:
-        af = mlo_audio.AudioFile(p)
-        af.set_lyrics("[00:01.00] line one\n[00:02.00] line two")
-    LATENCY = 0.15
-
-    real_fetch = lyrics_publish.lrclib_fetch
-    real_publish = lyrics_publish.lrclib_publish
-
-    def fake_fetch(artist, title, album=None, duration=None, **kw):
-        time.sleep(LATENCY)
-        return None                      # LRCLIB does not have it yet
-
-    def fake_publish(artist, title, album, duration, plain=None, synced=None,
-                     solver=None):
-        time.sleep(LATENCY)
-        return True, "published"
-
-    lyrics_publish.lrclib_fetch = fake_fetch
-    lyrics_publish.lrclib_publish = fake_publish
-
-    def run(worker_limit):
-        c = cfg(music_folder=lib, force_publish=True,
-                worker_limit=worker_limit)
-        t0 = time.perf_counter()
-        st = lyrics_publish.run_publish_lyrics(c)
-        return st, time.perf_counter() - t0
-
-    try:
-        seq_stats, t_seq = run(1)
-        par_stats, t_par = run(0)
-    finally:
-        lyrics_publish.lrclib_fetch = real_fetch
-        lyrics_publish.lrclib_publish = real_publish
-
-    ok(seq_stats["published"] == par_stats["published"] == len(files),
-       f"script 18: both runs publish every track "
-       f"({seq_stats['published']}/{par_stats['published']} of {len(files)})")
-    ok(t_par < t_seq * 0.6,
-       f"script 18: {len(files)} tracks x 2 LRCLIB calls take {t_par:.2f} s "
-       f"with lanes vs {t_seq:.2f} s one at a time ({t_seq / t_par:.1f}x)")
 
 
 # --------------------------------------------------------------------------- #
@@ -1659,7 +1611,6 @@ def main():
         ("script 13 Fetch lyrics (lanes)", check_lyrics_fetch_concurrency),
         ("script 13 Fetch lyrics (fills only)", check_lyrics_fetch_never_replaces),
         ("script 19 Artist images (lanes)", check_artist_image_lanes),
-        ("script 18 Publish lyrics (lanes)", check_publish_concurrency),
         ("script 9  AccurateRip (lanes)", check_accurip_album_lanes),
         ("script 20 Scan library layout (lanes)", check_layout_scan_lanes),
         ("script 1  Format lyrics (one open)", check_lyrics_one_open_per_track),

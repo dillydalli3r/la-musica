@@ -134,7 +134,7 @@ def _lyrics_text(path="", af=None, lyrics=None) -> str:
     if not path:
         return ""
     try:
-        from .lyrics_publish import local_lyrics
+        from .lyrics import local_lyrics
         return str(local_lyrics(path, af=af) or "").strip()
     except Exception:
         return ""

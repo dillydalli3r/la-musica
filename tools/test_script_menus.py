@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Menu-consistency gate: every surface that lists the 24 scripts must agree.
+"""Menu-consistency gate: every surface that lists the 23 scripts must agree.
 
 Sources checked:
   * ``EXPECTED_SCRIPTS`` below — the frozen expected registry (number + name)
@@ -47,9 +47,6 @@ EXPECTED_SCRIPTS = {
     # 17 is the AI pass: the lyric transliteration / translation script the
     # no-AI core removed, back under a fresh id (15 stayed with the tracklist).
     17: "Lyrics transliterate (AI)",
-    # 18 gives back: this library's lyrics are submitted to LRCLIB for
-    # recordings the database does not have yet.
-    18: "Publish lyrics (LRCLIB)",
     # 19 re-fits the artist images already in the library to the configured
     # aspect and size — the remedy for the codes grade_check_artist_image
     # raises (mlo/artistdata.py run_optimize_artist_images).
@@ -275,7 +272,7 @@ def check_wizard_finish_list(check):
 
 
 def table_scripts():
-    """The 24 ids `mlo/scripts.py` declares, read from the FILE.
+    """The 23 ids `mlo/scripts.py` declares, read from the FILE.
 
     It is the one table the menus print (mlo.cli re-exports it, server/api_stack
     and server/script_menu include it, tags_registry's writer column names it),
@@ -449,13 +446,11 @@ def check_run_all_migration(check):
     check("the stale script-15 entry is shed and 15 is re-anchored after beets",
           got.count(15) == 1 and got.index(15) == got.index(14) + 1, str(got))
     check("every script lands exactly once in a normalized order",
-          sorted(got) == [i for i in range(1, 25) if i != 22], str(sorted(got)))
-    # 17/18 were never in a saved order before they existed; the same
-    # shed-and-anchor rule has to place them after the fetch they read from.
-    check("18 (publish) lands after 13 (fetch lyrics) in a normalized order",
-          got.index(18) == got.index(13) + 1, str(got))
-    check("17 (AI transforms) lands after 18 (publish) in a normalized order",
-          got.index(17) == got.index(18) + 1, str(got))
+          sorted(got) == [i for i in range(1, 25) if i not in (18, 22)], str(sorted(got)))
+    # 17 was never in a saved order before it existed; the same shed-and-anchor
+    # rule has to place it after the fetch it reads from.
+    check("17 (AI transforms) lands after 13 (fetch lyrics) in a normalized order",
+          got.index(17) == got.index(13) + 1, str(got))
     # 20 and 21 were not in any saved order yet either: they join at their
     # anchors, which are the final pass (10) and the report on it (20).
     check("20 (layout scan) lands after 10 (format all) for an existing install",
@@ -584,8 +579,9 @@ def main():
     check("the web and the server declare the same opt-in scripts",
           opt_in_py == opt_in_web and bool(opt_in_py),
           f"server={sorted(opt_in_py)} web={sorted(opt_in_web)}")
-    check("canonical registry has 24 scripts", len(canon) == 24, str(sorted(canon)))
-    check("canonical numbers are 1..24", sorted(canon) == list(range(1, 25)))
+    check("canonical registry has 23 scripts", len(canon) == 23, str(sorted(canon)))
+    check("canonical numbers are 1..24 less the retired 18",
+          sorted(canon) == [i for i in range(1, 25) if i != 18])
     check("every opt-in script is a real script", opt_in_py <= set(canon),
           f"unknown={sorted(opt_in_py - set(canon))}")
     check("server RUNNERS == canonical numbers", runners == set(canon), f"server={sorted(runners)}")
@@ -606,15 +602,16 @@ def main():
 
     print("run-all order")
     py_run_all = python_default_run_all()
+    # `canon` is the shipped registry: 18 is retired, so "every script" means
+    # every one it still lists, less the opt-in ones.
+    shipped = sorted(set(canon) - set(opt_in_py))
     check("DEFAULT_RUN_ALL covers every script that ships in the order",
-          sorted(run_all) == [i for i in range(1, 25) if i not in opt_in_py],
-          str(sorted(run_all)))
+          sorted(run_all) == shipped, str(sorted(run_all)))
     check("…and leaves the opt-in scripts out of it",
           not (set(run_all) & opt_in_py), str(sorted(set(run_all) & opt_in_py)))
     check("DEFAULT_RUN_ALL has no duplicates", len(run_all) == len(set(run_all)), str(run_all))
     check("mlo/config.py DEFAULT_RUN_ALL_ORDER covers every script",
-          sorted(py_run_all) == [i for i in range(1, 25) if i not in opt_in_py],
-          str(sorted(py_run_all)))
+          sorted(py_run_all) == shipped, str(sorted(py_run_all)))
     check("python and web run-all order agree", py_run_all == run_all,
           f"python={py_run_all} web={run_all}")
 
