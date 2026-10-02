@@ -510,6 +510,15 @@ class DevBed:
                 self.web_started = True
                 print(f"· UI (vite, hot reload) starting on "
                       f"http://127.0.0.1:{self.web_port}", flush=True)
+                # Nothing to build while working: vite serves web/src with hot
+                # reload and uvicorn reloads server/ and mlo/. Only the BACKEND
+                # port serves a build — and a stale one at that — which looks
+                # exactly like "my change did not apply, I must need to compile".
+                if (ROOT / "web" / "dist" / "index.html").is_file():
+                    print(f"  edit web/src and reload that tab; "
+                          f"http://127.0.0.1:{self.port} serves the last "
+                          f"`npm run build` in web/dist, not your edits",
+                          flush=True)
         return True
 
     def stop(self) -> None:
