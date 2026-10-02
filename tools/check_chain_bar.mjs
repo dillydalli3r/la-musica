@@ -149,13 +149,33 @@ try {
     (f) => import("/src/store.ts").then((m) => m.useStore.getState().setProgress(f)),
     frame);
 
+  /** Wait (bounded, never asserting) for a shape the checks below then judge.
+   *  A FIXED wait samples too early on a busy machine — inside the whole suite
+   *  vite, React and the strip's own width transition share the CPU — and a
+   *  sample taken mid-render made the strip and the Finish step's bar disagree,
+   *  which the checks read as the APP disagreeing with itself (an intermittent:
+   *  ~1 run in 3 in-suite, 0 in 8 standalone). Every assertion below is
+   *  unchanged, so a real regression still fails, with its own message. */
+  const until = (fn, arg) => page.waitForFunction(fn, { timeout: 4000 }, arg).catch(() => {});
+  const bothBarsShow = async (label) => {
+    const deadline = Date.now() + 4000;
+    for (;;) {
+      const [a, b] = await Promise.all([readBar(strip), readBar(stepBar)]);
+      if (a.label === label && b.label === label) return;
+      if (Date.now() > deadline) return;
+      await page.waitForTimeout(50);
+    }
+  };
+
   // The frame already on screen when the user presses the button: the import's
   // stage, at 4/8 — no step pair, so it is nobody's chain.
   await pushFrame(stage);
   await page.waitForTimeout(50);
 
   await page.getByRole("button", { name: "Run all" }).click();
-  await page.waitForTimeout(200);
+  await until(() => Array.from(document.querySelectorAll('[role="status"]'))
+    .filter((el) => (el.textContent || "").includes("Run scripts")).length >= 2);
+  await page.waitForTimeout(100);
 
   const bars = [];
   for (const handle of await page.$$('[role="status"]')) {
@@ -187,7 +207,7 @@ try {
   // own numbers are its own to print — under its own name, never the chain's,
   // and the run's frames below replace them the moment the run claims the bar.
   await pushFrame(laterStage);
-  await page.waitForTimeout(60);
+  await bothBarsShow(laterStage.desc);
   const staging = await readBar(strip);
   check("a stage frame arriving mid-start names itself, not the chain",
         staging.label === laterStage.desc, `${staging.label} vs ${laterStage.desc}`);
@@ -200,7 +220,7 @@ try {
   for (let i = 0; i < frames.length; i += 1) {
     const frame = frames[i];
     await pushFrame(frame);
-    await page.waitForTimeout(60);
+    await bothBarsShow(frame.desc);
     const shown = await readBar(strip);
     const pair = frame.steps ? `${frame.steps[0]}/${frame.steps[1]}` : null;
     check(`frame ${i + 1}/${frames.length} (${frame.desc}) names itself as the label`,

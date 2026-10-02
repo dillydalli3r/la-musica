@@ -22,6 +22,15 @@ python -m uvicorn server.main:app --host 127.0.0.1 --port 8000   # http://127.0.
 python -m mlo    # the console menu (scripts 1–24), run from the server's environment
 ```
 
+**Editing the app** — `python tools/dev.py` is the whole dev bed in one command: a
+throwaway library at `local/dev/music` (gitignored, wiped with `--fresh`), the
+backend under `--reload` watching only `server/` and `mlo/`, the vite server with
+hot reload proxying `/api` and `/ws` to it, the wizard already flipped, and a tray
+to open the app / the library folder / the logs, restart it or quit. It never uses
+port 8000 — that is the live install — and picks 8011 (backend) and 5181 (UI) up.
+`--no-web`, `--no-reload`, `--no-tray`, `--music DIR` and `--help` are there for
+the rest.
+
 ## What it does
 - **Library** — artists → albums → tracks with grade/audit badges, five views (Grid, Compact, Albums, Artists, Tracks), sort/columns/presets, a query builder saved as smart playlists, bulk tag tools, half-star ratings, favourites, podcasts and music videos.
 - **Player** — a persistent bar and a fullscreen player: queue, gapless playback, `infinite_playback` similarity queue, ReplayGain (track/album/off), equalizer, sleep timer, visualizer, synced **or plain** lyrics, and a per-device accent colour. It remembers where you were.
