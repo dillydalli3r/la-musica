@@ -542,6 +542,7 @@ function FavArtists() {
                       to={artistRef(a)}
                       name={displayName}
                       pass={a.grade?.pass}
+                      disambiguation={a.disambiguation}
                       className="font-medium hover:text-accent-soft flex-1 min-w-0"
                       nameClassName="break-words"
                     />

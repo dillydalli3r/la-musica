@@ -62,8 +62,9 @@ extra request**.
 
 The app renders them the way MusicBrainz does: plain text in parentheses
 immediately after the name, one shade dimmer — on the album card, the album
-header, the library's album rows and table, every track row, and the track page.
-An absent comment renders **nothing** (never empty parentheses).
+header, the artist page header, the library's album rows/table and artist rows,
+Home's artist shelf, Favorites' artist table, every track row, and the track
+page. An absent comment renders **nothing** (never empty parentheses).
 
 One consequence worth knowing: whether MusicBrainz states a comment is only
 knowable from the release, so unlike an alias it cannot open an Auto Tagging

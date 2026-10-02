@@ -412,6 +412,13 @@ ok({"TITLEALIAS", "ARTISTALIAS", "ALBUMALIAS"} <= set(_lib.TRACK_TAGS),
    "the library payload reads every alias tag")
 ok({"ARTISTALIAS", "ALBUMALIAS"} <= set(_lib.ALBUM_LEVEL_TAGS),
    "…the album-level ones too")
+# The disambiguation family is read the same way: the recording's per track,
+# the release group's and the credited artist's as album-level values.
+ok({"TITLEDISAMBIGUATION", "ALBUMDISAMBIGUATION", "ARTISTDISAMBIGUATION"}
+   <= set(_lib.TRACK_TAGS),
+   "the library payload reads every disambiguation tag")
+ok({"ALBUMDISAMBIGUATION", "ARTISTDISAMBIGUATION"} <= set(_lib.ALBUM_LEVEL_TAGS),
+   "…including the two album-level ones")
 _fields = {f["field"]: f for g in _api_query.catalogue()["groups"]
            for f in g["fields"]}
 ok(_fields.get("tags.TITLEALIAS", {}).get("in_payload") is True,
@@ -452,6 +459,33 @@ if _FLAC:
     ok(_lib._artist_display_name(_artist_dir, [_res]) == "宇多田ヒカル (Hikaru Utada)",
        "the artist's display name shows the alias with the original "
        f"({_lib._artist_display_name(_artist_dir, [_res])!r})")
+
+    # MusicBrainz's disambiguation comment for the ARTIST — the same fact the
+    # album payload surfaces as `artist_disambiguation` — reaches the artist
+    # payload and the library's artist rows, and is None (never "") when no
+    # file states one. Written through the real tag writer, read back through
+    # the real builders (no network: both read the albums they already hold).
+    from server import main as _main  # noqa: E402
+    _cfg = {"music_folder": _TMP, "lyrics_format": "EMBEDDED",
+            "worker_limit": 2}
+    _marked = AudioFile(_path)
+    _marked.set_tag("ARTISTDISAMBIGUATION", "UK rock band")
+    _artist_payload = _main._artist_payload(_artist_dir, _cfg)
+    ok(_artist_payload.get("disambiguation") == "UK rock band",
+       f"the artist payload carries ARTISTDISAMBIGUATION "
+       f"({_artist_payload.get('disambiguation')!r})")
+    _art_row = next((a for a in _lib.build_library(_cfg)["artists"]
+                     if a["path"].replace("\\", "/").endswith("宇多田ヒカル")),
+                    {})
+    ok(_art_row.get("disambiguation") == "UK rock band",
+       f"…and so does the library's artist row "
+       f"({_art_row.get('disambiguation')!r})")
+    for _f in (_path, _path2):
+        AudioFile(_f).delete_tag("ARTISTDISAMBIGUATION")
+    _bare_artist = _main._artist_payload(_artist_dir, _cfg)
+    ok(_bare_artist.get("disambiguation") is None,
+       "an artist whose files state none surfaces None, not \"\" "
+       f"({_bare_artist.get('disambiguation')!r})")
     _shutil.rmtree(_TMP, ignore_errors=True)
 
 print(f"mb aliases: all {passed} assertions passed")

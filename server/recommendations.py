@@ -155,6 +155,12 @@ def _top_artists(artists, limit):
         row = {
             "path": str(ar.get("path") or "").replace("\\", "/"),
             "artist": name,
+            # The artist's MusicBrainz disambiguation comment, straight off the
+            # library row the shelf is built from — the same field the artist
+            # page and the Library's artist view carry, so every surface that
+            # names this artist draws the same parentheses. None when no album
+            # states one; no request of its own.
+            "disambiguation": str(ar.get("disambiguation") or "").strip() or None,
             "album_count": len(albs),
             "track_count": agg.get("track_count") or 0,
             # The ALBUM rollup's percentage (what the card prints under the

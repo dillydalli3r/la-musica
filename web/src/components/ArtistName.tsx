@@ -1,5 +1,6 @@
 import type { MouseEvent } from "react";
 import { Link } from "react-router-dom";
+import { DisambiguationMark } from "./Badges";
 
 /** An artist's name, with the artist's OWN verdict beside it.
  *
@@ -40,6 +41,7 @@ export function ArtistDot({ pass }: { pass?: boolean | null }) {
 export default function ArtistName({
   name,
   pass,
+  disambiguation,
   to,
   onClick,
   className = "",
@@ -51,6 +53,11 @@ export default function ArtistName({
    *  holds (`grade.pass` on the artist page and on the Library's rows,
    *  `top_artists[].grade.pass` on Home). Anything but `true` draws no dot. */
   pass?: boolean | null;
+  /** MusicBrainz's disambiguation comment for this artist ("UK rock band"),
+   *  drawn in parentheses right after the name in a dimmer tone — the same
+   *  `DisambiguationMark` every other surface wears. Absent or null draws
+   *  nothing; the locale alias is already part of `name`. */
+  disambiguation?: string | null;
   /** Wraps the name in its own link when set; absent, the caller's own link or
    *  row click owns the navigation. */
   to?: string;
@@ -71,6 +78,10 @@ export default function ArtistName({
       <span className={`min-w-0 ${nameClassName}`} title={name}>
         {name}
       </span>
+      {/* Sibling of the (possibly truncating) name span, not a child: the
+          comment keeps its own width and can never be clipped away by a long
+          name. */}
+      <DisambiguationMark value={disambiguation} />
     </>
   );
   if (to) {

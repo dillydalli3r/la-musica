@@ -2039,6 +2039,7 @@ export default function LibraryPage() {
                             onClick={(e) => e.stopPropagation()}
                             name={a.display_name || a.name}
                             pass={a.grade?.pass}
+                            disambiguation={a.disambiguation}
                             className="font-medium hover:text-accent-soft"
                             nameClassName="truncate"
                           />

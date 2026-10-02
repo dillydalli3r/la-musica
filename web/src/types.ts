@@ -492,6 +492,12 @@ export interface Artist {
   path: string;
   name: string;
   display_name?: string | null;
+  /** MusicBrainz's disambiguation comment for this artist, or null when none
+   *  of the artist's albums states one — rendered in parentheses after the
+   *  name (`DisambiguationMark`). Read from the artist's own albums by
+   *  `server.library._artist_disambiguation`, the same rule for the artist
+   *  page (`/api/artist`), the Library's artist rows and Home's shelf. */
+  disambiguation?: string | null;
   albums: Album[];
   aggregate: Aggregate;
   /** Whether an `artist.*` image is stored in the artist folder — read from
@@ -1105,6 +1111,10 @@ export interface HomeData {
 export interface HomeArtist {
   path: string;
   artist: string;
+  /** MusicBrainz's disambiguation comment for this artist, or absent — the
+   *  same field the Library's artist rows carry, passed through by
+   *  `server.recommendations._top_artists`. */
+  disambiguation?: string | null;
   album_count: number;
   track_count: number;
   grade_pct: number | null;

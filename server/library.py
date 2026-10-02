@@ -771,6 +771,24 @@ def _artist_display_name(artist_dir, albums_data):
     return base
 
 
+def _artist_disambiguation(albums_data):
+    """The credited artist's MusicBrainz disambiguation comment, or None.
+
+    The SAME album-level fact `_artist_display_name` reads its alias from, and
+    the same rule: the comment is written to every file of every album the
+    artist is credited on, so the FIRST album that states one speaks for the
+    artist (an artist whose files predate the tag — or MusicBrainz states no
+    comment — answers None, never ""). The pages render it in parentheses
+    beside the name (`DisambiguationMark`), exactly as the album payload's own
+    `artist_disambiguation` is rendered beside an album's artist caption, so
+    the artist page and the album it was opened from never spell the same
+    artist two ways.
+    """
+    return next((str(a.get("artist_disambiguation") or "").strip()
+                 for a in albums_data
+                 if str(a.get("artist_disambiguation") or "").strip()), None)
+
+
 def library_cache_key(cfg):
     """The tagcache key for a library payload.
 
@@ -933,6 +951,11 @@ def _library_builder(folder, cfg):
                 "path": artist_dir.replace("\\", "/"),
                 "name": os.path.basename(artist_dir),
                 "display_name": _artist_display_name(artist_dir, albums_data),
+                # The credited artist's MusicBrainz disambiguation comment,
+                # beside the display name (the first album that states one —
+                # see `_artist_disambiguation`). None when no file of the
+                # artist's albums states one.
+                "disambiguation": _artist_disambiguation(albums_data),
                 "albums": albums_data,
                 "aggregate": agg,
                 # Whether `GET /api/artist/image` would answer for this folder:

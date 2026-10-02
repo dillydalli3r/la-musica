@@ -1294,6 +1294,14 @@ def _artist_payload(p, cfg):
         "path": p.replace("\\", "/"),
         "name": os.path.basename(p),
         "display_name": display_name,
+        # MusicBrainz's disambiguation comment for this artist, read off the
+        # albums the same payload already holds (the first one that states
+        # one — `server.library._artist_disambiguation`, the same rule the
+        # library's artist rows follow). The page renders it in parentheses
+        # beside the name, dimmer than it; None (never "") when the artist's
+        # files state none. The locale ALIAS keeps its own handling inside
+        # `display_name` — this is a different fact and does not touch it.
+        "disambiguation": lib_mod._artist_disambiguation(albums_data),
         "albums": albums_data,
         "aggregate": lib_mod._aggregate_albums(albums_data),
         "artwork": {

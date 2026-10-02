@@ -137,6 +137,7 @@ function ArtistShelf({ title, artists }: { title: string; artists?: HomeArtist[]
             <ArtistName
               name={ar.artist}
               pass={ar.grade?.pass}
+              disambiguation={ar.disambiguation}
               className="mt-2 w-full justify-center text-sm font-medium"
               nameClassName="truncate"
             />
