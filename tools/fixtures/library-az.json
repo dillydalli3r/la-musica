@@ -3579,6 +3579,596 @@
      "audit_summary": "REAL"
     },
     "has_image": false
+   },
+   {
+    "path": "F:/tmp/mlo-lib-az/Artists/Zed Case",
+    "name": "Zed Case",
+    "display_name": "Zed Case",
+    "albums": [
+     {
+      "path": "F:/tmp/mlo-lib-az/Artists/Zed Case/First Case",
+      "album_artist": "Zed Case",
+      "audit_summary": "REAL",
+      "media": "Digital Media",
+      "source_summary": "Digital",
+      "track_count": 1,
+      "partial": false,
+      "partial_reason": null,
+      "expected_total": null,
+      "expected_present": null,
+      "pass_count": 61,
+      "total_checks": 106,
+      "cover_file": null,
+      "cover_detail": null,
+      "cover_ok": false,
+      "has_log": true,
+      "has_cue": true,
+      "checksum_status": "NONE",
+      "accuraterip_status": "NONE",
+      "lyrics_present": 1,
+      "lyrics_expected": 1,
+      "instrumental_count": 0,
+      "tracks": [
+       {
+        "file": "01 - First Case.flac",
+        "issues": [
+         "MOOD_MISSING",
+         "ENERGY_MISSING",
+         "INITIALKEY",
+         "BPM",
+         "PATH",
+         "ENCODER_QUALITY",
+         "ENCODER_VERSION",
+         "AUDIT",
+         "MB_LINK",
+         "RYM_LINK",
+         "LYRICS",
+         "ALBUMITUNESADVISORY",
+         "ALBUM DYNAMIC RANGE",
+         "COVER"
+        ],
+        "values": {
+         "TITLE": "01 - Intro",
+         "ARTIST": "Artist Alpha",
+         "ALBUM": "First Album",
+         "ALBUMARTIST": "Artist Alpha",
+         "DATE": "2020",
+         "TRACKNUMBER": "01",
+         "DISCNUMBER": null,
+         "GENRE": "Rock",
+         "MOOD": null,
+         "ENERGY": null,
+         "ITUNESADVISORY": "0",
+         "REPLAYGAIN_TRACK_GAIN": "-3.00 dB",
+         "REPLAYGAIN_TRACK_PEAK": "0.5",
+         "REPLAYGAIN_ALBUM_GAIN": "-3.00 dB",
+         "REPLAYGAIN_ALBUM_PEAK": "0.5",
+         "DYNAMIC RANGE": "8",
+         "INSTRUMENTAL": "0",
+         "INITIALKEY": null,
+         "BPM": null,
+         "MEDIA": "Digital Media",
+         "SOURCE": "Digital",
+         "AUDIOAUDITOR_OVERRIDE": null,
+         "ALBUMITUNESADVISORY": "0",
+         "ALBUM DYNAMIC RANGE": "8"
+        },
+        "lyrics_embedded": true,
+        "lyrics_lrc": false,
+        "lyrics_kind": "synced",
+        "unreadable": false,
+        "audit": null,
+        "log_grade": null,
+        "sidecar_cover": null,
+        "sidecar_cover_file": null,
+        "checksum_status": "NONE",
+        "accuraterip_status": "NONE",
+        "path": "F:/tmp/mlo-lib-az/Artists/Zed Case/First Case/01 - First Case.flac",
+        "tags": {
+         "TITLE": "First Case",
+         "ARTIST": "Zed Case",
+         "ALBUMARTIST": "Zed Case",
+         "ALBUM": "First Case",
+         "DATE": "2020",
+         "GENRE": "Rock",
+         "ITUNESADVISORY": "0",
+         "INSTRUMENTAL": "0",
+         "MEDIA": "Digital Media",
+         "SOURCE": "Digital",
+         "TRACKNUMBER": "01",
+         "DISCNUMBER": null,
+         "MUSICBRAINZ_ALBUMID": null,
+         "MUSICBRAINZ_ALBUMARTISTID": null,
+         "MUSICBRAINZ_ARTISTID": null,
+         "MUSICBRAINZ_TRACKID": null,
+         "MUSICBRAINZ_RELEASEGROUPID": null,
+         "MUSICBRAINZ_RELEASETRACKID": null,
+         "MUSICBRAINZ_WORKID": null,
+         "RATEYOURMUSIC_ALBUM": null,
+         "RATEYOURMUSIC_TRACK": null,
+         "RATEYOURMUSIC_ARTIST": null,
+         "ALBUMARTISTSORT": null,
+         "ORIGINALDATE": null,
+         "RELEASETYPE": null,
+         "RELEASESTATUS": null,
+         "RELEASECOUNTRY": null,
+         "CATALOGNUMBER": null,
+         "LABEL": null,
+         "BARCODE": null,
+         "SCRIPT": null,
+         "PODCASTSERIES": null,
+         "PODCASTSERIESMBID": null,
+         "PODCASTEPISODE": null,
+         "TRACKTOTAL": null,
+         "DISCTOTAL": null,
+         "COMPOSER": null,
+         "COPYRIGHT": null,
+         "ISRC": null,
+         "LYRICIST": null,
+         "REMIXER": null,
+         "DYNAMIC RANGE": "8",
+         "MOOD": null,
+         "ENERGY": null,
+         "RATING": null,
+         "BPM": null,
+         "INITIALKEY": null,
+         "ALBUM DYNAMIC RANGE": "8"
+        },
+        "tech": {
+         "length": 2.0,
+         "bitrate": 104068.0,
+         "sample_rate": 44100.0,
+         "bits_per_sample": 16.0,
+         "channels": 2.0,
+         "codec": "FLAC"
+        },
+        "cover_file": null,
+        "discnumber": null,
+        "tracknumber": 1,
+        "is_video": false,
+        "grade_pass": false,
+        "lyrics_present": true
+       }
+      ],
+      "sidecars": [],
+      "album_values": {
+       "ALBUMITUNESADVISORY": "0",
+       "ALBUM DYNAMIC RANGE": "8"
+      },
+      "issues": {
+       "Missing MOOD": [
+        "01 - Intro.flac",
+        "02 - Second.flac",
+        "03 - Bonus.mp3"
+       ],
+       "Missing ENERGY": [
+        "01 - Intro.flac",
+        "02 - Second.flac",
+        "03 - Bonus.mp3"
+       ],
+       "Missing INITIALKEY": [
+        "01 - Intro.flac",
+        "02 - Second.flac",
+        "03 - Bonus.mp3"
+       ],
+       "Missing BPM": [
+        "01 - Intro.flac",
+        "02 - Second.flac",
+        "03 - Bonus.mp3"
+       ],
+       "Missing RELEASETYPE tag (the naming script writes it into the path)": [
+        "01 - Intro.flac"
+       ],
+       "PATH: expected 'Artist Alpha/[?] 2020 - First Album {Digital Media}/1-01 01 - Intro.flac' (run organize)": [
+        "01 - Intro.flac"
+       ],
+       "Missing ENCODER_QUALITY (re-optimize)": [
+        "01 - Intro.flac",
+        "02 - Second.flac"
+       ],
+       "Missing ENCODER_VERSION (re-optimize)": [
+        "01 - Intro.flac",
+        "02 - Second.flac"
+       ],
+       "Missing AUDIT tag (run Audit Library)": [
+        "01 - Intro.flac",
+        "02 - Second.flac",
+        "03 - Bonus.mp3"
+       ],
+       "Missing MusicBrainz release link (import from MusicBrainz)": [
+        "01 - Intro.flac",
+        "02 - Second.flac",
+        "03 - Bonus.mp3"
+       ],
+       "Missing RateYourMusic release link": [
+        "01 - Intro.flac",
+        "02 - Second.flac",
+        "03 - Bonus.mp3"
+       ],
+       "Lyrics not optimally formatted (run Lyrics script)": [
+        "01 - Intro.flac"
+       ],
+       "Missing GENRE": [
+        "02 - Second.flac",
+        "03 - Bonus.mp3"
+       ],
+       "Missing DYNAMIC RANGE": [
+        "02 - Second.flac",
+        "03 - Bonus.mp3"
+       ],
+       "Missing INSTRUMENTAL": [
+        "02 - Second.flac",
+        "03 - Bonus.mp3"
+       ],
+       "PATH: expected 'Artist Alpha/[?] 2020 - First Album/1-02 02 - Second.flac' (run organize)": [
+        "02 - Second.flac"
+       ],
+       "PATH: expected 'Artist Alpha/[?] 2020 - First Album/1-03 03 - Bonus.mp3' (run organize)": [
+        "03 - Bonus.mp3"
+       ],
+       "Missing SOURCE (required for Digital Media)": [
+        "02 - Second.flac",
+        "03 - Bonus.mp3"
+       ],
+       "Album tag ALBUMITUNESADVISORY missing on some tracks": [
+        "album-wide"
+       ],
+       "Album tag ALBUM DYNAMIC RANGE missing on some tracks": [
+        "album-wide"
+       ],
+       "Cover missing ENCODER_QUALITY (re-optimize)": [
+        "album"
+       ],
+       "Cover missing ENCODER_VERSION (re-optimize)": [
+        "album"
+       ],
+       "CUE sheet not optimally formatted (run CUE Sheets script)": [
+        "album"
+       ],
+       "CUE references a file the album does not have (2020 - First Album.cue: 01 - Side A.flac) — run CUE Sheets": [
+        "album"
+       ],
+       "Album description missing — fetch one on the album page": [
+        "album"
+       ]
+      },
+      "notes": [],
+      "meta": {
+       "ALBUM": "First Case",
+       "ALBUMARTIST": "Zed Case",
+       "ARTIST": "Zed Case",
+       "DATE": "2020",
+       "ORIGINALDATE": null,
+       "ORIGINALYEAR": null,
+       "ITUNESADVISORY": "0",
+       "ALBUMITUNESADVISORY": null,
+       "MUSICBRAINZ_ALBUMID": null,
+       "MUSICBRAINZ_ALBUMARTISTID": null,
+       "MUSICBRAINZ_RELEASEGROUPID": null,
+       "RATEYOURMUSIC_ALBUM": null,
+       "MEDIA": "Digital Media",
+       "CATALOGNUMBER": null,
+       "LABEL": null,
+       "BARCODE": null,
+       "RELEASETYPE": null,
+       "RELEASESTATUS": null,
+       "RELEASECOUNTRY": null,
+       "SCRIPT": null,
+       "PODCASTSERIES": null,
+       "PODCASTSERIESMBID": null,
+       "PODCASTEPISODE": null,
+       "ALBUM DYNAMIC RANGE": "8"
+      },
+      "podcast": null,
+      "expected_tracks": [],
+      "pending": false,
+      "artwork": {
+       "description": false,
+       "description_text": null,
+       "description_source": null,
+       "description_url": null
+      },
+      "grade_pct": 57.5,
+      "pass": false
+     },
+     {
+      "path": "F:/tmp/mlo-lib-az/Artists/Zed Case/Second Case",
+      "album_artist": "ZED CASE",
+      "audit_summary": "REAL",
+      "media": "Digital Media",
+      "source_summary": "Digital",
+      "track_count": 1,
+      "partial": false,
+      "partial_reason": null,
+      "expected_total": null,
+      "expected_present": null,
+      "pass_count": 61,
+      "total_checks": 106,
+      "cover_file": null,
+      "cover_detail": null,
+      "cover_ok": false,
+      "has_log": true,
+      "has_cue": true,
+      "checksum_status": "NONE",
+      "accuraterip_status": "NONE",
+      "lyrics_present": 1,
+      "lyrics_expected": 1,
+      "instrumental_count": 0,
+      "tracks": [
+       {
+        "file": "01 - Second Case.flac",
+        "issues": [
+         "MOOD_MISSING",
+         "ENERGY_MISSING",
+         "INITIALKEY",
+         "BPM",
+         "PATH",
+         "ENCODER_QUALITY",
+         "ENCODER_VERSION",
+         "AUDIT",
+         "MB_LINK",
+         "RYM_LINK",
+         "LYRICS",
+         "ALBUMITUNESADVISORY",
+         "ALBUM DYNAMIC RANGE",
+         "COVER"
+        ],
+        "values": {
+         "TITLE": "01 - Intro",
+         "ARTIST": "Artist Alpha",
+         "ALBUM": "First Album",
+         "ALBUMARTIST": "Artist Alpha",
+         "DATE": "2020",
+         "TRACKNUMBER": "01",
+         "DISCNUMBER": null,
+         "GENRE": "Rock",
+         "MOOD": null,
+         "ENERGY": null,
+         "ITUNESADVISORY": "0",
+         "REPLAYGAIN_TRACK_GAIN": "-3.00 dB",
+         "REPLAYGAIN_TRACK_PEAK": "0.5",
+         "REPLAYGAIN_ALBUM_GAIN": "-3.00 dB",
+         "REPLAYGAIN_ALBUM_PEAK": "0.5",
+         "DYNAMIC RANGE": "8",
+         "INSTRUMENTAL": "0",
+         "INITIALKEY": null,
+         "BPM": null,
+         "MEDIA": "Digital Media",
+         "SOURCE": "Digital",
+         "AUDIOAUDITOR_OVERRIDE": null,
+         "ALBUMITUNESADVISORY": "0",
+         "ALBUM DYNAMIC RANGE": "8"
+        },
+        "lyrics_embedded": true,
+        "lyrics_lrc": false,
+        "lyrics_kind": "synced",
+        "unreadable": false,
+        "audit": null,
+        "log_grade": null,
+        "sidecar_cover": null,
+        "sidecar_cover_file": null,
+        "checksum_status": "NONE",
+        "accuraterip_status": "NONE",
+        "path": "F:/tmp/mlo-lib-az/Artists/Zed Case/Second Case/01 - Second Case.flac",
+        "tags": {
+         "TITLE": "Second Case",
+         "ARTIST": "ZED CASE",
+         "ALBUMARTIST": "ZED CASE",
+         "ALBUM": "Second Case",
+         "DATE": "2020",
+         "GENRE": "Rock",
+         "ITUNESADVISORY": "0",
+         "INSTRUMENTAL": "0",
+         "MEDIA": "Digital Media",
+         "SOURCE": "Digital",
+         "TRACKNUMBER": "01",
+         "DISCNUMBER": null,
+         "MUSICBRAINZ_ALBUMID": null,
+         "MUSICBRAINZ_ALBUMARTISTID": null,
+         "MUSICBRAINZ_ARTISTID": null,
+         "MUSICBRAINZ_TRACKID": null,
+         "MUSICBRAINZ_RELEASEGROUPID": null,
+         "MUSICBRAINZ_RELEASETRACKID": null,
+         "MUSICBRAINZ_WORKID": null,
+         "RATEYOURMUSIC_ALBUM": null,
+         "RATEYOURMUSIC_TRACK": null,
+         "RATEYOURMUSIC_ARTIST": null,
+         "ALBUMARTISTSORT": null,
+         "ORIGINALDATE": null,
+         "RELEASETYPE": null,
+         "RELEASESTATUS": null,
+         "RELEASECOUNTRY": null,
+         "CATALOGNUMBER": null,
+         "LABEL": null,
+         "BARCODE": null,
+         "SCRIPT": null,
+         "PODCASTSERIES": null,
+         "PODCASTSERIESMBID": null,
+         "PODCASTEPISODE": null,
+         "TRACKTOTAL": null,
+         "DISCTOTAL": null,
+         "COMPOSER": null,
+         "COPYRIGHT": null,
+         "ISRC": null,
+         "LYRICIST": null,
+         "REMIXER": null,
+         "DYNAMIC RANGE": "8",
+         "MOOD": null,
+         "ENERGY": null,
+         "RATING": null,
+         "BPM": null,
+         "INITIALKEY": null,
+         "ALBUM DYNAMIC RANGE": "8"
+        },
+        "tech": {
+         "length": 2.0,
+         "bitrate": 104068.0,
+         "sample_rate": 44100.0,
+         "bits_per_sample": 16.0,
+         "channels": 2.0,
+         "codec": "FLAC"
+        },
+        "cover_file": null,
+        "discnumber": null,
+        "tracknumber": 1,
+        "is_video": false,
+        "grade_pass": false,
+        "lyrics_present": true
+       }
+      ],
+      "sidecars": [],
+      "album_values": {
+       "ALBUMITUNESADVISORY": "0",
+       "ALBUM DYNAMIC RANGE": "8"
+      },
+      "issues": {
+       "Missing MOOD": [
+        "01 - Intro.flac",
+        "02 - Second.flac",
+        "03 - Bonus.mp3"
+       ],
+       "Missing ENERGY": [
+        "01 - Intro.flac",
+        "02 - Second.flac",
+        "03 - Bonus.mp3"
+       ],
+       "Missing INITIALKEY": [
+        "01 - Intro.flac",
+        "02 - Second.flac",
+        "03 - Bonus.mp3"
+       ],
+       "Missing BPM": [
+        "01 - Intro.flac",
+        "02 - Second.flac",
+        "03 - Bonus.mp3"
+       ],
+       "Missing RELEASETYPE tag (the naming script writes it into the path)": [
+        "01 - Intro.flac"
+       ],
+       "PATH: expected 'Artist Alpha/[?] 2020 - First Album {Digital Media}/1-01 01 - Intro.flac' (run organize)": [
+        "01 - Intro.flac"
+       ],
+       "Missing ENCODER_QUALITY (re-optimize)": [
+        "01 - Intro.flac",
+        "02 - Second.flac"
+       ],
+       "Missing ENCODER_VERSION (re-optimize)": [
+        "01 - Intro.flac",
+        "02 - Second.flac"
+       ],
+       "Missing AUDIT tag (run Audit Library)": [
+        "01 - Intro.flac",
+        "02 - Second.flac",
+        "03 - Bonus.mp3"
+       ],
+       "Missing MusicBrainz release link (import from MusicBrainz)": [
+        "01 - Intro.flac",
+        "02 - Second.flac",
+        "03 - Bonus.mp3"
+       ],
+       "Missing RateYourMusic release link": [
+        "01 - Intro.flac",
+        "02 - Second.flac",
+        "03 - Bonus.mp3"
+       ],
+       "Lyrics not optimally formatted (run Lyrics script)": [
+        "01 - Intro.flac"
+       ],
+       "Missing GENRE": [
+        "02 - Second.flac",
+        "03 - Bonus.mp3"
+       ],
+       "Missing DYNAMIC RANGE": [
+        "02 - Second.flac",
+        "03 - Bonus.mp3"
+       ],
+       "Missing INSTRUMENTAL": [
+        "02 - Second.flac",
+        "03 - Bonus.mp3"
+       ],
+       "PATH: expected 'Artist Alpha/[?] 2020 - First Album/1-02 02 - Second.flac' (run organize)": [
+        "02 - Second.flac"
+       ],
+       "PATH: expected 'Artist Alpha/[?] 2020 - First Album/1-03 03 - Bonus.mp3' (run organize)": [
+        "03 - Bonus.mp3"
+       ],
+       "Missing SOURCE (required for Digital Media)": [
+        "02 - Second.flac",
+        "03 - Bonus.mp3"
+       ],
+       "Album tag ALBUMITUNESADVISORY missing on some tracks": [
+        "album-wide"
+       ],
+       "Album tag ALBUM DYNAMIC RANGE missing on some tracks": [
+        "album-wide"
+       ],
+       "Cover missing ENCODER_QUALITY (re-optimize)": [
+        "album"
+       ],
+       "Cover missing ENCODER_VERSION (re-optimize)": [
+        "album"
+       ],
+       "CUE sheet not optimally formatted (run CUE Sheets script)": [
+        "album"
+       ],
+       "CUE references a file the album does not have (2020 - First Album.cue: 01 - Side A.flac) — run CUE Sheets": [
+        "album"
+       ],
+       "Album description missing — fetch one on the album page": [
+        "album"
+       ]
+      },
+      "notes": [],
+      "meta": {
+       "ALBUM": "Second Case",
+       "ALBUMARTIST": "ZED CASE",
+       "ARTIST": "ZED CASE",
+       "DATE": "2020",
+       "ORIGINALDATE": null,
+       "ORIGINALYEAR": null,
+       "ITUNESADVISORY": "0",
+       "ALBUMITUNESADVISORY": null,
+       "MUSICBRAINZ_ALBUMID": null,
+       "MUSICBRAINZ_ALBUMARTISTID": null,
+       "MUSICBRAINZ_RELEASEGROUPID": null,
+       "RATEYOURMUSIC_ALBUM": null,
+       "MEDIA": "Digital Media",
+       "CATALOGNUMBER": null,
+       "LABEL": null,
+       "BARCODE": null,
+       "RELEASETYPE": null,
+       "RELEASESTATUS": null,
+       "RELEASECOUNTRY": null,
+       "SCRIPT": null,
+       "PODCASTSERIES": null,
+       "PODCASTSERIESMBID": null,
+       "PODCASTEPISODE": null,
+       "ALBUM DYNAMIC RANGE": "8"
+      },
+      "podcast": null,
+      "expected_tracks": [],
+      "pending": false,
+      "artwork": {
+       "description": false,
+       "description_text": null,
+       "description_source": null,
+       "description_url": null
+      },
+      "grade_pct": 57.5,
+      "pass": false
+     }
+    ],
+    "aggregate": {
+     "album_count": 1,
+     "track_count": 3,
+     "pass_count": 61,
+     "total_checks": 106,
+     "grade_pct": 57.5,
+     "pass": false,
+     "audit_summary": "REAL"
+    },
+    "has_image": true,
+    "grade": {}
    }
   ]
  },

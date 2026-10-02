@@ -541,6 +541,51 @@ try {
         (await shown(albums)).length === albums.length && (await countSpan()) === allCount,
         `${(await shown(albums)).length} albums, "${await countSpan()}"`);
 
+  /* ---- ONE artist, however its albums are spelled ------------------------
+   * The owner's library held ONE artist tagged two ways ("System of a Down"
+   * beside "System Of A Down": a hand-tagged album next to the folder's own
+   * spelling), and the Grid and the album table grouped on the raw tag — so one
+   * artist drew two headers and its albums were split across them. The group key
+   * is the app's own name fold now (the one the A–Z rail files names under), and
+   * the header is the FOLDER's spelling — the name the Artists view, Home's
+   * shelf and the artist page all draw. The fixture carries the case: one
+   * "Zed Case" folder whose second album is tagged "ZED CASE". */
+  const gridHeaders = () => page.evaluate(() =>
+    [...document.querySelectorAll("main div.col-span-full")]
+      .map((el) => (el.firstElementChild?.textContent || "").trim())
+      .filter(Boolean));
+  const heads = await gridHeaders();
+  const caseHeads = heads.filter((h) => h.toLowerCase() === "zed case");
+  check("two spellings of one artist draw ONE header, not two",
+        caseHeads.length === 1, JSON.stringify(heads));
+  check("and the header is the artist folder's spelling, not a tag's",
+        caseHeads[0] === "Zed Case", JSON.stringify(caseHeads));
+  // Both albums under it — the header is furniture around its own cards, so the
+  // count is the cards between this header and the next.
+  const underHeader = await page.evaluate(() => {
+    const all = [...document.querySelectorAll("main div.col-span-full")];
+    const at = all.findIndex((h) => (h.firstElementChild?.textContent || "").trim().toLowerCase() === "zed case");
+    if (at < 0) return -1;
+    let n = 0;
+    for (let el = all[at].nextElementSibling; el && !el.classList.contains("col-span-full"); el = el.nextElementSibling) n += 1;
+    return n;
+  });
+  check("both of that artist's albums sit under its one header",
+        underHeader === 2, `${underHeader} cards`);
+
+  const tableHeaders = async () => page.evaluate(() =>
+    [...document.querySelectorAll("main table tbody tr td[colspan]")]
+      .map((td) => (td.textContent || "").trim()));
+  await viewTab("Albums").click();
+  await page.waitForTimeout(80);
+  const tableHeads = await tableHeaders();
+  check("the Albums table draws that one header too, the same way",
+        tableHeads.filter((h) => h.toLowerCase() === "zed case").length === 1
+          && tableHeads.filter((h) => h.toLowerCase() === "zed case")[0] === "Zed Case",
+        JSON.stringify(tableHeads));
+  await viewTab("Grid").click();
+  await page.waitForTimeout(80);
+
   // ---- each of the five views obeys both controls ----
   // Compact and Albums both draw album rows; only the album TABLE draws artist
   // headers, and the name a row answers to follows the headers the view draws

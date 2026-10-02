@@ -163,6 +163,10 @@ const ARTIST_PHONE_CLS: Record<string, string> = {
 };
 interface FlatAlbum extends Album {
   artist: string;
+  /** The artist folder's own spelling of the artist — the header over a group
+   *  of this artist's albums, and the reason a group does not read as the
+   *  odd-one-out tag spelling. */
+  artist_label: string;
   video_count: number;
   inst_count: number;
   hay: string; // lowercase search blob, built once per payload
@@ -544,6 +548,12 @@ export default function LibraryPage() {
         // its MBID disambiguator ("Radiohead [a74b1b7f-…]") — so the folder's
         // own display name is what that fallback reads, never the raw basename.
         const artistName = al.album_artist || a.display_name || a.name;
+        // The artist FOLDER's own spelling — what the Artists view, Home's
+        // shelf and the artist page call this artist. The header over a group
+        // of albums reads this, not the tag: one album of a set can be tagged
+        // "System Of A Down" while its folder (and every other album) says
+        // "System of a Down", and the group is the artist, not the tag.
+        const artistLabel = a.display_name || a.name;
         const trackHays: string[] = [];
         for (const t of al.tracks ?? []) {
           const hay = [artistName, al.meta?.ALBUM ?? "", t.file, tagHay(t.tags)]
@@ -554,6 +564,7 @@ export default function LibraryPage() {
         albums.push({
           ...al,
           artist: artistName,
+          artist_label: artistLabel,
           video_count: (al.tracks ?? []).filter((t) => t.is_video).length,
           inst_count: (al.tracks ?? []).filter((t) => t.tags.INSTRUMENTAL === "1").length,
           hay: [artistName, tagHay(al.meta), ...trackHays].filter(Boolean).join(" ").toLowerCase(),
@@ -1072,42 +1083,52 @@ export default function LibraryPage() {
     return out;
   }, [albumWindow, view]);
 
-  // Grid sections: one flat list, or artist-headed groups — the GRID view's own
-  // shape, so it is built only while that view is the one on screen (the same
-  // rule the compact tracklists above follow).
-  const gridSections = useMemo(() => {
-    if (view !== "grid") return [] as { artist: string | null; albums: FlatAlbum[] }[];
-    if (!groupByArtist) return [{ artist: null as string | null, albums: albumWindow }];
-    const out: { artist: string | null; albums: FlatAlbum[] }[] = [];
-    let cur: string | null = null;
+  // ONE artist-headed grouping, for the two views that draw headers. Built only
+  // while one of them is the view on screen (the same rule the compact
+  // tracklists below follow), and keyed by the app's own name fold — the one
+  // the A–Z rail files names under — because a library tagged by hand or by two
+  // tools holds both "System of a Down" and "System Of A Down" for ONE artist.
+  // Comparing the raw tags drew that artist twice, with two headers; keying it
+  // means a row the window sorted away from its siblings still lands in their
+  // group, and the header is the artist FOLDER's spelling (the name the
+  // Artists view, Home's shelf and the artist page all draw) rather than
+  // whichever tag came first.
+  const artistGroups = useMemo(() => {
+    if (!groupByArtist || (view !== "grid" && view !== "albums")) return null;
+    const groups = new Map<string, { artist: string; albums: FlatAlbum[] }>();
     for (const al of albumWindow) {
-      if (al.artist !== cur) {
-        cur = al.artist;
-        out.push({ artist: cur, albums: [] });
+      const key = foldName((al.artist ?? "").trim());
+      let group = groups.get(key);
+      if (!group) {
+        group = { artist: al.artist_label || al.artist, albums: [] };
+        groups.set(key, group);
       }
-      out[out.length - 1].albums.push(al);
+      group.albums.push(al);
     }
-    return out;
+    return [...groups.values()];
   }, [albumWindow, groupByArtist, view]);
 
-  // The rows the albums TABLE draws: artist-headed groups when the toggle is on,
-  // a flat list otherwise — over the drawn WINDOW (a header is furniture around
-  // its albums, never a row of its own), and built only while the albums view is
-  // the one on screen.
+  // Grid sections: one flat list, or the artist-headed groups above — the GRID
+  // view's own shape.
+  const gridSections = useMemo(() => {
+    if (view !== "grid") return [] as { artist: string | null; albums: FlatAlbum[] }[];
+    if (!artistGroups) return [{ artist: null as string | null, albums: albumWindow }];
+    return artistGroups;
+  }, [artistGroups, albumWindow, view]);
+
+  // The rows the albums TABLE draws: the same groups, as header/album rows,
+  // over the drawn WINDOW (a header is furniture around its albums, never a row
+  // of its own) — so the two views cannot name or split an artist differently.
   const albumTableRows = useMemo(() => {
     const rows: ({ kind: "header"; artist: string } | { kind: "album"; album: FlatAlbum })[] = [];
     if (view !== "albums") return rows;
-    if (!groupByArtist) return albumWindow.map((al) => ({ kind: "album" as const, album: al }));
-    let current: string | null = null;
-    for (const al of albumWindow) {
-      if (al.artist !== current) {
-        current = al.artist;
-        rows.push({ kind: "header", artist: current });
-      }
-      rows.push({ kind: "album", album: al });
+    if (!artistGroups) return albumWindow.map((al) => ({ kind: "album" as const, album: al }));
+    for (const group of artistGroups) {
+      rows.push({ kind: "header", artist: group.artist });
+      for (const album of group.albums) rows.push({ kind: "album", album });
     }
     return rows;
-  }, [albumWindow, groupByArtist, view]);
+  }, [artistGroups, albumWindow, view]);
 
   if (error) return <EmptyState title="Backend unreachable" hint={String(error)} />;
   if (isLoading || !lib) return <PageLoading label="Scanning library…" />;
