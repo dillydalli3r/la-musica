@@ -31,7 +31,7 @@ the wizard) rather than clicking through it.
 
 ## The dev bed, for work that needs the app running by hand
 
-`python tools/dev.py` does all of the above in one command — a throwaway library
+`python dev.py` does all of the above in one command — a throwaway library
 under `local/dev/music` (gitignored), a port from 8011 up (the bed asks the port,
 so it can never land on 8000 or on one you are already using), the wizard already
 flipped, the backend under `--reload` watching only `server/` and `mlo/`, and the
@@ -39,7 +39,7 @@ UI on vite with hot reload proxying `/api` and `/ws` to it. Its logs are
 `local/dev/logs/{server,web}.log`.
 
 ```bash
-python tools/dev.py --no-open --no-tray     # what an agent wants: console, no browser
+python dev.py --no-open --no-tray           # what an agent wants: console, no browser
 ```
 
 Ctrl+C stops both halves — and the TREE, not just the leader: `uvicorn --reload`

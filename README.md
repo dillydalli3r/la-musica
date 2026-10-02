@@ -22,7 +22,8 @@ python -m uvicorn server.main:app --host 127.0.0.1 --port 8000   # http://127.0.
 python -m mlo    # the console menu (scripts 1–24), run from the server's environment
 ```
 
-**Editing the app** — `python tools/dev.py` is the whole dev bed in one command: a
+**Editing the app** — `python dev.py`, from the repo root (double-clicking it
+does the same on Windows), is the whole dev bed in one command: a
 throwaway library at `local/dev/music` (gitignored, wiped with `--fresh`), the
 backend under `--reload` watching only `server/` and `mlo/`, the vite server with
 hot reload proxying `/api` and `/ws` to it, the wizard already flipped, and a tray

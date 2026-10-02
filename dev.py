@@ -1,4 +1,4 @@
-"""A one-key dev bed for la musica on this machine — `python tools/dev.py`.
+"""A one-key dev bed for la musica on this machine — `python dev.py`.
 
 What it is for: running the app you are EDITING, against a throwaway library,
 without touching the owner's live install. It starts the same two things the
@@ -47,7 +47,7 @@ import urllib.request
 import webbrowser
 from pathlib import Path
 
-ROOT = Path(__file__).resolve().parents[1]
+ROOT = Path(__file__).resolve().parent
 DEFAULT_PORT = 8011        # AGENTS.md: 8000 is the owner's live install.
 DEFAULT_WEB_PORT = 5181
 
