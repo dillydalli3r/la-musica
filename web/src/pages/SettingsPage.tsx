@@ -1146,7 +1146,7 @@ export default function SettingsPage() {
         {
           k: "import_scripts", label: "Import script ids (e.g. 1, 3, 5, 7 — blank = built-in chain)", type: "text",
         },
-        { k: "import_bulk_concurrency", label: "Bulk import concurrency", type: "number", min: 1, max: 8 },
+        { k: "import_bulk_concurrency", label: "Bulk import concurrency (albums imported at once; the rest wait in the queue)", type: "number", min: 1, max: 16 },
         { k: "import_acoustid", label: "Fingerprint with AcoustID", type: "bool" },
         { k: "import_acoustid_autofill", label: "Match the release from the fingerprint automatically", type: "bool" },
         { k: "acoustid_enabled", label: "AcoustID enabled", type: "bool" },

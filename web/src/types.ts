@@ -1536,9 +1536,21 @@ export interface ImportBulkJob {
   finished?: number;
   total?: number;
   done?: number;
+  /** Rows in the "running" state right now (imported concurrently). */
+  running?: number;
+  /** Rows still waiting for a worker — the queue behind `concurrency`. */
+  queued?: number;
+  /** Albums imported at once for the whole app (`import_bulk_concurrency`):
+   *  every batch shares it, so this is the queue's width, not each batch's. */
+  concurrency?: number;
   label?: string;
   items?: ImportBulkItem[];
   error?: string;
+  /** What else is running (the server's registry): every live batch, plus the
+   *  one this payload is about. A batch of albums started here does not block
+   *  one started elsewhere, so a surface can say so. */
+  jobs?: { id: string; status: string; total: number; done: number;
+           label: string; started: number }[];
 }
 
 export interface ImportBulkResult {

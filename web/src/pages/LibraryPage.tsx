@@ -5,7 +5,7 @@ import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { Link, useNavigate, useSearchParams } from "react-router-dom";
 import {
   ArrowDownAZ, ArrowDownUp, BarChart3, ChevronDown, ChevronRight, CloudDownload,
-  FileVideo, FolderSync, FolderTree, Info as InfoIcon, Layers, Library, ListChecks,
+  FileVideo, FolderSync, FolderTree, Import, Info as InfoIcon, Layers, Library, ListChecks,
   ListFilter, ListPlus, Play, RefreshCw, Search, Tag, Trash2, Wand2, X,
 } from "lucide-react";
 import { api } from "../api";
@@ -865,6 +865,43 @@ export default function LibraryPage() {
     }
   };
 
+  // "Run importing" on the selection: the same pipeline a fresh arrival goes
+  // through (bulk_import → the pre-chain lookups — release identity, links,
+  // metadata, covers, genres, advisories, instrumentals — then the configured
+  // script chain), started as a JOB so this page does not wait for it. NOT a
+  // confirm dialog and not a busy state: an import is minutes of work, the
+  // In-progress page (and the album rows) show it running, and several batches
+  // may be in flight at once — the server refuses only an album another import
+  // already holds.
+  const importSelection = async () => {
+    const paths = selectionAlbumDirs;
+    if (!paths.length) {
+      toast("Select albums, artists or tracks to import");
+      return;
+    }
+    try {
+      const res = await api.importBulk(paths.map((path) => ({ path })));
+      if (!res.ok) {
+        toast.error(res.error ?? "could not start the import");
+        return;
+      }
+      const job = res.job;
+      const others = (job?.jobs ?? []).filter((j) => j.id !== job?.id);
+      const width = job?.concurrency ?? 0;
+      const n = paths.length;
+      const what = n === 1 ? paths[0].split(/[\\/]/).pop() : `${n} albums`;
+      const parts = [
+        `Importing ${what}`,
+        width && n > width ? `${width} at once, ${n - width} queued` : null,
+        others.length ? `${others.length} other batch${others.length === 1 ? "" : "es"} running` : null,
+      ].filter(Boolean);
+      toast(parts.join(" — "));
+      invalidateLibrary(qc);
+    } catch (e) {
+      toast.error(String(e));
+    }
+  };
+
   const organizeSelection = async () => {
     if (busy) {
       toast("Still organizing the previous selection");
@@ -1587,6 +1624,14 @@ export default function LibraryPage() {
                 <Trash2 className="h-3.5 w-3.5" /> Remove
               </button>
             )}
+            <button
+              className="btn-ghost !py-1 text-xs tap"
+              onClick={importSelection}
+              disabled={!selectionAlbumDirs.length}
+              title="Run the import pipeline on the selected albums: match and stamp the release, then links, metadata, covers, genres, lyrics, advisories and the configured script chain. As many batches as you start run at once — only an album another import already holds is refused."
+            >
+              <Import className="h-3.5 w-3.5" /> Import
+            </button>
             <ScriptsDropdown onRun={runScriptsOnSelection} runAllIds={runAllIds} />
             <button
               className="btn-ghost !py-1 text-xs tap"

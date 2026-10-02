@@ -395,8 +395,13 @@ assert os.path.isdir(LIB), "the library must be untouched by the refused items"
 assert sorted(os.listdir(LIB)) == ["Album One", "Album Two"], os.listdir(LIB)
 
 # --------------------------------------------------------------------------- #
-# start_bulk + job_state: one at a time, and it settles
+# start_bulk + job_state: MANY at once, each answering for itself
 # --------------------------------------------------------------------------- #
+# The single-slot rule ("bulk import already running") is gone: a batch started
+# from the Library's Import button must not wait behind the wizard's queue, or
+# the reverse. What stays exclusive is the ALBUM (`_bulk_one` refuses a path an
+# import already chains — pinned at the end of this file), and the pipelines
+# every job runs share ONE budget, so three batches are not three machines.
 assert imports.job_state()["status"] == "idle", imports.job_state()
 
 gate = threading.Event()
@@ -415,29 +420,96 @@ def _slow_finish(album_dir, cfg=None, progress=None, force=None, **kwargs):
     return {"path": os.path.normpath(album_dir), "scripts": [], "chain": [], "errors": []}
 
 
+def _wait_job(job_id, timeout=30):
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        state = imports.job_state(job_id)
+        if state["status"] != "running":
+            return state
+        time.sleep(0.05)
+    return imports.job_state(job_id)
+
+
 job_album = staging_album("Job Album")
+other_album = staging_album("Other Job Album")
 imports.finish_album = _slow_finish
 try:
-    started = imports.start_bulk([{"path": job_album}], CFG)
-    assert started["ok"] is True, started
-    assert started["job"]["status"] == "running" and started["job"]["kind"] == "bulk", started
-    assert started["job"]["total"] == 1 and started["job"]["id"], started
-    refused = imports.start_bulk([{"path": job_album}], CFG)
-    assert refused == {"ok": False, "error": "bulk import already running"}, refused
+    first = imports.start_bulk([{"path": job_album}], CFG)
+    assert first["ok"] is True, first
+    assert first["job"]["status"] == "running" and first["job"]["kind"] == "bulk", first
+    assert first["job"]["total"] == 1 and first["job"]["id"], first
+    second = imports.start_bulk([{"path": other_album}], CFG)
+    assert second["ok"] is True, second
+    assert second["job"]["id"] != first["job"]["id"], (first, second)
+    # Every payload says what else is running — the surfaces that start a batch
+    # away from the wizard name that ("N other batches running").
+    assert {j["id"] for j in second["job"]["jobs"]} >= {first["job"]["id"], second["job"]["id"]}, second["job"]
+    # Each job answers for its own albums while the other is still going, and an
+    # id nobody started answers the idle shape the route always had.
+    assert imports.job_state(first["job"]["id"])["total"] == 1, imports.job_state(first["job"]["id"])
+    assert imports.job_state(second["job"]["id"])["total"] == 1, imports.job_state(second["job"]["id"])
+    assert imports.job_state("nonexistent")["status"] == "idle", imports.job_state("nonexistent")
+    # The pool is the PROCESS's, not the job's: the same width hands back the
+    # same pool, which is what makes the concurrency a budget and not a
+    # multiplier.
+    assert imports._import_pool(4) is imports._import_pool(4)
 finally:
     gate.set()
     imports.finish_album = _real_finish
 
-deadline = time.time() + 20
-while time.time() < deadline and imports.job_state()["status"] == "running":
-    time.sleep(0.05)
-state = imports.job_state()
+state = _wait_job(first["job"]["id"])
 assert state["status"] == "done", state
 assert state["done"] == 1 and state["total"] == 1, state
 assert state["finished"] and state["error"] is None, state
 assert [i["status"] for i in state["items"]] == ["imported"], state
 assert state["items"][0]["album_path"].endswith("Job Album"), state["items"][0]
 assert os.path.isdir(os.path.join(LIB, "Job Album")), os.listdir(LIB)
+
+second_state = _wait_job(second["job"]["id"])
+assert second_state["status"] == "done", second_state
+assert [i["status"] for i in second_state["items"]] == ["imported"], second_state
+assert second_state["items"][0]["album_path"].endswith("Other Job Album"), second_state["items"][0]
+assert os.path.isdir(os.path.join(LIB, "Other Job Album")), os.listdir(LIB)
+# The id-less poll (the shape the route answered before ids existed) is one of
+# the two, never a third: nothing invented a job.
+assert imports.job_state()["id"] in {first["job"]["id"], second["job"]["id"]}, imports.job_state()
+
+# --------------------------------------------------------------------------- #
+# The QUEUE: `import_bulk_concurrency` at once, the rest waiting their turn
+# --------------------------------------------------------------------------- #
+# Not a free-for-all and not one at a time: the process has a budget, and what
+# it does not admit WAITS — each album with a row that says which it is
+# ("queued" until a worker picks it up, "running" while it is imported). The
+# width is the payload's own `concurrency`, so a surface can say "4 at once, 9
+# queued" without guessing.
+queue_cfg = dict(CFG, import_bulk_concurrency=1)
+queued_albums = [staging_album(f"Queue Album {n}") for n in (1, 2, 3)]
+gate.clear()
+imports.finish_album = _slow_finish
+try:
+    job = imports.start_bulk([{"path": p} for p in queued_albums], queue_cfg)
+    assert job["ok"] is True and job["job"]["total"] == 3, job
+    assert job["job"]["concurrency"] == 1, job["job"]
+    assert all(r["status"] in ("queued", "running") for r in job["job"]["items"]), job["job"]["items"]
+    deadline = time.time() + 10
+    while time.time() < deadline:
+        now = imports.job_state(job["job"]["id"])
+        if now["running"] == 1 and now["queued"] == 2:
+            break
+        time.sleep(0.05)
+    now = imports.job_state(job["job"]["id"])
+    assert now["running"] == 1, now
+    assert now["queued"] == 2, now
+    assert [r["status"] for r in now["items"]].count("running") == 1, now["items"]
+    assert now["total"] == 3 and now["done"] == 0, now
+finally:
+    gate.set()
+    imports.finish_album = _real_finish
+queue_state = _wait_job(job["job"]["id"])
+assert queue_state["status"] == "done" and queue_state["done"] == 3, queue_state
+assert [i["status"] for i in queue_state["items"]] == ["imported"] * 3, queue_state
+assert queue_state["running"] == 0 and queue_state["queued"] == 0, queue_state
+assert os.path.isdir(os.path.join(LIB, "Queue Album 1")), os.listdir(LIB)
 
 # --------------------------------------------------------------------------- #
 # The routes the wizard calls

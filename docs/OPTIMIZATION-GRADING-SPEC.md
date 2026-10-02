@@ -6081,6 +6081,42 @@ composition instead (R267). Above `lg` the pane sits beside the artwork.
   `albumoftheyear` to `genre_sources` (it is not in the shipped list, for the
   cost reason in R358a).
 
+- **R361 — the Library's batch bar runs the import pipeline, and MANY batches
+  run at once.** With albums, artists or tracks selected, the selection toolbar
+  offers **Import** beside Organize: it starts the same pipeline a fresh arrival
+  goes through — the pre-chain lookups (release identity, links, metadata and
+  cover art, genres, advisories, instrumentals) and then the configured script
+  chain (`server.imports.bulk_import` → `finish_album`) — as a JOB, so the page
+  never waits for minutes of work; the running albums are the ones the
+  In-progress page lists (`server.job_locks`, each chain holding its album).
+
+  A batch started here does not queue behind the wizard's queue, or the
+  reverse. The server keys jobs: `POST /api/import/bulk` answers with the job
+  and `GET /api/import/bulk/status?job=<id>` answers for THAT job (without the
+  id, the newest — the shape the route always had), and every payload carries
+  `jobs`, what else is running. What stays exclusive is the ALBUM: a row for a
+  path an import already chains is `failed` with `already_importing` and names
+  the holder (`server.imports._bulk_one`), so pressing Import twice, or
+  importing from the wizard and the Library at once, can never import an album
+  twice.
+
+  The pipelines all share ONE budget: `import_bulk_concurrency` (default 4,
+  clamp 1–16) is the number of albums being imported at once for the whole
+  process, however many batches are asking — three batches of four albums are
+  four imports, not twelve. What the budget does not admit WAITS: every album
+  has a row of its own from the moment a batch starts, `"status": "queued"`
+  until a worker picks it up and `"running"` while it is imported, and the job
+  payload carries `running`, `queued` and the pool's `concurrency`, so a
+  surface can say "4 at once, 9 queued" instead of leaving the reader to guess.
+  A changed setting is picked up at the next idle moment (the shared pool is
+  rebuilt then, never under running work). MusicBrainz is what makes a big
+  batch polite on the network side: every WS/2 request goes through the one
+  one-request-per-second throttle (`server.integrations.mb_get`), so a large
+  batch takes longer per album rather than being refused.
+  `tools/test_import_pipeline.py` pins it: two batches at once, each answering
+  for its own albums, one shared pool, and — at a width of 1 — one row
+  `running` with the rest `queued` until their turn comes.
+
 ## 8. Recommended runbook
 
 Nothing here is a substitute for the app's own Dependencies page: run it first

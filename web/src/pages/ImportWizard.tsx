@@ -640,11 +640,15 @@ export default function ImportWizard() {
   });
   const importPrompts = promptData?.prompts ?? [];
 
-  // Poll the bulk queue while it runs; done/failed stops the poll.
+  // Poll the bulk queue while it runs; done/failed stops the poll. The job's
+  // OWN id is asked for: the Library's Import button starts batches with the
+  // same machinery now, and "the newest job" would hand this strip somebody
+  // else's progress the moment one of those starts.
   useEffect(() => {
     if (bulkJob?.status !== "running") return;
+    const jobId = bulkJob.id;
     const timer = setInterval(() => {
-      api.importBulkStatus()
+      api.importBulkStatus(jobId)
         .then((job) => {
           setBulkJob(job);
           if (job.status !== "running") qc.invalidateQueries({ queryKey: ["library"] });
@@ -652,7 +656,7 @@ export default function ImportWizard() {
         .catch(() => setBulkJob(null)); // server restarted: nothing to poll
     }, 1500);
     return () => clearInterval(timer);
-  }, [bulkJob?.status, qc]);
+  }, [bulkJob?.status, bulkJob?.id, qc]);
 
   const { data: lib } = useQuery({ queryKey: ["library"], queryFn: () => api.library() });
 

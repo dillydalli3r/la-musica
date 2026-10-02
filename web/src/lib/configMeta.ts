@@ -466,7 +466,7 @@ export const CONFIG_GROUPS: CfgGroup[] = [
         { k: "import_keep_synced_lyrics", label: "Keep a synced lyric an import arrives with", type: "bool", help: "An import replaces the families it decides for itself with what it found — the album's lyrics, genres, advisories and cover art win over whatever the download came with (a family you kept above, or one whose own switch is off, is never touched). This is the lyric family's one exception: ON, a track whose lyric already carries timestamps (a synced one) keeps it and the fetch skips that track; OFF, the shipped default, the peer's lyric is replaced like everything else. A PLAIN (untimed) lyric is always replaced — that is the form the providers answer with." },
         { k: "import_auto_scripts", label: "Run the script chain after import", type: "bool" },
         { k: "import_scripts", label: "Import script ids (e.g. 1, 3, 5, 7 — blank = built-in chain)", type: "text", pattern: "^(\\s*\\d+\\s*[,;]?)*$", patternHelp: "comma-separated script ids, e.g. 1, 3, 5, 7" },
-        { k: "import_bulk_concurrency", label: "Bulk import concurrency", type: "number", min: 1, max: 8 },
+        { k: "import_bulk_concurrency", label: "Bulk import concurrency (albums imported at once; the rest wait in the queue)", type: "number", min: 1, max: 16 },
         { k: "import_acoustid", label: "Fingerprint with AcoustID", type: "bool" },
         { k: "import_acoustid_autofill", label: "Match the release from the fingerprint automatically", type: "bool" },
         { k: "acoustid_enabled", label: "AcoustID enabled", type: "bool" },

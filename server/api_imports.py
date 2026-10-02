@@ -292,9 +292,15 @@ def import_bulk(req: BulkRequest):
 
 
 @router.get("/api/import/bulk/status")
-def import_bulk_status():
-    """Poll the bulk job started by POST /api/import/bulk."""
-    return imports.job_state()
+def import_bulk_status(job: Optional[str] = None):
+    """Poll a bulk job started by POST /api/import/bulk.
+
+    ``?job=<id>`` asks for THAT job — what a caller which kept the id it was
+    handed wants, now that several batches may run at once (the wizard's queue
+    panel and the Library's Import button are two of them). Without an id: the
+    newest job, the shape this route has always answered.
+    """
+    return imports.job_state(job)
 
 
 @router.post("/api/import/scripts/preview")

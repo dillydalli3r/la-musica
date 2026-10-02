@@ -1093,8 +1093,12 @@ DEFAULT_CONFIG = {
     # writes MusicBrainz tags, lyrics and covers itself).
     "import_auto_scripts": True,
     "import_scripts": [],
-    # Albums processed at the same time when several are imported at once.
-    "import_bulk_concurrency": 2,
+    # Albums processed at the same time when several are imported at once. This
+    # is the WHOLE process's budget, shared by every running batch (the
+    # wizard's queue, the Library's Import button): four albums import at once
+    # by default and the rest WAIT IN THE QUEUE (the job payload says which is
+    # which), and the setting goes to 16 for a machine that can take it.
+    "import_bulk_concurrency": 4,
     # AcoustID release matching during import: fingerprint each track with
     # chromaprint's fpcalc and ask AcoustID which MusicBrainz recording the
     # audio actually is, then offer the release that contains them. Falls back
@@ -1641,7 +1645,7 @@ _INT_RANGES = {
     "home_recent_count": (4, 60),
     "artist_image_target_size": (0, 4000),
     "discovery_timeout_s": (3, 30),
-    "import_bulk_concurrency": (1, 8),
+    "import_bulk_concurrency": (1, 16),
     "mb_genre_count": (1, GENRE_COUNT_MAX),
     "export_embed_cover_jpeg_quality": (1, 100),
     "export_embed_cover_resolution": (0, 8000),

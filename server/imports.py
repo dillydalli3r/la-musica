@@ -4371,32 +4371,136 @@ def stamp_rym_links(album_dir, cfg=None):
 # --------------------------------------------------------------------------- #
 # Bulk queue
 # --------------------------------------------------------------------------- #
-_job_lock = threading.Lock()
-_job = {"id": None, "kind": None, "status": "idle", "started": None,
-        "finished": None, "total": 0, "done": 0, "label": "", "items": [],
-        "error": None}
+# MORE than one at a time. A batch started from the Library's Import button must
+# not wait behind the wizard's queue, or the reverse — the owner's ask, and what
+# the app is built for: every album's chain already holds its own claim in
+# `server.job_locks` (kind "import"/"scripts"), and `_bulk_one` refuses a path an
+# import is already chaining, so two jobs can never touch one album. Jobs are
+# therefore a REGISTRY rather than the single slot this used to be.
+#
+# What they DO share is the pool: `import_bulk_concurrency` is the number of
+# albums being imported at once for the whole process, however many jobs are
+# asking — three jobs of four albums are four imports, not twelve. That is the
+# "works well" half: flac/ffmpeg/disk work is bounded by the setting, while
+# MusicBrainz is paced by its own one-request-per-second throttle
+# (server.integrations), so a bigger batch is slower per album, never rude.
+_jobs_lock = threading.Lock()
+_jobs: "dict[str, dict]" = {}
+_JOB_HISTORY = 20            # finished jobs kept for a poll that comes late
+
+_pool_lock = threading.Lock()
+_pool: "ThreadPoolExecutor | None" = None
+_pool_size = 0
+
+_IDLE_JOB = {"id": None, "kind": None, "status": "idle", "started": None,
+             "finished": None, "total": 0, "done": 0, "running": 0, "queued": 0,
+             "concurrency": 0, "label": "", "items": [], "error": None}
 
 
-def job_state():
-    """The bulk job the UI polls."""
-    with _job_lock:
-        return dict(_job, items=[dict(x) for x in _job["items"]])
+def _bulk_concurrency(cfg):
+    """How many albums import at once — the process-wide budget (1..32 here;
+    the config's own clamp is narrower)."""
+    try:
+        return max(1, min(32, int(cfg.get("import_bulk_concurrency") or 1)))
+    except (TypeError, ValueError):
+        return 1
 
 
-def _job_update(**fields):
-    with _job_lock:
-        _job.update(fields)
+def _bulk_items(job):
+    """A job dict as a poll payload: its rows copied, no per-script stats."""
+    rows = [dict(x) for x in job["items"]]
+    payload = {**job, "items": rows}
+    payload["running"] = sum(1 for r in rows if r.get("status") == "running")
+    payload["queued"] = sum(1 for r in rows if r.get("status") == "queued")
+    return payload
 
 
-def _job_note(done, label, item):
-    """Live progress for a running job; a no-op for a direct bulk_import call."""
-    with _job_lock:
-        if _job["status"] != "running":
+def _import_pool(size, exclude=None):
+    """The one pool every job's albums run on, sized by the config.
+
+    Rebuilt when the configured number changes (Settings → Bulk import
+    concurrency) — but only while nothing ELSE is on it: a pool is not resized
+    under running work, and the new size applies from the next idle moment.
+    *exclude* is the job asking (a job finds itself "running" in the registry,
+    which must not stop its own batch from being sized correctly).
+    """
+    global _pool, _pool_size
+    with _pool_lock:
+        with _jobs_lock:
+            busy = any(j["status"] == "running" and j["id"] != exclude
+                       for j in _jobs.values())
+        if _pool is None or (_pool_size != size and not busy):
+            if _pool is not None:
+                _pool.shutdown(wait=False)     # nothing else is running on it
+            _pool = ThreadPoolExecutor(max_workers=size,
+                                       thread_name_prefix="mlo-import")
+            _pool_size = size
+        return _pool
+
+
+def job_state(job_id=None):
+    """The bulk job a poll reads: *job_id*, else the newest one.
+
+    The newest is the shape `/api/import/bulk/status` has always answered (a
+    caller that started a job without keeping its id); a caller that DID keep
+    the id (the wizard's queue, the Library's Import button) asks for its own
+    job, so a second batch started elsewhere cannot take over its strip. Every
+    payload carries `jobs` — what else is running — so a surface can say so
+    without a second route.
+    """
+    with _jobs_lock:
+        if job_id:
+            job = _jobs.get(str(job_id))
+        else:
+            job = max(_jobs.values(), key=lambda j: j["started"]) if _jobs else None
+        payload = _bulk_items(job) if job else dict(_IDLE_JOB)
+        payload["jobs"] = [
+            {"id": j["id"], "status": j["status"], "total": j["total"],
+             "done": j["done"], "label": j["label"], "started": j["started"]}
+            for j in sorted(_jobs.values(), key=lambda j: j["started"])
+            if j["status"] == "running" or j["id"] == payload["id"]
+        ]
+        return payload
+
+
+def _job_update(job_id, **fields):
+    with _jobs_lock:
+        job = _jobs.get(str(job_id))
+        if job is not None:
+            job.update(fields)
+
+
+def _job_row(job_id, index, row):
+    """Put one album's row where the queue already has its place.
+
+    Rows are addressed by INDEX, not appended: the payload is the queue the
+    reader is watching ("Queued" → "Running" → "Imported"), so an album keeps
+    its line from the moment the batch started, and `items` stays in input
+    order. A no-op for a direct `bulk_import` call (no job).
+    """
+    if not job_id:
+        return
+    with _jobs_lock:
+        job = _jobs.get(str(job_id))
+        if job is None or index >= len(job["items"]):
             return
-        _job["done"] = done
-        _job["label"] = label
+        job["items"][index] = row
+
+
+def _job_note(job_id, index, done, label, item):
+    """Live progress for a running job; a no-op for a direct bulk_import call."""
+    if not job_id:
+        return
+    with _jobs_lock:
+        job = _jobs.get(str(job_id))
+        if job is None or job["status"] != "running":
+            return
+        job["done"] = done
+        job["label"] = label
         # the per-script stats of a whole library are noise in a poll payload
-        _job["items"].append({k: v for k, v in item.items() if k != "scripts"})
+        row = {k: v for k, v in item.items() if k != "scripts"}
+        if 0 <= index < len(job["items"]):
+            job["items"][index] = row
 
 
 def _stats_hook(done, total, desc):
@@ -4592,20 +4696,26 @@ def _bulk_one(item, cfg):
     return row
 
 
-def bulk_import(items, cfg=None, progress=None):
+def bulk_import(items, cfg=None, progress=None, job_id=None):
     """Import a queue of albums (staging folders or library folders).
 
     *items*: ``{"path", "release": <optional MB release dict>, "move": bool}``
     — ``move`` defaults to True for a path outside the library and False for
     one already inside it. Each album is moved into
     ``<music folder>/Artists``, stamped with the release identity when one is
-    supplied, then finished with the configured chain. ``import_bulk_concurrency``
-    albums run at once (each on its own copy of the config).
+    supplied, then finished with the configured chain. Up to
+    ``import_bulk_concurrency`` albums run at once (each on its own copy of the
+    config) — and that number is the PROCESS's, shared with every other job
+    (see `_import_pool`), so a second caller is not a second budget.
+
+    *job_id* is the registry entry in `_jobs` this run reports into (started by
+    :func:`start_bulk`); a direct call passes none and reports only through
+    *progress* and the websocket relay.
 
     Progress goes to *progress(done, total, label, item_result)* and to
-    ``mlo.stats.progress_hook`` (the websocket relay); a running job started by
-    :func:`start_bulk` is updated too. Returns ``{"total", "ok", "failed",
-    "skipped", "items": [...]}`` with the item rows in input order.
+    ``mlo.stats.progress_hook`` (the websocket relay). Returns ``{"total",
+    "ok", "failed", "skipped", "items": [...]}`` with the item rows in input
+    order.
 
     A row's ``status``: ``imported`` — the album is in the library (a failing
     *script* rides along in ``error``, it does not un-import the album);
@@ -4614,46 +4724,55 @@ def bulk_import(items, cfg=None, progress=None):
     ``note`` say what the configured chain did: a row that is ``imported`` with
     ``chain_off`` was imported without the optimization/tagging pass because
     this library configures none, and says so rather than looking like a run
-    that happened.
+    that happened. A row for an album another import is ALREADY chaining is
+    ``failed`` with ``already_importing`` — the album is the exclusive thing,
+    never the job.
     """
     cfg = cfg or load_config()
     items = [dict(it) for it in (items or [])]
     total = len(items)
     rows = [None] * total
-    try:
-        concurrency = max(1, int(cfg.get("import_bulk_concurrency") or 1))
-    except (TypeError, ValueError):
-        concurrency = 1
+    concurrency = _bulk_concurrency(cfg)
 
     def label_for(index):
         name = os.path.basename(str(items[index].get("path") or "").rstrip("\\/"))
         return f"Importing {name}" if name else f"Importing {index + 1}/{total}"
 
+    def run_one(index, item):
+        """One album on a worker: its queue row says "running" from the moment
+        a worker picks it up, not only when it lands — the difference between
+        the albums being imported now and the ones waiting their turn."""
+        _job_row(job_id, index, {"path": os.path.normpath(str(item.get("path") or "")),
+                                 "status": "running", "started": time.time()})
+        return _bulk_one(item, dict(cfg))
+
     if total:
-        with ThreadPoolExecutor(max_workers=concurrency,
-                                thread_name_prefix="mlo-import") as pool:
-            futures = {pool.submit(_bulk_one, it, dict(cfg)): i
-                       for i, it in enumerate(items)}
-            done = 0
-            for future in as_completed(futures):
-                index = futures[future]
+        # The process-wide pool (`_import_pool`), not one per job: how many
+        # albums are being imported at once is `import_bulk_concurrency` for the
+        # WHOLE app, so a second job shares this budget instead of doubling it.
+        # Everything beyond it waits its turn on the pool's own queue.
+        pool = _import_pool(concurrency, exclude=job_id)
+        futures = {pool.submit(run_one, i, it): i for i, it in enumerate(items)}
+        done = 0
+        for future in as_completed(futures):
+            index = futures[future]
+            try:
+                row = future.result()
+            except Exception as e:          # _bulk_one reports, never raises
+                traceback.print_exc()
+                row = {"path": str(items[index].get("path") or ""),
+                       "status": "failed", "album_path": None,
+                       "error": str(e), "scripts": []}
+            rows[index] = row
+            done += 1
+            label = label_for(index)
+            _job_note(job_id, index, done, label, row)
+            _stats_hook(done, total, label)
+            if progress is not None:
                 try:
-                    row = future.result()
-                except Exception as e:          # _bulk_one reports, never raises
+                    progress(done, total, label, row)
+                except Exception:
                     traceback.print_exc()
-                    row = {"path": str(items[index].get("path") or ""),
-                           "status": "failed", "album_path": None,
-                           "error": str(e), "scripts": []}
-                rows[index] = row
-                done += 1
-                label = label_for(index)
-                _job_note(done, label, row)
-                _stats_hook(done, total, label)
-                if progress is not None:
-                    try:
-                        progress(done, total, label, row)
-                    except Exception:
-                        traceback.print_exc()
 
     rows = [r for r in rows if r is not None]
     return {
@@ -4668,27 +4787,62 @@ def bulk_import(items, cfg=None, progress=None):
 def start_bulk(items, cfg=None):
     """Start :func:`bulk_import` on a daemon thread; returns straight away.
 
-    One bulk job at a time: a second start is refused with
-    ``{"ok": False, "error": "bulk import already running"}``. Poll
-    :func:`job_state` for progress.
+    Any number of jobs may run at once — the wizard's queue and the Library's
+    Import button are the same machinery, and making one wait for the other is a
+    queue nobody asked for. What stays exclusive is the ALBUM: `_bulk_one`
+    refuses a path an import already chains (row ``already_importing``), so a
+    double press cannot import an album twice. The pipelines they all run share
+    one budget (`_import_pool`).
+
+    Poll :func:`job_state` with the returned ``job["id"]`` for this job's
+    progress — the payload carries the whole queue, each album "Queued" until a
+    worker picks it up and "Running" while it is imported, plus `running`,
+    `queued` and the pool's `concurrency`. Without an id it answers the newest
+    job, which is what the wizard's strip did before ids were available.
     """
-    with _job_lock:
-        if _job["status"] == "running":
-            return {"ok": False, "error": "bulk import already running"}
-        _job.update({"id": uuid.uuid4().hex[:12], "kind": "bulk",
-                     "status": "running", "started": time.time(),
-                     "finished": None, "total": len(items or []), "done": 0,
-                     "label": "", "items": [], "error": None})
-        job = dict(_job, items=[])
+    items = [dict(it) for it in (items or [])]
+    cfg = cfg or load_config()
+    job = {"id": uuid.uuid4().hex[:12], "kind": "bulk", "status": "running",
+           "started": time.time(), "finished": None, "total": len(items),
+           "done": 0, "running": 0, "queued": len(items),
+           "concurrency": _bulk_concurrency(cfg), "label": "", "error": None,
+           # Every album has its line from the start, "Queued" until a worker
+           # picks it up: `import_bulk_concurrency` are imported at once and the
+           # rest wait their turn, and the payload says which is which.
+           "items": [{"path": os.path.normpath(str(it.get("path") or "")),
+                      "status": "queued"} for it in items]}
+    with _jobs_lock:
+        _jobs[job["id"]] = job
+        _trim_jobs()
 
     def run():
         try:
-            result = bulk_import(items, cfg or load_config())
-            _job_update(status="done", finished=time.time(),
+            result = bulk_import(items, cfg, job_id=job["id"])
+            _job_update(job["id"], status="done", finished=time.time(),
                         done=result["total"], error=None)
         except Exception as e:
             traceback.print_exc()
-            _job_update(status="failed", finished=time.time(), error=str(e))
+            _job_update(job["id"], status="failed", finished=time.time(),
+                        error=str(e))
 
-    threading.Thread(target=run, name="mlo-bulk-import", daemon=True).start()
-    return {"ok": True, "job": job}
+    threading.Thread(target=run, name=f"mlo-bulk-{job['id']}", daemon=True).start()
+    # The poll's own payload, so the caller starts from the same shape it will
+    # be polling — `jobs` (what else is running) included.
+    return {"ok": True, "job": job_state(job["id"])}
+
+
+def _trim_jobs():
+    """Keep the poll window finite: the oldest FINISHED jobs go first.
+
+    Called with `_jobs_lock` held (start_bulk) — a running job is never dropped,
+    so a job's rows are still there for the poll that comes late.
+    """
+    extra = len(_jobs) - _JOB_HISTORY
+    if extra <= 0:
+        return
+    for jid in sorted(_jobs, key=lambda k: _jobs[k]["started"]):
+        if extra <= 0:
+            return
+        if _jobs[jid]["status"] != "running":
+            _jobs.pop(jid, None)
+            extra -= 1

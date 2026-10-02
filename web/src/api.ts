@@ -2732,7 +2732,9 @@ export const api = {
       },
       60000
     ),
-  importBulkStatus: () => json<ImportBulkJob>(`${API}/import/bulk/status`),
+  importBulkStatus: (job?: string) =>
+    json<ImportBulkJob>(
+      `${API}/import/bulk/status${job ? `?job=${encodeURIComponent(job)}` : ""}`),
   /** Albums an import could not finish, each with the wizard link that lands
    *  on the album at the step needing a decision (GET /api/import/prompts). */
   importPrompts: () => json<{ prompts: ImportPrompt[] }>(`${API}/import/prompts`),
