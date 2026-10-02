@@ -3,6 +3,10 @@ config.json
 config.local.json
 server/data/
 
+# The dev bed's own config (dev.py): a library path from THIS machine, so it is
+# the checkout's to hold, not the repo's. Missing it means local/dev/music.
+dev.config.json
+
 # The folder docker-compose.yml mounts as /music — app state, not source. The
 # app writes .mlo/data (config.json with the RYM cookie, auth.db,
 # playlists.db), downloads and trash under it, so running the compose template

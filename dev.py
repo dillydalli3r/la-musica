@@ -12,21 +12,38 @@ app is made of and then stays out of the way:
 
 Both ports come from AGENTS.md's rule: never 8000 (that is the owner's live
 container, and a dev bed answering there would look like the real library),
-8011 up, and if a port is taken the next one up is used. The library is
-`local/dev/music` by default — inside the repo, gitignored, disposable — and
-the app's own state lands beside it in `local/dev/music/.mlo`, exactly as it
-would for a real install. `first_run_done` is seeded through `POST /api/config`
-(AGENTS.md's own recipe) so the bed opens on the app rather than the wizard.
+8011 up, and if a port is taken the next one up is used.
+
+WHICH LIBRARY is `dev.config.json` beside this file — one key, machine-local,
+gitignored, so a clone of the repo gets the scratch default:
+
+    { "music_folder": "F:/Media/Music" }
+
+Unset it is `local/dev/music` (inside the repo, disposable) and `--music <dir>`
+overrides it for one run. The app's own state lands beside whichever library is
+in play, in its `.mlo`, exactly as it would for a real install. The wizard flag
+is seeded through `POST /api/config` (AGENTS.md's own recipe) so the bed opens
+on the app rather than the wizard — read first, written only when it differs,
+and only for a library of the bed's OWN: for any other library it writes
+nothing, because that `.mlo` config belongs to whatever real install uses it.
+
+A library outside `local/` and the temp dir is NOT the bed's own: the banner
+says so, because the state above is then shared with whatever else uses that
+library (the live install on 8000), and `--fresh` refuses to wipe it. Pointing
+the bed at the real library is a legitimate thing to want — silently sharing its
+state is not, so for a library it does not own the bed WITHHOLDS the env vars the
+app would seed into that config (`MLO_SERVER_HOST` when it differs) and reads
+those settings as that library's own install has them — the login gate among
+them, so the dev UI can ask you to log in. The app still re-stamps the config's
+`music_folder` with this machine's path on every start (mlo.config
+`_migrate_to_data_dir`: "keep the live value aligned with the new folder"); the
+bed remembers the old value and puts it back when it stops, so the install that
+owns the library is left exactly as it was found.
 
 A tray icon (pystray + the desktop shell's own icon; `pip install pystray` if it
 is missing, the bed runs in console mode without it) carries the small verbs
-you want while testing: open the app, open the dev library, open the logs,
-restart, quit. Ctrl+C quits too.
-
-Testing a feature against REAL files: copy an album in with
-`cp -r "<album>" local/dev/music/Artists/`, or point the whole bed at a folder
-of your choosing with `--music`. The bed never writes outside that folder and
-`local/`, and `--fresh` refuses to wipe anything that is not under them.
+you want while testing: open the app, open the library, open the logs, restart,
+quit. Ctrl+C quits too, and takes the whole process tree with it.
 """
 
 from __future__ import annotations
@@ -48,8 +65,47 @@ import webbrowser
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent
+CONFIG_PATH = ROOT / "dev.config.json"
 DEFAULT_PORT = 8011        # AGENTS.md: 8000 is the owner's live install.
 DEFAULT_WEB_PORT = 5181
+
+
+def load_settings(path: "Path | None" = None) -> dict:
+    """The bed's own knobs, from `dev.config.json` beside it:
+
+        { "music_folder": "F:/Media/Music" }
+
+    Machine-local by design — it names a path from THIS machine, so it is
+    gitignored — and a missing file is simply the default. `--music` still wins
+    over it, so a one-off run somewhere else needs no edit."""
+    path = Path(path) if path else CONFIG_PATH
+    try:
+        raw = path.read_text(encoding="utf-8")
+    except FileNotFoundError:
+        return {}
+    except OSError as exc:
+        raise SystemExit(f"{path.name} could not be read: {exc}")
+    try:
+        data = json.loads(raw)
+    except ValueError as exc:
+        raise SystemExit(f"{path.name} is not valid JSON: {exc}")
+    if not isinstance(data, dict):
+        raise SystemExit(f'{path.name} must be a JSON object, e.g. '
+                         '{"music_folder": "F:/Media/Music"}')
+    return data
+
+
+def scratch_roots() -> list[Path]:
+    """Where `--fresh` may delete: the repo's own scratch folder and the OS temp
+    dir. A library anywhere else is somebody's music — pointing the bed at it is
+    fine, wiping it never is."""
+    return [ROOT / "local", Path(tempfile.gettempdir()).resolve()]
+
+
+def is_scratch(path: Path) -> bool:
+    resolved = Path(path).resolve()
+    return any(resolved == root or root in resolved.parents
+               for root in scratch_roots())
 
 
 # --------------------------------------------------------------------------- #
@@ -101,12 +157,40 @@ def wait_http(url: str, timeout: float) -> bool:
     return False
 
 
-def seed_config(port: int, music: Path) -> str:
-    """Flip the wizard off for this bed — `first_run_done` alone is not saved
-    (the folder is what the app pins itself to), so both go together."""
+def ensure_config(port: int, music: Path) -> str:
+    """Make the app's answer the bed's, and only when it is not already.
+
+    `first_run_done` alone is not saved (the folder is what the app pins itself
+    to), so both go together — but a library the bed is pointed at may be one a
+    REAL install is already using (`dev.config.json` can name the live one), and
+    rewriting its config on every start of a dev tool is not the bed's business.
+    So: read first, write only on a difference. A path that differs in case or
+    slash alone is the same folder on Windows."""
+    base = f"http://127.0.0.1:{port}"
+    current: dict = {}
+    try:
+        with urllib.request.urlopen(base + "/api/config", timeout=20) as reply:
+            loaded = json.loads(reply.read().decode("utf-8"))
+            current = loaded if isinstance(loaded, dict) else {}
+    except Exception:
+        current = {}
+    same = (current.get("first_run_done") is True
+            and os.path.normcase(str(current.get("music_folder") or ""))
+            == os.path.normcase(str(music)))
+    if same:
+        return "already configured — left alone"
+    if not is_scratch(music):
+        # A library the bed does not own: the config in its `.mlo` is the one
+        # whatever real install uses — the live container on 8000 stores ITS
+        # folder in the same file — so writing ours into it is churn with a
+        # failure window (a `/music` in a Linux install, a Windows path in the
+        # server that reads it). The wizard flag there is that install's
+        # business; the bed serves the app and touches nothing.
+        return "not configured (a library the bed does not own) — left alone"
+
     body = json.dumps({"music_folder": str(music), "first_run_done": True}).encode()
     request = urllib.request.Request(
-        f"http://127.0.0.1:{port}/api/config", data=body, method="POST",
+        base + "/api/config", data=body, method="POST",
         headers={"Content-Type": "application/json"})
     try:
         with urllib.request.urlopen(request, timeout=20) as reply:
@@ -182,30 +266,112 @@ class Child:
 
 
 class DevBed:
-    def __init__(self, args: argparse.Namespace):
+    def __init__(self, args: argparse.Namespace, settings: "dict | None" = None):
         self.args = args
-        # Logs and the default library live in the repo's own scratch folder
-        # (gitignored); `--music` replaces only the library.
+        self.settings = settings or {}
+        # Logs always live in the repo's own scratch folder (gitignored); the
+        # LIBRARY is `--music`, else `music_folder` in dev.config.json, else
+        # that same scratch folder.
         self.home = ROOT / "local" / "dev"
-        self.music = Path(args.music).resolve() if args.music \
-            else (self.home / "music")
         self.logs = self.home / "logs"
+        self.config_path = CONFIG_PATH
+        self.music = self._library(args.music)
         self.port = free_port(args.port)
         self.web_port = free_port(args.web_port)
         self.server = Child("server", self.logs / "server.log")
         self.web = Child("web", self.logs / "web.log")
         self.web_started = False
+        self.foreign_folder = None
         self.quit = threading.Event()
+
+    def _library(self, override: "str | None") -> Path:
+        """`--music` > dev.config.json > local/dev/music. A configured folder
+        that is not there is a typo, not a fallback: say so rather than start a
+        bed against the wizard's default."""
+        if override:
+            return Path(override).expanduser().resolve()
+        configured = str(self.settings.get("music_folder") or "").strip()
+        if not configured:
+            return self.home / "music"
+        path = Path(os.path.expandvars(configured)).expanduser()
+        if not path.is_dir():
+            raise SystemExit(
+                f"music_folder in {self.config_path.name} is not a folder on this "
+                f"machine: {path}\n  fix it there, or run with --music <folder>")
+        return path.resolve()
+
+    # -- a library the bed does not own ----------------------------------- #
+    def shared_config(self) -> "Path | None":
+        """The app's config file for a library the bed does NOT own — the one a
+        real install (the container on 8000) reads and writes too. None when the
+        library is the bed's own."""
+        if is_scratch(self.music):
+            return None
+        return self.music / ".mlo" / "data" / "config.json"
+
+    def remember_foreign_folder(self) -> None:
+        """What that config says its music folder is, BEFORE the app starts.
+
+        The app aligns that value with the folder the run was TOLD
+        (`mlo.config._migrate_to_data_dir`: "keep the live value aligned with
+        the new folder"), so any run of this bed against a real library rewrites
+        the file with a path from THIS machine — measured, on every start. That
+        file is shared with the install that owns the library, so the bed puts
+        the original back when it stops."""
+        self.foreign_folder = None
+        config = self.shared_config()
+        if config is None or not config.is_file():
+            return
+        try:
+            self.foreign_folder = json.loads(
+                config.read_text(encoding="utf-8")).get("music_folder")
+        except Exception:
+            self.foreign_folder = None
+
+    def restore_foreign_folder(self) -> None:
+        """Undo the one write this bed causes in somebody else's config, and
+        only that one: the value goes back only while it is still the path this
+        run stamped. If the install that owns the library saved in the meantime,
+        its value is not ours to touch."""
+        config = self.shared_config()
+        if config is None or not self.foreign_folder or not config.is_file():
+            return
+        try:
+            data = json.loads(config.read_text(encoding="utf-8"))
+        except Exception:
+            return
+        stamped = os.path.normcase(str(data.get("music_folder") or ""))
+        if stamped != os.path.normcase(str(self.music)):
+            return                        # not ours (or already put back)
+        data["music_folder"] = self.foreign_folder
+        temp = config.with_name(config.name + ".devbed")
+        temp.write_text(json.dumps(data, indent=2, sort_keys=True) + "\n",
+                        encoding="utf-8")
+        os.replace(temp, config)
+        print(f"· restored music_folder in {config} to "
+              f"{self.foreign_folder!r}", flush=True)
 
     # -- lifecycle -------------------------------------------------------- #
     def start(self) -> bool:
         self.logs.mkdir(parents=True, exist_ok=True)
         self.music.mkdir(parents=True, exist_ok=True)
+        self.remember_foreign_folder()
 
         env = dict(os.environ)
         env["MLO_MUSIC_FOLDER"] = str(self.music)
-        env["MLO_SERVER_HOST"] = "127.0.0.1"
         env["PYTHONUNBUFFERED"] = "1"
+        if is_scratch(self.music):
+            # MLO_SERVER_HOST is what the app SEEDS INTO THE CONFIG when the
+            # stored value differs (server/main.py), and MLO_MUSIC_FOLDER is
+            # stamped on by any save — both fine for the bed's own library, and
+            # both a hostile write to somebody else's: measured, one run against
+            # the real library rewrote its `server_host` from 0.0.0.0 to
+            # 127.0.0.1 (the login gate's own input) and its music folder, in the
+            # very .mlo the live install on 8000 uses. For a library the bed does
+            # not own, bind loopback with uvicorn's own `--host` and leave the
+            # file alone: the app then reads that library's real settings, gate
+            # included, and nothing writes.
+            env["MLO_SERVER_HOST"] = "127.0.0.1"
 
         cmd = [sys.executable, "-m", "uvicorn", "server.main:app",
                "--host", "127.0.0.1", "--port", str(self.port)]
@@ -220,7 +386,7 @@ class DevBed:
             print(f"· the backend never answered /api/health — see "
                   f"{self.server.log_path}", flush=True)
             return False
-        print(f"· {seed_config(self.port, self.music)}", flush=True)
+        print(f"· {ensure_config(self.port, self.music)}", flush=True)
 
         if not self.args.no_web:
             npm = shutil.which("npm")
@@ -250,6 +416,7 @@ class DevBed:
             print("· stopping…", flush=True)
         self.web.stop()
         self.server.stop()
+        self.restore_foreign_folder()
 
     def restart(self) -> None:
         self.stop()
@@ -286,6 +453,19 @@ class DevBed:
         print(f"  la musica dev bed   {self.url()}")
         print(f"  library             {self.music}")
         print(f"  logs                {self.logs}")
+        print(f"  config              {self.config_path}")
+        if not is_scratch(self.music):
+            # Not a refusal — pointing the bed at the real library is a
+            # legitimate thing to want — but the app writes its state BESIDE
+            # the library it is given, so this is not a private copy of it.
+            print()
+            print("  ! this library is not the bed's own scratch folder. The state")
+            print("    below lives beside it (.mlo: caches, job locks, ratings, wishes,")
+            print("    playlists), so anything else using this library — the live")
+            print("    install on 8000 — shares it, and an import or a script run from")
+            print("    this window edits these real files. The app re-stamps that")
+            print("    library's music_folder with this machine's path on every start;")
+            print("    the bed puts the old value back when it stops.")
         print("  the tray has open / logs / restart / quit; Ctrl+C quits too")
         print()
 
@@ -355,13 +535,17 @@ class DevBed:
 # --------------------------------------------------------------------------- #
 # Wiping
 # --------------------------------------------------------------------------- #
-def wipe(path: Path, home: Path, music: Path) -> None:
-    """`--fresh`: a first-run state, but only inside the dev bed's own folders
-    — a typed path that is not under them is refused, never deleted."""
-    resolved = path.resolve()
-    allowed = [home, music, Path(tempfile.gettempdir()).resolve()]
-    if not any(resolved == root or root in resolved.parents for root in allowed):
-        raise SystemExit(f"refusing --fresh outside the dev bed: {resolved}")
+def wipe(path: Path) -> None:
+    """`--fresh`: a first-run state, and only ever of the bed's own scratch
+    folders. The library may now be configured anywhere — including the real
+    library a live install is using — so this guard is what keeps a flag meaning
+    "throw away the test data" from deleting a music collection."""
+    resolved = Path(path).resolve()
+    if not is_scratch(resolved):
+        raise SystemExit(
+            f"refusing --fresh outside the dev bed: {resolved}\n"
+            f"  --fresh only wipes {ROOT / 'local'} and {tempfile.gettempdir()}"
+            f" — delete a real library by hand if that is what you mean")
     if resolved.exists():
         shutil.rmtree(resolved, ignore_errors=True)
         print(f"· wiped {resolved}", flush=True)
@@ -370,10 +554,11 @@ def wipe(path: Path, home: Path, music: Path) -> None:
 # --------------------------------------------------------------------------- #
 def main() -> int:
     parser = argparse.ArgumentParser(
-        description="Run la musica against a throwaway library, with hot "
-                    "reload on both sides and a tray to drive it.")
-    parser.add_argument("--music", help="the library the bed uses "
-                        "(default: local/dev/music)")
+        description="Run la musica against a library of its own, with hot "
+                    "reload on both sides and a tray to drive it. The library "
+                    "comes from dev.config.json beside this file (or --music).")
+    parser.add_argument("--music", help="the library the bed uses (default: "
+                        "music_folder in dev.config.json, else local/dev/music)")
     parser.add_argument("--port", type=int, default=DEFAULT_PORT,
                         help=f"backend port, 8011 up (default: {DEFAULT_PORT})")
     parser.add_argument("--web-port", type=int, default=DEFAULT_WEB_PORT,
@@ -387,12 +572,13 @@ def main() -> int:
     parser.add_argument("--no-open", action="store_true",
                         help="do not open a browser window")
     parser.add_argument("--fresh", action="store_true",
-                        help="wipe the dev library and its state first")
+                        help="wipe the bed's own scratch library first (refused "
+                             "outside local/ and the temp dir)")
     args = parser.parse_args()
 
-    bed = DevBed(args)
+    bed = DevBed(args, load_settings())
     if args.fresh:
-        wipe(bed.music, bed.home, bed.music)
+        wipe(bed.music)
     if not bed.start():
         # Nothing to drive: say why (already printed) and leave the port free
         # rather than sitting on a console that has no app behind it.

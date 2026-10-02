@@ -31,12 +31,17 @@ the wizard) rather than clicking through it.
 
 ## The dev bed, for work that needs the app running by hand
 
-`python dev.py` does all of the above in one command — a throwaway library
-under `local/dev/music` (gitignored), a port from 8011 up (the bed asks the port,
-so it can never land on 8000 or on one you are already using), the wizard already
-flipped, the backend under `--reload` watching only `server/` and `mlo/`, and the
-UI on vite with hot reload proxying `/api` and `/ws` to it. Its logs are
-`local/dev/logs/{server,web}.log`.
+`python dev.py` does all of the above in one command — a library from
+`dev.config.json` beside it (`music_folder`; the bed's own scratch folder under
+`local/dev/music` when unset, and `--music` overrides for one run), a port from
+8011 up (the bed asks the port, so it can never land on 8000 or on one you are
+already using), the wizard already flipped, the backend under `--reload` watching
+only `server/` and `mlo/`, and the UI on vite with hot reload proxying `/api` and
+`/ws` to it. Its logs are `local/dev/logs/{server,web}.log`.
+
+A library the bed does not own (the real one, say) is never written to by the
+bed: it withholds the env vars the app would seed into that shared config, and
+puts back the one value the app itself re-stamps on every start.
 
 ```bash
 python dev.py --no-open --no-tray           # what an agent wants: console, no browser

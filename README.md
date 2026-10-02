@@ -23,14 +23,18 @@ python -m mlo    # the console menu (scripts 1–24), run from the server's envi
 ```
 
 **Editing the app** — `python dev.py`, from the repo root (double-clicking it
-does the same on Windows), is the whole dev bed in one command: a
-throwaway library at `local/dev/music` (gitignored, wiped with `--fresh`), the
-backend under `--reload` watching only `server/` and `mlo/`, the vite server with
-hot reload proxying `/api` and `/ws` to it, the wizard already flipped, and a tray
-to open the app / the library folder / the logs, restart it or quit. It never uses
-port 8000 — that is the live install — and picks 8011 (backend) and 5181 (UI) up.
-`--no-web`, `--no-reload`, `--no-tray`, `--music DIR` and `--help` are there for
-the rest.
+does the same on Windows), is the whole dev bed in one command: the backend under
+`--reload` watching only `server/` and `mlo/`, the vite server with hot reload
+proxying `/api` and `/ws` to it, and a tray to open the app / the library folder /
+the logs, restart it or quit. **Which library** is `dev.config.json` beside it —
+one key, `music_folder`, machine-local and gitignored, `local/dev/music` when
+unset (that one is wiped by `--fresh`). Point it at a real library and the bed
+still writes nothing of its own there: that `.mlo` is shared with whatever else
+uses the library, so it reads that install's settings as they are — login gate
+included — and puts back the one value a Windows run re-stamps as its own. It
+never uses port 8000 — that is the live install — and picks 8011 (backend) and
+5181 (UI) up. `--no-web`, `--no-reload`, `--no-tray`, `--music DIR` and `--help`
+are there for the rest.
 
 ## What it does
 - **Library** — artists → albums → tracks with grade/audit badges, five views (Grid, Compact, Albums, Artists, Tracks), sort/columns/presets, a query builder saved as smart playlists, bulk tag tools, half-star ratings, favourites, podcasts and music videos.

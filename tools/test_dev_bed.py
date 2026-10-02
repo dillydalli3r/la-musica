@@ -18,6 +18,7 @@ two-level process that only writes a heartbeat file.
 Run:  python tools/test_dev_bed.py
 """
 import argparse
+import json
 import os
 import socket
 import sys
@@ -70,15 +71,15 @@ check("a released port reads as free again", not devtool._in_use(busy))
 # --------------------------------------------------------------------------- #
 # Defaults
 # --------------------------------------------------------------------------- #
-def bed(**overrides):
+def bed(settings=None, **overrides):
     base = dict(music=None, port=8011, web_port=5181, no_web=False,
                 no_reload=False, no_tray=True, no_open=True, fresh=False)
     base.update(overrides)
-    return devtool.DevBed(argparse.Namespace(**base))
+    return devtool.DevBed(argparse.Namespace(**base), settings)
 
 
 default = bed()
-check("the default library is the repo's own scratch folder",
+check("with no dev.config.json the library is the repo's own scratch folder",
       default.music == ROOT / "local" / "dev" / "music", default.music)
 check("its logs sit beside it, not in the library",
       default.logs.parent == default.music.parent, default.logs)
@@ -86,19 +87,105 @@ check("both ports come from 8011 up", default.port >= 8011 and default.web_port 
       (default.port, default.web_port))
 
 # --------------------------------------------------------------------------- #
+# dev.config.json
+# --------------------------------------------------------------------------- #
+lib = Path(tempfile.gettempdir()) / "mlo-dev-bed-lib"
+lib.mkdir(parents=True, exist_ok=True)
+cfg = Path(tempfile.gettempdir()) / "mlo-dev-bed.dev.config.json"
+cfg.write_text(json.dumps({"music_folder": str(lib)}), encoding="utf-8")
+
+check("a missing dev.config.json is simply the default",
+      devtool.load_settings(cfg.with_name("mlo-dev-bed-absent.json")) == {})
+check("music_folder in the file is the library the bed uses",
+      bed(settings=devtool.load_settings(cfg)).music == lib.resolve(),
+      bed(settings=devtool.load_settings(cfg)).music)
+check("--music still wins over the file",
+      bed(music=str(tempfile.gettempdir()), settings=devtool.load_settings(cfg)).music
+      == Path(tempfile.gettempdir()).resolve())
+
+cfg.write_text("{ not json", encoding="utf-8")
+try:
+    devtool.load_settings(cfg)
+    check("dev.config.json that is not JSON is refused", False, "it did not refuse")
+except SystemExit as exc:
+    check("dev.config.json that is not JSON is refused", "not valid JSON" in str(exc), exc)
+
+cfg.write_text(json.dumps({"music_folder": str(lib / "gone")}), encoding="utf-8")
+try:
+    bed(settings=devtool.load_settings(cfg))
+    check("a configured library that is not there is refused, not defaulted",
+          False, "it fell back instead")
+except SystemExit as exc:
+    check("a configured library that is not there is refused, not defaulted",
+          "not a folder" in str(exc), exc)
+cfg.unlink()
+devtool.wipe(lib)
+
+# --------------------------------------------------------------------------- #
+# A library the bed does not own: it writes back the value it stamped
+# --------------------------------------------------------------------------- #
+check("the bed's own library has no foreign config to watch",
+      default.shared_config() is None, default.shared_config())
+
+foreign_lib = Path(tempfile.gettempdir()) / "mlo-dev-bed-foreign"
+(foreign_lib / ".mlo" / "data").mkdir(parents=True, exist_ok=True)
+foreign_cfg = foreign_lib / ".mlo" / "data" / "config.json"
+foreign_cfg.write_text(json.dumps({"music_folder": "/music", "kept": 1}),
+                       encoding="utf-8")
+
+real_is_scratch = devtool.is_scratch
+devtool.is_scratch = lambda path: False          # pretend: somebody's real library
+try:
+    foreign = bed(music=str(foreign_lib))
+    check("a library the bed does not own is watched at its own config",
+          foreign.shared_config() == foreign_cfg, foreign.shared_config())
+    foreign.remember_foreign_folder()
+    check("what that config said is remembered",
+          foreign.foreign_folder == "/music", foreign.foreign_folder)
+
+    # The app aligns the stored folder with the one the run was TOLD, on every
+    # start (mlo.config._migrate_to_data_dir) — this is that write.
+    stamped = json.loads(foreign_cfg.read_text(encoding="utf-8"))
+    stamped["music_folder"] = str(foreign_lib)
+    foreign_cfg.write_text(json.dumps(stamped, indent=2, sort_keys=True) + "\n",
+                           encoding="utf-8")
+
+    foreign.restore_foreign_folder()
+    after = json.loads(foreign_cfg.read_text(encoding="utf-8"))
+    check("the folder this run stamped is put back",
+          after.get("music_folder") == "/music", after.get("music_folder"))
+    check("and nothing else in that config is touched", after.get("kept") == 1, after)
+
+    stamped["music_folder"] = "D:/somewhere/else"      # not ours
+    foreign_cfg.write_text(json.dumps(stamped, indent=2, sort_keys=True) + "\n",
+                           encoding="utf-8")
+    foreign.restore_foreign_folder()
+    check("a value the bed did not stamp is left alone",
+          json.loads(foreign_cfg.read_text(encoding="utf-8")).get("music_folder")
+          == "D:/somewhere/else")
+finally:
+    devtool.is_scratch = real_is_scratch
+    devtool.wipe(foreign_lib)
+
+# --------------------------------------------------------------------------- #
 # The wipe guard
 # --------------------------------------------------------------------------- #
 outside = Path(tempfile.gettempdir()).parent / "mlo-dev-bed-guard-probe"
 try:
-    devtool.wipe(outside, default.home, default.music)
+    devtool.wipe(outside)
     check("--fresh refuses a path outside the bed", False, "it did not refuse")
 except SystemExit as exc:
     check("--fresh refuses a path outside the bed", "refusing" in str(exc), exc)
 
+# The library can be pointed anywhere now — including at a real collection a
+# live install is using — so this guard IS the safety of `--fresh`.
+check("a configured library outside scratch reads as not-scratch",
+      not devtool.is_scratch(Path("F:/Media/Music")), "F:/Media/Music reads as scratch")
+
 inside = Path(tempfile.gettempdir()) / "mlo-dev-bed-wipe-probe"
 inside.mkdir(parents=True, exist_ok=True)
 (inside / "jar").write_text("x", encoding="utf-8")
-devtool.wipe(inside, default.home, default.music)
+devtool.wipe(inside)
 check("--fresh still wipes inside a scratch root", not inside.exists(), inside)
 
 # --------------------------------------------------------------------------- #
