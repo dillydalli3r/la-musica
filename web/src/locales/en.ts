@@ -538,12 +538,12 @@ export default {
   // —— Web ratings: the WEBRATING / ALBUMWEBRATING pair script 24 writes, and
   // the second, dimmer reading the star field draws for it (StarRating). The
   // value is Picard's 0-100 scale; what is shown here is 0-5.
-  "rating.webReadout": "{value} web",
-  "rating.webAlbumReadout": "{value} album web",
+  "rating.webReadout": "{value} Web",
+  "rating.webAlbumReadout": "{value} Album Web",
   "rating.webTitle": "Web rating {value} of 5 — from {sources}",
   "rating.webTitleNoSources": "Web rating {value} of 5 — the script recorded no source",
-  "rating.webAlbumTitle": "Album web rating {value} of 5 — from {sources}",
-  "rating.webAlbumTitleNoSources": "Album web rating {value} of 5 — the script recorded no source",
+  "rating.webAlbumTitle": "Album Web rating {value} of 5 — from {sources}",
+  "rating.webAlbumTitleNoSources": "Album Web rating {value} of 5 — the script recorded no source",
   "rating.webAria": "Web rating: {value} of 5",
-  "rating.webAlbumAria": "Album web rating: {value} of 5",
+  "rating.webAlbumAria": "Album Web rating: {value} of 5",
 } as const;

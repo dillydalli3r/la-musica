@@ -2722,7 +2722,7 @@ export const api = {
       1800000
     ),
   /** Bulk import: move several staged albums into the library at once. */
-  importBulk: (items: { path: string; move?: boolean; release?: Record<string, unknown> }[]) =>
+  importBulk: (items: { path: string; move?: boolean; release?: Record<string, unknown>; mbid?: string }[]) =>
     json<ImportBulkResult>(
       `${API}/import/bulk`,
       {

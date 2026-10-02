@@ -495,12 +495,12 @@ export default {
   // script 24, y la segunda lectura, más apagada, que el campo de estrellas
   // dibuja para ella (StarRating). El valor es la escala 0-100 de Picard; lo
   // que se muestra es 0-5.
-  "rating.webReadout": "{value} web",
-  "rating.webAlbumReadout": "{value} álbum web",
-  "rating.webTitle": "Valoración web {value} de 5 — de {sources}",
-  "rating.webTitleNoSources": "Valoración web {value} de 5 — el script no registró ninguna fuente",
-  "rating.webAlbumTitle": "Valoración web del álbum {value} de 5 — de {sources}",
-  "rating.webAlbumTitleNoSources": "Valoración web del álbum {value} de 5 — el script no registró ninguna fuente",
-  "rating.webAria": "Valoración web: {value} de 5",
-  "rating.webAlbumAria": "Valoración web del álbum: {value} de 5",
+  "rating.webReadout": "{value} Web",
+  "rating.webAlbumReadout": "{value} álbum Web",
+  "rating.webTitle": "Valoración Web {value} de 5 — de {sources}",
+  "rating.webTitleNoSources": "Valoración Web {value} de 5 — el script no registró ninguna fuente",
+  "rating.webAlbumTitle": "Valoración Web del álbum {value} de 5 — de {sources}",
+  "rating.webAlbumTitleNoSources": "Valoración Web del álbum {value} de 5 — el script no registró ninguna fuente",
+  "rating.webAria": "Valoración Web: {value} de 5",
+  "rating.webAlbumAria": "Valoración Web del álbum: {value} de 5",
 } as const;

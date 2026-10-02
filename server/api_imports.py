@@ -108,6 +108,10 @@ class BulkItem(BaseModel):
     path: str
     move: Optional[bool] = None
     release: Optional[dict] = None
+    # A MusicBrainz release (or release-group) link or bare id the user pinned
+    # for this album before the run: `server.imports.bulk_import` resolves it
+    # and imports THAT release. `release` (a full dict) wins when both are sent.
+    mbid: Optional[str] = None
 
 
 class BulkRequest(BaseModel):
@@ -286,7 +290,8 @@ def import_bulk(req: BulkRequest):
     _require_manual()
     _cap(len(req.items), MAX_ITEMS, "items")
     _guard([item.path for item in req.items])
-    items = [{"path": item.path, "move": item.move, "release": item.release}
+    items = [{"path": item.path, "move": item.move, "release": item.release,
+              "mbid": item.mbid}
              for item in req.items]
     return imports.start_bulk(items)
 

@@ -434,13 +434,18 @@ def run_beets_tagging(config=None):
     # time on the runner thread front of the beets subprocess.
     pre = {}
     try:
-        scan_before = folder if os.path.isdir(folder) else os.path.commonpath(paths)
-    except ValueError:
-        scan_before = ""
-    try:
-        dirs = _find_albums(scan_before) if os.path.isdir(scan_before) else []
         if targets:
-            dirs = sorted(set(dirs) | set(paths))
+            # A SCOPED run snapshots exactly the albums IT will touch (plus any
+            # other path it was handed): the snapshot is what a move leaves
+            # behind, and albums beets is not going to move have nothing to
+            # leave. Walking the whole library here cost 0.65 ms per FILE per
+            # run — measured at 104 container opens for a 12-album import, and
+            # ~6.5 s on a 10k-file library — for state that is then never read.
+            dirs = sorted({os.path.normpath(str(p)) for p in paths
+                           if os.path.isdir(str(p))})
+        else:
+            scan_before = folder if os.path.isdir(folder) else os.path.commonpath(paths)
+            dirs = _find_albums(scan_before) if os.path.isdir(scan_before) else []
         if dirs:
             workers = worker_count(config, items=len(dirs))
             with ThreadPoolExecutor(max_workers=workers) as ex:
@@ -461,7 +466,29 @@ def run_beets_tagging(config=None):
     # whole import — the single biggest step of a Run All).
     import mlo.stats as _stats
     from mlo.paths import LIB_AUDIO_EXTS
+    from server import job_locks
     hook = getattr(_stats, "progress_hook", None)
+    # The job this import is running under, if any: the Beets PAGE's own
+    # import holds one (`@job_locks.holds(..., kind="beets")`) and its frames
+    # used to go to the raw relay, which sends them with no id — the client
+    # keys those into one shared, id-less slot that no `progress_end` ever
+    # clears, so a bar could sit on screen after the run was done. Inside a
+    # CHAIN the installed hook is the run's own dispatcher (`_mlo_chain`),
+    # which re-labels the tick as the running step and already carries an
+    # owner: that path is left exactly as it was.
+    job = job_locks.current()
+
+    def _fire(done, total, desc):
+        try:
+            if callable(hook) and getattr(hook, "_mlo_chain", False):
+                hook(done, total, desc)
+            elif job:
+                job_locks.publish(done, total, desc, job=job)
+            elif callable(hook):
+                hook(done, total, desc)      # no owner anywhere: the old frame
+        except Exception:
+            pass
+
     total_items = 0
     try:
         for d in (list(pre) or paths):
@@ -485,19 +512,12 @@ def run_beets_tagging(config=None):
             # detail: the header then shows the album/file it is working on,
             # and a run that is genuinely busy can never look hung.
             phase[0] = line.strip()[:80]
-        if callable(hook):
-            try:
-                hook(min(done_items[0], total_items or done_items[0]),
-                     total_items or done_items[0],
-                     f"Beets tagging — {phase[0]}")
-            except Exception:
-                pass
+        _fire(min(done_items[0], total_items or done_items[0]),
+              total_items or done_items[0],
+              f"Beets tagging — {phase[0]}")
 
-    if callable(hook) and total_items:
-        try:
-            hook(0, total_items, "Beets tagging — looking up on MusicBrainz")
-        except Exception:
-            pass
+    if total_items:
+        _fire(0, total_items, "Beets tagging — looking up on MusicBrainz")
     ok, output = run_beets_import(paths, config, on_line=_tick)
     if not ok:
         stats["error_count"] += 1

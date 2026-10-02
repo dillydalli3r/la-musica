@@ -280,10 +280,13 @@ def s1():
                          for _, url, _, side, fmt in rows if side},
                       sleeve["image"]: image(1200, 1200)},
             "group": [],
-            # one RELEASE's own sleeve: below a name-searched row (release tier)
+            # one RELEASE's own sleeve: ABOVE a name-searched row, because a
+            # named edition is evidence and a text match is a guess (the
+            # owner's import of Toxicity took the blue store row that used to
+            # outrank it)
             "release": [sleeve],
-            "winner": "https://img.test/s1-qobuz.jpg", "winner_index": 8,
-            "decides": "the configured source order"}
+            "winner": sleeve["image"], "winner_index": 9,
+            "decides": "the album's own cover (the release group's art, then the matched release's)"}
 
 
 def s2():
@@ -300,7 +303,7 @@ def s2():
             # the group's image is the last row the finder appends
             "winner": f"{intg.CAA_BASE}/release-group/{GROUP_MBID}/front-1200.jpg",
             "winner_index": 2,
-            "decides": "the album's own cover (the release group's art)"}
+            "decides": "the album's own cover (the release group's art, then the matched release's)"}
 
 
 def s3():
@@ -489,20 +492,23 @@ for payload, who in ((s1_pick, "import"), (r1, "dialog")):
     karaoke = row_of(payload, "https://img.test/s1-karaoke.jpg")
     assert "Karaoke Hits" in karaoke["rejected"] and \
         "not this album's cover" in karaoke["rejected"], (who, karaoke)
-    # the oversized file and the upscaled thumbnail both ranked below the winner
-    winner = row_of(payload, "https://img.test/s1-qobuz.jpg")
+    # the oversized file and the upscaled thumbnail both ranked below the
+    # name-searched row they are compared with here
+    qobuz = row_of(payload, "https://img.test/s1-qobuz.jpg")
     assert row_of(payload, "https://img.test/s1-a1400.jpg")["score"] < \
-        winner["score"], who
+        qobuz["score"], who
     assert "upscaled" in " ".join(
         row_of(payload, "https://cdn.test/deezer/250x250-1234.jpg")["reasons"]), who
     # the size a provider stated as text was read as the size it is, and the
     # container nobody measured says so
-    assert winner["width"] == 1200 and winner["height"] == 1200, (who, winner)
-    assert "container was not read" in " ".join(winner["reasons"]), (who, winner)
-    # one release's OWN sleeve ranks below a name-searched row (release tier)
-    assert "one release's own front cover" in " ".join(row_of(
-        payload, f"{intg.CAA_BASE}/release/{RELEASE_MBID}/front-1200.jpg"
-    )["reasons"]), who
+    assert qobuz["width"] == 1200 and qobuz["height"] == 1200, (who, qobuz)
+    assert "container was not read" in " ".join(qobuz["reasons"]), (who, qobuz)
+    # the MATCHED RELEASE's own sleeve ranks ABOVE a name-searched row: a named
+    # edition is evidence, a text match is a guess (the owner's Toxicity import
+    # took the blue store row that used to outrank it)
+    sleeve_row = row_of(payload, f"{intg.CAA_BASE}/release/{RELEASE_MBID}/front-1200.jpg")
+    assert "the matched release's own front cover" in " ".join(sleeve_row["reasons"]), who
+    assert sleeve_row["score"] > qobuz["score"], (who, sleeve_row["score"], qobuz["score"])
     # a source the configured order does not name ranks after every named one
     assert "not in the configured cover source order" in " ".join(
         row_of(payload, "https://img.test/s1-spotify.jpg")["reasons"]), who

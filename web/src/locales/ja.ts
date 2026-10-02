@@ -493,8 +493,8 @@ export default {
   // —— Web 評価: スクリプト 24 が書き込む WEBRATING / ALBUMWEBRATING の組と、
   // それを星表示が第 2 の、より控えめな読みとして描くための文字列
   // (StarRating)。値は Picard の 0-100 スケールで、表示は 0-5。
-  "rating.webReadout": "{value} web",
-  "rating.webAlbumReadout": "{value} アルバム web",
+  "rating.webReadout": "{value} Web",
+  "rating.webAlbumReadout": "{value} アルバム Web",
   "rating.webTitle": "Web 評価 {value} / 5 — 取得元: {sources}",
   "rating.webTitleNoSources": "Web 評価 {value} / 5 — スクリプトは取得元を記録していません",
   "rating.webAlbumTitle": "アルバムの Web 評価 {value} / 5 — 取得元: {sources}",

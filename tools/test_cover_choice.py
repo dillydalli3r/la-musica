@@ -295,7 +295,7 @@ has(chosen.reasons[0], "release group",
 has(chosen.reasons[-1], "release group",
     "and the deciding sentence says the tier it won on")
 has(" ".join(by_url(ranked, CAA_RELEASE).reasons),
-    "one release's own", "a single release's cover states what it is")
+    "the matched release's own front cover", "a single release's cover states what it is")
 eq(intg.cover_url_labels(CAA_GROUP), (None, False),
    "a CAA release-group URL is read as the album's own art")
 eq(intg.cover_url_labels(CAA_RELEASE), ("front", True),

@@ -148,6 +148,11 @@ def _mark_lyrics_absent(path, config, result):
         marked = inst.lyrics_absent([path], config)
     except Exception:
         return
+    _apply_absent(result, path, marked)
+
+
+def _apply_absent(result, path, marked):
+    """Book ONE track's row out of an album-wide `lyrics_absent` payload."""
     key = os.path.normpath(str(path))
     note = str((marked.get("reason") or {}).get(key)
                or marked.get("skipped") or "")
@@ -163,7 +168,24 @@ def _mark_lyrics_absent(path, config, result):
     result["reason"] = "no lyrics found — marked INSTRUMENTAL"
 
 
-def fetch_one(path, config, replace=False):
+def _absent_answer(path, config, result, batched):
+    """The no-lyrics answer, asked here or deferred to the run's one pass.
+
+    `lyrics_absent` cross-references its own sources per track (LRCLIB's own
+    flag, Spotify's audio features, the AI) and each call fans out its own
+    network asks, so asking it once PER TRACK inside a bulk run serializes
+    minutes of lookups behind each other — measured on an 8-track album:
+    10-20 s of a 41 s lyrics step, the single biggest waste in the whole
+    import pipeline. *batched* defers the decision to `run_fetch_lyrics`'s one
+    album-wide call, which lands the same values on the same files.
+    """
+    if batched:
+        result["needs_absent"] = True
+        return
+    _mark_lyrics_absent(path, config, result)
+
+
+def fetch_one(path, config, replace=False, mark_absent=True):
     """Fetch + write lyrics for ONE track; the shared core of script 13 and
     the API's "auto-import lyrics" button.
 
@@ -268,13 +290,13 @@ def fetch_one(path, config, replace=False):
             # (`_mark_lyrics_absent`): mark it instrumental instead of leaving
             # the album in the "needs you" queue for a person to answer.
             result["reason"] = "no confident match"
-            _mark_lyrics_absent(path, config, result)
+            _absent_answer(path, config, result, not mark_absent)
             return result
         # A synced provider hit keeps its timestamps; a plain one does not.
         text = ((hit or {}).get("synced") or (hit or {}).get("plain") or "").strip()
         if not text:
             result["reason"] = "no provider had lyrics"
-            _mark_lyrics_absent(path, config, result)
+            _absent_answer(path, config, result, not mark_absent)
             return result
         result["provider"] = hit["provider"]
         result["provider_label"] = hit.get("provider_label") or hit["provider"]
@@ -359,9 +381,18 @@ def run_fetch_lyrics(config):
     counts = {"ok": 0, "skip": 0, "fail": 0}
     pbar = _make_pbar(total=len(files), desc="Fetch lyrics")
 
+    # Rows whose search came back empty, held for the run's ONE album-wide
+    # absent pass (below): booking them here would mean asking
+    # `server.instrumental.lyrics_absent` once per track, which is what used to
+    # serialize 10-20 s of this step's 41 s behind its own per-track lookups.
+    pending_absent: "list[tuple[str, dict]]" = []
+
     def _finish(path, res):
         """Book one track's result — the runner thread owns every counter, so
         the workers below never touch shared state."""
+        if res.get("needs_absent"):
+            pending_absent.append((path, res))
+            return
         if res.get("marked_instrumental"):
             # The family's own automatic answer (`server.instrumental
             # .lyrics_absent`), counted on its own: the track is booked as
@@ -397,13 +428,17 @@ def run_fetch_lyrics(config):
     # nothing is shared but the counters kept on this thread.
     workers = worker_count(config, maximum=8, items=len(files))
     try:
-        if len(files) == 1 or workers == 1:
+        if len(files) == 1:
+            # One track: nothing to batch, the search settles it itself.
             for path in files:
                 _finish(path, fetch_one(path, config))
+        elif workers == 1:
+            for path in files:
+                _finish(path, fetch_one(path, config, False, False))
         else:
             from concurrent.futures import ThreadPoolExecutor, as_completed
             with ThreadPoolExecutor(max_workers=workers) as ex:
-                futures = {ex.submit(fetch_one, p, config): p
+                futures = {ex.submit(fetch_one, p, config, False, False): p
                            for p in files}
                 for fut in as_completed(futures):
                     path = futures[fut]
@@ -417,6 +452,23 @@ def run_fetch_lyrics(config):
             pbar.close()
         except Exception:
             pass
+
+    # The run's ONE absent-marking pass: every track whose search came back
+    # empty is settled together, so `lyrics_absent` cross-references its
+    # sources once for the album instead of once per track (each call fanning
+    # out its own asks and queueing behind the previous one). Same rule, same
+    # values, same writes — fewer requests, measured at 10-20 s of an 8-track
+    # album's lyrics step.
+    if pending_absent:
+        try:
+            from server import instrumental as inst
+            marked = inst.lyrics_absent([p for p, _ in pending_absent], config)
+        except Exception:
+            marked = {}
+        for path, res in pending_absent:
+            res.pop("needs_absent", None)
+            _apply_absent(res, path, marked)
+            _finish(path, res)
 
     # The kind split rides on the same line as the counters: "2 fetched" says
     # nothing about whether either of them has timestamps.

@@ -17,25 +17,26 @@ const READOUT: Record<StarSize, string> = { sm: "text-[10px]", md: "text-xs", lg
 /** The WEB tone — the same five-star geometry in an ink that cannot be taken
  *  for the user's own mark.
  *
- *  The user's stars are the app's accent at full strength, and the accent is
- *  the reader's OWN colour: a web reading drawn in it would be the same fact
- *  twice. So the fill is a dimmed sky (never `text-accent`), and the outline
- *  stays the hollow one — a web rating reads as a ghost of a rating, which is
- *  what it is: somebody else's number the script recorded. Legible on the
- *  app's own dark background under every accent, including the sky one, since
- *  the fill is also at 70 % while the user's is opaque, and the readout says
- *  the word "web" beside it. Overridable for the one surface drawn on artwork
- *  (see the doc above); `NowPlayingView` hands in the ink there. */
-const WEB_EMPTY = "text-sky-500/60";
-const WEB_FILL = "fill-current text-sky-400/70";
+ *  The user's stars are the app's ink at full strength (near-white); the web
+ *  reading is GREY. The owner's report was that the sky-blue web stars were
+ *  "disorienting" beside their own — a second colour competing with the one
+ *  they chose — so the web reading is a shade of the same ink instead: a ghost
+ *  of a rating, which is what it is (somebody else's number the script
+ *  recorded), and the readout says the words "Album Web" beside it.
+ *  Overridable for the one surface drawn on artwork (see the doc above);
+ *  `NowPlayingView` hands in the cover's own ink there — opacity does the same
+ *  job in a picture, so the fullscreen player inverts without this file
+ *  knowing what it is drawn on. */
+const WEB_EMPTY = "text-zinc-700";
+const WEB_FILL = "fill-current text-zinc-400";
 /** The mark `webReadout="mark"` draws instead of the text readout, for a cell
- *  that is a fixed narrow column (see that prop). Fixed sky, like the tone:
- *  the mark is never drawn on artwork, which uses the text readout. */
-const WEB_MARK = "bg-sky-400/70";
+ *  that is a fixed narrow column (see that prop). Grey, like the tone: the
+ *  mark is never drawn on artwork, which uses the text readout. */
+const WEB_MARK = "bg-zinc-400";
 /** The web readout's own colour: a shade brighter than the fill, because it
  *  is the part that has to be READ. Overridden beside the other two on the
  *  artwork surface. */
-const WEB_TEXT = "text-sky-400/80";
+const WEB_TEXT = "text-zinc-400";
 
 /** Clamp into range and snap to the half-star grid — an album average
  *  arrives as 3.6667 and the drawn stars have to land on halves. */
@@ -82,7 +83,7 @@ const half = (v: number) => (Number.isInteger(v) ? String(v) : v.toFixed(1));
  *  `emptyClass` / `fillClass` are the two colours, and they exist for the one
  *  surface whose background is not the app's: the fullscreen player draws its
  *  star row straight onto the artwork, where the fixed `zinc-600` outline and
- *  the white accent FILL both blend into a bright cover (reported). The caller
+ *  the near-white FILL both blend into a bright cover (reported). The caller
  *  there hands in the player's own ink (`text-current` + the surface's tone),
  *  the same rule the lyrics, the chrome and the frequency strip follow — so
  *  the stars read as part of the block instead of vanishing into the picture.
@@ -94,7 +95,7 @@ const half = (v: number) => (Number.isInteger(v) ? String(v) : v.toFixed(1));
  *  only while the user has rated nothing here (in the dimmed web tone, same
  *  geometry), and once they have, their own stars win the field and the web
  *  number becomes a small readout beside them. Hovering the field while it is
- *  still unrated previews the user's own rating in the accent, as it always
+ *  still unrated previews the user's own rating in their own ink, as it always
  *  has. `undefined` — the tag is absent — draws nothing at all, because an
  *  absence is not a rating of zero.
  *
@@ -119,7 +120,7 @@ export default function StarRating({
   webReadout = "text",
   className = "",
   emptyClass = "text-zinc-600",
-  fillClass = "fill-current text-accent",
+  fillClass = "fill-current text-zinc-100",
   webEmptyClass = WEB_EMPTY,
   webFillClass = WEB_FILL,
   webTextClass = WEB_TEXT,
@@ -151,7 +152,8 @@ export default function StarRating({
    *  labelled as their own. Defaults to the track's. */
   webKind?: "track" | "album";
   /** How the web value reads once the user's own stars are the ones drawn:
-   *  "text" prints "4.4 web" beside them; "mark" draws one dot instead, for a
+   *  "text" prints "4.4 Album Web" while the user has rated nothing; "mark"
+   *  draws one dot instead, for a
    *  cell that is a FIXED narrow column (the Tracks view's Rating column is
    *  104 px) where a text readout would paint over the column beside it. The
    *  value and its sources stay on the tooltip either way. */
@@ -263,7 +265,7 @@ export default function StarRating({
         const fill = Math.max(0, Math.min(1, shown - (star - 1)));
         // The web tone applies only while the web value is what the field is
         // DRAWING. A previewing field is the user's own rating-to-be, so it
-        // switches back to the accent the moment they point at a star.
+        // switches back to the user's own ink the moment they point at a star.
         const webTone = webOnly && !previewing;
         return (
           <span key={star} className="relative inline-flex shrink-0">
@@ -312,17 +314,25 @@ export default function StarRating({
           </span>
         );
       })}
-      {showValue && !webOnly && (
+      {/* The user's own number. `showValue` is the surfaces that always print
+          one (a card, a page header); the SECOND case is the replacement for
+          the web words the owner asked to be rid of: a row that showed "4.2
+          Web" beside their four stars now shows the rating they gave, and the
+          web reading stays on the stars' tooltip. The `mark` readout is left
+          alone — that cell is 104 px wide and would paint over its neighbour. */}
+      {((showValue && !webOnly) || (value > 0 && hasWeb && webReadout === "text")) && (
         <span className={`ml-1.5 tabular-nums text-zinc-400 ${READOUT[size]}`} aria-hidden="true">
           {value > 0 ? half(value) : "—"}
         </span>
       )}
-      {/* The web reading, beside the stars — never as them. While the web
-          value is what the field draws, this readout is also the only place
-          the number is printed (`showValue` above stands down for it, so an
-          unrated track does not read "— 4.4 web"). It carries the sources on
-          its own tooltip: the script's names, verbatim and unedited. */}
-      {hasWeb && (
+      {/* The web reading, beside the stars — never as them. Drawn only while
+          the user has rated NOTHING here: once they have, their own number is
+          what the surface prints (above) and the web figure, its sources and
+          the fact that it is somebody else's live on the tooltip. While the
+          web value is what the field draws, this readout is also the only
+          place the number is printed. It carries the sources on its own
+          tooltip: the script's names, verbatim and unedited. */}
+      {hasWeb && webOnly && (
         <span
           className={`${webReadout === "text" ? "ml-1.5 tabular-nums" : "ml-0.5"} shrink-0 ${webTextClass} ${READOUT[size]}`}
           title={webTip}

@@ -154,7 +154,7 @@ _TIER_NAMES = ("release", "identity", "kind", "size", "source", "format",
                "square", "quality", "rank")
 # What a tie-break sentence calls each tier.
 _TIER_LABELS = {
-    "release": "the album's own cover (the release group's art)",
+    "release": "the album's own cover (the release group's art, then the matched release's)",
     "identity": "the album-identity check",
     "kind": "the front-vs-other type",
     "size": "the image size",
@@ -195,8 +195,8 @@ _UPSCALE_TOLERANCE = 0.02
 _SHIPPED_TARGET = 1200
 
 _RULES = (
-    "the release group's front cover — the album's own art — beats one "
-    "release's own cover",
+    "the release group's front cover — the album's own art — beats the "
+    "matched release's own front, which beats a row found by name search",
     "a candidate has to BE this album: a row whose own release names another "
     "artist or another album is rejected, a row whose tracklist disagrees "
     "ranks below one that matches, and a row that states nothing about its "
@@ -555,20 +555,24 @@ def _release_level(row):
     The REFERENCE is the release-group's image: that is the cover the finder
     shows the candidates beside (`CoverSearchModal`'s `caaRef`), the one the
     automatic search is judged against, and the album's art rather than one
-    pressing's. A `/release/<id>/front` URL is that single release's own cover
-    — a different edition's art, a promo sleeve, a reissue — so it ranks below
-    a name-searched row, which at least does not claim to be this album's
-    specific edition either. (This used to be inverted, which is how an
-    automatic search could pick an image that was NOT the reference the user
-    was comparing it with.)
+    pressing's.
+
+    Below it sits the MATCHED RELEASE's own front (`release_cover` True, CAA by
+    release id): a real edition of this album, and one the app can name. It
+    ranks ABOVE a name-searched row, which states nothing about whose release
+    it depicts — the owner's report was exactly that inversion in the field:
+    an import of Toxicity took a store row found by artist+title (a different
+    pressing, tinted blue) over the release's own front cover, because the
+    search guess scored 0.6 and the release's own art scored 0.2. A named
+    edition is evidence; a text match is a guess.
     """
     got = row.get("release_cover")
     if got is False:
         return 1.0, ("the release group's front cover — this album's own art, "
                      "the image the candidates are compared against")
     if got is True:
-        return 0.2, ("one release's own front cover — that edition's art, not "
-                     "necessarily this album's")
+        return 0.8, ("the matched release's own front cover — a named edition "
+                     "of this album")
     return 0.6, "a name-searched cover — the source does not say whose release it is"
 
 

@@ -1330,9 +1330,12 @@ rating.
   picked that exact image. **The album's reference cover is the release GROUP's**
   (`coverartarchive.org/release-group/<rg>/front-500`): it is the image the
   finder shows beside the candidates, the wizard's Links/Covers preview, and what
-  the policy's first rule prefers — a `/release/<id>/front` is one edition's own
-  sleeve and ranks below even a name-searched row. Both are asked when both ids
-  are known, and the group's cover being absent falls back to the release's.
+  the policy's first rule prefers — and the **matched release's own front cover
+  ranks just below it, above any row found by name search**: a named edition is
+  evidence, a text match is a guess, and inverting those two is how the owner's
+  Toxicity import took a store row's blue-tinted art (a different pressing) over
+  the release's own cover. Both are asked when both ids are known, and the
+  group's cover being absent falls back to the release's.
 - **R163 — the autonomous fetch asks the release group and ranks by that
   reference, and it derives the group id when only the release is tagged.** What
   R56b promises is only true if the query actually carries the group:
@@ -4153,7 +4156,15 @@ composition instead (R267). Above `lg` the pane sits beside the artwork.
   shows its label beside the bar; the row whose kind is `export` carries a
   Cancel control that calls the route above. A frame with no identity (a chain
   ticking between two scripts) still draws on the single legacy bar, so an older
-  producer never loses its bar.
+  producer never loses its bar — and that bar now EXPIRES: a total-complete
+  frame plus 2.5 s of quiet, or a minute of quiet on its own, drops it from the
+  map (the owner's report was bars that stayed on screen for good, an id-less
+  producer having no `progress_end` to be ended by). A NAMED job is exempt from
+  the quiet rule — a stalled export still holds its locks and keeps its bar, and
+  clears on the 5 s "absent from `/api/jobs/locks`" sweep instead. The Beets
+  step's own ticks carry its job when one is held (`server/beetscfg.py`
+  publishes through `job_locks` rather than calling the relay raw), so the
+  Beets page's import ends its bar like every other job.
 - **R238 — a duplicate sidecar is reported, removable, and no longer made.**
   The app itself wrote `description (2).txt`: the import chain wrote
   `description.txt` into the pre-organize staging folder while
@@ -6062,13 +6073,25 @@ composition instead (R267). Above `lg` the pane sits beside the artwork.
     `RateYourMusic; MusicBrainz`; the album's score still comes from every
     source that answered.
 - **R359 — the star field says which rating it is drawing.** `StarRating`
-  renders the web value in its own dimmer tone only while the reader has rated
-  nothing there, and reduces it to a small readout beside the user's stars once
+  renders the web value in its own tone only while the reader has rated
+  nothing there, and reduces it to a readout beside the user's stars once
   they have — the user's own rating always wins the field, and a web value is
   never drawn as if it were theirs. The album's value and a track's value are
   labelled as what they are (a track row never draws the album's), the sources
   ride the control's `title`, and a track with no web rating draws nothing —
-  an empty star is not a zero.
+  an empty star is not a zero. **The two tones are two shades of one ink, not
+  two colours** (the owner's report: the sky-blue web stars were
+  "disorienting" beside their own): the user's stars are the app's ink at full
+  strength (`text-zinc-100`), the web reading is grey (`zinc-400` fill,
+  `zinc-700` outline, `zinc-400` readout), and the fullscreen player overrides
+  all three with the cover's own ink and its opacity — the same rule the
+  lyrics and the chrome follow — so the surface inverts with the artwork
+  without this control knowing what it is drawn on. **Once the user has rated,
+  the surface prints THEIR number and no web wording**: "4.2 album web" beside
+  their four stars was the owner's complaint — the four stars and the number
+  they gave is the readout, and the web figure, its sources and whose it is
+  stay on the hover. While unrated, the web readout is the number itself and
+  reads "4.2 Album Web" (title case, every locale: "Web" is a proper noun).
 - **R360 — MusicBrainz genres are read at the level the entity is entitled
   to.** Album-level genres come from the RELEASE GROUP (the album is the group,
   not the pressing), and a track's come from its recording, with the WORK's
@@ -6100,7 +6123,7 @@ composition instead (R267). Above `lg` the pane sits beside the artwork.
   importing from the wizard and the Library at once, can never import an album
   twice.
 
-  The pipelines all share ONE budget: `import_bulk_concurrency` (default 4,
+  The pipelines all share ONE budget: `import_bulk_concurrency` (default 5,
   clamp 1–16) is the number of albums being imported at once for the whole
   process, however many batches are asking — three batches of four albums are
   four imports, not twelve. What the budget does not admit WAITS: every album
@@ -6116,6 +6139,22 @@ composition instead (R267). Above `lg` the pane sits beside the artwork.
   `tools/test_import_pipeline.py` pins it: two batches at once, each answering
   for its own albums, one shared pool, and — at a width of 1 — one row
   `running` with the rest `queued` until their turn comes.
+
+  **It ASKS which release, first** (the owner's ask: "no confusion about what
+  album it is"). An import is a match, and a match can be wrong — the wrong
+  pressing's identity, the wrong cover. With an album selected, Import opens
+  `ImportIdentifyDialog` for the albums whose files name no release (the ones
+  that DO name one, `MUSICBRAINZ_ALBUMID` in their tags, go straight through:
+  there is nothing to ask), and each row offers the three ways a person knows:
+  a MusicBrainz link or bare id (release or release-group — the server resolves
+  it), **Detect**, which fingerprints the album with AcoustID and shows the
+  release group it says the audio is (`POST /api/import/acoustid`), and the
+  release's **catalogue number** (`GET /api/mb/search/releases?mode=catno`),
+  whose hits are one click from being the pin. The link rides the bulk item as
+  `mbid`, is resolved per album on its own worker through the shared
+  rate-limited client, and a link that cannot be resolved fails that row BEFORE
+  the album is moved — nothing is imported as something else, and nothing
+  half-imported is left behind. A row left blank imports the way it always did.
 
 ## 8. Recommended runbook
 

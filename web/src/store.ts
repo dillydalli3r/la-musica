@@ -108,6 +108,15 @@ const PROGRESS_GONE_MS = 5000;
  *  sweep applies rather than a timer armed per frame. */
 const PROGRESS_LEGACY_DONE_MS = 2500;
 
+/** …and how long an id-less bar may stay QUIET before it is dropped anyway.
+ *  The total-complete rule above is not enough for a producer that ticks
+ *  without numbers at all: the Beets page's own import published 0/0 frames
+ *  (they have an owner now — server/beetscfg.py — but a third-party or older
+ *  producer still might), and such a bar sat on screen for good. A minute with
+ *  no frame and no job in `/api/jobs/locks` is stale by any reading; a NAMED
+ *  job is exempt, because a stalled export still holds its locks. */
+const PROGRESS_LEGACY_QUIET_MS = 60000;
+
 interface Store {
   /** Every live producer's bar, keyed by `progressKey`. Frames land here and
    *  only `progress_end` (or the fallback in `pruneProgress`) clears one: a
@@ -391,7 +400,8 @@ export const useStore = create<Store>((set) => ({
       for (const [key, e] of Object.entries(st.progresses)) {
         const gone = e.job
           ? !listed.has(e.job) && now - e.t >= PROGRESS_GONE_MS
-          : e.total > 0 && e.done >= e.total && now - e.t >= PROGRESS_LEGACY_DONE_MS;
+          : (e.total > 0 && e.done >= e.total && now - e.t >= PROGRESS_LEGACY_DONE_MS) ||
+            now - e.t >= PROGRESS_LEGACY_QUIET_MS;
         if (gone) dropped = true;
         else kept[key] = e;
       }

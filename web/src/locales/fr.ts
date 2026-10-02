@@ -495,12 +495,12 @@ export default {
   // 24, et la seconde lecture, plus sourde, que le champ d'étoiles en dessine
   // (StarRating). La valeur suit l'échelle 0-100 de Picard ; l'affichage est
   // en 0-5.
-  "rating.webReadout": "{value} web",
-  "rating.webAlbumReadout": "{value} album web",
-  "rating.webTitle": "Note web {value} sur 5 — de {sources}",
-  "rating.webTitleNoSources": "Note web {value} sur 5 — le script n'a enregistré aucune source",
-  "rating.webAlbumTitle": "Note web de l'album {value} sur 5 — de {sources}",
-  "rating.webAlbumTitleNoSources": "Note web de l'album {value} sur 5 — le script n'a enregistré aucune source",
-  "rating.webAria": "Note web : {value} sur 5",
-  "rating.webAlbumAria": "Note web de l'album : {value} sur 5",
+  "rating.webReadout": "{value} Web",
+  "rating.webAlbumReadout": "{value} album Web",
+  "rating.webTitle": "Note Web {value} sur 5 — de {sources}",
+  "rating.webTitleNoSources": "Note Web {value} sur 5 — le script n'a enregistré aucune source",
+  "rating.webAlbumTitle": "Note Web de l'album {value} sur 5 — de {sources}",
+  "rating.webAlbumTitleNoSources": "Note Web de l'album {value} sur 5 — le script n'a enregistré aucune source",
+  "rating.webAria": "Note Web : {value} sur 5",
+  "rating.webAlbumAria": "Note Web de l'album : {value} sur 5",
 } as const;

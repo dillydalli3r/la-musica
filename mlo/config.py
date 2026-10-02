@@ -1095,10 +1095,10 @@ DEFAULT_CONFIG = {
     "import_scripts": [],
     # Albums processed at the same time when several are imported at once. This
     # is the WHOLE process's budget, shared by every running batch (the
-    # wizard's queue, the Library's Import button): four albums import at once
+    # wizard's queue, the Library's Import button): five albums import at once
     # by default and the rest WAIT IN THE QUEUE (the job payload says which is
     # which), and the setting goes to 16 for a machine that can take it.
-    "import_bulk_concurrency": 4,
+    "import_bulk_concurrency": 5,
     # AcoustID release matching during import: fingerprint each track with
     # chromaprint's fpcalc and ask AcoustID which MusicBrainz recording the
     # audio actually is, then offer the release that contains them. Falls back

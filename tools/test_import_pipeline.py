@@ -512,6 +512,67 @@ assert queue_state["running"] == 0 and queue_state["queued"] == 0, queue_state
 assert os.path.isdir(os.path.join(LIB, "Queue Album 1")), os.listdir(LIB)
 
 # --------------------------------------------------------------------------- #
+# A pinned MusicBrainz link: the release the owner asked for, and no guessing
+# --------------------------------------------------------------------------- #
+# `POST /api/import/bulk` items may carry `mbid` — the Library's Import dialog
+# collects a MusicBrainz link (or a release-group link) for every album whose
+# files name no release, so the pipeline imports the release the user pointed
+# at instead of matching by name. The run resolves it (through the shared,
+# rate-limited MusicBrainz client) and stamps THAT release; a link MusicBrainz
+# cannot answer for is the row's own reason — the album is never imported as
+# something else.
+from server import integrations as _intg
+_real_resolve = _intg.resolve_release
+_real_stamp = imports._stamp_release
+PIN_ID, PIN_GROUP = "33333333-3333-3333-3333-333333333333", "44444444-4444-4444-4444-444444444444"
+PIN_LINK = f"https://musicbrainz.org/release/{PIN_ID}"
+stamped = []
+
+
+def _fake_resolve(mbid):
+    stamped.append(("resolved", mbid))
+    return {"id": PIN_ID, "title": "Pinned Album", "release_group_id": PIN_GROUP,
+            "media": [{"disc": 1, "position": 1, "title": "Song",
+                       "recording_mbid": None}],
+            "artists": []}
+
+
+def _record_stamp(album, release, cfg, **kw):
+    stamped.append(("stamped", release.get("id")))
+    return (1, 0)
+
+
+_intg.resolve_release = _fake_resolve
+imports._stamp_release = _record_stamp
+try:
+    pinned = staging_album("Pinned Album")
+    pinned_out = imports.bulk_import([{"path": pinned, "mbid": PIN_LINK}], CFG)
+finally:
+    _intg.resolve_release = _real_resolve
+    imports._stamp_release = _real_stamp
+assert pinned_out["ok"] == 1 and pinned_out["items"][0]["status"] == "imported", pinned_out
+# resolved ONCE from the item's link, and every stamp used that release
+# (an import stamps it twice by design: the identity pass and the genres)
+assert stamped[0] == ("resolved", PIN_LINK), stamped
+assert {v for k, v in stamped if k == "stamped"} == {PIN_ID}, stamped
+assert os.path.isdir(os.path.join(LIB, "Pinned Album")), os.listdir(LIB)
+
+# …and a link that cannot be resolved fails THAT row, naming MusicBrainz: an
+# import must not quietly fall back to a name match the user did not ask for.
+def _bad_resolve(mbid):
+    raise RuntimeError("MusicBrainz is busy, try again")
+
+
+_intg.resolve_release = _bad_resolve
+try:
+    unpinned = staging_album("Unresolvable Album")
+    bad_out = imports.bulk_import([{"path": unpinned, "mbid": "https://musicbrainz.org/release/nope"}], CFG)
+finally:
+    _intg.resolve_release = _real_resolve
+assert bad_out["failed"] == 1 and "MusicBrainz" in str(bad_out["items"][0]["error"]), bad_out
+assert not os.path.isdir(os.path.join(LIB, "Unresolvable Album")), os.listdir(LIB)
+
+# --------------------------------------------------------------------------- #
 # The routes the wizard calls
 # --------------------------------------------------------------------------- #
 from server import api_imports

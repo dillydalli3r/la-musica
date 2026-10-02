@@ -32,6 +32,7 @@ import ArtistAvatar from "../components/ArtistAvatar";
 import ArtistName from "../components/ArtistName";
 import LockedChip from "../components/LockedChip";
 import SelectAllButton from "../components/SelectAllButton";
+import ImportIdentifyDialog, { type IdentifyAlbum } from "../components/ImportIdentifyDialog";
 import { forceDict, loadForceSel } from "../lib/force";
 import Segmented from "../components/Segmented";
 import PageHeader from "../components/PageHeader";
@@ -467,6 +468,9 @@ export default function LibraryPage() {
     ? (lib?.artists ?? []).flatMap((a) => a.albums).find((al) => al.path === detailTrack.albumPath)
     : undefined;
   const [bulkTagsOpen, setBulkTagsOpen] = useState(false);
+  // The albums the Import button has to ASK about: a selection whose files
+  // all name a release never opens this (see `importSelection`).
+  const [identify, setIdentify] = useState<{ albums: IdentifyAlbum[]; identified: number } | null>(null);
 
   const [fullDates, setFullDates] = useLocalPref("full-dates", false);
   // User-added tag columns ride in the same visible/width prefs as the
@@ -873,14 +877,16 @@ export default function LibraryPage() {
   // In-progress page (and the album rows) show it running, and several batches
   // may be in flight at once — the server refuses only an album another import
   // already holds.
-  const importSelection = async () => {
-    const paths = selectionAlbumDirs;
-    if (!paths.length) {
-      toast("Select albums, artists or tracks to import");
-      return;
-    }
+  //
+  // What it DOES ask (the owner's ask): which release each album is, for the
+  // albums whose files do not already name one. A selection whose files all
+  // carry a MusicBrainz release id goes straight through — there is nothing to
+  // ask — and the rest open the identify dialog, where a link, an AcoustID
+  // detection or a catalogue number can pin the release before anything runs.
+  const startImport = async (paths: string[], pins: Record<string, string>) => {
     try {
-      const res = await api.importBulk(paths.map((path) => ({ path })));
+      const res = await api.importBulk(
+        paths.map((path) => ({ path, mbid: pins[path] || undefined })));
       if (!res.ok) {
         toast.error(res.error ?? "could not start the import");
         return;
@@ -890,16 +896,48 @@ export default function LibraryPage() {
       const width = job?.concurrency ?? 0;
       const n = paths.length;
       const what = n === 1 ? paths[0].split(/[\\/]/).pop() : `${n} albums`;
+      const pinned = Object.values(pins).filter(Boolean).length;
       const parts = [
         `Importing ${what}`,
+        pinned ? `${pinned} pinned to a release` : null,
         width && n > width ? `${width} at once, ${n - width} queued` : null,
         others.length ? `${others.length} other batch${others.length === 1 ? "" : "es"} running` : null,
       ].filter(Boolean);
       toast(parts.join(" — "));
-      invalidateLibrary(qc);
+      // NOT `invalidateLibrary(qc)`: starting a batch changes nothing on disk
+      // yet, and a full tree rebuild is exactly the CPU the pipelines are about
+      // to want. The albums being imported show themselves through the lock
+      // chips (`lib/locks`, polled every 2 s) and the header bars, and the tree
+      // is refetched when the work lands.
     } catch (e) {
       toast.error(String(e));
     }
+  };
+
+  const importSelection = () => {
+    const paths = selectionAlbumDirs;
+    if (!paths.length) {
+      toast("Select albums, artists or tracks to import");
+      return;
+    }
+    const byPath = new Map(flat.albums.map((al) => [al.path, al]));
+    const unknown: IdentifyAlbum[] = [];
+    for (const p of paths) {
+      const al = byPath.get(p);
+      const pin = al?.meta?.MUSICBRAINZ_ALBUMID ?? al?.album_values?.MUSICBRAINZ_ALBUMID ?? "";
+      if (!pin) {
+        unknown.push({
+          path: p,
+          artist: al?.album_artist ?? "",
+          album: al?.meta?.ALBUM || p.split(/[\\/]/).pop() || "",
+        });
+      }
+    }
+    if (!unknown.length) {
+      void startImport(paths, {});
+      return;
+    }
+    setIdentify({ albums: unknown, identified: paths.length - unknown.length });
   };
 
   const organizeSelection = async () => {
@@ -1529,8 +1567,15 @@ export default function LibraryPage() {
             the view without the user reaching back up to the app bar — and
             the two boxes cannot fork into two filters, which is the whole
             reason the query lives in the store. `key:value` terms match tags
-            (artist:, genre:, year:, composer:) exactly as they do there. */}
-        <div className="search-field relative flex-1 min-w-[9rem] max-w-xs">
+            (artist:, genre:, year:, composer:) exactly as they do there.
+
+            It GROWS into the free room on its own row, up to a cap that rises
+            with the window (the owner's report: with the actions wrapped to
+            the row below — which is what selects mode does, adding Select all
+            and Deselect all — the box sat at a fixed 20 rem while half its row
+            was empty). A phone, where the actions are always below, gets the
+            whole row. */}
+        <div className="search-field relative flex-1 min-w-[9rem] max-w-none sm:max-w-sm lg:max-w-md">
           <Search className="absolute left-2.5 top-1/2 -translate-y-1/2 h-3.5 w-3.5 text-zinc-500" />
           <input
             className="input !py-1.5 !pl-8 text-xs"
@@ -1689,6 +1734,18 @@ export default function LibraryPage() {
             ? { total: layout.report.total, counts: layout.report.counts, scanned_at: layout.scanned_at }
             : undefined}
           onClose={() => setStatsOpen(false)}
+        />
+      )}
+
+      {identify && (
+        <ImportIdentifyDialog
+          albums={identify.albums}
+          identified={identify.identified}
+          onClose={() => setIdentify(null)}
+          onStart={async (pins) => {
+            setIdentify(null);
+            await startImport([...selectionAlbumDirs], pins);
+          }}
         />
       )}
 

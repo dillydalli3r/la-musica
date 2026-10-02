@@ -4610,6 +4610,24 @@ def _bulk_one(item, cfg):
         row["error"] = "no audio files"
         return row
 
+    # A pinned release, resolved BEFORE anything is claimed or moved: the
+    # Library's Import dialog collects a MusicBrainz link (or simply an ID) for
+    # every album whose files do not already name one, and the item carries it
+    # here so the release the owner asked for is the release this run imports —
+    # its identity tags, its genres, and the cover the cover step fetches.
+    # Resolved on the item's own worker (the request is not held open for a
+    # lookup) through the shared one-request-per-second client, and a link that
+    # cannot be resolved is the row's reason BEFORE the album moves: nothing is
+    # imported as something else, and nothing half-imported is left behind.
+    release = item.get("release")
+    if not release and item.get("mbid"):
+        try:
+            from server.integrations import resolve_release
+            release = resolve_release(str(item["mbid"]).strip())
+        except Exception as e:
+            row["error"] = f"MusicBrainz: {e}"
+            return row
+
     # ONE CHAIN PER ALBUM, whoever asks — and BEFORE anything of this row
     # touches the album. A bulk row for an album an import is ALREADY chaining
     # (the download's own finish, the import queue, another bulk run) used to
@@ -4649,7 +4667,6 @@ def _bulk_one(item, cfg):
             return row
         album = dest
 
-    release = item.get("release")
     stamp_error = None
     if release:
         try:
@@ -4699,9 +4716,13 @@ def _bulk_one(item, cfg):
 def bulk_import(items, cfg=None, progress=None, job_id=None):
     """Import a queue of albums (staging folders or library folders).
 
-    *items*: ``{"path", "release": <optional MB release dict>, "move": bool}``
-    — ``move`` defaults to True for a path outside the library and False for
-    one already inside it. Each album is moved into
+    *items*: ``{"path", "release": <optional MB release dict>, "mbid": <optional
+    MusicBrainz release or release-group link/id>, "move": bool}`` — ``move``
+    defaults to True for a path outside the library and False for one already
+    inside it. *mbid* is resolved here (`server.integrations.resolve_release`,
+    through the shared rate-limited client) when no ``release`` dict came with
+    the item, so the Library's identify-before-import dialog only has to carry
+    the link the user pasted. Each album is moved into
     ``<music folder>/Artists``, stamped with the release identity when one is
     supplied, then finished with the configured chain. Up to
     ``import_bulk_concurrency`` albums run at once (each on its own copy of the
