@@ -49,6 +49,7 @@ quit. Ctrl+C quits too, and takes the whole process tree with it.
 from __future__ import annotations
 
 import argparse
+import atexit
 import json
 import os
 import shutil
@@ -332,24 +333,42 @@ class DevBed:
         """Undo the one write this bed causes in somebody else's config, and
         only that one: the value goes back only while it is still the path this
         run stamped. If the install that owns the library saved in the meantime,
-        its value is not ours to touch."""
+        its value is not ours to touch.
+
+        Retried, and it never raises: this is the LAST thing the bed does, and a
+        file another process still holds (Windows sharing violations are
+        transient) or a second Ctrl+C must not leave a Windows path in a
+        library whose own install is a container."""
         config = self.shared_config()
         if config is None or not self.foreign_folder or not config.is_file():
             return
-        try:
-            data = json.loads(config.read_text(encoding="utf-8"))
-        except Exception:
-            return
-        stamped = os.path.normcase(str(data.get("music_folder") or ""))
-        if stamped != os.path.normcase(str(self.music)):
-            return                        # not ours (or already put back)
-        data["music_folder"] = self.foreign_folder
-        temp = config.with_name(config.name + ".devbed")
-        temp.write_text(json.dumps(data, indent=2, sort_keys=True) + "\n",
-                        encoding="utf-8")
-        os.replace(temp, config)
-        print(f"· restored music_folder in {config} to "
-              f"{self.foreign_folder!r}", flush=True)
+        for attempt in range(4):
+            try:
+                data = json.loads(config.read_text(encoding="utf-8"))
+                if os.path.normcase(str(data.get("music_folder") or "")) \
+                        != os.path.normcase(str(self.music)):
+                    return                    # not ours (or already put back)
+                data["music_folder"] = self.foreign_folder
+                temp = config.with_name(config.name + ".devbed")
+                temp.write_text(json.dumps(data, indent=2, sort_keys=True) + "\n",
+                                encoding="utf-8")
+                os.replace(temp, config)
+                print(f"· restored music_folder in {config} to "
+                      f"{self.foreign_folder!r}", flush=True)
+                return
+            except KeyboardInterrupt:
+                continue                      # still ours to undo: try again
+            except OSError as exc:
+                if attempt == 3:
+                    print(f"· COULD NOT put {config} back ({exc}) — it still says "
+                          f"{self.music!r}; that library's own install rewrites it "
+                          f"on its next start", flush=True)
+                    return
+                time.sleep(0.5)
+            except Exception as exc:
+                print(f"· COULD NOT put {config} back ({type(exc).__name__}: {exc})",
+                      flush=True)
+                return
 
     # -- lifecycle -------------------------------------------------------- #
     def start(self) -> bool:
@@ -416,6 +435,13 @@ class DevBed:
             print("· stopping…", flush=True)
         self.web.stop()
         self.server.stop()
+        # The app writes its config while it STARTS (and on a save). Give the
+        # killed tree a moment to be really gone before putting the file back,
+        # or a late write lands on top of the restore — measured once: the bed
+        # stopped, the restore ran, and the file still read this machine's path.
+        deadline = time.monotonic() + 8
+        while time.monotonic() < deadline and _in_use(self.port):
+            time.sleep(0.2)
         self.restore_foreign_folder()
 
     def restart(self) -> None:
@@ -589,9 +615,21 @@ def main() -> int:
         threading.Timer(1.0, bed.open_app).start()
     if args.no_tray or not bed.run_tray():
         print("· console mode", flush=True)
-    bed.run_console()
-    bed.quit_now()
-    bed.stop()
+    try:
+        bed.run_console()
+    finally:
+        # The restore is the only thing that undoes the write this run caused in
+        # a config it does not own, so nothing may skip it: not a second Ctrl+C
+        # (the console hands one to every process in the group, and it can land
+        # inside the stop itself) and not an exception on the way out.
+        atexit.register(bed.restore_foreign_folder)
+        while True:
+            try:
+                bed.quit_now()
+                bed.stop()
+                break
+            except KeyboardInterrupt:
+                continue
     return 0
 
 

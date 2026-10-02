@@ -163,6 +163,17 @@ try:
     check("a value the bed did not stamp is left alone",
           json.loads(foreign_cfg.read_text(encoding="utf-8")).get("music_folder")
           == "D:/somewhere/else")
+
+    # The restore is the LAST thing the bed does, in somebody else's file: a
+    # config it cannot read (another install mid-write) must not take the
+    # shutdown path down with it.
+    foreign_cfg.write_text("{ half a write", encoding="utf-8")
+    try:
+        foreign.restore_foreign_folder()
+        check("an unreadable shared config does not raise out of the restore", True)
+    except Exception as exc:
+        check("an unreadable shared config does not raise out of the restore",
+              False, f"{type(exc).__name__}: {exc}")
 finally:
     devtool.is_scratch = real_is_scratch
     devtool.wipe(foreign_lib)
