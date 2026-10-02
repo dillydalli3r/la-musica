@@ -572,7 +572,7 @@ export const CONFIG_GROUPS: CfgGroup[] = [
         { k: "grade_check_cue_format", label: "CUE format", type: "bool" },
         { k: "grade_check_cue_files", label: "Per-track CUE sheets (a CUE beside the tracks)", type: "bool" },
         { k: "grade_check_accurip_format", label: ".accurip format", type: "bool" },
-        { k: "grade_check_expected_tracks", label: "Release tracklist manifest (albums carrying a MusicBrainz release id)", type: "bool" },
+        { k: "grade_check_expected_tracks", label: "Whole release present (the tracklist manifest, and every track it names)", type: "bool" },
         { k: "grade_check_disallowed", label: "Disallowed files", type: "bool" },
         { k: "grade_check_extra_images", label: "Extra artwork (images not tied to a track)", type: "bool" },
         { k: "grade_check_empty_folders", label: "Empty folders (no files anywhere beneath them)", type: "bool" },

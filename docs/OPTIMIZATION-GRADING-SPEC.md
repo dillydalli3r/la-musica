@@ -101,7 +101,7 @@ An issue is `{code, label, where, reason}` for album-level and artist problems
 | `CD_FORMAT` | a CD track is not 16-bit/44.1 kHz FLAC |
 | `LOG_CHECKSUM` | the rip log's EAC SHA256 does not verify |
 | `AUDIT` | the audit tag is missing or not REAL (with `grade_check_audit` on) |
-| `EMPTY_FOLDER`, `EXPECTED_TRACKS_MISSING` | folder/release-level failures |
+| `EMPTY_FOLDER`, `EXPECTED_TRACKS_MISSING`, `EXPECTED_TRACKS_INCOMPLETE` | folder/release-level failures (`INCOMPLETE`: the album holds part of its recorded tracklist) |
 | `ARTIST_IMAGE_MISSING`, `ARTIST_IMAGE_CORRUPT`, `ARTIST_IMAGE_FORMAT`, `ARTIST_IMAGE_OVERSIZED`, `ARTIST_IMAGE_ASPECT`, `ARTIST_IMAGE_UPSCALED`, `ARTIST_DESCRIPTION_MISSING`, `ARTIST_FOLDER_MISSING`, `ARTIST_EMPTY` | artist-folder failures (script 19 clears the image ones). `ARTIST_EMPTY` is an artist folder holding NO album folder — only the artist's own image/description: the artist is not in the library, so the folder is not a graded artist. Script 20 reports it and the Optimization page can remove it to the Trash |
 | `ARTIST_IMAGE_UNDERSIZED` | informational note on an artist image below `artist_image_target_size` — reported, never failing |
 
@@ -398,7 +398,7 @@ group still renders (section *Other checks*).
 | `grade_check_disallowed` | Disallowed file types | ON | no file whose category is switched off in `grade_include_*` |
 | `grade_check_extra_images` | Stray images | ON | no image that is neither `cover.*` nor a per-track sidecar |
 | `grade_check_empty_folders` | Empty folders | ON | no audio-less folder (`EMPTY_FOLDER`) |
-| `grade_check_expected_tracks` | Release tracklist manifest | ON | an album carrying a MusicBrainz release id has a non-empty `.mlo_expected.json` (`EXPECTED_TRACKS_MISSING`) |
+| `grade_check_expected_tracks` | Whole release present | ON | an album carrying a MusicBrainz release id has a non-empty `.mlo_expected.json` (`EXPECTED_TRACKS_MISSING`), **and** every row of a manifest the album does carry is on disk (`EXPECTED_TRACKS_INCOMPLETE` — 14 of a CD's 15 tracks fails) |
 | `grade_check_album_description` | Album description stored | ON | `<album>/description.txt` exists and is non-blank |
 | `grade_check_raw_video` | Raw videos | ON | no un-remuxed video container (`.vob`/`.avi`/`.wmv`/`.ts`…) |
 | `grade_check_lossless_source` | Lossless sources | ON | no uncompressed lossless source (`.wav`/`.aif`/`.aiff`/`.ape`/`.wv`/`.shn`/`.tta`) is left in the library. The check **stands down** (adds no check at all) when the conversion pass would never touch one: the target is itself one of those containers (`library_codec` = `wav`/`aiff`) or nothing is converted (`library_codec`/`library_codec_optimize` = `keep`). The issue names the target: *"… (script 3 converts them to FLAC)"* |
@@ -2983,6 +2983,15 @@ user asked for, in the order they asked for it. `server/exporter.py` owns both.
     `expected_total` and `expected_present` ride the album result, and the
     report's first line says "Partial album: …" rather than letting a slice read
     as a small album.
+  * **the tracks that are missing FAIL the album** (`EXPECTED_TRACKS_INCOMPLETE`,
+    `grade_check_expected_tracks`, the owner's ask): a folder holding 14 of a
+    CD's 15 tracks used to grade PASS while the page said "14 of 15" beside it —
+    the readout knew and the grade did not charge for it. The rule is the one
+    completeness rule the app already has (`mlo.paths.expected_tracks_state`,
+    read by the page, the grade and script 9), never a second opinion, and the
+    count rides `partial_reason`. This is the one thing a partial album cannot
+    do: it is graded on the evidence it HAS (the bullets above) and it fails on
+    what it does not have.
 
 - **R287 — a release-driven import writes the album's OWN identity, and the
   album entry reads it while the audio is still arriving.** The owner's report:

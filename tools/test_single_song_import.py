@@ -107,7 +107,7 @@ from mlo.accurip import (  # noqa: E402
     run_generate_accurip,
 )
 from mlo.config import load_config, normalize_config  # noqa: E402
-from mlo.grader import _grade_album  # noqa: E402
+from mlo.grader import EXPECTED_TRACKS_INCOMPLETE, _grade_album  # noqa: E402
 from mlo.paths import load_expected_tracks  # noqa: E402
 from server import library as lib_mod  # noqa: E402
 from server import main as mlo_main  # noqa: E402
@@ -427,6 +427,9 @@ check(not any(i.startswith("Missing .log file") for i in issues),
       "the .log IS there: no generic missing-.log failure", issues)
 check(not any(i.startswith("Missing .cue file") for i in issues),
       "the .cue IS there: no generic missing-.cue failure", issues)
+check(EXPECTED_TRACKS_INCOMPLETE in issues,
+      "and the album is CHARGED for the three tracks of its tracklist that "
+      "never arrived: a 1-of-4 rip fails the grade (the owner's ask)", issues)
 track = g["tracks"][0]
 eq(track["file"], NAMES[1], "the graded track is the imported one")
 eq(track["accuraterip_status"], "REAL",
@@ -485,6 +488,9 @@ check(not os.path.isdir(os.path.join(pathmod.library_root(MF),
                                      os.path.splitext(NAMES[0])[0])),
       "no sibling album was created beside it")
 row3 = album_row(album_dir)
+eq(row3["pass"], False,
+   "the library row for a partial album does not pass — the same failure the "
+   "album page shows as a red dot")
 eq(missing_positions(row3), [3, 4],
    "the album is still partial, now missing only what is not there")
 eq(row3["partial_reason"], "2 of 4 tracks of the album's tracklist are in this folder",

@@ -4448,20 +4448,30 @@ def _grade_album(album_dir, lyrics_format, cfg=None):
                       f"(script 3 converts them to {_src_target})", "album")
 
     # Every album must carry the MusicBrainz release's own tracklist manifest
-    # (.mlo_expected.json, written at import and by script 15). The files on
-    # disk only describe themselves, so without the manifest a PARTIAL import
-    # (3 tracks of 12) is indistinguishable from a complete album and grades
-    # PASS. An album that HAS the manifest is never failed by this check —
-    # its tracklist is diffed against the files as before (see
-    # server.library._add_expected_tracks → `expected_tracks` / `partial`).
-    # Only an album carrying a MusicBrainz release id is graded on it: script
-    # 15 writes NO manifest without one (it will not fabricate a tracklist for
-    # a release it cannot name), so requiring one there failed the album with
-    # nothing the user could run to clear it — the manifest is unattainable by
-    # design, and the missing release link is what that album is graded on.
-    if cfg.get("grade_check_expected_tracks", True) and album_has_mbid:
-        total_checks += 1
-        if not load_expected_tracks(album_dir)["tracks"]:
+    # (.mlo_expected.json, written at import and by script 15) AND hold every
+    # row of it. The files on disk only describe themselves, so without the
+    # manifest a PARTIAL import (3 tracks of 12) is indistinguishable from a
+    # complete album and grades PASS. An album that carries one is diffed
+    # against it — the same rule the album page reads (mlo.discs
+    # .album_expected_state → mlo.paths.expected_tracks_state), never a second
+    # opinion — and a folder holding 14 of a disc's 15 tracks is a FAILED
+    # album, not a small one: the page could already say "14 of 15 tracks of
+    # the album's tracklist are in this folder" while the grade still passed
+    # it, which is the state the owner asked to be charged for.
+    # Only an album carrying a MusicBrainz release id is failed for a MISSING
+    # manifest: script 15 writes NO manifest without one (it will not fabricate
+    # a tracklist for a release it cannot name), so requiring one there failed
+    # the album with nothing the user could run to clear it — the manifest is
+    # unattainable by design, and the missing release link is what that album
+    # is graded on.
+    if cfg.get("grade_check_expected_tracks", True):
+        if load_expected_tracks(album_dir)["tracks"]:
+            total_checks += 1
+            if partial:
+                failed_checks += 1
+                add_issue(EXPECTED_TRACKS_INCOMPLETE, "album")
+        elif album_has_mbid:
+            total_checks += 1
             failed_checks += 1
             add_issue(EXPECTED_TRACKS_MISSING, "album")
 
@@ -4976,6 +4986,13 @@ EMPTY_FOLDER = "EMPTY_FOLDER"
 # tracklist is missing, so nothing can say whether the album is complete.
 # Album-wide like the other album checks (see grade_check_expected_tracks).
 EXPECTED_TRACKS_MISSING = "EXPECTED_TRACKS_MISSING"
+
+# Issue code for an album that holds only PART of its recorded tracklist — a
+# folder with 14 of a disc's 15 tracks. The count and the missing rows ride the
+# same album payload (`partial`, `partial_reason`, `expected_tracks`), so the
+# page and the grade name the same tracks; this code is the failure the grade
+# charges for it.
+EXPECTED_TRACKS_INCOMPLETE = "EXPECTED_TRACKS_INCOMPLETE"
 
 
 def _find_empty_folders(root, dirs_out):

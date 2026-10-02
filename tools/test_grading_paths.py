@@ -14,7 +14,8 @@ import wave
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from mlo.grader import (ALBUM_TAGS, EMPTY_FOLDER, EXPECTED_TRACKS_MISSING,
+from mlo.grader import (ALBUM_TAGS, EMPTY_FOLDER, EXPECTED_TRACKS_INCOMPLETE,
+                        EXPECTED_TRACKS_MISSING,
                         PER_TRACK_TAGS, REPLAYGAIN_TAGS,
                         _grade_album, _naming_mismatch, _release_type_candidates,
                         printed_pct, run_grade_library, tag_key_allowed)
@@ -1624,10 +1625,42 @@ save_expected_tracks(mn_dir, "11111111-1111-1111-1111-111111111111",
                        "recording_mbid": "22222222-2222-2222-2222-222222222222"}])
 stats_man_yes, lines_man_yes = graded(dict(MAN_CFG))
 ok(EXPECTED_TRACKS_MISSING not in stats_man_yes["issue_counts"],
-   f"an album WITH a manifest is never failed by the check "
+   f"an album WITH a manifest is not failed for the manifest "
    f"({stats_man_yes['issue_counts']})")
 ok(stats_man_yes["grade_dist"] == {"PASS": 1, "FAIL": 0},
-   f"it grades PASS ({stats_man_yes['grade_dist']})")
+   f"and every row of it is in the folder, so it grades PASS "
+   f"({stats_man_yes['grade_dist']})")
+
+# A folder holding PART of the recorded tracklist: 1 of the manifest's 2 rows
+# is on disk. The page could always say "1 of 2 tracks …"; the grade now charges
+# for it, because a rip missing a track is a broken album rather than a small
+# one (the owner's ask: 14 of a CD's 15 tracks must fail).
+save_expected_tracks(mn_dir, "11111111-1111-1111-1111-111111111111",
+                     [{"disc": 1, "position": 1, "title": "Song",
+                       "recording_mbid": None},
+                      {"disc": 1, "position": 2, "title": "Second Song",
+                       "recording_mbid": None}])
+stats_man_short, lines_man_short = graded(dict(MAN_CFG))
+short_row = row_line(lines_man_short, mn_rel)
+ok(stats_man_short["issue_counts"].get(EXPECTED_TRACKS_INCOMPLETE) == 1,
+   f"an album holding 1 of the 2 tracks its tracklist names reports one "
+   f"EXPECTED_TRACKS_INCOMPLETE ({stats_man_short['issue_counts']})")
+ok(short_row is not None and "✕" in short_row and "FAIL" in short_row,
+   f"the incomplete album is a FAILED row ({short_row})")
+ok(stats_man_short["grade_dist"] == {"PASS": 0, "FAIL": 1},
+   f"it does not grade PASS ({stats_man_short['grade_dist']})")
+
+# The missing track arrives: the same album is whole and passes again — the
+# failure is the absent file, not the manifest.
+mn_flac2 = album_path(mn_music, dict(mn_tags, TRACKNUMBER="2", TITLE="Second Song"))
+make_flac(mn_flac2)
+set_tags(mn_flac2, dict(mn_tags, TRACKNUMBER="2", TITLE="Second Song"))
+stats_man_whole, lines_man_whole = graded(dict(MAN_CFG))
+ok(EXPECTED_TRACKS_INCOMPLETE not in stats_man_whole["issue_counts"],
+   f"the second track's arrival clears the failure "
+   f"({stats_man_whole['issue_counts']})")
+ok(stats_man_whole["grade_dist"] == {"PASS": 1, "FAIL": 0},
+   f"and the album grades PASS again ({stats_man_whole['grade_dist']})")
 
 # Key OFF: the same album (manifest deleted again) is not graded on it at all
 # — no issue, no row change, no extra check in the denominator.
