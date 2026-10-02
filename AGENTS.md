@@ -41,7 +41,10 @@ only `server/` and `mlo/`, and the UI on vite with hot reload proxying `/api` an
 
 A library the bed does not own (the real one, say) is never written to by the
 bed: it withholds the env vars the app would seed into that shared config, and
-puts back the one value the app itself re-stamps on every start.
+puts back the one value the app itself re-stamps on every start. It records that
+value in a marker beside the config before the app starts, so a run killed
+before it could put it back (Task Manager, a second Ctrl+C) is healed by the
+next run instead of being read as the library's own value.
 
 ```bash
 python dev.py --no-open --no-tray           # what an agent wants: console, no browser
@@ -51,19 +54,54 @@ Ctrl+C stops both halves — and the TREE, not just the leader: `uvicorn --reloa
 and `npm run dev` each leave a child holding the inherited listening socket, so a
 plain kill leaves the port bound to a dead pid.
 
+## Commit locally; release only when the owner says so
+
+Work lands as **local commits on `main`** — explicit `git add`, a message that is
+the record of what changed and what proved it. That is where a task ends:
+**do not `git push`, tag or cut a release until the owner says the state is good.**
+They run the app from this repo, so an unreleased change is already live for
+them; releasing is their decision, not the last step of a task.
+
+When they do ask for one:
+
+1. `python tools/check_versions.py vX.Y.Z` — every copy that must agree (10 of
+   them: `mlo/__init__.py`, `Dockerfile`, `README.md`, `desktop/README.md`,
+   `desktop/package.json`, `web/package.json`, `desktop/src-tauri/Cargo.toml`,
+   `Cargo.lock`, `tauri.conf.json` ×2) is listed, and the run fails until all say
+   the same version. Bump first, then run it again with no argument.
+2. Release notes: `docs/release-notes/release-notes-<version>.md`, never the repo
+   root — nothing reads them at build time, they are the record of what a release
+   changed. `git mv` keeps the history when one moves.
+3. `git push origin main`, then tag and push it
+   (`git tag -a vX.Y.Z -m "la musica X.Y.Z" && git push origin vX.Y.Z`): the tag
+   runs `.github/workflows/release.yml` — suites, then the web/desktop/mobile/
+   docker builds and the published GitHub release (~10 min). Watch it with
+   `gh run watch <id>`; a red job there is the release, not the change.
+
 ## Commands worth knowing
 
-- The suites: `python tools/test_*.py` — one per area, each exits non-zero on
-  failure. Run the ones your change touches, and add a case there rather than a
-  new suite.
-- Every version copy must agree: `python tools/check_versions.py [vX.Y.Z]`.
-- Release notes go in **`docs/release-notes/`** (as
-  `release-notes-<version>.md`), never in the repo root — nothing reads them at
-  build time, they are the record of what a release changed. `git mv` keeps the
-  history when one moves.
-- Web: `cd web && npm run build` (typecheck: `npx tsc -b`).
-- UI checks: `node tools/check_*.mjs <payload.json>` are payload-driven (no server);
-  `tools/check_*.cjs` drive a running scratch server.
+- **Suites**: `python tools/test_*.py` (one per area) and `node tools/test_*.cjs`.
+  Each exits **0 pass · 1 failed · 2 cannot run here** (no `flac.exe`, no
+  Playwright, no server) — 2 is this machine, not a failure. Add a case to the
+  suite your change touches rather than a new suite.
+- **The gate before handing work over** — every suite, the typecheck, the linter
+  and the build, plus the check for the surface you touched:
+
+  ```bash
+  for f in tools/test_*.py;  do python "$f" >/dev/null || [ $? = 2 ] || echo "FAIL $f"; done
+  for f in tools/test_*.cjs; do node   "$f" >/dev/null || [ $? = 2 ] || echo "FAIL $f"; done
+  (cd web && npx tsc -b && npx oxlint src && npm run build)
+  node tools/check_<the surface you touched>.mjs    # payload-driven: no server needed
+  ```
+
+- **UI checks**: `node tools/check_*.mjs <payload.json>` stand the real app up on
+  a stub backend, so they need no server and never touch the owner's library;
+  `tools/check_*.cjs` drive a running scratch server (8011 up, scratch
+  `MLO_MUSIC_FOLDER`).
+- **A UI change is not verified by a check alone**: start the app
+  (`python dev.py --no-open --no-tray`), drive the real page, and read what it
+  did — a check that passes while the screen is wrong is a check that is wrong.
+- Web on its own: `cd web && npm run build` (typecheck `npx tsc -b`).
 
 ## House rules that came from real bugs
 
