@@ -332,6 +332,27 @@ export function InstrumentalBadge({ value }: { value: string | null | undefined 
   return null;
 }
 
+/** MusicBrainz's disambiguation comment beside a name — the plain text it
+ *  renders in parentheses to tell two same-named things apart: "1967–1970
+ *  (The Blue Album)", "The Beatles (UK rock band)", a track's "… (live)".
+ *
+ *  It is drawn in a tone DIMMER than the name it annotates, exactly as
+ *  MusicBrainz draws it, and it is deliberately VISIBLE rather than a
+ *  hover-only tooltip: the whole point of the comment is to be read next to
+ *  the name. Nothing is drawn when the entity states none — never an empty
+ *  "()" — which is why the server hands over null (not "") for an absent
+ *  comment. `className` overrides the tone for a name already drawn dim
+ *  (the caller's own caption colour), and the mark is `shrink-0` so a
+ *  truncated name can never clip it away. */
+export function DisambiguationMark({ value, className = "text-zinc-500" }: {
+  value?: string | null;
+  className?: string;
+}) {
+  const text = (value || "").trim();
+  if (!text) return null;
+  return <span className={`shrink-0 ${className}`}> ({text})</span>;
+}
+
 /** Which KIND a track's stored lyrics are — the server's own field
  *  (`lyrics_kind`, mlo.grader → mlo.lyrics.stored_lyrics_kind). */
 export type LyricsKind = "synced" | "plain";

@@ -2,7 +2,7 @@ import { Link } from "react-router-dom";
 import { Play } from "lucide-react";
 import { useStore } from "../store";
 import { statusFor } from "../lib/status";
-import { AdvisoryMark, albumAdvisory, mediaSourceLabel, releaseCountries } from "./Badges";
+import { AdvisoryMark, albumAdvisory, DisambiguationMark, mediaSourceLabel, releaseCountries } from "./Badges";
 import { albumTech } from "../lib/fmt";
 import CoverImg from "./CoverImg";
 import FavHeart from "./FavHeart";
@@ -274,6 +274,7 @@ export default function AlbumCard({ al, artistName, selectable, selected, onSele
               thing a reader looks for next to a name — whether the album is
               explicit — was missing, even for albums whose own tracks say so
               (see `albumAdvisory`: the album tag can lag its tracks). */}
+          <DisambiguationMark value={al.disambiguation} />
           <AdvisoryMark value={albumAdvisory(al)} />
           {/* the folder is held by a job right now: its files cannot be played
               until that job finishes (the chip's tooltip is the server's own
@@ -300,6 +301,12 @@ export default function AlbumCard({ al, artistName, selectable, selected, onSele
           >
             {artist}
           </Link>
+          {/* The credited artist's MusicBrainz disambiguation comment, beside
+              the artist and dimmer than it (the caption is already zinc-500,
+              so this steps one shade further): "The Beatles (UK rock band)".
+              A sibling of the link, not a child, so the link's own `truncate`
+              can never clip the comment away. */}
+          <DisambiguationMark value={al.artist_disambiguation} className="text-zinc-600" />
           {(() => {
             const y = originalYear(al.meta);
             return y ? (

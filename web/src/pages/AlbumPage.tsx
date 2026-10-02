@@ -5,7 +5,7 @@ import { ChevronDown, ChevronRight, CircleAlert, Play, Wand2, Trash2, FolderSync
 import { api } from "../api";
 import { LinkChips, LinkEditorButton } from "../components/Links";
 import { SubtitledVideo } from "../components/SubtitledVideo";
-import { EmptyState, AdvisoryMark, albumAdvisory, CachedMark, GradeBadge, PageLoading, PendingMark, pendingSummary, mediaCountryLabel } from "../components/Badges";
+import { EmptyState, AdvisoryMark, albumAdvisory, CachedMark, DisambiguationMark, GradeBadge, PageLoading, PendingMark, pendingSummary, mediaCountryLabel } from "../components/Badges";
 import CoverImg, { TrackCover } from "../components/CoverImg";
 import CoverSearchModal from "../components/CoverSearchModal";
 import Description from "../components/Description";
@@ -724,6 +724,10 @@ export default function AlbumPage() {
                   // on the name they are reading, not in a chip two lines down.
                   <span className="inline-flex items-center gap-2 min-w-0">
                     <span className="truncate">{data.meta?.ALBUM ?? data.path.split("/").pop() ?? ""}</span>
+                    {/* the release group's MusicBrainz comment, right after the
+                        album name and dimmer than it — "1967–1970 (The Blue
+                        Album)", the way MusicBrainz itself renders it */}
+                    <DisambiguationMark value={data.disambiguation} />
                     <AdvisoryMark value={albumAdvisory(data)} />
                     {/* held right now (a run, an import, an organize) */}
                     <LockedChip path={data.path} />
@@ -742,6 +746,9 @@ export default function AlbumPage() {
                       title="Open the artist page"
                     >
                       {data.meta?.ALBUMARTIST ?? data.meta?.ARTIST ?? "—"}
+                      {/* the credited artist's own comment, beside its name
+                          and dimmer than it ("The Beatles (UK rock band)") */}
+                      <DisambiguationMark value={data.artist_disambiguation} className="text-zinc-500" />
                     </Link>
                     <span className="text-zinc-500" title={data.meta?.ORIGINALDATE ?? undefined}>
                       <span className="text-zinc-600 uppercase tracking-wider text-[10px] mr-1.5">Original</span>

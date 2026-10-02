@@ -20,7 +20,10 @@ a different scale and each is converted in ONE place (``SOURCE_PARSERS``):
 
   * MusicBrainz 0-5 (``{"value": 4.35, "votes-count": 31}``, VERIFIED live)
   * RateYourMusic 0.5-5 (``<meta itemprop="ratingValue" content="4.18" />``,
-    VERIFIED live against a real release page)
+    VERIFIED live against a real release page, and the
+    ``page_section_main_info_music_rating_value`` component a 2026 page serves
+    instead — see ``rym_rating_from_html``; a release page answers for the
+    album, a SONG page for the track)
   * Discogs 0-5 (``community.rating = {"average": 4.72, "count": 3809}``,
     VERIFIED live)
   * Album of the Year 0-100 — see the note on that source below.
@@ -106,7 +109,9 @@ FORCE_KEY = "force_web_ratings"
 # every source that answers contributes to the weighted mean — so the order
 # only decides presentation.
 #
-#   a. rateyourmusic   the album page's average (0.5-5) and its vote count.
+#   a. rateyourmusic   the release page's average (0.5-5) and its vote count
+#                      for the album, the SONG page's own average and count
+#                      for the track (RYM rates both).
 #                      FIRST because it is the score this app's owner already
 #                      reads, and because its album answer is the one the
 #                      genre chain also wants (one page read, two answers).
@@ -124,20 +129,23 @@ SOURCE_LABELS = {
     "discogs": "Discogs",
 }
 
-# Which level each source can answer at. MusicBrainz is the only one with a
-# per-track statement (a recording carries its own rating); the other three
-# rate a RELEASE, so their answers are album-level and are written to
-# ALBUMWEBRATING, never promoted to a track.
+# Which level each source can answer at. Two of them have a per-track
+# statement of their own — MusicBrainz rates the recording, and RateYourMusic
+# keeps a separate page (and a separate community average) per SONG — so both
+# may fill WEBRATING. Album of the Year and Discogs rate a RELEASE only: their
+# answers are album-level and are written to ALBUMWEBRATING, never promoted to
+# a track.
 ALBUM_SOURCES = ("rateyourmusic", "musicbrainz", "albumoftheyear", "discogs")
-TRACK_SOURCES = ("musicbrainz",)
+TRACK_SOURCES = ("rateyourmusic", "musicbrainz")
 
 # One honest line per source for a settings list, exactly like the lyrics and
 # genre chains carry: the coverage it is good at, and the caveat it comes with.
 SOURCE_NOTES = {
     "rateyourmusic": "The release page's community average (0.5-5) and its "
-                     "vote count. Live pages need a rym_cookie; without one "
-                     "the archived snapshot of the same page answers (when "
-                     "one exists).",
+                     "vote count for the album, the song page's own for the "
+                     "track. Live pages need a rym_cookie; without one the "
+                     "archived snapshot of the same page answers (when one "
+                     "exists).",
     "musicbrainz": "Open data: the release group's community rating for the "
                    "album, the recording's own for the track. Free, no key, "
                    "MBID-native.",
@@ -290,42 +298,72 @@ _RYM_COUNT_RE = re.compile(
     r'itemprop="ratingCount"[^>]*content="([0-9]+)"', re.I)
 _RYM_AVG_RE = re.compile(
     r'class="avg_rating"[^>]*>\s*([0-9]+(?:\.[0-9]+)?)\s*<', re.I)
+# RYM's 2026 design states the same number in its own component, with NO
+# microdata at all — the release page's rating and a SONG page's rating are the
+# same component. VERIFIED on the archived song page of Radiohead's "Paranoid
+# Android" (web.archive.org/web/20260814042836id_/…/song/radiohead/
+# paranoid-android/), which carries neither an `itemprop` nor an `avg_rating`
+# span:
+#   <div class="page_section_main_info_music_rating_value has_tip">
+#     <div class="page_section_main_info_music_rating_value_rating">
+#       <img alt="rating bolded" alt="bold star" class="metadata-star-bold" /> 4.67
+#     </div>
+#     <div class="page_section_main_info_music_rating_value_number">
+#       17,654
+#       ratings
+#     </div>
+#   </div>
+# The star image's tags are skipped before the value is read, so a digit inside
+# an attribute can never be mistaken for the score.
+_RYM_SECTION_VALUE_RE = re.compile(
+    r'page_section_main_info_music_rating_value_rating[^>]*>\s*'
+    r'(?:<[^>]*>\s*)*([0-9]+(?:\.[0-9]+)?)', re.I)
+_RYM_SECTION_COUNT_RE = re.compile(
+    r'page_section_main_info_music_rating_value_number[^>]*>\s*'
+    r'([0-9][0-9,]*)\s*ratings', re.I)
 
 
 def rym_rating_from_html(html):
-    """``{"value", "count"}`` for a RYM release page, or None.
+    """``{"value", "count"}`` for a RYM release OR song page, or None.
 
-    Called by ``server.integrations._rym_album_answer`` — the one place a RYM
-    release page becomes an answer — so a rating read from a LIVE page and one
-    read from an ARCHIVED snapshot go through the same parser. The regexes are
-    the fastest correct parse of the markup that was verified live; the scale
-    is RYM's own worst-to-best 0.5-5, whose maximum is what the conversion
-    needs (a 0.5 floor would only matter to a reader that rescales the bottom).
+    Called by ``server.integrations._rym_album_answer`` for a release page and
+    by ``server.integrations.rym_song_rating`` for a song page — so a rating
+    read from a LIVE page and one read from an ARCHIVED snapshot go through the
+    same parser, whichever design the page is in.
+
+    TWO designs are accepted, in this order: the schema.org microdata a 2021
+    page publishes, the visual ``avg_rating`` twin that sits beside it, and the
+    ``page_section_main_info_music_rating_value`` component the 2026 design
+    uses instead (see above). The microdata is tried first so a page carrying
+    both is read exactly as it always was. The scale is RYM's own
+    worst-to-best 0.5-5, whose maximum is what the conversion needs (a 0.5 floor
+    would only matter to a reader that rescales the bottom).
     """
     text = html or ""
     if not text:
         return None
-    match = _RYM_VALUE_RE.search(text) or _RYM_AVG_RE.search(text)
+    match = (_RYM_VALUE_RE.search(text) or _RYM_AVG_RE.search(text)
+             or _RYM_SECTION_VALUE_RE.search(text))
     if not match:
         return None
     value = _to_int(match.group(1))
     if value is None:
         return None
     count = 0
-    found = _RYM_COUNT_RE.search(text)
+    found = _RYM_COUNT_RE.search(text) or _RYM_SECTION_COUNT_RE.search(text)
     if found:
-        count = int(found.group(1))
+        count = int(found.group(1).replace(",", ""))
     return {"value": value, "count": count}
 
 
 def parse_rateyourmusic(payload):
-    """A RYM answer (or a release page's HTML) -> the album's average.
+    """A RYM answer (or a release/song page's HTML) -> its community average.
 
-    Two shapes are accepted because the two routes that produce them differ:
-    the app's own genre ladder answers with a parsed dict carrying
-    ``{"rating": {"value", "count"}}`` (``_rym_album_answer``), while a raw
-    page body is parsed here. Both end on RYM's 0.5-5 average, converted by
-    the one scale helper.
+    Two shapes are accepted because the routes that produce them differ: the
+    app's own scrape answers with a parsed dict carrying ``{"rating": {"value",
+    "count"}}`` (``_rym_album_answer`` for a release, ``rym_song_rating`` for a
+    song), while a raw page body is parsed here. Both end on RYM's 0.5-5
+    average, converted by the one scale helper.
     """
     if isinstance(payload, dict):
         rating = payload.get("rating")
@@ -436,8 +474,11 @@ def parse_source(source, payload, kind="album"):
 
     The MUSICBRAINZ entry is level-aware: an album payload is a release-group
     node, a track payload is ``{"recording", "work"}`` (see
-    ``parse_musicbrainz_track``). Every other source rates a release, so it
-    answers at album level only.
+    ``parse_musicbrainz_track``). RATEYOURMUSIC needs no branch here: the
+    fetcher already answers a track with the SONG page's own rating and an
+    album with the release page's, and ``parse_rateyourmusic`` reads both
+    shapes. Album of the Year and Discogs rate a release, so they answer at
+    album level only.
     """
     parser = SOURCE_PARSERS.get(str(source or "").strip().lower())
     if parser is None or payload is None:
@@ -552,9 +593,9 @@ def album_rating(artist, album, rg_mbid, cfg, fetch):
 def track_rating(artist, title, recording_mbid, cfg, fetch):
     """The TRACK's aggregated web rating, or None.
 
-    Track-level sources only (MusicBrainz today): a release-wide score is an
-    ALBUM answer and is never dressed up as a track's (see the module
-    docstring).
+    Track-level sources only (MusicBrainz's recording rating and RYM's SONG
+    page): a release-wide score is an ALBUM answer and is never dressed up as
+    a track's (see the module docstring).
     """
     return _rate("track", {"artist": str(artist or "").strip(),
                            "title": str(title or "").strip(),

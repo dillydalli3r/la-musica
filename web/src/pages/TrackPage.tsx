@@ -8,7 +8,7 @@ import { uncacheTrack } from "../lib/mediaCache";
 import { LinkEditorButton, MbIcon, RymIcon } from "../components/Links";
 import { SubtitledVideo } from "../components/SubtitledVideo";
 import { useStore, toast } from "../store";
-import { AuditBadge, GradeBadge, IssueList, EmptyState, PageLoading, LyricsKindChip, allowPlainOf, isInstrumental } from "../components/Badges";
+import { AuditBadge, DisambiguationMark, GradeBadge, IssueList, EmptyState, PageLoading, LyricsKindChip, allowPlainOf, isInstrumental } from "../components/Badges";
 import CoverImg from "../components/CoverImg";
 import DownloadButton from "../components/DownloadButton";
 import { ExportButton } from "../components/ExportDialog";
@@ -293,6 +293,11 @@ export default function TrackPage() {
         title={
           <span className="inline-flex items-center gap-2 min-w-0">
             <span className="truncate">{tags.TITLE ?? fileName}</span>
+            {/* MusicBrainz's disambiguation comment for this recording, right
+                after the title and dimmer than it ("… (live)"), the way
+                MusicBrainz renders it. The raw tag is what this page holds
+                first; the album payload's own field is the same value. */}
+            <DisambiguationMark value={tags.TITLEDISAMBIGUATION ?? track?.disambiguation} />
             <LockedChip path={decoded} />
           </span>
         }
@@ -312,6 +317,8 @@ export default function TrackPage() {
             <Link to={tags.MUSICBRAINZ_ALBUMID ? `/album/mb:${tags.MUSICBRAINZ_ALBUMID}` : `/album/${encodeURIComponent(albumDir)}`} className="hover:text-accent-soft">
               {tags.ALBUM || albumDir.split("/").pop()}
             </Link>
+            {/* the album's own comment, beside the album name it belongs to */}
+            <DisambiguationMark value={album?.disambiguation} />
             {" · "}
             <span className="inline-flex items-center gap-1"><Disc3 className="h-3 w-3" /> {fileName}</span>
           </>

@@ -156,6 +156,21 @@ for _tag in _CREDIT_TAGS + _RELEASE_TAGS:
     ok(_tag in TAG_MAP, f"{_tag} is part of the app's tag vocabulary")
     ok(tag_key_allowed(_tag),
        f"{_tag} survives the excess-tags predicate (what the strip passes use)")
+# MusicBrainz's disambiguation comments — the plain text it renders in
+# parentheses after a name. Semantic uppercase vorbis keys, Picard's TXXX /
+# iTunes-freeform shape in the other two containers, exactly like the alias
+# family beside them; the vocabulary entry is also what keeps the strip
+# passes' allow-list (mlo.grader.TAG_ALLOWLIST, built from TAG_MAP) from
+# deleting them.
+_DISAMBIGUATION_TAGS = ("TITLEDISAMBIGUATION", "ARTISTDISAMBIGUATION",
+                        "ALBUMDISAMBIGUATION")
+for _tag in _DISAMBIGUATION_TAGS:
+    ok(_tag in TAG_MAP, f"{_tag} is part of the app's tag vocabulary")
+    ok(tag_key_allowed(_tag),
+       f"{_tag} survives the excess-tags predicate (what the strip passes use)")
+    ok(TAG_MAP[_tag] == {"flac": _tag, "mp3": ("TXXX", _tag),
+                         "mp4": ("freeform", "com.apple.iTunes", _tag)},
+       f"{_tag} is written to its own vorbis comment / TXXX / freeform atom")
 # The ID3 frame each role is written to, spelled Picard's way. The frames
 # themselves are not standalone allowed names (the predicate judges a tag by
 # its semantic name — see the all_tags() assertions below), so this is about
@@ -262,6 +277,8 @@ _RELEASE = {
         "release_track_mbid": "release-track-1",
         "isrcs": ["USSM19800758", "USSM19800763"],
         "credits": _track_credits({"relations": _RELATIONS}),
+        # The recording's own MusicBrainz comment, written per track.
+        "disambiguation": "2011 remaster",
     }},
     "label": "American Recordings",
     "catalog_number": "SRCS 8757",
@@ -278,6 +295,11 @@ _RELEASE = {
     "asin": "B00000I78Y",
     "license": "https://creativecommons.org/licenses/by/3.0/",
     "medium_titles": {1: "Disc 1: The Album"},
+    # MusicBrainz's disambiguation comments: the release GROUP's (album-level,
+    # every file of the release) and the credited artist's. The recording's OWN
+    # one rides its track slot above.
+    "release_group_disambiguation": "The Blue Album",
+    "artist_disambiguation": "UK rock band",
 }
 
 _VALUES = mb_track_tags(_RELEASE, _RELEASE["tracks"][(1, 1)], disc=1,
@@ -319,6 +341,9 @@ _WANT = {
     "MUSICBRAINZ_RELEASEGROUPID": "group-1",
     "MUSICBRAINZ_ALBUMARTISTID": "artist-1",
     "RELEASECOUNTRY": "JP; US",
+    "ALBUMDISAMBIGUATION": "The Blue Album",
+    "ARTISTDISAMBIGUATION": "UK rock band",
+    "TITLEDISAMBIGUATION": "2011 remaster",
 }
 ok(all([v for t, v in _VALUES if t == k] for k in _WANT),
    "mb_track_tags() offers a value for every field of the release")
@@ -612,6 +637,95 @@ _af.delete_tag("ENGINEER")
 _af.set_tag("ENGINEER", _WANT["ENGINEER"])
 
 # --------------------------------------------------------------------------- #
+print("== disambiguation: one comment per entity, written where the name is ==")
+# MusicBrainz's disambiguation comments are plain strings, not aliases: the
+# release GROUP's is album-level (every file of the release carries it), the
+# credited artist's is album-level too, and the recording's belongs to its own
+# track. Three cases the alias family's rule does not cover, pinned here: all
+# three present writes all three, none writes NONE (never a blank tag), and a
+# value a file already holds is not clobbered by a release that states none.
+_DISAMB = {
+    "id": "release-d",
+    "release_group_disambiguation": "The Blue Album",
+    "artist_disambiguation": "UK rock band",
+    "tracks": {
+        (1, 1): {"recording_mbid": "rec-1", "artist_mbid": "artist-1",
+                 "release_track_mbid": "rt-1", "disambiguation": "2011 remaster"},
+        (1, 2): {"recording_mbid": "rec-2", "artist_mbid": "artist-1",
+                 "release_track_mbid": "rt-2", "disambiguation": ""},
+    },
+}
+_D_DICT = dict(mb_track_tags(_DISAMB, _DISAMB["tracks"][(1, 1)], disc=1,
+                             album_artist_mbid="artist-1"))
+_D2_DICT = dict(mb_track_tags(_DISAMB, _DISAMB["tracks"][(1, 2)], disc=1,
+                              album_artist_mbid="artist-1"))
+ok(_D_DICT.get("ALBUMDISAMBIGUATION") == "The Blue Album"
+   and _D_DICT.get("ARTISTDISAMBIGUATION") == "UK rock band"
+   and _D_DICT.get("TITLEDISAMBIGUATION") == "2011 remaster",
+   f"all three disambiguation comments are offered "
+   f"({_D_DICT.get('ALBUMDISAMBIGUATION')!r}, "
+   f"{_D_DICT.get('ARTISTDISAMBIGUATION')!r}, "
+   f"{_D_DICT.get('TITLEDISAMBIGUATION')!r})")
+# The album-level pair is what EVERY track carries; a track MusicBrainz states
+# no comment for carries no TITLEDISAMBIGUATION at all.
+ok(_D2_DICT.get("ALBUMDISAMBIGUATION") == "The Blue Album"
+   and _D2_DICT.get("ARTISTDISAMBIGUATION") == "UK rock band"
+   and "TITLEDISAMBIGUATION" not in _D2_DICT,
+   "the album-level comments land on every track, and a track with no comment "
+   "of its own writes no title tag")
+
+_D_DIR = os.path.join(TMP, "disamb")
+os.makedirs(_D_DIR, exist_ok=True)
+d_one = os.path.join(_D_DIR, "one.flac")
+d_two = os.path.join(_D_DIR, "two.flac")
+make_flac(d_one)
+make_flac(d_two)
+write(d_one, list(_D_DICT.items()))
+write(d_two, list(_D2_DICT.items()))
+_d_one = AudioFile(d_one)
+ok(_d_one.get_tag("ALBUMDISAMBIGUATION") == "The Blue Album"
+   and _d_one.get_tag("ARTISTDISAMBIGUATION") == "UK rock band"
+   and _d_one.get_tag("TITLEDISAMBIGUATION") == "2011 remaster",
+   "the three tags read back off the file")
+_d_two = AudioFile(d_two)
+ok(_d_two.get_tag("ALBUMDISAMBIGUATION") == "The Blue Album"
+   and _d_two.get_tag("ARTISTDISAMBIGUATION") == "UK rock band"
+   and not _d_two.get_tag("TITLEDISAMBIGUATION"),
+   "a track with no comment of its own carries only the album-level pair")
+
+# A release that states NO comment writes NO disambiguation tag — an empty
+# string (and a missing field) is absence, never a blank tag.
+_NO_DISAMB = {"id": "release-n",
+              "tracks": {(1, 1): {"recording_mbid": "rec-1",
+                                  "artist_mbid": "artist-1",
+                                  "release_track_mbid": "rt-1"}}}
+d_none = os.path.join(_D_DIR, "none.flac")
+make_flac(d_none)
+write(d_none, mb_track_tags(_NO_DISAMB, _NO_DISAMB["tracks"][(1, 1)], disc=1))
+_none_tags = AudioFile(d_none).all_tags()
+ok(not [t for t in _DISAMBIGUATION_TAGS if t in _none_tags],
+   f"a release that states no comment writes no disambiguation tag "
+   f"({[t for t in _DISAMBIGUATION_TAGS if t in _none_tags]})")
+
+# A value the file already holds is NOT clobbered by a release that states
+# none — the same keep-rule every other scalar tag follows.
+d_keep = os.path.join(_D_DIR, "keep.flac")
+make_flac(d_keep)
+_af = AudioFile(d_keep)
+_af.set_tag("TITLEDISAMBIGUATION", "12-inch mix")
+_af.set_tag("ALBUMDISAMBIGUATION", "US pressing")
+_af.defer_save(True)
+write_mb_tags(_af, mb_track_tags(_NO_DISAMB, _NO_DISAMB["tracks"][(1, 1)],
+                                disc=1), None)
+_af.defer_save(False)
+_kept = AudioFile(d_keep)
+ok(_kept.get_tag("TITLEDISAMBIGUATION") == "12-inch mix"
+   and _kept.get_tag("ALBUMDISAMBIGUATION") == "US pressing",
+   f"a comment a file already holds is kept when the release states none "
+   f"({_kept.get_tag('TITLEDISAMBIGUATION')!r}, "
+   f"{_kept.get_tag('ALBUMDISAMBIGUATION')!r})")
+
+# --------------------------------------------------------------------------- #
 print("== the album pass: the same fields, through _fill_release_tags ==")
 # The stage itself, over a real album directory with the server's release
 # reader stubbed — no socket is opened.
@@ -649,10 +763,13 @@ _MB_JSON = {
                        {"date": "1998-11-03",
                         "area": {"iso-3166-1-codes": ["US"]}}],
     "release-group": {"id": "group-1", "primary-type": "Album",
-                      "first-release-date": "1998-06-30"},
+                      "first-release-date": "1998-06-30",
+                      # the release group's disambiguation comment, album-level
+                      "disambiguation": "The Blue Album"},
     "label-info": [{"catalog-number": "SRCS 8757",
                     "label": {"name": "American Recordings"}}],
-    "artist-credit": [{"artist": {"id": "artist-1", "name": "System of a Down"}}],
+    "artist-credit": [{"artist": {"id": "artist-1", "name": "System of a Down",
+                                  "disambiguation": "UK rock band"}}],
     # A licence musicbrainz.org states for the whole release (a url relation).
     "relations": [{"type": "license", "target-type": "url",
                    "url": {"resource": "https://creativecommons.org/licenses/by/3.0/"}}],
@@ -661,6 +778,7 @@ _MB_JSON = {
                    "id": "release-track-1", "position": 1, "title": "Suite-Pee",
                    "artist-credit": [{"artist": {"id": "artist-1"}}],
                    "recording": {"id": "recording-1", "title": "Suite-Pee",
+                                 "disambiguation": "2011 remaster",
                                  "isrcs": ["USSM19800758", "USSM19800763"],
                                  "relations": _RELATIONS}}]}],
 }

@@ -6011,22 +6011,47 @@ composition instead (R267). Above `lg` the pane sits beside the artwork.
   gated by `web_ratings_enabled` (`SCRIPT_GATES[24]` and the write-gate family
   switch both read it, so an install with it off neither asks nor writes).
 - **R358a — RateYourMusic leads the shipped sources, and MusicBrainz stays on
-  because it is the only source that rates a TRACK.** `web_ratings_sources`
-  ships `["rateyourmusic", "musicbrainz", "albumoftheyear", "discogs"]`. RYM
-  leads because it is the widest public verdict the app can read — one score
-  from tens of thousands of ratings — and its rating rides the SAME page fetch
-  its genres already make (one request, one cache entry, one refusal latch); the
+  as the fast, credential-free floor.** `web_ratings_sources` ships
+  `["rateyourmusic", "musicbrainz", "albumoftheyear", "discogs"]`. RYM leads
+  because it is the widest public verdict the app can read — one score from tens
+  of thousands of ratings — and its ALBUM rating rides the SAME page fetch its
+  genres already make (one request, one cache entry, one refusal latch); the
   list's order is also the order the names appear in `WEBRATING_SOURCE`. RYM,
   Album of the Year and Discogs are all ARCHIVE-backed when their live pages
   refuse (RYM's live page needs a `cf_clearance` matching the configured
-  `rym_user_agent`), so an album costs ~23 s against ~1 s for MusicBrainz alone
-  — measured, and cached 30 days, so it is a first-run cost per album rather
-  than a per-run one. Dropping MusicBrainz is a real choice with a real
-  consequence, not a speed knob: it is the only source that answers per track
-  (the recording's rating, the WORK's as a fallback — work ratings are usually
-  empty, so the recording leads), so an all-archive list writes
-  `ALBUMWEBRATING` and no `WEBRATING` at all. Discogs needs `discogs_token` and
-  skips cleanly without one.
+  `rym_user_agent`), so an album costs seconds rather than milliseconds — cached
+  30 days, misses included, so it is a first-run cost per album rather than a
+  per-run one. Dropping MusicBrainz is a real choice with a real consequence: it
+  is the only source that needs no credential and no archive leg and the only
+  one whose track answer costs a single throttled request with no slug guess, so
+  it is the fast floor under every other answer. Discogs needs `discogs_token`
+  and skips cleanly without one.
+- **R358b — every source is asked at the level it actually rates.** Verified
+  against the sources themselves, not assumed:
+  - **MusicBrainz** — a RELEASE GROUP for the album and a RECORDING for each
+    track, with the recording's WORK behind it (`inc=ratings`; confirmed live:
+    OK Computer's group 4.55 from 89 votes, Airbag 3.85 from 25, Paranoid
+    Android 4.35 from 31, and the works behind them rated or empty).
+  - **RateYourMusic** — the release page for the album (schema.org
+    `ratingValue`/`ratingCount`, e.g. OK Computer 4.23 from 66,965) AND a SONG
+    page for each track: `rateyourmusic.com/song/<artist-slug>/<title-slug>/`
+    states its own aggregate (Paranoid Android 4.67 from 17,654 — verified in a
+    2026 capture). The release page does NOT publish per-track community
+    averages: its `track_rating` markup is the personal rating control and
+    per-reviewer scores. The song walk tries the bare title slug and, if
+    needed, one `-1` spelling; only the newest archive capture is tried per
+    spelling. A page is believed only when its own title and artist match the
+    asked track — a mismatch is a miss, never a guess. Measured end-to-end
+    with all four sources on a two-track OK Computer scratch album: **48.5 s**;
+    Paranoid Android was answered by RYM + MusicBrainz, Airbag fell back to
+    MusicBrainz. That first pass included archive misses; each miss is cached
+    for 30 days, so it is not paid on the next run.
+  - **Discogs** — the RELEASE only: `community.rating` (In Rainbows 4.72 from
+    3,812, read off the live API). Its tracklist carries no rating field at all.
+  - Consequence for the star field: a TRACK can now be rated by **two** sources
+    (MusicBrainz and RateYourMusic) and its `WEBRATING_SOURCE` reads e.g.
+    `RateYourMusic; MusicBrainz`; the album's score still comes from every
+    source that answered.
 - **R359 — the star field says which rating it is drawing.** `StarRating`
   renders the web value in its own dimmer tone only while the reader has rated
   nothing there, and reduces it to a small readout beside the user's stars once

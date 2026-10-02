@@ -138,6 +138,12 @@ export interface Track {
   tags: TrackTags;
   grade_pass: boolean;
   lyrics_present: boolean;
+  /** MusicBrainz's disambiguation comment for this recording, or null when it
+   *  states none — rendered in parentheses after the title in a dimmer tone
+   *  (`DisambiguationMark`), the way MusicBrainz shows "title (comment)".
+   *  Read server-side from the TITLEDISAMBIGUATION tag by
+   *  `server.library._enrich_track`. */
+  disambiguation?: string | null;
   cover_file?: string | null;
   sidecar_cover?: boolean;
   sidecar_cover_file?: string | null;
@@ -211,6 +217,16 @@ export interface Album {
    *  `NeedsWarning`). The album is IN the library either way. */
   needs?: NeedsWarning;
   album_artist?: string | null;
+  /** MusicBrainz's disambiguation comment for the release GROUP, or null —
+   *  rendered in parentheses after the album name ("1967–1970 (The Blue
+   *  Album)"), dimmer than the name itself. Read from the album's
+   *  ALBUMDISAMBIGUATION tag by `server.library.build_album`. */
+  disambiguation?: string | null;
+  /** MusicBrainz's disambiguation comment for the credited artist, or null —
+   *  the artist caption's own parentheses ("The Beatles (UK rock band)"),
+   *  read from the album's ARTISTDISAMBIGUATION tag. Album-level: every file
+   *  of the release carries it. */
+  artist_disambiguation?: string | null;
   album_values?: Record<string, string>;
   grade_pct: number | null;
   pass: boolean;

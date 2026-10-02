@@ -36,6 +36,11 @@ TRACK_TAGS = [
     # every value in `tags` — finds a track by its alias as well as by the
     # stored name, and so the rows can show "name (alias)".
     "TITLEALIAS", "ARTISTALIAS", "ALBUMALIAS",
+    # MusicBrainz's disambiguation comments: the recording's (TITLEDISAMBIGUATION,
+    # shown in parentheses after the track title, the way MusicBrainz renders
+    # it) and the two album-level ones, read on every track so `_album_meta`
+    # can lift them for the album row and its artist caption.
+    "TITLEDISAMBIGUATION", "ALBUMDISAMBIGUATION", "ARTISTDISAMBIGUATION",
     # The podcast identity (mlo.naming's DERIVED type): the SERIES MusicBrainz
     # links an episode's release group to, and the episode number it states.
     # Read here so the Podcasts shelf, the series page and the Podcasts
@@ -72,6 +77,10 @@ ALBUM_LEVEL_TAGS = [
     # credited artist, so the first readable track speaks for the album (the
     # artist page shows ARTISTALIAS beside the artist's display name).
     "ARTISTALIAS", "ALBUMALIAS",
+    # Album-level disambiguation comments, read from the first readable track
+    # the same way: the release group's ("The Blue Album") rides beside the
+    # album name and the credited artist's ("UK rock band") beside the artist.
+    "ALBUMDISAMBIGUATION", "ARTISTDISAMBIGUATION",
     # Album-level like every other release fact: one episode folder states one
     # series (the tag is written to every file of it, and the first readable
     # track is what an album-level value is read from).
@@ -244,6 +253,13 @@ def _enrich_track(tr, album_dir, cover_for=None):
     # original title stays the tag it is while the other-language name is what
     # the reader sees. None (not "") when the file states none.
     tr["alias"] = str((tr.get("tags") or {}).get("TITLEALIAS") or "").strip() or None
+    # MusicBrainz's disambiguation comment for this recording, shown in
+    # parentheses after the title in a dimmer tone (`DisambiguationMark`) —
+    # the same treatment the alias beside it gets, but a plain string: there
+    # is nothing to ladder, and None (not "") when the file states none so
+    # the mark renders nothing rather than an empty "()".
+    tr["disambiguation"] = str((tr.get("tags") or {}).get("TITLEDISAMBIGUATION")
+                               or "").strip() or None
     return tr
 
 
@@ -414,6 +430,15 @@ def _build_album(album_dir, cfg, light=False):
     # with `withAlias`, the shape the MusicBrainz rows already use. The
     # original stays meta.ALBUM, which the details view reads.
     res["alias"] = str(res["meta"].get("ALBUMALIAS") or "").strip() or None
+    # MusicBrainz's disambiguation comments for the album and the artist it is
+    # credited to, from the same first track the meta block is read from: the
+    # release group's ("The Blue Album") renders beside the album name and the
+    # credited artist's ("UK rock band") beside the artist caption. None when
+    # absent, so the marks render nothing at all.
+    res["disambiguation"] = str(res["meta"].get("ALBUMDISAMBIGUATION")
+                                or "").strip() or None
+    res["artist_disambiguation"] = str(res["meta"].get("ARTISTDISAMBIGUATION")
+                                       or "").strip() or None
     # The DERIVED podcast identity of this album, read from its own tags (see
     # podcast_info) — the field the Home shelf, the series page, the Podcasts
     # preset and the Artist page's Podcast bucket all read. None for anything

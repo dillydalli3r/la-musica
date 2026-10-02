@@ -811,6 +811,11 @@ def _cached_release(mbid):
                 "artist_name": str(credit_artist.get("name") or ""),
                 "aliases": list(rec.get("aliases") or []),
                 "artist_aliases": list(credit_artist.get("aliases") or []),
+                # This recording's own disambiguation comment ("The Blue
+                # Album"-style plain text, from the same `inc=recordings`
+                # payload) — what TITLEDISAMBIGUATION carries for this track
+                # alone. Empty when MusicBrainz states none.
+                "disambiguation": str(rec.get("disambiguation") or "").strip(),
                 # The id of this POSITION (distinct from the recording) and
                 # the ISRCs MusicBrainz knows for it: `inc` above already
                 # fetched both, and they are what the naming script and the
@@ -839,6 +844,17 @@ def _cached_release(mbid):
         "aliases": list(data.get("aliases") or []),
         "release_group_aliases": list(rg.get("aliases") or []),
         "artist_aliases": list(album_credit.get("aliases") or []),
+        # MusicBrainz's DISAMBIGUATION comments, the same `inc` payload: the
+        # release GROUP's ("The Blue Album" for 1967–1970) and the credited
+        # artist's ("UK rock band"). Album-level like the aliases above — the
+        # one comment describes the release and the artist every file of the
+        # album is credited to, so ALBUMDISAMBIGUATION / ARTISTDISAMBIGUATION
+        # ride every file. The RELEASE's own comment is `disambiguation`
+        # elsewhere in this repo and is deliberately not tagged.
+        "release_group_disambiguation": str(rg.get("disambiguation")
+                                            or "").strip(),
+        "artist_disambiguation": str(album_credit.get("disambiguation")
+                                     or "").strip(),
         "tracks": tracks,
         "label": label,
         "catalog_number": catalogs[0] if catalogs else "",
@@ -1008,6 +1024,21 @@ def album_release_tags(release, disc=1, config=None):
                    if artists and isinstance(artists[0], dict) else "")
     values.extend(_alias_tag_values(
         "ARTISTALIAS", _release_artist_aliases(release), artist_name, config))
+    # MusicBrainz's disambiguation comments, album-level like the aliases
+    # above — a plain trimmed string, not an alias set: there is no locale
+    # ladder to run and no `-<locale>` suffix to consider (a comment is not a
+    # translated spelling), so `_alias_tag_values` is deliberately NOT reused
+    # here. The release GROUP's comment describes the album ("1967–1970" ->
+    # "The Blue Album") and its credited artist's the artist ("UK rock band"),
+    # so both ride every file of the release; empty means the tag is not
+    # written at all, exactly as an absent alias writes nothing.
+    for tag, value in (("ALBUMDISAMBIGUATION",
+                        release.get("release_group_disambiguation")),
+                       ("ARTISTDISAMBIGUATION",
+                        release.get("artist_disambiguation"))):
+        text = str(value or "").strip()
+        if text:
+            values.append((tag, text))
     return values
 
 
@@ -1044,6 +1075,12 @@ def mb_track_tags(release, slot, disc=1, album_artist_mbid="", config=None):
     values.extend(_alias_tag_values(
         "ARTISTALIAS", slot.get("artist_aliases"),
         str(slot.get("artist_name") or ""), config))
+    # This recording's own disambiguation comment, per track (the slot's
+    # `disambiguation`): MusicBrainz's plain text in parentheses after the
+    # title, written only when it states one.
+    title_disambiguation = str(slot.get("disambiguation") or "").strip()
+    if title_disambiguation:
+        values.append(("TITLEDISAMBIGUATION", title_disambiguation))
     values.append(("MUSICBRAINZ_ARTISTID",
                    slot.get("artist_mbid") or album_artist_mbid))
     # The id of this track's POSITION on this release — a different id from
@@ -1276,9 +1313,15 @@ def _fill_release_tags(info, config, album_dir):
     release and its tracks (see mb_track_tags): the credit table with each
     shared role as the list it is, the work's songwriters, every ISRC, and the
     release facts no naming script reads (barcode, ASIN, language, script,
-    licence, each medium's title). Those ride along on a request made for
-    another reason and are never a reason to make one — an album that already
-    carries every prescan slot costs nothing, exactly as before.
+    licence, each medium's title) — plus the three disambiguation comments
+    (ALBUMDISAMBIGUATION, ARTISTDISAMBIGUATION, TITLEDISAMBIGUATION). Those
+    ride along on a request made for another reason and are never a reason to
+    make one — an album that already carries every prescan slot costs nothing,
+    exactly as before. A comment is the one thing a file cannot be asked
+    about locally (whether MusicBrainz states one is only knowable from the
+    release), so a completed album is NOT made "open" for it: the comments
+    land whenever the release is asked about anyway — every import, and any
+    tagging run whose own slots are open.
 
     A tag that already holds a value is never touched — another pressing's
     label, ids another tagger wrote, are the album's own business — with

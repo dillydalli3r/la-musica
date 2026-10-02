@@ -81,6 +81,13 @@ TAG_FAMILY = {
     # is release-level like ALBUM).
     "TITLEALIAS": "identity", "ARTISTALIAS": "identity",
     "ALBUMALIAS": "release",
+    # MusicBrainz's disambiguation comment — the plain text it renders in
+    # parentheses after a name to tell two same-named things apart. It sits
+    # beside the same name an alias does, so it takes the same display
+    # families: the track's and the artist's annotate a name (identity), the
+    # album's annotates the release.
+    "TITLEDISAMBIGUATION": "identity", "ARTISTDISAMBIGUATION": "identity",
+    "ALBUMDISAMBIGUATION": "release",
     # The rest of the credit table MusicBrainz states on a recording (and on
     # its work): who played what, who produced, engineered, mixed, arranged,
     # conducted or directed it. People, so they are identity — the same family
@@ -168,6 +175,27 @@ TAG_INFO = {
                                   "not read the script it is written in — at most one value, and "
                                   "only when the title needs one. Locale-suffixed when it is for "
                                   "one: ALBUMALIAS-JA."),
+    "TITLEDISAMBIGUATION": ("Title disambiguation", "MusicBrainz's own disambiguation comment for "
+                                                    "this recording, the plain text it shows in "
+                                                    "parentheses after the title to tell two "
+                                                    "same-named tracks apart (\"live version\", "
+                                                    "\"2011 remaster\"). One value, written only "
+                                                    "when MusicBrainz states one; never locale-"
+                                                    "suffixed."),
+    "ARTISTDISAMBIGUATION": ("Artist disambiguation", "MusicBrainz's own disambiguation comment for "
+                                                      "the credited artist — the plain text that "
+                                                      "tells two same-named artists apart (\"UK "
+                                                      "rock band\"). Album-level: every file of "
+                                                      "the release is credited to that artist. One "
+                                                      "value, written only when MusicBrainz states "
+                                                      "one."),
+    "ALBUMDISAMBIGUATION": ("Album disambiguation", "MusicBrainz's own disambiguation comment for "
+                                                    "the release GROUP — the plain text it shows "
+                                                    "in parentheses after the album title, such "
+                                                    "as \"The Blue Album\" for The Beatles' "
+                                                    "1967–1970. Album-level: written to every "
+                                                    "file of the release. One value, written only "
+                                                    "when MusicBrainz states one."),
     "ALBUMARTIST": ("Album artist", "Who the release is filed under — one value across the album."),
     "ALBUMARTISTSORT": ("Album artist sort", "Sort spelling of the album artist (The Beatles → Beatles)."),
     "ARTISTSORT": ("Artist sort", "Sort spelling of the track artist."),
@@ -340,6 +368,13 @@ TAG_WRITER = {
     "TITLEALIAS": f"{_RELEASE_WRITER} · locale aliases · the tag editor",
     "ARTISTALIAS": f"{_RELEASE_WRITER} · locale aliases · the tag editor",
     "ALBUMALIAS": f"{_RELEASE_WRITER} · locale aliases · the tag editor",
+    # The disambiguation comments have the SAME writer as the aliases they sit
+    # beside (mlo.autotag's release payload carries all of them), but they are
+    # a plain string, not a locale alias: nothing strips them for a locale and
+    # the tag editor is the only hand-writer.
+    "TITLEDISAMBIGUATION": f"{_RELEASE_WRITER} · MusicBrainz disambiguation · the tag editor",
+    "ARTISTDISAMBIGUATION": f"{_RELEASE_WRITER} · MusicBrainz disambiguation · the tag editor",
+    "ALBUMDISAMBIGUATION": f"{_RELEASE_WRITER} · MusicBrainz disambiguation · the tag editor",
     # No writer at all: it is the free text of whatever ripper or vendor
     # tagger made the file, which is why its VALUE fails the excess grade and
     # the strip passes clear it.

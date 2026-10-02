@@ -27,7 +27,7 @@ import { gradeSliver, statusFor, auditFails } from "../lib/status";
 import { invalidateLibrary } from "../lib/invalidate";
 import { albumRef, trackRef, artistRef, entityLinkClick } from "../lib/refs";
 import { fmtTech, fmtDuration, fmtDateCell, originalYear, GRID_SIZE_MIN } from "../lib/fmt";
-import { EmptyState, GradeBadge, MediaChip, AdvisoryMark, CachedMark, PageLoading, PendingMark } from "../components/Badges";
+import { EmptyState, GradeBadge, MediaChip, AdvisoryMark, CachedMark, DisambiguationMark, PageLoading, PendingMark } from "../components/Badges";
 import ArtistAvatar from "../components/ArtistAvatar";
 import ArtistName from "../components/ArtistName";
 import LockedChip from "../components/LockedChip";
@@ -1717,6 +1717,11 @@ export default function LibraryPage() {
                       >
                         {al.meta?.ALBUM ?? al.path.split("/").pop()}
                       </Link>
+                      {/* MusicBrainz's disambiguation comment for the release
+                          group, in parentheses right after the album name and
+                          dimmer than it ("1967–1970 (The Blue Album)") — the
+                          same slot the table's album column draws it in. */}
+                      <DisambiguationMark value={al.disambiguation} />
                       <AdvisoryMark value={al.meta?.ITUNESADVISORY ?? al.meta?.ALBUMITUNESADVISORY} />
                       {/* The folder itself is held (a run, an import, an
                           organize): its files are not playable right now. */}
@@ -1728,6 +1733,9 @@ export default function LibraryPage() {
                       <PendingMark album={al} label />
                       <span className="text-[11px] text-zinc-500 truncate">
                         {al.artist}
+                        {/* the credited artist's own comment, beside its
+                            name and one shade dimmer */}
+                        <DisambiguationMark value={al.artist_disambiguation} className="text-zinc-600" />
                         {al.meta?.ORIGINALDATE || al.meta?.DATE ? ` · ${originalYear(al.meta)}` : ""}
                         {al.meta?.DATE && al.meta?.ORIGINALDATE && String(al.meta.ORIGINALDATE).slice(0, 4) !== String(al.meta?.DATE ?? "").slice(0, 4)
                           ? ` (rel. ${String(al.meta.DATE).slice(0, 4)})` : ""}
@@ -1814,6 +1822,7 @@ export default function LibraryPage() {
                             >
                               {t.tags.TITLE ?? t.file}
                             </Link>
+                            <DisambiguationMark value={t.disambiguation} />
                             <AdvisoryMark value={t.tags.ITUNESADVISORY} />
                             <LockedChip path={t.path} />
                             {!!t.issues?.length && (
@@ -2166,6 +2175,7 @@ export default function LibraryPage() {
                             >
                               {tr.tags.TITLE ?? tr.file}
                             </Link>
+                            <DisambiguationMark value={tr.disambiguation} />
                             <AdvisoryMark value={tr.tags.ITUNESADVISORY} />
                             <LockedChip path={tr.path} />
                             {!!tr.issues?.length && (
@@ -2476,6 +2486,7 @@ function AlbumRowGroup({
         titleHref={albumRef(album)}
         titleExtra={
           <>
+            {showAlbumCol ? <DisambiguationMark value={album.disambiguation} /> : null}
             {showAlbumCol ? <AdvisoryMark value={album.meta?.ITUNESADVISORY ?? album.meta?.ALBUMITUNESADVISORY} /> : null}
             {/* the same marker the compact rows and the cards carry — the
                 albums table is one more album-shaped surface */}
@@ -2610,6 +2621,7 @@ function AlbumRowGroup({
                                 >
                                   {t.tags.TITLE ?? t.file}
                                 </Link>
+                                <DisambiguationMark value={t.disambiguation} />
                                 <AdvisoryMark value={t.tags.ITUNESADVISORY} />
                                 <LockedChip path={t.path} />
                                 {!!t.issues?.length && (

@@ -611,6 +611,34 @@ TAG_MAP = {
         "mp3": ("TXXX", "ALBUMALIAS"),
         "mp4": ("freeform", "com.apple.iTunes", "ALBUMALIAS"),
     },
+    # MusicBrainz's DISAMBIGUATION COMMENT for the three entities whose name a
+    # reader sees — the plain text MusicBrainz renders in parentheses after a
+    # name to tell two same-named things apart ("1967–1970 (The Blue Album)",
+    # "UK rock band"). It is NOT a translated spelling, so it follows no
+    # locale ladder and takes no `-<locale>` suffix: ONE trimmed string,
+    # written only when MusicBrainz states one (an empty comment is never a
+    # tag). Per entity level, exactly like the alias family above: the release
+    # GROUP's comment rides every file of the album (ALBUMDISAMBIGUATION, the
+    # owner's "(The Blue Album)" example), the credited artist's rides every
+    # file too (ARTISTDISAMBIGUATION), and the recording's belongs to its own
+    # track (TITLEDISAMBIGUATION). The release's OWN comment already has a
+    # home — it is the lowercased `disambiguation` the release-choice policy
+    # reads, not a tag — and is deliberately not duplicated here.
+    "TITLEDISAMBIGUATION": {
+        "flac": "TITLEDISAMBIGUATION",
+        "mp3": ("TXXX", "TITLEDISAMBIGUATION"),
+        "mp4": ("freeform", "com.apple.iTunes", "TITLEDISAMBIGUATION"),
+    },
+    "ARTISTDISAMBIGUATION": {
+        "flac": "ARTISTDISAMBIGUATION",
+        "mp3": ("TXXX", "ARTISTDISAMBIGUATION"),
+        "mp4": ("freeform", "com.apple.iTunes", "ARTISTDISAMBIGUATION"),
+    },
+    "ALBUMDISAMBIGUATION": {
+        "flac": "ALBUMDISAMBIGUATION",
+        "mp3": ("TXXX", "ALBUMDISAMBIGUATION"),
+        "mp4": ("freeform", "com.apple.iTunes", "ALBUMDISAMBIGUATION"),
+    },
     # A medium's own title ("Disc 2: The Rarities"), MusicBrainz's medium
     # `title`. TSST is the ID3v2.4 frame for it — and ID3v2.3 has no disc-title
     # frame at all, which is why the TXXX spelling is listed second: mutagen's

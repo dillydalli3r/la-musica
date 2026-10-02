@@ -821,8 +821,14 @@ def release_lookup(mbid):
                         "mbid": ac["artist"].get("id"),
                         # MusicBrainz's aliases for this credited artist —
                         # `inc=aliases` above nests them in the same response
-                        # (mlo.autotag writes the ARTISTALIAS tags from here).
+                        # (mlo.autotag writes the ARTISTALIAS tags from here) —
+                        # and its DISAMBIGUATION comment ("UK rock band"), the
+                        # plain-text counterpart the ARTISTDISAMBIGUATION tag
+                        # carries. Both ride the same artist row, so neither
+                        # costs a request.
                         "aliases": list(ac["artist"].get("aliases") or []),
+                        "disambiguation": str(ac["artist"].get("disambiguation")
+                                              or "").strip(),
                     })
             tracks.append({
                 "position": trk.get("position"),
@@ -835,6 +841,10 @@ def release_lookup(mbid):
                 # artist it credits — the ladder needs the name beside the
                 # aliases to tell a translation from a repeat of it.
                 "aliases": list(rec.get("aliases") or []),
+                # This recording's own disambiguation comment when MusicBrainz
+                # states one — the name in parentheses after the title a
+                # listener sees (mlo.autotag's TITLEDISAMBIGUATION tag).
+                "disambiguation": str(rec.get("disambiguation") or "").strip(),
                 "artist_name": str(((trk.get("artist-credit") or [{}])[0]
                                     .get("artist") or {}).get("name") or ""),
                 "artist_aliases": list(((trk.get("artist-credit") or [{}])[0]
@@ -855,7 +865,8 @@ def release_lookup(mbid):
             })
     release_artists = [
         {"name": ac.get("name", ""), "mbid": ac["artist"].get("id"),
-         "aliases": list(ac["artist"].get("aliases") or [])}
+         "aliases": list(ac["artist"].get("aliases") or []),
+         "disambiguation": str(ac["artist"].get("disambiguation") or "").strip()}
         for ac in data.get("artist-credit", []) if "artist" in ac
     ]
     rg_obj = data.get("release-group") or {}
@@ -920,6 +931,17 @@ def release_lookup(mbid):
         # remaster") — empty when it states none, which is what every reader
         # treats as "no disambiguation".
         "disambiguation": data.get("disambiguation") or "",
+        # The same KIND of comment one level up and beside the name: the
+        # release GROUP's comment ("The Blue Album" for 1967–1970) and the
+        # credited artist's ("UK rock band"). `inc=release-groups` and
+        # `artist-credit` above already carried both, so neither costs a
+        # request; the album-level half of mlo.autotag reads them into the
+        # ALBUMDISAMBIGUATION / ARTISTDISAMBIGUATION tags, and the album pages
+        # render them in parentheses after the album and artist names.
+        "release_group_disambiguation": str(rg_obj.get("disambiguation")
+                                            or "").strip(),
+        "artist_disambiguation": str((release_artists[0].get("disambiguation")
+                                      if release_artists else "") or "").strip(),
         "date": (data.get("date") or ""),
         # the release-group's first-release-date — the "original" release
         # date shown next to this specific release's own date
@@ -3314,6 +3336,12 @@ def _rym_slug(value):
     Garfunkel" → `/artist/simon-and-garfunkel`). A RELEASE page is a DIFFERENT
     spelling — see `_rym_release_slug` — and asking for one with this slug is
     what made every multi-word album a 404 on the first candidate.
+
+    A SONG page uses THIS spelling for BOTH its segments — VERIFIED live:
+    `/song/earth-wind-and-fire/kalimba-story/`, and the titles
+    `lady-godivas-operation`, `aint-it-funny`, `nmistiu` and
+    `sweet-i-thought-you-wanted-to-dance` — which is why `_rym_song_paths`
+    slugs the artist and the title with this one function.
     """
     text = unicodedata.normalize("NFKD", str(value or ""))
     text = text.encode("ascii", "ignore").decode("ascii").lower()
@@ -3700,6 +3728,212 @@ def rym_album_rating(artist, album, cfg=None, album_url="", rg_mbid=""):
     return rym_genres(artist, album, cfg, album_url or stated, archive=True)
 
 
+# A RYM RELEASE page publishes no per-track community average at all: the only
+# per-track numbers on it are the reader's OWN "Track ratings" widget and the
+# per-reviewer scores (VERIFIED against the archived OK Computer release page —
+# every `track_rating` hit belongs to one of those). The per-track average
+# lives on RYM's SONG page instead, one page per song:
+#
+#     /song/<artist-slug>/<title-slug>/
+#
+# whose artist segment is the artist-page spelling (`_rym_slug` — "Earth, Wind
+# & Fire" → `earth-wind-and-fire`) and whose title segment is the SAME
+# generator applied to the title — VERIFIED live against song pages: "Lady
+# Godiva's Operation" → `lady-godivas-operation`, "Ain't It Funny" →
+# `aint-it-funny`, "N'mistiu" → `nmistiu`, "Sweet / I Thought You Wanted to
+# Dance" → `sweet-i-thought-you-wanted-to-dance`, "Exit Music (For a Film)" →
+# `exit-music-for-a-film`. Apostrophes go and `&` becomes "and", exactly as on
+# an artist or release page; everything else collapses to one dash.
+#
+# A slug is only ever TRIED: the page that comes back must be the song's own
+# (`_rym_song_matches`, which reads the page's `<title>`) before its score is
+# read, so a page for another song is a MISS, never a wrong answer. RYM appends
+# `-1`, `-2`… to the SECOND song that takes a slug (VERIFIED: OK Computer's
+# `subterranean-homesick-alien-1` and `electioneering-1`), so the numbered
+# spellings are tried after the bare one and the walk stops at the first
+# confirmed hit.
+#
+# THE WALK IS DELIBERATELY SHORT (`RYM_SONG_TRIES`): a track's rating is ONE
+# datapoint, and a song RYM has no page for is the COMMON case on an album
+# nobody rates per track — so a miss must stay cheap. At RYM's 1 req/s every
+# extra candidate is a second of the user's run. The album-level readers
+# already pay the full release ladder for the same record; this walk does not.
+# The archive leg is one request per candidate too (`_rym_archive_newest`, the
+# newest capture only), never the release readers' indexed-capture ladder.
+RYM_SONG_SUFFIXES = ("", "-1", "-2")
+RYM_SONG_TRIES = 2
+
+
+_RYM_TITLE_RE = re.compile(r"<title[^>]*>(.*?)</title>", re.I | re.S)
+
+
+def _rym_song_paths(artist, title):
+    """The `/song/<artist>/<title>/` paths to try, best first (see above)."""
+    who, what = _rym_slug(artist), _rym_slug(title)
+    if not who or not what:
+        return []
+    return [f"/song/{who}/{what}{suffix}/"
+            for suffix in RYM_SONG_SUFFIXES[:RYM_SONG_TRIES]]
+
+
+def _rym_song_matches(page, artist, title):
+    """Whether *page* IS that song's page — read off the page's own `<title>`.
+
+    NOT off the page's whole text, deliberately: a song page carries the
+    album's track list (the rating widget and the JS payload behind it name
+    every other song on the record) and the lists the song appears in, so "is
+    the asked title somewhere in these bytes?" answers YES on pages that are
+    about another song entirely (VERIFIED: asking the archived "Paranoid
+    Android" page for "Let Down" — a sibling track, named by the same page's
+    track-list widget — passed a whole-text check). The `<title>` is the
+    page's own statement of what it is (VERIFIED: "Radiohead - Paranoid
+    Android - Lyrics and ratings - Rate Your Music"), and both names are
+    compared case- and punctuation-insensitively (`_rym_mentions` → `_rym_ref`),
+    so the artist's accents and the title's punctuation do not matter. A page
+    with no `<title>` at all is a MISS.
+    """
+    hit = _RYM_TITLE_RE.search(page or "")
+    if not hit:
+        return False
+    return _rym_mentions(hit.group(1), artist, title)
+
+
+def _rym_song_page(path, cfg, artist, title):
+    """The page at *path* when it IS that song, or None — one polite GET.
+
+    The GET is `_rym_get`, the module's ONE client: the 1 req/s throttle, the
+    module request lock, the 30-day disk cache with its negative beside it, the
+    browser-like headers and the refusal latch. `expect` is the path itself, so
+    a slug RYM does not know (a 404, or the 200 redirect to search/home it
+    serves instead) is the miss it is, not an answer.
+    """
+    page = _rym_get(path, cfg=cfg, expect=path)
+    if not page or not _rym_song_matches(page, artist, title):
+        return None
+    return page
+
+
+def _rym_live_song_answer(artist, title, cfg):
+    """The LIVE RYM song pages, in `_rym_song_paths` order, or None.
+
+    Every candidate goes through `_rym_song_page`, so the walk inherits
+    everything the release ladder has and adds nothing of its own. A refusal,
+    or the wall-clock budget (`RYM_MAX_WALL`), ends it: a page RYM will not
+    serve is not made likelier by the next slug.
+    """
+    started = time.time()
+    for path in _rym_song_paths(artist, title):
+        page = _rym_song_page(path, cfg, artist, title)
+        if page:
+            return page
+        if _rym_expired(started) or _rym_blocked(cfg):
+            return None
+    return None
+
+
+def _rym_archive_newest(path, cfg=None):
+    """The NEWEST archived capture of one RYM page, or None — ONE request.
+
+    The release readers fall back to `_rym_archive_get`, which tries the newest
+    capture and then walks the capture INDEX for up to `RYM_ARCHIVE_TRIES`
+    older ones — a ladder an album-level answer earns (one read serves the
+    whole record) and a single track's rating does not: on an album nobody
+    rates per track a song page is usually absent, so the song walk asks the
+    `2id_` form ONCE per candidate and gives up.
+
+    Everything else is the release route's, unchanged: the same magic URL
+    shape, the same 1 req/s throttle and module lock (it goes through
+    `_rym_archive_fetch` → `_rym_fetch`), and the same 30-day disk cache with
+    the negative included, so a miss is paid once and not once per run. The
+    negative is cached under a key of ITS OWN (`wayback-newest-…`): "the newest
+    capture is not this page" must never answer for the release readers, whose
+    ladder may still find an older capture. The release readers' own cached
+    copy IS read when one exists — a capture they already paid for answers this
+    question too.
+    """
+    if not path or not _rym_archive_on(cfg):
+        return None
+    target = f"{RYM_BASE}{path}"
+    digest = hashlib.sha1(target.encode("utf-8")).hexdigest()
+    key = "wayback-" + digest
+    cached = _rym_cache_read(key, RYM_CACHE_TTL)
+    if cached is None:
+        key = "wayback-newest-" + digest
+        cached = _rym_cache_read(key, RYM_CACHE_TTL)
+    if cached is not None:
+        html, archive = _rym_archive_unpack(cached)
+        if not html:
+            return None
+        _rym_route.update({"route": "archive", "cached": True,
+                           "url": archive.get("url") or "",
+                           "snapshot": archive.get("snapshot") or ""})
+        return html
+    text, final, _answered = _rym_archive_fetch(
+        f"{RYM_ARCHIVE_BASE}/{RYM_ARCHIVE_LATEST}/{target}")
+    if not text:
+        _rym_cache_write(key, _rym_archive_pack("", {}))
+        return None
+    archive = _rym_archive_snapshot(final)
+    _rym_cache_write(key, _rym_archive_pack(text, archive))
+    _rym_route.update({"route": "archive", "cached": False,
+                       "url": archive.get("url") or "",
+                       "snapshot": archive.get("snapshot") or ""})
+    return text
+
+
+def _rym_archived_song_answer(artist, title, cfg):
+    """The ARCHIVED copy of the RYM song page, or None.
+
+    The Wayback route, one newest-capture request per candidate
+    (`_rym_archive_newest` — see there for why a track does not get the release
+    readers' capture ladder), under the same identity rule: only a capture that
+    IS this song answers.
+    """
+    started = time.time()
+    for path in _rym_song_paths(artist, title):
+        html = _rym_archive_newest(path, cfg)
+        if html and _rym_song_matches(html, artist, title):
+            return html
+        if _rym_expired(started):
+            break
+    return None
+
+
+def rym_song_rating(artist, title, cfg=None):
+    """A TRACK's RYM answer — the SONG page's community average — or None.
+
+    `mlo.web_ratings` asks a track-level source for a value and the source's
+    own vote count, and that is exactly what a song page states: the answer is
+    ``{"rating": {"value", "count"}}``, the same shape `rym_album_rating`
+    returns and `mlo.web_ratings.parse_rateyourmusic` reads.
+
+    Which route is asked is settled the way `rym_genres` settles it: the live
+    site needs a `rym_cookie` whose `cf_clearance` matches `rym_user_agent`, so
+    without one the live ladder is not walked at all and the archived snapshot
+    answers instead (`rym_archive_fallback` still vetoes that route). A song
+    page that states no rating, and a song RYM cannot be reached for, are both
+    MISSES: nothing is guessed, and no release score is ever promoted to a
+    track.
+    """
+    artist = str(artist or "").strip()
+    title = str(title or "").strip()
+    if not artist or not title:
+        return None
+    archive = _rym_archive_on(cfg)
+    page = None
+    if bool(_rym_cookie(cfg)) or not archive:
+        page = _rym_live_song_answer(artist, title, cfg)
+    if not page and archive:
+        page = _rym_archived_song_answer(artist, title, cfg)
+    if not page:
+        return None
+    from mlo.web_ratings import rym_rating_from_html
+    parsed = rym_rating_from_html(page)
+    if not parsed or parsed.get("value") is None:
+        return None
+    return {"rating": {"value": parsed["value"], "count": parsed.get("count")}}
+
+
 def discogs_album_rating(artist, album, cfg=None):
     """The Discogs release detail for an album, or None without a token.
 
@@ -3740,8 +3974,9 @@ def web_rating_fetchers():
                 return _recording_with_work(mbid)
             return release_group_rating(mbid)
         if source == "rateyourmusic":
-            if str(kind or "album") != "album":
-                return None
+            if str(kind or "album") == "track":
+                return rym_song_rating(ident.get("artist"), ident.get("title"),
+                                       cfg)
             return rym_album_rating(ident.get("artist"), ident.get("album"),
                                     cfg, str(ident.get("url") or ""), mbid)
         if source == "albumoftheyear":

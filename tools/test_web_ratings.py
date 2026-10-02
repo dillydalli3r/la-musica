@@ -111,6 +111,86 @@ RYM_HTML_AVG_ONLY = ('<th class="info_hdr">RYM Rating</td><td colspan="2">'
                      '<span class="avg_rating" >\n 3.77\n </span>'
                      '<span class="max_rating">/ <span>5.0</span>')
 
+# RYM's 2026 design: the same two numbers with NO microdata at all, in the
+# component the current pages serve. This is the block read out of the archived
+# SONG page of Radiohead's "Paranoid Android"
+# (web.archive.org/web/20260814042836id_/…/song/radiohead/paranoid-android/),
+# where the star image's `alt`/`class` attributes sit between the value's
+# opening tag and the number itself.
+RYM_SONG_HTML = (
+    '<div class="page_section_main_info_music_rating_main">\n'
+    '   <div data-tiptip="&lt;b&gt;Bolded&lt;/b&gt;: In the top 10,000 songs '
+    'of all time."\n'
+    '      class="page_section_main_info_music_rating_value has_tip">\n'
+    '      <div class="page_section_main_info_music_rating_value_rating">\n'
+    '          <img alt="rating bolded" alt="bold star" '
+    'class="metadata-star-bold" /> 4.67\n'
+    '         \n'
+    '      </div>\n'
+    '      <div class="page_section_main_info_music_rating_value_number">\n'
+    '         17,654 \n'
+    '         \n'
+    '         ratings\n'
+    '      </div>\n'
+    '   </div>\n'
+    '</div>\n'
+)
+# The same component on a RELEASE page — the album aggregate a 2026 capture
+# carries instead of the microdata above.
+RYM_ALBUM_HTML_NEW = (
+    '<div class="page_section_main_info_music_rating_main">\n'
+    '   <div class="page_section_main_info_music_rating_value has_tip">\n'
+    '      <div class="page_section_main_info_music_rating_value_rating">\n'
+    '          <img alt="rating bolded" class="metadata-star-bold" /> 4.23\n'
+    '      </div>\n'
+    '      <div class="page_section_main_info_music_rating_value_number">\n'
+    '         66,965\n'
+    '         ratings\n'
+    '      </div>\n'
+    '   </div>\n'
+    '</div>\n'
+)
+
+# Whole SONG pages, as the identity check sees them: the page's own `<title>`
+# (what it says it IS), the rating component, and the album track-list widget a
+# real page carries. That widget names EVERY song of the record — and the
+# archived Paranoid Android page names "Let Down" in exactly this way — which
+# is why the check reads the page's own title, not the page's whole text.
+RYM_TRACKLIST_WIDGET = (
+    '<ul class="tracklist">\n'
+    '<li><div class="tracklist_line"><span class="tracklist_num">2</span>'
+    '<span class="tracklist_title"><a class="song bolded" '
+    'href="/song/radiohead/paranoid-android/"><span class="rendered_text">'
+    'Paranoid Android</span></a></span></div></li>\n'
+    '<li><div class="tracklist_line"><span class="tracklist_num">5</span>'
+    '<span class="tracklist_title"><a class="song" '
+    'href="/song/radiohead/let-down/"><span class="rendered_text">Let Down'
+    '</span></a></span></div></li>\n'
+    '</ul>\n')
+# A different song by the SAME artist, naming the asked title in its own
+# track list — the shape a bare-slug hit serves when RYM's entry for the asked
+# title carries a `-1` suffix.
+RYM_SONG_PAGE_OTHER = (
+    '<title>Radiohead - Let Down - Lyrics and ratings - Rate Your Music</title>'
+    '\n<a href="/artist/radiohead">Radiohead</a>\n'
+    + RYM_TRACKLIST_WIDGET +
+    '<div class="page_section_main_info_music_rating_value_rating">\n'
+    '   4.42\n</div>\n'
+    '<div class="page_section_main_info_music_rating_value_number">\n'
+    '   9,001 ratings\n</div>\n')
+RYM_SONG_PAGE = ('<title>Radiohead - Paranoid Android - Lyrics and ratings - '
+                 'Rate Your Music</title>\n'
+                 '<a href="/artist/radiohead">Radiohead</a>\n'
+                 + RYM_TRACKLIST_WIDGET + RYM_SONG_HTML)
+RYM_SONG_PAGE_SHA = (
+    '<title>Radiohead - Subterranean Homesick Alien - Lyrics and ratings - '
+    'Rate Your Music</title>\n'
+    '<a href="/artist/radiohead">Radiohead</a>\n' + RYM_SONG_HTML)
+# A page that IS the song but states no community average yet.
+RYM_SONG_PAGE_UNRATED = ('<title>Radiohead - Paranoid Android - Lyrics and '
+                         'ratings - Rate Your Music</title>\n'
+                         '<a href="/artist/radiohead">Radiohead</a>\n')
+
 # Discogs, `releases/1174296` (Radiohead, In Rainbows) — the live document.
 DISCOGS = {"id": 1174296, "title": "In Rainbows",
            "genres": ["Electronic", "Rock"],
@@ -195,6 +275,29 @@ eq(wr.parse_rateyourmusic({"rating": {"value": 4.18, "count": 49366}}),
 eq(wr.parse_rateyourmusic({"genres": ["art rock"]}), None,
    "an answer with no rating sub-dict is a miss")
 
+# The 2026 design — no microdata at all, the value and its count in RYM's own
+# component. Both levels are this same shape.
+eq(wr.rym_rating_from_html(RYM_SONG_HTML), {"value": 4.67, "count": 17654},
+   "the 2026 SONG markup parses to its value and its ratings count")
+eq(wr.rym_rating_from_html(RYM_ALBUM_HTML_NEW), {"value": 4.23, "count": 66965},
+   "…and the same component on a release page (the album aggregate)")
+eq(wr.rym_rating_from_html(RYM_HTML + RYM_SONG_HTML),
+   {"value": 4.18, "count": 49366},
+   "the schema.org microdata still wins when a page carries both designs")
+eq(wr.rym_rating_from_html('<div class="page_section_main_info_music_rating_'
+                           'value_rating"> 4.50 </div>'),
+   {"value": 4.5, "count": 0},
+   "a component with no count is a value with no votes, never a miss")
+eq(wr.parse_rateyourmusic(RYM_SONG_HTML), (93, 17654, "RateYourMusic"),
+   "a song page -> 93, weighted by its own 17 654 votes")
+eq(wr.parse_rateyourmusic({"rating": {"value": 4.67, "count": 17654}}),
+   (93, 17654, "RateYourMusic"),
+   "…and the song answer the fetcher hands over reads identically")
+eq(wr.parse_source("rateyourmusic", RYM_SONG_HTML, "track"),
+   (93, 17654, "RateYourMusic"),
+   "the one dispatch reads a TRACK's RYM payload (no level branch needed)")
+ok("rateyourmusic" in wr.TRACK_SOURCES, "RateYourMusic is a track-level source")
+
 eq(wr.parse_discogs(DISCOGS), (94, 3809, "Discogs"),
    "Discogs: 4.72/5 over 3 809 votes")
 eq(wr.parse_discogs(DISCOGS_UNRATED), None,
@@ -223,6 +326,189 @@ eq(intg.aoty_genres_from_html(AOTY_HTML),
 eq(intg.aoty_genres_from_html("<html><body>no genres here</body></html>"), [],
    "…and a page without them yields no names")
 eq(intg.aoty_genres_from_html(""), [], "…and neither does an empty page")
+
+print("== the RYM song source (slug, identity check, fallback order) ==")
+# The ONE slug generator both segments use, on real RYM song titles. Each
+# spelling below was read off rateyourmusic.com: apostrophes are DELETED
+# ("Lady Godiva's" → `lady-godivas-…`, "Ain't" → `aint-…`) and `&` becomes
+# "and" ("Earth, Wind & Fire" → `earth-wind-and-fire`) — as on the artist and
+# release pages — while every other run of punctuation/space collapses to ONE
+# dash. This is the spelling a /song/ URL carries; a wrong guess is a MISS,
+# never a wrong answer (the page is checked before it is read).
+eq(intg._rym_slug("Paranoid Android"), "paranoid-android", "a plain title")
+eq(intg._rym_slug("Subterranean Homesick Alien"),
+   "subterranean-homesick-alien", "…a long one (RYM's page adds the `-1`)")
+eq(intg._rym_slug("Exit Music (For a Film)"), "exit-music-for-a-film",
+   "parentheses collapse together with the spaces around them")
+eq(intg._rym_slug("Lady Godiva's Operation"), "lady-godivas-operation",
+   "an apostrophe is DELETED, not turned into a dash")
+eq(intg._rym_slug("Ain't It Funny"), "aint-it-funny", "…and again")
+eq(intg._rym_slug("Sweet / I Thought You Wanted to Dance"),
+   "sweet-i-thought-you-wanted-to-dance",
+   "a slash collapses into the run around it, not into two dashes")
+eq(intg._rym_slug("Rock & Roll"), "rock-and-roll", "`&` is RYM's own `and`")
+eq(intg._rym_slug("Björk — Jóga"), "bjork-joga",
+   "diacritics fold and an em dash leaves no stray dash")
+
+eq(intg._rym_song_paths("Radiohead", "Paranoid Android"),
+   ["/song/radiohead/paranoid-android/",
+    "/song/radiohead/paranoid-android-1/"],
+   "the ladder is the bare slug, then ONE numbered spelling — no `-2`")
+eq(intg.RYM_SONG_TRIES, 2,
+   "…and that bound is the module's own, deliberately small budget")
+eq(intg._rym_song_paths("Earth, Wind & Fire", "Kalimba Story"),
+   ["/song/earth-wind-and-fire/kalimba-story/",
+    "/song/earth-wind-and-fire/kalimba-story-1/"],
+   "the artist segment is the artist-page spelling")
+eq(intg._rym_song_paths("", "Paranoid Android"), [],
+   "no artist = no path, so no request is ever made")
+
+# The identity check reads the page's OWN `<title>`, never the whole page: a
+# song page's track-list widget names every song on the record (the archived
+# "Paranoid Android" page names "Let Down", and vice versa), so a whole-text
+# check would accept a sibling track's page.
+eq(intg._rym_song_matches(RYM_SONG_PAGE, "Radiohead", "Paranoid Android"), True,
+   "the page's own title is the song that was asked for")
+eq(intg._rym_song_matches(RYM_SONG_PAGE, "Radiohead", "Let Down"), False,
+   "…and a title the page only LISTS is not accepted as its own")
+eq(intg._rym_song_matches(RYM_SONG_PAGE_OTHER, "Radiohead", "Paranoid Android"),
+   False,
+   "a sibling track's page is a miss, even though its track list names ours")
+eq(intg._rym_song_matches("<html><body>no title</body></html>", "A", "B"), False,
+   "a page with no <title> at all is never verified")
+
+# The live route, with the module's own GET replaced by saved pages: the whole
+# ladder runs — the identity check included — with no socket. `_served`
+# records what it would have fetched, in order.
+_ORIG_RYM_GET = intg._rym_get
+_served = {"pages": {}, "asked": [], "default": None}
+
+
+def _fake_rym_get(path, params=None, cfg=None, expect=None):
+    _served["asked"].append(path)
+    return _served["pages"].get(path, _served["default"])
+
+
+def song_from(pages, artist="Radiohead", title="Paranoid Android", default=None):
+    """`rym_song_rating` over saved pages, with the live site's GET replaced."""
+    _served.update(pages=pages, asked=[], default=default)
+    intg._rym_get = _fake_rym_get
+    try:
+        return intg.rym_song_rating(artist, title,
+                                    {"rym_archive_fallback": False})
+    finally:
+        intg._rym_get = _ORIG_RYM_GET
+
+
+eq(song_from({"/song/radiohead/paranoid-android/": RYM_SONG_PAGE}),
+   {"rating": {"value": 4.67, "count": 17654}},
+   "a VERIFIED song page answers with its own value and count")
+eq(_served["asked"], ["/song/radiohead/paranoid-android/"],
+   "…and the walk stops at the FIRST hit (no -1/-2 request is spent)")
+
+eq(song_from({}, default=RYM_SONG_PAGE_OTHER), None,
+   "a page that IS another song is a MISS, never its score")
+eq(_served["asked"],
+   ["/song/radiohead/paranoid-android/",
+    "/song/radiohead/paranoid-android-1/"],
+   "…after every slug was tried (two, the whole budget, then it gives up)")
+
+eq(song_from({"/song/radiohead/subterranean-homesick-alien/":
+              RYM_SONG_PAGE_OTHER,
+              "/song/radiohead/subterranean-homesick-alien-1/":
+              RYM_SONG_PAGE_SHA},
+             title="Subterranean Homesick Alien"),
+   {"rating": {"value": 4.67, "count": 17654}},
+   "a bare slug serving another song falls through to the `-1` page")
+eq(_served["asked"],
+   ["/song/radiohead/subterranean-homesick-alien/",
+    "/song/radiohead/subterranean-homesick-alien-1/"],
+   "…and stops there — the `-2` candidate is never asked")
+
+eq(song_from({"/song/radiohead/paranoid-android/": RYM_SONG_PAGE_UNRATED}), None,
+   "the right page with no community average is a miss, never a zero")
+eq(_served["asked"], ["/song/radiohead/paranoid-android/"],
+   "…and it is still the first VERIFIED hit, so the walk stops")
+
+eq(song_from({}, artist="", title="Paranoid Android"), None,
+   "a track with no artist is a miss")
+eq(_served["asked"], [], "…with ZERO requests")
+
+# With the archive permitted and no `rym_cookie`, the live site is not asked at
+# all — the snapshot answers, under the same identity check. The REAL archive
+# leg runs (`_rym_archive_newest` included); only the two seams are replaced,
+# so this process reads and writes nothing outside itself.
+_ORIG_FETCH = intg._rym_archive_fetch
+_ORIG_READ, _ORIG_WRITE = intg._rym_cache_read, intg._rym_cache_write
+_arch_urls = []
+_served.update(pages={}, asked=[], default=None)
+intg._rym_get = _fake_rym_get
+intg._rym_cache_read = lambda key, ttl: None
+intg._rym_cache_write = lambda key, text: None
+
+
+def _fake_archive_fetch(url, params=None):
+    """One Wayback request: the bare slug IS this song, nothing else is."""
+    _arch_urls.append(url)
+    if url.endswith("/song/radiohead/paranoid-android/"):
+        return RYM_SONG_PAGE, url.replace("/2id_/", "/20260814042836id_/"), True
+    return None, url, True
+
+
+intg._rym_archive_fetch = _fake_archive_fetch
+try:
+    archived = intg.rym_song_rating("Radiohead", "Paranoid Android",
+                                    {"rym_archive_fallback": True})
+finally:
+    intg._rym_archive_fetch = _ORIG_FETCH
+    intg._rym_cache_read, intg._rym_cache_write = _ORIG_READ, _ORIG_WRITE
+    intg._rym_get = _ORIG_RYM_GET
+eq(archived, {"rating": {"value": 4.67, "count": 17654}},
+   "with no cookie the archived copy of the song page answers")
+eq(_served["asked"], [], "…and the live site is never asked")
+eq(_arch_urls, ["https://web.archive.org/web/2id_/https://rateyourmusic.com"
+                "/song/radiohead/paranoid-android/"],
+   "…ONE newest-capture request, for the bare slug")
+
+# A song RYM has no capture for is the common case on an album nobody rates
+# per track, so its cost is bounded deliberately: the two candidates, ONE
+# newest-capture request each — never the release readers' indexed-capture
+# ladder (the bare `2id_` URLs below are what pins that).
+_arch_urls = []
+intg._rym_archive_fetch = _fake_archive_fetch
+intg._rym_cache_read = lambda key, ttl: None
+intg._rym_cache_write = lambda key, text: None
+try:
+    missing = intg.rym_song_rating("Radiohead", "Airbag",
+                                   {"rym_archive_fallback": True})
+finally:
+    intg._rym_archive_fetch = _ORIG_FETCH
+    intg._rym_cache_read, intg._rym_cache_write = _ORIG_READ, _ORIG_WRITE
+eq(missing, None, "a song the archive holds no capture of is a miss")
+eq(_arch_urls, ["https://web.archive.org/web/2id_/https://rateyourmusic.com"
+                "/song/radiohead/airbag/",
+                "https://web.archive.org/web/2id_/https://rateyourmusic.com"
+                "/song/radiohead/airbag-1/"],
+   "…costing the bare slug and ONE numbered spelling, newest capture only")
+
+print("== a track's aggregate over RYM and MusicBrainz ==")
+
+
+def _rym_mb_fetch(source, kind, ident, cfg):
+    """Two track-level sources, no socket: RYM's song page, MB's recording."""
+    if source == "rateyourmusic":
+        return {"rating": {"value": 4.67, "count": 17654}}   # the song page
+    if source == "musicbrainz":
+        return MB_TRACK_OWN                                  # 4.2/5, 18 votes
+    return None
+
+
+track = wr.track_rating("Radiohead", "Paranoid Android", "rec-mbid", {},
+                        _rym_mb_fetch)
+eq(track["sources"], ["RateYourMusic", "MusicBrainz"],
+   "a track's WEBRATING_SOURCE can now read RateYourMusic; MusicBrainz")
+eq(track["value"], 93,
+   "…and the vote-weighted mean is RYM's own 93 (17 654 votes vs 18)")
 
 print("== aggregation ==")
 # 87 and 84 over 31 and 49 366 votes: the big one decides the number.
@@ -411,6 +697,11 @@ else:
     eq(stats2["skipped_count"], 3, "…and books every track as skipped")
     for path, stamp in before.items():
         eq(os.path.getmtime(path), stamp, f"{os.path.basename(path)} untouched")
+
+    # …and a run that does not list rateyourmusic never asks it: the track
+    # source is opt-in through `web_ratings_sources`, exactly like every other.
+    ok(not any(src == "rateyourmusic" for src, _k, _i in calls),
+       "a run without rateyourmusic in web_ratings_sources asks it ZERO times")
 
     # The feature switch stops the run before a single request is made.
     asked = len(calls)
