@@ -174,6 +174,73 @@ try:
     except Exception as exc:
         check("an unreadable shared config does not raise out of the restore",
               False, f"{type(exc).__name__}: {exc}")
+
+    # A run that is KILLED never reaches its restore, so what it stamped stays
+    # in the shared file. The marker it wrote before starting is what the next
+    # run heals from: without it, the leftover is read as if it were the
+    # library's own value — which is how this machine's path got pinned into
+    # the owner's config once, and put back there by every run after it.
+    marker = devtool.DevBed.marker_path(foreign_cfg)
+    foreign_cfg.write_text(json.dumps({"music_folder": "/music", "kept": 1}),
+                           encoding="utf-8")
+    marker.unlink(missing_ok=True)
+    foreign.remember_foreign_folder()
+    check("the value is written to a marker beside the config before the app runs",
+          marker.is_file()
+          and json.loads(marker.read_text(encoding="utf-8"))
+          == {"value": "/music", "stamped": str(foreign_lib)},
+          marker.read_text(encoding="utf-8") if marker.is_file() else "no marker")
+
+    # A killed run: the config still carries what it stamped, the marker is on
+    # disk, nothing put the value back.
+    killed = json.loads(foreign_cfg.read_text(encoding="utf-8"))
+    killed["music_folder"] = str(foreign_lib)
+    foreign_cfg.write_text(json.dumps(killed, indent=2, sort_keys=True), encoding="utf-8")
+    foreign.foreign_folder = None
+    foreign.remember_foreign_folder()
+    healed = json.loads(foreign_cfg.read_text(encoding="utf-8"))
+    check("the next run puts back what the killed one left stamped",
+          healed.get("music_folder") == "/music", healed.get("music_folder"))
+    check("and starts from it, not from the leftover",
+          foreign.foreign_folder == "/music", foreign.foreign_folder)
+    check("the killed run's marker is spent, and this run's own takes its place "
+          "for the value it now protects",
+          json.loads(marker.read_text(encoding="utf-8"))
+          == {"value": "/music", "stamped": str(foreign_lib)},
+          marker.read_text(encoding="utf-8") if marker.is_file() else "no marker")
+
+    # A marker is believed only about the exact value IT stamped: a value
+    # anything else has written since (the install that owns the library saving)
+    # is left alone — and becomes the value this run would put back.
+    marker.write_text(json.dumps({"value": "/music", "stamped": str(foreign_lib)}),
+                      encoding="utf-8")
+    foreign_cfg.write_text(json.dumps({"music_folder": "/somewhere/else"}), encoding="utf-8")
+    foreign.foreign_folder = None
+    foreign.remember_foreign_folder()
+    check("a value that has changed since is not overwritten from a stale marker",
+          json.loads(foreign_cfg.read_text(encoding="utf-8")).get("music_folder")
+          == "/somewhere/else"
+          and foreign.foreign_folder == "/somewhere/else",
+          f"{json.loads(foreign_cfg.read_text(encoding='utf-8')).get('music_folder')} / "
+          f"{foreign.foreign_folder!r}")
+
+    # The leftover with NO marker at all (a run older than the marker above):
+    # its original value is recorded nowhere, so it is reported, never written
+    # back — writing it back would keep this machine's path in a file that a
+    # container reads.
+    marker.unlink(missing_ok=True)
+    foreign_cfg.write_text(json.dumps({"music_folder": str(foreign_lib)}), encoding="utf-8")
+    foreign.foreign_folder = None
+    foreign.remember_foreign_folder()
+    check("a shared config already stamped with this machine's path is not "
+          "taken for its own value",
+          foreign.foreign_folder is None and not marker.is_file(),
+          f"{foreign.foreign_folder!r} marker={marker.is_file()}")
+    foreign.restore_foreign_folder()
+    check("and it is left exactly as it was found",
+          json.loads(foreign_cfg.read_text(encoding="utf-8")).get("music_folder")
+          == str(foreign_lib))
+    marker.unlink(missing_ok=True)
 finally:
     devtool.is_scratch = real_is_scratch
     devtool.wipe(foreign_lib)

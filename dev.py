@@ -318,16 +318,94 @@ class DevBed:
         the new folder"), so any run of this bed against a real library rewrites
         the file with a path from THIS machine — measured, on every start. That
         file is shared with the install that owns the library, so the bed puts
-        the original back when it stops."""
+        the original back when it stops.
+
+        The value is copied to a marker file FIRST (see `marker_path`): a run
+        killed before it could put the file back leaves that marker behind, and
+        the next run heals from it instead of reading the leftover as if it were
+        the library's own value — which is exactly how one killed run once
+        pinned this machine's path into the owner's config for good."""
         self.foreign_folder = None
         config = self.shared_config()
         if config is None or not config.is_file():
             return
+        self.heal_leftover(config)
         try:
-            self.foreign_folder = json.loads(
-                config.read_text(encoding="utf-8")).get("music_folder")
+            value = json.loads(config.read_text(encoding="utf-8")).get("music_folder")
         except Exception:
-            self.foreign_folder = None
+            return
+        if not value:
+            return
+        if os.path.normcase(str(value)) == os.path.normcase(str(self.music)):
+            # Already this machine's path. Either the install that owns the
+            # library runs on this very folder (the app's stamp writes the same
+            # bytes — there is nothing to undo), or a bed run older than the
+            # marker above was killed with the value still stamped. Only the
+            # second case is damage, and its original value is not recorded
+            # anywhere, so it is said out loud rather than guessed at: writing
+            # the leftover back would keep this machine's path in a config that
+            # a container reads.
+            print(f"! {config} already reads this machine's path {str(value)!r} — "
+                  f"either that library's own install runs here (nothing to put "
+                  f"back) or an older bed run was killed before it could. It will "
+                  f"be left as it is; set music_folder by hand if it should point "
+                  f"somewhere else", flush=True)
+            return
+        self.foreign_folder = value
+        try:
+            self.marker_path(config).write_text(
+                json.dumps({"value": value, "stamped": str(self.music)}),
+                encoding="utf-8")
+        except OSError as exc:                # no marker is survivable: the
+            print(f"! cannot write the restore marker ({exc}) — a killed run "
+                  f"would leave the stamped path behind", flush=True)
+
+    @staticmethod
+    def marker_path(config: Path) -> Path:
+        """Where a run records what it is about to overwrite. Hidden beside the
+        config, and NOT the same name the atomic write uses for its temp file:
+        an interrupted run leaves this file, and `heal_leftover` finds it."""
+        return config.with_name(config.name + ".devbed-restore")
+
+    def heal_leftover(self, config: Path) -> None:
+        """Undo what a KILLED bed run left in a shared config.
+
+        A run writes the marker before it lets the app start, so a marker that
+        is still there means that run never reached its restore: the value in
+        the file may be this machine's path where the library's own install had
+        something else. The marker is believed only about the exact value IT
+        stamped — a value anything else has written since is left alone."""
+        marker = self.marker_path(config)
+        if not marker.is_file():
+            return
+        try:
+            saved = json.loads(marker.read_text(encoding="utf-8"))
+        except Exception:
+            marker.unlink(missing_ok=True)     # unusable: nothing to heal from
+            return
+        stamped = str(saved.get("stamped") or "")
+        value = saved.get("value")
+        try:
+            data = json.loads(config.read_text(encoding="utf-8"))
+            if stamped and value is not None and os.path.normcase(
+                    str(data.get("music_folder") or "")) == os.path.normcase(stamped):
+                data["music_folder"] = value
+                self.write_config(config, data)
+                print(f"! an earlier bed run was killed before it could put "
+                      f"{config} back — music_folder is {value!r} again", flush=True)
+            marker.unlink(missing_ok=True)
+        except OSError as exc:                 # keep the marker: heal next time
+            print(f"! could not put {config} back from {marker.name} ({exc})",
+                  flush=True)
+
+    @staticmethod
+    def write_config(config: Path, data: dict) -> None:
+        """Replace the config atomically, the way the app itself does: a reader
+        (the container's own install) never sees half a file."""
+        temp = config.with_name(config.name + ".devbed")
+        temp.write_text(json.dumps(data, indent=2, sort_keys=True) + "\n",
+                        encoding="utf-8")
+        os.replace(temp, config)
 
     def restore_foreign_folder(self) -> None:
         """Undo the one write this bed causes in somebody else's config, and
@@ -347,12 +425,13 @@ class DevBed:
                 data = json.loads(config.read_text(encoding="utf-8"))
                 if os.path.normcase(str(data.get("music_folder") or "")) \
                         != os.path.normcase(str(self.music)):
-                    return                    # not ours (or already put back)
+                    # Not ours (or already put back): the marker has nothing
+                    # left to protect either way.
+                    self.marker_path(config).unlink(missing_ok=True)
+                    return
                 data["music_folder"] = self.foreign_folder
-                temp = config.with_name(config.name + ".devbed")
-                temp.write_text(json.dumps(data, indent=2, sort_keys=True) + "\n",
-                                encoding="utf-8")
-                os.replace(temp, config)
+                self.write_config(config, data)
+                self.marker_path(config).unlink(missing_ok=True)
                 print(f"· restored music_folder in {config} to "
                       f"{self.foreign_folder!r}", flush=True)
                 return
@@ -360,9 +439,12 @@ class DevBed:
                 continue                      # still ours to undo: try again
             except OSError as exc:
                 if attempt == 3:
+                    # The marker stays: the next run heals from it, which is
+                    # what it is for.
                     print(f"· COULD NOT put {config} back ({exc}) — it still says "
-                          f"{self.music!r}; that library's own install rewrites it "
-                          f"on its next start", flush=True)
+                          f"{self.music!r}; the next bed run will put it back, and "
+                          f"that library's own install rewrites it on its next start",
+                          flush=True)
                     return
                 time.sleep(0.5)
             except Exception as exc:
