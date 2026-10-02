@@ -31,6 +31,7 @@ import { EmptyState, GradeBadge, MediaChip, AdvisoryMark, CachedMark, Disambigua
 import ArtistAvatar from "../components/ArtistAvatar";
 import ArtistName from "../components/ArtistName";
 import LockedChip from "../components/LockedChip";
+import SelectAllButton from "../components/SelectAllButton";
 import { forceDict, loadForceSel } from "../lib/force";
 import Segmented from "../components/Segmented";
 import PageHeader from "../components/PageHeader";
@@ -1159,6 +1160,31 @@ export default function LibraryPage() {
   const allTracksSelected =
     selTrackSet.size >= sortedTracks.length && sortedTracks.length > 0 && sortedTracks.every((t) => selTrackSet.has(t.path));
 
+  /* What Select mode's new "Select all" ticks: whatever the ACTIVE view lists,
+   * which is the same set that view's table header ticks (both write the whole
+   * FILTERED list, never the drawn window) — so the button and the header
+   * checkbox cannot come to different answers, and the grid and the compact
+   * list, which have no header row to put a checkbox in, get the control the
+   * three tables already had. */
+  const selectAll =
+    view === "artists"
+      ? {
+          count: sortedArtists.length, noun: "artists", all: allArtistsSelected,
+          onSelectAll: () => setSelection({ artists: sortedArtists.map((a) => a.path) }),
+          onClear: () => setSelection({ artists: [] }),
+        }
+      : view === "tracks"
+        ? {
+            count: sortedTracks.length, noun: "tracks", all: allTracksSelected,
+            onSelectAll: () => setSelection({ tracks: sortedTracks.map((t) => t.path) }),
+            onClear: () => setSelection({ tracks: [] }),
+          }
+        : {
+            count: sortedAlbums.length, noun: "albums", all: allAlbumsSelected,
+            onSelectAll: () => setSelection({ albums: sortedAlbums.map((a) => a.path) }),
+            onClear: () => setSelection({ albums: [] }),
+          };
+
   return (
     <div className="p-6 space-y-5 mx-auto max-w-[1600px]">
       {/* toolbar rides in the header: controls left, stats/select/counts right */}
@@ -1512,6 +1538,12 @@ export default function LibraryPage() {
           >
             <ListChecks className="h-3.5 w-3.5" /> Select
           </button>
+
+          {/* Beside the control that turned checkboxes on, and only while they
+              are on: Select mode on an empty tick-list is what the button is
+              for, and outside select mode it would be a control with nothing
+              to tick. */}
+          {selectMode && <SelectAllButton {...selectAll} />}
 
           {/* Refresh: re-walk the music folder. Home carries the same control
               in the same order (Stats, Select, Refresh), so the two pages that

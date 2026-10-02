@@ -13,6 +13,7 @@ import PageHeader from "../components/PageHeader";
 import Popover, { MenuItem } from "../components/Popover";
 import AlbumCard from "../components/AlbumCard";
 import AlbumRow, { type AlbumRowCell } from "../components/AlbumRow";
+import SelectAllButton from "../components/SelectAllButton";
 import type { Album } from "../types";
 
 /** The two presentations the bin needs — the library's Segmented control with
@@ -279,11 +280,13 @@ export default function TrashPage() {
   const toggleExpand = (name: string) =>
     setExpanded((cur) => (cur.includes(name) ? cur.filter((n) => n !== name) : [...cur, name]));
 
+  // Same shape, same reason as `useSelectMode` (lib/libraryView): the clear
+  // belongs to the handler, not to the state updater — React runs an updater
+  // during the render it schedules, and a setState from inside one is a
+  // setState during render.
   const toggleSelectMode = () => {
-    setSelectMode((v) => {
-      if (v) setSelected([]);
-      return !v;
-    });
+    if (selectMode) setSelected([]);
+    setSelectMode(!selectMode);
     setSortOpen(false);
   };
 
@@ -530,6 +533,19 @@ export default function TrashPage() {
           >
             <ListChecks className="h-3.5 w-3.5" /> Select
           </button>
+
+          {/* The table's own header checkbox ticks `rows`; this is the same set
+              for the grid view, and for the header on a phone where that
+              checkbox is a scroll away. */}
+          {selectMode && (
+            <SelectAllButton
+              count={rows.length}
+              noun="entries"
+              all={allSelected}
+              onSelectAll={() => setSelected(rows.map((e) => e.name))}
+              onClear={() => setSelected([])}
+            />
+          )}
           <span className="text-xs text-zinc-500 whitespace-nowrap">
             {isLoading
               ? "Reading trash…"

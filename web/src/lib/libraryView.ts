@@ -169,12 +169,15 @@ export function useSelectMode(): { selectMode: boolean; toggleSelectMode: () => 
   const [selectMode, setSelectMode] = useState(false);
   // Leaving select mode drops what was ticked: the batch toolbar reads the
   // store, so a selection left behind a hidden checkbox would be acted on
-  // while nothing on screen shows it as chosen.
-  const toggleSelectMode = () =>
-    setSelectMode((on) => {
-      if (on) clearSelection();
-      return !on;
-    });
+  // while nothing on screen shows it as chosen. The clear is called from the
+  // HANDLER, not from inside the state updater: React runs an updater during
+  // the render it schedules, so a store write from there is a setState during
+  // render — React's own "Cannot update a component while rendering a
+  // different component", raised on every exit from select mode with a tick.
+  const toggleSelectMode = () => {
+    if (selectMode) clearSelection();
+    setSelectMode(!selectMode);
+  };
   return { selectMode, toggleSelectMode };
 }
 

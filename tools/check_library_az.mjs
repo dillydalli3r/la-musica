@@ -17,6 +17,15 @@
  *     lib/libraryView.ts in the browser, which is where a click cannot reach:
  *     no album in the payload is titled with a symbol, and only one has an
  *     accent, so the fallback cases are proved there.
+ *   * Select mode's "Select all" is ONE control (components/SelectAllButton)
+ *     over four different selections — the Library's five views, Home's
+ *     shelves, the artist page and the trash — so the check drives each
+ *     wiring: the label's number against what the list shows (the toolbar's
+ *     own counts, the artist rows, the de-duplicated shelves, the entries),
+ *     every drawn box ticked by one click, the batch bar reading the same
+ *     number, and the same button clearing it again. With a name typed, "all"
+ *     is what the filter left. The fixture puts one album on two Home shelves
+ *     on purpose: the count stays one album.
  *   * The album page's "Recommended (Local)" shelf was a single horizontal row
  *     that ran off the shelf's own width and cut the card at the edge (the
  *     owner's screenshot: six cards, the sixth in halves). It is a wrapped grid
@@ -262,6 +271,38 @@ const HOME = {
   top_artists: served.artists.slice(0, 3).map(homeArtist),
   grade_warning: null,
 };
+/* Two album shelves, with ONE album on both of them: Home's own rows are
+ * library albums, and the same album rides on several shelves — which is what
+ * "Select all" has to count once (the check reads 3 out of these 4 rows). */
+HOME.recent = served.artists.find((a) => a.name === "Zed Case")?.albums ?? [];
+HOME.favorites = [
+  ...(served.artists.find((a) => a.name === "Zed Case")?.albums.slice(1) ?? []),
+  ...(served.artists.find((a) => a.name === "Ásgeir")?.albums ?? []),
+];
+/* The trash's own payload: enough rows for "Select all" to mean something, and
+ * one entry with no recorded origin — an older removal, the case the restore
+ * path has to ask about instead of guessing a destination. */
+const TRASH = {
+  folder: "F:/tmp/mlo-lib-az/.mlo/trash",
+  music_folder: "F:/tmp/mlo-lib-az",
+  exists: true,
+  count: 12,
+  bytes: 1234567,
+  entries: Array.from({ length: 12 }, (_, i) => {
+    const name = `entry-${String(i + 1).padStart(2, "0")}`;
+    return {
+      name,
+      path: `F:/tmp/mlo-lib-az/.mlo/trash/${name}`,
+      kind: i % 3 === 0 ? "file" : "album",
+      label: `Trashed ${i + 1}`,
+      tracks: i % 3 === 0 ? 0 : 5,
+      bytes: 1000 * (i + 1),
+      trashed_at: "2026-01-01T00:00:00",
+      cover: false,
+      origin: i === 11 ? null : "F:/tmp/mlo-lib-az/Somewhere",
+    };
+  }),
+};
 const apiStub = createHttpServer((req, res) => {
   const url = req.url || "";
   const json = (body) => {
@@ -297,6 +338,7 @@ const apiStub = createHttpServer((req, res) => {
     return json(artistPayload(row));
   }
   if (url.startsWith("/api/home")) return json(HOME);
+  if (url.startsWith("/api/trash")) return json(TRASH);
   if (url.startsWith("/api/recommend")) {
     // The shelf asks with a POST body (a playlist or a favourites set is a seed
     // LIST); the older GET form has none. Either way the answer is the
@@ -370,6 +412,15 @@ try {
   await context.route("**/sw.js*", (route) => route.abort());
   const page = await context.newPage();
   page.on("pageerror", (e) => failures.push(`the page threw: ${String(e).split("\n")[0]}`));
+  /* React's own dev-mode complaint about a setState during a render. The one
+   * place this app used to earn it is leaving select mode (the clear ran inside
+   * the state updater, which React calls during the render it schedules), so
+   * the select-mode checks below read it as a failure — a console warning is
+   * not a failing test on its own, this one is a named bug. */
+  const renderPhaseWarnings = [];
+  page.on("console", (msg) => {
+    if (/Cannot update a component/.test(msg.text())) renderPhaseWarnings.push(msg.text());
+  });
 
   // ---------------------------------------------------------------- helpers
   /** Which of `wanted` the page is showing, by TEXT: an element whose whole
@@ -1138,6 +1189,205 @@ try {
     + `no source of its own "${unsourcedCard?.media}" | disc "${physicalCard?.media}" (countries "${physicalCard?.country}") | `
     + `album page "${albumChip.digital.join(" / ")}"`);
 
+  /* ---- 8b. Select mode's "Select all" -----------------------------------
+   * The owner's ask: one click for the whole list, wherever the Select button
+   * is. It is the same control in four places (lib: components/SelectAllButton)
+   * over four different selections, so the check drives each wiring: the
+   * Library's five views, Home's shelves, the artist page and the trash.
+   *
+   * Two claims are read off the running app rather than assumed:
+   *   * the number in the label is the number the list shows — the toolbar's
+   *     own count for the albums and tracks views, the artist rows for the
+   *     artists view, the de-duplicated shelves for Home (the fixture puts one
+   *     album on two shelves on purpose), the entries for the trash;
+   *   * clicking it ticks EVERY box the view draws, and clicking it again (it
+   *     is the way back out once everything is ticked) leaves nothing ticked
+   *     and no batch bar behind.
+   * The filtered case is the third: with "asgeir" typed, "all" is the one album
+   * left, not the eleven in the library.
+   */
+  const selectBtn = page.getByRole("button", { name: "Select", exact: true });
+  const selectAllBtn = page.getByRole("button", { name: /^(Select all|Deselect all) \d+ / });
+  const allLabel = async () => (await selectAllBtn.innerText()).replace(/\s+/g, " ").trim();
+  const boxCounts = () =>
+    page.$$eval("input[type=checkbox]", (els) => ({
+      drawn: els.length,
+      ticked: els.filter((e) => e.checked).length,
+    }));
+  /** The batch bar's own sentence, whichever page drew it: the Library's
+   *  "N albums · M artists · K tracks · T total tracks", Home's and the artist
+   *  page's "N albums selected", the trash's "N selected". Empty when no bar is
+   *  drawn at all. */
+  const barLine = () =>
+    page.evaluate(() =>
+      [...document.querySelectorAll("span, div")]
+        .map((el) => (el.textContent || "").replace(/\s+/g, " ").trim())
+        .find((t) =>
+          /^\d+ albums? · \d+ artists? · \d+ tracks? · \d+ total tracks$/.test(t)
+          || /^\d+ albums? selected$/.test(t)
+          || /^\d+ entries selected$/.test(t)
+          || /^\d+ selected$/.test(t)) || "");
+  const headerCounts = async () => {
+    const m = /^(\d+) albums · (\d+) tracks$/.exec(await countSpan());
+    return m ? { albums: Number(m[1]), tracks: Number(m[2]) } : null;
+  };
+  /* The artists table: one row per artist, each of several cells (the empty
+   * state is one cell spanning them all). */
+  const artistRowCount = () =>
+    page.$$eval("main table tbody tr", (rows) =>
+      rows.filter((r) => r.querySelectorAll("td").length > 1).length);
+
+  await page.setViewportSize({ width: 1440, height: 900 });
+  for (const c of [
+    { tab: "Grid", noun: "albums", want: async () => (await headerCounts())?.albums },
+    { tab: "Compact", noun: "albums", want: async () => (await headerCounts())?.albums },
+    { tab: "Albums", noun: "albums", want: async () => (await headerCounts())?.albums },
+    { tab: "Artists", noun: "artists", want: async () => artistRowCount() },
+    { tab: "Tracks", noun: "tracks", want: async () => (await headerCounts())?.tracks },
+  ]) {
+    await page.goto(`${base}/library`);
+    await page.waitForSelector(`a[title="${albums[0]}"]`, { timeout: 30000 });
+    await viewTab(c.tab).click();
+    await page.waitForTimeout(80);
+    await selectBtn.click();
+    await page.waitForTimeout(80);
+    const want = await c.want();
+    const label = await allLabel();
+    check(`${c.tab}: Select mode offers the whole list in one click, and says how many`,
+          label === `Select all ${want} ${c.noun}`, `"${label}" vs ${want} ${c.noun}`);
+    const before = await boxCounts();
+    check(`${c.tab}: nothing is ticked before that click`,
+          before.ticked === 0, JSON.stringify(before));
+    await selectAllBtn.click();
+    await page.waitForTimeout(80);
+    const on = await boxCounts();
+    check(`${c.tab}: one click ticks every box the view draws (${on.ticked}/${on.drawn})`,
+          on.drawn > 0 && on.ticked === on.drawn, JSON.stringify(on));
+    const bar = await barLine();
+    check(`${c.tab}: and the batch bar reads the same number it promised`,
+          bar.includes(`${want} ${c.noun}`), `"${bar}" for ${want} ${c.noun}`);
+    check(`${c.tab}: the button is the way back out while everything is ticked`,
+          (await allLabel()) === `Deselect all ${want} ${c.noun}`, await allLabel());
+    await selectAllBtn.click();
+    await page.waitForTimeout(80);
+    const off = await boxCounts();
+    check(`${c.tab}: unticks every one of them again, and the bar goes with them`,
+          off.ticked === 0 && (await barLine()) === "", `${JSON.stringify(off)} "${await barLine()}"`);
+  }
+
+  // "All" is the list the filters left, not the library: the button's own
+  // promise, on the view that opened.
+  await page.goto(`${base}/library`);
+  await page.waitForSelector(`a[title="${albums[0]}"]`, { timeout: 30000 });
+  await selectBtn.click();
+  await typeName("asgeir");
+  check("Grid: with a name typed, 'all' is what the filter left — one album, not the library",
+        (await allLabel()) === "Select all 1 albums", await allLabel());
+  await selectAllBtn.click();
+  await page.waitForTimeout(80);
+  const filtered = await boxCounts();
+  check("and ticking it ticks exactly that one",
+        filtered.drawn === 1 && filtered.ticked === 1 && (await barLine()).startsWith("1 album ·"),
+        `${JSON.stringify(filtered)} "${await barLine()}"`);
+
+  // Leaving select mode drops the ticks with it — and does it from the
+  // handler, not from inside the state updater React runs during a render.
+  const warningsBeforeLeaving = renderPhaseWarnings.length;
+  await page.goto(`${base}/library`);
+  await page.waitForSelector(`a[title="${albums[0]}"]`, { timeout: 30000 });
+  await selectBtn.click();
+  await selectAllBtn.click();
+  await page.waitForTimeout(80);
+  await selectBtn.click();                       // leave select mode
+  await page.waitForTimeout(120);
+  const left = await boxCounts();
+  check("leaving select mode drops what was ticked, and the boxes go with it",
+        left.drawn === 0 && left.ticked === 0 && (await barLine()) === "",
+        `${JSON.stringify(left)} "${await barLine()}"`);
+  check("and it is not a store write inside a render (React's setState-in-render warning)",
+        renderPhaseWarnings.length === warningsBeforeLeaving,
+        renderPhaseWarnings.slice(warningsBeforeLeaving).join(" | "));
+
+  // ---- Home: the shelves' own albums, de-duplicated ----
+  const homeTicked = (() => {
+    const seen = new Set();
+    const out = [];
+    for (const row of [
+      ...(HOME.recent ?? []), ...(HOME.pending ?? []), ...(HOME.top_rated ?? []),
+      ...(HOME.rated ?? []), ...(HOME.needs_attention ?? []), ...(HOME.discover ?? []),
+      ...(HOME.favorites ?? []), ...(HOME.podcasts ?? []),
+    ]) {
+      const key = row.path || `mb:${row.mbid ?? ""}`;
+      if (seen.has(key)) continue;
+      seen.add(key);
+      if (row.owned !== false && row.path) out.push(row.path);
+    }
+    return out;
+  })();
+  await page.goto(`${base}/`);
+  await selectBtn.waitFor({ timeout: 30000 });
+  await selectBtn.click();
+  await page.waitForTimeout(80);
+  check("Home: the count is the tickable albums the shelves show, counted once each",
+        (await allLabel()) === `Select all ${homeTicked.length} albums`,
+        `"${await allLabel()}" vs ${homeTicked.length} of ${(HOME.recent ?? []).length + (HOME.favorites ?? []).length} rows`);
+  await selectAllBtn.click();
+  await page.waitForTimeout(80);
+  const homeBoxes = await boxCounts();
+  check("Home: every card that draws a ticked album shows it ticked, and the two "
+        + "shelves' shared album is still ONE album in the count",
+        homeBoxes.drawn === 4 && homeBoxes.ticked === 4
+          && (await barLine()) === `${homeTicked.length} ${homeTicked.length === 1 ? "album" : "albums"} selected`,
+        `${JSON.stringify(homeBoxes)} for ${homeTicked.length} distinct albums`);
+  check("and Home's bar carries the way to act on them, in the Library",
+        (await page.getByRole("link", { name: /Act on them in the Library/ }).count()) === 1);
+  await selectAllBtn.click();
+  await page.waitForTimeout(80);
+  check("Home: the same button clears it again",
+        (await boxCounts()).ticked === 0 && (await barLine()) === "",
+        `"${await barLine()}"`);
+
+  // ---- the artist page: every album it lists ----
+  await page.goto(`${base}/artist/${encodeURIComponent(alphaRow.path)}`);
+  await selectBtn.waitFor({ timeout: 30000 });
+  await selectBtn.click();
+  await page.waitForTimeout(80);
+  check("the artist page offers its whole discography in one click",
+        (await allLabel()) === `Select all ${alphaRow.albums.length} albums`, await allLabel());
+  await selectAllBtn.click();
+  await page.waitForTimeout(80);
+  const artistBoxes = await boxCounts();
+  check("and ticking it ticks every album card on the page",
+        artistBoxes.drawn === alphaRow.albums.length && artistBoxes.ticked === artistBoxes.drawn,
+        JSON.stringify(artistBoxes));
+  check("the artist page's own bar counts albums, in the singular when it is one",
+        (await barLine()) === `${plural(alphaRow.albums.length, "album")} selected`, await barLine());
+
+  // ---- the trash: the entries, grid view and table view alike ----
+  await page.goto(`${base}/trash`);
+  await selectBtn.waitFor({ timeout: 30000 });
+  await selectBtn.click();
+  await page.waitForTimeout(80);
+  check("the trash offers every entry in one click",
+        (await allLabel()) === `Select all ${TRASH.entries.length} entries`, await allLabel());
+  await selectAllBtn.click();
+  await page.waitForTimeout(80);
+  const trashGrid = await boxCounts();
+  check("its grid ticks every entry card",
+        trashGrid.drawn === TRASH.entries.length && trashGrid.ticked === trashGrid.drawn,
+        JSON.stringify(trashGrid));
+  check("and the trash's bar counts the selection",
+        (await barLine()) === `${TRASH.entries.length} selected`, await barLine());
+  await viewTab("Albums").click();
+  await page.waitForTimeout(80);
+  const trashTable = await boxCounts();
+  check("the table view keeps the selection — every entry row plus its own header box",
+        trashTable.drawn === TRASH.entries.length + 1 && trashTable.ticked === trashTable.drawn
+          && (await page.$$eval("main table thead input[type=checkbox]", (els) => els.every((e) => e.checked))),
+        JSON.stringify(trashTable));
+  check("and the button still offers the way out there",
+        (await allLabel()) === `Deselect all ${TRASH.entries.length} entries`, await allLabel());
+
   /* ---- 9. stored column widths: hostile maps, and the reader's own ------
    * The browser-level reproduction of the owner's blank Albums/Tracks views:
    * a stored width map with 0/garbage values used to be applied verbatim into a
@@ -1310,4 +1560,4 @@ if (failures.length) {
   for (const f of failures) console.log(`  - ${f}`);
   process.exit(1);
 }
-console.log("\nPASS — the Library's alphabet filter, and the album page's wrapped shelf");
+console.log("\nPASS — the Library's alphabet filter, select mode's Select all, and the album page's wrapped shelf");

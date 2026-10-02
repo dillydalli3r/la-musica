@@ -10,6 +10,7 @@ import PageHeader from "../components/PageHeader";
 import AlbumCard, { GRID_COVER_W } from "../components/AlbumCard";
 import CoverImg from "../components/CoverImg";
 import Segmented from "../components/Segmented";
+import SelectAllButton from "../components/SelectAllButton";
 import StatsPanel from "../components/StatsPanel";
 import { useI18n } from "../lib/i18n";
 import ArtistAvatar from "../components/ArtistAvatar";
@@ -263,6 +264,7 @@ export default function HomePage() {
   // album the Library's batch toolbar acts on.
   const selection = useStore((s) => s.selection);
   const toggleAlbum = useStore((s) => s.toggleAlbum);
+  const setSelection = useStore((s) => s.setSelection);
   // What the Stats panel reads: the albums on this page, in shelf order and
   // de-duplicated (an album rides on several shelves). Home is a set of
   // curated shelves rather than the library — the whole-library numbers are
@@ -284,6 +286,19 @@ export default function HomePage() {
     }
     return { albums, tracks };
   }, [data]);
+
+  /* What Select mode's "Select all" ticks: every album the shelves show that
+   * CAN be ticked — a release the library does not hold has no checkbox (the
+   * card is the same one the Library draws, and Home's rows are only sometimes
+   * library albums) — de-duplicated, because an album rides on several
+   * shelves. The same list the Stats panel reads, filtered the same way the
+   * shelf filters it, so the button cannot tick a row with no box to show. */
+  const selectableShown = useMemo(
+    () => shown.albums.filter((a) => a.owned !== false && !!a.path),
+    [shown]
+  );
+  const allShownSelected =
+    selectMode && selectableShown.length > 0 && selectableShown.every((a) => selection.albums.includes(a.path));
 
   if (isLoading) {
     return (
@@ -395,6 +410,15 @@ export default function HomePage() {
                 >
                   <ListChecks className="h-3.5 w-3.5" /> Select
                 </button>
+                {selectMode && (
+                  <SelectAllButton
+                    count={selectableShown.length}
+                    noun="albums"
+                    all={allShownSelected}
+                    onSelectAll={() => setSelection({ albums: selectableShown.map((a) => a.path) })}
+                    onClear={() => setSelection({ albums: [] })}
+                  />
+                )}
                 <button
                   className="btn-ghost !py-1.5 text-xs tap"
                   onClick={refresh}

@@ -22,6 +22,7 @@ import MoreLikeThis from "../components/MoreLikeThis";
 import OnlineRecommendations from "../components/OnlineRecommendations";
 import OverflowMenu from "../components/OverflowMenu";
 import PageHeader from "../components/PageHeader";
+import SelectAllButton from "../components/SelectAllButton";
 import TagActionsMenu from "../components/TagActionsMenu";
 import type { Album } from "../types";
 import { artistMbid } from "../lib/refs";
@@ -226,6 +227,10 @@ export default function ArtistPage() {
 
   const selectedAlbums = data.albums.filter((al) => selected.has(al.path));
   const selectedTrackPaths = selectedAlbums.flatMap((al) => al.tracks.map((t) => t.path));
+  /* Every album this page lists — the same set the batch bar above acts on
+   * (its buttons re-run on whatever is ticked, and this is the largest tick a
+   * reader can ask for here). */
+  const allAlbumsSelected = data.albums.length > 0 && data.albums.every((al) => selected.has(al.path));
 
   const toggleSel = (albumPath: string) => {
     setSelected((prev) => {
@@ -551,6 +556,17 @@ export default function ArtistPage() {
               {selectMode ? <SquareCheck className="h-3.5 w-3.5" /> : <Square className="h-3.5 w-3.5" />}
               Select
             </button>
+          )}
+          {/* Where the reader just pressed Select: every album this page lists,
+              in one click, instead of one per card. */}
+          {selectMode && (
+            <SelectAllButton
+              count={data.albums.length}
+              noun="albums"
+              all={allAlbumsSelected}
+              onSelectAll={() => setSelected(new Set(data.albums.map((al) => al.path)))}
+              onClear={() => setSelected(new Set<string>())}
+            />
           )}
         </div>
 
