@@ -17,10 +17,13 @@ import type { ReactNode } from "react";
  *
  *  A caller that draws the rating passes it LAST in `trailing`, because it is
  *  the one thing a reader scans down a column and the cell's edge is what makes
- *  that scan straight (the album tracklist does). The Library's Tracks view
- *  gives the rating a COLUMN of its own instead and passes none: one cell
- *  holding the name, the marks and the stars at once is how that table ended up
- *  with a 0 px title.
+ *  that scan straight (the album tracklist does). The rating is then the one
+ *  trailing item that can change its own width — the web reading beside the
+ *  stars becomes the user's own number once they rate — so a column passes
+ *  `webReadout="slot"` (see StarRating): the readout reserves its box and the
+ *  stars keep one x. The Library's Tracks view gives the rating a COLUMN of
+ *  its own instead and passes none: one cell holding the name, the marks and
+ *  the stars at once is how that table ended up with a 0 px title.
  *
  *  Devices: nothing here wraps or hides by breakpoint EXCEPT `stackOnPhone`,
  *  which the album tracklist asks for because its own cell is narrower than the

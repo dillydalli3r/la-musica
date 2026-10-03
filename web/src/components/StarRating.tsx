@@ -152,12 +152,19 @@ export default function StarRating({
    *  labelled as their own. Defaults to the track's. */
   webKind?: "track" | "album";
   /** How the web value reads once the user's own stars are the ones drawn:
-   *  "text" prints "4.4 Album Web" while the user has rated nothing; "mark"
-   *  draws one dot instead, for a
-   *  cell that is a FIXED narrow column (the Tracks view's Rating column is
-   *  104 px) where a text readout would paint over the column beside it. The
-   *  value and its sources stay on the tooltip either way. */
-  webReadout?: "text" | "mark";
+   * "text" prints "4.4 Album Web" while the user has rated nothing; "mark"
+   * draws one dot instead, for a
+   * cell that is a FIXED narrow column (the Tracks view's Rating column is
+   * 104 px) where a text readout would paint over the column beside it. The
+   * value and its sources stay on the tooltip either way. "slot" prints the
+   * same words as "text" — but inside a box reserved for the WIDEST thing this
+   * control can print, so the stars keep one x as the readout changes from the
+   * web reading to the user's own number: for a control that sits in a COLUMN
+   * the eye scans (the album tracklist's trailing slot, the album tables). A
+   * plain "text" readout is only as wide as its words, so a row that swaps
+   * "3.9 Web" for "5" moves its stars right — invisible inline, misaligned
+   * down a column (the owner's report). */
+  webReadout?: "text" | "mark" | "slot";
   className?: string;
   /** The empty outline's colour and the filled halves' — overrides for the one
    *  surface drawn on artwork (see the doc above). */
@@ -206,6 +213,21 @@ export default function StarRating({
       ? t(webKind === "album" ? "rating.webAlbumTitle" : "rating.webTitle", { value: webText, sources: webSources.trim() })
       : t(webKind === "album" ? "rating.webAlbumTitleNoSources" : "rating.webTitleNoSources", { value: webText });
   const webAria = hasWeb ? t(webKind === "album" ? "rating.webAlbumAria" : "rating.webAria", { value: webText }) : "";
+  // The readout: the user's own number comes first (`showValue` surfaces
+  // always print one — "—" while unrated — and a row that has a web reading
+  // prints THEIR number instead of the web's words, R359), else the web
+  // reading while it is what the field draws. `ownNumber` and `webWords` are
+  // mutually exclusive: `webOnly` is exactly "the user has rated nothing here".
+  const slot = webReadout === "slot";
+  const ownNumber = (showValue && !webOnly) || (value > 0 && hasWeb && webReadout !== "mark");
+  const webWords = hasWeb && webOnly;
+  const readout = ownNumber ? (value > 0 ? half(value) : "—") : webWords ? webReadoutText : "";
+  // The slot's width: an invisible copy of the WIDEST string this control can
+  // print reserves the box, so the words inside never move the stars. A px
+  // constant would be wrong in another locale or font — "4.4 Album Web",
+  // "4.4 album Web", "4.4 アルバム Web" are three widths — so the sizer is the
+  // control's OWN template with the widest value the grid allows.
+  const readoutSizer = t(webKind === "album" ? "rating.webAlbumReadout" : "rating.webReadout", { value: "4.5" });
 
   /** A drawn-scale value back to the UI scale (identity at max = 5). */
   const toValue = (v: number) => (stars === MAX_RATING ? snap(v) : snap((v * MAX_RATING) / stars));
@@ -314,35 +336,34 @@ export default function StarRating({
           </span>
         );
       })}
-      {/* The user's own number. `showValue` is the surfaces that always print
-          one (a card, a page header); the SECOND case is the replacement for
-          the web words the owner asked to be rid of: a row that showed "4.2
-          Web" beside their four stars now shows the rating they gave, and the
-          web reading stays on the stars' tooltip. The `mark` readout is left
-          alone — that cell is 104 px wide and would paint over its neighbour. */}
-      {((showValue && !webOnly) || (value > 0 && hasWeb && webReadout === "text")) && (
-        <span className={`ml-1.5 tabular-nums text-zinc-400 ${READOUT[size]}`} aria-hidden="true">
-          {value > 0 ? half(value) : "—"}
+      {/* The readout. `showValue` is the surfaces that always print a number
+          (a card, a page header); the SECOND case is the replacement for the
+          web words the owner asked to be rid of: a row that showed "4.2 Web"
+          beside their four stars now shows the rating they gave, and the web
+          reading stays on the stars' tooltip (R359). In `slot` the box is
+          reserved whether or not it has words (see `readoutSizer`), so the
+          stars cannot move as the row changes between the two; in `text` it
+          is only as wide as its words, which is what an inline surface wants. */}
+      {(readout !== "" || slot) && (
+        <span
+          className={`relative ml-1.5 shrink-0 tabular-nums ${READOUT[size]} ${ownNumber ? "text-zinc-400" : webTextClass}`}
+          title={!ownNumber && webWords ? webTip : undefined}
+          aria-hidden="true"
+        >
+          {slot && <span className="invisible block whitespace-nowrap">{readoutSizer}</span>}
+          <span className={slot ? "absolute inset-0 flex items-center whitespace-nowrap" : undefined}>{readout}</span>
         </span>
       )}
-      {/* The web reading, beside the stars — never as them. Drawn only while
-          the user has rated NOTHING here: once they have, their own number is
-          what the surface prints (above) and the web figure, its sources and
-          the fact that it is somebody else's live on the tooltip. While the
-          web value is what the field draws, this readout is also the only
-          place the number is printed. It carries the sources on its own
-          tooltip: the script's names, verbatim and unedited. */}
-      {hasWeb && webOnly && (
+      {/* The web reading's `mark` form: one dot, for a cell that is a FIXED
+          narrow column where even the reserved text box would paint over its
+          neighbour. The value and its sources stay on the tooltip. */}
+      {webReadout === "mark" && webWords && (
         <span
-          className={`${webReadout === "text" ? "ml-1.5 tabular-nums" : "ml-0.5"} shrink-0 ${webTextClass} ${READOUT[size]}`}
+          className={`ml-0.5 shrink-0 ${webTextClass} ${READOUT[size]}`}
           title={webTip}
           aria-hidden="true"
         >
-          {webReadout === "text" ? (
-            webReadoutText
-          ) : (
-            <span className={`inline-block h-1.5 w-1.5 rounded-full align-middle ${WEB_MARK}`} />
-          )}
+          <span className={`inline-block h-1.5 w-1.5 rounded-full align-middle ${WEB_MARK}`} />
         </span>
       )}
     </span>

@@ -713,6 +713,7 @@ export default function ExportPage() {
                                     <span className="shrink-0" onClick={(ev) => ev.stopPropagation()}>
                                       <StarRating
                                         size="sm"
+                                        webReadout="slot"
                                         value={ratingOf(ratings, p)}
                                         onChange={(v) => setRating(p, v)}
                                         pending={pending(p)}

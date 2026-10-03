@@ -1916,6 +1916,7 @@ export default function LibraryPage() {
                     pending={albumPending(al.path)}
                     {...webStarProps(albumWebRating(al.tracks))}
                     webKind="album"
+                    webReadout="slot"
                   />
                   <span className="text-[10px] text-zinc-600 shrink-0 w-8 text-right">{al.track_count}t</span>
                   <div className="opacity-0 group-hover:opacity-100 [@media(hover:none)]:opacity-100 flex gap-1 shrink-0 transition-opacity" onClick={(e) => e.stopPropagation()}>
@@ -1966,7 +1967,7 @@ export default function LibraryPage() {
                                 <span className="row-hover shrink-0" onClick={(e) => e.stopPropagation()}>
                                   <TrackActionsMenu path={t.path} releaseMbid={t.tags.MUSICBRAINZ_ALBUMID} />
                                 </span>
-                                <StarRating size="sm" value={ratingOf(ratings, t.path)} onChange={(v) => setRating(t.path, v)} pending={pending(t.path)} {...webStarProps(trackWebRating(t.tags))} />
+                                <StarRating size="sm" webReadout="slot" value={ratingOf(ratings, t.path)} onChange={(v) => setRating(t.path, v)} pending={pending(t.path)} {...webStarProps(trackWebRating(t.tags))} />
                                 <span className="text-[10px] text-zinc-600 font-mono w-10 text-right shrink-0 cell-nowrap">{fmtDuration(t.tech.length)}</span>
                               </>
                             }
@@ -2592,6 +2593,7 @@ function AlbumRowGroup({
           pending={albumPending(album.path)}
           {...webStarProps(albumWebRating(album.tracks))}
           webKind="album"
+          webReadout="slot"
         />
       ),
     });
@@ -2762,9 +2764,13 @@ function AlbumRowGroup({
                                     {/* the rating in the row's fixed slot —
                                         the same x on every track of the album,
                                         and out of the 80 px Dur column beside
-                                        it, which cannot hold both */}
+                                        it, which cannot hold both. The readout
+                                        reserves its own box (`webReadout="slot"`)
+                                        so the stars really do stay on that x as
+                                        a row swaps its web reading for the
+                                        user's own number. */}
                                     <span className="shrink-0" onClick={(e) => e.stopPropagation()}>
-                                      <StarRating size="sm" value={ratingOf(ratings, t.path)} onChange={(v) => setRating(t.path, v)} pending={pending(t.path)} {...webStarProps(trackWebRating(t.tags))} />
+                                      <StarRating size="sm" webReadout="slot" value={ratingOf(ratings, t.path)} onChange={(v) => setRating(t.path, v)} pending={pending(t.path)} {...webStarProps(trackWebRating(t.tags))} />
                                     </span>
                                   </>
                                 }

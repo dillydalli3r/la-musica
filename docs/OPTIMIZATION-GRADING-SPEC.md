@@ -6040,6 +6040,19 @@ composition instead (R267). Above `lg` the pane sits beside the artwork.
   they gave is the readout, and the web figure, its sources and whose it is
   stay on the hover. While unrated, the web readout is the number itself and
   reads "4.2 Album Web" (title case, every locale: "Web" is a proper noun).
+  **The readout sits in a box that does not resize** where the control is part
+  of a COLUMN: `webReadout="slot"` (the album tracklist's trailing slot, the
+  Library's album and track rows, the export preview) reserves the width of the
+  widest string the control can print — measured from the control's own
+  localized template, so "4.4 Album Web", "4.4 album Web" and "4.4 アルバム
+  Web" each get their own correct box — and the words are drawn inside it. The
+  owner's report: rating a track swapped "3.9 Web" for the shorter "5" and the
+  row's stars jumped right, so every row of the column had its stars at a
+  different x. Inline surfaces keep the natural-width readout (`webReadout`
+  "text", the default): there the same change moves nothing a reader can
+  compare. Which control got what is pinned by `tools/check_rating_alignment.mjs`
+  (four row shapes measured in a real browser, plus the inline control's own
+  width as the control case).
 - **R360 — MusicBrainz genres are read at the level the entity is entitled
   to.** Album-level genres come from the RELEASE GROUP (the album is the group,
   not the pressing), and a track's come from its recording, with the WORK's

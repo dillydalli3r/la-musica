@@ -1539,7 +1539,7 @@ export default function AlbumPage() {
                             <TrackActionsMenu path={tr.path} releaseMbid={tr.tags.MUSICBRAINZ_ALBUMID} buttonClass="!p-1 text-zinc-500 hover:text-white tap-hit" />
                           </span>
                           <span className="shrink-0" onClick={(e) => e.stopPropagation()}>
-                            <StarRating size="sm" value={ratingOf(ratings, tr.path)} onChange={(v) => setRating(tr.path, v)} pending={pending(tr.path)} {...webStarProps(trackWebRating(tr.tags))} />
+                            <StarRating size="sm" webReadout="slot" value={ratingOf(ratings, tr.path)} onChange={(v) => setRating(tr.path, v)} pending={pending(tr.path)} {...webStarProps(trackWebRating(tr.tags))} />
                           </span>
                         </>
                       }
