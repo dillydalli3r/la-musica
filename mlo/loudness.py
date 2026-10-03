@@ -391,10 +391,12 @@ def run_calc_dr_replaygain(config):
         stats["errors"].append(("replaygain", why))
 
     # Dynamic range is measured here, in this process, from ffmpeg's decode —
-    # so the only two things it can be missing are ffmpeg and the numpy the
-    # block math is numpy's. Both are named once, up front, instead of every
+    # so the only things it can be missing are ffmpeg and a block-math engine:
+    # the Rust helper (`rust/`, preferred — it keeps the PCM out of Python) or
+    # numpy, its fallback. Both are named once, up front, instead of every
     # album quietly coming back "skipped" and the run looking like a success.
-    dr_usable = bool(write_dr and ffmpeg and dr.have_numpy())
+    dr_usable = bool(write_dr and ffmpeg
+                     and (dr.have_helper() or dr.have_numpy()))
     if write_dr and not dr_usable:
         why = ("dynamic range needs ffmpeg, which is not installed"
                if not ffmpeg else dr.NUMPY_REASON)
@@ -406,11 +408,12 @@ def run_calc_dr_replaygain(config):
         # The detected version can be absent (an install whose folder name does
         # not carry one) — say "ffmpeg" then, never "vNone".
         version = ffmpeg.get("version")
+        engine = "mlo-audio" if dr.have_helper() else "numpy"
         log("dynamic range: in process + ffmpeg"
-            + (f" v{version}" if version else ""))
+            + (f" v{version}" if version else "") + f" (block math: {engine})")
     elif write_dr:
-        log(c("dynamic range: unavailable (needs ffmpeg and numpy)",
-              Color.YELLOW))
+        log(c("dynamic range: unavailable (needs ffmpeg and the mlo-audio "
+              "helper or numpy)", Color.YELLOW))
 
     albums = _album_dirs(config)
     if not albums:

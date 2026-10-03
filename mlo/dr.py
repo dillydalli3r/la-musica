@@ -31,10 +31,19 @@ release is measured with, so a second opinion is a different number:
 numpy is a declared dependency of the server (see server/requirements.txt); it
 is imported here at module level because the block math is numpy's, and a build
 without it says so as the reason instead of measuring nothing quietly.
+
+The default engine is the app's own Rust helper (`rust/`, the `mlo-audio`
+binary): it spawns the same ffmpeg, reads the PCM itself and prints one JSON
+line, so the decoded track never travels into Python at all — a five-minute
+stereo track is ~100 MB of PCM that used to be accumulated and re-scanned in
+this process. The numpy math stays as the fallback for a build without the
+helper, and is the oracle the helper's parity test compares against; the two
+produce the same integers because the block math is the same arithmetic.
 """
 import json
 import math
 import os
+import shutil
 import subprocess
 from typing import NamedTuple
 
@@ -45,9 +54,9 @@ except ImportError:  # pragma: no cover - the dependency ships with the app
 
 from .subproc import run_tool, run_tool_stream
 
-# What a build without numpy reports, per album and once per run, instead of
-# skipping every track in silence.
-NUMPY_REASON = "dynamic range needs numpy, which this install is missing"
+# What a build WITHOUT the Rust helper and without numpy reports, per album and
+# once per run, instead of skipping every track in silence.
+NUMPY_REASON = "dynamic range needs numpy or the mlo-audio helper, which this install is missing"
 
 # The meter's block length, and the rate it measures at: both are part of the
 # convention the numbers are quoted under, not tuning knobs.
@@ -84,6 +93,87 @@ def have_numpy():
     return np is not None
 
 
+# The helper the Rust crate builds, and where a build puts it: the repo's own
+# cargo target (dev + tests), `MLO_AUDIO_BIN` for an explicit path, or PATH
+# (the container copies it to /usr/local/bin). Probed ONCE per process — the
+# measurement runs per track, and a filesystem walk per track is the kind of
+# cost this module exists to remove.
+_RUST_PROBED = False
+_RUST_PATH = None
+
+
+def rust_helper():
+    """The `mlo-audio` binary, or None when this install has none.
+
+    A missing helper is not an error: the numpy block math is the same
+    measurement and still runs. The helper is preferred only because it keeps
+    the decoded PCM out of Python.
+    """
+    global _RUST_PROBED, _RUST_PATH
+    if _RUST_PROBED:
+        return _RUST_PATH
+    _RUST_PROBED = True
+    explicit = os.environ.get("MLO_AUDIO_BIN")
+    if explicit and os.path.isfile(explicit):
+        _RUST_PATH = explicit
+        return _RUST_PATH
+    root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    for rel in ("rust/target/release/mlo-audio.exe", "rust/target/release/mlo-audio",
+                "rust/target/debug/mlo-audio.exe", "rust/target/debug/mlo-audio"):
+        cand = os.path.join(root, rel)
+        if os.path.isfile(cand):
+            _RUST_PATH = cand
+            return _RUST_PATH
+    _RUST_PATH = shutil.which("mlo-audio")
+    return _RUST_PATH
+
+
+def have_helper():
+    """Whether the Rust helper is available here."""
+    return rust_helper() is not None
+
+
+def _measure_with_rust(path, ffmpeg_exe, helper, *, block_seconds=BLOCK_SECONDS,
+                       sample_rate=MEASURE_SAMPLE_RATE, channels=0, threads=0):
+    """TrackDR from the Rust helper, or None when it could not be used.
+
+    None means "fall back to numpy": a helper that will not start, prints
+    nothing, or prints something that is not its JSON contract is a broken
+    install, not a verdict about the audio. A helper that DID run returns its
+    TrackDR — including a decode failure it reported itself.
+    """
+    argv = [helper, "dr", "--ffmpeg", str(ffmpeg_exe), "--input", path,
+            "--channels", str(int(channels or 0)),
+            "--rate", str(int(sample_rate)),
+            "--block-seconds", str(block_seconds)]
+    if int(threads or 0) > 0:
+        argv += ["--threads", str(int(threads))]
+    try:
+        proc = run_tool(argv, capture_output=True, text=True,
+                        timeout=DECODE_TIMEOUT)
+    except subprocess.TimeoutExpired:
+        return TrackDR(None, f"ffmpeg did not finish within "
+                             f"{DECODE_TIMEOUT // 60} minutes", True)
+    except OSError as e:
+        return TrackDR(None, f"the mlo-audio helper could not be started: {e}", True)
+    lines = [ln for ln in (proc.stdout or "").splitlines() if ln.strip()]
+    if not lines:
+        return None
+    try:
+        data = json.loads(lines[-1])
+    except ValueError:
+        return None
+    if not isinstance(data, dict) or "dr" not in data:
+        return None
+    dr = data.get("dr")
+    if dr is not None:
+        try:
+            dr = int(dr)
+        except (TypeError, ValueError):
+            return None
+    return TrackDR(dr, str(data.get("reason") or ""), bool(data.get("failed")))
+
+
 def measure_track(path, ffmpeg_exe, *, block_seconds=BLOCK_SECONDS,
                   sample_rate=MEASURE_SAMPLE_RATE, channels=0, threads=0):
     """The track's DR (the loudness-war value), or None.
@@ -110,7 +200,8 @@ def measure_track_detailed(path, ffmpeg_exe, *, block_seconds=BLOCK_SECONDS,
     the handle already, so it passes the number and pays for the probe only
     when the container states none.
     """
-    if np is None:
+    helper = rust_helper()
+    if helper is None and np is None:
         return TrackDR(None, NUMPY_REASON, True)
 
     channels = int(channels or 0)
@@ -118,6 +209,16 @@ def measure_track_detailed(path, ffmpeg_exe, *, block_seconds=BLOCK_SECONDS,
         channels, why = probe_channels(path, ffmpeg_exe)
         if not channels:
             return TrackDR(None, why, True)
+
+    if helper is not None:
+        got = _measure_with_rust(path, ffmpeg_exe, helper,
+                                 block_seconds=block_seconds,
+                                 sample_rate=sample_rate, channels=channels,
+                                 threads=threads)
+        if got is not None:
+            return got
+    if np is None:
+        return TrackDR(None, NUMPY_REASON, True)
 
     samples_per_block = max(1, int(block_seconds * sample_rate))
     block_bytes = samples_per_block * _SAMPLE_BYTES * channels

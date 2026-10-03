@@ -1,0 +1,22 @@
+[package]
+name = "mlo-audio"
+version = "0.1.0"
+edition = "2021"
+description = "la musica's native audio-analysis helper (dynamic range so far)"
+license = "MIT"
+# ZERO dependencies on purpose: the helper has to build offline, from nothing
+# but rustc + cargo, in a container stage and on a developer's machine alike.
+# A crate here would mean a crates.io fetch at image-build time for arithmetic
+# the standard library already has.
+[dependencies]
+
+[[bin]]
+name = "mlo-audio"
+path = "src/main.rs"
+
+[profile.release]
+opt-level = 3
+lto = true
+codegen-units = 1
+strip = true
+panic = "abort"

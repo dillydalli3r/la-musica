@@ -8,7 +8,16 @@ RUN npm ci
 COPY web/ ./
 RUN npm run build
 
-# ---------- Stage 2: Python backend + system toolchain ----------
+# ---------- Stage 2: build the Rust audio helper ----------
+# `mlo-audio` (rust/) is the app's own native analysis pass; DR is the first
+# one it owns. It has ZERO crate dependencies, so this stage needs nothing but
+# the toolchain — no registry access at image-build time.
+FROM rust:1.97-slim AS rust-build
+WORKDIR /src
+COPY rust/ ./rust/
+RUN cargo build --release --manifest-path rust/Cargo.toml
+
+# ---------- Stage 3: Python backend + system toolchain ----------
 # The Debian release is PINNED (trixie) and not left to float: the package
 # names below are that release's — libicu76, libjxl-tools, rsgain — and
 # `python:3.12-slim` moved from bookworm to trixie on its own, which quietly
@@ -78,6 +87,10 @@ COPY --from=web-build /app/web/dist /app/web/dist
 COPY server/ /app/server/
 COPY mlo/ /app/mlo/
 COPY tools/ /app/tools/
+# The native analysis helper, on PATH for every user: `mlo.dr` finds it with
+# shutil.which. Absent (an image built without the stage) the numpy fallback
+# still measures, so this is an optimization, never a requirement.
+COPY --from=rust-build /src/rust/target/release/mlo-audio /usr/local/bin/mlo-audio
 
 # Run unprivileged. uid/gid 1000 is the usual first desktop user, which is what
 # a bind-mounted ./music is normally owned by (docker-compose.yml documents the

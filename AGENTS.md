@@ -102,6 +102,13 @@ When they do ask for one:
   (`python dev.py --no-open --no-tray`), drive the real page, and read what it
   did — a check that passes while the screen is wrong is a check that is wrong.
 - Web on its own: `cd web && npm run build` (typecheck `npx tsc -b`).
+- **The Rust helper** (`rust/`, binary `mlo-audio`): build it with
+  `cargo build --release --manifest-path rust/Cargo.toml` (zero crate
+  dependencies, so it builds offline). `mlo/dr.py` prefers it and falls back to
+  the numpy block math; `tools/test_dynamic_range.py` pins the two engines to
+  the same integers and skips only the parity block when the binary is not
+  built, so the gate passes either way. The container builds it in its own
+  stage.
 
 ## House rules that came from real bugs
 

@@ -48,6 +48,7 @@ web/dist/
 # Rust / Tauri
 desktop/target/
 desktop/src-tauri/target/
+rust/target/
 
 # Testing / coverage
 .pytest_cache/

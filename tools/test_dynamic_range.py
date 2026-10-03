@@ -405,29 +405,82 @@ def check_undecodable_track(tmp, exe):
 
 
 def check_without_numpy(tmp, exe):
-    """A build with no numpy must SAY so, not come back with silent skips."""
-    lib = os.path.join(tmp, "nolib")
-    album, paths = _album_fixture(tmp, exe, lib, "Album", [("Loud", {})])
-    config = _cfg(lib, worker_limit=1)
+    """The block-math engine: the Rust helper first, numpy its fallback, and a
+    build with NEITHER must SAY so instead of silently skipping."""
+    real_np, real_helper = dr.np, dr.rust_helper
 
-    real_np = dr.np
-    dr.np = None
+    # (a) neither engine available: the run names the missing dependency and
+    # writes no DYNAMIC RANGE tag rather than a value it cannot measure.
+    lib_a = os.path.join(tmp, "noboth")
+    _album_a, paths_a = _album_fixture(tmp, exe, lib_a, "Album", [("Loud", {})])
     try:
-        stats = run_calc_dr_replaygain(config)
+        dr.np = None
+        dr.rust_helper = lambda: None
+        stats = run_calc_dr_replaygain(_cfg(lib_a, worker_limit=1))
         reason = dict(stats["errors"]).get("dynamic range", "")
-        tagged = str(AudioFile(paths[0]).get_tag("DYNAMIC RANGE") or "")
+        tagged = str(AudioFile(paths_a[0]).get_tag("DYNAMIC RANGE") or "")
     finally:
-        dr.np = real_np
+        dr.np, dr.rust_helper = real_np, real_helper
 
     ok(reason == dr.NUMPY_REASON and stats["error_count"] >= 1,
-       f"without numpy the run reports {reason!r} as the reason and counts an "
-       f"error ({stats['error_count']})")
+       f"with neither engine the run reports {reason!r} and counts an error "
+       f"({stats['error_count']})")
     ok(tagged == "",
-       f"and writes no DYNAMIC RANGE tag rather than a value it cannot "
-       f"measure (got {tagged!r})")
-    ok(dr.measure_track(paths[0], exe) is not None,
-       "with numpy back, the same file measures normally (the check above "
-       "tested the missing dependency, not a broken fixture)")
+       f"and writes no DYNAMIC RANGE tag (got {tagged!r})")
+
+    # (b) no numpy but the Rust helper present: the measurement still happens,
+    # because the helper owns the block math and numpy is only its fallback.
+    if not dr.have_helper():
+        skip("mlo-audio helper not built: the numpy-less measurement is untested")
+        return
+    lib_b = os.path.join(tmp, "norust")
+    _album_b, paths_b = _album_fixture(tmp, exe, lib_b, "Album", [("Loud", {})])
+    try:
+        dr.np = None
+        stats_b = run_calc_dr_replaygain(_cfg(lib_b, worker_limit=1))
+        tagged_b = str(AudioFile(paths_b[0]).get_tag("DYNAMIC RANGE") or "")
+        why_b = dict(stats_b["errors"]).get("dynamic range", "")
+    finally:
+        dr.np = real_np
+    ok(tagged_b != "" and not why_b,
+       f"the mlo-audio helper measures with numpy absent (tag {tagged_b!r}, "
+       f"reason {why_b!r})")
+
+
+def check_rust_parity(tmp, exe):
+    """The Rust helper's integers ARE the numpy path's, on real decodes.
+
+    Two independent implementations of the same block math: the helper (std
+    Rust) and the fallback (numpy). They must agree on every fixture — stereo,
+    mono, 96 kHz, silent, one block, undecodable — or the engine swap would
+    silently change the numbers the DR tags and the spec are quoted under.
+    """
+    helper = dr.rust_helper()
+    if helper is None:
+        skip("mlo-audio helper not built: parity with the numpy path is untested")
+        return
+    cases = [
+        ("parity-stereo.wav", 2, {}),
+        ("parity-mono.wav", 1, {}),
+        ("parity-hi.wav", 2, {"rate": 96000}),
+        ("parity-silent.wav", 2, {"silent": True}),
+        ("parity-short.wav", 2, {"blocks": 1}),
+    ]
+    for name, channels, kw in cases:
+        path = make_wav(os.path.join(tmp, name), channels=channels, **kw)
+        py = dr.measure_track_detailed(path, exe, channels=channels)
+        got = dr._measure_with_rust(path, exe, helper, channels=channels)
+        ok(got is not None and got.dr == py.dr and got.failed == py.failed,
+           f"{name}: helper and numpy agree (helper dr={got and got.dr!r}, "
+           f"numpy dr={py.dr!r})")
+
+    broken = os.path.join(tmp, "parity-broken.flac")
+    with open(broken, "wb") as fh:
+        fh.write(b"not a flac stream" * 64)
+    got = dr._measure_with_rust(broken, exe, helper, channels=2)
+    ok(got is not None and got.failed and got.reason,
+       f"an undecodable file is a failure the helper reports too "
+       f"({got and got.reason!r})")
 
 
 def main():
@@ -446,6 +499,7 @@ def main():
     ]
     if exe:
         checks.append(("built files", lambda: check_built_files(tmp, exe)))
+        checks.append(("rust parity", lambda: check_rust_parity(tmp, exe)))
         checks.append(("reference meter", lambda: check_reference_meter(tmp, exe)))
         checks.append(("FLAC vs MP4", lambda: check_container_parity(tmp, exe)))
         checks.append(("without numpy", lambda: check_without_numpy(tmp, exe)))

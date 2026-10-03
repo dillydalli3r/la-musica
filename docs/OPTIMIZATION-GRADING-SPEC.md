@@ -2482,6 +2482,24 @@ user asked for, in the order they asked for it. `server/exporter.py` owns both.
   sources could not supply, while a session is a run that has not reached
   Finish at all. Pinned by `tools/test_import_sessions.py`.
 
+- **R346 — a native analysis helper is allowed, the engine that ran is named,
+  and no dependency stays without a call site.** `rust/` is a zero-dependency
+  cargo crate that builds the `mlo-audio` binary; `mlo.dr` prefers it (it
+  spawns the app's ffmpeg and reads the PCM itself, so a decoded track never
+  materializes in Python) and falls back to the numpy block math, and
+  `tools/test_dynamic_range.py` pins the two to the same integers on stereo,
+  mono, 96 kHz, silent, one-block and undecodable fixtures — plus the case
+  where numpy is absent and the helper still measures. A build with neither
+  engine keeps reporting the missing dependency instead of skipping silently
+  (`mlo.loudness`'s gate reads `have_helper() or have_numpy()` and logs which
+  one ran). The container builds the helper in its own stage and copies it onto
+  PATH; a build without that stage keeps working on numpy, so this is an
+  optimization, never a requirement. Every runtime dependency is audited with
+  its call sites in `docs/DEPENDENCY-AUDIT.md`, and one that no call site needs
+  is removed rather than kept: `aiofiles` and the three unused `desktop/` npm
+  deps went that way. Pinned by `tools/test_dynamic_range.py` and
+  `tools/test_import_sessions.py`.
+
 - **R164 — a script that moves an album reports the folder the album is in
   WHEN THE SCRIPT RETURNS, and the chain follows it.** A script that takes an
   album's audio out of the folder the chain is pointed at knows where the album
