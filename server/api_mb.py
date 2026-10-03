@@ -53,20 +53,32 @@ class AssignTagsRequest(BaseModel):
 # --------------------------------------------------------------------------- #
 @router.get("/api/mb/release")
 def mb_release_query(mbid: str = Query(...)):
-    """Release lookup by ID or full URL (query param — URLs contain slashes
-    and cannot travel inside the path segment)."""
+    """Full release by ID or URL; a RELEASE-GROUP id resolves to its best edition.
+
+    The wizard's link field accepts either ("release or release-group — the
+    server resolves it"), and a group id sent to MusicBrainz's release endpoint
+    404s. Resolving here, through the same release-choice policy the import and
+    the bulk queue use, means the payload's `id` is always the concrete release
+    — so a caller that writes it writes a release id, never a group's.
+    """
     rid = intg._mbid(mbid)
     if not rid:
         raise HTTPException(400, "invalid MusicBrainz ID or URL")
     try:
-        release = intg.release_lookup(rid)
+        release, resolved = intg.resolve_release(rid)
+    except Exception as e:
+        raise HTTPException(502, f"MusicBrainz lookup failed: {e}")
+    if not release:
+        raise HTTPException(404, "no release found for that MusicBrainz ID")
+    try:
         # The tracklist's aliases, in ONE browse call (MusicBrainz carries none
         # inside the lookup): the page renders each track's title with the name
         # it is also known by, exactly as the artist and release rows do.
-        intg.attach_recording_aliases(release, rid)
-        return release
-    except Exception as e:
-        raise HTTPException(502, f"MusicBrainz lookup failed: {e}")
+        intg.attach_recording_aliases(release, resolved or rid)
+    except Exception:
+        # Aliases are a nicety; a release that resolved is still an answer.
+        pass
+    return release
 
 
 @router.get("/api/mb/release-genres")
@@ -298,9 +310,14 @@ def mb_match(req: MatchRequest):
     if not rid:
         raise HTTPException(400, "invalid release ID")
     try:
-        release = intg.release_lookup(rid)
+        # A release-GROUP id resolves to its best edition, exactly as the
+        # release lookup does: the wizard and the queue both accept a group
+        # link, and matching against one directly 404s.
+        release, _resolved = intg.resolve_release(rid)
     except Exception as e:
         raise HTTPException(502, f"MusicBrainz lookup failed: {e}")
+    if not release:
+        raise HTTPException(404, "no release found for that MusicBrainz ID")
 
     from mlo.audio import AudioFile
     local_tracks = _scan_album_tracks(album_dir)

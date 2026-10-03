@@ -548,6 +548,42 @@ assert release["release_group_id"] == MBID_RG, release
 # list (never a made-up one) — the page then prints no country field at all.
 assert release["countries"] == [], release["countries"]
 
+# ---- a RELEASE-GROUP id resolves to its best edition ----------------------
+# The wizard's link field accepts a release OR a release-group link, and a
+# group id sent to MusicBrainz's release endpoint 404s. Both the release fetch
+# and the match must resolve it, because the wizard writes the id the fetch
+# returned — a group id must never end up in MUSICBRAINZ_ALBUMID.
+mb = _install(FakeMB())
+_CONCRETE = {
+    "id": MBID_RELEASE, "title": "Kid A", "date": "2000-10-02",
+    "barcode": "724384925321", "country": "GB", "status": "Official",
+    "artist-credit": [{"name": "Radiohead", "artist": {"id": MBID_ARTIST}}],
+    "release-group": {"id": MBID_RG, "primary-type": "Album",
+                      "secondary-types": [], "first-release-date": "2000-10-02"},
+    "label-info": [{"catalog-number": "CDP 7 46001 2",
+                    "label": {"name": "Parlophone"}}],
+    "media": [{"position": 1, "format": "CD", "track-count": 1, "tracks": [
+        {"position": 1, "title": "Everything in Its Right Place", "length": 251000,
+         "recording": {"id": MBID_REC}, "artist-credit": [{"name": "Radiohead"}]},
+    ]}],
+}
+mb.lookup[f"release-group/{MBID_RG}"] = {
+    "id": MBID_RG, "title": "Kid A", "primary-type": "Album",
+    "secondary-types": [], "first-release-date": "2000-10-02",
+}
+mb.browse[("release", MBID_RG)] = [dict(_CONCRETE)]
+mb.lookup[f"release/{MBID_RELEASE}"] = dict(_CONCRETE)
+
+resolved = _client.get("/api/mb/release", params={"mbid": MBID_RG})
+assert resolved.status_code == 200, resolved.text
+assert resolved.json()["id"] == MBID_RELEASE, resolved.json().get("id")
+
+matched = _client.post("/api/mb/match", json={"album_path": ALBUM_DIR,
+                                              "release_id": MBID_RG})
+assert matched.status_code == 200, matched.text
+assert matched.json()["release"]["id"] == MBID_RELEASE, matched.json()["release"].get("id")
+assert matched.json()["suggestions"], matched.json()
+
 
 # --------------------------------------------------------------------------- #
 # 7. a field-qualified query IS the query MusicBrainz is asked

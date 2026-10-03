@@ -2500,6 +2500,23 @@ user asked for, in the order they asked for it. `server/exporter.py` owns both.
   deps went that way. Pinned by `tools/test_dynamic_range.py` and
   `tools/test_import_sessions.py`.
 
+- **R347 — changing the MusicBrainz link in the import wizard TAKES EFFECT, and
+  a release-group link resolves before anything is written.** The Links step
+  resolves the chosen id through `GET /api/mb/release`, which — like
+  `POST /api/mb/match` — resolves a release GROUP to its best edition through
+  the same release-choice policy the import and the bulk queue use, and then
+  commits THAT release id. Before this, Links committed the new id and the Match
+  step's Confirm wrote the PREVIOUSLY fetched release's id back over it, so
+  picking a different release appeared to do nothing; and a group link was
+  stored in `MUSICBRAINZ_ALBUMID` as the group's own id. The Match writer also
+  never writes an EMPTY album-level id (`ImportWizard.assignTracks` omits
+  `MUSICBRAINZ_ALBUMID`/`RELEASEGROUPID`/`RELEASEID` when the release is
+  unknown), so a Match step that lost its release can no longer CLEAR a link the
+  Links step just committed — which is what left freshly-linked albums grading
+  "Missing MusicBrainz release link". Pinned by `tools/test_mb_search.py` (a
+  release-group id resolves in both routes, never the group's own id) and
+  verified live against the real page (link A → link B through the wizard).
+
 - **R164 — a script that moves an album reports the folder the album is in
   WHEN THE SCRIPT RETURNS, and the chain follows it.** A script that takes an
   album's audio out of the folder the chain is pointed at knows where the album

@@ -1698,25 +1698,33 @@ export default function ImportWizard() {
     doSearch(`artist:"${name}"`);
   };
 
-  const pickRelease = async (id: string, target: string | null = albumPath) => {
-    if (!id) return;
+  const pickRelease = async (id: string, target: string | null = albumPath): Promise<MBRelease | null> => {
+    if (!id) return null;
+    // Already the loaded release: nothing to fetch and nothing to re-match, so
+    // pressing Next again does not fire two more 1-req/s MusicBrainz calls.
+    if (release && release.id === id) return release;
     setBusy(true);
     setFetchStatus("Fetching release from MusicBrainz…");
     try {
-      // MusicBrainz rate-limits and blips — retry the remote calls.
+      // MusicBrainz rate-limits and blips — retry the remote calls. The route
+      // resolves a RELEASE-GROUP id to its best edition, so `rel.id` is the
+      // concrete release and it is what the id state and every writer below
+      // use: a group id must never be written as MUSICBRAINZ_ALBUMID.
       const rel = await withRetry(() => api.mbRelease(id));
       setRelease(rel);
-      setReleaseId(id);
+      setReleaseId(rel.id);
       setFetchStatus("Matching local tracks to the release…");
-      const matched = await api.mbMatch(target!, id, staged);
+      const matched = await api.mbMatch(target!, rel.id, staged);
       setSuggestions(matched.suggestions);
       if (!matched.suggestions.length) {
         toast("No audio tracks found in this folder — check the album folder contains the music files");
       } else {
         toast(`Matched ${matched.suggestions.filter((s) => s.matched).length}/${matched.suggestions.length} tracks`);
       }
+      return rel;
     } catch (e) {
       toast.error(String(e));
+      return null;
     } finally {
       setBusy(false);
       setFetchStatus(null);
@@ -1833,7 +1841,8 @@ export default function ImportWizard() {
   }, [step, albumPath, stepTracks, release]);
 
   const nextFromLinks = async () => {
-    const rid = releaseId || extractMbid(mbLink) || "";
+    const typed = extractMbid(mbLink) || "";
+    const rid = typed || releaseId || "";
     if (!albumPath || !rid) {
       toast("Enter a valid MusicBrainz release URL or ID first");
       return;
@@ -1841,21 +1850,25 @@ export default function ImportWizard() {
     setBusy(true);
     setAct({ label: "Saving links…" });
     try {
+      // Resolve the chosen link FIRST and write the release it resolves to.
+      // This is the fix for "the link will not change": the wizard used to
+      // commit the new id and then let the Match step's Confirm write the
+      // PREVIOUSLY fetched release's id back over it (so picking another
+      // release appeared to do nothing), and a release-GROUP link was stored
+      // in MUSICBRAINZ_ALBUMID as the group's own id. `pickRelease` returns
+      // null only after saying why.
+      const rel = await pickRelease(rid, albumPath);
+      if (!rel) return;
       // Only an ALBUM page may be stored as the album link — rymValid is
       // already false for a song/other page, and an artist paste never lands
-      // in this field at all.
+      // in this field at all. The artist page is artist-level, so it goes on
+      // every track as RATEYOURMUSIC_ARTIST — and only a link the server
+      // confirmed as an ARTIST page: a song or album paste in this field would
+      // be a wrong artist link forever. Both ride along on the commit, which
+      // is the step's ONE pass over the album.
       const albumLink = rymValid ? rymLink.trim() : undefined;
-      // The artist page is artist-level, so it goes on every track as
-      // RATEYOURMUSIC_ARTIST — the same tag the artist page's editor writes.
-      // Only a link the server confirmed as an ARTIST page is stored: a song
-      // or album paste in this field would be a wrong artist link forever.
-      // It rides along with the album tags on the commit call, which is the
-      // step's ONE pass over the album: a second call to write it would
-      // rewrite every track again for a third tag (that used to be half of
-      // "Saving links…" on a real album, and it rewrote the whole file even
-      // when the tag was already correct).
       const artistLink = rymArtistValid ? rymArtistLink.trim() : "";
-      await api.importCommit(albumPath, mbLink || `https://musicbrainz.org/release/${rid}`, albumLink, staged, artistLink || undefined);
+      await api.importCommit(albumPath, `https://musicbrainz.org/release/${rel.id}`, albumLink, staged, artistLink || undefined);
       toast("Links saved to album");
       setStep(2);
     } catch (e) {
@@ -2067,10 +2080,21 @@ export default function ImportWizard() {
         // links / IDs
         MUSICBRAINZ_TRACKID: t?.recording_mbid ?? null,
         MUSICBRAINZ_ARTISTID: t?.artist_mbids?.[0] ?? null,
-        MUSICBRAINZ_ALBUMID: release?.id ?? null,
-        MUSICBRAINZ_RELEASEGROUPID: release?.release_group_id ?? null,
-        MUSICBRAINZ_RELEASEID: release?.id ?? null,
-        MUSICBRAINZ_ALBUMARTISTID: release?.artists?.[0]?.mbid ?? null,
+        // Album-level identity is written ONLY when the release is known. A
+        // `null` here means the server's per-key writer writes nothing, so a
+        // Match step that lost its release can never CLEAR a MusicBrainz link
+        // the Links step already committed — which is exactly what produced
+        // "Missing MusicBrainz release link" on an album whose link had just
+        // been set.
+        ...(release?.id
+          ? { MUSICBRAINZ_ALBUMID: release.id, MUSICBRAINZ_RELEASEID: release.id }
+          : {}),
+        ...(release?.release_group_id
+          ? { MUSICBRAINZ_RELEASEGROUPID: release.release_group_id }
+          : {}),
+        ...(release?.artists?.[0]?.mbid
+          ? { MUSICBRAINZ_ALBUMARTISTID: release.artists[0].mbid }
+          : {}),
         // metadata
         TITLE: t?.title ?? null,
         ARTIST: t?.artist_credit || (release?.artists ?? [])[0]?.name || null,
