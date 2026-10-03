@@ -244,6 +244,20 @@ function matchesRoute(pattern, link) {
   check("an entry with no id is refused",
     fresh.ingestDerived({ id: "", kind: fresh.GRADE_WARNING_KIND, title: "x", body: "" }) === null);
 
+  // ---- the library-changed signal is SILENT, and it refreshes -------------
+  // The server publishes `library_changed` on every library write (and again
+  // when its background tree rebuild lands, so a page ends up on the fresh
+  // rows rather than the stale-while-revalidate ones). Screens must refresh on
+  // it; the tray must never list it.
+  const inv = await import("../web/src/lib/invalidate.ts");
+  check("a library write refreshes the derived queries",
+    inv.affectsLibrary("library_changed") === true);
+  check("...while a version check does not", inv.affectsLibrary("update_available") === false);
+  check("library_changed is SILENT (never a tray row, never an OS popup)",
+    fresh.SILENT_KINDS.library_changed === true
+      && !("library_changed" in fresh.OS_KINDS)
+      && !("library_changed" in fresh.PUSH_KINDS));
+
   if (problems.length) {
     console.log(`\nFAIL — ${problems.length} problem(s)`);
     for (const p of problems) console.log(`  - ${p}`);

@@ -29,6 +29,7 @@ import os
 import struct
 import sys
 import tempfile
+import time
 from urllib.parse import quote
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -655,6 +656,65 @@ try:
           json.dumps({"first": seqs[0], "last": seqs[-1], "kept": len(kept)}))
 finally:
     events_mod.notify_devices = _log_notify_devices
+
+# ── The library-changed signal ──────────────────────────────────────────────
+#
+# Every mutating request that can touch the library publishes ONE coalesced
+# `library_changed` frame, so an open page drops its library-derived queries —
+# including a page that did not make the write, and a second device. Paths that
+# cannot change the library (credentials, config, the per-user stores) publish
+# nothing, and a GET never does. The client treats the kind as silent (no tray
+# row, no OS popup) and refreshes on it — tools/test_notifications.cjs owns that
+# half.
+print("== the library-changed signal ==")
+check("a tag write is a library write", events_mod.affects_library("/api/mb/assign"))
+check("a cover write is a library write", events_mod.affects_library("/api/cover/fromurl"))
+check("a trash move is a library write", events_mod.affects_library("/api/trash/delete"))
+check("a script run is a library write", events_mod.affects_library("/api/run"))
+check("a config write is NOT", not events_mod.affects_library("/api/config"))
+check("auth is NOT", not events_mod.affects_library("/api/auth/login"))
+check("a rating is NOT", not events_mod.affects_library("/api/ratings"))
+check("the wizard's bookmark is NOT", not events_mod.affects_library("/api/import/sessions"))
+
+drain()
+events_mod.note_library_write("/api/mb/assign")
+events_mod.note_library_write("/api/cover/fromurl")   # the same burst
+time.sleep(events_mod._LIB_CHANGED_DELAY + 0.4)
+burst = frames("library_changed")
+check("a burst of writes is ONE frame (coalesced)", len(burst) == 1, json.dumps(burst))
+
+try:
+    from fastapi.testclient import TestClient
+    from server import auth as _auth
+except Exception as exc:  # pragma: no cover
+    print(f"  SKIP  TestClient/auth unavailable: {exc}")
+else:
+    # Gate OFF (about the write signal, not who may call the route) and a
+    # scratch music folder (the route guards its folder), both restored below.
+    _gate_off = {"required": False, "mode": "auto", "has_password": False, "username": "",
+                 "host": "127.0.0.1", "public_url": "", "session_days": 30}
+    _cached, _current = _auth.cached_state, _auth.current_state
+    _real_load_cfg = main_mod.load_config
+    _lib_dir = tempfile.mkdtemp(prefix="mlo-libchg-")
+    _auth.cached_state = lambda: dict(_gate_off)
+    _auth.current_state = lambda refresh=False: dict(_gate_off)
+    main_mod.load_config = lambda: {"music_folder": _lib_dir}
+    try:
+        client = TestClient(main_mod.app)  # no `with`: no lifespan, no workers
+        drain()
+        res = client.post("/api/mb/assign", json={"tracks": {}})
+        time.sleep(events_mod._LIB_CHANGED_DELAY + 0.4)
+        check("a successful mutating request publishes the frame through HTTP",
+              res.status_code < 400 and len(frames("library_changed")) == 1,
+              f"{res.status_code} {res.text[:200]} {json.dumps(frames('library_changed'))}")
+        drain()
+        client.get("/api/health")
+        time.sleep(events_mod._LIB_CHANGED_DELAY + 0.4)
+        check("a GET publishes nothing",
+              frames("library_changed") == [], json.dumps(frames("library_changed")))
+    finally:
+        _auth.cached_state, _auth.current_state = _cached, _current
+        main_mod.load_config = _real_load_cfg
 
 print(f"\n{len(FAILED)} failure(s)")
 sys.exit(1 if FAILED else 0)

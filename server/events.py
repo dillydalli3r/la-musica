@@ -68,6 +68,7 @@ import queue
 import struct
 import threading
 import time
+import traceback
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -630,6 +631,80 @@ def _put_nowait(queue, payload):
         queue.put_nowait(payload)
     except Exception:
         pass
+
+
+# ── the library-changed signal ──────────────────────────────────────────────
+#
+# One outcome that is a SIGNAL rather than a record: "the library changed under
+# you, drop what you derived from it". Every mutating request that can touch the
+# library publishes it — a tag write, a cover, a rename, an import step, a trash
+# move — and so does the background rebuild of the assembled tree (`server
+# .tagcache`), because that tree is served STALE-WHILE-REVALIDATE: the refetch a
+# write immediately triggers is answered with the PRE-write rows, and this second
+# frame is what makes the page ask again once the fresh tree is in hand.
+#
+# The client treats it as silent (no tray entry, no OS notification — see
+# web/src/lib/notify.ts): a tag write must not fill the notification panel. It
+# exists only so `onAppEvent` listeners can invalidate.
+_LIBRARY_CHANGED = "library_changed"
+# A burst — one wizard step, one import, one chain — must cost ONE refetch: the
+# emit is coalesced, so the last write of the burst is the only frame.
+_LIB_CHANGED_DELAY = 0.35
+_lib_changed_lock = threading.Lock()
+_lib_changed_timer = None
+
+# Mutating paths that cannot have changed the library: credentials and sessions,
+# the config UI's own writes, installed-tool and export/EQ state, and the
+# per-user listening/rating/playlist stores (they invalidate their own client
+# queries). Everything else a POST/PUT/PATCH/DELETE touches is treated as a
+# library write — a loud list would have to be maintained forever, and a
+# forgotten route is a page that quietly goes stale.
+_NOT_LIBRARY_WRITES = (
+    "/api/auth", "/login", "/logout", "/password", "/revoke-all", "/setup",
+    "/users", "/api/push", "/api/config", "/api/dependencies", "/api/export",
+    "/api/eq", "/api/cookies", "/api/youtube/cookies", "/api/rym/cookies",
+    "/api/ai/test", "/api/open-folder", "/api/naming/preview",
+    "/api/library/query", "/api/import/scripts/preview",
+    "/api/import/prompts/dismiss", "/api/import/sessions", "/api/recommend",
+    "/api/plays", "/api/ratings", "/api/favorites", "/api/likes",
+    "/api/playlists", "/api/stack",
+)
+
+
+def affects_library(path: str) -> bool:
+    """Whether a mutating request on *path* can have changed the library."""
+    p = str(path or "")
+    return not any(p == pre or p.startswith(pre + "/") for pre in _NOT_LIBRARY_WRITES)
+
+
+def note_library_write(path: str = "") -> None:
+    """Announce that the library changed, coalesced into one frame per burst.
+
+    Called by the HTTP middleware after a successful mutating request and by
+    the library rebuild when it lands. Safe from any thread; never raises.
+    """
+    global _lib_changed_timer
+    try:
+        with _lib_changed_lock:
+            if _lib_changed_timer is not None:
+                _lib_changed_timer.cancel()
+            timer = threading.Timer(_LIB_CHANGED_DELAY, _fire_library_changed,
+                                    args=(str(path or ""),))
+            timer.daemon = True
+            _lib_changed_timer = timer
+            timer.start()
+    except Exception:
+        traceback.print_exc()
+
+
+def _fire_library_changed(path):
+    global _lib_changed_timer
+    with _lib_changed_lock:
+        _lib_changed_timer = None
+    try:
+        emit(_LIBRARY_CHANGED, "", "", {"path": path} if path else {})
+    except Exception:
+        traceback.print_exc()
 
 
 def subscribe(queue, loop):

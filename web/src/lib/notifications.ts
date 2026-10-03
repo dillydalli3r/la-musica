@@ -237,6 +237,17 @@ export const GRADE_WARNING_KIND = "grade_warning";
  *  mirrors it. */
 export const IMPORT_UNFINISHED_KIND = "import_unfinished";
 
+/** Outcome kinds that are SIGNALS, not records.
+ *
+ *  `library_changed` says "the library moved under you, drop what you derived
+ *  from it". The server publishes it on every library write (a tag, a cover, a
+ *  rename, an import step) and again when its background tree rebuild lands —
+ *  so it must never reach the tray and never raise an OS notification, or the
+ *  panel would fill with rows nobody asked for. The `/ws/events` reader
+ *  (`lib/notify.ts`) skips these for the log while still handing them to the
+ *  listeners, which is the whole point: the App drops its library queries. */
+export const SILENT_KINDS: Record<string, true> = { library_changed: true };
+
 /** The stable tray id for one album's unfinished import: the wizard dismisses
  *  exactly this when the album is finished, and the sync that ingests the
  *  session list keys on it, so the two never disagree about which album a row

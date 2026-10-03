@@ -2517,6 +2517,27 @@ user asked for, in the order they asked for it. `server/exporter.py` owns both.
   release-group id resolves in both routes, never the group's own id) and
   verified live against the real page (link A → link B through the wizard).
 
+- **R348 — the library refreshes itself after any write, and the refresh ENDS
+  on the fresh tree.** Every mutating request that can touch the library
+  publishes one coalesced `library_changed` frame — an HTTP middleware
+  (`server.main._library_write_signal` → `server.events.note_library_write`),
+  so a tag write, a cover, a rename, a trash move or an import step reaches
+  every open page, not only the surface that made it. `server.tagcache`
+  publishes the same frame again when its background rebuild of the assembled
+  tree lands, and that second frame is the point: `invalidate_album` serves the
+  tree STALE-WHILE-REVALIDATE, so the refetch a write immediately triggers is
+  answered with the PRE-write rows — without the rebuild's own frame a page kept
+  them until the next visit. The kind is SILENT to the client
+  (`notifications.SILENT_KINDS`): `/ws/events` hands it to `onAppEvent` (which
+  drops the library-derived queries in `App`) but never to the tray and never to
+  an OS notification — a tag write must not fill the panel. Credentials,
+  config, dependencies, export/EQ and the per-user stores (ratings, favourites,
+  likes, playlists, plays) are excluded: they invalidate their own client
+  queries and must not cost a library refetch per click. Pinned by
+  `tools/test_notifications.py` (the coalesced burst, the middleware over HTTP,
+  and a GET announcing nothing) and `tools/test_notifications.cjs` (the kind
+  refreshes the derived queries, and is silent).
+
 - **R164 — a script that moves an album reports the folder the album is in
   WHEN THE SCRIPT RETURNS, and the chain follows it.** A script that takes an
   album's audio out of the folder the chain is pointed at knows where the album

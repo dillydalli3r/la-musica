@@ -12,6 +12,7 @@ import json
 import os
 import threading
 import time
+import traceback
 from collections import OrderedDict
 
 from mlo.audio import AudioFile
@@ -277,13 +278,19 @@ def json_document(payload):
     return _json_document(payload)
 
 
-def _refresh_library(key, builder):
+def _refresh_library(key, builder, notify=False):
     """Rebuild one cached tree OFF the request path (single-flight).
 
     Never runs while the key is being built for a first paint, never twice at
     once, and never raises: a refresh that fails leaves the cached tree in
     place and the next request tries again. The stamp is written AFTER the
     build, like the first paint's, so a slow scan is not born already stale.
+
+    `notify` says a write marked the tree dirty (rather than the TTL simply
+    lapsing): the rebuilt tree is announced on the event bus, because every
+    client has just been served the PRE-write rows (the stale-while-revalidate
+    contract above) and this frame is what makes it ask again for the fresh
+    ones. Without it a page would keep the old rows until the next visit.
     """
     with _lock:
         if key in _lib_refreshing or key in _lib_building:
@@ -306,6 +313,12 @@ def _refresh_library(key, builder):
                 _lib_dirty.discard(key)
             _lib_refreshing.discard(key)
             _build_done.notify_all()
+        if payload is not None and notify:
+            try:
+                from server import events
+                events.note_library_write()
+            except Exception:
+                traceback.print_exc()
 
     threading.Thread(target=run, daemon=True, name="library-refresh").start()
 
@@ -344,7 +357,8 @@ def get_library(key, builder):
         with _lock:
             hit = _lib_cache.get(key)
             if hit is not None:
-                stale = key in _lib_dirty or time.time() - hit[0] >= _LIB_TTL
+                dirty = key in _lib_dirty
+                stale = dirty or time.time() - hit[0] >= _LIB_TTL
                 payload = hit[1]
                 break
             if key not in _lib_building:
@@ -354,7 +368,7 @@ def get_library(key, builder):
             _build_done.wait(timeout=300.0)
     if payload is not None:
         if stale:
-            _refresh_library(key, builder)
+            _refresh_library(key, builder, notify=dirty)
         return payload
     try:
         payload = builder()

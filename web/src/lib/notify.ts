@@ -4,6 +4,7 @@ import { toast } from "../store";
 import {
   OS_KINDS,
   PUSH_KINDS,
+  SILENT_KINDS,
   ingest,
   openNotification,
   type NotificationRecord,
@@ -552,8 +553,11 @@ function handle(raw: string) {
   // A frame the server sent no title for still gets words: the tray must never
   // list a blank row.
   if (!frame.title) frame.title = t("notify.event");
-  const rec = ingest(frame);
-  if (!rec) return;
+  // A SILENT kind is a signal, not an outcome: it refreshes screens and is
+  // never listed (see SILENT_KINDS).
+  const silent = SILENT_KINDS[frame.event] === true;
+  const rec = silent ? null : ingest(frame);
+  if (!silent && !rec) return;
   for (const fn of eventListeners) {
     try {
       fn(frame.event);
@@ -561,6 +565,7 @@ function handle(raw: string) {
       /* a listener's own problem: the tray and the socket carry on */
     }
   }
+  if (!rec) return;
   void showNotification(frame, rec);
 }
 

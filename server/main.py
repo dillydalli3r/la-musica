@@ -42,6 +42,7 @@ from mlo import stats as stats_mod
 from mlo import eq as eq_mod
 
 from server import library as lib_mod
+from server import events as events_mod
 from server import mbresolve
 from server import playlists as pl_mod
 from server import integrations as intg
@@ -341,6 +342,33 @@ async def _media_cors(request: Request, call_next):
 # The /api/library payload is large (every track's tags + grading details);
 # gzip cuts it ~10x for a cheap first-paint win on big libraries.
 app.add_middleware(GZipMiddleware, minimum_size=1024)
+
+
+@app.middleware("http")
+async def _library_write_signal(request: Request, call_next):
+    """Tell every client the library changed after a successful write.
+
+    A mutating request that can touch the library — a tag write, a cover, a
+    rename, an import step, a trash move — publishes ONE coalesced
+    `library_changed` frame (see `server.events.note_library_write`). Every open
+    page drops its library-derived queries on it, so a change made from the
+    album page, the track page or a second device reaches the Library and Home
+    views instead of leaving them stale until a visit or a manual Refresh.
+    `server.tagcache` publishes the same frame again when its background rebuild
+    of the assembled tree lands, because the first refetch is answered with the
+    pre-write rows (stale-while-revalidate).
+
+    Never allowed to fail the request it describes: this only observes it.
+    """
+    response = await call_next(request)
+    try:
+        if (request.method in ("POST", "PUT", "PATCH", "DELETE")
+                and response.status_code < 400
+                and events_mod.affects_library(request.url.path)):
+            events_mod.note_library_write(request.url.path)
+    except Exception:
+        traceback.print_exc()
+    return response
 
 # Feature routers live in their own modules (discovery/artwork/lyrics/import)
 # so each provider layer stays independently testable; main.py only wires
